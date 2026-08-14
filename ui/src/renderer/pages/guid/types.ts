@@ -43,7 +43,7 @@ export type MentionOption = {
   key: string;
   label: string;
   tokens: Set<string>;
-  avatar: string | undefined;
+  avatarEmoji: string | undefined;
   avatarImage: string | undefined;
   logo: string | undefined;
   isExtension?: boolean;

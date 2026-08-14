@@ -10,7 +10,11 @@ import type { Preset } from '@/common/types/agent/presetTypes';
 import { IconClose } from '@arco-design/web-react/icon';
 import { Down, Robot } from '@icon-park/react';
 import React from 'react';
-import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
+import {
+  isEmoji,
+  resolvePresetAvatarImageSrc,
+  resolvePresetCatalogName,
+} from '@/renderer/utils/model/presetPresentation';
 import { Dropdown, Menu } from '@arco-design/web-react';
 import styles from '../index.module.css';
 
@@ -41,15 +45,10 @@ const PresetAgentTag: React.FC<PresetAgentTagProps> = ({
   onAgentSwitch,
 }) => {
   const avatarValue = agentInfo.avatar?.trim();
-  const mappedAvatar = avatarValue ? CUSTOM_AVATAR_IMAGE_MAP[avatarValue] : undefined;
-  const resolvedAvatar = avatarValue ? resolveExtensionAssetUrl(avatarValue) : undefined;
-  const avatarImage = mappedAvatar || resolvedAvatar;
-  const isImageAvatar = Boolean(
-    avatarImage &&
-    (/\.(svg|png|jpe?g|webp|gif)$/i.test(avatarImage) || /^(https?:|file:\/\/|data:|\/)/i.test(avatarImage))
-  );
+  const avatarImage = resolvePresetAvatarImageSrc(avatarValue, CUSTOM_AVATAR_IMAGE_MAP);
+  const avatarEmoji = avatarValue && !avatarImage && isEmoji(avatarValue) ? avatarValue : undefined;
   const preset = presets.find((item) => item.preset_id === agentInfo.preset_id);
-  const name = preset?.name_i18n?.[localeKey] || preset?.name || agentInfo.name;
+  const name = preset ? resolvePresetCatalogName(preset, localeKey) : agentInfo.name;
 
   const hasSwitcher = Boolean(agentSwitcherItems && agentSwitcherItems.length > 0 && onAgentSwitch);
 
@@ -83,10 +82,10 @@ const PresetAgentTag: React.FC<PresetAgentTagProps> = ({
           <Down theme='outline' size={12} fill='currentColor' />
         </span>
       ) : null}
-      {isImageAvatar ? (
+      {avatarImage ? (
         <img src={avatarImage} alt='' width={15} height={15} style={{ objectFit: 'contain', flexShrink: 0 }} />
-      ) : avatarValue ? (
-        <span style={{ fontSize: 14, lineHeight: '15px', flexShrink: 0 }}>{avatarValue}</span>
+      ) : avatarEmoji ? (
+        <span style={{ fontSize: 14, lineHeight: '15px', flexShrink: 0 }}>{avatarEmoji}</span>
       ) : (
         <Robot theme='outline' size={15} style={{ flexShrink: 0 }} />
       )}
