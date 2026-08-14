@@ -5,6 +5,10 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+No unreleased changes yet.
+
+## v0.6.3 - 2026-08-15
+
 - **New feature (小程序 / mini-apps).** A conversation could always generate a web
   page, but the page died with the workspace: to use it again you had to dig up the
   session or ask for it a second time. 小程序 closes that loop, and it does so without
