@@ -15,11 +15,9 @@ that maintainers can review without guessing.
 
 If you only remember one page of rules, remember these:
 
-1. GitHub Actions are strictly forbidden. Do not add, restore, generate, or
-   re-enable any workflow, including disabled or manual-only workflows. Use
-   local scripts and documented manual commands instead. A pull request that
-   introduces `.github/workflows/*.yml` or `.github/workflows/*.yaml` must be
-   rejected.
+1. Use the simplest maintainable automation for the job. Local scripts and
+   GitHub Actions are both acceptable; avoid workflows that add cloud coupling
+   without a clear maintenance benefit.
 2. Keep pull requests small. One problem, one behavior change, one reviewable
    story.
 3. Ask first before large product changes, new top-level surfaces, database
@@ -81,13 +79,6 @@ review generated code, remove hallucinated APIs, do not paste private or
 licensed third-party code into prompts, and disclose material AI assistance in
 the PR notes when it helps reviewers understand the work.
 
-Git attribution must always identify the responsible human. AI models,
-products, vendors, bots, and agents must not appear as the author, committer,
-co-author, or other credited contributor. After cloning, run
-`bun run setup:git-hooks`; it enables checks only for this repository and does
-not change global Git configuration. Do not bypass the checks with
-`--no-verify`.
-
 ## Local Setup
 
 Prerequisites:
@@ -106,7 +97,6 @@ Install and smoke-check:
 git clone <repo-url> nomifun-tauri
 cd nomifun-tauri
 bun install
-bun run setup:git-hooks
 cargo check --workspace
 ```
 
