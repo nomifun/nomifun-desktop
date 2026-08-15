@@ -24,7 +24,7 @@ bun run serve:web
 The web host requires login by default. On a fresh data directory, the first
 visitor creates the initial admin unless you pre-seed `NOMIFUN_ADMIN_PASSWORD`.
 
-![First-run admin setup](../images/gs-04-quickstart-login.png)
+![Current WebUI authentication screen](../images/gs-04-quickstart-login.png)
 
 ## 2. Start From `/guid`
 

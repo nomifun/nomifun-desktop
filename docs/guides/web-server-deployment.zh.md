@@ -32,7 +32,7 @@ cargo build --release -p nomifun-web
 
 然后打开 `http://127.0.0.1:8787`，首次访问时让你创建管理员账户。之后，setup 端点会返回 `409 Conflict`，唯一的进入方式就是通过登录表单 (或 `NOMIFUN_ADMIN_PASSWORD`)。
 
-![首次运行管理员设置界面](../images/webserver-02-first-run-setup.png)
+![当前 WebUI 认证入口](../images/webserver-02-first-run-setup.png)
 
 ### 或者从仓库通过 Cargo 运行
 
