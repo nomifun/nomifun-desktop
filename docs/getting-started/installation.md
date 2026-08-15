@@ -84,7 +84,7 @@ console — that is the embedded backend. The renderer reads
 `window.__backendPort` (injected by the Tauri shell as an init script) so the
 SPA always knows where to call `/api`.
 
-![nomifun-desktop running in dev with the embedded backend](../images/gs-02-desktop-dev.png)
+![NomiFun desktop workspace](../images/getting-started/en/desktop-home.png)
 
 ### Build a release binary
 
@@ -168,7 +168,7 @@ Open `http://127.0.0.1:8787` in a browser. On the very first visit you will
 be sent to a setup screen — the username and password you type **become the
 initial admin account**. After that, login is required for everyone.
 
-![First-run admin setup in the browser](../images/gs-03-web-first-run-setup.png)
+![Current WebUI authentication screen](../images/gs-03-web-first-run-setup.png)
 
 ### Common flags
 

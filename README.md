@@ -3,7 +3,7 @@
 <div align="center">
 
 <a href="https://www.nomifun.com">
-  <img src="docs/images/readme-00-agent-collaboration-hero.png" alt="NomiFun Agent collaboration, reusable roles, and execution graph" width="100%">
+  <img src="docs/images/readme/en/workspace.png" alt="Current NomiFun Desktop workspace" width="100%">
 </a>
 
 <h3>A no-holds-barred, fully open-source, <em>local-first</em> super AI workstation.</h3>
@@ -149,32 +149,41 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
 </p>
 
 <p>
-  <img src="docs/images/readme-01-workbench-overview.png" alt="NomiFun Agent collaboration and execution graph" width="100%">
-  <br/><sub><b>Agent collaboration: one conversation, reusable roles, and a live execution graph</b></sub>
+  <img src="docs/images/readme/en/workspace.png" alt="Current NomiFun Desktop workspace" width="100%">
+  <br/><sub><b>Workspace · conversations, Agents, tasks, tools, and connected devices in one desktop</b></sub>
 </p>
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/readme-05-companions.png" alt="Desktop companion overview"><br/><sub><b>Desktop companions · memory and growth</b></sub></td>
-    <td width="50%"><img src="docs/images/readme-07-requirements.png" alt="Requirements platform list"><br/><sub><b>Requirements platform · AutoWork entry</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/en/models.png" alt="NomiFun multi-model management"><br/><sub><b>Multi-model management · task-aware routing and Free Models</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/en/companions.png" alt="NomiFun desktop companions"><br/><sub><b>Desktop companions · persona, memory, models, and remote control</b></sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/readme-06-knowledge.png" alt="Knowledge base list"><br/><sub><b>Knowledge base · local domain context</b></sub></td>
-    <td width="50%"><img src="docs/images/readme-02-terminal-create.png" alt="Create an agent terminal"><br/><sub><b>Terminal · capabilities for Agent CLI</b></sub></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="docs/images/readme-03-presets.png" alt="Presets and Skills capability library"><br/><sub><b>Presets & Skills · reusable capability templates</b></sub></td>
-    <td width="50%"><img src="docs/images/readme-04-model-agents.png" alt="Models and Agents management"><br/><sub><b>Models & Agents · unified management and setup</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/en/skills.png" alt="Current NomiFun Skills Hub"><br/><sub><b>Skills Hub · reusable, governed Agent capabilities</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/en/creative-workshop.png" alt="NomiFun Creative Workshop Beta"><br/><sub><b>Creative Workshop · persistent multimodal creation canvas (Beta)</b></sub></td>
   </tr>
 </table>
 
-<sub>Captured from the live NomiFun desktop app on 2026-07-01 and kept at 2560px wide. See <a href="docs/images/SCREENSHOTS.md">the screenshot manifest</a> for the full set and capture method.</sub>
+<sub>Refreshed from the current NomiFun Portal product screenshot collection. See <a href="docs/images/SCREENSHOTS.md">the screenshot manifest</a> for source and usage details.</sub>
 
 </div>
 
 ---
 
 ## 🚀 Feature highlights
+
+NomiFun Desktop has grown from an Agent chat client into a local, extensible AI
+workspace. Its major product surfaces now share the same conversations, models,
+memory, tools, permissions, and execution runtime:
+
+| Product surface | What it adds |
+|---|---|
+| **Multi-Agent execution cluster** | Plans dependency-aware work, delegates steps to specialized Agents, schedules parallel execution, and exposes live state, transcripts, approvals, retry, and recovery. |
+| **Agent Mini Apps** | Turns a normal Agent conversation into a previewable and publishable local web tool, with an editable working copy and a durable published snapshot. |
+| **Creative Workshop (Beta)** | Provides a persistent visual canvas and asset library for model-driven image, text, video, and speech creation. |
+| **Task-aware multi-model control plane** | Manages extensible providers and models for chat, realtime, speech, vision, media generation, embedding, and reranking, with per-task routing and fallback. |
+| **NomiFun Free Models** | Ships a managed provider that can be enabled, refreshed, health-checked, and used without first creating your own provider entry. |
+| **Phone, robot, and open access** | Pairs Mobile directly with Desktop, binds a Xiaozhi robot to a companion, and exposes governed capabilities through WebUI, REST, MCP, IM channels, and NomiRelay. |
 
 ### 🐾 Desktop Companion — it grows with you
 
@@ -202,20 +211,39 @@ activation code shown by the robot, and bind the device to that companion.
 
 ### 🧩 Agent Mini Apps — turn a conversation into a reusable tool
 
-Create a Mini App in a normal Agent conversation, preview it, and publish it
-into the local Mini Apps library. Published snapshots and editable working
-copies are managed by Desktop; subsequent iteration remains a normal auditable
-conversation instead of a hidden second chat system. A Mini App can therefore
-become a durable interface to the same local Agents, data, and governed tools.
+Create a Mini App in a normal Agent conversation, preview it in the same
+workspace, and explicitly publish a durable snapshot to the local Mini Apps
+library. Desktop keeps that published version separate from the editable working
+copy, so you can continue iterating without silently changing what users launch.
+Every revision remains attached to a normal, auditable conversation rather than
+a hidden second chat system, and the resulting app can reuse the same local
+Agents, data, models, and governed tools.
 
-### 🧠 Agent collaboration
+### 🎨 Creative Workshop — visual creation on a persistent canvas *(Beta)*
 
-Start from a normal Agent conversation. When the task deserves parallel work, the same Agent capability can delegate parts of it and expose a live execution graph.
+Creative Workshop combines a persistent canvas with a reusable asset library.
+Arrange image, text, video, generator, loop, compare, output, and group nodes to
+build visual workflows instead of losing each prompt in an isolated chat.
+Depending on the models you configure, the workshop can drive text-to-image,
+image-to-image, inpainting, text-to-video, image-to-video, text generation, and
+text-to-speech. Outputs stay on the canvas for comparison and further editing.
 
-- **One product concept.** Configure Agents and a collaboration policy; delegated work stays in the same Conversation and the single `AgentExecution` aggregate.
-- **Per-step preflight control.** Before a delegated Agent starts, override its model and add a preset brief; settled steps can be retried with the same configuration.
-- **Review before execution.** Approval-enabled collaboration pauses after planning and shows the plan in the conversation, so you can adjust the graph before work begins.
-- **Real Agent transcripts.** Click any step to read that Agent's actual conversation, then return to the lead conversation to keep guiding the work.
+> **Beta:** Creative Workshop is available in the current build, but its canvas
+> model and workflow format are still evolving. Keep original source assets and
+> avoid treating a workshop project as your only archival copy.
+
+### 🧠 Multi-Agent execution cluster — plan, schedule, supervise
+
+Start from a normal Agent conversation. When a task deserves specialization or
+parallel work, NomiFun creates one persistent `AgentExecution` aggregate linked
+to that Conversation, plans a dependency graph, and schedules ready steps across
+delegated Agents while the lead Agent remains the control point.
+
+- **Dependency-aware scheduling.** Independent steps can run concurrently; blocked steps wait for their prerequisites instead of racing on incomplete context.
+- **Per-step preflight control.** Override a delegated Agent's model and add a preset brief before it starts; completed or failed steps can be retried with the same configuration.
+- **Review before execution.** Approval-enabled collaboration pauses after planning and presents the graph in the conversation so you can adjust it before work begins.
+- **Live, real transcripts.** Follow state changes and open any step's actual Agent conversation, then return to the lead conversation to keep supervising the whole cluster.
+- **Recovery is part of execution.** Persisted state supports retry and restart recovery instead of reducing a cluster run to disposable background messages.
 
 ### 🤖 Unattended automation — Requirements + AutoWork + IDMM
 
@@ -276,9 +304,25 @@ Every capability NomiFun has is exposed through a single, typed capability regis
 - **Graceful multimodal fallback** — if a selected provider/model rejects image input, NomiFun strips the images, retries in the same conversation, and leaves an inline notice instead of killing the session.
 - **Per-model context tuning** — override context-window limits per model when an upstream platform reports bad defaults or hides them, improving routing and long-context budgeting.
 
-### 🔌 Model providers: quick setup links
+### 🔌 Multi-model control plane — providers, capabilities, and Free Models
 
-NomiFun does not lock you into a single model vendor. Pick providers by region, price, quota, model capability, and data policy, then paste the API key into NomiFun's **Models & Agents** page. These are third-party services; pricing, regional availability, rate limits, and data-handling terms are controlled by each provider.
+NomiFun separates provider credentials from model capabilities. Extend the
+catalog with your own providers and assign models to chat, realtime, ASR, TTS,
+vision, image generation/editing, video generation, embedding, and reranking.
+Routing is task-aware, supports per-model context limits, and can fail over
+without pretending that every provider uses the same URL, protocol, or auth.
+
+**NomiFun Free Models** are available through a built-in managed provider. You
+can enable it, refresh its catalog, run a health check, and activate an available
+model without first creating a separate provider entry or supplying your own API
+key. These are online third-party inference services: availability, limits, and
+data-handling terms can change, so review the in-product notice before sending
+sensitive content.
+
+For your own providers, pick by region, price, quota, capability, and data policy,
+then add the credentials on **Models & Agents**. The following services are
+third-party offerings; their pricing, availability, rate limits, and data terms
+remain under each provider's control.
 
 | Provider | Start here | Good to evaluate |
 |---|---|---|
@@ -310,7 +354,9 @@ No social platform or NomiFun cloud relay is required on a LAN. One-tap **QR
 pairing** gives the phone a short-lived, one-time login credential and connects
 it directly to the authenticated listener inside Desktop. Mobile then uses the
 same sessions, tasks, requirements, companions, models, and tools in real time;
-Desktop remains the data and execution authority.
+Desktop remains the data and execution authority. The phone is a connected,
+authenticated client, so it does not need a duplicate database or a second copy
+of your model credentials.
 
 ### ⚙️ Config once, use anywhere
 

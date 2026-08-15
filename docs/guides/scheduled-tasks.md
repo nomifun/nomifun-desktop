@@ -129,7 +129,6 @@ The detail page also lists the conversations created by this job, sorted
 by activity — useful when the job runs in `new_conversation` mode and
 fans out one thread per fire.
 
-![Scheduled task detail](../images/cron-03-detail.png)
 
 ## Keep-Awake
 

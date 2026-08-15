@@ -32,7 +32,7 @@ cargo build --release -p nomifun-web
 
 Then open `http://127.0.0.1:8787` and the first visit lets you create the admin account. After that, the setup endpoint returns `409 Conflict` and the only way in is via the login form (or `NOMIFUN_ADMIN_PASSWORD`).
 
-![First-run admin setup screen](../images/webserver-02-first-run-setup.png)
+![Current WebUI authentication screen](../images/webserver-02-first-run-setup.png)
 
 ### Or via Cargo, from the repo
 
