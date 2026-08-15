@@ -36,6 +36,7 @@
   <a href="docs/README.zh.md">📖 文档</a>&nbsp;·&nbsp;
   <a href="#-快速开始">🚀 快速开始</a>&nbsp;·&nbsp;
   <a href="https://github.com/nomifun/nomifun-desktop/releases">📦 下载</a>&nbsp;·&nbsp;
+  <a href="https://gitee.com/nomifun/nomifun-desktop">🇨🇳 Gitee 源码</a>&nbsp;·&nbsp;
   <a href="https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA">百度网盘</a>&nbsp;·&nbsp;
   <a href="#-联系我们--社区">💬 社区</a>
 </p>
@@ -65,10 +66,10 @@ Agent 小程序，让 Agent 创建的应用继续复用同一套本地运行时�
 
 | 项目 | 定位 | 文档与入口 |
 |---|---|---|
-| **[NomiFun Desktop](https://github.com/nomifun/nomifun-desktop)**（本仓库） | 数据、模型、Agent、任务、Skill、知识库、小程序、WebUI、REST 与 MCP 的本地事实源和执行中枢 | [下载](https://github.com/nomifun/nomifun-desktop/releases) · [Desktop 文档](https://www.nomifun.com/zh/docs/) · [WebUI 远程访问](docs/guides/webui-remote-access.zh.md) |
-| [NomiFun Mobile](https://github.com/nomifun/nomifun-mobile) | 直接复用 Desktop 会话、任务、需求、伙伴与管理能力的 Android / iOS / H5 客户端 | [Mobile 文档](https://github.com/nomifun/nomifun-mobile#readme) · 在 Desktop 开启**远程与开放 → WebUI 访问**后扫描一次性二维码 |
-| [NomiFun 小智云台](https://github.com/nomifun/nomifun-xiaozhi-yuntai) | 为伙伴提供语音、运动、屏幕和设备侧多模态交互的 ESP32-S3 机器人与云台 | [小智文档](https://github.com/nomifun/nomifun-xiaozhi-yuntai#readme) · [Desktop 接入指南](docs/guides/xiaozhi-robot.zh.md) |
-| [NomiFun Net Infra](https://github.com/nomifun/nomifun-net-infra) | 自托管的 NomiRelay 网络中继，把 NAT 后的 Desktop 或其他 HTTP/WebSocket/TCP/UDP 服务提供给跨网络手机与 IoT 设备 | [产品页](https://www.nomifun.com/zh/products/net-infra/) · [门户接入文档](https://www.nomifun.com/zh/docs/guides/net-infra/) · [中继文档](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
+| **NomiFun Desktop**（本仓库；[GitHub](https://github.com/nomifun/nomifun-desktop) · [Gitee](https://gitee.com/nomifun/nomifun-desktop)） | 数据、模型、Agent、任务、Skill、知识库、小程序、WebUI、REST 与 MCP 的本地事实源和执行中枢 | [下载](https://github.com/nomifun/nomifun-desktop/releases) · [Desktop 文档](https://www.nomifun.com/zh/docs/) · [WebUI 远程访问](docs/guides/webui-remote-access.zh.md) |
+| NomiFun Mobile（[GitHub](https://github.com/nomifun/nomifun-mobile) · [Gitee](https://gitee.com/nomifun/nomifun-mobile)） | 直接复用 Desktop 会话、任务、需求、伙伴与管理能力的 Android / iOS / H5 客户端 | [Mobile 文档](https://github.com/nomifun/nomifun-mobile#readme) · 在 Desktop 开启**远程与开放 → WebUI 访问**后扫描一次性二维码 |
+| NomiFun 小智云台（[GitHub](https://github.com/nomifun/nomifun-xiaozhi-yuntai) · [Gitee](https://gitee.com/nomifun/nomifun-xiaozhi-yuntai)） | 为伙伴提供语音、运动、屏幕和设备侧多模态交互的 ESP32-S3 机器人与云台 | [小智文档](https://github.com/nomifun/nomifun-xiaozhi-yuntai#readme) · [Desktop 接入指南](docs/guides/xiaozhi-robot.zh.md) |
+| NomiFun Net Infra（[GitHub](https://github.com/nomifun/nomifun-net-infra) · [Gitee](https://gitee.com/nomifun/nomifun-net-infra)） | 自托管的 NomiRelay 网络中继，把 NAT 后的 Desktop 或其他 HTTP/WebSocket/TCP/UDP 服务提供给跨网络手机与 IoT 设备 | [产品页](https://www.nomifun.com/zh/products/net-infra/) · [门户接入文档](https://www.nomifun.com/zh/docs/guides/net-infra/) · [中继文档](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
 
 ### 四个项目如何接入
 

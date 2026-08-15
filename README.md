@@ -36,6 +36,7 @@
   <a href="docs/README.md">📖 Docs</a>&nbsp;·&nbsp;
   <a href="#-getting-started">🚀 Get started</a>&nbsp;·&nbsp;
   <a href="https://github.com/nomifun/nomifun-desktop/releases">📦 Releases</a>&nbsp;·&nbsp;
+  <a href="https://gitee.com/nomifun/nomifun-desktop">🇨🇳 Gitee source</a>&nbsp;·&nbsp;
   <a href="https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA">China mirror</a>&nbsp;·&nbsp;
   <a href="./RELEASING.zh-CN.md">发版手册</a>&nbsp;·&nbsp;
   <a href="#-contact--community">💬 Community</a>
@@ -67,10 +68,10 @@ and governed capabilities instead of becoming an isolated demo.
 
 | Project | Role | Start here |
 |---|---|---|
-| **[NomiFun Desktop](https://github.com/nomifun/nomifun-desktop)** (this repository) | Local source of truth and runtime for data, models, Agents, tasks, Skills, knowledge, Mini Apps, WebUI, REST and MCP | [Download](https://github.com/nomifun/nomifun-desktop/releases) · [Desktop docs](https://www.nomifun.com/docs/) · [WebUI remote access](docs/guides/webui-remote-access.md) |
-| [NomiFun Mobile](https://github.com/nomifun/nomifun-mobile) | Android / iOS / H5 client that directly reuses Desktop sessions, tasks, requirements, companions and administration | [Mobile docs](https://github.com/nomifun/nomifun-mobile#readme) · Enable **Remote & Open → WebUI access** in Desktop, then scan its one-time QR code |
-| [NomiFun Xiaozhi Yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai) | ESP32-S3 Xiaozhi robot and pan-tilt platform for voice, motion and device-side multimodal interaction | [Xiaozhi docs](https://github.com/nomifun/nomifun-xiaozhi-yuntai#readme) · [Desktop integration guide](docs/guides/xiaozhi-robot.md) |
-| [NomiFun Net Infra](https://github.com/nomifun/nomifun-net-infra) | Self-hosted NomiRelay infrastructure for exposing Desktop or other HTTP/WebSocket/TCP/UDP services behind NAT across networks | [Product page](https://www.nomifun.com/products/net-infra/) · [Portal guide](https://www.nomifun.com/docs/guides/net-infra/) · [Relay docs](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
+| **NomiFun Desktop** (this repository; [GitHub](https://github.com/nomifun/nomifun-desktop) · [Gitee](https://gitee.com/nomifun/nomifun-desktop)) | Local source of truth and runtime for data, models, Agents, tasks, Skills, knowledge, Mini Apps, WebUI, REST and MCP | [Download](https://github.com/nomifun/nomifun-desktop/releases) · [Desktop docs](https://www.nomifun.com/docs/) · [WebUI remote access](docs/guides/webui-remote-access.md) |
+| NomiFun Mobile ([GitHub](https://github.com/nomifun/nomifun-mobile) · [Gitee](https://gitee.com/nomifun/nomifun-mobile)) | Android / iOS / H5 client that directly reuses Desktop sessions, tasks, requirements, companions and administration | [Mobile docs](https://github.com/nomifun/nomifun-mobile#readme) · Enable **Remote & Open → WebUI access** in Desktop, then scan its one-time QR code |
+| NomiFun Xiaozhi Yuntai ([GitHub](https://github.com/nomifun/nomifun-xiaozhi-yuntai) · [Gitee](https://gitee.com/nomifun/nomifun-xiaozhi-yuntai)) | ESP32-S3 Xiaozhi robot and pan-tilt platform for voice, motion and device-side multimodal interaction | [Xiaozhi docs](https://github.com/nomifun/nomifun-xiaozhi-yuntai#readme) · [Desktop integration guide](docs/guides/xiaozhi-robot.md) |
+| NomiFun Net Infra ([GitHub](https://github.com/nomifun/nomifun-net-infra) · [Gitee](https://gitee.com/nomifun/nomifun-net-infra)) | Self-hosted NomiRelay infrastructure for exposing Desktop or other HTTP/WebSocket/TCP/UDP services behind NAT across networks | [Product page](https://www.nomifun.com/products/net-infra/) · [Portal guide](https://www.nomifun.com/docs/guides/net-infra/) · [Relay docs](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
 
 ### Connect the four projects
 
