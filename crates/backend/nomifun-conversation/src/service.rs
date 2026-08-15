@@ -67,6 +67,7 @@ use crate::convert::{
     row_to_artifact_response, row_to_message_response, row_to_message_response_compact,
     row_to_response, row_to_response_with_extra, search_row_to_item, string_to_enum,
 };
+use crate::failover_seam::FailoverAuthoritySnapshot;
 use crate::skill_resolver::SkillResolver;
 use crate::skill_snapshot::compute_initial_skills;
 use crate::stream_relay::{
@@ -4951,9 +4952,10 @@ impl ConversationService {
         mut req: UpdateConversationRequest,
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<ConversationResponse, AppError> {
-        let existing = self
+        let conversation_id = parse_conv_id(id)?;
+        let mut existing = self
             .conversation_repo
-            .get(parse_conv_id(id)?)
+            .get(conversation_id)
             .await?
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {id} not found")))?;
@@ -4977,6 +4979,39 @@ impl ConversationService {
             req.decision_policy = Some(DecisionPolicy::default());
             req.execution_template_id = Some(None);
         }
+
+        // Runtime-affecting PATCHes and fields rewritten by failover share the
+        // same per-Conversation preparation gate. `execution_model_pool` and
+        // `execution_template_id` are turn-planning authority rather than
+        // runtime-factory inputs, so they need serialization against failover
+        // but do not by themselves recycle the cached runtime. Pure
+        // presentation changes (name/pin and non-runtime extra) stay outside.
+        let failover_authority_update_requested = req.model.is_some()
+            || req.delegation_policy.is_some()
+            || req.execution_model_pool.is_some()
+            || req.execution_template_id.is_some()
+            || req
+                .extra
+                .as_ref()
+                .is_some_and(|extra| extra.get("workspace").is_some());
+        let failover_authority_fence = if failover_authority_update_requested {
+            let lease = self.begin_public_runtime_preparation(conversation_id, user_id)?;
+            let cancellation = lease.cancellation_token();
+            let guard = self
+                .runtime_state
+                .acquire_preparation_gate(conversation_id, &cancellation)
+                .await?;
+            lease.ensure_active()?;
+            existing = self
+                .conversation_repo
+                .get(conversation_id)
+                .await?
+                .filter(|row| row.user_id == user_id)
+                .ok_or_else(|| AppError::NotFound(format!("Conversation {id} not found")))?;
+            Some((lease, guard))
+        } else {
+            None
+        };
 
         // Public PATCH cannot mutate or recycle the runtime snapshot owned by
         // an Execution Attempt. Backend-only metadata seams such as
@@ -5197,14 +5232,15 @@ impl ConversationService {
             updated_at: Some(now),
         };
 
-        self.conversation_repo.update(parse_conv_id(id)?, &updates).await?;
-
         if model_changed || workspace_changed || delegation_policy_changed {
+            if let Some((lease, _)) = failover_authority_fence.as_ref() {
+                lease.ensure_active()?;
+            }
             info!(
                 model_changed,
                 workspace_changed,
                 delegation_policy_changed,
-                "Conversation updated, terminating Agent runtime so the change takes effect on the next message"
+                "Conversation configuration update awaiting old runtime teardown before persistence"
             );
             Self::terminate_runtime_with_proof(
                 runtime_registry,
@@ -5213,12 +5249,20 @@ impl ConversationService {
                 "conversation configuration update",
             )
             .await?;
+            if let Some((lease, _)) = failover_authority_fence.as_ref() {
+                lease.ensure_active()?;
+            }
         }
+
+        if let Some((lease, _)) = failover_authority_fence.as_ref() {
+            lease.ensure_active()?;
+        }
+        self.conversation_repo.update(conversation_id, &updates).await?;
 
         // Re-fetch to return the updated version
         let updated = self
             .conversation_repo
-            .get(parse_conv_id(id)?)
+            .get(conversation_id)
             .await?
             .ok_or_else(|| AppError::Internal("Conversation vanished after update".into()))?;
 
@@ -8571,6 +8615,13 @@ impl ConversationService {
         // mid-turn, and `perform_model_failover` re-fetches the row for the
         // freshly-written model when it rebuilds.
         let failover_extra_json = row.extra.clone();
+        let initial_failover_authority = runtime_options.model.clone().map(|model| {
+            FailoverAuthoritySnapshot {
+                model,
+                execution_model_pool: row.execution_model_pool.clone(),
+                execution_template_id: row.execution_template_id.clone(),
+            }
+        });
 
         // Send message to the agent in a background task.
         // prompt() blocks until the PromptResponse arrives (turn completed),
@@ -8605,7 +8656,10 @@ impl ConversationService {
             let build_started_at = now_ms();
             info!(conversation_id = %conv_id, "Agent runtime build started");
             let knowledge_extra = runtime_options.extra.clone();
-            let mut successful_turn_model = runtime_options.model.clone();
+            let mut successful_turn_model = initial_failover_authority
+                .as_ref()
+                .map(|authority| authority.model.clone());
+            let mut failover_authority = initial_failover_authority;
             let mut agent = match runtime_registry
                 .get_or_create_runtime_for_turn(
                     &conv_id,
@@ -9067,19 +9121,26 @@ impl ConversationService {
                 // wrapped in the cancellable post-terminal side-effect budget:
                 // dropping it after quarantine would let the durable Running
                 // turn finalize while the old process might still execute.
-                let failover_switch = service
-                    .maybe_failover_in_send_loop(
-                        &conv_id,
-                        agent.agent_type(),
-                        &outcome,
-                        failover_switches_done,
-                        &failover_tried,
-                        &failover_extra_json,
-                        &runtime_registry,
-                        turn_cancellation.turn_id(),
-                        &turn_token,
-                    )
-                    .await;
+                let failover_switch = if let Some(failed_turn_authority) =
+                    failover_authority.as_ref()
+                {
+                    service
+                        .maybe_failover_in_send_loop(
+                            &conv_id,
+                            agent.agent_type(),
+                            &outcome,
+                            failover_switches_done,
+                            &failover_tried,
+                            failed_turn_authority,
+                            &failover_extra_json,
+                            &runtime_registry,
+                            turn_cancellation.turn_id(),
+                            &turn_token,
+                        )
+                        .await
+                } else {
+                    None
+                };
                 if turn_token.is_cancelled() {
                     // Any runtime constructed by failover belongs to the same
                     // still-blocked generation; the stop worker has already
@@ -9097,6 +9158,7 @@ impl ConversationService {
                     failover_switches_done += 1;
                     failover_tried.push(switch.picked.clone());
                     successful_turn_model = Some(switch.picked.clone());
+                    failover_authority = Some(switch.authority.clone());
                     info!(
                         conversation_id = %conv_id,
                         switch = failover_switches_done,
@@ -10564,6 +10626,83 @@ impl ConversationService {
                 }),
             ),
         );
+    }
+
+    pub(crate) async fn persist_and_broadcast_model_failover_teardown_tip(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        turn_id: Option<&str>,
+    ) -> Option<MessageRow> {
+        let Some(row) = self
+            .persist_model_failover_teardown_tip(conversation_id, turn_id)
+            .await
+        else {
+            return None;
+        };
+
+        let msg_id = row
+            .msg_id
+            .clone()
+            .unwrap_or_else(|| row.message_id.clone());
+        let content_value: serde_json::Value = serde_json::from_str(&row.content)
+            .unwrap_or_else(|_| serde_json::Value::String(row.content.clone()));
+        self.user_events.send_to_user(
+            user_id,
+            WebSocketMessage::new(
+                "message.stream",
+                serde_json::json!({
+                    "conversation_id": row.conversation_id,
+                    "turn_id": turn_id,
+                    "msg_id": msg_id,
+                    "type": row.r#type,
+                    "data": content_value,
+                    "position": row.position,
+                    "status": row.status,
+                    "hidden": row.hidden,
+                    "replace": false,
+                }),
+            ),
+        );
+        Some(row)
+    }
+
+    pub(crate) async fn resolve_and_broadcast_model_failover_teardown_tip(
+        &self,
+        user_id: &str,
+        row: &mut MessageRow,
+        turn_id: Option<&str>,
+    ) -> bool {
+        if !self
+            .resolve_model_failover_teardown_tip(row, turn_id)
+            .await
+        {
+            return false;
+        }
+        let msg_id = row
+            .msg_id
+            .clone()
+            .unwrap_or_else(|| row.message_id.clone());
+        let content_value: serde_json::Value = serde_json::from_str(&row.content)
+            .unwrap_or_else(|_| serde_json::Value::String(row.content.clone()));
+        self.user_events.send_to_user(
+            user_id,
+            WebSocketMessage::new(
+                "message.stream",
+                serde_json::json!({
+                    "conversation_id": row.conversation_id,
+                    "turn_id": turn_id,
+                    "msg_id": msg_id,
+                    "type": row.r#type,
+                    "data": content_value,
+                    "position": row.position,
+                    "status": row.status,
+                    "hidden": row.hidden,
+                    "replace": true,
+                }),
+            ),
+        );
+        true
     }
 
     /// Durable at-most-once edit/rewind/truncate/resubmit workflow.

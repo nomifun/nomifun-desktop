@@ -769,3 +769,151 @@ fn exact_process_identity_registries_are_admission_bounded_and_retire_terminal_e
         );
     }
 }
+
+#[test]
+fn linux_group_quiescence_keeps_retry_authority_and_anchors_proc_identity() {
+    let unix = without_whitespace(&production_source(
+        "crates/shared/nomi-process-runtime/src/platform/unix.rs",
+    ));
+    assert!(
+        !unix.contains("absence_deadline"),
+        "a short wall-clock deadline must not permanently discard sealed PGID proof authority"
+    );
+    for required in [
+        "constGROUP_QUIESCENCE_POLL:Duration=Duration::from_millis(50);",
+        "probe_group_execution_once(pgid,self.leader_starttime)",
+        "Ok(GroupExecutionProbe::Live)",
+        "GroupExecutionProbe::Quiesced|GroupExecutionProbe::ReusedAfterQuiescence",
+        "CleanupStep::Retry(Box::new(self))",
+        "fnsettle_child_process_watchdog_outcome(",
+        "iferror.kind()==io::ErrorKind::Unsupported",
+        "next_poll:Instant::now()+self.retry_delay",
+    ] {
+        assert!(
+            unix.contains(required),
+            "Unix durable cleanup is missing retry/quiescence contract {required}"
+        );
+    }
+
+    let linux = without_whitespace(&production_source(
+        "crates/shared/nomi-process-runtime/src/platform/linux_watchdog.rs",
+    ));
+    for required in [
+        "ProcessGroupExecutionState::ZombieOnly",
+        "ProcessGroupExecutionState::ReusedAfterQuiescence",
+        "leader.starttime!=expected",
+        "earlier.starttime==member.starttime",
+        "earlier.pgrp==member.pgrp",
+    ] {
+        assert!(
+            linux.contains(required),
+            "Linux /proc group proof is missing identity anchor {required}"
+        );
+    }
+}
+
+#[test]
+fn docker_runtime_images_own_exactly_one_init_reaper() {
+    for path in ["Dockerfile", "Dockerfile.prebuilt"] {
+        let dockerfile = read_workspace(path);
+        let logical_instructions = dockerfile.replace("\\\n", " ");
+        assert!(
+            logical_instructions.lines().any(|instruction| {
+                instruction.trim_start().starts_with("RUN ")
+                    && instruction.contains("apt-get")
+                    && instruction.contains("install")
+                    && instruction
+                        .split_ascii_whitespace()
+                        .any(|token| token == "tini")
+            }),
+            "{path} must install tini in a runtime apt instruction"
+        );
+        assert_eq!(
+            dockerfile
+                .lines()
+                .filter(|line| line.trim() == "ENTRYPOINT [\"/usr/bin/tini\", \"--\"]")
+                .count(),
+            1,
+            "{path} must expose one deterministic tini entrypoint"
+        );
+    }
+
+    let compose = read_workspace("docker-compose.yml");
+    assert!(
+        !compose
+            .lines()
+            .any(|line| line.trim_start().starts_with("init:")),
+        "Compose must inherit the image reaper instead of nesting docker-init around tini"
+    );
+}
+
+#[test]
+fn child_cleanup_receipts_preserve_wakeups_and_typed_retry_semantics() {
+    let unix = without_whitespace(&production_source(
+        "crates/shared/nomi-process-runtime/src/platform/unix.rs",
+    ));
+    for required in [
+        "tokio::pin!(notified);",
+        "notified.as_mut().enable();",
+        "self.publish(Err(error));LifecyclePoll::Quarantine{reason}",
+    ] {
+        assert!(
+            unix.contains(required),
+            "Unix child cleanup receipt is missing race-free contract {required}"
+        );
+    }
+
+    let windows = without_whitespace(&production_source(
+        "crates/shared/nomi-process-runtime/src/platform/windows.rs",
+    ));
+    for required in [
+        "completion:watch::Sender<Option<Result<(),ChildProcessCleanupFailure>>>",
+        "result.map_err(ChildProcessCleanupFailure::into_error)",
+        "ifcrate::cleanup_authority_lost(&error){self.publish(Err(error));LifecyclePoll::Quarantine{reason}",
+        "LifecyclePoll::Pending{next_poll:Instant::now()+self.retry_delay",
+    ] {
+        assert!(
+            windows.contains(required),
+            "Windows child cleanup receipt is missing typed retry contract {required}"
+        );
+    }
+}
+
+#[test]
+fn quarantined_poller_failures_publish_permanent_authority_loss() {
+    let unix = read_workspace("crates/shared/nomi-process-runtime/src/platform/unix.rs");
+    let lifecycle_start = unix
+        .find("impl LifecyclePollJob for UnixLifecyclePollerJob")
+        .expect("Unix lifecycle poller implementation");
+    let cleanup_start = unix
+        .find("impl LifecyclePollJob for CleanupPollerJob")
+        .expect("Unix cleanup poller implementation");
+    let cleanup_end = unix[cleanup_start..]
+        .find("impl CleanupJob")
+        .map(|offset| cleanup_start + offset)
+        .expect("Unix cleanup job implementation");
+    for (label, implementation) in [
+        ("Unix lifecycle", &unix[lifecycle_start..cleanup_start]),
+        ("Unix cleanup", &unix[cleanup_start..cleanup_end]),
+    ] {
+        assert!(
+            without_whitespace(implementation)
+                .contains("kind:io::ErrorKind::Unsupported"),
+            "{label} poller infrastructure failure is quarantined and must publish permanent authority loss"
+        );
+    }
+
+    let windows = read_workspace("crates/shared/nomi-process-runtime/src/platform/windows.rs");
+    let lifecycle_start = windows
+        .find("impl LifecyclePollJob for WindowsLifecyclePollerJob")
+        .expect("Windows lifecycle poller implementation");
+    let lifecycle_end = windows[lifecycle_start..]
+        .find("struct WindowsFailedSpawnDebt")
+        .map(|offset| lifecycle_start + offset)
+        .expect("Windows failed-spawn debt declaration");
+    assert!(
+        without_whitespace(&windows[lifecycle_start..lifecycle_end])
+            .contains("kind:io::ErrorKind::Unsupported"),
+        "Windows lifecycle poller infrastructure failure is quarantined and must publish permanent authority loss"
+    );
+}

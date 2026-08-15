@@ -923,25 +923,7 @@ fn redact_secret_words(line: &str) -> String {
 }
 
 fn redact_url_queries(input: &str) -> String {
-    input
-        .split_whitespace()
-        .map(|word| {
-            if (word.starts_with("http://") || word.starts_with("https://")) && word.contains('?') {
-                let end_punct = word
-                    .chars()
-                    .last()
-                    .filter(|c| matches!(c, '.' | ',' | ';' | ')' | ']'))
-                    .map(|c| c.to_string())
-                    .unwrap_or_default();
-                let trimmed = word.trim_end_matches(['.', ',', ';', ')', ']']);
-                let base = trimmed.split_once('?').map(|(base, _)| base).unwrap_or(trimmed);
-                format!("{base}?<redacted>{end_punct}")
-            } else {
-                word.to_owned()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    nomifun_net::secret_redaction::redact_url_queries(input)
 }
 
 fn truncate_chars(value: &str, max: usize) -> String {
@@ -1077,6 +1059,12 @@ mod tests {
         assert_eq!(
             redact_url_queries("GET https://example.com/v1?api_key=sk-secret"),
             "GET https://example.com/v1?<redacted>"
+        );
+        assert_eq!(
+            redact_url_queries(
+                r#"Post "https://chatgpt.com/backend-api/codex/responses?access_token=sk-secret": EOF"#
+            ),
+            r#"Post "https://chatgpt.com/backend-api/codex/responses?<redacted>": EOF"#
         );
     }
 

@@ -74,6 +74,8 @@ const POST_EXIT_READER_DRAIN: Duration = Duration::from_secs(1);
 const CONPTY_NATURAL_CLOSE_WAIT: Duration = Duration::from_millis(250);
 const CONPTY_INPUT_CLOSE_GRACE: Duration = Duration::from_millis(250);
 const JOB_EMPTY_POLL: Duration = Duration::from_millis(2);
+const CHILD_PROCESS_CLEANUP_RETRY_INITIAL: Duration = Duration::from_millis(25);
+const CHILD_PROCESS_CLEANUP_RETRY_MAX: Duration = Duration::from_secs(30);
 const WRITE_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_LINE_UNITS: usize = 32_767;
 const TERMINATED_BY_HOST_EXIT_CODE: u32 = 0xC000_013A;
@@ -604,6 +606,25 @@ pub(crate) struct ChildProcessCleanup {
     process: Option<Arc<ChildProcessJob>>,
 }
 
+#[derive(Clone)]
+struct ChildProcessCleanupFailure {
+    kind: io::ErrorKind,
+    message: Arc<str>,
+}
+
+impl ChildProcessCleanupFailure {
+    fn from_error(error: io::Error) -> Self {
+        Self {
+            kind: error.kind(),
+            message: Arc::from(error.to_string()),
+        }
+    }
+
+    fn into_error(self) -> io::Error {
+        io::Error::new(self.kind, self.message.to_string())
+    }
+}
+
 impl ChildProcessCleanup {
     fn from_process(process: &Arc<ChildProcessJob>) -> Self {
         Self {
@@ -622,11 +643,11 @@ impl ChildProcessCleanup {
         let wait = async {
             loop {
                 if let Some(result) = completion.borrow().clone() {
-                    return result
-                        .map_err(|message| io::Error::other(message.to_string()));
+                    return result.map_err(ChildProcessCleanupFailure::into_error);
                 }
                 completion.changed().await.map_err(|_| {
-                    io::Error::other(
+                    io::Error::new(
+                        io::ErrorKind::Unsupported,
                         "child-process Job cleanup channel closed without a result",
                     )
                 })?;
@@ -1154,7 +1175,7 @@ async fn wait_child_after_job_shutdown(
 struct ChildProcessJob {
     process: OwnedHandle,
     job: Arc<JobControl>,
-    completion: watch::Sender<Option<Result<(), Arc<str>>>>,
+    completion: watch::Sender<Option<Result<(), ChildProcessCleanupFailure>>>,
     shutdown_requested: AtomicBool,
 }
 
@@ -1183,6 +1204,7 @@ fn register_child_process_job(
         let job: Box<dyn LifecyclePollJob> = Box::new(ChildProcessJobPoller {
             pid,
             process: Arc::clone(&process),
+            retry_delay: CHILD_PROCESS_CLEANUP_RETRY_INITIAL,
             _permit: permit,
         });
         let poller = platform_lifecycle_poller()?;
@@ -1198,6 +1220,7 @@ fn register_child_process_job(
     let job: Box<dyn LifecyclePollJob> = Box::new(ChildProcessJobPoller {
         pid,
         process: Arc::clone(&process),
+        retry_delay: CHILD_PROCESS_CLEANUP_RETRY_INITIAL,
         _permit: permit,
     });
     let poller = platform_lifecycle_poller()?;
@@ -1238,11 +1261,13 @@ fn remove_child_process_job(pid: u32, expected: &Arc<ChildProcessJob>) {
 struct ChildProcessJobPoller {
     pid: u32,
     process: Arc<ChildProcessJob>,
+    retry_delay: Duration,
     _permit: PlatformLifecyclePermit,
 }
 
 impl ChildProcessJobPoller {
-    fn publish(&self, result: Result<(), Arc<str>>) {
+    fn publish(&self, result: io::Result<()>) {
+        let result = result.map_err(ChildProcessCleanupFailure::from_error);
         if self.process.completion.borrow().is_none() {
             self.process.completion.send_replace(Some(result));
         }
@@ -1274,10 +1299,24 @@ impl LifecyclePollJob for ChildProcessJobPoller {
                 LifecyclePoll::ExactComplete
             }
             Err(error) => {
-                let reason = Arc::<str>::from(error.to_string());
-                self.publish(Err(Arc::clone(&reason)));
-                LifecyclePoll::Quarantine {
-                    reason: reason.to_string(),
+                let reason = error.to_string();
+                if crate::cleanup_authority_lost(&error) {
+                    self.publish(Err(error));
+                    LifecyclePoll::Quarantine { reason }
+                } else {
+                    tracing::warn!(
+                        pid = self.pid,
+                        %error,
+                        "child-process Job cleanup proof remains retryable"
+                    );
+                    self.retry_delay = self
+                        .retry_delay
+                        .checked_mul(2)
+                        .unwrap_or(CHILD_PROCESS_CLEANUP_RETRY_MAX)
+                        .min(CHILD_PROCESS_CLEANUP_RETRY_MAX);
+                    LifecyclePoll::Pending {
+                        next_poll: Instant::now() + self.retry_delay,
+                    }
                 }
             }
         }
@@ -1286,7 +1325,10 @@ impl LifecyclePollJob for ChildProcessJobPoller {
     fn poller_failed(&mut self, reason: &str) {
         request_child_process_job_shutdown(&self.process);
         let _ = self.process.job.close_for_kill();
-        self.publish(Err(Arc::<str>::from(reason.to_owned())));
+        self.publish(Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            reason.to_owned(),
+        )));
     }
 
     fn label(&self) -> &'static str {
@@ -1345,9 +1387,12 @@ fn reap_child_process_job(process: &ChildProcessJob) -> io::Result<()> {
                     );
                     Ok(())
                 }
-                Err(fallback_error) => Err(io::Error::other(format!(
-                    "child-process Job cleanup was not proven ({error}); fallback proof failed ({fallback_error})"
-                ))),
+                Err(fallback_error) => Err(io::Error::new(
+                    fallback_error.kind(),
+                    format!(
+                        "child-process Job cleanup was not proven ({error}); fallback proof failed ({fallback_error})"
+                    ),
+                )),
             }
         }
     }
@@ -1361,7 +1406,7 @@ fn reap_child_process_job(process: &ChildProcessJob) -> io::Result<()> {
 /// only when a complete pre-termination snapshot was retained and every exact
 /// handle reaches the terminal state.
 fn settle_child_process_job_after_failure(process: &ChildProcessJob) -> io::Result<()> {
-    let mut errors = Vec::new();
+    let mut errors = Vec::<(io::ErrorKind, String)>::new();
     let snapshot_error = process
         .job
         .refresh_pre_termination_members_with_retry()
@@ -1369,19 +1414,47 @@ fn settle_child_process_job_after_failure(process: &ChildProcessJob) -> io::Resu
     let termination_error = process.job.terminate().err();
     let supplemental_snapshot_error = process.job.retain_current_members().err();
     if let Err(error) = process.job.close_for_kill() {
-        errors.push(format!("issue process Job kill-on-close fallback: {error}"));
+        // No later attempt can safely recover a Job handle that could not be
+        // released through its owned state.
+        errors.push((
+            io::ErrorKind::Unsupported,
+            format!("issue process Job kill-on-close fallback: {error}"),
+        ));
     }
 
     let deadline = Instant::now()
         .checked_add(CLEANUP_TIMEOUT)
         .unwrap_or_else(Instant::now);
     if let Err(error) = wait_handle_until(process.process.as_raw(), deadline) {
-        errors.push(format!("wait exact direct child after fallback: {error}"));
+        let kind = if error.kind() == io::ErrorKind::TimedOut {
+            io::ErrorKind::TimedOut
+        } else {
+            // A non-timeout failure on the retained direct-process handle is
+            // a permanent loss of the exact proof anchor.
+            io::ErrorKind::Unsupported
+        };
+        errors.push((
+            kind,
+            format!("wait exact direct child after fallback: {error}"),
+        ));
     }
     if let Err(error) = process.job.require_complete_member_interval_proof() {
-        errors.push(format!("verify exact Job member interval after fallback: {error}"));
+        // The Job is already closed at this point. A missing pre/post member
+        // boundary can never be reconstructed by a later retry.
+        errors.push((
+            io::ErrorKind::Unsupported,
+            format!("verify exact Job member interval after fallback: {error}"),
+        ));
     } else if let Err(error) = process.job.wait_retained_members_until(deadline) {
-        errors.push(format!("wait retained exact Job members after fallback: {error}"));
+        let kind = if error.kind() == io::ErrorKind::TimedOut {
+            io::ErrorKind::TimedOut
+        } else {
+            io::ErrorKind::Unsupported
+        };
+        errors.push((
+            kind,
+            format!("wait retained exact Job members after fallback: {error}"),
+        ));
     }
 
     if errors.is_empty() {
@@ -1391,22 +1464,39 @@ fn settle_child_process_job_after_failure(process: &ChildProcessJob) -> io::Resu
         // proof has succeeded.
         Ok(())
     } else {
+        let kind = if errors
+            .iter()
+            .any(|(kind, _)| *kind == io::ErrorKind::Unsupported)
+        {
+            io::ErrorKind::Unsupported
+        } else if errors
+            .iter()
+            .any(|(kind, _)| *kind == io::ErrorKind::TimedOut)
+        {
+            io::ErrorKind::TimedOut
+        } else {
+            errors[0].0
+        };
+        let mut messages = errors
+            .into_iter()
+            .map(|(_, message)| message)
+            .collect::<Vec<_>>();
         if let Some(error) = snapshot_error {
-            errors.insert(
+            messages.insert(
                 0,
                 format!("capture exact Job members during fallback: {error}"),
             );
         }
         if let Some(error) = termination_error {
-            errors.insert(0, format!("terminate process Job during fallback: {error}"));
+            messages.insert(0, format!("terminate process Job during fallback: {error}"));
         }
         if let Some(error) = supplemental_snapshot_error {
-            errors.insert(
+            messages.insert(
                 0,
                 format!("merge post-termination Job members during fallback: {error}"),
             );
         }
-        Err(io::Error::other(errors.join("; ")))
+        Err(io::Error::new(kind, messages.join("; ")))
     }
 }
 
@@ -1972,7 +2062,7 @@ impl LifecyclePollJob for WindowsLifecyclePollerJob {
             let _ = pseudoconsole.begin_close();
         }
         self.completion.send_replace(LifecycleCompletion::Failed {
-            kind: io::ErrorKind::Other,
+            kind: io::ErrorKind::Unsupported,
             message: Arc::from(reason.to_owned()),
         });
     }
@@ -4112,6 +4202,27 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn child_process_completion_preserves_retryable_and_permanent_failure_kinds() {
+        for kind in [io::ErrorKind::Other, io::ErrorKind::TimedOut] {
+            let error = ChildProcessCleanupFailure::from_error(io::Error::new(
+                kind,
+                "retryable cleanup proof",
+            ))
+            .into_error();
+            assert_eq!(error.kind(), kind);
+            assert!(!crate::cleanup_authority_lost(&error));
+        }
+
+        let lost = ChildProcessCleanupFailure::from_error(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "permanent cleanup authority loss",
+        ))
+        .into_error();
+        assert_eq!(lost.kind(), io::ErrorKind::Unsupported);
+        assert!(crate::cleanup_authority_lost(&lost));
     }
 
     #[test]
