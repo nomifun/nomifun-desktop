@@ -1,15 +1,15 @@
 //! Phase 3 模型故障转移 seam(plan D3/D5/D6)的会话服务侧实现。
 //!
 //! 纯逻辑(挑选器 / 配置读写 / 故障分类)在 [`crate::model_failover`];本模块只放
-//! 需要 `&ConversationService`(仓库 + runtime_registry)的有副作用步骤,并把
-//! 「挑下一候选 → 写 `conversation.model` →
-//! kill_and_wait → 重建任务」抽成**一个** pub 方法 [`ConversationService::perform_model_failover`],
-//! 供 send-loop(D3)与 IDMM 故障值守(D6,Task 3)共用同一份实现。
+//! 需要 `&ConversationService`(仓库 + runtime_registry)的有副作用步骤。生产切换只由
+//! 持有精确 turn generation 的 send-loop 发起;IDMM 仅验证观察结果,不会越权换模型或
+//! 重建 runtime。
 //!
 //! 这是 [`crate::acp_error_recovery::ConversationService::evict_acp_task_after_terminal_error`]
 //! 的泛化:那条路径在 ACP 终态错误后终止 runtime,这条路径换模型后重建并交回新句柄。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use nomifun_api_types::{ExecutionModelPool, ExecutionModelRef};
 use nomifun_common::{
@@ -17,6 +17,7 @@ use nomifun_common::{
 };
 use nomifun_db::ConversationRowUpdate;
 use nomifun_ai_agent::{AgentRuntimeHandle, AgentRuntimeRegistry};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -34,6 +35,16 @@ pub struct FailoverSwitch {
     pub agent: AgentRuntimeHandle,
     /// 本次切换到的 `(provider_id, model)`(已写入 `conversation.model`)。
     pub picked: ProviderWithModel,
+    /// 新 runtime 构建时对应的完整 durable failover authority。send-loop
+    /// 必须把它带入下一次切换，避免把上一轮快照误判为并发配置修改。
+    pub(crate) authority: FailoverAuthoritySnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FailoverAuthoritySnapshot {
+    pub(crate) model: ProviderWithModel,
+    pub(crate) execution_model_pool: Option<String>,
+    pub(crate) execution_template_id: Option<String>,
 }
 
 fn selected_model_ref(model: &ProviderWithModel) -> ExecutionModelRef {
@@ -94,30 +105,26 @@ impl ConversationService {
         Some(get_global_failover_config(&client_prefs).await)
     }
 
-    /// **核心、可复用**的故障转移动作(plan D3 的「Some(next)」分支主体):
-    /// 挑下一候选 → 写 `conversation.model`(origin 标记,非用户编辑)→
-    /// `kill_and_wait`(镜像
-    /// [`Self::evict_acp_task_after_terminal_error`])→ 用刷新后的行
+    /// 聚焦测试使用的故障转移入口(plan D3 的「Some(next)」分支主体):
+    /// 挑下一候选 → `kill_and_wait`(镜像
+    /// [`Self::evict_acp_task_after_terminal_error`])→
+    /// 写 `conversation.model`→ 用刷新后的行
     /// `build_runtime_options` 重建任务。返回 `Some(FailoverSwitch)` 表示换好新模型、
     /// 新句柄就绪;返回 `None` 表示**队列耗尽**(无可用候选)—— 调用方据此回落到
     /// 「emit 原始错误」,绝不无限切换。
     ///
-    /// send-loop(D3)与 IDMM 故障值守(D6)共用此方法:一份实现,两处触发。
-    ///
     /// **ACP 边界(review #9,plan D7)**:加载会话行后在此**统一**判定 agent 类型——
     /// 仅 `AgentType::Nomi` 放行,其余(ACP / 终端 CLI / 远程 …)`warn` + 返回 `None`
-    /// (不终止 runtime、不写 model)。send-loop 自己也有一道便宜的早闸,但**这里**才是
-    /// 唯一的强制点:send-loop 与 IDMM 两条路径都过这道闸,所以 ACP 会话无论从哪条
-    /// 路径进来都安全地被拒。
+    /// (不终止 runtime、不写 model)。send-loop 自己也有一道便宜的早闸,这里是
+    /// 实际有副作用路径的强制点。
     ///
-    /// 注意:这里只换模型 + 重建 + 交回句柄,**不**负责重发消息 —— 重发是触发方
-    /// (send-loop 重发同一 `current_send`;IDMM 自行决定)的职责。
+    /// 注意:这里只换模型 + 重建 + 交回句柄,**不**负责重发消息;生产 send-loop
+    /// 负责重发同一 `current_send`。
     ///
     /// `tried` 是本轮**已经切到过**的候选(review #2 单调性):挑选器跳过它们,
-    /// 多次切换不回头重试同一候选。send-loop 累积本轮 picks 后传入;IDMM 单次切换
-    /// 传空切片即可(它每次 `WakeAction::Failover` 只切一次,无跨回合累积)。
+    /// 多次切换不回头重试同一候选。send-loop 累积本轮 picks 后传入;聚焦测试可传空。
     // Production failover is authorized only by
-    // `perform_model_failover_for_turn`, which carries the exact active turn
+    // `maybe_failover_in_send_loop`, which carries the exact active turn
     // generation and cancellation token. Keep this standalone wrapper solely
     // for focused unit tests so no future observer can rebuild a Finished
     // conversation by calling failover out of band.
@@ -138,6 +145,7 @@ impl ConversationService {
             conversation_id,
             config,
             tried,
+            None,
             runtime_registry,
             lease.id(),
             &cancellation,
@@ -150,10 +158,25 @@ impl ConversationService {
         conversation_id: &str,
         config: &nomifun_api_types::ModelFailoverConfig,
         tried: &[ProviderWithModel],
+        expected_authority: Option<&FailoverAuthoritySnapshot>,
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
         runtime_generation: u64,
         cancellation: &CancellationToken,
     ) -> Option<FailoverSwitch> {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        let runtime_state = self.runtime_state();
+        let _configuration_guard = match runtime_state
+            .acquire_preparation_gate(conversation_id, cancellation)
+            .await
+        {
+            Ok(guard) => guard,
+            Err(error) => {
+                warn!(error = %ErrorChain(&error), conversation_id, "Failover skipped: configuration gate unavailable");
+                return None;
+            }
+        };
         if cancellation.is_cancelled() {
             return None;
         }
@@ -179,8 +202,7 @@ impl ConversationService {
 
         // ACP 边界(review #9,plan D7)的**唯一强制闸**:仅 nomi 自有引擎的普通会话
         // 可换模型重建。ACP / 终端 / 远程等 agent 自管模型(独立 reconcile),在此被
-        // fail-safe 拒绝——不终止 runtime、不写 model。send-loop 与 IDMM inject 都走这条
-        // 路径,故两处都被这一道闸覆盖。
+        // fail-safe 拒绝——不终止 runtime、不写 model。IDMM 不进入这条有副作用路径。
         let agent_type: AgentType = match string_to_enum(&row.r#type) {
             Ok(t) => t,
             Err(e) => {
@@ -208,6 +230,23 @@ impl ConversationService {
                 return None;
             }
         };
+        if let Some(expected) = expected_authority
+            && (failed != expected.model
+                || row.execution_model_pool != expected.execution_model_pool
+                || row.execution_template_id != expected.execution_template_id)
+        {
+            warn!(
+                conversation_id,
+                expected_provider = %expected.model.provider_id,
+                expected_model = %expected.model.model,
+                durable_provider = %failed.provider_id,
+                durable_model = %failed.model,
+                pool_changed = row.execution_model_pool != expected.execution_model_pool,
+                template_changed = row.execution_template_id != expected.execution_template_id,
+                "Failover skipped: explicit failover authority changed after the failing runtime was built"
+            );
+            return None;
+        }
         let providers = match provider_repo.list().await {
             Ok(providers) => providers,
             Err(e) => {
@@ -244,9 +283,8 @@ impl ConversationService {
             &capability_rows,
         )?;
 
-        // 写 conversation.model(origin 标记:非用户编辑)。这正是 spec §5.5 锚定的
-        // 「改模型 + 终止 runtime → 下次 send 重建」形状,只是这里立刻重建。
-        // 同时这会改掉 IDMM 默认 bypass 模型(可接受:换走的正是那个故障模型)。
+        // 先构造新模型的持久化内容，但必须等旧 runtime 精确退出后才写入。
+        // 否则 teardown 失败或取消会留下“DB 是新模型、进程仍是旧模型”的半提交。
         let model_json = match serde_json::to_string(&picked) {
             Ok(json) => json,
             Err(e) => {
@@ -265,21 +303,6 @@ impl ConversationService {
                 return None;
             }
         };
-        let update = ConversationRowUpdate {
-            model: Some(Some(model_json)),
-            execution_model_pool: Some(execution_model_pool),
-            execution_template_id: Some(None),
-            updated_at: Some(now_ms()),
-            ..Default::default()
-        };
-        if let Err(e) = self.conversation_repo().update(conv_id, &update).await {
-            warn!(error = %ErrorChain(&e), conversation_id, "Failover aborted: failed to persist new model");
-            return None;
-        }
-        if cancellation.is_cancelled() {
-            return None;
-        }
-
         info!(
             conversation_id,
             failed_provider = %failed.provider_id,
@@ -287,7 +310,7 @@ impl ConversationService {
             next_provider = %picked.provider_id,
             next_model = %picked.model,
             reason = ?AgentKillReason::ConfigurationChanged,
-            "Model failover: switching model and rebuilding task"
+            "Model failover: awaiting old runtime teardown before committing model switch"
         );
 
         // kill_and_wait,镜像 evict_acp_task_after_terminal_error(acp_error_recovery.rs):
@@ -296,13 +319,110 @@ impl ConversationService {
         // registry quarantines the old slot, and this owner must keep retrying
         // until process-tree exit is proven before either rebuilding or letting
         // the durable Running turn finalize.
-        Self::terminate_runtime_until_confirmed(
-            runtime_registry,
-            conversation_id,
-            AgentKillReason::ConfigurationChanged,
-            "model failover",
-        )
-        .await;
+        let mut retry_delay = Duration::from_millis(25);
+        let warning_deadline = Instant::now() + Duration::from_secs(2);
+        let mut warning_attempted = false;
+        let mut teardown_warning = None;
+        loop {
+            if !warning_attempted && Instant::now() >= warning_deadline {
+                warning_attempted = true;
+                teardown_warning = self
+                    .persist_and_broadcast_model_failover_teardown_tip(
+                        &row.user_id,
+                        conversation_id,
+                        None,
+                    )
+                    .await;
+            }
+            let teardown = Self::terminate_runtime_with_proof(
+                runtime_registry,
+                conversation_id,
+                AgentKillReason::ConfigurationChanged,
+                "model failover",
+            );
+            tokio::pin!(teardown);
+            let teardown_result = if warning_attempted {
+                teardown.await
+            } else {
+                tokio::select! {
+                    biased;
+                    result = &mut teardown => result,
+                    _ = tokio::time::sleep_until(warning_deadline) => {
+                        warning_attempted = true;
+                        teardown_warning = self
+                            .persist_and_broadcast_model_failover_teardown_tip(
+                                &row.user_id,
+                                conversation_id,
+                                None,
+                            )
+                            .await;
+                        teardown.await
+                    }
+                }
+            };
+            match teardown_result {
+                Ok(()) => break,
+                Err(_) => {}
+            }
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
+        }
+        if let Some(mut warning) = teardown_warning {
+            let _ = self
+                .resolve_and_broadcast_model_failover_teardown_tip(
+                    &row.user_id,
+                    &mut warning,
+                    None,
+                )
+                .await;
+        }
+        if cancellation.is_cancelled() {
+            return None;
+        }
+
+        // Revalidate the durable authority after the potentially long teardown.
+        // Public runtime-affecting PATCHes take the same preparation gate, and
+        // this snapshot comparison also fails closed for any trusted writer
+        // that bypassed that gate. Never let an old failover overwrite a newer
+        // explicit model/pool/template choice.
+        let current = match self.conversation_repo().get(conv_id).await {
+            Ok(Some(current)) => current,
+            Ok(None) => {
+                warn!(conversation_id, "Failover aborted: conversation vanished after runtime teardown");
+                return None;
+            }
+            Err(error) => {
+                warn!(error = %ErrorChain(&error), conversation_id, "Failover aborted: failed to revalidate configuration after runtime teardown");
+                return None;
+            }
+        };
+        if current.model != row.model
+            || current.execution_model_pool != row.execution_model_pool
+            || current.execution_template_id != row.execution_template_id
+        {
+            warn!(
+                conversation_id,
+                "Failover aborted: durable model authority changed while old runtime was tearing down"
+            );
+            return None;
+        }
+
+        let next_authority = FailoverAuthoritySnapshot {
+            model: picked.clone(),
+            execution_model_pool: execution_model_pool.clone(),
+            execution_template_id: None,
+        };
+        let update = ConversationRowUpdate {
+            model: Some(Some(model_json)),
+            execution_model_pool: Some(execution_model_pool),
+            execution_template_id: Some(None),
+            updated_at: Some(now_ms()),
+            ..Default::default()
+        };
+        if let Err(e) = self.conversation_repo().update(conv_id, &update).await {
+            warn!(error = %ErrorChain(&e), conversation_id, "Failover aborted: failed to persist new model after runtime teardown");
+            return None;
+        }
         if cancellation.is_cancelled() {
             return None;
         }
@@ -374,7 +494,11 @@ impl ConversationService {
         }
 
         self.commit_runtime_knowledge_signature(conversation_id, knowledge_signature);
-        Some(FailoverSwitch { agent, picked })
+        Some(FailoverSwitch {
+            agent,
+            picked,
+            authority: next_authority,
+        })
     }
 
     /// 同模型"剔图重建":标记 registry(该 provider+model 不支持图片)→终止 runtime→
@@ -493,11 +617,14 @@ impl ConversationService {
     /// **全部满足**才转移(否则返回 `None`,send-loop 按现状 emit 原始错误):
     /// 1. terminal 是 Error 且 code 命中 [`crate::model_failover::is_provider_fault`];
     /// 2. **pre-response**:本轮未吐任何 assistant Text / 工具动作
-    ///    (`!outcome.emitted_response`,plan D4 + review #4)—— 杜绝重复输出 /
-    ///    重复副作用 / 重复计费;
+    ///    (`!outcome.emitted_response`,plan D4 + review #4)—— 杜绝重复可见输出 /
+    ///    工具副作用。上游在返回 500 / EOF 前仍可能已经消耗推理资源,不能保证零重复
+    ///    计费;额外 token 风险由较低的 provider 重试次数和有限模型切换次数约束;
     /// 3. 故障转移启用(会话级覆盖否则全局,`enabled == true`);
     /// 4. `switches_done < min(max_switches, queue.len())` —— bounded;
     /// 5. agent 是 **nomi** 实例(plan D7;终端 CLI / ACP 自管模型,排除)。
+    /// 6. 持久化 model / pool / template 仍与失败 runtime 构建时的完整 authority
+    ///    一致;并发显式 PATCH 已提交时立即放弃旧 failover,绝不覆盖用户的新选择。
     ///
     /// 命中且挑到可用候选 → 换模型 + 重建,返回 `Some(FailoverSwitch)`;
     /// 任一条件不满足 / 队列耗尽 → `None`。
@@ -512,6 +639,7 @@ impl ConversationService {
         outcome: &RelayOutcome,
         switches_done: u32,
         tried: &[ProviderWithModel],
+        failed_turn_authority: &FailoverAuthoritySnapshot,
         extra_json: &str,
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
         turn_generation: u64,
@@ -521,8 +649,7 @@ impl ConversationService {
             return None;
         }
         // (5) 仅 nomi 自有引擎的普通会话。便宜的早闸(避免无谓加载);真正的强制点
-        //     在 `perform_model_failover` 的 ACP 边界闸(review #9),send-loop 与 IDMM
-        //     共用那一处。
+        //     在 inner 的 ACP 边界闸(review #9)。IDMM 不进入有副作用路径。
         if agent_type != AgentType::Nomi {
             return None;
         }
@@ -542,7 +669,8 @@ impl ConversationService {
             return None;
         }
         // (2) pre-response:本轮已吐过 Text / 工具动作则不转移(post-response 故障 →
-        //     emit 错误,杜绝重复输出 / 重复副作用 / 重复计费)。
+        //     emit 错误,杜绝重复可见输出 / 工具副作用)。这不保证零重复计费:上游在
+        //     500 / EOF 前可能已经消耗推理资源;额外 token 风险由低重试和有限切换约束。
         if *emitted_response {
             return None;
         }
@@ -571,6 +699,7 @@ impl ConversationService {
             conversation_id,
             &config,
             tried,
+            Some(failed_turn_authority),
             runtime_registry,
             turn_generation,
             cancellation,

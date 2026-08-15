@@ -21,6 +21,9 @@ use nomi_config::compat::ProviderCompat;
 use nomi_types::llm::{LlmEvent, LlmRequest};
 
 const MAX_DOUBLE_ENCODED_TOOL_ARGUMENT_BYTES: usize = 512 * 1024;
+const MAX_PROVIDER_ERROR_BODY_BYTES: usize = 16 * 1024;
+const PROVIDER_ERROR_BODY_READ_TIMEOUT: Duration = Duration::from_secs(2);
+const TRUNCATED_PROVIDER_ERROR_BODY: &str = "\n[provider error body truncated]";
 
 fn merge_json_value(target: &mut Value, incoming: &Value) {
     match (target, incoming) {
@@ -231,7 +234,7 @@ pub(crate) async fn send_initial(
             return Ok(response);
         }
         let retry_after_ms = parse_retry_after_ms(response.headers()).unwrap_or(5000);
-        let body_text = redactor.redact(&response.text().await.unwrap_or_default());
+        let body_text = read_provider_error_body(response, redactor).await;
         if status.as_u16() == 429 {
             return Err(ProviderError::RateLimited {
                 retry_after_ms,
@@ -244,6 +247,68 @@ pub(crate) async fn send_initial(
         })
     })
     .await
+}
+
+/// Read an untrusted non-success response without allowing a provider or proxy
+/// to turn diagnostics into an unbounded allocation. The returned text is
+/// credential-aware and strips every embedded URL query before it can enter a
+/// log, transcript, or frontend error payload.
+pub(crate) async fn read_provider_error_body(
+    response: reqwest::Response,
+    redactor: &SecretRedactor,
+) -> String {
+    use futures::StreamExt;
+
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::with_capacity(MAX_PROVIDER_ERROR_BODY_BYTES.min(1024));
+    let mut truncated = false;
+    let deadline = tokio::time::Instant::now() + PROVIDER_ERROR_BODY_READ_TIMEOUT;
+    loop {
+        let chunk = match tokio::time::timeout_at(deadline, stream.next()).await {
+            Ok(Some(Ok(chunk))) => chunk,
+            Ok(None) => break,
+            Ok(Some(Err(_))) | Err(_) => {
+                truncated = true;
+                break;
+            }
+        };
+        let remaining = MAX_PROVIDER_ERROR_BODY_BYTES.saturating_sub(body.len());
+        if chunk.len() > remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+        if body.len() == MAX_PROVIDER_ERROR_BODY_BYTES {
+            // Do not perform one more read merely to distinguish an exactly
+            // full body from a larger or stalled one. The diagnostic marker is
+            // preferable to extending an error path by the idle-read timeout.
+            truncated = true;
+            break;
+        }
+    }
+
+    if truncated {
+        // Exact redaction cannot recognize a credential whose prefix is the
+        // retained buffer tail and whose remainder fell beyond the cap (or a
+        // failed/timed-out body read). Drop only the longest credential-prefix
+        // suffix before decoding; this also covers encoded variants.
+        let safe_boundary = redactor.redaction_safe_truncation_boundary(&body);
+        body.truncate(safe_boundary);
+    }
+    let mut text = redactor.redact(&String::from_utf8_lossy(&body));
+    if text.len() > MAX_PROVIDER_ERROR_BODY_BYTES {
+        let mut boundary = MAX_PROVIDER_ERROR_BODY_BYTES;
+        while !text.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        text.truncate(boundary);
+        truncated = true;
+    }
+    if truncated {
+        text.push_str(TRUNCATED_PROVIDER_ERROR_BODY);
+    }
+    text
 }
 
 /// Send the initial streaming request, rotating through the configured API
@@ -560,7 +625,10 @@ mod retryable_tests {
     use nomifun_net::secret_redaction::SecretRedactor;
     use tokio::sync::mpsc;
 
-    use super::{LlmProvider, ProviderError, SecretRedactingProvider};
+    use super::{
+        read_provider_error_body, LlmProvider, ProviderError, SecretRedactingProvider,
+        MAX_PROVIDER_ERROR_BODY_BYTES, TRUNCATED_PROVIDER_ERROR_BODY,
+    };
     use super::{
         is_api_key_rotation_error, parse_api_keys, parse_retry_after_ms,
         parse_tool_call_arguments, MAX_DOUBLE_ENCODED_TOOL_ARGUMENT_BYTES,
@@ -614,6 +682,140 @@ mod retryable_tests {
             "URL-encoded secret leaked: {message}"
         );
         assert!(message.contains("[REDACTED]"), "redaction marker missing: {message}");
+    }
+
+    #[tokio::test]
+    async fn provider_error_body_is_bounded_and_sanitized() {
+        let secret = "gateway-secret";
+        let body = format!(
+            "Post \"https://gateway.test/responses?access_token={secret}\": EOF\n{}",
+            "x".repeat(MAX_PROVIDER_ERROR_BODY_BYTES + 4096)
+        );
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(500)
+                .body(body)
+                .expect("test response"),
+        );
+
+        let sanitized =
+            read_provider_error_body(response, &SecretRedactor::default()).await;
+
+        assert!(!sanitized.contains(secret));
+        assert!(sanitized.contains("https://gateway.test/responses?<redacted>"));
+        assert!(sanitized.ends_with(TRUNCATED_PROVIDER_ERROR_BODY));
+        assert!(
+            sanitized.len()
+                <= MAX_PROVIDER_ERROR_BODY_BYTES + TRUNCATED_PROVIDER_ERROR_BODY.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_provider_body_drops_raw_and_encoded_secret_prefixes_at_the_cap() {
+        let redactor = SecretRedactor::new([REFLECTED_SECRET]);
+        for reflected in [REFLECTED_SECRET, URL_ENCODED_SECRET] {
+            let retained_secret_prefix_len = reflected.len() - 3;
+            let padding_len = MAX_PROVIDER_ERROR_BODY_BYTES - retained_secret_prefix_len;
+            let body = format!("{}{}", "x".repeat(padding_len), reflected);
+            let response = reqwest::Response::from(
+                http::Response::builder()
+                    .status(500)
+                    .body(body)
+                    .expect("test response"),
+            );
+
+            let sanitized = read_provider_error_body(response, &redactor).await;
+
+            assert_eq!(
+                sanitized,
+                format!("{}{}", "x".repeat(padding_len), TRUNCATED_PROVIDER_ERROR_BODY),
+                "a credential prefix crossing the byte cap must be removed: {reflected}"
+            );
+            assert!(
+                sanitized.len()
+                    <= MAX_PROVIDER_ERROR_BODY_BYTES + TRUNCATED_PROVIDER_ERROR_BODY.len()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn truncated_provider_body_keeps_an_unrelated_plain_tail() {
+        let ordinary_tail = "ordinary diagnostic tail";
+        let padding_len = MAX_PROVIDER_ERROR_BODY_BYTES - ordinary_tail.len();
+        let body = format!(
+            "{}{}overflow beyond cap",
+            "x".repeat(padding_len),
+            ordinary_tail
+        );
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(500)
+                .body(body)
+                .expect("test response"),
+        );
+
+        let sanitized = read_provider_error_body(
+            response,
+            &SecretRedactor::new(["gateway-secret"]),
+        )
+        .await;
+
+        assert!(sanitized.ends_with(&format!(
+            "{ordinary_tail}{TRUNCATED_PROVIDER_ERROR_BODY}"
+        )));
+        assert_eq!(
+            sanitized.len(),
+            MAX_PROVIDER_ERROR_BODY_BYTES + TRUNCATED_PROVIDER_ERROR_BODY.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn redaction_marker_expansion_still_respects_the_diagnostic_cap() {
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(500)
+                .body("x".repeat(MAX_PROVIDER_ERROR_BODY_BYTES + 1))
+                .expect("test response"),
+        );
+
+        let sanitized =
+            read_provider_error_body(response, &SecretRedactor::new(["x"])).await;
+
+        assert!(!sanitized.contains('x'));
+        assert!(sanitized.ends_with(TRUNCATED_PROVIDER_ERROR_BODY));
+        assert_eq!(
+            sanitized.len(),
+            MAX_PROVIDER_ERROR_BODY_BYTES + TRUNCATED_PROVIDER_ERROR_BODY.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn small_provider_error_body_is_not_marked_truncated() {
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(500)
+                .body("upstream EOF".to_owned())
+                .expect("test response"),
+        );
+
+        let body = read_provider_error_body(response, &SecretRedactor::default()).await;
+
+        assert_eq!(body, "upstream EOF");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_provider_error_body_has_its_own_short_deadline() {
+        let stalled = futures::stream::pending::<Result<Vec<u8>, std::io::Error>>();
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(500)
+                .body(reqwest::Body::wrap_stream(stalled))
+                .expect("test response"),
+        );
+
+        let body = read_provider_error_body(response, &SecretRedactor::default()).await;
+
+        assert_eq!(body, TRUNCATED_PROVIDER_ERROR_BODY);
     }
 
     #[tokio::test]

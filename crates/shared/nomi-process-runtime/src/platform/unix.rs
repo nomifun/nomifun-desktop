@@ -39,7 +39,8 @@ use super::{
 };
 #[cfg(target_os = "linux")]
 use super::linux_watchdog::{
-    FAULT_NONE, WatchdogConfig, capture_close_upper_exclusive, capture_starttime, run_watchdog,
+    FAULT_NONE, ProcessGroupExecutionState, WatchdogConfig, capture_close_upper_exclusive,
+    capture_starttime, probe_process_group_after_exact_leader_reap, run_watchdog,
 };
 #[cfg(all(test, target_os = "linux"))]
 use super::linux_watchdog::{
@@ -70,7 +71,8 @@ const READ_BUFFER_BYTES: usize = 8 * 1024;
 const POST_EXIT_READER_DRAIN: Duration = Duration::from_millis(100);
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const WATCHDOG_QUIESCING_WAIT: Duration = Duration::from_millis(100);
-const GROUP_ABSENCE_WAIT: Duration = Duration::from_millis(100);
+const GROUP_QUIESCENCE_WAIT: Duration = Duration::from_secs(1);
+const GROUP_QUIESCENCE_POLL: Duration = Duration::from_millis(50);
 const LEGACY_SPAWN_FAILURE_FRAME_DRAIN: Duration = Duration::from_millis(10);
 const CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(10);
 const CLEANUP_RETRY_MAX: Duration = Duration::from_secs(1);
@@ -364,7 +366,7 @@ impl ChildProcessCleanup {
             .completion()
             .wait(Instant::now() + Duration::from_secs(5))
             .await?;
-        prove_group_absent(pgid)
+        prove_group_execution_quiesced(pgid, watchdog.leader_starttime)
     }
 
     pub(crate) async fn shutdown(
@@ -392,7 +394,7 @@ impl ChildProcessCleanup {
             .await;
         child_result?;
         cleanup_result?;
-        prove_group_absent(pgid)
+        prove_group_execution_quiesced(pgid, watchdog.leader_starttime)
     }
 }
 
@@ -426,7 +428,7 @@ pub(crate) fn spawn_child_process(
         Ok(committed) => committed,
         Err(error) => {
             wait_tokio_child_reaped(&mut child, Instant::now() + SETUP_TIMEOUT)?;
-            let _ = prove_group_absent(pid as libc::pid_t);
+            let _ = prove_group_execution_quiesced(pid as libc::pid_t, None);
             return Err(error);
         }
     };
@@ -461,6 +463,7 @@ pub(crate) fn spawn_child_process(
                 "validate child-process watchdog after registry failure: {anchor_error}"
             )),
         }
+        let mut cleanup_deferred = false;
         if let Err(cleanup_error) = waitpid_exact_setup(watchdog.watchdog_pid, deadline) {
             cleanup_errors.push(format!("reap child-process watchdog: {cleanup_error}"));
             defer_child_process_cleanup(
@@ -469,18 +472,38 @@ pub(crate) fn spawn_child_process(
                 Some(watchdog.watchdog_pid),
                 None,
                 Some(pid as libc::pid_t),
+                watchdog.leader_starttime,
                 true,
                 group_sealed,
                 platform_permit.clone(),
             );
+            cleanup_deferred = true;
         }
         if let Err(cleanup_error) =
             wait_tokio_child_reaped(&mut child, Instant::now() + SETUP_TIMEOUT)
         {
             cleanup_errors.push(format!("reap Tokio child process: {cleanup_error}"));
         }
-        if let Err(cleanup_error) = prove_group_absent(pid as libc::pid_t) {
+        if let Err(cleanup_error) =
+            prove_group_execution_quiesced(pid as libc::pid_t, watchdog.leader_starttime)
+        {
             cleanup_errors.push(format!("prove child process group absent: {cleanup_error}"));
+            if group_sealed
+                && !cleanup_deferred
+                && cleanup_error.kind() != io::ErrorKind::Unsupported
+            {
+                defer_child_process_cleanup(
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(pid as libc::pid_t),
+                    watchdog.leader_starttime,
+                    false,
+                    true,
+                    platform_permit.clone(),
+                );
+            }
         }
         return Err(if cleanup_errors.is_empty() {
             error
@@ -519,13 +542,14 @@ pub(crate) async fn kill_process_tree(
             .await;
         child_result?;
         cleanup_result?;
-        return prove_group_absent(pid as libc::pid_t);
+        return prove_group_execution_quiesced(pid as libc::pid_t, watchdog.leader_starttime);
     }
     match child.try_wait() {
         Ok(Some(_)) => return Ok(()),
         Ok(None) => {}
         Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
-            return Err(io::Error::other(
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
                 "child process exact ownership was lost; cached PGID was quarantined",
             ));
         }
@@ -607,6 +631,7 @@ impl ChildProcessSpawnTransaction {
                         None,
                         None,
                         Some(watchdog_pid),
+                        None,
                         None,
                         None,
                         false,
@@ -710,6 +735,19 @@ impl ChildProcessSpawnTransaction {
                 true,
             ));
         }
+        let leader_starttime = match capture_group_leader_starttime(pid) {
+            Ok(starttime) => starttime,
+            Err(error) => {
+                return Err(self.fail_registered_with_tokio_child(
+                    pid,
+                    io::Error::new(
+                        error.kind(),
+                        format!("capture committed process-group identity: {error}"),
+                    ),
+                    true,
+                ));
+            }
+        };
         let watchdog_pid = self
             .watchdog_pid
             .take()
@@ -726,6 +764,7 @@ impl ChildProcessSpawnTransaction {
                 watchdog_pid,
                 control,
                 pid,
+                leader_starttime,
                 self.nonce,
             )),
             self.platform_permit.clone(),
@@ -746,6 +785,7 @@ impl ChildProcessSpawnTransaction {
                 None,
                 None,
                 Some(watchdog_pid),
+                None,
                 None,
                 None,
                 false,
@@ -806,6 +846,7 @@ impl ChildProcessSpawnTransaction {
         error: io::Error,
         watchdog_anchors_group: bool,
     ) -> io::Error {
+        let leader_starttime = capture_group_leader_starttime(pid).ok().flatten();
         self.registration.take();
         self.control.take();
         let mut cleanup_errors = Vec::new();
@@ -831,18 +872,37 @@ impl ChildProcessSpawnTransaction {
                 "validate child-process cleanup anchor before group sealing: {anchor_error}"
             )),
         }
-        if let Some(watchdog_pid) = self.watchdog_pid.take()
-            && let Err(cleanup_error) = waitpid_exact_setup(watchdog_pid, self.deadline)
-        {
-            cleanup_errors.push(format!("reap child-process watchdog: {cleanup_error}"));
+        let mut cleanup_deferred = false;
+        if let Some(watchdog_pid) = self.watchdog_pid.take() {
+            if let Err(cleanup_error) = waitpid_exact_setup(watchdog_pid, self.deadline) {
+                cleanup_errors.push(format!("reap child-process watchdog: {cleanup_error}"));
+                defer_child_process_cleanup(
+                    None,
+                    None,
+                    Some(watchdog_pid),
+                    None,
+                    Some(pid),
+                    leader_starttime,
+                    watchdog_anchors_group,
+                    group_sealed,
+                    self.platform_permit.clone(),
+                );
+                cleanup_deferred = true;
+            }
+        }
+        if group_sealed && !cleanup_deferred {
+            // The caller may still own/reap the direct leader. Preserve a
+            // sealed, observation-only PGID receipt now so any later bounded
+            // proof timeout cannot discard retry authority.
             defer_child_process_cleanup(
                 None,
                 None,
-                Some(watchdog_pid),
+                None,
                 None,
                 Some(pid),
-                watchdog_anchors_group,
-                group_sealed,
+                leader_starttime,
+                false,
+                true,
                 self.platform_permit.clone(),
             );
         }
@@ -860,6 +920,7 @@ impl ChildProcessSpawnTransaction {
         pid: libc::pid_t,
         error: io::Error,
     ) -> io::Error {
+        let leader_starttime = capture_group_leader_starttime(pid).ok().flatten();
         // A verified queued Registered frame proves the non-external watchdog
         // joined the group; std/Tokio may already have reaped the leader.
         let anchor_pid = self.watchdog_pid.unwrap_or(pid);
@@ -871,7 +932,9 @@ impl ChildProcessSpawnTransaction {
             .and_then(|deadline| waitpid_exact_setup(pid, deadline))
         {
             Ok(_) => {
-                if let Err(cleanup_error) = prove_group_absent(pid) {
+                if let Err(cleanup_error) =
+                    prove_group_execution_quiesced(pid, leader_starttime)
+                {
                     cleanup_errors.push(format!("prove child process group absent: {cleanup_error}"));
                 }
             }
@@ -881,20 +944,12 @@ impl ChildProcessSpawnTransaction {
                 // the exact watchdog anchor was still held; require group
                 // absence instead of falsely treating the expected ECHILD as
                 // lost ownership.
-                if let Err(absence_error) = prove_group_absent(pid) {
+                if let Err(absence_error) =
+                    prove_group_execution_quiesced(pid, leader_starttime)
+                {
                     cleanup_errors.push(format!(
                         "prove child process group absent after spawn reaped child: {absence_error}"
                     ));
-                    defer_child_process_cleanup(
-                        None,
-                        None,
-                        None,
-                        None,
-                        Some(pid),
-                        false,
-                        true,
-                        self.platform_permit.clone(),
-                    );
                 }
             }
             Err(cleanup_error) => {
@@ -905,6 +960,7 @@ impl ChildProcessSpawnTransaction {
                     None,
                     None,
                     Some(pid),
+                    leader_starttime,
                     false,
                     true,
                     self.platform_permit.clone(),
@@ -927,6 +983,7 @@ fn defer_child_process_cleanup(
     watchdog_pid: Option<libc::pid_t>,
     control: Option<OwnedFd>,
     pgid: Option<libc::pid_t>,
+    leader_starttime: Option<u64>,
     watchdog_anchors_group: bool,
     group_sealed: bool,
     permit: PlatformLifecyclePermit,
@@ -938,6 +995,7 @@ fn defer_child_process_cleanup(
         watchdog_anchors_group,
         control,
         pgid,
+        leader_starttime,
         group_state: match (pgid, group_sealed) {
             (Some(_), true) => CleanupGroupState::Sealed,
             (Some(_), false) => CleanupGroupState::Pending,
@@ -952,7 +1010,6 @@ fn defer_child_process_cleanup(
         leader_ownership_lost: false,
         retry_delay: CLEANUP_RETRY_DELAY,
         next_attempt: Instant::now(),
-        absence_deadline: None,
         #[cfg(test)]
         audit: TestSpawnAudit::default(),
         #[cfg(test)]
@@ -1001,6 +1058,7 @@ struct ChildProcessWatchdog {
     watchdog_pid: libc::pid_t,
     control: Mutex<Option<OwnedFd>>,
     pgid: libc::pid_t,
+    leader_starttime: Option<u64>,
     nonce: Nonce,
     signal_gate: Mutex<bool>,
     completion: Arc<ChildProcessWatchdogCompletion>,
@@ -1012,6 +1070,7 @@ impl ChildProcessWatchdog {
         watchdog_pid: libc::pid_t,
         control: OwnedFd,
         pgid: libc::pid_t,
+        leader_starttime: Option<u64>,
         nonce: Nonce,
     ) -> Self {
         Self {
@@ -1019,6 +1078,7 @@ impl ChildProcessWatchdog {
             watchdog_pid,
             control: Mutex::new(Some(control)),
             pgid,
+            leader_starttime,
             nonce,
             signal_gate: Mutex::new(true),
             completion: Arc::new(ChildProcessWatchdogCompletion::new()),
@@ -1102,6 +1162,11 @@ impl ChildProcessWatchdogCompletion {
     async fn wait(&self, deadline: Instant) -> io::Result<()> {
         loop {
             let notified = self.notify.notified();
+            tokio::pin!(notified);
+            // Register the waiter before inspecting the completion snapshot.
+            // `notify_waiters` does not retain a permit, so polling only after
+            // the snapshot would leave a publish-between-the-two race.
+            notified.as_mut().enable();
             let result = match self.result.lock() {
                 Ok(stored) => stored.clone(),
                 Err(poisoned) => poisoned.into_inner().clone(),
@@ -1113,7 +1178,7 @@ impl ChildProcessWatchdogCompletion {
             }
             tokio::time::timeout_at(
                 tokio::time::Instant::from_std(deadline),
-                notified,
+                notified.as_mut(),
             )
             .await
             .map_err(|_| {
@@ -1154,6 +1219,7 @@ fn register_child_process_watchdog(
     }
     let job: Box<dyn LifecyclePollJob> = Box::new(ChildProcessWatchdogPoller {
         watchdog: Arc::clone(&watchdog),
+        retry_delay: CLEANUP_RETRY_DELAY,
         _permit: permit,
     });
     let poller = platform_lifecycle_poller()?;
@@ -1191,6 +1257,7 @@ fn remove_child_process_watchdog(pid: u32, expected: &ChildProcessWatchdog) {
 
 struct ChildProcessWatchdogPoller {
     watchdog: Arc<ChildProcessWatchdog>,
+    retry_delay: Duration,
     _permit: PlatformLifecyclePermit,
 }
 
@@ -1252,14 +1319,33 @@ impl LifecyclePollJob for ChildProcessWatchdogPoller {
             }
             Err(error) => {
                 let reason = error.to_string();
-                self.publish(Err(io::Error::new(error.kind(), reason.clone())));
-                LifecyclePoll::Quarantine { reason }
+                if error.kind() == io::ErrorKind::Unsupported {
+                    self.publish(Err(error));
+                    LifecyclePoll::Quarantine { reason }
+                } else {
+                    tracing::warn!(
+                        pid = self.watchdog.pid,
+                        %error,
+                        "child-process cleanup proof remains retryable"
+                    );
+                    self.retry_delay = self
+                        .retry_delay
+                        .checked_mul(2)
+                        .unwrap_or(CLEANUP_ERROR_RETRY_MAX)
+                        .min(CLEANUP_ERROR_RETRY_MAX);
+                    LifecyclePoll::Pending {
+                        next_poll: Instant::now() + self.retry_delay,
+                    }
+                }
             }
         }
     }
 
     fn poller_failed(&mut self, reason: &str) {
-        self.publish(Err(io::Error::other(reason.to_owned())));
+        self.publish(Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            reason.to_owned(),
+        )));
     }
 
     fn label(&self) -> &'static str {
@@ -1268,20 +1354,53 @@ impl LifecyclePollJob for ChildProcessWatchdogPoller {
 }
 
 fn settle_child_process_watchdog(watchdog: &Arc<ChildProcessWatchdog>) -> io::Result<()> {
-    let mut outcome = run_child_process_watchdog_inner(&watchdog);
-    if outcome.result.is_err() && outcome.anchor == ChildProcessWatchdogAnchor::Held {
+    let outcome = run_child_process_watchdog_inner(&watchdog);
+    settle_child_process_watchdog_outcome(outcome, || {
         watchdog.close_control();
-        if let Err(cleanup_error) = recover_child_process_watchdog(&watchdog) {
-            outcome.result = Err(io::Error::other(format!(
-                "{}; fallback cleanup failed: {cleanup_error}",
-                outcome
-                    .result
-                    .as_ref()
-                    .expect_err("child-process watchdog result is an error")
-            )));
+        recover_child_process_watchdog(&watchdog)
+    })
+}
+
+fn settle_child_process_watchdog_outcome(
+    outcome: ChildProcessWatchdogOutcome,
+    recover_held: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    match outcome.anchor {
+        ChildProcessWatchdogAnchor::Reaped => {
+            if let Err(error) = outcome.result {
+                // The group seal and exact watchdog reap are the cleanup
+                // receipt. Protocol anomalies remain diagnostic only; callers
+                // still perform their independent post-leader group proof.
+                tracing::warn!(%error, "child-process watchdog cleanup completed with a protocol diagnostic");
+            }
+            Ok(())
+        }
+        ChildProcessWatchdogAnchor::Lost => outcome.result.and_then(|()| {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "child-process watchdog reported lost authority without an error",
+            ))
+        }),
+        ChildProcessWatchdogAnchor::Held => {
+            let diagnostic = outcome
+                .result
+                .err()
+                .unwrap_or_else(|| io::Error::other("cleanup settlement ended without a proof"));
+            match recover_held() {
+                Ok(()) => {
+                    tracing::warn!(
+                        %diagnostic,
+                        "child-process watchdog cleanup completed through exact fallback"
+                    );
+                    Ok(())
+                }
+                Err(cleanup_error) => Err(io::Error::new(
+                    cleanup_error.kind(),
+                    format!("{diagnostic}; fallback cleanup failed: {cleanup_error}"),
+                )),
+            }
         }
     }
-    outcome.result
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1356,7 +1475,8 @@ fn run_child_process_watchdog_inner(watchdog: &ChildProcessWatchdog) -> ChildPro
                     Ok(status) => status,
                     Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
                         retire_child_process_signal_gate(watchdog);
-                        return ChildProcessWatchdogOutcome::lost(io::Error::other(
+                        return ChildProcessWatchdogOutcome::lost(io::Error::new(
+                            io::ErrorKind::Unsupported,
                             "child-process Unix watchdog exact ownership was lost before reap",
                         ));
                     }
@@ -1375,7 +1495,8 @@ fn run_child_process_watchdog_inner(watchdog: &ChildProcessWatchdog) -> ChildPro
             Ok(false) => {}
             Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
                 retire_child_process_signal_gate(watchdog);
-                return ChildProcessWatchdogOutcome::lost(io::Error::other(
+                return ChildProcessWatchdogOutcome::lost(io::Error::new(
+                    io::ErrorKind::Unsupported,
                     "child-process Unix watchdog exact ownership was lost before group sealing",
                 ));
             }
@@ -1441,7 +1562,8 @@ fn recover_child_process_watchdog(watchdog: &ChildProcessWatchdog) -> io::Result
         Ok(_) => {}
         Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
             retire_child_process_signal_gate(watchdog);
-            return Err(io::Error::other(
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
                 "child-process Unix watchdog exact ownership was lost; cached PGID was quarantined",
             ));
         }
@@ -1460,7 +1582,8 @@ fn recover_child_process_watchdog(watchdog: &ChildProcessWatchdog) -> io::Result
     let deadline = Deadline::after(CLEANUP_RETRY_MAX).map_err(protocol_io_error)?;
     match waitpid_exact_setup(watchdog.watchdog_pid, deadline) {
         Ok(_) => Ok(()),
-        Err(error) if error.raw_os_error() == Some(libc::ECHILD) => Err(io::Error::other(
+        Err(error) if error.raw_os_error() == Some(libc::ECHILD) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
             "child-process Unix watchdog exact ownership was lost during fallback reap",
         )),
         Err(error) => Err(error),
@@ -1773,6 +1896,7 @@ struct SpawnTransaction {
     watchdog_anchors_group: bool,
     control: Option<OwnedFd>,
     pgid: Option<libc::pid_t>,
+    leader_starttime: Option<u64>,
     nonce: Nonce,
     platform_permit: Option<PlatformLifecyclePermit>,
     #[cfg(test)]
@@ -1822,6 +1946,7 @@ impl SpawnTransaction {
             watchdog_anchors_group: self.watchdog_anchors_group,
             control: self.control.take(),
             pgid: self.pgid.take(),
+            leader_starttime: self.leader_starttime.take(),
             group_state: CleanupGroupState::new(signal_group),
             signal_gate: None,
             completion: None,
@@ -1832,7 +1957,6 @@ impl SpawnTransaction {
             leader_ownership_lost: false,
             retry_delay: CLEANUP_RETRY_DELAY,
             next_attempt: Instant::now(),
-            absence_deadline: None,
             #[cfg(test)]
             audit: self.audit.clone(),
             #[cfg(test)]
@@ -1961,6 +2085,7 @@ impl SpawnTransaction {
             .pgid
             .take()
             .expect("committed ownership bundle was validated");
+        let leader_starttime = self.leader_starttime.take();
         let signal_gate = Arc::new(Mutex::new(SignalGate {
             phase: SignalPhase::Open,
             final_kill_sent: false,
@@ -1973,6 +2098,9 @@ impl SpawnTransaction {
             watchdog_anchors_group: self.watchdog_anchors_group,
             control: Some(control),
             pgid,
+            leader_starttime,
+            group_sealed: false,
+            group_quiesced: false,
             nonce: self.nonce,
             signal_gate: Arc::clone(&signal_gate),
             completion: Some(completion_sender),
@@ -2072,6 +2200,7 @@ struct CleanupJob {
     watchdog_anchors_group: bool,
     control: Option<OwnedFd>,
     pgid: Option<libc::pid_t>,
+    leader_starttime: Option<u64>,
     group_state: CleanupGroupState,
     signal_gate: Option<Arc<Mutex<SignalGate>>>,
     completion: Option<watch::Sender<LifecycleCompletion>>,
@@ -2082,7 +2211,6 @@ struct CleanupJob {
     leader_ownership_lost: bool,
     retry_delay: Duration,
     next_attempt: Instant,
-    absence_deadline: Option<Instant>,
     #[cfg(test)]
     audit: TestSpawnAudit,
     #[cfg(test)]
@@ -2249,7 +2377,7 @@ impl LifecyclePollJob for UnixLifecyclePollerJob {
             let _ = job.host_fallback_kill(&mut attempted);
             if let Some(completion) = job.completion.as_ref() {
                 completion.send_replace(LifecycleCompletion::Failed {
-                    kind: io::ErrorKind::Other,
+                    kind: io::ErrorKind::Unsupported,
                     message: Arc::<str>::from(reason.to_owned()),
                 });
             }
@@ -2310,7 +2438,7 @@ impl LifecyclePollJob for CleanupPollerJob {
             && let Some(completion) = job.completion.as_ref()
         {
             completion.send_replace(LifecycleCompletion::Failed {
-                kind: io::ErrorKind::Other,
+                kind: io::ErrorKind::Unsupported,
                 message: Arc::<str>::from(reason.to_owned()),
             });
         }
@@ -2577,31 +2705,24 @@ impl CleanupJob {
             && self.raw_leader_pid.is_none()
             && self.watchdog_pid.is_none();
         let direct_identities_reaped = direct_identities_gone && !ownership_lost;
-        let mut group_absent = self.group_state == CleanupGroupState::NotRequired;
+        let mut group_quiesced = self.group_state == CleanupGroupState::NotRequired;
         let mut containment_lost = false;
         if direct_identities_reaped && self.group_state == CleanupGroupState::Sealed {
             if let Some(pgid) = self.pgid {
-                match probe_group_absent_once(pgid) {
-                    Ok(true) => group_absent = true,
-                    Ok(false) => {
-                        let absence_deadline = self.absence_deadline.get_or_insert_with(|| {
-                            Instant::now()
-                                .checked_add(GROUP_ABSENCE_WAIT)
-                                .unwrap_or_else(Instant::now)
-                        });
-                        if Instant::now() >= *absence_deadline {
-                            containment_lost = true;
-                            errors.push(
-                                "process group still exists after relay exact reaps".to_owned(),
-                            );
-                        } else {
-                            errors.push("process group absence is not yet proven".to_owned());
-                        }
-                    }
+                match probe_group_execution_once(pgid, self.leader_starttime) {
+                    Ok(
+                        GroupExecutionProbe::Quiesced
+                        | GroupExecutionProbe::ReusedAfterQuiescence,
+                    ) => group_quiesced = true,
+                    Ok(GroupExecutionProbe::Live) => errors.push(
+                        "process group still has a live member after relay exact reaps".to_owned(),
+                    ),
+                    Ok(GroupExecutionProbe::Unproven) => errors.push(
+                        "process-group execution quiescence is not yet proven".to_owned(),
+                    ),
                     Err(error) => {
-                        containment_lost = true;
                         errors.push(format!(
-                            "process group absence is unproven after relay exact reaps: {error}"
+                            "process-group execution probe failed after relay exact reaps: {error}"
                         ));
                     }
                 }
@@ -2617,7 +2738,7 @@ impl CleanupJob {
                     .to_owned(),
             );
         }
-        let exact_cleanup = direct_identities_reaped && group_absent;
+        let exact_cleanup = direct_identities_reaped && group_quiesced;
         let lost_cleanup_terminal = ownership_lost
             && direct_identities_gone
             && self.group_state != CleanupGroupState::Pending;
@@ -2652,7 +2773,7 @@ impl CleanupJob {
                     )
                 } else if containment_lost {
                     format!(
-                        "lifecycle cleanup is unproven because process-group absence could not be established; last diagnostic: {diagnostics}"
+                        "lifecycle cleanup is unproven because process-group identity containment was lost; last diagnostic: {diagnostics}"
                     )
                 } else if self.attempts == 1 && diagnostics == "none" {
                     "lifecycle failed; exact cleanup completed on the durable relay".to_owned()
@@ -2662,12 +2783,15 @@ impl CleanupJob {
                         self.attempts
                     )
                 };
-                let (kind, original) = self.failure_context.take().unwrap_or_else(|| {
+                let (mut kind, original) = self.failure_context.take().unwrap_or_else(|| {
                     (
                         io::ErrorKind::Other,
                         Arc::<str>::from("lifecycle failed before exact cleanup"),
                     )
                 });
+                if ownership_lost || containment_lost {
+                    kind = io::ErrorKind::Unsupported;
+                }
                 completion.send_replace(LifecycleCompletion::Failed {
                     kind,
                     message: format!("{original}; {message}").into(),
@@ -2890,6 +3014,7 @@ fn spawn_transaction(
         watchdog_anchors_group: false,
         control: Some(control_host),
         pgid: None,
+        leader_starttime: None,
         nonce,
         platform_permit: Some(platform_permit),
         #[cfg(test)]
@@ -2991,6 +3116,18 @@ fn spawn_transaction(
     transaction.pgid = Some(pid);
     transaction.child = Some(child);
     transaction.io = Some(transaction_io);
+    transaction.leader_starttime = match capture_group_leader_starttime(pid) {
+        Ok(starttime) => starttime,
+        Err(error) => {
+            return Err(transaction.post_exec_failure(
+                "process_group_identity_failed",
+                io::Error::new(
+                    error.kind(),
+                    format!("capture process-group leader starttime: {error}"),
+                ),
+            ));
+        }
+    };
     if let Err(error) = recv_expected(control_fd, nonce, FrameKind::Registered, deadline)
         .and_then(|frame| validate_frame_identity(frame, pid, pid).map(drop))
     {
@@ -3546,6 +3683,9 @@ struct LifecycleJob {
     watchdog_anchors_group: bool,
     control: Option<OwnedFd>,
     pgid: libc::pid_t,
+    leader_starttime: Option<u64>,
+    group_sealed: bool,
+    group_quiesced: bool,
     nonce: Nonce,
     signal_gate: Arc<Mutex<SignalGate>>,
     completion: Option<watch::Sender<LifecycleCompletion>>,
@@ -3599,6 +3739,7 @@ impl LifecycleJob {
         };
         if self.child.is_none()
             && self.watchdog_pid.is_none()
+            && self.group_quiesced
             && let Some(sender) = self.completion.as_ref()
         {
             sender.send_replace(completion);
@@ -3799,6 +3940,11 @@ impl LifecycleJob {
                 format!("final host group seal: {error}"),
             ));
         }
+        // From here on the exact unreaped leader (or the authenticated macOS
+        // watchdog proof above) established that every then-current member was
+        // sent SIGKILL. A later proof failure must retain this sealed PGID for
+        // observation only; it must never authorize another signal after reap.
+        self.group_sealed = true;
         let leader_reap_deadline = Instant::now()
             .checked_add(CLEANUP_RETRY_MAX)
             .unwrap_or_else(Instant::now);
@@ -3809,7 +3955,8 @@ impl LifecycleJob {
             pause.block();
         }
         self.retire_signal_identity();
-        prove_group_absent(self.pgid)?;
+        prove_group_execution_quiesced(self.pgid, self.leader_starttime)?;
+        self.group_quiesced = true;
         if let Some(error) = lifecycle_error {
             return Err(error);
         }
@@ -3969,7 +4116,7 @@ impl LifecycleJob {
 
 impl Drop for LifecycleJob {
     fn drop(&mut self) {
-        if self.child.is_none() && self.watchdog_pid.is_none() {
+        if self.child.is_none() && self.watchdog_pid.is_none() && self.group_quiesced {
             self.retire_control();
             return;
         }
@@ -3995,7 +4142,12 @@ impl Drop for LifecycleJob {
             watchdog_anchors_group: self.watchdog_anchors_group,
             control: self.control.take(),
             pgid: Some(self.pgid),
-            group_state: CleanupGroupState::Pending,
+            leader_starttime: self.leader_starttime,
+            group_state: if self.group_sealed {
+                CleanupGroupState::Sealed
+            } else {
+                CleanupGroupState::Pending
+            },
             signal_gate: Some(Arc::clone(&self.signal_gate)),
             completion: self.completion.take(),
             failure_context: self.failure_context.take(),
@@ -4005,7 +4157,6 @@ impl Drop for LifecycleJob {
             leader_ownership_lost: false,
             retry_delay: CLEANUP_RETRY_DELAY,
             next_attempt: Instant::now(),
-            absence_deadline: None,
             #[cfg(test)]
             audit: self.audit.clone(),
             #[cfg(test)]
@@ -4360,32 +4511,66 @@ fn exit_fact(status: ExitStatus) -> io::Result<ExitFact> {
     })
 }
 
-fn prove_group_absent(pgid: libc::pid_t) -> io::Result<()> {
+fn capture_group_leader_starttime(pgid: libc::pid_t) -> io::Result<Option<u64>> {
+    #[cfg(target_os = "linux")]
+    {
+        capture_starttime(pgid).map(Some)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = pgid;
+        Ok(None)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+enum GroupExecutionProbe {
+    Quiesced,
+    Live,
+    ReusedAfterQuiescence,
+    Unproven,
+}
+
+fn prove_group_execution_quiesced(
+    pgid: libc::pid_t,
+    leader_starttime: Option<u64>,
+) -> io::Result<()> {
     let deadline = Instant::now()
-        .checked_add(GROUP_ABSENCE_WAIT)
+        .checked_add(GROUP_QUIESCENCE_WAIT)
         .unwrap_or_else(Instant::now);
     loop {
-        match probe_group_absent_once(pgid) {
-            Ok(true) => return Ok(()),
-            Ok(false) => {}
+        match probe_group_execution_once(pgid, leader_starttime) {
+            Ok(GroupExecutionProbe::Quiesced | GroupExecutionProbe::ReusedAfterQuiescence) => {
+                return Ok(());
+            }
+            Ok(GroupExecutionProbe::Live | GroupExecutionProbe::Unproven) => {}
             Err(error) => {
                 return Err(io::Error::other(format!(
-                    "process group absence is unproven after exact reaps: {error}"
+                    "process-group execution quiescence is unproven after exact reaps: {error}"
                 )));
             }
         }
         if Instant::now() >= deadline {
             return Err(io::Error::other(
-                "process group still exists after exact reaps",
+                "process group still has live or unproven members after exact reaps",
             ));
         }
-        poll_delay(5)?;
+        poll_delay(
+            GROUP_QUIESCENCE_POLL
+                .as_millis()
+                .min(libc::c_int::MAX as u128) as libc::c_int,
+        )?;
     }
 }
 
-fn probe_group_absent_once(pgid: libc::pid_t) -> io::Result<bool> {
+fn probe_group_execution_once(
+    pgid: libc::pid_t,
+    leader_starttime: Option<u64>,
+) -> io::Result<GroupExecutionProbe> {
     #[cfg(target_os = "macos")]
     {
+        let _ = leader_starttime;
         let mut member = 0 as libc::pid_t;
         // proc_listpgrppids returns zero for an empty group. A one-element
         // buffer is sufficient because any returned member disproves absence.
@@ -4399,19 +4584,23 @@ fn probe_group_absent_once(pgid: libc::pid_t) -> io::Result<bool> {
         if returned < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(returned == 0)
+        Ok(if returned == 0 {
+            GroupExecutionProbe::Quiesced
+        } else {
+            GroupExecutionProbe::Live
+        })
     }
     #[cfg(target_os = "linux")]
     {
-    // SAFETY: signal zero only probes the cached process-group identity.
-        if unsafe { libc::kill(-pgid, 0) } == 0 {
-            return Ok(false);
-        }
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
-            Ok(true)
-        } else {
-            Err(error)
+        match probe_process_group_after_exact_leader_reap(pgid, leader_starttime)? {
+            ProcessGroupExecutionState::Absent | ProcessGroupExecutionState::ZombieOnly => {
+                Ok(GroupExecutionProbe::Quiesced)
+            }
+            ProcessGroupExecutionState::Live => Ok(GroupExecutionProbe::Live),
+            ProcessGroupExecutionState::ReusedAfterQuiescence => {
+                Ok(GroupExecutionProbe::ReusedAfterQuiescence)
+            }
+            ProcessGroupExecutionState::Unproven => Ok(GroupExecutionProbe::Unproven),
         }
     }
 }
@@ -4519,6 +4708,33 @@ mod tests {
                 .is_none(),
             "terminal child-process watchdog entry was not retired"
         );
+    }
+
+    #[tokio::test]
+    async fn exact_fallback_replaces_a_settlement_error_with_reusable_cleanup_proof() {
+        let outcome = super::ChildProcessWatchdogOutcome::held(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "injected first settlement timeout",
+        ));
+        let settled = super::settle_child_process_watchdog_outcome(outcome, || Ok(()));
+        let completion = super::ChildProcessWatchdogCompletion::new();
+        completion.publish(settled);
+
+        for _ in 0..2 {
+            completion
+                .wait(Instant::now() + Duration::from_millis(100))
+                .await
+                .expect("exact fallback must publish a reusable successful cleanup receipt");
+        }
+
+        let protocol_diagnostic = super::ChildProcessWatchdogOutcome {
+            result: Err(std::io::Error::other("injected QUIESCING diagnostic")),
+            anchor: super::ChildProcessWatchdogAnchor::Reaped,
+        };
+        super::settle_child_process_watchdog_outcome(protocol_diagnostic, || {
+            panic!("an exactly reaped watchdog must not run fallback cleanup")
+        })
+        .expect("a protocol diagnostic must not overwrite exact cleanup proof");
     }
 
     #[test]
@@ -5489,6 +5705,7 @@ mod tests {
             watchdog_anchors_group: true,
             control: None,
             pgid: Some(pgid),
+            leader_starttime: None,
             group_state: super::CleanupGroupState::Pending,
             signal_gate: Some(Arc::clone(&signal_gate)),
             completion: Some(completion),
@@ -5502,7 +5719,6 @@ mod tests {
             leader_ownership_lost: false,
             retry_delay: super::CLEANUP_RETRY_DELAY,
             next_attempt: Instant::now(),
-            absence_deadline: None,
             audit: audit.clone(),
             hold: None,
         };
@@ -5549,6 +5765,7 @@ mod tests {
             // A deliberately unrelated/nonexistent cached group identity. The
             // test fails if cleanup attempts any negative-PGID signal.
             pgid: Some(libc::pid_t::MAX),
+            leader_starttime: None,
             group_state: super::CleanupGroupState::Pending,
             signal_gate: Some(Arc::clone(&signal_gate)),
             completion: Some(completion),
@@ -5562,7 +5779,6 @@ mod tests {
             leader_ownership_lost: false,
             retry_delay: super::CLEANUP_RETRY_DELAY,
             next_attempt: Instant::now(),
-            absence_deadline: None,
             audit: audit.clone(),
             hold: None,
         };
@@ -5601,6 +5817,7 @@ mod tests {
             watchdog_anchors_group: true,
             control: None,
             pgid: Some(impossible_child),
+            leader_starttime: None,
             group_state: super::CleanupGroupState::Pending,
             signal_gate: Some(Arc::clone(&signal_gate)),
             completion: Some(completion),
@@ -5614,7 +5831,6 @@ mod tests {
             leader_ownership_lost: false,
             retry_delay: super::CLEANUP_RETRY_DELAY,
             next_attempt: Instant::now(),
-            absence_deadline: None,
             audit: audit.clone(),
             hold: None,
         };
@@ -5639,7 +5855,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_never_claims_exact_cleanup_while_group_absence_is_unproven() {
+    fn relay_retains_retry_authority_while_group_quiescence_is_unproven() {
         let audit = TestSpawnAudit::default();
         let signal_gate = Arc::new(std::sync::Mutex::new(super::SignalGate {
             phase: super::SignalPhase::CleanupOwned,
@@ -5657,6 +5873,7 @@ mod tests {
             watchdog_anchors_group: false,
             control: None,
             pgid: Some(live_group),
+            leader_starttime: None,
             group_state: super::CleanupGroupState::Sealed,
             signal_gate: Some(Arc::clone(&signal_gate)),
             completion: Some(completion),
@@ -5670,28 +5887,26 @@ mod tests {
             leader_ownership_lost: false,
             retry_delay: super::CLEANUP_RETRY_DELAY,
             next_attempt: Instant::now(),
-            absence_deadline: Some(Instant::now() - Duration::from_millis(1)),
             audit: audit.clone(),
             hold: None,
         };
 
         let step = job.run_once();
 
-        assert!(matches!(
-            step,
-            super::CleanupStep::Finished { exact: false }
-        ));
+        let super::CleanupStep::Retry(job) = step else {
+            panic!("a transient quiescence proof must retain cleanup authority");
+        };
+        assert_eq!(job.pgid, Some(live_group));
+        assert_eq!(job.group_state, super::CleanupGroupState::Sealed);
         assert_eq!(audit.group_signals.load(Ordering::SeqCst), 0);
         assert_eq!(
             signal_gate.lock().expect("signal gate lock").phase,
-            super::SignalPhase::Retired
+            super::SignalPhase::CleanupOwned
         );
-        match completion_state.borrow().clone() {
-            super::LifecycleCompletion::Failed { message, .. } => {
-                assert!(message.contains("process-group absence"));
-            }
-            _ => panic!("unproven group absence did not publish lifecycle failure"),
-        }
+        assert!(matches!(
+            completion_state.borrow().clone(),
+            super::LifecycleCompletion::Running
+        ));
     }
 
     #[tokio::test]
