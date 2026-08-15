@@ -72,7 +72,7 @@ While WebUI is enabled (the LAN listener is running), a QR code appears in the c
 
 QR login always logs you in as the configured WebUI admin (the primary admin user), regardless of how many users exist in the database — it is the per-instance "skip the password form" shortcut, not a multi-user feature.
 
-![QR code login on phone](../images/webui-04-qr-login-phone.png)
+![Current NomiFun remote workspace](../images/webui-04-cross-device.png)
 
 ## How this differs from `nomifun-web`
 

@@ -9,7 +9,7 @@ application.
 > [Quick Start](quick-start.md). For the full documentation map, see
 > [docs/README.md](../README.md).
 
-![NomiFun guide / landing page](../images/gs-01-introduction-hero.png)
+![NomiFun desktop workspace](../images/getting-started/en/home.png)
 
 ## What NomiFun Solves
 

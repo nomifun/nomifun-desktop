@@ -77,7 +77,7 @@ bun run dev
 日志——这就是嵌入式后端。渲染端会读取 `window.__backendPort`（由 Tauri
 外壳作为 init script 注入），因此 SPA 始终知道 `/api` 该往哪里调用。
 
-![以开发模式运行的 nomifun-desktop 与嵌入式后端](../images/gs-02-desktop-dev.png)
+![NomiFun 桌面工作台](../images/getting-started/zh/desktop-home.png)
 
 ### 构建 Release 二进制
 
@@ -152,7 +152,7 @@ listening on 127.0.0.1:8787  auth=required  dist=../../ui/dist
 在浏览器中打开 `http://127.0.0.1:8787`。首次访问会被引导到设置页——
 你输入的用户名与密码**将成为初始管理员账户**。此后所有人都需要登录。
 
-![浏览器中的首次启动管理员设置](../images/gs-03-web-first-run-setup.png)
+![当前 WebUI 认证入口](../images/gs-03-web-first-run-setup.png)
 
 ### 常用参数
 

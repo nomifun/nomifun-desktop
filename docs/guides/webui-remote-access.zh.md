@@ -71,7 +71,7 @@ WebUI 启用时（局域网监听器运行中），凭据卡中会出现一个�
 
 无论数据库中存在多少用户，二维码登录始终把你登入为已配置的 WebUI 管理员 (主管理员) —— 它是按实例的"跳过密码表单"的捷径，而不是一个多用户功能。
 
-![手机上的二维码登录](../images/webui-04-qr-login-phone.png)
+![当前 NomiFun 远程工作台](../images/webui-04-cross-device.png)
 
 ## 与 `nomifun-web` 的区别
 

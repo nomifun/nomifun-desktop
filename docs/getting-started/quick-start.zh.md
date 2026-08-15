@@ -26,7 +26,7 @@ bun run serve:web
 
 访问 `http://127.0.0.1:8787`。首次访问会创建管理员账号，之后需要登录。
 
-![首次启动管理员设置（仅 Web）](../images/gs-04-quickstart-login.png)
+![当前 WebUI 认证入口（仅 Web）](../images/gs-04-quickstart-login.png)
 
 ## 2. 认识首页
 
