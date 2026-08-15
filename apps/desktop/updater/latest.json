@@ -1,7 +1,7 @@
 {
   "version": "0.6.3",
   "notes": "## Highlights\n\n- Added mini-apps: generate, preview, publish, run, iterate, rename, delete, and import self-contained H5 apps from ordinary Nomi conversations.\n- Mini-app publishing now separates working copies from published snapshots, so unfinished edits cannot overwrite the app users rely on.\n- The mini-app runner and live preview share a sandboxed rendering policy, with explicit controls for publish, continue iteration, refresh, open in browser, rename, and delete.\n- Imported mini-apps are validated with concrete rule-by-rule feedback, and invalid apps can be sent into a conversation for repair.\n- UI/API contract version moved from 16 to 18 for the new mini-app routes and DTOs.\n\n## macOS\n\n- First `v0.6.3` desktop release for macOS, built for Apple Silicon.\n- Includes signed updater artifacts and a notarized manual DMG installer.",
-  "pub_date": "2026-08-14T19:34:04.064Z",
+  "pub_date": "2026-08-15T08:03:35.814Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODd0OXJ4MXYxZTlsK0FjRlFqN3hjTFpQYlluK01NOFZsYlpDdk8wcVU1OWFJQVF3bmx6Nm1VVFhzTUdUMnJmV2hDYmc1eUdpaHUwTVZseE41blRIa2c0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NzI3ODcwCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CklZT1RiRnYzb0pOcDdEUU5GTlRLb1RLTEFpV3RyOHZSbkxjYXRtcVNSM3ZwM3h3M0lpSWRaV0xJUE13T1dlaUFtbGt2SVZlUXdVaGRnb0wraUlEZEJBPT0K",
@@ -10,6 +10,10 @@
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODZlMTg0ajJxOTNKdTkxd0lxbWFtS2kwVEM0a0dVRldkcmpmSEFMRzNkdXlkK1RjRTQ3RXZ3aFJ1NGlFVDg5cURIM016YjdqemRHTUJibHQwVCtYRlFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NzM2MDQyCWZpbGU6Tm9taUZ1bl8wLjYuM194NjQtc2V0dXAuZXhlCjdKam5hdXF6aHBOS3VSdnRPTkFnRUNBZDJ5MXNqeVhkdjlWcWwwQ296bUdUVUhtSEdvWGhhc0xxdGtqcWpqNGZtTWJhaDJjelBQL2tVTEFoSXBqb0NBPT0K",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.6.3/NomiFun_0.6.3_x64-setup.exe"
+    },
+    "linux-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODBXMXFzNHN5MDJhWC93VHU3WGJidVFGbzg3K3U3MjBrSDBjVUFveW5yMWpqT2w1QWxtYlR3bVovOGlUU2pTV3lsRVdvWVNIQ3BnNkR6ZVU4TTQ4M1E4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NzgxMDE0CWZpbGU6Tm9taUZ1bl8wLjYuM19hbWQ2NC5BcHBJbWFnZQpLMlRyall0L3g0ZXREdmNsaDY1b29DVnBCeHQ3NnMxNm1EQ2FIemk2S0xjL1JCUFg3bXB6R1NKTFRNZzl5VitDWjZDRHBkV0JLalpBV3FpanhYb1JCQT09Cg==",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.6.3/NomiFun_0.6.3_amd64.AppImage"
     }
   }
 }
