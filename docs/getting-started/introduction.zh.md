@@ -7,7 +7,7 @@ CLI agent、内置 Nomi 引擎、模型提供商、MCP 服务、技能、终端�
 > 想立刻开始？请先读 [安装](installation.zh.md)，再读
 > [快速上手](quick-start.zh.md)。完整文档地图见 [`../README.zh.md`](../README.zh.md)。
 
-![NomiFun 引导页](../images/gs-01-introduction-hero.png)
+![NomiFun 桌面工作台](../images/getting-started/zh/home.png)
 
 ## 它解决什么问题
 

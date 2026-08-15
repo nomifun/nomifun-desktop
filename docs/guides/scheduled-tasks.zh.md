@@ -118,7 +118,6 @@ prompt。诸如下面这些模式：
 以 `new_conversation` 模式运行并为每次触发各分出一个线程时
 非常有用。
 
-![定时任务详情](../images/cron-03-detail.png)
 
 ## 保持唤醒
 
