@@ -23,7 +23,7 @@ RUN if [ -n "$APT_MIRROR" ]; then \
     fi
 RUN apt-get -o Acquire::Retries=5 update \
     && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
-        ca-certificates git liblzma5 python3 python3-yaml ripgrep zlib1g \
+        ca-certificates git liblzma5 python3 python3-yaml ripgrep tini zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=bun-base /usr/local/bin/bun /usr/local/bin/bun
@@ -52,4 +52,7 @@ VOLUME /data
 EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD bun -e "fetch('http://127.0.0.1:'+(process.env.NOMIFUN_WEB_PORT||'8787')+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+# Match the source-built image: one PID 1 reaper owns orphan collection and
+# signal forwarding regardless of whether the image is launched by Compose.
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["nomifun-web"]

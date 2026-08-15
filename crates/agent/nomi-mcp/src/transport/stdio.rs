@@ -1,15 +1,16 @@
 use std::collections::HashMap;
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use nomi_process_runtime::{
-    ChildProcessBuilder, ChildProcessCleanup, kill_process_tree,
+    ChildProcessBuilder, ChildProcessCleanup, cleanup_authority_lost, kill_process_tree,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, Notify, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::{McpError, McpTransport};
@@ -51,18 +52,247 @@ struct Connection {
     cleanup_result: Option<watch::Sender<Option<CleanupOutcome>>>,
 }
 
-type CleanupOutcome = Result<(), String>;
+type CleanupOutcome = Arc<CleanupProof>;
+
+#[async_trait]
+trait CleanupAuthority: Send + Sync {
+    async fn wait(&self) -> io::Result<()>;
+}
+
+struct ProcessCleanupAuthority(ChildProcessCleanup);
+
+#[async_trait]
+impl CleanupAuthority for ProcessCleanupAuthority {
+    async fn wait(&self) -> io::Result<()> {
+        self.0.clone().wait().await
+    }
+}
+
+#[derive(Clone)]
+enum CleanupProofState {
+    Pending,
+    Success,
+    FailedTransient { generation: u64, error: String },
+    AuthorityLost(String),
+}
+
+/// Retains the spawn-captured cleanup authority after the child connection has
+/// been retired. A bounded platform proof wait can fail transiently (for
+/// example, a Unix process group may still be observable immediately after the
+/// exact reaps). Such a failure is an observation, not an absorbing result: a
+/// later manager shutdown must be able to query the same authority again.
+struct CleanupProof {
+    authority: std::sync::Mutex<Option<Arc<dyn CleanupAuthority>>>,
+    state: std::sync::Mutex<CleanupProofState>,
+    retry_gate: Mutex<()>,
+    changed: Notify,
+    #[cfg(test)]
+    retry_observer_barrier: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+}
+
+impl CleanupProof {
+    fn new(cleanup: ChildProcessCleanup) -> Self {
+        Self::with_authority(Arc::new(ProcessCleanupAuthority(cleanup)))
+    }
+
+    fn with_authority(authority: Arc<dyn CleanupAuthority>) -> Self {
+        Self {
+            authority: std::sync::Mutex::new(Some(authority)),
+            state: std::sync::Mutex::new(CleanupProofState::Pending),
+            retry_gate: Mutex::new(()),
+            changed: Notify::new(),
+            #[cfg(test)]
+            retry_observer_barrier: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn snapshot(&self) -> CleanupProofState {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn settle(&self, result: io::Result<()>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(
+            *state,
+            CleanupProofState::Success | CleanupProofState::AuthorityLost(_)
+        ) {
+            return;
+        }
+        let next = match result {
+            Ok(()) => CleanupProofState::Success,
+            Err(error) if cleanup_authority_lost(&error) => {
+                CleanupProofState::AuthorityLost(error.to_string())
+            }
+            Err(error) => {
+                let generation = match &*state {
+                    CleanupProofState::FailedTransient { generation, .. } => {
+                        generation.wrapping_add(1)
+                    }
+                    CleanupProofState::Pending => 1,
+                    CleanupProofState::Success | CleanupProofState::AuthorityLost(_) => {
+                        unreachable!("terminal cleanup proof returned before generation update")
+                    }
+                };
+                CleanupProofState::FailedTransient {
+                    generation,
+                    error: error.to_string(),
+                }
+            }
+        };
+        *state = next;
+        let terminal = matches!(
+            *state,
+            CleanupProofState::Success | CleanupProofState::AuthorityLost(_)
+        );
+        drop(state);
+        if terminal {
+            self.authority
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+        }
+        self.changed.notify_waiters();
+    }
+
+    fn result(state: CleanupProofState) -> Option<Result<(), McpError>> {
+        match state {
+            CleanupProofState::Pending => None,
+            CleanupProofState::Success => Some(Ok(())),
+            CleanupProofState::FailedTransient { error, .. }
+            | CleanupProofState::AuthorityLost(error) => {
+                Some(Err(McpError::Transport(error)))
+            }
+        }
+    }
+
+    /// Observe the retirement attempt that owns the child handle. This path
+    /// deliberately does not retry: callers see that first attempt fail, while
+    /// the registry retains authority for a later shutdown attempt.
+    async fn wait_initial(&self) -> Result<(), McpError> {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(result) = Self::result(self.snapshot()) {
+                return result;
+            }
+            changed.await;
+        }
+    }
+
+    /// Re-query a transiently failed proof once. Callers that observed the same
+    /// failure generation serialize here: one performs the platform query and
+    /// the rest reuse its result, even when that result is still transient. A
+    /// later shutdown invocation may advance the next retry generation.
+    async fn wait_retrying(&self) -> Result<(), McpError> {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            match self.snapshot() {
+                CleanupProofState::Pending => changed.await,
+                CleanupProofState::Success => return Ok(()),
+                CleanupProofState::AuthorityLost(error) => {
+                    return Err(McpError::Transport(error));
+                }
+                CleanupProofState::FailedTransient {
+                    generation: observed_generation,
+                    ..
+                } => {
+                    #[cfg(test)]
+                    let retry_observer_barrier = {
+                        self.retry_observer_barrier
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .clone()
+                    };
+                    #[cfg(test)]
+                    if let Some(barrier) = retry_observer_barrier {
+                        barrier.wait().await;
+                    }
+                    let _retry = self.retry_gate.lock().await;
+                    match self.snapshot() {
+                        CleanupProofState::Success => return Ok(()),
+                        CleanupProofState::AuthorityLost(error) => {
+                            return Err(McpError::Transport(error));
+                        }
+                        CleanupProofState::Pending => continue,
+                        CleanupProofState::FailedTransient { generation, error }
+                            if generation != observed_generation =>
+                        {
+                            return Err(McpError::Transport(error));
+                        }
+                        CleanupProofState::FailedTransient { .. } => {}
+                    }
+                    let authority = self
+                        .authority
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone();
+                    let result = match authority {
+                        Some(authority) => authority.wait().await,
+                        None => Err(io::Error::new(
+                            io::ErrorKind::Unsupported,
+                            "MCP cleanup proof lost its retained platform authority",
+                        )),
+                    };
+                    self.settle(result);
+                    return Self::result(self.snapshot())
+                        .expect("a cleanup proof retry always settles its state");
+                }
+            }
+        }
+    }
+}
+
+struct CleanupAttemptGuard {
+    proof: Arc<CleanupProof>,
+    complete: bool,
+}
+
+impl CleanupAttemptGuard {
+    fn new(proof: Arc<CleanupProof>) -> Self {
+        Self {
+            proof,
+            complete: false,
+        }
+    }
+
+    fn finish(mut self, result: io::Result<()>) {
+        self.proof.settle(result);
+        self.complete = true;
+    }
+}
+
+impl Drop for CleanupAttemptGuard {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.proof.settle(Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "MCP cleanup custodian stopped before publishing an exact result",
+            )));
+        }
+    }
+}
 
 pub(crate) struct ConnectionCleanupRegistry {
     receipts: std::sync::Mutex<Vec<watch::Receiver<Option<CleanupOutcome>>>>,
-    failure: std::sync::Mutex<Option<String>>,
+    #[cfg(test)]
+    retirements: std::sync::atomic::AtomicUsize,
 }
 
 impl ConnectionCleanupRegistry {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             receipts: std::sync::Mutex::new(Vec::new()),
-            failure: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            retirements: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -85,52 +315,55 @@ impl ConnectionCleanupRegistry {
         let result_tx = conn.cleanup_result.take().ok_or_else(|| {
             McpError::Transport("MCP connection cleanup was already retired".to_owned())
         })?;
+        #[cfg(test)]
+        self.retirements.fetch_add(1, Ordering::SeqCst);
         let result_rx = result_tx.subscribe();
-        let registry = Arc::clone(self);
+        let proof = Arc::new(CleanupProof::new(conn.cleanup.clone()));
+        result_tx.send_replace(Some(Arc::clone(&proof)));
         let runtime = match tokio::runtime::Handle::try_current() {
             Ok(runtime) => runtime,
             Err(_) => {
                 let error =
                     "Cannot schedule MCP connection cleanup outside a Tokio runtime".to_owned();
-                *self
-                    .failure
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.clone());
-                result_tx.send_replace(Some(Err(error.clone())));
+                proof.settle(Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    error.clone(),
+                )));
                 return Err(McpError::Transport(error));
             }
         };
+        let attempt = CleanupAttemptGuard::new(proof);
         runtime.spawn(async move {
-            let outcome = StdioTransport::close_connection(conn)
-                .await
-                .map_err(|error| error.to_string());
-            if let Err(error) = &outcome {
-                let mut failure = registry
-                    .failure
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if failure.is_none() {
-                    *failure = Some(error.clone());
-                }
-            }
-            result_tx.send_replace(Some(outcome));
+            attempt.finish(StdioTransport::close_connection(conn).await);
         });
         Ok(result_rx)
     }
 
-    async fn wait_receipt(
+    async fn receipt_proof(
         mut receipt: watch::Receiver<Option<CleanupOutcome>>,
-    ) -> Result<(), McpError> {
+    ) -> Result<CleanupOutcome, McpError> {
         loop {
-            if let Some(result) = receipt.borrow().clone() {
-                return result.map_err(McpError::Transport);
+            if let Some(proof) = receipt.borrow().clone() {
+                return Ok(proof);
             }
             receipt.changed().await.map_err(|_| {
                 McpError::Transport(
-                    "MCP cleanup custodian stopped without an exact result".to_owned(),
+                    "MCP cleanup authority was lost before a proof was published".to_owned(),
                 )
             })?;
         }
+    }
+
+    async fn wait_initial_receipt(
+        receipt: watch::Receiver<Option<CleanupOutcome>>,
+    ) -> Result<(), McpError> {
+        Self::receipt_proof(receipt).await?.wait_initial().await
+    }
+
+    async fn wait_receipt(
+        receipt: watch::Receiver<Option<CleanupOutcome>>,
+    ) -> Result<(), McpError> {
+        Self::receipt_proof(receipt).await?.wait_retrying().await
     }
 
     pub(crate) async fn wait_all(&self) -> Result<(), McpError> {
@@ -146,14 +379,6 @@ impl ConnectionCleanupRegistry {
             {
                 first_error = Some(error.to_string());
             }
-        }
-        if let Some(error) = self
-            .failure
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-        {
-            first_error.get_or_insert(error);
         }
         match first_error {
             Some(error) => Err(McpError::Transport(error)),
@@ -190,7 +415,7 @@ impl ConnectionOwner {
     async fn retire(mut self) -> Result<(), McpError> {
         let conn = self.take();
         let receipt = self.cleanup_registry.retire(conn)?;
-        ConnectionCleanupRegistry::wait_receipt(receipt).await
+        ConnectionCleanupRegistry::wait_initial_receipt(receipt).await
     }
 }
 
@@ -199,14 +424,7 @@ impl Drop for ConnectionOwner {
         if let Some(conn) = self.conn.take()
             && let Err(error) = self.cleanup_registry.retire(conn)
         {
-            let mut failure = self
-                .cleanup_registry
-                .failure
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if failure.is_none() {
-                *failure = Some(error.to_string());
-            }
+            tracing::error!(%error, "could not retire dropped MCP connection");
         }
     }
 }
@@ -225,7 +443,6 @@ pub struct StdioTransport {
     closed: AtomicBool,
     closing: CancellationToken,
     respawn_gate: Mutex<()>,
-    close_error: std::sync::Mutex<Option<String>>,
     cleanup_registry: Arc<ConnectionCleanupRegistry>,
 }
 
@@ -278,7 +495,6 @@ impl StdioTransport {
             closed: AtomicBool::new(false),
             closing: CancellationToken::new(),
             respawn_gate: Mutex::new(()),
-            close_error: std::sync::Mutex::new(None),
             cleanup_registry,
         })
     }
@@ -332,15 +548,50 @@ impl StdioTransport {
         }
     }
 
-    async fn close_connection(mut conn: Connection) -> Result<(), McpError> {
+    async fn close_connection(mut conn: Connection) -> io::Result<()> {
         let _ = conn.stdin.shutdown().await;
         drop(conn.stdin);
         drop(conn.stdout);
         let kill_result = kill_process_tree(&mut conn.child).await;
         let cleanup_result = conn.cleanup.wait().await;
-        kill_result?;
-        cleanup_result?;
-        Ok(())
+        Self::resolve_cleanup_proofs(kill_result, cleanup_result)
+    }
+
+    /// `kill_process_tree` and the spawn-captured cleanup handle are independent
+    /// exact-cleanup proofs. Either successful proof is sufficient. If both
+    /// fail, only the captured handle remains available for a later retry, so
+    /// its error kind determines whether authority was permanently lost.
+    fn resolve_cleanup_proofs(
+        kill_result: io::Result<()>,
+        cleanup_result: io::Result<()>,
+    ) -> io::Result<()> {
+        match (kill_result, cleanup_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => {
+                tracing::warn!(
+                    target: "nomi_mcp",
+                    %error,
+                    "process-tree termination path failed, but the retained cleanup proof succeeded"
+                );
+                Ok(())
+            }
+            (Ok(()), Err(error)) => {
+                tracing::warn!(
+                    target: "nomi_mcp",
+                    %error,
+                    "retained cleanup proof failed, but process-tree termination proved exact cleanup"
+                );
+                Ok(())
+            }
+            (Err(kill_error), Err(cleanup_error)) => {
+                Err(io::Error::new(
+                    cleanup_error.kind(),
+                    format!(
+                        "process-tree termination failed: {kill_error}; exact cleanup proof failed: {cleanup_error}"
+                    ),
+                ))
+            }
+        }
     }
 
     /// Serialize and write a JSON-RPC message to the child's stdin (one line +
@@ -646,30 +897,15 @@ impl McpTransport for StdioTransport {
         self.closing.cancel();
         let _respawn = self.respawn_gate.lock().await;
         let conn = self.conn.lock().await.take();
-        let result = if let Some(conn) = conn {
+        if let Some(conn) = conn {
             match self.cleanup_registry.retire(conn) {
-                Ok(receipt) => ConnectionCleanupRegistry::wait_receipt(receipt).await,
+                Ok(receipt) => ConnectionCleanupRegistry::wait_initial_receipt(receipt).await,
                 Err(error) => Err(error),
             }
         } else {
             Ok(())
         }
-        .and(self.cleanup_registry.wait_all().await);
-        if let Err(error) = &result {
-            *self
-                .close_error
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_string());
-        }
-        match self
-            .close_error
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-        {
-            Some(error) => Err(McpError::Transport(error)),
-            None => result,
-        }
+        .and(self.cleanup_registry.wait_all().await)
     }
 }
 
@@ -682,14 +918,7 @@ impl Drop for StdioTransport {
             if let Some(conn) = conn.take()
                 && let Err(error) = self.cleanup_registry.retire(conn)
             {
-                let mut failure = self
-                    .cleanup_registry
-                    .failure
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if failure.is_none() {
-                    *failure = Some(error.to_string());
-                }
+                tracing::error!(%error, "could not retire dropped MCP stdio transport");
             }
             return;
         }
@@ -712,17 +941,9 @@ impl Drop for StdioTransport {
                 });
             }
             Err(_) => {
-                let mut failure = self
-                    .cleanup_registry
-                    .failure
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if failure.is_none() {
-                    *failure = Some(
-                        "Cannot schedule dropped MCP transport cleanup outside a Tokio runtime"
-                            .to_owned(),
-                    );
-                }
+                tracing::error!(
+                    "cannot schedule dropped MCP transport cleanup outside a Tokio runtime"
+                );
             }
         }
     }
@@ -743,6 +964,297 @@ mod tests {
     use crate::protocol::{ClientCapabilities, ClientInfo};
     #[cfg(not(windows))]
     use serde_json::json;
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Clone)]
+    enum ScriptedCleanupOutcome {
+        Success,
+        Failure(io::ErrorKind, &'static str),
+    }
+
+    struct ScriptedCleanupAuthority {
+        outcomes: std::sync::Mutex<VecDeque<ScriptedCleanupOutcome>>,
+        waits: AtomicUsize,
+        delay: Duration,
+    }
+
+    impl ScriptedCleanupAuthority {
+        fn new(outcomes: impl IntoIterator<Item = ScriptedCleanupOutcome>) -> Arc<Self> {
+            Arc::new(Self {
+                outcomes: std::sync::Mutex::new(outcomes.into_iter().collect()),
+                waits: AtomicUsize::new(0),
+                delay: Duration::ZERO,
+            })
+        }
+
+        fn with_delay(
+            outcomes: impl IntoIterator<Item = ScriptedCleanupOutcome>,
+            delay: Duration,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                outcomes: std::sync::Mutex::new(outcomes.into_iter().collect()),
+                waits: AtomicUsize::new(0),
+                delay,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl CleanupAuthority for ScriptedCleanupAuthority {
+        async fn wait(&self) -> io::Result<()> {
+            self.waits.fetch_add(1, Ordering::SeqCst);
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            match self
+                .outcomes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .pop_front()
+                .expect("scripted cleanup authority ran out of outcomes")
+            {
+                ScriptedCleanupOutcome::Success => Ok(()),
+                ScriptedCleanupOutcome::Failure(kind, message) => {
+                    Err(io::Error::new(kind, message))
+                }
+            }
+        }
+    }
+
+    fn register_scripted_cleanup(
+        registry: &ConnectionCleanupRegistry,
+        authority: Arc<ScriptedCleanupAuthority>,
+        initial_error: io::Error,
+    ) -> Arc<CleanupProof> {
+        let result = registry.track_connection();
+        let proof = Arc::new(CleanupProof::with_authority(authority));
+        proof.settle(Err(initial_error));
+        result.send_replace(Some(Arc::clone(&proof)));
+        proof
+    }
+
+    fn closed_transport_with_registry(
+        cleanup_registry: Arc<ConnectionCleanupRegistry>,
+    ) -> StdioTransport {
+        StdioTransport {
+            conn: Arc::new(Mutex::new(None)),
+            spec: SpawnSpec {
+                command: "scripted-cleanup".to_owned(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                init_params: crate::protocol::default_init_params(),
+            },
+            respawn_state: Mutex::new(RespawnState::default()),
+            closed: AtomicBool::new(true),
+            closing: CancellationToken::new(),
+            respawn_gate: Mutex::new(()),
+            cleanup_registry,
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_cleanup_failure_converges_on_later_close() {
+        let registry = ConnectionCleanupRegistry::new();
+        let authority = ScriptedCleanupAuthority::new([
+            ScriptedCleanupOutcome::Failure(io::ErrorKind::TimedOut, "proof still pending"),
+            ScriptedCleanupOutcome::Success,
+        ]);
+        register_scripted_cleanup(
+            &registry,
+            Arc::clone(&authority),
+            io::Error::new(io::ErrorKind::TimedOut, "initial proof still pending"),
+        );
+        let transport = closed_transport_with_registry(registry);
+
+        let first = transport
+            .close()
+            .await
+            .expect_err("the first proof retry is still transiently unproven");
+        assert!(first.to_string().contains("proof still pending"));
+        transport
+            .close()
+            .await
+            .expect("a later close must re-query the retained authority");
+        transport
+            .close()
+            .await
+            .expect("success is absorbing and idempotent");
+        assert_eq!(authority.waits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_cleanup_waiters_share_one_transient_retry_generation() {
+        const WAITER_COUNT: usize = 8;
+        let registry = ConnectionCleanupRegistry::new();
+        let authority = ScriptedCleanupAuthority::with_delay(
+            [
+                ScriptedCleanupOutcome::Failure(
+                    io::ErrorKind::TimedOut,
+                    "shared retry remains pending",
+                ),
+                ScriptedCleanupOutcome::Success,
+            ],
+            Duration::from_millis(20),
+        );
+        let proof = register_scripted_cleanup(
+            &registry,
+            Arc::clone(&authority),
+            io::Error::new(io::ErrorKind::TimedOut, "initial proof still pending"),
+        );
+        let observed = Arc::new(tokio::sync::Barrier::new(WAITER_COUNT + 1));
+        *proof
+            .retry_observer_barrier
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&observed));
+
+        let mut waiters = Vec::new();
+        for _ in 0..WAITER_COUNT {
+            let registry = Arc::clone(&registry);
+            waiters.push(tokio::spawn(async move { registry.wait_all().await }));
+        }
+        observed.wait().await;
+        proof
+            .retry_observer_barrier
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+
+        for waiter in waiters {
+            let error = waiter
+                .await
+                .expect("cleanup waiter task must join")
+                .expect_err("all concurrent waiters must share the transient retry result");
+            assert!(error.to_string().contains("shared retry remains pending"));
+        }
+        assert_eq!(
+            authority.waits.load(Ordering::SeqCst),
+            1,
+            "one transient retry generation must issue only one platform proof query"
+        );
+        registry
+            .wait_all()
+            .await
+            .expect("a later shutdown generation can retry and converge");
+        assert_eq!(authority.waits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn lost_cleanup_authority_is_an_absorbing_failure() {
+        let registry = ConnectionCleanupRegistry::new();
+        let authority = ScriptedCleanupAuthority::new([
+            ScriptedCleanupOutcome::Failure(
+                io::ErrorKind::Unsupported,
+                "no host-owned cleanup authority",
+            ),
+            ScriptedCleanupOutcome::Success,
+        ]);
+        register_scripted_cleanup(
+            &registry,
+            Arc::clone(&authority),
+            io::Error::new(io::ErrorKind::TimedOut, "initial proof still pending"),
+        );
+        let transport = closed_transport_with_registry(registry);
+
+        for _ in 0..2 {
+            let error = transport
+                .close()
+                .await
+                .expect_err("authority loss must remain a hard failure");
+            assert!(error.to_string().contains("no host-owned cleanup authority"));
+        }
+        assert_eq!(
+            authority.waits.load(Ordering::SeqCst),
+            1,
+            "authority loss must not be retried as though ownership still existed"
+        );
+    }
+
+    #[test]
+    fn terminal_cleanup_proof_releases_retained_platform_authority() {
+        let authority = ScriptedCleanupAuthority::new([ScriptedCleanupOutcome::Success]);
+        let weak_authority = Arc::downgrade(&authority);
+        let proof = CleanupProof::with_authority(authority.clone());
+
+        proof.settle(Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "proof remains retryable",
+        )));
+        drop(authority);
+        assert!(
+            weak_authority.upgrade().is_some(),
+            "transient failure must retain cleanup authority"
+        );
+
+        proof.settle(Ok(()));
+        assert!(
+            weak_authority.upgrade().is_none(),
+            "successful proof must release platform handles"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_cleanup_attempt_remains_retryable() {
+        let authority = ScriptedCleanupAuthority::new([ScriptedCleanupOutcome::Success]);
+        let proof = Arc::new(CleanupProof::with_authority(authority.clone()));
+
+        drop(CleanupAttemptGuard::new(Arc::clone(&proof)));
+        proof
+            .wait_retrying()
+            .await
+            .expect("a cancelled custodian must leave authority available for retry");
+        assert_eq!(authority.waits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn either_exact_cleanup_proof_can_establish_success() {
+        StdioTransport::resolve_cleanup_proofs(
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "kill path lost authority",
+            )),
+            Ok(()),
+        )
+        .expect("the retained cleanup proof is independently authoritative");
+
+        StdioTransport::resolve_cleanup_proofs(
+            Ok(()),
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "retained proof lost authority",
+            )),
+        )
+        .expect("the process-tree termination proof is independently authoritative");
+    }
+
+    #[test]
+    fn retained_proof_classifies_failure_when_both_cleanup_paths_fail() {
+        let retryable = StdioTransport::resolve_cleanup_proofs(
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "kill path lost authority",
+            )),
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "retained proof remains pending",
+            )),
+        )
+        .expect_err("both exact cleanup paths failed");
+        assert!(!cleanup_authority_lost(&retryable));
+
+        let permanent = StdioTransport::resolve_cleanup_proofs(
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "kill path remains pending",
+            )),
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "retained proof lost authority",
+            )),
+        )
+        .expect_err("both exact cleanup paths failed");
+        assert!(cleanup_authority_lost(&permanent));
+    }
 
     /// Pure-unit checks on the failure classifier — these need no child process.
     #[test]
@@ -838,6 +1350,66 @@ mod tests {
             .await
             .expect("drop custodian must not hang")
             .expect("drop custodian must prove exact cleanup");
+    }
+
+    #[cfg(any(windows, unix))]
+    #[tokio::test]
+    async fn concurrent_close_retires_the_physical_connection_once() {
+        let cleanup_registry = ConnectionCleanupRegistry::new();
+        #[cfg(windows)]
+        let (command, args) = (
+            "cmd.exe",
+            vec![
+                "/D".to_owned(),
+                "/S".to_owned(),
+                "/C".to_owned(),
+                "ping -n 120 127.0.0.1 >nul".to_owned(),
+            ],
+        );
+        #[cfg(unix)]
+        let (command, args) = (
+            "/bin/sh",
+            vec!["-c".to_owned(), "exec sleep 120".to_owned()],
+        );
+        let transport = Arc::new(
+            StdioTransport::spawn_with_cleanup_registry(
+                command,
+                &args,
+                &HashMap::new(),
+                crate::protocol::default_init_params(),
+                Arc::clone(&cleanup_registry),
+            )
+            .await
+            .expect("spawn long-lived mock MCP server"),
+        );
+
+        let mut closes = Vec::new();
+        for _ in 0..8 {
+            let transport = Arc::clone(&transport);
+            closes.push(tokio::spawn(async move { transport.close().await }));
+        }
+        for close in closes {
+            tokio::time::timeout(Duration::from_secs(30), close)
+                .await
+                .expect("concurrent close must not hang")
+                .expect("close task must join")
+                .expect("all concurrent close callers must observe exact cleanup");
+        }
+
+        assert_eq!(
+            cleanup_registry.retirements.load(Ordering::SeqCst),
+            1,
+            "taking the connection once is the only path that can request termination"
+        );
+        assert_eq!(
+            cleanup_registry
+                .receipts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            1,
+            "close must not respawn or register a replacement child"
+        );
     }
 
     // -----------------------------------------------------------------------

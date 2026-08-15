@@ -17,9 +17,11 @@ const MAX_BACKOFF: Duration = Duration::from_secs(15);
 const INITIAL_REQUEST_BACKOFF: Duration = Duration::from_millis(300);
 const MAX_INITIAL_REQUEST_BACKOFF: Duration = Duration::from_secs(2);
 
-/// Retry bounded, side-effect-free initial request failures: connection
-/// failures and transient gateway/service 500/502/503/504 responses. Client
-/// errors and rate limits are surfaced immediately.
+/// Retry bounded initial failures before any response is exposed locally:
+/// connection failures and transient gateway/service 500/502/503/504
+/// responses. The upstream may still have spent work before returning an
+/// error, so attempts stay deliberately low; client errors and rate limits are
+/// surfaced immediately.
 pub async fn with_initial_request_retry<F, Fut, T>(f: F) -> Result<T, ProviderError>
 where
     F: Fn() -> Fut,
@@ -41,7 +43,19 @@ where
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(MAX_INITIAL_REQUEST_BACKOFF);
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                if attempt > 0 {
+                    let (error_kind, status) = retry_log_classification(&e);
+                    tracing::warn!(
+                        attempts = attempt + 1,
+                        max_retries = MAX_INITIAL_REQUEST_RETRIES,
+                        error_kind,
+                        status = status.unwrap_or_default(),
+                        "provider initial request retries exhausted"
+                    );
+                }
+                return Err(e);
+            }
         }
     }
     unreachable!()
@@ -58,8 +72,9 @@ fn retry_log_classification(error: &ProviderError) -> (&'static str, Option<u16>
 
 fn is_retryable_initial_request_error(error: &ProviderError) -> bool {
     match error {
-        // No response stream exists yet, so a connect/request timeout cannot
-        // have exposed model output or tool progress and is replay-safe.
+        // No response stream exists yet, so retrying cannot duplicate visible
+        // model output or tool progress. It can still duplicate upstream work,
+        // which is why the shared retry budget is intentionally small.
         ProviderError::Http(err) => err.is_connect() || err.is_timeout() || err.is_request(),
         ProviderError::Connection(_) => true,
         ProviderError::Api { status, .. } => {
@@ -88,7 +103,7 @@ pub async fn send_and_check(
 
     let status = response.status();
     if !status.is_success() {
-        let body_text = redactor.redact(&response.text().await.unwrap_or_default());
+        let body_text = crate::read_provider_error_body(response, redactor).await;
         return Err(ProviderError::Api {
             status: status.as_u16(),
             message: body_text,
@@ -169,7 +184,9 @@ pub async fn finish_stream_with_retry<S, SFut, P, PFut>(
 
     let mut backoff = Duration::from_secs(1);
     let mut final_err = Some(initial_err);
+    let mut attempts_made = 0;
     for attempt in 1..=MAX_STREAM_RETRIES {
+        attempts_made = attempt;
         backoff = backoff_sleep(attempt, backoff).await;
         match send().await {
             Ok(resp) => match evaluate_outcome(process(resp).await, attempt) {
@@ -191,6 +208,14 @@ pub async fn finish_stream_with_retry<S, SFut, P, PFut>(
         }
     }
     if let Some(err) = final_err {
+        let (error_kind, status) = retry_log_classification(&err);
+        tracing::warn!(
+            attempts = attempts_made,
+            max_retries = MAX_STREAM_RETRIES,
+            error_kind,
+            status = status.unwrap_or_default(),
+            "provider empty-stream retry ended with an error"
+        );
         let _ = tx.send(LlmEvent::Error(err.to_string())).await;
     }
 }

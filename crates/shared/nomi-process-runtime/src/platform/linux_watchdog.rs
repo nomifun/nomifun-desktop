@@ -340,8 +340,191 @@ pub(super) fn ignore_graceful_and_anchor(leader: libc::pid_t) -> io::Result<()> 
     }
     Ok(())
 }
-pub(super) fn capture_starttime(pid: libc::pid_t) -> io::Result<u64> { let bytes=fs::read(format!("/proc/{pid}/stat"))?; parse_proc_stat(&bytes,pid).map(|v|v.starttime).ok_or_else(||io::Error::new(io::ErrorKind::InvalidData,"invalid proc stat")) }
-pub(super) fn parse_proc_stat(bytes: &[u8], pid: libc::pid_t) -> Option<ProcIdentity> { let close=bytes.iter().rposition(|b|*b==b')')?; let rest=bytes.get(close+2..)?; let fields=rest.split(|b|*b==b' '); let values=fields.filter(|v|!v.is_empty()).collect::<Vec<_>>(); if values.len()<20{return None} Some(ProcIdentity{pid, state:*values[0].first()?, ppid:std::str::from_utf8(values[1]).ok()?.parse().ok()?, pgrp:std::str::from_utf8(values[2]).ok()?.parse().ok()?, starttime:std::str::from_utf8(values[19]).ok()?.parse().ok()?}) }
+pub(super) fn capture_starttime(pid: libc::pid_t) -> io::Result<u64> {
+    let bytes = fs::read(format!("/proc/{pid}/stat"))?;
+    parse_proc_stat(&bytes, pid)
+        .map(|identity| identity.starttime)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid proc stat"))
+}
+
+pub(super) fn parse_proc_stat(bytes: &[u8], pid: libc::pid_t) -> Option<ProcIdentity> {
+    let close = bytes.iter().rposition(|byte| *byte == b')')?;
+    let rest = bytes.get(close + 2..)?;
+    let values = rest
+        .split(|byte| *byte == b' ')
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if values.len() < 20 {
+        return None;
+    }
+    Some(ProcIdentity {
+        pid,
+        state: *values[0].first()?,
+        ppid: std::str::from_utf8(values[1]).ok()?.parse().ok()?,
+        pgrp: std::str::from_utf8(values[2]).ok()?.parse().ok()?,
+        starttime: std::str::from_utf8(values[19]).ok()?.parse().ok()?,
+    })
+}
+
+/// Post-reap execution state of an owned Linux process group.
+///
+/// Linux keeps zombies in a process group until their current parent collects
+/// them. In a container without an init process that state can persist
+/// indefinitely, even though no member can execute user code. Keep this
+/// separate from numeric group absence so cleanup can converge without
+/// confusing a live member or a recycled process-group leader with a harmless
+/// zombie.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProcessGroupExecutionState {
+    Absent,
+    ZombieOnly,
+    Live,
+    ReusedAfterQuiescence,
+    Unproven,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProcessGroupSnapshot {
+    members: Vec<ProcIdentity>,
+}
+
+impl ProcessGroupSnapshot {
+    fn capture(pgid: libc::pid_t) -> io::Result<Self> {
+        let mut members = Vec::new();
+        for entry in fs::read_dir("/proc")? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(pid) = parse_u64_raw(name.as_bytes())
+                .and_then(|pid| libc::pid_t::try_from(pid).ok())
+                .filter(|pid| *pid > 0)
+            else {
+                continue;
+            };
+            let stat = match fs::read(entry.path().join("stat")) {
+                Ok(stat) => stat,
+                Err(error)
+                    if matches!(error.kind(), io::ErrorKind::NotFound)
+                        || error.raw_os_error() == Some(libc::ESRCH) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let identity = parse_proc_stat(&stat, pid).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid /proc/{pid}/stat while proving process-group quiescence"),
+                )
+            })?;
+            if identity.pgrp == pgid {
+                members.push(identity);
+            }
+        }
+        members.sort_unstable_by_key(|member| member.pid);
+        Ok(Self { members })
+    }
+}
+
+fn process_group_exists(pgid: libc::pid_t) -> io::Result<bool> {
+    if pgid <= 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "process-group proof requires a PGID greater than one",
+        ));
+    }
+    // SAFETY: signal zero is a read-only existence/permission probe and pgid
+    // was validated before negation.
+    if unsafe { libc::kill(-pgid, 0) } == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        // Permission still proves that at least one numeric group member
+        // exists; /proc must independently establish whether it can execute.
+        Some(libc::EPERM) => Ok(true),
+        _ => Err(error),
+    }
+}
+
+fn member_is_terminal(member: &ProcIdentity) -> bool {
+    matches!(member.state, b'Z' | b'X' | b'x')
+}
+
+fn classify_stable_group_snapshots(
+    pgid: libc::pid_t,
+    expected_leader_starttime: Option<u64>,
+    first: &ProcessGroupSnapshot,
+    second: &ProcessGroupSnapshot,
+) -> ProcessGroupExecutionState {
+    for snapshot in [first, second] {
+        if let Some(leader) = snapshot.members.iter().find(|member| member.pid == pgid) {
+            return match expected_leader_starttime {
+                Some(expected) if leader.starttime != expected => {
+                    // Linux PID and process-group IDs share one refcounted
+                    // `struct pid`. The number cannot be allocated to this
+                    // new leader while any member still references the old
+                    // group. Reuse therefore proves the old group quiesced,
+                    // while forbidding every future signal to this number.
+                    ProcessGroupExecutionState::ReusedAfterQuiescence
+                }
+                // The caller reaped the exact original leader before this
+                // probe. Seeing that identity again is therefore inconsistent
+                // until another observation resolves the race.
+                _ => ProcessGroupExecutionState::Unproven,
+            };
+        }
+        if snapshot.members.iter().any(|member| !member_is_terminal(member)) {
+            return ProcessGroupExecutionState::Live;
+        }
+    }
+
+    if first.members.is_empty() || second.members.is_empty() {
+        return ProcessGroupExecutionState::Unproven;
+    }
+
+    // Every member in the later snapshot must be the same PID/start-time
+    // instance observed in the first one. Disappearing zombies are harmless;
+    // a new or recycled member means the snapshot is not yet a proof.
+    let stable = second.members.iter().all(|member| {
+        first.members.iter().any(|earlier| {
+            earlier.pid == member.pid
+                && earlier.starttime == member.starttime
+                && earlier.pgrp == member.pgrp
+        })
+    });
+    if stable {
+        ProcessGroupExecutionState::ZombieOnly
+    } else {
+        ProcessGroupExecutionState::Unproven
+    }
+}
+
+/// Prove post-reap group execution quiescence with two `/proc` snapshots.
+///
+/// The caller must have sealed the group while holding an exact direct-child
+/// anchor and then reaped the original leader. `expected_leader_starttime`
+/// binds a reappearing `pid == pgid` to the original instance: a mismatch is a
+/// genuine PID/PGID reuse and must never authorize another group signal.
+pub(super) fn probe_process_group_after_exact_leader_reap(
+    pgid: libc::pid_t,
+    expected_leader_starttime: Option<u64>,
+) -> io::Result<ProcessGroupExecutionState> {
+    if !process_group_exists(pgid)? {
+        return Ok(ProcessGroupExecutionState::Absent);
+    }
+    let first = ProcessGroupSnapshot::capture(pgid)?;
+    let second = ProcessGroupSnapshot::capture(pgid)?;
+    if !process_group_exists(pgid)? {
+        return Ok(ProcessGroupExecutionState::Absent);
+    }
+    Ok(classify_stable_group_snapshots(
+        pgid,
+        expected_leader_starttime,
+        &first,
+        &second,
+    ))
+}
 
 /// Minimal direct-child watchdog bootstrap. The full committed-state monitor is
 /// extended by the next TDD slice; every setup failure closes the protocol and
@@ -849,11 +1032,13 @@ unsafe fn exit_watchdog(config: WatchdogConfig, code: libc::c_int) -> ! {
 mod tests {
     use super::{
         CloseRangeAttempt, FdRange, IdentityObservation, PidfdErrorAction, ProcIdentity,
-        ProcessMonitor, TestFaultCheckpoint, WatchdogEvent, WatchdogState,
+        ProcessGroupExecutionState, ProcessGroupSnapshot, ProcessMonitor,
+        TestFaultCheckpoint, WatchdogEvent, WatchdogState,
         FAULT_EXIT_AFTER_COMMIT_BEFORE_COMMITTED, FAULT_EXIT_BEFORE_ACK,
         FAULT_EXIT_BEFORE_BOOT_READY, FAULT_SKIP_FINAL_GROUP_KILL, WatchdogConfig,
         capture_close_upper_exclusive, capture_starttime, classify_pidfd_error,
-        close_range_needs_fallback, compare_identity, decision_frame_is_valid,
+        classify_stable_group_snapshots, close_range_needs_fallback, compare_identity,
+        decision_frame_is_valid,
         final_kill_retry_delay_ms, force_next_proc_fallback_for_pid,
         group_kill_needs_failure, ignore_graceful_and_anchor, monitor_alive, next_state,
         ignored_graceful_signal_action, install_signal_action, open_monitor, parse_proc_stat,
@@ -1217,6 +1402,52 @@ mod tests {
     }
 
     #[test]
+    fn stable_zombie_only_group_is_execution_quiesced() {
+        let first = snapshot([
+            group_member(81, 70, b'Z', 501),
+            group_member(82, 70, b'X', 502),
+        ]);
+        let second = snapshot([group_member(82, 70, b'Z', 502)]);
+
+        assert_eq!(
+            classify_stable_group_snapshots(70, Some(400), &first, &second),
+            ProcessGroupExecutionState::ZombieOnly
+        );
+    }
+
+    #[test]
+    fn any_live_group_member_keeps_cleanup_unproven() {
+        let first = snapshot([group_member(81, 70, b'D', 501)]);
+        let second = first.clone();
+
+        assert_eq!(
+            classify_stable_group_snapshots(70, Some(400), &first, &second),
+            ProcessGroupExecutionState::Live
+        );
+    }
+
+    #[test]
+    fn leader_starttime_mismatch_proves_old_group_quiesced_before_reuse() {
+        let reused = snapshot([group_member(70, 70, b'S', 999)]);
+
+        assert_eq!(
+            classify_stable_group_snapshots(70, Some(400), &reused, &reused),
+            ProcessGroupExecutionState::ReusedAfterQuiescence
+        );
+    }
+
+    #[test]
+    fn member_turnover_between_snapshots_is_not_a_zombie_proof() {
+        let first = snapshot([group_member(81, 70, b'Z', 501)]);
+        let second = snapshot([group_member(82, 70, b'Z', 502)]);
+
+        assert_eq!(
+            classify_stable_group_snapshots(70, Some(400), &first, &second),
+            ProcessGroupExecutionState::Unproven
+        );
+    }
+
+    #[test]
     fn child_exit_before_host_decision_is_held_until_commit_or_abort() {
         assert_eq!(
             next_state(WatchdogState::AwaitingDecision, WatchdogEvent::ChildExited),
@@ -1302,6 +1533,27 @@ mod tests {
             pgrp: 7,
             state,
             starttime,
+        }
+    }
+
+    const fn group_member(
+        pid: libc::pid_t,
+        pgrp: libc::pid_t,
+        state: u8,
+        starttime: u64,
+    ) -> ProcIdentity {
+        ProcIdentity {
+            pid,
+            ppid: 2,
+            pgrp,
+            state,
+            starttime,
+        }
+    }
+
+    fn snapshot<const N: usize>(members: [ProcIdentity; N]) -> ProcessGroupSnapshot {
+        ProcessGroupSnapshot {
+            members: members.into(),
         }
     }
 }

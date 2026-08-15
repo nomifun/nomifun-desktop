@@ -11,6 +11,8 @@
 
 services:
   nomifun:
+    # The image's tini ENTRYPOINT is the single PID 1/reaper. Do not add the
+    # Compose `init` option here: that would unnecessarily nest two init layers.
     build:
       context: .
       args:

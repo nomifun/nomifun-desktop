@@ -53,7 +53,7 @@ use nomifun_db::{
 };
 use nomifun_realtime::{EventBroadcaster, UserEventSink};
 use serde_json::json;
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{Notify, Semaphore, broadcast};
 
 use crate::service::{
     BackgroundTurnReconciliationDisposition, ConversationService,
@@ -499,6 +499,7 @@ struct MockRepo {
     turn_admissions: Mutex<HashMap<String, (i64, Option<String>)>>,
     fail_set_mcp_server_ids: AtomicBool,
     fail_next_messages_keyset: AtomicBool,
+    fail_next_message_update: AtomicBool,
     block_turn_finalization: AtomicBool,
     turn_finalization_attempted: Notify,
 }
@@ -513,6 +514,7 @@ impl MockRepo {
             turn_admissions: Mutex::new(HashMap::new()),
             fail_set_mcp_server_ids: AtomicBool::new(false),
             fail_next_messages_keyset: AtomicBool::new(false),
+            fail_next_message_update: AtomicBool::new(false),
             block_turn_finalization: AtomicBool::new(false),
             turn_finalization_attempted: Notify::new(),
         }
@@ -525,6 +527,10 @@ impl MockRepo {
     fn fail_next_messages_keyset_read(&self) {
         self.fail_next_messages_keyset
             .store(true, Ordering::SeqCst);
+    }
+
+    fn fail_next_message_update(&self) {
+        self.fail_next_message_update.store(true, Ordering::SeqCst);
     }
 
     fn block_turn_finalization(&self, blocked: bool) {
@@ -754,6 +760,18 @@ impl IConversationRepository for MockRepo {
         }
         if let Some(extra) = &updates.extra {
             row.extra = extra.clone();
+        }
+        if let Some(delegation_policy) = &updates.delegation_policy {
+            row.delegation_policy = delegation_policy.clone();
+        }
+        if let Some(execution_model_pool) = &updates.execution_model_pool {
+            row.execution_model_pool = execution_model_pool.clone();
+        }
+        if let Some(decision_policy) = &updates.decision_policy {
+            row.decision_policy = decision_policy.clone();
+        }
+        if let Some(execution_template_id) = &updates.execution_template_id {
+            row.execution_template_id = execution_template_id.clone();
         }
         if let Some(status) = &updates.status {
             row.status = Some(status.clone());
@@ -1188,6 +1206,14 @@ impl IConversationRepository for MockRepo {
     }
 
     async fn update_message(&self, id: &str, updates: &MessageRowUpdate) -> Result<(), nomifun_db::DbError> {
+        if self
+            .fail_next_message_update
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(nomifun_db::DbError::Init(
+                "injected message update failure".to_owned(),
+            ));
+        }
         let mut messages = self.messages.lock().unwrap();
         let message = messages
             .iter_mut()
@@ -2521,6 +2547,60 @@ async fn update_model() {
         1,
         "model update must await old agent teardown"
     );
+}
+
+#[tokio::test]
+async fn update_model_teardown_failure_leaves_durable_configuration_untouched() {
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
+    let create_req: CreateConversationRequest = serde_json::from_value(json!({
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "workspace": "/project" }
+    }))
+    .unwrap();
+    let conv = svc.create(TEST_USER_1, create_req).await.unwrap();
+    let mock = Arc::new(MockAgentRuntimeRegistry::new());
+    mock.fail_next_termination_wait("injected configuration teardown failure");
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = mock.clone();
+    let req: UpdateConversationRequest = serde_json::from_value(json!({
+        "model": { "provider_id": PROVIDER_ID_2, "model": "new-model" }
+    }))
+    .unwrap();
+
+    assert!(matches!(
+        svc.update(
+            TEST_USER_1,
+            &conv.conversation_id,
+            req,
+            &runtime_registry,
+        )
+        .await
+        .unwrap_err(),
+        AppError::Internal(message) if message.contains("injected configuration teardown failure")
+    ));
+    let unchanged = repo.get(&conv.conversation_id).await.unwrap().unwrap();
+    let model: ProviderWithModel =
+        serde_json::from_str(unchanged.model.as_deref().unwrap()).unwrap();
+    assert_eq!(model.provider_id, PROVIDER_ID_1);
+    assert_eq!(model.model, "m1");
+
+    // A later request can retry after the transient teardown failure; only the
+    // proven retry is allowed to commit the new configuration.
+    let retry: UpdateConversationRequest = serde_json::from_value(json!({
+        "model": { "provider_id": PROVIDER_ID_2, "model": "new-model" }
+    }))
+    .unwrap();
+    let updated = svc
+        .update(
+            TEST_USER_1,
+            &conv.conversation_id,
+            retry,
+            &runtime_registry,
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.model.unwrap().provider_id, PROVIDER_ID_2);
+    assert_eq!(mock.termination_wait_count(), 2);
 }
 
 #[tokio::test]
@@ -5425,6 +5505,7 @@ struct ScriptedAgent {
     workspace: String,
     event_tx: broadcast::Sender<AgentStreamEvent>,
     scripts: Mutex<VecDeque<Vec<AgentStreamEvent>>>,
+    send_gates: Mutex<VecDeque<Arc<Semaphore>>>,
     sent_contents: Mutex<Vec<String>>,
 }
 
@@ -5437,6 +5518,7 @@ impl ScriptedAgent {
             workspace: cross_platform_mock_workspace().to_owned(),
             event_tx,
             scripts: Mutex::new(VecDeque::from(scripts)),
+            send_gates: Mutex::new(VecDeque::new()),
             sent_contents: Mutex::new(vec![]),
         }
     }
@@ -5448,6 +5530,11 @@ impl ScriptedAgent {
 
     fn with_workspace(mut self, workspace: impl Into<String>) -> Self {
         self.workspace = workspace.into();
+        self
+    }
+
+    fn with_send_gates(self, gates: Vec<Arc<Semaphore>>) -> Self {
+        *self.send_gates.lock().unwrap() = gates.into();
         self
     }
 
@@ -5488,6 +5575,13 @@ impl AgentRuntimeControl for ScriptedAgent {
 
     async fn send_message(&self, data: SendMessageData) -> Result<(), AgentSendError> {
         self.sent_contents.lock().unwrap().push(data.content);
+        let send_gate = self.send_gates.lock().unwrap().pop_front();
+        if let Some(send_gate) = send_gate {
+            let _permit = send_gate
+                .acquire_owned()
+                .await
+                .expect("scripted send gate unexpectedly closed");
+        }
         let script = self
             .scripts
             .lock()
@@ -16217,6 +16311,149 @@ struct PersistentScriptedRuntimeRegistry {
     termination_count: AtomicUsize,
 }
 
+#[derive(Clone)]
+enum FailoverTeardownStep {
+    Fail,
+    Succeed,
+    Wait(Arc<Semaphore>),
+}
+
+/// Runtime registry with deterministic teardown sequencing. Unlike the older
+/// persistent scripted stub above, a successful teardown removes the logical
+/// old runtime and every replacement request is counted, so failover ordering
+/// tests can prove that no build occurs before exact exit.
+struct SequencedFailoverRuntimeRegistry {
+    agent: AgentRuntimeHandle,
+    runtime_present: Arc<AtomicBool>,
+    teardown_steps: Mutex<VecDeque<FailoverTeardownStep>>,
+    repeat_failure: AtomicBool,
+    teardown_attempts: AtomicUsize,
+    replacement_build_count: AtomicUsize,
+    attempt_notify: Notify,
+}
+
+impl SequencedFailoverRuntimeRegistry {
+    fn new(agent: AgentRuntimeHandle, teardown_steps: Vec<FailoverTeardownStep>) -> Self {
+        Self {
+            agent,
+            runtime_present: Arc::new(AtomicBool::new(true)),
+            teardown_steps: Mutex::new(teardown_steps.into()),
+            repeat_failure: AtomicBool::new(false),
+            teardown_attempts: AtomicUsize::new(0),
+            replacement_build_count: AtomicUsize::new(0),
+            attempt_notify: Notify::new(),
+        }
+    }
+
+    fn set_repeat_failure(&self, fail: bool) {
+        self.repeat_failure.store(fail, Ordering::SeqCst);
+    }
+
+    fn teardown_attempts(&self) -> usize {
+        self.teardown_attempts.load(Ordering::SeqCst)
+    }
+
+    fn build_count(&self) -> usize {
+        self.replacement_build_count.load(Ordering::SeqCst)
+    }
+
+    async fn wait_for_teardown_attempts(&self, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let notified = self.attempt_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.teardown_attempts() >= expected {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("teardown attempt did not arrive");
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentRuntimeRegistry for SequencedFailoverRuntimeRegistry {
+    fn get_runtime(&self, _conversation_id: &str) -> Option<AgentRuntimeHandle> {
+        self.runtime_present
+            .load(Ordering::SeqCst)
+            .then(|| self.agent.clone())
+    }
+
+    async fn get_or_create_runtime(
+        &self,
+        _conversation_id: &str,
+        _options: AgentRuntimeBuildOptions,
+    ) -> Result<AgentRuntimeHandle, AppError> {
+        if !self.runtime_present.swap(true, Ordering::SeqCst) {
+            self.replacement_build_count.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(self.agent.clone())
+    }
+
+    fn terminate(
+        &self,
+        _conversation_id: &str,
+        _reason: Option<AgentKillReason>,
+    ) -> Result<(), AppError> {
+        self.runtime_present.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn terminate_and_wait_result(
+        &self,
+        _conversation_id: &str,
+        _reason: Option<AgentKillReason>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send>> {
+        self.teardown_attempts.fetch_add(1, Ordering::SeqCst);
+        self.attempt_notify.notify_waiters();
+        let step = self
+            .teardown_steps
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| {
+                if self.repeat_failure.load(Ordering::SeqCst) {
+                    FailoverTeardownStep::Fail
+                } else {
+                    FailoverTeardownStep::Succeed
+                }
+            });
+        let runtime_present = Arc::clone(&self.runtime_present);
+        Box::pin(async move {
+            match step {
+                FailoverTeardownStep::Fail => Err(AppError::Internal(
+                    "injected failover teardown failure".to_owned(),
+                )),
+                FailoverTeardownStep::Succeed => {
+                    runtime_present.store(false, Ordering::SeqCst);
+                    Ok(())
+                }
+                FailoverTeardownStep::Wait(gate) => {
+                    let _permit = gate
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| AppError::Internal("teardown test gate closed".to_owned()))?;
+                    runtime_present.store(false, Ordering::SeqCst);
+                    Ok(())
+                }
+            }
+        })
+    }
+
+    fn terminate_all(&self) {}
+
+    fn active_runtime_count(&self) -> usize {
+        usize::from(self.runtime_present.load(Ordering::SeqCst))
+    }
+
+    fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
+        vec![]
+    }
+}
+
 impl PersistentScriptedRuntimeRegistry {
     fn new(scripted: Arc<ScriptedAgent>) -> Self {
         Self {
@@ -16383,6 +16620,27 @@ fn provider_fault_then_finish_agent(conv_id: &str) -> Arc<ScriptedAgent> {
     )
 }
 
+fn provider_500_then_finish_agent(conv_id: &str) -> Arc<ScriptedAgent> {
+    Arc::new(
+        ScriptedAgent::new(
+            conv_id,
+            vec![
+                vec![AgentStreamEvent::Error(ErrorEventData::legacy(
+                    "Provider error: API error 500: EOF",
+                    Some(AgentErrorCode::UserLlmProviderGatewayError),
+                ))],
+                vec![
+                    AgentStreamEvent::Text(TextEventData {
+                        content: "recovered after provider 500".into(),
+                    }),
+                    AgentStreamEvent::Finish(FinishEventData::default()),
+                ],
+            ],
+        )
+        .with_agent_type(AgentType::Nomi),
+    )
+}
+
 #[tokio::test]
 async fn failover_pre_response_fault_rebuilds_with_next_model_and_resends() {
     let (svc, _broadcaster, repo, _capability_repo) =
@@ -16425,6 +16683,677 @@ async fn failover_pre_response_fault_rebuilds_with_next_model_and_resends() {
     assert_eq!(model.provider_id, PROVIDER_ID_2);
     assert_eq!(model.model, "m2");
 
+}
+
+#[tokio::test]
+async fn provider_500_failover_commits_model_only_after_transient_teardown_recovers() {
+    let (svc, _broadcaster, repo, _capability_repo) = make_failover_service(vec![
+        test_provider(PROVIDER_ID_1, &["m1"]),
+        test_provider(PROVIDER_ID_2, &["m2"]),
+    ]);
+    let conv_id = seed_nomi_failover_conversation(
+        &repo,
+        pwm(PROVIDER_ID_1, "m1"),
+        json!({ "enabled": true, "queue": [{"provider_id": PROVIDER_ID_2, "model": "m2"}] }),
+    )
+    .await;
+    let scripted = provider_500_then_finish_agent(&conv_id);
+    let runtime_registry = Arc::new(SequencedFailoverRuntimeRegistry::new(
+        AgentRuntimeHandle::Mock(scripted.clone()),
+        vec![FailoverTeardownStep::Fail, FailoverTeardownStep::Succeed],
+    ));
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
+
+    send_message_with_test_key(
+        &svc,
+        TEST_USER_1,
+        &conv_id,
+        "failover-provider-500-transient-teardown",
+        make_send_req(),
+        &runtime_registry_dyn,
+    )
+    .await
+    .unwrap();
+    wait_for_turn_released(&svc, &conv_id).await;
+
+    assert_eq!(runtime_registry.teardown_attempts(), 2);
+    assert_eq!(runtime_registry.build_count(), 1);
+    assert_eq!(scripted.sent_contents(), vec!["Hello", "Hello"]);
+    let row = repo.get(&conv_id).await.unwrap().unwrap();
+    let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
+    assert_eq!(model.provider_id, PROVIDER_ID_2);
+    let messages = repo
+        .get_messages(&conv_id, 1, 50, SortOrder::Asc)
+        .await
+        .unwrap()
+        .items;
+    assert!(
+        !messages.iter().any(|message| {
+            serde_json::from_str::<serde_json::Value>(&message.content)
+                .ok()
+                .is_some_and(|content| content["source"] == "model_failover_teardown")
+        }),
+        "one transient teardown miss should recover without a stale warning"
+    );
+}
+
+#[tokio::test]
+async fn permanent_failover_teardown_failure_keeps_old_model_and_visible_running_fence() {
+    let (svc, broadcaster, repo, _capability_repo) = make_failover_service(vec![
+        test_provider(PROVIDER_ID_1, &["m1"]),
+        test_provider(PROVIDER_ID_2, &["m2"]),
+    ]);
+    let conv_id = seed_nomi_failover_conversation(
+        &repo,
+        pwm(PROVIDER_ID_1, "m1"),
+        json!({ "enabled": true, "queue": [{"provider_id": PROVIDER_ID_2, "model": "m2"}] }),
+    )
+    .await;
+    let scripted = provider_500_then_finish_agent(&conv_id);
+    let runtime_registry = Arc::new(SequencedFailoverRuntimeRegistry::new(
+        AgentRuntimeHandle::Mock(scripted.clone()),
+        vec![],
+    ));
+    runtime_registry.set_repeat_failure(true);
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
+
+    send_message_with_test_key(
+        &svc,
+        TEST_USER_1,
+        &conv_id,
+        "failover-provider-500-permanent-teardown",
+        make_send_req(),
+        &runtime_registry_dyn,
+    )
+    .await
+    .unwrap();
+    runtime_registry.wait_for_teardown_attempts(3).await;
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let messages = repo
+                .get_messages(&conv_id, 1, 50, SortOrder::Asc)
+                .await
+                .unwrap()
+                .items;
+            if messages.iter().any(|message| {
+                serde_json::from_str::<serde_json::Value>(&message.content)
+                    .ok()
+                    .is_some_and(|content| content["source"] == "model_failover_teardown")
+            }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("blocked failover warning was not persisted");
+
+    let warning_rows = repo
+        .get_messages(&conv_id, 1, 50, SortOrder::Asc)
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .filter(|message| {
+            serde_json::from_str::<serde_json::Value>(&message.content)
+                .ok()
+                .is_some_and(|content| content["source"] == "model_failover_teardown")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(warning_rows.len(), 1);
+    let warning_message_id = warning_rows[0].message_id.clone();
+    assert_eq!(warning_rows[0].status.as_deref(), Some("work"));
+
+    let blocked_row = repo.get(&conv_id).await.unwrap().unwrap();
+    let blocked_model: ProviderWithModel =
+        serde_json::from_str(blocked_row.model.as_deref().unwrap()).unwrap();
+    assert_eq!(blocked_model.provider_id, PROVIDER_ID_1);
+    assert_eq!(runtime_registry.build_count(), 0);
+    assert_eq!(scripted.sent_contents(), vec!["Hello"]);
+    let summary = svc.runtime_summary_for(&conv_id).await;
+    assert!(summary.is_processing);
+    assert!(!summary.can_send_message);
+    let events = broadcaster.take_events();
+    assert!(events.iter().any(|event| {
+        event.name == "message.stream"
+            && event.data["type"] == "tips"
+            && event.data["data"]["source"] == "model_failover_teardown"
+    }));
+    assert!(events.iter().all(|event| event.name != "turn.completed"));
+
+    // Repair the injected infrastructure fault so the detached owner can prove
+    // exit and complete. Until this point neither DB configuration nor runtime
+    // admission moved forward.
+    let recovery_attempt = runtime_registry.teardown_attempts() + 1;
+    runtime_registry.set_repeat_failure(false);
+    runtime_registry
+        .wait_for_teardown_attempts(recovery_attempt)
+        .await;
+    wait_for_turn_released(&svc, &conv_id).await;
+    let recovered_row = repo.get(&conv_id).await.unwrap().unwrap();
+    let recovered_model: ProviderWithModel =
+        serde_json::from_str(recovered_row.model.as_deref().unwrap()).unwrap();
+    assert_eq!(recovered_model.provider_id, PROVIDER_ID_2);
+    assert_eq!(runtime_registry.build_count(), 1);
+    let resolved_rows = repo
+        .get_messages(&conv_id, 1, 50, SortOrder::Asc)
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .filter(|message| {
+            serde_json::from_str::<serde_json::Value>(&message.content)
+                .ok()
+                .is_some_and(|content| content["source"] == "model_failover_teardown")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(resolved_rows.len(), 1, "recovery must update, not append");
+    assert_eq!(resolved_rows[0].message_id, warning_message_id);
+    assert_eq!(resolved_rows[0].status.as_deref(), Some("finish"));
+    let resolved_content: serde_json::Value =
+        serde_json::from_str(&resolved_rows[0].content).unwrap();
+    assert_eq!(resolved_content["state"], "resolved");
+    let recovery_events = broadcaster.take_events();
+    assert!(recovery_events.iter().any(|event| {
+        event.name == "message.stream"
+            && event.data["msg_id"] == warning_message_id
+            && event.data["replace"] == true
+            && event.data["data"]["state"] == "resolved"
+    }));
+}
+
+#[tokio::test]
+async fn warning_resolution_failure_does_not_block_safe_failover_completion() {
+    let (svc, broadcaster, repo, _capability_repo) = make_failover_service(vec![
+        test_provider(PROVIDER_ID_1, &["m1"]),
+        test_provider(PROVIDER_ID_2, &["m2"]),
+    ]);
+    let conv_id = seed_nomi_failover_conversation(
+        &repo,
+        pwm(PROVIDER_ID_1, "m1"),
+        json!({ "enabled": true, "queue": [{"provider_id": PROVIDER_ID_2, "model": "m2"}] }),
+    )
+    .await;
+    let scripted = provider_500_then_finish_agent(&conv_id);
+    let runtime_registry = Arc::new(SequencedFailoverRuntimeRegistry::new(
+        AgentRuntimeHandle::Mock(scripted),
+        vec![],
+    ));
+    runtime_registry.set_repeat_failure(true);
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
+
+    send_message_with_test_key(
+        &svc,
+        TEST_USER_1,
+        &conv_id,
+        "failover-warning-resolution-write-failure",
+        make_send_req(),
+        &runtime_registry_dyn,
+    )
+    .await
+    .unwrap();
+    runtime_registry.wait_for_teardown_attempts(3).await;
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let warning_exists = repo
+                .get_messages(&conv_id, 1, 50, SortOrder::Asc)
+                .await
+                .unwrap()
+                .items
+                .iter()
+                .any(|message| {
+                    serde_json::from_str::<serde_json::Value>(&message.content)
+                        .ok()
+                        .is_some_and(|content| content["source"] == "model_failover_teardown")
+                });
+            if warning_exists {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("blocked failover warning was not persisted");
+
+    repo.fail_next_message_update();
+    let recovery_attempt = runtime_registry.teardown_attempts() + 1;
+    runtime_registry.set_repeat_failure(false);
+    runtime_registry
+        .wait_for_teardown_attempts(recovery_attempt)
+        .await;
+    wait_for_turn_released(&svc, &conv_id).await;
+
+    let row = repo.get(&conv_id).await.unwrap().unwrap();
+    let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
+    assert_eq!(model.provider_id, PROVIDER_ID_2);
+    assert_eq!(runtime_registry.build_count(), 1);
+    let summary = svc.runtime_summary_for(&conv_id).await;
+    assert!(!summary.is_processing);
+    assert!(summary.can_send_message);
+    let warning_rows = repo
+        .get_messages(&conv_id, 1, 50, SortOrder::Asc)
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .filter(|message| {
+            serde_json::from_str::<serde_json::Value>(&message.content)
+                .ok()
+                .is_some_and(|content| content["source"] == "model_failover_teardown")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(warning_rows.len(), 1);
+    assert_eq!(warning_rows[0].status.as_deref(), Some("work"));
+    let events = broadcaster.take_events();
+    assert!(events.iter().any(|event| event.name == "turn.completed"));
+    assert!(events.iter().all(|event| {
+        !(event.name == "message.stream"
+            && event.data["data"]["source"] == "model_failover_teardown"
+            && event.data["replace"] == true)
+    }));
+}
+
+#[tokio::test]
+async fn cancellation_racing_failover_teardown_never_commits_or_builds_replacement() {
+    let (svc, _broadcaster, repo, _capability_repo) = make_failover_service(vec![
+        test_provider(PROVIDER_ID_1, &["m1"]),
+        test_provider(PROVIDER_ID_2, &["m2"]),
+    ]);
+    let conv_id = seed_nomi_failover_conversation(
+        &repo,
+        pwm(PROVIDER_ID_1, "m1"),
+        json!({ "enabled": true, "queue": [{"provider_id": PROVIDER_ID_2, "model": "m2"}] }),
+    )
+    .await;
+    let scripted = provider_500_then_finish_agent(&conv_id);
+    let teardown_gate = Arc::new(Semaphore::new(0));
+    let runtime_registry = Arc::new(SequencedFailoverRuntimeRegistry::new(
+        AgentRuntimeHandle::Mock(scripted.clone()),
+        vec![
+            FailoverTeardownStep::Wait(Arc::clone(&teardown_gate)),
+            FailoverTeardownStep::Wait(Arc::clone(&teardown_gate)),
+        ],
+    ));
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
+
+    send_message_with_test_key(
+        &svc,
+        TEST_USER_1,
+        &conv_id,
+        "failover-provider-500-cancel-race",
+        make_send_req(),
+        &runtime_registry_dyn,
+    )
+    .await
+    .unwrap();
+    runtime_registry.wait_for_teardown_attempts(1).await;
+    let before_cancel = repo.get(&conv_id).await.unwrap().unwrap();
+    let before_model: ProviderWithModel =
+        serde_json::from_str(before_cancel.model.as_deref().unwrap()).unwrap();
+    assert_eq!(before_model.provider_id, PROVIDER_ID_1);
+    assert_eq!(runtime_registry.build_count(), 0);
+
+    let cancel_svc = svc.clone();
+    let cancel_conv_id = conv_id.clone();
+    let cancel_registry = Arc::clone(&runtime_registry_dyn);
+    let cancel_task = tokio::spawn(async move {
+        cancel_svc
+            .cancel(TEST_USER_1, &cancel_conv_id, &cancel_registry)
+            .await
+    });
+    runtime_registry.wait_for_teardown_attempts(2).await;
+    teardown_gate.add_permits(2);
+    tokio::time::timeout(Duration::from_secs(5), cancel_task)
+        .await
+        .expect("cancel did not finish after exact teardown proof")
+        .expect("cancel task panicked")
+        .expect("cancel failed");
+    wait_for_turn_released(&svc, &conv_id).await;
+
+    let cancelled_row = repo.get(&conv_id).await.unwrap().unwrap();
+    let cancelled_model: ProviderWithModel =
+        serde_json::from_str(cancelled_row.model.as_deref().unwrap()).unwrap();
+    assert_eq!(cancelled_model.provider_id, PROVIDER_ID_1);
+    assert_eq!(runtime_registry.build_count(), 0);
+    assert_eq!(scripted.sent_contents(), vec!["Hello"]);
+}
+
+#[tokio::test]
+async fn failover_never_overwrites_model_authority_changed_during_teardown() {
+    let (svc, _broadcaster, repo, _capability_repo) = make_failover_service(vec![
+        test_provider(PROVIDER_ID_1, &["m1"]),
+        test_provider(PROVIDER_ID_2, &["m2"]),
+    ]);
+    let conv_id = seed_nomi_failover_conversation(
+        &repo,
+        pwm(PROVIDER_ID_1, "m1"),
+        json!({ "enabled": true, "queue": [{"provider_id": PROVIDER_ID_2, "model": "m2"}] }),
+    )
+    .await;
+    let scripted = provider_500_then_finish_agent(&conv_id);
+    let teardown_gate = Arc::new(Semaphore::new(0));
+    let runtime_registry = Arc::new(SequencedFailoverRuntimeRegistry::new(
+        AgentRuntimeHandle::Mock(scripted.clone()),
+        vec![FailoverTeardownStep::Wait(Arc::clone(&teardown_gate))],
+    ));
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
+
+    send_message_with_test_key(
+        &svc,
+        TEST_USER_1,
+        &conv_id,
+        "failover-provider-500-concurrent-model-change",
+        make_send_req(),
+        &runtime_registry_dyn,
+    )
+    .await
+    .unwrap();
+    runtime_registry.wait_for_teardown_attempts(1).await;
+
+    // Model PATCHes use the shared configuration gate in production. This
+    // direct repository write simulates a trusted/internal writer that bypasses
+    // it, proving the post-teardown snapshot check still fails closed.
+    let explicit_model = pwm(PROVIDER_ID_3, "explicit-m3");
+    repo.update(
+        &conv_id,
+        &ConversationRowUpdate {
+            model: Some(Some(serde_json::to_string(&explicit_model).unwrap())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    teardown_gate.add_permits(1);
+    wait_for_turn_released(&svc, &conv_id).await;
+
+    let row = repo.get(&conv_id).await.unwrap().unwrap();
+    let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
+    assert_eq!(model.provider_id, PROVIDER_ID_3);
+    assert_eq!(model.model, "explicit-m3");
+    assert_eq!(runtime_registry.build_count(), 0);
+    assert_eq!(scripted.sent_contents(), vec!["Hello"]);
+}
+
+#[tokio::test]
+async fn concurrent_model_patch_waits_for_failover_and_remains_final_authority() {
+    let (svc, _broadcaster, repo, _capability_repo) = make_failover_service(vec![
+        test_provider(PROVIDER_ID_1, &["m1"]),
+        test_provider(PROVIDER_ID_2, &["m2"]),
+        test_provider(PROVIDER_ID_3, &["explicit-m3"]),
+    ]);
+    let conv_id = seed_nomi_failover_conversation(
+        &repo,
+        pwm(PROVIDER_ID_1, "m1"),
+        json!({ "enabled": true, "queue": [{"provider_id": PROVIDER_ID_2, "model": "m2"}] }),
+    )
+    .await;
+    let scripted = provider_500_then_finish_agent(&conv_id);
+    let teardown_gate = Arc::new(Semaphore::new(0));
+    let runtime_registry = Arc::new(SequencedFailoverRuntimeRegistry::new(
+        AgentRuntimeHandle::Mock(scripted),
+        vec![
+            FailoverTeardownStep::Wait(Arc::clone(&teardown_gate)),
+            FailoverTeardownStep::Succeed,
+        ],
+    ));
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
+
+    send_message_with_test_key(
+        &svc,
+        TEST_USER_1,
+        &conv_id,
+        "failover-provider-500-concurrent-public-model-patch",
+        make_send_req(),
+        &runtime_registry_dyn,
+    )
+    .await
+    .unwrap();
+    runtime_registry.wait_for_teardown_attempts(1).await;
+
+    let update_svc = svc.clone();
+    let update_conv_id = conv_id.clone();
+    let update_registry = Arc::clone(&runtime_registry_dyn);
+    let update_request: UpdateConversationRequest = serde_json::from_value(json!({
+        "model": { "provider_id": PROVIDER_ID_3, "model": "explicit-m3" }
+    }))
+    .unwrap();
+    let mut update_task = tokio::spawn(async move {
+        update_svc
+            .update(
+                TEST_USER_1,
+                &update_conv_id,
+                update_request,
+                &update_registry,
+            )
+            .await
+    });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut update_task)
+            .await
+            .is_err(),
+        "public model PATCH must wait behind the in-flight failover gate"
+    );
+    let blocked_row = repo.get(&conv_id).await.unwrap().unwrap();
+    let blocked_model: ProviderWithModel =
+        serde_json::from_str(blocked_row.model.as_deref().unwrap()).unwrap();
+    assert_eq!(blocked_model.provider_id, PROVIDER_ID_1);
+    assert_eq!(runtime_registry.teardown_attempts(), 1);
+
+    teardown_gate.add_permits(1);
+    let update_response = tokio::time::timeout(Duration::from_secs(5), update_task)
+        .await
+        .expect("model PATCH remained blocked after failover released the gate")
+        .expect("model PATCH task panicked")
+        .expect("model PATCH failed");
+    assert_eq!(
+        update_response.model.unwrap().provider_id,
+        PROVIDER_ID_3
+    );
+    wait_for_turn_released(&svc, &conv_id).await;
+
+    let row = repo.get(&conv_id).await.unwrap().unwrap();
+    let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
+    assert_eq!(model.provider_id, PROVIDER_ID_3);
+    assert_eq!(model.model, "explicit-m3");
+    assert_eq!(runtime_registry.teardown_attempts(), 2);
+    assert_eq!(runtime_registry.build_count(), 1);
+}
+
+#[tokio::test]
+async fn model_patch_committed_before_failover_gate_prevents_stale_switch() {
+    let (svc, _broadcaster, repo, _capability_repo) = make_failover_service(vec![
+        test_provider(PROVIDER_ID_1, &["m1"]),
+        test_provider(PROVIDER_ID_2, &["m2"]),
+        test_provider(PROVIDER_ID_3, &["explicit-m3"]),
+    ]);
+    let conv_id = seed_nomi_failover_conversation(
+        &repo,
+        pwm(PROVIDER_ID_1, "m1"),
+        json!({ "enabled": true, "queue": [{"provider_id": PROVIDER_ID_2, "model": "m2"}] }),
+    )
+    .await;
+    let provider_error_gate = Arc::new(Semaphore::new(0));
+    let scripted = Arc::new(
+        ScriptedAgent::new(
+            &conv_id,
+            vec![vec![AgentStreamEvent::Error(ErrorEventData::legacy(
+                "Provider error: API error 500: EOF",
+                Some(AgentErrorCode::UserLlmProviderGatewayError),
+            ))]],
+        )
+        .with_agent_type(AgentType::Nomi)
+        .with_send_gates(vec![Arc::clone(&provider_error_gate)]),
+    );
+    let update_teardown_gate = Arc::new(Semaphore::new(0));
+    let runtime_registry = Arc::new(SequencedFailoverRuntimeRegistry::new(
+        AgentRuntimeHandle::Mock(scripted.clone()),
+        vec![FailoverTeardownStep::Wait(Arc::clone(
+            &update_teardown_gate,
+        ))],
+    ));
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
+
+    send_message_with_test_key(
+        &svc,
+        TEST_USER_1,
+        &conv_id,
+        "public-model-patch-wins-before-failover-gate",
+        make_send_req(),
+        &runtime_registry_dyn,
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while scripted.sent_contents().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initial provider call did not reach its scripted gate");
+
+    let update_svc = svc.clone();
+    let update_conv_id = conv_id.clone();
+    let update_registry = Arc::clone(&runtime_registry_dyn);
+    let update_request: UpdateConversationRequest = serde_json::from_value(json!({
+        "model": { "provider_id": PROVIDER_ID_3, "model": "explicit-m3" }
+    }))
+    .unwrap();
+    let update_task = tokio::spawn(async move {
+        update_svc
+            .update(
+                TEST_USER_1,
+                &update_conv_id,
+                update_request,
+                &update_registry,
+            )
+            .await
+    });
+    runtime_registry.wait_for_teardown_attempts(1).await;
+    update_teardown_gate.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), update_task)
+        .await
+        .expect("model PATCH did not finish after exact teardown")
+        .expect("model PATCH task panicked")
+        .expect("model PATCH failed");
+
+    provider_error_gate.add_permits(1);
+    wait_for_turn_released(&svc, &conv_id).await;
+
+    let row = repo.get(&conv_id).await.unwrap().unwrap();
+    let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
+    assert_eq!(model.provider_id, PROVIDER_ID_3);
+    assert_eq!(model.model, "explicit-m3");
+    assert_eq!(
+        runtime_registry.teardown_attempts(),
+        1,
+        "stale failover must stop before a second teardown"
+    );
+    assert_eq!(runtime_registry.build_count(), 0);
+    assert_eq!(scripted.sent_contents(), vec!["Hello"]);
+}
+
+#[tokio::test]
+async fn pool_and_template_patch_before_failover_gate_prevents_stale_switch() {
+    let (svc, _broadcaster, repo, _capability_repo) = make_failover_service(vec![
+        test_provider(PROVIDER_ID_1, &["m1"]),
+        test_provider(PROVIDER_ID_2, &["m2"]),
+        test_provider(PROVIDER_ID_3, &["m3"]),
+    ]);
+    let conv_id = seed_nomi_failover_conversation(
+        &repo,
+        pwm(PROVIDER_ID_1, "m1"),
+        json!({ "enabled": true, "queue": [{"provider_id": PROVIDER_ID_2, "model": "m2"}] }),
+    )
+    .await;
+    let provider_error_gate = Arc::new(Semaphore::new(0));
+    let scripted = Arc::new(
+        ScriptedAgent::new(
+            &conv_id,
+            vec![vec![AgentStreamEvent::Error(ErrorEventData::legacy(
+                "Provider error: API error 500: EOF",
+                Some(AgentErrorCode::UserLlmProviderGatewayError),
+            ))]],
+        )
+        .with_agent_type(AgentType::Nomi)
+        .with_send_gates(vec![Arc::clone(&provider_error_gate)]),
+    );
+    let runtime_registry = Arc::new(SequencedFailoverRuntimeRegistry::new(
+        AgentRuntimeHandle::Mock(scripted.clone()),
+        vec![],
+    ));
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
+
+    send_message_with_test_key(
+        &svc,
+        TEST_USER_1,
+        &conv_id,
+        "public-pool-template-patch-wins-before-failover-gate",
+        make_send_req(),
+        &runtime_registry_dyn,
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while scripted.sent_contents().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initial provider call did not reach its scripted gate");
+
+    let explicit_pool = ExecutionModelPool::Range {
+        models: vec![
+            ExecutionModelRef {
+                provider_id: PROVIDER_ID_1.to_owned(),
+                model: "m1".to_owned(),
+            },
+            ExecutionModelRef {
+                provider_id: PROVIDER_ID_3.to_owned(),
+                model: "m3".to_owned(),
+            },
+        ],
+    };
+    let explicit_template_id = nomifun_common::AgentExecutionTemplateId::new().into_string();
+    let update_request: UpdateConversationRequest = serde_json::from_value(json!({
+        "execution_model_pool": explicit_pool,
+        "execution_template_id": explicit_template_id,
+    }))
+    .unwrap();
+    svc.update(
+        TEST_USER_1,
+        &conv_id,
+        update_request,
+        &runtime_registry_dyn,
+    )
+    .await
+    .expect("pool/template PATCH failed");
+    assert_eq!(
+        runtime_registry.teardown_attempts(),
+        0,
+        "pool/template planning authority alone must not recycle the runtime"
+    );
+
+    provider_error_gate.add_permits(1);
+    wait_for_turn_released(&svc, &conv_id).await;
+
+    let row = repo.get(&conv_id).await.unwrap().unwrap();
+    let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
+    assert_eq!(model.provider_id, PROVIDER_ID_1);
+    assert_eq!(
+        serde_json::from_str::<ExecutionModelPool>(
+            row.execution_model_pool.as_deref().unwrap()
+        )
+        .unwrap(),
+        explicit_pool
+    );
+    assert_eq!(
+        row.execution_template_id.as_deref(),
+        Some(explicit_template_id.as_str())
+    );
+    assert_eq!(runtime_registry.teardown_attempts(), 0);
+    assert_eq!(runtime_registry.build_count(), 0);
+    assert_eq!(scripted.sent_contents(), vec!["Hello"]);
 }
 
 #[tokio::test]
@@ -16778,6 +17707,108 @@ async fn failover_is_bounded_by_max_switches() {
     let row = repo.get(&conv_id).await.unwrap().unwrap();
     let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
     assert_eq!(model.provider_id, PROVIDER_ID_2, "stopped at the first switch, not p3");
+}
+
+#[tokio::test]
+async fn failover_carries_rewritten_authority_into_the_next_switch() {
+    let (svc, _broadcaster, repo, _provider_repo) = make_failover_service(vec![
+        test_provider(PROVIDER_ID_1, &["m1"]),
+        test_provider(PROVIDER_ID_2, &["m2"]),
+        test_provider(PROVIDER_ID_3, &["m3"]),
+    ]);
+    let conv_id = seed_nomi_failover_conversation(
+        &repo,
+        pwm(PROVIDER_ID_1, "m1"),
+        json!({
+            "enabled": true,
+            "max_switches": 2,
+            "queue": [
+                {"provider_id": PROVIDER_ID_2, "model": "m2"},
+                {"provider_id": PROVIDER_ID_3, "model": "m3"}
+            ]
+        }),
+    )
+    .await;
+    let initial_pool = ExecutionModelPool::Range {
+        models: vec![
+            ExecutionModelRef {
+                provider_id: PROVIDER_ID_1.to_owned(),
+                model: "m1".to_owned(),
+            },
+            ExecutionModelRef {
+                provider_id: PROVIDER_ID_2.to_owned(),
+                model: "m2".to_owned(),
+            },
+            ExecutionModelRef {
+                provider_id: PROVIDER_ID_3.to_owned(),
+                model: "m3".to_owned(),
+            },
+        ],
+    };
+    repo.update(
+        &conv_id,
+        &ConversationRowUpdate {
+            execution_model_pool: Some(Some(serde_json::to_string(&initial_pool).unwrap())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let scripted = Arc::new(
+        ScriptedAgent::new(
+            &conv_id,
+            vec![
+                vec![AgentStreamEvent::Error(ErrorEventData::legacy(
+                    "first provider fault",
+                    Some(AgentErrorCode::UserLlmProviderGatewayError),
+                ))],
+                vec![AgentStreamEvent::Error(ErrorEventData::legacy(
+                    "second provider fault",
+                    Some(AgentErrorCode::UserLlmProviderGatewayError),
+                ))],
+                vec![
+                    AgentStreamEvent::Text(TextEventData {
+                        content: "recovered on third model".to_owned(),
+                    }),
+                    AgentStreamEvent::Finish(FinishEventData::default()),
+                ],
+            ],
+        )
+        .with_agent_type(AgentType::Nomi),
+    );
+    let runtime_registry = Arc::new(PersistentScriptedRuntimeRegistry::new(scripted));
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
+
+    send_message_with_test_key(
+        &svc,
+        TEST_USER_1,
+        &conv_id,
+        "failover-two-successive-switches",
+        make_send_req(),
+        &runtime_registry_dyn,
+    )
+    .await
+    .unwrap();
+    wait_for_turn_released(&svc, &conv_id).await;
+
+    assert_eq!(runtime_registry.sent_contents().len(), 3);
+    assert_eq!(runtime_registry.termination_count(), 2);
+    let row = repo.get(&conv_id).await.unwrap().unwrap();
+    let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
+    assert_eq!(model.provider_id, PROVIDER_ID_3);
+    assert_eq!(
+        serde_json::from_str::<ExecutionModelPool>(
+            row.execution_model_pool.as_deref().unwrap()
+        )
+        .unwrap(),
+        ExecutionModelPool::Range {
+            models: vec![ExecutionModelRef {
+                provider_id: PROVIDER_ID_3.to_owned(),
+                model: "m3".to_owned(),
+            }]
+        }
+    );
 }
 
 // ── review #11: ACP exclusion (send-loop) + IDMM/perform direct on non-nomi ──

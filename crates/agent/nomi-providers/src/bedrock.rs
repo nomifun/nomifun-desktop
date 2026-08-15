@@ -317,8 +317,7 @@ impl LlmProvider for BedrockProvider {
                 if !status.is_success() {
                     let retry_after_ms =
                         crate::parse_retry_after_ms(response.headers()).unwrap_or(5000);
-                    let body_text =
-                        redactor.redact(&response.text().await.unwrap_or_default());
+                    let body_text = crate::read_provider_error_body(response, &redactor).await;
                     if status.as_u16() == 429 {
                         return Err(ProviderError::RateLimited {
                             retry_after_ms,

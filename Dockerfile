@@ -98,7 +98,7 @@ RUN if [ -n "$APT_MIRROR" ]; then \
     fi
 RUN apt-get -o Acquire::Retries=5 update \
     && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
-        ca-certificates git python3 python3-yaml ripgrep \
+        ca-certificates git python3 python3-yaml ripgrep tini \
     && rm -rf /var/lib/apt/lists/*
 # bun is a hard runtime dependency of the agent engine (>= 1.3.13).
 COPY --from=bun-base /usr/local/bin/bun /usr/local/bin/bun
@@ -133,4 +133,7 @@ EXPOSE 8787
 # start-period covers first-run data-dir + DB init.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD bun -e "fetch('http://127.0.0.1:'+(process.env.NOMIFUN_WEB_PORT||'8787')+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+# Keep one real PID 1 reaper for both `docker run` and Compose deployments.
+# Tini also forwards shutdown signals to the server before collecting orphans.
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["nomifun-web"]

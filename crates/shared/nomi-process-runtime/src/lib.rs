@@ -38,6 +38,35 @@ pub use supervisor::{
     ProcessHandle, PollResult, ProcessSupervisor, QuiesceReport, QuiesceSessionReport,
     ShutdownReport, ShutdownSessionReport, SupervisorConfig,
 };
+
+/// Returns true only when cleanup can no longer be retried safely because its
+/// exact process-tree authority was never present or has been permanently
+/// lost. Timeouts, live members, and transient platform probes return false.
+///
+/// Callers should use this classifier instead of matching platform error text.
+pub fn cleanup_authority_lost(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::Unsupported
+}
+
+#[cfg(test)]
+mod cleanup_authority_tests {
+    use super::cleanup_authority_lost;
+
+    #[test]
+    fn only_explicit_permanent_loss_is_classified_as_authority_loss() {
+        assert!(cleanup_authority_lost(&std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "exact authority lost",
+        )));
+        assert!(!cleanup_authority_lost(&std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "proof remains retryable",
+        )));
+        assert!(!cleanup_authority_lost(&std::io::Error::other(
+            "transient platform probe failed",
+        )));
+    }
+}
 #[cfg(windows)]
 pub use platform::windows::{
     WindowsExactProcess, WindowsProcessIdentity, WindowsProcessJob, WindowsRecoveryJob,
