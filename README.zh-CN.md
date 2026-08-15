@@ -3,7 +3,7 @@
 <div align="center">
 
 <a href="https://www.nomifun.com">
-  <img src="docs/images/readme-00-agent-collaboration-hero.png" alt="NomiFun Agent 协作、角色沉淀与执行图" width="100%">
+  <img src="docs/images/readme/zh/workspace.png" alt="当前 NomiFun Desktop 工作台" width="100%">
 </a>
 
 <h3>一项毫无保留、<em>本地优先</em>的超级 AI 工作站。</h3>
@@ -137,32 +137,40 @@ Agent 小程序，让 Agent 创建的应用继续复用同一套本地运行时�
 </p>
 
 <p>
-  <img src="docs/images/readme-01-workbench-overview.png" alt="NomiFun Agent 协作与执行图" width="100%">
-  <br/><sub><b>Agent 协作：一条会话、可复用角色与实时执行图</b></sub>
+  <img src="docs/images/readme/zh/workspace.png" alt="当前 NomiFun Desktop 工作台" width="100%">
+  <br/><sub><b>统一工作台 · 会话、Agent、任务、工具与连接设备集中管理</b></sub>
 </p>
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/readme-05-companions.png" alt="桌面伙伴总览"><br/><sub><b>桌面伙伴 · 记忆与成长</b></sub></td>
-    <td width="50%"><img src="docs/images/readme-07-requirements.png" alt="需求平台列表"><br/><sub><b>需求平台 · AutoWork 入口</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/zh/models.png" alt="NomiFun 多模型管理"><br/><sub><b>多模型管理 · 按任务路由与免费模型</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/zh/companions.png" alt="NomiFun 桌面伙伴"><br/><sub><b>桌面伙伴 · 人格、记忆、模型与远程控制</b></sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/readme-06-knowledge.png" alt="知识库列表"><br/><sub><b>知识库 · 本地领域知识</b></sub></td>
-    <td width="50%"><img src="docs/images/readme-02-terminal-create.png" alt="新建智能体终端"><br/><sub><b>终端 · 能力开放给 Agent CLI</b></sub></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="docs/images/readme-03-presets.png" alt="设定与 Skill 能力库"><br/><sub><b>设定 & Skill · 可复用能力模板</b></sub></td>
-    <td width="50%"><img src="docs/images/readme-04-model-agents.png" alt="模型与 Agent 管理"><br/><sub><b>模型 & Agent · 统一管理与接入</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/zh/skills.png" alt="当前 NomiFun Skill 中心"><br/><sub><b>Skill 中心 · 可复用、受治理的 Agent 能力</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/zh/creative-workshop.png" alt="NomiFun 创意工坊 Beta"><br/><sub><b>创意工坊 · 持久化多模态创作画布（Beta）</b></sub></td>
   </tr>
 </table>
 
-<sub>均为 2026-07-01 从当前运行中的 NomiFun 桌面应用截取，并保留 2560px 宽度版本。完整截图清单与采集方式见 <a href="docs/images/SCREENSHOTS.md">截图 manifest</a>。</sub>
+<sub>已同步为 NomiFun Portal 中当前的产品截图。完整截图清单、来源与使用范围见 <a href="docs/images/SCREENSHOTS.md">截图 manifest</a>。</sub>
 
 </div>
 
 ---
 
 ## 🚀 功能亮点
+
+NomiFun Desktop 已经从 Agent 聊天客户端发展为本地优先、可扩展的 AI 工作空间。下面
+这些产品界面共享同一套会话、模型、记忆、工具、权限与执行运行时：
+
+| 产品能力 | 带来的价值 |
+|---|---|
+| **多 Agent 执行集群** | 按依赖规划任务，委派给专用 Agent，并行调度执行，同时提供实时状态、真实会话、审批、重试与恢复。 |
+| **Agent 小程序** | 把普通 Agent 会话变成可预览、可发布的本地 Web 工具，同时保留可编辑工作副本与稳定的发布快照。 |
+| **创意工坊（Beta）** | 用持久化可视画布与素材库组织由模型驱动的图片、文本、视频和语音创作。 |
+| **按任务路由的多模型控制面** | 可扩展管理聊天、实时、语音、视觉、媒体生成、Embedding 与 Rerank 模型，并支持任务级路由与故障切换。 |
+| **NomiFun 免费模型** | 内置托管供应商，无需先手动新建供应商，即可启用、刷新目录、健康检查并开箱使用。 |
+| **手机、机器人与开放接入** | Mobile 直连 Desktop，小智机器人绑定伙伴，并通过 WebUI、REST、MCP、IM 渠道和 NomiRelay 安全开放能力。 |
 
 ### 🐾 桌面伙伴 —— 越用越懂你
 
@@ -188,18 +196,32 @@ ASR、TTS、会话和工具协同。接入入口就在每个伙伴的**远程控
 
 ### 🧩 Agent 小程序 —— 把一次会话变成可复用工具
 
-在普通 Agent 会话中创建、预览小程序，并发布到本地小程序库。已发布快照和可编辑工作
-副本均由 Desktop 管理；继续迭代时仍然使用一条正常、可审计的会话，而不是藏在小程序
-里的第二套聊天系统。因此，小程序能成为同一套本地 Agent、数据和受治理工具的持久界面。
+在普通 Agent 会话中创建小程序，在同一工作区预览，并显式发布稳定快照到本地小程序
+库。Desktop 会把已发布版本与可编辑工作副本分开管理，因此后续迭代不会悄悄改变用户
+正在启动的版本。每次修改仍然依附于一条正常、可审计的会话，而不是藏在小程序里的
+第二套聊天系统；最终的小程序可以继续复用同一套本地 Agent、数据、模型和受治理工具。
 
-### 🧠 Agent 协作
+### 🎨 创意工坊 —— 持久化画布上的多模态创作 *（Beta）*
 
-从一条普通 Agent 会话开始。当任务确实值得并行时，同一套 Agent 能力会委派部分工作，并展示实时执行图。
+创意工坊把持久化可视画布与可复用素材库放在一起。你可以组合图片、文本、视频、生成器、
+循环、对比、输出与分组节点来搭建创作流程，不再让每次提示词都散落在独立会话里。根据
+已配置模型的能力，工坊可以执行文生图、图生图、局部重绘、文生视频、图生视频、文本生成
+与语音合成，生成结果会留在画布上，方便对比和继续加工。
 
-- **产品只保留一个概念。** 你只需配置 Agent 和协作策略；委派工作始终留在同一个 Conversation 与唯一的 `AgentExecution` 聚合中。
-- **每个步骤都能启动前配置。** 被委派的 Agent 真正启动前，可单独改模型、补一段预置要求；已完成步骤也能带着这套配置重试。
-- **执行前先给你过目。** 开启计划审批后，协作会在规划完成时暂停，让你先审核和调整执行图，再开始工作。
-- **真实 Agent 会话。** 点击任一步骤，就能查看该 Agent 的真实会话；随时回到主会话继续指导整体工作。
+> **Beta 提示：** 创意工坊已经包含在当前版本中，但画布模型和工作流格式仍在演进。
+> 请保留原始素材，不要把单个工坊项目当作唯一归档副本。
+
+### 🧠 多 Agent 执行集群 —— 规划、调度与监督
+
+从一条普通 Agent 会话开始。当任务需要专业分工或并行执行时，NomiFun 会创建一个与原始
+Conversation 关联的持久化 `AgentExecution` 聚合，规划依赖图，把就绪步骤调度给被委派的
+Agent；主 Agent 始终是整次执行的控制点。
+
+- **依赖感知调度。** 相互独立的步骤可以并行；被依赖阻塞的步骤会等待前置结果，不会拿着不完整上下文抢跑。
+- **逐步骤启动前控制。** 被委派 Agent 启动前可单独改模型、补充预置要求；完成或失败步骤可以沿用配置重试。
+- **执行前先审批。** 开启计划审批后，系统会在规划完成时暂停并把执行图放回会话，让你调整后再开始。
+- **实时状态与真实会话。** 跟踪每个步骤的状态，打开该 Agent 的真实会话，再返回主会话继续监督整个集群。
+- **恢复属于执行本身。** 持久化状态支持重试与重启恢复，不会把集群任务降级成一次性后台消息。
 
 ### 🤖 智能值守 —— 需求平台 + AutoWork + IDMM
 
@@ -260,9 +282,19 @@ NomiFun 的每一项能力都经由单一、强类型的能力注册表对外开
 - **多模态失败会优雅降级。** 如果当前模型/供应商不接受图片输入，NomiFun 会自动剔除图片、在同一会话里重试，并给出一条可见提示，而不是直接把整段会话打断。
 - **每模型上下文窗口可单独校准。** 当上游平台默认值不准、没报全，或你想精细控制路由与长上下文预算时，可以按模型单独覆写上下文窗口上限。
 
-### 🔌 大模型供应商快捷入口
+### 🔌 多模型控制面 —— 供应商、能力与免费模型
 
-NomiFun 不绑定任何一家模型厂商。你可以按地区、价格、额度、模型能力和数据政策选择供应商，注册后把 API Key 填到 NomiFun 的 **模型 & Agent** 页面即可使用。以下均为第三方服务，费用、可用地区、速率限制与数据处理规则以各家官方说明为准。
+NomiFun 把供应商凭据与模型能力分开管理。你可以持续扩展自己的供应商目录，并把模型
+分别用于聊天、实时交互、ASR、TTS、视觉、图片生成/编辑、视频生成、Embedding 与
+Rerank。路由会感知任务类型，支持逐模型上下文窗口与故障切换，也不会假设不同供应商
+共用同一套 URL、协议或鉴权方式。
+
+**NomiFun 免费模型**通过内置托管供应商提供。无需先新建供应商或填写自己的 API Key，
+即可启用服务、刷新模型目录、执行健康检查并激活可用模型，真正做到开箱即用。它们属于
+在线第三方推理服务，可用性、限额和数据处理方式可能变化；发送敏感内容前请阅读产品内提示。
+
+对于自有供应商，可以按地区、价格、额度、能力和数据政策选择，并在 **模型 & Agent**
+页面填写凭据。下列均为第三方服务，费用、可用地区、速率限制与数据处理规则由各家控制。
 
 | 供应商 | 快速入口 | 推荐关注点 |
 |---|---|---|
@@ -293,6 +325,7 @@ NomiFun 不绑定任何一家模型厂商。你可以按地区、价格、额度
 局域网内无需社交平台，也无需 NomiFun 云中转。一键**扫码配对**会给手机签发短时效、
 一次性的登录凭证，让 Mobile 直连 Desktop 进程内的认证监听器。Mobile 随即实时使用
 Desktop 中同一套会话、任务、需求、伙伴、模型和工具；Desktop 始终是数据与执行权威端。
+手机只是经过认证的连接客户端，因此不需要复制一套数据库，也不需要再保存一份模型密钥。
 
 ### ⚙️ config one，use anywhere
 
