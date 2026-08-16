@@ -70,9 +70,6 @@ impl AgentRuntimeRegistry for NoopAgentRuntimeRegistry {
     fn active_runtime_count(&self) -> usize {
         0
     }
-    fn collect_idle_runtimes(&self, _: TimestampMs) -> Vec<String> {
-        vec![]
-    }
 }
 
 struct EmptySkillResolver;
