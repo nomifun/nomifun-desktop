@@ -45,8 +45,8 @@ pub use acp::{
     WorkspaceBrowseQuery, WorkspaceEntry,
 };
 pub use agent_build_extra::{
-    AcpBuildExtra, AcpModelInfo, NomiBuildExtra, NomiGoalSpec, OpenClawBuildExtra,
-    OpenClawGatewayConfig, SessionMcpServer, SessionMcpTransport,
+    AcpBuildExtra, AcpModelInfo, NomiBuildExtra, NomiGoalSpec, SessionMcpServer,
+    SessionMcpTransport,
     SlashCommandItem, SummonConfig,
 };
 pub use agent_discovery::{
@@ -174,10 +174,10 @@ pub use model_protocol::{
 };
 pub use model_task::{ModelTask, ModelTrait, infer_catalog_tasks_and_traits};
 pub use office::{
-    DetectStarOfficeRequest, GetSnapshotContentRequest, ListSnapshotsRequest,
+    GetSnapshotContentRequest, ListSnapshotsRequest,
     PREVIEW_CAPABILITY_BYTES, PREVIEW_CAPABILITY_HEX_LEN, PreviewHistoryTargetDto,
     PreviewSnapshotInfoDto, PreviewState, PreviewStatusEvent, PreviewUrlResponse,
-    SaveSnapshotRequest, SnapshotContentResponse, StarOfficeDetectResponse, StartPreviewRequest,
+    SaveSnapshotRequest, SnapshotContentResponse, StartPreviewRequest,
     StopPreviewRequest, is_preview_capability,
 };
 pub use preset::{

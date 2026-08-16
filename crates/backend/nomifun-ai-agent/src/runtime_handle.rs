@@ -4,7 +4,7 @@
 //! implements identically and that the generic runtime registry, idle scanner,
 //! message-flow code actually needs. Anything that is type-specific
 //! (session modes, session keys, model switching, config options, pending
-//! confirmation lists, approval memory, ACP usage, OpenClaw diagnostics,
+//! confirmation lists, approval memory, ACP usage,
 //! etc.) lives as **inherent** methods on each concrete `XxxAgentManager`
 //! and is reached through the `AgentRuntimeHandle` enum — forcing every callsite
 //! to say out loud which agent type it is addressing.
@@ -18,7 +18,6 @@ use tokio::sync::broadcast;
 
 use crate::manager::acp::AcpAgentManager;
 use crate::manager::nomi::NomiAgentManager;
-use crate::manager::openclaw::OpenClawAgentManager;
 use crate::protocol::events::AgentStreamEvent;
 use crate::protocol::send_error::AgentSendError;
 use crate::types::SendMessageData;
@@ -150,9 +149,6 @@ pub trait MockAgentRuntime: AgentRuntimeControl {
     ) -> Result<(), AppError> {
         Ok(())
     }
-    fn get_session_key(&self) -> Option<String> {
-        None
-    }
     async fn mode(&self) -> Result<nomifun_api_types::AgentModeResponse, AppError> {
         Ok(nomifun_api_types::AgentModeResponse {
             mode: "default".into(),
@@ -196,7 +192,6 @@ pub trait MockAgentRuntime: AgentRuntimeControl {
 pub enum AgentRuntimeHandle {
     Acp(Arc<AcpAgentManager>),
     Nomi(Arc<NomiAgentManager>),
-    OpenClaw(Arc<OpenClawAgentManager>),
     /// Test-only trait-object escape hatch used by downstream crates
     /// (conversation/cron/requirement/app tests) to inject fake agents without
     /// spinning up a real CLI or WebSocket connection. Gated behind
@@ -216,7 +211,6 @@ impl AgentRuntimeHandle {
         match self {
             Self::Acp(m) => m.as_ref(),
             Self::Nomi(m) => m.as_ref(),
-            Self::OpenClaw(m) => m.as_ref(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.as_ref(),
         }
@@ -260,7 +254,7 @@ impl AgentRuntimeHandle {
         match self {
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.requires_turn_boundary_recycle(),
-            Self::Acp(_) | Self::Nomi(_) | Self::OpenClaw(_) => false,
+            Self::Acp(_) | Self::Nomi(_) => false,
         }
     }
 
@@ -302,7 +296,6 @@ impl AgentRuntimeHandle {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send>> {
         match self {
             Self::Acp(m) => m.kill_and_wait(reason),
-            Self::OpenClaw(m) => m.kill_and_wait(reason),
             Self::Nomi(m) => m.kill_and_wait(reason),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.kill_and_wait(reason),
@@ -319,12 +312,11 @@ impl AgentRuntimeHandle {
     /// Pending confirmation items for this runtime.
     ///
     /// ACP surfaces pending permission prompts through its permission
-    /// router. Nomi / OpenClaw maintain inline confirmation lists.
+    /// router. Nomi maintains an inline confirmation list.
     pub fn get_confirmations(&self) -> Vec<nomifun_common::Confirmation> {
         match self {
             Self::Acp(m) => m.get_confirmations(),
             Self::Nomi(m) => m.get_confirmations(),
-            Self::OpenClaw(m) => m.get_confirmations(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_confirmations(),
         }
@@ -341,7 +333,6 @@ impl AgentRuntimeHandle {
         match self {
             Self::Acp(m) => m.confirm(msg_id, call_id, data, always_allow),
             Self::Nomi(m) => m.confirm(msg_id, call_id, data, always_allow),
-            Self::OpenClaw(m) => m.confirm(msg_id, call_id, data, always_allow),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.confirm(msg_id, call_id, data, always_allow),
         }
@@ -352,49 +343,26 @@ impl AgentRuntimeHandle {
         match self {
             Self::Acp(_) => false,
             Self::Nomi(m) => m.check_approval(action, command_type),
-            Self::OpenClaw(m) => m.check_approval(action, command_type),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.check_approval(action, command_type),
         }
     }
 
-    /// Session key for gateway agent types that expose one (OpenClaw and
-    /// remote OpenClaw).
-    pub fn get_session_key(&self) -> Option<String> {
-        match self {
-            Self::OpenClaw(m) => m.get_session_key(),
-            Self::Acp(_) | Self::Nomi(_) => None,
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Mock(m) => m.get_session_key(),
-        }
-    }
-
-    /// Get the current session mode. Only ACP and Nomi model a mode;
-    /// other variants report `mode = "default"`, `initialized = false`
-    /// so cron / UI can skip mode reconciliation.
+    /// Get the current session mode. Both ACP and Nomi model a mode.
     pub async fn get_mode(&self) -> Result<nomifun_api_types::AgentModeResponse, AppError> {
         match self {
             Self::Acp(m) => m.mode().await,
             Self::Nomi(m) => m.mode().await,
-            Self::OpenClaw(_) => Ok(nomifun_api_types::AgentModeResponse {
-                mode: "default".into(),
-                initialized: false,
-            }),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.mode().await,
         }
     }
 
-    /// Set the session mode. Unsupported for variants other than ACP /
-    /// Nomi — returns a `BadRequest` so the caller can surface an
-    /// actionable error rather than silently no-op.
+    /// Set the session mode. Both ACP and Nomi model a mode.
     pub async fn set_mode(&self, mode: &str) -> Result<(), AppError> {
         match self {
             Self::Acp(m) => m.set_mode(mode).await,
             Self::Nomi(m) => m.set_mode(mode).await,
-            Self::OpenClaw(_) => Err(AppError::BadRequest(
-                "Mode switching is not supported for this agent type".into(),
-            )),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.set_mode(mode).await,
         }
@@ -402,13 +370,11 @@ impl AgentRuntimeHandle {
 
     /// Clear the conversation context ("release model context") in place,
     /// keeping the agent/process alive. ACP rotates to a fresh `session/new`;
-    /// Nomi empties its engine history; OpenClaw forgets its gateway
-    /// session key so the next send re-creates a clean session.
+    /// Nomi empties its engine history.
     pub async fn clear_context(&self) -> Result<(), AppError> {
         match self {
             Self::Acp(m) => m.clear_context().await,
             Self::Nomi(m) => m.clear_context().await,
-            Self::OpenClaw(m) => m.clear_context().await,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(_) => Ok(()),
         }
@@ -423,7 +389,7 @@ impl AgentRuntimeHandle {
     pub fn steer(&self, text: String) -> Result<bool, AppError> {
         match self {
             Self::Nomi(m) => m.steer(text),
-            Self::Acp(_) | Self::OpenClaw(_) => Err(
+            Self::Acp(_) => Err(
                 AppError::BadRequest("Steering is not supported for this agent type".into()),
             ),
             #[cfg(any(test, feature = "test-support"))]
@@ -450,7 +416,7 @@ impl AgentRuntimeHandle {
         }
         match self {
             Self::Nomi(m) => m.notify_system_resource(notice),
-            Self::Acp(_) | Self::OpenClaw(_) => {
+            Self::Acp(_) => {
                 Err(AppError::BadRequest(format!(
                     "System resource notifications are not supported for {} runtimes",
                     self.agent_type().display_name()
@@ -471,7 +437,7 @@ impl AgentRuntimeHandle {
                 m.ensure_can_rewind_last_turn(expected_source_message_id)
                     .await
             }
-            Self::Acp(_) | Self::OpenClaw(_) => Err(
+            Self::Acp(_) => Err(
                 AppError::BadRequest("Edit & resubmit is not supported for this agent type".into()),
             ),
             #[cfg(any(test, feature = "test-support"))]
@@ -490,7 +456,7 @@ impl AgentRuntimeHandle {
     ) -> Result<(), AppError> {
         match self {
             Self::Nomi(m) => m.rewind_last_turn(expected_source_message_id).await,
-            Self::Acp(_) | Self::OpenClaw(_) => Err(
+            Self::Acp(_) => Err(
                 AppError::BadRequest("Edit & resubmit is not supported for this agent type".into()),
             ),
             #[cfg(any(test, feature = "test-support"))]
@@ -514,7 +480,7 @@ impl AgentRuntimeHandle {
                 let model_info = merge_model_info(sdk_info, cc_switch_info);
                 Ok(GetModelInfoResponse { model_info })
             }
-            Self::Nomi(_) | Self::OpenClaw(_) => {
+            Self::Nomi(_) => {
                 Ok(GetModelInfoResponse { model_info: None })
             }
             #[cfg(any(test, feature = "test-support"))]
@@ -531,7 +497,7 @@ impl AgentRuntimeHandle {
         }
         match self {
             Self::Acp(m) => m.set_model(model_id).await,
-            Self::Nomi(_) | Self::OpenClaw(_) => Err(AppError::BadRequest(
+            Self::Nomi(_) => Err(AppError::BadRequest(
                 "Model switching is not supported for this agent type".into(),
             )),
             #[cfg(any(test, feature = "test-support"))]
@@ -546,7 +512,6 @@ impl AgentRuntimeHandle {
         match self {
             Self::Acp(m) => m.load_slash_commands().await,
             Self::Nomi(m) => m.get_slash_commands().await,
-            Self::OpenClaw(_) => Ok(Vec::new()),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_slash_commands().await,
         }
@@ -564,7 +529,7 @@ impl AgentRuntimeHandle {
             return Err(AppError::BadRequest("question must not be empty".into()));
         }
         match self {
-            Self::Acp(_) | Self::Nomi(_) | Self::OpenClaw(_) => {
+            Self::Acp(_) | Self::Nomi(_) => {
                 Ok(SideQuestionResponse {
                     status: "unsupported".into(),
                     answer: None,

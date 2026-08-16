@@ -106,25 +106,6 @@ impl TurnTerminalProofProvider for BootTerminalProofProvider {
                     }
                 }
             }
-            // A gateway is registered only when self-spawned; absence could
-            // mean an external/attached gateway still hosts the work.
-            OrphanProofRequirement::RegisteredGatewayAuthority => {
-                if self.reap_report.conversation_had_entries(conversation_id)
-                    && self
-                        .reap_report
-                        .conversation_tree_proven_empty(conversation_id)
-                {
-                    TerminalProofDecision::Proven {
-                        evidence: "server-lock authority + boot-frozen generation + identity-verified reaping of the self-spawned gateway"
-                            .to_owned(),
-                    }
-                } else {
-                    TerminalProofDecision::Unproven {
-                        reason: "gateway process was not registry-owned by this data dir; external work cannot be proven terminal locally"
-                            .to_owned(),
-                    }
-                }
-            }
         }
     }
 }
@@ -218,25 +199,6 @@ mod tests {
             )
             .await;
         assert!(matches!(wrong_user, TerminalProofDecision::Unproven { .. }));
-    }
-
-    #[tokio::test]
-    async fn gateway_requirement_treats_registry_absence_as_unproven() {
-        let provider =
-            BootTerminalProofProvider::new(frozen_map(1, Some("op-a")), empty_reap_report().await);
-        let decision = provider
-            .prove_orphan_generation_terminal(
-                USER,
-                CONV,
-                OrphanProofRequirement::RegisteredGatewayAuthority,
-                1,
-                Some("op-a"),
-            )
-            .await;
-        assert!(
-            matches!(decision, TerminalProofDecision::Unproven { .. }),
-            "a gateway with no registry entry may be external: {decision:?}"
-        );
     }
 
     #[tokio::test]

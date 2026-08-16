@@ -5,8 +5,6 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum AgentType {
     Acp,
-    #[serde(rename = "openclaw-gateway")]
-    OpenclawGateway,
     Nomi,
 }
 
@@ -14,7 +12,6 @@ impl AgentType {
     pub fn display_name(&self) -> &'static str {
         match self {
             AgentType::Acp => "ACP",
-            AgentType::OpenclawGateway => "OpenClaw Gateway",
             AgentType::Nomi => "Nomi",
         }
     }
@@ -22,7 +19,6 @@ impl AgentType {
     pub fn serde_name(&self) -> &'static str {
         match self {
             AgentType::Acp => "acp",
-            AgentType::OpenclawGateway => "openclaw-gateway",
             AgentType::Nomi => "nomi",
         }
     }
@@ -36,7 +32,7 @@ impl AgentType {
     pub fn native_skills_dirs(&self) -> Option<&'static [&'static str]> {
         match self {
             AgentType::Nomi => Some(&[".nomi/skills"]),
-            AgentType::Acp | AgentType::OpenclawGateway => None,
+            AgentType::Acp => None,
         }
     }
 
@@ -59,7 +55,7 @@ impl AgentType {
                 Some("cursor") => "agent",
                 _ => "yolo",
             },
-            AgentType::Nomi | AgentType::OpenclawGateway => "yolo",
+            AgentType::Nomi => "yolo",
         }
     }
 }
@@ -232,16 +228,15 @@ mod tests {
 
     #[test]
     fn test_agent_type_display_names() {
-        assert_eq!(AgentType::OpenclawGateway.display_name(), "OpenClaw Gateway");
         assert_eq!(AgentType::Nomi.display_name(), "Nomi");
         assert_eq!(AgentType::Acp.display_name(), "ACP");
     }
 
     #[test]
     fn test_agent_type_serde_roundtrip() {
-        let val = AgentType::OpenclawGateway;
+        let val = AgentType::Acp;
         let json = serde_json::to_string(&val).unwrap();
-        assert_eq!(json, r#""openclaw-gateway""#);
+        assert_eq!(json, r#""acp""#);
         let parsed: AgentType = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, val);
     }
@@ -250,7 +245,6 @@ mod tests {
     fn test_agent_type_all_variants() {
         let cases = [
             (AgentType::Acp, "acp"),
-            (AgentType::OpenclawGateway, "openclaw-gateway"),
             (AgentType::Nomi, "nomi"),
         ];
         for (variant, expected) in cases {

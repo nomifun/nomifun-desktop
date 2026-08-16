@@ -1239,7 +1239,6 @@ fn platform_to_source(platform: PluginType) -> ConversationSource {
 fn parse_agent_type(s: &str) -> Result<AgentType, ChannelError> {
     match s {
         "acp" => Ok(AgentType::Acp),
-        "openclaw-gateway" => Ok(AgentType::OpenclawGateway),
         "nomi" => Ok(AgentType::Nomi),
         _ => Err(ChannelError::InvalidConfig(format!(
             "channel session names agent type '{s}', which no longer exists in this build"
@@ -1477,10 +1476,6 @@ mod tests {
     #[test]
     fn parse_known_agent_types() {
         assert_eq!(parse_agent_type("acp").unwrap(), AgentType::Acp);
-        assert_eq!(
-            parse_agent_type("openclaw-gateway").unwrap(),
-            AgentType::OpenclawGateway
-        );
         assert_eq!(parse_agent_type("nomi").unwrap(), AgentType::Nomi);
     }
 
@@ -1488,6 +1483,7 @@ mod tests {
     fn parse_unknown_agent_type_is_rejected() {
         assert!(parse_agent_type("unknown").is_err());
         assert!(parse_agent_type("nanobot").is_err());
+        assert!(parse_agent_type("openclaw-gateway").is_err());
         assert!(parse_agent_type("").is_err());
     }
 

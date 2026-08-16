@@ -44,7 +44,7 @@ use nomifun_mcp::{
 };
 use nomifun_office::{
     OfficeRouterState, OfficecliWatchManager, ProxyService,
-    SnapshotService as OfficeSnapshotService, StarOfficeDetector,
+    SnapshotService as OfficeSnapshotService,
 };
 use nomifun_agent_execution::{AgentExecutionEngine, AgentExecutionEngineConfig};
 use nomifun_companion::CompanionRouterState;
@@ -2102,13 +2102,11 @@ pub fn build_office_state(services: &AppServices) -> OfficeRouterState {
     let watch_manager = Arc::new(OfficecliWatchManager::new(spawner, services.event_bus.clone()));
 
     let snapshot_service = Arc::new(OfficeSnapshotService::new(data_dir));
-    let star_office_detector = Arc::new(StarOfficeDetector::local());
     let proxy_service = Arc::new(ProxyService::new(watch_manager.clone()));
 
     OfficeRouterState {
         watch_manager,
         snapshot_service,
-        star_office_detector,
         proxy_service,
         allowed_roots,
     }

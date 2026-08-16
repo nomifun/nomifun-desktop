@@ -217,46 +217,6 @@ pub struct AcpBuildExtra {
     pub knowledge_writeback_eagerness: Option<String>,
 }
 
-/// OpenClaw gateway configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct OpenClawGatewayConfig {
-    pub host: Option<String>,
-    pub port: Option<u16>,
-    pub token: Option<String>,
-    pub password: Option<String>,
-    #[serde(default)]
-    pub use_external_gateway: bool,
-    pub cli_path: Option<String>,
-}
-
-/// OpenClaw-specific fields extracted from `extra` in build runtime options.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenClawBuildExtra {
-    #[serde(default)]
-    pub backend: Option<String>,
-    #[serde(default)]
-    pub agent_name: Option<String>,
-    /// Backend-projected immutable preset context. The catalog snapshot is
-    /// authoritative; this adapter field is consumed only on the first prompt
-    /// of each local runtime activation (including a resumed remote session).
-    #[serde(default)]
-    pub preset_context: Option<String>,
-    #[serde(default)]
-    pub gateway: OpenClawGatewayConfig,
-    #[serde(default)]
-    pub skills: Vec<String>,
-    #[serde(
-        default,
-        deserialize_with = "crate::serde_util::deserialize_optional_preset_id"
-    )]
-    pub preset_id: Option<String>,
-    /// Stable `cron_jobs.cron_job_id`.
-    #[serde(default, deserialize_with = "deserialize_cron_job_id")]
-    pub cron_job_id: Option<String>,
-    #[serde(default)]
-    pub session_key: Option<String>,
-}
-
 /// Opt-in goal-driven continuation for a session. When present, the engine
 /// keeps working toward `objective` across turns (with a completion audit)
 /// until the model proves completion, hits `max_auto_continuations`, or
