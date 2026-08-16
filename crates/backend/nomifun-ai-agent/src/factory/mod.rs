@@ -23,8 +23,7 @@ use nomifun_api_types::{
 };
 use nomifun_common::{AgentType, AppError, ExecutionAuthority};
 use nomifun_db::{
-    IClientPreferenceRepository, IMcpServerRepository, IProviderModelRepository,
-    IProviderRepository, IRemoteAgentRepository, ISettingsRepository,
+    IClientPreferenceRepository, IMcpServerRepository, IRemoteAgentRepository, ISettingsRepository,
 };
 use nomifun_model_invoke::{ModelInvokeService, ModelRef};
 
@@ -115,14 +114,6 @@ pub struct AgentFactoryDeps {
     /// Single task-capability and connection resolver used by every Nomi Chat
     /// build and by native image generation.
     pub model_invoke: Arc<ModelInvokeService>,
-    /// Read-only catalog membership used to enumerate native image-generation
-    /// candidates. Chat configuration still resolves exclusively through
-    /// `model_invoke`.
-    pub provider_repo: Arc<dyn IProviderRepository>,
-    /// Read-only model membership paired with `provider_repo` for native image
-    /// discovery. Protocol, connection, credential and task validation remain
-    /// owned by `model_invoke`.
-    pub provider_model_repo: Arc<dyn IProviderModelRepository>,
     /// Native image generation uses the same process-wide invoke service as
     /// chat when this capability is enabled. `None` is reserved for
     /// lightweight tests and standalone hosts that must not expose the tool.
@@ -138,10 +129,6 @@ pub struct AgentFactoryDeps {
     /// which provisions under `AppConfig.work_dir` — a `--work-dir` /
     /// `NOMIFUN_WORK_DIR` override must not split the two roots.
     pub work_dir: PathBuf,
-    /// Absolute path to the backend binary, reused as the `command` of stdio MCP
-    /// bridges injected into ACP `session/new`.
-    /// Captured once at app startup (`std::env::current_exe()`).
-    pub backend_binary_path: Arc<PathBuf>,
     /// Requirement MCP server config. When `Some`, injected into ACP agent
     /// sessions so the agent gets the `requirement_complete` /
     /// `requirement_update_status` declaration tools — the ACP soft-failure fix

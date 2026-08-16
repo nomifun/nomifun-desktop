@@ -2969,15 +2969,12 @@ impl AppServices {
             skill_manager: AcpSkillManager::new(skill_paths.clone()),
             remote_agent_repo,
             model_invoke: model_invoke_service.clone(),
-            provider_repo,
-            provider_model_repo: provider_model_repo.clone(),
             model_invoke_service: Some(model_invoke_service.clone()),
             encryption_key,
             agent_registry: agent_registry.clone(),
             acp_agent_service: acp_agent_service.clone(),
             data_dir: data_dir.clone(),
             work_dir: work_dir.clone(),
-            backend_binary_path: backend_binary_path.clone(),
             requirement_mcp_config: requirement_mcp_config.clone(),
             // Scoped knowledge-search MCP. Populated only when the server started
             // above; the assembler further gates injection on bound bases, so a
