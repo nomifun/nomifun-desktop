@@ -14,7 +14,7 @@ use async_trait::async_trait;
 /// Which persisted evidence source must vouch for one orphaned generation.
 ///
 /// Mirrors `RunningOrphanDisposition` for the provable backends; the
-/// `ExternalTerminalProofRequired` disposition never reaches a provider.
+/// A disposition with no local evidence source never reaches a provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrphanProofRequirement {
     /// In-process turn owner with audited parent-death containment for every

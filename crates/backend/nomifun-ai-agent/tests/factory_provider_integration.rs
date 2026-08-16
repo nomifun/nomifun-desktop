@@ -13,7 +13,7 @@ use nomifun_db::{
     NewProviderModel, NewProviderModelCapability, SqliteAcpSessionRepository,
     SqliteAgentMetadataRepository, SqliteProviderConnectionRepository,
     SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
-    SqliteProviderRepository, SqliteRemoteAgentRepository, init_database_memory,
+    SqliteProviderRepository, init_database_memory,
 };
 use nomifun_model_invoke::{AdapterRegistry, ModelInvokeService, default_adapters};
 
@@ -30,7 +30,6 @@ async fn setup() -> (
     Arc<dyn IProviderRepository>,
     Arc<dyn IProviderModelRepository>,
     Arc<ModelInvokeService>,
-    Arc<SqliteRemoteAgentRepository>,
     Arc<AgentRegistry>,
     Arc<AcpSessionSyncService>,
 ) {
@@ -52,7 +51,6 @@ async fn setup() -> (
         reqwest::Client::new(),
         AdapterRegistry::new(default_adapters()),
     ));
-    let remote_agent_repo = Arc::new(SqliteRemoteAgentRepository::new(pool.clone()));
     let metadata_repo = Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
     let registry = AgentRegistry::new(metadata_repo);
     registry.hydrate().await.unwrap();
@@ -62,7 +60,6 @@ async fn setup() -> (
         provider_repo,
         provider_model_repo,
         model_invoke,
-        remote_agent_repo,
         registry,
         acp_agent_service,
     )
@@ -128,13 +125,11 @@ async fn insert_test_provider(
 
 fn make_factory(
     model_invoke: Arc<ModelInvokeService>,
-    remote_agent_repo: Arc<SqliteRemoteAgentRepository>,
     agent_registry: Arc<AgentRegistry>,
     acp_agent_service: Arc<AcpSessionSyncService>,
 ) -> nomifun_ai_agent::runtime_registry::AgentRuntimeFactory {
     make_factory_with_summon(
         model_invoke,
-        remote_agent_repo,
         agent_registry,
         acp_agent_service,
         None,
@@ -143,7 +138,6 @@ fn make_factory(
 
 fn make_factory_with_summon(
     model_invoke: Arc<ModelInvokeService>,
-    remote_agent_repo: Arc<SqliteRemoteAgentRepository>,
     agent_registry: Arc<AgentRegistry>,
     acp_agent_service: Arc<AcpSessionSyncService>,
     companion_summon: Option<Arc<dyn nomifun_ai_agent::CompanionSummonProvider>>,
@@ -166,7 +160,6 @@ fn make_factory_with_summon(
         ssh_provider: None,
         companion_skill_sink: None,
         skill_manager: AcpSkillManager::new(skill_paths),
-        remote_agent_repo,
         model_invoke,
         model_invoke_service: None,
         encryption_key: test_encryption_key(),
@@ -192,13 +185,11 @@ async fn nomi_factory_returns_unavailable_when_no_providers_configured() {
         _provider_repo,
         _provider_model_repo,
         model_invoke,
-        remote_agent_repo,
         agent_registry,
         acp_agent_service,
     ) = setup().await;
     let factory = make_factory(
         model_invoke,
-        remote_agent_repo,
         agent_registry,
         acp_agent_service,
     );
@@ -240,7 +231,6 @@ async fn nomi_factory_rejects_missing_bound_provider_without_fallback() {
         provider_repo,
         provider_model_repo,
         model_invoke,
-        remote_agent_repo,
         agent_registry,
         acp_agent_service,
     ) = setup().await;
@@ -253,7 +243,6 @@ async fn nomi_factory_rejects_missing_bound_provider_without_fallback() {
     .await;
     let factory = make_factory(
         model_invoke,
-        remote_agent_repo,
         agent_registry,
         acp_agent_service,
     );
@@ -285,7 +274,6 @@ async fn nomi_factory_resolves_provider_from_db() {
         provider_repo,
         provider_model_repo,
         model_invoke,
-        remote_agent_repo,
         agent_registry,
         acp_agent_service,
     ) = setup().await;
@@ -298,7 +286,6 @@ async fn nomi_factory_resolves_provider_from_db() {
     .await;
     let factory = make_factory(
         model_invoke,
-        remote_agent_repo,
         agent_registry,
         acp_agent_service,
     );
@@ -329,7 +316,6 @@ async fn nomi_factory_respects_use_model_override() {
         provider_repo,
         provider_model_repo,
         model_invoke,
-        remote_agent_repo,
         agent_registry,
         acp_agent_service,
     ) = setup().await;
@@ -342,7 +328,6 @@ async fn nomi_factory_respects_use_model_override() {
     .await;
     let factory = make_factory(
         model_invoke,
-        remote_agent_repo,
         agent_registry,
         acp_agent_service,
     );
@@ -477,7 +462,6 @@ async fn nomi_factory_summon_session_consults_provider_and_materializes_skills()
         provider_repo,
         provider_model_repo,
         model_invoke,
-        remote_agent_repo,
         agent_registry,
         acp_agent_service,
     ) = setup().await;
@@ -491,7 +475,6 @@ async fn nomi_factory_summon_session_consults_provider_and_materializes_skills()
     let fake = FakeSummonProvider::new();
     let factory = make_factory_with_summon(
         model_invoke,
-        remote_agent_repo,
         agent_registry,
         acp_agent_service,
         Some(fake.clone()),
@@ -528,7 +511,6 @@ async fn nomi_factory_plain_session_runs_summon_cleanup_only() {
         provider_repo,
         provider_model_repo,
         model_invoke,
-        remote_agent_repo,
         agent_registry,
         acp_agent_service,
     ) = setup().await;
@@ -542,7 +524,6 @@ async fn nomi_factory_plain_session_runs_summon_cleanup_only() {
     let fake = FakeSummonProvider::new();
     let factory = make_factory_with_summon(
         model_invoke,
-        remote_agent_repo,
         agent_registry,
         acp_agent_service,
         Some(fake.clone()),
@@ -564,7 +545,6 @@ async fn nomi_factory_companion_session_ignores_summon() {
         provider_repo,
         provider_model_repo,
         model_invoke,
-        remote_agent_repo,
         agent_registry,
         acp_agent_service,
     ) = setup().await;
@@ -578,7 +558,6 @@ async fn nomi_factory_companion_session_ignores_summon() {
     let fake = FakeSummonProvider::new();
     let factory = make_factory_with_summon(
         model_invoke,
-        remote_agent_repo,
         agent_registry,
         acp_agent_service,
         Some(fake.clone()),

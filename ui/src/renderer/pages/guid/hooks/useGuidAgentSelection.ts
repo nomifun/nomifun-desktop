@@ -228,7 +228,6 @@ export const useGuidAgentSelection = ({
   const selectedAgent: string = ((): string => {
     if (selectedAgentKey.startsWith('preset:')) return 'preset';
     const info = availableAgents?.find((a) => a.id === selectedAgentKey);
-    if (info?.agent_type === 'remote') return 'remote';
     if (info?.agent_source === 'custom') return 'custom';
     return selectedAgentKey;
   })();
@@ -242,13 +241,10 @@ export const useGuidAgentSelection = ({
   // --- SWR: Fetch detected execution engines (shared cache) ---
   const { data: availableAgentsData } = useSWR<AvailableAgent[]>(DETECTED_AGENTS_SWR_KEY, fetchDetectedAgents);
 
-  // Fetch remote agents from DB and merge into available agents
-  const { data: remoteAgentsData } = useSWR('remote-agents.list', () => ipcBridge.remoteAgent.list.invoke());
-
   useEffect(() => {
     if (!availableAgentsData) return;
     // Map the named AgentMetadata wire identity into the local mixed display
-    // aggregate. The aggregate's `id` slot also hosts remote/preset identities.
+    // aggregate. The aggregate's `id` slot also hosts preset identities.
     const normalisedDetected: AvailableAgent[] = availableAgentsData.map((a) => {
       const asAgent = a as AgentMetadata;
       const { agent_id, ...displayFields } = asAgent;
@@ -259,17 +255,8 @@ export const useGuidAgentSelection = ({
         avatar: isCustomRow ? asAgent.icon : (a as AvailableAgent).avatar,
       };
     });
-    const remoteAsAvailable: AvailableAgent[] = (remoteAgentsData || [])
-      .filter((ra) => ra.protocol === 'openclaw')
-      .map((ra) => ({
-        agent_type: 'remote',
-        name: ra.name,
-        id: ra.remote_agent_id,
-        remote_agent_id: ra.remote_agent_id,
-        avatar: ra.avatar,
-      }));
-    setAvailableAgents([...normalisedDetected, ...remoteAsAvailable]);
-  }, [availableAgentsData, remoteAgentsData]);
+    setAvailableAgents(normalisedDetected);
+  }, [availableAgentsData]);
 
   // Track whether the resetPreset flag has been consumed so it only fires once
   // per navigation. Use locationKey (changes on every navigate()) to reset the guard,

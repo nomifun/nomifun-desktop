@@ -46,8 +46,7 @@ pub use nomi_types::agent::{
 pub use crypto::{decrypt_string, encrypt_string};
 pub use enums::{
     AgentKillReason, AgentType, ConversationSource, ConversationStatus, FileChangeOperation, McpServerStatus,
-    McpSource, MessagePosition, MessageStatus, MessageType, PreviewContentType, ProtocolType, RemoteAgentAuthType,
-    RemoteAgentProtocol, RemoteAgentStatus,
+    McpSource, MessagePosition, MessageStatus, MessageType, PreviewContentType, ProtocolType,
 };
 pub use error::{AppError, ErrorChain, workspace_path_has_edge_whitespace_segment};
 pub use execution_authority::ExecutionAuthority;

@@ -29,8 +29,8 @@ export interface BasicRuntimeChatProps {
 }
 
 /**
- * Shared chat surface for the three "basic runtime" platforms
- * (remote / openclaw-gateway).
+ * Shared chat surface for the "basic runtime" platforms
+ * (openclaw-gateway).
  *
  * These platforms render an identical message list + send box shell; the only
  * platform-specific parts are the ConversationProvider `type` and the send box
@@ -39,7 +39,7 @@ export interface BasicRuntimeChatProps {
  * are intentionally not built on this factory.
  */
 export function createBasicRuntimeChat(
-  type: 'remote' | 'openclaw-gateway',
+  type: 'openclaw-gateway',
   PlatformSendBox: React.ComponentType<{ conversation_id: ConversationId }>
 ) {
   const BasicRuntimeChat: React.FC<BasicRuntimeChatProps> = ({

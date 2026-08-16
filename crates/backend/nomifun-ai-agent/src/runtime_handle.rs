@@ -19,7 +19,6 @@ use tokio::sync::broadcast;
 use crate::manager::acp::AcpAgentManager;
 use crate::manager::nomi::NomiAgentManager;
 use crate::manager::openclaw::OpenClawAgentManager;
-use crate::manager::remote::RemoteAgentManager;
 use crate::protocol::events::AgentStreamEvent;
 use crate::protocol::send_error::AgentSendError;
 use crate::types::SendMessageData;
@@ -198,7 +197,6 @@ pub enum AgentRuntimeHandle {
     Acp(Arc<AcpAgentManager>),
     Nomi(Arc<NomiAgentManager>),
     OpenClaw(Arc<OpenClawAgentManager>),
-    Remote(Arc<RemoteAgentManager>),
     /// Test-only trait-object escape hatch used by downstream crates
     /// (conversation/cron/requirement/app tests) to inject fake agents without
     /// spinning up a real CLI or WebSocket connection. Gated behind
@@ -219,7 +217,6 @@ impl AgentRuntimeHandle {
             Self::Acp(m) => m.as_ref(),
             Self::Nomi(m) => m.as_ref(),
             Self::OpenClaw(m) => m.as_ref(),
-            Self::Remote(m) => m.as_ref(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.as_ref(),
         }
@@ -263,7 +260,7 @@ impl AgentRuntimeHandle {
         match self {
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.requires_turn_boundary_recycle(),
-            Self::Acp(_) | Self::Nomi(_) | Self::OpenClaw(_) | Self::Remote(_) => false,
+            Self::Acp(_) | Self::Nomi(_) | Self::OpenClaw(_) => false,
         }
     }
 
@@ -307,7 +304,6 @@ impl AgentRuntimeHandle {
             Self::Acp(m) => m.kill_and_wait(reason),
             Self::OpenClaw(m) => m.kill_and_wait(reason),
             Self::Nomi(m) => m.kill_and_wait(reason),
-            Self::Remote(m) => m.kill_and_wait(reason),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.kill_and_wait(reason),
         }
@@ -323,13 +319,12 @@ impl AgentRuntimeHandle {
     /// Pending confirmation items for this runtime.
     ///
     /// ACP surfaces pending permission prompts through its permission
-    /// router. Nomi / OpenClaw / Remote maintain inline confirmation lists.
+    /// router. Nomi / OpenClaw maintain inline confirmation lists.
     pub fn get_confirmations(&self) -> Vec<nomifun_common::Confirmation> {
         match self {
             Self::Acp(m) => m.get_confirmations(),
             Self::Nomi(m) => m.get_confirmations(),
             Self::OpenClaw(m) => m.get_confirmations(),
-            Self::Remote(m) => m.get_confirmations(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_confirmations(),
         }
@@ -347,7 +342,6 @@ impl AgentRuntimeHandle {
             Self::Acp(m) => m.confirm(msg_id, call_id, data, always_allow),
             Self::Nomi(m) => m.confirm(msg_id, call_id, data, always_allow),
             Self::OpenClaw(m) => m.confirm(msg_id, call_id, data, always_allow),
-            Self::Remote(m) => m.confirm(msg_id, call_id, data, always_allow),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.confirm(msg_id, call_id, data, always_allow),
         }
@@ -359,7 +353,6 @@ impl AgentRuntimeHandle {
             Self::Acp(_) => false,
             Self::Nomi(m) => m.check_approval(action, command_type),
             Self::OpenClaw(m) => m.check_approval(action, command_type),
-            Self::Remote(m) => m.check_approval(action, command_type),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.check_approval(action, command_type),
         }
@@ -370,7 +363,6 @@ impl AgentRuntimeHandle {
     pub fn get_session_key(&self) -> Option<String> {
         match self {
             Self::OpenClaw(m) => m.get_session_key(),
-            Self::Remote(m) => m.get_session_key(),
             Self::Acp(_) | Self::Nomi(_) => None,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_session_key(),
@@ -384,7 +376,7 @@ impl AgentRuntimeHandle {
         match self {
             Self::Acp(m) => m.mode().await,
             Self::Nomi(m) => m.mode().await,
-            Self::OpenClaw(_) | Self::Remote(_) => Ok(nomifun_api_types::AgentModeResponse {
+            Self::OpenClaw(_) => Ok(nomifun_api_types::AgentModeResponse {
                 mode: "default".into(),
                 initialized: false,
             }),
@@ -400,7 +392,7 @@ impl AgentRuntimeHandle {
         match self {
             Self::Acp(m) => m.set_mode(mode).await,
             Self::Nomi(m) => m.set_mode(mode).await,
-            Self::OpenClaw(_) | Self::Remote(_) => Err(AppError::BadRequest(
+            Self::OpenClaw(_) => Err(AppError::BadRequest(
                 "Mode switching is not supported for this agent type".into(),
             )),
             #[cfg(any(test, feature = "test-support"))]
@@ -410,14 +402,13 @@ impl AgentRuntimeHandle {
 
     /// Clear the conversation context ("release model context") in place,
     /// keeping the agent/process alive. ACP rotates to a fresh `session/new`;
-    /// Nomi empties its engine history; OpenClaw / Remote forget their gateway
+    /// Nomi empties its engine history; OpenClaw forgets its gateway
     /// session key so the next send re-creates a clean session.
     pub async fn clear_context(&self) -> Result<(), AppError> {
         match self {
             Self::Acp(m) => m.clear_context().await,
             Self::Nomi(m) => m.clear_context().await,
             Self::OpenClaw(m) => m.clear_context().await,
-            Self::Remote(m) => m.clear_context().await,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(_) => Ok(()),
         }
@@ -432,7 +423,7 @@ impl AgentRuntimeHandle {
     pub fn steer(&self, text: String) -> Result<bool, AppError> {
         match self {
             Self::Nomi(m) => m.steer(text),
-            Self::Acp(_) | Self::OpenClaw(_) | Self::Remote(_) => Err(
+            Self::Acp(_) | Self::OpenClaw(_) => Err(
                 AppError::BadRequest("Steering is not supported for this agent type".into()),
             ),
             #[cfg(any(test, feature = "test-support"))]
@@ -459,7 +450,7 @@ impl AgentRuntimeHandle {
         }
         match self {
             Self::Nomi(m) => m.notify_system_resource(notice),
-            Self::Acp(_) | Self::OpenClaw(_) | Self::Remote(_) => {
+            Self::Acp(_) | Self::OpenClaw(_) => {
                 Err(AppError::BadRequest(format!(
                     "System resource notifications are not supported for {} runtimes",
                     self.agent_type().display_name()
@@ -480,7 +471,7 @@ impl AgentRuntimeHandle {
                 m.ensure_can_rewind_last_turn(expected_source_message_id)
                     .await
             }
-            Self::Acp(_) | Self::OpenClaw(_) | Self::Remote(_) => Err(
+            Self::Acp(_) | Self::OpenClaw(_) => Err(
                 AppError::BadRequest("Edit & resubmit is not supported for this agent type".into()),
             ),
             #[cfg(any(test, feature = "test-support"))]
@@ -499,7 +490,7 @@ impl AgentRuntimeHandle {
     ) -> Result<(), AppError> {
         match self {
             Self::Nomi(m) => m.rewind_last_turn(expected_source_message_id).await,
-            Self::Acp(_) | Self::OpenClaw(_) | Self::Remote(_) => Err(
+            Self::Acp(_) | Self::OpenClaw(_) => Err(
                 AppError::BadRequest("Edit & resubmit is not supported for this agent type".into()),
             ),
             #[cfg(any(test, feature = "test-support"))]
@@ -523,7 +514,7 @@ impl AgentRuntimeHandle {
                 let model_info = merge_model_info(sdk_info, cc_switch_info);
                 Ok(GetModelInfoResponse { model_info })
             }
-            Self::Nomi(_) | Self::OpenClaw(_) | Self::Remote(_) => {
+            Self::Nomi(_) | Self::OpenClaw(_) => {
                 Ok(GetModelInfoResponse { model_info: None })
             }
             #[cfg(any(test, feature = "test-support"))]
@@ -540,7 +531,7 @@ impl AgentRuntimeHandle {
         }
         match self {
             Self::Acp(m) => m.set_model(model_id).await,
-            Self::Nomi(_) | Self::OpenClaw(_) | Self::Remote(_) => Err(AppError::BadRequest(
+            Self::Nomi(_) | Self::OpenClaw(_) => Err(AppError::BadRequest(
                 "Model switching is not supported for this agent type".into(),
             )),
             #[cfg(any(test, feature = "test-support"))]
@@ -555,7 +546,7 @@ impl AgentRuntimeHandle {
         match self {
             Self::Acp(m) => m.load_slash_commands().await,
             Self::Nomi(m) => m.get_slash_commands().await,
-            Self::OpenClaw(_) | Self::Remote(_) => Ok(Vec::new()),
+            Self::OpenClaw(_) => Ok(Vec::new()),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_slash_commands().await,
         }
@@ -573,7 +564,7 @@ impl AgentRuntimeHandle {
             return Err(AppError::BadRequest("question must not be empty".into()));
         }
         match self {
-            Self::Acp(_) | Self::Nomi(_) | Self::OpenClaw(_) | Self::Remote(_) => {
+            Self::Acp(_) | Self::Nomi(_) | Self::OpenClaw(_) => {
                 Ok(SideQuestionResponse {
                     status: "unsupported".into(),
                     answer: None,

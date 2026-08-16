@@ -8,7 +8,6 @@ pub(crate) mod construction_guard;
 mod context;
 pub(crate) mod nomi;
 mod openclaw;
-mod remote;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,7 +21,7 @@ use nomifun_api_types::{
 };
 use nomifun_common::{AgentType, AppError, ExecutionAuthority};
 use nomifun_db::{
-    IClientPreferenceRepository, IMcpServerRepository, IRemoteAgentRepository, ISettingsRepository,
+    IClientPreferenceRepository, IMcpServerRepository, ISettingsRepository,
 };
 use nomifun_model_invoke::{ModelInvokeService, ModelRef};
 
@@ -109,7 +108,6 @@ pub struct AgentFactoryDeps {
     /// before injecting host-wide MCP bridges or native singleton-domain tools.
     pub authoritative_user_id: Arc<str>,
     pub skill_manager: Arc<AcpSkillManager>,
-    pub remote_agent_repo: Arc<dyn IRemoteAgentRepository>,
     /// Single task-capability and connection resolver used by every Nomi Chat
     /// build and by native image generation.
     pub model_invoke: Arc<ModelInvokeService>,
@@ -309,7 +307,6 @@ async fn build_agent(
     match options.agent_type {
         AgentType::Acp => acp::build(deps, options, ctx).await,
         AgentType::OpenclawGateway => openclaw::build(deps, options, ctx).await,
-        AgentType::Remote => remote::build(deps, options, ctx).await,
         AgentType::Nomi => nomi::build(deps, options, ctx, authority).await,
     }
 }

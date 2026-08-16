@@ -10,7 +10,6 @@ import React, { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import LocalAgents from '@/renderer/pages/settings/AgentSettings/LocalAgents';
-import RemoteAgents from '@/renderer/pages/settings/AgentSettings/RemoteAgentManagement';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import AgentRuntimeSettingsContent from './AgentRuntimeSettingsContent';
 
@@ -22,7 +21,7 @@ const AgentModalContent: React.FC = () => {
 
   useEffect(() => {
     const tabParam = searchParams.get('tab');
-    if (tabParam === 'remote' || tabParam === 'local' || tabParam === 'runtime') {
+    if (tabParam === 'local' || tabParam === 'runtime') {
       setActiveTab(tabParam);
     }
   }, [searchParams]);
@@ -47,11 +46,6 @@ const AgentModalContent: React.FC = () => {
         <Tabs.TabPane key='local' title={t('settings.agentManagement.localAgents')}>
           <NomiScrollArea className='flex-1 min-h-0 pb-16px scrollbar-hide' disableOverflow>
             <LocalAgents />
-          </NomiScrollArea>
-        </Tabs.TabPane>
-        <Tabs.TabPane key='remote' title={t('settings.agentManagement.remoteAgents')}>
-          <NomiScrollArea className='flex-1 min-h-0 pb-16px scrollbar-hide' disableOverflow>
-            <RemoteAgents />
           </NomiScrollArea>
         </Tabs.TabPane>
         <Tabs.TabPane key='runtime' title={t('settings.executionEngineHub.runtimeTab')}>

@@ -68,7 +68,6 @@ pub use repository::mcp_server::{CreateMcpServerParams, UpdateMcpServerParams};
 pub use repository::miniapp::{CreateMiniAppParams, IMiniAppRepository, UpdateMiniAppParams};
 pub use repository::oauth_token::UpsertOAuthTokenParams;
 pub use repository::provider::{CreateProviderParams, UpdateProviderParams};
-pub use repository::remote_agent::{CreateRemoteAgentParams, UpdateRemoteAgentParams};
 pub use repository::ssh_host::{
     CreateSshHostParams, ISshHostRepository, UpdateSshHostParams,
 };
@@ -100,7 +99,7 @@ pub use repository::{
     IMcpServerRepository, IOAuthTokenRepository,
     IProviderConnectionRepository, IProviderModelCapabilityRepository, IProviderModelRepository,
     IProviderRepository,
-    IRemoteAgentRepository, IRequirementRepository, ISettingsRepository, ISkillTagRepository,
+    IRequirementRepository, ISettingsRepository, ISkillTagRepository,
     ITagSettingRepository, ITerminalRepository, IUserRepository, IWebhookRepository,
     ListRequirementsParams, RequirementClaim, RequirementClaimResolution,
     MAX_IDMM_ACTION_FAILURE_REASON_CHARS, PER_TARGET_CAP, PER_USER_ACTIVITY_CAP,
@@ -115,7 +114,7 @@ pub use repository::{
     SqliteOAuthTokenRepository,
     SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
     SqliteProviderModelRepository, SqliteProviderRepository,
-    SqliteRemoteAgentRepository, SqliteRequirementRepository, SqliteSettingsRepository,
+    SqliteRequirementRepository, SqliteSettingsRepository,
     SqliteSkillTagRepository, SqliteTagSettingRepository, SqliteTerminalRepository,
     SqliteUserRepository, SqliteWebhookRepository, TerminalTurnAdmissionClaim,
     TerminalTurnAdmissionKey, TerminalTurnAdmissionScope, TerminalTurnEffectsStart,

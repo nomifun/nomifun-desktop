@@ -63,7 +63,7 @@ const LocalAgents: React.FC = () => {
     }
   }, [refreshCustomAgents]);
 
-  const detectedAgents = allAgents.filter((a) => a.agent_type !== 'remote' && a.agent_source !== 'custom');
+  const detectedAgents = allAgents.filter((a) => a.agent_source !== 'custom');
 
   const customAgents: AgentMetadata[] = allAgents.filter((a) => a.agent_source === 'custom');
 

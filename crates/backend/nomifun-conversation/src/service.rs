@@ -3353,9 +3353,6 @@ impl ConversationService {
             RunningOrphanDisposition::RegisteredGatewayAuthorityRequired => {
                 OrphanProofRequirement::RegisteredGatewayAuthority
             }
-            // Work may continue outside this machine; no local provider can
-            // vouch for it.
-            RunningOrphanDisposition::ExternalTerminalProofRequired => return Ok(false),
         };
         let decision = provider
             .prove_orphan_generation_terminal(
@@ -12290,7 +12287,7 @@ fn project_preset_runtime_context(
             object.insert("preset_rules".to_owned(), context);
             object.remove("preset_context");
         }
-        AgentType::Acp | AgentType::OpenclawGateway | AgentType::Remote => {
+        AgentType::Acp | AgentType::OpenclawGateway => {
             object.insert("preset_context".to_owned(), context);
             object.remove("preset_rules");
         }

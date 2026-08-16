@@ -454,8 +454,8 @@ mod tests {
     fn registry_capability_count_floor() {
         let n = Registry::global().len();
         assert!(
-            n >= 135,
-            "capability count fell to {n} (floor 135) — a caps_* module may have lost its \
+            n >= 127,
+            "capability count fell to {n} (floor 127) — a caps_* module may have lost its \
              register() call in Registry::build(), or a domain was removed. If intentional, lower the floor."
         );
     }
@@ -634,11 +634,6 @@ mod tests {
         // contains the agent-delegation cap, excludes a system-management cap
         let names: Vec<&str> = agentish.iter().map(|s| s.name).collect();
         assert!(names.contains(&"nomi_delegate"));
-        assert!(names.contains(&"nomi_remote_agent_list"));
-        assert!(
-            !names.contains(&"nomi_remote_agent_handshake"),
-            "active saved-endpoint probes are hard-denied on the Remote surface"
-        );
         assert!(
             !names.contains(&"nomi_system_update_settings"),
             "system domain must be excluded"

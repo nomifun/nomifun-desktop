@@ -11,7 +11,7 @@ import type { AgentId } from '@/common/types/ids';
 export const DETECTED_AGENTS_SWR_KEY = 'agents.detected';
 
 /** Type of an agent. */
-export type AgentType = 'acp' | 'remote' | 'nomi' | 'openclaw-gateway';
+export type AgentType = 'acp' | 'nomi' | 'openclaw-gateway';
 
 /** Source tier of an agent row, mirroring backend `agent_source` enum. */
 export type AgentSource = 'internal' | 'builtin' | 'extension' | 'custom';
@@ -79,7 +79,7 @@ export type AgentMetadata = {
 
   /** Vendor label (e.g. "claude"). Absent for agents without vendor grouping. */
   backend?: string;
-  /** Top-level runtime discriminant: "acp" | "remote" | "nomi" | … */
+  /** Top-level runtime discriminant: "acp" | "nomi" | … */
   agent_type: AgentType;
   agent_source: AgentSource;
   agent_source_info?: AgentSourceInfo;

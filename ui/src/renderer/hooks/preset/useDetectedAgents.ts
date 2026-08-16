@@ -25,7 +25,6 @@ export const useDetectedAgents = () => {
   const availableBackends = useMemo<AvailableBackend[]>(
     () =>
       rawAgents
-        .filter((a) => a.agent_type !== 'remote')
         .map((a) => ({
           // Presets reference the canonical AgentMetadata agent_id, never a backend slug.
           id: a.agent_id,
