@@ -127,16 +127,12 @@ async fn insert_test_provider(
 }
 
 fn make_factory(
-    provider_repo: Arc<dyn IProviderRepository>,
-    provider_model_repo: Arc<dyn IProviderModelRepository>,
     model_invoke: Arc<ModelInvokeService>,
     remote_agent_repo: Arc<SqliteRemoteAgentRepository>,
     agent_registry: Arc<AgentRegistry>,
     acp_agent_service: Arc<AcpSessionSyncService>,
 ) -> nomifun_ai_agent::runtime_registry::AgentRuntimeFactory {
     make_factory_with_summon(
-        provider_repo,
-        provider_model_repo,
         model_invoke,
         remote_agent_repo,
         agent_registry,
@@ -146,8 +142,6 @@ fn make_factory(
 }
 
 fn make_factory_with_summon(
-    provider_repo: Arc<dyn IProviderRepository>,
-    provider_model_repo: Arc<dyn IProviderModelRepository>,
     model_invoke: Arc<ModelInvokeService>,
     remote_agent_repo: Arc<SqliteRemoteAgentRepository>,
     agent_registry: Arc<AgentRegistry>,
@@ -174,15 +168,12 @@ fn make_factory_with_summon(
         skill_manager: AcpSkillManager::new(skill_paths),
         remote_agent_repo,
         model_invoke,
-        provider_repo,
-        provider_model_repo,
         model_invoke_service: None,
         encryption_key: test_encryption_key(),
         agent_registry,
         acp_agent_service,
         data_dir: PathBuf::from("/tmp/nomi-test"),
         work_dir: PathBuf::from("/tmp/nomi-test"),
-        backend_binary_path: Arc::new(PathBuf::from("/tmp/nomi-test/nomicore")),
         requirement_mcp_config: None,
         knowledge_mcp_config: None,
         mcp_server_repo: None,
@@ -198,16 +189,14 @@ async fn nomi_factory_returns_unavailable_when_no_providers_configured() {
     // With no provider row, exact capability resolution fails at the selected
     // provider. No catalog-wide fallback is allowed.
     let (
-        provider_repo,
-        provider_model_repo,
+        _provider_repo,
+        _provider_model_repo,
         model_invoke,
         remote_agent_repo,
         agent_registry,
         acp_agent_service,
     ) = setup().await;
     let factory = make_factory(
-        provider_repo,
-        provider_model_repo,
         model_invoke,
         remote_agent_repo,
         agent_registry,
@@ -263,8 +252,6 @@ async fn nomi_factory_rejects_missing_bound_provider_without_fallback() {
     )
     .await;
     let factory = make_factory(
-        provider_repo,
-        provider_model_repo,
         model_invoke,
         remote_agent_repo,
         agent_registry,
@@ -310,8 +297,6 @@ async fn nomi_factory_resolves_provider_from_db() {
     )
     .await;
     let factory = make_factory(
-        provider_repo,
-        provider_model_repo,
         model_invoke,
         remote_agent_repo,
         agent_registry,
@@ -356,8 +341,6 @@ async fn nomi_factory_respects_use_model_override() {
     )
     .await;
     let factory = make_factory(
-        provider_repo,
-        provider_model_repo,
         model_invoke,
         remote_agent_repo,
         agent_registry,
@@ -507,8 +490,6 @@ async fn nomi_factory_summon_session_consults_provider_and_materializes_skills()
     .await;
     let fake = FakeSummonProvider::new();
     let factory = make_factory_with_summon(
-        provider_repo,
-        provider_model_repo,
         model_invoke,
         remote_agent_repo,
         agent_registry,
@@ -560,8 +541,6 @@ async fn nomi_factory_plain_session_runs_summon_cleanup_only() {
     .await;
     let fake = FakeSummonProvider::new();
     let factory = make_factory_with_summon(
-        provider_repo,
-        provider_model_repo,
         model_invoke,
         remote_agent_repo,
         agent_registry,
@@ -598,8 +577,6 @@ async fn nomi_factory_companion_session_ignores_summon() {
     .await;
     let fake = FakeSummonProvider::new();
     let factory = make_factory_with_summon(
-        provider_repo,
-        provider_model_repo,
         model_invoke,
         remote_agent_repo,
         agent_registry,
