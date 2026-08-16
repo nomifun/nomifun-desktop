@@ -54,7 +54,17 @@ describe('execution transcript capability boundary', () => {
 
     expect(chatSource.includes('usePendingConfirmationsRecovery(conversation_id, { enabled: !readOnly })')).toBe(true);
     expect(chatSource.includes('readOnly,')).toBe(true);
-    expect(messageSource.includes('if (readOnly || !msgId')).toBe(true);
+
+    // These assert the SHAPE of the read-only guards rather than a verbatim
+    // source line: pinning the exact expression drifted once already, when
+    // startLegacyPostProcess grew additional generation/terminal conditions
+    // around an unchanged `readOnly` short-circuit. The behavioural contract is
+    // covered by readOnlyConversation.sideEffects.test.ts; these checks only
+    // keep the guards from being deleted outright.
+    const postProcessGuard = messageSource.slice(
+      messageSource.indexOf('const startLegacyPostProcess')
+    );
+    expect(postProcessGuard.slice(0, 400).includes('readOnly')).toBe(true);
     expect(messageSource.includes('if (!readOnly) {')).toBe(true);
     expect(messageSource.includes('ipcBridge.conversation.update.invoke')).toBe(true);
   });

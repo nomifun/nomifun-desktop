@@ -2816,3 +2816,115 @@ fn set_config_effort_clear_always_works() {
     assert!(engine.current_reasoning_effort.is_none());
     assert!(changes.iter().any(|c| c.contains("cleared")));
 }
+
+/// Emits one round of "large text draft + a Write of that same draft", then ends.
+struct DraftThenWriteProvider {
+    calls: std::sync::atomic::AtomicUsize,
+    draft: String,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for DraftThenWriteProvider {
+    async fn stream(
+        &self,
+        _request: &LlmRequest,
+    ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        if n == 0 {
+            let _ = tx.send(LlmEvent::TextDelta(self.draft.clone())).await;
+            let _ = tx
+                .send(LlmEvent::ToolUse {
+                    id: "w1".to_string(),
+                    name: "Write".to_string(),
+                    input: serde_json::json!({
+                        "file_path": "tests/cli.test.ts",
+                        "content": self.draft.clone(),
+                    }),
+                    extra: None,
+                })
+                .await;
+            let _ = tx
+                .send(LlmEvent::Done {
+                    stop_reason: nomi_types::message::StopReason::ToolUse,
+                    usage: Default::default(),
+                })
+                .await;
+        } else {
+            let _ = tx
+                .send(LlmEvent::Done {
+                    stop_reason: nomi_types::message::StopReason::EndTurn,
+                    usage: Default::default(),
+                })
+                .await;
+        }
+        Ok(rx)
+    }
+}
+
+#[tokio::test]
+async fn a_draft_written_in_the_same_round_does_not_stay_in_engine_history() {
+    // Durable history is what gets re-sent to the provider on every later turn,
+    // so a 5 KB draft the round already wrote to disk must not survive there:
+    // in the reported session it would have been replayed across 54 turns.
+    // Lives here rather than in superseded_draft_tests.rs to reuse make_engine
+    // and ConstantResultTool; that module covers the classification rules, this
+    // one proves the engine loop actually applies them.
+    let mut draft = String::new();
+    for i in 0..30 {
+        draft.push_str(&format!(
+            "it(\"contract clause {i} is honored by the CLI\", () => {{\n  \
+             expect(runCli([\"list\"]).exitCode).toBe(0);\n}});\n"
+        ));
+    }
+    let mut engine = make_engine("draft-write");
+    engine.provider = Arc::new(DraftThenWriteProvider {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        draft: draft.clone(),
+    });
+    engine.tools.register(Box::new(ConstantResultTool {
+        name: "Write",
+        polling: false,
+        category: ToolCategory::Exec,
+        calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        steer_on_call: None,
+    }));
+
+    let result = engine
+        .execute_turn("write the tests", "m-draft")
+        .await
+        .expect("engine.execute_turn ok");
+
+    let assistant = engine
+        .messages
+        .iter()
+        .find(|m| m.role == Role::Assistant)
+        .expect("the tool round is in history");
+    let text = assistant
+        .content
+        .iter()
+        .find_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .expect("the text block is kept in place");
+    assert!(
+        !text.contains("is honored by the CLI"),
+        "the written draft lines must not remain in history: {text}"
+    );
+    assert!(
+        text.contains("tests/cli.test.ts"),
+        "the marker names the file that superseded it: {text}"
+    );
+    assert!(
+        !result.text.contains("[Draft omitted"),
+        "the value returned to the caller keeps the model's own words"
+    );
+    assert!(
+        assistant
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { name, .. } if name == "Write")),
+        "the Write call still carries the real body"
+    );
+}
