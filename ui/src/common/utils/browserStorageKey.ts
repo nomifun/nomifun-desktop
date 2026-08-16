@@ -22,7 +22,6 @@ export type BrowserStorageFeature =
   | 'draft'
   | 'initial-message-acp'
   | 'initial-message-nomi'
-  | 'initial-message-openclaw'
   | 'initial-message-processed'
   | 'command-queue'
   | 'cron-unread'
