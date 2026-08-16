@@ -5,7 +5,7 @@
 //! each child receives only a short-lived signed capability. Stateless bridge
 //! configs (`OpenMcpConfig`, `ComputerMcpConfig`) and the process-private
 //! browser issuer config live here too so downstream crates
-//! (`nomifun-ai-agent` deserializing `AcpBuildExtra`, etc.) can reference the
+//! (`nomifun-ai-agent` deserializing its build extras, etc.) can reference the
 //! same shape from a leaf crate.
 
 use std::fmt;
@@ -24,7 +24,7 @@ pub const KNOWLEDGE_CAPABILITY_DOMAIN: &str = "nomifun-knowledge-mcp-v2";
 /// Signed Requirement MCP authorization contract.
 ///
 /// Version 2 deliberately binds a reusable child to its owner session, not to
-/// one numeric claim generation: ACP runtimes and terminal PTYs can predate a
+/// one numeric claim generation: agent runtimes and terminal PTYs can predate a
 /// claim and survive across claims. Every mutating request under this contract
 /// must instead carry a canonical requirement id, a positive
 /// `claim_generation`, and that generation's unguessable 256-bit
@@ -678,7 +678,7 @@ impl GatewayMcpConfig {
 
 /// Connection config for the reliable "open" MCP stdio bridge.
 ///
-/// Passed through `AcpBuildExtra::open_mcp_config` by the factory on Windows
+/// Passed through `NomiBuildExtra::open_mcp_config` by the factory on Windows
 /// (only — macOS/Linux already have reliable `open`/`xdg-open` and need no
 /// nudging away from `cmd /c start`). The session assembler injects
 /// `nomicore mcp-open-stdio` as a stdio MCP server exposing a single `open`
@@ -703,13 +703,14 @@ impl OpenMcpConfig {
 
 /// Connection config for the computer-use discrete-tool MCP stdio bridge.
 ///
-/// Passed through `AcpBuildExtra::computer_mcp_config` by the factory on every
+/// Passed through `NomiBuildExtra::computer_mcp_config` by the factory on every
 /// desktop OS (macOS / Windows / Linux) when the host binary was built with the
 /// `computer-use` feature. The session assembler injects `nomicore
 /// mcp-computer-stdio` — an MCP server exposing the desktop computer-use
 /// capability as discrete tools (snapshot / click / type / launch / …), a thin
-/// facade over the in-tree `ComputerTool`, so codex/ACP get the same automation
-/// the nomi engine has (macOS AX / Windows UIA / Linux AT-SPI via `nomi-a11y`).
+/// facade over the in-tree `ComputerTool`, so any stdio-bridged child gets the
+/// same automation the nomi engine has (macOS AX / Windows UIA / Linux AT-SPI
+/// via `nomi-a11y`).
 ///
 /// Like the open bridge this is STATELESS at the protocol level (no HTTP
 /// callback): it drives the local desktop directly, so it needs only the
@@ -724,17 +725,6 @@ impl ComputerMcpConfig {
     /// `mcp__nomifun-computer__cursor_position` (39 chars) stays within
     /// Anthropic's 64-char tool-name limit.
     pub const SERVER_NAME: &'static str = "nomifun-computer";
-}
-
-/// Audience of a browser child capability.
-///
-/// The first bridge is intentionally ACP-only. Keeping the audience in the
-/// signed immutable scope prevents replay by a Gateway, renderer, or remote
-/// adapter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BrowserCapabilitySurface {
-    Acp,
 }
 
 /// Browser operation families authorized for one child runtime.
@@ -755,15 +745,14 @@ pub enum BrowserCapabilityOperation {
     Crawl,
 }
 
-/// Server-authoritative ACP browser scope. The runtime id is generated at
+/// Server-authoritative browser scope. The runtime id is generated at
 /// issuance time, never accepted from model/tool arguments, and changes on
-/// every ACP runtime rebuild.
+/// every agent runtime rebuild.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserCapabilityScope {
     pub runtime_instance_id: String,
     pub agent_id: Option<String>,
-    pub surface: BrowserCapabilitySurface,
     pub allowed_operations: Vec<BrowserCapabilityOperation>,
 }
 
@@ -798,7 +787,7 @@ pub type BrowserCapabilityClaims = LoopbackCapabilityClaims<BrowserCapabilitySco
 pub type BrowserMcpChildConfig = ScopedMcpChildConfig<BrowserCapabilityClaims>;
 
 /// Every discrete tool implemented by the stdio facade. `evaluate` remains in
-/// the router for protocol compatibility but is not granted by the default ACP
+/// the router for protocol compatibility but is not granted by the default
 /// capability because arbitrary page script execution is outside the
 /// least-privilege surface.
 pub const BROWSER_MCP_TOOL_NAMES: &[&str] = &[
@@ -928,7 +917,6 @@ impl BrowserMcpConfig {
         let scope = BrowserCapabilityScope {
             runtime_instance_id: generate_id(),
             agent_id: agent_id.map(str::to_owned),
-            surface: BrowserCapabilitySurface::Acp,
             allowed_operations: vec![
                 BrowserCapabilityOperation::Manage,
                 BrowserCapabilityOperation::Navigate,
@@ -952,7 +940,7 @@ impl BrowserMcpConfig {
                 .filter(|tool| *tool != "evaluate"),
             scope,
         )?;
-        // Multiple ACP runtimes (including cluster attempts) may legitimately
+        // Multiple agent runtimes (including cluster attempts) may legitimately
         // share a conversation. Their fresh runtime ids keep Lane ownership
         // distinct, so issuing one must not revoke its siblings.
         let (token, renewal_proof) = self.issuer.activate_concurrent_bounded(
@@ -1016,19 +1004,11 @@ mod tests {
     }
 
     #[test]
-    fn requirement_issuer_is_redacted_and_build_extra_cannot_serialize_it() {
+    fn requirement_issuer_is_redacted_in_debug_output() {
         let cfg = requirement_config(41234, "/usr/bin/nomicore");
         let debug = format!("{cfg:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("root-secret"));
-
-        let extra = crate::AcpBuildExtra {
-            requirement_mcp_config: Some(cfg),
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&extra).unwrap();
-        assert!(!json.contains("requirement_mcp_config"));
-        assert!(!json.contains("root-secret"));
     }
 
     #[test]
@@ -1228,7 +1208,7 @@ mod tests {
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("root-secret"));
 
-        let extra = crate::AcpBuildExtra {
+        let extra = crate::NomiBuildExtra {
             gateway_mcp_config: Some(cfg),
             ..Default::default()
         };
@@ -1480,16 +1460,12 @@ mod tests {
     }
 
     #[test]
-    fn browser_mcp_config_issues_scoped_acp_capability() {
+    fn browser_mcp_config_issues_scoped_capability() {
         let cfg = BrowserMcpConfig::from_issuer(41_000, test_issuer(), "/usr/bin/nomicore".into());
         let child = cfg
             .issue_for_conversation(TEST_USER_ID, OTHER_USER_ID, Some("agent-1"))
             .unwrap();
         assert_eq!(child.bootstrap.port, 41_000);
-        assert_eq!(
-            child.bootstrap.access.claims.scope.surface,
-            BrowserCapabilitySurface::Acp
-        );
         assert!(
             child
                 .bootstrap
@@ -1500,12 +1476,12 @@ mod tests {
         );
         assert!(
             !child.bootstrap.access.claims.allows("evaluate"),
-            "arbitrary page script execution is not in the default ACP scope"
+            "arbitrary page script execution is not in the default browser scope"
         );
         for tool in ["get_console_logs", "get_page_errors", "get_network_log"] {
             assert!(
                 child.bootstrap.access.claims.allows(tool),
-                "read-only ACP debug capability must include {tool}"
+                "read-only browser debug capability must include {tool}"
             );
         }
         for tool in [
@@ -1519,7 +1495,7 @@ mod tests {
         ] {
             assert!(
                 child.bootstrap.access.claims.allows(tool),
-                "default ACP browser capability must include {tool}"
+                "the default browser capability must include {tool}"
             );
         }
         assert!(
@@ -1562,7 +1538,7 @@ mod tests {
                     &first.bootstrap.access.token,
                 )
                 .is_ok(),
-            "a sibling ACP runtime must not revoke an existing runtime"
+            "a sibling agent runtime must not revoke an existing runtime"
         );
         assert!(
             cfg.issuer
@@ -1679,7 +1655,6 @@ mod tests {
         let mut scope = BrowserCapabilityScope {
             runtime_instance_id: generate_id(),
             agent_id: None,
-            surface: BrowserCapabilitySurface::Acp,
             allowed_operations: vec![
                 BrowserCapabilityOperation::Manage,
                 BrowserCapabilityOperation::Navigate,

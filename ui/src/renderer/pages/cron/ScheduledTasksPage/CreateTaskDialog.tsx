@@ -17,7 +17,6 @@ import dayjs from 'dayjs';
 import { getFullAutoMode } from '@renderer/utils/model/agentModes';
 import type { TProviderWithModel } from '@/common/config/storage';
 import type { ConversationId, ProviderId } from '@/common/types/ids';
-import { type AcpModelInfo } from '@/common/types/platform/acpTypes';
 import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
 import GuidModelSelector from '@renderer/pages/guid/components/GuidModelSelector';
 import { WorkspaceFolderSelect } from '@renderer/components/workspace';
@@ -285,7 +284,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   const resolvedBackend = selectedRuntimeAgent?.backend || selectedRuntimeAgent?.agent_type;
   const isPresetSelection = parseCronAgentSelection(selectedAgent)?.kind === 'preset';
 
-  const isGeminiMode = resolvedBackend === 'gemini' || resolvedBackend === 'nomi';
+  const isProviderModelMode = resolvedBackend === 'nomi';
 
   const nomiGroups = useMemo(
     () => chatGroups.filter((g) => !g.provider.platform?.toLowerCase().includes('gemini-with-google-auth')),
@@ -319,22 +318,6 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
     setProviderId(selection.id);
     setModelId(selection.use_model);
   }, []);
-
-  const handleAcpModelSelect: React.Dispatch<React.SetStateAction<string | null>> = useCallback(
-    (action: React.SetStateAction<string | null>) => {
-      setModelId((prev) => {
-        const next = typeof action === 'function' ? action(prev ?? null) : action;
-        return next ?? undefined;
-      });
-    },
-    []
-  );
-
-  const acpCachedModelInfo = useMemo<AcpModelInfo | null>(() => {
-    if (!resolvedBackend || resolvedBackend === 'gemini' || resolvedBackend === 'nomi') return null;
-    const info = selectedRuntimeAgent?.handshake?.available_models as AcpModelInfo | undefined;
-    return info?.available_models?.length ? info : null;
-  }, [resolvedBackend, selectedRuntimeAgent]);
 
   useEffect(() => {
     if (isPresetSelection || resolvedBackend !== 'nomi' || model) return;
@@ -407,7 +390,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
     conversationModeOptions.find((o) => o.value === execution_mode) ?? conversationModeOptions[0]
   ).description;
 
-  const showModelSelector = Boolean(!isPresetSelection && resolvedBackend && (isGeminiMode || acpCachedModelInfo));
+  const showModelSelector = Boolean(!isPresetSelection && resolvedBackend && isProviderModelMode);
 
   const handleFrequencyChange = (value: FrequencyType) => {
     setFrequency(value);
@@ -461,13 +444,6 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           ...(agent.backend ? { backend: agent.backend } : {}),
           custom_agent_id: agent.agent_id,
           name: resolveCronAgentDisplayName(agent, i18n.language),
-          ...(agent.agent_type === 'acp'
-            ? {
-                mode: agent.yolo_id || getFullAutoMode(backend),
-                model,
-                config_options,
-              }
-            : {}),
           workspace,
           clear_context_each_run: shouldClearContextEachRun,
         };
@@ -791,13 +767,10 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   const modelFormItem = showModelSelector ? (
     <FormItem label={t('cron.page.form.model')}>
       <GuidModelSelector
-        isGeminiMode={isGeminiMode}
+        isProviderModelMode={isProviderModelMode}
         modelList={filteredProviders}
         current_model={geminiCurrentModel}
         setCurrentModel={handleGeminiModelSelect}
-        currentAcpCachedModelInfo={acpCachedModelInfo}
-        selectedAcpModel={model ?? null}
-        setSelectedAcpModel={handleAcpModelSelect}
       />
     </FormItem>
   ) : null;

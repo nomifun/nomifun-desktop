@@ -71,8 +71,9 @@ All production call paths ultimately use the same Hub:
   runtime is created.
 - Gateway resolves `CallerIdentity` from authenticated conversation/runtime
   context before forwarding to the Hub.
-- ACP browser stdio holds only a short-lived, renewable loopback capability
-  scoped to an audience and operation set; it does not own Chromium.
+- Feature-gated browser stdio bridges hold only a short-lived, renewable
+  loopback capability scoped to an audience and operation set; they do not own
+  Chromium.
 - Each knowledge URL render uses a transaction-scoped Anonymous Lane. The
   renderer serializes `navigate` plus `rendered_html`, then closes that exact
   Lane on success, error, timeout, or cancellation; it does not pin a page

@@ -5,40 +5,20 @@ use crate::attachments::PromptAttachment;
 
 /// Whether a chat-style engine has the native `requirement_complete` /
 /// `requirement_update_status` tools registered into its tool bus at session
-/// build time.
+/// build time — and therefore whether the platform should EXPECT an explicit
+/// verdict rather than assuming a clean turn means success.
 ///
 /// This must mirror the runtime registration logic: only the Nomi factory
 /// (`crates/backend/nomifun-ai-agent/src/factory/nomi.rs`) consumes the
 /// `requirement_sink`, and only `NomiAgentManager` registers
 /// `RequirementCompleteTool` / `RequirementUpdateStatusTool` on the engine.
-/// Every other engine (ACP, Openclaw, Remote) ships without
-/// them *in-process* — though ACP gains an equivalent declaration channel via
-/// the injected requirement MCP server (see [`session_has_requirement_tools`]).
 ///
 /// Keep this in lock-step with the registration site if engines ever change.
+/// A prompt must never name a tool the session lacks: the agent would try to
+/// call a missing tool and break the turn, the exact failure the tool-free
+/// prompt variant was written to avoid.
 pub fn has_native_requirement_tools(agent_type: AgentType) -> bool {
     matches!(agent_type, AgentType::Nomi)
-}
-
-/// Whether *this session* exposes the requirement declaration tools
-/// (`requirement_complete` / `requirement_update_status`) — and therefore the
-/// platform should EXPECT an explicit verdict rather than assuming a clean turn
-/// means success.
-///
-/// True when either:
-/// - the engine registers them natively in-process (Nomi), or
-/// - the requirement MCP server is injected for this ACP session
-///   (`requirement_mcp_enabled`), giving claude/codex/gemini the same tools over
-///   the stdio bridge.
-///
-/// `requirement_mcp_enabled` is a bootstrap-level flag (the requirement MCP
-/// server started and its config was plumbed into the agent factory). Gating on
-/// it — rather than on `agent_type` alone — guarantees the prompt only tells an
-/// ACP agent to call `requirement_complete` when that tool actually exists in
-/// the session. Otherwise the agent would try to call a missing tool and break
-/// the turn, the exact failure the tool-free prompt was written to avoid.
-pub fn session_has_requirement_tools(agent_type: AgentType, requirement_mcp_enabled: bool) -> bool {
-    has_native_requirement_tools(agent_type) || (requirement_mcp_enabled && matches!(agent_type, AgentType::Acp))
 }
 
 /// Whether a terminal AutoWork turn should expect a structured verdict from the
@@ -95,10 +75,9 @@ pub fn build_requirement_prompt(
     claim_generation: i64,
     claim_token: &str,
     agent_type: AgentType,
-    requirement_mcp_enabled: bool,
     attachments: &[PromptAttachment],
 ) -> String {
-    if session_has_requirement_tools(agent_type, requirement_mcp_enabled) {
+    if has_native_requirement_tools(agent_type) {
         build_requirement_prompt_with_native_tools(
             tag,
             req,
@@ -233,8 +212,8 @@ fn build_requirement_prompt_no_native_tools(
 ///
 /// The agent is instructed to declare completion via the `requirement_complete`
 /// / `requirement_update_status` MCP tools (injected by Task 2 into every
-/// AutoWork-enabled agent terminal). This mirrors the ACP `requirement_mcp_enabled`
-/// branch of `build_requirement_prompt`: the tools ARE present, so the agent
+/// AutoWork-enabled agent terminal). This mirrors the native-tools branch of
+/// `build_requirement_prompt`: the tools ARE present, so the agent
 /// SHOULD call them. A clean turn-end where the agent did NOT call them → the
 /// platform parks the requirement as `needs_review` (not silently done).
 pub fn build_terminal_requirement_prompt(
@@ -320,9 +299,8 @@ mod tests {
 
     #[test]
     fn attachments_section_lists_paths_and_missing_marker() {
-        for at in [AgentType::Nomi, AgentType::Acp] {
-            let p =
-                build_requirement_prompt("t", &req(), 7, CLAIM_TOKEN, at, false, &atts());
+        for at in [AgentType::Nomi] {
+            let p = build_requirement_prompt("t", &req(), 7, CLAIM_TOKEN, at, &atts());
             assert!(p.contains("Requirement attachments"));
             assert!(p.contains(&format!(
                 "./.nomi/requirement-attachments/{ATTACHMENT_REQ_ID}/设计稿.png"
@@ -345,7 +323,6 @@ mod tests {
             7,
             CLAIM_TOKEN,
             AgentType::Nomi,
-            false,
             &[],
         );
         assert!(!p.contains("Requirement attachments"));
@@ -361,7 +338,6 @@ mod tests {
             7,
             CLAIM_TOKEN,
             AgentType::Nomi,
-            false,
             &[],
         );
         assert!(p.contains(&format!("id: {ATTACHMENT_REQ_ID}")));
@@ -381,104 +357,8 @@ mod tests {
     }
 
     #[test]
-    fn non_native_prompt_does_not_mention_requirement_complete_tool() {
-        // Every non-Nomi engine WITHOUT the requirement MCP injected: no tool bus
-        // entry for the native requirement tools, so the prompt must NOT tell the
-        // model to call them.
-        for at in [AgentType::Acp] {
-            let p =
-                build_requirement_prompt("t", &req(), 7, CLAIM_TOKEN, at, false, &[]);
-            assert!(
-                p.contains(&format!("id: {ATTACHMENT_REQ_ID}")),
-                "{at:?}: must still carry the requirement UUIDv7"
-            );
-            assert!(
-                p.contains(&format!("claim_token: {CLAIM_TOKEN}")),
-                "{at:?}: must carry the exact claim capability"
-            );
-            assert!(p.contains("Detailed body"), "{at:?}: must still carry the body");
-            assert!(
-                !p.contains("requirement_complete"),
-                "{at:?}: prompt MUST NOT name the requirement_complete tool — it isn't registered for this engine"
-            );
-            assert!(
-                !p.contains("requirement_update_status"),
-                "{at:?}: prompt MUST NOT name the requirement_update_status tool — it isn't registered for this engine"
-            );
-            // It SHOULD describe the tool-free contract: end the turn with a note,
-            // platform records completion automatically; failures are stated in plain text.
-            assert!(
-                p.contains("automatically") || p.contains("turn ends"),
-                "{at:?}: prompt should describe the auto-finalize-on-clean-finish contract"
-            );
-            assert!(
-                p.contains("Requirement failed:"),
-                "{at:?}: prompt should tell the model how to surface a failure in plain text"
-            );
-        }
-    }
-
-    #[test]
-    fn acp_with_requirement_mcp_uses_native_prompt() {
-        // Once the requirement MCP is injected, an ACP session DOES expose the
-        // declaration tools, so it must be told to call them (same contract as
-        // Nomi). This is the soft-failure fix for ACP backends.
-        let p = build_requirement_prompt(
-            "t",
-            &req(),
-            7,
-            CLAIM_TOKEN,
-            AgentType::Acp,
-            true,
-            &[],
-        );
-        assert!(p.contains(&format!("id: {ATTACHMENT_REQ_ID}")));
-        assert!(
-            p.contains("requirement_complete"),
-            "ACP + requirement MCP MUST instruct calling requirement_complete"
-        );
-        assert!(
-            p.contains("requirement_update_status"),
-            "ACP + requirement MCP MUST instruct calling requirement_update_status on failure"
-        );
-    }
-
-    #[test]
-    fn acp_without_requirement_mcp_stays_tool_free() {
-        let p = build_requirement_prompt(
-            "t",
-            &req(),
-            7,
-            CLAIM_TOKEN,
-            AgentType::Acp,
-            false,
-            &[],
-        );
-        assert!(
-            !p.contains("requirement_complete"),
-            "ACP without the requirement MCP must NOT be told to call a tool it does not have"
-        );
-    }
-
-    #[test]
-    fn session_has_requirement_tools_reflects_mcp_for_acp() {
-        // Nomi always has them in-process, regardless of the MCP flag.
-        assert!(session_has_requirement_tools(AgentType::Nomi, false));
-        assert!(session_has_requirement_tools(AgentType::Nomi, true));
-        // ACP only when the requirement MCP is enabled.
-        assert!(!session_has_requirement_tools(AgentType::Acp, false));
-        assert!(session_has_requirement_tools(AgentType::Acp, true));
-    }
-
-    #[test]
-    fn has_native_requirement_tools_only_for_nomi() {
+    fn has_native_requirement_tools_holds_for_nomi() {
         assert!(has_native_requirement_tools(AgentType::Nomi));
-        for at in [AgentType::Acp] {
-            assert!(
-                !has_native_requirement_tools(at),
-                "{at:?}: the native requirement tools are NOT registered for this engine"
-            );
-        }
     }
 
     #[test]

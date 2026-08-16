@@ -283,11 +283,10 @@ const ModelHubPage: React.FC = () => {
   );
 
   // Compatibility for bookmarks and links from builds where execution engines
-  // were embedded in model management. Preserve the local/remote sub-tab.
+  // were embedded in model management. The engine page has a single surface
+  // now, so every legacy sub-tab resolves to it.
   if (searchParams.get('section') === 'agents') {
-    const tab = searchParams.get('tab');
-    const target = tab === 'remote' ? '/settings/execution-engines?tab=remote' : '/settings/execution-engines?tab=local';
-    return <Navigate to={target} replace />;
+    return <Navigate to='/settings/execution-engines' replace />;
   }
 
   // Mobile: horizontal segmented nav above the content (no left sidebar).

@@ -182,7 +182,7 @@ pub struct RelayOutcome {
     pub stop_reason: Option<TurnStopReason>,
     /// Phase 3 (plan D4): whether this turn emitted **any** externally-visible
     /// response before terminating — assistant `Text` OR a forwarded/persisted
-    /// tool action (ToolCall / AcpToolCall / ToolGroup / persisted Thinking).
+    /// tool action (ToolCall / ToolGroup / persisted Thinking).
     /// The failover seam only switches models pre-response (`!emitted_response`)
     /// so a fault AFTER any visible output is never failed over — that would
     /// duplicate already-streamed text OR re-run a tool side effect (and re-bill).
@@ -3309,19 +3309,12 @@ impl StreamRelay {
             AgentStreamEvent::Tips(_) => "Tips",
             AgentStreamEvent::Thinking(_) => "Thinking",
             AgentStreamEvent::ToolCall(_) => "ToolCall",
-            AgentStreamEvent::AcpToolCall(_) => "AcpToolCall",
             AgentStreamEvent::ToolGroup(_) => "ToolGroup",
             AgentStreamEvent::AgentStatus(_) => "AgentStatus",
             AgentStreamEvent::Plan(_) => "Plan",
             AgentStreamEvent::Permission(_) => "Permission",
-            AgentStreamEvent::AcpPermission(_) => "AcpPermission",
             AgentStreamEvent::SkillSuggest(_) => "SkillSuggest",
             AgentStreamEvent::CronTrigger(_) => "CronTrigger",
-            AgentStreamEvent::AcpModelInfo(_) => "AcpModelInfo",
-            AgentStreamEvent::AcpModeInfo(_) => "AcpModeInfo",
-            AgentStreamEvent::AcpConfigOption(_) => "AcpConfigOption",
-            AgentStreamEvent::AcpSessionInfo(_) => "AcpSessionInfo",
-            AgentStreamEvent::AcpContextUsage(_) => "AcpContextUsage",
             AgentStreamEvent::SlashCommandsUpdated(_) => "SlashCommandsUpdated",
             AgentStreamEvent::AvailableCommands(_) => "AvailableCommands",
             AgentStreamEvent::TurnCompleted(_) => "TurnCompleted",

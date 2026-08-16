@@ -132,7 +132,6 @@ function isExcluded(path) {
     LEGACY_MIGRATION_ALLOWLIST.has(path) ||
     path.includes('/fixtures/') ||
     path.startsWith('docs/superpowers/') ||
-    path.includes('/manager/openclaw/') ||
     /\/tests\/[^/]*migration[^/]*\.[^/]+$/i.test(path)
   );
 }

@@ -24,9 +24,9 @@ use nomifun_common::{PaginatedResult, TimestampMs, now_ms};
 use nomifun_conversation::ConversationService;
 use nomifun_conversation::response_middleware::{CronCreateParams, CronUpdateParams};
 use nomifun_db::{
-    ConversationFilters, ConversationRowUpdate, IAcpSessionRepository, IAgentMetadataRepository,
+    ConversationFilters, ConversationRowUpdate, IAgentMetadataRepository,
     IConversationRepository, ICronRepository, MessageRowUpdate, MessageSearchRow, SortOrder,
-    ReserveCronRunParams, SqliteAcpSessionRepository, SqliteAgentMetadataRepository,
+    ReserveCronRunParams, SqliteAgentMetadataRepository,
     SqliteConversationRepository, SqliteCronRepository, models::MessageRow,
 };
 use nomifun_realtime::UserEventSink;
@@ -61,7 +61,6 @@ const SAFE_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000002";
 const FOREIGN_USER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000003";
 const OWNER_A_ID: &str = "0190f5fe-7c00-7a00-8000-000000000004";
 const OWNER_B_ID: &str = "0190f5fe-7c00-7a00-8000-000000000005";
-const GEMINI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000103";
 const GEMINI_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000003";
 const CODEX_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000004";
 const CLAUDE_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000005";
@@ -302,7 +301,7 @@ impl IConversationRepository for StubConvRepo {
                 conversation_id: id.to_owned(),
                 user_id: TEST_USER_ID.into(),
                 name: "Gemini Chat".into(),
-                r#type: "acp".into(),
+                r#type: "nomi".into(),
                 delegation_policy: "automatic".into(),
                 execution_model_pool: None,
                 decision_policy: "automatic".into(),
@@ -342,7 +341,7 @@ impl IConversationRepository for StubConvRepo {
                 conversation_id: id.to_owned(),
                 user_id: TEST_USER_ID.into(),
                 name: "Gemini Default Chat".into(),
-                r#type: "acp".into(),
+                r#type: "nomi".into(),
                 delegation_policy: "automatic".into(),
                 execution_model_pool: None,
                 decision_policy: "automatic".into(),
@@ -382,7 +381,7 @@ impl IConversationRepository for StubConvRepo {
                 conversation_id: id.to_owned(),
                 user_id: TEST_USER_ID.into(),
                 name: "Codex Chat".into(),
-                r#type: "acp".into(),
+                r#type: "nomi".into(),
                 delegation_policy: "automatic".into(),
                 execution_model_pool: None,
                 decision_policy: "automatic".into(),
@@ -422,7 +421,7 @@ impl IConversationRepository for StubConvRepo {
                 conversation_id: id.to_owned(),
                 user_id: TEST_USER_ID.into(),
                 name: "Claude Chat".into(),
-                r#type: "acp".into(),
+                r#type: "nomi".into(),
                 delegation_policy: "automatic".into(),
                 execution_model_pool: None,
                 decision_policy: "automatic".into(),
@@ -501,12 +500,19 @@ impl IConversationRepository for StubConvRepo {
                 conversation_id: id.to_owned(),
                 user_id: TEST_USER_ID.into(),
                 name: "stub".into(),
-                r#type: "acp".into(),
+                r#type: "nomi".into(),
                 delegation_policy: "automatic".into(),
                 execution_model_pool: None,
                 decision_policy: "automatic".into(),
                 execution_template_id: None,
-                model: None,
+                model: Some(
+                    serde_json::json!({
+                        "provider_id": GEMINI_PROVIDER_ID,
+                        "model": "gemini-2.5-pro",
+                        "use_model": "gemini-2.5-pro"
+                    })
+                    .to_string(),
+                ),
                 status: Some("active".into()),
                 source: None,
                 channel_chat_id: None,
@@ -558,12 +564,19 @@ impl IConversationRepository for StubConvRepo {
                 conversation_id: id.to_owned(),
                 user_id: TEST_USER_ID.into(),
                 name: "stub".into(),
-                r#type: "acp".into(),
+                r#type: "nomi".into(),
                 delegation_policy: "automatic".into(),
                 execution_model_pool: None,
                 decision_policy: "automatic".into(),
                 execution_template_id: None,
-                model: None,
+                model: Some(
+                    serde_json::json!({
+                        "provider_id": GEMINI_PROVIDER_ID,
+                        "model": "gemini-2.5-pro",
+                        "use_model": "gemini-2.5-pro"
+                    })
+                    .to_string(),
+                ),
                 status: Some("active".into()),
                 source: None,
                 channel_chat_id: None,
@@ -878,13 +891,20 @@ async fn setup_with_conv_repo() -> (
                     conversation_id: id.to_owned(),
                     user_id: TEST_USER_ID.into(),
                     name: "Seed Conversation".into(),
-                    r#type: "acp".into(),
+                    r#type: "nomi".into(),
                     extra: r#"{"workspace":"/tmp/cron-test-workspace"}"#.into(),
                     delegation_policy: "automatic".into(),
                     execution_model_pool: None,
                     decision_policy: "automatic".into(),
                     execution_template_id: None,
-                    model: None,
+                    model: Some(
+                        serde_json::json!({
+                            "provider_id": GEMINI_PROVIDER_ID,
+                            "model": "gemini-2.5-pro",
+                            "use_model": "gemini-2.5-pro"
+                        })
+                        .to_string(),
+                    ),
                     status: Some("finished".into()),
                     source: Some("nomifun".into()),
                     channel_chat_id: None,
@@ -904,8 +924,6 @@ async fn setup_with_conv_repo() -> (
 
     let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
         Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
-    let acp_session_repo: Arc<dyn IAcpSessionRepository> =
-        Arc::new(SqliteAcpSessionRepository::new(pool.clone()));
     let bc = Arc::new(MockBroadcaster::new());
     let data_dir = std::env::temp_dir().join(format!("nomifun-cron-test-{}", now_ms()));
     std::fs::create_dir_all(&data_dir).unwrap();
@@ -946,7 +964,6 @@ async fn setup_with_conv_repo() -> (
         Arc::clone(&runtime_registry),
         Arc::clone(&stub_conv_repo_trait),
         Arc::clone(&agent_metadata_repo),
-        acp_session_repo,
         Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
     ));
     let agent_registry = AgentRegistry::new(agent_metadata_repo);
@@ -990,20 +1007,20 @@ fn make_create_req(name: &str, schedule: CronScheduleDto) -> CreateCronJobReques
         message: Some("test message".into()),
         conversation_id: None,
         conversation_title: None,
-        agent_type: "acp".into(),
+        agent_type: "nomi".into(),
         created_by: "user".into(),
         execution_mode: None,
         agent_config: Some(CronAgentConfigDto {
-            backend: Some("gemini".into()),
+            backend: None,
             name: "Gemini".into(),
             cli_path: None,
-            custom_agent_id: Some(GEMINI_AGENT_ID.into()),
+            custom_agent_id: None,
             preset_id: None,
             preset_revision: None,
             preset_snapshot: None,
             mode: None,
-            model: None,
-            provider_id: None,
+            model: Some("gemini-2.5-pro".into()),
+            provider_id: Some(GEMINI_PROVIDER_ID.into()),
             config_options: None,
             workspace: None,
             clear_context_each_run: false,
@@ -1185,10 +1202,14 @@ async fn secondary_cron_keeps_model_selection_but_cannot_gain_host_configuration
         .unwrap_err();
     assert!(skill_error.to_string().contains("installation owner"));
 
+    // `agent_type` arrives as a raw wire string, so the non-owner authority
+    // gate still has to reject anything that is not the canonical `"nomi"`
+    // selector before any config shape is considered.
     let mut forbidden = make_create_req("Host agent", every_60s());
     forbidden.conversation_id = None;
+    forbidden.agent_type = "some-host-runtime".into();
     let error = svc.add_job(secondary, forbidden).await.unwrap_err();
-    assert!(error.to_string().contains("model-only"));
+    assert!(error.to_string().contains("model-only"), "{error}");
 
     sqlx::query("UPDATE cron_jobs SET enabled=0, agent_config=NULL WHERE cron_job_id=?")
         .bind(&job.cron_job_id)
@@ -1438,7 +1459,7 @@ async fn cron_crud_run_history_and_skill_boundaries_are_owner_scoped() {
     let mut foreign_request = make_create_req("Cross Owner", every_60s());
     // Keep the foreign principal within its model-only authority so this
     // assertion reaches the owner-scoped Conversation lookup rather than being
-    // rejected earlier for requesting an ACP host runtime.
+    // rejected earlier for requesting a host runtime it may not select.
     foreign_request.agent_type = "nomi".into();
     foreign_request.agent_config = None;
     foreign_request.conversation_id = Some(CONV_1.to_owned());
@@ -2704,9 +2725,12 @@ async fn icron_service_create_job_inherits_conversation_mode_and_backend() {
         .agent_config
         .as_ref()
         .expect("agent config should be copied");
-    assert_eq!(job.agent_type, "acp");
+    assert_eq!(job.agent_type, "nomi");
     assert_eq!(job.conversation_title.as_deref(), Some("Gemini Chat"));
-    assert_eq!(config.backend.as_deref(), Some("gemini"));
+    // `backend` is a removed host-runtime selector: a job derived from a
+    // conversation must never resurrect one, or validation would reject it.
+    assert_eq!(config.backend, None);
+    assert_eq!(config.provider_id.as_deref(), Some(GEMINI_PROVIDER_ID));
     assert_eq!(config.name, "Gemini");
     assert_eq!(config.mode.as_deref(), Some("yolo"));
     assert_eq!(config.model.as_deref(), Some("gemini-2.5-pro"));
@@ -2726,73 +2750,31 @@ async fn icron_service_create_job_forces_full_auto_mode_for_generated_crons() {
         message: "do agent work".into(),
     };
 
-    let gemini = ICronService::create_job(&svc, TEST_USER_ID, CONV_MODE_DEFAULT, &params).await;
-    assert!(gemini.success);
+    // An agent-generated cron runs unattended, so it must be pinned to the
+    // canonical full-auto mode rather than inheriting the conversation's
+    // interactive `session_mode` — every source row below carries
+    // `"session_mode": "default"`, which would stall waiting for approval.
+    // The mode is a single canonical id now that the engine set is one entry;
+    // the per-vendor mode table this test used to sweep is gone.
+    for conversation_id in [CONV_MODE_DEFAULT, CONV_MODE_CODEX, CONV_MODE_CLAUDE, CONV_MODE_NOMI] {
+        let created = ICronService::create_job(&svc, TEST_USER_ID, conversation_id, &params).await;
+        assert!(created.success, "cron creation for {conversation_id}");
 
-    let codex = ICronService::create_job(&svc, TEST_USER_ID, CONV_MODE_CODEX, &params).await;
-    assert!(codex.success);
-
-    let claude = ICronService::create_job(&svc, TEST_USER_ID, CONV_MODE_CLAUDE, &params).await;
-    assert!(claude.success);
-
-    let nomi = ICronService::create_job(&svc, TEST_USER_ID, CONV_MODE_NOMI, &params).await;
-    assert!(nomi.success);
-
-    let gemini_jobs = svc
-        .list_jobs(TEST_USER_ID, &ListCronJobsQuery {
-            conversation_id: Some(CONV_MODE_DEFAULT.to_owned()),
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        gemini_jobs[0]
-            .agent_config
-            .as_ref()
-            .and_then(|config| config.mode.as_deref()),
-        Some("yolo")
-    );
-
-    let codex_jobs = svc
-        .list_jobs(TEST_USER_ID, &ListCronJobsQuery {
-            conversation_id: Some(CONV_MODE_CODEX.to_owned()),
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        codex_jobs[0]
-            .agent_config
-            .as_ref()
-            .and_then(|config| config.mode.as_deref()),
-        Some("agent-full-access")
-    );
-
-    let claude_jobs = svc
-        .list_jobs(TEST_USER_ID, &ListCronJobsQuery {
-            conversation_id: Some(CONV_MODE_CLAUDE.to_owned()),
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        claude_jobs[0]
-            .agent_config
-            .as_ref()
-            .and_then(|config| config.mode.as_deref()),
-        Some("bypassPermissions")
-    );
-
-    let nomi_jobs = svc
-        .list_jobs(TEST_USER_ID, &ListCronJobsQuery {
-            conversation_id: Some(CONV_MODE_NOMI.to_owned()),
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        nomi_jobs[0]
-            .agent_config
-            .as_ref()
-            .and_then(|config| config.mode.as_deref()),
-        Some("yolo")
-    );
+        let jobs = svc
+            .list_jobs(TEST_USER_ID, &ListCronJobsQuery {
+                conversation_id: Some(conversation_id.to_owned()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            jobs[0]
+                .agent_config
+                .as_ref()
+                .and_then(|config| config.mode.as_deref()),
+            Some(nomifun_common::AgentType::Nomi.full_auto_mode_id()),
+            "generated cron for {conversation_id} must run full-auto"
+        );
+    }
 }
 
 // ── ICronService trait: list ───────────────────────────────────────
@@ -3353,7 +3335,6 @@ async fn cd4_conversation_transaction_hands_captured_job_ids_to_post_commit_clea
         Arc::new(StubAgentRuntimeRegistry),
         Arc::new(SqliteConversationRepository::new(pool.clone())),
         Arc::new(SqliteAgentMetadataRepository::new(pool.clone())),
-        Arc::new(SqliteAcpSessionRepository::new(pool.clone())),
         Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
     );
     conversation_service.with_delete_hook(cron_service.clone());

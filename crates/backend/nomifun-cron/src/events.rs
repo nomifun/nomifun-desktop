@@ -171,7 +171,7 @@ mod tests {
             metadata: CronJobMetadataDto {
                 conversation_id: Some("0190f5fe-7c00-7a00-8abc-012345678901".into()),
                 conversation_title: None,
-                agent_type: "acp".into(),
+                agent_type: "nomi".into(),
                 created_by: "user".into(),
                 created_at: 1000,
                 updated_at: 2000,

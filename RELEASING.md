@@ -110,6 +110,19 @@ use `latest`, query strings, or replaceable generic filenames.
 4. Confirm no private keys, local paths, proprietary assets, or internal-only
    roadmap claims are included.
 5. Confirm third-party licenses and attributions are current.
+6. If the release carries a **destructive migration** — one that deletes or
+   rewrites user rows rather than only adding schema — put the warning at the
+   TOP of the release-notes text you pass to `--notes` / `-NotesFile`, before
+   any highlights, and say what is lost and what the user must do before
+   upgrading.
+
+   This is not covered by step 1. Migrations run unconditionally at boot with
+   no consent prompt, and the desktop updater shows only `latest.json`'s
+   `notes` field. `make-latest-json.mjs` deliberately skips `## Unreleased`
+   when falling back to the changelog, so an entry that is still unreleased is
+   invisible to the updater — a thorough `CHANGELOG.md` entry alone would ship
+   a data-deleting release whose entire user-visible warning is whatever short
+   string happened to be passed on the command line.
 
 ## Desktop Release
 

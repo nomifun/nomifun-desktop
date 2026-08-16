@@ -69,12 +69,10 @@ IDMM Intervention。
 | --- | --- | --- |
 | `IUserRepository` | `SqliteUserRepository` | 用户与密码哈希 |
 | `IConversationRepository` | `SqliteConversationRepository` | 会话 + 消息，含过滤与全文搜索行 |
-| `IAgentMetadataRepository` | `SqliteAgentMetadataRepository` | ACP 握手结果、可用模型、agent 二进制元数据 |
-| `IAcpSessionRepository` | `SqliteAcpSessionRepository` | 持久化 ACP 会话（重启后可恢复） |
+| `IAgentMetadataRepository` | `SqliteAgentMetadataRepository` | 可用模型与 agent 元数据 |
 | `IMcpServerRepository` | `SqliteMcpServerRepository` | 已配置的 MCP 服务器（CRUD） |
 | `IOAuthTokenRepository` | `SqliteOAuthTokenRepository` | HTTP MCP 服务器的加密 OAuth token |
 | `IProviderRepository` | `SqliteProviderRepository` | LLM provider 凭证（加密） |
-| `IRemoteAgentRepository` | `SqliteRemoteAgentRepository` | 远程 agent 端点 |
 | `IAgentExecutionRepository` | `SqliteAgentExecutionRepository` | AgentExecution、不可变 Participant、按 revision 演进的 Step/Dependency、Attempt、Conversation Link 与 Event outbox；详见[统一模型](agent-execution.zh.md) |
 | `IRequirementRepository` | `SqliteRequirementRepository` | AutoWork requirements；所有 owner 关联都遵循 Repository/Service 管理的逻辑关联策略 |
 | `ICronRepository` | `SqliteCronRepository` | 定时任务及其按时区归一化的表达式 |
@@ -86,7 +84,7 @@ IDMM Intervention。
 | `ISettingsRepository` | `SqliteSettingsRepository` | 杂项应用设置 |
 | `IWebhookRepository` | `SqliteWebhookRepository` | 出站 webhook 目的地（飞书 Lark） |
 
-伴随其行的若干参数类型包括 `UpdateAgentHandshakeParams`、`ConversationFilters`、`ConversationRowUpdate`、`MessageRowUpdate`、`MessageSearchRow`、`UpdateCronJobParams`、`UpsertOAuthTokenParams`、`CreateProviderParams`、`UpdateRemoteAgentParams`、`CreateAgentExecutionParams`、`ReconcileAgentExecutionPlanParams` 和 `SettleAgentExecutionAttemptParams` 等。Repository trait 是功能域契约；领域服务通过它们访问数据，只有范围明确的 bootstrap/schema 维护是直接使用 pool 的已记录例外。
+伴随其行的若干参数类型包括 `UpdateAgentHandshakeParams`、`ConversationFilters`、`ConversationRowUpdate`、`MessageRowUpdate`、`MessageSearchRow`、`UpdateCronJobParams`、`UpsertOAuthTokenParams`、`CreateProviderParams`、`CreateAgentExecutionParams`、`ReconcileAgentExecutionPlanParams` 和 `SettleAgentExecutionAttemptParams` 等。Repository trait 是功能域契约；领域服务通过它们访问数据，只有范围明确的 bootstrap/schema 维护是直接使用 pool 的已记录例外。
 
 ### v3 baseline 与数据集 reset
 
@@ -166,7 +164,7 @@ SQLite cascade 或 trigger。数据库和受管 side-store 都执行 orphan audi
 - [`nomifun-file::watch_service`](../../crates/backend/nomifun-file/src/watch_service.rs) 借助 `notify` 把文件系统变更通过 WS 反馈给 SPA。
 - [`nomifun-file::snapshot_service`](../../crates/backend/nomifun-file/src/snapshot_service/) 记录工具编辑前后的快照以便审计。
 
-仓库通过 `nomifun_common::error::workspace_path_has_edge_whitespace_segment` 强制额外约束：工作区路径的任何目录名不得以空白字符开头或结尾（或整段全为空白）——这类名称会破坏 Win32 路径往返，且在任何 UI 中都无法分辨。目录名内部含空格则完全支持：macOS 默认的用户级数据目录（`~/Library/Application Support/NomiFun`）本身就含空格，而所有子进程管道（`Command::current_dir`、PTY cwd、ACP 会话 JSON）均以独立参数传递工作区路径，对空格安全。
+仓库通过 `nomifun_common::error::workspace_path_has_edge_whitespace_segment` 强制额外约束：工作区路径的任何目录名不得以空白字符开头或结尾（或整段全为空白）——这类名称会破坏 Win32 路径往返，且在任何 UI 中都无法分辨。目录名内部含空格则完全支持：macOS 默认的用户级数据目录（`~/Library/Application Support/NomiFun`）本身就含空格，而所有子进程管道（`Command::current_dir`、PTY cwd）均以独立参数传递工作区路径，对空格安全。
 
 ### 知识库挂载（`.nomi/knowledge/`）
 

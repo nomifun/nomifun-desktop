@@ -6,9 +6,6 @@
 import type { ConversationId } from '@/common/types/ids';
 
 import { ipcBridge } from '@/common';
-import { configService } from '@/common/config/configService';
-import type { AcpSessionConfigOption } from '@/common/types/platform/acpTypes';
-import { normalizeCodexMode } from '@/common/types/codex/codexModes';
 import { savePreferredMode } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
 import { getAgentModes, supportsModeSwitch, type AgentModeOption } from '@/renderer/utils/model/agentModes';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
@@ -18,20 +15,6 @@ import { Down } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import MarqueePillLabel from './MarqueePillLabel';
-
-/**
- * Extract mode options from cached ACP config_options.
- * Looks for a select-type option with category === 'mode' and converts
- * its choices to AgentModeOption[] format.
- */
-function extractModesFromConfigOptions(config_options: AcpSessionConfigOption[]): AgentModeOption[] {
-  const modeOption = config_options.find((opt) => opt.category === 'mode' && opt.type === 'select' && opt.options);
-  if (!modeOption?.options || modeOption.options.length === 0) return [];
-  return modeOption.options.map((opt) => ({
-    value: opt.value,
-    label: opt.name || opt.label || opt.value,
-  }));
-}
 
 export interface AgentModeSelectorProps {
   /** Agent backend type / 代理后端类型 */
@@ -103,54 +86,19 @@ const AgentModeSelector: React.FC<AgentModeSelectorProps> = ({
   beforeRuntimeSync,
   beforeRuntimeMutation,
 }) => {
-  // Fold codex's historical mode-id lineage (default/autoEdit/auto ->
-  // agent; full-access -> agent-full-access) BEFORE validating against the
-  // available-mode list. Conversations persisted before the bridge swap
-  // carry the old ids in extra.session_mode; without the fold they miss the
-  // list and the pill falls back to modes[0] = 'read-only' — displaying
-  // read-only for a session that actually runs at full access.
-  const initialMode = backend === 'codex' ? normalizeCodexMode(rawInitialMode) : rawInitialMode;
+  const initialMode = rawInitialMode;
   const { t } = useTranslation();
   const layout = useLayoutContext();
   const isMobile = Boolean(layout?.isMobile);
-  const [cachedModes, setCachedModes] = useState<AgentModeOption[]>([]);
 
-  // Load modes from cache: try top-level `acp.cachedModes` first (qoder, opencode),
-  // then fall back to `acp.cached_config_options` category=mode (codex)
-  useEffect(() => {
-    if (!backend) return;
-
-    const cachedModes = configService.get('acp.cachedModes');
-    const session_modes = cachedModes?.[backend];
-    if (session_modes?.available_modes && session_modes.available_modes.length > 0) {
-      setCachedModes(
-        session_modes.available_modes.map((m) => ({
-          value: m.id,
-          label: m.name ?? m.id,
-        }))
-      );
-      return;
-    }
-
-    const cached = configService.get('acp.cached_config_options');
-    const options = cached?.[backend];
-    if (Array.isArray(options)) {
-      const modes = extractModesFromConfigOptions(options as AcpSessionConfigOption[]);
-      if (modes.length > 0) {
-        setCachedModes(modes);
-      }
-    }
-  }, [backend]);
-
-  // Priority: dynamicModes (runtime) > cachedModes (from cache) > getAgentModes (static fallback)
+  // Priority: dynamicModes (runtime) > getAgentModes (static fallback)
   const modes = useMemo(() => {
     if (dynamicModes && dynamicModes.length > 0) return dynamicModes;
-    if (cachedModes.length > 0) return cachedModes;
     return getAgentModes(backend);
-  }, [dynamicModes, cachedModes, backend]);
+  }, [dynamicModes, backend]);
   const defaultMode = modes[0]?.value ?? 'default';
-  // Validate initialMode against available modes; fall back to backend's default
-  // when the provided value doesn't match (e.g. opencode has 'build'/'plan', not 'default')
+  // Validate initialMode against available modes; fall back to the runtime
+  // default when the provided value doesn't match.
   const validInitialMode = initialMode && modes.some((m) => m.value === initialMode) ? initialMode : defaultMode;
   const [current_mode, setCurrentMode] = useState<string>(validInitialMode);
   const [isLoading, setIsLoading] = useState(false);
@@ -181,7 +129,7 @@ const AgentModeSelector: React.FC<AgentModeSelectorProps> = ({
 
     void (async () => {
       await beforeRuntimeSync?.();
-      return ipcBridge.acpConversation.getMode.invoke({ conversation_id });
+      return ipcBridge.agentConversation.getMode.invoke({ conversation_id });
     })()
       .then((result) => {
         if (!cancelled && result) {
@@ -223,7 +171,7 @@ const AgentModeSelector: React.FC<AgentModeSelectorProps> = ({
       try {
         await (beforeRuntimeMutation ?? beforeRuntimeSync)?.();
         // setMode returns void; success if no throw
-        await ipcBridge.acpConversation.setMode.invoke({
+        await ipcBridge.agentConversation.setMode.invoke({
           conversation_id,
           mode,
         });

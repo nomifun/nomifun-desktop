@@ -120,15 +120,6 @@ const ChatWorkspace: React.FC<WorkspaceProps> = ({
       const handleResponse = (data: IResponseMessage) => {
         if (data.conversation_id && data.conversation_id !== conversation_id) return;
 
-        if (data.type === 'acp_tool_call') {
-          const acpData = data.data as { update?: { kind?: string; status?: string } } | undefined;
-          const kind = acpData?.update?.kind;
-          const status = acpData?.update?.status;
-          const shouldRefresh = kind === 'edit' || kind === 'execute' || (status === 'completed' && kind !== 'read');
-          if (shouldRefresh) {
-            throttledRefresh();
-          }
-        }
         if (data.type === 'tool_call') {
           const toolData = data.data as { status?: string } | undefined;
           if (toolData?.status === 'completed') {
@@ -137,7 +128,7 @@ const ChatWorkspace: React.FC<WorkspaceProps> = ({
         }
       };
 
-      const unsubscribeStream = ipcBridge.acpConversation.responseStream.on(handleResponse);
+      const unsubscribeStream = ipcBridge.agentConversation.responseStream.on(handleResponse);
       const unsubscribeManual = addEventListener(`${eventPrefix}.workspace.refresh`, () => cb());
 
       return () => {

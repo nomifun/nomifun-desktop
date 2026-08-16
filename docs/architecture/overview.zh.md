@@ -8,7 +8,7 @@ NomiFun 围绕一个核心原则构建：**一份 Rust 后端、两种宿主形�
 - [`agent-engine.md`](agent-engine.zh.md) —— 15 个 `nomi-*` crate（AI 引擎）。
 - [`agent-execution.zh.md`](agent-execution.zh.md) —— 统一的持久化 AgentExecution 模型。
 - [`frontend.md`](frontend.zh.md) —— React SPA、适配层、路由。
-- [`communication.md`](communication.zh.md) —— HTTP / WebSocket / Tauri IPC / ACP / MCP。
+- [`communication.md`](communication.zh.md) —— HTTP / WebSocket / Tauri IPC / MCP。
 - [`data-and-storage.md`](data-and-storage.zh.md) —— SQLite、工作区、运行时。
 - [`id-system.md`](id-system.zh.md) —— v3 技术主键、业务 ID、内部技术行与逻辑关联契约。
 
@@ -51,15 +51,15 @@ NomiFun 围绕一个核心原则构建：**一份 Rust 后端、两种宿主形�
               │  conversation, etc. │   │  nomifun-ai-agent     │
               └─────────────────────┘   └─────────────────────┘
                           │
-                          ├─▶ SQLite (sqlx)         see data-and-storage.md
-                          ├─▶ ACP agent CLIs         see agent-engine.md
+                          ├─▶ SQLite (sqlx)          see data-and-storage.md
                           ├─▶ MCP stdio bridges      see communication.md
+                          ├─▶ PTY terminal sessions  see ../guides/terminal.zh.md
                           └─▶ bundled bun runtime    see data-and-storage.md
 ```
 
 ## 一次请求的流转
 
-一个典型的用户消息 ——“向会话 X 中的 Claude agent 发送一条聊天” —— 会穿过图中的每一层。下方追踪过程列出了真实参与的类型与文件。
+一个典型的用户消息 ——“在会话 X 中发送一条聊天” —— 会穿过图中的每一层。下方追踪过程列出了真实参与的类型与文件。
 
 ```
 1. UI keypress → React handler
@@ -78,12 +78,12 @@ NomiFun 围绕一个核心原则构建：**一份 Rust 后端、两种宿主形�
    persists the message, looks up the conversation's bound agent
 5. Agent seam
    crates/backend/nomifun-ai-agent  — the only backend crate that sees nomi-*
-   AgentRegistry 解析 Agent 类型；AgentRuntimeRegistry 复用该 Conversation 的 runtime
+   AgentRuntimeRegistry 复用该 Conversation 的进程内 runtime
 6. Agent turn
    nomi-agent  drives the engine: providers (anthropic/openai/bedrock/vertex),
    tools (bash/read/write/...), MCP servers, skills, plan/confirm/output sinks
-   For ACP-protocol agents (Claude Code, Codex, Gemini CLI, ...), the backend
-   speaks ACP over stdio to a child process spawned with the bundled runtime
+   内置 nomi agent 是唯一的会话引擎；该回合在进程内完成，
+   不存在可供移交会话的子 agent CLI
 7. Streaming back to the UI
    nomifun-realtime  broadcasts each token as a WS event over /ws
    ui/src/common/adapter/httpBridge.ts ensureWs() routes events to listeners

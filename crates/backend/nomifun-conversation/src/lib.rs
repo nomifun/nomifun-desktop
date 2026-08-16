@@ -1,5 +1,4 @@
 //! Conversation and message CRUD with streaming relay and event emission.
-mod acp_error_recovery;
 mod agent_execution_port;
 mod convert;
 mod execution_conversation_boundary;

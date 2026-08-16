@@ -111,7 +111,7 @@ CREATE TABLE conversations (
 
 v3 中的稳定实体包括用户、会话、消息、终端会话、Provider、Requirement、
 Agent Execution 及模板、Agent Execution
-Participant/Step/Attempt/Template Participant、知识库、附件、Remote Agent、
+Participant/Step/Attempt/Template Participant、知识库、附件、
 用户 Preset、Workshop 画布/资产，以及 Channel Plugin/User/Session。
 这些实体分别使用具名业务字段；其中 Requirement 使用 `requirement_id`，
 并另有只供人类展示的 `display_no`，Agent Execution 和 Channel 子实体使用
@@ -220,9 +220,8 @@ Skill 名、Extension slug、模型名、URL、locale、tag 和 singleton key �
 保留各自领域格式。关系表和单例表仍有自增 `id`，业务唯一性由额外 `UNIQUE`
 约束表达。
 
-`acp_session_id`、`platform_user_id`、`platform_chat_id`、
-`remote_task_id` 和 Provider request ID 等外部标识保持不透明，只按来源协议
-校验。
+`platform_user_id`、`platform_chat_id` 和 Provider request ID 等外部标识保持
+不透明，只按来源协议校验。
 
 请求 ID、幂等键、capability nonce、workspace token 等短生命周期操作值不是
 实体 ID。它们必须使用用途明确的字段名，不能意外升级为表主键或逻辑业务 ID。

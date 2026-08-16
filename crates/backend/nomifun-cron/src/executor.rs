@@ -7,9 +7,9 @@ use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 #[cfg(test)]
 use nomifun_ai_agent::types::SendMessageData;
 use nomifun_ai_agent::{AgentRegistry, AgentStreamEvent};
-use nomifun_api_types::{AgentSource, CreateConversationRequest, SendMessageRequest};
+use nomifun_api_types::{CreateConversationRequest, SendMessageRequest};
 use nomifun_common::{
-    AgentId, AgentType, AppError, ConversationId, ExecutionAuthority, ProviderWithModel, UserId,
+    AgentType, AppError, ConversationId, ExecutionAuthority, ProviderWithModel, UserId,
     now_ms, validate_uuidv7, workspace_path_has_edge_whitespace_segment,
 };
 use nomifun_conversation::{
@@ -38,7 +38,7 @@ use crate::skill_file::{
     cron_skill_name, validate_skill_content, write_raw_skill_file,
 };
 use crate::skill_suggest::SkillSuggestDetector;
-use crate::types::{CronAgentConfig, CronJob, ExecutionMode, cron_job_to_row};
+use crate::types::{CronJob, ExecutionMode, cron_job_to_row};
 
 pub const RETRY_INTERVAL_MS: u64 = 30_000;
 const DURABLE_RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -95,6 +95,11 @@ pub struct JobExecutor {
     work_dir: PathBuf,
     data_dir: PathBuf,
     user_events: Arc<dyn UserEventSink>,
+    /// Retained only to keep the executor's injection contract stable for the
+    /// application assembly; no cron code path reads the catalog any more. The
+    /// agent-metadata lookups that used it existed to resolve a per-job
+    /// external agent, and the native executor is the only agent type left.
+    #[allow(dead_code)]
     agent_registry: Arc<AgentRegistry>,
     skill_suggest_detector: SkillSuggestDetector,
 }
@@ -135,34 +140,13 @@ impl JobExecutor {
             .controls_host()
     }
 
-    pub(crate) async fn canonicalize_new_conversation_agent(
+    /// Normalize the job's persisted `agent_type` selector to its canonical
+    /// serde name, rejecting a selector the executor cannot run.
+    pub(crate) fn canonicalize_new_conversation_agent(
         &self,
         job: &mut CronJob,
     ) -> Result<(), CronError> {
-        let agent_type = resolve_new_conversation_agent_type(&self.agent_registry, job).await?;
-        if agent_type == AgentType::Acp {
-            let meta = require_configured_acp_agent(&self.agent_registry, job).await?;
-            let config = job.agent_config.get_or_insert_with(|| CronAgentConfig {
-                backend: Some(meta.backend.clone().unwrap_or_else(|| "acp".to_owned())),
-                name: meta.name.clone(),
-                cli_path: None,
-                custom_agent_id: None,
-                preset_id: None,
-                preset_revision: None,
-                preset_snapshot: None,
-                mode: None,
-                model: None,
-                provider_id: None,
-                config_options: None,
-                workspace: None,
-                clear_context_each_run: false,
-            });
-            config.custom_agent_id = Some(meta.agent_id);
-            if let Some(backend) = meta.backend {
-                config.backend = Some(backend);
-            }
-            config.provider_id = None;
-        }
+        let agent_type = resolve_new_conversation_agent_type(job)?;
         job.agent_type = agent_type.serde_name().to_owned();
         Ok(())
     }
@@ -471,13 +455,10 @@ impl JobExecutor {
         saved_skill: Option<&SavedSkillContext>,
         run_id: &str,
     ) -> Result<String, CronError> {
-        let agent_type =
-            resolve_new_conversation_agent_type(&self.agent_registry, job).await?;
+        let agent_type = resolve_new_conversation_agent_type(job)?;
         let model = resolve_model(job);
 
-        let extra =
-            build_conversation_extra(&self.agent_registry, job, saved_skill, agent_type)
-                .await?;
+        let extra = build_conversation_extra(job, saved_skill);
 
         let req = CreateConversationRequest {
             r#type: agent_type,
@@ -769,18 +750,6 @@ impl JobExecutor {
         }
 
         let mut build_extra = build_task_extra(job, &skill_names);
-        if agent_type == AgentType::Acp {
-            for key in ["agent_id", "backend", "agent_source"] {
-                let Some(value) = row_extra.get(key).cloned() else {
-                    return ExecutionResult::Error {
-                        message: format!(
-                            "conversation {conversation_id} is missing canonical ACP extra.{key}"
-                        ),
-                    };
-                };
-                build_extra[key] = value;
-            }
-        }
         if managed_workspace {
             let temp_workspace_id = row_extra
                 .get(TEMP_WORKSPACE_ID_EXTRA_KEY)
@@ -1430,119 +1399,23 @@ impl JobExecutor {
     }
 }
 
-fn configured_agent_id(job: &CronJob) -> Option<&str> {
-    job.agent_config
-        .as_ref()
-        .and_then(|config| config.custom_agent_id.as_deref())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
-fn require_configured_agent_id(job: &CronJob) -> Result<&str, CronError> {
-    let agent_id = configured_agent_id(job).ok_or_else(|| {
-        CronError::InvalidAgentConfig(format!(
-            "cron job {} requires an explicit UUIDv7 agent_config.custom_agent_id",
-            job.cron_job_id
-        ))
-    })?;
-    AgentId::parse(agent_id.to_owned()).map_err(|error| {
-        CronError::InvalidAgentConfig(format!(
-            "cron job {} has invalid agent_config.custom_agent_id '{agent_id}': {error}",
-            job.cron_job_id
-        ))
-    })?;
-    Ok(agent_id)
-}
-
-async fn resolve_configured_agent(
-    registry: &AgentRegistry,
-    job: &CronJob,
-) -> Result<Option<nomifun_api_types::AgentMetadata>, CronError> {
-    if job.agent_type == AgentType::Nomi.serde_name() {
-        return Ok(None);
-    }
-    let agent_id = require_configured_agent_id(job)?;
-
-    Ok(registry.get(agent_id).await)
-}
-
-async fn resolve_new_conversation_agent_type(
-    registry: &AgentRegistry,
-    job: &CronJob,
-) -> Result<AgentType, CronError> {
-    if let Some(agent) = resolve_configured_agent(registry, job).await? {
-        return Ok(agent.agent_type);
-    }
-
+fn resolve_new_conversation_agent_type(job: &CronJob) -> Result<AgentType, CronError> {
     let raw = job.agent_type.trim();
-    let agent_type =
-        serde_json::from_value::<AgentType>(serde_json::Value::String(raw.to_owned()))
-            .map_err(|_| {
-                CronError::InvalidAgentConfig(format!(
-                    "cron job {} has unknown agent selector '{raw}'",
-                    job.cron_job_id
-                ))
-            })?;
-    if agent_type == AgentType::Acp {
-        return Err(CronError::InvalidAgentConfig(format!(
-            "cron job {} requires an explicit UUIDv7 agent_config.custom_agent_id",
+    serde_json::from_value::<AgentType>(serde_json::Value::String(raw.to_owned())).map_err(|_| {
+        CronError::InvalidAgentConfig(format!(
+            "cron job {} has unknown agent selector '{raw}'",
             job.cron_job_id
-        )));
-    }
-    Ok(agent_type)
+        ))
+    })
 }
 
-fn validate_acp_agent_metadata(
-    job_id: &str,
-    meta: &nomifun_api_types::AgentMetadata,
-) -> Result<(), CronError> {
-    if meta.agent_type != AgentType::Acp {
-        return Err(CronError::InvalidAgentConfig(format!(
-            "cron job {job_id} agent '{}' is type '{}', not ACP",
-            meta.agent_id,
-            meta.agent_type.serde_name()
-        )));
-    }
-    if !meta.enabled {
-        return Err(CronError::InvalidAgentConfig(format!(
-            "cron job {job_id} agent '{}' is disabled",
-            meta.agent_id
-        )));
-    }
-    if meta.agent_source == AgentSource::Internal {
-        return Err(CronError::InvalidAgentConfig(format!(
-            "cron job {job_id} agent '{}' has unsupported internal source",
-            meta.agent_id
-        )));
-    }
-    Ok(())
-}
-
-async fn require_configured_acp_agent(
-    registry: &AgentRegistry,
-    job: &CronJob,
-) -> Result<nomifun_api_types::AgentMetadata, CronError> {
-    let agent_id = require_configured_agent_id(job)?;
-    let meta = resolve_configured_agent(registry, job)
-        .await?
-        .ok_or_else(|| {
-            CronError::InvalidAgentConfig(format!(
-                "cron job {} references missing ACP agent '{agent_id}'",
-                job.cron_job_id
-            ))
-        })?;
-    validate_acp_agent_metadata(&job.cron_job_id, &meta)?;
-    Ok(meta)
-}
-
-/// Only nomi conversations carry meaningful model info in `conversations.model`;
-/// ACP and other agent types ignore this field and resolve the model via their own
-/// mechanisms (catalog defaults, CLI flags, etc.). Returning `None` lets the
-/// `CreateConversationRequest.model` stay `None` for those types, which is the
-/// correct semantic.
+/// Only nomi conversations carry meaningful model info in `conversations.model`,
+/// and nomi is the only agent type, so a job that fails any of the checks below
+/// is an invalid in-memory value rather than another engine's shape. Returning
+/// `None` lets `CreateConversationRequest.model` stay `None`.
 ///
-/// For Nomi, `agent_config.provider_id` holds the Provider UUIDv7 while
-/// `agent_config.backend` is reserved for ACP/agent runtime selection.
+/// `agent_config.provider_id` holds the Provider UUIDv7;
+/// `agent_config.backend` must be unset.
 /// `CronService::add_job`/`update_job` already rejects Nomi
 /// jobs lacking a canonical provider ID, so the `None` return here is a
 /// defensive check for invalid in-memory values.
@@ -1568,66 +1441,6 @@ fn resolve_model(job: &CronJob) -> Option<ProviderWithModel> {
     })
 }
 
-async fn inject_agent_identity(
-    extra: &mut serde_json::Map<String, serde_json::Value>,
-    registry: &AgentRegistry,
-    job: &CronJob,
-    agent_type: AgentType,
-) -> Result<(), CronError> {
-    if agent_type != AgentType::Acp {
-        return Ok(());
-    }
-
-    let meta = require_configured_acp_agent(registry, job).await?;
-    let agent_source = match meta.agent_source {
-        AgentSource::Builtin => "builtin",
-        AgentSource::Extension => "extension",
-        AgentSource::Custom => "custom",
-        AgentSource::Internal => unreachable!("validated above"),
-    };
-    extra.insert("agent_id".to_owned(), serde_json::Value::String(meta.agent_id));
-    extra.insert(
-        "agent_source".to_owned(),
-        serde_json::Value::String(agent_source.to_owned()),
-    );
-    if let Some(backend) = meta.backend {
-        extra.insert("backend".to_owned(), serde_json::Value::String(backend));
-    }
-    Ok(())
-}
-
-/// Inject the cron-configured model into `extra` for ACP (non-nomi) agents.
-///
-/// ACP agents do **not** read `conversations.model` — `resolve_model`
-/// deliberately returns `None` for them. They pick up their model from the
-/// session `extra` carrying `current_model_id`, which the `AcpAgentManager`
-/// seeds into its desired model and reconciles via `session/set_model` once
-/// the session advertises its model catalog.
-///
-/// nomi is excluded: it resolves its model through the top-level
-/// `CreateConversationRequest.model` provider path instead, so emitting
-/// `current_model_id` here would be both redundant and off-channel.
-fn inject_acp_current_model(extra: &mut serde_json::Map<String, serde_json::Value>, job: &CronJob) {
-    if job.agent_type == "nomi" {
-        return;
-    }
-    let Some(config) = &job.agent_config else {
-        return;
-    };
-    let Some(model) = config
-        .model
-        .as_ref()
-        .map(|m| m.trim())
-        .filter(|m| !m.is_empty())
-    else {
-        return;
-    };
-    extra.insert(
-        "current_model_id".to_owned(),
-        serde_json::Value::String(model.to_owned()),
-    );
-}
-
 fn build_task_extra(job: &CronJob, skills: &[String]) -> serde_json::Value {
     let mut extra = serde_json::Map::new();
     extra.insert(
@@ -1646,8 +1459,6 @@ fn build_task_extra(job: &CronJob, skills: &[String]) -> serde_json::Value {
             ),
         );
     }
-
-    inject_acp_current_model(&mut extra, job);
 
     if let Some(config) = &job.agent_config {
         if let Some(cli_path) = &config.cli_path {
@@ -1759,12 +1570,10 @@ struct SavedSkillContext {
     raw_content: String,
 }
 
-async fn build_conversation_extra(
-    registry: &AgentRegistry,
+fn build_conversation_extra(
     job: &CronJob,
     saved_skill: Option<&SavedSkillContext>,
-    agent_type: AgentType,
-) -> Result<serde_json::Value, CronError> {
+) -> serde_json::Value {
     let mut extra = serde_json::Map::new();
     extra.insert(
         "cron_job_id".to_owned(),
@@ -1781,9 +1590,6 @@ async fn build_conversation_extra(
             serde_json::Value::Array(vec![serde_json::Value::String(saved_skill.name.clone())]),
         );
     }
-
-    inject_agent_identity(&mut extra, registry, job, agent_type).await?;
-    inject_acp_current_model(&mut extra, job);
 
     if let Some(config) = &job.agent_config {
         if let Some(cli_path) = &config.cli_path {
@@ -1831,7 +1637,7 @@ async fn build_conversation_extra(
         }
     }
 
-    Ok(serde_json::Value::Object(extra))
+    serde_json::Value::Object(extra)
 }
 
 fn schedule_description_text(schedule: &crate::types::CronSchedule) -> String {
@@ -1902,7 +1708,7 @@ mod tests {
     const JOB_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
     const USER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const JOB_SKILL_NAME: &str = JOB_ID;
-    const TEST_ACP_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000101";
+    const TEST_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000101";
 
     fn sample_job() -> CronJob {
         CronJob {
@@ -1921,7 +1727,7 @@ mod tests {
                 backend: Some("claude".into()),
                 name: "Claude".into(),
                 cli_path: Some("/usr/bin/claude".into()),
-                custom_agent_id: Some(TEST_ACP_AGENT_ID.into()),
+                custom_agent_id: Some(TEST_AGENT_ID.into()),
                 preset_id: None,
                 preset_revision: None,
                 preset_snapshot: None,
@@ -1934,7 +1740,7 @@ mod tests {
             }),
             conversation_id: Some("0190f5fe-7c00-7a00-8abc-012345678901".into()),
             conversation_title: Some("Test Conv".into()),
-            agent_type: "acp".into(),
+            agent_type: "nomi".into(),
             created_by: CreatedBy::User,
             skill_content: None,
             description: None,
@@ -2167,84 +1973,34 @@ mod tests {
         assert!(!prompt.contains("create a file"));
     }
 
-    // -- registry helper ------------------------------------------------------
+    // -- canonical agent selector tests --------------------------------------
 
-    /// Build a registry backed by an in-memory DB seeded from the v3 baseline,
-    /// so agent-id lookup tests exercise the same catalog rows the server sees.
-    async fn hydrated_registry() -> Arc<AgentRegistry> {
-        let db = nomifun_db::init_database_memory().await.unwrap();
-        let repo = Arc::new(nomifun_db::SqliteAgentMetadataRepository::new(
-            db.pool().clone(),
-        ));
-        let registry = AgentRegistry::new(repo);
-        registry.hydrate().await.unwrap();
-        registry
-    }
-
-    // -- canonical Agent identity tests --------------------------------------
-
-    #[tokio::test]
-    async fn new_conversation_agent_type_resolves_canonical_agent_id() {
-        let registry = hydrated_registry().await;
+    #[test]
+    fn new_conversation_agent_type_resolves_the_native_selector() {
         let job = sample_job();
         assert_eq!(
-            resolve_new_conversation_agent_type(&registry, &job)
-                .await
-                .unwrap(),
-            AgentType::Acp
+            resolve_new_conversation_agent_type(&job).unwrap(),
+            AgentType::Nomi
         );
     }
 
-    #[tokio::test]
-    async fn bare_acp_type_is_rejected_without_agent_id() {
-        let registry = hydrated_registry().await;
-        let job = CronJob {
-            agent_type: "acp".into(),
-            agent_config: None,
-            ..sample_job()
-        };
-        let error = resolve_new_conversation_agent_type(&registry, &job)
-            .await
-            .unwrap_err();
-        assert!(matches!(error, CronError::InvalidAgentConfig(_)));
-    }
-
-    #[tokio::test]
-    async fn unknown_agent_selector_is_rejected() {
-        let registry = hydrated_registry().await;
+    #[test]
+    fn unknown_agent_selector_is_rejected() {
         let job = CronJob {
             agent_type: "unknown_type".into(),
             agent_config: None,
             ..sample_job()
         };
-        let error = resolve_new_conversation_agent_type(&registry, &job)
-            .await
-            .unwrap_err();
+        let error = resolve_new_conversation_agent_type(&job).unwrap_err();
         assert!(matches!(error, CronError::InvalidAgentConfig(_)));
     }
 
     // -- resolve_model tests -------------------------------------------------
 
     #[test]
-    fn resolve_model_returns_none_for_acp() {
-        // Model info only applies to nomi; ACP ignores it.
-        let job = sample_job();
-        assert!(resolve_model(&job).is_none());
-    }
-
-    #[test]
-    fn resolve_model_returns_none_for_acp_without_config() {
-        let job = CronJob {
-            agent_config: None,
-            ..sample_job()
-        };
-        assert!(resolve_model(&job).is_none());
-    }
-
-    #[test]
     fn resolve_model_returns_none_for_non_nomi_type() {
         let job = CronJob {
-            agent_type: "claude".into(),
+            agent_type: "not-an-agent-type".into(),
             ..sample_job()
         };
         assert!(resolve_model(&job).is_none());
@@ -2353,7 +2109,7 @@ mod tests {
         assert!(extra.get("backend").is_none());
         assert_eq!(extra["cli_path"], "/usr/bin/claude");
         assert_eq!(extra["agent_name"], "Claude");
-        assert_eq!(extra["custom_agent_id"], TEST_ACP_AGENT_ID);
+        assert_eq!(extra["custom_agent_id"], TEST_AGENT_ID);
         assert_eq!(extra["skills"], serde_json::json!([JOB_SKILL_NAME]));
     }
 
@@ -2365,57 +2121,19 @@ mod tests {
         };
         let extra = build_task_extra(&job, &[]);
         assert_eq!(extra["cron_job_id"], JOB_ID);
-        assert!(extra.get("backend").is_none());
-    }
-
-    #[test]
-    fn build_task_extra_does_not_rederive_agent_identity_from_job_selector() {
-        let job = CronJob {
-            agent_type: "claude".into(),
-            agent_config: None,
-            ..sample_job()
-        };
-        let extra = build_task_extra(&job, &[]);
+        // Agent identity is never synthesized here: the conversation row owns
+        // it, so a job that carries no config contributes no identity keys.
         assert!(extra.get("agent_id").is_none());
         assert!(extra.get("backend").is_none());
         assert!(extra.get("agent_source").is_none());
     }
 
     #[test]
-    fn build_task_extra_injects_current_model_id_for_acp() {
-        // ACP agents resolve their model via the session `extra` carrying
-        // `current_model_id`, mirroring the Agent execution path. The
-        // configured `agent_config.model` must reach the session.
+    fn build_task_extra_omits_current_model_id() {
+        // The model reaches the runtime through the top-level
+        // `conversation.model` provider path, never through an
+        // `extra.current_model_id` side channel.
         let job = CronJob {
-            agent_type: "claude".into(),
-            agent_config: Some(CronAgentConfig {
-                backend: Some("claude".into()),
-                name: "Claude".into(),
-                cli_path: None,
-                custom_agent_id: Some(TEST_ACP_AGENT_ID.into()),
-                preset_id: None,
-                preset_revision: None,
-                preset_snapshot: None,
-                mode: None,
-                model: Some("claude-sonnet-4-6".into()),
-                provider_id: None,
-                config_options: None,
-                workspace: None,
-                clear_context_each_run: false,
-            }),
-            ..sample_job()
-        };
-        let extra = build_task_extra(&job, &[]);
-        assert_eq!(extra["current_model_id"], "claude-sonnet-4-6");
-    }
-
-    #[test]
-    fn build_task_extra_omits_current_model_id_for_nomi() {
-        // nomi resolves model via the top-level conversation.model provider
-        // path, never `current_model_id`. The ACP injection must not bleed
-        // into the nomi branch.
-        let job = CronJob {
-            agent_type: "nomi".into(),
             agent_config: Some(CronAgentConfig {
                 backend: None,
                 name: "OpenAI".into(),
@@ -2437,23 +2155,16 @@ mod tests {
         assert!(extra.get("current_model_id").is_none());
     }
 
-    #[tokio::test]
-    async fn build_conversation_extra_without_saved_skill_excludes_cron_auto_inject_only() {
-        let registry = hydrated_registry().await;
+    #[test]
+    fn build_conversation_extra_without_saved_skill_excludes_cron_auto_inject_only() {
         let job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
         };
 
-        let agent_type = resolve_new_conversation_agent_type(&registry, &job).await.unwrap();
-        let extra = build_conversation_extra(&registry, &job, None, agent_type)
-            .await
-            .unwrap();
+        let extra = build_conversation_extra(&job, None);
 
         assert_eq!(extra["cron_job_id"], JOB_ID);
-        assert_eq!(extra["agent_id"], TEST_ACP_AGENT_ID);
-        assert_eq!(extra["backend"], "claude");
-        assert_eq!(extra["agent_source"], "builtin");
         assert_eq!(
             extra["exclude_auto_inject_skills"],
             serde_json::json!(["cron"])
@@ -2461,9 +2172,8 @@ mod tests {
         assert!(extra.get("preset_enabled_skills").is_none());
     }
 
-    #[tokio::test]
-    async fn build_conversation_extra_with_saved_skill_enables_preset_skill() {
-        let registry = hydrated_registry().await;
+    #[test]
+    fn build_conversation_extra_with_saved_skill_enables_preset_skill() {
         let job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
@@ -2473,10 +2183,7 @@ mod tests {
             raw_content: "---\nname: test\ndescription: desc\n---\nDo X".into(),
         };
 
-        let agent_type = resolve_new_conversation_agent_type(&registry, &job).await.unwrap();
-        let extra = build_conversation_extra(&registry, &job, Some(&saved_skill), agent_type)
-            .await
-            .unwrap();
+        let extra = build_conversation_extra(&job, Some(&saved_skill));
 
         assert_eq!(
             extra["exclude_auto_inject_skills"],
@@ -2488,9 +2195,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn build_conversation_extra_preserves_agent_workspace() {
-        let registry = hydrated_registry().await;
+    #[test]
+    fn build_conversation_extra_preserves_agent_workspace() {
         let mut job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
@@ -2500,73 +2206,18 @@ mod tests {
             .expect("sample agent config")
             .workspace = Some("/home/user/project".into());
 
-        let agent_type = resolve_new_conversation_agent_type(&registry, &job).await.unwrap();
-        let extra = build_conversation_extra(&registry, &job, None, agent_type)
-            .await
-            .unwrap();
+        let extra = build_conversation_extra(&job, None);
 
         assert_eq!(extra["workspace"], "/home/user/project");
     }
 
-    #[tokio::test]
-    async fn build_conversation_extra_rejects_backend_without_agent_id() {
-        let registry = hydrated_registry().await;
+    #[test]
+    fn build_conversation_extra_omits_current_model_id() {
+        // A new conversation resolves its model through the top-level
+        // `CreateConversationRequest.model` provider path, so the session
+        // `extra` must not carry a competing `current_model_id`.
         let job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
-            agent_type: "claude".into(),
-            agent_config: None,
-            ..sample_job()
-        };
-
-        let error = resolve_new_conversation_agent_type(&registry, &job)
-            .await
-            .unwrap_err();
-        assert!(matches!(error, CronError::InvalidAgentConfig(_)));
-    }
-
-    #[tokio::test]
-    async fn build_conversation_extra_injects_current_model_id_for_acp() {
-        // ACP agents pick up the configured model from the session `extra`
-        // via `current_model_id` (the same channel interactive Agent sessions
-        // use). Without this the cron-configured model is silently dropped.
-        let registry = hydrated_registry().await;
-        let job = CronJob {
-            execution_mode: ExecutionMode::NewConversation,
-            agent_type: "claude".into(),
-            agent_config: Some(CronAgentConfig {
-                backend: Some("claude".into()),
-                name: "Claude".into(),
-                cli_path: None,
-                custom_agent_id: Some(TEST_ACP_AGENT_ID.into()),
-                preset_id: None,
-                preset_revision: None,
-                preset_snapshot: None,
-                mode: None,
-                model: Some("claude-sonnet-4-6".into()),
-                provider_id: None,
-                config_options: None,
-                workspace: None,
-                clear_context_each_run: false,
-            }),
-            ..sample_job()
-        };
-
-        let agent_type = resolve_new_conversation_agent_type(&registry, &job).await.unwrap();
-        let extra = build_conversation_extra(&registry, &job, None, agent_type)
-            .await
-            .unwrap();
-
-        assert_eq!(extra["current_model_id"], "claude-sonnet-4-6");
-    }
-
-    #[tokio::test]
-    async fn build_conversation_extra_omits_current_model_id_for_nomi() {
-        // nomi must keep resolving its model through the top-level
-        // conversation.model provider path, never `current_model_id`.
-        let registry = hydrated_registry().await;
-        let job = CronJob {
-            execution_mode: ExecutionMode::NewConversation,
-            agent_type: "nomi".into(),
             agent_config: Some(CronAgentConfig {
                 backend: None,
                 name: "OpenAI".into(),
@@ -2585,44 +2236,7 @@ mod tests {
             ..sample_job()
         };
 
-        let agent_type = resolve_new_conversation_agent_type(&registry, &job).await.unwrap();
-        let extra = build_conversation_extra(&registry, &job, None, agent_type)
-            .await
-            .unwrap();
-
-        assert!(extra.get("current_model_id").is_none());
-    }
-
-    #[tokio::test]
-    async fn build_conversation_extra_omits_current_model_id_when_model_unset() {
-        // An ACP job without a configured model must not emit an empty
-        // `current_model_id`; the agent falls back to its own default.
-        let registry = hydrated_registry().await;
-        let job = CronJob {
-            execution_mode: ExecutionMode::NewConversation,
-            agent_type: "claude".into(),
-            agent_config: Some(CronAgentConfig {
-                backend: Some("claude".into()),
-                name: "Claude".into(),
-                cli_path: None,
-                custom_agent_id: Some(TEST_ACP_AGENT_ID.into()),
-                preset_id: None,
-                preset_revision: None,
-                preset_snapshot: None,
-                mode: None,
-                model: None,
-                provider_id: None,
-                config_options: None,
-                workspace: None,
-                clear_context_each_run: false,
-            }),
-            ..sample_job()
-        };
-
-        let agent_type = resolve_new_conversation_agent_type(&registry, &job).await.unwrap();
-        let extra = build_conversation_extra(&registry, &job, None, agent_type)
-            .await
-            .unwrap();
+        let extra = build_conversation_extra(&job, None);
 
         assert!(extra.get("current_model_id").is_none());
     }
@@ -2898,7 +2512,6 @@ mod tests {
                 CONVERSATION_ID,
                 serde_json::json!({ "workspace": workspace_path }),
             )
-            .with_agent_type("remote")
             .with_delivery_receipt(receipt),
         );
         let executor =
@@ -3426,7 +3039,6 @@ mod tests {
         let repo = Arc::new(MissingWorkspaceConversationRepo::new(
             "0190f5fe-7c00-7a00-8abc-012345678901",
             serde_json::json!({
-                "backend": "claude",
                 "temp_workspace_id": WORKSPACE_ID,
                 "workspace": "/source-install/conversations/0190f5fe-7c00-7a00-8abc-000000000000"
             }),
@@ -3756,8 +3368,6 @@ mod tests {
         let stub_repo: Arc<dyn IConversationRepository> = Arc::new(StubConvRepo);
         let agent_metadata_repo: Arc<dyn nomifun_db::IAgentMetadataRepository> =
             Arc::new(StubAgentMetadataRepo);
-        let acp_session_repo: Arc<dyn nomifun_db::IAcpSessionRepository> =
-            Arc::new(StubAcpSessionRepo);
         let conv_service = Arc::new(ConversationService::new(
             Arc::<str>::from(USER_ID),
             std::env::temp_dir(),
@@ -3766,7 +3376,6 @@ mod tests {
             Arc::new(StubAgentRuntimeRegistry),
             Arc::clone(&stub_repo),
             Arc::clone(&agent_metadata_repo),
-            acp_session_repo,
             Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
         ));
 
@@ -3859,7 +3468,7 @@ mod tests {
     #[async_trait::async_trait]
     impl AgentRuntimeControl for RecordingAgent {
         fn agent_type(&self) -> AgentType {
-            AgentType::Acp
+            AgentType::Nomi
         }
 
         fn conversation_id(&self) -> &str {
@@ -4278,19 +3887,22 @@ mod tests {
                 conversation_id: id.to_owned(),
                 user_id: USER_ID.into(),
                 name: "Cron Conversation".into(),
-                r#type: "acp".into(),
-                extra: serde_json::json!({
-                    "workspace": workspace,
-                    "agent_id": TEST_ACP_AGENT_ID,
-                    "backend": "claude",
-                    "agent_source": "builtin"
-                })
-                .to_string(),
+                r#type: "nomi".into(),
+                extra: serde_json::json!({ "workspace": workspace }).to_string(),
                 delegation_policy: "automatic".into(),
                 execution_model_pool: None,
                 decision_policy: "automatic".into(),
                 execution_template_id: None,
-                model: None,
+                // A nomi row must carry a canonical provider/model selection or
+                // no runtime can be built for it.
+                model: Some(
+                    serde_json::json!({
+                        "provider_id": PROVIDER_ID,
+                        "model": "gpt-5",
+                        "use_model": "gpt-5"
+                    })
+                    .to_string(),
+                ),
                 status,
                 source: None,
                 channel_chat_id: None,
@@ -4552,22 +4164,13 @@ mod tests {
             let extra = extra
                 .as_object_mut()
                 .expect("conversation fixture extra must be a JSON object");
-            extra
-                .entry("agent_id")
-                .or_insert_with(|| serde_json::Value::String(TEST_ACP_AGENT_ID.to_owned()));
-            extra
-                .entry("backend")
-                .or_insert_with(|| serde_json::Value::String("claude".to_owned()));
-            extra
-                .entry("agent_source")
-                .or_insert_with(|| serde_json::Value::String("builtin".to_owned()));
             Self {
                 row: nomifun_db::models::ConversationRow {
                     id: 0,
                     conversation_id: conversation_id.to_owned(),
                     user_id: USER_ID.into(),
                     name: "Cron Conversation".into(),
-                    r#type: "acp".into(),
+                    r#type: "nomi".into(),
                     extra: serde_json::Value::Object(extra.clone()).to_string(),
                     delegation_policy: "automatic".into(),
                     execution_model_pool: None,
@@ -4603,11 +4206,6 @@ mod tests {
             }
             turn.delivery_receipt = Some(receipt);
             drop(turn);
-            self
-        }
-
-        fn with_agent_type(mut self, agent_type: &str) -> Self {
-            self.row.r#type = agent_type.to_owned();
             self
         }
 
@@ -5089,8 +4687,6 @@ mod tests {
 
         let agent_metadata_repo: Arc<dyn nomifun_db::IAgentMetadataRepository> =
             Arc::new(StubAgentMetadataRepo);
-        let acp_session_repo: Arc<dyn nomifun_db::IAcpSessionRepository> =
-            Arc::new(StubAcpSessionRepo);
         let conversation_service = Arc::new(ConversationService::new(
             Arc::<str>::from(USER_ID),
             work_dir.clone(),
@@ -5099,7 +4695,6 @@ mod tests {
             Arc::clone(&runtime_registry),
             Arc::clone(&repo),
             Arc::clone(&agent_metadata_repo),
-            acp_session_repo,
             Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
         ));
 
@@ -5116,53 +4711,6 @@ mod tests {
             broadcaster,
             agent_registry,
         )
-    }
-
-    struct StubAcpSessionRepo;
-
-    #[async_trait::async_trait]
-    impl nomifun_db::IAcpSessionRepository for StubAcpSessionRepo {
-        async fn get(
-            &self,
-            _conversation_id: &str,
-        ) -> Result<Option<nomifun_db::models::AcpSessionRow>, nomifun_db::DbError> {
-            Ok(None)
-        }
-        async fn create(
-            &self,
-            _params: &nomifun_db::CreateAcpSessionParams<'_>,
-        ) -> Result<nomifun_db::models::AcpSessionRow, nomifun_db::DbError> {
-            Err(nomifun_db::DbError::Init("stub".into()))
-        }
-        async fn update_session_id(
-            &self,
-            _conversation_id: &str,
-            _session_id: &str,
-        ) -> Result<bool, nomifun_db::DbError> {
-            Ok(false)
-        }
-        async fn clear_session_id(
-            &self,
-            _conversation_id: &str,
-        ) -> Result<bool, nomifun_db::DbError> {
-            Ok(false)
-        }
-        async fn delete(&self, _conversation_id: &str) -> Result<bool, nomifun_db::DbError> {
-            Ok(false)
-        }
-        async fn load_runtime_state(
-            &self,
-            _conversation_id: &str,
-        ) -> Result<Option<nomifun_db::PersistedSessionState>, nomifun_db::DbError> {
-            Ok(None)
-        }
-        async fn save_runtime_state(
-            &self,
-            _conversation_id: &str,
-            _params: &nomifun_db::SaveRuntimeStateParams<'_>,
-        ) -> Result<bool, nomifun_db::DbError> {
-            Ok(false)
-        }
     }
 
     struct StubAgentMetadataRepo;

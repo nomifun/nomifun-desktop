@@ -5,11 +5,8 @@ const readSource = (relativePath: string): string =>
   readFileSync(new URL(relativePath, import.meta.url), 'utf8');
 
 const queueSource = readSource('./useConversationCommandQueue.ts');
-const acpSource = readSource('./acp/AcpSendBox.tsx');
-// The
-// OpenClaw file still hosts the platform-only Star Office install flow.
 const nomiSource = readSource('./nomi/NomiSendBox.tsx');
-const platformSources = [acpSource, nomiSource];
+const platformSources = [nomiSource];
 
 describe('conversation send idempotency wiring', () => {
   test('uses the persisted UUIDv7 queue item id as the send key', () => {
@@ -58,11 +55,6 @@ describe('conversation send idempotency wiring', () => {
         guardedDirectOpen: 'if (!deferLocalTurnUntilFresh) setWaitingResponse(true);',
         deferredFreshOpen: 'if (deferLocalTurnUntilFresh) {',
       },
-      {
-        source: acpSource,
-        guardedDirectOpen: 'if (!deferLocalTurnUntilFresh) setAiProcessing(true);',
-        deferredFreshOpen: 'if (deferLocalTurnUntilFresh) {',
-      },
     ];
 
     for (const { source, guardedDirectOpen, deferredFreshOpen } of queueCallers) {
@@ -96,10 +88,7 @@ describe('conversation send idempotency wiring', () => {
   });
 
   test('authorizes exact initial payloads and marks only those POSTs initial-only', () => {
-    const initialConsumers = [
-      readSource('./acp/useAcpInitialMessage.ts'),
-      readSource('./nomi/NomiSendBox.tsx'),
-    ];
+    const initialConsumers = [readSource('./nomi/NomiSendBox.tsx')];
 
     for (const source of initialConsumers) {
       const authority = source.indexOf('readAuthorizedInitialMessageDelivery(');
@@ -121,35 +110,6 @@ describe('conversation send idempotency wiring', () => {
   });
 
   test('keeps persisted initial deliveries closed until a fresh accepted response', () => {
-    const initialCallers = [
-      {
-        source: readSource('./acp/useAcpInitialMessage.ts'),
-        start: 'const sendInitialMessage = async () => {',
-        post: 'sendMessage.invoke({',
-        open: 'setAiProcessing(true);',
-      },
-    ];
-
-    for (const { source, start: startMarker, post: postMarker, open } of initialCallers) {
-      const start = source.indexOf(startMarker);
-      const post = source.indexOf(postMarker, start);
-      const classification = source.indexOf(
-        'const disposition = classifyPublicMessageDelivery(',
-        post
-      );
-      const fresh = source.indexOf("if (disposition === 'fresh') {", classification);
-      const freshOpen = source.indexOf(open, fresh);
-      const preResponse = source.slice(start, post);
-
-      expect(start >= 0).toBe(true);
-      expect(post > start).toBe(true);
-      expect(preResponse.includes('beginLocalTurn();')).toBe(false);
-      expect(preResponse.includes('setAiProcessing(true);')).toBe(false);
-      expect(preResponse.includes('setWaitingResponse(true);')).toBe(false);
-      expect(fresh > post).toBe(true);
-      expect(freshOpen > fresh).toBe(true);
-    }
-
     const nomiInitial = nomiSource.indexOf('const processInitialMessage = async () => {');
     const nomiDeferredDispatch = nomiSource.indexOf(
       '{ id: idempotency_key, input, files, initialOnly: true }',

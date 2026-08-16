@@ -18,22 +18,54 @@ use nomifun_db::{ConversationRowUpdate, IConversationRepository};
 const MISSING_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345679990";
 const MISSING_MESSAGE_ID: &str = "0190f5fe-7c00-7a00-8abc-012345679989";
 const TEST_CRON_JOB_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678998";
+/// Provider/model backing every fixture conversation. Nomi is the only engine,
+/// and a nomi runtime cannot be built without a canonical provider/model pair,
+/// so every conversation that a send/warmup test touches must carry one.
+const TEST_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345679988";
+const TEST_MODEL: &str = "message-model";
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
 fn create_conv_body(name: &str) -> serde_json::Value {
     json!({
-        "type": "acp",
+        "type": "nomi",
         "name": name,
+        "model": {
+            "provider_id": TEST_PROVIDER_ID,
+            "model": TEST_MODEL,
+            "use_model": TEST_MODEL,
+        },
         "extra": {
-            "agent_id": "0190f5fe-7c00-7a00-8000-000000000103",
-            "workspace": "/project",
-            "backend": "gemini"
+            "workspace": "/project"
         }
     })
 }
 
-async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str, name: &str) -> String {
+/// Seed the provider/model pair `create_conv_body` pins. Idempotent.
+async fn seed_conversation_provider(services: &nomifun_app::AppServices) {
+    let credentials_encrypted = common::encrypted_bearer_credentials();
+    sqlx::query(
+        "INSERT OR IGNORE INTO providers (\
+            provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
+            created_at, updated_at\
+         ) VALUES (?, 'openai', 'message-fixture', 'https://example.invalid', 'bearer', ?, 1, 1, 1)",
+    )
+    .bind(TEST_PROVIDER_ID)
+    .bind(&credentials_encrypted)
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+    common::seed_openai_chat_model(services.database.pool(), TEST_PROVIDER_ID, TEST_MODEL).await;
+}
+
+async fn create_conversation(
+    app: &mut axum::Router,
+    services: &nomifun_app::AppServices,
+    token: &str,
+    csrf: &str,
+    name: &str,
+) -> String {
+    seed_conversation_provider(services).await;
     let req = common::json_with_token("POST", "/api/conversations", create_conv_body(name), token, csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = common::body_json(resp).await;
@@ -97,7 +129,7 @@ async fn update_conversation_workspace(services: &nomifun_app::AppServices, conv
         &repo,
         conv_id,
         &ConversationRowUpdate {
-            extra: Some(json!({ "workspace": workspace, "backend": "gemini" }).to_string()),
+            extra: Some(json!({ "workspace": workspace }).to_string()),
             ..Default::default()
         },
     )
@@ -105,10 +137,13 @@ async fn update_conversation_workspace(services: &nomifun_app::AppServices, conv
     .unwrap();
 }
 
-async fn insert_acp_tool_message(
+/// Insert a persisted native `tool_call` message whose output is large enough
+/// to exercise the compaction threshold. `rg` has no artifact obligation, so a
+/// completed receipt-less row stays a valid successful projection.
+async fn insert_tool_call_message(
     services: &nomifun_app::AppServices,
     conv_id: &str,
-    tool_call_id: &str,
+    call_id: &str,
     output: &str,
     created_at: i64,
 ) -> String {
@@ -119,21 +154,14 @@ async fn insert_acp_tool_message(
         message_id: message_id.clone(),
         conversation_id: conv_id.to_owned(),
         msg_id: Some(message_id.clone()),
-        r#type: "acp_tool_call".into(),
+        r#type: "tool_call".into(),
         content: serde_json::json!({
-            "session_id": "session-1",
-            "update": {
-                "session_update": "tool_call",
-                "tool_call_id": tool_call_id,
-                "status": "completed",
-                "title": "rg",
-                "kind": "search",
-                "raw_input": { "pattern": "needle", "path": "." },
-                "content": [{
-                    "type": "content",
-                    "content": { "type": "text", "text": output }
-                }]
-            }
+            "call_id": call_id,
+            "name": "rg",
+            "args": { "pattern": "needle", "path": "." },
+            "status": "completed",
+            "output": output,
+            "artifacts": [],
         })
         .to_string(),
         position: Some("left".into()),
@@ -164,7 +192,7 @@ async fn seed_cron_job(services: &nomifun_app::AppServices) -> String {
     sqlx::query_scalar(
         "INSERT INTO cron_jobs \
             (cron_job_id, user_id, name, schedule_kind, schedule_value, payload_message, agent_type, created_by, created_at, updated_at) \
-         VALUES (?, ?, 'Job', 'every', '60000', 'msg', 'acp', 'user', 0, 0) \
+         VALUES (?, ?, 'Job', 'every', '60000', 'msg', 'nomi', 'user', 0, 0) \
          RETURNING cron_job_id",
     )
     .bind(&cron_job_id)
@@ -180,7 +208,7 @@ async fn seed_cron_job(services: &nomifun_app::AppServices) -> String {
 async fn t8_1_messages_empty() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Empty Conv").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Empty Conv").await;
 
     let resp = app
         .oneshot(get_with_token(
@@ -200,7 +228,7 @@ async fn t8_1_messages_empty() {
 async fn t8_2_messages_pagination() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Paginated Conv").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Paginated Conv").await;
 
     // Insert 10 messages
     for i in 0..10 {
@@ -244,10 +272,10 @@ async fn t8_2_messages_pagination() {
 async fn t8_2b_messages_compact_mode_truncates_large_tool_payload() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Compact Tool Conv").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Compact Tool Conv").await;
     let large_output = "match line\n".repeat(10_000);
 
-    insert_acp_tool_message(&services, &conv_id, "tool-big", &large_output, 1000).await;
+    insert_tool_call_message(&services, &conv_id, "tool-big", &large_output, 1000).await;
 
     let resp = app
         .clone()
@@ -260,7 +288,7 @@ async fn t8_2b_messages_compact_mode_truncates_large_tool_payload() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     let content = &json["data"]["items"][0]["content"];
-    let preview = content["update"]["content"][0]["content"]["text"].as_str().unwrap();
+    let preview = content["output"].as_str().unwrap();
 
     assert_eq!(content["_compact"]["truncated"], true);
     assert!(preview.len() < large_output.len());
@@ -271,10 +299,10 @@ async fn t8_2b_messages_compact_mode_truncates_large_tool_payload() {
 async fn t8_2c_get_message_returns_full_tool_payload() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Tool Detail Conv").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Tool Detail Conv").await;
     let large_output = "wide rg output\n".repeat(10_000);
 
-    let message_id = insert_acp_tool_message(&services, &conv_id, "tool-detail", &large_output, 1000).await;
+    let message_id = insert_tool_call_message(&services, &conv_id, "tool-detail", &large_output, 1000).await;
 
     let resp = app
         .clone()
@@ -288,9 +316,7 @@ async fn t8_2c_get_message_returns_full_tool_payload() {
     let json = body_json(resp).await;
 
     assert_eq!(
-        json["data"]["content"]["update"]["content"][0]["content"]["text"]
-            .as_str()
-            .unwrap(),
+        json["data"]["content"]["output"].as_str().unwrap(),
         large_output
     );
 }
@@ -299,7 +325,7 @@ async fn t8_2c_get_message_returns_full_tool_payload() {
 async fn t8_2d_get_message_requires_auth() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Tool Detail Auth Conv").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Tool Detail Auth Conv").await;
 
     let resp = app
         .oneshot(get_request(&format!(
@@ -315,7 +341,7 @@ async fn t8_2d_get_message_requires_auth() {
 async fn t8_2e_get_message_not_found_returns_specific_error() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Tool Detail Missing Conv").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Tool Detail Missing Conv").await;
 
     let resp = app
         .oneshot(get_with_token(
@@ -340,9 +366,9 @@ async fn t8_2e_get_message_not_found_returns_specific_error() {
 async fn t8_2f_get_message_does_not_leak_cross_user_conversation() {
     let (mut app, services) = build_app().await;
     let (owner_token, owner_csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let owner_conv_id = create_conversation(&mut app, &owner_token, &owner_csrf, "Owner Tool Conv").await;
+    let owner_conv_id = create_conversation(&mut app, &services, &owner_token, &owner_csrf, "Owner Tool Conv").await;
     let owner_message_id =
-        insert_acp_tool_message(&services, &owner_conv_id, "owner-tool", "private output", 1000).await;
+        insert_tool_call_message(&services, &owner_conv_id, "owner-tool", "private output", 1000).await;
 
     let (other_token, _other_csrf) = setup_and_login(&mut app, &services, "other-user", "StrongP@ss2").await;
 
@@ -371,7 +397,7 @@ async fn t8_2f_get_message_does_not_leak_cross_user_conversation() {
 async fn t8_3_messages_order_asc_default() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Order Test").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Order Test").await;
 
     insert_message(&services, &conv_id, "Old", 1000).await;
     insert_message(&services, &conv_id, "Mid", 2000).await;
@@ -395,7 +421,7 @@ async fn t8_3_messages_order_asc_default() {
 async fn t8_4_messages_order_asc() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "ASC Test").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "ASC Test").await;
 
     insert_message(&services, &conv_id, "Old", 1000).await;
     insert_message(&services, &conv_id, "Mid", 2000).await;
@@ -444,7 +470,7 @@ async fn t8_6_messages_requires_auth() {
 async fn t8_7_messages_exclude_legacy_cron_rows() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Legacy Filter").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Legacy Filter").await;
 
     insert_message(&services, &conv_id, "Visible", 1000).await;
 
@@ -507,7 +533,7 @@ async fn t8_7_messages_exclude_legacy_cron_rows() {
 async fn t8_8_artifacts_list_and_patch_status() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Artifacts").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Artifacts").await;
     let cron_job_id = seed_cron_job(&services).await;
 
     let conversation_artifact_id = upsert_artifact(
@@ -572,7 +598,7 @@ async fn t9_1_search_keyword_match() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Search Conv").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Search Conv").await;
     insert_message(&services, &conv_id, "Rust is great", 1000).await;
     insert_message(&services, &conv_id, "Python is also nice", 2000).await;
 
@@ -592,7 +618,7 @@ async fn t9_2_search_no_match() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let conv_id = create_conversation(&mut app, &token, &csrf, "No Match Conv").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "No Match Conv").await;
     insert_message(&services, &conv_id, "Hello world", 1000).await;
 
     let resp = app
@@ -609,7 +635,7 @@ async fn t9_3_search_pagination() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Search Paged").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Search Paged").await;
     for i in 0..5 {
         insert_message(
             &services,
@@ -683,7 +709,7 @@ async fn message_response_has_correct_fields() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Field Check").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Field Check").await;
     insert_message(&services, &conv_id, "Content check", 5000).await;
 
     let resp = app
@@ -718,7 +744,7 @@ async fn delete_conversation_cleans_up_messages() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Cleanup Test").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Cleanup Test").await;
     insert_message(&services, &conv_id, "msg 1", 1000).await;
     insert_message(&services, &conv_id, "msg 2", 2000).await;
 
@@ -750,8 +776,8 @@ async fn search_across_multiple_conversations() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let conv1 = create_conversation(&mut app, &token, &csrf, "Conv Alpha").await;
-    let conv2 = create_conversation(&mut app, &token, &csrf, "Conv Beta").await;
+    let conv1 = create_conversation(&mut app, &services, &token, &csrf, "Conv Alpha").await;
+    let conv2 = create_conversation(&mut app, &services, &token, &csrf, "Conv Beta").await;
 
     insert_message(&services, &conv1, "Rust review needed", 1000).await;
     insert_message(&services, &conv2, "Rust performance tips", 2000).await;
@@ -814,7 +840,7 @@ async fn t2_1_send_message_requires_idempotency_key() {
     let app_root = tempfile::tempdir().unwrap();
     let (mut app, services) = build_isolated_app_with_mock_agents(app_root.path()).await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Missing Idempotency Key").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Missing Idempotency Key").await;
 
     let req = send_message_request(
         &format!("/api/conversations/{conv_id}/messages"),
@@ -840,7 +866,7 @@ async fn t2_1_send_message_rejects_duplicate_or_illegal_idempotency_key() {
     let app_root = tempfile::tempdir().unwrap();
     let (mut app, services) = build_isolated_app_with_mock_agents(app_root.path()).await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Invalid Idempotency Key").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Invalid Idempotency Key").await;
     let uri = format!("/api/conversations/{conv_id}/messages");
 
     for keys in [&["first", "second"][..], &["contains space"][..]] {
@@ -863,7 +889,7 @@ async fn t2_1_send_message_accepts_one_legal_idempotency_key() {
     let app_root = tempfile::tempdir().unwrap();
     let (mut app, services) = build_isolated_app_with_mock_agents(app_root.path()).await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Legal Idempotency Key").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Legal Idempotency Key").await;
 
     let workspace = app_root.path().join("conversation");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -934,7 +960,7 @@ async fn t2_1_send_message_accepts_one_legal_idempotency_key() {
 async fn t2_1_send_message_accepted() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Send Test").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Send Test").await;
 
     let body = json!({ "content": "Hello AI" });
     let req = common::json_with_token(
@@ -970,7 +996,7 @@ async fn t2_1_send_message_accepted() {
 async fn t2_1_send_message_empty_content_bad_request() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Empty Content").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Empty Content").await;
 
     let body = json!({ "content": "" });
     let req = common::json_with_token(
@@ -1005,7 +1031,7 @@ async fn t2_1_send_message_conversation_not_found() {
 async fn t2_1b_send_message_pathological_workspace_returns_runtime_whitespace_code() {
     let (mut app, services) = build_app_with_mock_agents().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Legacy Workspace").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Legacy Workspace").await;
     update_conversation_workspace(&services, &conv_id, "/tmp/my project ").await;
 
     let body = json!({ "content": "Hello" });
@@ -1032,7 +1058,7 @@ async fn t2_1b_send_message_pathological_workspace_returns_runtime_whitespace_co
 async fn t2_1c_send_message_accepts_interior_whitespace_workspace() {
     let (mut app, services) = build_app_with_mock_agents().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "macOS Workspace").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "macOS Workspace").await;
 
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("Application Support").join("Nomi").join("conversations").join("nomi-temp-1");
@@ -1059,7 +1085,7 @@ async fn t2_1c_send_message_accepts_interior_whitespace_workspace() {
 async fn t2_1d_accepted_user_message_is_immediately_readable_without_cache() {
     let (mut app, services) = build_app_with_mock_agents().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Message Readback").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Message Readback").await;
 
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("conversation");
@@ -1171,7 +1197,7 @@ async fn t2_3_warmup_conversation_not_found() {
 async fn t2_3b_warmup_pathological_workspace_returns_runtime_whitespace_code() {
     let (mut app, services) = build_app_with_mock_agents().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Legacy Warmup").await;
+    let conv_id = create_conversation(&mut app, &services, &token, &csrf, "Legacy Warmup").await;
     update_conversation_workspace(&services, &conv_id, "/tmp/my project ").await;
 
     let req = common::json_with_token(

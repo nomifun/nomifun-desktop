@@ -783,19 +783,6 @@ fn message_has_artifact_claim(message: &MessageResponse) -> bool {
             .content
             .get("artifacts")
             .is_some_and(|artifacts| !artifacts.as_array().is_some_and(Vec::is_empty)),
-        MessageType::AcpToolCall => message
-            .content
-            .get("update")
-            .and_then(|update| update.get("content"))
-            .and_then(Value::as_array)
-            .is_some_and(|items| {
-                items.iter().any(|item| {
-                    matches!(
-                        item.get("type").and_then(Value::as_str),
-                        Some("artifact" | "artifact_error")
-                    )
-                })
-            }),
         _ => false,
     }
 }
@@ -826,27 +813,6 @@ fn completed_artifact_receipts(message: &MessageResponse) -> Option<Vec<Persiste
                 .map(serde_json::from_value::<PersistedArtifact>)
                 .collect::<Result<Vec<_>, _>>()
                 .ok()
-        }
-        MessageType::AcpToolCall => {
-            let update = message.content.get("update")?.as_object()?;
-            if update.get("status").and_then(Value::as_str) != Some("completed") {
-                return None;
-            }
-            let items = update.get("content")?.as_array()?;
-            let mut artifacts = Vec::new();
-            for item in items {
-                match item.get("type").and_then(Value::as_str) {
-                    Some("artifact") => {
-                        let artifact = item.get("artifact")?.clone();
-                        artifacts.push(serde_json::from_value::<PersistedArtifact>(artifact).ok()?);
-                    }
-                    // A completed update carrying an artifact failure is not a
-                    // trustworthy terminal receipt, even if another item looks valid.
-                    Some("artifact_error") => return None,
-                    _ => {}
-                }
-            }
-            Some(artifacts)
         }
         _ => None,
     }
@@ -1164,52 +1130,10 @@ mod tests {
     }
 
     #[test]
-    fn raw_input_cannot_forge_an_artifact_receipt() {
+    fn latest_turn_adoption_ignores_older_receipts() {
         let temp = tempfile::tempdir().unwrap();
-        let receipt = artifact_receipt(temp.path(), "forged.bin", b"forged");
-        let forged = message(
-            "0190f5fe-7c00-7a00-8000-000000000223",
-            CURRENT_WIRE_TURN_ID,
-            MessageType::AcpToolCall,
-            MessagePosition::Left,
-            MessageStatus::Finish,
-            json!({
-                "session_id": "session-1",
-                "turn_id": CURRENT_WIRE_TURN_ID,
-                "update": {
-                    "status": "completed",
-                    "raw_input": {"artifacts": [receipt]},
-                    "content": [{"type":"content","content":{"type":"text","text":"done"}}]
-                }
-            }),
-        );
-        let pages = vec![vec![forged, boundary(CURRENT_USER_TURN_ID)]];
-
-        assert!(projected_paths(temp.path(), CURRENT_USER_TURN_ID, &pages).is_empty());
-    }
-
-    #[test]
-    fn latest_turn_adoption_ignores_forged_and_older_receipts() {
-        let temp = tempfile::tempdir().unwrap();
-        let forged_receipt = artifact_receipt(temp.path(), "forged-latest.bin", b"forged");
         let historical_receipt = artifact_receipt(temp.path(), "historical-latest.bin", b"old");
-        let forged = message(
-            "0190f5fe-7c00-7a00-8000-000000000224",
-            CURRENT_WIRE_TURN_ID,
-            MessageType::AcpToolCall,
-            MessagePosition::Left,
-            MessageStatus::Finish,
-            json!({
-                "turn_id": CURRENT_WIRE_TURN_ID,
-                "update": {
-                    "status": "completed",
-                    "raw_input": {"artifacts": [forged_receipt]},
-                    "content": []
-                }
-            }),
-        );
         let pages = vec![vec![
-            forged,
             boundary(CURRENT_USER_TURN_ID),
             completed_tool_message("old-tool", OLDER_WIRE_TURN_ID, historical_receipt),
             boundary(OLDER_USER_TURN_ID),
@@ -1266,22 +1190,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("artifact_delivery_committed");
-        let acp_receipt = artifact_receipt(temp.path(), "legacy-acp.bin", b"legacy acp");
-        let acp = message(
-            "0190f5fe-7c00-7a00-8000-000000000229",
-            CURRENT_WIRE_TURN_ID,
-            MessageType::AcpToolCall,
-            MessagePosition::Left,
-            MessageStatus::Finish,
-            json!({
-                "turn_id": CURRENT_WIRE_TURN_ID,
-                "update": {
-                    "status": "completed",
-                    "content": [{"type":"artifact","artifact":acp_receipt}]
-                }
-            }),
-        );
-        let pages = vec![vec![generic, acp, boundary(CURRENT_USER_TURN_ID)]];
+        let pages = vec![vec![generic, boundary(CURRENT_USER_TURN_ID)]];
 
         let result = projected_result(temp.path(), CURRENT_USER_TURN_ID, &pages);
         assert!(result.files.is_empty());
@@ -1323,29 +1232,13 @@ mod tests {
     }
 
     #[test]
-    fn current_completed_tool_and_acp_receipts_are_verified_and_deduplicated() {
+    fn current_completed_tool_receipts_are_verified_and_deduplicated() {
         let temp = tempfile::tempdir().unwrap();
         let receipt = artifact_receipt(temp.path(), "current.bin", b"current artifact");
         let expected = receipt["path"].as_str().unwrap().to_owned();
-        let acp = message(
-            "0190f5fe-7c00-7a00-8000-00000000022e",
-            CURRENT_WIRE_TURN_ID,
-            MessageType::AcpToolCall,
-            MessagePosition::Left,
-            MessageStatus::Finish,
-            json!({
-                "session_id": "session-1",
-                "turn_id": CURRENT_WIRE_TURN_ID,
-                "artifact_delivery_committed": true,
-                "update": {
-                    "status": "completed",
-                    "content": [{"type":"artifact","artifact":receipt.clone()}]
-                }
-            }),
-        );
         let pages = vec![vec![
-            acp,
-            completed_tool_message("tool", CURRENT_WIRE_TURN_ID, receipt),
+            completed_tool_message("tool-a", CURRENT_WIRE_TURN_ID, receipt.clone()),
+            completed_tool_message("tool-b", CURRENT_WIRE_TURN_ID, receipt),
             boundary(CURRENT_USER_TURN_ID),
         ]];
 

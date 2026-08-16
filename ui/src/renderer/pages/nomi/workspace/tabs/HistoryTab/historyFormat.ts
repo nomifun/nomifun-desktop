@@ -87,8 +87,6 @@ export const toHistoryEntry = (message: TMessage): HistoryEntry | null => {
     }
     case 'tool_call':
       return { ...base, kind: 'tool', text: firstString(message.content?.name, message.content?.description) };
-    case 'acp_tool_call':
-      return { ...base, kind: 'tool', text: firstString(message.content?.update?.title) };
     case 'tool_group': {
       const calls = Array.isArray(message.content) ? message.content : [];
       const names = calls

@@ -257,10 +257,6 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
                     WHERE agent_id = ?1\
                 ) \
                 OR EXISTS(\
-                    SELECT 1 FROM acp_session \
-                    WHERE agent_id = ?1\
-                ) \
-                OR EXISTS(\
                     SELECT 1 FROM conversations \
                     WHERE json_extract(extra, '$.agent_id') = ?1 \
                        OR json_extract(extra, '$.custom_agent_id') = ?1\
@@ -271,7 +267,7 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
         .await?;
         if retained_reference_exists {
             return Err(DbError::Conflict(format!(
-                "Agent '{id}' is still referenced by execution, preset, or ACP state"
+                "Agent '{id}' is still referenced by execution, preset, or conversation state"
             )));
         }
 
@@ -300,10 +296,6 @@ mod tests {
 
     const CUSTOM_AGENT_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678921";
     const OTHER_CUSTOM_AGENT_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678922";
-    const CLAUDE_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000101";
-    const OPENCODE_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-00000000010a";
-    const CURSOR_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-00000000010e";
-    const KIRO_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-00000000010f";
     const NOMI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000114";
     const DELETE_FIXTURE_PRESET_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678923";
 
@@ -321,17 +313,17 @@ mod tests {
             name_i18n: None,
             description: Some("a custom agent"),
             description_i18n: None,
-            backend: Some("claude"),
-            agent_type: "acp",
+            backend: None,
+            agent_type: "nomi",
             agent_source: "custom",
-            agent_source_info: Some(r#"{"binary_name":"claude"}"#),
+            agent_source_info: None,
             enabled: true,
-            command: Some("claude"),
+            command: None,
             args: Some("[]"),
             env: Some("[]"),
-            native_skills_dirs: Some(r#"[".claude/skills"]"#),
+            native_skills_dirs: Some(r#"[".nomi/skills"]"#),
             behavior_policy: Some(r#"{"supports_side_question":true}"#),
-            yolo_id: Some("bypassPermissions"),
+            yolo_id: Some("yolo"),
             agent_capabilities: None,
             auth_methods: None,
             config_options: None,
@@ -346,16 +338,14 @@ mod tests {
     async fn seed_rows_populated_after_migrations() {
         let (repo, _db) = setup().await;
         let rows = repo.list_all().await.unwrap();
-        // 17 ACP vendors + 2 non-ACP builtins + 1 internal = 20.
-        assert_eq!(rows.len(), 20);
-        assert!(
-            rows.iter()
-                .any(|r| r.name == "Claude Code" && r.agent_source == "builtin")
-        );
+        // The engine collapse leaves exactly the internal nomi row: migration
+        // 034 deletes every `agent_type <> 'nomi'` row.
+        assert_eq!(rows.len(), 1);
         assert!(rows.iter().any(|r| r.name == "Nomi" && r.agent_source == "internal"));
-        // Nanobot and OpenClaw are builtin (not internal).
-        assert!(rows.iter().any(|r| r.name == "Nanobot" && r.agent_source == "builtin"));
-        assert!(rows.iter().any(|r| r.name == "OpenClaw" && r.agent_source == "builtin"));
+        assert!(
+            rows.iter().all(|r| r.agent_type == "nomi"),
+            "no retired-engine row may survive the migration"
+        );
         assert!(rows
             .iter()
             .all(|r| nomifun_common::validate_uuidv7(&r.agent_id).is_ok()));
@@ -370,45 +360,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builtins_use_current_official_cli_names_after_migrations() {
-        let (repo, _db) = setup().await;
-
-        let cursor = repo.get(CURSOR_AGENT_ID).await.unwrap().expect("seeded cursor row");
-        assert_eq!(cursor.agent_source_info.as_deref(), Some(r#"{"binary_name":"agent"}"#));
-        assert_eq!(cursor.command.as_deref(), Some("agent"));
-        assert_eq!(cursor.args.as_deref(), Some(r#"["acp"]"#));
-
-        let kiro = repo.get(KIRO_AGENT_ID).await.unwrap().expect("seeded kiro row");
-        assert_eq!(kiro.agent_source_info.as_deref(), Some(r#"{"binary_name":"kiro-cli"}"#));
-        assert_eq!(kiro.command.as_deref(), Some("kiro-cli"));
-        assert_eq!(kiro.args.as_deref(), Some(r#"["acp"]"#));
-    }
-
-    #[tokio::test]
-    async fn find_by_source_and_name_hits_seed_row() {
-        let (repo, _db) = setup().await;
-        let row = repo
-            .find_by_source_and_name("builtin", "Claude Code")
-            .await
-            .unwrap()
-            .expect("seeded claude row");
-        assert_eq!(row.backend.as_deref(), Some("claude"));
-        assert_eq!(row.agent_type, "acp");
-    }
-
-    #[tokio::test]
     async fn seed_rows_include_icon_backfill() {
         let (repo, _db) = setup().await;
 
-        let claude = repo.get(CLAUDE_AGENT_ID).await.unwrap().expect("seeded claude row");
-        assert_eq!(claude.icon.as_deref(), Some("/api/assets/logos/ai-major/claude.svg"));
-        assert_eq!(claude.source_key.as_deref(), Some("agent_builtin_claude"));
-
         let nomi = repo.get(NOMI_AGENT_ID).await.unwrap().expect("seeded nomi row");
         assert_eq!(nomi.icon.as_deref(), Some("/api/assets/logos/brand/nomi.svg"));
-
-        let kiro = repo.get(KIRO_AGENT_ID).await.unwrap().expect("seeded kiro row");
-        assert!(kiro.icon.is_none());
+        assert_eq!(nomi.source_key.as_deref(), Some("agent_builtin_nomi"));
     }
 
     #[tokio::test]
@@ -439,13 +396,13 @@ mod tests {
     #[tokio::test]
     async fn upsert_preserves_builtin_source_key_lineage() {
         let (repo, _db) = setup().await;
-        let mut p = custom_params(CLAUDE_AGENT_ID, "updated Claude");
-        p.agent_source = "builtin";
+        let mut p = custom_params(NOMI_AGENT_ID, "updated Nomi");
+        p.agent_source = "internal";
 
         let row = repo.upsert(&p).await.unwrap();
 
-        assert_eq!(row.agent_id, CLAUDE_AGENT_ID);
-        assert_eq!(row.source_key.as_deref(), Some("agent_builtin_claude"));
+        assert_eq!(row.agent_id, NOMI_AGENT_ID);
+        assert_eq!(row.source_key.as_deref(), Some("agent_builtin_nomi"));
     }
 
     #[tokio::test]
@@ -453,7 +410,7 @@ mod tests {
         let (repo, _db) = setup().await;
         let updated = repo
             .apply_handshake(
-                CLAUDE_AGENT_ID,
+                NOMI_AGENT_ID,
                 &UpdateAgentHandshakeParams {
                     agent_capabilities: Some(Some(r#"{"loadSession":true}"#)),
                     auth_methods: Some(Some(r#"[{"id":"oauth"}]"#)),
@@ -473,7 +430,7 @@ mod tests {
     async fn apply_handshake_can_clear_to_null() {
         let (repo, _db) = setup().await;
         repo.apply_handshake(
-            CLAUDE_AGENT_ID,
+            NOMI_AGENT_ID,
             &UpdateAgentHandshakeParams {
                 agent_capabilities: Some(Some(r#"{"x":1}"#)),
                 ..Default::default()
@@ -484,7 +441,7 @@ mod tests {
 
         let cleared = repo
             .apply_handshake(
-                CLAUDE_AGENT_ID,
+                NOMI_AGENT_ID,
                 &UpdateAgentHandshakeParams {
                     agent_capabilities: Some(None),
                     ..Default::default()
@@ -515,8 +472,8 @@ mod tests {
     #[tokio::test]
     async fn set_enabled_toggles_flag() {
         let (repo, _db) = setup().await;
-        assert!(repo.set_enabled(CLAUDE_AGENT_ID, false).await.unwrap());
-        let row = repo.get(CLAUDE_AGENT_ID).await.unwrap().unwrap();
+        assert!(repo.set_enabled(NOMI_AGENT_ID, false).await.unwrap());
+        let row = repo.get(NOMI_AGENT_ID).await.unwrap().unwrap();
         assert!(!row.enabled);
         assert!(!repo.set_enabled("missing", true).await.unwrap());
     }
@@ -525,16 +482,16 @@ mod tests {
     async fn set_behavior_policy_overwrites_column_and_misses_unknown_row() {
         let (repo, _db) = setup().await;
         let updated = repo
-            .set_behavior_policy(OPENCODE_AGENT_ID, r#"{"supports_side_question":true}"#)
+            .set_behavior_policy(NOMI_AGENT_ID, r#"{"supports_side_question":true}"#)
             .await
             .unwrap()
-            .expect("opencode row exists");
+            .expect("nomi row exists");
         assert_eq!(
             updated.behavior_policy.as_deref(),
             Some(r#"{"supports_side_question":true}"#)
         );
         // Re-read confirms persistence.
-        let row = repo.get(OPENCODE_AGENT_ID).await.unwrap().unwrap();
+        let row = repo.get(NOMI_AGENT_ID).await.unwrap().unwrap();
         assert_eq!(
             row.behavior_policy.as_deref(),
             Some(r#"{"supports_side_question":true}"#)

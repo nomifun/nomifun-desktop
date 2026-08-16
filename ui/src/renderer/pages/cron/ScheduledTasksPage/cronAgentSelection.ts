@@ -54,7 +54,7 @@ export const findCronSelectedAgent = (
 };
 
 /**
- * Restore edit-mode selection without conflating several custom ACP agents.
+ * Restore edit-mode selection without conflating several custom agents.
  * New jobs always have `custom_agent_id`; the backend/type fallback is only for legacy rows and
  * is accepted when it identifies exactly one current AgentRegistry entry.
  */

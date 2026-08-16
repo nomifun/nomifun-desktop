@@ -1,12 +1,12 @@
 //! HTTP routes for the ai-agent crate, grouped by capability.
 //!
 //! - [`agent`] — agent-registry endpoints (`/api/agents*`, including
-//!   custom-agent CRUD and the ACP health-check probe).
+//!   agent-catalog listing and the model-provider health check).
 //!
 //! Session-scoped endpoints (mode / model / config / usage /
-//! agent-capabilities / slash-commands / side-question / workspace /
-//! now live in the `nomifun-conversation` crate, where
-//! they dispatch through `AgentRuntimeHandle` via `ConversationService`.
+//! agent-capabilities / slash-commands / side-question / workspace) now live
+//! in the `nomifun-conversation` crate, where they dispatch through
+//! `AgentRuntimeHandle` via `ConversationService`.
 
 pub mod agent;
 pub mod state;

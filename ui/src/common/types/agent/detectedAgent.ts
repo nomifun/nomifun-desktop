@@ -13,4 +13,4 @@
  */
 
 /** Execution engine kinds — each uses a different protocol or runtime */
-export type DetectedAgentKind = 'acp' | 'nomi';
+export type DetectedAgentKind = 'nomi';

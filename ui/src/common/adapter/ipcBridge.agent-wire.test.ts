@@ -20,9 +20,16 @@ describe('agent metadata wire ID contract', () => {
     expect(bridgeSource.includes('AgentMetadata legacy field "id" is not accepted')).toBe(true);
     expect(bridgeSource.includes('agent_id: parseAgentId(value.agent_id)')).toBe(true);
     expect(bridgeSource.includes("value.agent_source === 'custom' || value.agent_source === 'extension'")).toBe(false);
-    expect(bridgeSource.includes('/api/agents/custom/${p.agent_id}')).toBe(true);
-    expect(bridgeSource.includes('/api/agents/${p.agent_id}/enabled')).toBe(true);
-    expect(bridgeSource.includes('/api/agents/custom/${p.id}')).toBe(false);
-    expect(bridgeSource.includes('/api/agents/${p.id}/enabled')).toBe(false);
+    // Only three `/api/agents*` routes survived the engine collapse: the list,
+    // the availability refresh, and the model-provider probe. The custom-agent
+    // CRUD, the per-row enabled toggle and the engine health-check went with
+    // the engines that owned them, so the bridge must ship no client for them —
+    // a surviving client would only ever produce a 404.
+    expect(bridgeSource.includes('/api/agents/custom/')).toBe(false);
+    expect(bridgeSource.includes('/api/agents/health-check')).toBe(false);
+    expect(bridgeSource.includes('/enabled')).toBe(false);
+    for (const survivor of ['/api/agents', '/api/agents/refresh', '/api/agents/provider-health-check']) {
+      expect(bridgeSource.includes(`'${survivor}'`)).toBe(true);
+    }
   });
 });

@@ -16,8 +16,8 @@ const ChatSlider: React.FC<{
 }> = ({ conversation, extraTabs }) => {
   const [messageApi, messageContext] = useArcoMessage({ maxCount: 1 });
 
-  // All conversation types ('acp' | 'nomi')
-  // render the same workspace rail; eventPrefix is always the conversation type.
+  // Every conversation renders the same workspace rail; eventPrefix is
+  // always the conversation type.
   if (!conversation?.extra?.workspace) {
     return <div></div>;
   }

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use nomifun_ai_agent::{AcpPermissionEventData, AcpPermissionOptionKind, AcpToolCallKind, AgentStreamEvent, TurnStopReason};
+use nomifun_ai_agent::{AgentStreamEvent, TurnStopReason};
 use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
 use nomifun_api_types::{
     ConfirmRequest, ConversationRuntimeStateKind, ConversationRuntimeSummary, IdmmTargetKind,
@@ -98,92 +98,22 @@ pub fn map_agent_event(ev: &AgentStreamEvent) -> Option<SessionSignal> {
         } else {
             SessionSignal::Done
         }),
-        AgentStreamEvent::Permission(v) => Some(SessionSignal::Decision(permission_decision_from_value(v))),
-        AgentStreamEvent::AcpPermission(d) => Some(SessionSignal::Decision(permission_decision_from_acp(d))),
+        AgentStreamEvent::Permission(d) => Some(SessionSignal::Decision(
+            permission_decision_from_confirmation(d.confirmation()),
+        )),
         // All other events are activity → reset idle.
         _ => Some(SessionSignal::Working),
     }
 }
 
-fn permission_text(v: &serde_json::Value) -> String {
-    v.get("message")
-        .or_else(|| v.get("title"))
-        .and_then(|m| m.as_str())
-        .unwrap_or("agent requested a permission decision")
-        .to_string()
-}
-
-/// An ACP tool kind is safe to auto-approve without a model when it is
-/// read-only / non-mutating. Edit/Execute must escalate to the sidecar (model
-/// judges with the tool details) or a human — never blanket auto-approve.
-fn acp_tool_is_safe(kind: Option<AcpToolCallKind>) -> bool {
-    !matches!(kind, Some(AcpToolCallKind::Edit) | Some(AcpToolCallKind::Execute))
-}
-
 /// A `Confirmation.command_type` ("read"/"edit"/"execute") is auto-safe when
-/// read-only (or unknown). Mirrors `acp_tool_is_safe` for the nomi/openclaw path.
+/// read-only (or unknown).
 fn command_type_is_safe(command_type: Option<&str>) -> bool {
     !matches!(command_type, Some("edit") | Some("execute"))
 }
 
-/// Build a permission decision from a raw `Permission(Value)` payload (a
-/// serialized `Confirmation`). Falls back to a NON-confirmable text decision
-/// when the payload lacks a usable call_id (rare; the structured `AcpPermission`
-/// path is the live one).
-fn permission_decision_from_value(v: &serde_json::Value) -> DecisionPrompt {
-    match serde_json::from_value::<Confirmation>(v.clone()) {
-        Ok(conf) if !conf.call_id.is_empty() => permission_decision_from_confirmation(&conf),
-        _ => DecisionPrompt {
-            text: permission_text(v),
-            options: vec![],
-            recommended: None,
-            source: DecisionSource::Permission,
-            kind: DecisionKind::Options,
-            permission: None,
-        },
-    }
-}
-
-/// Build a structured permission decision from an ACP permission event. The
-/// `Request` variant preserves per-option `kind`, so the conservatively-safe
-/// "allow once" option is identified precisely.
-fn permission_decision_from_acp(d: &AcpPermissionEventData) -> DecisionPrompt {
-    match d {
-        AcpPermissionEventData::Request(req) => {
-            let safe_tool = acp_tool_is_safe(req.tool_call.kind);
-            let options: Vec<(String, String)> =
-                req.options.iter().map(|o| (o.name.clone(), o.option_id.clone())).collect();
-            let safe_value = if safe_tool {
-                req.options
-                    .iter()
-                    .find(|o| matches!(o.kind, AcpPermissionOptionKind::AllowOnce))
-                    .map(|o| o.option_id.clone())
-            } else {
-                None
-            };
-            DecisionPrompt {
-                text: req
-                    .tool_call
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| "agent requested a tool permission".to_string()),
-                options: req.options.iter().map(|o| o.name.clone()).collect(),
-                recommended: None,
-                source: DecisionSource::Permission,
-                kind: DecisionKind::Options,
-                permission: Some(PermissionConfirm {
-                    call_id: req.tool_call.tool_call_id.clone(),
-                    options,
-                    safe_value,
-                }),
-            }
-        }
-        AcpPermissionEventData::Confirmation(conf) => permission_decision_from_confirmation(conf),
-    }
-}
-
 /// Build a structured permission decision from a `Confirmation` (nomi/openclaw
-/// path + the ACP `Confirmation` variant). The safe "proceed once" option is
+/// path). The safe "proceed once" option is
 /// matched by its submit-value token (kind isn't carried on a `Confirmation`).
 fn permission_decision_from_confirmation(conf: &Confirmation) -> DecisionPrompt {
     let safe_tool = command_type_is_safe(conf.command_type.as_deref());
@@ -275,7 +205,7 @@ fn conversation_is_routed(extra: &str, channel_chat_id: Option<&str>) -> bool {
 /// A user cancel stands the supervisor down. Every other clean `Finish` is
 /// absorbing: assistant prose, option-looking text, and open questions are all
 /// terminal output and cannot create a new `Decision` after the turn completed.
-/// Only live structured events (for example `AcpPermission`) may carry decision
+/// Only live structured events (for example `Permission`) may carry decision
 /// authority.
 fn finish_signal(stop_reason: Option<TurnStopReason>, cancelled_since_work: bool) -> SessionSignal {
     if matches!(stop_reason, Some(TurnStopReason::Cancelled)) || cancelled_since_work {
@@ -287,15 +217,15 @@ fn finish_signal(stop_reason: Option<TurnStopReason>, cancelled_since_work: bool
 /// On-arm recovery of a pending tool-permission CONFIRMATION (the agent is
 /// BLOCKED awaiting approval right now).
 ///
-/// `observe()` subscribes only to FUTURE events, so an `AcpPermission`/
-/// `Permission` the agent emitted BEFORE the watch armed is invisible to the
+/// `observe()` subscribes only to FUTURE events, so a `Permission` event the
+/// agent emitted BEFORE the watch armed is invisible to the
 /// live lane. Persisted assistant text is deliberately not replayed; this live
 /// runtime list is the sole on-arm recovery lane.
 ///
 /// Recover it from the live runtime's pending-confirmation list directly — the same
 /// `get_confirmations()` source `ConversationService::confirm`/`list_confirmations`
 /// read — and map the first to a `Decision` exactly as [`map_agent_event`] maps a
-/// live `AcpPermission`. Queried via the runtime registry (mirroring `observe()`'s
+/// live `Permission`. Queried via the runtime registry (mirroring `observe()`'s
 /// own `get_runtime`), NOT via `conversation_service`, so on-arm READ detection
 /// never couples to the row-owner check. Returns `None` when there is no live
 /// runtime or no pending confirmation. Pure given the runtime registry; the mapping is
@@ -1166,7 +1096,9 @@ mod tests {
 
     #[test]
     fn map_agent_event_permission_is_decision() {
-        let ev = AgentStreamEvent::Permission(serde_json::json!({"message": "allow write?"}));
+        let mut conf = confirmation("read");
+        conf.title = Some("allow write?".into());
+        let ev = AgentStreamEvent::Permission(conf.into());
         match map_agent_event(&ev) {
             Some(SessionSignal::Decision(d)) => {
                 assert_eq!(d.source, DecisionSource::Permission);
@@ -1346,11 +1278,9 @@ mod tests {
 
     #[test]
     fn map_agent_event_structured_permission_remains_decision() {
-        let event = AgentStreamEvent::Permission(serde_json::json!({
-            "id": "call-1",
-            "message": "Allow file write?",
-            "options": [{"id": "allow", "label": "Allow"}]
-        }));
+        let mut conf = confirmation("edit");
+        conf.title = Some("Allow file write?".into());
+        let event = AgentStreamEvent::Permission(conf.into());
         assert!(
             matches!(map_agent_event(&event), Some(SessionSignal::Decision(_))),
             "live structured permission events must retain decision authority"

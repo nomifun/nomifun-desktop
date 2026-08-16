@@ -19,17 +19,10 @@ const RETIRED_TEST_ONLY_FILES = [
   'crates/agent/nomi-tools/src/pty.rs',
   'crates/agent/nomi-tools/src/persistent_shell.rs',
 ];
-// Existing CLI and user-terminal runtimes are outside the Wave A Agent
-// command paths. Pin the exact reviewed primitive counts until their own
-// migration wave so any added or changed ownership path fails closed.
+// The user-terminal runtime is outside the Wave A Agent command paths. Pin its
+// exact reviewed primitive counts until its own migration wave so any added or
+// changed ownership path fails closed.
 const REVIEWED_EXTERNAL_OWNERSHIP = new Map([
-  [
-    'crates/backend/nomifun-ai-agent/src/capability/cli_process/stderr_monitor.rs',
-    new Map([
-      ['unix-group-owner', 1],
-      ['windows-tree-kill-owner', 1],
-    ]),
-  ],
   [
     'crates/backend/nomifun-terminal/src/pty.rs',
     new Map([
@@ -984,39 +977,35 @@ function selfTest() {
   );
   assertNoViolation(
     base.concat({
-      path:
-        'crates/backend/nomifun-ai-agent/src/capability/cli_process/stderr_monitor.rs',
+      path: 'crates/backend/nomifun-terminal/src/pty.rs',
       source:
-        'fn cleanup(pgid: i32) { unsafe { libc::kill(-pgid, 9); } std::process::Command::new("taskkill").arg("/T"); }\n',
+        'fn open() { native_pty_system(); }\nfn cleanup(pgid: i32) { unsafe { libc::kill(-pgid, 9); } }\n',
     }),
     'reviewed external ownership signatures were not accepted',
   );
   assertViolation(
     base.concat({
-      path:
-        'crates/backend/nomifun-ai-agent/src/capability/cli_process/stderr_monitor.rs',
+      path: 'crates/backend/nomifun-terminal/src/pty.rs',
       source:
-        'fn cleanup(pgid: i32) { unsafe { libc::kill(-pgid, 9); libc::kill(-pgid, 9); } std::process::Command::new("taskkill").arg("/T"); }\n',
+        'fn open() { native_pty_system(); }\nfn cleanup(pgid: i32) { unsafe { libc::kill(-pgid, 9); libc::kill(-pgid, 9); } }\n',
     }),
     'unix-group-owner',
     'reviewed external ownership count changed without failing closed',
   );
   assertViolation(
     base.concat({
-      path:
-        'crates/backend/nomifun-ai-agent/src/capability/cli_process/stderr_monitor.rs',
+      path: 'crates/backend/nomifun-terminal/src/pty.rs',
       source:
-        'fn cleanup(pgid: i32) { unsafe { libc::kill(-pgid, 9); } std::process::Command::new("taskkill").arg("/T"); command.hand_off(); }\n',
+        'fn open() { native_pty_system(); }\nfn cleanup(pgid: i32) { unsafe { libc::kill(-pgid, 9); } command.hand_off(); }\n',
     }),
     'hand-off-allowlist',
     'reviewed ownership exception suppressed another boundary rule',
   );
   assertViolation(
     base.concat({
-      path:
-        'crates/backend/nomifun-ai-agent/src/capability/cli_process/new_owner.rs',
+      path: 'crates/backend/nomifun-terminal/src/new_owner.rs',
       source:
-        'fn cleanup(pgid: i32) { unsafe { libc::kill(-pgid, 9); } }\n',
+        'fn open() { native_pty_system(); }\nfn cleanup(pgid: i32) { unsafe { libc::kill(-pgid, 9); } }\n',
     }),
     'unix-group-owner',
     'reviewed external runtime exception widened beyond its exact file',

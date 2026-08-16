@@ -5,7 +5,6 @@
 //! [`resolve_all_contributions`] coordinates resolution across all
 //! enabled extensions.
 
-pub mod acp_adapter;
 pub mod agent;
 pub mod preset;
 pub mod channel_plugin;
@@ -61,7 +60,7 @@ pub(super) fn extension_source_key(
 /// Resolve all contributions from a single extension.
 ///
 /// Failures in individual contribution types are logged and skipped —
-/// one broken theme does not block ACP adapter resolution.
+/// one broken theme does not block MCP server resolution.
 pub fn resolve_extension_contributions(ext: &LoadedExtension) -> ResolvedContributions {
     let ext_name = &ext.manifest.name;
     let ext_dir = Path::new(&ext.directory);
@@ -72,7 +71,6 @@ pub fn resolve_extension_contributions(ext: &LoadedExtension) -> ResolvedContrib
     };
 
     ResolvedContributions {
-        acp_adapters: acp_adapter::resolve_acp_adapters(&contributes.acp_adapters, ext_name, ext_dir),
         mcp_servers: mcp_server::resolve_mcp_servers(&contributes.mcp_servers, ext_name),
         presets: preset::resolve_presets(&contributes.presets, ext_name, ext_dir),
         agents: agent::resolve_agents(&contributes.agents, ext_name, ext_dir),
@@ -101,7 +99,7 @@ pub fn resolve_all_contributions(extensions: &[LoadedExtension]) -> ResolvedCont
         }
 
         let resolved = resolve_extension_contributions(ext);
-        merge_contributions(&mut merged, resolved, &ext.manifest.name);
+        merge_contributions(&mut merged, resolved);
     }
 
     merged
@@ -112,16 +110,7 @@ pub fn resolve_all_contributions(extensions: &[LoadedExtension]) -> ResolvedCont
 }
 
 /// Merge `source` contributions into `target`.
-fn merge_contributions(target: &mut ResolvedContributions, source: ResolvedContributions, extension_name: &str) {
-    if !source.acp_adapters.is_empty() {
-        tracing::debug!(
-            extension = extension_name,
-            count = source.acp_adapters.len(),
-            "Merged ACP adapters"
-        );
-    }
-
-    target.acp_adapters.extend(source.acp_adapters);
+fn merge_contributions(target: &mut ResolvedContributions, source: ResolvedContributions) {
     target.mcp_servers.extend(source.mcp_servers);
     target.presets.extend(source.presets);
     target.agents.extend(source.agents);
@@ -206,7 +195,6 @@ mod tests {
     fn test_resolve_extension_no_contributes() {
         let ext = make_extension("empty-ext", true, None);
         let result = resolve_extension_contributions(&ext);
-        assert!(result.acp_adapters.is_empty());
         assert!(result.mcp_servers.is_empty());
         assert!(result.presets.is_empty());
     }
@@ -311,7 +299,7 @@ mod tests {
     #[test]
     fn test_resolve_all_empty_extensions() {
         let result = resolve_all_contributions(&[]);
-        assert!(result.acp_adapters.is_empty());
+        assert!(result.mcp_servers.is_empty());
         assert!(result.i18n.is_empty());
     }
 

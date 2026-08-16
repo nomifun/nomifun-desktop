@@ -109,10 +109,10 @@ describe('conversation execution canvas integration', () => {
     expect(hookSource.includes('getConversationOrNull(conversationId)')).toBe(true);
     expect(chatSource.includes('isRetainedAttemptTranscript')).toBe(true);
     expect(chatSource.includes('<ReadOnlyConversationView')).toBe(true);
-    // One hideSendBox / readOnly prop per projected platform arm
-    // (acp / nomi).
-    expect(readOnlySource.match(/hideSendBox/g)?.length).toBeGreaterThanOrEqual(2);
-    expect(readOnlySource.match(/readOnly/g)?.length).toBeGreaterThanOrEqual(2);
+    // One hideSendBox / readOnly prop per projected platform arm. Only the nomi
+    // arm remains, so each prop appears exactly once.
+    expect(readOnlySource.match(/hideSendBox/g)?.length).toBe(1);
+    expect(readOnlySource.match(/readOnly/g)?.length).toBe(1);
     expect(readOnlySource.includes('ipcBridge.conversation.update')).toBe(false);
   });
 

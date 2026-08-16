@@ -95,7 +95,9 @@ describe('MessageList turn completion disclosure structure', () => {
 
     expect(toolSummaryCase.includes('hasDetail: true')).toBe(true);
     expect(fileSummaryCase.includes('hasDetail: item.diffs.length > 1')).toBe(true);
-    expect(permissionCase.match(/hasDetail: true/g) ?? []).toHaveLength(2);
+    // One permission carrier remains, so the case block declares its detail
+    // affordance once. The retired second wire shape is gone.
+    expect(permissionCase.match(/hasDetail: true/g) ?? []).toHaveLength(1);
   });
 
   test('routes context compaction tips through process receipts instead of assistant text', () => {

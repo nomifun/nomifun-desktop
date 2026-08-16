@@ -205,7 +205,7 @@ impl AgentRuntimeState {
     /// downstream consumers (StreamRelay, AutoWork, IDMM) can tell a clean
     /// `EndTurn` apart from a refusal / truncation / user cancel. Idempotent
     /// in the Finished absorbing state (no-op) — which also means a LATE
-    /// terminal event (e.g. the ACP protocol's delayed `Finish(Cancelled)`
+    /// terminal event (e.g. a delayed `Finish(Cancelled)` arriving
     /// after `cancel()` already finished the turn) is absorbed instead of
     /// leaking into the next turn's subscription.
     pub fn emit_finish_with_reason(&self, session_id: Option<String>, stop_reason: Option<TurnStopReason>) {
@@ -384,8 +384,8 @@ mod tests {
             other => panic!("expected Finish, got {other:?}"),
         }
 
-        // Absorbing: a late terminal event for the same turn (e.g. the ACP
-        // protocol's delayed Finish after cancel) must NOT broadcast — it
+        // Absorbing: a late terminal event for the same turn (e.g. a runtime's
+        // delayed Finish arriving after cancel) must NOT broadcast — it
         // would leak into the next turn's subscription.
         rt.emit_finish_with_reason(None, Some(TurnStopReason::EndTurn));
         let res = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;

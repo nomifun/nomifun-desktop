@@ -4,7 +4,7 @@ use nomifun_ai_agent::AgentRuntimeRegistry;
 use nomifun_api_types::{
     CreateConversationRequest, ListConversationsQuery, UpdateConversationRequest, WebSocketMessage,
 };
-use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationSource, ConversationStatus, TimestampMs};
+use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationSource, ConversationStatus};
 use nomifun_conversation::ConversationService;
 use nomifun_conversation::skill_resolver::SkillResolver;
 use nomifun_db::{
@@ -175,8 +175,6 @@ async fn setup_with_workspace_root(
     let broadcaster = Arc::new(TestBroadcaster::new());
     let agent_metadata_repo: Arc<dyn nomifun_db::IAgentMetadataRepository> =
         Arc::new(nomifun_db::SqliteAgentMetadataRepository::new(db.pool().clone()));
-    let acp_session_repo: Arc<dyn nomifun_db::IAcpSessionRepository> =
-        Arc::new(nomifun_db::SqliteAcpSessionRepository::new(db.pool().clone()));
     let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(NoopAgentRuntimeRegistry);
     let svc = ConversationService::new(
         Arc::<str>::from(USER_ID),
@@ -186,14 +184,12 @@ async fn setup_with_workspace_root(
         runtime_registry.clone(),
         repo,
         agent_metadata_repo,
-        acp_session_repo,
         Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
     );
     (svc, broadcaster, runtime_registry)
 }
 
 const USER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
-const TEST_ACP_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000101";
 
 async fn init_database_memory() -> Result<nomifun_db::Database, nomifun_db::DbError> {
     nomifun_db::init_database_memory_with_owner(
@@ -204,9 +200,9 @@ async fn init_database_memory() -> Result<nomifun_db::Database, nomifun_db::DbEr
 
 fn make_create_req() -> CreateConversationRequest {
     serde_json::from_value(json!({
-        "type": "acp",
+        "type": "nomi",
+        "model": { "provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "m1" },
         "extra": {
-            "agent_id": TEST_ACP_AGENT_ID,
             "workspace": "/home/user/project"
         }
     }))
@@ -215,8 +211,9 @@ fn make_create_req() -> CreateConversationRequest {
 
 fn make_auto_workspace_create_req() -> CreateConversationRequest {
     serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID }
+        "type": "nomi",
+        "model": { "provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "m1" },
+        "extra": {}
     }))
     .unwrap()
 }
@@ -230,7 +227,7 @@ async fn t1_1_create_with_defaults() {
     let resp = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     assert!(nomifun_common::ConversationId::parse(resp.conversation_id.clone()).is_ok());
-    assert_eq!(resp.r#type, AgentType::Acp);
+    assert_eq!(resp.r#type, AgentType::Nomi);
     assert_eq!(resp.status, ConversationStatus::Pending);
     assert_eq!(resp.source, Some(ConversationSource::Nomifun));
     assert!(!resp.pinned);
@@ -239,8 +236,10 @@ async fn t1_1_create_with_defaults() {
     assert!(resp.created_at > 0);
     assert_eq!(resp.created_at, resp.modified_at);
 
-    // Non-nomi: top-level model is None.
-    assert!(resp.model.is_none(), "ACP response should not carry top-level model");
+    // The nomi fixture carries a top-level model, which is nomi's only model
+    // source and is echoed back on the response.
+    let model = resp.model.as_ref().expect("nomi response carries top-level model");
+    assert_eq!(model.model, "m1");
 
     // WebSocket event
     let events = broadcaster.take_events();
@@ -319,10 +318,7 @@ async fn delete_removes_managed_auto_workspace() {
 async fn t1_2_create_each_agent_type() {
     let (svc, _, _runtime_registry) = setup().await;
 
-    let types = vec![
-        ("acp", AgentType::Acp),
-        ("nomi", AgentType::Nomi),
-    ];
+    let types = vec![("nomi", AgentType::Nomi)];
 
     for (type_str, expected_type) in types {
         let body = if type_str == "nomi" {
@@ -330,12 +326,6 @@ async fn t1_2_create_each_agent_type() {
                 "type": type_str,
                 "model": { "provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "m1" },
                 "extra": {}
-            })
-        } else if type_str == "acp" {
-            // ACP identity is explicit: extra.agent_id is required at create.
-            json!({
-                "type": type_str,
-                "extra": { "agent_id": TEST_ACP_AGENT_ID }
             })
         } else {
             json!({
@@ -359,11 +349,12 @@ async fn t1_3_create_with_optional_fields() {
     let (svc, _, _runtime_registry) = setup().await;
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
+        "type": "nomi",
         "name": "Custom Name",
         "source": "telegram",
         "channel_chat_id": "user:123",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": "/path" }
+        "model": { "provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "m1" },
+        "extra": { "workspace": "/path" }
     }))
     .unwrap();
     let resp = svc.create(USER_ID, req).await.unwrap();
@@ -456,9 +447,10 @@ async fn t2_4_source_filter() {
     svc.create(USER_ID, make_create_req()).await.unwrap();
 
     let telegram_req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
+        "type": "nomi",
         "source": "telegram",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID }
+        "model": { "provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "m1" },
+        "extra": {}
     }))
     .unwrap();
     svc.create(USER_ID, telegram_req).await.unwrap();
@@ -567,8 +559,9 @@ async fn t4_4_extra_merge_preserves_existing_keys() {
     let (svc, _, runtime_registry) = setup().await;
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": "/old", "contextFileName": "ctx.md" }
+        "type": "nomi",
+        "model": { "provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "m1" },
+        "extra": { "workspace": "/old", "contextFileName": "ctx.md" }
     }))
     .unwrap();
     let conv = svc.create(USER_ID, req).await.unwrap();
@@ -702,9 +695,10 @@ async fn t12_1_long_name() {
     let long_name = "x".repeat(1000);
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
+        "type": "nomi",
         "name": long_name,
-        "extra": { "agent_id": TEST_ACP_AGENT_ID }
+        "model": { "provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "m1" },
+        "extra": {}
     }))
     .unwrap();
     let resp = svc.create(USER_ID, req).await.unwrap();
@@ -716,7 +710,6 @@ async fn t12_2_large_extra_json() {
     let (svc, _, _runtime_registry) = setup().await;
 
     let large_extra = json!({
-        "agent_id": TEST_ACP_AGENT_ID,
         "workspace": "/project",
         "nested": {
             "deep": {
@@ -728,7 +721,8 @@ async fn t12_2_large_extra_json() {
     });
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
+        "type": "nomi",
+        "model": { "provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "m1" },
         "extra": large_extra
     }))
     .unwrap();
@@ -802,41 +796,6 @@ async fn full_lifecycle_create_get_update_delete() {
 // ── Type-aware model rules ─────────────────────────────────────────
 
 #[tokio::test]
-async fn create_rejects_top_level_model_for_acp() {
-    let (svc, _, _runtime_registry) = setup().await;
-
-    let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "model": { "provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "claude-sonnet-4-20250514" },
-        "extra": {}
-    }))
-    .unwrap();
-
-    let err = svc.create(USER_ID, req).await.unwrap_err();
-    match err {
-        AppError::BadRequest(msg) => {
-            assert!(msg.contains("model"), "error message should mention model: {msg}");
-            assert!(msg.contains("extra"), "error message should mention extra: {msg}");
-        }
-        other => panic!("expected BadRequest, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn create_rejects_top_level_model_for_remote() {
-    let (svc, _, _runtime_registry) = setup().await;
-
-    let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "remote",
-        "model": { "provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "m1" },
-        "extra": {}
-    }))
-    .unwrap();
-
-    assert!(matches!(svc.create(USER_ID, req).await, Err(AppError::BadRequest(_))));
-}
-
-#[tokio::test]
 async fn create_accepts_top_level_model_for_nomi() {
     let (svc, _, _runtime_registry) = setup().await;
 
@@ -873,23 +832,6 @@ async fn create_nomi_rejects_extra_model_field() {
 }
 
 #[tokio::test]
-async fn update_rejects_top_level_model_for_acp() {
-    let (svc, _, runtime_registry) = setup().await;
-    let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
-
-    let req: UpdateConversationRequest = serde_json::from_value(json!({
-        "model": { "provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "claude-sonnet-4-20250514" }
-    }))
-    .unwrap();
-
-    let err = svc.update(USER_ID, &conv.conversation_id.to_string(), req, &runtime_registry).await.unwrap_err();
-    assert!(
-        matches!(err, AppError::BadRequest(_)),
-        "expected BadRequest, got {err:?}"
-    );
-}
-
-#[tokio::test]
 async fn update_accepts_top_level_model_for_nomi() {
     let (svc, _, runtime_registry) = setup().await;
 
@@ -907,25 +849,6 @@ async fn update_accepts_top_level_model_for_nomi() {
     .unwrap();
     let updated = svc.update(USER_ID, &conv.conversation_id.to_string(), req, &runtime_registry).await.unwrap();
     assert_eq!(updated.model.unwrap().model, "gpt-4o-mini");
-}
-
-#[tokio::test]
-async fn update_non_nomi_extra_model_does_not_kill_task() {
-    // Verifies the explicit rule that `extra.model` changes for non-nomi
-    // do NOT trigger runtime_registry.kill. Since our `NoopAgentRuntimeRegistry::kill` is
-    // a no-op we can't assert the negative directly; we assert the update
-    // succeeds and the merged extra carries the new field, and that top-level
-    // model remains None.
-    let (svc, _, runtime_registry) = setup().await;
-    let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
-
-    let req: UpdateConversationRequest = serde_json::from_value(json!({
-        "extra": { "current_model_id": "claude-opus-4" }
-    }))
-    .unwrap();
-    let updated = svc.update(USER_ID, &conv.conversation_id.to_string(), req, &runtime_registry).await.unwrap();
-    assert_eq!(updated.extra["current_model_id"], "claude-opus-4");
-    assert!(updated.model.is_none());
 }
 
 #[tokio::test]
@@ -953,99 +876,4 @@ async fn update_nomi_rejects_extra_model_from_patch() {
     // Top-level model unchanged by the extra-only patch.
     let unchanged = svc.get(USER_ID, &conv.conversation_id).await.unwrap();
     assert_eq!(unchanged.model.unwrap().model, "gpt-4o");
-}
-
-#[tokio::test]
-async fn create_acp_seeds_acp_session_runtime_from_extra() {
-    use nomifun_db::SqliteAcpSessionRepository;
-
-    let db = init_database_memory().await.unwrap();
-    let repo = Arc::new(nomifun_db::SqliteConversationRepository::new(db.pool().clone()));
-    let broadcaster = Arc::new(TestBroadcaster::new());
-    let agent_metadata_repo: Arc<dyn nomifun_db::IAgentMetadataRepository> =
-        Arc::new(nomifun_db::SqliteAgentMetadataRepository::new(db.pool().clone()));
-    let acp_session_repo: Arc<dyn nomifun_db::IAcpSessionRepository> =
-        Arc::new(SqliteAcpSessionRepository::new(db.pool().clone()));
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(NoopAgentRuntimeRegistry);
-    let svc = nomifun_conversation::ConversationService::new(
-        Arc::<str>::from(USER_ID),
-        std::env::temp_dir(),
-        broadcaster.clone(),
-        Arc::new(EmptySkillResolver),
-        runtime_registry,
-        repo,
-        agent_metadata_repo,
-        acp_session_repo.clone(),
-        Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
-    );
-
-    let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": {
-            "agent_id": TEST_ACP_AGENT_ID,
-            "backend": "claude",
-            "current_mode_id": "bypassPermissions",
-            "current_model_id": "claude-opus-4"
-        }
-    }))
-    .unwrap();
-    let conv = svc.create(USER_ID, req).await.unwrap();
-
-    let runtime = acp_session_repo
-        .load_runtime_state(&conv.conversation_id)
-        .await
-        .unwrap()
-        .expect("acp_session runtime state should exist after create");
-    assert_eq!(
-        runtime.current_mode_id.as_deref(),
-        Some("bypassPermissions"),
-        "extra.current_mode_id must be seeded into acp_session on create"
-    );
-    assert_eq!(
-        runtime.current_model_id.as_deref(),
-        Some("claude-opus-4"),
-        "extra.current_model_id must be seeded into acp_session on create"
-    );
-}
-
-#[tokio::test]
-async fn create_acp_skips_seed_when_extra_has_empty_runtime_fields() {
-    use nomifun_db::SqliteAcpSessionRepository;
-
-    let db = init_database_memory().await.unwrap();
-    let repo = Arc::new(nomifun_db::SqliteConversationRepository::new(db.pool().clone()));
-    let broadcaster = Arc::new(TestBroadcaster::new());
-    let agent_metadata_repo: Arc<dyn nomifun_db::IAgentMetadataRepository> =
-        Arc::new(nomifun_db::SqliteAgentMetadataRepository::new(db.pool().clone()));
-    let acp_session_repo: Arc<dyn nomifun_db::IAcpSessionRepository> =
-        Arc::new(SqliteAcpSessionRepository::new(db.pool().clone()));
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(NoopAgentRuntimeRegistry);
-    let svc = nomifun_conversation::ConversationService::new(
-        Arc::<str>::from(USER_ID),
-        std::env::temp_dir(),
-        broadcaster.clone(),
-        Arc::new(EmptySkillResolver),
-        runtime_registry,
-        repo,
-        agent_metadata_repo,
-        acp_session_repo.clone(),
-        Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
-    );
-
-    // Both fields present but empty — treated as absent, no save_runtime_state call.
-    let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "backend": "claude", "current_mode_id": "", "current_model_id": "" }
-    }))
-    .unwrap();
-    let conv = svc.create(USER_ID, req).await.unwrap();
-
-    let runtime = acp_session_repo.load_runtime_state(&conv.conversation_id).await.unwrap();
-    // Either `None` (no runtime key yet) or Some(default) — both mean "nothing seeded".
-    assert!(
-        runtime
-            .as_ref()
-            .is_none_or(|r| r.current_mode_id.is_none() && r.current_model_id.is_none()),
-        "empty runtime fields should not produce a seed: got {runtime:?}"
-    );
 }

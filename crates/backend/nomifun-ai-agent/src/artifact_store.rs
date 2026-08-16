@@ -233,7 +233,7 @@ impl ArtifactStore {
         self.persist_validated_batch(validated)
     }
 
-    /// Persist one ACP/MCP inline artifact after kind-specific validation.
+    /// Persist one MCP inline artifact after kind-specific validation.
     pub fn persist_inline(
         &self,
         kind: ArtifactKind,

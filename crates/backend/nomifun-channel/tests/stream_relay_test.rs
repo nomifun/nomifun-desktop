@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use nomifun_ai_agent::AgentStreamEvent;
 use nomifun_ai_agent::protocol::events::{
-    AcpPermissionEventData, AcpPermissionOptionData, AcpPermissionOptionKind, AcpPermissionRequestData,
-    AcpPermissionToolCall, ErrorEventData, FinishEventData, TextEventData, ToolCallEventData, ToolCallStatus,
+    ErrorEventData, FinishEventData, TextEventData, ToolCallEventData, ToolCallStatus,
 };
 use nomifun_channel::pending_decision::PendingDecisionStore;
 use nomifun_channel::stream_relay::{ChannelSender, ChannelStreamRelay, MessageRecorder, RelayConfig};
@@ -444,37 +443,32 @@ async fn lark_messages_have_no_parse_mode() {
 
 // ── Decision relay (Bug 1, Case A) ───────────────────────────────────
 
-/// Builds an ACP permission-request event with two options.
-fn acp_decision_event(call_id: &str, title: &str) -> AgentStreamEvent {
-    AgentStreamEvent::AcpPermission(AcpPermissionEventData::Request(AcpPermissionRequestData {
-        session_id: "s1".into(),
-        tool_call: AcpPermissionToolCall {
-            tool_call_id: call_id.into(),
-            status: None,
+/// Builds a permission event carrying a two-option `Confirmation`.
+fn decision_event(call_id: &str, title: &str) -> AgentStreamEvent {
+    AgentStreamEvent::Permission(
+        nomifun_common::Confirmation {
+            id: format!("conf-{call_id}"),
+            call_id: call_id.into(),
             title: Some(title.into()),
-            kind: None,
-            raw_input: None,
-            raw_output: None,
-            content: None,
-            locations: None,
-            meta: None,
-        },
-        options: vec![
-            AcpPermissionOptionData {
-                option_id: "allow".into(),
-                name: "Allow once".into(),
-                kind: AcpPermissionOptionKind::AllowOnce,
-                meta: None,
-            },
-            AcpPermissionOptionData {
-                option_id: "reject".into(),
-                name: "Reject".into(),
-                kind: AcpPermissionOptionKind::RejectOnce,
-                meta: None,
-            },
-        ],
-        meta: None,
-    }))
+            action: None,
+            description: String::new(),
+            command_type: None,
+            options: vec![
+                nomifun_common::ConfirmationOption {
+                    label: "Allow once".into(),
+                    value: serde_json::json!("allow"),
+                    params: None,
+                },
+                nomifun_common::ConfirmationOption {
+                    label: "Reject".into(),
+                    value: serde_json::json!("reject"),
+                    params: None,
+                },
+            ],
+            screenshot: None,
+        }
+        .into(),
+    )
 }
 
 /// A relayed decision is recorded in the shared store and forwarded as a
@@ -495,7 +489,7 @@ async fn relay_forwards_decision_and_records_pending() {
     let relay = relay_with_store(config, recorder.clone(), Arc::clone(&store));
     let rx = event_tx.subscribe();
 
-    event_tx.send(acp_decision_event("call-42", "Run rm -rf?")).unwrap();
+    event_tx.send(decision_event("call-42", "Run rm -rf?")).unwrap();
     event_tx
         .send(AgentStreamEvent::Finish(FinishEventData {
             session_id: None,
@@ -542,7 +536,7 @@ async fn weixin_relay_forwards_decision() {
     let relay = relay_with_store(config, recorder.clone(), Arc::clone(&store));
     let rx = event_tx.subscribe();
 
-    event_tx.send(acp_decision_event("call-wx", "Proceed?")).unwrap();
+    event_tx.send(decision_event("call-wx", "Proceed?")).unwrap();
     event_tx
         .send(AgentStreamEvent::Finish(FinishEventData {
             session_id: None,
@@ -711,7 +705,7 @@ async fn telegram_decision_with_thinking_only_leaves_card_intact() {
     event_tx
         .send(AgentStreamEvent::Text(TextEventData { content: "<think>hmm</think>".into() }))
         .unwrap();
-    event_tx.send(acp_decision_event("call-1", "Proceed?")).unwrap();
+    event_tx.send(decision_event("call-1", "Proceed?")).unwrap();
     event_tx
         .send(AgentStreamEvent::Finish(FinishEventData { session_id: None, stop_reason: None }))
         .unwrap();

@@ -15,29 +15,15 @@ const MISSING_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345679998";
 
 // ── Helpers ─────────────────────────────────────────────────────
 
-fn create_conv_body(name: &str, agent_type: &str) -> serde_json::Value {
-    let extra = if agent_type == "acp" {
-        common::acp_extra_with_workspace("/project")
-    } else {
-        json!({ "workspace": "/project" })
-    };
-    json!({
-        "type": agent_type,
-        "name": name,
-        "extra": extra
-    })
+fn create_conv_body(name: &str) -> serde_json::Value {
+    create_conv_body_with_workspace(name, "/project")
 }
 
-fn create_conv_body_with_workspace(name: &str, agent_type: &str, workspace: &str) -> serde_json::Value {
-    let extra = if agent_type == "acp" {
-        common::acp_extra_with_workspace(workspace)
-    } else {
-        json!({ "workspace": workspace })
-    };
+fn create_conv_body_with_workspace(name: &str, workspace: &str) -> serde_json::Value {
     json!({
-        "type": agent_type,
+        "type": "nomi",
         "name": name,
-        "extra": extra
+        "extra": common::nomi_extra_with_workspace(workspace)
     })
 }
 
@@ -46,13 +32,12 @@ async fn create_conversation_with_workspace(
     token: &str,
     csrf: &str,
     name: &str,
-    agent_type: &str,
     workspace: &str,
 ) -> String {
     let req = common::json_with_token(
         "POST",
         "/api/conversations",
-        create_conv_body_with_workspace(name, agent_type, workspace),
+        create_conv_body_with_workspace(name, workspace),
         token,
         csrf,
     );
@@ -64,11 +49,11 @@ async fn create_conversation_with_workspace(
         .to_owned()
 }
 
-async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str, name: &str, agent_type: &str) -> String {
+async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str, name: &str) -> String {
     let req = common::json_with_token(
         "POST",
         "/api/conversations",
-        create_conv_body(name, agent_type),
+        create_conv_body(name),
         token,
         csrf,
     );
@@ -121,7 +106,7 @@ async fn workspace_browse_no_active_task() {
     std::fs::write(tmp.path().join("src/lib.rs"), b"// hi").unwrap();
 
     let ws = tmp.path().to_string_lossy().into_owned();
-    let conv_id = create_conversation_with_workspace(&mut app, &token, &csrf, "Test Conv", "acp", &ws).await;
+    let conv_id = create_conversation_with_workspace(&mut app, &token, &csrf, "Test Conv", &ws).await;
 
     let req = get_with_token(&format!("/api/conversations/{conv_id}/workspace?path=/src"), &token);
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -173,7 +158,7 @@ async fn workspace_browse_treats_symlinked_skill_dir_as_directory() {
     std::os::unix::fs::symlink(&builtin, workspace.join(".claude/skills/nomifun-skills")).unwrap();
 
     let ws = workspace.to_string_lossy().into_owned();
-    let conv_id = create_conversation_with_workspace(&mut app, &token, &csrf, "Test Conv", "acp", &ws).await;
+    let conv_id = create_conversation_with_workspace(&mut app, &token, &csrf, "Test Conv", &ws).await;
 
     let req = get_with_token(
         &format!("/api/conversations/{conv_id}/workspace?path=/.claude/skills"),
@@ -327,7 +312,7 @@ async fn side_question_empty_question() {
 async fn side_question_no_active_task() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_owner(&mut app, &services).await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Side Q Test", "acp").await;
+    let conv_id = create_conversation(&mut app, &token, &csrf, "Side Q Test").await;
 
     let req = json_with_token(
         "POST",
@@ -359,7 +344,7 @@ async fn slash_commands_requires_auth() {
 async fn slash_commands_no_active_task() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_owner(&mut app, &services).await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Slash Test", "acp").await;
+    let conv_id = create_conversation(&mut app, &token, &csrf, "Slash Test").await;
 
     let req = get_with_token(&format!("/api/conversations/{conv_id}/slash-commands"), &token);
     let resp = app.oneshot(req).await.unwrap();
@@ -372,7 +357,7 @@ async fn slash_commands_no_active_task() {
 async fn list_confirmations_no_task() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_owner(&mut app, &services).await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Confirm Test", "acp").await;
+    let conv_id = create_conversation(&mut app, &token, &csrf, "Confirm Test").await;
 
     let req = get_with_token(&format!("/api/conversations/{conv_id}/confirmations"), &token);
     let resp = app.oneshot(req).await.unwrap();
@@ -386,7 +371,7 @@ async fn list_confirmations_no_task() {
 async fn confirm_call_no_task() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_owner(&mut app, &services).await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Confirm Test", "acp").await;
+    let conv_id = create_conversation(&mut app, &token, &csrf, "Confirm Test").await;
 
     let req = json_with_token(
         "POST",
@@ -407,7 +392,7 @@ async fn confirm_call_no_task() {
 async fn check_approval_no_task() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_owner(&mut app, &services).await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Approval Test", "acp").await;
+    let conv_id = create_conversation(&mut app, &token, &csrf, "Approval Test").await;
 
     let req = get_with_token(
         &format!("/api/conversations/{conv_id}/approvals/check?action=edit_file"),
@@ -426,7 +411,7 @@ async fn check_approval_no_task() {
 async fn stop_stream_no_task() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_owner(&mut app, &services).await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Stop Test", "acp").await;
+    let conv_id = create_conversation(&mut app, &token, &csrf, "Stop Test").await;
 
     let req = json_with_token(
         "POST",

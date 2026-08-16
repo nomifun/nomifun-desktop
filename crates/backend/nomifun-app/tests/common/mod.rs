@@ -72,18 +72,15 @@ pub async fn seed_openai_chat_model(
     .unwrap();
 }
 
-pub const CLAUDE_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000101";
-pub const GEMINI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000103";
-
-pub fn acp_extra() -> serde_json::Value {
-    serde_json::json!({
-        "agent_id": GEMINI_AGENT_ID,
-    })
+/// `extra` for a nomi conversation that does not pin a workspace. The backend
+/// auto-provisions a managed workspace under the work dir when this is empty.
+pub fn nomi_extra() -> serde_json::Value {
+    serde_json::json!({})
 }
 
-pub fn acp_extra_with_workspace(workspace: impl Into<String>) -> serde_json::Value {
+/// `extra` for a nomi conversation bound to an explicit workspace path.
+pub fn nomi_extra_with_workspace(workspace: impl Into<String>) -> serde_json::Value {
     serde_json::json!({
-        "agent_id": GEMINI_AGENT_ID,
         "workspace": workspace.into(),
     })
 }
@@ -220,7 +217,7 @@ struct NoopMockAgent {
 #[async_trait::async_trait]
 impl AgentRuntimeControl for NoopMockAgent {
     fn agent_type(&self) -> nomifun_common::AgentType {
-        nomifun_common::AgentType::Acp
+        nomifun_common::AgentType::Nomi
     }
     fn conversation_id(&self) -> &str {
         &self.conversation_id

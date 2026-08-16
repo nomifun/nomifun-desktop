@@ -133,7 +133,7 @@ pub(super) async fn build(
     overrides.gateway_mcp_config = None;
 
     // A non-owner runtime is deliberately model-only.  Hiding a few tools is
-    // insufficient because every native shell/ACP process shares the backend's
+    // insufficient because every native shell process shares the backend's
     // OS uid; the single ceiling below is the enforceable boundary.
     if !is_instance_owner {
         apply_model_only_ceiling(&mut overrides);
@@ -373,7 +373,7 @@ pub(super) async fn build(
     // Knowledge bases: append the mounted-bases section (per-base TOC +
     // write-back contract) to the system prompt, so nomi-engine sessions
     // (companion companion threads included) see the same knowledge context the
-    // ACP path gets via its preset_context.
+    // engine assembles into its session context.
     overrides.system_prompt = append_knowledge_context(
         overrides.system_prompt.take(),
         &overrides,
@@ -1038,7 +1038,7 @@ fn output_language_directive() -> &'static str {
 /// delegated to the shared builder
 /// (`nomifun_knowledge::context::build_knowledge_context`,
 /// `PromptSection` format) so nomi-engine sessions (companion companion threads
-/// included) see exactly the same knowledge context the ACP path gets via
+/// included) see exactly the same knowledge context every session gets via
 /// its preset_context — single source of truth, no more structural copies.
 fn should_expose_knowledge_search(
     is_instance_owner: bool,
@@ -1546,10 +1546,9 @@ fn resolved_session_mode(overrides: &NomiBuildExtra) -> String {
         .to_owned()
 }
 
-/// Platform Gateway MCP stdio bridge config for the Nomi engine, mirroring the
-/// ACP assembler's `gateway_mcp_server`. Caller conversation + user ids ride
-/// along for self-protection and data scoping; the companion binding (when present)
-/// rides along for attribution.
+/// Platform Gateway MCP stdio bridge config for the Nomi engine. Caller
+/// conversation + user ids ride along for self-protection and data scoping; the
+/// companion binding (when present) rides along for attribution.
 fn gateway_mcp_to_config(
     cfg: &GatewayMcpConfig,
     overrides: &NomiBuildExtra,
@@ -1880,8 +1879,7 @@ mod tests {
     // ----- output-language directive (follow each current user request) -----
 
     /// Minimal mock settings repo for `read_app_language`: yields a fixed result
-    /// (`Err(())` simulates a DB read failure). Mirrors the McpServerRepo mock in
-    /// factory/acp.rs.
+    /// (`Err(())` simulates a DB read failure).
     struct MockSettingsRepo(Result<Option<nomifun_db::models::SystemSettings>, ()>);
 
     #[async_trait::async_trait]
@@ -2404,7 +2402,7 @@ mod tests {
         assert!(readonly.contains("intro.md — 简介"));
         assert!(readonly.contains("READ-ONLY"));
         // Hit-rate contract: retrieval protocol (once), per-base summary and
-        // when-to-consult guidance — same shared builder as the ACP path.
+        // when-to-consult guidance — the shared context builder.
         assert_eq!(readonly.matches("Retrieval protocol").count(), 1);
         assert!(readonly.contains("Covers deployment flows and runbooks."));
         assert!(readonly.contains("When to consult"));

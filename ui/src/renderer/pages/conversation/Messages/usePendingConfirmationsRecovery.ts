@@ -32,14 +32,13 @@ export function hasPermissionMessageForCallId(list: TMessage[], callId: string):
 
 export function getPermissionMessageCallId(message: TMessage): string | undefined {
   if (message.type === 'permission') return message.content?.call_id;
-  if (message.type === 'acp_permission') return message.content?.tool_call?.tool_call_id;
   return undefined;
 }
 
 export function removePermissionMessage(list: TMessage[], target: { id?: string; call_id?: string }): TMessage[] {
   return list.filter((message) => {
-    if (message.type !== 'permission' && message.type !== 'acp_permission') return true;
-    if (target.id && message.type === 'permission' && message.content.id === target.id) return false;
+    if (message.type !== 'permission') return true;
+    if (target.id && message.content.id === target.id) return false;
     if (target.call_id && getPermissionMessageCallId(message) === target.call_id) return false;
     return true;
   });
@@ -50,11 +49,7 @@ export function removePermissionMessagesForTurn(
   turnId: MessageId | undefined
 ): TMessage[] {
   if (!turnId) return list;
-  return list.filter(
-    (message) =>
-      (message.type !== 'permission' && message.type !== 'acp_permission') ||
-      message.turn_id !== turnId
-  );
+  return list.filter((message) => message.type !== 'permission' || message.turn_id !== turnId);
 }
 
 function errorMessage(error: unknown): string {
@@ -127,7 +122,7 @@ export function usePendingConfirmationsRecovery(conversation_id: ConversationId,
     const offTurnCompleted = ipcBridge.conversation.turnCompleted.on((event) => {
       if (event.conversation_id !== conversation_id) return;
 
-      // ACP permission watchdog expiry removes the durable pending item but has
+      // Permission watchdog expiry removes the durable pending item but has
       // no protocol-level `confirmation.remove` frame. Clear only cards owned
       // by the completed turn so a delayed terminal cannot erase a newer
       // turn's prompt, then re-fetch to retire turnless `confirmation:*`

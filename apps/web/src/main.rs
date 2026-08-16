@@ -205,7 +205,7 @@ fn validate_static_dist_with_build_id(
 }
 
 fn main() -> Result<ExitCode> {
-    // If an ACP agent CLI spawned this binary as an MCP stdio bridge
+    // If a terminal agent CLI spawned this binary as an MCP stdio bridge
     // (`current_exe() mcp-requirement-stdio` etc.), run that helper and exit
     // BEFORE clap parses our own Args (which would reject the subcommand) and
     // before any backend/server init. Every host binary must honor these or the

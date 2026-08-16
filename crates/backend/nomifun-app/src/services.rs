@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nomifun_ai_agent::{
-    AcpSessionSyncService, AcpSkillManager, AgentFactoryDeps, AgentRegistry, AgentRuntimeRegistry,
+    AgentFactoryDeps, AgentRegistry, AgentRuntimeRegistry,
     InMemoryAgentRuntimeRegistry, build_agent_factory, build_agent_model_config_resolver,
 };
 use nomifun_api_types::{GatewayMcpConfig, RequirementMcpConfig};
@@ -19,10 +19,10 @@ use nomifun_conversation::{
     ExecutionConversationBoundary, RepositoryExecutionConversationBoundary,
 };
 use nomifun_db::{
-    Database, IAcpSessionRepository, IAgentMetadataRepository, ICompanionTokenRepository,
+    Database, IAgentMetadataRepository, ICompanionTokenRepository,
     IConversationRepository, IMcpServerRepository, IProviderModelCapabilityRepository,
     IProviderModelRepository, IProviderRepository,
-    IUserRepository, SqliteAcpSessionRepository, SqliteAgentMetadataRepository,
+    IUserRepository, SqliteAgentMetadataRepository,
     SqliteCompanionTokenRepository, SqliteConversationRepository, SqliteMcpServerRepository,
     SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
     SqliteProviderRepository,
@@ -1542,7 +1542,6 @@ pub struct AppServices {
     /// loop is attached during router assembly, where the `ConversationService`
     /// the sessions dispatch through exists.
     pub robot: Option<Arc<crate::robot_wiring::RobotServices>>,
-    pub acp_session_sync: Arc<AcpSessionSyncService>,
     /// Raw JWT secret string, used only for authentication/session signing.
     pub jwt_secret_raw: String,
     /// Persistent AES-256-GCM key for encrypted app data.
@@ -2350,9 +2349,6 @@ impl AppServices {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to hydrate agent registry: {e}"))?;
 
-        let acp_session_repo: Arc<dyn IAcpSessionRepository> =
-            Arc::new(SqliteAcpSessionRepository::new(database.pool().clone()));
-        let acp_agent_service = AcpSessionSyncService::new(acp_session_repo.clone());
 
         let conversation_repo: Arc<dyn IConversationRepository> =
             Arc::new(SqliteConversationRepository::new(database.pool().clone()));
@@ -2486,34 +2482,6 @@ impl AppServices {
             .install_browser_platform(browser_platform_shutdown.clone())
             .await;
 
-        // Reliable-launch (`open`) MCP config — Windows only. macOS/Linux already
-        // launch URLs/apps reliably (`open`/`xdg-open`), so the agent needs no
-        // nudging there; on Windows it stops the agent from using the fragile
-        // `cmd /c start` (which mis-parses URLs as window titles and pops
-        // "Windows cannot find '\\'" dialogs). Stateless — no server to start,
-        // just the binary path so the assembler can spawn `mcp-open-stdio`.
-        let open_mcp_config =
-            cfg!(target_os = "windows").then(|| nomifun_api_types::OpenMcpConfig {
-                binary_path: backend_binary_path_utf8.clone(),
-            });
-
-        // Computer-use discrete-tool MCP config — every desktop OS (macOS /
-        // Windows / Linux), gated ONLY on the `computer-use` feature (else
-        // `mcp-computer-stdio` is a stub, so we'd inject a bridge the binary
-        // can't serve). Lets codex/ACP sessions drive the desktop (snapshot /
-        // click / type / launch) via `nomicore mcp-computer-stdio`, mirroring the
-        // in-process `ComputerTool` the nomi engine already gets on all platforms
-        // (`nomi-a11y` implements macOS AX / Windows UIA / Linux AT-SPI backends).
-        // Platform reality the bridge surfaces honestly: macOS needs the user to
-        // grant TCC (Accessibility + Screen Recording) or ops error out; Linux
-        // lacks OCR + cross-app window focus and degrades synthetic input on
-        // Wayland. None of that warrants gating the bridge off — the tools simply
-        // report `Unsupported` where the OS can't serve them.
-        let computer_mcp_config =
-            cfg!(feature = "computer-use").then(|| nomifun_api_types::ComputerMcpConfig {
-                binary_path: backend_binary_path_utf8.clone(),
-            });
-
         // Singleton knowledge service: knowledge base registry + workspace
         // mounting. Shared by the `/api/knowledge/*` routes and the
         // conversation service (mount-at-task-start).
@@ -2620,35 +2588,29 @@ impl AppServices {
         };
 
         // Browser-use MCP is a scoped proxy into the process-wide Hub. Start
-        // its issuer only after orphan recovery proved safe. Failure or a
-        // degraded recovery disables ACP browser tools without falling back to
-        // child-owned Chromium.
+        // its issuer only after orphan recovery proved safe. The server is
+        // registered for shutdown; its issuer config has no consumer now that
+        // no engine spawns `mcp-browser-stdio` as a child (the nomi engine
+        // drives the Hub in-process).
         #[cfg(feature = "browser-use")]
-        let (browser_mcp_server, browser_mcp_config) = if browser_orphan_recovery.is_safe() {
+        let browser_mcp_server = if browser_orphan_recovery.is_safe() {
             match crate::browser_mcp_server::BrowserMcpServer::start().await {
                 Ok(server) => {
-                    let server = Arc::new(server);
-                    let config = server.issuer_config(backend_binary_path_utf8.clone());
                     tracing::info!("Browser MCP scoped proxy started");
-                    (Some(server), Some(config))
+                    Some(Arc::new(server))
                 }
                 Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "Browser MCP scoped proxy failed to start; ACP browser tools disabled"
-                    );
-                    (None, None)
+                    tracing::warn!(%error, "Browser MCP scoped proxy failed to start");
+                    None
                 }
             }
         } else {
-            (None, None)
+            None
         };
         #[cfg(feature = "browser-use")]
         browser_platform_shutdown
             .set_browser_mcp(browser_mcp_server.clone())
             .await;
-        #[cfg(not(feature = "browser-use"))]
-        let browser_mcp_config = None;
         // Boot-resume: re-fetch snapshot-mode URL sources whose create-time
         // fetch never completed (the app exited mid-run — the source is
         // persisted unstamped before fetching). Spawned after the completer
@@ -2965,24 +2927,12 @@ impl AppServices {
 
         let factory = build_agent_factory(AgentFactoryDeps {
             authoritative_user_id: authoritative_user_id.clone(),
-            skill_manager: AcpSkillManager::new(skill_paths.clone()),
             model_invoke: model_invoke_service.clone(),
             model_invoke_service: Some(model_invoke_service.clone()),
             encryption_key,
-            agent_registry: agent_registry.clone(),
-            acp_agent_service: acp_agent_service.clone(),
             data_dir: data_dir.clone(),
             work_dir: work_dir.clone(),
-            requirement_mcp_config: requirement_mcp_config.clone(),
-            // Scoped knowledge-search MCP. Populated only when the server started
-            // above; the assembler further gates injection on bound bases, so a
-            // session without mounts never sees the tool. Independent of the
-            // gateway config — this token never grants gateway reach.
-            knowledge_mcp_config: knowledge_mcp_config.clone(),
             gateway_mcp_config: gateway_mcp_config.clone(),
-            open_mcp_config: open_mcp_config.clone(),
-            computer_mcp_config: computer_mcp_config.clone(),
-            browser_mcp_config: browser_mcp_config.clone(),
             #[cfg(feature = "browser-use")]
             browser_lane_provider: Some(browser_lane_provider_slot.clone()),
             client_prefs: Some(Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
@@ -3084,7 +3034,6 @@ impl AppServices {
             terminal_service,
             ssh_pool,
             robot,
-            acp_session_sync: acp_agent_service,
             jwt_secret_raw: secret,
             encryption_key,
             data_dir,

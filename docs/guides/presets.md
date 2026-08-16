@@ -12,7 +12,7 @@ capability library at **`/skills`**.
 | Concept | Owns | Does not own |
 | --- | --- | --- |
 | Preset | Instructions, target scope, preferred agents and models, skill scope, knowledge scope, examples, and selection metadata | Runtime process, conversation history, or companion identity |
-| Agent | An executable backend such as Nomi, Codex, Claude, Gemini, or a remote agent | A reusable user configuration |
+| Agent | The executable backend — the built-in Nomi engine | A reusable user configuration |
 | Companion | Persistent identity, persona, figure, memory, and relationship state | The reusable launch template itself |
 | Skill | One focused capability that can be discovered and loaded | Agent/model selection or a complete persona |
 

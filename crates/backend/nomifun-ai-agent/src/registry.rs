@@ -9,7 +9,7 @@
 //!   field reflects PATH state right now (not a persisted column);
 //! - exposes lookups the factory and routes use (`get`,
 //!   `find_by_backend`, `list_by_agent_type`, etc.);
-//! - writes ACP handshake payloads back to the row through
+//! - writes handshake payloads back to the row through
 //!   [`AgentRegistry::catalog_sender`] (serialised through a single
 //!   consumer task, see [`CatalogSender`]).
 
@@ -40,9 +40,9 @@ struct CatalogSyncMessage {
 pub struct AgentRegistry {
     repo: Arc<dyn IAgentMetadataRepository>,
     by_id: RwLock<HashMap<String, AgentMetadata>>,
-    /// MPSC sender shared with every forwarder in every `AcpAgentManager`.
-    /// Draining happens in a single background task owned by this
-    /// registry, so DB writes for the same (id, field) serialize.
+    /// MPSC sender shared with every catalog forwarder. Draining happens in a
+    /// single background task owned by this registry, so DB writes for the same
+    /// (id, field) serialize.
     catalog_tx: mpsc::Sender<CatalogSyncMessage>,
 }
 
@@ -119,8 +119,7 @@ impl AgentRegistry {
 }
 
 impl AgentRegistry {
-    /// Sender end of the catalog-sync MPSC, cloned by each
-    /// `AcpAgentManager` forwarder.
+    /// Sender end of the catalog-sync MPSC, cloned by each catalog forwarder.
     pub fn catalog_sender(&self) -> CatalogSender {
         CatalogSender {
             tx: self.catalog_tx.clone(),
@@ -470,8 +469,8 @@ fn encode_optional(value: &Option<Value>, field: &str) -> Result<Option<String>,
     }
 }
 
-/// Cloneable handle each `AcpAgentManager` holds to forward ACP events
-/// into the registry's background consumer task. Dropping it is cheap
+/// Cloneable handle for forwarding catalog-sync events into the registry's
+/// background consumer task. Dropping it is cheap
 /// and does not affect the consumer — the registry itself keeps one
 /// sender alive for the life of the process.
 #[derive(Clone)]
@@ -587,6 +586,10 @@ mod tests {
     use super::*;
     use nomifun_db::{SqliteAgentMetadataRepository, init_database_memory};
 
+    /// The internal `nomi` seed row — the only `agent_metadata` row that still
+    /// decodes into an `AgentType`.
+    const NOMI_SEED_ROW_ID: &str = "0190f5fe-7c00-7a00-8000-000000000114";
+
     async fn registry() -> Arc<AgentRegistry> {
         let db = init_database_memory().await.unwrap();
         let repo = Arc::new(SqliteAgentMetadataRepository::new(db.pool().clone()));
@@ -601,57 +604,14 @@ mod tests {
         // filter so this assertion keeps counting the seed rows even
         // when none of the CLIs are installed on the test host.
         //
-        // 18, not the baseline's 20: seeded rows naming a retired engine no
-        // longer decode into an `AgentType`, so `decode_row` drops them until
-        // the migration deletes those rows.
+        // 1, not the baseline's 20: every seeded row naming a retired engine
+        // fails to decode into an `AgentType`, so `decode_row` drops them until
+        // the migration deletes those rows. Only the internal nomi row is left.
         let reg = registry().await;
         let all = reg.list_all_including_hidden().await;
-        assert_eq!(all.len(), 18);
+        assert_eq!(all.len(), 1);
     }
 
-    #[tokio::test]
-    async fn find_builtin_claude_has_bridge_command() {
-        let reg = registry().await;
-        let m = reg
-            .get("0190f5fe-7c00-7a00-8000-000000000101")
-            .await
-            .unwrap();
-        assert_eq!(m.command.as_deref(), Some("bun"));
-        assert!(m.behavior_policy.supports_side_question);
-        assert_eq!(
-            m.native_skills_dirs.as_deref(),
-            Some(&[".claude/skills".to_string()][..])
-        );
-    }
-
-    #[tokio::test]
-    async fn codex_yolo_id_maps_to_full_access() {
-        let reg = registry().await;
-        let codex = reg
-            .get("0190f5fe-7c00-7a00-8000-000000000102")
-            .await
-            .unwrap();
-        // Legacy Nomi yolo aliases resolve to the codex bridge's native
-        // full-access mode via the catalog row (agent-full-access since the
-        // migration-022 swap to @agentclientprotocol/codex-acp).
-        assert_eq!(codex.yolo_id.as_deref(), Some("agent-full-access"));
-    }
-
-    #[tokio::test]
-    async fn claude_yolo_id_maps_to_bypass_permissions() {
-        let reg = registry().await;
-        let claude = reg
-            .get("0190f5fe-7c00-7a00-8000-000000000101")
-            .await
-            .unwrap();
-        assert_eq!(claude.yolo_id.as_deref(), Some("bypassPermissions"));
-    }
-
-    /// On a host that has *none* of the seeded CLIs installed, the
-    /// public listing collapses to the rows that don't need one
-    /// (Nomi is `agent_source = internal` with no `command`).
-    /// This guards the pill-bar contract: never show an unusable
-    /// vendor.
     #[tokio::test]
     async fn list_all_filters_out_unavailable_rows() {
         let reg = registry().await;
@@ -679,12 +639,13 @@ mod tests {
         //
         // Rows whose `agent_type` names a retired engine no longer decode
         // (`parse_agent_type` returns `None` and `decode_row` drops them), so
-        // they are absent here until the migration deletes them.
+        // they never reach this view even while the migration has yet to
+        // delete them — hence exactly one decoded seed row.
         let reg = registry().await;
         let all = reg.list_all_including_hidden().await;
         let count = |t: AgentType| all.iter().filter(|m| m.agent_type == t).count();
-        assert_eq!(count(AgentType::Acp), 17);
         assert_eq!(count(AgentType::Nomi), 1);
+        assert_eq!(all.len(), 1, "no retired-engine row may decode into the cache");
     }
 
     #[tokio::test]
@@ -704,10 +665,7 @@ mod tests {
     #[tokio::test]
     async fn apply_handshake_persists_json_payload() {
         let reg = registry().await;
-        let claude = reg
-            .get("0190f5fe-7c00-7a00-8000-000000000101")
-            .await
-            .unwrap();
+        let row = reg.get(NOMI_SEED_ROW_ID).await.unwrap();
 
         let snapshot = AgentHandshake {
             auth_methods: Some(serde_json::json!([
@@ -715,9 +673,9 @@ mod tests {
             ])),
             ..Default::default()
         };
-        reg.apply_handshake_inner(&claude.agent_id, &snapshot).await.unwrap();
+        reg.apply_handshake_inner(&row.agent_id, &snapshot).await.unwrap();
 
-        let refreshed = reg.get(&claude.agent_id).await.unwrap();
+        let refreshed = reg.get(&row.agent_id).await.unwrap();
         let methods = refreshed.handshake.auth_methods.unwrap();
         assert_eq!(methods.as_array().unwrap().len(), 1);
     }
@@ -728,20 +686,16 @@ mod tests {
     /// later write only carries one `Some(..)` field, the rest are
     /// `None`. After all three land, every earlier value must still be
     /// readable. This locks the contract that `None` means "don't
-    /// touch" (as opposed to "clear to null"), which is what the
-    /// `initialize` / `session/new` / `AvailableCommandsUpdate` write
-    /// sites rely on.
+    /// touch" (as opposed to "clear to null"), which is what every
+    /// incremental catalog write site relies on.
     #[tokio::test]
     async fn apply_handshake_is_partial_does_not_clobber_siblings() {
         let reg = registry().await;
-        let claude = reg
-            .get("0190f5fe-7c00-7a00-8000-000000000101")
-            .await
-            .unwrap();
+        let row = reg.get(NOMI_SEED_ROW_ID).await.unwrap();
 
         // Write #1: agent_capabilities only.
         reg.apply_handshake_inner(
-            &claude.agent_id,
+            &row.agent_id,
             &AgentHandshake {
                 agent_capabilities: Some(serde_json::json!({"load_session": true})),
                 ..Default::default()
@@ -752,7 +706,7 @@ mod tests {
 
         // Write #2: auth_methods only. Capabilities must survive.
         reg.apply_handshake_inner(
-            &claude.agent_id,
+            &row.agent_id,
             &AgentHandshake {
                 auth_methods: Some(serde_json::json!([{"type": "agent", "id": "oauth"}])),
                 ..Default::default()
@@ -763,7 +717,7 @@ mod tests {
 
         // Write #3: available_modes only. Capabilities + auth_methods must survive.
         reg.apply_handshake_inner(
-            &claude.agent_id,
+            &row.agent_id,
             &AgentHandshake {
                 available_modes: Some(serde_json::json!([{"id": "code", "name": "Code"}])),
                 ..Default::default()
@@ -772,7 +726,7 @@ mod tests {
         .await
         .unwrap();
 
-        let refreshed = reg.get(&claude.agent_id).await.unwrap();
+        let refreshed = reg.get(&row.agent_id).await.unwrap();
         assert_eq!(
             refreshed.handshake.agent_capabilities,
             Some(serde_json::json!({"load_session": true})),
@@ -791,14 +745,18 @@ mod tests {
 
     /// `diagnostic_snapshot` returns one entry per row, populates a
     /// reason for every unavailable row, and leaves available rows
-    /// without one. The CI host doesn't have the seeded CLIs
-    /// installed, so the bridge/CLI rows are reliably unavailable
-    /// here — the assertion exploits that to lock the contract.
+    /// without one.
+    ///
+    /// NOTE: the seeded catalog now decodes to the single internal nomi row,
+    /// which is always available. The `(false, Some(_))` pairing below is
+    /// therefore no longer exercised by this fixture — it previously relied on
+    /// the seeded vendor CLIs being absent on the test host. What still holds
+    /// is one-entry-per-row and "an available row carries no reason".
     #[tokio::test]
     async fn diagnostic_snapshot_pairs_rows_with_reasons() {
         let reg = registry().await;
         let snapshot = reg.diagnostic_snapshot().await;
-        assert_eq!(snapshot.len(), 18, "every row appears once");
+        assert_eq!(snapshot.len(), 1, "every row appears once");
 
         for (meta, reason) in &snapshot {
             match (meta.available, reason) {
@@ -829,7 +787,7 @@ mod tests {
     #[tokio::test]
     async fn handshake_backfills_capabilities() {
         let reg = registry().await;
-        let id = "0190f5fe-7c00-7a00-8000-00000000010a";
+        let id = NOMI_SEED_ROW_ID;
 
         let before = reg.get(id).await.unwrap();
         assert!(before.handshake.agent_capabilities.is_none());
@@ -858,13 +816,10 @@ mod tests {
     #[tokio::test]
     async fn apply_handshake_with_empty_snapshot_is_noop() {
         let reg = registry().await;
-        let claude = reg
-            .get("0190f5fe-7c00-7a00-8000-000000000101")
-            .await
-            .unwrap();
+        let row = reg.get(NOMI_SEED_ROW_ID).await.unwrap();
 
         reg.apply_handshake_inner(
-            &claude.agent_id,
+            &row.agent_id,
             &AgentHandshake {
                 agent_capabilities: Some(serde_json::json!({"x": 1})),
                 ..Default::default()
@@ -873,11 +828,11 @@ mod tests {
         .await
         .unwrap();
 
-        reg.apply_handshake_inner(&claude.agent_id, &AgentHandshake::default())
+        reg.apply_handshake_inner(&row.agent_id, &AgentHandshake::default())
             .await
             .unwrap();
 
-        let refreshed = reg.get(&claude.agent_id).await.unwrap();
+        let refreshed = reg.get(&row.agent_id).await.unwrap();
         assert_eq!(
             refreshed.handshake.agent_capabilities,
             Some(serde_json::json!({"x": 1}))

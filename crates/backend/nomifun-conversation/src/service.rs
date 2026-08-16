@@ -41,14 +41,13 @@ use nomifun_common::{
     ConversationStatus, CronJobId, DecisionPolicy, DelegationPolicy, ErrorChain, ExecutionAuthority, MessageId, MessageType, OnConversationDelete, PaginatedResult, ProviderId, ProviderWithModel,
     generate_id, now_ms, validate_uuidv7, workspace_path_has_edge_whitespace_segment,
 };
-use nomifun_db::models::{AgentMetadataRow, ConversationRow, MessageRow};
+use nomifun_db::models::{ConversationRow, MessageRow};
 use nomifun_db::{
-    AgentExecutionTurnAuthority, ConversationFilters, ConversationRowUpdate, CreateAcpSessionParams, IAcpSessionRepository,
-    IAgentMetadataRepository, IConversationRepository, IMcpServerRepository, MessageDayBucket, SaveRuntimeStateParams,
+    AgentExecutionTurnAuthority, ConversationFilters, ConversationRowUpdate,
+    IAgentMetadataRepository, IConversationRepository, IMcpServerRepository, MessageDayBucket,
     ConversationTurnAdmissionState, RequirementConversationTurnAuthority, SortOrder,
     TurnLifecycleTransition, TurnReceiptCompletion,
 };
-use nomifun_mcp::{AcpMcpCapabilities, parse_acp_mcp_capabilities};
 use nomifun_realtime::UserEventSink;
 use nomifun_runtime::resolve_command_path;
 use std::collections::{HashMap, HashSet};
@@ -850,99 +849,6 @@ fn reconcile_preset_conversation_model_pool(
     Ok(Some(reconciled))
 }
 
-fn required_trimmed_extra_string<'a>(
-    extra: &'a serde_json::Value,
-    key: &str,
-    context: &str,
-) -> Result<&'a str, AppError> {
-    let value = extra
-        .get(key)
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| AppError::BadRequest(format!("{context} requires extra.{key}")))?;
-    if value.is_empty() || value.trim() != value {
-        return Err(AppError::BadRequest(format!(
-            "{context} extra.{key} must be a non-empty trimmed string"
-        )));
-    }
-    Ok(value)
-}
-
-fn optional_trimmed_extra_string<'a>(
-    extra: &'a serde_json::Value,
-    key: &str,
-    context: &str,
-) -> Result<Option<&'a str>, AppError> {
-    match extra.get(key) {
-        None => Ok(None),
-        Some(serde_json::Value::String(value))
-            if !value.is_empty() && value.trim() == value =>
-        {
-            Ok(Some(value))
-        }
-        Some(_) => Err(AppError::BadRequest(format!(
-            "{context} extra.{key} must be a non-empty trimmed string"
-        ))),
-    }
-}
-
-fn validate_acp_agent_metadata_row(
-    row: &AgentMetadataRow,
-    extra: &serde_json::Value,
-) -> Result<(), AppError> {
-    if row.agent_type != AgentType::Acp.serde_name() {
-        return Err(AppError::BadRequest(format!(
-            "ACP extra.agent_id '{}' resolves to agent type '{}'",
-            row.agent_id, row.agent_type
-        )));
-    }
-    if !row.enabled {
-        return Err(AppError::BadRequest(format!(
-            "ACP extra.agent_id '{}' is disabled",
-            row.agent_id
-        )));
-    }
-    if !matches!(row.agent_source.as_str(), "builtin" | "extension" | "custom") {
-        return Err(AppError::BadRequest(format!(
-            "ACP extra.agent_id '{}' has unsupported agent_source '{}'",
-            row.agent_id, row.agent_source
-        )));
-    }
-    if let Some(backend) = optional_trimmed_extra_string(extra, "backend", "ACP conversation")?
-        && row.backend.as_deref() != Some(backend)
-    {
-        return Err(AppError::BadRequest(format!(
-            "ACP extra.backend '{backend}' does not match agent '{}'",
-            row.agent_id
-        )));
-    }
-    if let Some(agent_source) =
-        optional_trimmed_extra_string(extra, "agent_source", "ACP conversation")?
-        && row.agent_source != agent_source
-    {
-        return Err(AppError::BadRequest(format!(
-            "ACP extra.agent_source '{agent_source}' does not match agent '{}'",
-            row.agent_id
-        )));
-    }
-    Ok(())
-}
-
-fn reject_acp_identity_patch(extra: &serde_json::Value) -> Result<(), AppError> {
-    let Some(object) = extra.as_object() else {
-        return Ok(());
-    };
-    const IDENTITY_KEYS: [&str; 3] = ["agent_id", "backend", "agent_source"];
-    if let Some(key) = IDENTITY_KEYS
-        .into_iter()
-        .find(|key| object.contains_key(*key))
-    {
-        return Err(AppError::BadRequest(format!(
-            "ACP extra.{key} is immutable after creation; create a new conversation to change the agent"
-        )));
-    }
-    Ok(())
-}
-
 #[derive(Debug, Clone, Copy)]
 struct McpSupportPolicy {
     stdio: bool,
@@ -958,15 +864,6 @@ impl McpSupportPolicy {
         sse: true,
         streamable_http: true,
     };
-
-    fn from_acp_capabilities(capabilities: AcpMcpCapabilities) -> Self {
-        Self {
-            stdio: capabilities.stdio,
-            http: capabilities.http,
-            sse: capabilities.sse,
-            streamable_http: capabilities.http,
-        }
-    }
 
     fn supports_row_transport(self, transport_type: &str) -> bool {
         match transport_type {
@@ -1076,10 +973,9 @@ pub struct ConversationService {
     public_admission_cutpoint:
         Arc<std::sync::Mutex<Option<PublicAdmissionCutpointControl>>>,
 
-    // Repos for conversation, acp_session and agent_metadata access.
+    // Repos for conversation and agent_metadata access.
     conversation_repo: Arc<dyn IConversationRepository>,
     agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
-    acp_session_repo: Arc<dyn IAcpSessionRepository>,
     /// Optional IDMM arm hook (post-construction registration, same slot pattern
     /// as `cron_service`). Wired by `nomifun-app` so a desktop turn arms 智能决策
     /// supervision; `None` in contexts that don't run IDMM (tests, webui-only).
@@ -2204,7 +2100,6 @@ impl ConversationService {
 
         conversation_repo: Arc<dyn IConversationRepository>,
         agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
-        acp_session_repo: Arc<dyn IAcpSessionRepository>,
         execution_conversation_boundary: Arc<dyn ExecutionConversationBoundary>,
     ) -> Self {
         Self {
@@ -2227,7 +2122,6 @@ impl ConversationService {
 
             conversation_repo,
             agent_metadata_repo,
-            acp_session_repo,
             supervision_hook: Arc::new(RwLock::new(None)),
             turn_completion_observer: Arc::new(RwLock::new(None)),
             failover_provider_repo: Arc::new(RwLock::new(None)),
@@ -2453,10 +2347,6 @@ impl ConversationService {
 
     pub fn conversation_repo(&self) -> &Arc<dyn IConversationRepository> {
         &self.conversation_repo
-    }
-
-    pub(crate) fn acp_session_repo(&self) -> &Arc<dyn IAcpSessionRepository> {
-        &self.acp_session_repo
     }
 
     /// Snapshot of the registered failover deps (`None` until
@@ -2856,19 +2746,6 @@ impl ConversationService {
         };
 
         if aggregate_deleted {
-            // SQLite's Conversation repository owns this logical child
-            // cleanup. Keep the explicit repository call for alternate
-            // repository implementations and tests; deleting a missing row is
-            // intentionally a no-op.
-            if let Err(error) = self.acp_session_repo.delete(conversation_id).await {
-                warn!(
-                    conversation_id,
-                    error = %ErrorChain(&error),
-                    "conversation rollback committed, but ACP session cleanup failed; session row may be orphaned"
-                );
-                cleanup_errors.push(format!("ACP session cleanup failed: {error}"));
-            }
-
             if let Some(path) = managed_workspace
                 && path.exists()
                 && let Err(error) = std::fs::remove_dir_all(path)
@@ -3346,9 +3223,6 @@ impl ConversationService {
         let requirement = match running_orphan_disposition(&row.r#type)? {
             RunningOrphanDisposition::LocalContainedAuthority => {
                 OrphanProofRequirement::LocalContainedAuthority
-            }
-            RunningOrphanDisposition::RegisteredLocalProcessTree => {
-                OrphanProofRequirement::RegisteredLocalProcessTree
             }
         };
         let decision = provider
@@ -4249,47 +4123,6 @@ impl ConversationService {
             ));
         }
 
-        // V3 ACP identity is row-scoped and explicit. A backend label is
-        // descriptive metadata, never a lookup key or a substitute for the
-        // catalog business ID. Validate the logical parent before creating the
-        // Conversation row so an invalid agent cannot leave a half-created
-        // aggregate behind.
-        let acp_agent = if req.r#type == AgentType::Acp {
-            let agent_id =
-                required_trimmed_extra_string(&extra, "agent_id", "ACP conversation")?;
-            let agent = self
-                .agent_metadata_repo
-                .get(agent_id)
-                .await
-                .map_err(|error| AppError::Internal(format!("agent_metadata lookup: {error}")))?
-                .ok_or_else(|| {
-                    AppError::BadRequest(format!(
-                        "ACP extra.agent_id '{agent_id}' does not exist"
-                    ))
-                })?;
-            validate_acp_agent_metadata_row(&agent, &extra)?;
-            if let Some(object) = extra.as_object_mut() {
-                match agent.backend.as_ref() {
-                    Some(backend) => {
-                        object.insert(
-                            "backend".to_owned(),
-                            serde_json::Value::String(backend.clone()),
-                        );
-                    }
-                    None => {
-                        object.remove("backend");
-                    }
-                }
-                object.insert(
-                    "agent_source".to_owned(),
-                    serde_json::Value::String(agent.agent_source.clone()),
-                );
-            }
-            Some(agent)
-        } else {
-            None
-        };
-
         // Determine whether the user chose this workspace ("custom") or we
         // auto-provision one under `{work_dir}/conversations/{uuidv7}/`.
         // `is_custom_workspace` is the authoritative signal consumed later to
@@ -4388,7 +4221,9 @@ impl ConversationService {
             None => None,
         };
 
-        let mcp_support = self.resolve_mcp_support_policy(&req.r#type, &extra).await?;
+        // Nomi supports every MCP transport, so no selection can be narrowed
+        // by an agent-capability filter.
+        let mcp_support = McpSupportPolicy::NOMI;
         let mut resolved_mcp_server_ids: Vec<String> = Vec::new();
         let mut selected_mcp_names: Vec<String> = Vec::new();
         let mut selected_mcp_statuses: Vec<ConversationMcpStatus> = Vec::new();
@@ -4616,8 +4451,7 @@ impl ConversationService {
 
                 if !is_custom_workspace
                     && !skills_for_links.is_empty()
-                    && let Some(rel_dirs) =
-                        native_skills_dirs(&req.r#type, acp_agent.as_ref())
+                    && let Some(rel_dirs) = native_skills_dirs(&req.r#type)
                 {
                     let resolved = self.skill_resolver.resolve_skills(&skills_for_links).await;
                     if !resolved.is_empty() {
@@ -4658,11 +4492,6 @@ impl ConversationService {
                 self.conversation_repo
                     .set_mcp_server_ids(&new_id, &resolved_mcp_server_ids)
                     .await?;
-            }
-
-            // ACP conversations own one logical 1:1 acp_session child.
-            if let Some(agent) = acp_agent.as_ref() {
-                self.create_acp_session_row(&new_id, &extra, agent).await?;
             }
 
             // Build the response before the final cross-domain binding write
@@ -4753,56 +4582,6 @@ impl ConversationService {
         log_conversation_created(&response, &extra);
 
         Ok(response)
-    }
-
-    #[tracing::instrument(skip_all, fields(conversation_id = %conversation_id))]
-    async fn create_acp_session_row(
-        &self,
-        conversation_id: &str,
-        extra: &serde_json::Value,
-        agent: &AgentMetadataRow,
-    ) -> Result<(), AppError> {
-        debug!("Creating acp_session row");
-
-        let conv_id = parse_conv_id(conversation_id)?;
-        validate_acp_agent_metadata_row(agent, extra)?;
-
-        let params = CreateAcpSessionParams {
-            conversation_id: conv_id,
-            agent_backend: agent.backend.as_deref().unwrap_or_default(),
-            agent_source: &agent.agent_source,
-            agent_id: &agent.agent_id,
-        };
-        self.acp_session_repo
-            .create(&params)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to create acp_session row: {e}")))?;
-
-        // Seed optional runtime state from create payload. Empty strings are
-        // treated as absent, matching the "send key only when value present"
-        // contract on the wire. Mode/model take effect on the first
-        // reconcile right after session/new.
-        let mode = extra
-            .get("current_mode_id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
-        let model = extra
-            .get("current_model_id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
-        if mode.is_some() || model.is_some() {
-            let params = SaveRuntimeStateParams {
-                current_mode_id: mode.map(Some),
-                current_model_id: model.map(Some),
-                config_selections_json: None,
-                context_usage_json: None,
-            };
-            self.acp_session_repo
-                .save_runtime_state(conv_id, &params)
-                .await
-                .map_err(|e| AppError::Internal(format!("Failed to seed acp_session runtime state: {e}")))?;
-        }
-        Ok(())
     }
 
     /// Get a single conversation by ID.
@@ -5056,14 +4835,6 @@ impl ConversationService {
                 existing.r#type
             )));
         }
-        if existing_type == AgentType::Acp
-            && let Some(incoming) = req.extra.as_ref()
-        {
-            // The conversation row and its 1:1 acp_session row must always
-            // point at the same logical agent parent. Agent replacement is an
-            // aggregate replacement, not a JSON patch.
-            reject_acp_identity_patch(incoming)?;
-        }
 
         let now = now_ms();
 
@@ -5286,9 +5057,6 @@ impl ConversationService {
             .get(parse_conv_id(conversation_id)?)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
-        if string_to_enum::<AgentType>(&existing.r#type)? == AgentType::Acp {
-            reject_acp_identity_patch(&patch)?;
-        }
 
         let mut merged: serde_json::Value =
             serde_json::from_str(&existing.extra).map_err(|error| {
@@ -5539,24 +5307,6 @@ impl ConversationService {
                 Some(error) => Err(AppError::Internal(error)),
                 None => Ok(()),
             });
-
-            match tokio::time::timeout(
-                DELETE_CLEANUP_ITEM_GRACE,
-                service.acp_session_repo.delete(&conversation_id),
-            )
-            .await
-            {
-                Ok(Ok(_)) => {}
-                Ok(Err(err)) => warn!(
-                    conversation_id,
-                    error = %ErrorChain(&err),
-                    "Failed to delete acp_session row on conversation delete"
-                ),
-                Err(_) => warn!(
-                    conversation_id,
-                    "Timed out deleting acp_session row on conversation delete"
-                ),
-            }
 
             let deleted_cron_job_ids: Arc<[String]> = delete_cleanup.into();
             for hook in hooks {
@@ -6391,14 +6141,16 @@ impl ConversationService {
         preparation_lease.ensure_active()?;
         let (companion, _companion_id, channel_platform) =
             companion_context_from_extra(&conversation.extra)?;
-        let agent_type = string_to_enum(&conversation.r#type)?;
+        // The persisted agent type is still validated here: an unparseable row
+        // must not reach the write-back path even though the surface no longer
+        // varies by engine.
+        let _: AgentType = string_to_enum(&conversation.r#type)?;
         let (knowledge_service, mut request) = self
             .build_turn_writeback_request(
                 &runtime_options.extra,
                 &assistant.message_id,
                 &user_text,
                 None,
-                agent_type,
                 companion,
                 channel_platform.as_deref(),
             )
@@ -9101,9 +8853,7 @@ impl ConversationService {
                 // On a usable next model we swap `agent` to the rebuilt task and
                 // resend the SAME content with a fresh msg_id; on None (queue
                 // exhausted / disabled / not eligible) we fall through to the
-                // ACP-eviction + error-surfacing path unchanged. This runs BEFORE
-                // `evict_acp_task_after_terminal_error` (which only acts on ACP),
-                // so a successful nomi failover short-circuits via `continue`.
+                // error-surfacing path unchanged.
                 // This path can terminate and replace a process. It must not be
                 // wrapped in the cancellable post-terminal side-effect budget:
                 // dropping it after quarantine would let the durable Running
@@ -9277,19 +9027,6 @@ impl ConversationService {
                     ),
                 ));
 
-                let acp_evicted = service
-                    .evict_acp_task_after_terminal_error(
-                        &conv_id,
-                        agent.agent_type(),
-                        &outcome,
-                        &runtime_registry,
-                        turn_cancellation.turn_id(),
-                        &turn_token,
-                    )
-                    .await;
-                if acp_evicted {
-                    break;
-                }
                 if turn_token.is_cancelled() {
                     durable_completion = Some((
                         false,
@@ -9310,7 +9047,6 @@ impl ConversationService {
                             &turn_msg_id,
                             &turn_user_text,
                             turn_origin.as_deref(),
-                            agent.agent_type(),
                             companion,
                             channel_platform.as_deref(),
                     )
@@ -11906,11 +11642,6 @@ impl ConversationService {
                 .await?;
         }
 
-        // ACP session clearing is durable authority, not best effort. Returning
-        // success while the old resume id survives would make the next cold
-        // runtime silently recover the supposedly archived context.
-        self.acp_session_repo.clear_session_id(conv_id).await?;
-
         drop(reset_guard);
         drop(preparation_guard);
         info!("Conversation context cleared");
@@ -12277,10 +12008,6 @@ fn project_preset_runtime_context(
             object.insert("preset_rules".to_owned(), context);
             object.remove("preset_context");
         }
-        AgentType::Acp => {
-            object.insert("preset_context".to_owned(), context);
-            object.remove("preset_rules");
-        }
     }
     debug!(
         conversation_id = %row.conversation_id,
@@ -12458,20 +12185,7 @@ impl ConversationService {
             return Ok(());
         }
 
-        let acp_agent = if runtime_options.agent_type == AgentType::Acp {
-            Some(
-                resolve_acp_agent_metadata(
-                    &self.agent_metadata_repo,
-                    &runtime_options.extra,
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-        let Some(rel_dirs) =
-            native_skills_dirs(&runtime_options.agent_type, acp_agent.as_ref())
-        else {
+        let Some(rel_dirs) = native_skills_dirs(&runtime_options.agent_type) else {
             return Ok(());
         };
         if rel_dirs.is_empty() {
@@ -12707,7 +12421,6 @@ impl ConversationService {
         _msg_id: &str,
         user_text: &str,
         origin: Option<&str>,
-        agent_type: AgentType,
         companion: bool,
         channel_platform: Option<&str>,
     ) -> Option<(
@@ -12758,8 +12471,6 @@ impl ConversationService {
             nomifun_knowledge::WriteSurface::Companion
         } else if channel_platform.map(str::trim).filter(|s| !s.is_empty()).is_some() {
             nomifun_knowledge::WriteSurface::ExternalChannel
-        } else if agent_type == AgentType::Acp {
-            nomifun_knowledge::WriteSurface::TerminalAcp
         } else {
             nomifun_knowledge::WriteSurface::RegularChat
         };
@@ -13116,72 +12827,16 @@ fn rebase_managed_workspace_in_row(
     Ok(())
 }
 
-/// Resolve the native skills directory list for an agent by looking it
-/// up in the `agent_metadata` catalog (ACP vendors) or the bundled
-/// `AgentType` table (non-ACP built-ins).
+/// Resolve the native skills directory list for an agent from the bundled
+/// `AgentType` table.
 ///
 /// Returns `None` when the agent does not support native skill
 /// discovery — callers should then skip the workspace-symlink step and
 /// rely on prompt injection instead.
-fn native_skills_dirs(
-    agent_type: &AgentType,
-    acp_agent: Option<&AgentMetadataRow>,
-) -> Option<Vec<String>> {
-    if *agent_type == AgentType::Acp {
-        let row = acp_agent?;
-        let raw = row.native_skills_dirs.as_deref()?;
-        return serde_json::from_str::<Vec<String>>(raw).ok();
-    }
+fn native_skills_dirs(agent_type: &AgentType) -> Option<Vec<String>> {
     agent_type
         .native_skills_dirs()
         .map(|dirs| dirs.iter().map(|s| (*s).to_owned()).collect())
-}
-
-impl ConversationService {
-    async fn resolve_mcp_support_policy(
-        &self,
-        agent_type: &AgentType,
-        extra: &serde_json::Value,
-    ) -> Result<McpSupportPolicy, AppError> {
-        match agent_type {
-            AgentType::Acp => resolve_acp_mcp_support_policy(&self.agent_metadata_repo, extra).await,
-            AgentType::Nomi => Ok(McpSupportPolicy::NOMI),
-            _ => Ok(McpSupportPolicy::NOMI),
-        }
-    }
-}
-
-async fn resolve_acp_mcp_support_policy(
-    repo: &Arc<dyn IAgentMetadataRepository>,
-    extra: &serde_json::Value,
-) -> Result<McpSupportPolicy, AppError> {
-    let row = resolve_acp_agent_metadata(repo, extra).await?;
-    let capabilities = Some(&row)
-        .and_then(|row| row.agent_capabilities.as_deref())
-        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
-        .map(|value| parse_acp_mcp_capabilities(&value))
-        .unwrap_or_default();
-
-    Ok(McpSupportPolicy::from_acp_capabilities(capabilities))
-}
-
-async fn resolve_acp_agent_metadata(
-    repo: &Arc<dyn IAgentMetadataRepository>,
-    extra: &serde_json::Value,
-) -> Result<AgentMetadataRow, AppError> {
-    let agent_id =
-        required_trimmed_extra_string(extra, "agent_id", "ACP conversation")?;
-    let row = repo
-        .get(agent_id)
-        .await
-        .map_err(|error| AppError::Internal(format!("agent_metadata lookup: {error}")))?
-        .ok_or_else(|| {
-            AppError::BadRequest(format!(
-                "ACP extra.agent_id '{agent_id}' does not exist"
-            ))
-        })?;
-    validate_acp_agent_metadata_row(&row, extra)?;
-    Ok(row)
 }
 
 fn upsert_conversation_mcp_status(
@@ -13326,7 +12981,7 @@ fn validate_url_field(transport: &str, url: Option<&str>) -> Result<(), String> 
 
 /// Serialize a serde-compatible enum to its JSON string form for DB storage.
 ///
-/// e.g. `AgentType::Acp` → `"acp"`
+/// e.g. `AgentType::Nomi` → `"nomi"`
 fn enum_to_db<T: serde::Serialize>(val: &T) -> Result<String, AppError> {
     let json_val =
         serde_json::to_value(val).map_err(|e| AppError::Internal(format!("Enum serialization failed: {e}")))?;
@@ -13697,7 +13352,7 @@ fn log_conversation_created(response: &ConversationResponse, extra: &serde_json:
 fn is_tool_message_type(message_type: MessageType) -> bool {
     matches!(
         message_type,
-        MessageType::ToolCall | MessageType::ToolGroup | MessageType::AcpToolCall
+        MessageType::ToolCall | MessageType::ToolGroup
     )
 }
 
@@ -13811,20 +13466,6 @@ mod tests {
     }
 
     #[test]
-    fn frozen_snapshot_projects_to_non_nomi_runtime_context() {
-        let row = row_with_runtime_preset(json!({}));
-        let mut extra = json!({});
-
-        project_preset_runtime_context(&row, &AgentType::Acp, &mut extra).unwrap();
-
-        assert!(extra["preset_context"]
-            .as_str()
-            .unwrap()
-            .contains("Name: 文案版"));
-        assert!(extra.get("preset_rules").is_none());
-    }
-
-    #[test]
     fn incomplete_or_mismatched_preset_lineage_fails_closed() {
         let mut incomplete = row_with_runtime_preset(json!({}));
         incomplete.preset_snapshot = None;
@@ -13852,7 +13493,7 @@ mod tests {
     #[test]
     fn enum_to_db_agent_type() {
         use nomifun_common::AgentType;
-        assert_eq!(enum_to_db(&AgentType::Acp).unwrap(), "acp");
+        assert_eq!(enum_to_db(&AgentType::Nomi).unwrap(), "nomi");
     }
 
     #[test]
@@ -14295,9 +13936,9 @@ mod tests {
     }
 
     #[test]
-    fn preset_lineage_extracts_acp_builtin_fields() {
+    fn preset_lineage_extracts_agent_identity_fields() {
         use nomifun_common::AgentType;
-        let response = response_with_type(AgentType::Acp);
+        let response = response_with_type(AgentType::Nomi);
         let extra = json!({
             "agent_id": "0190f5fe-7c00-7a00-8000-000000000101",
             "agent_name": "Claude Code",
@@ -14306,7 +13947,7 @@ mod tests {
             "session_mode": "default",
         });
         let lineage = PresetLineage::from_response_and_extra(&response, &extra);
-        assert_eq!(lineage.agent_type, "acp");
+        assert_eq!(lineage.agent_type, "nomi");
         assert_eq!(
             lineage.agent_id,
             "0190f5fe-7c00-7a00-8000-000000000101"
@@ -14332,15 +13973,15 @@ mod tests {
     }
 
     #[test]
-    fn preset_lineage_extracts_acp_custom_agent_id() {
+    fn preset_lineage_extracts_custom_agent_id() {
         use nomifun_common::AgentType;
-        let response = response_with_type(AgentType::Acp);
+        let response = response_with_type(AgentType::Nomi);
         let extra = json!({
             "custom_agent_id": "custom-1",
             "backend": "openrouter",
         });
         let lineage = PresetLineage::from_response_and_extra(&response, &extra);
-        assert_eq!(lineage.agent_type, "acp");
+        assert_eq!(lineage.agent_type, "nomi");
         assert_eq!(lineage.custom_agent_id, "custom-1");
         assert_eq!(lineage.backend, "openrouter");
         assert!(lineage.has_any_identity());
@@ -14349,17 +13990,17 @@ mod tests {
     #[test]
     fn preset_lineage_no_identity_when_extra_lacks_assistant_fields() {
         use nomifun_common::AgentType;
-        let response = response_with_type(AgentType::Acp);
+        let response = response_with_type(AgentType::Nomi);
         let extra = json!({ "workspace": "/project" });
         let lineage = PresetLineage::from_response_and_extra(&response, &extra);
-        assert_eq!(lineage.agent_type, "acp");
+        assert_eq!(lineage.agent_type, "nomi");
         assert!(!lineage.has_any_identity());
     }
 
     #[test]
     fn preset_lineage_treats_non_string_fields_as_missing() {
         use nomifun_common::AgentType;
-        let response = response_with_type(AgentType::Acp);
+        let response = response_with_type(AgentType::Nomi);
         let extra = json!({
             "agent_id": 42,
             "agent_name": null,

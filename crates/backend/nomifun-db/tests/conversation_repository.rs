@@ -230,61 +230,20 @@ fn make_generic_artifact_commit(
     }
 }
 
-fn make_acp_artifact_commit(
-    message_id: String,
-    turn_message_id: &str,
-    call_id: &str,
-    artifact_id: &str,
-) -> TurnArtifactMessageCommit {
-    TurnArtifactMessageCommit {
-        message_id,
-        message_type: "acp_tool_call".to_owned(),
-        content: serde_json::json!({
-            "session_id": "session-1",
-            "update": {
-                "session_update": "tool_call_update",
-                "tool_call_id": call_id,
-                "status": "completed",
-                "title": "Generate image",
-                "content": [{
-                    "type": "artifact",
-                    "artifact": {
-                        "id": artifact_id,
-                        "kind": "image",
-                        "mime_type": "image/png",
-                        "path": format!("/workspace/{artifact_id}.png"),
-                        "relative_path": format!("nomifun-artifacts/{artifact_id}.png"),
-                        "size_bytes": 10,
-                        "sha256": "b".repeat(64),
-                    }
-                }]
-            },
-            "turn_id": turn_message_id,
-            "artifact_delivery_committed": true,
-        })
-        .to_string(),
-    }
-}
-
 fn make_provisional_artifact_message(
     conversation_id: &str,
     turn_message_id: &str,
     commit: &TurnArtifactMessageCommit,
     created_at: i64,
 ) -> MessageRow {
+    assert_eq!(
+        commit.message_type, "tool_call",
+        "test fixture only supports artifact tool messages"
+    );
     let mut content: serde_json::Value = serde_json::from_str(&commit.content).unwrap();
     content["artifact_delivery_committed"] = serde_json::json!(false);
-    match commit.message_type.as_str() {
-        "tool_call" => {
-            content["status"] = serde_json::json!("running");
-            content["artifacts"] = serde_json::json!([]);
-        }
-        "acp_tool_call" => {
-            content["update"]["status"] = serde_json::json!("in_progress");
-            content["update"]["content"] = serde_json::json!([]);
-        }
-        _ => unreachable!("test fixture only supports artifact tool messages"),
-    }
+    content["status"] = serde_json::json!("running");
+    content["artifacts"] = serde_json::json!([]);
     MessageRow {
         id: 0,
         message_id: commit.message_id.clone(),
@@ -3353,27 +3312,6 @@ async fn reset_terminal_conversation_clears_finished_aggregate_atomically() {
     })
     .to_string();
     conversation.conversation_id = repo.create(&conversation).await.unwrap();
-    sqlx::query(
-        "INSERT INTO acp_session (\
-             conversation_id, agent_backend, agent_source, acp_session_id, \
-             session_status, session_config, last_active_at\
-         ) VALUES (?, 'claude', 'builtin', 'acp-session-before-reset', 'active', ?, 7)",
-    )
-    .bind(&conversation.conversation_id)
-    .bind(
-        serde_json::json!({
-            "runtime": {
-                "current_mode_id": "plan",
-                "current_model_id": "model-kept",
-                "context_usage": {"used": 999}
-            },
-            "pending_config_options": {"theme": "kept"}
-        })
-        .to_string(),
-    )
-    .execute(db.pool())
-    .await
-    .unwrap();
     let accepted_operation_id = "turn:reset-absorbs-accepted";
     repo.claim_delivery_receipt(
         USER_ID,
@@ -3493,43 +3431,6 @@ async fn reset_terminal_conversation_clears_finished_aggregate_atomically() {
     assert_eq!(already_completed.result_ok, Some(true));
     assert_eq!(already_completed.result_text.as_deref(), Some("original result"));
     assert_eq!(already_completed.result_error, None);
-    let (acp_session_id, session_status, session_config, last_active_at):
-        (Option<String>, String, String, Option<i64>) = sqlx::query_as(
-            "SELECT acp_session_id, session_status, session_config, last_active_at \
-             FROM acp_session WHERE conversation_id = ?",
-        )
-        .bind(&conversation.conversation_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-    assert_eq!(acp_session_id, None);
-    assert_eq!(session_status, "idle");
-    assert_eq!(last_active_at, Some(reset_at));
-    let session_config: serde_json::Value = serde_json::from_str(&session_config).unwrap();
-    assert!(
-        session_config
-            .pointer("/runtime/context_usage")
-            .is_none(),
-        "reset must remove only cached ACP context usage"
-    );
-    assert_eq!(
-        session_config
-            .pointer("/runtime/current_mode_id")
-            .and_then(serde_json::Value::as_str),
-        Some("plan")
-    );
-    assert_eq!(
-        session_config
-            .pointer("/runtime/current_model_id")
-            .and_then(serde_json::Value::as_str),
-        Some("model-kept")
-    );
-    assert_eq!(
-        session_config
-            .pointer("/pending_config_options/theme")
-            .and_then(serde_json::Value::as_str),
-        Some("kept")
-    );
     assert_eq!(
         repo.get_messages(&conversation.conversation_id, 1, 10, SortOrder::Asc)
             .await
@@ -3685,24 +3586,6 @@ async fn reset_terminal_conversation_rolls_back_deletes_when_status_write_fails(
     .to_string();
     let original_extra: serde_json::Value = serde_json::from_str(&conversation.extra).unwrap();
     conversation.conversation_id = repo.create(&conversation).await.unwrap();
-    let original_acp_config = serde_json::json!({
-        "runtime": {
-            "current_mode_id": "code",
-            "context_usage": {"used": 42}
-        }
-    })
-    .to_string();
-    sqlx::query(
-        "INSERT INTO acp_session (\
-             conversation_id, agent_backend, agent_source, acp_session_id, \
-             session_status, session_config, last_active_at\
-         ) VALUES (?, 'claude', 'builtin', 'acp-session-must-rollback', 'active', ?, 11)",
-    )
-    .bind(&conversation.conversation_id)
-    .bind(&original_acp_config)
-    .execute(db.pool())
-    .await
-    .unwrap();
     let accepted_operation_id = "turn:reset-rollback-receipt";
     repo.claim_delivery_receipt(
         USER_ID,
@@ -3772,22 +3655,6 @@ async fn reset_terminal_conversation_rolls_back_deletes_when_status_write_fails(
     );
     assert_eq!(receipt_after_failure.result_ok, None);
     assert_eq!(receipt_after_failure.result_error, None);
-    let (rolled_back_session_id, rolled_back_status, rolled_back_config, rolled_back_active_at):
-        (Option<String>, String, String, Option<i64>) = sqlx::query_as(
-            "SELECT acp_session_id, session_status, session_config, last_active_at \
-             FROM acp_session WHERE conversation_id = ?",
-        )
-        .bind(&conversation.conversation_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-    assert_eq!(
-        rolled_back_session_id.as_deref(),
-        Some("acp-session-must-rollback")
-    );
-    assert_eq!(rolled_back_status, "active");
-    assert_eq!(rolled_back_config, original_acp_config);
-    assert_eq!(rolled_back_active_at, Some(11));
     assert_eq!(
         repo.get_messages(&conversation.conversation_id, 1, 10, SortOrder::Asc)
             .await
@@ -4239,11 +4106,11 @@ async fn artifact_message_commit_promotes_inserts_and_replays_atomically() {
         "generic-call",
         "generic-image",
     );
-    let acp = make_acp_artifact_commit(
+    let inserted = make_generic_artifact_commit(
         MessageId::new().into_string(),
         &turn_id,
-        "acp-call",
-        "acp-image",
+        "inserted-call",
+        "inserted-image",
     );
     let provisional = make_provisional_artifact_message(&conv.conversation_id, &turn_id, &generic, 100);
     repo.insert_message(&provisional).await.unwrap();
@@ -4255,7 +4122,7 @@ async fn artifact_message_commit_promotes_inserts_and_replays_atomically() {
     assert!(matches!(empty_error, nomifun_db::DbError::Conflict(_)));
 
     let committed = repo
-        .commit_turn_artifact_messages(&conv.conversation_id, &turn_id, &[generic.clone(), acp.clone()], 200)
+        .commit_turn_artifact_messages(&conv.conversation_id, &turn_id, &[generic.clone(), inserted.clone()], 200)
         .await
         .unwrap();
     assert_eq!(committed.len(), 2);
@@ -4263,20 +4130,20 @@ async fn artifact_message_commit_promotes_inserts_and_replays_atomically() {
     assert_eq!(committed[0].status.as_deref(), Some("finish"));
     assert_eq!(committed[0].content, generic.content);
     assert_eq!(committed[0].created_at, 100, "promotion preserves provisional creation time");
-    assert_eq!(committed[1].message_id, acp.message_id);
+    assert_eq!(committed[1].message_id, inserted.message_id);
     assert_eq!(committed[1].status.as_deref(), Some("finish"));
-    assert_eq!(committed[1].content, acp.content);
+    assert_eq!(committed[1].content, inserted.content);
     assert_eq!(committed[1].created_at, 200, "missing row is inserted at commit time");
 
     let replay = repo
-        .commit_turn_artifact_messages(&conv.conversation_id, &turn_id, &[generic.clone(), acp.clone()], 999)
+        .commit_turn_artifact_messages(&conv.conversation_id, &turn_id, &[generic.clone(), inserted.clone()], 999)
         .await
         .unwrap();
     assert_eq!(replay.len(), 2);
     assert_eq!(replay[0].created_at, 100);
     assert_eq!(replay[1].created_at, 200);
     assert_eq!(replay[0].content, generic.content);
-    assert_eq!(replay[1].content, acp.content);
+    assert_eq!(replay[1].content, inserted.content);
 }
 
 #[tokio::test]
@@ -4292,7 +4159,7 @@ async fn artifact_message_commit_rolls_back_the_batch_on_error_state() {
         "insert-before-conflict",
         "new-image",
     );
-    let blocked = make_acp_artifact_commit(
+    let blocked = make_generic_artifact_commit(
         MessageId::new().into_string(),
         &turn_id,
         "already-failed",
@@ -4344,7 +4211,7 @@ async fn artifact_message_commit_rejects_cross_turn_and_wrong_type_rows() {
     )
     .await;
 
-    let cross_conversation = make_acp_artifact_commit(
+    let cross_conversation = make_generic_artifact_commit(
         MessageId::new().into_string(),
         &turn_id,
         "cross-conversation-call",
@@ -4353,7 +4220,7 @@ async fn artifact_message_commit_rejects_cross_turn_and_wrong_type_rows() {
     let cross_conversation_row = make_provisional_artifact_message(
         &other_conv.conversation_id,
         &other_conversation_turn_id,
-        &make_acp_artifact_commit(
+        &make_generic_artifact_commit(
             cross_conversation.message_id.clone(),
             &other_conversation_turn_id,
             "cross-conversation-call",
@@ -4443,11 +4310,11 @@ async fn artifact_message_commit_rolls_back_on_different_finished_projection() {
     conv.conversation_id = repo.create(&conv).await.unwrap();
     let turn_id = MessageId::new().into_string();
     insert_turn_message(&repo, &conv.conversation_id, &turn_id).await;
-    let would_insert = make_acp_artifact_commit(
+    let would_insert = make_generic_artifact_commit(
         MessageId::new().into_string(),
         &turn_id,
         "insert-before-finish-conflict",
-        "new-acp-image",
+        "new-inserted-image",
     );
     let existing = make_generic_artifact_commit(
         MessageId::new().into_string(),

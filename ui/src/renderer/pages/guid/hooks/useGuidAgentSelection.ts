@@ -5,13 +5,10 @@
  */
 
 import { ipcBridge } from '@/common';
-import { DEFAULT_CODEX_MODELS } from '@/common/types/codex/codexModels';
-import { CODEX_MODE_NATIVE_FULL_ACCESS, normalizeCodexMode } from '@/common/types/codex/codexModes';
 import type { IProvider } from '@/common/config/storage';
 import { configService } from '@/common/config/configService';
 import type { Preset, PresetReference } from '@/common/types/agent/presetTypes';
-import type { AcpSessionModes } from '@/common/types/platform/acpTypes';
-import type { AcpModelInfo, AvailableAgent, EffectiveAgentInfo } from '../types';
+import type { AvailableAgent, EffectiveAgentInfo } from '../types';
 import {
   DETECTED_AGENTS_SWR_KEY,
   fetchDetectedAgents,
@@ -24,7 +21,7 @@ import useSWR from 'swr';
 import { savePreferredMode, getAgentKey as getAgentKeyUtil } from './agentSelectionUtils';
 import { usePresetResolver } from './usePresetResolver';
 import { useAgentAvailability } from './useAgentAvailability';
-import { useCustomAgentsLoader } from './useCustomAgentsLoader';
+import { usePresetCatalogLoader } from './usePresetCatalogLoader';
 
 export type GuidAgentSelectionResult = {
   selectedAgentKey: string;
@@ -36,13 +33,10 @@ export type GuidAgentSelectionResult = {
   availableAgents: AvailableAgent[] | undefined;
   /** Backend-merged preset catalog: builtin + user + extension. */
   presets: Preset[];
-  /** User-defined ACP engine rows (agent_source === 'custom') from the backend. */
+  /** User-defined engine rows (agent_source === 'custom') from the backend. */
   customAgents: AgentMetadata[];
   selectedMode: string;
   setSelectedMode: React.Dispatch<React.SetStateAction<string>>;
-  selectedAcpModel: string | null;
-  setSelectedAcpModel: React.Dispatch<React.SetStateAction<string | null>>;
-  currentAcpCachedModelInfo: AcpModelInfo | null;
   currentEffectiveAgentInfo: EffectiveAgentInfo;
   getAgentKey: (agent: {
     agent_type: string;
@@ -66,24 +60,14 @@ export type GuidAgentSelectionResult = {
  * Resolve the default session_mode for a given backend.
  *
  * Priority:
- *   1. Handshake `available_modes.current_mode_id` from `/api/agents`
- *   2. First entry of handshake `available_modes`
- *   3. First entry of the static `AGENT_MODES` table
- *   4. Literal `'default'` (legacy fallback — only correct for claude/qwen/gemini/nomi)
+ *   1. First entry of the static `AGENT_MODES` table
+ *   2. Literal `'default'`
  *
  * This mirrors the runtime fallback inside `AgentModeSelector` so the
  * parent-held `selectedMode` stays in sync with what the UI shows.
  */
-function resolveDefaultMode(backend: string | undefined, agents: AgentMetadata[] | undefined): string {
+function resolveDefaultMode(backend: string | undefined): string {
   if (!backend) return 'default';
-
-  const matched = agents?.find((a) => (a.backend ?? a.agent_type) === backend);
-  const handshakeModes = matched?.handshake?.available_modes as AcpSessionModes | undefined;
-  if (handshakeModes) {
-    if (handshakeModes.current_mode_id) return handshakeModes.current_mode_id;
-    const first = handshakeModes.available_modes?.[0]?.id;
-    if (first) return first;
-  }
 
   const staticModes = getAgentModes(backend);
   if (staticModes.length > 0) return staticModes[0].value;
@@ -124,8 +108,6 @@ export const useGuidAgentSelection = ({
   const selectedAgentRef = useRef<string | null>(null);
   // Guard: only run the initial restore once; user selections are never overwritten
   const initialRestoreDoneRef = useRef(false);
-  const [selectedAcpModel, _setSelectedAcpModel] = useState<string | null>(null);
-
   // Wrap setSelectedAgentKey to also save to storage
   const setSelectedAgentKey = useCallback((key: string) => {
     initialRestoreDoneRef.current = true;
@@ -147,14 +129,6 @@ export const useGuidAgentSelection = ({
     });
   }, []);
 
-  // Wrap setSelectedAcpModel: selection is per-conversation intent only.
-  // Deliberately NOT persisted as a global per-backend preference — a new
-  // session must initialize from the agent CLI's own local default config,
-  // and a model picked here applies only to the conversation being created.
-  const setSelectedAcpModel = useCallback((model_id: React.SetStateAction<string | null>) => {
-    _setSelectedAcpModel(model_id);
-  }, []);
-
   const availableCustomAgentIds = useMemo(() => {
     const ids = new Set<string>();
     (availableAgents || []).forEach((agent) => {
@@ -168,9 +142,8 @@ export const useGuidAgentSelection = ({
   const getAgentKey = getAgentKeyUtil;
 
   // --- Sub-hooks ---
-  const { presets, presetsLoaded, customAgents, customAgentAvatarMap, refreshCustomAgents } = useCustomAgentsLoader({
-    availableCustomAgentIds,
-  });
+  const { presets, presetsLoaded, customAgents, customAgentAvatarMap, refreshCustomAgents } =
+    usePresetCatalogLoader({ availableCustomAgentIds });
 
   const { resolvePresetAgentType } = usePresetResolver({ presets });
 
@@ -184,7 +157,7 @@ export const useGuidAgentSelection = ({
    * Find agent by key.
    *
    * Key formats:
-   *   - Plain id (custom ACP / remote rows) → resolved by `AvailableAgent.id`.
+   *   - Plain id (custom rows) → resolved by `AvailableAgent.id`.
    *   - Plain backend or agent_type (builtin rows) → resolved by `backend` or
    *     `agent_type` fallback.
    *   - `preset:<presetId>` → preset preset from the preset catalog
@@ -223,8 +196,7 @@ export const useGuidAgentSelection = ({
   };
 
   // Derived state: collapse row-scoped rows to a stable slot key so shared
-  // config namespaces (acp.config / mode preferences) are not fragmented
-  // per row.
+  // mode-preference namespaces are not fragmented per row.
   const selectedAgent: string = ((): string => {
     if (selectedAgentKey.startsWith('preset:')) return 'preset';
     const info = availableAgents?.find((a) => a.id === selectedAgentKey);
@@ -374,104 +346,30 @@ export const useGuidAgentSelection = ({
     return getEffectiveAgentType(selectedAgentInfo);
   }, [is_presetAgent, selectedAgent, selectedAgentInfo, getEffectiveAgentType, isMainAgentAvailable]);
 
-  // Reset selected ACP model when the agent SELECTION changes: prefer the
-  // preset's own configured model; otherwise leave the selection EMPTY so the
-  // created conversation follows the agent CLI's local default config. The
-  // selector still displays the handshake-advertised current model as its
-  // label, but only an explicit user pick puts a model id into the creation
-  // params — sending the cached handshake value would override a local
-  // default the user may have changed since the last session.
-  //
-  // Guarded on the actual selection key: metadata/preset SWR revalidation
-  // must NOT re-run the reset, or it would wipe a model the user already
-  // picked for the pending conversation.
-  const modelResetForAgentKeyRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (modelResetForAgentKeyRef.current === selectedAgentKey) return;
-
-    // A preset carries provider-qualified model preferences.
-    // Use the first display preference only; execution resolution remains server-side.
-    if (is_presetAgent) {
-      const preset = presets.find((entry) => entry.preset_id === selectedAgentInfo?.preset_id);
-      if (!preset) {
-        // Preset catalog not loaded yet — reset now, but leave the guard
-        // unset so the preference is applied once presets arrive.
-        modelResetForAgentKeyRef.current = null;
-        _setSelectedAcpModel(null);
-        return;
-      }
-      modelResetForAgentKeyRef.current = selectedAgentKey;
-      _setSelectedAcpModel(preset.model_preferences?.[0]?.model ?? null);
-      return;
-    }
-
-    modelResetForAgentKeyRef.current = selectedAgentKey;
-    _setSelectedAcpModel(null);
-  }, [selectedAgentKey, is_presetAgent, presets, selectedAgentInfo?.preset_id]);
-
-  // Read preferred mode or fallback to legacy yoloMode config
+  // Read the persisted preferred mode for the selected engine.
   useEffect(() => {
     // For preset agents, use the effective backend type for config lookup and mode saving
     const configKey = is_presetAgent ? currentEffectiveAgentInfo.agent_type : selectedAgent;
     selectedAgentRef.current = configKey;
     // Default authorization mode = full-auto (产品决策:开箱即用全自动,不再反复弹授权).
     // Use the backend's full-auto value (`getFullAutoMode`) when it is a mode the
-    // backend actually offers (handshake available_modes for ACP engines, else the
-    // static AGENT_MODES table); otherwise fall back to the backend's natural
-    // default via `resolveDefaultMode` — safe for engines without a yolo-equivalent.
-    // A saved `preferredMode` (explicit user choice, incl. a downgrade) still wins
-    // below.
+    // backend actually offers; otherwise fall back to the backend's natural
+    // default via `resolveDefaultMode`. A saved `preferredMode` (explicit user
+    // choice, incl. a downgrade) still wins below.
     const fullAutoMode = getFullAutoMode(configKey);
-    const handshakeModes = (availableAgentsData as unknown as AgentMetadata[] | undefined)?.find(
-      (a) => (a.backend ?? a.agent_type) === configKey
-    )?.handshake?.available_modes as AcpSessionModes | undefined;
-    const availableModeIds = handshakeModes?.available_modes?.map((m) => m.id) ??
-      getAgentModes(configKey).map((m) => m.value);
-    const fallbackMode = availableModeIds.includes(fullAutoMode)
-      ? fullAutoMode
-      : resolveDefaultMode(configKey, availableAgentsData as unknown as AgentMetadata[] | undefined);
+    const availableModeIds = getAgentModes(configKey).map((m) => m.value);
+    const fallbackMode = availableModeIds.includes(fullAutoMode) ? fullAutoMode : resolveDefaultMode(configKey);
     _setSelectedMode(fallbackMode);
-    if (!configKey) return;
+    if (configKey !== 'nomi') return;
 
     let cancelled = false;
 
     const loadPreferredMode = async () => {
       try {
-        // Read preferredMode from the agent's own config, fallback to legacy yoloMode
-        let preferred: string | undefined;
-        let yoloMode = false;
-
-        if (configKey === 'nomi') {
-          const config = configService.get('nomi.config');
-          preferred = config?.preferredMode;
-        } else {
-          const config = configService.get('acp.config');
-          const backendConfig = config?.[configKey as string] as Record<string, unknown> | undefined;
-          preferred = backendConfig?.preferredMode as string | undefined;
-          yoloMode = (backendConfig?.yoloMode as boolean) ?? false;
-        }
-
-        if (cancelled) return;
-
-        // 1. Use preferredMode if valid
-        const normalizedPreferred = configKey === 'codex' ? normalizeCodexMode(preferred) : preferred;
-        if (normalizedPreferred) {
-          const modes = getAgentModes(configKey);
-          if (modes.some((m) => m.value === normalizedPreferred)) {
-            _setSelectedMode(normalizedPreferred);
-            return;
-          }
-        }
-
-        // 2. Fallback: legacy yoloMode
-        if (yoloMode) {
-          const yoloValues: Record<string, string> = {
-            claude: 'bypassPermissions',
-            gemini: 'yolo',
-            codex: CODEX_MODE_NATIVE_FULL_ACCESS,
-            qwen: 'yolo',
-          };
-          _setSelectedMode(yoloValues[configKey] || 'yolo');
+        const preferred = configService.get('nomi.config')?.preferredMode;
+        if (cancelled || !preferred) return;
+        if (getAgentModes(configKey).some((m) => m.value === preferred)) {
+          _setSelectedMode(preferred);
         }
       } catch {
         /* silent */
@@ -483,43 +381,7 @@ export const useGuidAgentSelection = ({
     return () => {
       cancelled = true;
     };
-  }, [selectedAgent, is_presetAgent, currentEffectiveAgentInfo.agent_type, availableAgentsData]);
-
-  const currentAcpCachedModelInfo = useMemo(() => {
-    // For preset agents, resolve to the actual backend type for model list lookup
-    const backend = is_presetAgent ? currentEffectiveAgentInfo.agent_type : selectedAgent;
-
-    // Source: `handshake.available_models` from `/api/agents`.
-    // The backend persists the last-seen `ModelInfoPayload` (snake_case) on
-    // the agent_metadata row, so this is populated across restarts without
-    // requiring a fresh session.
-    const metadataAgents = availableAgentsData as unknown as AgentMetadata[] | undefined;
-    const matched = metadataAgents?.find((a) => (a.backend ?? a.agent_type) === backend);
-    const handshakeModels = matched?.handshake?.available_models as AcpModelInfo | undefined;
-    if (
-      handshakeModels &&
-      Array.isArray(handshakeModels.available_models) &&
-      handshakeModels.available_models.length > 0
-    ) {
-      return handshakeModels;
-    }
-
-    // Fallback: when the backend has not yet observed a session for codex
-    // (e.g., first launch before any warmup), use the hardcoded default list
-    // so the Guid page shows a model selector immediately. current model is
-    // deliberately null — the real default lives in the user's local codex
-    // config, so the button shows the generic "default model" label instead
-    // of pretending a hardcoded entry is active.
-    if (backend === 'codex' && DEFAULT_CODEX_MODELS.length > 0) {
-      return {
-        current_model_id: null,
-        current_model_label: null,
-        available_models: DEFAULT_CODEX_MODELS.map((m) => ({ id: m.id, label: m.label })),
-      } satisfies AcpModelInfo;
-    }
-
-    return null;
-  }, [selectedAgentKey, is_presetAgent, currentEffectiveAgentInfo.agent_type, availableAgentsData]);
+  }, [selectedAgent, is_presetAgent, currentEffectiveAgentInfo.agent_type]);
 
   // Key of the first non-preset CLI agent (used as fallback when leaving preset mode)
   const defaultAgentKey = useMemo(() => {
@@ -539,9 +401,6 @@ export const useGuidAgentSelection = ({
     customAgents,
     selectedMode,
     setSelectedMode,
-    selectedAcpModel,
-    setSelectedAcpModel,
-    currentAcpCachedModelInfo,
     currentEffectiveAgentInfo,
     getAgentKey,
     findAgentByKey,

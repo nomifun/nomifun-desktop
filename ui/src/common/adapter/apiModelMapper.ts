@@ -253,13 +253,6 @@ export function fromApiConversation(raw: unknown): TChatConversation {
     };
   }
 
-  if (extra && extra.acp_session_conversation_id != null) {
-    extra = {
-      ...extra,
-      acp_session_conversation_id: parseConversationId(extra.acp_session_conversation_id),
-    };
-  }
-
   if (extra && extra.companion_id != null) {
     extra = {
       ...extra,

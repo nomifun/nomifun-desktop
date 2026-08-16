@@ -18,12 +18,10 @@ pub mod knowledge_writeback;
 pub mod manager;
 pub mod nomi_session_persistence;
 pub mod one_shot;
-pub(crate) mod persistence;
 pub mod protocol;
 pub mod registry;
 pub mod routes;
 pub(crate) mod services;
-pub mod session;
 pub mod runtime_registry;
 pub mod terminal_title_completer;
 pub mod types;
@@ -53,9 +51,6 @@ pub use runtime_handle::MockAgentRuntime;
 pub use runtime_handle::{
     AgentRuntimeControl, AgentRuntimeHandle, SystemResourceNoticeDelivery,
 };
-pub use capability::skill_manager::{
-    AcpSkillManager, SkillDefinition, SkillIndex, build_skills_index_text, prepare_first_message_with_skills_index,
-};
 pub use factory::provider_config::{
     one_shot_completion, resolve_provider_config, streaming_completion,
     streaming_completion_text_or_reasoning, user_message, DeltaKind,
@@ -78,12 +73,9 @@ pub use knowledge_retrieval::LiveKnowledgeRetrievalSink;
 pub use knowledge_writeback::LiveKnowledgeWritebackSink;
 pub use nomi_session_persistence::{NomiSessionPersistence, NomiSessionResetOutcome};
 pub use terminal_title_completer::LiveTerminalTitleCompleter;
-pub use nomifun_api_types::{
-    AcpBuildExtra, AcpModelInfo, NomiBuildExtra, SlashCommandItem,
-};
-pub use persistence::AcpSessionSyncService;
+pub use nomifun_api_types::{NomiBuildExtra, SlashCommandItem};
 pub use protocol::events::{
-    AcpPermissionEventData, AcpPermissionOptionKind, AcpToolCallKind, AgentStreamEvent, FinishEventData, TurnStopReason,
+    AgentStreamEvent, FinishEventData, PermissionEventData, TurnStopReason,
 };
 pub use protocol::send_error::AgentSendError;
 pub use registry::{AgentRegistry, UnavailableReason};

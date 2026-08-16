@@ -100,105 +100,58 @@ export interface TokenUsageData {
   context_window?: number;
 }
 
-export type TChatConversation =
-  | Omit<
-      IChatConversation<
-        'acp',
-        {
-          workspace?: string;
-          backend: string;
-          cli_path?: string;
-          custom_workspace?: boolean;
-          /** Opaque AgentRegistry key; external/extension agent ids are not UUID entities. */
-          agent_id: string;
-          agent_name?: string;
-          /** Skills snapshot for this conversation — authoritative list, written
-           * once at creation. Join with `GET /api/skills` for descriptions. */
-          skills?: string[];
-          /** MCP server id snapshot chosen when the conversation was created. */
-          mcp_server_ids?: McpServerId[];
-          /** MCP server name snapshot chosen when the conversation was created. */
-          mcp_servers?: string[];
-          /** Conversation-scoped MCP status snapshot shown in the sendbox menu. */
-          mcp_statuses?: IConversationMcpStatus[];
-          /** Session-only MCP server snapshot persisted at creation time. */
-          session_mcp_servers?: ISessionMcpServer[];
-          /** ACP 后端的 session UUID，用于会话恢复 / ACP backend session UUID for session resume */
-          acp_session_id?: string;
-          /** Conversation ID that owns the ACP session / 拥有该 ACP session 的会话 ID */
-          acp_session_conversation_id?: ConversationId;
-          /** ACP session 最后更新时间 / Last update time of ACP session */
-          acp_session_updated_at?: number;
-          /** Persisted session mode for resume support / 持久化的会话模式，用于恢复 */
-          session_mode?: string;
-          /** Persisted model ID for resume support / 持久化的模型 ID，用于恢复 */
-          current_model_id?: string;
-          /** Cached config options from ACP backend / 缓存的 ACP 配置选项 */
-          cached_config_options?: import('@/common/types/platform/acpTypes').AcpSessionConfigOption[];
-          /** Pending config option selections from Guid page / Guid 页面待应用的配置选项 */
-          pending_config_options?: Record<string, string>;
-          /** Codex ACP-specific sandbox setting for newly created sessions. */
-          sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
-          /** Codex ACP-specific selected model. */
-          codexModel?: string;
-          /** Legacy marker for pre-provider-probe health-check conversations */
-          is_health_check?: boolean;
-        }
-      >,
-      'model'
-    >
-  | IChatConversation<
-      'nomi',
-      {
-        workspace: string;
-        custom_workspace?: boolean;
-        proxy?: string;
-        /** Skills snapshot for this conversation — authoritative list, written
-         * once at creation. Join with `GET /api/skills` for descriptions. */
-        skills?: string[];
-        /** MCP server id snapshot chosen when the conversation was created. */
-        mcp_server_ids?: McpServerId[];
-        /** MCP server name snapshot chosen when the conversation was created. */
-        mcp_servers?: string[];
-        /** Conversation-scoped MCP status snapshot shown in the sendbox menu. */
-        mcp_statuses?: IConversationMcpStatus[];
-        /** Session-only MCP server snapshot persisted at creation time. */
-        session_mcp_servers?: ISessionMcpServer[];
-        /** Max tokens per response */
-        maxTokens?: number;
-        /** Max agentic turns */
-        maxTurns?: number;
-        /** Persisted session mode for resume support */
-        session_mode?: string;
-        /** Legacy marker for pre-provider-probe health-check conversations */
-        is_health_check?: boolean;
-        /** Last token usage stats */
-        last_token_usage?: TokenUsageData;
-        /** Marks this nomi conversation as a desktop-companion's single per-companion
-         * session (单会话契约). Written by the backend at companion-session creation.
-         * Drives the 桌面伙伴 session-list group, the constrained companion chat panel
-         * (CompanionChatPanel), and the work-conversation list filter. */
-        companion_session?: boolean;
-        /** The companion (桌面伙伴) this session belongs to, when `companion_session` is
-         * set. Resolves the companion profile for the constrained chat panel + the
-         * session-list group's active-row highlight. */
-        companion_id?: CompanionId;
-        /** IM-channel platform when a companion turn originated from an external
-         * channel (telegram/lark/…). Present on channel-sourced companion turns. */
-        channel_platform?: string;
-        /** In-session companion summon marker（设计 B）: the summoned companion's
-         * id + hand-picked memory ids + excluded skills, `summoned_at`
-         * server-stamped. Written only through PUT
-         * /api/conversations/{id}/summon or trusted backend creators; drives
-         * the sendbox summon control and the header/sidebar badges. */
-        summon?: {
-          companion_id: CompanionId;
-          memory_ids: string[];
-          skill_exclusions: string[];
-          summoned_at: number;
-        };
-      }
-    >;
+export type TChatConversation = IChatConversation<
+  'nomi',
+  {
+    workspace: string;
+    custom_workspace?: boolean;
+    proxy?: string;
+    /** Skills snapshot for this conversation — authoritative list, written
+     * once at creation. Join with `GET /api/skills` for descriptions. */
+    skills?: string[];
+    /** MCP server id snapshot chosen when the conversation was created. */
+    mcp_server_ids?: McpServerId[];
+    /** MCP server name snapshot chosen when the conversation was created. */
+    mcp_servers?: string[];
+    /** Conversation-scoped MCP status snapshot shown in the sendbox menu. */
+    mcp_statuses?: IConversationMcpStatus[];
+    /** Session-only MCP server snapshot persisted at creation time. */
+    session_mcp_servers?: ISessionMcpServer[];
+    /** Max tokens per response */
+    maxTokens?: number;
+    /** Max agentic turns */
+    maxTurns?: number;
+    /** Persisted session mode for resume support */
+    session_mode?: string;
+    /** Legacy marker for pre-provider-probe health-check conversations */
+    is_health_check?: boolean;
+    /** Last token usage stats */
+    last_token_usage?: TokenUsageData;
+    /** Marks this nomi conversation as a desktop-companion's single per-companion
+     * session (单会话契约). Written by the backend at companion-session creation.
+     * Drives the 桌面伙伴 session-list group, the constrained companion chat panel
+     * (CompanionChatPanel), and the work-conversation list filter. */
+    companion_session?: boolean;
+    /** The companion (桌面伙伴) this session belongs to, when `companion_session` is
+     * set. Resolves the companion profile for the constrained chat panel + the
+     * session-list group's active-row highlight. */
+    companion_id?: CompanionId;
+    /** IM-channel platform when a companion turn originated from an external
+     * channel (telegram/lark/…). Present on channel-sourced companion turns. */
+    channel_platform?: string;
+    /** In-session companion summon marker（设计 B）: the summoned companion's
+     * id + hand-picked memory ids + excluded skills, `summoned_at`
+     * server-stamped. Written only through PUT
+     * /api/conversations/{id}/summon or trusted backend creators; drives
+     * the sendbox summon control and the header/sidebar badges. */
+    summon?: {
+      companion_id: CompanionId;
+      memory_ids: string[];
+      skill_exclusions: string[];
+      summoned_at: number;
+    };
+  }
+>;
 
 export type IChatConversationRefer = {
   'chat.history': TChatConversation[];

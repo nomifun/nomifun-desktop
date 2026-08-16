@@ -20,7 +20,6 @@ export type BrowserStorageFeature =
   | 'workspace-panel-tab'
   | 'workspace-preview'
   | 'draft'
-  | 'initial-message-acp'
   | 'initial-message-nomi'
   | 'initial-message-processed'
   | 'command-queue'

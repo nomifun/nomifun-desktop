@@ -5,8 +5,8 @@
 //! 持有精确 turn generation 的 send-loop 发起;IDMM 仅验证观察结果,不会越权换模型或
 //! 重建 runtime。
 //!
-//! 这是 [`crate::acp_error_recovery::ConversationService::evict_acp_task_after_terminal_error`]
-//! 的泛化:那条路径在 ACP 终态错误后终止 runtime,这条路径换模型后重建并交回新句柄。
+//! 终态错误后仅终止 runtime 的旧恢复路径已随多引擎收敛一并移除;本模块是它的泛化:
+//! 换模型后重建 runtime 并把新句柄交回 send-loop。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -106,16 +106,14 @@ impl ConversationService {
     }
 
     /// 聚焦测试使用的故障转移入口(plan D3 的「Some(next)」分支主体):
-    /// 挑下一候选 → `kill_and_wait`(镜像
-    /// [`Self::evict_acp_task_after_terminal_error`])→
+    /// 挑下一候选 → `kill_and_wait`→
     /// 写 `conversation.model`→ 用刷新后的行
     /// `build_runtime_options` 重建任务。返回 `Some(FailoverSwitch)` 表示换好新模型、
     /// 新句柄就绪;返回 `None` 表示**队列耗尽**(无可用候选)—— 调用方据此回落到
     /// 「emit 原始错误」,绝不无限切换。
     ///
-    /// **ACP 边界(review #9,plan D7)**:加载会话行后在此**统一**判定 agent 类型——
-    /// 仅 `AgentType::Nomi` 放行,其余(ACP / 终端 CLI / 远程 …)`warn` + 返回 `None`
-    /// (不终止 runtime、不写 model)。send-loop 自己也有一道便宜的早闸,这里是
+    /// **Agent 类型边界(review #9,plan D7)**:加载会话行后在此**统一**判定 agent
+    /// 类型——仅 `AgentType::Nomi` 放行。send-loop 自己也有一道便宜的早闸,这里是
     /// 实际有副作用路径的强制点。
     ///
     /// 注意:这里只换模型 + 重建 + 交回句柄,**不**负责重发消息;生产 send-loop
@@ -129,6 +127,7 @@ impl ConversationService {
     // for focused unit tests so no future observer can rebuild a Finished
     // conversation by calling failover out of band.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) async fn perform_model_failover(
         &self,
         conversation_id: &str,
@@ -313,8 +312,7 @@ impl ConversationService {
             "Model failover: awaiting old runtime teardown before committing model switch"
         );
 
-        // kill_and_wait,镜像 evict_acp_task_after_terminal_error(acp_error_recovery.rs):
-        // 旧任务句柄绑定旧 provider/model,必须等它落幕再用新行重建。
+        // kill_and_wait:旧任务句柄绑定旧 provider/model,必须等它落幕再用新行重建。
         // Cancellation cannot be allowed to drop an in-flight teardown: the
         // registry quarantines the old slot, and this owner must keep retrying
         // until process-tree exit is proven before either rebuilding or letting

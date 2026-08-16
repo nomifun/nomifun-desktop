@@ -32,21 +32,20 @@ use nomifun_common::{
     StepFailurePolicy, TimestampMs, now_ms,
 };
 use nomifun_db::models::{
-    AcpSessionRow, AgentMetadataRow, ConversationArtifactRow,
+    AgentMetadataRow, ConversationArtifactRow,
     ConversationDeliveryReceiptRow, ConversationRow, MessageRow, UpdateAgentHandshakeParams,
     UpsertAgentMetadataParams,
 };
 use nomifun_db::{
     AgentExecutionLeaseToken, AgentExecutionTurnAuthority, AttemptConversationEffectParams,
     ConversationDeliveryReceiptClaim, ConversationFilters, ConversationRowUpdate,
-    CreateAcpSessionParams,
     CreateAgentExecutionAttemptParams, CreateAgentExecutionParams,
     CreateAgentExecutionTemplateParams, DbError, IAgentExecutionTemplateRepository,
-    IAcpSessionRepository, IAgentExecutionRepository, IAgentMetadataRepository,
+    IAgentExecutionRepository, IAgentMetadataRepository,
     IConversationRepository, MessageRowUpdate, MessageSearchRow,
     NewAgentExecutionEvent, NewAgentExecutionParticipant,
-    NewAgentExecutionStep, NewAgentExecutionTemplateParticipant, PersistedSessionState,
-    ReconcileAgentExecutionPlanParams, SaveRuntimeStateParams,
+    NewAgentExecutionStep, NewAgentExecutionTemplateParticipant,
+    ReconcileAgentExecutionPlanParams,
     SettleAgentExecutionAttemptParams, SortOrder, SqliteAgentExecutionRepository,
     SqliteAgentExecutionTemplateRepository, SqliteConversationRepository,
     TurnLifecycleTransition, TurnReceiptCompletion,
@@ -64,9 +63,6 @@ use crate::skill_resolver::{FixedSkillResolver, ResolvedAgentSkill, SkillResolve
 use nomifun_knowledge::{
     KnowledgeBinding, KnowledgeCompleter, KnowledgeEventEmitter, KnowledgeService,
 };
-
-#[path = "service_test/acp_error_recovery_test.rs"]
-mod acp_error_recovery_test;
 
 #[path = "service_test/summon_test.rs"]
 mod summon_test;
@@ -334,11 +330,16 @@ impl crate::ExecutionConversationBoundary for BlockingNoExecutionBoundary {
 }
 
 async fn init_database_memory() -> Result<nomifun_db::Database, nomifun_db::DbError> {
-    nomifun_db::init_database_memory_with_owner(
+    let database = nomifun_db::init_database_memory_with_owner(
         nomifun_common::UserId::parse(SQLITE_TEST_OWNER.to_owned())
             .expect("canonical fixture owner"),
     )
-    .await
+    .await?;
+    // Every conversation fixture is now `nomi`, and a nomi row carries a
+    // top-level `model` whose provider must exist: the repository enforces the
+    // provider foreign key inside the create transaction.
+    seed_openai_chat_model(database.pool(), PROVIDER_ID_1, "fixture-provider", "m1", 1).await;
+    Ok(database)
 }
 
 fn encrypted_bearer_credentials() -> String {
@@ -353,7 +354,7 @@ async fn seed_openai_chat_model(
     sort_order: i64,
 ) {
     nomifun_db::sqlx::query(
-        "INSERT INTO providers (\
+        "INSERT OR IGNORE INTO providers (\
             provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
             created_at, updated_at\
          ) VALUES (?, 'openai', ?, 'https://example.invalid', 'bearer', \
@@ -366,7 +367,7 @@ async fn seed_openai_chat_model(
     .await
     .unwrap();
     nomifun_db::sqlx::query(
-        "INSERT INTO provider_models (\
+        "INSERT OR IGNORE INTO provider_models (\
             provider_id, model, enabled, sort_order, description, created_at, updated_at\
          ) VALUES (?, ?, 1, ?, NULL, 1, 1)",
     )
@@ -377,7 +378,7 @@ async fn seed_openai_chat_model(
     .await
     .unwrap();
     nomifun_db::sqlx::query(
-        "INSERT INTO provider_model_capabilities (\
+        "INSERT OR IGNORE INTO provider_model_capabilities (\
             provider_id, model, task, traits, protocol, connection_role, \
             allow_cross_origin_credentials, provider_params, created_at, updated_at\
          ) VALUES (?, ?, 'chat', '[]', 'openai.chat_text', 'default', 0, '{}', 1, 1)",
@@ -1395,7 +1396,7 @@ fn test_acp_agent_metadata() -> AgentMetadataRow {
         description: None,
         description_i18n: None,
         backend: Some("claude".to_owned()),
-        agent_type: AgentType::Acp.serde_name().to_owned(),
+        agent_type: AgentType::Nomi.serde_name().to_owned(),
         agent_source: "builtin".to_owned(),
         agent_source_info: None,
         source_key: Some("agent_builtin_claude".to_owned()),
@@ -1454,81 +1455,6 @@ impl IAgentMetadataRepository for StubAgentMetadataRepo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeStateSaveCall {
-    conversation_id: String,
-    current_model_id: Option<Option<String>>,
-}
-
-#[derive(Default)]
-struct StubAcpSessionRepo {
-    runtime_state_saves: Mutex<Vec<RuntimeStateSaveCall>>,
-    cleared_session_ids: Mutex<Vec<String>>,
-}
-
-impl StubAcpSessionRepo {
-    fn runtime_state_saves(&self) -> Vec<RuntimeStateSaveCall> {
-        self.runtime_state_saves.lock().unwrap().clone()
-    }
-
-    fn cleared_session_ids(&self) -> Vec<String> {
-        self.cleared_session_ids.lock().unwrap().clone()
-    }
-}
-
-#[async_trait::async_trait]
-impl IAcpSessionRepository for StubAcpSessionRepo {
-    async fn get(&self, _conversation_id: &str) -> Result<Option<AcpSessionRow>, DbError> {
-        Ok(None)
-    }
-    async fn create(&self, params: &CreateAcpSessionParams<'_>) -> Result<AcpSessionRow, DbError> {
-        // Return a synthetic row so `ConversationService::create` can
-        // succeed for ACP conversations in unit tests.
-        Ok(AcpSessionRow {
-            id: 0,
-            conversation_id: params.conversation_id.to_owned(),
-            agent_backend: params.agent_backend.to_owned(),
-            agent_source: params.agent_source.to_owned(),
-            agent_id: params.agent_id.to_owned(),
-            acp_session_id: None,
-            session_status: "idle".into(),
-            session_config: "{}".into(),
-            last_active_at: None,
-            suspended_at: None,
-        })
-    }
-    async fn update_session_id(&self, _conversation_id: &str, _session_id: &str) -> Result<bool, DbError> {
-        Ok(false)
-    }
-    async fn clear_session_id(&self, conversation_id: &str) -> Result<bool, DbError> {
-        self.cleared_session_ids
-            .lock()
-            .unwrap()
-            .push(conversation_id.to_owned());
-        Ok(true)
-    }
-    async fn delete(&self, _conversation_id: &str) -> Result<bool, DbError> {
-        Ok(false)
-    }
-    async fn load_runtime_state(&self, _conversation_id: &str) -> Result<Option<PersistedSessionState>, DbError> {
-        Ok(Some(PersistedSessionState {
-            current_model_id: Some("deepseek-v4-pro".to_owned()),
-            ..Default::default()
-        }))
-    }
-    async fn save_runtime_state(
-        &self,
-        conversation_id: &str,
-        params: &SaveRuntimeStateParams<'_>,
-    ) -> Result<bool, DbError> {
-        self.runtime_state_saves.lock().unwrap().push(RuntimeStateSaveCall {
-            conversation_id: conversation_id.to_owned(),
-            current_model_id: params.current_model_id.map(|outer| outer.map(ToOwned::to_owned)),
-        });
-        Ok(true)
-    }
-}
-
 fn make_service() -> (
     ConversationService,
     Arc<MockBroadcaster>,
@@ -1540,18 +1466,6 @@ fn make_service() -> (
 
 fn make_service_with_resolver(
     skill_resolver: Arc<dyn crate::skill_resolver::SkillResolver>,
-) -> (
-    ConversationService,
-    Arc<MockBroadcaster>,
-    Arc<MockRepo>,
-    Arc<dyn AgentRuntimeRegistry>,
-) {
-    make_service_with_resolver_and_acp_session_repo(skill_resolver, Arc::new(StubAcpSessionRepo::default()))
-}
-
-fn make_service_with_resolver_and_acp_session_repo(
-    skill_resolver: Arc<dyn crate::skill_resolver::SkillResolver>,
-    acp_session_repo: Arc<dyn IAcpSessionRepository>,
 ) -> (
     ConversationService,
     Arc<MockBroadcaster>,
@@ -1570,7 +1484,6 @@ fn make_service_with_resolver_and_acp_session_repo(
         runtime_registry.clone(),
         repo.clone(),
         agent_metadata_repo,
-        acp_session_repo,
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     (svc, broadcaster, repo, runtime_registry)
@@ -1598,18 +1511,17 @@ fn make_service_with_workspace_root(
         runtime_registry.clone(),
         repo.clone(),
         agent_metadata_repo,
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     (svc, broadcaster, repo, runtime_registry)
 }
 
 fn make_create_req() -> CreateConversationRequest {
-    let workspace = isolated_test_workspace("acp");
+    let workspace = isolated_test_workspace("nomi");
     serde_json::from_value(json!({
-        "type": "acp",
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
         "extra": {
-            "agent_id": TEST_ACP_AGENT_ID,
             "workspace": workspace
         }
     }))
@@ -1644,7 +1556,7 @@ async fn create_returns_conversation_with_defaults() {
     let resp = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
 
     assert!(ConversationId::try_from(resp.conversation_id.as_str()).is_ok());
-    assert_eq!(resp.r#type, AgentType::Acp);
+    assert_eq!(resp.r#type, AgentType::Nomi);
     assert_eq!(resp.status, ConversationStatus::Pending);
     assert_eq!(resp.source, Some(ConversationSource::Nomifun));
     assert!(!resp.pinned);
@@ -1842,7 +1754,6 @@ async fn preset_resolved_nomi_model_does_not_bypass_explicit_template_authority(
         Arc::new(MockAgentRuntimeRegistry::new()),
         conversation_repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let request: CreateConversationRequest = serde_json::from_value(json!({
@@ -1910,26 +1821,6 @@ async fn preset_resolved_nomi_model_does_not_bypass_explicit_template_authority(
 }
 
 #[tokio::test]
-async fn create_rejects_backend_only_acp_identity_before_persisting() {
-    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
-    let req = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": {
-            "backend": "claude",
-            "workspace": "/project"
-        }
-    }))
-    .unwrap();
-
-    let error = svc.create(TEST_USER_1, req).await.unwrap_err();
-    assert!(matches!(
-        error,
-        AppError::BadRequest(message) if message.contains("extra.agent_id")
-    ));
-    assert!(repo.rows.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
 async fn create_rejects_every_backend_owned_lifecycle_extra_key_before_persisting() {
     let (svc, _broadcaster, repo, _runtime_registry) = make_service();
 
@@ -1957,48 +1848,6 @@ async fn create_rejects_every_backend_owned_lifecycle_extra_key_before_persistin
 }
 
 #[tokio::test]
-async fn create_rejects_missing_acp_agent_parent_before_persisting() {
-    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
-    let missing_agent_id = ConversationId::new().into_string();
-    let req = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": {
-            "agent_id": missing_agent_id,
-            "workspace": "/project"
-        }
-    }))
-    .unwrap();
-
-    let error = svc.create(TEST_USER_1, req).await.unwrap_err();
-    assert!(matches!(
-        error,
-        AppError::BadRequest(message) if message.contains("does not exist")
-    ));
-    assert!(repo.rows.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn create_rejects_acp_backend_that_disagrees_with_agent_parent() {
-    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
-    let req = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": {
-            "agent_id": TEST_ACP_AGENT_ID,
-            "backend": "codex",
-            "workspace": "/project"
-        }
-    }))
-    .unwrap();
-
-    let error = svc.create(TEST_USER_1, req).await.unwrap_err();
-    assert!(matches!(
-        error,
-        AppError::BadRequest(message) if message.contains("does not match agent")
-    ));
-    assert!(repo.rows.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
 async fn create_rolls_back_row_and_managed_workspace_when_post_create_write_fails() {
     let workspace_root = std::env::temp_dir().join(format!(
         "nomifun-conversation-create-rollback-{}",
@@ -2009,6 +1858,7 @@ async fn create_rolls_back_row_and_managed_workspace_when_post_create_write_fail
     repo.fail_next_mcp_selection_write();
     let req = serde_json::from_value(json!({
         "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
         "extra": {
             "selected_mcp_server_ids": ["0190f5fe-7c00-7a00-8000-000000000123"]
         }
@@ -2040,9 +1890,9 @@ async fn create_rolls_back_row_and_managed_workspace_when_post_create_write_fail
 async fn create_rejects_numeric_session_mcp_ids() {
     let (svc, _broadcaster, _repo, _task_mgr) = make_service();
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
         "extra": {
-            "agent_id": TEST_ACP_AGENT_ID,
             "workspace": "/project",
             "selected_session_mcp_servers": [{
                 "id": 3,
@@ -2068,9 +1918,9 @@ async fn create_rejects_numeric_session_mcp_ids() {
 async fn create_rejects_non_string_session_mcp_ids() {
     let (svc, _broadcaster, _repo, _task_mgr) = make_service();
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
         "extra": {
-            "agent_id": TEST_ACP_AGENT_ID,
             "workspace": "/project",
             "selected_session_mcp_servers": [{
                 "id": true,
@@ -2102,8 +1952,9 @@ async fn create_rejects_workspace_with_trailing_whitespace_in_request() {
     let workspace_with_trailing_space = format!("{} ", workspace.to_string_lossy());
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": workspace_with_trailing_space }
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "workspace": workspace_with_trailing_space }
     }))
     .unwrap();
     let err = svc.create(TEST_USER_1, req).await.unwrap_err();
@@ -2126,8 +1977,9 @@ async fn create_accepts_workspace_with_interior_whitespace_segment() {
     std::fs::create_dir_all(&workspace).unwrap();
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": workspace.to_string_lossy() }
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "workspace": workspace.to_string_lossy() }
     }))
     .unwrap();
     let resp = svc.create(TEST_USER_1, req).await.unwrap();
@@ -2141,18 +1993,19 @@ async fn create_with_custom_name_and_source() {
     let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
         "name": "Custom Name",
         "source": "telegram",
         "channel_chat_id": "chat:123",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID }
+        "extra": {}
     }))
     .unwrap();
 
     let resp = svc.create(TEST_USER_1, req).await.unwrap();
 
     assert_eq!(resp.name, "Custom Name");
-    assert_eq!(resp.r#type, AgentType::Acp);
+    assert_eq!(resp.r#type, AgentType::Nomi);
     assert_eq!(resp.source, Some(ConversationSource::Telegram));
     assert_eq!(resp.channel_chat_id.as_deref(), Some("chat:123"));
 }
@@ -2288,6 +2141,7 @@ async fn list_filters_by_user() {
     svc.create(TEST_USER_1, make_create_req()).await.unwrap();
     let secondary_model_only_req = serde_json::from_value(json!({
         "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
         "extra": {}
     }))
     .unwrap();
@@ -2303,9 +2157,10 @@ async fn list_with_source_filter() {
     svc.create(TEST_USER_1, make_create_req()).await.unwrap();
 
     let telegram_req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
         "source": "telegram",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID }
+        "extra": {}
     }))
     .unwrap();
     svc.create(TEST_USER_1, telegram_req).await.unwrap();
@@ -2392,8 +2247,9 @@ async fn update_extra_merge() {
     let (svc, _broadcaster, _repo, runtime_registry) = make_service();
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": "/old", "contextFileName": "ctx.md" }
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "workspace": "/old", "contextFileName": "ctx.md" }
     }))
     .unwrap();
     let conv = svc.create(TEST_USER_1, req).await.unwrap();
@@ -2405,27 +2261,6 @@ async fn update_extra_merge() {
 
     assert_eq!(updated.extra["workspace"], "/new");
     assert_eq!(updated.extra["contextFileName"], "ctx.md");
-}
-
-#[tokio::test]
-async fn update_rejects_acp_agent_identity_patch() {
-    let (svc, _broadcaster, repo, runtime_registry) = make_service();
-    let conversation = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-    let before = repo.get(&conversation.conversation_id).await.unwrap().unwrap().extra;
-    let req = serde_json::from_value(json!({
-        "extra": { "agent_id": "0190f5fe-7c00-7a00-8000-000000000102" }
-    }))
-    .unwrap();
-
-    let error = svc
-        .update(TEST_USER_1, &conversation.conversation_id, req, &runtime_registry)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        AppError::BadRequest(message) if message.contains("immutable after creation")
-    ));
-    assert_eq!(repo.get(&conversation.conversation_id).await.unwrap().unwrap().extra, before);
 }
 
 #[tokio::test]
@@ -2524,7 +2359,6 @@ async fn update_model() {
     // (Task 8 enforces the nomi-only rule in update).
     let create_req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
-        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
         "extra": { "workspace": "/project" }
     }))
     .unwrap();
@@ -2729,7 +2563,6 @@ async fn make_sqlite_projection_service() -> (
         runtime_registry,
         repository.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     (service, broadcaster, repository, database)
@@ -2745,6 +2578,7 @@ async fn assistant_projection_is_one_durable_row_and_rebroadcasts_stable_final_c
             PROJECTION_OWNER,
             serde_json::from_value(json!({
                 "type": "nomi",
+                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
                 "name": "lead",
                 "extra": { "workspace": "/project" }
             }))
@@ -2829,6 +2663,7 @@ async fn assistant_projection_reuses_companion_and_channel_wire_markers() {
             PROJECTION_OWNER,
             serde_json::from_value(json!({
                 "type": "nomi",
+                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
                 "name": "companion lead",
                 "extra": {
                     "workspace": "/project",
@@ -2874,6 +2709,7 @@ async fn two_user_private_events_are_owner_scoped() {
     let request = || {
         serde_json::from_value(json!({
             "type": "nomi",
+            "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
             "name": "private conversation",
             "extra": { "workspace": "/project" }
         }))
@@ -2946,7 +2782,6 @@ async fn delete_rejects_soft_deleted_execution_attempt_transcript() {
         runtime_registry.clone(),
         conversation_repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(RepositoryExecutionConversationBoundary::new(
             execution_repo.clone(),
         )),
@@ -2962,7 +2797,7 @@ async fn delete_rejects_soft_deleted_execution_attempt_transcript() {
                 "model": "model_test",
                 "use_model": "model_test"
             },
-            "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": workspace }
+            "extra": { "workspace": workspace }
         }))
         .unwrap()
     };
@@ -3531,9 +3366,10 @@ async fn broadcast_includes_source_on_delete() {
     let (svc, broadcaster, _repo, _runtime_registry) = make_service();
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
         "source": "telegram",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID }
+        "extra": {}
     }))
     .unwrap();
     let conv = svc.create(TEST_USER_1, req).await.unwrap();
@@ -3611,10 +3447,10 @@ async fn clone_without_source_creates_isolated_workspace_and_session_state() {
 
     let req: CloneConversationRequest = serde_json::from_value(json!({
         "conversation": {
-            "type": "acp",
+            "type": "nomi",
+            "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
             "name": "Cloned",
             "extra": {
-                "agent_id": TEST_ACP_AGENT_ID,
                 "backend": "claude",
                 "workspace": "/old",
                 "custom_workspace": true,
@@ -3970,7 +3806,6 @@ async fn reset_nomi_clears_exact_persisted_session_generation_before_db_commit()
         runtime_registry,
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let request: CreateConversationRequest = serde_json::from_value(json!({
@@ -4029,7 +3864,6 @@ async fn companion_archive_context_reset_clears_finished_cold_nomi_without_runti
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let request: CreateConversationRequest = serde_json::from_value(json!({
@@ -4103,61 +3937,6 @@ async fn companion_archive_context_reset_clears_finished_cold_nomi_without_runti
             !matches!(event.name.as_str(), "turn.started" | "turn.completed")
         }),
         "archive maintenance is not a business turn"
-    );
-}
-
-#[tokio::test]
-async fn clear_context_clears_finished_cold_acp_resume_identity_without_runtime_build() {
-    let repo = Arc::new(MockRepo::new());
-    let broadcaster = Arc::new(MockBroadcaster::new());
-    let registry_impl = Arc::new(MockAgentRuntimeRegistry::new());
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = registry_impl.clone();
-    let acp_sessions = Arc::new(StubAcpSessionRepo::default());
-    let svc = ConversationService::new(
-        Arc::<str>::from(TEST_USER_1),
-        std::env::temp_dir(),
-        broadcaster.clone(),
-        Arc::new(FixedSkillResolver { names: vec![] }),
-        runtime_registry.clone(),
-        repo.clone(),
-        Arc::new(StubAgentMetadataRepo),
-        acp_sessions.clone(),
-        Arc::new(crate::NoExecutionConversationBoundary),
-    );
-    let conversation = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-    repo.update(
-        &conversation.conversation_id,
-        &ConversationRowUpdate {
-            status: Some("finished".to_owned()),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    broadcaster.take_events();
-
-    svc.clear_context(TEST_USER_1, &conversation.conversation_id)
-    .await
-    .unwrap();
-
-    assert_eq!(registry_impl.build_count(), 0);
-    assert_eq!(
-        acp_sessions.cleared_session_ids(),
-        vec![conversation.conversation_id.clone()]
-    );
-    assert_eq!(
-        repo.get(&conversation.conversation_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status
-            .as_deref(),
-        Some("finished")
-    );
-    assert!(
-        broadcaster.take_events().iter().all(|event| {
-            !matches!(event.name.as_str(), "turn.started" | "turn.completed")
-        })
     );
 }
 
@@ -4241,7 +4020,6 @@ async fn reset_nomi_persistence_failure_leaves_durable_aggregate_untouched() {
         runtime_registry,
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let request: CreateConversationRequest = serde_json::from_value(json!({
@@ -4299,7 +4077,6 @@ async fn reset_runtime_teardown_failure_leaves_durable_aggregate_untouched() {
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
@@ -4387,14 +4164,14 @@ async fn reset_absorbs_accepted_internal_turn_so_replay_never_builds() {
             runtime_registry.clone(),
             repo.clone(),
             Arc::new(StubAgentMetadataRepo),
-            Arc::new(StubAcpSessionRepo::default()),
             Arc::new(crate::NoExecutionConversationBoundary),
         )
     };
     let svc = make_service();
     let request: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": "/project" }
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "workspace": "/project" }
     }))
     .unwrap();
     let conversation = svc.create(USER_ID, request).await.unwrap();
@@ -4495,8 +4272,9 @@ async fn history_reverifies_committed_local_artifact_after_replace_and_delete() 
         .create(
             TEST_USER_1,
             serde_json::from_value(json!({
-                "type": "acp",
-                "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": workspace.to_string_lossy() }
+                "type": "nomi",
+                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+                "extra": { "workspace": workspace.to_string_lossy() }
             }))
             .unwrap(),
         )
@@ -4583,7 +4361,7 @@ async fn history_reverifies_committed_local_artifact_after_replace_and_delete() 
 }
 
 #[tokio::test]
-async fn history_without_workspace_fails_closed_for_acp_local_artifact_batch() {
+async fn history_without_workspace_fails_closed_for_local_artifact_batch() {
     use nomifun_ai_agent::artifact_store::ArtifactStore;
 
     const ONE_PIXEL_PNG: &str =
@@ -4601,8 +4379,9 @@ async fn history_without_workspace_fails_closed_for_acp_local_artifact_batch() {
         .create(
             TEST_USER_1,
             serde_json::from_value(json!({
-                "type": "acp",
-                "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": workspace.to_string_lossy() }
+                "type": "nomi",
+                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+                "extra": { "workspace": workspace.to_string_lossy() }
             }))
             .unwrap(),
         )
@@ -4615,6 +4394,9 @@ async fn history_without_workspace_fails_closed_for_acp_local_artifact_batch() {
         .next()
         .unwrap();
 
+    // Drop the workspace binding: without it there is no ArtifactStore to
+    // re-verify the committed receipt against, so a previously-green batch
+    // must be projected as failed rather than trusted on its marker alone.
     repo.update(
         &conv.conversation_id,
         &ConversationRowUpdate {
@@ -4629,19 +4411,13 @@ async fn history_without_workspace_fails_closed_for_acp_local_artifact_batch() {
         message_id: MessageId::new().into_string(),
         conversation_id: conv.conversation_id.clone(),
         msg_id: None,
-        r#type: "acp_tool_call".into(),
+        r#type: "tool_call".into(),
         content: json!({
-            "session_id": "session-history",
+            "call_id": "historical-image-no-workspace",
+            "name": "ImageGeneration",
+            "status": "completed",
             "artifact_delivery_committed": true,
-            "update": {
-                "session_update": "tool_call_update",
-                "tool_call_id": "historical-acp-image",
-                "status": "completed",
-                "content": [
-                    { "type": "artifact", "artifact": artifact },
-                    { "type": "resource_link", "name": "remote copy", "uri": "https://example.com/copy.png" }
-                ]
-            }
+            "artifacts": [artifact],
         })
         .to_string(),
         position: Some("left".into()),
@@ -4658,16 +4434,9 @@ async fn history_without_workspace_fails_closed_for_acp_local_artifact_batch() {
         .unwrap();
     let message = &history.items[0];
     assert_eq!(message.status, Some(nomifun_common::MessageStatus::Error));
-    assert_eq!(message.content["update"]["status"], "failed");
+    assert_eq!(message.content["status"], "error");
     assert_eq!(message.content["artifact_delivery_committed"], false);
-    let items = message.content["update"]["content"].as_array().unwrap();
-    assert!(items.iter().all(|item| {
-        !matches!(
-            item["type"].as_str(),
-            Some("artifact" | "resource_link")
-        )
-    }));
-    assert!(items.iter().any(|item| item["type"] == "artifact_error"));
+    assert_eq!(message.content["artifacts"], json!([]));
     std::fs::remove_dir_all(&data_root).unwrap();
 }
 
@@ -4823,116 +4592,6 @@ async fn legacy_completed_high_signal_tool_group_without_receipts_is_not_green()
 }
 
 #[tokio::test]
-async fn legacy_completed_acp_artifact_tool_without_required_receipts_is_not_green() {
-    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-    let fake_receipt = json!({
-        "id": "acp-artifact-history-contract",
-        "kind": "image",
-        "mime_type": "image/png",
-        "path": "/project/nomifun-artifacts/history.png",
-        "relative_path": "nomifun-artifacts/history.png",
-        "size_bytes": 10,
-        "sha256": "a".repeat(64),
-    });
-    let mut wrong_mime_receipt = fake_receipt.clone();
-    wrong_mime_receipt["mime_type"] = json!("application/pdf");
-    let identity_free_first = fake_receipt.clone();
-    let mut identity_free_duplicate_id = fake_receipt.clone();
-    identity_free_duplicate_id["path"] =
-        json!("/project/nomifun-artifacts/history-second.png");
-    identity_free_duplicate_id["relative_path"] =
-        json!("nomifun-artifacts/history-second.png");
-    let updates = [
-        json!({
-            "session_update": "tool_call_update",
-            "tool_call_id": "acp-empty-image",
-            "title": "ImageGeneration",
-            "status": "completed",
-            "raw_input": { "prompt": "cat" },
-            "content": [],
-        }),
-        json!({
-            "session_update": "tool_call_update",
-            "tool_call_id": "acp-count-short",
-            "title": "image_gen",
-            "status": "completed",
-            "raw_input": { "prompt": "cats", "n": 2 },
-            "content": [{ "type": "artifact", "artifact": fake_receipt }],
-        }),
-        json!({
-            "session_update": "tool_call_update",
-            "tool_call_id": "acp-wrong-mime",
-            "title": "image_gen",
-            "status": "completed",
-            "raw_input": { "prompt": "cat" },
-            "content": [{ "type": "artifact", "artifact": wrong_mime_receipt }],
-        }),
-        json!({
-            "session_update": "tool_call_update",
-            "tool_call_id": "acp-identity-free-duplicate-id",
-            "status": "completed",
-            "content": [
-                { "type": "artifact", "artifact": identity_free_first },
-                { "type": "artifact", "artifact": identity_free_duplicate_id }
-            ],
-        }),
-        json!({
-            "session_update": "tool_call_update",
-            "tool_call_id": "acp-ordinary-read",
-            "title": "Read",
-            "status": "completed",
-            "raw_input": { "path": "README.md" },
-            "content": [],
-        }),
-    ];
-    for (index, update) in updates.iter().enumerate() {
-        repo.insert_message(&MessageRow {
-            id: 0,
-            message_id: MessageId::new().into_string(),
-            conversation_id: conv.conversation_id.clone(),
-            msg_id: None,
-            r#type: "acp_tool_call".into(),
-            content: json!({
-                "session_id": "legacy-acp-history",
-                "update": update,
-            })
-            .to_string(),
-            position: Some("left".into()),
-            status: Some("finish".into()),
-            hidden: false,
-            created_at: index as i64,
-        })
-        .await
-        .unwrap();
-    }
-
-    let history = svc
-        .list_messages(TEST_USER_1, &conv.conversation_id, ListMessagesQuery::default())
-        .await
-        .unwrap();
-    assert_eq!(history.items.len(), 5);
-    for message in &history.items[..4] {
-        assert_eq!(message.status, Some(nomifun_common::MessageStatus::Error));
-        assert_eq!(message.content["update"]["status"], "failed");
-        assert_eq!(message.content["artifact_delivery_committed"], false);
-        let items = message.content["update"]["content"].as_array().unwrap();
-        assert!(items.iter().any(|item| item["type"] == "artifact_error"));
-        assert!(items.iter().all(|item| item["type"] != "artifact"));
-    }
-    let ordinary_read = &history.items[4];
-    assert_eq!(
-        ordinary_read.status,
-        Some(nomifun_common::MessageStatus::Finish)
-    );
-    assert_eq!(ordinary_read.content["update"]["status"], "completed");
-    assert!(ordinary_read
-        .content
-        .get("artifact_delivery_committed")
-        .is_none());
-}
-
-#[tokio::test]
 async fn reset_not_found() {
     let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     let err = svc.reset(TEST_USER_1, "no-such-id").await.unwrap_err();
@@ -5035,7 +4694,7 @@ impl MockAgent {
 #[async_trait::async_trait]
 impl AgentRuntimeControl for MockAgent {
     fn agent_type(&self) -> AgentType {
-        AgentType::Acp
+        AgentType::Nomi
     }
     fn conversation_id(&self) -> &str {
         &self.conversation_id
@@ -5361,6 +5020,7 @@ struct SlowAgentRuntimeRegistry {
     delay: Duration,
     built: AtomicBool,
     build_calls: AtomicUsize,
+    nomi_reset_records: Mutex<Vec<(String, TimestampMs)>>,
 }
 
 impl SlowAgentRuntimeRegistry {
@@ -5369,6 +5029,7 @@ impl SlowAgentRuntimeRegistry {
             delay,
             built: AtomicBool::new(false),
             build_calls: AtomicUsize::new(0),
+            nomi_reset_records: Mutex::new(Vec::new()),
         }
     }
 
@@ -5378,6 +5039,11 @@ impl SlowAgentRuntimeRegistry {
 
     fn build_calls(&self) -> usize {
         self.build_calls.load(Ordering::SeqCst)
+    }
+
+    #[allow(dead_code)]
+    fn nomi_reset_records(&self) -> Vec<(String, TimestampMs)> {
+        self.nomi_reset_records.lock().unwrap().clone()
     }
 }
 
@@ -5402,6 +5068,29 @@ impl AgentRuntimeRegistry for SlowAgentRuntimeRegistry {
 
     fn terminate(&self, _conversation_id: &str, _reason: Option<AgentKillReason>) -> Result<(), AppError> {
         Ok(())
+    }
+
+    /// Nomi is the only agent type, so every reset/clear path now reaches the
+    /// persisted-session seam. Record the exact `(conversation_id, created_at)`
+    /// owner token production fences with; there is no persisted context behind
+    /// this double, so the reset is always `AlreadyAbsent`.
+    fn reset_persisted_nomi_session(
+        &self,
+        conversation_id: &str,
+        conversation_created_at: TimestampMs,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<NomiSessionResetOutcome, AppError>>
+                + Send,
+        >,
+    > {
+        self.nomi_reset_records
+            .lock()
+            .unwrap()
+            .push((conversation_id.to_owned(), conversation_created_at));
+        Box::pin(std::future::ready(Ok(
+            NomiSessionResetOutcome::AlreadyAbsent,
+        )))
     }
 
 
@@ -5497,7 +5186,7 @@ impl ScriptedAgent {
         let (event_tx, _) = broadcast::channel(64);
         Self {
             conversation_id: conversation_id.to_owned(),
-            agent_type: AgentType::Acp,
+            agent_type: AgentType::Nomi,
             workspace: cross_platform_mock_workspace().to_owned(),
             event_tx,
             scripts: Mutex::new(VecDeque::from(scripts)),
@@ -5938,7 +5627,6 @@ async fn make_execution_steer_service(
         runtime_registry,
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(ActiveRetainedExecutionBoundary),
     );
     let conversation = service
@@ -5975,7 +5663,6 @@ async fn make_public_steer_service(
         runtime_registry,
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let conversation = service
@@ -6177,8 +5864,9 @@ async fn send_message_broadcasts_companion_markers_for_companion_conversation() 
 
     let workspace = isolated_test_workspace("companion");
     let create_req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": workspace, "companion_session": true, "companion_id": "0190f5fe-7c00-7a00-8abc-012345678942" }
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "workspace": workspace, "companion_session": true, "companion_id": "0190f5fe-7c00-7a00-8abc-012345678942" }
     }))
     .unwrap();
     let conv = svc.create(TEST_USER_1, create_req).await.unwrap();
@@ -6221,8 +5909,9 @@ async fn send_message_stamps_channel_platform_for_channel_agent_conversation() {
     // apply_master_agent_extra): companion_session + companion_id + channel_platform.
     let workspace = isolated_test_workspace("channel-agent");
     let create_req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": workspace, "companion_session": true, "companion_id": "0190f5fe-7c00-7a00-8abc-012345678942", "channel_platform": "telegram" }
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "workspace": workspace, "companion_session": true, "companion_id": "0190f5fe-7c00-7a00-8abc-012345678942", "channel_platform": "telegram" }
     }))
     .unwrap();
     let conv = svc.create(TEST_USER_1, create_req).await.unwrap();
@@ -6451,13 +6140,13 @@ async fn idempotent_send_replay_reuses_pending_turn_and_completed_receipt() {
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let workspace = isolated_test_workspace("idempotent-send");
     let request: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": workspace }
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "workspace": workspace }
     }))
     .unwrap();
     let conversation = svc.create(USER_ID, request).await.unwrap();
@@ -6537,13 +6226,13 @@ async fn empty_final_text_finish_persists_structured_error_code_on_receipt() {
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let workspace = isolated_test_workspace("empty-final-text-code");
     let request: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": workspace }
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "workspace": workspace }
     }))
     .unwrap();
     let conversation = svc.create(USER_ID, request).await.unwrap();
@@ -6610,14 +6299,14 @@ async fn public_idempotent_send_reuses_one_turn_and_never_restarts_after_complet
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let request = || -> CreateConversationRequest {
         let workspace = isolated_test_workspace("public-idempotent-send");
         serde_json::from_value(json!({
-            "type": "acp",
-            "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": workspace }
+            "type": "nomi",
+            "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+            "extra": { "workspace": workspace }
         }))
         .unwrap()
     };
@@ -6692,7 +6381,6 @@ async fn public_idempotent_send_reuses_one_turn_and_never_restarts_after_complet
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let accepted_after_restart = restarted_svc
@@ -6764,7 +6452,6 @@ async fn public_idempotent_send_reuses_one_turn_and_never_restarts_after_complet
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         replay_boundary.clone(),
     );
     broadcaster.take_events();
@@ -6894,16 +6581,15 @@ async fn delayed_initial_delivery_cannot_cross_a_completed_turn_generation() {
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let conversation = service
         .create(
             USER_ID,
             serde_json::from_value(json!({
-                "type": "acp",
+                "type": "nomi",
+                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
                 "extra": {
-                    "agent_id": TEST_ACP_AGENT_ID,
                     "workspace": isolated_test_workspace("initial-delivery-toctou")
                 }
             }))
@@ -7027,16 +6713,15 @@ async fn fresh_initial_delivery_is_exactly_once_and_replayable() {
         runtime_registry.clone(),
         repo,
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let conversation = service
         .create(
             USER_ID,
             serde_json::from_value(json!({
-                "type": "acp",
+                "type": "nomi",
+                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
                 "extra": {
-                    "agent_id": TEST_ACP_AGENT_ID,
                     "workspace": isolated_test_workspace("fresh-initial-delivery")
                 }
             }))
@@ -7094,16 +6779,15 @@ async fn successor_pending_generation_cannot_impersonate_creation_for_initial_de
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let conversation = service
         .create(
             USER_ID,
             serde_json::from_value(json!({
-                "type": "acp",
+                "type": "nomi",
+                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
                 "extra": {
-                    "agent_id": TEST_ACP_AGENT_ID,
                     "workspace": isolated_test_workspace("successor-initial-delivery")
                 }
             }))
@@ -7205,15 +6889,15 @@ async fn completed_replay_repairs_finished_row_that_still_carries_its_active_ope
             runtime_registry.clone(),
             repo.clone(),
             Arc::new(StubAgentMetadataRepo),
-            Arc::new(StubAcpSessionRepo::default()),
             Arc::new(crate::NoExecutionConversationBoundary),
         )
     };
     let service = make_service();
     let workspace = isolated_test_workspace("finished-active-partial-replay");
     let request: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": workspace }
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "workspace": workspace }
     }))
     .unwrap();
     let conversation = service.create(USER_ID, request).await.unwrap();
@@ -7569,16 +7253,15 @@ async fn public_admission_cutpoint_fixture(
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let conversation = service
         .create(
             SQLITE_TEST_OWNER,
             serde_json::from_value(json!({
-                "type": "acp",
+                "type": "nomi",
+                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
                 "extra": {
-                    "agent_id": TEST_ACP_AGENT_ID,
                     "workspace": isolated_test_workspace(label)
                 }
             }))
@@ -7632,7 +7315,6 @@ async fn agent_execution_admission_cutpoint_fixture(
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         boundary.clone(),
     );
     let conversation = service
@@ -7843,16 +7525,15 @@ async fn background_reconciliation_fixture(
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         boundary,
     );
     let conversation = service
         .create(
             SQLITE_TEST_OWNER,
             serde_json::from_value(json!({
-                "type": "acp",
+                "type": "nomi",
+                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
                 "extra": {
-                    "agent_id": TEST_ACP_AGENT_ID,
                     "workspace": isolated_test_workspace(label)
                 }
             }))
@@ -7983,7 +7664,6 @@ async fn writeback_retry_is_linearized_against_stop_clear_reset_and_delete() {
             runtime_registry.clone(),
             repo.clone(),
             Arc::new(StubAgentMetadataRepo),
-            Arc::new(StubAcpSessionRepo::default()),
             Arc::new(crate::NoExecutionConversationBoundary),
         );
         let conversation = if matches!(mutation, WritebackRetryLifecycleMutation::Delete) {
@@ -8668,7 +8348,6 @@ async fn background_finished_active_partial_is_quarantined_and_boot_skips_retain
         retained_runtime_registry.clone(),
         retained_repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(AlwaysRetainedExecutionBoundary),
     );
     drop(initial_service);
@@ -8698,13 +8377,7 @@ async fn background_finished_active_partial_is_quarantined_and_boot_skips_retain
 
 #[tokio::test]
 async fn boot_reconcile_quarantines_every_current_backend_without_terminal_proof() {
-    for (index, backend) in [
-        AgentType::Nomi.serde_name(),
-        AgentType::Acp.serde_name(),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (index, backend) in [AgentType::Nomi.serde_name()].into_iter().enumerate() {
         let key = format!("boot-unproven-{index}");
         let (service, repo, slow_registry, runtime_registry, database, conversation_id) =
             background_reconciliation_fixture(
@@ -8848,6 +8521,10 @@ impl StubTerminalProofProvider {
         );
     }
 
+    /// Retained for diagnostics: the requirement recorded per consultation.
+    /// With a single agent type every orphan resolves to
+    /// `LocalContainedAuthority`, so no surviving test asserts on the variant.
+    #[allow(dead_code)]
     fn consultations(&self) -> Vec<(String, crate::terminal_proof::OrphanProofRequirement)> {
         self.consultations.lock().unwrap().clone()
     }
@@ -8885,13 +8562,7 @@ impl crate::terminal_proof::TurnTerminalProofProvider for StubTerminalProofProvi
 
 #[tokio::test]
 async fn boot_reconcile_heals_proven_orphan_as_interrupted_failure() {
-    for (index, backend) in [
-        AgentType::Nomi.serde_name(),
-        AgentType::Acp.serde_name(),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (index, backend) in [AgentType::Nomi.serde_name()].into_iter().enumerate() {
         let key = format!("boot-heal-proven-{index}");
         let (service, repo, slow_registry, runtime_registry, database, conversation_id) =
             background_reconciliation_fixture(
@@ -9529,16 +9200,15 @@ async fn dropped_while_sqlite_commit_result_is_not_yet_returned_abandons_exact_c
         runtime_registry.clone(),
         repository,
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let conversation = service
         .create(
             SQLITE_TEST_OWNER,
             serde_json::from_value(json!({
-                "type": "acp",
+                "type": "nomi",
+                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
                 "extra": {
-                    "agent_id": TEST_ACP_AGENT_ID,
                     "workspace": isolated_test_workspace("drop-before-claim-await-return")
                 }
             }))
@@ -9659,16 +9329,15 @@ async fn explicit_claim_error_disarms_ambiguity_custodian_after_proven_rollback(
         runtime_registry.clone(),
         repository,
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let conversation = service
         .create(
             SQLITE_TEST_OWNER,
             serde_json::from_value(json!({
-                "type": "acp",
+                "type": "nomi",
+                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
                 "extra": {
-                    "agent_id": TEST_ACP_AGENT_ID,
                     "workspace": isolated_test_workspace("explicit-claim-rollback")
                 }
             }))
@@ -10299,7 +9968,6 @@ async fn background_receipt_preflight_absorbs_replay_before_runtime_or_mount_and
         runtime_registry,
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let workspace = tempfile::tempdir().unwrap();
@@ -10307,9 +9975,9 @@ async fn background_receipt_preflight_absorbs_replay_before_runtime_or_mount_and
         .create(
             USER_ID,
             serde_json::from_value(json!({
-                "type": "acp",
+                "type": "nomi",
+                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
                 "extra": {
-                    "agent_id": TEST_ACP_AGENT_ID,
                     "workspace": workspace.path().to_string_lossy()
                 }
             }))
@@ -10407,7 +10075,6 @@ async fn background_receipt_preflight_absorbs_replay_before_runtime_or_mount_and
         retained_runtime_registry,
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(AlwaysRetainedExecutionBoundary),
     );
     assert!(matches!(
@@ -10500,6 +10167,9 @@ async fn public_idempotent_send_has_one_execution_owner_across_independent_sqlit
     // A second init opens a genuinely independent SqlitePool over the same
     // durable file, matching two backend processes rather than two Arc clones.
     let database_b = nomifun_db::init_database(&db_path).await.unwrap();
+    // The nomi conversation below carries a top-level model whose provider must
+    // exist: the repository enforces the provider foreign key on create.
+    seed_openai_chat_model(database_a.pool(), PROVIDER_ID_1, "fixture-provider", "m1", 1).await;
     let repo_a = Arc::new(SqliteConversationRepository::new(
         database_a.pool().clone(),
     ));
@@ -10517,15 +10187,14 @@ async fn public_idempotent_send_has_one_execution_owner_across_independent_sqlit
         runtime_registry.clone(),
         repo_a.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let workspace = test_root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let request: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
         "extra": {
-            "agent_id": TEST_ACP_AGENT_ID,
             "workspace": workspace.to_string_lossy()
         }
     }))
@@ -10539,7 +10208,6 @@ async fn public_idempotent_send_has_one_execution_owner_across_independent_sqlit
         runtime_registry.clone(),
         repo_b.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
 
@@ -10688,7 +10356,6 @@ async fn public_idempotency_receipt_never_grants_execution_attempt_authority() {
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(AlwaysRetainedExecutionBoundary),
     );
     let conversation = svc
@@ -10741,13 +10408,13 @@ async fn public_idempotent_send_remains_owner_cancellable_during_runtime_startup
         runtime_registry.clone(),
         repo,
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let workspace = isolated_test_workspace("cancellable-send");
     let request: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": workspace }
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "workspace": workspace }
     }))
     .unwrap();
     let conversation = svc.create(USER_ID, request).await.unwrap();
@@ -11018,54 +10685,6 @@ async fn send_message_keeps_cold_acp_orphan_running_without_restarting_it() {
 }
 
 #[tokio::test]
-async fn send_message_keeps_external_gateway_orphan_running_until_terminal_is_proven() {
-    let (svc, broadcaster, repo, _runtime_registry) = make_service();
-    let runtime_registry_impl = Arc::new(MockAgentRuntimeRegistry::new());
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = runtime_registry_impl.clone();
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-    {
-        let mut rows = repo.rows.lock().unwrap();
-        let row = rows
-            .iter_mut()
-            .find(|row| row.conversation_id == conv.conversation_id)
-            .unwrap();
-        row.r#type = AgentType::Acp.serde_name().to_owned();
-        row.status = Some("running".to_owned());
-    }
-    broadcaster.take_events();
-
-    let error = svc
-        .send_message(
-            TEST_USER_1,
-            &conv.conversation_id,
-            make_send_req(),
-            &runtime_registry,
-        )
-        .await
-        .expect_err("an unproven remote turn must remain fenced");
-
-    assert!(matches!(error, AppError::Conflict(_)));
-    assert_eq!(
-        repo.get(&conv.conversation_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status
-            .as_deref(),
-        Some("running"),
-        "absence from this process must not finalize work that may still run remotely"
-    );
-    assert_eq!(runtime_registry_impl.active_runtime_count(), 0);
-    assert!(
-        !broadcaster
-            .take_events()
-            .iter()
-            .any(|event| event.name == "turn.completed"),
-        "no completion may be published without a remote terminal proof"
-    );
-}
-
-#[tokio::test]
 async fn send_message_rejects_active_turn() {
     let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
@@ -11090,8 +10709,9 @@ async fn send_message_missing_managed_workspace_identity_fails_closed() {
         Arc::new(MockAgentRuntimeRegistryWithWorkspace::new("/tmp/factory-resolved"));
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID }
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": {}
     }))
     .unwrap();
     let conv = svc.create(TEST_USER_1, req).await.unwrap();
@@ -11135,12 +10755,12 @@ async fn durable_turn_preflight_failure_atomically_finishes_conversation_and_rec
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let request: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID }
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": {}
     }))
     .unwrap();
     let conversation = svc.create(USER_ID, request).await.unwrap();
@@ -11194,8 +10814,9 @@ async fn build_runtime_options_rebases_managed_workspace_after_restore() {
     let (svc, _broadcaster, repo, _runtime_registry) =
         make_service_with_workspace_root(destination_root.clone());
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "backend": "claude" }
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "backend": "claude" }
     }))
     .unwrap();
     let conv = svc.create(TEST_USER_1, req).await.unwrap();
@@ -11205,7 +10826,6 @@ async fn build_runtime_options_rebases_managed_workspace_after_restore() {
         .to_owned();
 
     let restored_extra = json!({
-        "agent_id": TEST_ACP_AGENT_ID,
         "agent_source": "builtin",
         "backend": "claude",
         "temp_workspace_id": temp_workspace_id,
@@ -11260,8 +10880,9 @@ async fn binding_a_workspace_retires_the_temp_marker_so_the_bind_survives_reads(
         make_service_with_workspace_root(workspace_root.clone());
 
     let create: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "backend": "claude" }
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "backend": "claude" }
     }))
     .unwrap();
     let conv = svc.create(TEST_USER_1, create).await.unwrap();
@@ -11341,8 +10962,9 @@ async fn binding_a_workspace_keeps_the_temp_directory_reclaimable_on_delete() {
         make_service_with_workspace_root(workspace_root.clone());
 
     let create: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "backend": "claude" }
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "backend": "claude" }
     }))
     .unwrap();
     let conv = svc.create(TEST_USER_1, create).await.unwrap();
@@ -11385,8 +11007,9 @@ async fn an_empty_workspace_patch_does_not_retire_the_temp_marker() {
         make_service_with_workspace_root(workspace_root.clone());
 
     let create: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "backend": "claude" }
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "backend": "claude" }
     }))
     .unwrap();
     let conv = svc.create(TEST_USER_1, create).await.unwrap();
@@ -11416,9 +11039,9 @@ async fn build_runtime_options_preserves_explicit_custom_workspace() {
     let (svc, _broadcaster, repo, _runtime_registry) =
         make_service_with_workspace_root(destination_root.clone());
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
         "extra": {
-            "agent_id": TEST_ACP_AGENT_ID,
             "backend": "claude",
             "workspace": custom_workspace.to_string_lossy()
         }
@@ -11768,7 +11391,6 @@ async fn slow_turn_writeback_completes_turn_immediately_and_never_blocks_next_se
         Arc::clone(&runtime_registry_dyn),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let workspace = unique_test_dir("conv-knowledge-workspace-slow-writeback");
@@ -12066,7 +11688,6 @@ async fn slow_turn_writeback_completes_turn_immediately_and_never_blocks_next_se
         Arc::clone(&replay_registry),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let replay = replay_service
@@ -13637,7 +13258,6 @@ async fn stop_repairs_accepted_turn_receipt_in_same_terminal_commit() {
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
@@ -13766,9 +13386,9 @@ async fn view_warmup_creates_agent_runtime_for_empty_pending_conversation() {
     let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
     let workspace = tempfile::tempdir().unwrap();
     let request: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
         "extra": {
-            "agent_id": TEST_ACP_AGENT_ID,
             "workspace": workspace.path()
         }
     }))
@@ -13856,7 +13476,6 @@ async fn view_warmup_quarantines_cached_idle_runtime_without_terminal_proof() {
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let conversation = service
@@ -13944,7 +13563,6 @@ async fn restart_view_recovers_only_the_unadmitted_edit_reservation_cutpoint() {
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let conversation = service
@@ -14013,7 +13631,6 @@ async fn restart_view_recovers_only_the_unadmitted_edit_reservation_cutpoint() {
         runtime_registry,
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     restarted
@@ -14072,7 +13689,6 @@ async fn edit_resubmit_rebuilds_a_missing_terminal_runtime_before_rewind() {
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let conversation = service
@@ -14235,7 +13851,6 @@ async fn edit_resubmit_reprepares_an_existing_runtime_after_knowledge_binding_ch
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
 
@@ -14365,7 +13980,6 @@ async fn edit_rewind_then_transcript_delete_failure_quarantines_runtime_before_f
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let conversation = service
@@ -14526,7 +14140,6 @@ async fn view_recovery_cannot_cancel_a_live_edit_request_between_reserve_and_adm
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let conversation = service
@@ -14666,7 +14279,6 @@ async fn view_warmup_of_finished_writeback_session_never_builds_or_reconciles_mo
         runtime_registry.clone(),
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     let knowledge_db = nomifun_db::init_database_memory().await.unwrap();
@@ -14702,9 +14314,9 @@ async fn view_warmup_of_finished_writeback_session_never_builds_or_reconciles_mo
     );
 
     let request: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
         "extra": {
-            "agent_id": TEST_ACP_AGENT_ID,
             "workspace": workspace
         }
     }))
@@ -14959,94 +14571,6 @@ async fn view_warmup_keeps_cold_acp_orphan_quarantined_without_building() {
             .into_iter()
             .any(|event| event.name == "turn.completed"),
         "restart quarantine must not publish a fabricated completion"
-    );
-}
-
-#[tokio::test]
-async fn view_warmup_keeps_external_gateway_orphan_running_until_terminal_is_proven() {
-    let (svc, broadcaster, repo, _default_runtime_registry) = make_service();
-    let registry = Arc::new(SlowAgentRuntimeRegistry::new(Duration::ZERO));
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-    {
-        let mut rows = repo.rows.lock().unwrap();
-        let row = rows
-            .iter_mut()
-            .find(|row| row.conversation_id == conv.conversation_id)
-            .unwrap();
-        row.r#type = AgentType::Acp.serde_name().to_owned();
-        row.status = Some("running".to_owned());
-    }
-    broadcaster.take_events();
-
-    let error = svc
-        .warmup_for_view(
-            TEST_USER_1,
-            &conv.conversation_id,
-            &(registry.clone() as Arc<dyn AgentRuntimeRegistry>),
-        )
-        .await
-        .expect_err("view warmup must fail closed for an unproven external gateway turn");
-
-    assert!(matches!(error, AppError::Conflict(_)));
-    assert_eq!(registry.build_calls(), 0);
-    assert_eq!(
-        repo.get(&conv.conversation_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status
-            .as_deref(),
-        Some("running")
-    );
-    assert!(
-        !broadcaster
-            .take_events()
-            .iter()
-            .any(|event| event.name == "turn.completed")
-    );
-}
-
-#[tokio::test]
-async fn view_warmup_keeps_remote_orphan_running_until_terminal_is_proven() {
-    let (svc, broadcaster, repo, _default_runtime_registry) = make_service();
-    let registry = Arc::new(SlowAgentRuntimeRegistry::new(Duration::ZERO));
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-    {
-        let mut rows = repo.rows.lock().unwrap();
-        let row = rows
-            .iter_mut()
-            .find(|row| row.conversation_id == conv.conversation_id)
-            .unwrap();
-        row.r#type = AgentType::Acp.serde_name().to_owned();
-        row.status = Some("running".to_owned());
-    }
-    broadcaster.take_events();
-
-    let error = svc
-        .warmup_for_view(
-            TEST_USER_1,
-            &conv.conversation_id,
-            &(registry.clone() as Arc<dyn AgentRuntimeRegistry>),
-        )
-        .await
-        .expect_err("view warmup must not rebuild an unproven remote turn");
-
-    assert!(matches!(error, AppError::Conflict(_)));
-    assert_eq!(registry.build_calls(), 0);
-    assert_eq!(
-        repo.get(&conv.conversation_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status
-            .as_deref(),
-        Some("running")
-    );
-    assert!(
-        !broadcaster
-            .take_events()
-            .iter()
-            .any(|event| event.name == "turn.completed")
     );
 }
 
@@ -15633,10 +15157,10 @@ async fn create_writes_extra_skills_from_auto_inject_and_preset() {
     let (svc, _broadcaster, _repo, _runtime_registry) = make_service_with_resolver(resolver);
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
         "name": "t",
         "extra": {
-            "agent_id": TEST_ACP_AGENT_ID,
             "workspace": "/project",
             "backend": "claude",
             "preset_enabled_skills": ["pdf", "cron"],
@@ -15663,8 +15187,9 @@ async fn create_writes_empty_skills_when_no_auto_inject_and_no_preset() {
     let (svc, _broadcaster, _repo, _runtime_registry) = make_service_with_resolver(resolver);
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": "/project", "backend": "claude" },
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "workspace": "/project", "backend": "claude" },
     }))
     .unwrap();
     let resp = svc.create(TEST_USER_1, req).await.unwrap();
@@ -15709,8 +15234,9 @@ async fn update_rejects_extra_skills() {
     let (svc, _broadcaster, _repo, runtime_registry) = make_service();
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": "/project", "backend": "claude" },
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "workspace": "/project", "backend": "claude" },
     }))
     .unwrap();
     let resp = svc.create(TEST_USER_1, req).await.unwrap();
@@ -15783,7 +15309,8 @@ async fn create_rejects_retired_skill_fields_without_interpreting_them() {
         )]);
         extra.insert(field.to_owned(), json!(["cron"]));
         let req: CreateConversationRequest = serde_json::from_value(json!({
-            "type": "acp",
+            "type": "nomi",
+            "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
             "extra": extra,
         }))
         .unwrap();
@@ -15801,8 +15328,9 @@ async fn create_rejects_retired_skill_fields_without_interpreting_them() {
 async fn update_rejects_retired_skill_fields_without_removing_them() {
     let (svc, _broadcaster, repo, runtime_registry) = make_service();
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": "/project" },
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "workspace": "/project" },
     }))
     .unwrap();
     let resp = svc.create(TEST_USER_1, req).await.unwrap();
@@ -15829,8 +15357,9 @@ async fn update_allows_other_extra_fields() {
     let (svc, _broadcaster, _repo, runtime_registry) = make_service();
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": "/project", "backend": "claude" },
+        "type": "nomi",
+        "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+        "extra": { "workspace": "/project", "backend": "claude" },
     }))
     .unwrap();
     let resp = svc.create(TEST_USER_1, req).await.unwrap();
@@ -16507,7 +16036,6 @@ fn make_failover_service(
         runtime_registry,
         repo.clone(),
         agent_metadata_repo,
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     svc.with_failover_deps(
@@ -17736,12 +17264,12 @@ async fn failover_carries_rewritten_authority_into_the_next_switch() {
 
 /// Seed an ACP conversation row with a model + a session-level `model_failover`
 /// override (mirror of [`seed_nomi_failover_conversation`] but `type: "acp"`).
-async fn seed_acp_failover_conversation(
+async fn seed_failover_conversation(
     repo: &Arc<MockRepo>,
     model: ProviderWithModel,
     failover: serde_json::Value,
 ) -> String {
-    let workspace = isolated_test_workspace("acp-failover");
+    let workspace = isolated_test_workspace("failover");
     let row = ConversationRow {
         cron_job_id: None,
         preset_id: None,
@@ -17750,8 +17278,8 @@ async fn seed_acp_failover_conversation(
         id: 0,
         conversation_id: ConversationId::new().into_string(),
         user_id: TEST_USER_1.into(),
-        name: "acp-failover".into(),
-        r#type: "acp".into(),
+        name: "failover".into(),
+        r#type: "nomi".into(),
         extra: serde_json::to_string(&json!({
             "workspace": workspace,
             "model_failover": failover,
@@ -17774,135 +17302,10 @@ async fn seed_acp_failover_conversation(
 }
 
 #[tokio::test]
-async fn failover_send_loop_excludes_acp_conversation() {
-    // review #11(1) / plan D7: an ACP conversation that hits a pre-response
-    // provider fault must NOT be failed over — ACP self-manages its model. With
-    // failover deps wired + an enabled queue, the seam still stands down because
-    // the conversation is ACP-typed: no resend (one send only), no model write,
-    // The ACP terminal-error eviction path legitimately
-    // terminates and recreates the runtime; that is unrelated to the failover seam, so we
-    // assert the failover-specific facts rather than termination_count.)
-    let (svc, _broadcaster, repo, _capability_repo) =
-        make_failover_service(vec![test_provider(PROVIDER_ID_1, &["m1"]), test_provider(PROVIDER_ID_2, &["m2"])]);
-    let conv_id = seed_acp_failover_conversation(
-        &repo,
-        pwm(PROVIDER_ID_1, "m1"),
-        json!({ "enabled": true, "queue": [{"provider_id": PROVIDER_ID_2, "model": "m2"}] }),
-    )
-    .await;
-
-    // ACP-typed agent that faults pre-response on the first (only) turn.
-    let scripted = Arc::new(ScriptedAgent::new(
-        &conv_id,
-        vec![vec![AgentStreamEvent::Error(ErrorEventData::legacy(
-            "rate limited",
-            Some(AgentErrorCode::UserLlmProviderRateLimited),
-        ))]],
-    )); // default agent_type = Acp
-    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
-    runtime_registry.insert_agent(&conv_id, AgentRuntimeHandle::Mock(scripted.clone()));
-    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
-
-    send_message_with_test_key(
-        &svc,
-        TEST_USER_1,
-        &conv_id,
-        "failover-acp-excluded",
-        make_send_req(),
-        &runtime_registry_dyn,
-    )
-        .await
-        .unwrap();
-    wait_for_turn_released(&svc, &conv_id).await;
-
-    // No failover resend: the single send is the original turn only.
-    assert_eq!(
-        scripted.sent_contents().len(),
-        1,
-        "ACP conversation must not be failed over (no resend)"
-    );
-    // Model unchanged — the seam never wrote a new conversation.model.
-    let row = repo.get(&conv_id).await.unwrap().unwrap();
-    let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
-    assert_eq!(model.provider_id, PROVIDER_ID_1, "ACP model must be untouched by failover");
-}
-
-#[tokio::test]
-async fn idmm_failover_conversation_returns_false_for_acp_conversation() {
-    // IDMM is an observer, not the active turn owner. Even a fully-live
-    // observation must be declined so only the send-loop can switch and
-    // re-drive the exact current turn.
-    let (svc, _broadcaster, repo, _capability_repo) =
-        make_failover_service(vec![test_provider(PROVIDER_ID_1, &["m1"]), test_provider(PROVIDER_ID_2, &["m2"])]);
-    let conv_id = seed_acp_failover_conversation(
-        &repo,
-        pwm(PROVIDER_ID_1, "m1"),
-        json!({ "enabled": true, "queue": [{"provider_id": PROVIDER_ID_2, "model": "m2"}] }),
-    )
-    .await;
-
-    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
-    repo.update(
-        &conv_id,
-        &ConversationRowUpdate {
-            status: Some("running".to_owned()),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    let turn = svc
-        .runtime_state()
-        .try_acquire_turn_with_wire_context_at_epoch_and_owner(
-            &conv_id,
-            Some(MessageId::new().into_string()),
-            crate::runtime_state::TurnWireContext::default(),
-            None,
-            Some(TEST_USER_1.to_owned()),
-            true,
-            None,
-        )
-        .unwrap();
-    runtime_registry.insert_agent(
-        &conv_id,
-        AgentRuntimeHandle::Mock(Arc::new(SteerableAgent::new(
-            &conv_id,
-            Some(ConversationStatus::Running),
-            true,
-        ))),
-    );
-    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
-
-    let switched = svc
-        .idmm_failover_conversation(TEST_USER_1, &conv_id, &runtime_registry_dyn)
-        .await
-        .unwrap();
-    assert!(!switched, "IDMM failover must report false for an ACP conversation");
-    assert_eq!(runtime_registry.termination_count(), 0, "no termination on a rejected ACP failover");
-    assert_eq!(
-        runtime_registry.active_runtime_count(),
-        1,
-        "the IDMM observer must neither replace nor evict the owner runtime"
-    );
-    let row = repo.get(&conv_id).await.unwrap().unwrap();
-    let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
-    assert_eq!(model.provider_id, PROVIDER_ID_1, "ACP model must be untouched");
-    assert!(
-        repo.get_messages(&conv_id, 1, 20, SortOrder::Asc)
-            .await
-            .unwrap()
-            .items
-            .is_empty(),
-        "declining an IDMM observation must not synthesize a continuation message"
-    );
-    drop(turn);
-}
-
-#[tokio::test]
 async fn idmm_failover_on_finished_conversation_cannot_build_or_send() {
     let (svc, broadcaster, repo, _capability_repo) =
         make_failover_service(vec![test_provider(PROVIDER_ID_1, &["m1"]), test_provider(PROVIDER_ID_2, &["m2"])]);
-    let conv_id = seed_acp_failover_conversation(
+    let conv_id = seed_failover_conversation(
         &repo,
         pwm(PROVIDER_ID_1, "m1"),
         json!({ "enabled": true, "queue": [{"provider_id": PROVIDER_ID_2, "model": "m2"}] }),
@@ -17955,57 +17358,7 @@ async fn idmm_failover_on_finished_conversation_cannot_build_or_send() {
     );
 }
 
-#[tokio::test]
-async fn perform_model_failover_returns_none_for_acp_conversation() {
-    // review #11(2): calling the bottleneck directly on a non-nomi conversation
-    // returns None (the review #9 ACP gate), with no termination and no model write.
-    let (svc, _broadcaster, repo, _capability_repo) =
-        make_failover_service(vec![test_provider(PROVIDER_ID_1, &["m1"]), test_provider(PROVIDER_ID_2, &["m2"])]);
-    let conv_id = seed_acp_failover_conversation(
-        &repo,
-        pwm(PROVIDER_ID_1, "m1"),
-        json!({ "enabled": true, "queue": [{"provider_id": PROVIDER_ID_2, "model": "m2"}] }),
-    )
-    .await;
-
-    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
-    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
-
-    let config = nomifun_api_types::ModelFailoverConfig {
-        enabled: true,
-        queue: vec![pwm(PROVIDER_ID_2, "m2")],
-        ..Default::default()
-    };
-    let result = svc
-        .perform_model_failover(&conv_id, &config, &[], &runtime_registry_dyn)
-        .await;
-    assert!(result.is_none(), "perform_model_failover must reject a non-nomi conversation");
-    assert_eq!(runtime_registry.termination_count(), 0);
-    let row = repo.get(&conv_id).await.unwrap().unwrap();
-    let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
-    assert_eq!(model.provider_id, PROVIDER_ID_1);
-}
-
 // ── edit_and_resubmit tests ─────────────────────────────────────
-
-/// 非 Nomi 会话调用 edit_and_resubmit → BadRequest（Nomi 门禁在取 agent/查消息之前）。
-#[tokio::test]
-async fn edit_and_resubmit_rejects_non_nomi() {
-    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
-    // make_create_req() 建的是 acp 会话
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-    let conv_id = conv.conversation_id.clone();
-
-    let req: SendMessageRequest = serde_json::from_value(json!({ "content": "edited" })).unwrap();
-    let err = svc
-        .edit_and_resubmit(TEST_USER_1, &conv_id, MESSAGE_ID_1, req, &runtime_registry)
-        .await
-        .unwrap_err();
-
-    assert!(matches!(err, AppError::BadRequest(_)));
-    assert!(err.to_string().contains("Nomi"), "应为 Nomi 门禁错误，实际: {err}");
-}
 
 /// Nomi 会话但没有可编辑的用户消息 → BadRequest（消息查找守卫，在取 agent 之前）。
 #[tokio::test]

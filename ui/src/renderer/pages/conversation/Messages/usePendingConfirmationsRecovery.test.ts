@@ -17,7 +17,7 @@ const conversationId = parseConversationId('019b0000-0000-7000-8000-000000000001
 const completedTurnId = parseMessageId('019b0000-0000-7000-8000-000000000002');
 const nextTurnId = parseMessageId('019b0000-0000-7000-8000-000000000003');
 
-const genericPermission = (
+const permission = (
   id: string,
   callId: string,
   turnId?: MessageId
@@ -36,42 +36,15 @@ const genericPermission = (
   },
 });
 
-const acpPermission = (
-  id: string,
-  callId: string,
-  turnId?: MessageId
-): TMessage => ({
-  id,
-  type: 'acp_permission',
-  position: 'left',
-  conversation_id: conversationId,
-  created_at: 1,
-  ...(turnId ? { turn_id: turnId } : {}),
-  content: {
-    session_id: 'session-1',
-    options: [],
-    tool_call: {
-      tool_call_id: callId,
-      title: 'Run command',
-    },
-  },
-});
-
 describe('pending confirmation message recovery', () => {
-  test('deduplicates durable confirmations against both permission wire shapes', () => {
-    expect(hasPermissionMessageForCallId([genericPermission('generic', 'call-1')], 'call-1')).toBe(
-      true
-    );
-    expect(hasPermissionMessageForCallId([acpPermission('acp', 'call-2')], 'call-2')).toBe(true);
+  test('deduplicates durable confirmations by their call id', () => {
+    expect(hasPermissionMessageForCallId([permission('raised', 'call-1')], 'call-1')).toBe(true);
+    expect(hasPermissionMessageForCallId([permission('raised', 'call-1')], 'call-2')).toBe(false);
   });
 
-  test('removes both permission wire shapes by their shared call id', () => {
+  test('removes permission cards by their call id', () => {
     const remaining = removePermissionMessage(
-      [
-        genericPermission('generic', 'shared-call'),
-        acpPermission('acp', 'shared-call'),
-        acpPermission('unrelated', 'other-call'),
-      ],
+      [permission('shared', 'shared-call'), permission('unrelated', 'other-call')],
       { call_id: 'shared-call' }
     );
 
@@ -81,10 +54,10 @@ describe('pending confirmation message recovery', () => {
   test('turn completion removes only permission cards owned by that exact turn', () => {
     const remaining = removePermissionMessagesForTurn(
       [
-        genericPermission('completed-generic', 'same-call', completedTurnId),
-        acpPermission('completed-acp', 'other-call', completedTurnId),
-        acpPermission('next-turn', 'same-call', nextTurnId),
-        genericPermission('confirmation:turnless', 'same-call'),
+        permission('completed-first', 'same-call', completedTurnId),
+        permission('completed-second', 'other-call', completedTurnId),
+        permission('next-turn', 'same-call', nextTurnId),
+        permission('confirmation:turnless', 'same-call'),
       ],
       completedTurnId
     );

@@ -11,7 +11,7 @@ import type { AgentId } from '@/common/types/ids';
 export const DETECTED_AGENTS_SWR_KEY = 'agents.detected';
 
 /** Type of an agent. */
-export type AgentType = 'acp' | 'nomi';
+export type AgentType = 'nomi';
 
 /** Source tier of an agent row, mirroring backend `agent_source` enum. */
 export type AgentSource = 'internal' | 'builtin' | 'extension' | 'custom';
@@ -37,7 +37,7 @@ export type AgentEnvEntry = {
  * because older rows may not have every field populated.
  *
  * Whether the agent supports session/load is NOT in this bag — read
- * `handshake.agent_capabilities.load_session` instead, since the CLI
+ * `handshake.agent_capabilities.load_session` instead, since the runtime
  * advertises that during init.
  */
 export type BehaviorPolicy = {
@@ -45,7 +45,7 @@ export type BehaviorPolicy = {
 };
 
 /**
- * Handshake-derived fields captured from the ACP init/session-response.
+ * Handshake-derived fields captured from the agent's session response.
  * Each field is opaque JSON the backend passes through verbatim; typing
  * happens in whatever call site actually consumes it.
  */
@@ -79,7 +79,7 @@ export type AgentMetadata = {
 
   /** Vendor label (e.g. "claude"). Absent for agents without vendor grouping. */
   backend?: string;
-  /** Top-level runtime discriminant: "acp" | "nomi" | … */
+  /** Top-level runtime discriminant; only "nomi" remains. */
   agent_type: AgentType;
   agent_source: AgentSource;
   agent_source_info?: AgentSourceInfo;
@@ -107,7 +107,7 @@ export type AgentMetadata = {
 /** Shared fetcher for DETECTED_AGENTS_SWR_KEY — single source of truth. */
 export async function fetchDetectedAgents(): Promise<AgentMetadata[]> {
   try {
-    return await ipcBridge.acpConversation.getAvailableAgents.invoke();
+    return await ipcBridge.agentConversation.getAvailableAgents.invoke();
   } catch {
     // fallback to empty
   }

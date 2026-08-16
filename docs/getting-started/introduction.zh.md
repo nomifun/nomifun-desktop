@@ -1,7 +1,7 @@
 # 简介
 
-**NomiFun** 是一个面向 AI agent 工作流的本地优先工作台。它把多种
-CLI agent、内置 Nomi 引擎、模型提供商、MCP 服务、技能、终端、计划任务
+**NomiFun** 是一个面向 AI agent 工作流的本地优先工作台。它把一个内置
+Nomi 引擎、模型提供商、MCP 服务、技能、终端、知识库、计划任务
 和远程 WebUI 收拢到同一个 Rust + Tauri monorepo 中。
 
 > 想立刻开始？请先读 [安装](installation.zh.md)，再读
@@ -11,14 +11,16 @@ CLI agent、内置 Nomi 引擎、模型提供商、MCP 服务、技能、终端�
 
 ## 它解决什么问题
 
-真实的 AI 工作流经常被拆散在多个地方：一个终端跑 Claude Code，一个终端跑
-Codex，浏览器里开着自托管页面，旁边还有单独的 MCP 服务和项目脚本。
-NomiFun 的目标不是再做一个聊天框，而是把这些运行时接到同一个工作区：
+真实的 AI 工作流经常被拆散在多个地方：一个终端跑 agent CLI，浏览器里开着
+自托管页面，旁边还有单独的 MCP 服务、知识文档和项目脚本。NomiFun 的目标
+不是再做一个聊天框，而是把这些东西接到同一个工作区：
 
-- **一个会话入口，多种 agent。** 会话可以选择内置 Nomi、Claude Code、
-  Codex、Gemini、Qwen、OpenCode、CodeBuddy 等后端。
+- **一个智能体，一条代码路径。** 每个会话跑的都是内置 Nomi 引擎，因此
+  不论你把它指向哪个模型，能力、工具策略、审批和模型故障转移的行为都一致。
+  Claude Code、Codex、Gemini CLI 等第三方 CLI 则运行在
+  [应用内终端](../guides/terminal.zh.md)里，保留它们自己的登录与审批提示。
 - **一个模型目录，多处复用。** 在 `/models` 配好 Anthropic、OpenAI、
-  Bedrock、Vertex 或兼容接口后，支持这些模型的 agent 和设定可以复用。
+  Bedrock、Vertex 或兼容接口后，会话、设定、伙伴与计划任务都能复用。
 - **一个工作区，不只是消息流。** 会话有工作目录、文件树、预览面板和后端
   管理的 PTY 终端。
 - **后端驱动的自动化。** 计划任务、AutoWork、IDMM、WebUI 远程访问、
@@ -27,7 +29,7 @@ NomiFun 的目标不是再做一个聊天框，而是把这些运行时接到同
   同一套 `nomifun-app` 后端与同一份 React SPA。
 
 NomiFun 更适合已经在用 agent 做真实工作的用户。它要求你理解 API key、
-本地数据目录、CLI agent 安装和自托管边界；它不是零配置的 SaaS 聊天产品。
+本地数据目录和自托管边界；它不是零配置的 SaaS 聊天产品。
 
 ## 两种运行方式
 
