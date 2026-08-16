@@ -128,6 +128,65 @@ impl ConversationService {
         Some(row)
     }
 
+    /// Persist an audit receipt for a completed automatic model switch.
+    ///
+    /// Failover is otherwise invisible in the transcript: the provider fault is
+    /// suppressed once recovery succeeds, so a session that silently changed
+    /// models looked identical to one that never did. Without this row, long-task
+    /// auditing, cost attribution, and quality retrospectives cannot tell which
+    /// model produced which output, and the only hint was the model selector
+    /// quietly changing. Written after the switch is committed, so it records
+    /// what happened rather than what was attempted.
+    ///
+    /// Model and provider names are safe to show; upstream error text is not, so
+    /// only a caller-supplied reason code is carried and never a raw provider
+    /// body.
+    pub(crate) async fn persist_model_failover_receipt(
+        &self,
+        conversation_id: &str,
+        failed_model: &str,
+        next_model: &str,
+        reason: &str,
+        switch: usize,
+        turn_id: Option<&str>,
+    ) -> Option<MessageRow> {
+        let message_id = Self::mint_msg_id();
+        let row = MessageRow {
+            id: 0,
+            message_id: message_id.clone(),
+            conversation_id: conversation_id.to_owned(),
+            msg_id: Some(message_id),
+            r#type: "tips".into(),
+            content: serde_json::json!({
+                "content": format!(
+                    "模型已自动切换：{failed_model} → {next_model}（原因：{reason}，第 {switch} 次切换）。本轮后续输出由 {next_model} 生成。"
+                ),
+                "type": "warning",
+                "source": "model_failover",
+                "failed_model": failed_model,
+                "next_model": next_model,
+                "reason": reason,
+                "switch": switch,
+                "turn_id": turn_id,
+            })
+            .to_string(),
+            position: Some("center".into()),
+            status: Some("finish".into()),
+            hidden: false,
+            created_at: now_ms(),
+        };
+
+        if let Err(store_err) = self.conversation_repo().insert_message(&row).await {
+            warn!(
+                conversation_id,
+                error = %ErrorChain(&store_err),
+                "Failed to persist model-failover receipt"
+            );
+            return None;
+        }
+        Some(row)
+    }
+
     /// Resolve the exact warning row in place once old-runtime exit is proven.
     /// Keeping the same message identity lets every mounted client replace the
     /// transient "waiting" state instead of retaining a stale work item in

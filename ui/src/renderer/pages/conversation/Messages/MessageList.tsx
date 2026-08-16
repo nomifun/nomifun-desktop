@@ -1455,7 +1455,11 @@ const MessageList: React.FC<{
           className='min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto turn_deliverables'
           style={highlighted ? highlightStyle : undefined}
         >
-          <TurnDeliverablesCard items={item.items} workspace={conversationContext?.workspace} />
+          <TurnDeliverablesCard
+            items={item.items}
+            workspace={conversationContext?.workspace}
+            partial={hasMoreOlder === true}
+          />
         </div>
       );
     }

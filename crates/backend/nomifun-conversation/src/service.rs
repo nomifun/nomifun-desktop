@@ -9157,6 +9157,10 @@ impl ConversationService {
                 if let Some(switch) = failover_switch {
                     failover_switches_done += 1;
                     failover_tried.push(switch.picked.clone());
+                    let failed_model = successful_turn_model
+                        .as_ref()
+                        .map(|m| m.model.clone())
+                        .unwrap_or_else(|| "未知模型".to_owned());
                     successful_turn_model = Some(switch.picked.clone());
                     failover_authority = Some(switch.authority.clone());
                     info!(
@@ -9166,6 +9170,31 @@ impl ConversationService {
                         model = %switch.picked.model,
                         "Model failover succeeded; resending turn to next model"
                     );
+                    // Audit receipt: the provider fault is suppressed once
+                    // recovery succeeds, so without this row the transcript
+                    // cannot show that a different model produced the answer.
+                    // The reason is the classified error code, never raw
+                    // provider text, which can carry credentials.
+                    let reason = outcome
+                        .terminal
+                        .code()
+                        .and_then(|code| {
+                            serde_json::to_value(code)
+                                .ok()
+                                .and_then(|v| v.as_str().map(str::to_owned))
+                        })
+                        .unwrap_or_else(|| "PROVIDER_FAULT".to_owned());
+                    service
+                        .persist_and_broadcast_model_failover_receipt(
+                            &user_id_owned,
+                            &conv_id,
+                            &failed_model,
+                            &switch.picked.model,
+                            &reason,
+                            failover_switches_done as usize,
+                            Some(&stable_turn_id),
+                        )
+                        .await;
                     agent = switch.agent;
                     let resend_msg_id = Self::mint_msg_id();
                     pending_send = Some((
@@ -10640,6 +10669,56 @@ impl ConversationService {
         else {
             return None;
         };
+
+        let msg_id = row
+            .msg_id
+            .clone()
+            .unwrap_or_else(|| row.message_id.clone());
+        let content_value: serde_json::Value = serde_json::from_str(&row.content)
+            .unwrap_or_else(|_| serde_json::Value::String(row.content.clone()));
+        self.user_events.send_to_user(
+            user_id,
+            WebSocketMessage::new(
+                "message.stream",
+                serde_json::json!({
+                    "conversation_id": row.conversation_id,
+                    "turn_id": turn_id,
+                    "msg_id": msg_id,
+                    "type": row.r#type,
+                    "data": content_value,
+                    "position": row.position,
+                    "status": row.status,
+                    "hidden": row.hidden,
+                    "replace": false,
+                }),
+            ),
+        );
+        Some(row)
+    }
+
+    /// Persist and broadcast the audit receipt for a committed model switch.
+    /// Mirrors the teardown tip so a receipt arriving mid-turn renders live and
+    /// remains visible after reconnect.
+    pub(crate) async fn persist_and_broadcast_model_failover_receipt(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        failed_model: &str,
+        next_model: &str,
+        reason: &str,
+        switch: usize,
+        turn_id: Option<&str>,
+    ) -> Option<MessageRow> {
+        let row = self
+            .persist_model_failover_receipt(
+                conversation_id,
+                failed_model,
+                next_model,
+                reason,
+                switch,
+                turn_id,
+            )
+            .await?;
 
         let msg_id = row
             .msg_id
