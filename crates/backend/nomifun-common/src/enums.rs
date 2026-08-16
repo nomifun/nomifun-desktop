@@ -7,7 +7,6 @@ pub enum AgentType {
     Acp,
     #[serde(rename = "openclaw-gateway")]
     OpenclawGateway,
-    Remote,
     Nomi,
 }
 
@@ -16,7 +15,6 @@ impl AgentType {
         match self {
             AgentType::Acp => "ACP",
             AgentType::OpenclawGateway => "OpenClaw Gateway",
-            AgentType::Remote => "Remote",
             AgentType::Nomi => "Nomi",
         }
     }
@@ -25,7 +23,6 @@ impl AgentType {
         match self {
             AgentType::Acp => "acp",
             AgentType::OpenclawGateway => "openclaw-gateway",
-            AgentType::Remote => "remote",
             AgentType::Nomi => "nomi",
         }
     }
@@ -39,7 +36,7 @@ impl AgentType {
     pub fn native_skills_dirs(&self) -> Option<&'static [&'static str]> {
         match self {
             AgentType::Nomi => Some(&[".nomi/skills"]),
-            AgentType::Acp | AgentType::OpenclawGateway | AgentType::Remote => None,
+            AgentType::Acp | AgentType::OpenclawGateway => None,
         }
     }
 
@@ -62,7 +59,7 @@ impl AgentType {
                 Some("cursor") => "agent",
                 _ => "yolo",
             },
-            AgentType::Nomi | AgentType::OpenclawGateway | AgentType::Remote => "yolo",
+            AgentType::Nomi | AgentType::OpenclawGateway => "yolo",
         }
     }
 }
@@ -134,34 +131,6 @@ pub enum ProtocolType {
     Anthropic,
     Gemini,
     Unknown,
-}
-
-/// Remote Agent protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RemoteAgentProtocol {
-    OpenClaw,
-    ZeroClaw,
-    Acp,
-}
-
-/// Remote Agent authentication method.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RemoteAgentAuthType {
-    Bearer,
-    Password,
-    None,
-}
-
-/// Remote Agent connection status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RemoteAgentStatus {
-    Unknown,
-    Connected,
-    Pending,
-    Error,
 }
 
 /// Reason for terminating an Agent.
@@ -265,7 +234,6 @@ mod tests {
     fn test_agent_type_display_names() {
         assert_eq!(AgentType::OpenclawGateway.display_name(), "OpenClaw Gateway");
         assert_eq!(AgentType::Nomi.display_name(), "Nomi");
-        assert_eq!(AgentType::Remote.display_name(), "Remote");
         assert_eq!(AgentType::Acp.display_name(), "ACP");
     }
 
@@ -283,7 +251,6 @@ mod tests {
         let cases = [
             (AgentType::Acp, "acp"),
             (AgentType::OpenclawGateway, "openclaw-gateway"),
-            (AgentType::Remote, "remote"),
             (AgentType::Nomi, "nomi"),
         ];
         for (variant, expected) in cases {
@@ -382,6 +349,5 @@ mod tests {
         assert_eq!(AgentType::Acp.full_auto_mode_id(Some("gemini")), "yolo");
         assert_eq!(AgentType::Acp.full_auto_mode_id(None), "yolo");
         assert_eq!(AgentType::Nomi.full_auto_mode_id(None), "yolo");
-        assert_eq!(AgentType::Remote.full_auto_mode_id(None), "yolo");
     }
 }

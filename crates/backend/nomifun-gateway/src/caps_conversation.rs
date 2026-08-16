@@ -448,22 +448,8 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationPar
     } else if p.agent_id.is_some() {
         return json!({ "error": "agent_id is only valid when agent_type is 'acp'" });
     }
-    if agent_type == AgentType::Remote {
-        let Some(remote_agent_id) = p.remote_agent_id else {
-            return json!({ "error": "remote_agent_id is required when agent_type is 'remote'" });
-        };
-        match deps.remote_agent_service.get(&remote_agent_id).await {
-            Ok(remote) if remote.protocol == nomifun_common::RemoteAgentProtocol::OpenClaw => {}
-            Ok(_) => {
-                return json!({
-                    "error": "remote_agent_id refers to an unsupported legacy protocol; create an OpenClaw remote agent"
-                });
-            }
-            Err(error) => return json!({ "error": format!("invalid remote_agent_id: {error}") }),
-        }
-        extra["remote_agent_id"] = json!(remote_agent_id);
-    } else if p.remote_agent_id.is_some() {
-        return json!({ "error": "remote_agent_id is only valid when agent_type is 'remote'" });
+    if p.remote_agent_id.is_some() {
+        return json!({ "error": "remote_agent_id is no longer supported" });
     }
     if let Some(backend) = p.backend {
         extra["backend"] = json!(backend);
@@ -472,9 +458,6 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationPar
     // the sidebar groups it under that workpath drawer; `custom_workspace` is
     // derived client-side from a non-empty non-temporary workspace.
     if let Some(workpath) = p.workpath.as_deref() {
-        if agent_type == AgentType::Remote {
-            return json!({ "error": "workpath is not valid for remote conversations" });
-        }
         match normalized_workpath(workpath) {
             Ok(path) => extra["workspace"] = json!(path),
             Err(e) => return json!({ "error": e }),

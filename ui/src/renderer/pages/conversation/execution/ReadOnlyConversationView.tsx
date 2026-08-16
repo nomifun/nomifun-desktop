@@ -14,7 +14,6 @@ import { browserStorageKey } from '@/common/utils/browserStorageKey';
 const AcpChat = React.lazy(() => import('@/renderer/pages/conversation/platforms/acp/AcpChat'));
 const NomiChat = React.lazy(() => import('@/renderer/pages/conversation/platforms/nomi/NomiChat'));
 const OpenClawChat = React.lazy(() => import('@/renderer/pages/conversation/platforms/openclaw/OpenClawChat'));
-const RemoteChat = React.lazy(() => import('@/renderer/pages/conversation/platforms/remote/RemoteChat'));
 
 // Narrow to Nomi conversations so model field is always available
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
@@ -98,16 +97,6 @@ const ReadOnlyConversationView: React.FC<ReadOnlyConversationViewProps> = ({ con
       case 'openclaw-gateway':
         return (
           <OpenClawChat
-            key={conversation.id}
-            conversation_id={conversation.id}
-            workspace={conversation.extra?.workspace ?? ''}
-            hideSendBox
-            readOnly
-          />
-        );
-      case 'remote':
-        return (
-          <RemoteChat
             key={conversation.id}
             conversation_id={conversation.id}
             workspace={conversation.extra?.workspace ?? ''}

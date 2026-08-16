@@ -25,7 +25,7 @@ use nomifun_db::{
     IUserRepository, SqliteAcpSessionRepository, SqliteAgentMetadataRepository,
     SqliteCompanionTokenRepository, SqliteConversationRepository, SqliteMcpServerRepository,
     SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
-    SqliteProviderRepository, SqliteRemoteAgentRepository,
+    SqliteProviderRepository,
     SqliteTerminalRepository, SqliteUserRepository,
 };
 #[cfg(feature = "browser-use")]
@@ -2295,7 +2295,6 @@ impl AppServices {
         let encryption_key = load_or_create_data_encryption_key(&data_dir, &secret)
             .map_err(|e| anyhow::anyhow!("Failed to load data encryption key: {e}"))?;
 
-        let remote_agent_repo = Arc::new(SqliteRemoteAgentRepository::new(database.pool().clone()));
         let provider_repo = Arc::new(SqliteProviderRepository::new(database.pool().clone()));
         let provider_model_repo: Arc<dyn IProviderModelRepository> =
             Arc::new(SqliteProviderModelRepository::new(database.pool().clone()));
@@ -2967,7 +2966,6 @@ impl AppServices {
         let factory = build_agent_factory(AgentFactoryDeps {
             authoritative_user_id: authoritative_user_id.clone(),
             skill_manager: AcpSkillManager::new(skill_paths.clone()),
-            remote_agent_repo,
             model_invoke: model_invoke_service.clone(),
             model_invoke_service: Some(model_invoke_service.clone()),
             encryption_key,

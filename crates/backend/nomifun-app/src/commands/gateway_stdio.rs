@@ -497,14 +497,6 @@ mod tests {
         assert!(names.contains(&"nomi_cron_create"));
         assert!(names.contains(&"nomi_requirement_create"));
         assert!(names.contains(&"nomi_knowledge_list_bases"));
-        assert!(
-            names.contains(&"nomi_remote_agent_list"),
-            "the work profile must let a trusted Nomi session discover saved OpenClaw gateways"
-        );
-        assert!(
-            names.contains(&"nomi_remote_agent_handshake"),
-            "the work profile must let a trusted desktop Nomi session verify a saved gateway"
-        );
         // The desktop default (work) profile exposes the unified collaboration
         // surface so the lead Agent can delegate or create persistent executions.
         assert!(names.contains(&"nomi_delegate"));

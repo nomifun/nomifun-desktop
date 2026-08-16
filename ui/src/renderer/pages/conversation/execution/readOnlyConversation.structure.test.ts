@@ -12,7 +12,7 @@ const readSource = (url: URL) => readFileSync(url, 'utf8');
 describe('execution transcript capability boundary', () => {
   test('marks every projected platform chat as read-only', () => {
     const source = readSource(new URL('./ReadOnlyConversationView.tsx', import.meta.url));
-    // The openclaw / remote chat surfaces and send boxes share the
+    // The openclaw chat surface and send box share the
     // BasicRuntimeChat / BasicRuntimeSendBox implementations.
     const basicPlatformChats = [
       readSource(new URL('../platforms/BasicRuntimeChat.tsx', import.meta.url)),
@@ -20,11 +20,12 @@ describe('execution transcript capability boundary', () => {
     const basicPlatformSendBoxes = [
       readSource(new URL('../platforms/BasicRuntimeSendBox.tsx', import.meta.url)),
       readSource(new URL('../platforms/openclaw/OpenClawSendBox.tsx', import.meta.url)),
-      readSource(new URL('../platforms/remote/RemoteSendBox.tsx', import.meta.url)),
     ];
 
-    expect(source.match(/\breadOnly\b/g)?.length).toBeGreaterThanOrEqual(4);
-    expect(source.match(/\bhideSendBox\b/g)?.length).toBeGreaterThanOrEqual(4);
+    // One readOnly / hideSendBox prop per projected platform arm
+    // (acp / nomi / openclaw-gateway).
+    expect(source.match(/\breadOnly\b/g)?.length).toBeGreaterThanOrEqual(3);
+    expect(source.match(/\bhideSendBox\b/g)?.length).toBeGreaterThanOrEqual(3);
     for (const chatSource of basicPlatformChats) {
       expect(chatSource.includes('readOnly?: boolean')).toBe(true);
       expect(chatSource.includes('useConversationResponseMessages(conversation_id)')).toBe(true);

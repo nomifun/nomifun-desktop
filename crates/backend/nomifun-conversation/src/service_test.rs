@@ -8433,7 +8433,6 @@ async fn background_reconcile_exact_live_owner_waits_without_settling_or_buildin
 async fn background_reconcile_external_backends_fail_closed_without_mutation() {
     for (index, backend) in [
         AgentType::Nomi.serde_name(),
-        AgentType::Remote.serde_name(),
         AgentType::OpenclawGateway.serde_name(),
     ]
     .into_iter()
@@ -8703,7 +8702,6 @@ async fn boot_reconcile_quarantines_every_current_backend_without_terminal_proof
     for (index, backend) in [
         AgentType::Nomi.serde_name(),
         AgentType::Acp.serde_name(),
-        AgentType::Remote.serde_name(),
         AgentType::OpenclawGateway.serde_name(),
     ]
     .into_iter()
@@ -8993,53 +8991,6 @@ async fn boot_reconcile_heals_proven_orphan_as_interrupted_failure() {
             claim_background_turn_for_test(repo.as_ref(), &conversation_id, "post-heal").await;
         assert_eq!(next_epoch, admitted_epoch + 2, "{backend}");
     }
-}
-
-#[tokio::test]
-async fn boot_reconcile_keeps_remote_backend_quarantined_even_with_provider() {
-    const KEY: &str = "boot-remote-stays-quarantined";
-    let (service, repo, _slow_registry, runtime_registry, database, conversation_id) =
-        background_reconciliation_fixture(
-            KEY,
-            Arc::new(crate::NoExecutionConversationBoundary),
-        )
-        .await;
-    nomifun_db::sqlx::query(
-        "UPDATE conversations SET type = ? WHERE conversation_id = ? AND user_id = ?",
-    )
-    .bind(AgentType::Remote.serde_name())
-    .bind(&conversation_id)
-    .bind(SQLITE_TEST_OWNER)
-    .execute(database.pool())
-    .await
-    .unwrap();
-    let (operation_id, _, _, admitted_epoch) =
-        claim_background_turn_for_test(repo.as_ref(), &conversation_id, KEY).await;
-
-    let provider = StubTerminalProofProvider::new();
-    provider.arm(&conversation_id, admitted_epoch, Some(&operation_id));
-    service.with_terminal_proof_provider(provider.clone());
-
-    service
-        .reconcile_locally_quiescent_orphan_on_boot(
-            SQLITE_TEST_OWNER,
-            &conversation_id,
-            &runtime_registry,
-        )
-        .await
-        .expect_err("remote work cannot be proven terminal locally");
-    assert!(
-        provider.consultations().is_empty(),
-        "an external-execution backend must never consult a local proof provider"
-    );
-    let row = repo.get(&conversation_id).await.unwrap().unwrap();
-    assert_eq!(row.status.as_deref(), Some("running"));
-    let receipt = repo
-        .get_delivery_receipt(SQLITE_TEST_OWNER, &conversation_id, &operation_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(receipt.status, "accepted");
 }
 
 #[tokio::test]
@@ -11080,7 +11031,7 @@ async fn send_message_keeps_external_gateway_orphan_running_until_terminal_is_pr
             .iter_mut()
             .find(|row| row.conversation_id == conv.conversation_id)
             .unwrap();
-        row.r#type = AgentType::Remote.serde_name().to_owned();
+        row.r#type = AgentType::OpenclawGateway.serde_name().to_owned();
         row.status = Some("running".to_owned());
     }
     broadcaster.take_events();
@@ -15068,7 +15019,7 @@ async fn view_warmup_keeps_remote_orphan_running_until_terminal_is_proven() {
             .iter_mut()
             .find(|row| row.conversation_id == conv.conversation_id)
             .unwrap();
-        row.r#type = AgentType::Remote.serde_name().to_owned();
+        row.r#type = AgentType::OpenclawGateway.serde_name().to_owned();
         row.status = Some("running".to_owned());
     }
     broadcaster.take_events();

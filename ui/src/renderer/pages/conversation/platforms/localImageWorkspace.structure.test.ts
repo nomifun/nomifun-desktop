@@ -13,7 +13,7 @@ const readSource = (relativePath: string): string =>
 describe('conversation artifact image workspace wiring', () => {
   const surfaces = [
     ['ACP', './acp/AcpChat.tsx', "updateLocalImage({ root: workspace ?? '' });"],
-    // Remote / OpenClaw share the BasicRuntimeChat implementation.
+    // OpenClaw is built on the BasicRuntimeChat implementation.
     ['BasicRuntime', './BasicRuntimeChat.tsx', 'updateLocalImage({ root: workspace });'],
   ] as const;
 

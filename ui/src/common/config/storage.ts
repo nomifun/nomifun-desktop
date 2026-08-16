@@ -25,7 +25,6 @@ import type {
   McpServerId,
   PresetId,
   ProviderId,
-  RemoteAgentId,
 } from '@/common/types/ids';
 
 /**
@@ -177,25 +176,6 @@ export type TChatConversation =
             expectedIdentityHash?: string | null;
             switchedAt?: number;
           };
-          /** Skills snapshot for this conversation — authoritative list, written
-           * once at creation. Join with `GET /api/skills` for descriptions. */
-          skills?: string[];
-          /** Legacy marker for pre-provider-probe health-check conversations */
-          is_health_check?: boolean;
-        }
-      >,
-      'model'
-    >
-  | Omit<
-      IChatConversation<
-        'remote',
-        {
-          workspace?: string;
-          custom_workspace?: boolean;
-          /** Remote-agent business ID (application-enforced logical reference). */
-          remote_agent_id: RemoteAgentId;
-          /** Remote session key for resume */
-          sessionKey?: string;
           /** Skills snapshot for this conversation — authoritative list, written
            * once at creation. Join with `GET /api/skills` for descriptions. */
           skills?: string[];

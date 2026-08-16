@@ -36,10 +36,6 @@ pub(crate) enum RunningOrphanDisposition {
     /// existed for this Conversation and every one was reaped with
     /// exact-identity verification.
     RegisteredGatewayAuthorityRequired,
-    /// Work may still be executing outside this application process or
-    /// machine.  A protocol-specific external terminal proof is required
-    /// before durable finalization; no local evidence source can supply it.
-    ExternalTerminalProofRequired,
 }
 
 pub(crate) fn running_orphan_disposition(
@@ -61,9 +57,6 @@ pub(crate) fn running_orphan_disposition(
         }
         value if value == AgentType::OpenclawGateway.serde_name() => {
             RunningOrphanDisposition::RegisteredGatewayAuthorityRequired
-        }
-        value if value == AgentType::Remote.serde_name() => {
-            RunningOrphanDisposition::ExternalTerminalProofRequired
         }
         unknown => {
             return Err(AppError::Conflict(format!(
@@ -88,10 +81,6 @@ mod tests {
             (
                 AgentType::Acp.serde_name(),
                 RunningOrphanDisposition::RegisteredLocalProcessTree,
-            ),
-            (
-                AgentType::Remote.serde_name(),
-                RunningOrphanDisposition::ExternalTerminalProofRequired,
             ),
             (
                 AgentType::OpenclawGateway.serde_name(),

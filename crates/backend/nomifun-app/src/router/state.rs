@@ -8,8 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nomifun_ai_agent::{
-    AgentRouterState, AgentRuntimeRegistry, AgentService, RemoteAgentRouterState,
-    RemoteAgentService,
+    AgentRouterState, AgentRuntimeRegistry, AgentService,
 };
 use nomifun_api_types::TerminalExitEvent;
 use nomifun_preset::{BuiltinPresetRegistry, PresetRouterState, PresetService};
@@ -27,7 +26,7 @@ use nomifun_db::{
     SqliteAgentExecutionTemplateRepository,
     SqliteAgentMetadataRepository, SqlitePresetRepository, SqlitePresetStateRepository,
     SqlitePresetTagRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
-    SqliteIdmmInterventionRepository, SqliteProviderRepository, SqliteRemoteAgentRepository, SqliteSettingsRepository,
+    SqliteIdmmInterventionRepository, SqliteProviderRepository, SqliteSettingsRepository,
     MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
 };
 use nomifun_extension::{
@@ -70,7 +69,6 @@ use crate::services::AppServices;
 pub struct ModuleStates {
     pub system: SystemRouterState,
     pub conversation: ConversationRouterState,
-    pub remote_agent: RemoteAgentRouterState,
     pub ssh_host: nomifun_ssh::SshHostRouterState,
     pub agent: AgentRouterState,
 
@@ -554,7 +552,6 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
     let states = ModuleStates {
         system: build_system_state(services),
         conversation,
-        remote_agent: build_remote_agent_state(services),
         ssh_host: build_ssh_host_state(services),
         agent: AgentRouterState {
             agent_registry: services.agent_registry.clone(),
@@ -780,16 +777,6 @@ pub fn build_conversation_state(
     ConversationRouterState {
         service: conversation_service,
         runtime_registry: services.agent_runtime_registry.clone(),
-    }
-}
-
-/// Build the default `RemoteAgentRouterState` from application services.
-pub fn build_remote_agent_state(services: &AppServices) -> RemoteAgentRouterState {
-    let encryption_key = services.encryption_key;
-    let pool = services.database.pool().clone();
-    let repo = Arc::new(SqliteRemoteAgentRepository::new(pool));
-    RemoteAgentRouterState {
-        service: Arc::new(RemoteAgentService::new(repo, encryption_key)),
     }
 }
 

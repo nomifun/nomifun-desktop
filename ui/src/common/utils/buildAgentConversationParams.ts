@@ -6,7 +6,6 @@
 
 import type { ICreateConversationParams } from '@/common/adapter/ipcBridge';
 import type { TProviderWithModel } from '@/common/config/storage';
-import type { RemoteAgentId } from '@/common/types/ids';
 import type { PresetReference } from '@/common/types/agent/presetTypes';
 
 export type BuildAgentConversationInput = {
@@ -18,7 +17,6 @@ export type BuildAgentConversationInput = {
   workspace: string;
   model: TProviderWithModel;
   cli_path?: string;
-  remote_agent_id?: RemoteAgentId;
   custom_workspace?: boolean;
   is_preset?: boolean;
   session_mode?: string;
@@ -33,8 +31,6 @@ export function getConversationTypeForBackend(backend: string): ICreateConversat
     case 'openclaw-gateway':
     case 'openclaw':
       return 'openclaw-gateway';
-    case 'remote':
-      return 'remote';
     default:
       return 'acp';
   }
@@ -50,7 +46,6 @@ export function buildAgentConversationParams(input: BuildAgentConversationInput)
     workspace,
     model,
     cli_path,
-    remote_agent_id,
     custom_workspace = true,
     is_preset = false,
     session_mode,
@@ -66,12 +61,7 @@ export function buildAgentConversationParams(input: BuildAgentConversationInput)
   };
 
   if (!is_preset) {
-    if (type === 'remote') {
-      if (!remote_agent_id) {
-        throw new Error('A valid remote_agent_id is required for remote conversations');
-      }
-      extra.remote_agent_id = remote_agent_id;
-    } else if (type === 'openclaw-gateway') {
+    if (type === 'openclaw-gateway') {
       extra.agent_name = agent_name || name;
       extra.gateway = {
         cli_path,

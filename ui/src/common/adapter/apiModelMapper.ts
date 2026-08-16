@@ -23,7 +23,6 @@ import {
   parseMcpServerId,
   parseCompanionId,
   parseProviderId,
-  parseRemoteAgentId,
 } from '../types/ids';
 
 export type ApiProviderWithModel = {
@@ -201,14 +200,6 @@ export function fromApiConversation(raw: unknown): TChatConversation {
     extra = {
       ...extra,
       custom_workspace: workspace.length > 0 && !isTemporary,
-    };
-  }
-
-  // Remote-agent conversations use one canonical logical-reference field.
-  if (extra && 'remote_agent_id' in extra) {
-    extra = {
-      ...extra,
-      remote_agent_id: parseRemoteAgentId(extra.remote_agent_id),
     };
   }
 

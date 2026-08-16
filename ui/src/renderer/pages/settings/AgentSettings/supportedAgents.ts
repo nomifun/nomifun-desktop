@@ -13,7 +13,7 @@
  * so users can discover the full set of supported agents and install them —
  * we keep this small front-end catalog. The list mirrors the seeded
  * `agent_metadata` rows in 001_baseline.sql (ACP builtins +
- * openclaw); `nomi` (internal, always available) and remote agents are
+ * openclaw); `nomi` (internal, always available) is
  * intentionally excluded.
  *
  * `backend` matches both the detected agent's `backend` key and the logo map

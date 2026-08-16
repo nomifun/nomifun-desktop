@@ -7,7 +7,6 @@
 import type { AcpModelInfo } from '@/common/types/platform/acpTypes';
 import type { AgentSource } from '@/renderer/utils/model/agentTypes';
 import type { PresetReference } from '@/common/types/agent/presetTypes';
-import type { RemoteAgentId } from '@/common/types/ids';
 
 /**
  * Available agent entry returned by the backend.
@@ -26,8 +25,6 @@ export type AvailableAgent = {
   icon?: string;
   name: string;
   cli_path?: string;
-  /** Canonical remote-agent entity identity; never routed through the custom-agent catalog key. */
-  remote_agent_id?: RemoteAgentId;
   is_preset?: boolean;
   preset_id?: PresetReference;
   context?: string;

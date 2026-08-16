@@ -1,12 +1,6 @@
 use std::sync::Arc;
 
-use crate::{AgentRegistry, AgentService, RemoteAgentService};
-
-/// Router state for remote agent routes.
-#[derive(Clone)]
-pub struct RemoteAgentRouterState {
-    pub service: Arc<RemoteAgentService>,
-}
+use crate::{AgentRegistry, AgentService};
 
 #[derive(Clone)]
 pub struct AgentRouterState {

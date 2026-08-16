@@ -23,7 +23,6 @@ export type BrowserStorageFeature =
   | 'initial-message-acp'
   | 'initial-message-nomi'
   | 'initial-message-openclaw'
-  | 'initial-message-remote'
   | 'initial-message-processed'
   | 'command-queue'
   | 'cron-unread'

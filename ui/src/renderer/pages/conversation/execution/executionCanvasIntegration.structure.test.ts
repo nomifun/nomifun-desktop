@@ -109,8 +109,10 @@ describe('conversation execution canvas integration', () => {
     expect(hookSource.includes('getConversationOrNull(conversationId)')).toBe(true);
     expect(chatSource.includes('isRetainedAttemptTranscript')).toBe(true);
     expect(chatSource.includes('<ReadOnlyConversationView')).toBe(true);
-    expect(readOnlySource.match(/hideSendBox/g)?.length).toBeGreaterThanOrEqual(4);
-    expect(readOnlySource.match(/readOnly/g)?.length).toBeGreaterThanOrEqual(4);
+    // One hideSendBox / readOnly prop per projected platform arm
+    // (acp / nomi / openclaw-gateway).
+    expect(readOnlySource.match(/hideSendBox/g)?.length).toBeGreaterThanOrEqual(3);
+    expect(readOnlySource.match(/readOnly/g)?.length).toBeGreaterThanOrEqual(3);
     expect(readOnlySource.includes('ipcBridge.conversation.update')).toBe(false);
   });
 
