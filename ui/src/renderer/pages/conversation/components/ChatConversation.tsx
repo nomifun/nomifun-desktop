@@ -21,7 +21,6 @@ import { emitter } from '../../../utils/emitter';
 import AcpChat from '../platforms/acp/AcpChat';
 import ChatLayout, { type ChatLayoutProps } from './ChatLayout';
 import ChatSlider from './ChatSlider.tsx';
-import NanobotChat from '../platforms/nanobot/NanobotChat';
 import OpenClawChat from '../platforms/openclaw/OpenClawChat';
 import RemoteChat from '../platforms/remote/RemoteChat';
 import { saveNomiDefaultModel } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
@@ -583,17 +582,6 @@ const ChatConversation: React.FC<{
             loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
           />
         );
-      case 'nanobot':
-        return (
-          <NanobotChat
-            key={conversation.id}
-            conversation_id={conversation.id}
-            workspace={conversation.extra?.workspace ?? ''}
-            cron_job_id={conversation.cron_job_id}
-            hideSendBox={hideSendBox}
-            loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
-          />
-        );
       case 'remote':
         return (
           <RemoteChat
@@ -694,11 +682,9 @@ const ChatConversation: React.FC<{
                 // never reach this branch, so the chain starts at non-ACP types.
                 conversation?.type === 'openclaw-gateway'
                   ? 'openclaw-gateway'
-                  : conversation?.type === 'nanobot'
-                    ? 'nanobot'
-                    : conversation?.type === 'remote'
-                      ? 'remote'
-                      : undefined,
+                  : conversation?.type === 'remote'
+                    ? 'remote'
+                    : undefined,
           agent_name: conversationAgentName,
         };
 

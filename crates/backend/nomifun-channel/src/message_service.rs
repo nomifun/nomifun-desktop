@@ -389,7 +389,7 @@ impl ChannelMessageService {
         // Every GROUP turn is forced into a dedicated channel conversation so
         // group members can never read or pollute the owner's private transcript.
         // Non-companion / ACP / unbound channels are dedicated as before.
-        let agent_type = parse_agent_type(&session.agent_type);
+        let agent_type = parse_agent_type(&session.agent_type)?;
         let is_direct = session.chat_kind == CHANNEL_CHAT_KIND_DIRECT;
         let is_group = session.chat_kind == CHANNEL_CHAT_KIND_GROUP;
         let auto_group_guest = if is_group {
@@ -621,7 +621,7 @@ impl ChannelMessageService {
         auto_group_guest: bool,
     ) -> Result<String, ChannelError> {
         let source = platform_to_source(platform);
-        let agent_type = parse_agent_type(&session.agent_type);
+        let agent_type = parse_agent_type(&session.agent_type)?;
 
         let agent_config = self.settings.get_agent_config(platform).await?;
         let model_config = self.settings.get_model_config(platform).await?;
@@ -1230,20 +1230,21 @@ fn platform_to_source(platform: PluginType) -> ConversationSource {
     }
 }
 
-/// Parses an agent_type string to an AgentType enum.
+/// Parses an `agent_type` string from a persisted channel session.
 ///
-/// Falls back to `AgentType::Acp` for unknown values.
-fn parse_agent_type(s: &str) -> AgentType {
+/// Rejects anything that is not a live engine. This column is free-form TEXT,
+/// so a session bound to a retired engine is still readable — coercing it to a
+/// surviving engine would resurrect it with the wrong runtime and the wrong
+/// `extra` shape, failing much later and far from the cause.
+fn parse_agent_type(s: &str) -> Result<AgentType, ChannelError> {
     match s {
-        "acp" => AgentType::Acp,
-        "openclaw-gateway" => AgentType::OpenclawGateway,
-        "nanobot" => AgentType::Nanobot,
-        "remote" => AgentType::Remote,
-        "nomi" => AgentType::Nomi,
-        _ => {
-            warn!(agent_type = %s, "unknown agent type, defaulting to Acp");
-            AgentType::Acp
-        }
+        "acp" => Ok(AgentType::Acp),
+        "openclaw-gateway" => Ok(AgentType::OpenclawGateway),
+        "remote" => Ok(AgentType::Remote),
+        "nomi" => Ok(AgentType::Nomi),
+        _ => Err(ChannelError::InvalidConfig(format!(
+            "channel session names agent type '{s}', which no longer exists in this build"
+        ))),
     }
 }
 
@@ -1476,17 +1477,20 @@ mod tests {
 
     #[test]
     fn parse_known_agent_types() {
-        assert_eq!(parse_agent_type("acp"), AgentType::Acp);
-        assert_eq!(parse_agent_type("openclaw-gateway"), AgentType::OpenclawGateway);
-        assert_eq!(parse_agent_type("nanobot"), AgentType::Nanobot);
-        assert_eq!(parse_agent_type("remote"), AgentType::Remote);
-        assert_eq!(parse_agent_type("nomi"), AgentType::Nomi);
+        assert_eq!(parse_agent_type("acp").unwrap(), AgentType::Acp);
+        assert_eq!(
+            parse_agent_type("openclaw-gateway").unwrap(),
+            AgentType::OpenclawGateway
+        );
+        assert_eq!(parse_agent_type("remote").unwrap(), AgentType::Remote);
+        assert_eq!(parse_agent_type("nomi").unwrap(), AgentType::Nomi);
     }
 
     #[test]
-    fn parse_unknown_agent_type_defaults_to_acp() {
-        assert_eq!(parse_agent_type("unknown"), AgentType::Acp);
-        assert_eq!(parse_agent_type(""), AgentType::Acp);
+    fn parse_unknown_agent_type_is_rejected() {
+        assert!(parse_agent_type("unknown").is_err());
+        assert!(parse_agent_type("nanobot").is_err());
+        assert!(parse_agent_type("").is_err());
     }
 
     // ── process_stream_event ───────────────────────────────────────────

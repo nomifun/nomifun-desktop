@@ -29,7 +29,7 @@ export interface ConversationContextValue {
    * Conversation type
    * 会话类型
    */
-  type: 'acp' | 'openclaw-gateway' | 'nanobot' | 'remote' | 'nomi';
+  type: 'acp' | 'openclaw-gateway' | 'remote' | 'nomi';
 
   /**
    * Cron job ID (if this conversation was created by a scheduled task)

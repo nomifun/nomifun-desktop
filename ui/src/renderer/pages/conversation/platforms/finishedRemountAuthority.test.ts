@@ -57,7 +57,7 @@ describe('Finished conversation remount authority', () => {
     const simpleFence = getAuthoritativeHydrationFence(false);
     const nomiFence = getNomiHydrationLifecycleFence(false);
 
-    // Delayed old output cannot raise Remote/OpenClaw/Nanobot, Nomi, or ACP.
+    // Delayed old output cannot raise Remote/OpenClaw, Nomi, or ACP.
     expect(
       shouldAcceptAuthoritativeStreamActivity({
         closed: simpleFence.closed,

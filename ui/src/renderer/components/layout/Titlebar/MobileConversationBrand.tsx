@@ -30,11 +30,9 @@ const MobileConversationBrand: React.FC<MobileConversationBrandProps> = ({ conve
         ? 'nomi'
         : conversation?.type === 'openclaw-gateway'
             ? 'openclaw-gateway'
-            : conversation?.type === 'nanobot'
-              ? 'nanobot'
-              : conversation?.type === 'remote'
-                ? 'remote'
-                : undefined;
+            : conversation?.type === 'remote'
+              ? 'remote'
+              : undefined;
 
   const showLogo = Boolean(backend || preset);
   const title = conversation?.name || fallbackTitle;

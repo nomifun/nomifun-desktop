@@ -14,13 +14,12 @@ describe('Guid initial-message idempotency', () => {
     const source = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
 
     expect(source.includes("import { uuidv7 } from '@/common/utils';")).toBe(true);
-    expect(source.match(/idempotency_key: uuidv7\(\),/g)).toHaveLength(4);
-    expect(source.match(/conversation_id: conversation\.id,/g)).toHaveLength(4);
-    expect(source.match(/initial_admission_epoch: 0,/g)).toHaveLength(4);
+    expect(source.match(/idempotency_key: uuidv7\(\),/g)).toHaveLength(3);
+    expect(source.match(/conversation_id: conversation\.id,/g)).toHaveLength(3);
+    expect(source.match(/initial_admission_epoch: 0,/g)).toHaveLength(3);
 
     const storageWrites = [
       "'initial-message-openclaw'",
-      "'initial-message-nanobot'",
       "'initial-message-nomi'",
       "'initial-message-remote' : 'initial-message-acp'",
     ];

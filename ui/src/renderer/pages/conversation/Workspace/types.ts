@@ -26,7 +26,13 @@ export interface WorkspaceProps {
    * Renamed here to camelCase per the frontend prop convention.
    */
   isTemporaryWorkspace?: boolean;
-  eventPrefix?: 'acp' | 'nomi' | 'openclaw-gateway' | 'nanobot' | 'remote';
+  /**
+   * Emitter channel namespace for this workspace's file-selection and refresh
+   * events. REQUIRED on purpose: the channel names are built by template
+   * interpolation, so TypeScript cannot police a wrong value — a default would
+   * silently listen on a namespace nobody publishes to.
+   */
+  eventPrefix: 'acp' | 'nomi' | 'openclaw-gateway' | 'remote';
   messageApi?: MessageApi;
   extraTabs?: WorkspaceExtraTab[];
 }

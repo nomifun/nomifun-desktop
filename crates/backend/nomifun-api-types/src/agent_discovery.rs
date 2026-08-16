@@ -21,7 +21,7 @@ use std::path::PathBuf;
 pub enum AgentSource {
     /// Ships with the backend binary (no CLI install required — e.g. `nomi`).
     Internal,
-    /// Seeded from the migration (ACP vendors, nanobot, openclaw).
+    /// Seeded from the migration (ACP vendors, openclaw).
     Builtin,
     /// Installed from the extension hub.
     Extension,
@@ -128,7 +128,7 @@ pub struct AgentMetadata {
     pub description_i18n: Option<serde_json::Value>,
 
     /// Vendor label (e.g. "claude"). `None` for agents without vendor
-    /// grouping (remote / internal / nanobot).
+    /// grouping (remote / internal).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     pub agent_type: AgentType,

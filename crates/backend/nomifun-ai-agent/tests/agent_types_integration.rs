@@ -141,7 +141,6 @@ fn agent_type_serde_all_variants() {
     for (variant, expected_json) in [
         (AgentType::Acp, "\"acp\""),
         (AgentType::OpenclawGateway, "\"openclaw-gateway\""),
-        (AgentType::Nanobot, "\"nanobot\""),
         (AgentType::Remote, "\"remote\""),
         (AgentType::Nomi, "\"nomi\""),
     ] {

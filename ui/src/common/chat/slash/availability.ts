@@ -17,7 +17,7 @@ export interface SlashCommandListAvailabilityInput {
  *
  * Slash commands are supported by ACP and nomi agent types. The backend's
  * `/slash-commands` endpoint returns an empty list for other agent types
- * (openclaw-gateway / nanobot / remote), so calling it from those is waste
+ * (openclaw-gateway / remote), so calling it from those is waste
  * (and additionally 404s when the agent has not been warmed up yet).
  *
  * @param input - Conversation type and status information

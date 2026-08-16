@@ -1639,7 +1639,7 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
 }
 
 /// Wired up by `nomifun-app` so deleting a conversation tears down its
-/// agent process. Without this hook, ACP/nomi/nanobot subprocesses keep
+/// agent process. Without this hook, ACP/nomi subprocesses keep
 /// streaming events for a `conversation_id` whose DB row is already gone
 /// (Sentry ELECTRON-1BD).
 #[async_trait]
@@ -2661,7 +2661,7 @@ mod tests {
                         &options.conversation_id,
                         Some(ConversationStatus::Finished),
                     )
-                    .with_agent_type(AgentType::Nanobot)
+                    .with_agent_type(AgentType::Acp)
                     .with_turn_boundary_recycle(Arc::clone(&recycle_required))
                     .with_blocking_kill(
                         Arc::clone(&kill_started),
@@ -2670,7 +2670,7 @@ mod tests {
                     .with_kill_reasons(Arc::clone(&kill_reasons))
                 } else {
                     MockAgent::new(&options.conversation_id, None)
-                        .with_agent_type(AgentType::Nanobot)
+                        .with_agent_type(AgentType::Acp)
                 };
                 async move { Ok(mock_runtime(agent)) }.boxed()
             })
@@ -2743,7 +2743,7 @@ mod tests {
                     &options.conversation_id,
                     Some(ConversationStatus::Finished),
                 )
-                .with_agent_type(AgentType::Nanobot)
+                .with_agent_type(AgentType::Acp)
                 .with_turn_boundary_recycle(recycle_required)
                 .with_kill_reasons(Arc::clone(&kill_reasons));
                 async move { Ok(mock_runtime(agent)) }.boxed()
