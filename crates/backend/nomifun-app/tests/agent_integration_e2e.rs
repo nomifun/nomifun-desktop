@@ -401,24 +401,6 @@ async fn slash_commands_with_mock_returns_empty() {
     );
 }
 
-#[tokio::test]
-async fn openclaw_runtime_wrong_agent_type() {
-    let (mut app, services, runtime_registry) = build_app_with_mock_runtime_registry().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "OpenClaw Wrong Type").await;
-    runtime_registry.insert(&conv_id, "/mock-workspace");
-
-    let req = get_with_token(&format!("/api/conversations/{conv_id}/openclaw/runtime"), &token);
-    let resp = app.oneshot(req).await.unwrap();
-    // Non-OpenClaw agents return a JSON null payload instead of an
-    // error — the endpoint is a best-effort diagnostic; callers that
-    // need stricter typing check the payload shape themselves.
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert!(json["data"].is_null());
-}
 
 #[tokio::test]
 async fn side_question_with_mock_agent() {

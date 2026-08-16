@@ -1,7 +1,7 @@
 //! Agent-session operations on ConversationService.
 //!
 //! These forward to the active AgentRuntimeHandle (via `self.runtime_handle(id)`) for
-//! mode/model/usage/slash-commands/side-question/openclaw-runtime queries,
+//! mode/model/slash-commands/side-question queries,
 //! plus workspace browsing that needs the conversations.extra.workspace
 //! field.
 //!
@@ -97,17 +97,7 @@ impl ConversationService {
         runtime.set_model(&req.model_id).await
     }
 
-    // ── Usage / Slash commands ──────────────────────────────────────
-
-    pub async fn get_usage(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-    ) -> Result<Option<serde_json::Value>, AppError> {
-        self.require_owned_conversation(user_id, conversation_id)
-            .await?;
-        self.runtime_handle(conversation_id)?.get_usage().await
-    }
+    // ── Slash commands ──────────────────────────────────────────────
 
     pub async fn get_slash_commands(
         &self,
@@ -132,18 +122,6 @@ impl ConversationService {
         // `AgentRuntimeHandle::handle_side_question` already validates that the
         // question is non-empty; no need to duplicate the check here.
         self.runtime_handle(conversation_id)?.handle_side_question(req).await
-    }
-
-    // ── OpenClaw runtime diagnostics ────────────────────────────────
-
-    pub async fn get_openclaw_runtime(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-    ) -> Result<serde_json::Value, AppError> {
-        self.require_owned_conversation(user_id, conversation_id)
-            .await?;
-        self.runtime_handle(conversation_id)?.get_openclaw_runtime().await
     }
 
     // ── Workspace browsing ──────────────────────────────────────────

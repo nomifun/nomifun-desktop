@@ -1,7 +1,7 @@
 //! E2E integration tests for auxiliary conversation routes.
 //!
-//! Tests cover: workspace browse, side-question,
-//! slash-commands, and openclaw-runtime endpoints.
+//! Tests cover: workspace browse, side-question, and
+//! slash-commands endpoints.
 
 mod common;
 
@@ -362,31 +362,6 @@ async fn slash_commands_no_active_task() {
     let conv_id = create_conversation(&mut app, &token, &csrf, "Slash Test", "acp").await;
 
     let req = get_with_token(&format!("/api/conversations/{conv_id}/slash-commands"), &token);
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-// ── 9.5 OpenClaw runtime ────────────────────────────────────────
-
-#[tokio::test]
-async fn openclaw_runtime_requires_auth() {
-    let (app, _) = build_app().await;
-    let req = axum::http::Request::builder()
-        .method("GET")
-        .uri("/api/conversations/test-conv/openclaw/runtime")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
-async fn openclaw_runtime_no_active_task() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_owner(&mut app, &services).await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "OpenClaw Test", "openclaw-gateway").await;
-
-    let req = get_with_token(&format!("/api/conversations/{conv_id}/openclaw/runtime"), &token);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
