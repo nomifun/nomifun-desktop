@@ -27,7 +27,7 @@ export function shouldDiscoverExecutionRelation(
 
 export function useConversationExecution(conversation: TChatConversation | null | undefined): ConversationExecutionState {
   // ConversationExecutionLink is authoritative for every Agent runtime. ACP,
-  // Codex, OpenClaw, Nanobot and companion sessions can all delegate through
+  // Codex, OpenClaw and companion sessions can all delegate through
   // the same process-issued Platform Gateway capability; filtering by
   // conversation type would create an
   // execution that exists in the backend but cannot be observed or controlled.

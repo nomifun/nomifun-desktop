@@ -12,7 +12,6 @@ const sendBoxFiles = [
   './nomi/NomiSendBox.tsx',
   './BasicRuntimeSendBox.tsx',
   './remote/RemoteSendBox.tsx',
-  './nanobot/NanobotSendBox.tsx',
   './openclaw/OpenClawSendBox.tsx',
 ];
 

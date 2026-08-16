@@ -56,10 +56,7 @@ pub(crate) fn running_orphan_disposition(
         value if value == AgentType::Nomi.serde_name() => {
             RunningOrphanDisposition::LocalContainedAuthority
         }
-        value
-            if value == AgentType::Acp.serde_name()
-                || value == AgentType::Nanobot.serde_name() =>
-        {
+        value if value == AgentType::Acp.serde_name() => {
             RunningOrphanDisposition::RegisteredLocalProcessTree
         }
         value if value == AgentType::OpenclawGateway.serde_name() => {
@@ -90,10 +87,6 @@ mod tests {
             ),
             (
                 AgentType::Acp.serde_name(),
-                RunningOrphanDisposition::RegisteredLocalProcessTree,
-            ),
-            (
-                AgentType::Nanobot.serde_name(),
                 RunningOrphanDisposition::RegisteredLocalProcessTree,
             ),
             (

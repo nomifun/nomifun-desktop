@@ -8433,7 +8433,6 @@ async fn background_reconcile_exact_live_owner_waits_without_settling_or_buildin
 async fn background_reconcile_external_backends_fail_closed_without_mutation() {
     for (index, backend) in [
         AgentType::Nomi.serde_name(),
-        AgentType::Nanobot.serde_name(),
         AgentType::Remote.serde_name(),
         AgentType::OpenclawGateway.serde_name(),
     ]
@@ -8704,7 +8703,6 @@ async fn boot_reconcile_quarantines_every_current_backend_without_terminal_proof
     for (index, backend) in [
         AgentType::Nomi.serde_name(),
         AgentType::Acp.serde_name(),
-        AgentType::Nanobot.serde_name(),
         AgentType::Remote.serde_name(),
         AgentType::OpenclawGateway.serde_name(),
     ]
@@ -8894,7 +8892,6 @@ async fn boot_reconcile_heals_proven_orphan_as_interrupted_failure() {
     for (index, backend) in [
         AgentType::Nomi.serde_name(),
         AgentType::Acp.serde_name(),
-        AgentType::Nanobot.serde_name(),
     ]
     .into_iter()
     .enumerate()

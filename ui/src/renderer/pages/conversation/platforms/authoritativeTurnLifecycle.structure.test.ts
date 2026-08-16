@@ -6,7 +6,7 @@ const runtimeReconciler = readFileSync(
   new URL('./reconcileConversationTurnAfterStreamTerminal.ts', import.meta.url),
   'utf8'
 );
-// The nanobot / remote / openclaw send boxes share one implementation.
+// The remote / openclaw send boxes share one implementation.
 const simpleSendBoxes = ['./BasicRuntimeSendBox.tsx'].map((path) =>
   readFileSync(new URL(path, import.meta.url), 'utf8')
 );

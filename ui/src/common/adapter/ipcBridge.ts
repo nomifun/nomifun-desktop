@@ -3218,7 +3218,7 @@ export interface IConfirmMessageParams {
 }
 
 export interface ICreateConversationParams {
-  type: 'acp' | 'codex' | 'openclaw-gateway' | 'nanobot' | 'remote' | 'nomi';
+  type: 'acp' | 'codex' | 'openclaw-gateway' | 'remote' | 'nomi';
   name?: string;
   model: TProviderWithModel;
   /** Backend-resolved reusable launch configuration. */

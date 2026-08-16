@@ -17,7 +17,6 @@ use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationStatus, T
 use tokio::sync::broadcast;
 
 use crate::manager::acp::AcpAgentManager;
-use crate::manager::nanobot::NanobotAgentManager;
 use crate::manager::nomi::NomiAgentManager;
 use crate::manager::openclaw::OpenClawAgentManager;
 use crate::manager::remote::RemoteAgentManager;
@@ -199,7 +198,6 @@ pub enum AgentRuntimeHandle {
     Acp(Arc<AcpAgentManager>),
     Nomi(Arc<NomiAgentManager>),
     OpenClaw(Arc<OpenClawAgentManager>),
-    Nanobot(Arc<NanobotAgentManager>),
     Remote(Arc<RemoteAgentManager>),
     /// Test-only trait-object escape hatch used by downstream crates
     /// (conversation/cron/requirement/app tests) to inject fake agents without
@@ -221,7 +219,6 @@ impl AgentRuntimeHandle {
             Self::Acp(m) => m.as_ref(),
             Self::Nomi(m) => m.as_ref(),
             Self::OpenClaw(m) => m.as_ref(),
-            Self::Nanobot(m) => m.as_ref(),
             Self::Remote(m) => m.as_ref(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.as_ref(),
@@ -259,12 +256,11 @@ impl AgentRuntimeHandle {
     }
 
     /// Whether this exact process must be retired before another explicit turn
-    /// can be admitted. Nanobot's JSON-lines protocol has no per-frame turn
-    /// identity, so a terminal boundary permanently closes that process'
-    /// emission authority even though the transport itself is still healthy.
+    /// can be admitted. A protocol without per-frame turn identity has its
+    /// emission authority permanently closed by a terminal boundary, even
+    /// though the transport itself is still healthy.
     pub fn requires_turn_boundary_recycle(&self) -> bool {
         match self {
-            Self::Nanobot(m) => m.requires_turn_boundary_recycle(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.requires_turn_boundary_recycle(),
             Self::Acp(_) | Self::Nomi(_) | Self::OpenClaw(_) | Self::Remote(_) => false,
@@ -310,7 +306,6 @@ impl AgentRuntimeHandle {
         match self {
             Self::Acp(m) => m.kill_and_wait(reason),
             Self::OpenClaw(m) => m.kill_and_wait(reason),
-            Self::Nanobot(m) => m.kill_and_wait(reason),
             Self::Nomi(m) => m.kill_and_wait(reason),
             Self::Remote(m) => m.kill_and_wait(reason),
             #[cfg(any(test, feature = "test-support"))]
@@ -329,13 +324,11 @@ impl AgentRuntimeHandle {
     ///
     /// ACP surfaces pending permission prompts through its permission
     /// router. Nomi / OpenClaw / Remote maintain inline confirmation lists.
-    /// Nanobot has no concept of confirmations.
     pub fn get_confirmations(&self) -> Vec<nomifun_common::Confirmation> {
         match self {
             Self::Acp(m) => m.get_confirmations(),
             Self::Nomi(m) => m.get_confirmations(),
             Self::OpenClaw(m) => m.get_confirmations(),
-            Self::Nanobot(_) => Vec::new(),
             Self::Remote(m) => m.get_confirmations(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_confirmations(),
@@ -354,7 +347,6 @@ impl AgentRuntimeHandle {
             Self::Acp(m) => m.confirm(msg_id, call_id, data, always_allow),
             Self::Nomi(m) => m.confirm(msg_id, call_id, data, always_allow),
             Self::OpenClaw(m) => m.confirm(msg_id, call_id, data, always_allow),
-            Self::Nanobot(m) => m.confirm(msg_id, call_id, data, always_allow),
             Self::Remote(m) => m.confirm(msg_id, call_id, data, always_allow),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.confirm(msg_id, call_id, data, always_allow),
@@ -367,7 +359,6 @@ impl AgentRuntimeHandle {
             Self::Acp(_) => false,
             Self::Nomi(m) => m.check_approval(action, command_type),
             Self::OpenClaw(m) => m.check_approval(action, command_type),
-            Self::Nanobot(_) => false,
             Self::Remote(m) => m.check_approval(action, command_type),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.check_approval(action, command_type),
@@ -380,7 +371,7 @@ impl AgentRuntimeHandle {
         match self {
             Self::OpenClaw(m) => m.get_session_key(),
             Self::Remote(m) => m.get_session_key(),
-            Self::Acp(_) | Self::Nomi(_) | Self::Nanobot(_) => None,
+            Self::Acp(_) | Self::Nomi(_) => None,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_session_key(),
         }
@@ -393,7 +384,7 @@ impl AgentRuntimeHandle {
         match self {
             Self::Acp(m) => m.mode().await,
             Self::Nomi(m) => m.mode().await,
-            Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => Ok(nomifun_api_types::AgentModeResponse {
+            Self::OpenClaw(_) | Self::Remote(_) => Ok(nomifun_api_types::AgentModeResponse {
                 mode: "default".into(),
                 initialized: false,
             }),
@@ -409,7 +400,7 @@ impl AgentRuntimeHandle {
         match self {
             Self::Acp(m) => m.set_mode(mode).await,
             Self::Nomi(m) => m.set_mode(mode).await,
-            Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => Err(AppError::BadRequest(
+            Self::OpenClaw(_) | Self::Remote(_) => Err(AppError::BadRequest(
                 "Mode switching is not supported for this agent type".into(),
             )),
             #[cfg(any(test, feature = "test-support"))]
@@ -420,17 +411,13 @@ impl AgentRuntimeHandle {
     /// Clear the conversation context ("release model context") in place,
     /// keeping the agent/process alive. ACP rotates to a fresh `session/new`;
     /// Nomi empties its engine history; OpenClaw / Remote forget their gateway
-    /// session key so the next send re-creates a clean session. Nanobot has no
-    /// resumable session and returns a `BadRequest` the caller can surface.
+    /// session key so the next send re-creates a clean session.
     pub async fn clear_context(&self) -> Result<(), AppError> {
         match self {
             Self::Acp(m) => m.clear_context().await,
             Self::Nomi(m) => m.clear_context().await,
             Self::OpenClaw(m) => m.clear_context().await,
             Self::Remote(m) => m.clear_context().await,
-            Self::Nanobot(_) => Err(AppError::BadRequest(
-                "Clear context is not supported for this agent type".into(),
-            )),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(_) => Ok(()),
         }
@@ -445,7 +432,7 @@ impl AgentRuntimeHandle {
     pub fn steer(&self, text: String) -> Result<bool, AppError> {
         match self {
             Self::Nomi(m) => m.steer(text),
-            Self::Acp(_) | Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => Err(
+            Self::Acp(_) | Self::OpenClaw(_) | Self::Remote(_) => Err(
                 AppError::BadRequest("Steering is not supported for this agent type".into()),
             ),
             #[cfg(any(test, feature = "test-support"))]
@@ -472,7 +459,7 @@ impl AgentRuntimeHandle {
         }
         match self {
             Self::Nomi(m) => m.notify_system_resource(notice),
-            Self::Acp(_) | Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => {
+            Self::Acp(_) | Self::OpenClaw(_) | Self::Remote(_) => {
                 Err(AppError::BadRequest(format!(
                     "System resource notifications are not supported for {} runtimes",
                     self.agent_type().display_name()
@@ -493,7 +480,7 @@ impl AgentRuntimeHandle {
                 m.ensure_can_rewind_last_turn(expected_source_message_id)
                     .await
             }
-            Self::Acp(_) | Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => Err(
+            Self::Acp(_) | Self::OpenClaw(_) | Self::Remote(_) => Err(
                 AppError::BadRequest("Edit & resubmit is not supported for this agent type".into()),
             ),
             #[cfg(any(test, feature = "test-support"))]
@@ -512,7 +499,7 @@ impl AgentRuntimeHandle {
     ) -> Result<(), AppError> {
         match self {
             Self::Nomi(m) => m.rewind_last_turn(expected_source_message_id).await,
-            Self::Acp(_) | Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => Err(
+            Self::Acp(_) | Self::OpenClaw(_) | Self::Remote(_) => Err(
                 AppError::BadRequest("Edit & resubmit is not supported for this agent type".into()),
             ),
             #[cfg(any(test, feature = "test-support"))]
@@ -536,7 +523,7 @@ impl AgentRuntimeHandle {
                 let model_info = merge_model_info(sdk_info, cc_switch_info);
                 Ok(GetModelInfoResponse { model_info })
             }
-            Self::Nomi(_) | Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => {
+            Self::Nomi(_) | Self::OpenClaw(_) | Self::Remote(_) => {
                 Ok(GetModelInfoResponse { model_info: None })
             }
             #[cfg(any(test, feature = "test-support"))]
@@ -553,7 +540,7 @@ impl AgentRuntimeHandle {
         }
         match self {
             Self::Acp(m) => m.set_model(model_id).await,
-            Self::Nomi(_) | Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => Err(AppError::BadRequest(
+            Self::Nomi(_) | Self::OpenClaw(_) | Self::Remote(_) => Err(AppError::BadRequest(
                 "Model switching is not supported for this agent type".into(),
             )),
             #[cfg(any(test, feature = "test-support"))]
@@ -568,7 +555,7 @@ impl AgentRuntimeHandle {
         match self {
             Self::Acp(m) => m.load_slash_commands().await,
             Self::Nomi(m) => m.get_slash_commands().await,
-            Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => Ok(Vec::new()),
+            Self::OpenClaw(_) | Self::Remote(_) => Ok(Vec::new()),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_slash_commands().await,
         }
@@ -586,7 +573,7 @@ impl AgentRuntimeHandle {
             return Err(AppError::BadRequest("question must not be empty".into()));
         }
         match self {
-            Self::Acp(_) | Self::Nomi(_) | Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => {
+            Self::Acp(_) | Self::Nomi(_) | Self::OpenClaw(_) | Self::Remote(_) => {
                 Ok(SideQuestionResponse {
                     status: "unsupported".into(),
                     answer: None,

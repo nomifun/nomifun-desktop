@@ -7,7 +7,6 @@ pub enum AgentType {
     Acp,
     #[serde(rename = "openclaw-gateway")]
     OpenclawGateway,
-    Nanobot,
     Remote,
     Nomi,
 }
@@ -17,7 +16,6 @@ impl AgentType {
         match self {
             AgentType::Acp => "ACP",
             AgentType::OpenclawGateway => "OpenClaw Gateway",
-            AgentType::Nanobot => "Nanobot",
             AgentType::Remote => "Remote",
             AgentType::Nomi => "Nomi",
         }
@@ -27,7 +25,6 @@ impl AgentType {
         match self {
             AgentType::Acp => "acp",
             AgentType::OpenclawGateway => "openclaw-gateway",
-            AgentType::Nanobot => "nanobot",
             AgentType::Remote => "remote",
             AgentType::Nomi => "nomi",
         }
@@ -42,10 +39,7 @@ impl AgentType {
     pub fn native_skills_dirs(&self) -> Option<&'static [&'static str]> {
         match self {
             AgentType::Nomi => Some(&[".nomi/skills"]),
-            AgentType::Acp
-            | AgentType::OpenclawGateway
-            | AgentType::Nanobot
-            | AgentType::Remote => None,
+            AgentType::Acp | AgentType::OpenclawGateway | AgentType::Remote => None,
         }
     }
 
@@ -68,10 +62,7 @@ impl AgentType {
                 Some("cursor") => "agent",
                 _ => "yolo",
             },
-            AgentType::Nomi
-            | AgentType::OpenclawGateway
-            | AgentType::Nanobot
-            | AgentType::Remote => "yolo",
+            AgentType::Nomi | AgentType::OpenclawGateway | AgentType::Remote => "yolo",
         }
     }
 }
@@ -274,7 +265,6 @@ mod tests {
     fn test_agent_type_display_names() {
         assert_eq!(AgentType::OpenclawGateway.display_name(), "OpenClaw Gateway");
         assert_eq!(AgentType::Nomi.display_name(), "Nomi");
-        assert_eq!(AgentType::Nanobot.display_name(), "Nanobot");
         assert_eq!(AgentType::Remote.display_name(), "Remote");
         assert_eq!(AgentType::Acp.display_name(), "ACP");
     }
@@ -293,7 +283,6 @@ mod tests {
         let cases = [
             (AgentType::Acp, "acp"),
             (AgentType::OpenclawGateway, "openclaw-gateway"),
-            (AgentType::Nanobot, "nanobot"),
             (AgentType::Remote, "remote"),
             (AgentType::Nomi, "nomi"),
         ];

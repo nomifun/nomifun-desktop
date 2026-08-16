@@ -112,7 +112,7 @@ export type GuidSendResult = {
 };
 
 /**
- * Hook that manages the send logic for all conversation types (openclaw/nanobot/acp).
+ * Hook that manages the send logic for all conversation types (openclaw/acp).
  */
 export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   const {
@@ -254,64 +254,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         await navigate(`/conversation/${conversation.id}`);
       } catch (error: unknown) {
         console.error('Failed to create OpenClaw conversation:', error);
-        throw error;
-      }
-      return;
-    }
-
-    // Nanobot path
-    if (selectedAgent === 'nanobot') {
-      const nanobotAgentInfo = agentInfo || findAgentByKey(selectedAgentKey);
-      const nanobotConversationParams = buildAgentConversationParams({
-        backend: nanobotAgentInfo?.backend || 'nanobot',
-        name: entryPlan.conversationName,
-        agent_name: nanobotAgentInfo?.name,
-        preset_id,
-        workspace: finalWorkspace,
-        model: current_model!,
-        custom_workspace: isCustomWorkspace,
-        is_preset,
-        extra: {
-          default_files: files,
-          preset_enabled_skills: enabled_skills_to_send,
-          exclude_auto_inject_skills: excludeBuiltinSkills,
-        },
-      });
-
-      try {
-        const conversation = await ipcBridge.conversation.create.invoke(nanobotConversationParams);
-
-        if (!conversation || !conversation.id) {
-          Message.error(t('conversation.createFailed'));
-          return;
-        }
-        assertCreatedConversationPreset(conversation, preset_id);
-
-        // Push the Guid page's advanced drafts (knowledge/AutoWork/IDMM) onto
-        // the new conversation before navigating, so they are live when the
-        // conversation page consumes the initial message.
-        await applyAdvancedConfig?.(conversation.id);
-
-        emitter.emit('chat.history.refresh');
-
-        const initialMessage = {
-          conversation_id: conversation.id,
-          initial_admission_epoch: 0,
-          input,
-          files: files.length > 0 ? files : undefined,
-          idempotency_key: uuidv7(),
-        };
-        if (entryPlan.sendInitialMessage) {
-          sessionStorage.setItem(
-            sessionStorageKey('initial-message-nanobot', conversationTarget(conversation.id)),
-            JSON.stringify(initialMessage)
-          );
-        }
-
-        seedConversationCache(conversation);
-        await navigate(`/conversation/${conversation.id}`);
-      } catch (error: unknown) {
-        console.error('Failed to create Nanobot conversation:', error);
         throw error;
       }
       return;
