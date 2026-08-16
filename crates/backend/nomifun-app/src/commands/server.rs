@@ -78,14 +78,7 @@ pub async fn run_server(env: ServerEnvironment, services: AppServices) -> Result
         "Server listening on {}:{}", env.config.host, actual_port
     );
 
-    // Kick off the idle-ACP-agent reaper. `start_idle_scanner` returns
-    // immediately with a `JoinHandle`; the scanner task polls every 60 s
-    // and kills ACP agents whose `status == Finished` + last_activity
-    // exceeds the default 5-minute idle threshold. The watch channel
-    // propagates graceful-shutdown so the scanner exits on SIGINT/SIGTERM.
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let idle_scanner_handle =
-        nomifun_ai_agent::start_idle_scanner(services.agent_runtime_registry.clone(), shutdown_rx, None, None);
+    let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
 
     let signal_shutdown_tx = shutdown_tx.clone();
     let serve_result = axum::serve(listener, router)
@@ -96,22 +89,13 @@ pub async fn run_server(env: ServerEnvironment, services: AppServices) -> Result
         .await;
 
     // `axum::serve` can fail before the graceful-shutdown future receives a
-    // process signal. Always stop the idle scanner explicitly in that path.
+    // process signal. Always broadcast shutdown explicitly in that path.
     let _ = shutdown_tx.send(true);
 
-    // Browser shutdown and the scanner join are independent. Run them together
-    // so a slow Chromium tree does not unnecessarily serialize cleanup.
-    let (browser_shutdown_result, idle_scanner_result) = tokio::join!(
-        services.shutdown_browser_platform(),
-        idle_scanner_handle
-    );
+    let browser_shutdown_result = services.shutdown_browser_platform().await;
     match &browser_shutdown_result {
         Ok(()) => info!("managed browser platform shut down"),
         Err(error) => warn!(%error, "managed browser platform shutdown failed"),
-    }
-
-    if let Err(e) = idle_scanner_result {
-        warn!(error = %e, "idle scanner join failed");
     }
 
     close_database_after_successful_browser_cleanup(&browser_shutdown_result, || {

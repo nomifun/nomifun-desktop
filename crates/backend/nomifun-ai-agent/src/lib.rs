@@ -11,7 +11,6 @@ pub mod browser_fetcher;
 pub mod capability;
 pub mod cc_switch;
 pub mod factory;
-pub(crate) mod idle_scanner;
 pub mod image_generation;
 pub mod knowledge_completer;
 pub mod knowledge_retrieval;
@@ -71,7 +70,6 @@ pub use factory::browser_lane::{
     BrowserLaneBinding, BrowserLaneClientProvider, BrowserLaneClientProviderSlot,
     BrowserOwnerLeaseGuard, TrustedBrowserRuntimeContext,
 };
-pub use idle_scanner::start_idle_scanner;
 #[cfg(feature = "browser-use")]
 pub use browser_fetcher::BrowserFetcher;
 pub use knowledge_completer::LiveKnowledgeCompleter;

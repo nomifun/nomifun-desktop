@@ -1379,7 +1379,6 @@ impl IConversationRepository for MockRepo {
             .retain(|artifact| artifact.conversation_id != conversation_id);
         Ok(())
     }
-
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -5252,10 +5251,6 @@ impl AgentRuntimeRegistry for FailingAgentRuntimeRegistry {
     fn active_runtime_count(&self) -> usize {
         0
     }
-
-    fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
-        vec![]
-    }
 }
 
 #[async_trait::async_trait]
@@ -5360,10 +5355,6 @@ impl AgentRuntimeRegistry for MockAgentRuntimeRegistry {
     fn active_runtime_count(&self) -> usize {
         self.agents.lock().unwrap().len()
     }
-
-    fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
-        vec![]
-    }
 }
 
 struct SlowAgentRuntimeRegistry {
@@ -5427,10 +5418,6 @@ impl AgentRuntimeRegistry for SlowAgentRuntimeRegistry {
     fn active_runtime_count(&self) -> usize {
         usize::from(self.was_built())
     }
-
-    fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
-        vec![]
-    }
 }
 
 /// A variant of MockAgentRuntimeRegistry that always builds agents with a specific workspace.
@@ -5492,10 +5479,6 @@ impl AgentRuntimeRegistry for MockAgentRuntimeRegistryWithWorkspace {
 
     fn active_runtime_count(&self) -> usize {
         self.agents.lock().unwrap().len()
-    }
-
-    fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
-        vec![]
     }
 }
 
@@ -16448,10 +16431,6 @@ impl AgentRuntimeRegistry for SequencedFailoverRuntimeRegistry {
     fn active_runtime_count(&self) -> usize {
         usize::from(self.runtime_present.load(Ordering::SeqCst))
     }
-
-    fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
-        vec![]
-    }
 }
 
 impl PersistentScriptedRuntimeRegistry {
@@ -16498,9 +16477,6 @@ impl AgentRuntimeRegistry for PersistentScriptedRuntimeRegistry {
     fn terminate_all(&self) {}
     fn active_runtime_count(&self) -> usize {
         1
-    }
-    fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
-        vec![]
     }
 }
 
@@ -16682,7 +16658,6 @@ async fn failover_pre_response_fault_rebuilds_with_next_model_and_resends() {
     let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
     assert_eq!(model.provider_id, PROVIDER_ID_2);
     assert_eq!(model.model, "m2");
-
 }
 
 #[tokio::test]

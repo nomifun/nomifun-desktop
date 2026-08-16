@@ -183,10 +183,6 @@ impl AgentRuntimeRegistry for RecordingAgentRuntimeRegistry {
     fn active_runtime_count(&self) -> usize {
         self.agents.lock().unwrap().len()
     }
-
-    fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
-        Vec::new()
-    }
 }
 
 /// Seed every provider id used by this integration fixture and give each

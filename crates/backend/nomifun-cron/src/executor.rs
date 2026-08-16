@@ -411,7 +411,6 @@ impl JobExecutor {
             )
             .await
     }
-
 }
 
 impl JobExecutor {
@@ -3603,9 +3602,6 @@ mod tests {
             fn active_runtime_count(&self) -> usize {
                 0
             }
-            fn collect_idle_runtimes(&self, _: nomifun_common::TimestampMs) -> Vec<String> {
-                vec![]
-            }
         }
 
         struct StubConvRepo;
@@ -3973,10 +3969,6 @@ mod tests {
         fn active_runtime_count(&self) -> usize {
             1
         }
-
-        fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
-            Vec::new()
-        }
     }
 
     struct RecordingAgentRuntimeRegistry {
@@ -4048,10 +4040,6 @@ mod tests {
 
         fn active_runtime_count(&self) -> usize {
             1
-        }
-
-        fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
-            Vec::new()
         }
     }
 
