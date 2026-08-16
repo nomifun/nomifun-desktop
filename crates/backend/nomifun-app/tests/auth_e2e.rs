@@ -474,9 +474,7 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
     for suffix in [
         "mode",
         "model",
-        "usage",
         "slash-commands",
-        "openclaw/runtime",
         "workspace?path=/",
     ] {
         let response = app

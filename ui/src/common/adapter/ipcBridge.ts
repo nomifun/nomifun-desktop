@@ -1719,32 +1719,6 @@ export const mcpService = {
 export const openclawConversation = {
   sendMessage: conversation.sendMessage,
   responseStream: conversation.responseStream,
-  getRuntime: httpGet<
-    {
-      conversation_id: ConversationId;
-      runtime: {
-        workspace?: string;
-        backend?: string;
-        agent_name?: string;
-        cli_path?: string;
-        model?: string;
-        session_key?: string | null;
-        is_connected?: boolean;
-        has_active_session?: boolean;
-        identity_hash?: string | null;
-      };
-      expected?: {
-        expected_workspace?: string;
-        expected_backend?: string;
-        expected_agent_name?: string;
-        expected_cli_path?: string;
-        expected_model?: string;
-        expected_identity_hash?: string | null;
-        switched_at?: number;
-      };
-    },
-    { conversation_id: ConversationId }
-  >((p) => `/api/conversations/${p.conversation_id}/openclaw/runtime`),
 };
 
 // ---------------------------------------------------------------------------
