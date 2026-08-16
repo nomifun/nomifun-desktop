@@ -13,7 +13,7 @@ describe('preset catalog cache consistency', () => {
   test('settings and Guid consume the same SWR catalog identity', () => {
     const listHook = readSource(new URL('./usePresetList.ts', import.meta.url));
     const guidLoader = readSource(
-      new URL('../../pages/guid/hooks/useCustomAgentsLoader.ts', import.meta.url),
+      new URL('../../pages/guid/hooks/usePresetCatalogLoader.ts', import.meta.url),
     );
     const conversationLoader = readSource(
       new URL('../../pages/conversation/hooks/useConversationAgents.ts', import.meta.url),

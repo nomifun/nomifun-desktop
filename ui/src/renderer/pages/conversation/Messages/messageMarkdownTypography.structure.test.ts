@@ -8,7 +8,6 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 const markdownMessageFiles = [
-  './acp/MessageAcpToolCall.tsx',
   './components/MessageText.tsx',
   './components/MessageTips.tsx',
   './components/MessageToolGroup.tsx',

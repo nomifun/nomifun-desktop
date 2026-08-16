@@ -99,7 +99,7 @@ export function assignTurnIdsFromUserRequests(
 
     // New stream/history rows carry the authoritative owning turn. Preserve it
     // even when a delayed event is interleaved after a newer user request. A
-    // user's message id is only a provisional request boundary: ACP backends
+    // user's message id is only a provisional request boundary: the backend
     // mint a distinct root turn id for the response. The first non-retired
     // explicit id therefore becomes the fallback for later transient rows that
     // omit turn_id. Known older ids must not move that boundary back.

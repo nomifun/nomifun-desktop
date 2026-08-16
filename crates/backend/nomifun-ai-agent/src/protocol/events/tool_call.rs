@@ -1,8 +1,6 @@
 use std::collections::HashSet;
 
-use agent_client_protocol::schema::Meta as SdkMeta;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::artifact_store::PersistedArtifact;
 
@@ -34,7 +32,7 @@ pub fn validate_completed_artifact_contract(data: &ToolCallEventData) -> Result<
 }
 
 /// Validate identity and locator uniqueness independently of tool identity.
-/// ACP updates may omit a title/raw tool name, but their untrusted receipt
+/// Upstream updates may omit a title/raw tool name, but their untrusted receipt
 /// batches must still satisfy the same UI-key and file-locator invariants.
 pub fn validate_artifact_receipt_integrity(
     tool_name: &str,
@@ -106,119 +104,6 @@ pub struct ToolCallEventData {
     // otherwise leave an earlier completed receipt visible after failure.
     #[serde(default)]
     pub artifacts: Vec<PersistedArtifact>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcpToolCallEventData {
-    pub session_id: String,
-    pub update: AcpToolCallUpdateData,
-    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
-    pub meta: Option<SdkMeta>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcpToolCallUpdateData {
-    #[serde(rename = "sessionUpdate")]
-    pub session_update: AcpToolCallSessionUpdateKind,
-    pub tool_call_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<AcpToolCallStatus>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kind: Option<AcpToolCallKind>,
-    #[serde(rename = "rawInput", skip_serializing_if = "Option::is_none")]
-    pub raw_input: Option<Value>,
-    #[serde(rename = "rawOutput", skip_serializing_if = "Option::is_none")]
-    pub raw_output: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<Vec<AcpToolCallContentItem>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub locations: Option<Vec<AcpToolCallLocationItem>>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AcpToolCallSessionUpdateKind {
-    ToolCall,
-    ToolCallUpdate,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AcpToolCallStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Failed,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AcpToolCallKind {
-    Read,
-    Edit,
-    Execute,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AcpToolCallContentItem {
-    Content {
-        content: AcpToolCallTextBlock,
-    },
-    Diff {
-        path: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        old_text: Option<String>,
-        new_text: String,
-    },
-    /// Inline ACP media/resource bytes after verified workspace persistence.
-    Artifact {
-        artifact: PersistedArtifact,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        source_uri: Option<String>,
-    },
-    /// A provider-owned resource that is already addressable by URI. The URI
-    /// is preserved instead of being silently discarded.
-    ResourceLink {
-        name: String,
-        uri: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        title: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        description: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        mime_type: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        size_bytes: Option<i64>,
-    },
-    Terminal {
-        terminal_id: String,
-    },
-    /// Explicit delivery failure retained in the receipt. When this variant is
-    /// emitted, the enclosing ACP tool status is forced to `failed`.
-    ArtifactError {
-        message: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcpToolCallTextBlock {
-    #[serde(rename = "type")]
-    pub block_type: AcpToolCallTextBlockType,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AcpToolCallTextBlockType {
-    Text,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcpToolCallLocationItem {
-    pub path: String,
 }
 
 /// Status of a tool call.

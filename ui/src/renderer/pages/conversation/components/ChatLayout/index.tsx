@@ -175,8 +175,8 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
     });
 
   // Resolve backend display name from detected agents catalog (backend-authoritative).
-  // Custom ACP agents live in the same catalog with `agent_source === 'custom'`,
-  // so we no longer need a separate `acp.customAgents` ConfigStorage fallback.
+  // Custom agents live in the same catalog with `agent_source === 'custom'`,
+  // so no separate ConfigStorage fallback list is needed.
   const { cliAgents } = useConversationAgents();
   const backendAgentName = backend
     ? cliAgents.find((a) => a.backend === backend || a.agent_type === backend)?.name

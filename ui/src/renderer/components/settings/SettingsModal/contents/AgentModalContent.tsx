@@ -4,54 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Tabs } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import React, { useState, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { useTranslation } from 'react-i18next';
+import React from 'react';
 import LocalAgents from '@/renderer/pages/settings/AgentSettings/LocalAgents';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
-import AgentRuntimeSettingsContent from './AgentRuntimeSettingsContent';
 
+/**
+ * Execution-engine settings. With the native `nomi` runtime as the only engine
+ * there is a single surface here, so the former local/runtime tab strip is gone
+ * — the runtime tab only ever hosted the retired engine's timeout sliders.
+ */
 const AgentModalContent: React.FC = () => {
-  const { t } = useTranslation();
   const [, agentMessageContext] = useArcoMessage({ maxCount: 10 });
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [activeTab, setActiveTab] = useState<string>('local');
-
-  useEffect(() => {
-    const tabParam = searchParams.get('tab');
-    if (tabParam === 'local' || tabParam === 'runtime') {
-      setActiveTab(tabParam);
-    }
-  }, [searchParams]);
-
-  const handleTabChange = (key: string) => {
-    setActiveTab(key);
-    const next = new URLSearchParams(searchParams);
-    next.set('tab', key);
-    setSearchParams(next, { replace: true });
-  };
 
   return (
     <div className='flex flex-col h-full w-full'>
       {agentMessageContext}
-
-      <Tabs
-        activeTab={activeTab}
-        onChange={handleTabChange}
-        type='line'
-        className='flex flex-col flex-1 min-h-0 [&>.arco-tabs-content]:pt-0'
-      >
-        <Tabs.TabPane key='local' title={t('settings.agentManagement.localAgents')}>
-          <NomiScrollArea className='flex-1 min-h-0 pb-16px scrollbar-hide' disableOverflow>
-            <LocalAgents />
-          </NomiScrollArea>
-        </Tabs.TabPane>
-        <Tabs.TabPane key='runtime' title={t('settings.executionEngineHub.runtimeTab')}>
-          <AgentRuntimeSettingsContent />
-        </Tabs.TabPane>
-      </Tabs>
+      <NomiScrollArea className='flex-1 min-h-0 pb-16px scrollbar-hide' disableOverflow>
+        <LocalAgents />
+      </NomiScrollArea>
     </div>
   );
 };

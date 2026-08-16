@@ -185,9 +185,7 @@ external IM ──▶ plugin (long-poll / WebSocket)
 另一套 Agent 或模型选择器。绑定桌面伙伴的 Nomi 机器人以伙伴 profile
 中的模型为权威值，仅在该模型缺失时回退部署配置
 `channels.<platform>.defaultModel`。绑定客服的机器人使用该客服在
-「服务 → 客服」中配置的模型。未绑定渠道默认使用 Nomi；若部署显式配置了
-`channels.<platform>.agent`，也可选择其他引擎，ACP 则继续读取其部署级
-backend/model 配置。平台级配置发生变化后，调用
+「服务 → 客服」中配置的模型。未绑定渠道使用 Nomi —— 它是唯一的引擎。平台级配置发生变化后，调用
 `POST /api/channel/settings/sync` 会清理该平台 session，使下一轮按新配置解析。
 
 ## 从 IM 端能做什么

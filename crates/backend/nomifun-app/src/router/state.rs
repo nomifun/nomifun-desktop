@@ -19,10 +19,10 @@ use nomifun_conversation::service::QuiescentOrphanReconciliation;
 use nomifun_conversation::{ConversationRouterState, ConversationService};
 use nomifun_cron::{CronEventEmitter, CronRouterState};
 use nomifun_db::{
-    IAcpSessionRepository, IAgentExecutionRepository, IAgentExecutionTemplateRepository,
+    IAgentExecutionRepository, IAgentExecutionTemplateRepository,
     IAgentMetadataRepository,
     IIdmmInterventionRepository, IPresetRepository, IPresetStateRepository, IPresetTagRepository,
-    IProviderRepository, SqliteAcpSessionRepository, SqliteAgentExecutionRepository,
+    IProviderRepository, SqliteAgentExecutionRepository,
     SqliteAgentExecutionTemplateRepository,
     SqliteAgentMetadataRepository, SqlitePresetRepository, SqlitePresetStateRepository,
     SqlitePresetTagRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
@@ -700,7 +700,6 @@ pub fn build_conversation_state(
     let conversaion_repo = Arc::new(SqliteConversationRepository::new(pool.clone()));
     let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
         Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
-    let acp_session_repo: Arc<dyn IAcpSessionRepository> = Arc::new(SqliteAcpSessionRepository::new(pool));
     let skill_resolver = Arc::new(nomifun_conversation::skill_resolver::ExtensionSkillResolver::new(
         services.skill_paths.clone(),
     ));
@@ -712,7 +711,6 @@ pub fn build_conversation_state(
         services.agent_runtime_registry.clone(),
         conversaion_repo,
         agent_metadata_repo,
-        acp_session_repo,
         services.execution_conversation_boundary.clone(),
     )
     .with_runtime_state(services.conversation_runtime_state.clone());
@@ -1050,9 +1048,6 @@ pub async fn build_channel_state(
     let agent_metadata_repo: Arc<dyn nomifun_db::IAgentMetadataRepository> = Arc::new(
         nomifun_db::SqliteAgentMetadataRepository::new(services.database.pool().clone()),
     );
-    let acp_session_repo: Arc<dyn nomifun_db::IAcpSessionRepository> = Arc::new(
-        nomifun_db::SqliteAcpSessionRepository::new(services.database.pool().clone()),
-    );
     let conversation_svc = Arc::new(
         ConversationService::new(
             services.authoritative_user_id.clone(),
@@ -1062,7 +1057,6 @@ pub async fn build_channel_state(
             services.agent_runtime_registry.clone(),
             conv_repo,
             agent_metadata_repo,
-            acp_session_repo,
             services.execution_conversation_boundary.clone(),
         )
         .with_runtime_state(services.conversation_runtime_state.clone()),
@@ -1257,7 +1251,6 @@ pub fn build_requirement_state(services: &AppServices) -> (RequirementRouterStat
         Arc::new(SqliteConversationRepository::new(pool.clone()));
     let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
         Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
-    let acp_session_repo: Arc<dyn IAcpSessionRepository> = Arc::new(SqliteAcpSessionRepository::new(pool.clone()));
     let skill_resolver = Arc::new(nomifun_conversation::skill_resolver::ExtensionSkillResolver::new(
         services.skill_paths.clone(),
     ));
@@ -1269,7 +1262,6 @@ pub fn build_requirement_state(services: &AppServices) -> (RequirementRouterStat
         services.agent_runtime_registry.clone(),
         conv_repo.clone(),
         agent_metadata_repo,
-        acp_session_repo,
         services.execution_conversation_boundary.clone(),
     )
     .with_runtime_state(services.conversation_runtime_state.clone());
@@ -1528,7 +1520,6 @@ pub fn build_companion_state(
         Arc::new(SqliteConversationRepository::new(pool.clone()));
     let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
         Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
-    let acp_session_repo: Arc<dyn IAcpSessionRepository> = Arc::new(SqliteAcpSessionRepository::new(pool));
     let skill_resolver = Arc::new(nomifun_conversation::skill_resolver::ExtensionSkillResolver::new(
         services.skill_paths.clone(),
     ));
@@ -1540,7 +1531,6 @@ pub fn build_companion_state(
         services.agent_runtime_registry.clone(),
         conv_repo,
         agent_metadata_repo,
-        acp_session_repo,
         services.execution_conversation_boundary.clone(),
     )
     .with_runtime_state(services.conversation_runtime_state.clone());
@@ -2005,7 +1995,6 @@ pub fn build_cron_state(
         Arc::new(SqliteConversationRepository::new(pool.clone()));
     let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
         Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
-    let acp_session_repo: Arc<dyn IAcpSessionRepository> = Arc::new(SqliteAcpSessionRepository::new(pool));
     let skill_resolver = Arc::new(nomifun_conversation::skill_resolver::ExtensionSkillResolver::new(
         services.skill_paths.clone(),
     ));
@@ -2017,7 +2006,6 @@ pub fn build_cron_state(
         services.agent_runtime_registry.clone(),
         conv_repo.clone(),
         agent_metadata_repo,
-        acp_session_repo,
         services.execution_conversation_boundary.clone(),
     )
     .with_runtime_state(services.conversation_runtime_state.clone());

@@ -137,7 +137,7 @@ fn default_source_kind() -> String {
 }
 
 /// A knowledge base mounted into a session workspace. Carried in
-/// `AcpBuildExtra` / `NomiBuildExtra` (and future build extras) so the
+/// `NomiBuildExtra` (and future build extras) so the
 /// shared context builder (`nomifun_knowledge::context`) can tell the agent
 /// what extended knowledge is available and where.
 ///

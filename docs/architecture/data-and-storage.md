@@ -119,12 +119,10 @@ list (see the `pub use repository::{...}` block in `lib.rs` for all of them):
 | --- | --- | --- |
 | `IUserRepository` | `SqliteUserRepository` | Users and password hashes |
 | `IConversationRepository` | `SqliteConversationRepository` | Conversations + messages, with filters and full-text search rows |
-| `IAgentMetadataRepository` | `SqliteAgentMetadataRepository` | ACP handshake results, available models, agent-binary metadata |
-| `IAcpSessionRepository` | `SqliteAcpSessionRepository` | Persistent ACP sessions for resume after restart |
+| `IAgentMetadataRepository` | `SqliteAgentMetadataRepository` | Available models and agent metadata |
 | `IMcpServerRepository` | `SqliteMcpServerRepository` | Configured MCP servers (CRUD) |
 | `IOAuthTokenRepository` | `SqliteOAuthTokenRepository` | Encrypted OAuth tokens for HTTP MCP servers |
 | `IProviderRepository` | `SqliteProviderRepository` | LLM provider credentials (encrypted) |
-| `IRemoteAgentRepository` | `SqliteRemoteAgentRepository` | Remote-agent endpoints |
 | `IAgentExecutionRepository` | `SqliteAgentExecutionRepository` | AgentExecution, immutable Participants, revisioned Steps/Dependencies, Attempts, Conversation Links, and the Event outbox; see the [unified model](agent-execution.zh.md) |
 | `IRequirementRepository` | `SqliteRequirementRepository` | AutoWork requirements; owner links follow the same application-managed logical-reference policy as every other repository |
 | `ICronRepository` | `SqliteCronRepository` | Scheduled tasks and their timezone-normalized expressions |
@@ -139,7 +137,7 @@ list (see the `pub use repository::{...}` block in `lib.rs` for all of them):
 A few row-update params types travel alongside (`UpdateAgentHandshakeParams`,
 `ConversationFilters`, `ConversationRowUpdate`, `MessageRowUpdate`,
 `MessageSearchRow`, `UpdateCronJobParams`, `UpsertOAuthTokenParams`,
-`CreateProviderParams`, `UpdateRemoteAgentParams`,
+`CreateProviderParams`,
 `CreateAgentExecutionParams`, `ReconcileAgentExecutionPlanParams`,
 `SettleAgentExecutionAttemptParams`, etc.). Repository traits are the feature
 contract. Domain services use them rather than the pool; narrowly scoped
@@ -270,7 +268,7 @@ and are visually indistinguishable in any UI. Interior whitespace is fully
 supported — the default per-user data dir on macOS
 (`~/Library/Application Support/NomiFun`) contains a space, and every
 process-spawn pipeline passes the workspace as a discrete argument
-(`Command::current_dir`, PTY cwd, ACP session JSON), which is
+(`Command::current_dir`, PTY cwd), which is
 whitespace-safe.
 
 ### Knowledge-base mounts (`.nomi/knowledge/`)

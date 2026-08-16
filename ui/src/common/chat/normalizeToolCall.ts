@@ -1,4 +1,4 @@
-import type { IMessageAcpToolCall, IMessageToolCall, IMessageToolGroup } from './chatLib';
+import type { IMessageToolCall, IMessageToolGroup } from './chatLib';
 import type { ConversationId, MessageId } from '../types/ids';
 import { toDisplayText } from './displayText';
 import { normalizeToolGroupStatus } from './toolGroupStatus';
@@ -134,22 +134,6 @@ export function normalizeToolGroup(message: IMessageToolGroup): NormalizedToolCa
   });
 }
 
-// ===== acp_tool_call → NormalizedToolCall =====
-
-function normalizeAcpStatus(status: unknown): NormalizedToolStatus {
-  switch (status) {
-    case 'completed':
-      return 'completed';
-    case 'failed':
-      return 'error';
-    case 'in_progress':
-      return 'running';
-    case 'pending':
-    default:
-      return 'pending';
-  }
-}
-
 const shellCommandTitles = new Set(['bash', 'shell', 'terminal', 'command', 'cmd', 'powershell']);
 const shellCommandFieldNames = ['command', 'cmd', 'script', 'shell', 'bash'];
 
@@ -177,116 +161,6 @@ const pickShellCommandInput = (value: unknown): string | undefined => {
 };
 
 const hasShellCommandInput = (value: unknown): boolean => Boolean(pickShellCommandInput(value));
-
-const isNonFatalAcpToolFailure = (
-  update: AcpToolCallUpdateCompat,
-  rawInput: Record<string, unknown> | undefined,
-  output: string | undefined
-): boolean => {
-  if (update.status !== 'failed') return false;
-  const kind = toDisplayText(update.kind);
-  if (['read', 'glob', 'grep', 'search', 'find'].includes(kind)) {
-    return isExplicitProbeMiss(kind, output);
-  }
-  if (kind !== 'execute') return false;
-  if (hasShellCommandInput(rawInput)) return true;
-  return shellCommandTitles.has(toDisplayText(update.title).trim().toLowerCase());
-};
-
-const buildParamSummary = (kind: string, rawInput?: Record<string, unknown>): string | undefined => {
-  if (!rawInput) return undefined;
-
-  if (kind === 'read' || kind === 'edit') {
-    return pickStringField(rawInput, ['file_path', 'path', 'file_name']);
-  }
-  if (kind === 'execute') {
-    return pickShellCommandInput(rawInput.command) || pickShellCommandInput(rawInput);
-  }
-  if (kind === 'search' || kind === 'grep') {
-    const parts: string[] = [];
-    if (rawInput.pattern) parts.push(`"${rawInput.pattern}"`);
-    if (rawInput.path) parts.push(`in ${rawInput.path}`);
-    else if (rawInput.glob) parts.push(`in ${rawInput.glob}`);
-    return parts.length > 0 ? parts.join(' ') : undefined;
-  }
-  if (kind === 'glob') {
-    const parts: string[] = [];
-    if (rawInput.pattern) parts.push(`${rawInput.pattern}`);
-    if (rawInput.path) parts.push(`in ${rawInput.path}`);
-    return parts.length > 0 ? parts.join(' ') : undefined;
-  }
-  if (kind === 'write') {
-    return pickStringField(rawInput, ['file_path', 'path']);
-  }
-
-  for (const key of ['file_path', 'command', 'path', 'pattern', 'query', 'url']) {
-    if (rawInput[key] && typeof rawInput[key] === 'string') return rawInput[key] as string;
-  }
-  return undefined;
-};
-
-type AcpToolCallUpdateCompat = IMessageAcpToolCall['content']['update'] & {
-  session_update?: string;
-  raw_input?: Record<string, unknown>;
-};
-
-type AcpToolCallContentCompat = IMessageAcpToolCall['content'] & {
-  _compact?: {
-    truncated?: boolean;
-    original_size?: number;
-    preview_chars?: number;
-  };
-  update?: AcpToolCallUpdateCompat;
-};
-
-export function normalizeAcpToolCall(message: IMessageAcpToolCall): NormalizedToolCall | undefined {
-  const content = message.content as AcpToolCallContentCompat | undefined;
-  const update = content?.update;
-  if (!update) return undefined;
-
-  const rawInput = update.rawInput ?? update.raw_input;
-  const input = rawInput ? formatValue(rawInput) : undefined;
-
-  let output: string | undefined;
-  if (Array.isArray(update.content) && update.content.length) {
-    output = update.content
-      .map((item) => {
-        if (item.type === 'content' && item.content?.text) return item.content.text;
-        if (item.type === 'diff' && 'path' in item) return `[diff] ${item.path}`;
-        if (item.type === 'artifact' && update.status === 'completed') {
-          return `[${item.artifact.kind}] ${item.artifact.path}`;
-        }
-        if (item.type === 'resource_link' && update.status === 'completed') return `[resource] ${item.uri}`;
-        if (item.type === 'terminal') return `[terminal] ${item.terminal_id}`;
-        if (item.type === 'artifact_error') return `[artifact error] ${item.message}`;
-        return '';
-      })
-      .filter(Boolean)
-      .join('\n');
-  }
-
-  // `kind` is optional on ACP tool_call_update frames. Keep an absent kind
-  // absent instead of inventing an `execute` operation: partial/provider
-  // updates without semantic metadata are not proof that a shell command ran.
-  const kind = toDisplayText(update.kind);
-  const keyParam = buildParamSummary(kind, rawInput);
-  const commandText = pickShellCommandInput(rawInput);
-  const description = keyParam || commandText || kind;
-
-  return {
-    key: toDisplayText(update.tool_call_id),
-    name: toDisplayText(update.title, 'Tool'),
-    status: normalizeAcpStatus(update.status),
-    ...(kind ? { kind } : {}),
-    ...(isNonFatalAcpToolFailure(update, rawInput, output) ? { nonFatalFailure: true } : {}),
-    ...(description ? { description } : {}),
-    input,
-    output,
-    truncated: content?._compact?.truncated === true,
-    messageId: message.message_id ?? message.msg_id,
-    conversationId: message.conversation_id,
-  };
-}
 
 // ===== tool_call → NormalizedToolCall =====
 
@@ -422,13 +296,12 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
 
 // ===== Unified entry =====
 
-export type ToolMessage = IMessageToolGroup | IMessageAcpToolCall | IMessageToolCall;
+export type ToolMessage = IMessageToolGroup | IMessageToolCall;
 
 export function normalizeToolMessages(messages: ToolMessage[]): NormalizedToolCall[] {
   return messages
     .flatMap((m) => {
       if (m.type === 'tool_group') return normalizeToolGroup(m);
-      if (m.type === 'acp_tool_call') return normalizeAcpToolCall(m);
       if (m.type === 'tool_call') return normalizeToolCall(m);
       return undefined;
     })
@@ -439,9 +312,6 @@ export function hasRunningToolMessages(messages: ToolMessage[]): boolean {
   return messages.some((m) => {
     if (m.type === 'tool_group') {
       return Array.isArray(m.content) && m.content.some((t) => toNormalizedToolGroupStatus(t.status) === 'running');
-    }
-    if (m.type === 'acp_tool_call') {
-      return m.content?.update && normalizeAcpStatus(m.content.update.status) === 'running';
     }
     if (m.type === 'tool_call') {
       return normalizeToolCallStatus(m.content?.status) === 'running';

@@ -70,12 +70,10 @@ Cron 语法速查 (5 字段 —— 秒字段会自动添加)：
 
 ### Agent
 
-选择每次触发运行的 agent。选择器中会显示三种类型：
+选择每次触发运行什么。选择器中会显示两种类型：
 
-- **CLI agent** —— `claude` / `codex` / `gemini` (后端在 `PATH`
-  上检测到的任何一个)。该任务记录后端标签并端到端使用 ACP。
 - **Nomi (内置)** —— 使用 Nomi 自有引擎以及你选择的
-  provider/model。
+  provider/model。它是唯一能运行计划会话的 agent。
 - **设定** —— 可复用的启动配置；任务记录设定 id、revision 与解析快照。
 
 **Advanced** 部分让你覆盖 workspace (agent 的工作目录)、model

@@ -22,7 +22,7 @@ async fn conversation_workspace_uses_work_dir() {
     let state = build_conversation_state(&services, None);
 
     let request = CreateConversationRequest {
-        r#type: AgentType::Acp,
+        r#type: AgentType::Nomi,
         name: Some("test".to_string()),
         model: None,
         source: None,
@@ -33,7 +33,7 @@ async fn conversation_workspace_uses_work_dir() {
         execution_model_pool: None,
         decision_policy: Default::default(),
         execution_template_id: None,
-        extra: common::acp_extra(),
+        extra: common::nomi_extra(),
     };
     let response = state
         .service
@@ -69,7 +69,7 @@ async fn user_specified_workspace_is_not_overridden() {
     let state = build_conversation_state(&services, None);
 
     let request = CreateConversationRequest {
-        r#type: AgentType::Acp,
+        r#type: AgentType::Nomi,
         name: Some("test".to_string()),
         model: None,
         source: None,
@@ -80,7 +80,7 @@ async fn user_specified_workspace_is_not_overridden() {
         execution_model_pool: None,
         decision_policy: Default::default(),
         execution_template_id: None,
-        extra: common::acp_extra_with_workspace(custom_workspace.path().to_str().unwrap()),
+        extra: common::nomi_extra_with_workspace(custom_workspace.path().to_str().unwrap()),
     };
     let response = state
         .service
@@ -110,7 +110,7 @@ async fn workspace_defaults_to_data_dir_when_work_dir_equals_data_dir() {
     let state = build_conversation_state(&services, None);
 
     let request = CreateConversationRequest {
-        r#type: AgentType::Acp,
+        r#type: AgentType::Nomi,
         name: Some("test".to_string()),
         model: None,
         source: None,
@@ -121,7 +121,7 @@ async fn workspace_defaults_to_data_dir_when_work_dir_equals_data_dir() {
         execution_model_pool: None,
         decision_policy: Default::default(),
         execution_template_id: None,
-        extra: common::acp_extra(),
+        extra: common::nomi_extra(),
     };
     let response = state
         .service

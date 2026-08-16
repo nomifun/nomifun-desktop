@@ -249,7 +249,7 @@ note search). It never receives the platform Gateway claim. Direct messages
 retain the existing customer-service auto-service semantics.
 
 When an owner-authorised Nomi channel context receives the gateway tools (all
-prefixed `nomi_*`, 32 of them today), they let the remote agent do the
+prefixed `nomi_*`, 32 of them today), they let the companion do the
 following on your behalf:
 
 - **Conversations** — list every conversation with its runtime state,
@@ -315,9 +315,8 @@ credentials and owner bindings; they do not introduce another Agent or model
 picker. A companion-bound Nomi bot uses the companion profile's model as the
 authoritative value, with a provisioned `channels.<platform>.defaultModel` only
 as fallback. A customer-service-bound bot uses that agent's own configured
-provider/model from the customer-service console. An unbound channel defaults to Nomi; deployments
-that explicitly provision `channels.<platform>.agent` can select another engine,
-and ACP continues to consume its provisioned backend/model configuration.
+provider/model from the customer-service console. An unbound channel uses Nomi,
+which is the only engine.
 After changing a platform-level provisioning preference, calling
 `POST /api/channel/settings/sync` clears that platform's sessions so the next
 turn resolves the new configuration.

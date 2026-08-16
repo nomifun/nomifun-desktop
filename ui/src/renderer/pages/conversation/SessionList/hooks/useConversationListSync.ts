@@ -22,7 +22,7 @@ import { isOrdinaryWorkConversation } from './conversationListFilter';
  * Whitelist of message types that indicate content generation is in progress.
  * Only these types should trigger the sidebar loading spinner.
  * Using a whitelist (instead of a blacklist) prevents unknown/internal message
- * types (e.g. slash_commands_updated, acp_context_usage) from falsely
+ * types (e.g. slash_commands_updated) from falsely
  * triggering the generating state.
  */
 const isPreparingAgentStatus = (data: unknown): boolean => {
@@ -56,8 +56,6 @@ export const isGeneratingStreamMessage = (message: {
     type === 'thought' ||
     type === 'thinking' ||
     type === 'tool_group' ||
-    type === 'acp_tool_call' ||
-    type === 'acp_permission' ||
     type === 'permission' ||
     type === 'plan'
   );

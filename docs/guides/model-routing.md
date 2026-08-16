@@ -3,22 +3,19 @@
 The current feature behind model-routing settings is a **model failover queue**,
 not a credential round-robin pool.
 
-It lets Nomi-engine conversations try a configured sequence of backup models
-when a provider fault is detected. ACP/CLI agents are not included in this
-feature because their provider calls happen inside external runtimes.
+It lets conversations try a configured sequence of backup models when a provider
+fault is detected.
 
 ## What It Does
 
 - Stores a global default queue under `agent.model_failover`.
 - Allows per-conversation overrides under `extra.model_failover`.
-- Applies only to Nomi-engine conversations.
 - Can be used by IDMM fault-watch flows when that session has failover enabled.
 - Does not distribute load across API keys.
-- Does not make all CLI agents share a common pool.
 
 ## When To Use It
 
-Use model failover when a Nomi-engine session should recover from transient
+Use model failover when a session should recover from transient
 provider/model faults without requiring manual model switching.
 
 Typical queue:

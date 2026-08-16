@@ -1,6 +1,6 @@
 //! In-process HTTP half of the Platform Gateway MCP.
 //!
-//! ACP CLIs and the nomi engine spawn a SEPARATE stdio process
+//! The nomi engine spawns a SEPARATE stdio process
 //! (`nomicore mcp-gateway-stdio`) that cannot share this process's services;
 //! it forwards each tool call back here as an authenticated `POST /tool`.
 

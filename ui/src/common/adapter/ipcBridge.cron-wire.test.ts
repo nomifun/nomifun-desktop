@@ -167,7 +167,7 @@ describe('cron response wire ID contract', () => {
           metadata: {
             ...rawCronJob(CRON_JOB_ID).metadata,
             agent_type: 'acp',
-            agent_config: { name: 'Broken reviewer', custom_agent_id: 'acp' },
+            agent_config: { name: 'Broken reviewer', custom_agent_id: 'not-a-uuid' },
           },
         },
       ]);

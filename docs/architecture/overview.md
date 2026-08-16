@@ -13,7 +13,7 @@ This document is the map. The sibling documents drill into the parts:
 - [`agent-engine.md`](agent-engine.md) — the 15 `nomi-*` agent crates.
 - [`agent-execution.zh.md`](agent-execution.zh.md) — the unified persistent AgentExecution model.
 - [`frontend.md`](frontend.md) — the React SPA, adapter layer, routing.
-- [`communication.md`](communication.md) — HTTP / WebSocket / Tauri IPC / ACP / MCP.
+- [`communication.md`](communication.md) — HTTP / WebSocket / Tauri IPC / MCP.
 - [`data-and-storage.md`](data-and-storage.md) — SQLite, workspaces, runtimes.
 - [`id-system.md`](id-system.md) — the v3 technical-key, business-ID, internal-row, and
   logical-reference contract.
@@ -57,17 +57,16 @@ This document is the map. The sibling documents drill into the parts:
               │  conversation, etc. │   │  nomifun-ai-agent     │
               └─────────────────────┘   └─────────────────────┘
                           │
-                          ├─▶ SQLite (sqlx)         see data-and-storage.md
-                          ├─▶ ACP agent CLIs         see agent-engine.md
+                          ├─▶ SQLite (sqlx)          see data-and-storage.md
                           ├─▶ MCP stdio bridges      see communication.md
+                          ├─▶ PTY terminal sessions  see ../guides/terminal.md
                           └─▶ bundled bun runtime    see data-and-storage.md
 ```
 
 ## How a request flows
 
-A typical user message — "send a chat to my Claude agent in conversation X" —
-crosses every layer in the diagram. The trace below names the real types and
-files that participate.
+A typical user message — "send a chat in conversation X" — crosses every layer
+in the diagram. The trace below names the real types and files that participate.
 
 ```
 1. UI keypress → React handler
@@ -86,12 +85,12 @@ files that participate.
    persists the message, looks up the conversation's bound agent
 5. Agent seam
    crates/backend/nomifun-ai-agent  — the primary backend bridge to nomi-*
-   AgentRegistry resolves the Agent kind; AgentRuntimeRegistry reuses its Conversation runtime
+   AgentRuntimeRegistry reuses this Conversation's in-process runtime
 6. Agent turn
    nomi-agent  drives the engine: providers (anthropic/openai/bedrock/vertex),
    tools (bash/read/write/...), MCP servers, skills, plan/confirm/output sinks
-   For ACP-protocol agents (Claude Code, Codex, Gemini CLI, ...), the backend
-   speaks ACP over stdio to a child process spawned with the bundled runtime
+   The built-in nomi agent is the only conversation engine; the turn runs
+   in-process, with no child agent CLI to hand the conversation off to
 7. Streaming back to the UI
    nomifun-realtime  broadcasts each token as a WS event over /ws
    ui/src/common/adapter/httpBridge.ts ensureWs() routes events to listeners

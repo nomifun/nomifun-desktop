@@ -14,7 +14,7 @@ import { DETECTED_AGENTS_SWR_KEY, fetchDetectedAgents } from '@/renderer/utils/m
 import type { AgentMetadata } from '@/renderer/utils/model/agentTypes';
 
 export type UseConversationAgentsResult = {
-  /** Detected execution engines (acp, extension, remote, nomi, gemini, etc.) */
+  /** Detected execution engines (nomi plus extension/custom rows) */
   cliAgents: AgentMetadata[];
   /** Reusable configurations from `/api/presets`, kept separate from execution Agents. */
   presets: Preset[];

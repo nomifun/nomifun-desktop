@@ -36,7 +36,7 @@ export const useDetectedAgents = () => {
 
   const refreshAgentDetection = useCallback(async () => {
     try {
-      await ipcBridge.acpConversation.refreshCustomAgents.invoke();
+      await ipcBridge.agentConversation.refreshCustomAgents.invoke();
       await mutate(DETECTED_AGENTS_SWR_KEY);
     } catch {
       // ignore

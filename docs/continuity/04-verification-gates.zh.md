@@ -128,7 +128,7 @@ all-targets check 外，其余 Rust 测试仍是定向范围，不等价于 work
 | `cargo test -p nomifun-requirement attachments::tests --lib` | 6 passed | attachment ingest、失败清理、删除与 workspace staging |
 | `cargo test -p nomifun-db --test provider_binding_invariants` | 2 passed | provider 权威写路径、删除原子性、JSON 引用清理 |
 | `cargo test -p nomifun-db --test webhook_repo` | 4 passed | webhook CRUD 与 `tag_settings.webhook_id` 的 `SET_NULL` |
-| `cargo test -p nomifun-companion -p nomifun-public-agent --lib --no-fail-fast` | 198 passed | Companion exact-v3 side-store、Provider 生命周期、逻辑引用和 Public Agent |
+| `cargo test -p nomifun-companion --lib --no-fail-fast` | 198 passed | Companion exact-v3 side-store、Provider 生命周期、逻辑引用和 Public Agent（当时的 `-p nomifun-public-agent` 已随 public-agent 域移除，命令已收窄以保持可运行） |
 | `cargo test -p nomifun-channel --test session_action_integration --test stream_relay_test --test message_loop_test --test message_service_integration --test manager_integration --test pairing_integration` | 100 passed | Channel Plugin/User/Session 裸 UUIDv7、配对、消息循环、relay |
 | `cargo test -p nomifun-app --test channel_e2e` | 23 passed | Channel HTTP 业务 ID、配对、用户撤销、启停 |
 | `cargo test -p nomifun-app --test agent_execution_e2e` | 3 passed | Execution/Template 稳定业务 ID 与权威自然键 |

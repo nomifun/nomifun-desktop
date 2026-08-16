@@ -24,7 +24,7 @@ const conv = (o: Record<string, unknown>) =>
     name: o.name ?? 'conv',
     modified_at: o.modified_at ?? 100,
     extra: o.extra ?? {},
-    type: 'acp',
+    type: 'nomi',
     created_at: o.created_at ?? 1,
     pinned: o.pinned ?? false,
     pinned_at: o.pinned_at,

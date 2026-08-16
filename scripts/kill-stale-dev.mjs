@@ -3,8 +3,8 @@
  * kill-stale-dev — kill leftover dev binaries running out of this repo's
  * `target/` directory.
  *
- * Why: agent sessions spawn CLI trees (e.g. `bunx → codex-acp → MCP stdio
- * bridges`), and the stdio bridges are the desktop binary itself
+ * Why: agent sessions spawn CLI trees (e.g. `bunx → MCP stdio bridges`), and
+ * the stdio bridges are the desktop binary itself
  * (`nomifun-desktop.exe mcp-*-stdio`). If the dev app dies without cleanup
  * (tauri dev rebuild, Ctrl+C, crash), the orphaned tree survives — and on
  * Windows a running image locks its exe, so the next `cargo build` fails

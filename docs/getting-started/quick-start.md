@@ -32,8 +32,7 @@ After auth, the app opens `/guid`. This is the default session start surface.
 
 You can choose:
 
-- an agent/runtime,
-- a model/provider when the runtime supports it,
+- a model/provider,
 - a reusable preset,
 - skills or MCP tools,
 - a workspace path,
@@ -43,26 +42,25 @@ You can choose:
 
 ## 3. Configure A Model
 
-Open **Models** (`/models`) and configure at least one provider or detected CLI
-agent. The page owns provider credentials, agent availability, and global
-reliability settings such as IDMM and model failover.
+Open **Models** (`/models`) and configure at least one provider. The page owns
+provider credentials, the model catalog, and global reliability settings such as
+IDMM and model failover.
 
 ![Model settings](../images/gs-06-quickstart-model-settings.png)
 
 For the simplest first run, use the built-in Nomi engine with an API provider
-you have credentials for. External CLIs such as Claude Code, Codex, Gemini CLI,
-Qwen, and OpenCode must also be installed on the host before NomiFun can use
-them.
+you have credentials for. If you would rather drive a third-party CLI such as
+Claude Code, Codex, or Gemini CLI, install it on the host and run it in an
+[in-app terminal](../guides/terminal.md).
 
 ## 4. Send The First Message
 
 Back on `/guid`:
 
-1. Choose an agent.
-2. Choose a model if required.
-3. Optionally choose a preset.
-4. Type a prompt.
-5. Send with the button or `Ctrl/Cmd+Enter`.
+1. Choose a model if required.
+2. Optionally choose a preset.
+3. Type a prompt.
+4. Send with the button or `Ctrl/Cmd+Enter`.
 
 NomiFun creates a conversation and navigates to `/conversation/<id>`.
 

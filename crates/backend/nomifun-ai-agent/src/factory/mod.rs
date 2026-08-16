@@ -1,10 +1,7 @@
-pub mod acp_assembler;
 #[cfg(feature = "browser-use")]
 pub mod browser_lane;
 pub mod provider_config;
 
-mod acp;
-pub(crate) mod construction_guard;
 mod context;
 pub(crate) mod nomi;
 
@@ -14,21 +11,13 @@ use std::sync::Arc;
 use futures_util::FutureExt;
 use nomi_agent::companion_tools::{CompanionMemorySink, CompanionSkillSink};
 use nomi_agent::requirement_tools::RequirementSink;
-use nomifun_api_types::{
-    BrowserMcpConfig, ComputerMcpConfig, GatewayMcpConfig, ModelTask, OpenMcpConfig,
-    RequirementMcpConfig,
-};
-use nomifun_common::{AgentType, AppError, ExecutionAuthority};
-use nomifun_db::{
-    IClientPreferenceRepository, IMcpServerRepository, ISettingsRepository,
-};
+use nomifun_api_types::{GatewayMcpConfig, ModelTask};
+use nomifun_common::{AppError, ExecutionAuthority};
+use nomifun_db::{IClientPreferenceRepository, IMcpServerRepository, ISettingsRepository};
 use nomifun_model_invoke::{ModelInvokeService, ModelRef};
 
 use crate::runtime_handle::AgentRuntimeHandle;
-use crate::capability::skill_manager::AcpSkillManager;
 use crate::factory::context::FactoryContext;
-use crate::persistence::AcpSessionSyncService;
-use crate::registry::AgentRegistry;
 use crate::runtime_registry::{
     AgentRuntimeFactory, AgentRuntimeModelConfigResolver, RuntimeModelConfigBinding,
 };
@@ -106,7 +95,6 @@ pub struct AgentFactoryDeps {
     /// compares the persisted Conversation owner id against this immutable id
     /// before injecting host-wide MCP bridges or native singleton-domain tools.
     pub authoritative_user_id: Arc<str>,
-    pub skill_manager: Arc<AcpSkillManager>,
     /// Single task-capability and connection resolver used by every Nomi Chat
     /// build and by native image generation.
     pub model_invoke: Arc<ModelInvokeService>,
@@ -115,8 +103,6 @@ pub struct AgentFactoryDeps {
     /// lightweight tests and standalone hosts that must not expose the tool.
     pub model_invoke_service: Option<Arc<ModelInvokeService>>,
     pub encryption_key: [u8; 32],
-    pub agent_registry: Arc<AgentRegistry>,
-    pub acp_agent_service: Arc<AcpSessionSyncService>,
     pub data_dir: PathBuf,
     /// Root for auto-provisioned managed workspaces
     /// (`{work_dir}/conversations/{uuidv7}`). Defaults to the data
@@ -125,40 +111,10 @@ pub struct AgentFactoryDeps {
     /// which provisions under `AppConfig.work_dir` — a `--work-dir` /
     /// `NOMIFUN_WORK_DIR` override must not split the two roots.
     pub work_dir: PathBuf,
-    /// Requirement MCP server config. When `Some`, injected into ACP agent
-    /// sessions so the agent gets the `requirement_complete` /
-    /// `requirement_update_status` declaration tools — the ACP soft-failure fix
-    /// (a clean turn with no declaration becomes `needs_review`, not silent
-    /// `done`). `None` when the requirement MCP server failed to start.
-    pub requirement_mcp_config: Option<RequirementMcpConfig>,
-    /// Wiring for the scoped knowledge-search MCP. Injected into ACP sessions
-    /// ONLY when they have bound knowledge bases (`!knowledge_mounts.is_empty()`).
-    /// Its token reaches only the knowledge_search server, never the platform
-    /// gateway. `None` disables ACP knowledge_search.
-    pub knowledge_mcp_config: Option<nomifun_api_types::KnowledgeMcpConfig>,
     /// Platform Gateway MCP server config. When `Some`, the factory injects it
     /// only after resolving installation-owner authority. `None` when the
     /// gateway server failed to start (graceful degradation).
     pub gateway_mcp_config: Option<GatewayMcpConfig>,
-    /// Reliable-launch (`open`) MCP server config. When `Some`, injected
-    /// UNCONDITIONALLY into every ACP session so the agent gets the `open` tool
-    /// (ShellExecute a URL/file/app) instead of fragile `cmd /c start` shell
-    /// commands. Populated on Windows only — `None` on macOS/Linux (which launch
-    /// reliably already) and so never injected there.
-    pub open_mcp_config: Option<OpenMcpConfig>,
-    /// Computer-use discrete-tool MCP server config. When `Some`, injected
-    /// UNCONDITIONALLY into every ACP session so the agent gets discrete desktop
-    /// tools (snapshot / click / type / launch / …). Populated on Windows only and
-    /// only when the host binary has the `computer-use` feature — `None`
-    /// otherwise, and so never injected there.
-    pub computer_mcp_config: Option<ComputerMcpConfig>,
-    /// Browser-use discrete-tool MCP server config. When `Some`, injected
-    /// UNCONDITIONALLY into every ACP session so the agent gets discrete browser
-    /// tools (navigate / observe / click / type / …). Populated on every desktop
-    /// OS only when the host binary has the `browser-use` feature — `None`
-    /// otherwise (web/headless), and so never injected there. Symmetric with
-    /// `computer_mcp_config`.
-    pub browser_mcp_config: Option<BrowserMcpConfig>,
     /// Late-wired issuer for native Browser Platform capabilities.
     ///
     /// `Some(slot)` means this host requires the process-wide Hub path. If the
@@ -179,8 +135,8 @@ pub struct AgentFactoryDeps {
     /// setting. `Option` lets tests omit the repository and use the host/default
     /// locale.
     pub settings_repo: Option<Arc<dyn ISettingsRepository>>,
-    /// User-configured MCP servers repository. Used by ACP factory to
-    /// inject enabled servers into `session/new` (ELECTRON-1JG fix).
+    /// User-configured MCP servers repository. Used by the nomi factory to
+    /// inject enabled servers into the session's MCP client set.
     /// `None` for tests/composition paths that do not need MCP injection.
     pub mcp_server_repo: Option<Arc<dyn IMcpServerRepository>>,
     /// Optional sink enabling nomi native requirement tools. When `Some`,
@@ -232,9 +188,9 @@ pub struct AgentFactoryDeps {
 ///
 /// [`AgentRuntimeFactory`] is async: the returned `BoxFuture` is driven by
 /// [`crate::runtime_registry::AgentRuntimeRegistry::get_or_create_runtime`] on whatever
-/// runtime is currently polling it. This lets us spawn CLI processes and
-/// await ACP handshakes directly, without the scoped-thread + `block_on`
-/// bridge the old sync-factory version needed.
+/// runtime is currently polling it. This lets construction await IO directly,
+/// without the scoped-thread + `block_on` bridge the old sync-factory version
+/// needed.
 pub fn build_agent_factory(deps: AgentFactoryDeps) -> AgentRuntimeFactory {
     let deps = Arc::new(deps);
 
@@ -290,23 +246,11 @@ async fn build_agent(
         deps.authoritative_user_id.as_ref(),
     );
 
-    // The external ACP runtime executes arbitrary code as
-    // the backend OS user.  Without an OS/container sandbox they can never be
-    // made safe by hiding individual tools, so model-only principals are
-    // rejected at the single factory boundary.  Nomi remains available under
-    // the model-only ceiling applied in its factory.
-    if !authority.controls_host() && options.agent_type != AgentType::Nomi {
-        return Err(AppError::Forbidden(format!(
-            "Agent runtime '{}' requires the installation owner; non-owner sessions are model-only",
-            options.agent_type.serde_name()
-        )));
-    }
-
+    // Nomi is the only executor, and it is safe for a model-only principal:
+    // its own factory applies the model-only capability ceiling. There is no
+    // longer a host-code-executing engine to reject at this boundary.
     let ctx = FactoryContext::resolve(&deps, &options).await?;
-    match options.agent_type {
-        AgentType::Acp => acp::build(deps, options, ctx).await,
-        AgentType::Nomi => nomi::build(deps, options, ctx, authority).await,
-    }
+    nomi::build(deps, options, ctx, authority).await
 }
 
 #[cfg(test)]

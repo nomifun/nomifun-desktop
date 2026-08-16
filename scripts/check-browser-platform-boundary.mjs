@@ -6,7 +6,7 @@
  * Production application/agent entry points may only dispatch through the
  * process-wide BrowserSessionHub.  The low-level browser engine and facade
  * retain standalone compatibility helpers for tests and explicit embeddings,
- * but those helpers must not leak into App, Gateway, ACP, or Agent factory
+ * but those helpers must not leak into App, Gateway, or Agent factory
  * production paths.
  */
 
@@ -20,40 +20,41 @@ const BOOTSTRAP = 'crates/agent/nomi-agent/src/bootstrap.rs';
 const BROWSER_TOOL = 'crates/agent/nomi-browser/src/tool.rs';
 const ENGINE_BACKEND = 'crates/agent/nomi-browser-engine/src/backend/cdp.rs';
 const PLATFORM_ADAPTER = 'crates/agent/nomi-browser/src/platform_adapter.rs';
-const ACP_BRIDGE = 'crates/backend/nomifun-app/src/commands/browser_stdio.rs';
+const BROWSER_STDIO_BRIDGE =
+  'crates/backend/nomifun-app/src/commands/browser_stdio.rs';
 const GATEWAY_REGISTRY = 'crates/backend/nomifun-gateway/src/browser_registry.rs';
 const HUB_COMPOSITION = 'crates/backend/nomifun-app/src/services.rs';
 
-const ACP_RESOURCE_SYMBOLS = [
+const BRIDGE_RESOURCE_SYMBOLS = [
   [
-    'acp-current-exe',
+    'bridge-current-exe',
     /\bcurrent_exe\b/gi,
-    'ACP browser stdio must not resolve resources from the current executable',
+    'the browser stdio bridge must not resolve resources from the current executable',
   ],
   [
-    'acp-bundled-chrome-resource',
+    'bridge-bundled-chrome-resource',
     /(?:chrome-for-testing|\bbundled_chrome(?:_dir)?\b)/gi,
-    'ACP browser stdio must not mention the bundled Chrome resource',
+    'the browser stdio bridge must not mention the bundled Chrome resource',
   ],
   [
-    'acp-profile-resource',
+    'bridge-profile-resource',
     /\b\w*profile\w*\b/gi,
-    'ACP browser stdio must not contain browser profile symbols',
+    'the browser stdio bridge must not contain browser profile symbols',
   ],
   [
-    'acp-user-data-resource',
+    'bridge-user-data-resource',
     /\b\w*user_data\w*\b/gi,
-    'ACP browser stdio must not contain Chromium user-data symbols',
+    'the browser stdio bridge must not contain Chromium user-data symbols',
   ],
   [
-    'acp-cdp-symbol',
+    'bridge-cdp-symbol',
     /\b\w*cdp\w*\b/gi,
-    'ACP browser stdio must not expose CDP state or symbols',
+    'the browser stdio bridge must not expose CDP state or symbols',
   ],
   [
-    'acp-launch-symbol',
+    'bridge-launch-symbol',
     /\b\w*launch\w*\b/gi,
-    'ACP browser stdio must not contain browser launch symbols',
+    'the browser stdio bridge must not contain browser launch symbols',
   ],
 ];
 
@@ -712,7 +713,7 @@ function scanEntries(entries) {
           masked,
           match.index,
           'private-browser-tool',
-          'production App/Gateway/ACP/Agent paths must use a bound BrowserLaneClient',
+          'production App/Gateway/Agent paths must use a bound BrowserLaneClient',
         );
       }
 
@@ -1021,33 +1022,40 @@ function scanEntries(entries) {
     }
   }
 
-  const acp = byPath.get(ACP_BRIDGE);
-  if (!acp) {
+  const bridge = byPath.get(BROWSER_STDIO_BRIDGE);
+  if (!bridge) {
     violations.push({
-      path: ACP_BRIDGE,
+      path: BROWSER_STDIO_BRIDGE,
       line: 1,
-      rule: 'acp-bridge-missing',
-      detail: 'ACP browser stdio bridge source is missing',
+      rule: 'browser-stdio-bridge-missing',
+      detail: 'browser stdio bridge source is missing',
       snippet: '',
     });
   } else {
-    const masked = productionMask(acp.source);
-    for (const [rule, pattern, detail] of ACP_RESOURCE_SYMBOLS) {
-      // These terms are forbidden from the ACP bridge entirely, including
+    const masked = productionMask(bridge.source);
+    for (const [rule, pattern, detail] of BRIDGE_RESOURCE_SYMBOLS) {
+      // These terms are forbidden from the bridge entirely, including
       // literals and documentation. Resource discovery belongs to App
       // composition and the bridge should describe only proxy behavior.
-      for (const match of findMatches(acp.source, pattern)) {
-        report(ACP_BRIDGE, acp.source, acp.source, match.index, rule, detail);
+      for (const match of findMatches(bridge.source, pattern)) {
+        report(
+          BROWSER_STDIO_BRIDGE,
+          bridge.source,
+          bridge.source,
+          match.index,
+          rule,
+          detail,
+        );
       }
     }
     if (!/\bScopedBridgeClient\b/.test(masked)) {
       report(
-        ACP_BRIDGE,
-        acp.source,
+        BROWSER_STDIO_BRIDGE,
+        bridge.source,
         masked,
         0,
-        'acp-not-proxy',
-        'ACP browser stdio must remain a scoped capability proxy',
+        'bridge-not-proxy',
+        'the browser stdio bridge must remain a scoped capability proxy',
       );
     }
   }
@@ -1106,7 +1114,7 @@ function selfTest() {
       `,
     },
     {
-      path: ACP_BRIDGE,
+      path: BROWSER_STDIO_BRIDGE,
       source: 'struct Bridge { client: ScopedBridgeClient<Scope> }',
     },
     {
@@ -1150,7 +1158,7 @@ function selfTest() {
       source: 'fn bad() { ManagedBrowserHost::launch(config).await?; }',
     }),
     'private-host-launch',
-    'failed to reject an ACP-owned Chromium host launch',
+    'failed to reject a bridge-owned Chromium host launch',
   );
   assertViolation(
     baseline.map((entry) =>
@@ -1227,26 +1235,26 @@ function selfTest() {
   );
   assertViolation(
     baseline.map((entry) =>
-      entry.path === ACP_BRIDGE
+      entry.path === BROWSER_STDIO_BRIDGE
         ? { ...entry, source: 'struct Bridge;' }
         : entry,
     ),
-    'acp-not-proxy',
-    'failed to enforce the ACP proxy contract',
+    'bridge-not-proxy',
+    'failed to enforce the browser stdio bridge proxy contract',
   );
-  const acpForbiddenSamples = [
-    ['acp-current-exe', 'fn bad() { std::env::current_exe(); }'],
-    ['acp-bundled-chrome-resource', 'let resource = "chrome-for-testing";'],
-    ['acp-bundled-chrome-resource', 'fn bundled_chrome_dir() {}'],
-    ['acp-profile-resource', 'let profile_dir = path;'],
-    ['acp-user-data-resource', 'let user_data = path;'],
-    ['acp-cdp-symbol', 'let cdp_endpoint = value;'],
-    ['acp-launch-symbol', 'fn launch() {}'],
+  const bridgeForbiddenSamples = [
+    ['bridge-current-exe', 'fn bad() { std::env::current_exe(); }'],
+    ['bridge-bundled-chrome-resource', 'let resource = "chrome-for-testing";'],
+    ['bridge-bundled-chrome-resource', 'fn bundled_chrome_dir() {}'],
+    ['bridge-profile-resource', 'let profile_dir = path;'],
+    ['bridge-user-data-resource', 'let user_data = path;'],
+    ['bridge-cdp-symbol', 'let cdp_endpoint = value;'],
+    ['bridge-launch-symbol', 'fn launch() {}'],
   ];
-  for (const [rule, forbiddenSource] of acpForbiddenSamples) {
+  for (const [rule, forbiddenSource] of bridgeForbiddenSamples) {
     assertViolation(
       baseline.map((entry) =>
-        entry.path === ACP_BRIDGE
+        entry.path === BROWSER_STDIO_BRIDGE
           ? {
               ...entry,
               source: `struct Bridge { client: ScopedBridgeClient<Scope> }\n${forbiddenSource}`,
@@ -1254,7 +1262,7 @@ function selfTest() {
           : entry,
       ),
       rule,
-      `failed to reject ACP resource/launch symbol: ${rule}`,
+      `failed to reject bridge resource/launch symbol: ${rule}`,
     );
   }
   assertViolation(

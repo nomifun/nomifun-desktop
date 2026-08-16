@@ -26,7 +26,7 @@ use nomifun_conversation::skill_resolver::{ResolvedAgentSkill, SkillResolver};
 use nomifun_db::models::{NewChannelPluginRow, NewChannelSessionRow, NewChannelUserRow};
 use nomifun_db::{
     CreateProviderParams, IChannelRepository, IProviderRepository, NewProviderModel,
-    NewProviderModelCapability, SqliteAcpSessionRepository, SqliteAgentMetadataRepository,
+    NewProviderModelCapability, SqliteAgentMetadataRepository,
     SqliteChannelRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
     SqliteProviderRepository, init_database_memory,
 };
@@ -312,7 +312,6 @@ async fn build_stack(pool: nomifun_db::SqlitePool, fail_first: u32) -> Stack {
             Arc::clone(&runtime_registry),
             Arc::new(SqliteConversationRepository::new(pool.clone())),
             Arc::new(SqliteAgentMetadataRepository::new(pool.clone())),
-            Arc::new(SqliteAcpSessionRepository::new(pool.clone())),
             Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
         )
         .with_runtime_state(Arc::clone(&runtime)),

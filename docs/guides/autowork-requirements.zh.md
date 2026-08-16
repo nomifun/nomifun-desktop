@@ -93,11 +93,9 @@ AutoWork 的管理面板（`/requirements/extensions?tab=autowork`）。列出�
 每一轮中发生的事：
 
 1. AutoWork 循环认领该 tag 中下一条 `pending` 需求。
-2. 它构造一段注入 prompt，点名该需求并告知智能体如何上报完成状态。具体协议是 **engine-aware** 的：
-   - 仅在 Nomi-engine 会话上，智能体会注册 `requirement_complete` / `requirement_update_status` 工具，并由 prompt 要求模型调用它们。
-   - 在所有其他 engine（ACP / Codex / Gemini / Openclaw / Nanobot / Remote）上，智能体不会注册任何 requirement 工具，因此 prompt 使用 **无工具协议**：把工作做完，以一段纯文本完成说明结束本轮，平台会在本轮干净结束后自动记为 `done`。失败通过纯文本上报（prompt 要求模型把最后一行以 `Requirement failed:` 起头，紧跟原因）。
+2. 它构造一段注入 prompt，点名该需求并告知智能体如何上报完成状态。在会话目标上，智能体会注册 `requirement_complete` / `requirement_update_status` 工具，并由 prompt 要求模型调用它们。（终端目标使用另一套无工具协议，见下文。）
 3. 注入消息会从用户可见的对话记录中隐藏。
-4. AutoWork 循环订阅该智能体的流，等待 `Finish`（干净）或 `Error`/超时（重置回 pending 或 fail）。同时它会把智能体的文本输出捕获到一份 tail-bounded 的 **completion note**，存到该需求上；在无工具协议的 engine 上，这份 note 就是发到下游的报告。
+4. AutoWork 循环订阅该智能体的流，等待 `Finish`（干净）或 `Error`/超时（重置回 pending 或 fail）。同时它会把智能体的文本输出捕获到一份 tail-bounded 的 **completion note**，存到该需求上。
 5. 当本轮干净结束时，`finalize_if_needed` 把该行记为 `done` 并触发通知器。
 
 ### 终端目标（运行在 PTY 中的 agent CLI）
@@ -112,7 +110,7 @@ Gemini 终端可以手动运行，但后端目前不会接受它作为终端 Aut
 1. AutoWork 循环在注入 **之前** 订阅终端的实时输出流（这样不会漏任何字节）。
 2. 它向 PTY 写入需求 prompt，外面包了一对 bracketed-paste 标记（`ESC [200~ … ESC [201~`），后跟 `CR`，使多行文本作为单次粘贴落入 CLI 的编辑器，并由 Enter 实际提交。
 3. prompt 只要求 agent 把活干完、**结束本轮回复**——不需要打印任何标记。从交互式 TUI 里抓协议字符串被证明不可靠(光标重绘输出、没有干净的换行、模型抄错 code),所以完成判定改为基于回合本身。
-4. 当输出 **静默**(在最少 3 秒后≥10 秒无输出,且 PTY 还活着),说明 agent 已干完并回到空闲——本轮记为 `done`,与无工具的对话 agent 用的是同一套「干净收尾即完成」契约。
+4. 当输出 **静默**(在最少 3 秒后≥10 秒无输出,且 PTY 还活着),说明 agent 已干完并回到空闲——本轮记为 `done`：PTY 里的 CLI 没有 requirement 工具可调用，所以「干净收尾」就是完成信号。
 5. 如果 agent 无法完成,会被要求用纯文本明确说明(例如最后一行以 `Requirement failed:` 开头);这类回合在平台层面仍记为 `done`,拿不准时请回看对话。
 6. 中途 PTY 死亡 → 重置回 pending。整轮硬超时是 1 小时。
 

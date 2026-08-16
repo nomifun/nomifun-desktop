@@ -201,7 +201,7 @@ mod tests {
             agent_config: None,
             conversation_id: Some(CONVERSATION_ID.into()),
             conversation_title: None,
-            agent_type: "acp".into(),
+            agent_type: "nomi".into(),
             created_by: CreatedBy::User,
             skill_content: None,
             description: None,

@@ -1,12 +1,9 @@
 use std::collections::HashMap;
 
-use nomifun_common::{CompanionId, CronJobId, DelegationPolicy, UserId};
+use nomifun_common::{CompanionId, DelegationPolicy, UserId};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    BrowserMcpConfig, ComputerMcpConfig, GatewayMcpConfig, KnowledgeMcpConfig, KnowledgeMountInfo,
-    McpServerId, OpenMcpConfig, RequirementMcpConfig,
-};
+use crate::{GatewayMcpConfig, KnowledgeMountInfo, McpServerId};
 
 macro_rules! optional_id_deserializer {
     ($name:ident, $id:ty) => {
@@ -28,7 +25,6 @@ macro_rules! optional_id_deserializer {
 
 optional_id_deserializer!(deserialize_companion_id, CompanionId);
 optional_id_deserializer!(deserialize_user_id, UserId);
-optional_id_deserializer!(deserialize_cron_job_id, CronJobId);
 
 fn deserialize_required_companion_id<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
@@ -99,122 +95,6 @@ pub struct SessionMcpServer {
     pub mcp_server_id: McpServerId,
     pub name: String,
     pub transport: SessionMcpTransport,
-}
-
-/// ACP-specific fields extracted from `extra` in build runtime options.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct AcpBuildExtra {
-    #[serde(default)]
-    pub agent_id: Option<String>,
-    #[serde(default)]
-    pub backend: Option<String>,
-    #[serde(default)]
-    pub cli_path: Option<String>,
-    #[serde(default)]
-    pub agent_name: Option<String>,
-    #[serde(default)]
-    pub custom_agent_id: Option<String>,
-    #[serde(default)]
-    pub preset_context: Option<String>,
-    #[serde(default)]
-    pub skills: Vec<String>,
-    #[serde(
-        default,
-        deserialize_with = "crate::serde_util::deserialize_optional_preset_id"
-    )]
-    pub preset_id: Option<String>,
-    #[serde(default)]
-    pub session_mode: Option<String>,
-    #[serde(default)]
-    pub current_model_id: Option<String>,
-    /// Stable `cron_jobs.cron_job_id`.
-    #[serde(default, deserialize_with = "deserialize_cron_job_id")]
-    pub cron_job_id: Option<String>,
-    /// Requirement MCP stdio bridge config. When `Some`, the ACP assembler
-    /// injects `nomicore mcp-requirement-stdio` so the agent gets the
-    /// `requirement_complete` / `requirement_update_status` declaration tools.
-    /// Injected from `AgentFactoryDeps::requirement_mcp_config` at build time.
-    #[serde(skip)]
-    pub requirement_mcp_config: Option<RequirementMcpConfig>,
-    /// Knowledge-search MCP stdio bridge config. When `Some`, the ACP assembler
-    /// injects `nomicore mcp-knowledge-stdio` so the agent gets a scoped
-    /// knowledge-search tool over the session's bound knowledge bases. The
-    /// assembler signs user/session/workspace/base ids into a short-lived child
-    /// capability; this non-serializable issuer is never persisted or sent to
-    /// the child. The nomi engine has `knowledge_search` natively.
-    #[serde(skip)]
-    pub knowledge_mcp_config: Option<KnowledgeMcpConfig>,
-    /// Platform Gateway MCP stdio bridge config. Process-owned and injected by
-    /// the Agent factory only after it derives installation-owner authority.
-    /// It is never deserialized from Conversation JSON.
-    #[serde(skip)]
-    pub gateway_mcp_config: Option<GatewayMcpConfig>,
-    /// Exact Platform Gateway tools omitted from this session. This subtractive
-    /// fence is signed into the session claims and enforced both by tools/list
-    /// and the in-process dispatch boundary.
-    #[serde(default)]
-    pub gateway_excluded_tools: Vec<String>,
-    /// Reliable-launch (`open`) MCP stdio bridge config. When `Some`, the ACP
-    /// assembler injects `nomicore mcp-open-stdio` so the agent gets the `open`
-    /// tool (ShellExecute a URL/file/app). Injected from
-    /// `AgentFactoryDeps::open_mcp_config` at build time — populated on Windows
-    /// only (macOS/Linux already launch reliably), independent of any flag.
-    #[serde(default)]
-    pub open_mcp_config: Option<OpenMcpConfig>,
-    /// Computer-use discrete-tool MCP stdio bridge config. When `Some`, the ACP
-    /// assembler injects `nomicore mcp-computer-stdio` so the agent gets discrete
-    /// desktop tools (snapshot / click / type / launch / …). Injected from
-    /// `AgentFactoryDeps::computer_mcp_config` at build time — populated on every
-    /// desktop OS (macOS / Windows / Linux) when the host binary has the
-    /// `computer-use` feature.
-    #[serde(default)]
-    pub computer_mcp_config: Option<ComputerMcpConfig>,
-    /// Browser-use discrete-tool MCP stdio bridge config. When `Some`, the ACP
-    /// assembler injects `nomicore mcp-browser-stdio` so the agent gets discrete
-    /// browser tools (navigate / observe / click / type / …). Injected from
-    /// `AgentFactoryDeps::browser_mcp_config` at build time — populated on every
-    /// desktop OS when the host binary has the `browser-use` feature. Unlike
-    /// computer-use, this process-private issuer is skipped by serde; the
-    /// assembler gives each ACP runtime one scoped renewable capability.
-    #[serde(skip)]
-    pub browser_mcp_config: Option<BrowserMcpConfig>,
-    /// The companion this session is bound to (multi-companion upgrade). Set by the
-    /// channel layer on Channel Agent sessions (platform binding > default
-    /// companion); the backend binds it into the signed Gateway child capability
-    /// so desktop tools can attribute the caller.
-    #[serde(default, deserialize_with = "deserialize_companion_id")]
-    pub companion_id: Option<String>,
-    /// IM platform this session serves (e.g. "lark") when it is a channel
-    /// Channel Agent. Set by the channel layer and bound into the signed Gateway
-    /// child capability so the gateway resolves the write surface (channel →
-    /// write-disabled unless re-enabled). Mirrors `NomiBuildExtra`.
-    #[serde(default)]
-    pub channel_platform: Option<String>,
-    #[serde(default)]
-    /// Stable MCP server business IDs.
-    pub mcp_server_ids: Option<Vec<McpServerId>>,
-    #[serde(default)]
-    pub session_mcp_servers: Vec<SessionMcpServer>,
-    #[serde(default, deserialize_with = "deserialize_user_id")]
-    pub user_id: Option<String>,
-    /// Knowledge bases mounted into this session's workspace, computed when
-    /// the Agent runtime is created. The ACP assembler renders
-    /// these into a preset-context section so the agent knows what extended
-    /// knowledge is available and where it lives.
-    #[serde(default)]
-    pub knowledge_mounts: Vec<KnowledgeMountInfo>,
-    /// Write-back ("回血") switch: `true` invites the agent to persist new
-    /// knowledge as markdown into the mounted directories; `false` declares
-    /// them read-only. Prompt-level contract — the mounts themselves stay
-    /// writable on disk.
-    #[serde(default)]
-    pub knowledge_writeback: bool,
-    /// Write-back disposition ("回写意识") while `knowledge_writeback` is true:
-    /// `manual` (the default) writes back only what the user explicitly asked
-    /// for; `auto` lets the agent decide against a high bar. It is the only
-    /// write-back knob — placement is always the base body.
-    #[serde(default)]
-    pub knowledge_writeback_eagerness: Option<String>,
 }
 
 /// Opt-in goal-driven continuation for a session. When present, the engine
@@ -308,19 +188,18 @@ pub struct NomiBuildExtra {
     /// Knowledge bases mounted into this session's workspace, computed when
     /// the Agent runtime is created. The Nomi factory renders
     /// these into a system-prompt section so the agent knows what extended
-    /// knowledge is available and where it lives. Same serde shape as
-    /// `AcpBuildExtra::knowledge_mounts`.
+    /// knowledge is available and where it lives.
     #[serde(default)]
     pub knowledge_mounts: Vec<KnowledgeMountInfo>,
     /// Write-back ("回血") switch: `true` invites the agent to persist new
     /// knowledge as markdown into the mounted directories; `false` declares
     /// them read-only. Prompt-level contract — the mounts themselves stay
-    /// writable on disk. Same shape as `AcpBuildExtra::knowledge_writeback`.
+    /// writable on disk.
     #[serde(default)]
     pub knowledge_writeback: bool,
     /// Write-back disposition ("回写意识") while `knowledge_writeback` is true:
-    /// `manual` (the default) or `auto`; same shape as
-    /// `AcpBuildExtra::knowledge_writeback_eagerness`.
+    /// `manual` (the default) or `auto`. It is the only write-back knob —
+    /// placement is always the base body.
     #[serde(default)]
     pub knowledge_writeback_eagerness: Option<String>,
     /// Opt-in for unattended IM-channel (bot) sessions to write back. Off by
@@ -328,9 +207,7 @@ pub struct NomiBuildExtra {
     /// the knowledge binding from this build-extra to resolve the per-surface
     /// write policy, so this MUST be threaded through — otherwise the
     /// reconstructed binding defaults it to `false` and `WriteSurface::ExternalChannel`
-    /// is permanently `Disabled` on the nomi engine. (The ACP path doesn't need
-    /// a mirror: it resolves channel writes at write time from the live binding
-    /// via the scoped knowledge MCP bridge.)
+    /// is permanently `Disabled`.
     #[serde(default)]
     pub knowledge_channel_write_enabled: bool,
     /// Per-session 工具白名单（受限的持久执行 Agent 使用）。非空时引擎只保留
@@ -357,14 +234,6 @@ fn default_nomi_max_tokens() -> u32 {
 
 fn default_delegation_policy() -> DelegationPolicy {
     DelegationPolicy::Automatic
-}
-
-/// ACP model information returned by the ACP backend.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcpModelInfo {
-    pub model_id: String,
-    pub model_name: Option<String>,
-    pub provider: Option<String>,
 }
 
 /// A slash command item available in a conversation session.
@@ -443,44 +312,6 @@ mod tests {
 
         let plain: NomiBuildExtra = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(plain.summon.is_none(), "absent summon must stay None");
-    }
-
-    /// Process-private browser issuers must never survive build-extra
-    /// serialization, while the stateless computer bridge remains serializable.
-    #[test]
-    fn acp_build_extra_skips_browser_mcp_issuer() {
-        let extra = AcpBuildExtra {
-            browser_mcp_config: Some(BrowserMcpConfig::from_issuer(
-                41_000,
-                std::sync::Arc::new(nomifun_common::LoopbackCapabilityIssuer::random().unwrap()),
-                "/usr/bin/nomicore".into(),
-            )),
-            computer_mcp_config: Some(ComputerMcpConfig {
-                binary_path: "/usr/bin/nomicore".into(),
-            }),
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&extra).unwrap();
-        let parsed: AcpBuildExtra = serde_json::from_str(&json).unwrap();
-        assert!(
-            parsed.browser_mcp_config.is_none(),
-            "browser issuer authority must remain process-local"
-        );
-        assert_eq!(
-            parsed
-                .computer_mcp_config
-                .as_ref()
-                .map(|c| c.binary_path.as_str()),
-            Some("/usr/bin/nomicore"),
-        );
-    }
-
-    /// Default `AcpBuildExtra` (feature OFF / no injection) leaves
-    /// `browser_mcp_config` `None`, so the assembler injects nothing (no-op).
-    #[test]
-    fn acp_build_extra_browser_mcp_config_defaults_none() {
-        let extra = AcpBuildExtra::default();
-        assert!(extra.browser_mcp_config.is_none());
     }
 
     #[test]

@@ -5,14 +5,12 @@
  */
 
 import type {
-  IMessageAcpToolCall,
   IMessageToolCall,
   IMessageToolGroup,
 } from '@/common/chat/chatLib';
-import type { PersistedToolArtifact } from '@/common/types/platform/acpTypes';
+import type { PersistedToolArtifact } from '@/common/types/platform/toolCallTypes';
 import type { MessageId } from '@/common/types/ids';
 import { parseDiff, type FileChangeInfo } from '@/renderer/utils/file/diffUtils';
-import { createTwoFilesPatch } from 'diff';
 import { isSuccessfulWriteFileResult } from './components/toolGroupArtifactVisibility';
 import type { TurnDisclosureProcessState, TurnDisclosureRole } from './turnDisclosureModel';
 import type { WriteFileResult } from './types';
@@ -22,9 +20,6 @@ export type TurnDeliverableTier = 'receipt' | 'reported';
 export type TurnDeliverableCarrier =
   | 'tool_call_artifact'
   | 'tool_call_args'
-  | 'acp_artifact'
-  | 'acp_diff'
-  | 'acp_edit_target'
   | 'tool_group_write_file'
   | 'write_file_diff';
 
@@ -83,7 +78,7 @@ export const isVerifiedImageDeliverable = (
   typeof item.mimeType === 'string' &&
   item.mimeType.toLowerCase().startsWith('image/');
 
-type DeliverableToolMessage = IMessageToolCall | IMessageAcpToolCall | IMessageToolGroup;
+type DeliverableToolMessage = IMessageToolCall | IMessageToolGroup;
 
 export interface TurnDeliverableCandidate {
   turnId?: MessageId;
@@ -251,17 +246,6 @@ const collectArgsTargetPaths = (args: Record<string, unknown> | null | undefined
   return paths;
 };
 
-const countPatchLines = (patch: string): { insertions: number; deletions: number } => {
-  let insertions = 0;
-  let deletions = 0;
-  for (const line of patch.split('\n')) {
-    if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@') || line.startsWith('\\')) continue;
-    if (line.startsWith('+')) insertions += 1;
-    else if (line.startsWith('-')) deletions += 1;
-  }
-  return { insertions, deletions };
-};
-
 interface DeliverableDraft {
   path: string;
   /** Carrier-supplied canonical absolute path, when distinct from `path`. */
@@ -326,55 +310,6 @@ const draftsFromToolCall = (message: IMessageToolCall): DeliverableDraft[] => {
   return drafts;
 };
 
-const draftsFromAcpToolCall = (message: IMessageAcpToolCall): DeliverableDraft[] => {
-  const update = message.content?.update;
-  if (!update || update.status !== 'completed') return [];
-  const sourceIds = messageSourceIds(message);
-  const callId = update.tool_call_id;
-  const drafts: DeliverableDraft[] = [];
-
-  for (const item of update.content ?? []) {
-    if (item.type === 'artifact') {
-      drafts.push(draftFromArtifact(item.artifact, 'acp_artifact', callId, sourceIds));
-      continue;
-    }
-    if (item.type === 'diff' && typeof item.path === 'string' && item.path.trim()) {
-      const displayName = getPathBasename(item.path);
-      const oldText = typeof item.old_text === 'string' ? item.old_text : '';
-      const newText = typeof item.new_text === 'string' ? item.new_text : '';
-      const patch = createTwoFilesPatch(displayName, displayName, oldText, newText, '', '', { context: 3 });
-      drafts.push({
-        path: item.path,
-        tier: 'reported',
-        ...countPatchLines(patch),
-        diff: patch,
-        source: { carrier: 'acp_diff', callId, sourceMessageIds: sourceIds },
-      });
-    }
-  }
-
-  if (update.kind === 'edit') {
-    const targets = new Set<string>();
-    const rawInput = update.rawInput;
-    if (rawInput && typeof rawInput === 'object') {
-      const direct = (rawInput as Record<string, unknown>).file_path ?? (rawInput as Record<string, unknown>).path;
-      if (typeof direct === 'string' && direct.trim()) targets.add(direct);
-    }
-    for (const location of update.locations ?? []) {
-      if (typeof location?.path === 'string' && location.path.trim()) targets.add(location.path);
-    }
-    for (const path of targets) {
-      drafts.push({
-        path,
-        tier: 'reported',
-        source: { carrier: 'acp_edit_target', callId, sourceMessageIds: sourceIds },
-      });
-    }
-  }
-
-  return drafts;
-};
-
 const draftsFromToolGroup = (message: IMessageToolGroup): DeliverableDraft[] => {
   if (!Array.isArray(message.content)) return [];
   const sourceIds = messageSourceIds(message);
@@ -402,7 +337,6 @@ const draftsFromCandidate = (candidate: TurnDeliverableCandidate): DeliverableDr
 
   for (const message of candidate.toolMessages ?? []) {
     if (message.type === 'tool_call') drafts.push(...draftsFromToolCall(message));
-    else if (message.type === 'acp_tool_call') drafts.push(...draftsFromAcpToolCall(message));
     else if (message.type === 'tool_group') drafts.push(...draftsFromToolGroup(message));
   }
 

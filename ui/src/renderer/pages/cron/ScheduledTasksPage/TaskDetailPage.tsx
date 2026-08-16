@@ -421,7 +421,7 @@ const TaskDetailPage: React.FC = () => {
             {job.metadata.agent_config?.config_options &&
               Object.keys(job.metadata.agent_config.config_options).length > 0 && (
                 <section className='flex flex-col gap-10px'>
-                  <h2 className='m-0 text-13px font-medium text-t-secondary'>{t('acp.config.reasoning_effort')}</h2>
+                  <h2 className='m-0 text-13px font-medium text-t-secondary'>{t('agent.config.reasoning_effort')}</h2>
                   <span className='break-words text-14px leading-22px text-t-primary'>
                     {Object.values(job.metadata.agent_config.config_options).join(', ')}
                   </span>

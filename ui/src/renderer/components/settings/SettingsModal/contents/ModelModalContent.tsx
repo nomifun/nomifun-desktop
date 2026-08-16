@@ -694,7 +694,7 @@ const ModelModalContent: React.FC = () => {
     const startTime = Date.now();
 
     try {
-      const result = await ipcBridge.acpConversation.checkProviderHealth.invoke({
+      const result = await ipcBridge.agentConversation.checkProviderHealth.invoke({
         provider_id: platform.id,
         model: modelName,
         task,

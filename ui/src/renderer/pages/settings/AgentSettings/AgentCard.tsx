@@ -5,12 +5,10 @@
  */
 
 import React from 'react';
-import { Avatar, Button, Switch, Typography } from '@arco-design/web-react';
-import { Delete, EditTwo, Robot } from '@icon-park/react';
+import { Avatar, Button, Typography } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { resolveAgentLogo } from '@/renderer/utils/model/agentLogo';
 import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
-import type { AgentId } from '@/common/types/ids';
 
 type DetectedAgent = {
   agent_type: string;
@@ -22,175 +20,43 @@ type DetectedAgent = {
   avatar?: string;
 };
 
-/** Catalog fields consumed by the 'installable' (not-installed) card variant. */
-type InstallableAgentCardData = {
-  /** Backend key — used to resolve the built-in logo. */
-  backend: string;
-  name: string;
-  /** Official site for manual installation; when absent the manual button is hidden. */
-  website?: string;
+type AgentCardProps = {
+  agent: DetectedAgent;
+  onGoToChat: () => void;
 };
 
-/** Minimal custom-agent fields consumed by the 'custom' card variant. */
-type CustomAgentCardData = {
-  agent_id: AgentId;
-  name: string;
-  /** User-picked emoji or avatar URL (maps to `AgentMetadata.icon`). */
-  icon?: string;
-  /** Spawn command for the CLI. */
-  command?: string;
-  /** Launch arguments for the CLI. */
-  args?: string[];
-  enabled: boolean;
-};
-
-type AgentCardProps =
-  | {
-      type: 'detected';
-      agent: DetectedAgent;
-      onGoToChat: () => void;
-    }
-  | {
-      type: 'installable';
-      agent: InstallableAgentCardData;
-      onOneClickInstall?: () => void;
-      onManualInstall?: () => void;
-      installing?: boolean;
-    }
-  | {
-      type: 'custom';
-      agent: CustomAgentCardData;
-      onGoToChat: () => void;
-      onEdit: () => void;
-      onDelete: () => void;
-      onToggle: (enabled: boolean) => void;
-    };
-
-const AgentCard: React.FC<AgentCardProps> = (props) => {
+const AgentCard: React.FC<AgentCardProps> = ({ agent, onGoToChat }) => {
   const { t } = useTranslation();
-  const goToChatButtonClassName = '!w-full !justify-center !rounded-10px !text-12px';
-
-  if (props.type === 'detected') {
-    const { agent, onGoToChat } = props;
-    const extensionAvatar = resolveExtensionAssetUrl(agent.isExtension ? agent.avatar : undefined);
-    const logo =
-      extensionAvatar ||
-      resolveAgentLogo({
-        icon: agent.icon,
-        backend: agent.backend || agent.agent_type,
-        agentId: agent.agent_id,
-        isExtension: agent.isExtension,
-      });
-
-    return (
-      <div className='flex min-h-[154px] flex-col rounded-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] p-12px transition-colors hover:border-[var(--color-border-3)]'>
-        <div className='mb-10px flex justify-center'>
-          <Avatar size={40} shape='square' style={{ flexShrink: 0, backgroundColor: 'transparent' }}>
-            {logo ? <img src={logo} alt={agent.name} className='h-full w-full object-contain' /> : '🤖'}
-          </Avatar>
-        </div>
-
-        <div className='mb-10px flex-1 text-center'>
-          <Typography.Text className='block text-13px font-medium leading-18px line-clamp-2'>
-            {agent.name}
-          </Typography.Text>
-          <Typography.Text className='mt-4px block text-11px text-t-secondary'>
-            {t('settings.agentManagement.installed')}
-          </Typography.Text>
-        </div>
-
-        <Button size='small' type='secondary' onClick={onGoToChat} className={goToChatButtonClassName}>
-          {t('settings.agentManagement.goToChat')}
-        </Button>
-      </div>
-    );
-  }
-
-  if (props.type === 'installable') {
-    const { agent, onOneClickInstall, onManualInstall, installing } = props;
-    const logo = resolveAgentLogo({ backend: agent.backend });
-    const hasOneClickInstall = Boolean(onOneClickInstall);
-
-    return (
-      <div className='flex min-h-[154px] flex-col rounded-12px border border-dashed border-[var(--color-border-2)] bg-[var(--color-bg-2)] p-12px transition-colors hover:border-[var(--color-border-3)]'>
-        <div className='mb-10px flex justify-center'>
-          <Avatar size={40} shape='square' style={{ flexShrink: 0, backgroundColor: 'transparent' }}>
-            {logo ? <img src={logo} alt={agent.name} className='h-full w-full object-contain opacity-70' /> : '🤖'}
-          </Avatar>
-        </div>
-
-        <div className='mb-10px flex-1 text-center'>
-          <Typography.Text className='block text-13px font-medium leading-18px line-clamp-2'>
-            {agent.name}
-          </Typography.Text>
-          <Typography.Text className='mt-4px block text-11px text-t-tertiary'>
-            {t('settings.agentManagement.notInstalled')}
-          </Typography.Text>
-        </div>
-
-        <div className='flex flex-col gap-6px'>
-          {onOneClickInstall && (
-            <Button
-              size='small'
-              type='primary'
-              loading={installing}
-              onClick={onOneClickInstall}
-              className='!w-full !justify-center !rounded-10px !text-12px'
-            >
-              {t('settings.agentManagement.oneClickInstall')}
-            </Button>
-          )}
-          {onManualInstall && (
-            <Button
-              size='small'
-              type={hasOneClickInstall ? 'text' : 'primary'}
-              onClick={onManualInstall}
-              className='!w-full !justify-center !rounded-10px !text-12px'
-            >
-              {t('settings.agentManagement.manualInstall')}
-            </Button>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  const { agent, onGoToChat, onEdit, onDelete, onToggle } = props;
+  const extensionAvatar = resolveExtensionAssetUrl(agent.isExtension ? agent.avatar : undefined);
+  const logo =
+    extensionAvatar ||
+    resolveAgentLogo({
+      icon: agent.icon,
+      backend: agent.backend || agent.agent_type,
+      agentId: agent.agent_id,
+      isExtension: agent.isExtension,
+    });
 
   return (
-    <div className='flex items-center justify-between px-16px py-10px rd-8px bg-aou-1 hover:bg-aou-2'>
-      <div className='flex items-center gap-12px min-w-0 flex-1'>
-        <Avatar
-          size={32}
-          shape='square'
-          style={{ flexShrink: 0, backgroundColor: agent.icon ? 'var(--color-fill-2)' : 'transparent', fontSize: 18 }}
-        >
-          {agent.icon || <Robot theme='outline' size='20' />}
+    <div className='flex min-h-[154px] flex-col rounded-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] p-12px transition-colors hover:border-[var(--color-border-3)]'>
+      <div className='mb-10px flex justify-center'>
+        <Avatar size={40} shape='square' style={{ flexShrink: 0, backgroundColor: 'transparent' }}>
+          {logo ? <img src={logo} alt={agent.name} className='h-full w-full object-contain' /> : '🤖'}
         </Avatar>
-        <div className='min-w-0 flex-1'>
-          <Typography.Text className='block truncate font-medium text-14px'>
-            {agent.name || t('settings.agentManagement.customEngineDefaultName')}
-          </Typography.Text>
-          <div className='text-12px text-t-secondary truncate'>
-            {agent.command}
-            {agent.args && agent.args.length > 0 ? ` ${agent.args.join(' ')}` : ''}
-          </div>
-        </div>
       </div>
-      <div className='flex shrink-0 items-center gap-8px'>
-        <Switch size='small' checked={agent.enabled !== false} onChange={onToggle} />
-        <Button size='small' type='text' onClick={onGoToChat} disabled={agent.enabled === false}>
-          {t('settings.agentManagement.goToChat')}
-        </Button>
-        <Button size='small' type='text' icon={<EditTwo theme='outline' size='14' />} onClick={onEdit} />
-        <Button
-          size='small'
-          type='text'
-          status='danger'
-          icon={<Delete theme='outline' size='14' />}
-          onClick={onDelete}
-        />
+
+      <div className='mb-10px flex-1 text-center'>
+        <Typography.Text className='block text-13px font-medium leading-18px line-clamp-2'>
+          {agent.name}
+        </Typography.Text>
+        <Typography.Text className='mt-4px block text-11px text-t-secondary'>
+          {t('settings.agentManagement.installed')}
+        </Typography.Text>
       </div>
+
+      <Button size='small' type='secondary' onClick={onGoToChat} className='!w-full !justify-center !rounded-10px !text-12px'>
+        {t('settings.agentManagement.goToChat')}
+      </Button>
     </div>
   );
 };

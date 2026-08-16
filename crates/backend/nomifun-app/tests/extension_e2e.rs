@@ -10,7 +10,10 @@ use nomifun_extension::{ExtensionSource, ScanPath};
 
 use common::{body_json, build_app, build_app_with_skill_paths, get_with_token, json_with_token, setup_and_login};
 
-const GEMINI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000103";
+/// Builtin nomi agent row (`agent_metadata.agent_id`, `agent_type = 'nomi'`).
+/// The engine collapse deleted every other builtin, so a preset's
+/// `preferred_agent_id` can only ever resolve to this one.
+const NOMI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000114";
 
 fn write_canonical_extension_fixture(tmp: &TempDir) -> std::path::PathBuf {
     let ext_root = tmp.path().join("extensions");
@@ -21,7 +24,6 @@ fn write_canonical_extension_fixture(tmp: &TempDir) -> std::path::PathBuf {
     std::fs::create_dir_all(ext_dir.join("skills")).unwrap();
     std::fs::create_dir_all(ext_dir.join("themes")).unwrap();
 
-    std::fs::write(ext_dir.join("assets/adapter.png"), "adapter").unwrap();
     std::fs::write(ext_dir.join("assets/preset.png"), "preset").unwrap();
     std::fs::write(ext_dir.join("assets/agent.png"), "agent").unwrap();
     std::fs::write(ext_dir.join("assets/theme-cover.png"), "cover").unwrap();
@@ -41,27 +43,6 @@ fn write_canonical_extension_fixture(tmp: &TempDir) -> std::path::PathBuf {
                 "nomifun": "^1.0.0"
             },
             "contributes": {
-                "acp_adapters": [
-                    {
-                        "id": "legacy-acp",
-                        "name": "Legacy ACP",
-                        "connection_type": "cli",
-                        "cli_command": "legacy-cli",
-                        "acp_args": ["--acp"],
-                        "avatar": "assets/adapter.png",
-                        "api_key_fields": [
-                            {
-                                "key": "LEGACY_API_KEY",
-                                "label": "API Key",
-                                "type": "password",
-                                "required": true
-                            }
-                        ],
-                        "yolo_mode": {
-                            "type": "session"
-                        }
-                    }
-                ],
                 "skills": [
                     {
                         "name": "review-skill",
@@ -100,7 +81,7 @@ fn write_canonical_extension_fixture(tmp: &TempDir) -> std::path::PathBuf {
                         "source_key": "legacy-preset",
                         "name": "Legacy Preset",
                         "icon": "assets/preset.png",
-                        "preferred_agent_id": GEMINI_AGENT_ID,
+                        "preferred_agent_id": NOMI_AGENT_ID,
                         "context": "@file:presets/context.md",
                         "models": ["gemini-2.0-flash"],
                         "enabled_skills": ["review-skill"],
@@ -236,18 +217,6 @@ async fn eq4_get_presets_empty() {
 
     let json = body_json(resp).await;
     assert_eq!(json["success"], true);
-}
-
-#[tokio::test]
-async fn eq5_get_acp_adapters_empty() {
-    let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_owner(&mut app, &services).await;
-
-    let resp = app
-        .oneshot(get_with_token("/api/extensions/acp-adapters", &token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -409,7 +378,7 @@ async fn eq14_risk_level_not_found() {
 }
 
 #[tokio::test]
-async fn eq15_canonical_acp_skill_and_mcp_endpoints_preserve_contract() {
+async fn eq15_canonical_skill_and_mcp_endpoints_preserve_contract() {
     let tmp = TempDir::new().unwrap();
     let ext_root = write_canonical_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
@@ -428,27 +397,6 @@ async fn eq15_canonical_acp_skill_and_mcp_endpoints_preserve_contract() {
     assert_eq!(skills[0]["description"], "Review code");
     assert!(skills[0]["location"].as_str().unwrap().ends_with("skills/review.md"));
     assert!(skills[0].get("path").is_none());
-
-    let acp_resp = app
-        .clone()
-        .oneshot(get_with_token("/api/extensions/acp-adapters", &token))
-        .await
-        .unwrap();
-    assert_eq!(acp_resp.status(), StatusCode::OK);
-    let acp_json = body_json(acp_resp).await;
-    let adapters = acp_json["data"].as_array().unwrap();
-    assert_eq!(adapters.len(), 1);
-    assert_eq!(adapters[0]["id"], "legacy-acp");
-    assert_eq!(adapters[0]["cli_command"], "legacy-cli");
-    assert_eq!(adapters[0]["default_cli_path"], "legacy-cli");
-    assert_eq!(adapters[0]["connection_type"], "cli");
-    assert_eq!(adapters[0]["supports_streaming"], false);
-    assert_eq!(adapters[0]["yolo_mode"]["type"], "session");
-    assert_eq!(
-        adapters[0]["avatar"],
-        "/api/extensions/legacy-suite/assets/assets/adapter.png"
-    );
-    assert_eq!(adapters[0]["_extension_name"], "legacy-suite");
 
     let mcp_resp = app
         .oneshot(get_with_token("/api/extensions/mcp-servers", &token))
@@ -484,7 +432,7 @@ async fn eq16_canonical_preset_agent_and_theme_endpoints_preserve_contract() {
     assert_eq!(presets.len(), 1);
     assert_eq!(presets[0]["source_key"], "legacy-suite:legacy-preset");
     assert!(presets[0].get("id").is_none());
-    assert_eq!(presets[0]["preferred_agent_id"], GEMINI_AGENT_ID);
+    assert_eq!(presets[0]["preferred_agent_id"], NOMI_AGENT_ID);
     assert_eq!(presets[0]["extension_name"], "legacy-suite");
     assert_eq!(presets[0]["enabled_skills"][0], "review-skill");
     assert_eq!(presets[0]["prompts"][0], "Review the diff");

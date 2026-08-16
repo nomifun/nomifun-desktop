@@ -18,9 +18,9 @@ use crate::registry_helpers::{
 use crate::resolvers::{resolve_all_contributions, resolve_i18n_for_all};
 use crate::state::ExtensionStateStore;
 use crate::types::{
-    ExtensionLifecyclePayload, ExtensionState, ExtensionSystemEvent, LoadedExtension, ResolvedAcpAdapter,
-    ResolvedAgent, ResolvedPreset, ResolvedChannelPlugin, ResolvedContributions, ResolvedModelProvider,
-    ResolvedSettingsTab, ResolvedSkill, ResolvedTheme, WebuiContribution,
+    ExtensionLifecyclePayload, ExtensionState, ExtensionSystemEvent, LoadedExtension, ResolvedAgent, ResolvedPreset,
+    ResolvedChannelPlugin, ResolvedContributions, ResolvedModelProvider, ResolvedSettingsTab, ResolvedSkill,
+    ResolvedTheme, WebuiContribution,
 };
 
 // Re-export ExtensionSummary from registry_helpers so that
@@ -329,11 +329,6 @@ impl ExtensionRegistry {
             .iter()
             .find(|preset| preset.source_key == source_key)
             .cloned()
-    }
-
-    pub async fn get_acp_adapters(&self) -> Vec<ResolvedAcpAdapter> {
-        let guard = self.inner.read().await;
-        guard.contributions.acp_adapters.clone()
     }
 
     pub async fn get_agents(&self) -> Vec<ResolvedAgent> {

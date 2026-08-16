@@ -5,9 +5,9 @@ edition.workspace = true
 
 [package.metadata.nomifun-runtime]
 # 1.3.x required: 1.1.38 has a stdin-buffering bug in `bun x --bun` that
-# prevents Nomi's ACP adapter (long-lived stdio protocol) from ever
-# receiving the initialize request — see nomicore fix notes for
-# Nomifun#2828. If bumping, keep >= 1.3.13.
+# prevents any long-lived stdio child from ever receiving its first request
+# on stdin — see nomicore fix notes for Nomifun#2828. Still load-bearing:
+# MCP stdio servers are exactly that shape. If bumping, keep >= 1.3.13.
 bun_version = "1.3.13"
 
 [dependencies]

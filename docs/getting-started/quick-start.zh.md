@@ -32,8 +32,7 @@ bun run serve:web
 
 登录后默认进入 `/guid`。这里提供开始会话所需的几件事：
 
-- **agent 选择**：选择 Nomi、Claude Code、Codex、Gemini、Qwen、OpenCode 等后端。
-- **模型选择**：对支持模型切换的 agent 选择 provider 和 model id。
+- **模型选择**：选择 provider 和 model id。
 - **设定**：选择可复用的 agent 指令、偏好模型、技能与知识范围。
 - **工具与工作区**：选择本次会话可见的 MCP server 和技能，并确认工作目录。
 - **输入框**：输入第一条提示词，必要时用 `@` 引用文件、技能或设定。
@@ -51,21 +50,21 @@ bun run serve:web
 
 ![模型设置](../images/gs-06-quickstart-model-settings.png)
 
-外部 CLI agent 仍需要在宿主机上安装对应 CLI；`/models` 只解决模型凭据和
+若想改用 Claude Code、Codex、Gemini CLI 等第三方 CLI，请在宿主机上装好它，
+然后在[应用内终端](../guides/terminal.zh.md)里运行；`/models` 只解决模型凭据和
 模型选择，不会替你安装第三方 CLI。
 
 ## 4. 创建第一段会话
 
 回到 `/guid`：
 
-1. 选择 **Nomi**，它不依赖外部 CLI，最适合首跑验证。
-2. 选择一个已配置的模型。
-3. 可选：选择一份设定。
-4. 输入提示词，例如：
+1. 选择一个已配置的模型。
+2. 可选：选择一份设定。
+3. 输入提示词，例如：
 
    > 写一个返回第 n 个斐波那契数的 Python 函数，并附一个小测试。
 
-5. 发送。
+4. 发送。
 
 NomiFun 会创建新会话并进入 `/conversation/:id`，随后开始流式输出。
 

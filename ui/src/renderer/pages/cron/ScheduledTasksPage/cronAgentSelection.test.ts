@@ -24,7 +24,7 @@ const agent = (agent_id: typeof firstId, name: string, backend?: string): AgentM
   agent_id,
   name,
   backend,
-  agent_type: 'acp',
+  agent_type: 'nomi',
   agent_source: 'custom',
   enabled: true,
   available: true,
@@ -33,11 +33,14 @@ const agent = (agent_id: typeof firstId, name: string, backend?: string): AgentM
 const first = agent(firstId, 'Reviewer A');
 const second = agent(secondId, 'Reviewer B');
 
+// `ICronJob.metadata.agent_type` is a raw persisted string; historical rows
+// still carry the retired 'acp' discriminant, which is exactly what the legacy
+// fallback below has to keep working against.
 const job = (config: ICronJob['metadata']['agent_config'], agent_type = 'acp'): ICronJob =>
   ({ metadata: { agent_type, agent_config: config } }) as ICronJob;
 
 describe('scheduled task Agent selection identity', () => {
-  test('keeps custom ACP Agents distinct even when both lack a backend', () => {
+  test('keeps custom Agents distinct even when both lack a backend', () => {
     expect(getCronAgentOptionValue(firstId)).not.toBe(getCronAgentOptionValue(secondId));
     expect(findCronSelectedAgent(getCronAgentOptionValue(firstId), [first, second])).toBe(first);
     expect(findCronSelectedAgent(getCronAgentOptionValue(secondId), [first, second])).toBe(second);
@@ -49,13 +52,15 @@ describe('scheduled task Agent selection identity', () => {
   });
 
   test('uses a legacy backend when unique and preserves a frozen placeholder when ambiguous', () => {
-    const claude = agent(firstId, 'Claude Code', 'claude');
-    expect(getCronAgentSelectionFromJob(job({ name: 'Claude', backend: 'claude' }), [claude])).toBe(
+    const backendRow = agent(firstId, 'Nomi', 'nomi');
+    expect(getCronAgentSelectionFromJob(job({ name: 'Nomi', backend: 'nomi' }), [backendRow])).toBe(
       getCronAgentOptionValue(firstId)
     );
-    expect(getCronAgentSelectionFromJob(job({ name: 'Old ACP' }), [first, second])).toBe('legacy:acp');
+    // Historical rows persisted a retired engine discriminant. The frozen
+    // legacy placeholder must survive so an unrelated edit does not rewrite it.
+    expect(getCronAgentSelectionFromJob(job({ name: 'Old engine' }), [first, second])).toBe('legacy:acp');
     expect(
-      hasCronAgentConfigurationChanged(job({ name: 'Old ACP' }), [first, second], {
+      hasCronAgentConfigurationChanged(job({ name: 'Old engine' }), [first, second], {
         selection: 'legacy:acp',
         clearContextEachRun: false,
       })

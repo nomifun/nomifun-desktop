@@ -6,7 +6,7 @@ const runtimeReconciler = readFileSync(
   new URL('./reconcileConversationTurnAfterStreamTerminal.ts', import.meta.url),
   'utf8'
 );
-const statefulLifecycles = ['./nomi/useNomiMessage.ts', './acp/useAcpMessage.ts'].map((path) =>
+const statefulLifecycles = ['./nomi/useNomiMessage.ts'].map((path) =>
   readFileSync(new URL(path, import.meta.url), 'utf8')
 );
 
@@ -26,21 +26,30 @@ describe('authoritative turn lifecycle wiring', () => {
     expect(verifyBeforeHydration).toBeGreaterThan(closeBeforeHydration);
   });
 
-  test('closes ACP lifecycle before its hydration request and requires exact stream correlation', () => {
-    const acpSource = statefulLifecycles[1];
-    const hydration = acpSource.indexOf('// Reset state when conversation changes');
-    const closed = acpSource.indexOf('turnClosedRef.current = true;', hydration);
-    const verify = acpSource.indexOf('verifyUnannouncedStartRuntimeRef.current = true;', hydration);
-    const request = acpSource.indexOf(
+  test('closes the stateful lifecycle before its hydration request and requires exact stream correlation', () => {
+    const nomiSource = statefulLifecycles[0];
+    const hydration = nomiSource.indexOf(
+      "// Clear turn state on conversation switch so a previous conversation's"
+    );
+    const closed = nomiSource.indexOf(
+      'turnClosedRef.current = pendingHydrationFence.turnClosed;',
+      hydration
+    );
+    const verify = nomiSource.indexOf(
+      'pendingHydrationFence.verifyUnannouncedStartRuntime;',
+      hydration
+    );
+    const request = nomiSource.indexOf(
       'void reconcileConversationAuthoritativeRuntime(conversation_id, {',
       hydration
     );
 
+    expect(hydration).toBeGreaterThan(-1);
     expect(closed).toBeGreaterThan(hydration);
     expect(verify).toBeGreaterThan(hydration);
     expect(request).toBeGreaterThan(closed);
     expect(request).toBeGreaterThan(verify);
-    expect(acpSource.includes('shouldApplyAcpStreamEventToTurn({')).toBe(true);
+    expect(nomiSource.includes('shouldApplyNomiStreamEventToTurn({')).toBe(true);
   });
 
   test('invalidates pending stop continuations at the authoritative completion boundary', () => {

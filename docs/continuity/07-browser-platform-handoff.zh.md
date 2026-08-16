@@ -141,7 +141,7 @@ Agent-only 发布验收。凡涉及 Viewer、JPEG、screencast、接管或 viewe
 - [ ] 补齐 target crash、Crawl Host crash、Primary Host restart/circuit
   breaker 的真实 Chromium 故障注入；证明旧 epoch/ref 确定失效且故障
   不跨 Host/Lane 扩散。
-- [ ] 对 ACP capability expiry、remote disconnect、attempt/runtime 终止、
+- [ ] 对 stdio capability expiry、attempt/runtime 终止、
   conversation 删除与应用关闭执行端到端生命周期验收，确认 5 秒内释放容量。
   另外验证 Native Agent turn 正常完成/取消会关闭 owner Lane，显式关闭 Lane 会先
   清理 target，并让最后一个 Host 立即退出而不等待 sweep/warm timer。

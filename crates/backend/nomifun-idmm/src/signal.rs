@@ -14,7 +14,7 @@ pub enum DecisionSource {
     /// conversations only — channel/companion conversations route such menus to
     /// a remote human and must NOT be auto-answered (see `ConversationProbe`).
     TextScan,
-    /// An agent `Permission`/`AcpPermission` event.
+    /// An agent `Permission` event.
     Permission,
 }
 
@@ -50,7 +50,7 @@ pub struct DecisionPrompt {
     /// answered with free text only by the model tier.
     pub kind: DecisionKind,
     /// Set when this is a STRUCTURED tool-permission decision
-    /// (`Permission`/`AcpPermission`): it is answered by resolving the agent's
+    /// (`Permission`): it is answered by resolving the agent's
     /// pending approval via `ConversationService::confirm(call_id, …)`, NOT by
     /// injecting a chat message. `None` for text/terminal numbered-choice
     /// prompts (answered with their option text). See [`PermissionConfirm`].

@@ -35,7 +35,7 @@ struct Parsed {
     ty: String,
     position: String,
     content: serde_json::Value,
-    /// tool_call/acp_tool_call 的 call_id(用于按锚精确框窗)。
+    /// tool_call 的 call_id(用于按锚精确框窗)。
     call_id: Option<String>,
 }
 
@@ -50,7 +50,7 @@ fn redact_clip(s: &str) -> String {
     }
 }
 
-/// 从 tool_call/acp_tool_call 的 content 提取 (name, args, result)。
+/// 从 tool_call 的 content 提取 (name, args, result)。
 fn extract_tool(ty: &str, content: &serde_json::Value) -> Option<(String, Option<String>, Option<String>)> {
     match ty {
         "tool_call" => {
@@ -61,13 +61,6 @@ fn extract_tool(ty: &str, content: &serde_json::Value) -> Option<(String, Option
                 .filter(|v| !v.is_null())
                 .map(|v| v.to_string());
             let result = content.get("output").and_then(|v| v.as_str()).map(|s| s.to_owned());
-            Some((name, args, result))
-        }
-        "acp_tool_call" => {
-            let upd = content.get("update")?;
-            let name = upd.get("title").and_then(|v| v.as_str()).unwrap_or("tool").to_owned();
-            let args = upd.get("raw_input").filter(|v| !v.is_null()).map(|v| v.to_string());
-            let result = upd.get("raw_output").filter(|v| !v.is_null()).map(|v| v.to_string());
             Some((name, args, result))
         }
         _ => None,
@@ -99,11 +92,6 @@ impl TranscriptSource for ConversationTranscriptSource {
                 let content: serde_json::Value = serde_json::from_str(&r.content).unwrap_or(serde_json::Value::Null);
                 let call_id = match r.r#type.as_str() {
                     "tool_call" => content.get("call_id").and_then(|v| v.as_str()).map(|s| s.to_owned()),
-                    "acp_tool_call" => content
-                        .get("update")
-                        .and_then(|u| u.get("tool_call_id"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_owned()),
                     _ => None,
                 };
                 Parsed { ty: r.r#type.clone(), position: r.position.clone().unwrap_or_default(), content, call_id }
@@ -146,7 +134,7 @@ impl TranscriptSource for ConversationTranscriptSource {
                         turns.push(TranscriptTurn::assistant(redact_clip(t)));
                     }
                 }
-                "tool_call" | "acp_tool_call" => {
+                "tool_call" => {
                     if let Some((name, args, result)) = extract_tool(&p.ty, &p.content) {
                         turns.push(TranscriptTurn::tool(
                             name,

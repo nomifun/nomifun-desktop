@@ -23,12 +23,7 @@ const MobileConversationBrand: React.FC<MobileConversationBrandProps> = ({ conve
   );
   const { info: preset } = usePresetInfo(conversation || undefined);
 
-  const backend =
-    conversation?.type === 'acp'
-      ? conversation.extra?.backend
-      : conversation?.type === 'nomi'
-        ? 'nomi'
-            : undefined;
+  const backend = conversation?.type === 'nomi' ? 'nomi' : undefined;
 
   const showLogo = Boolean(backend || preset);
   const title = conversation?.name || fallbackTitle;
