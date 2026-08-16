@@ -32,7 +32,7 @@ export interface WorkspaceProps {
    * interpolation, so TypeScript cannot police a wrong value — a default would
    * silently listen on a namespace nobody publishes to.
    */
-  eventPrefix: 'acp' | 'nomi' | 'openclaw-gateway';
+  eventPrefix: 'acp' | 'nomi';
   messageApi?: MessageApi;
   extraTabs?: WorkspaceExtraTab[];
 }

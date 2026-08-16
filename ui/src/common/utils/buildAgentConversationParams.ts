@@ -28,9 +28,6 @@ export function getConversationTypeForBackend(backend: string): ICreateConversat
   switch (backend) {
     case 'nomi':
       return 'nomi';
-    case 'openclaw-gateway':
-    case 'openclaw':
-      return 'openclaw-gateway';
     default:
       return 'acp';
   }
@@ -60,18 +57,11 @@ export function buildAgentConversationParams(input: BuildAgentConversationInput)
     ...extraOverrides,
   };
 
-  if (!is_preset) {
-    if (type === 'openclaw-gateway') {
-      extra.agent_name = agent_name || name;
-      extra.gateway = {
-        cli_path,
-      };
-    } else if (type === 'acp') {
-      extra.backend = backend as string;
-      extra.agent_name = agent_name || name;
-      if (agent_id) extra.agent_id = agent_id;
-      if (cli_path) extra.cli_path = cli_path;
-    }
+  if (!is_preset && type === 'acp') {
+    extra.backend = backend as string;
+    extra.agent_name = agent_name || name;
+    if (agent_id) extra.agent_id = agent_id;
+    if (cli_path) extra.cli_path = cli_path;
   }
 
   if (session_mode) extra.session_mode = session_mode;

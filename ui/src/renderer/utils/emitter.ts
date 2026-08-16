@@ -27,10 +27,6 @@ interface EventTypes {
   'acp.selected.file.append': [Array<string | FileOrFolderItem>];
   'acp.selected.file.clear': void;
   'acp.workspace.refresh': void;
-  'openclaw-gateway.selected.file': [Array<string | FileOrFolderItem>];
-  'openclaw-gateway.selected.file.append': [Array<string | FileOrFolderItem>];
-  'openclaw-gateway.selected.file.clear': void;
-  'openclaw-gateway.workspace.refresh': void;
   // 终端工作区栏选中文件事件（镜像会话栏键），由终端工作区栏发出、TerminalSendBox 消费
   // Terminal workspace rail file-selection events (mirror the conversation rail
   // keys). Emitted by the terminal workspace rail; consumed by TerminalSendBox.

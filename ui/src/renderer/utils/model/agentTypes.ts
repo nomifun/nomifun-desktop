@@ -11,7 +11,7 @@ import type { AgentId } from '@/common/types/ids';
 export const DETECTED_AGENTS_SWR_KEY = 'agents.detected';
 
 /** Type of an agent. */
-export type AgentType = 'acp' | 'nomi' | 'openclaw-gateway';
+export type AgentType = 'acp' | 'nomi';
 
 /** Source tier of an agent row, mirroring backend `agent_source` enum. */
 export type AgentSource = 'internal' | 'builtin' | 'extension' | 'custom';
