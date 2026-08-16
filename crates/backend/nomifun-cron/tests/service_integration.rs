@@ -195,9 +195,6 @@ impl nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry for StubAgentRunti
     fn active_runtime_count(&self) -> usize {
         0
     }
-    fn collect_idle_runtimes(&self, _: TimestampMs) -> Vec<String> {
-        vec![]
-    }
 }
 
 struct StubConvRepo {

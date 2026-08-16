@@ -309,10 +309,6 @@ impl AgentRuntimeRegistry for RecordingAgentRuntimeRegistry {
     fn active_runtime_count(&self) -> usize {
         self.agents.lock().unwrap().len()
     }
-
-    fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
-        Vec::new()
-    }
 }
 
 /// Everything needed to drive the message loop end-to-end with an in-memory

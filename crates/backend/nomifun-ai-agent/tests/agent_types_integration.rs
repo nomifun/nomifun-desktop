@@ -3,94 +3,16 @@
 //! These tests validate:
 //! - Each agent manager implements AgentRuntimeControl correctly
 //! - Agent factory can build all agent types
-//! - Idle scanner finds eligible runtimes
 //! - Workspace browsing works with real filesystem
 //! - Nomi stub returns appropriate errors
 
-use std::sync::Arc;
-
 use nomifun_ai_agent::manager::nomi::NomiAgentManager;
-use nomifun_ai_agent::runtime_registry::AgentRuntimeFactory;
-use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, NomiResolvedConfig, SendMessageData};
+use nomifun_ai_agent::types::NomiResolvedConfig;
 use nomifun_ai_agent::*;
-use nomifun_common::{AgentKillReason, AgentType, ConversationStatus, TimestampMs, now_ms};
+use nomifun_common::{AgentKillReason, AgentType, ConversationStatus};
 use serde_json::json;
-use std::sync::atomic::{AtomicI64, Ordering};
-use tokio::sync::broadcast;
 
 const NOMI_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000221";
-const NANOBOT_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000222";
-const OPENCLAW_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000223";
-const ACP_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000224";
-const REMOTE_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000225";
-
-// ---------------------------------------------------------------------------
-// Mock agent for AgentRuntimeRegistry tests with different agent types
-// ---------------------------------------------------------------------------
-
-struct TypedMockAgent {
-    agent_type: AgentType,
-    conversation_id: String,
-    workspace: String,
-    status: Option<ConversationStatus>,
-    last_activity: AtomicI64,
-    event_tx: broadcast::Sender<AgentStreamEvent>,
-}
-
-impl TypedMockAgent {
-    fn new(agent_type: AgentType, conversation_id: &str, status: Option<ConversationStatus>) -> Self {
-        let (event_tx, _) = broadcast::channel(16);
-        Self {
-            agent_type,
-            conversation_id: conversation_id.to_owned(),
-            workspace: "/tmp/test".to_owned(),
-            status,
-            last_activity: AtomicI64::new(now_ms()),
-            event_tx,
-        }
-    }
-
-    fn with_last_activity(mut self, ts: TimestampMs) -> Self {
-        self.last_activity = AtomicI64::new(ts);
-        self
-    }
-}
-
-#[async_trait::async_trait]
-impl AgentRuntimeControl for TypedMockAgent {
-    fn agent_type(&self) -> AgentType {
-        self.agent_type
-    }
-    fn conversation_id(&self) -> &str {
-        &self.conversation_id
-    }
-    fn workspace(&self) -> &str {
-        &self.workspace
-    }
-    fn status(&self) -> Option<ConversationStatus> {
-        self.status
-    }
-    fn is_transport_healthy(&self) -> bool {
-        true
-    }
-    fn last_activity_at(&self) -> TimestampMs {
-        self.last_activity.load(Ordering::Relaxed)
-    }
-    fn subscribe(&self) -> broadcast::Receiver<AgentStreamEvent> {
-        self.event_tx.subscribe()
-    }
-    async fn send_message(&self, _data: SendMessageData) -> Result<(), nomifun_ai_agent::AgentSendError> {
-        Ok(())
-    }
-    async fn cancel(&self) -> Result<(), nomifun_common::AppError> {
-        Ok(())
-    }
-    fn kill(&self, _reason: Option<AgentKillReason>) -> Result<(), nomifun_common::AppError> {
-        Ok(())
-    }
-}
-
-impl MockAgentRuntime for TypedMockAgent {}
 
 // ---------------------------------------------------------------------------
 // Nomi agent tests (real implementation with AgentEngine)
@@ -162,82 +84,6 @@ async fn nomi_agent_metadata() {
     assert_eq!(agent.status(), Some(ConversationStatus::Pending));
     assert!(agent.get_confirmations().is_empty());
     assert!(!agent.check_approval("any", None));
-}
-
-// ---------------------------------------------------------------------------
-// Idle scanner: collect_idle_runtimes only finds ACP runtimes
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn collect_idle_ignores_non_acp_agent_types() {
-    use futures_util::FutureExt;
-    let old_ts = now_ms() - 600_000; // 10 min ago
-
-    // Build a factory that creates typed mocks (all finished + old)
-    let factory: AgentRuntimeFactory = Arc::new(move |opts: AgentRuntimeBuildOptions| {
-        async move {
-            let mock = TypedMockAgent::new(
-                opts.agent_type,
-                &opts.conversation_id,
-                Some(ConversationStatus::Finished),
-            )
-            .with_last_activity(old_ts);
-            Ok(AgentRuntimeHandle::Mock(Arc::new(mock)))
-        }
-        .boxed()
-    });
-    let registry = InMemoryAgentRuntimeRegistry::new(factory);
-    let runtime_workspace = tempfile::tempdir().unwrap();
-
-    let make_opts = |agent_type: AgentType, id: &str| AgentRuntimeBuildOptions {
-        user_id: "test-user".into(),
-        agent_type,
-        workspace: runtime_workspace.path().to_string_lossy().into_owned(),
-        model: None,
-        conversation_id: id.into(),
-        delegation_policy: Default::default(),
-        conversation_created_at: None,
-        workspace_binding_lease: Some(
-            nomifun_knowledge::WorkspaceBindingLease::acquire_unbound(
-                runtime_workspace.path(),
-                id,
-            )
-            .unwrap(),
-        ),
-        extra: json!(null),
-    };
-
-    registry.get_or_create_runtime(
-        NANOBOT_CONVERSATION_ID,
-        make_opts(AgentType::Nanobot, NANOBOT_CONVERSATION_ID),
-    )
-        .await
-        .unwrap();
-    registry.get_or_create_runtime(
-        OPENCLAW_CONVERSATION_ID,
-        make_opts(AgentType::OpenclawGateway, OPENCLAW_CONVERSATION_ID),
-    )
-        .await
-        .unwrap();
-    registry.get_or_create_runtime(
-        ACP_CONVERSATION_ID,
-        make_opts(AgentType::Acp, ACP_CONVERSATION_ID),
-    )
-        .await
-        .unwrap();
-    registry.get_or_create_runtime(
-        REMOTE_CONVERSATION_ID,
-        make_opts(AgentType::Remote, REMOTE_CONVERSATION_ID),
-    )
-        .await
-        .unwrap();
-
-    assert_eq!(registry.active_runtime_count(), 4);
-
-    // Only ACP should be collected
-    let idle = registry.collect_idle_runtimes(300_000); // 5-min threshold
-    assert_eq!(idle.len(), 1);
-    assert_eq!(idle[0], ACP_CONVERSATION_ID);
 }
 
 // ---------------------------------------------------------------------------
