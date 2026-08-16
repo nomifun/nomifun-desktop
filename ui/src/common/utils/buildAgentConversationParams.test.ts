@@ -7,7 +7,7 @@
 import { describe, expect, test } from 'bun:test';
 import { buildAgentConversationParams } from './buildAgentConversationParams';
 import type { TProviderWithModel } from '@/common/config/storage';
-import { parseAgentId, parseProviderId, parseRemoteAgentId } from '@/common/types/ids';
+import { parseAgentId, parseProviderId } from '@/common/types/ids';
 import { parsePresetReference } from '@/common/types/agent/presetTypes';
 
 const agentId = parseAgentId('0190f5fe-7c00-7a00-8000-000000000002');
@@ -56,35 +56,5 @@ describe('buildAgentConversationParams preset contract', () => {
     expect(result.extra.agent_id).toBe(agentId);
     expect(result.extra.agent_name).toBe('Claude');
     expect(result.extra.backend).toBe('claude');
-  });
-
-  test('stores the selected remote-agent business id in snake_case', () => {
-    const remoteAgentId = parseRemoteAgentId('0190f5fe-7c00-7a00-8000-000000000001');
-    const result = buildAgentConversationParams({
-      backend: 'remote',
-      name: 'Remote OpenClaw',
-      workspace: '/tmp/workspace',
-      model,
-      remote_agent_id: remoteAgentId,
-    });
-
-    expect(result.type).toBe('remote');
-    expect(result.extra.remote_agent_id).toBe(remoteAgentId);
-  });
-
-  test('rejects a missing remote-agent business id', () => {
-    let error: unknown;
-    try {
-      buildAgentConversationParams({
-        backend: 'remote',
-        name: 'Remote OpenClaw',
-        workspace: '/tmp/workspace',
-        model,
-      });
-    } catch (caught) {
-      error = caught;
-    }
-    expect(error instanceof Error).toBe(true);
-    expect((error as Error).message.includes('remote_agent_id')).toBe(true);
   });
 });

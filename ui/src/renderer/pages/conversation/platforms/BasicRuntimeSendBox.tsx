@@ -104,28 +104,28 @@ export interface BasicRuntimeStreamHooks {
  * hooks.
  */
 export interface BasicRuntimeSendBoxConfig {
-  /** Tag used in console warnings, e.g. '[RemoteSendBox]'. */
+  /** Tag used in console warnings, e.g. '[OpenClawSendBox]'. */
   logTag: string;
   /** Workspace-rail selection events mirrored by this send box. */
   selectedFileEvents: {
-    set: 'remote.selected.file' | 'openclaw-gateway.selected.file';
-    append: 'remote.selected.file.append' | 'openclaw-gateway.selected.file.append';
-    clear: 'remote.selected.file.clear' | 'openclaw-gateway.selected.file.clear';
+    set: 'openclaw-gateway.selected.file';
+    append: 'openclaw-gateway.selected.file.append';
+    clear: 'openclaw-gateway.selected.file.clear';
   };
   /**
    * sessionStorage feature names for the guid-page initial-message delivery.
    * Note the historical suffixes: openclaw uses 'initial-message-openclaw',
    * not the 'openclaw-gateway' conversation type.
    */
-  initialMessageFeature: 'initial-message-remote' | 'initial-message-openclaw';
-  initialMessageProcessedFeature: 'initial-message-processed-remote' | 'initial-message-processed-openclaw';
+  initialMessageFeature: 'initial-message-openclaw';
+  initialMessageProcessedFeature: 'initial-message-processed-openclaw';
   /** Message send channel (openclaw routes through ipcBridge.openclawConversation). */
   sendMessage: typeof ipcBridge.conversation.sendMessage;
   /** Turn stream channel (openclaw routes through ipcBridge.openclawConversation). */
   responseStream: typeof ipcBridge.conversation.responseStream;
   /** Draft store hook created once at module scope via getSendBoxDraftHook. */
   useDraft: BasicRuntimeDraftHook;
-  /** Slash command list hook; omit to disable slash commands (remote). */
+  /** Slash command list hook; omit to disable slash commands. */
   useSlashCommandList?: (conversation_id: ConversationId) => SlashCommandItem[];
   /**
    * Platform extension hook mounted inside the send box (e.g. the OpenClaw
@@ -143,7 +143,7 @@ export interface BasicRuntimeSendBoxConfig {
   /**
    * How the workspace path used by buildDisplayMessage is resolved:
    * - 'on-mount': read from the conversation as soon as the box mounts
-   *   (remote / openclaw).
+   *   (openclaw).
    * - 'at-initial-message': resolved only while delivering a guid-page initial
    *   message (direct sends before any initial delivery format against an
    *   empty workspace path).
@@ -157,7 +157,7 @@ export interface BasicRuntimeSendBoxConfig {
   enableClearContext?: boolean;
   /** Backend display name for the placeholder (and fallback while resolving). */
   backendName: string;
-  /** Optional async backend name resolver (remote agent name). */
+  /** Optional async backend name resolver. */
   resolveBackendName?: (conversation_id: ConversationId) => Promise<string | undefined>;
   /** Re-emit the selection event when items change inside the send box (openclaw). */
   emitSelectedFileOnChange?: boolean;
@@ -165,7 +165,7 @@ export interface BasicRuntimeSendBoxConfig {
   showFolderTags?: boolean;
   /** Report pending attachments to the SendBox (openclaw). */
   reportPendingAttachments?: boolean;
-  /** SendBox multiline behavior (remote / openclaw force multiline). */
+  /** SendBox multiline behavior (openclaw forces multiline). */
   defaultMultiLine?: boolean;
   lockMultiLine?: boolean;
 }
@@ -178,8 +178,8 @@ const EMPTY_AT_PATH: Array<string | FileOrFolderItem> = [];
 const EMPTY_UPLOAD_FILES: string[] = [];
 
 /**
- * Shared send box for the "basic runtime" platforms (remote /
- * openclaw-gateway): identical turn-lifecycle hydration, response-stream
+ * Shared send box for the "basic runtime" platforms
+ * (openclaw-gateway): identical turn-lifecycle hydration, response-stream
  * subscription, draft persistence, command queue and stop wiring, with the
  * platform differences captured by {@link BasicRuntimeSendBoxConfig}.
  *

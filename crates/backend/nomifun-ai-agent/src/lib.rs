@@ -79,7 +79,7 @@ pub use knowledge_writeback::LiveKnowledgeWritebackSink;
 pub use nomi_session_persistence::{NomiSessionPersistence, NomiSessionResetOutcome};
 pub use terminal_title_completer::LiveTerminalTitleCompleter;
 pub use nomifun_api_types::{
-    AcpBuildExtra, AcpModelInfo, NomiBuildExtra, OpenClawBuildExtra, OpenClawGatewayConfig, RemoteBuildExtra,
+    AcpBuildExtra, AcpModelInfo, NomiBuildExtra, OpenClawBuildExtra, OpenClawGatewayConfig,
     SlashCommandItem,
 };
 pub use persistence::AcpSessionSyncService;
@@ -88,9 +88,8 @@ pub use protocol::events::{
 };
 pub use protocol::send_error::AgentSendError;
 pub use registry::{AgentRegistry, UnavailableReason};
-pub use routes::{AgentRouterState, RemoteAgentRouterState, agent_routes, remote_agent_routes};
+pub use routes::{AgentRouterState, agent_routes};
 pub use services::AgentService;
-pub use services::RemoteAgentService;
 pub use runtime_registry::{
     AgentRuntimeModelConfigResolver, AgentRuntimeRegistry, InMemoryAgentRuntimeRegistry,
     RuntimeModelConfigBinding,

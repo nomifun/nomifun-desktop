@@ -28,7 +28,6 @@ mod preset;
 mod provider;
 mod provider_connection;
 mod provider_model;
-mod remote_agent;
 mod requirement;
 mod response;
 mod serde_util;
@@ -47,7 +46,7 @@ pub use acp::{
 };
 pub use agent_build_extra::{
     AcpBuildExtra, AcpModelInfo, NomiBuildExtra, NomiGoalSpec, OpenClawBuildExtra,
-    OpenClawGatewayConfig, RemoteBuildExtra, SessionMcpServer, SessionMcpTransport,
+    OpenClawGatewayConfig, SessionMcpServer, SessionMcpTransport,
     SlashCommandItem, SummonConfig,
 };
 pub use agent_discovery::{
@@ -201,10 +200,6 @@ pub use provider_model::{
     CapabilityHealth, ProviderModelCapabilityInput, ProviderModelCapabilityResponse,
     ProviderModelInput, ProviderModelKeyRequest, ProviderModelResponse, SaveProviderModelRequest,
     validate_model_traits_unique,
-};
-pub use remote_agent::{
-    CreateRemoteAgentRequest, HandshakeResponse, RemoteAgentListItem, RemoteAgentResponse,
-    TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
 };
 pub use requirement::{
     AttachmentDto, AutoWorkConfigRequest, AutoWorkRunState, AutoWorkState, AutoWorkTargetKind,

@@ -81,10 +81,6 @@ name = "model_failover_e2e"
 path = "tests/model_failover_e2e.rs"
 
 [[test]]
-name = "remote_agent_e2e"
-path = "tests/remote_agent_e2e.rs"
-
-[[test]]
 name = "ssh_host_e2e"
 path = "tests/ssh_host_e2e.rs"
 

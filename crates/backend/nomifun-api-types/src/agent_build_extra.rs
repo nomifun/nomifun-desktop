@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use nomifun_common::{CompanionId, CronJobId, DelegationPolicy, RemoteAgentId, UserId};
+use nomifun_common::{CompanionId, CronJobId, DelegationPolicy, UserId};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -253,19 +253,6 @@ pub struct OpenClawBuildExtra {
     /// Stable `cron_jobs.cron_job_id`.
     #[serde(default, deserialize_with = "deserialize_cron_job_id")]
     pub cron_job_id: Option<String>,
-    #[serde(default)]
-    pub session_key: Option<String>,
-}
-
-/// Remote agent-specific fields extracted from `extra` in build runtime options.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteBuildExtra {
-    /// Canonical global ID of the configured remote-agent entity.
-    pub remote_agent_id: RemoteAgentId,
-    /// Backend-projected immutable preset context for the first remote prompt.
-    #[serde(default)]
-    pub preset_context: Option<String>,
-    /// Remote gateway session key persisted after a successful turn.
     #[serde(default)]
     pub session_key: Option<String>,
 }

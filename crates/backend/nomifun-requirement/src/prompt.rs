@@ -388,7 +388,6 @@ mod tests {
         for at in [
             AgentType::Acp,
             AgentType::OpenclawGateway,
-            AgentType::Remote,
         ] {
             let p =
                 build_requirement_prompt("t", &req(), 7, CLAIM_TOKEN, at, false, &[]);
@@ -475,7 +474,6 @@ mod tests {
         // Other engines never have them, even with the flag set.
         for at in [
             AgentType::OpenclawGateway,
-            AgentType::Remote,
         ] {
             assert!(!session_has_requirement_tools(at, true), "{at:?}: no requirement tools");
         }
@@ -487,7 +485,6 @@ mod tests {
         for at in [
             AgentType::Acp,
             AgentType::OpenclawGateway,
-            AgentType::Remote,
         ] {
             assert!(
                 !has_native_requirement_tools(at),

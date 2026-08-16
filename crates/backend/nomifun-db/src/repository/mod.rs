@@ -21,7 +21,6 @@ pub mod provider_connection;
 pub mod provider_model;
 pub mod provider_model_capability;
 pub mod preset;
-pub mod remote_agent;
 pub mod requirement;
 mod settings;
 pub mod skill_tag;
@@ -48,7 +47,6 @@ mod sqlite_provider_model;
 mod sqlite_provider_model_capability;
 mod sqlite_miniapp;
 mod sqlite_preset;
-mod sqlite_remote_agent;
 mod sqlite_requirement;
 mod sqlite_settings;
 mod sqlite_skill_tag;
@@ -98,7 +96,6 @@ pub use provider_connection::IProviderConnectionRepository;
 pub use provider_model::IProviderModelRepository;
 pub use provider_model_capability::IProviderModelCapabilityRepository;
 pub use preset::{IPresetRepository, IPresetStateRepository, IPresetTagRepository};
-pub use remote_agent::IRemoteAgentRepository;
 pub use requirement::{
     IRequirementRepository, ListRequirementsParams, RequirementClaim,
     RequirementClaimResolution,
@@ -127,7 +124,6 @@ pub use sqlite_provider_model::SqliteProviderModelRepository;
 pub use sqlite_provider_model_capability::SqliteProviderModelCapabilityRepository;
 pub use sqlite_miniapp::SqliteMiniAppRepository;
 pub use sqlite_preset::{SqlitePresetRepository, SqlitePresetStateRepository, SqlitePresetTagRepository};
-pub use sqlite_remote_agent::SqliteRemoteAgentRepository;
 pub use sqlite_requirement::SqliteRequirementRepository;
 pub use sqlite_settings::SqliteSettingsRepository;
 pub use sqlite_skill_tag::SqliteSkillTagRepository;

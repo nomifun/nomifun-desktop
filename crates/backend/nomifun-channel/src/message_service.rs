@@ -1240,7 +1240,6 @@ fn parse_agent_type(s: &str) -> Result<AgentType, ChannelError> {
     match s {
         "acp" => Ok(AgentType::Acp),
         "openclaw-gateway" => Ok(AgentType::OpenclawGateway),
-        "remote" => Ok(AgentType::Remote),
         "nomi" => Ok(AgentType::Nomi),
         _ => Err(ChannelError::InvalidConfig(format!(
             "channel session names agent type '{s}', which no longer exists in this build"
@@ -1482,7 +1481,6 @@ mod tests {
             parse_agent_type("openclaw-gateway").unwrap(),
             AgentType::OpenclawGateway
         );
-        assert_eq!(parse_agent_type("remote").unwrap(), AgentType::Remote);
         assert_eq!(parse_agent_type("nomi").unwrap(), AgentType::Nomi);
     }
 

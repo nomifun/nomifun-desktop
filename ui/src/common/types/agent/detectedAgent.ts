@@ -12,11 +12,5 @@
  * engines; they are not detected Agents themselves.
  */
 
-/** Remote agent communication protocol */
-export type RemoteAgentProtocol = 'openclaw' | 'zeroclaw' | 'acp';
-
-/** Remote agent authentication method */
-export type RemoteAgentAuthType = 'bearer' | 'password' | 'none';
-
 /** Execution engine kinds — each uses a different protocol or runtime */
-export type DetectedAgentKind = 'acp' | 'remote' | 'nomi' | 'openclaw-gateway';
+export type DetectedAgentKind = 'acp' | 'nomi' | 'openclaw-gateway';

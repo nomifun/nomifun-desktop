@@ -908,15 +908,6 @@ const SendBox: React.FC<{
     [conversationContext?.type, handleExternalSelectionAppend]
   );
   useAddEventListener(
-    'remote.selected.file.append',
-    (items: FileSelectionItem[]) => {
-      if (conversationContext?.type === 'remote') {
-        handleExternalSelectionAppend(items);
-      }
-    },
-    [conversationContext?.type, handleExternalSelectionAppend]
-  );
-  useAddEventListener(
     'openclaw-gateway.selected.file.append',
     (items: FileSelectionItem[]) => {
       if (conversationContext?.type === 'openclaw-gateway') {
@@ -934,9 +925,6 @@ const SendBox: React.FC<{
           break;
         case 'acp':
           emitter.emit('acp.selected.file.append', [item]);
-          break;
-        case 'remote':
-          emitter.emit('remote.selected.file.append', [item]);
           break;
         case 'openclaw-gateway':
           emitter.emit('openclaw-gateway.selected.file.append', [item]);

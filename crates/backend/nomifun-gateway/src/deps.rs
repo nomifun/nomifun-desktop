@@ -99,9 +99,8 @@ pub struct GatewayDeps {
     pub hub_index_manager: nomifun_extension::HubIndexManager,
     pub hub_installer: nomifun_extension::HubInstaller,
     pub skill_paths: nomifun_extension::SkillPaths,
-    /// Agent catalog + remote agents (same instances as the agent routes).
+    /// Agent catalog (same instance as the agent routes).
     pub agent_service: std::sync::Arc<nomifun_ai_agent::AgentService>,
-    pub remote_agent_service: std::sync::Arc<nomifun_ai_agent::RemoteAgentService>,
     /// Client-preference repo backing the global model-failover config.
     pub client_pref_repo: std::sync::Arc<dyn nomifun_db::IClientPreferenceRepository>,
     /// One shared persistent collaboration facade. REST, gateway tools, boot

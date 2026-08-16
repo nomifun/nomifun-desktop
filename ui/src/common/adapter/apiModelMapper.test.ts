@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { fromApiConversation, fromApiResolvedPresetSnapshot } from './apiModelMapper';
-import { parseMcpServerId, parseMessageId, parseRemoteAgentId } from '../types/ids';
+import { parseMcpServerId, parseMessageId } from '../types/ids';
 
 // 最小 ApiConversation 片段：只构造 mapper 关心的字段
 const apiConv = (o: Record<string, unknown>) => ({
@@ -50,7 +50,6 @@ const thrownMessage = (run: () => unknown): string => {
 type MappedExtra =
   | {
       custom_workspace?: boolean;
-      remote_agent_id?: ReturnType<typeof parseRemoteAgentId>;
     }
   | null
   | undefined;
@@ -90,13 +89,6 @@ describe('fromApiConversation first-class fields', () => {
     expect(mapped.pinned).toBe(true);
     expect(mapped.pinned_at).toBe(1712345678000);
     expect(mapped.extra && 'pinned' in mapped.extra).toBe(false);
-  });
-
-  test('keeps the canonical remote-agent logical reference only', () => {
-    const remoteAgentId = parseRemoteAgentId('0190f5fe-7c00-7a00-8000-000000000001');
-    const extra = extraOf(apiConv({ type: 'remote', extra: { remote_agent_id: remoteAgentId } }));
-    expect(extra?.remote_agent_id).toBe(remoteAgentId);
-    expect(extra && 'remoteAgentId' in extra).toBe(false);
   });
 
   test('parses runtime active_turn_id as exact lifecycle authority', () => {

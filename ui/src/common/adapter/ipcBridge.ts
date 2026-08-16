@@ -208,7 +208,6 @@ import {
   parseCsMessageId,
   parseCsNoteId,
   parseRequirementId,
-  parseRemoteAgentId,
   parseMiniAppId,
   parseSshHostId,
   parseSkillPatternId,
@@ -243,7 +242,6 @@ import {
   type ChannelUserId,
   type KnowledgeBaseId,
   type RequirementId,
-  type RemoteAgentId,
   type SshHostId,
   type SkillPatternId,
   type TerminalId,
@@ -1722,61 +1720,6 @@ export const openclawConversation = {
 };
 
 // ---------------------------------------------------------------------------
-// Remote Agent — routed to /api/remote-agents/*
-// ---------------------------------------------------------------------------
-
-const fromApiRemoteAgent = (
-  value: import('@/common/types/agent/remoteAgentTypes').RemoteAgentConfig
-): import('@/common/types/agent/remoteAgentTypes').RemoteAgentConfig => ({
-  ...value,
-  remote_agent_id: parseRemoteAgentId(value.remote_agent_id),
-});
-
-export const remoteAgent = {
-  list: withResponseMap(
-    httpGet<import('@/common/types/agent/remoteAgentTypes').RemoteAgentConfig[], void>('/api/remote-agents'),
-    (items) => items.map(fromApiRemoteAgent)
-  ),
-  get: withResponseMap(
-    httpGet<
-      import('@/common/types/agent/remoteAgentTypes').RemoteAgentConfig | null,
-      { remote_agent_id: RemoteAgentId }
-    >((p) => `/api/remote-agents/${p.remote_agent_id}`),
-    (item) => item == null ? null : fromApiRemoteAgent(item)
-  ),
-  create: withResponseMap(
-    httpPost<
-      import('@/common/types/agent/remoteAgentTypes').RemoteAgentConfig,
-      import('@/common/types/agent/remoteAgentTypes').RemoteAgentInput
-    >('/api/remote-agents'),
-    fromApiRemoteAgent
-  ),
-  update: withResponseMap(
-    httpPut<
-      import('@/common/types/agent/remoteAgentTypes').RemoteAgentConfig,
-      {
-        remote_agent_id: RemoteAgentId;
-        updates: Partial<import('@/common/types/agent/remoteAgentTypes').RemoteAgentInput>;
-      }
-    >(
-      (p) => `/api/remote-agents/${p.remote_agent_id}`,
-      (p) => p.updates
-    ),
-    fromApiRemoteAgent
-  ),
-  delete: httpDelete<void, { remote_agent_id: RemoteAgentId }>(
-    (p) => `/api/remote-agents/${p.remote_agent_id}`
-  ),
-  testConnection: httpPost<void, { url: string; auth_type: string; auth_token?: string; allow_insecure?: boolean }>(
-    '/api/remote-agents/test-connection'
-  ),
-  handshake: httpPost<
-    { status: 'ok' | 'pending_approval' | 'error'; error?: string },
-    { remote_agent_id: RemoteAgentId }
-  >((p) => `/api/remote-agents/${p.remote_agent_id}/handshake`),
-};
-
-// ---------------------------------------------------------------------------
 // SSH host book — saved, reusable remote-host connection profiles.
 // Secrets are write-only from the client: the server returns them masked as
 // '***', never as plaintext/ciphertext.
@@ -3218,7 +3161,7 @@ export interface IConfirmMessageParams {
 }
 
 export interface ICreateConversationParams {
-  type: 'acp' | 'codex' | 'openclaw-gateway' | 'remote' | 'nomi';
+  type: 'acp' | 'codex' | 'openclaw-gateway' | 'nomi';
   name?: string;
   model: TProviderWithModel;
   /** Backend-resolved reusable launch configuration. */
@@ -3277,7 +3220,6 @@ export interface ICreateConversationParams {
     };
     /** Legacy marker for pre-provider-probe health-check conversations. */
     is_health_check?: boolean;
-    remote_agent_id?: import('../types/ids').RemoteAgentId;
     /** Binds a nomi conversation to a saved SSH host: the remote tool family
      *  operates that host. Optional companion `ssh_remote_cwd` sets the shell's
      *  starting directory (defaults to the remote $HOME). */

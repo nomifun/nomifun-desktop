@@ -21,7 +21,7 @@ describe('Guid initial-message idempotency', () => {
     const storageWrites = [
       "'initial-message-openclaw'",
       "'initial-message-nomi'",
-      "'initial-message-remote' : 'initial-message-acp'",
+      "'initial-message-acp'",
     ];
     for (const marker of storageWrites) {
       expect(source.includes(marker)).toBe(true);

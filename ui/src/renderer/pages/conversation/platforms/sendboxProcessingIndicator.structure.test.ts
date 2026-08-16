@@ -11,7 +11,6 @@ const sendBoxFiles = [
   './acp/AcpSendBox.tsx',
   './nomi/NomiSendBox.tsx',
   './BasicRuntimeSendBox.tsx',
-  './remote/RemoteSendBox.tsx',
   './openclaw/OpenClawSendBox.tsx',
 ];
 

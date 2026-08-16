@@ -326,7 +326,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       return;
     }
 
-    // Remaining agent path (ACP/remote/custom, including preset fallbacks)
+    // Remaining agent path (ACP/custom, including preset fallbacks)
     {
       // Agent-type fallback only applies to preset presets whose primary agent
       // was unavailable and got switched. For non-preset
@@ -350,7 +350,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       const agentConversationParams = buildAgentConversationParams({
         backend: agentBackend,
         name: entryPlan.conversationName,
-        // For row-scoped rows (custom ACP / remote) the backend factory
+        // For row-scoped rows (custom ACP) the backend factory
         // needs the actual catalog id — `backend` collapses to the `custom`
         // slot so it cannot discriminate between rows on its own.
         agent_id: acpAgentInfo?.id,
@@ -359,7 +359,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         workspace: finalWorkspace,
         model: current_model!,
         cli_path: acpAgentInfo?.cli_path,
-        remote_agent_id: acpAgentInfo?.remote_agent_id,
         custom_workspace: isCustomWorkspace,
         is_preset,
         session_mode: selectedMode,
@@ -401,10 +400,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         };
         if (entryPlan.sendInitialMessage) {
           const target = conversationTarget(conversation.id);
-          const initialMessageKey = sessionStorageKey(
-            agentConversationParams.type === 'remote' ? 'initial-message-remote' : 'initial-message-acp',
-            target
-          );
+          const initialMessageKey = sessionStorageKey('initial-message-acp', target);
           sessionStorage.setItem(initialMessageKey, JSON.stringify(initialMessage));
         }
 

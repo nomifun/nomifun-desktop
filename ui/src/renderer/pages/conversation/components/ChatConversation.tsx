@@ -22,7 +22,6 @@ import AcpChat from '../platforms/acp/AcpChat';
 import ChatLayout, { type ChatLayoutProps } from './ChatLayout';
 import ChatSlider from './ChatSlider.tsx';
 import OpenClawChat from '../platforms/openclaw/OpenClawChat';
-import RemoteChat from '../platforms/remote/RemoteChat';
 import { saveNomiDefaultModel } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
 import { configService } from '@/common/config/configService';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
@@ -582,17 +581,6 @@ const ChatConversation: React.FC<{
             loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
           />
         );
-      case 'remote':
-        return (
-          <RemoteChat
-            key={conversation.id}
-            conversation_id={conversation.id}
-            workspace={conversation.extra?.workspace ?? ''}
-            cron_job_id={conversation.cron_job_id}
-            hideSendBox={hideSendBox}
-            loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
-          />
-        );
       default:
         return null;
     }
@@ -682,9 +670,7 @@ const ChatConversation: React.FC<{
                 // never reach this branch, so the chain starts at non-ACP types.
                 conversation?.type === 'openclaw-gateway'
                   ? 'openclaw-gateway'
-                  : conversation?.type === 'remote'
-                    ? 'remote'
-                    : undefined,
+                  : undefined,
           agent_name: conversationAgentName,
         };
 
