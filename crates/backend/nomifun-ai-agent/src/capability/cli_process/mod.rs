@@ -101,7 +101,7 @@ async fn cleanup_spawned_child_before_error(
 ///
 /// Supports two modes:
 ///
-/// 1. **JSON-lines mode** (Gemini, OpenClaw, Nanobot): stdout is read as line-delimited
+/// 1. **JSON-lines mode** (Gemini, OpenClaw): stdout is read as line-delimited
 ///    JSON and broadcast via `subscribe()`. Messages are sent via `send()`.
 ///
 /// 2. **SDK mode** (ACP): call [`take_stdio`](Self::take_stdio) to hand raw

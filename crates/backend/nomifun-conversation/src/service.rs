@@ -12290,10 +12290,7 @@ fn project_preset_runtime_context(
             object.insert("preset_rules".to_owned(), context);
             object.remove("preset_context");
         }
-        AgentType::Acp
-        | AgentType::OpenclawGateway
-        | AgentType::Nanobot
-        | AgentType::Remote => {
+        AgentType::Acp | AgentType::OpenclawGateway | AgentType::Remote => {
             object.insert("preset_context".to_owned(), context);
             object.remove("preset_rules");
         }
@@ -13869,7 +13866,6 @@ mod tests {
     fn enum_to_db_agent_type() {
         use nomifun_common::AgentType;
         assert_eq!(enum_to_db(&AgentType::Acp).unwrap(), "acp");
-        assert_eq!(enum_to_db(&AgentType::Nanobot).unwrap(), "nanobot");
         assert_eq!(enum_to_db(&AgentType::OpenclawGateway).unwrap(), "openclaw-gateway");
     }
 

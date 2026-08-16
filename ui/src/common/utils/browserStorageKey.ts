@@ -21,7 +21,6 @@ export type BrowserStorageFeature =
   | 'workspace-preview'
   | 'draft'
   | 'initial-message-acp'
-  | 'initial-message-nanobot'
   | 'initial-message-nomi'
   | 'initial-message-openclaw'
   | 'initial-message-remote'

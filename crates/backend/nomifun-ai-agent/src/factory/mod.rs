@@ -6,7 +6,6 @@ pub mod provider_config;
 mod acp;
 pub(crate) mod construction_guard;
 mod context;
-mod nanobot;
 pub(crate) mod nomi;
 mod openclaw;
 mod remote;
@@ -294,7 +293,7 @@ async fn build_agent(
         deps.authoritative_user_id.as_ref(),
     );
 
-    // External ACP/OpenClaw/Nanobot/Remote runtimes execute arbitrary code as
+    // External ACP/OpenClaw/Remote runtimes execute arbitrary code as
     // the backend OS user.  Without an OS/container sandbox they can never be
     // made safe by hiding individual tools, so model-only principals are
     // rejected at the single factory boundary.  Nomi remains available under
@@ -310,7 +309,6 @@ async fn build_agent(
     match options.agent_type {
         AgentType::Acp => acp::build(deps, options, ctx).await,
         AgentType::OpenclawGateway => openclaw::build(deps, options, ctx).await,
-        AgentType::Nanobot => nanobot::build(deps, options, ctx).await,
         AgentType::Remote => remote::build(deps, options, ctx).await,
         AgentType::Nomi => nomi::build(deps, options, ctx, authority).await,
     }

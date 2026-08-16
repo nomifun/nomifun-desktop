@@ -925,15 +925,6 @@ const SendBox: React.FC<{
     },
     [conversationContext?.type, handleExternalSelectionAppend]
   );
-  useAddEventListener(
-    'nanobot.selected.file.append',
-    (items: FileSelectionItem[]) => {
-      if (conversationContext?.type === 'nanobot') {
-        handleExternalSelectionAppend(items);
-      }
-    },
-    [conversationContext?.type, handleExternalSelectionAppend]
-  );
 
   const emitSelectedFileAppend = useCallback(
     (item: FileOrFolderItem) => {
@@ -949,9 +940,6 @@ const SendBox: React.FC<{
           break;
         case 'openclaw-gateway':
           emitter.emit('openclaw-gateway.selected.file.append', [item]);
-          break;
-        case 'nanobot':
-          emitter.emit('nanobot.selected.file.append', [item]);
           break;
         default:
           break;

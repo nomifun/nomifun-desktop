@@ -104,27 +104,21 @@ export interface BasicRuntimeStreamHooks {
  * hooks.
  */
 export interface BasicRuntimeSendBoxConfig {
-  /** Tag used in console warnings, e.g. '[NanobotSendBox]'. */
+  /** Tag used in console warnings, e.g. '[RemoteSendBox]'. */
   logTag: string;
   /** Workspace-rail selection events mirrored by this send box. */
   selectedFileEvents: {
-    set: 'nanobot.selected.file' | 'remote.selected.file' | 'openclaw-gateway.selected.file';
-    append:
-      | 'nanobot.selected.file.append'
-      | 'remote.selected.file.append'
-      | 'openclaw-gateway.selected.file.append';
-    clear: 'nanobot.selected.file.clear' | 'remote.selected.file.clear' | 'openclaw-gateway.selected.file.clear';
+    set: 'remote.selected.file' | 'openclaw-gateway.selected.file';
+    append: 'remote.selected.file.append' | 'openclaw-gateway.selected.file.append';
+    clear: 'remote.selected.file.clear' | 'openclaw-gateway.selected.file.clear';
   };
   /**
    * sessionStorage feature names for the guid-page initial-message delivery.
    * Note the historical suffixes: openclaw uses 'initial-message-openclaw',
    * not the 'openclaw-gateway' conversation type.
    */
-  initialMessageFeature: 'initial-message-nanobot' | 'initial-message-remote' | 'initial-message-openclaw';
-  initialMessageProcessedFeature:
-    | 'initial-message-processed-nanobot'
-    | 'initial-message-processed-remote'
-    | 'initial-message-processed-openclaw';
+  initialMessageFeature: 'initial-message-remote' | 'initial-message-openclaw';
+  initialMessageProcessedFeature: 'initial-message-processed-remote' | 'initial-message-processed-openclaw';
   /** Message send channel (openclaw routes through ipcBridge.openclawConversation). */
   sendMessage: typeof ipcBridge.conversation.sendMessage;
   /** Turn stream channel (openclaw routes through ipcBridge.openclawConversation). */
@@ -141,7 +135,7 @@ export interface BasicRuntimeSendBoxConfig {
   /**
    * Delay before processing a pending guid-page initial message, giving the
    * component time to mount and the stream listener to attach. Omit to send
-   * immediately (nanobot is stateless and needs no warmup).
+   * immediately when a runtime needs no warmup.
    */
   initialMessageDelayMs?: number;
   /** Gate initial-message processing on runtime hydration (openclaw). */
@@ -151,12 +145,12 @@ export interface BasicRuntimeSendBoxConfig {
    * - 'on-mount': read from the conversation as soon as the box mounts
    *   (remote / openclaw).
    * - 'at-initial-message': resolved only while delivering a guid-page initial
-   *   message (nanobot keeps its historical behavior: direct sends before any
-   *   initial delivery format against an empty workspace path).
+   *   message (direct sends before any initial delivery format against an
+   *   empty workspace path).
    */
   workspaceResolution: 'on-mount' | 'at-initial-message';
   /**
-   * Offer the clear-context action. Nanobot intentionally omits it: it has no
+   * Offer the clear-context action. A runtime omits it when it has no
    * resumable session history and the backend reports clear-context as
    * unsupported.
    */
@@ -165,11 +159,11 @@ export interface BasicRuntimeSendBoxConfig {
   backendName: string;
   /** Optional async backend name resolver (remote agent name). */
   resolveBackendName?: (conversation_id: ConversationId) => Promise<string | undefined>;
-  /** Re-emit the selection event when items change inside the send box (nanobot / openclaw). */
+  /** Re-emit the selection event when items change inside the send box (openclaw). */
   emitSelectedFileOnChange?: boolean;
-  /** Render closable tags for selected workspace folders (nanobot / openclaw). */
+  /** Render closable tags for selected workspace folders (openclaw). */
   showFolderTags?: boolean;
-  /** Report pending attachments to the SendBox (nanobot / openclaw). */
+  /** Report pending attachments to the SendBox (openclaw). */
   reportPendingAttachments?: boolean;
   /** SendBox multiline behavior (remote / openclaw force multiline). */
   defaultMultiLine?: boolean;
@@ -184,7 +178,7 @@ const EMPTY_AT_PATH: Array<string | FileOrFolderItem> = [];
 const EMPTY_UPLOAD_FILES: string[] = [];
 
 /**
- * Shared send box for the three "basic runtime" platforms (nanobot / remote /
+ * Shared send box for the "basic runtime" platforms (remote /
  * openclaw-gateway): identical turn-lifecycle hydration, response-stream
  * subscription, draft persistence, command queue and stop wiring, with the
  * platform differences captured by {@link BasicRuntimeSendBoxConfig}.

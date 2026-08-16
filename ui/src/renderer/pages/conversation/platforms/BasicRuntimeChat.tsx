@@ -30,7 +30,7 @@ export interface BasicRuntimeChatProps {
 
 /**
  * Shared chat surface for the three "basic runtime" platforms
- * (nanobot / remote / openclaw-gateway).
+ * (remote / openclaw-gateway).
  *
  * These platforms render an identical message list + send box shell; the only
  * platform-specific parts are the ConversationProvider `type` and the send box
@@ -39,7 +39,7 @@ export interface BasicRuntimeChatProps {
  * are intentionally not built on this factory.
  */
 export function createBasicRuntimeChat(
-  type: 'nanobot' | 'remote' | 'openclaw-gateway',
+  type: 'remote' | 'openclaw-gateway',
   PlatformSendBox: React.ComponentType<{ conversation_id: ConversationId }>
 ) {
   const BasicRuntimeChat: React.FC<BasicRuntimeChatProps> = ({

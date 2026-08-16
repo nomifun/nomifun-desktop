@@ -155,7 +155,7 @@ fn merge_chat_kind(existing: &str, incoming: &str) -> Result<String, DbError> {
 
 fn validate_agent_type(agent_type: &str, context: &str) -> Result<(), DbError> {
     match agent_type {
-        "acp" | "openclaw-gateway" | "nanobot" | "remote" | "nomi" => Ok(()),
+        "acp" | "openclaw-gateway" | "remote" | "nomi" => Ok(()),
         _ => Err(DbError::Conflict(format!(
             "{context} agent type '{agent_type}' is not supported"
         ))),

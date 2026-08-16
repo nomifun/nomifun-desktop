@@ -11,7 +11,7 @@ import type { RemoteAgentId } from '@/common/types/ids';
 
 /**
  * Available agent entry returned by the backend.
- * `agent_type` is the top-level discriminant (acp, nomi, nanobot, etc.).
+ * `agent_type` is the top-level discriminant (acp, nomi, etc.).
  * `backend` is only present when `agent_type === 'acp'` (claude, qwen, codex, …).
  */
 export type AvailableAgent = {

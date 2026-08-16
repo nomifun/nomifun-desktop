@@ -6,7 +6,7 @@ const readSource = (relativePath: string): string =>
 
 const queueSource = readSource('./useConversationCommandQueue.ts');
 const acpSource = readSource('./acp/AcpSendBox.tsx');
-// The nanobot / remote / openclaw send boxes share one implementation; the
+// The remote / openclaw send boxes share one implementation; the
 // OpenClaw file still hosts the platform-only Star Office install flow.
 const basicRuntimeSource = readSource('./BasicRuntimeSendBox.tsx');
 const openClawSource = readSource('./openclaw/OpenClawSendBox.tsx');

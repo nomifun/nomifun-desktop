@@ -21,7 +21,7 @@ pub struct ChannelSettingsService {
 /// Resolved agent configuration for a channel platform.
 ///
 /// `backend` is only meaningful for ACP agents (claude, gemini, codex, …).
-/// Non-ACP agent types (nomi, nanobot, remote, …) have `backend = None`.
+/// Non-ACP agent types (nomi, remote, …) have `backend = None`.
 #[derive(Debug, Clone)]
 pub struct ResolvedAgentConfig {
     pub agent_type: String,

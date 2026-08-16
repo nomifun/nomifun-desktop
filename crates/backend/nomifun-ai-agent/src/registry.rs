@@ -600,9 +600,13 @@ mod tests {
         // `list_all_including_hidden` bypasses the available/enabled
         // filter so this assertion keeps counting the seed rows even
         // when none of the CLIs are installed on the test host.
+        //
+        // 19, not the baseline's 20: the seeded row for a retired engine no
+        // longer decodes into an `AgentType`, so `decode_row` drops it until
+        // the migration deletes the row.
         let reg = registry().await;
         let all = reg.list_all_including_hidden().await;
-        assert_eq!(all.len(), 20);
+        assert_eq!(all.len(), 19);
     }
 
     #[tokio::test]
@@ -672,11 +676,14 @@ mod tests {
         // Seed counts — exercised against the unfiltered view because
         // on CI hosts the CLIs aren't installed, so `list_by_agent_type`
         // (which applies the visibility filter) would report zero.
+        //
+        // Rows whose `agent_type` names a retired engine no longer decode
+        // (`parse_agent_type` returns `None` and `decode_row` drops them), so
+        // they are absent here until the migration deletes them.
         let reg = registry().await;
         let all = reg.list_all_including_hidden().await;
         let count = |t: AgentType| all.iter().filter(|m| m.agent_type == t).count();
         assert_eq!(count(AgentType::Acp), 17);
-        assert_eq!(count(AgentType::Nanobot), 1);
         assert_eq!(count(AgentType::OpenclawGateway), 1);
         assert_eq!(count(AgentType::Nomi), 1);
     }
@@ -792,7 +799,7 @@ mod tests {
     async fn diagnostic_snapshot_pairs_rows_with_reasons() {
         let reg = registry().await;
         let snapshot = reg.diagnostic_snapshot().await;
-        assert_eq!(snapshot.len(), 20, "every row appears once");
+        assert_eq!(snapshot.len(), 19, "every row appears once");
 
         for (meta, reason) in &snapshot {
             match (meta.available, reason) {

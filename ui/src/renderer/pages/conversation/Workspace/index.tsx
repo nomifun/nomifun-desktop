@@ -42,7 +42,7 @@ const ChatWorkspace: React.FC<WorkspaceProps> = ({
   conversation_id,
   workspace,
   isTemporaryWorkspace: isTemporaryWorkspaceProp,
-  eventPrefix = 'acp',
+  eventPrefix,
   messageApi,
   extraTabs,
 }) => {

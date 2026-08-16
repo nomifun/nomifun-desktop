@@ -11,7 +11,7 @@ use crate::attachments::PromptAttachment;
 /// (`crates/backend/nomifun-ai-agent/src/factory/nomi.rs`) consumes the
 /// `requirement_sink`, and only `NomiAgentManager` registers
 /// `RequirementCompleteTool` / `RequirementUpdateStatusTool` on the engine.
-/// Every other engine (ACP, Openclaw, Nanobot, Remote) ships without
+/// Every other engine (ACP, Openclaw, Remote) ships without
 /// them *in-process* — though ACP gains an equivalent declaration channel via
 /// the injected requirement MCP server (see [`session_has_requirement_tools`]).
 ///
@@ -388,7 +388,6 @@ mod tests {
         for at in [
             AgentType::Acp,
             AgentType::OpenclawGateway,
-            AgentType::Nanobot,
             AgentType::Remote,
         ] {
             let p =
@@ -476,7 +475,6 @@ mod tests {
         // Other engines never have them, even with the flag set.
         for at in [
             AgentType::OpenclawGateway,
-            AgentType::Nanobot,
             AgentType::Remote,
         ] {
             assert!(!session_has_requirement_tools(at, true), "{at:?}: no requirement tools");
@@ -489,7 +487,6 @@ mod tests {
         for at in [
             AgentType::Acp,
             AgentType::OpenclawGateway,
-            AgentType::Nanobot,
             AgentType::Remote,
         ] {
             assert!(

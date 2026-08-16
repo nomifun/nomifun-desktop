@@ -22,7 +22,7 @@ impl CliAgentProcess {
     /// - Read stderr and buffer the last [`STDERR_BUFFER_MAX`] bytes
     /// - Monitor process exit
     ///
-    /// This is used by Gemini, OpenClaw, Nanobot agents.
+    /// This is used by Gemini and OpenClaw agents.
     pub async fn spawn(config: CommandSpec) -> Result<Self, AppError> {
         let mut cmd = CmdBuilder::new(&config.command);
         cmd.args(&config.args)

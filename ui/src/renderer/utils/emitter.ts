@@ -31,10 +31,6 @@ interface EventTypes {
   'openclaw-gateway.selected.file.append': [Array<string | FileOrFolderItem>];
   'openclaw-gateway.selected.file.clear': void;
   'openclaw-gateway.workspace.refresh': void;
-  'nanobot.selected.file': [Array<string | FileOrFolderItem>];
-  'nanobot.selected.file.append': [Array<string | FileOrFolderItem>];
-  'nanobot.selected.file.clear': void;
-  'nanobot.workspace.refresh': void;
   'remote.selected.file': [Array<string | FileOrFolderItem>];
   'remote.selected.file.append': [Array<string | FileOrFolderItem>];
   'remote.selected.file.clear': void;

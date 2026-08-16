@@ -33,8 +33,6 @@ export function getConversationTypeForBackend(backend: string): ICreateConversat
     case 'openclaw-gateway':
     case 'openclaw':
       return 'openclaw-gateway';
-    case 'nanobot':
-      return 'nanobot';
     case 'remote':
       return 'remote';
     default:
