@@ -103,7 +103,18 @@ data, or user-visible changes, run verification, include it in the plan if a pla
 a final all-completed update_plan snapshot.
  - After changing code, verify before reporting done: run the project's build \
 and tests (or the narrowest command that exercises your change) with Bash, and \
-fix what you broke. Don't claim something works that you haven't run.",
+fix what you broke. Don't claim something works that you haven't run.
+ - When you were given a spec (README, task file, issue text), re-read it before \
+reporting the work done, and check each required behavior against what you actually built. \
+Your own new tests are not evidence that the spec is met: tests written from memory encode what \
+you implemented, not what was asked. Never invent an interface the spec did not ask for, and if a \
+requirement is ambiguous, follow the spec's literal wording rather than a design you prefer.
+ - Never weaken existing tests to make a change pass: do not delete, skip, rename, or loosen \
+assertions you did not write, and do not remove exported symbols other code may depend on. If an \
+existing test genuinely encodes wrong behavior, say so explicitly instead of quietly editing it.
+ - Keep what you write portable: no machine-specific absolute paths, home directories, or \
+usernames baked into source, tests, or config. Resolve paths relative to the project or from the \
+environment.",
     );
     s.push_str(
         "\n - Treat every tool or command error as a hard checkpoint. Do not run \
@@ -1068,6 +1079,45 @@ mod tests {
         assert!(
             result.contains("verification"),
             "tool guidance should require verification before finalizing"
+        );
+    }
+
+    #[test]
+    fn tool_guidance_contains_spec_fidelity_and_portability_rules() {
+        // A model that passes its own tests around a self-invented interface
+        // shipped a contract-violating implementation while reporting success,
+        // so the always-on guidance has to name each of these explicitly.
+        let result = build_system_prompt(
+            &mut SystemPromptCache::new(),
+            None,
+            "/tmp",
+            "test-model",
+            &[],
+            None,
+            None,
+            false,
+            false,
+            false,
+        );
+        assert!(
+            result.contains("re-read it before"),
+            "guidance should require re-reading the spec before reporting done"
+        );
+        assert!(
+            result.contains("not evidence that the spec is met"),
+            "guidance should deny that self-written tests prove the contract"
+        );
+        assert!(
+            result.contains("invent an interface"),
+            "guidance should forbid inventing unrequested interfaces"
+        );
+        assert!(
+            result.contains("Never weaken existing tests"),
+            "guidance should forbid weakening pre-existing tests"
+        );
+        assert!(
+            result.contains("absolute paths"),
+            "guidance should forbid machine-specific absolute paths"
         );
     }
 

@@ -290,11 +290,19 @@ const DeliverableRow: React.FC<{
  * completed turn, rendered right below that turn's final assistant reply.
  * Renders nothing while availability is being confirmed and nothing when no
  * trustworthy deliverable remains — an empty card must never appear.
+ *
+ * `partial` marks a turn whose file events may extend past the loaded history
+ * window. The card is a projection over hydrated messages, so a turn with more
+ * tool events than the window silently lost items after a reload (an observed
+ * turn showed 4 files live and 3 after refresh, while the workspace Changes
+ * panel — which reads a snapshot rather than messages — still showed 4). A count
+ * that cannot be trusted must not be presented as a settled total.
  */
 const TurnDeliverablesCard: React.FC<{
   items: TurnDeliverableItem[];
   workspace?: string;
-}> = ({ items, workspace }) => {
+  partial?: boolean;
+}> = ({ items, workspace, partial = false }) => {
   const { t } = useTranslation();
   const { pending, available } = useTurnDeliverableAvailability(items, workspace);
   const [showAll, setShowAll] = useState(false);
@@ -314,25 +322,31 @@ const TurnDeliverablesCard: React.FC<{
   return (
     <div
       data-testid='turn-deliverables-card'
+      data-partial={partial ? 'true' : undefined}
       className='w-full box-border rounded-8px overflow-hidden border border-solid border-[var(--aou-2)]'
     >
       <div className='flex items-center gap-8px px-12px py-8px select-none'>
         <span className='w-8px h-8px rounded-full shrink-0' style={{ backgroundColor: diffColors.addition }}></span>
         <span className='text-14px text-t-primary font-medium'>
-          {verifiedImages.length === available.length
-            ? t('messages.turnDeliverables.imagesTitle', {
-                count: verifiedImages.length,
-                defaultValue: 'Generated {{count}} images',
+          {partial
+            ? t('messages.turnDeliverables.partialTitle', {
+                count: available.length,
+                defaultValue: 'Showing {{count}} changed files from this turn (scroll up to load the rest)',
               })
-            : verifiedImages.length > 0
-              ? t('messages.turnDeliverables.mixedTitle', {
-                  count: available.length,
-                  defaultValue: 'Generated {{count}} items',
+            : verifiedImages.length === available.length
+              ? t('messages.turnDeliverables.imagesTitle', {
+                  count: verifiedImages.length,
+                  defaultValue: 'Generated {{count}} images',
                 })
-              : t('messages.turnDeliverables.title', {
-                  count: fileDeliverables.length,
-                  defaultValue: 'Generated {{count}} files',
-                })}
+              : verifiedImages.length > 0
+                ? t('messages.turnDeliverables.mixedTitle', {
+                    count: available.length,
+                    defaultValue: 'Generated {{count}} items',
+                  })
+                : t('messages.turnDeliverables.title', {
+                    count: fileDeliverables.length,
+                    defaultValue: 'Generated {{count}} files',
+                  })}
         </span>
       </div>
 

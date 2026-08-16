@@ -1368,6 +1368,11 @@ const SendBox: React.FC<{
 
   const steerMessageHandler = () => {
     if (!onSteer || isUploading || isStopping) return;
+    // The draft is cleared eagerly so an in-flight steer cannot overwrite text
+    // the user types while it resolves. Recovery on failure is the handler's
+    // job, not this layer's: the Nomi handler diverts a failed interjection into
+    // the persisted command queue, which survives navigation in a way restoring
+    // local state would not.
     const finalMessage = composeAndClear();
     if (finalMessage == null) return;
     setIsLoading(true);
