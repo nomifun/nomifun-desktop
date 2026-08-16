@@ -79,26 +79,17 @@ pub struct ChannelStreamRelay {
 #[derive(Default)]
 struct TerminalToolCallGate {
     tool_calls: std::collections::HashSet<String>,
-    acp_tool_calls: std::collections::HashSet<String>,
 }
 
 impl TerminalToolCallGate {
     fn accepts(&mut self, event: &AgentStreamEvent) -> bool {
-        use nomifun_ai_agent::protocol::events::{AcpToolCallStatus, ToolCallStatus};
+        use nomifun_ai_agent::protocol::events::ToolCallStatus;
 
         match event {
             AgentStreamEvent::ToolCall(data) => match data.status {
                 ToolCallStatus::Running => !self.tool_calls.contains(&data.call_id),
                 ToolCallStatus::Completed | ToolCallStatus::Error => {
                     self.tool_calls.insert(data.call_id.clone())
-                }
-            },
-            AgentStreamEvent::AcpToolCall(data) => match data.update.status {
-                Some(AcpToolCallStatus::Completed | AcpToolCallStatus::Failed) => self
-                    .acp_tool_calls
-                    .insert(data.update.tool_call_id.clone()),
-                Some(AcpToolCallStatus::Pending | AcpToolCallStatus::InProgress) | None => {
-                    !self.acp_tool_calls.contains(&data.update.tool_call_id)
                 }
             },
             _ => true,
@@ -1560,144 +1551,6 @@ mod media_tests {
                 .as_deref()
                 .is_some_and(|text| text.contains("无文本输出"))
         }));
-    }
-
-    #[tokio::test]
-    async fn relay_uploads_acp_artifact_from_terminal_completed_frame() {
-        use nomifun_ai_agent::artifact_store::{ArtifactKind, PersistedArtifact};
-        use nomifun_ai_agent::protocol::events::{
-            AcpToolCallContentItem, AcpToolCallEventData, AcpToolCallSessionUpdateKind,
-            AcpToolCallStatus, AcpToolCallUpdateData, FinishEventData,
-        };
-
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("acp-image.png");
-        let bytes = b"verified-acp-image".to_vec();
-        std::fs::write(&path, &bytes).unwrap();
-        let artifact = PersistedArtifact {
-            id: PersistedArtifactId::new().into_string(),
-            kind: ArtifactKind::Image,
-            mime_type: "image/png".into(),
-            path: path.to_string_lossy().into_owned(),
-            relative_path: "nomifun-artifacts/acp-image.png".into(),
-            size_bytes: bytes.len() as u64,
-            sha256: format!("{:x}", Sha256::digest(&bytes)),
-        };
-        let event = |status, session_update| {
-            AgentStreamEvent::AcpToolCall(AcpToolCallEventData {
-                session_id: "sess-1".into(),
-                update: AcpToolCallUpdateData {
-                    session_update,
-                    tool_call_id: "tool-image".into(),
-                    status: Some(status),
-                    title: None,
-                    kind: None,
-                    raw_input: None,
-                    raw_output: None,
-                    content: Some(vec![AcpToolCallContentItem::Artifact {
-                        artifact: artifact.clone(),
-                        source_uri: None,
-                    }]),
-                    locations: None,
-                },
-                meta: None,
-            })
-        };
-
-        let recorder = Arc::new(MessageRecorder::new());
-        let relay = ChannelStreamRelay::new(
-            cfg(PluginType::Telegram),
-            recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
-            None,
-        );
-        let (tx, rx) = tokio::sync::broadcast::channel(8);
-        tx.send(event(
-            AcpToolCallStatus::InProgress,
-            AcpToolCallSessionUpdateKind::ToolCall,
-        ))
-        .unwrap();
-        tx.send(event(
-            AcpToolCallStatus::Completed,
-            AcpToolCallSessionUpdateKind::ToolCallUpdate,
-        ))
-        .unwrap();
-        tx.send(AgentStreamEvent::Finish(FinishEventData {
-            session_id: None,
-            stop_reason: None,
-        }))
-        .unwrap();
-        drop(tx);
-
-        relay.run(rx).await;
-
-        let media = recorder.take_media();
-        assert_eq!(media.len(), 1, "only the terminal ACP receipt is uploadable");
-        assert_eq!(media[0].bytes, bytes);
-        assert_eq!(media[0].kind, MediaKind::Image);
-    }
-
-    #[tokio::test]
-    async fn relay_does_not_upload_failed_acp_artifact_receipt() {
-        use nomifun_ai_agent::artifact_store::{ArtifactKind, PersistedArtifact};
-        use nomifun_ai_agent::protocol::events::{
-            AcpToolCallContentItem, AcpToolCallEventData, AcpToolCallSessionUpdateKind,
-            AcpToolCallStatus, AcpToolCallUpdateData, ErrorEventData,
-        };
-
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("failed-acp-image.png");
-        let bytes = b"failed-acp-image";
-        std::fs::write(&path, bytes).unwrap();
-        let artifact = PersistedArtifact {
-            id: PersistedArtifactId::new().into_string(),
-            kind: ArtifactKind::Image,
-            mime_type: "image/png".into(),
-            path: path.to_string_lossy().into_owned(),
-            relative_path: "nomifun-artifacts/failed-acp-image.png".into(),
-            size_bytes: bytes.len() as u64,
-            sha256: format!("{:x}", Sha256::digest(bytes)),
-        };
-        let recorder = Arc::new(MessageRecorder::new());
-        let relay = ChannelStreamRelay::new(
-            cfg(PluginType::Telegram),
-            recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
-            None,
-        );
-        let (tx, rx) = tokio::sync::broadcast::channel(8);
-        tx.send(AgentStreamEvent::AcpToolCall(AcpToolCallEventData {
-            session_id: "sess-1".into(),
-            update: AcpToolCallUpdateData {
-                session_update: AcpToolCallSessionUpdateKind::ToolCallUpdate,
-                tool_call_id: "tool-image".into(),
-                status: Some(AcpToolCallStatus::Failed),
-                title: None,
-                kind: None,
-                raw_input: None,
-                raw_output: None,
-                content: Some(vec![AcpToolCallContentItem::Artifact {
-                    artifact,
-                    source_uri: None,
-                }]),
-                locations: None,
-            },
-            meta: None,
-        }))
-        .unwrap();
-        tx.send(AgentStreamEvent::Error(ErrorEventData::legacy(
-            "artifact generation failed",
-            None,
-        )))
-        .unwrap();
-        drop(tx);
-
-        relay.run(rx).await;
-
-        assert!(
-            recorder.take_media().is_empty(),
-            "a Failed ACP frame must never enter the upload queue"
-        );
     }
 
     #[tokio::test]

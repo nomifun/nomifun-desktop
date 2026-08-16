@@ -162,7 +162,7 @@ async fn serve_authenticated_connection<S>(
     // This is an ephemeral session identity, not a display label. Keep it in
     // the same canonical UUIDv7 shape as every other v3 business/session ID.
     let process_session_id = generate_id();
-    let policy = resolve_write_policy(WriteSurface::TerminalAcp, &binding);
+    let policy = resolve_write_policy(WriteSurface::Terminal, &binding);
     // Falling back to all registered bases is a read-only convenience for an
     // unbound/empty workspace. Write authority requires a real, non-empty
     // persisted binding in addition to its writeback policy. Matching the

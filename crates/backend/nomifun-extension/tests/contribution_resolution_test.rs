@@ -77,55 +77,6 @@ fn make_loaded_extension_with_i18n(name: &str, dir: &str, i18n: I18nConfig) -> L
 }
 
 // ---------------------------------------------------------------------------
-// CR-1: ACP Adapter resolution
-// ---------------------------------------------------------------------------
-
-#[test]
-fn cr1_acp_adapter_resolved_with_env_and_avatar() {
-    unsafe { std::env::set_var("_CR1_API_KEY", "test-key-123") };
-
-    let mut env = HashMap::new();
-    env.insert("API_KEY".into(), "${_CR1_API_KEY}".into());
-
-    let contributes = ExtContributes {
-        acp_adapters: vec![ExtAcpAdapter {
-            id: "claude-adapter".into(),
-            name: "Claude Adapter".into(),
-            description: Some("Claude via ACP".into()),
-            cli_command: Some("claude".into()),
-            default_cli_path: None,
-            acp_args: vec!["--dangerously-skip-permissions".into()],
-            env,
-            avatar: Some("icons/claude.png".into()),
-            auth_required: Some(true),
-            supports_streaming: Some(true),
-            connection_type: Some("stdio".into()),
-            endpoint: None,
-            models: vec!["claude-sonnet-4-20250514".into()],
-            yolo_mode: Some(serde_json::json!({
-                "type": "session"
-            })),
-            health_check: None,
-            api_key_fields: vec![],
-        }],
-        ..Default::default()
-    };
-
-    let ext = make_loaded_extension("claude-ext", "/ext/claude-ext", contributes);
-    let result = resolve_extension_contributions(&ext);
-
-    assert_eq!(result.acp_adapters.len(), 1);
-    let adapter = &result.acp_adapters[0];
-    assert_eq!(adapter.extension_name, "claude-ext");
-    assert_eq!(adapter.id, "claude-adapter");
-    assert_eq!(adapter.cli_command.as_deref(), Some("claude"));
-    assert_eq!(adapter.env["API_KEY"], "test-key-123");
-    assert!(adapter.avatar.as_ref().unwrap().contains("icons/claude.png"));
-
-    unsafe { std::env::remove_var("_CR1_API_KEY") };
-}
-
-// ---------------------------------------------------------------------------
 // CR-2: MCP Server resolution
 // ---------------------------------------------------------------------------
 

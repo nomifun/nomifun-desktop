@@ -702,7 +702,7 @@ const NomiSendBox: React.FC<{
       if (mode === currentMode) return;
       try {
         await prepareRuntimeSync();
-        await ipcBridge.acpConversation.setMode.invoke({ conversation_id, mode });
+        await ipcBridge.agentConversation.setMode.invoke({ conversation_id, mode });
         setCurrentMode(mode);
         void savePreferredMode('nomi', mode);
         Message.success(t('agentMode.switchSuccess'));
@@ -720,7 +720,7 @@ const NomiSendBox: React.FC<{
     if (!conversation_id) return;
     let cancelled = false;
     void prepareRuntimeSync()
-      .then(() => ipcBridge.acpConversation.getMode.invoke({ conversation_id }))
+      .then(() => ipcBridge.agentConversation.getMode.invoke({ conversation_id }))
       .then((result) => {
         if (cancelled || !result) return;
         if (result.initialized !== false) {
@@ -978,7 +978,7 @@ const NomiSendBox: React.FC<{
         disabled={!current_model?.use_model}
         placeholder={
           current_model?.use_model
-            ? t('acp.sendbox.placeholder', {
+            ? t('agent.sendbox.placeholder', {
                 backend: agent_name || 'Nomi',
                 defaultValue: `Send message to {{backend}}...`,
               })

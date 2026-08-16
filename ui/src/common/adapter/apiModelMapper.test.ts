@@ -12,7 +12,7 @@ import { parseMcpServerId, parseMessageId } from '../types/ids';
 const apiConv = (o: Record<string, unknown>) => ({
   conversation_id: '0190f5fe-7c00-7a00-8000-000000000001',
   name: 'conv',
-  type: 'acp',
+  type: 'nomi',
   created_at: 1,
   modified_at: 2,
   ...o,
@@ -71,7 +71,7 @@ describe('fromApiConversation first-class fields', () => {
       fromApiConversation({
         id: '0190f5fe-7c00-7a00-8000-000000000001',
         name: 'legacy',
-        type: 'acp',
+        type: 'nomi',
         created_at: 1,
         modified_at: 2,
         extra: {},

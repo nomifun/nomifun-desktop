@@ -223,7 +223,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
           <Route path='/settings/system' element={withRouteFallback(SystemSettings)} />
           <Route path='/settings/execution-engines' element={withRouteFallback(ExecutionEngineSettings)} />
           <Route path='/settings/ssh-hosts' element={withRouteFallback(SshHostSettings)} />
-          <Route path='/settings/agent-runtime' element={<Navigate to='/settings/execution-engines?tab=runtime' replace />} />
+          <Route path='/settings/agent-runtime' element={<Navigate to='/settings/execution-engines' replace />} />
           <Route path='/settings/browser-use' element={<Navigate to='/browser?tab=settings' replace />} />
           <Route path='/settings/computer-use' element={withRouteFallback(SystemSettings)} />
           <Route path='/settings/about' element={withRouteFallback(SystemSettings)} />

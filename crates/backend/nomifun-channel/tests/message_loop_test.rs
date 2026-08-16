@@ -30,7 +30,7 @@ use nomifun_db::models::{
 };
 use nomifun_db::{
     CreateProviderParams, IChannelRepository, IClientPreferenceRepository, IProviderRepository,
-    NewProviderModel, NewProviderModelCapability, SqliteAcpSessionRepository,
+    NewProviderModel, NewProviderModelCapability,
     SqliteAgentMetadataRepository, SqliteChannelRepository, SqliteClientPreferenceRepository,
     SqliteConversationRepository, SqliteProviderRepository,
 };
@@ -434,7 +434,6 @@ async fn build_harness() -> Harness {
             Arc::clone(&runtime_registry),
             Arc::new(SqliteConversationRepository::new(pool.clone())),
             Arc::new(SqliteAgentMetadataRepository::new(pool.clone())),
-            Arc::new(SqliteAcpSessionRepository::new(pool.clone())),
             Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
         )
         .with_runtime_state(Arc::clone(&runtime)),

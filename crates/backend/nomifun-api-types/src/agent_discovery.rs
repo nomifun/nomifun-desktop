@@ -7,8 +7,8 @@
 //!
 //! Handshake-derived fields (`agent_capabilities` / `auth_methods` /
 //! `config_options` / `available_modes` / `available_models` /
-//! `available_commands`) stay as opaque JSON so this crate does not
-//! depend on the ACP protocol SDK — the ai-agent crate typed-decodes
+//! `available_commands`) stay as opaque JSON so this crate carries no
+//! protocol-decoding dependency — the ai-agent crate typed-decodes
 //! them when it needs to.
 
 use nomifun_common::AgentType;
@@ -21,7 +21,7 @@ use std::path::PathBuf;
 pub enum AgentSource {
     /// Ships with the backend binary (no CLI install required — e.g. `nomi`).
     Internal,
-    /// Seeded from the migration (ACP vendors).
+    /// Seeded from the migration.
     Builtin,
     /// Installed from the extension hub.
     Extension,
@@ -59,7 +59,7 @@ pub struct AgentSourceInfo {
 }
 
 /// Adapter-side behaviour switches. These drive code branches that used
-/// to be hardcoded per `AcpBackend`; new keys are added by extending
+/// to be hardcoded per vendor backend; new keys are added by extending
 /// this struct — we deliberately avoid a free-form "extra" bag so every
 /// flag is type-checked at its usage sites.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -77,7 +77,7 @@ pub struct BehaviorPolicy {
     #[serde(default)]
     pub self_identity_sticky: bool,
 
-    /// The agent does not implement the generic ACP `session/load`
+    /// The agent does not implement a generic `session/load`
     /// method. To resume, callers must call `session/new` again and
     /// pass the prior session id through a vendor-specific
     /// `_meta.<vendor>.options.resume` field.
@@ -85,7 +85,7 @@ pub struct BehaviorPolicy {
     pub session_load_via_meta_field: bool,
 }
 
-/// Handshake-derived fields captured from the ACP init/session-response.
+/// Handshake-derived fields captured from an agent's init/session response.
 ///
 /// All fields are opaque JSON at this layer: they are passed through to
 /// the frontend verbatim, and typed-decoded inside `nomifun-ai-agent`
@@ -209,7 +209,7 @@ mod tests {
             description: None,
             description_i18n: None,
             backend: Some("claude".into()),
-            agent_type: AgentType::Acp,
+            agent_type: AgentType::Nomi,
             agent_source: AgentSource::Builtin,
             agent_source_info: AgentSourceInfo::default(),
             enabled: true,
@@ -241,7 +241,7 @@ mod tests {
         let value = serde_json::json!({
             "id": "0190f5fe-7c00-7a00-8000-000000000101",
             "name": "Claude",
-            "agent_type": "acp",
+            "agent_type": "nomi",
             "agent_source": "builtin",
             "enabled": true,
             "available": true,
@@ -256,14 +256,14 @@ mod tests {
         let payload = json!({
             "agent_id": "0190f5fe-7c00-7a00-8000-000000000101",
             "name": "y",
-            "agent_type": "acp",
+            "agent_type": "nomi",
             "agent_source": "custom",
             "enabled": true,
             "available": false,
             "sort_order": 1100,
         });
         let meta: AgentMetadata = serde_json::from_value(payload).unwrap();
-        assert_eq!(meta.agent_type, AgentType::Acp);
+        assert_eq!(meta.agent_type, AgentType::Nomi);
         assert_eq!(meta.agent_source, AgentSource::Custom);
         assert!(nomifun_common::AgentId::parse(meta.agent_id).is_ok());
         assert!(!meta.available);
@@ -281,7 +281,7 @@ mod tests {
             let payload = json!({
                 "agent_id": invalid,
                 "name": "Claude",
-                "agent_type": "acp",
+                "agent_type": "nomi",
                 "agent_source": "builtin",
                 "enabled": true,
                 "available": false,

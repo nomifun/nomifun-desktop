@@ -138,10 +138,7 @@ async fn workspace_browse_reads_directory() {
 #[test]
 fn agent_type_serde_all_variants() {
     // Verify that all AgentType variants serialize/deserialize correctly
-    for (variant, expected_json) in [
-        (AgentType::Acp, "\"acp\""),
-        (AgentType::Nomi, "\"nomi\""),
-    ] {
+    for (variant, expected_json) in [(AgentType::Nomi, "\"nomi\"")] {
         let json = serde_json::to_string(&variant).unwrap();
         assert_eq!(json, expected_json, "Failed for {:?}", variant);
         let parsed: AgentType = serde_json::from_str(&json).unwrap();

@@ -4,12 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  CODEX_MODE_NATIVE_DEFAULT,
-  CODEX_MODE_NATIVE_FULL_ACCESS,
-  CODEX_MODE_READ_ONLY,
-} from '@/common/types/codex/codexModes';
-
 /**
  * Agent mode option interface
  * 代理模式选项接口
@@ -24,56 +18,15 @@ export interface AgentModeOption {
 }
 
 /**
- * Agent modes configuration
- * Maps backend type to available modes
- * Labels match CLI display text exactly — no i18n.
- *
- * Note:
- * - Claude: supports session/set_mode via ACP
- *   - Modes: default, acceptEdits, plan, auto, bypassPermissions (YOLO), dontAsk
- * - Qwen: ACP session/set_mode returns success but does not enforce plan mode behavior.
- *   Plan mode disabled until upstream fix. See https://github.com/QwenLM/qwen-code/issues/1806
- * - OpenCode: plan/build modes via ACP session/set_mode (no yolo support)
- * - Gemini: supports default/autoEdit/yolo (auto-approve at manager layer, not via ACP)
- * - Codex (@agentclientprotocol/codex-acp): advertises `read-only` / `agent` / `agent-full-access`
- * - Goose: mode set at startup only, not during session
+ * Agent modes configuration.
+ * Maps backend type to available modes.
+ * Labels match the runtime display text exactly — no i18n.
  */
 export const AGENT_MODES: Record<string, AgentModeOption[]> = {
-  claude: [
-    { value: 'default', label: 'Default' },
-    { value: 'acceptEdits', label: 'Accept Edits', description: 'Auto-approve file edits, prompt for commands' },
-    { value: 'plan', label: 'Plan' },
-    { value: 'bypassPermissions', label: 'YOLO' },
-    { value: 'dontAsk', label: "Don't Ask", description: 'Block all actions except pre-approved rules' },
-  ],
-  // Qwen: ACP session/set_mode returns success but does not enforce plan mode behavior.
-  // Plan mode disabled until upstream fix. See https://github.com/QwenLM/qwen-code/issues/1806
-  qwen: [
-    { value: 'default', label: 'Default' },
-    { value: 'yolo', label: 'YOLO' },
-  ],
-  opencode: [
-    { value: 'build', label: 'Build' },
-    { value: 'plan', label: 'Plan' },
-  ],
-  gemini: [
-    { value: 'default', label: 'Default' },
-    { value: 'autoEdit', label: 'Auto-Accept Edits' },
-    { value: 'yolo', label: 'YOLO' },
-  ],
   nomi: [
     { value: 'default', label: 'Default' },
     { value: 'auto_edit', label: 'Auto-Accept Edits' },
     { value: 'yolo', label: 'YOLO' },
-  ],
-  codex: [
-    { value: CODEX_MODE_READ_ONLY, label: 'Read-only' },
-    { value: CODEX_MODE_NATIVE_DEFAULT, label: 'Agent' },
-    { value: CODEX_MODE_NATIVE_FULL_ACCESS, label: 'Agent (full access)' },
-  ],
-  snow: [
-    { value: 'default', label: 'Agent', description: 'Full agent mode with tool access' },
-    { value: 'yolo', label: 'YOLO', description: 'Auto-approve all operations without prompting' },
   ],
 };
 

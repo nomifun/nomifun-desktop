@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { IMessageAcpToolCall, IMessageToolCall, IMessageToolGroup, TMessage } from '@/common/chat/chatLib';
+import type { IMessageToolCall, IMessageToolGroup, TMessage } from '@/common/chat/chatLib';
 import { normalizeToolMessages } from '@/common/chat/normalizeToolCall';
 import type { TurnDisclosureProcessState } from './turnDisclosureModel';
 
-type ToolProcessMessage = IMessageToolGroup | IMessageAcpToolCall | IMessageToolCall;
+type ToolProcessMessage = IMessageToolGroup | IMessageToolCall;
 
 type ProcessStateItem =
   | TMessage
@@ -67,10 +67,7 @@ export const getProcessItemState = (item: ProcessStateItem): TurnDisclosureProce
       return getToolMessagesProcessState([item]);
     case 'tool_group':
       return getToolMessagesProcessState([item]);
-    case 'acp_tool_call':
-      return getToolMessagesProcessState([item]);
     case 'permission':
-    case 'acp_permission':
       return 'waiting';
     case 'agent_status':
       if (item.content.status === 'error') return 'failed';

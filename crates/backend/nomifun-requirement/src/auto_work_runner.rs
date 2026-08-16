@@ -72,13 +72,13 @@ pub struct AutoWorkRunnerDeps {
     /// (with `IDLE_POLL` as a fallback) so newly created/re-pended work is picked
     /// up immediately. Shared with the `RequirementService` that fires it.
     pub wake: Arc<tokio::sync::Notify>,
-    /// Whether the requirement MCP server is running and injected into ACP
-    /// sessions (bootstrap-level flag). When true, ACP sessions expose the
-    /// `requirement_complete` / `requirement_update_status` declaration tools,
-    /// so the runner tells them to call those tools AND expects an explicit
-    /// verdict (a clean turn with no declaration → needs_review, not done). Kept
-    /// in lock-step with `AgentFactoryDeps::requirement_mcp_config` so the prompt
-    /// never names a tool the session lacks.
+    /// Whether the requirement MCP server is running and injected into agent
+    /// TERMINAL sessions (bootstrap-level flag). When true, those terminals
+    /// expose the `requirement_complete` / `requirement_update_status`
+    /// declaration tools over the stdio bridge, so the runner expects an
+    /// explicit verdict (a clean turn with no declaration → needs_review, not
+    /// done). Chat-engine sessions register the same tools in-process instead;
+    /// see [`crate::prompt::has_native_requirement_tools`].
     pub requirement_mcp_enabled: bool,
 }
 
@@ -1680,7 +1680,7 @@ async fn inject_and_wait(
     }
     let user_id = user_id.into_string();
 
-    let agent_type = parse_agent_type(&deps.agent_registry, &row.r#type).await;
+    let agent_type = parse_agent_type(&row.r#type)?;
     let model = nomifun_conversation::runtime_options::provider_model_from_conversation_row(&row)?;
     let delegation_policy =
         nomifun_conversation::runtime_options::delegation_policy_from_conversation_row(&row)?;
@@ -1716,7 +1716,6 @@ async fn inject_and_wait(
         claim_generation,
         claim_token,
         agent_type,
-        deps.requirement_mcp_enabled,
         &attachment_plan.attachments,
     );
     let send_req = SendMessageRequest {
@@ -1741,8 +1740,7 @@ async fn inject_and_wait(
     };
     let operation_id =
         autowork_turn_idempotency_key(&req.requirement_id, claim_generation, claim_token);
-    let expects_verdict =
-        crate::prompt::session_has_requirement_tools(agent_type, deps.requirement_mcp_enabled);
+    let expects_verdict = crate::prompt::has_native_requirement_tools(agent_type);
 
     if let Some(outcome) =
         legacy_recovered_claim_without_receipt_outcome(recovered_active, claim_generation)
@@ -2878,13 +2876,19 @@ async fn wait_terminal_turn_end(
     }
 }
 
-/// Mirror of cron's agent-type resolution.
-async fn parse_agent_type(registry: &AgentRegistry, agent_type_str: &str) -> nomifun_common::AgentType {
-    if registry.find_builtin_by_backend(agent_type_str).await.is_some() {
-        return nomifun_common::AgentType::Acp;
+/// Resolve a conversation's `type` column to a live engine.
+///
+/// Rejects anything that is not a live engine. This column is free-form TEXT,
+/// so a conversation bound to a retired engine is still readable — coercing it
+/// to a surviving engine would resurrect it with the wrong runtime and the
+/// wrong `extra` shape, failing much later and far from the cause.
+fn parse_agent_type(agent_type_str: &str) -> Result<nomifun_common::AgentType, AppError> {
+    match agent_type_str {
+        "nomi" => Ok(nomifun_common::AgentType::Nomi),
+        other => Err(AppError::Internal(format!(
+            "conversation names agent type '{other}', which no longer exists in this build"
+        ))),
     }
-    serde_json::from_value::<nomifun_common::AgentType>(serde_json::Value::String(agent_type_str.to_owned()))
-        .unwrap_or(nomifun_common::AgentType::Acp)
 }
 
 #[cfg(test)]

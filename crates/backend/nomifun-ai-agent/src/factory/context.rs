@@ -12,7 +12,6 @@ const TEMP_WORKSPACE_ID_EXTRA_KEY: &str = "temp_workspace_id";
 pub(super) struct FactoryContext {
     pub conversation_id: String,
     pub workspace: String,
-    pub is_custom_workspace: bool,
 }
 
 impl FactoryContext {
@@ -21,17 +20,11 @@ impl FactoryContext {
             .map_err(|error| AppError::BadRequest(format!("invalid Agent runtime conversation id: {error}")))?;
         let conversation_id = options.conversation_id.clone();
 
-        // `is_custom_workspace` is the authoritative signal for "user
-        // chose this path" — determined here and plumbed down to the
-        // managers that care (currently AcpAgentManager, for first-message
-        // injection). Do NOT re-derive it from the workspace string later:
-        // user paths may incidentally contain "conversations" or "-temp-".
-        //
         // A canonical `temp_workspace_id` is the durable marker for a
         // backend-managed workspace. Always rebase that workspace under this
         // installation's current `work_dir`; the persisted absolute workspace
         // may point at the source installation after restore/import.
-        let (workspace, is_custom_workspace) = if options
+        let workspace = if options
             .extra
             .get(TEMP_WORKSPACE_ID_EXTRA_KEY)
             .is_some()
@@ -44,15 +37,14 @@ impl FactoryContext {
                 .join(temp_workspace_id);
             std::fs::create_dir_all(&dir)
                 .map_err(|e| AppError::Internal(format!("Failed to create temp workspace: {e}")))?;
-            (dir.to_string_lossy().into_owned(), false)
+            dir.to_string_lossy().into_owned()
         } else {
-            (options.workspace.clone(), true)
+            options.workspace.clone()
         };
 
         Ok(Self {
             conversation_id,
             workspace,
-            is_custom_workspace,
         })
     }
 }
@@ -92,7 +84,7 @@ mod tests {
     fn options(extra: serde_json::Value) -> AgentRuntimeBuildOptions {
         AgentRuntimeBuildOptions {
             user_id: "0190f5fe-7c00-7a00-8000-000000000001".into(),
-            agent_type: AgentType::Acp,
+            agent_type: AgentType::Nomi,
             workspace: String::new(),
             model: None,
             conversation_id: "0190f5fe-7c00-7a00-8abc-012345678901".into(),

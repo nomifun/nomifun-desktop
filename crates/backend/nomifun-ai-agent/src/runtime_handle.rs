@@ -4,8 +4,8 @@
 //! implements identically and that the generic runtime registry, idle scanner,
 //! message-flow code actually needs. Anything that is type-specific
 //! (session modes, session keys, model switching, config options, pending
-//! confirmation lists, approval memory, ACP usage,
-//! etc.) lives as **inherent** methods on each concrete `XxxAgentManager`
+//! confirmation lists, approval memory, etc.) lives as **inherent** methods on
+//! each concrete `XxxAgentManager`
 //! and is reached through the `AgentRuntimeHandle` enum — forcing every callsite
 //! to say out loud which agent type it is addressing.
 //!
@@ -16,14 +16,13 @@ use std::sync::Arc;
 use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationStatus, TimestampMs};
 use tokio::sync::broadcast;
 
-use crate::manager::acp::AcpAgentManager;
 use crate::manager::nomi::NomiAgentManager;
 use crate::protocol::events::AgentStreamEvent;
 use crate::protocol::send_error::AgentSendError;
 use crate::types::SendMessageData;
 
 use nomifun_api_types::{
-    GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, SideQuestionRequest, SideQuestionResponse, SlashCommandItem,
+    GetModelInfoResponse, SideQuestionRequest, SideQuestionResponse, SlashCommandItem,
 };
 
 /// Where a trusted host resource notification was queued.
@@ -190,14 +189,13 @@ pub trait MockAgentRuntime: AgentRuntimeControl {
 /// type, which is the compile-time pressure we want.
 #[derive(Clone)]
 pub enum AgentRuntimeHandle {
-    Acp(Arc<AcpAgentManager>),
     Nomi(Arc<NomiAgentManager>),
     /// Test-only trait-object escape hatch used by downstream crates
     /// (conversation/cron/requirement/app tests) to inject fake agents without
     /// spinning up a real CLI or WebSocket connection. Gated behind
     /// `#[cfg(any(test, feature = "test-support"))]`: production builds
     /// never see this variant, so every `match` in release code can
-    /// rely on the five-variant closed set. The trait object is
+    /// rely on the closed set of real runtime variants. The trait object is
     /// [`MockAgentRuntime`] (extends `AgentRuntimeControl`) so mocks can also override
     /// the enum-level helpers — `get_confirmations`, `check_approval`,
     /// `confirm`, `get_session_key`, `get_mode`, `set_mode`.
@@ -209,7 +207,6 @@ impl AgentRuntimeHandle {
     /// Common `AgentRuntimeControl` view, regardless of variant.
     pub fn as_runtime(&self) -> &dyn AgentRuntimeControl {
         match self {
-            Self::Acp(m) => m.as_ref(),
             Self::Nomi(m) => m.as_ref(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.as_ref(),
@@ -254,7 +251,7 @@ impl AgentRuntimeHandle {
         match self {
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.requires_turn_boundary_recycle(),
-            Self::Acp(_) | Self::Nomi(_) => false,
+            Self::Nomi(_) => false,
         }
     }
 
@@ -295,7 +292,6 @@ impl AgentRuntimeHandle {
         reason: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send>> {
         match self {
-            Self::Acp(m) => m.kill_and_wait(reason),
             Self::Nomi(m) => m.kill_and_wait(reason),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.kill_and_wait(reason),
@@ -311,11 +307,9 @@ impl AgentRuntimeHandle {
 
     /// Pending confirmation items for this runtime.
     ///
-    /// ACP surfaces pending permission prompts through its permission
-    /// router. Nomi maintains an inline confirmation list.
+    /// Nomi maintains an inline confirmation list.
     pub fn get_confirmations(&self) -> Vec<nomifun_common::Confirmation> {
         match self {
-            Self::Acp(m) => m.get_confirmations(),
             Self::Nomi(m) => m.get_confirmations(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_confirmations(),
@@ -331,7 +325,6 @@ impl AgentRuntimeHandle {
         always_allow: bool,
     ) -> Result<(), AppError> {
         match self {
-            Self::Acp(m) => m.confirm(msg_id, call_id, data, always_allow),
             Self::Nomi(m) => m.confirm(msg_id, call_id, data, always_allow),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.confirm(msg_id, call_id, data, always_allow),
@@ -341,27 +334,24 @@ impl AgentRuntimeHandle {
     /// Check whether an action is auto-approved in this session.
     pub fn check_approval(&self, action: &str, command_type: Option<&str>) -> bool {
         match self {
-            Self::Acp(_) => false,
             Self::Nomi(m) => m.check_approval(action, command_type),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.check_approval(action, command_type),
         }
     }
 
-    /// Get the current session mode. Both ACP and Nomi model a mode.
+    /// Get the current session mode.
     pub async fn get_mode(&self) -> Result<nomifun_api_types::AgentModeResponse, AppError> {
         match self {
-            Self::Acp(m) => m.mode().await,
             Self::Nomi(m) => m.mode().await,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.mode().await,
         }
     }
 
-    /// Set the session mode. Both ACP and Nomi model a mode.
+    /// Set the session mode.
     pub async fn set_mode(&self, mode: &str) -> Result<(), AppError> {
         match self {
-            Self::Acp(m) => m.set_mode(mode).await,
             Self::Nomi(m) => m.set_mode(mode).await,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.set_mode(mode).await,
@@ -369,29 +359,21 @@ impl AgentRuntimeHandle {
     }
 
     /// Clear the conversation context ("release model context") in place,
-    /// keeping the agent/process alive. ACP rotates to a fresh `session/new`;
-    /// Nomi empties its engine history.
+    /// keeping the agent/process alive. Nomi empties its engine history.
     pub async fn clear_context(&self) -> Result<(), AppError> {
         match self {
-            Self::Acp(m) => m.clear_context().await,
             Self::Nomi(m) => m.clear_context().await,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(_) => Ok(()),
         }
     }
 
-    /// Push a mid-turn steering interjection into the running turn. Only the
-    /// Nomi native engine can inject mid-turn; every other variant is an
-    /// external process that cannot be steered, so they return a `BadRequest`
-    /// the service maps to `steer_unsupported` (client falls back to the
-    /// pending queue). `Ok(true)` = queued into a live turn; `Ok(false)` = no
-    /// turn running (caller should send normally).
+    /// Push a mid-turn steering interjection into the running turn. The Nomi
+    /// native engine injects mid-turn. `Ok(true)` = queued into a live turn;
+    /// `Ok(false)` = no turn running (caller should send normally).
     pub fn steer(&self, text: String) -> Result<bool, AppError> {
         match self {
             Self::Nomi(m) => m.steer(text),
-            Self::Acp(_) => Err(
-                AppError::BadRequest("Steering is not supported for this agent type".into()),
-            ),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.steer(text),
         }
@@ -401,10 +383,7 @@ impl AgentRuntimeHandle {
     /// the event came from the user.
     ///
     /// Nomi owns a dedicated inbox whose entries are injected into the
-    /// provider's top-level system context at the next model boundary. External
-    /// runtimes do not currently expose an equivalent trusted-context channel;
-    /// callers get an explicit error and can log the best-effort limitation
-    /// instead of falling back to `send_message`.
+    /// provider's top-level system context at the next model boundary.
     pub fn notify_system_resource(
         &self,
         notice: String,
@@ -416,12 +395,6 @@ impl AgentRuntimeHandle {
         }
         match self {
             Self::Nomi(m) => m.notify_system_resource(notice),
-            Self::Acp(_) => {
-                Err(AppError::BadRequest(format!(
-                    "System resource notifications are not supported for {} runtimes",
-                    self.agent_type().display_name()
-                )))
-            }
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.notify_system_resource(notice),
         }
@@ -437,66 +410,44 @@ impl AgentRuntimeHandle {
                 m.ensure_can_rewind_last_turn(expected_source_message_id)
                     .await
             }
-            Self::Acp(_) => Err(
-                AppError::BadRequest("Edit & resubmit is not supported for this agent type".into()),
-            ),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(_) => Ok(()),
         }
     }
 
     /// Rewind the last user turn (edit & resubmit the most recent user message).
-    /// Only the Nomi native engine can rewind its in-memory transcript; every
-    /// other variant is an external process whose context cannot be rewound, so
-    /// they return a `BadRequest` (the frontend never exposes the entry for
-    /// non-Nomi conversations).
+    /// The Nomi native engine rewinds its in-memory transcript.
     pub async fn rewind_last_turn(
         &self,
         expected_source_message_id: &str,
     ) -> Result<(), AppError> {
         match self {
             Self::Nomi(m) => m.rewind_last_turn(expected_source_message_id).await,
-            Self::Acp(_) => Err(
-                AppError::BadRequest("Edit & resubmit is not supported for this agent type".into()),
-            ),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(_) => Ok(()),
         }
     }
 
-    /// Get the current session model info. Only ACP exposes a model
-    /// catalog; other variants report `model_info = None` so the UI can
-    /// hide the model picker without an error.
+    /// Get the current session model info. The per-session model catalog was a
+    /// property of the external CLI protocol; a Nomi session's model is fixed by
+    /// the conversation's provider binding, so it reports `model_info = None` and
+    /// the UI hides the in-session model picker without an error.
     pub async fn get_model(&self) -> Result<GetModelInfoResponse, AppError> {
         match self {
-            Self::Acp(m) => {
-                let sdk_model = m.model().await;
-                let sdk_info = sdk_model.map(map_sdk_model_to_payload);
-                let cc_switch_info = if m.is_claude_backend() {
-                    crate::cc_switch::read_claude_model_info()
-                } else {
-                    None
-                };
-                let model_info = merge_model_info(sdk_info, cc_switch_info);
-                Ok(GetModelInfoResponse { model_info })
-            }
-            Self::Nomi(_) => {
-                Ok(GetModelInfoResponse { model_info: None })
-            }
+            Self::Nomi(_) => Ok(GetModelInfoResponse { model_info: None }),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_model().await,
         }
     }
 
-    /// Switch the active model. Unsupported for variants other than ACP —
-    /// returns a `BadRequest` so the caller can surface an actionable
-    /// error rather than silently no-op.
+    /// Switch the active model. Unsupported: a Nomi session's model comes from
+    /// the conversation's provider binding, so this returns a `BadRequest` the
+    /// caller can surface rather than silently no-op.
     pub async fn set_model(&self, model_id: &str) -> Result<(), AppError> {
         if model_id.trim().is_empty() {
             return Err(AppError::BadRequest("model_id must not be empty".into()));
         }
         match self {
-            Self::Acp(m) => m.set_model(model_id).await,
             Self::Nomi(_) => Err(AppError::BadRequest(
                 "Model switching is not supported for this agent type".into(),
             )),
@@ -505,12 +456,9 @@ impl AgentRuntimeHandle {
         }
     }
 
-    /// Slash commands available in the current session. Only ACP exposes
-    /// a slash-command catalog; other variants report an empty list
-    /// (the UI renders "no commands").
+    /// Slash commands available in the current session.
     pub async fn get_slash_commands(&self) -> Result<Vec<SlashCommandItem>, AppError> {
         match self {
-            Self::Acp(m) => m.load_slash_commands().await,
             Self::Nomi(m) => m.get_slash_commands().await,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_slash_commands().await,
@@ -520,16 +468,16 @@ impl AgentRuntimeHandle {
     /// Dispatch a side-question to the agent.
     ///
     /// No backend implements side-questions yet, so every variant honestly
-    /// reports `unsupported` (the UI surfaces this as a warning toast). The
-    /// previous ACP branch returned a hardcoded fake-success answer for
-    /// `supports_side_question` agents, presenting a placeholder string to the
-    /// user as a real reply; that path was removed rather than shipped.
+    /// reports `unsupported` (the UI surfaces this as a warning toast). An
+    /// earlier engine returned a hardcoded fake-success answer here, presenting
+    /// a placeholder string to the user as a real reply; that path was removed
+    /// rather than shipped.
     pub async fn handle_side_question(&self, req: SideQuestionRequest) -> Result<SideQuestionResponse, AppError> {
         if req.question.trim().is_empty() {
             return Err(AppError::BadRequest("question must not be empty".into()));
         }
         match self {
-            Self::Acp(_) | Self::Nomi(_) => {
+            Self::Nomi(_) => {
                 Ok(SideQuestionResponse {
                     status: "unsupported".into(),
                     answer: None,
@@ -538,92 +486,5 @@ impl AgentRuntimeHandle {
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.handle_side_question(req).await,
         }
-    }
-}
-
-/// Map the raw ACP SDK model state into the public API payload.
-///
-/// Kept private to this module: the only caller is
-/// [`AgentRuntimeHandle::get_model`]. Mirrors the helper formerly living in
-/// `services/agent.rs`; do not duplicate — if the shape of
-/// `ModelInfoPayload` changes, update it here.
-fn map_sdk_model_to_payload(m: agent_client_protocol::schema::SessionModelState) -> ModelInfoPayload {
-    let available: Vec<ModelInfoEntry> = m
-        .available_models
-        .iter()
-        .map(|am| ModelInfoEntry {
-            id: am.model_id.to_string(),
-            label: am.name.clone(),
-        })
-        .collect();
-    let current_id = m.current_model_id.to_string();
-    let current_label = available
-        .iter()
-        .find(|e| e.id == current_id)
-        .map(|e| e.label.clone())
-        .unwrap_or_else(|| current_id.clone());
-    ModelInfoPayload {
-        current_model_id: Some(current_id),
-        current_model_label: Some(current_label),
-        available_models: available,
-    }
-}
-
-fn merge_model_info(
-    sdk_info: Option<ModelInfoPayload>,
-    cc_switch_info: Option<ModelInfoPayload>,
-) -> Option<ModelInfoPayload> {
-    sdk_info.or(cc_switch_info)
-}
-
-#[cfg(test)]
-mod cc_switch_model_merge_tests {
-    use super::*;
-
-    #[test]
-    fn merge_prefers_sdk_model_over_cc_switch() {
-        let sdk_payload = ModelInfoPayload {
-            current_model_id: Some("default".into()),
-            current_model_label: Some("Claude Sonnet 4.6".into()),
-            available_models: vec![ModelInfoEntry {
-                id: "default".into(),
-                label: "Claude Sonnet 4.6".into(),
-            }],
-        };
-        let cc_switch_payload = ModelInfoPayload {
-            current_model_id: Some("default".into()),
-            current_model_label: Some("DeepSeek V4".into()),
-            available_models: vec![ModelInfoEntry {
-                id: "default".into(),
-                label: "DeepSeek V4".into(),
-            }],
-        };
-
-        let result = merge_model_info(Some(sdk_payload), Some(cc_switch_payload));
-        assert_eq!(
-            result.unwrap().current_model_label.as_deref(),
-            Some("Claude Sonnet 4.6")
-        );
-    }
-
-    #[test]
-    fn merge_falls_back_to_cc_switch_when_sdk_none() {
-        let cc_switch_payload = ModelInfoPayload {
-            current_model_id: Some("default".into()),
-            current_model_label: Some("DeepSeek V4".into()),
-            available_models: vec![ModelInfoEntry {
-                id: "default".into(),
-                label: "DeepSeek V4".into(),
-            }],
-        };
-
-        let result = merge_model_info(None, Some(cc_switch_payload));
-        assert_eq!(result.unwrap().current_model_label.as_deref(), Some("DeepSeek V4"));
-    }
-
-    #[test]
-    fn merge_returns_none_when_both_none() {
-        let result = merge_model_info(None, None);
-        assert!(result.is_none());
     }
 }

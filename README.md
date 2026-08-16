@@ -275,7 +275,7 @@ Pull the knowledge scattered across your system into one managed, trackable plac
 Self-built, **in-process Rust** — no Playwright, no Node, no third-party automation daemon. More capable, faster, and far cheaper on tokens, with fine-grained control and fully open source for you to extend.
 
 - **Computer use** — accessibility tree + Set-of-Marks overlay + OCR, steering the model to act on real UI elements instead of guessing pixels. macOS (AXUIElement + Vision OCR) and Windows (UI Automation) are complete; Linux (AT-SPI2) is partial.
-- **Browser use** — a main-process `BrowserSessionHub` owns managed Chromium Hosts and addressable Browser Lanes. Built-in agents, ACP/Codex, Gateway, remote agents, and parallel AgentExecution attempts all enter the same platform instead of launching private browsers.
+- **Browser use** — a main-process `BrowserSessionHub` owns managed Chromium Hosts and addressable Browser Lanes. The built-in agent, the Gateway, and parallel AgentExecution attempts all enter the same platform instead of launching private browsers.
 - **Status and lifecycle browser management** — the **Browser** page reports conversations, runtimes, Lanes, tabs, URLs, identity mode, capacity, queue position, pressure, resource estimates, and failures. Within that management boundary, a user can explicitly foreground an already-running Primary Lane; the page still does not embed a preview or expose page input or takeover controls.
 - **Shared live login identity** — ordinary interactive Lanes use an application-managed Primary profile and see live shared login state. Public crawls use an anonymous identity with no Primary cookies or site storage, while explicitly isolated work gets a separate identity. NomiFun never opens the user's real Chrome or Edge profile.
 - **Bounded, observable concurrency** — different Lanes can run concurrently while each Lane remains strictly serialized. When safe capacity is exhausted, callers and the UI receive queue position, pressure reason, and recommended concurrency rather than an apparently ready handle blocked by a hidden global lock.
@@ -295,13 +295,14 @@ Every capability NomiFun has is exposed through a single, typed capability regis
 - **REST + OpenAPI** at `/v1/tools`, with streaming and an auto-generated `/v1/openapi.json`.
 - Adding a capability to the bus makes it appear on MCP **and** REST automatically — no drift.
 
-### 🧩 Bring your own agents — or use the built-in one
+### 🧩 One built-in agent, many models
 
 > Guide: [`docs/guides/model-routing.md`](docs/guides/model-routing.md)
 
-- **Built-in `nomi` agent** — no extra install. Works with **26+ model providers/presets** (OpenAI, Anthropic, Gemini + Vertex AI, AWS Bedrock, DeepSeek, OpenRouter, Moonshot/Kimi, Qwen/Dashscope, Zhipu/GLM, MiniMax, SiliconFlow, xAI, Volcengine/Doubao, and more) across **4 wire protocols**, plus the **New API** aggregator gateway.
-- **~19 external agents over ACP** — connect Claude Code, Codex, Gemini, Qwen, Kimi, Cursor, Copilot, Goose, OpenCode, Droid, and more, and NomiFun feeds them models *and* its native capabilities (computer/browser/knowledge/gateway) over injected MCP bridges.
-- **Everywhere** — the native capabilities are available to the built-in agent, to ACP agents, in the chat UI, **and** in the terminal.
+- **Built-in `nomi` agent** — no extra install, and the only conversation engine. Works with **26+ model providers/presets** (OpenAI, Anthropic, Gemini + Vertex AI, AWS Bedrock, DeepSeek, OpenRouter, Moonshot/Kimi, Qwen/Dashscope, Zhipu/GLM, MiniMax, SiliconFlow, xAI, Volcengine/Doubao, and more) across **4 wire protocols**, plus the **New API** aggregator gateway.
+- **One code path** — every conversation runs the same engine, so capabilities, tool policy, approvals, and failover behave identically no matter which model you pick.
+- **Want Claude Code, Codex, or Gemini CLI?** Run them in **terminal mode** — real in-app PTY sessions with NomiFun's capabilities injected through each CLI's own native config. See [`docs/guides/terminal.md`](docs/guides/terminal.md).
+- **Everywhere** — the native capabilities are available to the built-in agent, in the chat UI, **and** in the terminal.
 - **Graceful multimodal fallback** — if a selected provider/model rejects image input, NomiFun strips the images, retries in the same conversation, and leaves an inline notice instead of killing the session.
 - **Per-model context tuning** — override context-window limits per model when an upstream platform reports bad defaults or hides them, improving routing and long-context budgeting.
 
@@ -340,11 +341,11 @@ remain under each provider's control.
 | <img src="https://www.google.com/s2/favicons?sz=64&domain=openai.com" alt="OpenAI logo" width="20" height="20"> **GPT / OpenAI** | [GPT models](https://platform.openai.com/docs/models) · [API keys](https://platform.openai.com/api-keys) | GPT models, OpenAI API, agent workflows, coding, and general-purpose tasks |
 | <img src="https://www.google.com/s2/favicons?sz=64&domain=aistudio.google.com" alt="Gemini logo" width="20" height="20"> **Gemini / Google AI** | [API keys](https://aistudio.google.com/app/apikey) | Gemini models, multimodal work, very long context, and Google AI Studio |
 
-### 💻 Terminal mode
+### 💻 Terminal mode — where third-party agent CLIs live
 
 > Guide: [`docs/guides/terminal.md`](docs/guides/terminal.md)
 
-Run agent CLIs inside in-app PTY sessions (or the standalone `nomi` CLI). NomiFun injects native capabilities — knowledge search, requirement completion, and lifecycle hooks — into known CLIs through their *own* native config, so you keep full fidelity and OAuth.
+Run agent CLIs inside in-app PTY sessions (or the standalone `nomi` CLI). This is how **Claude Code, Codex, and Gemini CLI** are used with NomiFun: a real pseudo-terminal, the CLI's own auth and OAuth, its own approval prompts, nothing re-implemented. NomiFun injects native capabilities — knowledge search, requirement completion, and lifecycle hooks — into known CLIs through their *own* native config, so you keep full fidelity. AutoWork can drive such a terminal turn by turn.
 
 ### 📱 NomiFun Mobile — direct to your Desktop
 

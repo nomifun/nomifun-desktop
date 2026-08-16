@@ -20,10 +20,10 @@ export type SlashCommandSelectionBehavior = 'execute' | 'insert';
 
 /**
  * Indicates where the slash command originates from.
- * - `acp`: Provided by the ACP agent (e.g., Claude)
+ * - `agent`: Advertised by the agent runtime
  * - `builtin`: Built into the application
  */
-export type SlashCommandSource = 'acp' | 'builtin';
+export type SlashCommandSource = 'agent' | 'builtin';
 
 /**
  * Represents a single slash command item in the autocomplete list.

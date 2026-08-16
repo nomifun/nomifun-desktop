@@ -13,10 +13,6 @@ path = "src/main.rs"
 # shared filesystem state. The content suite includes a coverage guard so a new
 # top-level test file cannot be silently omitted while autotests is disabled.
 [[test]]
-name = "custom_agent_e2e"
-path = "tests/custom_agent_e2e.rs"
-
-[[test]]
 name = "delivery_notify_integration"
 path = "tests/delivery_notify_integration.rs"
 
@@ -59,10 +55,6 @@ path = "tests/agent_execution_e2e.rs"
 [[test]]
 name = "autowork_idmm_cooperation_e2e"
 path = "tests/autowork_idmm_cooperation_e2e.rs"
-
-[[test]]
-name = "acp_e2e"
-path = "tests/acp_e2e.rs"
 
 [[test]]
 name = "agent_integration_e2e"

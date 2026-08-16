@@ -26,7 +26,7 @@ use crate::types::AgentRuntimeBuildOptions;
 /// Factory function that creates an [`AgentRuntimeHandle`] from build options.
 ///
 /// Async so the factory can do real I/O (spawn a CLI process, negotiate the
-/// ACP initialize handshake, etc.) without needing to `block_on` inside the
+/// provider handshakes, etc.) without needing to `block_on` inside the
 /// `AgentRuntimeRegistry` call site. Returning `BoxFuture` keeps the trait
 /// object-safe for DI.
 pub type AgentRuntimeFactory =
@@ -69,7 +69,7 @@ pub trait AgentRuntimeRegistry: Send + Sync {
     /// [`OnceCell`] so the factory runs at most once per conversation —
     /// avoiding the race where two concurrent HTTP requests (e.g.
     /// `/messages` + `/warmup`) would each spawn their own CLI process and
-    /// ACP connection, with one of them leaking.
+    /// runtime, with one of them leaking.
     async fn get_or_create_runtime(
         &self,
         conversation_id: &str,
@@ -253,7 +253,7 @@ fn options_carry_knowledge_metadata(extra: &serde_json::Value) -> bool {
 
 /// Max crash-evictions within [`RESTART_WINDOW_MS`] before a conversation's
 /// respawn is refused. Beyond this the agent is deterministically crash-looping
-/// and respawning again just burns a fresh CLI process + ACP handshake to die
+/// and respawning again just burns a fresh runtime build to die
 /// the same way.
 const RESTART_MAX_PER_WINDOW: u32 = 3;
 /// Sliding window (ms) over which crash-evictions are counted. A conversation
@@ -306,7 +306,7 @@ struct BuildFailureRecord {
 
 /// Crash-loop governor for agent (re)builds.
 ///
-/// A companion ACP agent that repeatedly crashes mid-turn (e.g. a native fault
+/// A companion agent runtime that repeatedly crashes mid-turn (e.g. a native fault
 /// in the Computer/a11y C-FFI, which no Rust error boundary can catch) is
 /// evicted with [`AgentKillReason::AgentErrorRecovery`] and lazily respawned on
 /// the next drive. With no throttle that respawn is instant, so a deterministic
@@ -1639,7 +1639,7 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
 }
 
 /// Wired up by `nomifun-app` so deleting a conversation tears down its
-/// agent process. Without this hook, ACP/nomi subprocesses keep
+/// agent process. Without this hook, agent subprocesses keep
 /// streaming events for a `conversation_id` whose DB row is already gone
 /// (Sentry ELECTRON-1BD).
 #[async_trait]
@@ -1698,8 +1698,7 @@ mod tests {
 
     /// A minimal mock Agent for testing runtime-registry logic. Lives behind
     /// the `AgentRuntimeHandle::Mock` trait-object variant so we don't have to
-    /// stand up a real `AcpAgentManager` just to exercise lifecycle
-    /// dispatch.
+    /// stand up a real agent manager just to exercise lifecycle dispatch.
     struct MockAgent {
         agent_type: AgentType,
         conversation_id: String,
@@ -1719,7 +1718,7 @@ mod tests {
         fn new(conversation_id: &str, status: Option<ConversationStatus>) -> Self {
             let (event_tx, _) = broadcast::channel(16);
             Self {
-                agent_type: AgentType::Acp,
+                agent_type: AgentType::Nomi,
                 conversation_id: conversation_id.to_owned(),
                 workspace: "/tmp/test".to_owned(),
                 status,
@@ -1853,7 +1852,7 @@ mod tests {
         let workspace = runtime_test_workspace();
         AgentRuntimeBuildOptions {
             user_id: "0190f5fe-7c00-7a00-8000-000000000001".into(),
-            agent_type: AgentType::Acp,
+            agent_type: AgentType::Nomi,
             workspace: workspace.to_string_lossy().into_owned(),
             model: None,
             conversation_id: conversation_id.into(),
@@ -2661,7 +2660,7 @@ mod tests {
                         &options.conversation_id,
                         Some(ConversationStatus::Finished),
                     )
-                    .with_agent_type(AgentType::Acp)
+                    .with_agent_type(AgentType::Nomi)
                     .with_turn_boundary_recycle(Arc::clone(&recycle_required))
                     .with_blocking_kill(
                         Arc::clone(&kill_started),
@@ -2670,7 +2669,7 @@ mod tests {
                     .with_kill_reasons(Arc::clone(&kill_reasons))
                 } else {
                     MockAgent::new(&options.conversation_id, None)
-                        .with_agent_type(AgentType::Acp)
+                        .with_agent_type(AgentType::Nomi)
                 };
                 async move { Ok(mock_runtime(agent)) }.boxed()
             })
@@ -2743,7 +2742,7 @@ mod tests {
                     &options.conversation_id,
                     Some(ConversationStatus::Finished),
                 )
-                .with_agent_type(AgentType::Acp)
+                .with_agent_type(AgentType::Nomi)
                 .with_turn_boundary_recycle(recycle_required)
                 .with_kill_reasons(Arc::clone(&kill_reasons));
                 async move { Ok(mock_runtime(agent)) }.boxed()

@@ -12,8 +12,7 @@ use nomifun_api_types::{
     UpdateConversationRequest,
 };
 use nomifun_common::{
-    AgentId, AgentType, AppError, CompanionId, ConversationId, ProviderWithModel,
-    RemoteAgentId,
+    AgentType, AppError, CompanionId, ConversationId, ProviderWithModel, RemoteAgentId,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -92,35 +91,29 @@ struct CreateConversationParams {
     /// Optional display name for the new conversation.
     #[serde(default)]
     name: Option<String>,
-    /// Agent type: "nomi" (default), "acp", or "remote". NOT for terminals — any
-    /// terminal/shell intent must go through nomi_create_terminal instead.
+    /// Agent type. "nomi" — the native executor — is the only accepted value
+    /// and the default, so omit it. NOT for terminals: any terminal/shell
+    /// intent must go through nomi_create_terminal instead.
     #[serde(default)]
     agent_type: Option<String>,
-    /// Canonical agent catalog id. Required when agent_type is "acp".
-    #[serde(default)]
-    #[schemars(schema_with = "crate::id_schema::optional_canonical_uuid_v7_schema")]
-    agent_id: Option<AgentId>,
-    /// ACP backend vendor when agent_type is "acp" (e.g. "claude", "codex", "gemini").
-    /// Descriptive compatibility metadata only; agent_id is authoritative.
-    #[serde(default)]
-    backend: Option<String>,
-    /// Exact provider/model pair for a nomi session. Omit to auto-resolve:
+    /// Exact provider/model pair for the new session. Omit to auto-resolve:
     /// your own companion model → first configured provider.
     #[serde(default)]
     model: Option<ModelRefParam>,
-    /// Registered remote-agent business id. Required when agent_type is "remote".
+    /// Retired parameter. Remote agents are no longer an engine — passing it is
+    /// rejected. Kept declared only so a stale caller gets that explanation
+    /// instead of an unknown-field parse failure.
     #[serde(default)]
     #[schemars(schema_with = "crate::id_schema::optional_canonical_uuid_v7_schema")]
     remote_agent_id: Option<RemoteAgentId>,
     /// Absolute project path the user gave you. Sets the conversation's
     /// workspace ("project session", grouped under that workpath in the
-    /// sidebar). Omit for an auto-provisioned workspace. Not valid for
-    /// agent_type "remote".
+    /// sidebar). Omit for an auto-provisioned workspace.
     #[serde(default)]
     workpath: Option<String>,
     /// Summon a companion into the new work session (spec 召唤伙伴): loads its
-    /// skills plus the selected memories read-only. Only valid for agent_type
-    /// "nomi". The server stamps summoned_at.
+    /// skills plus the selected memories read-only. The server stamps
+    /// summoned_at.
     #[serde(default)]
     summon: Option<CreateSummonParams>,
 }
@@ -424,35 +417,44 @@ fn summon_extra_value(summon: &CreateSummonParams, summoned_at: i64) -> Result<V
     }))
 }
 
+/// Validate the `agent_type` create param against the single surviving engine.
+///
+/// The param outlives the multi-engine era on purpose. `CreateConversationParams`
+/// is `deny_unknown_fields`, so dropping the field would turn a caller that still
+/// sends `agent_type: "nomi"` out of habit into an opaque deserialization
+/// failure. Keeping it declared lets that call succeed and lets every other value
+/// come back with an actionable message. `"terminal"` keeps its own redirect
+/// because a terminal is not a conversation on this surface.
+fn validated_agent_type(raw: Option<&str>) -> Result<AgentType, String> {
+    let raw = raw.unwrap_or(AgentType::Nomi.serde_name());
+    if raw == AgentType::Nomi.serde_name() {
+        return Ok(AgentType::Nomi);
+    }
+    if raw == "terminal" {
+        return Err(
+            "terminal sessions are not conversations: use nomi_create_terminal (preset shell | claude | codex | gemini) for any terminal/shell intent"
+                .to_owned(),
+        );
+    }
+    Err(format!(
+        "invalid agent_type '{raw}': the only conversation engine is 'nomi' (the native executor), \
+         and it is the default — omit agent_type entirely. For a terminal or agent-CLI session use \
+         nomi_create_terminal instead."
+    ))
+}
+
 async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationParams) -> Value {
     if let Err(error) = require_companion_creator(&ctx) {
         return error;
     }
     let user_id = ctx.user_id.as_str().to_owned();
-    let agent_type_str = p.agent_type.unwrap_or_else(|| "nomi".to_owned());
-    if agent_type_str == "terminal" {
-        return json!({
-            "error": "terminal sessions are not conversations: use nomi_create_terminal (preset shell | claude | codex | gemini) for any terminal/shell intent"
-        });
-    }
-    let agent_type: AgentType = match serde_json::from_value(json!(agent_type_str)) {
+    let agent_type = match validated_agent_type(p.agent_type.as_deref()) {
         Ok(t) => t,
-        Err(_) => return json!({ "error": format!("invalid agent_type '{agent_type_str}'") }),
+        Err(error) => return json!({ "error": error }),
     };
     let mut extra = json!({});
-    if agent_type == AgentType::Acp {
-        let Some(agent_id) = p.agent_id else {
-            return json!({ "error": "agent_id is required when agent_type is 'acp'" });
-        };
-        extra["agent_id"] = json!(agent_id);
-    } else if p.agent_id.is_some() {
-        return json!({ "error": "agent_id is only valid when agent_type is 'acp'" });
-    }
     if p.remote_agent_id.is_some() {
         return json!({ "error": "remote_agent_id is no longer supported" });
-    }
-    if let Some(backend) = p.backend {
-        extra["backend"] = json!(backend);
     }
     // Project session (spec §B6): a user-given path becomes the workspace —
     // the sidebar groups it under that workpath drawer; `custom_workspace` is
@@ -465,32 +467,19 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationPar
     }
     // Reverse summon (spec §B6): create the work session already carrying the
     // companion's capability pack; the owner can trim it later in the summon
-    // panel. First wave is nomi-native only.
+    // panel.
     if let Some(summon) = p.summon.as_ref() {
-        if agent_type != AgentType::Nomi {
-            return json!({
-                "error": "summon is only supported for nomi conversations in this version"
-            });
-        }
         match summon_extra_value(summon, nomifun_common::now_ms()) {
             Ok(value) => extra["summon"] = value,
             Err(e) => return json!({ "error": e }),
         }
     }
-    let mut model = None;
-    let mut model_source = None;
-    if agent_type == AgentType::Nomi {
-        let requested_model = p.model.map(ProviderWithModel::from);
+    let requested_model = p.model.map(ProviderWithModel::from);
+    let (model, model_source) =
         match provider_support::resolve_nomi_model(&deps, &ctx, requested_model.as_ref()).await {
-            Ok((m, source)) => {
-                model = Some(m);
-                model_source = Some(source);
-            }
+            Ok((m, source)) => (Some(m), Some(source)),
             Err(e) => return e,
-        }
-    } else if p.model.is_some() {
-        return json!({ "error": "model is only valid when agent_type is 'nomi'" });
-    }
+        };
     let req = CreateConversationRequest {
         r#type: agent_type,
         name: p.name,
@@ -689,7 +678,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_create_conversation",
             "conversation",
-            "Open a fresh desktop session on behalf of the calling companion (nomi, acp, or remote OpenClaw). For ACP sessions pass agent_id from nomi_agent_list; for remote sessions pass remote_agent_id from nomi_remote_agent_list. Pass workpath when the user gave a project path (creates a project session in that directory), and summon to load your own skills + hand-picked memories (read-only) into the new session — pre-select memory_ids with recall_memories. For multi-Agent work inside the current conversation, use nomi_delegate.",
+            "Open a fresh desktop session on behalf of the calling companion. Every conversation runs on the native nomi executor, so there is no engine or vendor to choose — just pass model to pin an exact provider/model pair, or omit it to inherit your own companion model. Pass workpath when the user gave a project path (creates a project session in that directory), and summon to load your own skills + hand-picked memories (read-only) into the new session — pre-select memory_ids with recall_memories. For a terminal or agent-CLI session use nomi_create_terminal; for multi-Agent work inside the current conversation, use nomi_delegate.",
             DangerTier::Write,
         ),
         create,
@@ -752,10 +741,80 @@ mod tests {
         let properties = cap.input_schema["properties"].as_object().unwrap();
         assert!(properties.contains_key("workpath"));
         assert!(properties.contains_key("summon"));
+        // Per-vendor engine selection is gone: the schema must not re-advertise
+        // an agent catalog id or a backend vendor to the model.
+        assert!(!properties.contains_key("agent_id"));
+        assert!(!properties.contains_key("backend"));
         assert_eq!(
             cap.input_schema.get("additionalProperties"),
             Some(&json!(false))
         );
+    }
+
+    #[test]
+    fn create_conversation_summary_does_not_advertise_engine_selection() {
+        let mut caps = Vec::new();
+        register(&mut caps);
+        let cap = caps
+            .iter()
+            .find(|cap| cap.meta.name == "nomi_create_conversation")
+            .expect("nomi_create_conversation must be registered");
+        let summary = cap.meta.summary.to_lowercase();
+        for dead in ["acp", "agent_id", "remote_agent_id", "openclaw"] {
+            assert!(
+                !summary.contains(dead),
+                "the create-conversation summary must not mention '{dead}': {}",
+                cap.meta.summary
+            );
+        }
+    }
+
+    #[test]
+    fn agent_type_accepts_only_nomi_and_redirects_terminal() {
+        // Omitted and explicit "nomi" both resolve to the native executor — the
+        // explicit form must keep working because the params are
+        // deny_unknown_fields and a stale caller still sends it.
+        assert_eq!(validated_agent_type(None).unwrap(), AgentType::Nomi);
+        assert_eq!(validated_agent_type(Some("nomi")).unwrap(), AgentType::Nomi);
+
+        let terminal = validated_agent_type(Some("terminal")).unwrap_err();
+        assert!(
+            terminal.contains("nomi_create_terminal"),
+            "the terminal redirect must name the tool to use: {terminal}"
+        );
+
+        for retired in ["acp", "remote", "openclaw", "claude", ""] {
+            let error = validated_agent_type(Some(retired)).unwrap_err();
+            assert!(
+                error.contains(&format!("invalid agent_type '{retired}'")),
+                "the error must quote the rejected value: {error}"
+            );
+            assert!(
+                error.contains("'nomi'"),
+                "the error must name the one valid value: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn retired_params_still_deserialize_so_they_can_be_answered_not_rejected_by_serde() {
+        // `deny_unknown_fields` makes an undeclared field a parse error, which
+        // reaches the caller as opaque serde text. `agent_type` and
+        // `remote_agent_id` therefore stay DECLARED after their engines were
+        // removed, so `create` can answer them itself. Deleting either field
+        // silently downgrades those explanations back to parse noise.
+        let parsed: CreateConversationParams = serde_json::from_value(json!({
+            "agent_type": "acp",
+            "remote_agent_id": "0190f5fe-7c00-7a00-8abc-012345678901",
+        }))
+        .unwrap();
+        assert_eq!(parsed.agent_type.as_deref(), Some("acp"));
+        assert_eq!(
+            parsed.remote_agent_id.as_ref().map(RemoteAgentId::as_str),
+            Some("0190f5fe-7c00-7a00-8abc-012345678901")
+        );
+        // …and the value that got this far is still refused, with a message.
+        assert!(validated_agent_type(parsed.agent_type.as_deref()).is_err());
     }
 
     #[test]
@@ -958,21 +1017,6 @@ mod tests {
         let v = json!({"content": "short"});
         let out = truncate_message_contents(v);
         assert_eq!(out["content"], "short");
-    }
-
-    #[test]
-    fn remote_create_params_accepts_canonical_remote_agent_id() {
-        let params: CreateConversationParams = serde_json::from_value(json!({
-            "agent_type": "remote",
-            "remote_agent_id": "0190f5fe-7c00-7a00-8abc-012345678901"
-        }))
-        .unwrap();
-
-        assert_eq!(params.agent_type.as_deref(), Some("remote"));
-        assert_eq!(
-            params.remote_agent_id.as_ref().map(RemoteAgentId::as_str),
-            Some("0190f5fe-7c00-7a00-8abc-012345678901")
-        );
     }
 
     #[test]

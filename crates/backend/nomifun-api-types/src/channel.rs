@@ -965,7 +965,7 @@ mod tests {
         let resp = ChannelSessionResponse {
             channel_session_id: CHANNEL_SESSION_ID.into(),
             channel_user_id: CHANNEL_USER_ID.into(),
-            agent_type: "acp".into(),
+            agent_type: "nomi".into(),
             conversation_id: None,
             workspace: None,
             chat_id: None,
@@ -1127,7 +1127,7 @@ mod tests {
         let resp = ChannelSessionResponse {
             channel_session_id: CHANNEL_SESSION_ID.into(),
             channel_user_id: CHANNEL_USER_ID.into(),
-            agent_type: "acp".into(),
+            agent_type: "nomi".into(),
             conversation_id: Some("0190f5fe-7c00-7a00-8000-000000000001".into()),
             workspace: None,
             chat_id: Some("ch1".into()),
@@ -1212,7 +1212,7 @@ mod tests {
         let valid = json!({
             "channel_session_id": CHANNEL_SESSION_ID,
             "channel_user_id": CHANNEL_USER_ID,
-            "agent_type": "acp",
+            "agent_type": "nomi",
             "conversation_id": CONVERSATION_ID,
             "channel_plugin_id": CHANNEL_ID,
             "created_at": 1000,
@@ -1245,7 +1245,7 @@ mod tests {
         let raw = json!({
             "id": CHANNEL_SESSION_ID,
             "user_id": CHANNEL_USER_ID,
-            "agent_type": "acp",
+            "agent_type": "nomi",
             "created_at": 1000,
             "last_activity": 2000
         });

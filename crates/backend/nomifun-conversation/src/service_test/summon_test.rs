@@ -29,7 +29,6 @@ fn summon_service() -> (
         runtime_registry,
         repo.clone(),
         Arc::new(StubAgentMetadataRepo),
-        Arc::new(StubAcpSessionRepo::default()),
         Arc::new(crate::NoExecutionConversationBoundary),
     );
     (svc, repo, registry_impl)

@@ -4,8 +4,6 @@ use nomifun_api_types::{
 };
 use nomifun_common::AppError;
 
-use super::error::AcpError;
-
 const MAX_DETAIL_CHARS: usize = 1000;
 
 #[derive(Debug, Clone)]
@@ -240,111 +238,6 @@ impl std::error::Error for AgentSendError {}
 impl From<AppError> for AgentSendError {
     fn from(err: AppError) -> Self {
         Self::from_app_error(err)
-    }
-}
-
-impl From<AcpError> for AgentSendError {
-    fn from(err: AcpError) -> Self {
-        let detail = err.to_string();
-        match &err {
-            AcpError::SpawnFailed { .. } => Self::new(
-                "The selected Agent executable could not be started",
-                AgentErrorCode::UserAgentNotInstalled,
-                AgentErrorOwnership::UserAgent,
-                Some(detail),
-                false,
-                false,
-                resolution(
-                    AgentErrorResolutionKind::CheckAgentInstallation,
-                    Some(AgentErrorResolutionTarget::AgentSettings),
-                ),
-            ),
-            AcpError::StartupCrash { .. } | AcpError::InitTimeout { .. } => Self::new(
-                "The selected Agent failed to start",
-                AgentErrorCode::UserAgentStartupFailed,
-                AgentErrorOwnership::UserAgent,
-                Some(detail),
-                true,
-                false,
-                resolution(
-                    AgentErrorResolutionKind::CheckAgentInstallation,
-                    Some(AgentErrorResolutionTarget::AgentSettings),
-                ),
-            ),
-            AcpError::Disconnected { .. } => Self::new(
-                "The selected Agent disconnected",
-                AgentErrorCode::UserAgentDisconnected,
-                AgentErrorOwnership::UserAgent,
-                Some(detail),
-                true,
-                false,
-                resolution(
-                    AgentErrorResolutionKind::ReconnectAgent,
-                    Some(AgentErrorResolutionTarget::AgentSettings),
-                ),
-            ),
-            AcpError::AuthRequired => Self::new(
-                "The selected Agent requires authentication",
-                AgentErrorCode::UserAgentAuthRequired,
-                AgentErrorOwnership::UserAgent,
-                Some(detail),
-                false,
-                false,
-                resolution(
-                    AgentErrorResolutionKind::CheckAgentLogin,
-                    Some(AgentErrorResolutionTarget::AgentSettings),
-                ),
-            ),
-            AcpError::SessionNotFound { .. } => Self::new(
-                "The Agent session was not found",
-                AgentErrorCode::UserAgentSessionNotFound,
-                AgentErrorOwnership::UserAgent,
-                Some(detail),
-                true,
-                false,
-                resolution(
-                    AgentErrorResolutionKind::StartNewSession,
-                    Some(AgentErrorResolutionTarget::NewConversation),
-                ),
-            ),
-            AcpError::MethodNotFound { .. } => Self::new(
-                "The selected Agent does not support this operation",
-                AgentErrorCode::UserAgentUnsupportedMethod,
-                AgentErrorOwnership::UserAgent,
-                Some(detail),
-                false,
-                false,
-                resolution(
-                    AgentErrorResolutionKind::CheckAgentVersion,
-                    Some(AgentErrorResolutionTarget::AgentSettings),
-                ),
-            ),
-            AcpError::InvalidParams { .. } => Self::new(
-                "The selected Agent rejected the request parameters",
-                AgentErrorCode::UserAgentInvalidParams,
-                AgentErrorOwnership::UserAgent,
-                Some(detail),
-                false,
-                true,
-                resolution(
-                    AgentErrorResolutionKind::SendFeedback,
-                    Some(AgentErrorResolutionTarget::Feedback),
-                ),
-            ),
-            AcpError::NotConnected => Self::new(
-                "Nomi lost its Agent protocol connection",
-                AgentErrorCode::NomifunInternalError,
-                AgentErrorOwnership::Nomifun,
-                Some(detail),
-                true,
-                true,
-                resolution(
-                    AgentErrorResolutionKind::SendFeedback,
-                    Some(AgentErrorResolutionTarget::Feedback),
-                ),
-            ),
-            AcpError::AgentInternal { .. } => classify_upstream_detail(&detail),
-        }
     }
 }
 
@@ -1374,17 +1267,6 @@ mod tests {
         assert_eq!(app_err.stream_error().feedback_recommended, Some(true));
         assert_eq!(
             app_err.stream_error().resolution.map(|value| value.kind),
-            Some(AgentErrorResolutionKind::SendFeedback)
-        );
-
-        let acp_err = AgentSendError::from(AcpError::InvalidParams {
-            message: "malformed request".into(),
-        });
-        assert_eq!(acp_err.code(), Some(AgentErrorCode::UserAgentInvalidParams));
-        assert_eq!(acp_err.stream_error().retryable, Some(false));
-        assert_eq!(acp_err.stream_error().feedback_recommended, Some(true));
-        assert_eq!(
-            acp_err.stream_error().resolution.map(|value| value.kind),
             Some(AgentErrorResolutionKind::SendFeedback)
         );
     }

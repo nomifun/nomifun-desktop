@@ -41,21 +41,31 @@ For the full lifecycle and `work-dir` semantics, see [Configuration Reference](.
 
 ## Which agents and providers are supported?
 
-The "Agent CLIs" NomiFun runs as ACP (Agent Client Protocol) backends include `claude`, `codex`, `gemini`, `nomi`, `codebuddy`, `qwen`, and `opencode`. Each one is a separate CLI you install on your system; NomiFun discovers them on `PATH` and the registry hydrates from there. Run `nomicore doctor` to see what your install detects.
+There is exactly one agent: the built-in **`nomi`** engine. It ships with the
+binary, needs no separate install, and is the only engine that can run a
+conversation. Earlier releases also ran external agent CLIs as conversation
+backends; that was removed (see the `Unreleased` section of
+[CHANGELOG.md](../../CHANGELOG.md)).
+
+Third-party CLIs — `claude`, `codex`, `gemini` and friends — are still fully
+usable through [in-app terminals](../guides/terminal.md): a real PTY, the CLI's
+own auth and approval prompts, with NomiFun capabilities injected through the
+CLI's own native config. Install the CLI yourself and make sure it is on `PATH`.
+Run `nomicore doctor` to see what your install detects.
 
 For raw model access (e.g. provider keys, custom OpenAI-compatible endpoints), the system supports configurable providers via `/api/providers/*` and the in-app settings UI. You bring the API keys; NomiFun stores them encrypted at rest in the data directory.
 
-There is no built-in agent that calls out to a hosted NomiFun endpoint — there is no such endpoint. Every agent / provider you configure is something you control.
+There is no built-in agent that calls out to a hosted NomiFun endpoint — there is no such endpoint. Every provider you configure is something you control.
 
 ## Is NomiFun really local-only?
 
-The application logic and your data are local. The agents you connect to may not be — most CLI agents make outbound calls to their respective providers (Anthropic, OpenAI, Google, …). That is between you and the agent.
+The application logic and your data are local. The model providers you configure are not — a chat turn makes outbound calls to whichever provider you selected (Anthropic, OpenAI, Google, …). That is between you and the provider.
 
 What NomiFun itself does over the network:
 
 - Optional update checks (system info / check-update endpoint).
 - Extension marketplace (`/api/hub/*`) — only if you actively use it.
-- Whatever your configured agents and providers do — typically API calls to LLM providers.
+- Whatever your configured providers do — typically API calls to LLM providers.
 
 There is no telemetry pipeline, no analytics SDK, no `SENTRY_DSN` integration in the binary. The backend does not phone home on its own.
 
@@ -63,11 +73,11 @@ There is no telemetry pipeline, no analytics SDK, no `SENTRY_DSN` integration in
 
 Extensions (themes, presets, channel plugins, settings tabs) are loaded by `nomifun-extension` from the data directory. Skills are bundles of prompts/instructions resolved into the agent's context per-conversation. Both are local files under your data dir; the marketplace flow simply downloads them into that directory.
 
-The agent CLI binaries are not extensions — they are external CLIs that NomiFun launches as child processes via the ACP protocol.
+Agent CLI binaries are not extensions either — they are third-party CLIs you install yourself and run in an [in-app terminal](../guides/terminal.md).
 
 ## Can I run agents on a different machine from the UI?
 
-Yes — that is exactly what `nomifun-web` is for. Deploy the web host on the machine where you want the agents (and their CLIs, and their network access) to live, and access the SPA from any browser. See [Web Server Deployment](../guides/web-server-deployment.md).
+Yes — that is exactly what `nomifun-web` is for. Deploy the web host on the machine where you want the agent turns, the terminals, and their network access to live, and access the SPA from any browser. See [Web Server Deployment](../guides/web-server-deployment.md).
 
 For lighter-weight remote access from a phone or another laptop without spinning up a separate server, [WebUI Remote Access](../guides/webui-remote-access.md) exposes an existing desktop install over the LAN.
 

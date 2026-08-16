@@ -9,8 +9,7 @@ NomiFun exposes two optional automation capability families to agents:
   Hosts, addressable Browser Lanes, identity, resource queues, and cleanup.
   `nomi-browser-engine` supplies the CDP driver and
   `nomi-browser` supplies the Lane-aware tool adapter. Native Nomi, Gateway,
-  ACP/Codex, remote agents, and parallel AgentExecution attempts all enter
-  this Hub.
+  and parallel AgentExecution attempts all enter this Hub.
 
 Both are high-privilege capabilities. In the desktop product UI they are
 compiled in and enabled by default so a user can opt out from Settings. In
@@ -19,7 +18,7 @@ enables the relevant build feature and runtime flag.
 
 ## Current Architecture
 
-The old external `@playwright/mcp` sidecar and the private Native/Gateway/ACP
+The old external `@playwright/mcp` sidecar and the private per-caller
 `BrowserTool` or Chromium ownership paths have been removed. The
 `mcp-browser-stdio` bridge is now a scoped proxy to the Hub; it does not create
 a browser or profile.

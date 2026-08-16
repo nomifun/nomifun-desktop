@@ -37,7 +37,7 @@ function setCachedCommands(conversation_id: ConversationId, commands: SlashComma
 
 interface UseSlashCommandsOptions {
   conversation_type?: string;
-  /** When provided, changes to this value trigger a re-fetch. Used by ACP to
+  /** When provided, changes to this value trigger a re-fetch. Used to
    *  re-fetch commands after the agent becomes active. */
   agentStatus?: string | null;
 }
@@ -91,7 +91,7 @@ export function useSlashCommands(conversation_id: ConversationId, options: UseSl
           name: item.command,
           description: item.description,
           kind: 'template' as const,
-          source: 'acp' as const,
+          source: 'agent' as const,
           selectionBehavior: 'insert' as const,
         }));
         setCachedCommands(conversation_id, mapped);

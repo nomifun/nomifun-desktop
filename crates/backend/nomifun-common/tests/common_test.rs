@@ -164,10 +164,7 @@ fn test_paginated_result_empty() {
 
 #[test]
 fn test_enum_serde_roundtrip() {
-    let roundtrip_cases: Vec<(&str, AgentType)> = vec![
-        (r#""acp""#, AgentType::Acp),
-        (r#""nomi""#, AgentType::Nomi),
-    ];
+    let roundtrip_cases: Vec<(&str, AgentType)> = vec![(r#""nomi""#, AgentType::Nomi)];
     for (json_str, expected) in roundtrip_cases {
         let parsed: AgentType = serde_json::from_str(json_str).unwrap();
         assert_eq!(parsed, expected);

@@ -1708,9 +1708,9 @@ impl BrowserRegistry {
     /// capability registry.
     ///
     /// The final in-process `LoopbackCapabilityLease` guard can revoke an
-    /// issuer lease without an HTTP revoke request (for example when an ACP
-    /// child crashes or its runtime is dropped). The Gateway server calls this
-    /// periodically so those owners and their Lane state do not wait for the
+    /// issuer lease without an HTTP revoke request (for example when a signed
+    /// child process crashes or its runtime is dropped). The Gateway server calls
+    /// this periodically so those owners and their Lane state do not wait for the
     /// longer Hub owner-lease TTL.
     pub async fn cleanup_inactive_signed_child_leases(
         &self,

@@ -125,7 +125,9 @@ impl FromStr for JobStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CronAgentConfig {
-    /// ACP/agent backend. Nomi jobs must leave this unset.
+    /// Removed host-runtime selector, still read off persisted rows so an old
+    /// job round-trips. Validation rejects it: a Nomi job must leave it unset
+    /// and select its model with `provider_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     pub name: String,
@@ -572,6 +574,7 @@ mod tests {
 
     const JOB_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
     const USER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+    const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000002";
 
     // -- Enum parsing ---------------------------------------------------------
 
@@ -737,13 +740,16 @@ mod tests {
             schedule_description: Some("every minute".into()),
             payload_message: "do something".into(),
             execution_mode: "existing".into(),
-            agent_config: Some(r#"{"backend":"acp","name":"Claude"}"#.into()),
+            agent_config: Some(
+                r#"{"name":"Nomi","model":"gpt-5","provider_id":"0190f5fe-7c00-7a00-8000-000000000002"}"#
+                    .into(),
+            ),
             preset_id: None,
             preset_revision: None,
             preset_snapshot: None,
             conversation_id: Some("0190f5fe-7c00-7a00-8abc-012345678901".into()),
             conversation_title: Some("Test Conv".into()),
-            agent_type: "acp".into(),
+            agent_type: "nomi".into(),
             created_by: "user".into(),
             skill_content: Some("---\nname: test\n---\nContent".into()),
             description: None,
@@ -773,23 +779,23 @@ mod tests {
             message: "do something".into(),
             execution_mode: ExecutionMode::Existing,
             agent_config: Some(CronAgentConfig {
-                backend: Some("acp".into()),
-                name: "Claude".into(),
+                backend: None,
+                name: "Nomi".into(),
                 cli_path: None,
                 custom_agent_id: None,
                 preset_id: None,
                 preset_revision: None,
                 preset_snapshot: None,
                 mode: None,
-                model: None,
-                provider_id: None,
+                model: Some("gpt-5".into()),
+                provider_id: Some(PROVIDER_ID.into()),
                 config_options: None,
                 workspace: None,
                 clear_context_each_run: false,
             }),
             conversation_id: Some("0190f5fe-7c00-7a00-8abc-012345678901".into()),
             conversation_title: Some("Test Conv".into()),
-            agent_type: "acp".into(),
+            agent_type: "nomi".into(),
             created_by: CreatedBy::User,
             skill_content: Some("---\nname: test\n---\nContent".into()),
             description: None,
@@ -822,11 +828,10 @@ mod tests {
         assert_eq!(job.execution_mode, ExecutionMode::Existing);
         assert_eq!(job.created_by, CreatedBy::User);
         assert_eq!(job.last_status, Some(JobStatus::Ok));
-        assert!(job.agent_config.is_some());
-        assert_eq!(
-            job.agent_config.as_ref().unwrap().backend.as_deref(),
-            Some("acp")
-        );
+        let config = job.agent_config.as_ref().expect("sample agent config");
+        assert_eq!(config.provider_id.as_deref(), Some(PROVIDER_ID));
+        assert_eq!(config.model.as_deref(), Some("gpt-5"));
+        assert_eq!(config.backend, None);
     }
 
     #[test]
@@ -1049,7 +1054,7 @@ mod tests {
             resp.metadata.conversation_id.as_deref(),
             Some("0190f5fe-7c00-7a00-8abc-012345678901")
         );
-        assert_eq!(resp.metadata.agent_type, "acp");
+        assert_eq!(resp.metadata.agent_type, "nomi");
         assert_eq!(resp.metadata.created_by, "user");
         assert_eq!(resp.state.run_count, 5);
         assert_eq!(resp.state.last_status.as_deref(), Some("ok"));

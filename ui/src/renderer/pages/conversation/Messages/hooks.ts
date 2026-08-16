@@ -21,10 +21,8 @@ import type {
 import { toDisplayText } from '@/common/chat/displayText';
 import {
   composeMessage,
-  mergeAcpToolCallContent,
   mergeToolCallContent,
   mergeTextMessageContent,
-  normalizeAcpToolCallContent,
   normalizeKnowledgeWritebackState,
   normalizeToolCallContent,
   normalizeToolGroupContent,
@@ -48,7 +46,6 @@ const beforeUpdateMessageListStack: Array<(list: TMessage[]) => TMessage[]> = []
 interface MessageIndex {
   msgIdIndex: Map<string, number>; // msg_id -> index
   call_idIndex: Map<string, number>; // turn + tool_call.call_id -> index
-  tool_call_idIndex: Map<string, number>; // turn + acp tool_call_id -> index
   permission_call_idIndex: Map<string, number>; // permission.content.call_id -> index
 }
 
@@ -110,7 +107,6 @@ export function logDroppedToolCallWithoutCallId(message: TMessage | undefined): 
 function buildMessageIndex(list: TMessage[]): MessageIndex {
   const msgIdIndex = new Map<string, number>();
   const call_idIndex = new Map<string, number>();
-  const tool_call_idIndex = new Map<string, number>();
   const permission_call_idIndex = new Map<string, number>();
 
   for (let i = 0; i < list.length; i++) {
@@ -122,15 +118,12 @@ function buildMessageIndex(list: TMessage[]): MessageIndex {
     if (msg.type === 'tool_call' && msg.content?.call_id) {
       call_idIndex.set(getToolLifecycleKey(msg, msg.content.call_id), i);
     }
-    if (msg.type === 'acp_tool_call' && msg.content?.update?.tool_call_id) {
-      tool_call_idIndex.set(getToolLifecycleKey(msg, msg.content.update.tool_call_id), i);
-    }
     if (msg.type === 'permission' && msg.content?.call_id) {
       permission_call_idIndex.set(msg.content.call_id, i);
     }
   }
 
-  return { msgIdIndex, call_idIndex, tool_call_idIndex, permission_call_idIndex };
+  return { msgIdIndex, call_idIndex, permission_call_idIndex };
 }
 
 // 获取或构建索引（带缓存）
@@ -197,7 +190,6 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
       const rebuilt = buildMessageIndex(result);
       index.msgIdIndex = rebuilt.msgIdIndex;
       index.call_idIndex = rebuilt.call_idIndex;
-      index.tool_call_idIndex = rebuilt.tool_call_idIndex;
       index.permission_call_idIndex = rebuilt.permission_call_idIndex;
     }
     return result;
@@ -236,36 +228,6 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
     return list.concat(message);
   }
 
-  // acp_tool_call: use tool_call_idIndex for fast lookup
-  if (message.type === 'acp_tool_call' && message.content?.update?.tool_call_id) {
-    const lifecycleKey = getToolLifecycleKey(message, message.content.update.tool_call_id);
-    const existingIdx = index.tool_call_idIndex.get(lifecycleKey);
-    if (existingIdx !== undefined && existingIdx < list.length) {
-      const existingMsg = list[existingIdx];
-      if (existingMsg.type === 'acp_tool_call') {
-        const newList = list.slice();
-        const merged = mergeAcpToolCallContent(existingMsg.content, message.content);
-        newList[existingIdx] = {
-          ...existingMsg,
-          ...message,
-          id: existingMsg.id,
-          msg_id: existingMsg.msg_id ?? message.msg_id,
-          turn_id: message.turn_id ?? existingMsg.turn_id,
-          created_at: existingMsg.created_at ?? message.created_at,
-          content: merged,
-        };
-        return newList;
-      }
-    }
-    // 未找到，添加新消息并更新索引
-    const newIdx = list.length;
-    index.tool_call_idIndex.set(lifecycleKey, newIdx);
-    const msgIndexKey = getMessageIndexKey(message);
-    if (msgIndexKey) index.msgIdIndex.set(msgIndexKey, newIdx);
-    return list.concat(message);
-  }
-
-  // permission: use call_id for recovery/live stream dedupe.
   if (message.type === 'permission' && message.content?.call_id) {
     const existingIdx = index.permission_call_idIndex.get(message.content.call_id);
     if (existingIdx !== undefined && existingIdx < list.length) {
@@ -403,7 +365,6 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
       const rebuilt = buildMessageIndex(newList);
       index.msgIdIndex = rebuilt.msgIdIndex;
       index.call_idIndex = rebuilt.call_idIndex;
-      index.tool_call_idIndex = rebuilt.tool_call_idIndex;
       index.permission_call_idIndex = rebuilt.permission_call_idIndex;
       return newList;
     }
@@ -493,9 +454,6 @@ export function drainPendingMessageUpdates(
         if (msgIndexKey) index.msgIdIndex.set(msgIndexKey, newIdx);
         if (msg.type === 'tool_call' && msg.content?.call_id) {
           index.call_idIndex.set(getToolLifecycleKey(msg, msg.content.call_id), newIdx);
-        }
-        if (msg.type === 'acp_tool_call' && msg.content?.update?.tool_call_id) {
-          index.tool_call_idIndex.set(getToolLifecycleKey(msg, msg.content.update.tool_call_id), newIdx);
         }
         if (msg.type === 'permission' && msg.content?.call_id) {
           index.permission_call_idIndex.set(msg.content.call_id, newIdx);
@@ -824,16 +782,6 @@ export function normalizeDbMessage(msg: TMessage): TMessage {
       status: content.status === 'error' ? 'error' : msg.status,
     };
   }
-  if (msg.type === 'acp_tool_call') {
-    const parsed = parseJsonRecord(msg.content) ?? {};
-    const content = normalizeAcpToolCallContent(parsed, msg.status ?? null);
-    return {
-      ...msg,
-      turn_id: msg.turn_id,
-      content,
-      status: content.update?.status === 'failed' ? 'error' : msg.status,
-    };
-  }
   if (msg.type === 'tool_group') {
     const content = normalizeToolGroupContent(parseJsonArray(msg.content) ?? []);
     return {
@@ -877,9 +825,6 @@ const getFetchedMergeKey = (message: TMessage): string | undefined => {
   if (!message.msg_id) return undefined;
   if (message.type === 'tool_call' && message.content?.call_id) {
     return `tool_call:${getToolLifecycleKey(message, message.content.call_id)}`;
-  }
-  if (message.type === 'acp_tool_call' && message.content?.update?.tool_call_id) {
-    return `acp_tool_call:${getToolLifecycleKey(message, message.content.update.tool_call_id)}`;
   }
   return `${message.type}:${message.msg_id}`;
 };
@@ -971,21 +916,6 @@ export const mergeFetchedMessagesForConversation = (
         turn_id: dbMessage.turn_id ?? streamMessage.turn_id,
         content,
         status: content.status === 'error' ? 'error' : dbMessage.status,
-      };
-    }
-    if (dbMessage.type === 'acp_tool_call' && streamMessage.type === 'acp_tool_call') {
-      const content = mergeAcpToolCallContent(dbMessage.content, streamMessage.content);
-      return {
-        ...dbMessage,
-        ...streamMessage,
-        id: dbMessage.id,
-        message_id: dbMessage.message_id,
-        msg_id: dbMessage.msg_id ?? streamMessage.msg_id,
-        conversation_id: dbMessage.conversation_id,
-        created_at: dbMessage.created_at ?? streamMessage.created_at,
-        turn_id: dbMessage.turn_id ?? streamMessage.turn_id,
-        content,
-        status: content.update.status === 'failed' ? 'error' : dbMessage.status,
       };
     }
     return dbMessage;

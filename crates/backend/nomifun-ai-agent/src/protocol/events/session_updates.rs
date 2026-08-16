@@ -1,4 +1,3 @@
-use agent_client_protocol::schema::AvailableCommand;
 use serde::{Deserialize, Serialize};
 
 /// Data for the `AgentStatus` event.
@@ -29,7 +28,7 @@ pub struct ThinkingEventData {
 pub struct PlanEventData {
     #[serde(default)]
     pub session_id: Option<String>,
-    /// Internal source tool call settled by this plan projection. ACP plans
+    /// Internal source tool call settled by this plan projection. Upstream plans
     /// have no source tool and leave this unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_call_id: Option<String>,
@@ -40,7 +39,7 @@ pub struct PlanEventData {
 /// Data for the `AvailableCommands` event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AvailableCommandsEventData {
-    pub commands: Vec<AvailableCommand>,
+    pub commands: Vec<serde_json::Value>,
 }
 
 /// Data for the `SkillSuggest` event.

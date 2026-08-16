@@ -4,8 +4,8 @@
 //! applies.
 //!
 //! Consumers:
-//! - `nomifun-ai-agent` factory paths (ACP assembler preset context, nomi
-//!   engine system prompt) via [`KnowledgeContextFormat::PromptSection`];
+//! - `nomifun-ai-agent` factory paths (nomi engine system prompt) via
+//!   [`KnowledgeContextFormat::PromptSection`];
 //! - the terminal-session task (C1) writes a standalone
 //!   `{cwd}/.nomi/knowledge/README.md` via
 //!   [`KnowledgeContextFormat::TerminalReadme`].
@@ -82,15 +82,16 @@ pub struct KnowledgeContextOptions<'a> {
     pub writeback_eagerness: Option<&'a str>,
     /// Whether THIS surface exposes a `knowledge_search` agent tool. When true,
     /// the protocol leads with an imperative to call it; when false (e.g. a raw
-    /// terminal PTY, or an ACP session before the knowledge MCP exists), it
-    /// keeps the Grep/Read file-navigation wording.
+    /// terminal PTY, or a terminal CLI session before the knowledge MCP exists),
+    /// it keeps the Grep/Read file-navigation wording.
     pub has_search_tool: bool,
     /// Whether THIS surface exposes the native `knowledge_write` agent tool.
     /// When true, the write-back contract tells the agent to CALL it — the
     /// reliable path for nomi-engine sessions, where the generic `Write` tool
     /// has no workspace cwd (relative mount paths miss the base) and sits behind
-    /// the approval gate. When false (terminal PTY, ACP file-based sessions),
-    /// the contract keeps the file-write prose against the mounted directory.
+    /// the approval gate. When false (terminal PTY, file-based terminal CLI
+    /// sessions), the contract keeps the file-write prose against the mounted
+    /// directory.
     pub has_write_tool: bool,
 }
 

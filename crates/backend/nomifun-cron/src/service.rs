@@ -407,8 +407,7 @@ impl CronService {
 
         if controls_host && job.conversation_id.is_none() {
             self.executor
-                .canonicalize_new_conversation_agent(&mut job)
-                .await?;
+                .canonicalize_new_conversation_agent(&mut job)?;
         }
         self.validate_job_workspace(&job).await?;
 
@@ -568,8 +567,7 @@ impl CronService {
             && (req.agent_config.is_some() || req.enabled == Some(true))
         {
             self.executor
-                .canonicalize_new_conversation_agent(&mut job)
-                .await?;
+                .canonicalize_new_conversation_agent(&mut job)?;
         }
         self.validate_job_workspace(&job).await?;
 
@@ -2951,32 +2949,30 @@ fn build_agent_config_from_conversation(
     // `agent_config.provider_id` derivation in sync with that parser
     // prevents the cached vendor-label fallback (`"nomi"`) from
     // sneaking back in (Sentry ELECTRON-1HM).
+    //
+    // The agent type is parsed first: serde accepts only the native engine, so
+    // a row naming anything else is rejected before any field is derived from
+    // it.
+    let agent_type_enum =
+        serde_json::from_value::<AgentType>(serde_json::Value::String(row.r#type.clone()))
+            .map_err(|_| {
+                nomifun_common::AppError::Internal(format!(
+                    "conversation {} has unknown agent type '{}'",
+                    row.conversation_id, row.r#type
+                ))
+            })?;
     let model_resolved =
         nomifun_conversation::runtime_options::provider_model_from_conversation_row(row)?;
     let model = model_resolved.as_ref();
 
-    let backend = (row.r#type != "nomi").then(|| {
-        get_string(&extra, "backend")
-            .or_else(|| {
-                model
-                    .map(|value| value.provider_id.clone())
-                    .filter(|value| !value.is_empty())
-            })
-            .unwrap_or_else(|| row.r#type.clone())
-    });
-    let provider_id = (row.r#type == "nomi")
-        .then(|| {
-            model
-                .map(|value| value.provider_id.clone())
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    nomifun_common::AppError::BadRequest(
-                        "the bound nomi conversation has no canonical provider/model selection"
-                            .into(),
-                    )
-                })
-        })
-        .transpose()?;
+    let provider_id = model
+        .map(|value| value.provider_id.clone())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            nomifun_common::AppError::BadRequest(
+                "the bound nomi conversation has no canonical provider/model selection".into(),
+            )
+        })?;
 
     let preset_id = get_string(&extra, "preset_id");
     let custom_agent_id = get_string(&extra, "custom_agent_id");
@@ -2993,21 +2989,11 @@ fn build_agent_config_from_conversation(
             ))
         })?;
 
-    let agent_type_enum =
-        serde_json::from_value::<AgentType>(serde_json::Value::String(row.r#type.clone()))
-            .map_err(|_| {
-                nomifun_common::AppError::Internal(format!(
-                    "conversation {} has unknown agent type '{}'",
-                    row.conversation_id, row.r#type
-                ))
-            })?;
-    // Backend is the ACP/agent vendor label (e.g. "claude"). Nomi intentionally
-    // leaves it unset and carries its model provider in `provider_id`.
-    let full_auto_mode = agent_type_enum
-        .full_auto_mode_id(backend.as_deref())
-        .to_owned();
+    let full_auto_mode = agent_type_enum.full_auto_mode_id().to_owned();
     let agent_config = nomifun_api_types::CronAgentConfigDto {
-        backend,
+        // Reserved for a host runtime selector that no longer exists; a nomi
+        // job must leave it unset so `validate_nomi_agent_selection` passes.
+        backend: None,
         name: get_string(&extra, "agent_name").unwrap_or_else(|| row.name.clone()),
         cli_path: get_string(&extra, "cli_path").or_else(|| {
             extra
@@ -3021,26 +3007,21 @@ fn build_agent_config_from_conversation(
         preset_revision,
         preset_snapshot,
         mode: Some(full_auto_mode),
-        model: if row.r#type == "nomi" {
-            Some(
-                model
-                    .and_then(|value| {
-                        value
-                            .use_model
-                            .clone()
-                            .or_else(|| (!value.model.is_empty()).then(|| value.model.clone()))
-                    })
-                    .ok_or_else(|| {
-                        nomifun_common::AppError::BadRequest(
-                            "the bound nomi conversation has no canonical model selection"
-                                .into(),
-                        )
-                    })?,
-            )
-        } else {
-            get_string(&extra, "current_model_id")
-        },
-        provider_id,
+        model: Some(
+            model
+                .and_then(|value| {
+                    value
+                        .use_model
+                        .clone()
+                        .or_else(|| (!value.model.is_empty()).then(|| value.model.clone()))
+                })
+                .ok_or_else(|| {
+                    nomifun_common::AppError::BadRequest(
+                        "the bound nomi conversation has no canonical model selection".into(),
+                    )
+                })?,
+        ),
+        provider_id: Some(provider_id),
         config_options: None,
         workspace: get_string(&extra, "workspace"),
         clear_context_each_run: false,
@@ -3113,7 +3094,7 @@ fn validate_nomi_agent_selection(
     }
     if agent_backend.is_some() {
         return Err(CronError::InvalidAgentConfig(
-            "agent_config.backend is reserved for ACP/agent backends; Nomi jobs must use agent_config.provider_id"
+            "agent_config.backend is a removed host-runtime selector and must be unset;              Nomi jobs select their model with agent_config.provider_id"
                 .into(),
         ));
     }
@@ -3626,7 +3607,7 @@ mod tests {
         let err = validate_nomi_agent_config("nomi", Some(&cfg)).unwrap_err();
         assert!(matches!(err, CronError::InvalidAgentConfig(_)));
         assert!(
-            err.to_string().contains("reserved for ACP/agent backends"),
+            err.to_string().contains("agent_config.backend"),
             "{err}"
         );
     }
@@ -3640,25 +3621,29 @@ mod tests {
     }
 
     #[test]
-    fn validate_nomi_ignores_non_nomi_type() {
-        // ACP / other types may legitimately omit agent_config or leave backend empty.
-        assert!(validate_nomi_agent_config("acp", None).is_ok());
+    fn validate_nomi_ignores_a_selector_that_is_not_nomi() {
+        // These validators are gated on the raw `agent_type` string, not on the
+        // parsed enum, so a selector that is not the canonical `"nomi"` still
+        // reaches them and must not have Nomi's provider/model requirement
+        // imposed on it. Serde rejects such a selector at the parse boundary.
+        assert!(validate_nomi_agent_config("not-an-agent-type", None).is_ok());
         let cfg = agent_cfg_dto(None);
-        assert!(validate_nomi_agent_config("claude", Some(&cfg)).is_ok());
+        assert!(validate_nomi_agent_config("", Some(&cfg)).is_ok());
     }
 
     // -- nomi_model_check (execution-mode-aware routing) ----------------------
 
     #[test]
-    fn nomi_model_check_skips_non_nomi() {
+    fn nomi_model_check_skips_a_selector_that_is_not_nomi() {
         const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
-        // Non-nomi jobs never carry a nomi model requirement, regardless of mode.
+        // A selector that is not the canonical `"nomi"` carries no nomi model
+        // requirement, regardless of mode.
         assert_eq!(
-            nomi_model_check("acp", ExecutionMode::Existing, Some(CONVERSATION_ID)),
+            nomi_model_check("not-an-agent-type", ExecutionMode::Existing, Some(CONVERSATION_ID)),
             NomiModelCheck::Skip
         );
         assert_eq!(
-            nomi_model_check("claude", ExecutionMode::NewConversation, None),
+            nomi_model_check("", ExecutionMode::NewConversation, None),
             NomiModelCheck::Skip
         );
     }
@@ -3767,7 +3752,7 @@ mod tests {
             agent_config: None,
             conversation_id: Some(CONVERSATION_ID.into()),
             conversation_title: None,
-            agent_type: "acp".into(),
+            agent_type: "nomi".into(),
             created_by: CreatedBy::User,
             skill_content: None,
             description: None,

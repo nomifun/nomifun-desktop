@@ -2557,7 +2557,7 @@ fn reconcile_companion_windows(
 }
 
 fn main() -> std::process::ExitCode {
-    // If an ACP agent CLI spawned this shell as an MCP stdio bridge
+    // If a terminal agent CLI spawned this shell as an MCP stdio bridge
     // (`current_exe() mcp-requirement-stdio` etc.), run that helper and exit
     // BEFORE any runtime init, single-instance handling, or window creation.
     // Every host binary must honor these or the injected declaration tools

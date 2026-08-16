@@ -46,12 +46,8 @@ export const appendWorkspaceFilesToZip = (
   root.children.forEach((child) => walk(child));
 };
 
-export const getBackendKeyFromConversation = (conversation: TChatConversation): string | undefined => {
-  if (conversation.type === 'acp') {
-    return conversation.extra?.backend;
-  }
-  return conversation.type;
-};
+export const getBackendKeyFromConversation = (conversation: TChatConversation): string | undefined =>
+  conversation.type;
 
 export const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | null = null;

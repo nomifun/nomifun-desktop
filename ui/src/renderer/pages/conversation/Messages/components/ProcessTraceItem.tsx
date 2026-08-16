@@ -5,14 +5,13 @@
  */
 
 import type { IConversationArtifact } from '@/common/adapter/ipcBridge';
-import type { IMessageAcpToolCall, IMessageToolCall, IMessageToolGroup, TMessage } from '@/common/chat/chatLib';
+import type { IMessageToolCall, IMessageToolGroup, TMessage } from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
 import { normalizeToolMessages } from '@/common/chat/normalizeToolCall';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { usePreviewLauncher } from '@/renderer/hooks/file/usePreviewLauncher';
 import { extractContentFromDiff } from '@/renderer/utils/file/diffUtils';
 import { getFileTypeInfo } from '@/renderer/utils/file/fileType';
-import MessageAcpPermission from '@renderer/pages/conversation/Messages/acp/MessageAcpPermission';
 import { Code, Edit, Info, Right, Terminal } from '@icon-park/react';
 import classNames from 'classnames';
 import React, { useCallback, useMemo, useState } from 'react';
@@ -36,7 +35,7 @@ import {
   type ToolReceiptDetailRow,
 } from './toolGroupSummaryModel';
 
-type ToolProcessMessage = IMessageToolGroup | IMessageAcpToolCall | IMessageToolCall;
+type ToolProcessMessage = IMessageToolGroup | IMessageToolCall;
 
 export type ProcessTraceRenderableItem =
   | TMessage
@@ -730,7 +729,6 @@ const ProcessTraceItem: React.FC<{
       );
     case 'tool_call':
     case 'tool_group':
-    case 'acp_tool_call':
       return (
         <ToolProcessTraceRows
           messages={[item]}
@@ -779,27 +777,6 @@ const ProcessTraceItem: React.FC<{
               label: t('messages.processReceipt.waitingPermission', {
                 target: compactReceiptText(
                   item.content.title || item.content.description,
-                  t('messages.permissionRequest')
-                ),
-                defaultValue: 'Waiting to confirm {{target}}',
-              }),
-            },
-          ]}
-        />
-      );
-    case 'acp_permission':
-      if (state === 'waiting') return <MessageAcpPermission message={item} />;
-      return (
-        <ProcessTraceRows
-          rows={[
-            {
-              key: item.id,
-              state,
-              label: t('messages.processReceipt.waitingPermission', {
-                target: compactReceiptText(
-                  item.content.tool_call?.title ||
-                    item.content.tool_call?.raw_input?.command ||
-                    item.content.tool_call?.raw_input?.description,
                   t('messages.permissionRequest')
                 ),
                 defaultValue: 'Waiting to confirm {{target}}',

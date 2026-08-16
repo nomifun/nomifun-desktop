@@ -572,8 +572,7 @@
 }
 
 .turn-process-disclosure__item .message-error-note,
-.turn-process-disclosure__item [data-testid='message-permission-card'],
-.turn-process-disclosure__item [data-testid='message-acp-permission-card'] {
+.turn-process-disclosure__item [data-testid='message-permission-card'] {
   margin-bottom: 0;
 }
 
@@ -672,8 +671,7 @@
 }
 
 .turn-process-receipt__body .message-error-note,
-.turn-process-receipt__body [data-testid='message-permission-card'],
-.turn-process-receipt__body [data-testid='message-acp-permission-card'] {
+.turn-process-receipt__body [data-testid='message-permission-card'] {
   margin-bottom: 0;
 }
 

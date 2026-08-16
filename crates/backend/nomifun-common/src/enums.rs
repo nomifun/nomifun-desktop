@@ -4,57 +4,36 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentType {
-    Acp,
     Nomi,
 }
 
 impl AgentType {
     pub fn display_name(&self) -> &'static str {
         match self {
-            AgentType::Acp => "ACP",
             AgentType::Nomi => "Nomi",
         }
     }
 
     pub fn serde_name(&self) -> &'static str {
         match self {
-            AgentType::Acp => "acp",
             AgentType::Nomi => "nomi",
         }
     }
 
-    /// Native skill-discovery directories for non-ACP agent types.
-    ///
-    /// ACP vendors own their skill dirs through the `agent_metadata`
-    /// table; this method covers the few non-ACP agent types that still
-    /// support native skill discovery. Returns `None` for agent types
-    /// that require prompt-injection instead of workspace symlinks.
+    /// Native skill-discovery directories for this agent type.
     pub fn native_skills_dirs(&self) -> Option<&'static [&'static str]> {
         match self {
             AgentType::Nomi => Some(&[".nomi/skills"]),
-            AgentType::Acp => None,
         }
     }
 
     /// Canonical full-auto session mode id for this agent type.
     ///
-    /// ACP agents need backend-specific mode ids, while other agent types
-    /// currently converge on the permissive `yolo` mode.
-    ///
-    /// `backend` is the vendor label (e.g. `"claude"`, `"codex"`) used
-    /// only by ACP; pass `None` for non-ACP agents. This mapping is
-    /// duplicated in the seed of `agent_metadata.yolo_id` — code paths
-    /// with DB access should prefer reading that column. This function
-    /// is a fallback for offline / pre-hydrate callers (cron, tests).
-    pub fn full_auto_mode_id(&self, backend: Option<&str>) -> &'static str {
+    /// The per-vendor mode table this used to carry existed only for external
+    /// CLI agents, each of which named its permissive mode differently. The
+    /// native engine has one name for it.
+    pub fn full_auto_mode_id(&self) -> &'static str {
         match self {
-            AgentType::Acp => match backend {
-                Some("claude") | Some("codebuddy") => "bypassPermissions",
-                Some("codex") => "agent-full-access",
-                Some("opencode") => "build",
-                Some("cursor") => "agent",
-                _ => "yolo",
-            },
             AgentType::Nomi => "yolo",
         }
     }
@@ -90,7 +69,6 @@ pub enum MessageType {
     ToolGroup,
     AgentStatus,
     Permission,
-    AcpToolCall,
     Plan,
     Thinking,
     AvailableCommands,
@@ -229,24 +207,20 @@ mod tests {
     #[test]
     fn test_agent_type_display_names() {
         assert_eq!(AgentType::Nomi.display_name(), "Nomi");
-        assert_eq!(AgentType::Acp.display_name(), "ACP");
     }
 
     #[test]
     fn test_agent_type_serde_roundtrip() {
-        let val = AgentType::Acp;
+        let val = AgentType::Nomi;
         let json = serde_json::to_string(&val).unwrap();
-        assert_eq!(json, r#""acp""#);
+        assert_eq!(json, r#""nomi""#);
         let parsed: AgentType = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, val);
     }
 
     #[test]
     fn test_agent_type_all_variants() {
-        let cases = [
-            (AgentType::Acp, "acp"),
-            (AgentType::Nomi, "nomi"),
-        ];
+        let cases = [(AgentType::Nomi, "nomi")];
         for (variant, expected) in cases {
             let json = serde_json::to_string(&variant).unwrap();
             assert_eq!(json, format!("\"{expected}\""), "serialize {variant:?}");
@@ -276,10 +250,6 @@ mod tests {
         let val = MessageType::ToolCall;
         let json = serde_json::to_string(&val).unwrap();
         assert_eq!(json, r#""tool_call""#);
-
-        let val = MessageType::AcpToolCall;
-        let json = serde_json::to_string(&val).unwrap();
-        assert_eq!(json, r#""acp_tool_call""#);
 
         let val = MessageType::AgentStatus;
         let json = serde_json::to_string(&val).unwrap();
@@ -337,11 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_type_full_auto_mode_id_supports_non_acp_agents() {
-        assert_eq!(AgentType::Acp.full_auto_mode_id(Some("codex")), "agent-full-access");
-        assert_eq!(AgentType::Acp.full_auto_mode_id(Some("claude")), "bypassPermissions");
-        assert_eq!(AgentType::Acp.full_auto_mode_id(Some("gemini")), "yolo");
-        assert_eq!(AgentType::Acp.full_auto_mode_id(None), "yolo");
-        assert_eq!(AgentType::Nomi.full_auto_mode_id(None), "yolo");
+    fn agent_type_full_auto_mode_id() {
+        assert_eq!(AgentType::Nomi.full_auto_mode_id(), "yolo");
     }
 }

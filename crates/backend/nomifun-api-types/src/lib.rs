@@ -1,5 +1,4 @@
 //! All HTTP request/response DTOs shared across the API surface.
-mod acp;
 mod agent_build_extra;
 mod agent_discovery;
 mod agent_error;
@@ -31,6 +30,7 @@ mod provider_model;
 mod requirement;
 mod response;
 mod serde_util;
+mod session_ops;
 mod shell;
 mod skill;
 mod system;
@@ -38,16 +38,14 @@ mod terminal;
 mod webhook;
 mod websocket;
 
-pub use acp::{
-    AcpHealthCheckRequest, AcpHealthCheckResponse, AgentModeResponse, GetModelInfoResponse,
-    ModelInfoEntry, ModelInfoPayload, SetModeRequest, SetModelRequest, SideQuestionRequest,
-    SideQuestionResponse, TryConnectCustomAgentRequest, TryConnectCustomAgentResponse,
-    WorkspaceBrowseQuery, WorkspaceEntry,
+pub use session_ops::{
+    AgentModeResponse, GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, SetModeRequest,
+    SetModelRequest, SideQuestionRequest, SideQuestionResponse, WorkspaceBrowseQuery,
+    WorkspaceEntry,
 };
 pub use agent_build_extra::{
-    AcpBuildExtra, AcpModelInfo, NomiBuildExtra, NomiGoalSpec, SessionMcpServer,
-    SessionMcpTransport,
-    SlashCommandItem, SummonConfig,
+    NomiBuildExtra, NomiGoalSpec, SessionMcpServer, SessionMcpTransport, SlashCommandItem,
+    SummonConfig,
 };
 pub use agent_discovery::{
     AgentEnvEntry, AgentHandshake, AgentMetadata, AgentSource, AgentSourceInfo, BehaviorPolicy,
@@ -155,7 +153,7 @@ pub use mcp::{
 };
 pub use mcp_bridge::{
     BROWSER_CAPABILITY_DOMAIN, BROWSER_MCP_TOOL_NAMES, BrowserCapabilityClaims,
-    BrowserCapabilityOperation, BrowserCapabilityScope, BrowserCapabilitySurface,
+    BrowserCapabilityOperation, BrowserCapabilityScope,
     BrowserMcpChildConfig, BrowserMcpConfig, ComputerMcpConfig, GATEWAY_CALL_TOOL_OPERATION,
     GATEWAY_CAPABILITY_DOMAIN, GATEWAY_CREATE_CONVERSATION_TOOL, GATEWAY_LIST_TOOLS_OPERATION,
     GatewayCapabilityClaims, GatewayCapabilityScope, GatewayMcpChildConfig, GatewayMcpConfig,

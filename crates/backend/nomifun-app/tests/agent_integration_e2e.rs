@@ -22,8 +22,9 @@ use nomifun_common::{AgentKillReason, AgentType, AppError, Confirmation, Convers
 
 use common::{body_json, get_with_token, json_with_token, setup_and_login};
 
-const GEMINI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000103";
 const MESSAGE_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
+const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345679987";
+const MODEL: &str = "mock-agent-model";
 
 // ── Mock Agent ──────────────────────────────────────────────────
 
@@ -53,7 +54,7 @@ impl MockAgent {
 #[async_trait]
 impl AgentRuntimeControl for MockAgent {
     fn agent_type(&self) -> AgentType {
-        AgentType::Acp
+        AgentType::Nomi
     }
 
     fn conversation_id(&self) -> &str {
@@ -195,6 +196,7 @@ async fn build_app_with_mock_runtime_registry() -> (axum::Router, nomifun_app::A
     let services = nomifun_app::AppServices::from_config(db, &nomifun_app::AppConfig::default())
         .await
         .unwrap();
+    seed_mock_provider(&services).await;
 
     let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
     let services = services.with_agent_runtime_registry(runtime_registry.clone());
@@ -203,13 +205,36 @@ async fn build_app_with_mock_runtime_registry() -> (axum::Router, nomifun_app::A
     (router, services, runtime_registry)
 }
 
+/// Nomi is the only engine, and its runtime options are refused without a
+/// canonical provider/model pair — even when the registry that consumes them is
+/// a mock. Every fixture conversation below pins this pair.
+async fn seed_mock_provider(services: &nomifun_app::AppServices) {
+    let credentials_encrypted =
+        nomifun_common::encrypt_string(r#"{"api_keys":["test-only"]}"#, &[0x42; 32]).unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT OR IGNORE INTO providers (\
+            provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
+            created_at, updated_at\
+         ) VALUES (?, 'openai', 'mock-agent-fixture', 'https://example.invalid', 'bearer', ?, 1, 1, 1)",
+    )
+    .bind(PROVIDER_ID)
+    .bind(&credentials_encrypted)
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+    common::seed_openai_chat_model(services.database.pool(), PROVIDER_ID, MODEL).await;
+}
+
 async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str, name: &str) -> String {
     let body = json!({
-        "type": "acp",
+        "type": "nomi",
         "name": name,
-        "extra": {
-            "agent_id": GEMINI_AGENT_ID
-        }
+        "model": {
+            "provider_id": PROVIDER_ID,
+            "model": MODEL,
+            "use_model": MODEL,
+        },
+        "extra": {}
     });
     let req = common::json_with_token("POST", "/api/conversations", body, token, csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -388,13 +413,14 @@ async fn slash_commands_with_mock_returns_empty() {
 
     let req = get_with_token(&format!("/api/conversations/{conv_id}/slash-commands"), &token);
     let resp = app.oneshot(req).await.unwrap();
-    // Mock agent is not a real AcpAgentManager, so downcast fails → 500
-    // OR if agent_type check prevents downcast, returns empty array
+    // The route dispatches straight through `AgentRuntimeHandle`, which has no
+    // per-engine downcast left: the mock's slash-command surface is an empty
+    // list, so this is an exact 200 rather than the old "200 or 500".
     let status = resp.status();
-    assert!(
-        status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
-        "Expected 200 or 500, got {status}"
-    );
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "slash-commands failed: {json}");
+    assert_eq!(json["success"], true);
+    assert!(json["data"].as_array().unwrap().is_empty());
 }
 
 
@@ -413,12 +439,12 @@ async fn side_question_with_mock_agent() {
         &csrf,
     );
     let resp = app.oneshot(req).await.unwrap();
-    // Mock agent is type Acp but not a real AcpAgentManager, so downcast
-    // fails. The handler first checks agent_type() == Acp, then tries to
-    // downcast. Since our mock returns Acp type, downcast fails → 500.
+    // Side-questions have no implementing backend, so the mock reports the same
+    // honest `unsupported` every real variant does — an exact 200 with that
+    // status, not the old "200 or 500" downcast-failure window.
     let status = resp.status();
-    assert!(
-        status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
-        "Expected 200 or 500, got {status}"
-    );
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "side-question failed: {json}");
+    assert_eq!(json["data"]["status"], "unsupported");
+    assert!(json["data"]["answer"].is_null());
 }

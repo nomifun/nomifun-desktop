@@ -24,15 +24,6 @@ export type BuildAgentConversationInput = {
   extra?: Partial<ICreateConversationParams['extra']>;
 };
 
-export function getConversationTypeForBackend(backend: string): ICreateConversationParams['type'] {
-  switch (backend) {
-    case 'nomi':
-      return 'nomi';
-    default:
-      return 'acp';
-  }
-}
-
 export function buildAgentConversationParams(input: BuildAgentConversationInput): ICreateConversationParams {
   const {
     backend,
@@ -50,15 +41,19 @@ export function buildAgentConversationParams(input: BuildAgentConversationInput)
     extra: extraOverrides,
   } = input;
 
-  const type = getConversationTypeForBackend(backend);
+  // Only one execution engine remains; the annotation keeps TS rejecting a
+  // stale literal if the union ever widens again.
+  const type: ICreateConversationParams['type'] = 'nomi';
   const extra: ICreateConversationParams['extra'] = {
     workspace,
     custom_workspace,
     ...extraOverrides,
   };
 
-  if (!is_preset && type === 'acp') {
-    extra.backend = backend as string;
+  // Bare Agent launches carry their runtime identity in `extra`; a preset
+  // launch resolves everything server-side from `preset_id` instead.
+  if (!is_preset) {
+    extra.backend = backend;
     extra.agent_name = agent_name || name;
     if (agent_id) extra.agent_id = agent_id;
     if (cli_path) extra.cli_path = cli_path;

@@ -19,7 +19,7 @@ interface MessageAgentStatusProps {
 }
 
 /**
- * Unified agent status message component for all ACP-based agents (Claude, Qwen, Codex, etc.)
+ * Unified agent status message component for the native agent runtime.
  */
 const MessageAgentStatus: React.FC<MessageAgentStatusProps> = ({ message }) => {
   const { t } = useTranslation();
@@ -40,13 +40,13 @@ const MessageAgentStatus: React.FC<MessageAgentStatusProps> = ({ message }) => {
   const getStatusBadge = () => {
     switch (status) {
       case 'connecting':
-        return <Badge status='processing' text={t('acp.status.connecting', { agent: display_name })} />;
+        return <Badge status='processing' text={t('agent.status.connecting', { agent: display_name })} />;
       case 'connected':
-        return <Badge status='success' text={t('acp.status.connected', { agent: display_name })} />;
+        return <Badge status='success' text={t('agent.status.connected', { agent: display_name })} />;
       case 'authenticated':
-        return <Badge status='success' text={t('acp.status.authenticated', { agent: display_name })} />;
+        return <Badge status='success' text={t('agent.status.authenticated', { agent: display_name })} />;
       case 'session_active':
-        return <Badge status='success' text={t('acp.status.session_active', { agent: display_name })} />;
+        return <Badge status='success' text={t('agent.status.session_active', { agent: display_name })} />;
       case 'preparing':
         return (
           <Badge
@@ -62,9 +62,9 @@ const MessageAgentStatus: React.FC<MessageAgentStatusProps> = ({ message }) => {
           />
         );
       case 'error':
-        return <Badge status='error' text={t('acp.status.error')} />;
+        return <Badge status='error' text={t('agent.status.error')} />;
       default:
-        return <Badge status='default' text={t('acp.status.unknown')} />;
+        return <Badge status='default' text={t('agent.status.unknown')} />;
     }
   };
 

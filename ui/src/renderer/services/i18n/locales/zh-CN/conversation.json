@@ -202,10 +202,6 @@
         "title": "Agent 握手超时",
         "body": "所选 Agent 未在预期时间内完成启动握手。首次启动可能需要下载运行组件（数十 MB），请确认网络/代理可用后重试；重试会自动清理未完成的下载。"
       },
-      "USER_AGENT_ACP_INIT_FAILED": {
-        "title": "Agent 协议初始化失败",
-        "body": "应用无法和该 Agent 初始化 Agent Client Protocol 会话。请检查 Agent 版本并重新连接。"
-      },
       "USER_AGENT_PROTOCOL_MISMATCH": {
         "title": "Agent 协议版本不兼容",
         "body": "所选 Agent 使用的协议版本不兼容。请升级 Agent，或切换到兼容的 Agent。"

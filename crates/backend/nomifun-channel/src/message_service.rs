@@ -384,11 +384,18 @@ impl ChannelMessageService {
             ));
         }
 
-        // Resolve the target conversation. A DIRECT Nomi turn bound to a
-        // companion uses that companion's one private persistent session.
-        // Every GROUP turn is forced into a dedicated channel conversation so
-        // group members can never read or pollute the owner's private transcript.
-        // Non-companion / ACP / unbound channels are dedicated as before.
+        // Resolve the target conversation. A DIRECT turn bound to a companion
+        // uses that companion's one private persistent session. Every GROUP turn
+        // is forced into a dedicated channel conversation so group members can
+        // never read or pollute the owner's private transcript. Non-companion and
+        // unbound channels are dedicated as before.
+        //
+        // The old "open-group guests may only use the restricted Nomi agent"
+        // check lived here. It is gone because `parse_agent_type` above now
+        // enforces something strictly stronger: a session naming any engine
+        // other than nomi is rejected for EVERY caller, guest or owner. Keeping
+        // the guest-only form would have asserted a condition that can no longer
+        // be true.
         let agent_type = parse_agent_type(&session.agent_type)?;
         let is_direct = session.chat_kind == CHANNEL_CHAT_KIND_DIRECT;
         let is_group = session.chat_kind == CHANNEL_CHAT_KIND_GROUP;
@@ -402,11 +409,6 @@ impl ChannelMessageService {
         } else {
             false
         };
-        if auto_group_guest && agent_type != AgentType::Nomi {
-            return Err(ChannelError::UserNotAuthorized(
-                "open-group guests may only use the restricted Nomi agent".into(),
-            ));
-        }
         let companion_id = if agent_type == AgentType::Nomi {
             self.resolve_session_companion(session, platform).await
         } else {
@@ -832,60 +834,9 @@ impl ChannelMessageService {
                     status: format!("{:?}", data.status),
                 })
             }
-            AgentStreamEvent::AcpToolCall(data) => {
-                if data.update.status
-                    != Some(nomifun_ai_agent::protocol::events::AcpToolCallStatus::Completed)
-                {
-                    return None;
-                }
-                let artifacts = data
-                    .update
-                    .content
-                    .as_ref()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|item| match item {
-                        nomifun_ai_agent::protocol::events::AcpToolCallContentItem::Artifact {
-                            artifact,
-                            ..
-                        } => Some(artifact.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                (!artifacts.is_empty()).then_some(StreamAction::ArtifactsProduced(artifacts))
-            }
             // Blocking decisions: forward as a numbered text choice. A decision
             // with no options is unanswerable, so it is dropped (None).
-            AgentStreamEvent::AcpPermission(data) => match data {
-                nomifun_ai_agent::protocol::events::AcpPermissionEventData::Request(req) => {
-                    let options: Vec<crate::types::DecisionOption> = req
-                        .options
-                        .iter()
-                        .map(|o| crate::types::DecisionOption {
-                            option_id: o.option_id.clone(),
-                            label: o.name.clone(),
-                        })
-                        .collect();
-                    if options.is_empty() {
-                        return None;
-                    }
-                    Some(StreamAction::Decision {
-                        call_id: req.tool_call.tool_call_id.clone(),
-                        prompt: req
-                            .tool_call
-                            .title
-                            .clone()
-                            .unwrap_or_else(|| "请选择".to_owned()),
-                        options,
-                    })
-                }
-                nomifun_ai_agent::protocol::events::AcpPermissionEventData::Confirmation(conf) => {
-                    confirmation_to_decision(conf)
-                }
-            },
-            AgentStreamEvent::Permission(value) => serde_json::from_value::<nomifun_common::Confirmation>(value.clone())
-                .ok()
-                .and_then(|conf| confirmation_to_decision(&conf)),
+            AgentStreamEvent::Permission(data) => confirmation_to_decision(data.confirmation()),
             // Events that don't produce user-facing messages
             AgentStreamEvent::Start(_)
             | AgentStreamEvent::Tips(_)
@@ -895,11 +846,6 @@ impl ChannelMessageService {
             | AgentStreamEvent::AvailableCommands(_)
             | AgentStreamEvent::SkillSuggest(_)
             | AgentStreamEvent::CronTrigger(_)
-            | AgentStreamEvent::AcpModelInfo(_)
-            | AgentStreamEvent::AcpModeInfo(_)
-            | AgentStreamEvent::AcpConfigOption(_)
-            | AgentStreamEvent::AcpSessionInfo(_)
-            | AgentStreamEvent::AcpContextUsage(_)
             | AgentStreamEvent::TurnCompleted(_)
             | AgentStreamEvent::System(_)
             | AgentStreamEvent::RequestTrace(_)
@@ -1238,7 +1184,6 @@ fn platform_to_source(platform: PluginType) -> ConversationSource {
 /// `extra` shape, failing much later and far from the cause.
 fn parse_agent_type(s: &str) -> Result<AgentType, ChannelError> {
     match s {
-        "acp" => Ok(AgentType::Acp),
         "nomi" => Ok(AgentType::Nomi),
         _ => Err(ChannelError::InvalidConfig(format!(
             "channel session names agent type '{s}', which no longer exists in this build"
@@ -1287,11 +1232,10 @@ fn channel_conversation_name(
 mod tests {
     use super::*;
     use nomifun_ai_agent::protocol::events::{
-        AcpToolCallContentItem, AcpToolCallEventData, AcpToolCallSessionUpdateKind, AcpToolCallStatus,
-        AcpToolCallUpdateData, ErrorEventData, FinishEventData, StartEventData, TextEventData,
-        ThinkingEventData, ToolCallEventData, ToolCallStatus,
+        ErrorEventData, FinishEventData, StartEventData, TextEventData, ThinkingEventData,
+        ToolCallEventData, ToolCallStatus,
     };
-    use nomifun_common::{PersistedArtifactId, ProviderWithModel};
+    use nomifun_common::PersistedArtifactId;
 
     // ── extract_last_user_text ────────────────────────────────────────
 
@@ -1441,13 +1385,15 @@ mod tests {
     }
 
     #[test]
-    fn channel_context_acp_preserves_backend_without_nomi_context() {
+    fn channel_context_preserves_declared_backend_alongside_nomi_context() {
+        // `extra.backend` is a free-form label a channel session may carry (an
+        // IM plugin's own naming). It is NOT the engine discriminant, so adding
+        // the nomi companion context must leave it untouched.
         let mut extra = ChannelMessageService::build_channel_extra(Some("claude"));
-        apply_channel_agent_context(&mut extra, AgentType::Acp, PluginType::Lark, Some("companion_1"));
-        assert!(extra.get("companion_session").is_none());
-        assert!(extra.get("channel_platform").is_none());
-        assert!(extra.get("companion_id").is_none());
+        apply_channel_agent_context(&mut extra, AgentType::Nomi, PluginType::Lark, Some("companion_1"));
         assert_eq!(extra["backend"], serde_json::json!("claude"));
+        assert_eq!(extra["companion_session"], serde_json::json!(true));
+        assert_eq!(extra["companion_id"], serde_json::json!("companion_1"));
     }
 
     #[test]
@@ -1475,12 +1421,17 @@ mod tests {
 
     #[test]
     fn parse_known_agent_types() {
-        assert_eq!(parse_agent_type("acp").unwrap(), AgentType::Acp);
         assert_eq!(parse_agent_type("nomi").unwrap(), AgentType::Nomi);
     }
 
     #[test]
     fn parse_unknown_agent_type_is_rejected() {
+        // Retired engine names must REJECT, not coerce. `channel_sessions
+        // .agent_type` is free-form TEXT, so a row written by an older build can
+        // still name a deleted engine; silently reading it as nomi would start a
+        // session with the wrong runtime and an incompatible `extra` shape,
+        // failing much later and far from the cause.
+        assert!(parse_agent_type("acp").is_err());
         assert!(parse_agent_type("unknown").is_err());
         assert!(parse_agent_type("nanobot").is_err());
         assert!(parse_agent_type("openclaw-gateway").is_err());
@@ -1651,77 +1602,6 @@ mod tests {
     }
 
     #[test]
-    fn completed_acp_tool_call_preserves_verified_artifact_receipts() {
-        let artifact = nomifun_ai_agent::artifact_store::PersistedArtifact {
-            id: PersistedArtifactId::new().into_string(),
-            kind: nomifun_ai_agent::artifact_store::ArtifactKind::Image,
-            mime_type: "image/png".into(),
-            path: "/workspace/nomifun-artifacts/artifact-acp-1.png".into(),
-            relative_path: "nomifun-artifacts/artifact-acp-1.png".into(),
-            size_bytes: 10,
-            sha256: "abc".into(),
-        };
-        let event = AgentStreamEvent::AcpToolCall(AcpToolCallEventData {
-            session_id: "sess-1".into(),
-            update: AcpToolCallUpdateData {
-                session_update: AcpToolCallSessionUpdateKind::ToolCallUpdate,
-                tool_call_id: "tool-1".into(),
-                status: Some(AcpToolCallStatus::Completed),
-                title: None,
-                kind: None,
-                raw_input: None,
-                raw_output: None,
-                content: Some(vec![AcpToolCallContentItem::Artifact {
-                    artifact: artifact.clone(),
-                    source_uri: None,
-                }]),
-                locations: None,
-            },
-            meta: None,
-        });
-
-        match ChannelMessageService::process_stream_event(&event) {
-            Some(StreamAction::ArtifactsProduced(artifacts)) => {
-                assert_eq!(artifacts, vec![artifact]);
-            }
-            other => panic!("expected ACP ArtifactsProduced, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn failed_acp_tool_call_never_uploads_artifact_receipts() {
-        let artifact = nomifun_ai_agent::artifact_store::PersistedArtifact {
-            id: PersistedArtifactId::new().into_string(),
-            kind: nomifun_ai_agent::artifact_store::ArtifactKind::Image,
-            mime_type: "image/png".into(),
-            path: "/workspace/nomifun-artifacts/artifact-acp-failed.png".into(),
-            relative_path: "nomifun-artifacts/artifact-acp-failed.png".into(),
-            size_bytes: 10,
-            sha256: "abc".into(),
-        };
-        let event = AgentStreamEvent::AcpToolCall(AcpToolCallEventData {
-            session_id: "sess-1".into(),
-            update: AcpToolCallUpdateData {
-                session_update: AcpToolCallSessionUpdateKind::ToolCallUpdate,
-                tool_call_id: "tool-1".into(),
-                status: Some(AcpToolCallStatus::Failed),
-                title: None,
-                kind: None,
-                raw_input: None,
-                raw_output: None,
-                content: Some(vec![AcpToolCallContentItem::Artifact {
-                    artifact,
-                    source_uri: None,
-                }]),
-                locations: None,
-            },
-            meta: None,
-        });
-
-        assert!(ChannelMessageService::process_stream_event(&event).is_none());
-    }
-
-    #[test]
     fn running_tool_call_still_produces_tool_call_status() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "c1".into(),
@@ -1848,67 +1728,7 @@ mod tests {
     }
 
     #[test]
-    fn acp_permission_request_produces_decision() {
-        use nomifun_ai_agent::protocol::events::{
-            AcpPermissionEventData, AcpPermissionOptionData, AcpPermissionOptionKind, AcpPermissionRequestData,
-            AcpPermissionToolCall,
-        };
-
-        let event = AgentStreamEvent::AcpPermission(AcpPermissionEventData::Request(AcpPermissionRequestData {
-            session_id: "s1".into(),
-            tool_call: AcpPermissionToolCall {
-                tool_call_id: "call-7".into(),
-                status: None,
-                title: Some("Run rm -rf?".into()),
-                kind: None,
-                raw_input: None,
-                raw_output: None,
-                content: None,
-                locations: None,
-                meta: None,
-            },
-            options: vec![
-                AcpPermissionOptionData {
-                    option_id: "allow".into(),
-                    name: "Allow once".into(),
-                    kind: AcpPermissionOptionKind::AllowOnce,
-                    meta: None,
-                },
-                AcpPermissionOptionData {
-                    option_id: "reject".into(),
-                    name: "Reject".into(),
-                    kind: AcpPermissionOptionKind::RejectOnce,
-                    meta: None,
-                },
-            ],
-            meta: None,
-        }));
-
-        match ChannelMessageService::process_stream_event(&event) {
-            Some(StreamAction::Decision { call_id, prompt, options }) => {
-                assert_eq!(call_id, "call-7");
-                assert_eq!(prompt, "Run rm -rf?");
-                assert_eq!(
-                    options,
-                    vec![
-                        crate::types::DecisionOption {
-                            option_id: "allow".into(),
-                            label: "Allow once".into()
-                        },
-                        crate::types::DecisionOption {
-                            option_id: "reject".into(),
-                            label: "Reject".into()
-                        },
-                    ]
-                );
-            }
-            other => panic!("expected Decision, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn permission_value_confirmation_produces_decision() {
-        // Legacy untyped Permission carrying a serialized `Confirmation`.
+    fn permission_confirmation_produces_decision() {
         let value = serde_json::json!({
             "id": "conf-1",
             "call_id": "call-9",
@@ -1921,7 +1741,8 @@ mod tests {
                 { "label": "No", "value": "no" },
             ],
         });
-        let event = AgentStreamEvent::Permission(value);
+        let conf: nomifun_common::Confirmation = serde_json::from_value(value).unwrap();
+        let event = AgentStreamEvent::Permission(conf.into());
 
         match ChannelMessageService::process_stream_event(&event) {
             Some(StreamAction::Decision { call_id, prompt, options }) => {
@@ -1954,7 +1775,8 @@ mod tests {
             "description": "",
             "options": [],
         });
-        let event = AgentStreamEvent::Permission(value);
+        let conf: nomifun_common::Confirmation = serde_json::from_value(value).unwrap();
+        let event = AgentStreamEvent::Permission(conf.into());
         assert!(
             ChannelMessageService::process_stream_event(&event).is_none(),
             "an unanswerable decision (no options) must not surface"
@@ -2033,52 +1855,6 @@ mod tests {
         let extra = ChannelMessageService::build_channel_extra(Some("claude"));
         assert_eq!(extra["session_mode"], "yolo");
         assert_eq!(extra["backend"], "claude");
-    }
-
-    // ── model placement by agent_type (regression: non-nomi must not
-    //    use top-level model) ──────────────────────────────────────────
-
-    #[test]
-    fn acp_model_goes_into_extra_not_top_level() {
-        let agent_type = AgentType::Acp;
-        let model = ProviderWithModel {
-            provider_id: "prov1".into(),
-            model: "claude-sonnet".into(),
-            use_model: Some("global.anthropic.claude-sonnet-4-6".into()),
-        };
-        let mut extra = ChannelMessageService::build_channel_extra(Some("codex"));
-
-        let top_level_model = if agent_type == AgentType::Nomi {
-            Some(model.clone())
-        } else {
-            extra["model"] = serde_json::to_value(&model).unwrap();
-            None
-        };
-
-        assert!(top_level_model.is_none(), "acp must not have top-level model");
-        assert_eq!(extra["model"]["provider_id"], "prov1");
-        assert_eq!(extra["model"]["use_model"], "global.anthropic.claude-sonnet-4-6");
-    }
-
-    #[test]
-    fn nomi_model_stays_at_top_level() {
-        let agent_type = AgentType::Nomi;
-        let model = ProviderWithModel {
-            provider_id: "prov2".into(),
-            model: "gpt-4o".into(),
-            use_model: None,
-        };
-        let mut extra = ChannelMessageService::build_channel_extra(None);
-
-        let top_level_model = if agent_type == AgentType::Nomi {
-            Some(model.clone())
-        } else {
-            extra["model"] = serde_json::to_value(&model).unwrap();
-            None
-        };
-
-        assert!(top_level_model.is_some(), "nomi must use top-level model");
-        assert!(extra.get("model").is_none() || extra["model"].is_null());
     }
 
     // ── channel_conversation_name ─────────────────────────────────────

@@ -46,26 +46,30 @@ Agent crates 不依赖 `nomifun-*` 后端 crate。常规的后端到 agent 集�
 的桥接面会直接依赖 browser/computer-use crate，以便把这些能力暴露为 stdio
 或公开工具。
 
-## Runtime Families
+## 唯一的运行时
 
-NomiFun 支持几类运行时：
-
-- **Nomi engine**：来自 `nomi-agent` 的仓内引擎，带 provider、内置工具、
-  skills、MCP、memory、browser 与 computer-use 支持。
-- **ACP-style CLI agents**：Claude Code、Codex、Gemini CLI、Qwen/OpenCode
-  风格集成及相关 CLI，由 `nomifun-ai-agent` 管理。
-- **Remote/Open capability surfaces**：外部 agent 通过 companion-token 认证的
-  `/mcp`、`/mcp-agent` 或 `/v1` 入口连接。
+NomiFun 只有一个会话引擎：来自 `nomi-agent` 的内置 **`nomi`** 引擎，带
+provider、内置工具、skills、MCP、memory、browser 与 computer-use 支持，在
+进程内运行。不存在第二套适配器栈，不需要与外部 agent 协商协议，也没有可以
+把会话移交出去的子 agent CLI。
 
 Factory 行为的源码真相来源：
 
 - `crates/backend/nomifun-ai-agent/src/factory/nomi.rs`
-- `crates/backend/nomifun-ai-agent/src/factory/acp.rs`
-- `crates/backend/nomifun-ai-agent/src/factory/acp_assembler.rs`
+
+两类容易被误认为“会话引擎”、但并不是的东西：
+
+- **终端 session。** 第三方 agent CLI（Claude Code、Codex、Gemini CLI）作为
+  普通子进程运行在 `nomifun-terminal` 的 PTY session 里。后端不解析它们的
+  协议、也不持有它们的回合状态，只持有伪终端。见
+  [`../guides/terminal.zh.md`](../guides/terminal.zh.md)。
+- **公开能力入口。** 外部 agent 与脚本经 companion-token 认证的 `/mcp`、
+  `/mcp-agent` 或 `/v1` 调用**进入** NomiFun。那是入站方向：NomiFun 是工具
+  提供方，不是引擎宿主。
 
 ## MCP 与工具注入
 
-MCP / tool 可用性按运行时与 session 组装，不是一张全局扁平列表。
+MCP / tool 可用性按 session 组装，不是一张全局扁平列表。
 
 常见来源包括：
 
@@ -75,7 +79,7 @@ MCP / tool 可用性按运行时与 session 组装，不是一张全局扁平列
 - Agent factory 根据实例所有者边界派生的平台 Gateway tools；
 - Windows/open helper bridge；
 - feature-gated computer-use 与 browser-use stdio bridges；
-- runtime-native skills 或 first-message skill injection；
+- 引擎自有 `Skill` tool 路径解析出的 skills；
 - Nomi 原生工具注册表。
 
 平台 Gateway 是内部能力传输，不是 Conversation 设置或持久化授权。服务端从
@@ -86,23 +90,17 @@ MCP / tool 可用性按运行时与 session 组装，不是一张全局扁平列
 不写入 build-extra、Conversation 或数据库；runtime teardown 和主进程重启会撤销它们。
 公开主体和非实例所有者默认拒绝，不能获得宿主能力。
 
-记录工具可用性时应引用上面的 factory 文件，不要假设所有 agent 都拿到同一组
-injected servers。
+记录工具可用性时应引用上面的 factory 文件，不要假设每个 session 都拿到同一组
+injected servers —— 这组集合仍会随会话配置、挂载的知识库和派生出的权限而变化。
 
 ## Skills
 
-Skills 是 instruction/tool bundle，其物化方式取决于运行时能力：
-
-- Nomi 在引擎内有真实的 `Skill` tool 路径。
-- Native CLI 运行时可能接收 symlink/copy 出来的 skill 文件，或在支持较弱时接收
-  first-message guidance。
-- Custom workspace 或非 native 路径可以收到 first-message skill index 摘要。
+Skills 是 instruction/tool bundle。`nomi` 引擎在引擎内有真实的 `Skill` tool
+路径，因此一个 skill 会被直接解析并调用，而不是被压平成 prompt 文本。
 
 相关源码：
 
 - `crates/backend/nomifun-extension/src/skill_service.rs`
-- `crates/backend/nomifun-ai-agent/src/capability/skill_manager/mod.rs`
-- `crates/backend/nomifun-ai-agent/src/capability/first_message_injector.rs`
 - `crates/agent/nomi-agent/src/skill_tool.rs`
 
 ## Session Flow
@@ -111,19 +109,23 @@ Skills 是 instruction/tool bundle，其物化方式取决于运行时能力：
 UI request
   -> nomifun-conversation route/service
   -> nomifun-ai-agent AgentService / AgentRuntimeRegistry
-  -> runtime family factory
-  -> Nomi engine or external CLI process
+  -> nomi runtime factory
+  -> Nomi engine turn (in-process)
   -> AgentStreamEvent
   -> nomifun-realtime /ws
   -> renderer stream handlers
 ```
 
-Nomi-engine session 在进程内运行。ACP-style session 会 spawn 并管理子 CLI。
-公开 remote capability 调用通过 `nomifun-public` 与平台 Gateway registry
-进入，而不是通过 conversation HTTP route。
+每个会话回合都在进程内运行。公开 remote capability 调用通过 `nomifun-public`
+与平台 Gateway registry 进入，而不是通过 conversation HTTP route。
 
 ## Design Notes
 
 旧 specs 会把 agent 层描述为“可机械抽离”并只列 11 个 crates。那些文件属于
 历史资料。当前代码仍保持强边界，但 browser/computer bridge 与 public gateway
 surfaces 意味着真实规则是“主接缝 + 明确记录的 feature-gated exceptions”。
+
+旧 specs 与带日期的 handoff 还会描述并存的多个运行时家族（ACP、OpenClaw
+Gateway、Nanobot、Remote Agent）以及在它们之间做选择的 factory。那些引擎已被
+移除，只剩 `nomi`。请把那些文档当作“接缝为何长成这样”的记录，而不是当前分发
+路径的描述。

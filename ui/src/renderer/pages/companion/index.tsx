@@ -819,7 +819,6 @@ const CompanionPage: React.FC = () => {
         }
         case 'tool_group':
         case 'tool_call':
-        case 'acp_tool_call':
           if (renderRemote()) dismissRemoteLater(STREAM_STALL_MS);
           break;
         case 'finish':
@@ -908,8 +907,7 @@ const CompanionPage: React.FC = () => {
           break;
         }
         case 'tool_group':
-        case 'tool_call':
-        case 'acp_tool_call': {
+        case 'tool_call': {
           // Tool activity: keep the bubble alive with a hint if no text yet.
           // P3-N1: the Browser tool gets a *specific* narration (navigate to
           // example.com / clicking / observing…) parsed from the event args
@@ -926,7 +924,6 @@ const CompanionPage: React.FC = () => {
           break;
         }
         case 'permission':
-        case 'acp_permission':
           // The bubble has no confirmation UI — route the user to the full
           // chat surface where MessagePermission renders.
           endTurn(t('nomi.companion.needsConfirm'));

@@ -253,7 +253,7 @@ Agent；主 Agent 始终是整次执行的控制点。
 自研、**进程内 Rust** 实现 —— 不依赖 Playwright、不依赖 Node、不依赖第三方自动化守护进程。能力更强、速度更快、token 更省，提供细粒度控制，且完全开源供你增强。
 
 - **Computer use** —— 无障碍树 + Set-of-Marks 叠层 + OCR，引导模型操作真实 UI 元素而非猜像素。macOS（AXUIElement + Vision OCR）与 Windows（UI Automation）已完整，Linux（AT-SPI2）为部分支持。
-- **Browser use** —— 由应用主进程中的 `BrowserSessionHub` 统一管理 Chromium Host 与可寻址 Browser Lane；内置 Agent、ACP/Codex、Gateway、远程 Agent 和并行 AgentExecution attempt 都进入同一平台，不再各自启动私有浏览器。
+- **Browser use** —— 由应用主进程中的 `BrowserSessionHub` 统一管理 Chromium Host 与可寻址 Browser Lane；内置 Agent、Gateway 和并行 AgentExecution attempt 都进入同一平台，不再各自启动私有浏览器。
 - **只做浏览器状态与生命周期管理。** 右侧 **Browser** 页面展示会话、runtime、Lane、Tab、URL、身份模式、容量、队列位置、压力、资源估算和错误；用户可对 running Primary Lane 显式“前台打开”，但页面不嵌入预览，也不提供页面输入或接管控件。
 - **共享实时登录身份。** 普通交互式 Lane 使用 NomiFun 管理的稳定 Primary profile，并实时共享登录状态；公开抓取使用不携带 Primary cookies/站点存储的匿名身份，显式隔离任务使用独立身份。NomiFun 不读取用户真实 Chrome / Edge profile。
 - **并发有界且可观察。** 不同 Lane 可真正并行，同一 Lane 严格串行；容量不足时显示队列位置、压力原因和建议并发，而不是用不可见的全局锁假装浏览器已就绪。
@@ -273,13 +273,14 @@ NomiFun 的每一项能力都经由单一、强类型的能力注册表对外开
 - **REST + OpenAPI** 位于 `/v1/tools`，支持流式，并自动生成 `/v1/openapi.json`。
 - 在总线上新增一项能力，会自动同时出现在 MCP **与** REST 上 —— 不漂移。
 
-### 🧩 自带智能体，也能接入你的
+### 🧩 一个内置智能体，任意模型
 
 > 指南：[`docs/guides/model-routing.zh.md`](docs/guides/model-routing.zh.md)
 
-- **内置 `nomi` 智能体** —— 无需额外安装。支持 **26+ 模型供应商/预设**（OpenAI、Anthropic、Gemini + Vertex AI、AWS Bedrock、DeepSeek、OpenRouter、Moonshot/Kimi、通义千问/Dashscope、智谱/GLM、MiniMax、SiliconFlow、xAI、火山/豆包 等），覆盖 **4 种线缆协议**，并支持 **New API** 聚合网关。
-- **经 ACP 直连约 19 个外部智能体** —— Claude Code、Codex、Gemini、Qwen、Kimi、Cursor、Copilot、Goose、OpenCode、Droid 等，NomiFun 为它们提供模型*以及*自家的原生能力（computer/browser/knowledge/gateway，经注入的 MCP 桥）。
-- **处处可用** —— 这些原生能力对内置智能体、ACP 智能体、聊天界面**以及**终端一律可用。
+- **内置 `nomi` 智能体** —— 无需额外安装，也是唯一的会话引擎。支持 **26+ 模型供应商/预设**（OpenAI、Anthropic、Gemini + Vertex AI、AWS Bedrock、DeepSeek、OpenRouter、Moonshot/Kimi、通义千问/Dashscope、智谱/GLM、MiniMax、SiliconFlow、xAI、火山/豆包 等），覆盖 **4 种线缆协议**，并支持 **New API** 聚合网关。
+- **只有一条代码路径** —— 每个会话跑的都是同一个引擎，因此不论你选哪个模型，能力、工具策略、审批与故障转移的行为完全一致。
+- **想用 Claude Code、Codex 或 Gemini CLI？** 请用**终端模式** —— 真实的应用内 PTY 会话，NomiFun 的能力经各 CLI 自己的原生配置注入。见 [`docs/guides/terminal.zh.md`](docs/guides/terminal.zh.md)。
+- **处处可用** —— 这些原生能力对内置智能体、聊天界面**以及**终端一律可用。
 - **多模态失败会优雅降级。** 如果当前模型/供应商不接受图片输入，NomiFun 会自动剔除图片、在同一会话里重试，并给出一条可见提示，而不是直接把整段会话打断。
 - **每模型上下文窗口可单独校准。** 当上游平台默认值不准、没报全，或你想精细控制路由与长上下文预算时，可以按模型单独覆写上下文窗口上限。
 
@@ -312,11 +313,11 @@ Rerank。路由会感知任务类型，支持逐模型上下文窗口与故障�
 | <img src="https://www.google.com/s2/favicons?sz=64&domain=openai.com" alt="OpenAI logo" width="20" height="20"> **GPT / OpenAI** | [GPT 模型](https://platform.openai.com/docs/models) · [API Key](https://platform.openai.com/api-keys) | GPT 模型、OpenAI API、Agent 工作流、代码与通用任务 |
 | <img src="https://www.google.com/s2/favicons?sz=64&domain=aistudio.google.com" alt="Gemini logo" width="20" height="20"> **Gemini / Google AI** | [API Key](https://aistudio.google.com/app/apikey) | Gemini 系列、多模态、超长上下文与 Google AI Studio |
 
-### 💻 终端模式
+### 💻 终端模式 —— 第三方 agent CLI 的落脚处
 
 > 指南：[`docs/guides/terminal.zh.md`](docs/guides/terminal.zh.md)
 
-在应用内 PTY 会话里运行各种 agent CLI（或独立的 `nomi` CLI）。NomiFun 会把原生能力 —— 知识检索、需求完成、生命周期 hooks —— 经各 CLI *自己的*原生配置注入进去，从而保留完整保真度与 OAuth。
+在应用内 PTY 会话里运行各种 agent CLI（或独立的 `nomi` CLI）。**Claude Code、Codex、Gemini CLI** 就是这样与 NomiFun 配合使用的：真实的伪终端，CLI 自己的登录与 OAuth，自己的审批提示，没有任何一处被重新实现。NomiFun 会把原生能力 —— 知识检索、需求完成、生命周期 hooks —— 经各 CLI *自己的*原生配置注入进去，从而保留完整保真度。AutoWork 也能逐回合驱动这样的终端。
 
 ### 📱 NomiFun Mobile —— 直连你的 Desktop
 

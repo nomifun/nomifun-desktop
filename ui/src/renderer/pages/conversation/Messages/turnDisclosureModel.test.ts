@@ -14,7 +14,7 @@ import { parseMessageId } from '@/common/types/ids';
 
 const TURN_1 = parseMessageId('0190f5fe-7c00-7a00-8000-000000000001');
 const TURN_2 = parseMessageId('0190f5fe-7c00-7a00-8000-000000000002');
-const ACP_ROOT_1 = parseMessageId('0190f5fe-7c00-7a00-8000-000000000011');
+const AGENT_ROOT_1 = parseMessageId('0190f5fe-7c00-7a00-8000-000000000011');
 const SOURCE_1 = parseMessageId('0190f5fe-7c00-7a00-8000-000000000021');
 const SOURCE_2 = parseMessageId('0190f5fe-7c00-7a00-8000-000000000022');
 const DISCLOSURE_1 = `turn-disclosure-${TURN_1}`;
@@ -700,11 +700,11 @@ describe('buildTurnDisclosureItems', () => {
 });
 
 describe('assignTurnIdsFromUserRequests', () => {
-  test('promotes the ACP root turn id over the distinct user request id for unowned tail rows', () => {
+  test('promotes the backend root turn id over the distinct user request id for unowned tail rows', () => {
     const assigned = assignTurnIdsFromUserRequests([
       item('user', 'user', { turnId: TURN_1, createdAt: 1000 }),
-      item('tool', 'process', { turnId: ACP_ROOT_1, createdAt: 2000, processState: 'completed' }),
-      item('final', 'assistant', { turnId: ACP_ROOT_1, createdAt: 3000 }),
+      item('tool', 'process', { turnId: AGENT_ROOT_1, createdAt: 2000, processState: 'completed' }),
+      item('final', 'assistant', { turnId: AGENT_ROOT_1, createdAt: 3000 }),
       item('terminal-orphan', 'process', {
         turnId: undefined,
         createdAt: 3001,
@@ -713,20 +713,20 @@ describe('assignTurnIdsFromUserRequests', () => {
     ]);
 
     expect(assigned.map((entry) => entry.turnId)).toEqual([
-      ACP_ROOT_1,
-      ACP_ROOT_1,
-      ACP_ROOT_1,
-      ACP_ROOT_1,
+      AGENT_ROOT_1,
+      AGENT_ROOT_1,
+      AGENT_ROOT_1,
+      AGENT_ROOT_1,
     ]);
 
     const display = buildTurnDisclosureItems(assigned, { tailClosed: true });
     const disclosures = display.filter((entry) => entry.type === 'turn_disclosure');
     expect(disclosures).toHaveLength(1);
-    expect(disclosures[0]?.turnId).toBe(ACP_ROOT_1);
+    expect(disclosures[0]?.turnId).toBe(AGENT_ROOT_1);
     expect(disclosures[0]?.processItemIds).toEqual(['tool', 'terminal-orphan']);
     expect(display.map((entry) => entry.id)).toEqual([
       'user',
-      `turn-disclosure-${ACP_ROOT_1}`,
+      `turn-disclosure-${AGENT_ROOT_1}`,
       'final',
     ]);
     expect(new Set(display.map((entry) => entry.id)).size).toBe(display.length);
@@ -771,15 +771,15 @@ describe('assignTurnIdsFromUserRequests', () => {
     const userTurn2 = parseMessageId('0190f5fe-7c00-7a00-8000-000000000022');
     const result = assignTurnIdsFromUserRequests([
       item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
-      item('root-1', 'process', { turnId: ACP_ROOT_1, createdAt: 1500 }),
+      item('root-1', 'process', { turnId: AGENT_ROOT_1, createdAt: 1500 }),
       item('user-2', 'user', { turnId: userTurn2, createdAt: 2000 }),
       item('delayed-provisional-1', 'assistant', { turnId: TURN_1, createdAt: 2500 }),
       item('legacy-tool-2', 'process', { turnId: undefined, createdAt: 3000 }),
     ]);
 
     expect(result.map((entry) => entry.turnId)).toEqual([
-      ACP_ROOT_1,
-      ACP_ROOT_1,
+      AGENT_ROOT_1,
+      AGENT_ROOT_1,
       userTurn2,
       TURN_1,
       userTurn2,
@@ -796,14 +796,14 @@ describe('assignTurnIdsFromUserRequests', () => {
           processState: 'running',
         }),
       ],
-      { activeRequestMessageId: TURN_1, activeTurnId: ACP_ROOT_1 }
+      { activeRequestMessageId: TURN_1, activeTurnId: AGENT_ROOT_1 }
     );
 
-    expect(assigned.map((entry) => entry.turnId)).toEqual([ACP_ROOT_1, ACP_ROOT_1]);
-    const display = buildTurnDisclosureItems(assigned, { activeTurnId: ACP_ROOT_1 });
+    expect(assigned.map((entry) => entry.turnId)).toEqual([AGENT_ROOT_1, AGENT_ROOT_1]);
+    const display = buildTurnDisclosureItems(assigned, { activeTurnId: AGENT_ROOT_1 });
     expect(display.map((entry) => entry.id)).toEqual([
       'user',
-      `turn-disclosure-${ACP_ROOT_1}`,
+      `turn-disclosure-${AGENT_ROOT_1}`,
     ]);
     expect(display[1]?.type).toBe('turn_disclosure');
     if (display[1]?.type !== 'turn_disclosure') return;
@@ -822,10 +822,10 @@ describe('assignTurnIdsFromUserRequests', () => {
           processState: 'running',
         }),
       ],
-      { activeRequestMessageId: TURN_1, activeTurnId: ACP_ROOT_1 }
+      { activeRequestMessageId: TURN_1, activeTurnId: AGENT_ROOT_1 }
     );
 
-    expect(assigned.map((entry) => entry.turnId)).toEqual([ACP_ROOT_1, TURN_2, ACP_ROOT_1]);
+    expect(assigned.map((entry) => entry.turnId)).toEqual([AGENT_ROOT_1, TURN_2, AGENT_ROOT_1]);
   });
 });
 

@@ -127,23 +127,15 @@ What happens per turn:
 
 1. The AutoWork loop claims the next `pending` requirement in that tag.
 2. It builds an injection prompt that names the requirement and tells the
-   agent how to signal completion. The exact contract is **engine-aware**:
-   - On Nomi-engine sessions only, the agent has the
-     `requirement_complete` / `requirement_update_status` tools registered
-     and the prompt asks the model to call them.
-   - On every other engine (ACP / Codex / Gemini / Openclaw / Nanobot /
-     Remote), the agent has no requirement tools registered, so the prompt
-     uses the **tool-free contract**: do the work, end the turn with a
-     plain-text completion note, and the platform records `done`
-     automatically when the turn finishes cleanly. Failures are surfaced in
-     plain text (the prompt asks the model to start the final line with
-     `Requirement failed:` followed by the reason).
+   agent how to signal completion. On a conversation target, the agent has the
+   `requirement_complete` / `requirement_update_status` tools registered and the
+   prompt asks the model to call them. (Terminal targets use a different,
+   tool-free contract — see below.)
 3. The injected message is hidden from the user-visible transcript.
 4. The AutoWork loop subscribes to the agent's stream and waits for a
    `Finish` (clean) or `Error`/timeout (re-pend or fail). It also captures
    the agent's prose into a tail-bounded **completion note** that is stored
-   on the requirement and, on tool-free engines, becomes the report sent
-   downstream.
+   on the requirement.
 5. When the turn ends cleanly, `finalize_if_needed` records the row as
    `done` and fires the notifier.
 
@@ -169,8 +161,8 @@ What happens per turn:
    mis-copying a code), so completion is detected from the turn itself.
 4. When the output goes **quiescent** (silent for ≥ 10 s after a 3 s minimum,
    with the PTY still alive) the agent has finished and gone idle — the turn is
-   recorded as `done`, the same clean-finish contract a tool-free chat agent
-   uses.
+   recorded as `done` — a clean finish is the completion signal, since a CLI in a
+   PTY has no requirement tools to call.
 5. If the agent cannot complete the requirement it is asked to say so in plain
    text (e.g. a final `Requirement failed:` line); such turns still finish as
    `done` at the platform level, so review the conversation when in doubt.

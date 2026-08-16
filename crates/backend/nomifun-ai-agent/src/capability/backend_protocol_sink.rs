@@ -7,7 +7,7 @@ use serde_json::json;
 use tokio::sync::broadcast;
 use tracing::debug;
 
-use crate::protocol::events::{AcpPermissionEventData, AgentStreamEvent};
+use crate::protocol::events::{AgentStreamEvent, PermissionEventData};
 
 /// Implements `ProtocolEmitter` for the nomicore context.
 ///
@@ -74,14 +74,14 @@ impl ProtocolEmitter for BackendProtocolSink {
 
                 let _ = self
                     .event_tx
-                    .send(AgentStreamEvent::AcpPermission(AcpPermissionEventData::Confirmation(
+                    .send(AgentStreamEvent::Permission(PermissionEventData(
                         confirmation.clone(),
                     )));
 
                 debug!(
                     call_id,
                     tool_name = %tool.name,
-                    "BackendProtocolSink: emitted AcpPermission(Confirmation) event"
+                    "BackendProtocolSink: emitted Permission event"
                 );
             }
 
@@ -140,11 +140,11 @@ mod tests {
 
         let received = rx.try_recv().unwrap();
         match received {
-            AgentStreamEvent::AcpPermission(AcpPermissionEventData::Confirmation(conf)) => {
+            AgentStreamEvent::Permission(PermissionEventData(conf)) => {
                 assert_eq!(conf.call_id, "c1");
                 assert!(conf.options.len() >= 3);
             }
-            other => panic!("Expected AcpPermission(Confirmation), got {:?}", other),
+            other => panic!("Expected Permission, got {:?}", other),
         }
 
         let stored = confs.read().unwrap();

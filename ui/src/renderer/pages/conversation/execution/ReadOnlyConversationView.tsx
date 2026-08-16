@@ -11,7 +11,6 @@ import { useNomiModelSelection } from '@/renderer/pages/conversation/platforms/n
 import { PreviewProvider } from '@/renderer/pages/conversation/Preview';
 import { browserStorageKey } from '@/common/utils/browserStorageKey';
 
-const AcpChat = React.lazy(() => import('@/renderer/pages/conversation/platforms/acp/AcpChat'));
 const NomiChat = React.lazy(() => import('@/renderer/pages/conversation/platforms/nomi/NomiChat'));
 
 // Narrow to Nomi conversations so model field is always available
@@ -47,9 +46,8 @@ export type ReadOnlyConversationViewProps = {
 };
 
 /**
- * Routes to the correct platform chat component based on conversation type and
- * renders it read-only (send box hidden). Used by the collaboration view to
- * mirror a participant's live conversation record.
+ * Renders the platform chat read-only (send box hidden). Used by the
+ * collaboration view to mirror a participant's live conversation record.
  *
  * Does NOT wrap in ChatLayout — the parent supplies its own chrome. It DOES,
  * however, mount its OWN {@link PreviewProvider}: the platform chat's
@@ -69,34 +67,13 @@ const ReadOnlyConversationView: React.FC<ReadOnlyConversationViewProps> = ({ con
       : conversation.execution_step_id != null
         ? browserStorageKey('workspace-preview', 'execution-step', conversation.execution_step_id)
         : browserStorageKey('workspace-preview', 'conversation', conversation.id);
-  const content = (() => {
-    switch (conversation.type) {
-      case 'acp':
-        return (
-          <AcpChat
-            key={conversation.id}
-            conversation_id={conversation.id}
-            workspace={conversation.extra?.workspace}
-            backend={conversation.extra?.backend || 'claude'}
-            initialModelId={(conversation.extra as { current_model_id?: string } | undefined)?.current_model_id}
-            session_mode={conversation.extra?.session_mode}
-            agent_name={agent_name ?? (conversation.extra as { agent_name?: string })?.agent_name}
-            hideSendBox
-            readOnly
-          />
-        );
-      case 'nomi':
-        return (
-          <NomiReadOnlyChat
-            key={conversation.id}
-            conversation={conversation as NomiConversation}
-            agent_name={agent_name}
-          />
-        );
-      default:
-        return null;
-    }
-  })();
+  const content = (
+    <NomiReadOnlyChat
+      key={conversation.id}
+      conversation={conversation as NomiConversation}
+      agent_name={agent_name}
+    />
+  );
 
   return (
     <PreviewProvider

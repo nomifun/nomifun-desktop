@@ -152,34 +152,6 @@ fn test_ext_contributes_with_skills() {
 }
 
 #[test]
-fn test_ext_acp_adapter_minimal() {
-    let adapter = ExtAcpAdapter {
-        id: "claude-adapter".into(),
-        name: "Claude".into(),
-        description: None,
-        cli_command: Some("claude".into()),
-        default_cli_path: None,
-        acp_args: vec![],
-        env: HashMap::new(),
-        avatar: None,
-        auth_required: None,
-        supports_streaming: Some(true),
-        connection_type: None,
-        endpoint: None,
-        models: vec![],
-        yolo_mode: None,
-        health_check: None,
-        api_key_fields: vec![],
-    };
-    let json = serde_json::to_value(&adapter).unwrap();
-    assert_eq!(json["id"], "claude-adapter");
-    assert_eq!(json["cli_command"], "claude");
-    assert_eq!(json["supports_streaming"], true);
-    // Empty vecs should be omitted
-    assert!(json.get("acp_args").is_none());
-}
-
-#[test]
 fn test_ext_theme_serde() {
     let theme = ExtTheme {
         id: "dark".into(),

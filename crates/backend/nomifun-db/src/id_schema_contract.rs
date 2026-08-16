@@ -12,7 +12,6 @@ use sqlx::{Row, SqlitePool};
 use crate::error::DbError;
 
 pub(crate) const PRODUCT_TABLES: &[&str] = &[
-    "acp_session",
     "agent_execution_attempts",
     "agent_execution_events",
     "agent_execution_participants",
@@ -77,7 +76,6 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "provider_model_capabilities",
     "provider_models",
     "providers",
-    "remote_agents",
     "requirement_display_sequence",
     "requirement_pre_effect_abandon_guards",
     "requirement_tags",
@@ -133,7 +131,6 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("presets", "preset_id"),
     ("provider_connections", "connection_id"),
     ("providers", "provider_id"),
-    ("remote_agents", "remote_agent_id"),
     ("requirements", "requirement_id"),
     ("ssh_hosts", "ssh_host_id"),
     ("terminal_sessions", "terminal_id"),
@@ -152,7 +149,6 @@ const UUIDV7_MANAGED_VALUE_COLUMNS: &[(&str, &str)] = &[("creation_tasks", "node
 /// opaque remote handles rather than relational links. Every other physical
 /// `_id` column must be present in [`LOGICAL_REFERENCES`].
 const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
-    ("acp_session", "acp_session_id"),
     ("agent_metadata", "agent_id"),
     ("agent_metadata", "yolo_id"),
     ("agent_execution_attempts", "attempt_id"),
@@ -209,8 +205,6 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("presets", "preset_id"),
     ("provider_connections", "connection_id"),
     ("providers", "provider_id"),
-    ("remote_agents", "remote_agent_id"),
-    ("remote_agents", "device_id"),
     ("requirements", "requirement_id"),
     ("ssh_hosts", "ssh_host_id"),
     ("terminal_sessions", "terminal_id"),
@@ -751,8 +745,6 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("preset_targets", "preset_id" => "presets", "preset_id", false, "idx_preset_targets_preset_id", Cascade),
     text_ref!("requirement_tags", "paused_requirement_id" => "requirements", "requirement_id", true, "idx_requirement_tags_paused_requirement_id", SetNull),
     text_ref!("tag_settings", "webhook_id" => "webhooks", "webhook_id", true, "idx_tag_settings_webhook_id", SetNull),
-    text_ref!("acp_session", "conversation_id" => "conversations", "conversation_id", false, "idx_acp_session_conversation_id", Cascade),
-    text_ref!("acp_session", "agent_id" => "agent_metadata", "agent_id", true, "idx_acp_session_agent_id", Restrict),
     external_ref!("companion_access_token", "companion_id", Text, false, CanonicalUuidV7, "idx_companion_access_token_companion_id", Cascade),
     text_ref!("installation_identity", "owner_user_id" => "users", "user_id", false, "idx_installation_identity_owner_user_id", Restrict),
     text_ref!("preset_knowledge_policy", "preset_id" => "presets", "preset_id", false, "idx_preset_knowledge_policy_preset_id", Cascade),
@@ -854,11 +846,6 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
         "client_preferences", "value", "$.rerank.provider_id",
         "SELECT json_extract(value, '$.rerank.provider_id') AS value FROM client_preferences WHERE key = 'knowledge.retrieval' AND json_valid(value) AND json_extract(value, '$.rerank.mode') = 'remote'" =>
         "providers", "provider_id", "idx_client_preferences_provider_key", SetNull, RequireParent
-    ),
-    json_text_ref!(
-        "conversations", "extra", "$.remote_agent_id",
-        "SELECT json_extract(extra, '$.remote_agent_id') AS value FROM conversations" =>
-        "remote_agents", "remote_agent_id", "idx_conversations_extra_remote_agent_id", Restrict, RequireParent
     ),
     json_text_ref!(
         "conversations", "extra", "$.ssh_host_id",

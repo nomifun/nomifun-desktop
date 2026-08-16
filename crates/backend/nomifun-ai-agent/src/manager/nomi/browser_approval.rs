@@ -23,7 +23,7 @@ use nomifun_common::{Confirmation, ConfirmationOption, generate_id};
 use serde_json::json;
 use tokio::sync::broadcast;
 
-use crate::protocol::events::{AcpPermissionEventData, AgentStreamEvent};
+use crate::protocol::events::{AgentStreamEvent, PermissionEventData};
 
 /// Default time the user has to approve a browser action before it fail-closes.
 /// Matches the engine's egress approval timeout (`EGRESS_APPROVAL_TIMEOUT` = 120s) so a
@@ -123,7 +123,7 @@ impl BrowserApprovalGate for DesktopApprovalGate {
         }
         let _ = self
             .event_tx
-            .send(AgentStreamEvent::AcpPermission(AcpPermissionEventData::Confirmation(conf)));
+            .send(AgentStreamEvent::Permission(PermissionEventData(conf)));
 
         let decision = match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(ToolApprovalResult::Approved)) => ApprovalDecision::Approve,

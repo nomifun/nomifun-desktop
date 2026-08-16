@@ -73,8 +73,7 @@ NomiFun 启动时进入三种鉴权策略之一：
 | 鉴权 —— 登录 / 设置 / 状态 / 刷新 | `/login`、`/logout`、`/api/auth/*`、`/api/ws-token`、`/qr-login` | 混合（登录/设置/qr-login：公共；其余：已鉴权） | [`nomifun-auth/src/routes.rs`](../../crates/backend/nomifun-auth/src/routes.rs) |
 | 鉴权 —— 仅本地 admin/internal | `/api/webui/*` | 仅本地模式 | 同上 |
 | 会话 | `/api/conversations/*`、`/api/messages/search` | 已鉴权 | [`nomifun-conversation/src/routes.rs`](../../crates/backend/nomifun-conversation/src/routes.rs)、[`routes_aux.rs`](../../crates/backend/nomifun-conversation/src/routes_aux.rs) |
-| 智能体（本地 CLI 智能体） | `/api/agents/*` | 已鉴权 | [`nomifun-ai-agent/src/routes/agent.rs`](../../crates/backend/nomifun-ai-agent/src/routes/agent.rs) |
-| 远程智能体 | `/api/remote-agents/*` | 已鉴权 | [`nomifun-ai-agent/src/routes/remote.rs`](../../crates/backend/nomifun-ai-agent/src/routes/remote.rs) |
+| 智能体 | `/api/agents/*` | 已鉴权 | [`nomifun-ai-agent/src/routes/agent.rs`](../../crates/backend/nomifun-ai-agent/src/routes/agent.rs) |
 | SSH 主机 | `/api/ssh-hosts/*` | 仅实例主人 | [`nomifun-ssh/src/routes.rs`](../../crates/backend/nomifun-ssh/src/routes.rs) |
 | 设定 | `/api/presets/*` | 已鉴权 | [`nomifun-preset/src/routes.rs`](../../crates/backend/nomifun-preset/src/routes.rs) |
 | 设定标签 | `/api/preset-tags/*` | 已鉴权 | 同上 |
@@ -96,7 +95,7 @@ NomiFun 启动时进入三种鉴权策略之一：
 | WebUI/public 能力 companion token | `/api/webui/companions/{id}/access-token` | 已鉴权 / 本地 WebUI admin 流 | [`router/companion_token_routes.rs`](../../crates/backend/nomifun-app/src/router/companion_token_routes.rs) |
 | 浏览器平台管理（Agent-only 受管浏览器） | `/api/browser/*` | 已鉴权；改变状态的 HTTP 请求受 CSRF 保护；仅安装 owner 可用的路由另有权限门禁 | [`router/browser_management.rs`](../../crates/backend/nomifun-app/src/router/browser_management.rs)、[`router/browser_login.rs`](../../crates/backend/nomifun-app/src/router/browser_login.rs) |
 | 文件系统 | `/api/fs/*` | 已鉴权 | [`nomifun-file/src/routes.rs`](../../crates/backend/nomifun-file/src/routes.rs) |
-| Office 预览 | `/api/word-preview/*`、`/api/excel-preview/*`、`/api/ppt-preview/*`、`/api/preview-history/*`、`/api/star-office/detect` | 已鉴权 | [`nomifun-office/src/routes.rs`](../../crates/backend/nomifun-office/src/routes.rs) |
+| Office 预览 | `/api/word-preview/*`、`/api/excel-preview/*`、`/api/ppt-preview/*`、`/api/preview-history/*` | 已鉴权 | [`nomifun-office/src/routes.rs`](../../crates/backend/nomifun-office/src/routes.rs) |
 | Office iframe 代理 | `/api/ppt-proxy/*`、`/api/office-watch-proxy/*` | 公共（提供 iframe 内容；不鉴权） | 同上 |
 | 设置 + 提供商 + 系统信息 | `/api/settings`、`/api/providers/*`、`/api/system/*` | 已鉴权 | [`nomifun-system/src/routes.rs`](../../crates/backend/nomifun-system/src/routes.rs) |
 | 全局模型故障转移队列 | `/api/agent/model-failover` | 已鉴权 | [`router/model_failover.rs`](../../crates/backend/nomifun-app/src/router/model_failover.rs) |

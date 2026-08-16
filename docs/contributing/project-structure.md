@@ -139,9 +139,9 @@ from silently tying themselves to engine internals.
 | [`nomifun-file`](../../crates/backend/nomifun-file) | Filesystem operations: read/write, path safety, file watching, snapshots, zip. |
 | [`nomifun-office`](../../crates/backend/nomifun-office) | Office-document preview, format conversion, proxy, snapshot management. |
 | [`nomifun-shell`](../../crates/backend/nomifun-shell) | OS shell integration: opener, tool detection, speech-to-text. |
-| [`nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent) | **The single bridge to `crates/agent/`.** Agent factory, runtime registry, runtime handles, and ACP session persistence; re-exports `nomi_config` / `nomi_types` / `RequirementSink`. |
+| [`nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent) | **The single bridge to `crates/agent/`.** Built-in `nomi` Agent factory, runtime registry, and runtime handles; re-exports `nomi_config` / `nomi_types` / `RequirementSink`. |
 | [`nomifun-mcp`](../../crates/backend/nomifun-mcp) | MCP server config, multi-agent sync adapters, OAuth, connection testing. |
-| [`nomifun-conversation`](../../crates/backend/nomifun-conversation) | Conversation + message CRUD with streaming relay, ACP error recovery, response middleware. |
+| [`nomifun-conversation`](../../crates/backend/nomifun-conversation) | Conversation + message CRUD with streaming relay and response middleware. |
 | [`nomifun-extension`](../../crates/backend/nomifun-extension) | Extension registry: manifest parsing, hub installer, skill scanning, lifecycle hooks. |
 | [`nomifun-channel`](../../crates/backend/nomifun-channel) | External channel integration: plugin system, pairing handshake, per-session messaging, formatter. |
 | [`nomifun-agent-execution`](../../crates/backend/nomifun-agent-execution) | Persistent single- and multi-Agent execution aggregate: participants, steps, attempts, scheduling, decisions, recovery, and events. |

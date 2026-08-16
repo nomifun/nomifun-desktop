@@ -92,26 +92,6 @@ describe('turn process state', () => {
     expect(getToolMessagesProcessState([rejected, remoteFailure])).toBe('failed');
   });
 
-  test('does not let non-fatal ACP shell command exits fail the whole process receipt', () => {
-    expect(
-      getToolMessagesProcessState([
-        {
-          type: 'acp_tool_call',
-          content: {
-            update: {
-              sessionUpdate: 'tool_call_update',
-              tool_call_id: 'call-bash',
-              title: 'Bash',
-              kind: 'execute',
-              status: 'failed',
-              rawInput: { command: 'grep -rn "missing" .' },
-            },
-          },
-        } as any,
-      ])
-    ).toBe('completed');
-  });
-
   test('does not let an ordinary Nomi Bash exit fail the whole process receipt', () => {
     expect(
       getToolMessagesProcessState([
@@ -144,32 +124,6 @@ describe('turn process state', () => {
         } as any,
       ])
     ).toBe('failed');
-  });
-
-  test('does not let failed ACP read probes fail the whole process receipt', () => {
-    expect(
-      getToolMessagesProcessState([
-        {
-          type: 'acp_tool_call',
-          content: {
-            update: {
-              sessionUpdate: 'tool_call_update',
-              tool_call_id: 'call-read',
-              title: 'config.yaml',
-              kind: 'read',
-              status: 'failed',
-              rawInput: { path: 'config.yaml' },
-              content: [
-                {
-                  type: 'content',
-                  content: { type: 'text', text: 'No such file or directory (os error 2)' },
-                },
-              ],
-            },
-          },
-        } as any,
-      ])
-    ).toBe('completed');
   });
 
   test('does not let an ordinary Nomi read miss fail the whole process receipt', () => {

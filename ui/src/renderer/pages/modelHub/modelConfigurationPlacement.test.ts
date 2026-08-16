@@ -11,7 +11,7 @@ describe('model-owned tool configuration placement', () => {
     expect(hubSource.includes("key: 'agents'")).toBe(false);
     expect(hubSource.includes('AgentModalContent')).toBe(false);
     expect(hubSource.includes("searchParams.get('section') === 'agents'")).toBe(true);
-    expect(hubSource.includes("'/settings/execution-engines?tab=remote'")).toBe(true);
+    expect(hubSource.includes("to='/settings/execution-engines'")).toBe(true);
   });
 
   test('the MCP page contains only MCP server management', () => {

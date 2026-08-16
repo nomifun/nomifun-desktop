@@ -6,7 +6,6 @@
 
 import type { IConversationArtifact } from '@/common/adapter/ipcBridge';
 import type {
-  IMessageAcpToolCall,
   IMessageText,
   IMessageToolCall,
   IMessageToolGroup,
@@ -18,9 +17,7 @@ import { iconColors } from '@/renderer/styles/colors';
 import { CHAT_MESSAGE_JUMP_EVENT, type ChatMessageJumpDetail } from '@/renderer/utils/chat/chatMinimapEvents';
 import { Image } from '@arco-design/web-react';
 import { Down } from '@icon-park/react';
-import MessageAcpPermission from '@renderer/pages/conversation/Messages/acp/MessageAcpPermission';
 import MessagePermission from './components/MessagePermission';
-import MessageAcpToolCall from '@renderer/pages/conversation/Messages/acp/MessageAcpToolCall';
 import classNames from 'classnames';
 import React, { createContext, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -97,7 +94,7 @@ type IMessageVO =
       id: string;
       msg_id?: MessageId;
       turn_id?: MessageId;
-      messages: Array<IMessageToolGroup | IMessageAcpToolCall | IMessageToolCall>;
+      messages: Array<IMessageToolGroup | IMessageToolCall>;
       sourceMessageIds: SourceMessageId[];
       created_at: number;
     };
@@ -280,8 +277,6 @@ const getProcessedItemRole = (item: IRenderableItem): TurnDisclosureInputItem['r
     case 'tool_group':
     case 'agent_status':
     case 'permission':
-    case 'acp_permission':
-    case 'acp_tool_call':
       return 'process';
     default:
       return 'other';
@@ -441,17 +436,10 @@ const formatToolReceiptPart = (
 };
 
 const getToolReceiptIcon = (
-  messages: Array<IMessageToolGroup | IMessageAcpToolCall | IMessageToolCall>
+  messages: Array<IMessageToolGroup | IMessageToolCall>
 ): TurnProcessReceiptIcon => {
   const latestMessage = messages.findLast(Boolean);
   if (!latestMessage) return 'tool';
-
-  if (latestMessage.type === 'acp_tool_call') {
-    const kind = latestMessage.content.update?.kind;
-    if (kind === 'edit') return 'edit';
-    if (kind === 'read') return 'file';
-    return 'tool';
-  }
 
   if (latestMessage.type === 'tool_group') {
     if (!Array.isArray(latestMessage.content)) return 'tool';
@@ -541,21 +529,6 @@ const buildProcessReceiptSummary = (
         defaultExpanded: true,
         hasDetail: true,
       };
-    case 'acp_permission':
-      return {
-        label: t('messages.processReceipt.waitingPermission', {
-          target: compactReceiptText(
-            item.content.tool_call?.title ||
-              item.content.tool_call?.raw_input?.command ||
-              item.content.tool_call?.raw_input?.description,
-            t('messages.permissionRequest')
-          ),
-          defaultValue: 'Waiting to confirm {{target}}',
-        }),
-        icon: 'permission',
-        defaultExpanded: true,
-        hasDetail: true,
-      };
     case 'agent_status':
       return {
         label:
@@ -596,7 +569,6 @@ const buildProcessReceiptSummary = (
       };
     case 'tool_call':
     case 'tool_group':
-    case 'acp_tool_call':
       return buildProcessReceiptSummary(
         {
           type: 'tool_summary',
@@ -661,11 +633,11 @@ const getProcessItemLayoutKind = (item: IRenderableItem): string => {
   if ('type' in item && item.type === 'thinking') return 'thinking';
   if (
     'type' in item &&
-    ['tool_summary', 'file_summary', 'tool_call', 'tool_group', 'acp_tool_call'].includes(item.type)
+    ['tool_summary', 'file_summary', 'tool_call', 'tool_group'].includes(item.type)
   ) {
     return 'tool';
   }
-  if ('type' in item && (item.type === 'permission' || item.type === 'acp_permission')) return 'permission';
+  if ('type' in item && item.type === 'permission') return 'permission';
   if ('type' in item && (item.type === 'agent_status' || item.type === 'tips' || item.type === 'artifact')) return 'status';
   return 'other';
 };
@@ -709,10 +681,6 @@ const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActi
         return <MessageAgentStatus message={message}></MessageAgentStatus>;
       case 'permission':
         return <MessagePermission message={message}></MessagePermission>;
-      case 'acp_permission':
-        return <MessageAcpPermission message={message}></MessageAcpPermission>;
-      case 'acp_tool_call':
-        return <MessageAcpToolCall message={message}></MessageAcpToolCall>;
       case 'plan':
         // Plans render in the docked PinnedPlan bar, not inline — they're
         // filtered out of processedList above. This guard keeps the switch
@@ -769,7 +737,7 @@ const MessageList: React.FC<{
     let diffsChanges: FileChangeInfo[] = [];
     let diffsSourceMessageIds: SourceMessageId[] = [];
     let diffsTurnId: MessageId | undefined;
-    let toolList: Array<IMessageToolGroup | IMessageAcpToolCall | IMessageToolCall> = [];
+    let toolList: Array<IMessageToolGroup | IMessageToolCall> = [];
     let toolSourceMessageIds: SourceMessageId[] = [];
     const retrySummaries = new ExplicitToolRetryReceiptIndex<ToolSummaryVO>();
 
@@ -802,7 +770,7 @@ const MessageList: React.FC<{
       toolList = [];
       toolSourceMessageIds = [];
     };
-    const pushToolList = (message: IMessageToolGroup | IMessageAcpToolCall | IMessageToolCall) => {
+    const pushToolList = (message: IMessageToolGroup | IMessageToolCall) => {
       const existingRetry = message.type === 'tool_call' ? retrySummaries.takeContinuation(message) : undefined;
       if (message.type === 'tool_call' && existingRetry) {
         existingRetry.messages.push(message);
@@ -907,10 +875,6 @@ const MessageList: React.FC<{
             continue;
           }
         }
-        pushToolList(message);
-        continue;
-      }
-      if (message.type === 'acp_tool_call') {
         pushToolList(message);
         continue;
       }

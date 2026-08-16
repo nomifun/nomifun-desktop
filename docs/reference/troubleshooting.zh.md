@@ -119,10 +119,10 @@ SPA 会在它的第一个 GET 请求中拿到。这通常因为以下几种原�
 
 ## "Agent CLI not found" 与 bun 相关问题
 
-### 会话立即以 "agent not available" / "command not found" 失败
+### 终端预设立即以 "command not found" 失败
 
-智能体引擎会派生 ACP 智能体 CLI（`claude`、`codex`、`gemini`、
-`nomi`、`codebuddy` 等），它们必须出现在**进程**的 `PATH` 里。
+终端的智能体预设（`claude`、`codex`、`gemini`）启动的是你自己安装的
+第三方 CLI，它们必须出现在**进程**的 `PATH` 里。
 进程 PATH 在启动时被增强（`nomifun_runtime::enhance_process_path`），
 但若二进制位置不寻常，仍可能被错过。
 
@@ -132,14 +132,16 @@ SPA 会在它的第一个 GET 请求中拿到。这通常因为以下几种原�
 nomicore doctor
 ```
 
-它会填充智能体注册表，逐个探测 `$PATH` 上的每个 CLI，并打印一张按
-智能体维度的可用性表格。务必在与启动应用相同的 shell 中运行它，
-以看到应用真正看到的内容。如果某个智能体缺失，请安装其 CLI 或把它
-的 bin 目录加入 `PATH` 后重启。
+它会逐个探测 `$PATH` 上已知的智能体 CLI，并打印一张按智能体维度的
+可用性表格。务必在与启动应用相同的 shell 中运行它，
+以看到应用真正看到的内容。如果某个 CLI 缺失，请安装它或把它
+的 bin 目录加入 `PATH` 后重启。注意会话本身不依赖这些：内置
+`nomi` 引擎已编译进二进制。
 
 ### 在 systemd 下：`bun: command not found`
 
-智能体引擎要求 **`bun ≥ 1.3.13`**。一个 `nologin` 的系统账户看不到
+NomiFun 内置 **`bun ≥ 1.3.13`** 用于启动 MCP stdio server 等 Node 风格
+子进程。一个 `nologin` 的系统账户看不到
 `~/.bun/bin/`；请把 bun 装到系统级（`sudo install ~/.bun/bin/bun
 /usr/local/bin/bun`），或用 `NOMIFUN_EMBED_BUN=1` 构建以将 bun 打包
 进二进制——它会在首次运行时把自己解压到数据目录。已写好的食谱见
@@ -147,31 +149,31 @@ nomicore doctor
 
 安装后用 `sudo -u nomifun -s -- which bun` 验证。
 
-### 看到 "bun runtime extraction" 日志后再无智能体活动
+### 看到 "bun runtime extraction" 日志后再无 MCP 活动
 
 嵌入式 bun 构建会在首次运行时把 bun 解压到数据目录。若解压失败
-（通常是权限问题），智能体引擎就没有运行时。请检查数据目录中是否
+（通常是权限问题），stdio MCP server 就没有可用的运行时。请检查数据目录中是否
 存在 bun 二进制，确认服务用户拥有数据目录，并在日志里查看真实的
 解压错误。
 
 ## Office 预览
 
-### Word/Excel/PPT 预览返回 "LibreOffice not detected"
+### Word/Excel/PPT 预览启动失败
 
-`/api/star-office/detect` 路由会在系统中探测 LibreOffice。Office 预览
-功能（`/api/word-preview/*`、`/api/excel-preview/*`、
-`/api/ppt-preview/*`）需要 LibreOffice 才能
-渲染文档。
+Office 预览功能（`/api/word-preview/*`、`/api/excel-preview/*`、
+`/api/ppt-preview/*`）会派生 `officecli` 辅助进程来渲染并监视文档。
+若它没有安装，start 调用会返回 "officecli not found" 错误。
 
-- Linux：`apt install libreoffice`（或同等发行版命令）。
-- macOS：`brew install --cask libreoffice`。
-- Windows：从 libreoffice.org 安装。
+请用 `npm install -g officecli` 安装（后端也可以替你执行这次安装），
+确认 `npm` 与安装出的 `officecli` 二进制都在**进程** `PATH` 上，然后
+重启后端。
 
-安装后请重启后端，让它重新探测。
+> 旧的 `POST /api/star-office/detect` 路由及其背后的 Star Office 集成
+> 已退役，不再存在。
 
 ### 预览 iframe 一直空白
 
-Office 预览路由会派生 LibreOffice 子进程，并通过
+Office 预览路由会派生 `officecli` 子进程，并通过
 `/api/ppt-proxy/*` 与 `/api/office-watch-proxy/*` 代理它们。这些代理
 路由是有意**公共**（不鉴权）的——iframe 内容必须在不带 SPA 会话
 cookie 的情况下加载。如果你的反向代理剥掉了 URL 路径段，或在边缘对

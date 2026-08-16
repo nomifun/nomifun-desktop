@@ -10,11 +10,12 @@ use crate::models::{
 /// explicit Conversation reset. User-authored configuration and execution
 /// policy remain untouched.
 ///
-/// Both casing variants are retained for upgrade safety: persisted
-/// OpenClaw/Remote sessions historically use `sessionKey`, while runtime build
-/// options are normalized to `session_key`. The ACP session's authoritative
-/// state lives in `acp_session`, but older Conversation rows may still carry
-/// one of these legacy snapshot aliases.
+/// The removed engines are gone, but their keys stay in this list for upgrade
+/// safety: a database written by an older build can still hold them on a
+/// surviving `nomi` row, and a reset must not leave resume state behind. Both
+/// casing variants are kept because the old writers disagreed — persisted
+/// sessions used `sessionKey` while runtime build options normalized to
+/// `session_key`.
 pub(crate) fn strip_runtime_resume_extra(extra: &str) -> Result<String, DbError> {
     let mut extra: serde_json::Value = serde_json::from_str(extra)
         .map_err(|error| DbError::Conflict(format!("Conversation extra is not valid JSON: {error}")))?;
@@ -154,7 +155,7 @@ impl std::fmt::Debug for RequirementConversationTurnAuthority {
 pub struct TurnArtifactMessageCommit {
     /// Canonical durable message identity claimed for the provider tool call.
     pub message_id: String,
-    /// Exactly `tool_call` or `acp_tool_call`.
+    /// Exactly `tool_call`.
     pub message_type: String,
     /// Final JSON object containing a committed, completed artifact delivery.
     pub content: String,

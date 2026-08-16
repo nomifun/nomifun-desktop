@@ -58,8 +58,8 @@ identifiers remain opaque.
 | Crate | Responsibility |
 | --- | --- |
 | [`nomifun-common`](../../crates/backend/nomifun-common/) | `AppError`, error chain, enums (`AgentType`, `ConversationStatus`, `MessageType`, `McpServerStatus`, ...), bare UUIDv7 generation/validation for stable business IDs, dataset-reset helpers, AES-GCM `encrypt_string` / `decrypt_string`, `TimestampMs`, pagination helpers, `constants::DEFAULT_HOST/DEFAULT_PORT/BODY_LIMIT/CSRF_*`. |
-| [`nomifun-api-types`](../../crates/backend/nomifun-api-types/) | Every HTTP request / response DTO, the `WebSocketMessage` envelope, ACP / Nomi / OpenClaw / Remote build-extras. The frontend's TypeScript types mirror this crate. |
-| [`nomifun-db`](../../crates/backend/nomifun-db/) | v3 SQLite baseline via `sqlx`, schema-contract and logical-reference registries, plus repository traits and Sqlite implementations for users, conversations, MCP, requirements, cron, ACP sessions, presets, terminal sessions, companion tokens, webhooks, and more. Owns the `Database` handle and v3 baseline initialization. |
+| [`nomifun-api-types`](../../crates/backend/nomifun-api-types/) | Every HTTP request / response DTO, the `WebSocketMessage` envelope, and the Nomi build-extras. The frontend's TypeScript types mirror this crate. |
+| [`nomifun-db`](../../crates/backend/nomifun-db/) | v3 SQLite baseline via `sqlx`, schema-contract and logical-reference registries, plus repository traits and Sqlite implementations for users, conversations, MCP, requirements, cron, presets, terminal sessions, companion tokens, webhooks, and more. Owns the `Database` handle and v3 baseline initialization. |
 | [`nomifun-realtime`](../../crates/backend/nomifun-realtime/) | `WebSocketManager`, `BroadcastEventBus`, `/ws` upgrade handler with token validation, message router trait, heartbeat timing, per-connection buffer constants. |
 | [`nomifun-runtime`](../../crates/backend/nomifun-runtime/) | Bundled Bun extraction, cache management, command discovery, and startup-time `PATH` enhancement. Child-process ownership lives in the shared `nomi-process-runtime` crate. |
 | [`nomifun-assets`](../../crates/backend/nomifun-assets/) | Embedded static assets (`include_dir!`) shipped with the server. |
@@ -74,13 +74,13 @@ identifiers remain opaque.
 
 | Crate | Responsibility |
 | --- | --- |
-| [`nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent/) | **The single bridge to `crates/agent/`.** Builds Agent runtimes (ACP / Nomi / OpenClaw / Nanobot / Remote variants), while `AgentRuntimeRegistry` caches one process-local runtime handle per Conversation. It persists ACP sessions, broadcasts `AgentStreamEvent`, exposes `agent_routes` (model info, capabilities, slash commands, ...) and `remote_agent_routes`, and re-exports `nomi_config`, `nomi_types`, and `RequirementSink` for the rest of the backend. |
+| [`nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent/) | **The single bridge to `crates/agent/`.** Builds the built-in `nomi` Agent runtime, while `AgentRuntimeRegistry` caches one process-local runtime handle per Conversation. It broadcasts `AgentStreamEvent`, exposes `agent_routes` (model info, capabilities, slash commands, ...), and re-exports `nomi_config`, `nomi_types`, and `RequirementSink` for the rest of the backend. |
 
 ## Feature crates (the bulk of the product)
 
 | Crate | Responsibility |
 | --- | --- |
-| [`nomifun-conversation`](../../crates/backend/nomifun-conversation/) | Conversation and message CRUD, send-message route, **streaming relay** that fans backend agent tokens onto `/ws`, ACP error recovery, response middleware (e.g. `/cron` slash-command detection, `<think>` stripping), skill resolver / snapshot, runtime-state persistence. |
+| [`nomifun-conversation`](../../crates/backend/nomifun-conversation/) | Conversation and message CRUD, send-message route, **streaming relay** that fans backend agent tokens onto `/ws`, response middleware (e.g. `/cron` slash-command detection, `<think>` stripping), skill resolver / snapshot, runtime-state persistence. |
 | [`nomifun-agent-execution`](../../crates/backend/nomifun-agent-execution/) | Persistent Agent collaboration: the `AgentExecutionEngine` facade owns planning, dependency scheduling, Attempts, recovery, decisions, events, and explicit Conversation links. Single- and multi-Agent work use this same aggregate; see the [unified execution architecture](agent-execution.zh.md). |
 | [`nomifun-mcp`](../../crates/backend/nomifun-mcp/) | MCP server CRUD, **OAuth flow**, multi-CLI sync (`Claude`, `Codex`, `CodeBuddy`, `Gemini`, `Qwen`, `OpenCode`, `Nomi`, `Nomifun` adapters under `adapters/`), connection test, session injection of MCP capabilities (incl. built-in image-gen). |
 | [`nomifun-extension`](../../crates/backend/nomifun-extension/) | Extension and skill hub: manifests, dependency graph, classifier, install / enable / disable, packs that bundle skills + MCP servers + presets. |
@@ -104,7 +104,7 @@ identifiers remain opaque.
 | --- | --- |
 | [`nomifun-terminal`](../../crates/backend/nomifun-terminal/) | Terminal sessions backed by `portable-pty`, resize, input/output streaming over WS. |
 | [`nomifun-ssh`](../../crates/backend/nomifun-ssh/) | SSH remote sessions: the encrypted, owner-scoped host book (`ssh_hosts`), the connection pool/provider, `/api/ssh-hosts` routes, and the `SshBackend` sink that gives an SSH-bound conversation's agent a remote tool family. Transport lives in the isolated shared `nomi-ssh` crate (`russh`/`russh-sftp`). |
-| [`nomifun-browser-platform`](../../crates/backend/nomifun-browser-platform/) | Main-process browser ownership, scheduling, and lifecycle authority: `BrowserSessionHub` supplies the ownership, isolation, scheduling, lease, inventory, and cleanup contract shared by Native, Gateway, ACP, remote, and cluster callers. Chromium launch stays behind a host-specific `BrowserHostFactory`. |
+| [`nomifun-browser-platform`](../../crates/backend/nomifun-browser-platform/) | Main-process browser ownership, scheduling, and lifecycle authority: `BrowserSessionHub` supplies the ownership, isolation, scheduling, lease, inventory, and cleanup contract shared by Native and Gateway callers. Chromium launch stays behind a host-specific `BrowserHostFactory`. |
 | [`nomifun-model-invoke`](../../crates/backend/nomifun-model-invoke/) | Unified multimodal model invocation layer: typed task requests/results, declarative auth schemes, shared HTTP transport, the protocol-adapter seam + registry, and catalog resolution. Consumed by `nomifun-shell` STT/TTS, `nomifun-creation`, and other model-calling features. |
 | [`nomifun-shell`](../../crates/backend/nomifun-shell/) | OS shell helpers: open files in the system, speech-to-text against Deepgram or OpenAI, clipboard / paste integration. |
 | [`nomifun-file`](../../crates/backend/nomifun-file/) | Sandboxed filesystem under the conversation work dir (`browse`, `path_safety`, `watch_service`, `snapshot_service`), zip helpers. |

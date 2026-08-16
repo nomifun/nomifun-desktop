@@ -43,7 +43,6 @@ pub fn extension_routes(state: ExtensionRouterState) -> Router {
         .route("/api/extensions", get(get_loaded_extensions))
         .route("/api/extensions/themes", get(get_themes))
         .route("/api/extensions/presets", get(get_presets))
-        .route("/api/extensions/acp-adapters", get(get_acp_adapters))
         .route("/api/extensions/agents", get(get_agents))
         .route("/api/extensions/mcp-servers", get(get_mcp_servers))
         .route("/api/extensions/skills", get(get_skills))
@@ -144,46 +143,6 @@ async fn get_presets(
                     "_source": "extension",
                     "extension_name": preset.extension_name,
                     "_kind": "preset",
-                })
-            })
-            .collect(),
-    );
-    Ok(Json(ApiResponse::ok(value)))
-}
-
-/// `GET /api/extensions/acp-adapters` — get all resolved ACP adapters.
-async fn get_acp_adapters(
-    State(state): State<ExtensionRouterState>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    let adapters = state.registry.get_acp_adapters().await;
-    let value = serde_json::Value::Array(
-        adapters
-            .into_iter()
-            .map(|adapter| {
-                let cli_command = adapter.cli_command.clone();
-                let default_cli_path = adapter.default_cli_path.clone().or_else(|| cli_command.clone());
-                serde_json::json!({
-                    "id": adapter.id,
-                    "name": adapter.name,
-                    "description": adapter.description,
-                    "cli_command": cli_command,
-                    "default_cli_path": default_cli_path,
-                    "acp_args": adapter.acp_args,
-                    "env": adapter.env,
-                    "avatar": adapter.avatar,
-                    "auth_required": adapter.auth_required,
-                    "supports_streaming": adapter.supports_streaming.unwrap_or(false),
-                    "connection_type": adapter.connection_type.unwrap_or_else(|| "cli".to_string()),
-                    "endpoint": adapter.endpoint,
-                    "models": adapter.models,
-                    "yolo_mode": adapter.yolo_mode,
-                    "health_check": adapter.health_check,
-                    "api_key_fields": adapter.api_key_fields,
-                    "is_preset": false,
-                    "is_builtin": false,
-                    "enabled": true,
-                    "_source": "extension",
-                    "_extension_name": adapter.extension_name,
                 })
             })
             .collect(),

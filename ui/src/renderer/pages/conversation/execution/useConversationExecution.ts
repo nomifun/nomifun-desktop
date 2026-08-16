@@ -26,10 +26,9 @@ export function shouldDiscoverExecutionRelation(
 }
 
 export function useConversationExecution(conversation: TChatConversation | null | undefined): ConversationExecutionState {
-  // ConversationExecutionLink is authoritative for every Agent runtime. ACP,
-  // Codex, OpenClaw and companion sessions can all delegate through
-  // the same process-issued Platform Gateway capability; filtering by
-  // conversation type would create an
+  // ConversationExecutionLink is authoritative for every Agent runtime. Work
+  // and companion sessions alike delegate through the same process-issued
+  // Platform Gateway capability; filtering by conversation type would create an
   // execution that exists in the backend but cannot be observed or controlled.
   const conversationId = conversation?.id;
   const [executionId, setExecutionId] = useState<ExecutionId | null>(conversation?.linked_execution_id ?? null);

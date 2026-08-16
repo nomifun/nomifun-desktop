@@ -51,32 +51,6 @@ pub struct SendMessageData {
     pub origin: Option<String>,
 }
 
-/// Attach the immutable conversation preset to the first prompt understood by
-/// runtimes that do not expose a native system-prompt channel.
-///
-/// The caller decides what "first" means for its transport/session lifecycle.
-/// Keeping the envelope identical across adapters makes the active contract
-/// explicit to both the model and runtime-level tests.
-pub(crate) fn inject_runtime_preset_context(
-    content: String,
-    preset_context: Option<&str>,
-    should_inject: bool,
-) -> String {
-    if !should_inject {
-        return content;
-    }
-    let Some(context) = preset_context
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return content;
-    };
-    format!(
-        "[Assistant Rules]\n{context}\n[/Assistant Rules]\n\n\
-         [Current User Request]\n{content}"
-    )
-}
-
 /// Options for creating or resuming a per-conversation Agent runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRuntimeBuildOptions {
@@ -90,7 +64,7 @@ pub struct AgentRuntimeBuildOptions {
     /// Working directory for the agent.
     pub workspace: String,
     /// Model selection config. Nomi runtimes require this; runtimes whose
-    /// backend owns model selection (for example ACP) keep it absent instead
+    /// backend owns model selection keep it absent instead
     /// of using an empty provider/model sentinel.
     pub model: Option<ProviderWithModel>,
     /// Conversation ID this runtime belongs to.
@@ -235,49 +209,8 @@ pub struct NomiResolvedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_api_types::{
-        AcpBuildExtra, AcpModelInfo, NomiBuildExtra, SlashCommandItem,
-    };
+    use nomifun_api_types::{NomiBuildExtra, SlashCommandItem};
     use serde_json::json;
-
-    #[test]
-    fn runtime_preset_context_is_injected_only_when_requested() {
-        let injected = inject_runtime_preset_context(
-            "write the copy".to_owned(),
-            Some("Preset: Copywriter r3"),
-            true,
-        );
-        assert!(injected.contains("[Assistant Rules]"));
-        assert!(injected.contains("Preset: Copywriter r3"));
-        assert!(injected.ends_with("write the copy"));
-
-        assert_eq!(
-            inject_runtime_preset_context(
-                "second turn".to_owned(),
-                Some("Preset: Copywriter r3"),
-                false,
-            ),
-            "second turn"
-        );
-        assert_eq!(
-            inject_runtime_preset_context("plain".to_owned(), Some("  "), true),
-            "plain"
-        );
-    }
-
-    #[test]
-    fn acp_build_extra_accepts_payload_without_skills() {
-        let legacy = r#"{"backend":"claude"}"#;
-        let parsed: AcpBuildExtra = serde_json::from_str(legacy).unwrap();
-        assert!(parsed.skills.is_empty());
-    }
-
-    #[test]
-    fn acp_build_extra_accepts_skills() {
-        let with_field = r#"{"backend":"claude","skills":["cron","pdf"]}"#;
-        let parsed: AcpBuildExtra = serde_json::from_str(with_field).unwrap();
-        assert_eq!(parsed.skills, vec!["cron".to_owned(), "pdf".to_owned()]);
-    }
 
     #[test]
     fn send_message_data_serde_roundtrip() {
@@ -323,7 +256,7 @@ mod tests {
     fn agent_runtime_build_options_serde() {
         let opts = AgentRuntimeBuildOptions {
             user_id: "0190f5fe-7c00-7a00-8000-000000000001".into(),
-            agent_type: AgentType::Acp,
+            agent_type: AgentType::Nomi,
             workspace: "/project".into(),
             model: Some(ProviderWithModel {
                 provider_id: "0190f5fe-7c00-7a00-8000-000000000001".into(),
@@ -332,12 +265,12 @@ mod tests {
             }),
             conversation_id: "0190f5fe-7c00-7a00-8000-000000000001".into(),
             delegation_policy: DelegationPolicy::Automatic,
-            extra: json!({ "backend": "claude" }),
+            extra: json!({ "workspace": "/project" }),
             conversation_created_at: None,
             workspace_binding_lease: None,
         };
         let json = serde_json::to_value(&opts).unwrap();
-        assert_eq!(json["agent_type"], "acp");
+        assert_eq!(json["agent_type"], "nomi");
         assert_eq!(json["user_id"], "0190f5fe-7c00-7a00-8000-000000000001");
         assert_eq!(json["workspace"], "/project");
         assert_eq!(
@@ -345,18 +278,6 @@ mod tests {
             "0190f5fe-7c00-7a00-8000-000000000001"
         );
         assert_eq!(json["delegation_policy"], "automatic");
-    }
-
-    #[test]
-    fn acp_model_info_serde() {
-        let info = AcpModelInfo {
-            model_id: "claude-sonnet-4".into(),
-            model_name: Some("Claude Sonnet 4".into()),
-            provider: Some("anthropic".into()),
-        };
-        let json = serde_json::to_value(&info).unwrap();
-        assert_eq!(json["model_id"], "claude-sonnet-4");
-        assert_eq!(json["model_name"], "Claude Sonnet 4");
     }
 
     #[test]

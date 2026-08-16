@@ -94,7 +94,7 @@ credential_id
 | 技术行 ID | 固定的本地 `id`；不能越过 repository 或产品边界。 |
 | 稳定业务 ID | 产品可定位实体使用的具名裸 UUIDv7。 |
 | 自然键 | 名称、slug、URL、locale、singleton key 等领域值；保持原格式。 |
-| 外部 ID | Provider 或协议签发的不透明值，如平台 user/chat ID、ACP session ID、remote task ID。 |
+| 外部 ID | Provider 或协议签发的不透明值，如平台 user/chat ID、上游 provider 的 request ID。 |
 | 操作 token | request ID、幂等键、nonce、workspace token、receipt token；有明确用途，不是实体身份。 |
 | 文档身份 | Canvas node/edge 等文档内部身份；不是数据库主键。 |
 

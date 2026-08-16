@@ -28,7 +28,7 @@ describe('settings navigation', () => {
 
   test('routes execution engines directly and keeps legacy links compatible', () => {
     const routerSource = readSource(new URL('../../../components/layout/Router.tsx', import.meta.url));
-    const engineTabsSource = readSource(
+    const engineContentSource = readSource(
       new URL('../../../components/settings/SettingsModal/contents/AgentModalContent.tsx', import.meta.url)
     );
 
@@ -37,10 +37,13 @@ describe('settings navigation', () => {
     }
 
     expect(routerSource.includes("import('@renderer/pages/settings/AgentSettings')")).toBe(true);
-    expect(routerSource.includes("to='/settings/execution-engines?tab=runtime'")).toBe(true);
+    expect(routerSource.includes("to='/settings/execution-engines'")).toBe(true);
     expect(routerSource.includes("to='/models?section=agents'")).toBe(false);
-    expect(engineTabsSource.includes("key='runtime'")).toBe(true);
-    expect(engineTabsSource.includes('<AgentRuntimeSettingsContent />')).toBe(true);
+    // One engine means one surface: no tab strip, and no separate runtime
+    // timeout panel.
+    expect(engineContentSource.includes('Tabs')).toBe(false);
+    expect(engineContentSource.includes('AgentRuntimeSettingsContent')).toBe(false);
+    expect(engineContentSource.includes('<LocalAgents />')).toBe(true);
     expect(
       routerSource.includes(
         "path='/settings/browser-use' element={<Navigate to='/browser?tab=settings' replace />}"

@@ -1,15 +1,13 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, OnceLock};
 
 use nomi_process_runtime::ExactProcessIdentity;
-use nomifun_common::{AgentType, AppError, ErrorChain};
+#[cfg(test)]
+use nomifun_common::AgentType;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
-
-use crate::capability::cli_process::CliAgentProcess;
 
 pub(crate) const AGENT_PROCESS_REGISTRY_RELATIVE_PATH: &str =
     nomifun_common::dataset_roots::AGENT_PROCESS_REGISTRY_FILE;
@@ -60,78 +58,10 @@ pub(crate) fn agent_process_registry_path(data_dir: &Path) -> PathBuf {
     data_dir.join(AGENT_PROCESS_REGISTRY_RELATIVE_PATH)
 }
 
-pub(crate) fn register_session_process(
-    data_dir: &Path,
-    process: Arc<CliAgentProcess>,
-    conversation_id: impl Into<String>,
-    agent_type: AgentType,
-    backend: Option<String>,
-    command_preview: Option<String>,
-) -> Result<(), AppError> {
-    let pid = process.pid();
-    let process_group_id = process.process_group_id();
-    // Observe exit through the independent watch channel.  Keeping `process`
-    // in this task would create a lifecycle cycle: a cancelled construction
-    // drops its real owner, but this watcher remains an owner waiting for a
-    // process that nobody can now stop.
-    let mut exit_rx = process.exit_receiver();
-    let entry = RegisteredAgentProcess {
-        pid,
-        process_group_id,
-        conversation_id: conversation_id.into(),
-        agent_type: agent_type.serde_name().to_owned(),
-        backend,
-        command_preview,
-        registered_at_ms: now_ms(),
-        identity: process.identity().cloned(),
-    };
-
-    register_agent_process(data_dir, entry).map_err(|e| {
-        AppError::Internal(format!(
-            "Failed to register agent process {pid} in runtime registry: {e}"
-        ))
-    })?;
-
-    let data_dir = data_dir.to_path_buf();
-    tokio::spawn(async move {
-        if exit_rx.borrow().is_running() {
-            let _ = exit_rx.changed().await;
-        }
-        let terminal = exit_rx.borrow().clone();
-        if let Some(error) = terminal.failure() {
-            // Retain the durable entry when the exact platform watchdog/Job
-            // could not prove tree cleanup. PID/PGID liveness probes are not a
-            // substitute: Windows has no Unix group to probe, and on Unix a
-            // recycled PID can turn polling into false authority.
-            warn!(
-                pid,
-                process_group_id,
-                error,
-                "Retaining failed agent process registry entry because process-tree cleanup was not proven"
-            );
-            return;
-        }
-        if terminal.exit_status().is_none() {
-            warn!(
-                pid,
-                process_group_id,
-                "Retaining agent process registry entry because exit monitor ended without proof"
-            );
-            return;
-        }
-        if let Err(e) = unregister_agent_process(&data_dir, pid) {
-            warn!(
-                pid,
-                path = %agent_process_registry_path(&data_dir).display(),
-                error = %ErrorChain(&e),
-                "Failed to unregister exited agent process from runtime registry"
-            );
-        }
-    });
-
-    Ok(())
-}
-
+/// Durable writer for one spawn-side entry. Retained for the on-disk format
+/// round-trip test: no live engine spawns a registry-tracked child process,
+/// but the boot reaper must keep reading entries left by older versions.
+#[cfg(test)]
 fn register_agent_process(data_dir: &Path, entry: RegisteredAgentProcess) -> io::Result<()> {
     with_registry_lock(|| {
         let path = agent_process_registry_path(data_dir);
@@ -142,7 +72,8 @@ fn register_agent_process(data_dir: &Path, entry: RegisteredAgentProcess) -> io:
     })
 }
 
-pub(crate) fn unregister_agent_process(data_dir: &Path, pid: u32) -> io::Result<()> {
+#[cfg(test)]
+fn unregister_agent_process(data_dir: &Path, pid: u32) -> io::Result<()> {
     with_registry_lock(|| {
         let path = agent_process_registry_path(data_dir);
         let mut registry = read_registry_file(&path)?;
@@ -369,15 +300,6 @@ pub(crate) fn with_registry_lock<T>(f: impl FnOnce() -> io::Result<T>) -> io::Re
     f()
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,9 +326,9 @@ mod tests {
             pid: 42,
             process_group_id: Some(42),
             conversation_id: "0190f5fe-7c00-7a00-8000-000000000211".into(),
-            agent_type: AgentType::Acp.serde_name().into(),
-            backend: Some("codex".into()),
-            command_preview: Some("codex-acp".into()),
+            agent_type: AgentType::Nomi.serde_name().into(),
+            backend: Some("nomi".into()),
+            command_preview: Some("nomi".into()),
             registered_at_ms: 123,
             identity: None,
         };
@@ -477,7 +399,7 @@ mod tests {
             pid: 77,
             start_time_epoch_seconds: 1_722_400_000,
             platform_start_key: 133_663_000_000_000_000,
-            executable: Some(PathBuf::from("C:/tools/codex-acp.exe")),
+            executable: Some(PathBuf::from("C:/tools/nomi.exe")),
         });
         let registry = ProcessRegistry {
             version: 2,
@@ -498,7 +420,7 @@ mod tests {
             "processes": [{
                 "pid": 4242,
                 "conversation_id": "conv-legacy",
-                "agent_type": "acp",
+                "agent_type": "nomi",
                 "registered_at_ms": 99
             }]
         }"#;
@@ -515,9 +437,9 @@ mod tests {
             pid,
             process_group_id: Some(pid),
             conversation_id: format!("conversation-{pid}"),
-            agent_type: AgentType::Acp.serde_name().into(),
+            agent_type: AgentType::Nomi.serde_name().into(),
             backend: Some("codex".into()),
-            command_preview: Some(format!("codex-acp-{pid}")),
+            command_preview: Some(format!("nomi-{pid}")),
             registered_at_ms: u64::from(pid),
             identity: None,
         }

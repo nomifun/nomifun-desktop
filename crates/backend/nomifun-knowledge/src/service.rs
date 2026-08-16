@@ -238,9 +238,9 @@ pub struct MountOutcome {
     pub writeback_eagerness: String,
     /// Raw `channel_write_enabled` opt-in from the binding. Carried verbatim
     /// (independent of `writeback`) so the nomi factory can resolve the
-    /// external-IM-channel write policy with the SAME value the ACP path reads
-    /// at write time — without it the nomi path reconstructs the binding with a
-    /// `false` default and channel write-back is permanently disabled.
+    /// external-IM-channel write policy with the SAME value the terminal path
+    /// reads at write time — without it the nomi path reconstructs the binding
+    /// with a `false` default and channel write-back is permanently disabled.
     pub channel_write_enabled: bool,
 }
 
@@ -335,7 +335,11 @@ pub enum WriteOp {
 pub enum WriteSurface {
     RegularChat,
     Companion,
-    TerminalAcp,
+    /// An in-app terminal CLI session. These sessions get `nomicore
+    /// mcp-knowledge-stdio` injected and reach the write path through
+    /// [`crate::broker`] / [`crate::mcp_server`], so this variant is what every
+    /// terminal `knowledge_write` resolves its policy from.
+    Terminal,
     ExternalChannel,
 }
 
@@ -463,7 +467,7 @@ pub fn resolve_write_policy(surface: WriteSurface, binding: &KnowledgeBinding) -
         match surface {
             WriteSurface::Companion
             | WriteSurface::RegularChat
-            | WriteSurface::TerminalAcp => WriteMode::Direct,
+            | WriteSurface::Terminal => WriteMode::Direct,
             WriteSurface::ExternalChannel => {
                 if binding.channel_write_enabled {
                     WriteMode::Direct
@@ -3670,7 +3674,7 @@ impl KnowledgeService {
         }
     }
 
-    /// Resolve the WRITE context for an ACP/terminal caller's cwd: the bound
+    /// Resolve the WRITE context for a terminal CLI caller's cwd: the bound
     /// kb_ids (scope), the governing workpath binding (drives the write policy),
     /// and a stable workpath key for staged-inbox placement. Mirrors
     /// [`Self::resolve_kb_ids_for_cwd`] but also returns the binding + key the
@@ -11160,7 +11164,7 @@ mod tests {
         const SURFACES: [WriteSurface; 4] = [
             WriteSurface::RegularChat,
             WriteSurface::Companion,
-            WriteSurface::TerminalAcp,
+            WriteSurface::Terminal,
             WriteSurface::ExternalChannel,
         ];
 
@@ -11178,7 +11182,7 @@ mod tests {
         for surface in [
             WriteSurface::RegularChat,
             WriteSurface::Companion,
-            WriteSurface::TerminalAcp,
+            WriteSurface::Terminal,
         ] {
             assert!(
                 matches!(resolve_write_policy(surface, &wb_binding(true)).mode, WriteMode::Direct),

@@ -116,42 +116,6 @@ pub struct PermissionSummary {
 // B. Contribution types (what an extension provides)
 // ---------------------------------------------------------------------------
 
-/// ACP adapter contributed by an extension.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct ExtAcpAdapter {
-    pub id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cli_command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_cli_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub acp_args: Vec<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub env: HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub avatar: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_required: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_streaming: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub yolo_mode: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub health_check: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub api_key_fields: Vec<serde_json::Value>,
-}
-
 /// MCP server contributed by an extension.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ExtMcpServer {
@@ -371,8 +335,6 @@ pub struct ExtModelProvider {
 #[serde(deny_unknown_fields)]
 pub struct ExtContributes {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub acp_adapters: Vec<ExtAcpAdapter>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<ExtMcpServer>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub presets: Vec<ExtPreset>,
@@ -566,42 +528,6 @@ pub struct HubExtensionWithStatus {
 // G. Resolved contribution types (post-processing output)
 // ---------------------------------------------------------------------------
 
-/// Resolved ACP adapter (after env template resolution).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ResolvedAcpAdapter {
-    pub extension_name: String,
-    pub id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cli_command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_cli_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub acp_args: Vec<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub env: HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub avatar: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_required: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_streaming: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub yolo_mode: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub health_check: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub api_key_fields: Vec<serde_json::Value>,
-}
-
 /// Resolved MCP server (after env template resolution).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ResolvedMcpServer {
@@ -754,7 +680,6 @@ pub struct ResolvedModelProvider {
 /// All resolved contributions from enabled extensions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ResolvedContributions {
-    pub acp_adapters: Vec<ResolvedAcpAdapter>,
     pub mcp_servers: Vec<ResolvedMcpServer>,
     pub presets: Vec<ResolvedPreset>,
     pub agents: Vec<ResolvedAgent>,

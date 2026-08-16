@@ -31,7 +31,7 @@ use nomi_browser::{
 };
 use nomifun_api_types::{
     BROWSER_CAPABILITY_DOMAIN, BROWSER_MCP_TOOL_NAMES, BrowserCapabilityClaims,
-    BrowserCapabilityOperation, BrowserCapabilityScope, BrowserCapabilitySurface,
+    BrowserCapabilityOperation, BrowserCapabilityScope,
     BrowserMcpConfig, browser_tool_operation,
 };
 use nomifun_browser_platform::{
@@ -1323,7 +1323,6 @@ fn validate_browser_claims(
     claims.validate_renewable_shape()?;
     claims.scope.validate(&claims.session)?;
     if claims.session.kind != LoopbackSessionKind::Conversation
-        || claims.scope.surface != BrowserCapabilitySurface::Acp
         || !claims
             .scope
             .allows(BrowserCapabilityOperation::Manage)

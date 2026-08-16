@@ -189,7 +189,7 @@ pub struct NomiAgentManager {
     /// One-shot knowledge reminder prepended to the FIRST user turn of a session
     /// that has bound bases — keeps the retrieval protocol adjacent to the task
     /// (the system-prompt section alone is too far from the user message to
-    /// reliably fire). Mirrors the ACP `KnowledgeContextHook`. `None` once
+    /// reliably fire). `None` once
     /// consumed or when no bases are mounted.
     knowledge_prelude: std::sync::Mutex<Option<String>>,
     /// When set, each user message is augmented with auto-retrieved KB hits

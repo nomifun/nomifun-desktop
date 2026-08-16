@@ -34,16 +34,18 @@ struct ResolveConfirmationParams {
     conversation_id: ConversationId,
     /// The call_id of the specific pending decision to resolve (from nomi_list_confirmations).
     call_id: String,
-    /// The chosen option's value (a bare option-id string for ACP).
+    /// The chosen option's value, copied verbatim from the option's `value` in
+    /// nomi_list_confirmations.
     option: String,
 }
 
-/// Build the `ConfirmRequest.data` for a resolved option, writing the chosen
-/// option under BOTH keys so either backend resolves it: the nomi agent reads
-/// `data.get("value")` (and defaults to "cancel" when the key is absent — a
-/// bare `Value::String` was therefore silently DENIED), while ACP's
-/// `confirm_option_id` reads `option_id` (falling back to `value`). Mirrors the
-/// double-key payload IDMM already uses in `nomifun-idmm` probe `inject`.
+/// Build the `ConfirmRequest.data` for a resolved option.
+///
+/// The load-bearing key is `value`: the nomi agent reads `data.get("value")` and
+/// defaults to "cancel" when it is absent — a bare `Value::String` was therefore
+/// silently DENIED. `option_id` is carried alongside it as an inert alias so this
+/// payload stays byte-identical to the one IDMM sends in `nomifun-idmm` probe
+/// `inject`; nothing reads it today.
 fn confirm_data(option: &str) -> Value {
     json!({ "option_id": option, "value": option })
 }
@@ -133,9 +135,8 @@ mod tests {
         // REGRESSION: the gateway previously sent ConfirmRequest.data as a bare
         // Value::String(option). The nomi agent's confirm reads data.get("value")
         // and defaults to "cancel" when absent → every relayed approval on a Nomi
-        // Agent attempt was silently DENIED. The payload must carry the option under
-        // BOTH keys (nomi reads `value`; ACP's confirm_option_id reads
-        // `option_id`, falling back to `value`).
+        // Agent attempt was silently DENIED. `value` is what fixes that; the
+        // `option_id` alias travels with it to match IDMM's payload shape.
         let d = confirm_data("proceed_once");
         assert_eq!(d.get("value").and_then(|v| v.as_str()), Some("proceed_once"));
         assert_eq!(d.get("option_id").and_then(|v| v.as_str()), Some("proceed_once"));

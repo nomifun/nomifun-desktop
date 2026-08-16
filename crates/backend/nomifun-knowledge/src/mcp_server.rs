@@ -1,25 +1,25 @@
-//! In-process HTTP MCP server exposing the single `knowledge_search` tool to
-//! ACP agent sessions (claude / codex / gemini CLIs).
+//! In-process HTTP MCP server exposing the scoped knowledge tools to in-app
+//! terminal CLI sessions (claude / codex / gemini and friends).
 //!
 //! ## Why this exists
 //!
-//! AutoWork drives ACP sessions, but ACP CLIs have no in-process tool bus we
-//! can register the native `KnowledgeSearchTool` into (only the nomi engine
-//! does). To give ACP agents the same knowledge-retrieval surface the nomi
-//! engine has natively, this server exposes ONE scoped tool, `knowledge_search`,
-//! over authenticated HTTP. The backend resolves workspace + mounted base ids
-//! before spawn and signs them into the child's capability. The model supplies
-//! only tool arguments; `cwd`, `kb_ids`, user, and session never come from an
-//! unsigned request body.
+//! Terminal CLIs have no in-process tool bus we can register the native
+//! `KnowledgeSearchTool` into (only the nomi engine does). To give those CLIs the
+//! same knowledge-retrieval surface the nomi engine has natively, this server
+//! exposes a scoped tool set (`knowledge_search` / `knowledge_read` /
+//! `knowledge_write`) over authenticated HTTP. The backend resolves workspace +
+//! mounted base ids before spawn and signs them into the child's capability. The
+//! model supplies only tool arguments; `cwd`, `kb_ids`, user, and session never
+//! come from an unsigned request body.
 //!
 //! ## Shape (mirrors `nomifun-requirement::mcp_server::RequirementMcpServer`)
 //!
-//! This is the in-process HTTP half. ACP CLIs spawn a SEPARATE stdio process
+//! This is the in-process HTTP half. Terminal CLIs spawn a SEPARATE stdio process
 //! (`nomicore mcp-knowledge-stdio`) that cannot share this process's
 //! `KnowledgeService`; it forwards each tool call back here as an authenticated
-//! `POST /tool`. The transport is stdio because claude / codex / gemini
-//! advertise stdio-only MCP capabilities (HTTP/SSE servers are dropped by the
-//! ACP capability filter), so a direct-HTTP injection would never reach them.
+//! `POST /tool`. The transport is stdio because claude / codex / gemini advertise
+//! stdio-only MCP capabilities (they drop HTTP/SSE servers), so a direct-HTTP
+//! injection would never reach them.
 //!
 //! ## Security
 //!
@@ -64,7 +64,7 @@ struct KbMcpState {
     service: ServiceSlot,
 }
 
-/// In-process HTTP MCP server for the scoped `knowledge_search` tool.
+/// In-process HTTP MCP server for the scoped knowledge tools.
 pub struct KnowledgeMcpServer {
     http_addr: SocketAddr,
     issuer: Arc<LoopbackCapabilityIssuer>,
@@ -482,7 +482,7 @@ pub(crate) async fn dispatch_read<I: AsRef<str>>(service: &KnowledgeService, kb_
 }
 
 /// Write a document through the canonical `write_document` path. The surface is
-/// always `TerminalAcp` (this server serves ACP/terminal CLIs); the placement
+/// always `Terminal` (this server serves the in-app terminal CLIs); the placement
 /// policy is resolved server-side from the caller's workpath binding — the model
 /// supplies only `handle | base+rel_path` + `content`, never the policy.
 pub(crate) async fn dispatch_write<I: AsRef<str>>(
@@ -509,7 +509,7 @@ pub(crate) async fn dispatch_write<I: AsRef<str>>(
         };
         WriteTargetSpec::Path { kb_id, rel_path: rel_path.to_owned() }
     };
-    let policy = resolve_write_policy(WriteSurface::TerminalAcp, binding);
+    let policy = resolve_write_policy(WriteSurface::Terminal, binding);
     let bound_kb_ids = match bound_kb_ids
         .iter()
         .map(|id| KnowledgeBaseId::parse(id.as_ref()))

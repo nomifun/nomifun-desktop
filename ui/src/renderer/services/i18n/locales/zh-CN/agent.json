@@ -30,5 +30,19 @@
   "model": {
     "switchSuccess": "模型切换成功",
     "switchFailed": "模型切换失败"
+  },
+  "sendbox": {
+    "placeholder": "发送消息到 {{backend}}..."
+  },
+  "status": {
+    "connecting": "正在连接 {{agent}}...",
+    "connected": "已连接到 {{agent}}",
+    "authenticated": "已通过 {{agent}} 身份验证",
+    "session_active": "{{agent}} 会话活跃中",
+    "error": "连接错误",
+    "unknown": "未知状态"
+  },
+  "config": {
+    "reasoning_effort": "推理深度"
   }
 }

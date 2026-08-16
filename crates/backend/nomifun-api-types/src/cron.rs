@@ -39,8 +39,8 @@ pub enum CronScheduleDto {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CronAgentConfigDto {
-    /// ACP/agent backend only. Nomi provider selection is carried by
-    /// `provider_id`; this field must be absent for Nomi jobs.
+    /// Retired vendor-backend selector. Nomi provider selection is carried by
+     /// `provider_id`; this field must be absent for Nomi jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     pub name: String,
@@ -49,8 +49,8 @@ pub struct CronAgentConfigDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_agent_id: Option<String>,
     /// Reusable configuration preset selected for this scheduled task. This is
-    /// deliberately independent from `custom_agent_id`, which identifies an
-    /// executable custom ACP agent rather than a preset.
+    /// deliberately independent from `custom_agent_id`, which identifies a
+    /// custom agent row rather than a preset.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn agent_config_full() {
         let raw = json!({
-            "backend": "acp",
+            "backend": "legacy-backend",
             "name": "Claude Agent",
             "cli_path": "/usr/bin/claude",
             "custom_agent_id": "agent-1",
@@ -433,7 +433,7 @@ mod tests {
             "workspace": "/tmp/ws"
         });
         let c: CronAgentConfigDto = serde_json::from_value(raw).unwrap();
-        assert_eq!(c.backend.as_deref(), Some("acp"));
+        assert_eq!(c.backend.as_deref(), Some("legacy-backend"));
         assert_eq!(c.name, "Claude Agent");
         assert_eq!(c.cli_path.as_deref(), Some("/usr/bin/claude"));
         assert_eq!(c.custom_agent_id.as_deref(), Some("agent-1"));
@@ -457,7 +457,7 @@ mod tests {
         ] {
             assert!(
                 serde_json::from_value::<CronAgentConfigDto>(json!({
-                    "backend": "acp",
+                    "backend": "legacy-backend",
                     "name": "Claude",
                     "preset_id": preset_id
                 }))

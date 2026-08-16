@@ -183,11 +183,11 @@ describe('buildToolReceiptSummaryParts', () => {
     expect(parts).toEqual([{ action: 'load_tools', count: 1, state: 'completed' }]);
   });
 
-  test('uses explicit ACP semantics before a conflicting tool-name action', () => {
+  test('uses an explicit protocol kind before a conflicting tool-name action', () => {
     const parts = buildToolReceiptSummaryParts(
       [
         tool({
-          key: 'acp-read',
+          key: 'protocol-read',
           name: 'write_file',
           kind: 'read',
           description: 'config.yaml',

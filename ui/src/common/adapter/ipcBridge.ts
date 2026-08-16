@@ -87,7 +87,6 @@ import {
 } from '../types/agent/presetTypes';
 import type { PreviewHistoryTarget, PreviewSnapshotInfo, PreviewUrlResponse } from '../types/office/preview';
 import { parsePresetTagId, parsePreviewSnapshotId } from '../types/ids';
-import type { AcpModelInfo } from '../types/platform/acpTypes';
 import {
   fromProviderResponse,
   toCreateProviderRequest,
@@ -1494,10 +1493,10 @@ export const providerConnection = {
 };
 
 // ---------------------------------------------------------------------------
-// ACP Conversation — routed to /api/agents/* + conversation routes
+// Agent Conversation — routed to /api/agents/* + conversation routes
 // ---------------------------------------------------------------------------
 
-export const acpConversation = {
+export const agentConversation = {
   sendMessage: conversation.sendMessage,
   responseStream: conversation.responseStream,
   getAvailableAgents: withResponseMap(
@@ -1505,68 +1504,6 @@ export const acpConversation = {
     (agents) => agents.map(fromApiAgentMetadata)
   ),
   refreshCustomAgents: httpPost<void, void>('/api/agents/refresh'),
-  testCustomAgent: httpPost<
-    { step: 'success' } | { step: 'fail_cli'; error: string } | { step: 'fail_acp'; error: string },
-    { command: string; acp_args?: string[]; env?: Record<string, string> }
-  >('/api/agents/custom/try-connect'),
-  createCustomAgent: withResponseMap(
-    httpPost<
-      AgentMetadata,
-      {
-        name: string;
-        command: string;
-        icon?: string;
-        args?: string[];
-        env?: Array<{ name: string; value: string; description?: string }>;
-        advanced?: {
-          yolo_id?: string;
-          native_skills_dirs?: string[];
-          behavior_policy?: { supports_side_question?: boolean };
-          description?: string;
-        };
-      }
-    >('/api/agents/custom'),
-    fromApiAgentMetadata
-  ),
-  updateCustomAgent: withResponseMap(
-    httpPut<
-      AgentMetadata,
-      {
-        agent_id: AgentMetadata['agent_id'];
-        name: string;
-        command: string;
-        icon?: string;
-        args?: string[];
-        env?: Array<{ name: string; value: string; description?: string }>;
-        advanced?: {
-          yolo_id?: string;
-          native_skills_dirs?: string[];
-          behavior_policy?: { supports_side_question?: boolean };
-          description?: string;
-        };
-      }
-    >(
-      (p) => `/api/agents/custom/${p.agent_id}`,
-      (p) => {
-        const { agent_id: _agentId, ...rest } = p;
-        return rest;
-      }
-    ),
-    fromApiAgentMetadata
-  ),
-  deleteCustomAgent: httpDelete<{ deleted: boolean }, { agent_id: AgentMetadata['agent_id'] }>(
-    (p) => `/api/agents/custom/${p.agent_id}`
-  ),
-  setAgentEnabled: withResponseMap(
-    httpPatch<AgentMetadata, { agent_id: AgentMetadata['agent_id']; enabled: boolean }>(
-      (p) => `/api/agents/${p.agent_id}/enabled`,
-      (p) => ({ enabled: p.enabled })
-    ),
-    fromApiAgentMetadata
-  ),
-  checkAgentHealth: httpPost<{ available: boolean; latency?: number; error?: string }, { backend: string }>(
-    '/api/agents/health-check'
-  ),
   checkProviderHealth: withResponseMap(
     httpPost<ProviderHealthCheckResponse, ProviderHealthCheckRequest>(
       '/api/agents/provider-health-check'
@@ -1578,25 +1515,15 @@ export const acpConversation = {
     (p) => ({ mode: p.mode })
   ),
   // 404 is the expected pre-warmup response from `/api/conversations/:id/mode`
-  // and `/api/conversations/:id/model` — the agent has not attached yet, so
-  // we have nothing to read. AcpModeSelector / AcpModelSelector both fall back
-  // to handshake metadata in that case. Silence the bridge log so this
-  // ordinary state doesn't pollute Sentry breadcrumbs (ELECTRON-1BT).
+  // — the agent has not attached yet, so we have nothing to read.
+  // AgentModeSelector falls back to handshake metadata in that case. Silence
+  // the bridge log so this ordinary state doesn't pollute Sentry breadcrumbs
+  // (ELECTRON-1BT).
   getMode: httpGet<{ mode: string; initialized: boolean }, { conversation_id: ConversationId }>(
     (p) => `/api/conversations/${p.conversation_id}/mode`,
     {
       silentStatuses: [404],
     }
-  ),
-  getModel: httpGet<{ model_info: AcpModelInfo | null }, { conversation_id: ConversationId }>(
-    (p) => `/api/conversations/${p.conversation_id}/model`,
-    {
-      silentStatuses: [404],
-    }
-  ),
-  setModel: httpPut<void, { conversation_id: ConversationId; model: string }>(
-    (p) => `/api/conversations/${p.conversation_id}/model`,
-    (p) => ({ model: p.model })
   ),
 };
 
@@ -2878,7 +2805,7 @@ export interface ICronJobRun {
 }
 
 export interface ICronAgentConfig {
-  /** ACP/agent backend only; absent for Nomi jobs. */
+  /** Agent backend label; absent for jobs without one. */
   backend?: string;
   name: string;
   cli_path?: string;
@@ -3168,7 +3095,7 @@ export interface IConfirmMessageParams {
 }
 
 export interface ICreateConversationParams {
-  type: 'acp' | 'codex' | 'nomi';
+  type: 'nomi';
   name?: string;
   model: TProviderWithModel;
   /** Backend-resolved reusable launch configuration. */
@@ -3214,7 +3141,6 @@ export interface ICreateConversationParams {
     session_mode?: string;
     codex_model?: string;
     current_model_id?: string;
-    cached_config_options?: import('../types/platform/acpTypes').AcpSessionConfigOption[];
     pending_config_options?: Record<string, string>;
     runtime_validation?: {
       expected_workspace?: string;
@@ -3565,7 +3491,6 @@ export const extensions = {
   getLoadedExtensions: httpGet<IExtensionInfo[], void>('/api/extensions'),
   getPresets: httpGet<Record<string, unknown>[], void>('/api/extensions/presets'),
   getAgents: httpGet<Record<string, unknown>[], void>('/api/extensions/agents'),
-  getAcpAdapters: httpGet<Record<string, unknown>[], void>('/api/extensions/acp-adapters'),
   getMcpServers: httpGet<IExtensionMcpServerContribution[], void>('/api/extensions/mcp-servers'),
   getSkills: httpGet<Array<{ name: string; description: string; location: string }>, void>('/api/extensions/skills'),
   getSettingsTabs: httpGet<IExtensionSettingsTab[], void>('/api/extensions/settings-tabs'),

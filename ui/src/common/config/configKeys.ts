@@ -1,4 +1,3 @@
-import type { AcpInitializeResult, AcpSessionConfigOption, AcpSessionModes } from '@/common/types/platform/acpTypes';
 import type { SpeechToTextConfig, TextToSpeechConfig } from '@/common/types/provider/speech';
 import type { ICssTheme } from '@/common/config/storage';
 import type { CompanionId, ProviderId } from '@/common/types/ids';
@@ -13,26 +12,6 @@ export type ConfigKeyMap = {
   'google.config': {
     proxy?: string;
   };
-  'codex.config':
-    | { cli_path?: string; yoloMode?: boolean; sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access' }
-    | undefined;
-  'acp.config': {
-    [backend: string]: {
-      auth_methodId?: string;
-      authToken?: string;
-      lastAuthTime?: number;
-      cli_path?: string;
-      yoloMode?: boolean;
-      preferredMode?: string;
-      preferredModelId?: string;
-      promptTimeout?: number;
-    };
-  };
-  'acp.promptTimeout': number | undefined;
-  'acp.agentIdleTimeout': number | undefined;
-  'acp.cachedInitializeResult': Record<string, AcpInitializeResult> | undefined;
-  'acp.cached_config_options': Record<string, AcpSessionConfigOption[]> | undefined;
-  'acp.cachedModes': Record<string, AcpSessionModes> | undefined;
   language: string;
   theme: string;
   colorScheme: string;

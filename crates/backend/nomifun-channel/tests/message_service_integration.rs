@@ -21,7 +21,7 @@ use nomifun_db::{
     CreateProviderParams, IChannelRepository, IClientPreferenceRepository,
     IConversationRepository, IProviderModelRepository, IProviderRepository, NewProviderModel,
     NewProviderModelCapability,
-    SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteChannelRepository,
+    SqliteAgentMetadataRepository, SqliteChannelRepository,
     SqliteClientPreferenceRepository, SqliteConversationRepository, SqliteProviderModelRepository,
     SqliteProviderRepository, init_database_memory,
 };
@@ -280,7 +280,6 @@ async fn send_to_agent_warms_cold_task_before_returning_stream_subscription() {
         Arc::clone(&runtime_registry),
         Arc::new(SqliteConversationRepository::new(pool.clone())),
         Arc::new(SqliteAgentMetadataRepository::new(pool.clone())),
-        Arc::new(SqliteAcpSessionRepository::new(pool.clone())),
         Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
     ));
 
@@ -353,7 +352,6 @@ async fn build_stack(pool: nomifun_db::SqlitePool) -> TestStack {
             Arc::clone(&runtime_registry),
             Arc::new(SqliteConversationRepository::new(pool.clone())),
             Arc::new(SqliteAgentMetadataRepository::new(pool.clone())),
-            Arc::new(SqliteAcpSessionRepository::new(pool.clone())),
             Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
         )
         .with_runtime_state(Arc::clone(&runtime)),
@@ -911,14 +909,24 @@ async fn open_group_guest_uses_restricted_dedicated_conversation() {
 }
 
 #[tokio::test]
-async fn open_group_guest_cannot_select_host_agent() {
+async fn session_naming_a_removed_engine_is_refused_for_a_group_guest() {
+    // `channel_sessions.agent_type` is free-form TEXT, so a row written by a
+    // build that still had other engines can name one after the upgrade. It must
+    // be REFUSED, not coerced to nomi — coercing would start the turn on the
+    // wrong runtime with an incompatible `extra` shape and fail much later.
+    //
+    // This replaces an earlier test asserting a guest-only restriction
+    // ("open-group guests may only use the restricted Nomi agent"). That rule is
+    // now subsumed: rejection applies to EVERY caller, so the guest identity here
+    // is incidental — it only proves the refusal happens before any
+    // guest-specific branch could have rescued the turn.
     let db = init_database_memory().await.unwrap();
     let stack = build_stack(db.pool().clone()).await;
     let channel_plugin_id = create_plain_channel(&stack.channel_repo).await;
     let guest = stack
         .channel_repo
         .ensure_auto_group_user(&NewChannelUserRow {
-            platform_user_id: "group-member-acp".into(),
+            platform_user_id: "group-member-legacy-engine".into(),
             platform_type: "telegram".into(),
             channel_plugin_id: Some(channel_plugin_id.clone()),
             display_name: Some("Group Member".into()),
@@ -940,14 +948,14 @@ async fn open_group_guest_cannot_select_host_agent() {
             &session,
             "run a host command",
             PluginType::Telegram,
-            "test:group-guest:reject-acp",
+            "test:group-guest:reject-removed-engine",
         )
         .await
-        .expect_err("auto-group identities must not use host agents");
-    assert!(matches!(
-        error,
-        nomifun_channel::error::ChannelError::UserNotAuthorized(_)
-    ));
+        .expect_err("a session naming a removed engine must not run");
+    assert!(
+        matches!(error, nomifun_channel::error::ChannelError::InvalidConfig(_)),
+        "expected InvalidConfig naming the dead engine, got {error:?}"
+    );
 }
 
 #[tokio::test]

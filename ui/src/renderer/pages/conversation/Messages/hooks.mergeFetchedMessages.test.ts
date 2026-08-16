@@ -120,7 +120,7 @@ describe('mergeFetchedMessagesForConversation', () => {
     expect(disclosures[0]?.processItemIds).toEqual([status.id, thinking.id]);
   });
 
-  test('keeps a late ACP image completion before the final answer and produces one disclosure', () => {
+  test('keeps a late tool completion before the final answer and produces one disclosure', () => {
     const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
     const userId = messageId('image-user');
     const rootTurnId = messageId('image-root');
@@ -143,17 +143,14 @@ describe('mergeFetchedMessagesForConversation', () => {
       id: 'persisted-image-tool',
       msg_id: 'image-root',
       turn_id: rootTurnId,
-      type: 'acp_tool_call',
+      type: 'tool_call',
       created_at: 2900,
       content: {
-        session_id: 'session-image',
+        call_id: 'image-call',
+        name: 'Generate',
+        status: 'completed',
         artifact_delivery_committed: true,
-        update: {
-          session_update: 'tool_call_update',
-          tool_call_id: 'image-call',
-          status: 'completed',
-          content: [],
-        },
+        artifacts: [],
       } as any,
     }));
     const final = normalizeDbMessage(baseMessage({
@@ -167,16 +164,13 @@ describe('mergeFetchedMessagesForConversation', () => {
       id: 'late-live-image-tool',
       msg_id: 'image-root',
       turn_id: rootTurnId,
-      type: 'acp_tool_call',
+      type: 'tool_call',
       created_at: 5000,
       content: {
-        session_id: 'session-image',
-        update: {
-          session_update: 'tool_call_update',
-          tool_call_id: 'image-call',
-          status: 'completed',
-          content: [],
-        },
+        call_id: 'image-call',
+        name: 'Generate',
+        status: 'completed',
+        artifacts: [],
       },
     } as any);
     const liveIntro = { ...intro, id: 'live-intro', turn_id: rootTurnId } as TMessage;
@@ -503,61 +497,6 @@ describe('mergeFetchedMessagesForConversation', () => {
     expect((merged[0] as any).content.artifacts).toEqual([]);
   });
 
-  test('does not restore stale ACP artifact content over a live failed correction', () => {
-    const liveFailure = baseMessage({
-      id: 'live-acp-error',
-      msg_id: 'assistant-turn-acp',
-      type: 'acp_tool_call',
-      status: 'error',
-      content: {
-        session_id: 'session-1',
-        update: {
-          sessionUpdate: 'tool_call_update',
-          tool_call_id: 'acp-image-call',
-          status: 'failed',
-          content: [],
-        },
-      },
-    } as any);
-    const staleDbSuccess = baseMessage({
-      id: 'persisted-acp-row',
-      msg_id: 'assistant-turn-acp',
-      type: 'acp_tool_call',
-      status: 'finish',
-      content: {
-        session_id: 'session-1',
-        update: {
-          sessionUpdate: 'tool_call_update',
-          tool_call_id: 'acp-image-call',
-          status: 'completed',
-          content: [
-            {
-              type: 'artifact',
-              artifact: {
-                id: '019b0000-0000-7000-8000-000000000002',
-                kind: 'image',
-                mime_type: 'image/png',
-                path: '/workspace/stale-acp.png',
-                relative_path: 'nomifun-artifacts/stale-acp.png',
-                size_bytes: 10,
-                sha256: 'b'.repeat(64),
-              },
-            },
-          ],
-        },
-      },
-    } as any);
-
-    const merged = mergeFetchedMessagesForConversation(
-      [liveFailure],
-      fetchedMessages([staleDbSuccess]),
-      liveFailure.conversation_id
-    );
-
-    expect((merged[0] as any).content.update.status).toBe('failed');
-    expect((merged[0] as any).content.update.content).toEqual([]);
-  });
-
   test('keys fetched tool lifecycles by call id so one turn can retain multiple tools', () => {
     const persistedCall = baseMessage({
       id: 'persisted-call-1',
@@ -591,37 +530,23 @@ describe('mergeFetchedMessagesForConversation', () => {
 });
 
 describe('composeMessageForTest', () => {
-  test('keeps the first ACP tool envelope stable when a terminal frame arrives late', () => {
+  test('keeps the first tool envelope stable when a terminal frame arrives late', () => {
     const turnId = messageId('stable-turn');
     const running = baseMessage({
       id: 'first-live-tool-id',
       msg_id: 'stable-turn',
       turn_id: turnId,
-      type: 'acp_tool_call',
+      type: 'tool_call',
       created_at: 2000,
-      content: {
-        session_id: 'session-stable',
-        update: {
-          session_update: 'tool_call_update',
-          tool_call_id: 'stable-call',
-          status: 'in_progress',
-        },
-      },
+      content: { call_id: 'stable-call', name: 'Generate', status: 'running' },
     } as any);
     const completed = baseMessage({
       id: 'late-terminal-tool-id',
       msg_id: 'stable-turn',
       turn_id: turnId,
-      type: 'acp_tool_call',
+      type: 'tool_call',
       created_at: 5000,
-      content: {
-        session_id: 'session-stable',
-        update: {
-          session_update: 'tool_call_update',
-          tool_call_id: 'stable-call',
-          status: 'completed',
-        },
-      },
+      content: { call_id: 'stable-call', name: 'Generate', status: 'completed' },
     } as any);
 
     const merged = composeMessageForTest(completed, [running]);
@@ -630,7 +555,7 @@ describe('composeMessageForTest', () => {
     expect(merged[0].id).toBe('first-live-tool-id');
     expect(merged[0].created_at).toBe(2000);
     expect(merged[0].turn_id).toBe(turnId);
-    expect((merged[0] as any).content.update.status).toBe('completed');
+    expect((merged[0] as any).content.status).toBe('completed');
   });
 
   test('backfills the root turn id when a thinking completion merges into an early unowned row', () => {
@@ -782,48 +707,6 @@ describe('composeMessageForTest', () => {
 
     expect((merged[0] as any).content.status).toBe('error');
     expect((merged[0] as any).content.artifacts).toEqual([]);
-  });
-
-  test('indexed ACP failure correction removes inherited completed artifact content', () => {
-    const completed = baseMessage({
-      id: 'turn-1:acp:artifact-1',
-      msg_id: 'turn-1',
-      type: 'acp_tool_call',
-      content: {
-        session_id: 'session-1',
-        update: {
-          sessionUpdate: 'tool_call_update',
-          tool_call_id: 'acp-artifact-1',
-          status: 'completed',
-          content: [
-            {
-              type: 'resource_link',
-              name: 'report.pdf',
-              uri: 'https://example.invalid/report.pdf',
-            },
-          ],
-        },
-      },
-    } as any);
-    const failed = baseMessage({
-      id: 'turn-1:acp:artifact-1',
-      msg_id: 'turn-1',
-      type: 'acp_tool_call',
-      status: 'error',
-      content: {
-        session_id: 'session-1',
-        update: {
-          sessionUpdate: 'tool_call_update',
-          tool_call_id: 'acp-artifact-1',
-          status: 'failed',
-        },
-      },
-    } as any);
-
-    const merged = composeMessageForTest(failed, [completed]);
-
-    expect((merged[0] as any).content.update.status).toBe('failed');
-    expect((merged[0] as any).content.update.content).toEqual([]);
   });
 
   test('does not merge reused provider call ids across turns', () => {
@@ -1054,9 +937,8 @@ describe('normalizeDbMessage', () => {
     expect(normalized.turn_id).toBe(turnId);
   });
 
-  test('keeps persisted turn identity for generic tools, ACP tools, and text', () => {
+  test('keeps persisted turn identity for tools and text', () => {
     const genericTurnId = messageId('generic-turn');
-    const acpTurnId = messageId('acp-turn');
     const textTurnId = messageId('text-turn');
 
     const generic = normalizeDbMessage(
@@ -1069,22 +951,6 @@ describe('normalizeDbMessage', () => {
           call_id: 'generic-call',
           name: 'Generate',
           status: 'running',
-        } as any,
-      })
-    );
-    const acp = normalizeDbMessage(
-      baseMessage({
-        id: 'persisted-acp-tool',
-        msg_id: 'acp-tool-row',
-        turn_id: acpTurnId,
-        type: 'acp_tool_call',
-        content: {
-          session_id: 'session-1',
-          update: {
-            sessionUpdate: 'tool_call_update',
-            tool_call_id: 'acp-call',
-            status: 'in_progress',
-          },
         } as any,
       })
     );
@@ -1101,7 +967,6 @@ describe('normalizeDbMessage', () => {
     );
 
     expect(generic.turn_id).toBe(genericTurnId);
-    expect(acp.turn_id).toBe(acpTurnId);
     expect(text.turn_id).toBe(textTurnId);
   });
 
@@ -1228,21 +1093,6 @@ describe('normalizeDbMessage', () => {
       ),
       normalizeDbMessage(
         baseMessage({
-          id: 'invalid-acp-turn',
-          type: 'acp_tool_call',
-          content: {
-            session_id: 'session-invalid',
-            turn_id: malformed,
-            update: {
-              sessionUpdate: 'tool_call_update',
-              tool_call_id: 'invalid-acp-call',
-              status: 'in_progress',
-            },
-          } as any,
-        })
-      ),
-      normalizeDbMessage(
-        baseMessage({
           id: 'invalid-text-turn',
           type: 'text',
           content: { content: 'answer', turn_id: malformed } as any,
@@ -1251,7 +1101,6 @@ describe('normalizeDbMessage', () => {
     ];
 
     expect(normalized.map((message) => message.turn_id)).toEqual([
-      undefined,
       undefined,
       undefined,
       undefined,
@@ -1313,31 +1162,6 @@ describe('normalizeDbMessage', () => {
     expect(normalized.content.artifacts).toEqual([]);
   });
 
-  test('row-level ACP error removes stale completed artifact receipts from history', () => {
-    const normalized = normalizeDbMessage(
-      baseMessage({
-        id: 'failed-acp-row',
-        msg_id: 'assistant-failed-acp',
-        type: 'acp_tool_call',
-        status: 'error',
-        content: {
-          session_id: 'session-1',
-          update: {
-            sessionUpdate: 'tool_call_update',
-            tool_call_id: 'failed-acp-image',
-            status: 'completed',
-            content: [{ type: 'artifact', artifact: persistedArtifact }],
-          },
-        } as any,
-      })
-    );
-
-    expect(normalized.type).toBe('acp_tool_call');
-    if (normalized.type !== 'acp_tool_call') throw new Error('expected ACP tool call');
-    expect(normalized.content.update.status).toBe('failed');
-    expect(normalized.content.update.content).toEqual([]);
-  });
-
   test('history hydration rejects an entire completed receipt batch when one member is malformed', () => {
     const normalized = normalizeDbMessage(
       baseMessage({
@@ -1359,46 +1183,6 @@ describe('normalizeDbMessage', () => {
     if (normalized.type !== 'tool_call') throw new Error('expected generic tool call');
     expect(normalized.content.status).toBe('error');
     expect(normalized.content.artifacts).toEqual([]);
-  });
-
-  test('history hydration fails a completed ACP batch containing an unsafe resource URI', () => {
-    const normalized = normalizeDbMessage(
-      baseMessage({
-        id: 'unsafe-acp-row',
-        msg_id: 'assistant-unsafe-acp',
-        type: 'acp_tool_call',
-        status: 'finish',
-        content: {
-          session_id: 'session-unsafe',
-          artifact_delivery_committed: true,
-          update: {
-            sessionUpdate: 'tool_call_update',
-            tool_call_id: 'unsafe-resource',
-            status: 'completed',
-            content: [
-              { type: 'resource_link', name: 'unsafe', uri: 'javascript:alert(1)' },
-              { type: 'artifact', artifact: persistedArtifact },
-            ],
-          },
-        },
-      } as any)
-    );
-
-    expect(normalized.type).toBe('acp_tool_call');
-    if (normalized.type !== 'acp_tool_call') throw new Error('expected ACP tool call');
-    expect(normalized.content.update.status).toBe('failed');
-    expect(
-      normalized.content.update.content?.some(
-        (item) => item.type === 'artifact' || item.type === 'resource_link'
-      )
-    ).toBe(false);
-    expect(
-      normalized.content.update.content?.some(
-        (item) =>
-          item.type === 'artifact_error' &&
-          item.message === 'Invalid or unsafe resource link'
-      )
-    ).toBe(true);
   });
 
   test('history exposes generic receipts only after the enclosing turn commit marker', () => {
@@ -1428,46 +1212,6 @@ describe('normalizeDbMessage', () => {
     if (committed.type !== 'tool_call') throw new Error('expected generic tool call');
     expect(committed.content.status).toBe('completed');
     expect(committed.content.artifacts).toEqual([persistedArtifact]);
-  });
-
-  test('history exposes ACP deliveries only after the enclosing turn commit marker', () => {
-    const hydrate = (artifact_delivery_committed?: boolean) =>
-      normalizeDbMessage(
-        baseMessage({
-          id: artifact_delivery_committed ? 'committed-acp-row' : 'legacy-acp-row',
-          msg_id: 'assistant-committed-acp',
-          type: 'acp_tool_call',
-          status: 'finish',
-          content: {
-            session_id: 'session-committed',
-            ...(artifact_delivery_committed === undefined ? {} : { artifact_delivery_committed }),
-            update: {
-              sessionUpdate: 'tool_call_update',
-              tool_call_id: 'committed-acp-image',
-              status: 'completed',
-              content: [{ type: 'artifact', artifact: persistedArtifact }],
-            },
-          },
-        } as any)
-      );
-
-    const legacy = hydrate();
-    if (legacy.type !== 'acp_tool_call') throw new Error('expected ACP tool call');
-    expect(legacy.content.update.status).toBe('failed');
-    expect(
-      legacy.content.update.content?.some(
-        (item) => item.type === 'artifact' || item.type === 'resource_link'
-      )
-    ).toBe(false);
-
-    const committed = hydrate(true);
-    if (committed.type !== 'acp_tool_call') throw new Error('expected ACP tool call');
-    expect(committed.content.update.status).toBe('completed');
-    expect(
-      committed.content.update.content?.some(
-        (item) => item.type === 'artifact' && item.artifact.id === persistedArtifact.id
-      )
-    ).toBe(true);
   });
 
   test('history downgrades receipt-less tool-group image success before process rendering', () => {

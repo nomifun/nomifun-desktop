@@ -59,13 +59,13 @@ const extractNameAndArgs = (
     return { name: asToolCall.name, args: asToolCall.args as Record<string, unknown> };
   }
 
-  // acp_tool_call：{ update: { title, rawInput } }（兼容 snake_case raw_input）
-  const asAcp = data as {
+  // tool_call update envelope：{ update: { title, rawInput } }（兼容 snake_case raw_input）
+  const asUpdate = data as {
     update?: { title?: unknown; rawInput?: unknown; raw_input?: unknown };
   };
-  if (asAcp.update && typeof asAcp.update === 'object') {
-    const title = asAcp.update.title;
-    const raw = asAcp.update.rawInput ?? asAcp.update.raw_input;
+  if (asUpdate.update && typeof asUpdate.update === 'object') {
+    const title = asUpdate.update.title;
+    const raw = asUpdate.update.rawInput ?? asUpdate.update.raw_input;
     if (typeof title === 'string' && raw && typeof raw === 'object') {
       return { name: title, args: raw as Record<string, unknown> };
     }
@@ -91,7 +91,7 @@ const str = (args: Record<string, unknown>, key: string): string =>
 /**
  * 解析浏览器动作 → 气泡 narration（i18n key + 参数）。
  *
- * @param data 流式事件的 `message.data`（ToolCallEventData / AcpToolCallEventData / ToolGroup 数组）
+ * @param data 流式事件的 `message.data`（ToolCallEventData / ToolGroup 数组）
  * @returns Browser 工具 → 具体 narration；非 Browser 或无法识别 → `null`（调用方维持通用占位）
  */
 export const browserNarrationFor = (data: unknown): BrowserNarration | null => {

@@ -7,7 +7,7 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use common::{
-    acp_extra_with_workspace, body_json, build_app, delete_with_token, get_request,
+    nomi_extra_with_workspace, body_json, build_app, delete_with_token, get_request,
     get_with_token, json_with_token, setup_and_login,
 };
 
@@ -366,9 +366,9 @@ async fn tag_bindings_lists_enabled_autowork_conversations() {
             "POST",
             "/api/conversations",
             json!({
-                "type": "acp",
+                "type": "nomi",
                 "name": "Conv X",
-                "extra": acp_extra_with_workspace("/project")
+                "extra": nomi_extra_with_workspace("/project")
             }),
             &token,
             &csrf,
@@ -423,9 +423,9 @@ async fn admin_disable_of_idle_target_is_allowed() {
             "POST",
             "/api/conversations",
             json!({
-                "type": "acp",
+                "type": "nomi",
                 "name": "Conv Y",
-                "extra": acp_extra_with_workspace("/project")
+                "extra": nomi_extra_with_workspace("/project")
             }),
             &token,
             &csrf,

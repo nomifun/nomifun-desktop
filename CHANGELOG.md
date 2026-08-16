@@ -5,7 +5,119 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
-No unreleased changes yet.
+- **BREAKING CHANGE (agent engines / 引擎收敛为 `nomi`).** NomiFun shipped five
+  conversation engines. It now ships one: the built-in native **`nomi`**
+  executor. **ACP**, **OpenClaw Gateway**, **Nanobot** and **Remote Agent** are
+  removed outright — not deprecated, not feature-flagged — and with ACP go the
+  ~19 third-party CLI integrations it carried (Claude Code, Codex, Gemini CLI,
+  Qwen, Kimi, Cursor, Copilot, Goose, OpenCode, Droid, CodeBuddy, and the rest).
+  `AgentType` is a single-variant enum whose serde refuses every other string, so
+  the collapse is enforced at the type boundary rather than by a runtime branch
+  that someone could re-open by accident. The reason is cost, and it is worth
+  stating plainly: **every release paid a compatibility and test tax to keep four
+  adapter stacks alive.** Each engine had its own handshake, its own protocol
+  framing, its own cancellation path, its own idea of what a "session" was and
+  what a turn boundary meant — and every capability we added (knowledge mounts,
+  requirement tools, browser lanes, gateway claims, IDMM supervision) had to be
+  designed five times, degraded four times for the runtimes that could not
+  support it, and then tested across a matrix that only grew. Several of those
+  engines were already hollow: Nanobot had no confirmations, no session modes, no
+  model catalog and no resumable session — every capability method either
+  rejected it or returned an empty value. One engine means one code path to
+  reason about, one place a capability lands, and one turn lifecycle that either
+  works or is a bug.
+
+- **DATA IS DELETED, NOT MIGRATED. 请在升级前先导出。** This is the single
+  biggest user-facing risk of this release, so it gets said without hedging: on
+  first boot after upgrading, migration `034_collapse_engines_to_nomi.sql`
+  **permanently deletes every conversation whose engine is not `nomi`, together
+  with all of its messages.** There is no archive, no export step, no
+  recovery-from-the-app path. The reasoning is that the alternative is worse: a
+  conversation that names an engine which no longer exists in the binary can
+  never be resumed, replayed or displayed again — the only behaviour it has left
+  is to fail, so keeping the transcript would hand the user a permanently dead
+  thread that errors every time it is opened. **If you want those transcripts,
+  copy them out of the app (or back up the data directory) BEFORE you upgrade.**
+  The deletion is deliberately thorough rather than shallow, because a half-
+  deleted graph fails the boot-time reference audit and the app then refuses to
+  start: doomed conversations take their messages, artifacts, MCP bindings,
+  knowledge bindings, message correlations, creation keys, IDMM reservations and
+  interventions, execution links and pending channel prompts with them; cron jobs
+  that either targeted a doomed conversation *or* named a deleted engine
+  themselves are deleted with their runs and reservations; channel sessions whose
+  own `agent_type` was a deleted engine are deleted with their bindings and
+  prompts; the agent catalog drops every non-`nomi` row, and any preset agent
+  preference or preferred-agent selection pointing at one is cleared first. Some
+  things are deliberately **kept**: a 小程序 keeps running from its published
+  snapshot and merely forgets which conversation authored it; requirements that
+  were mid-flight are settled to `needs_review` with a completion note saying the
+  executing engine was removed and the outcome is unknown, rather than being
+  silently marked done or quietly deleted; accepted turn receipts are completed
+  with a truthful `engine_removed` error code instead of being erased; and
+  historical Agent Execution event rows are left intact as actor evidence.
+  Surviving `nomi` conversations are also cleaned: a stale `acp_tool_call`
+  message (possible in a `nomi` thread whose pre-collapse Execution attempt was
+  routed to an ACP participant) is removed because no surviving renderer can draw
+  it and `MessageType` no longer deserializes it — one leftover row would fail
+  the whole page read — and stale `extra` engine keys (`agent_id`, `backend`,
+  `agent_source`, `custom_agent_id`, `remote_agent_id`) are stripped, because a
+  dangling one fails the next boot's reference audit and the app would not start.
+
+- **Also removed.** The **remote-agent registry** goes with its engine rather
+  than being left stranded: `RemoteAgentService`, the `/api/remote-agents/*`
+  routes, the `remote_agents` table, and the **seven `nomi_remote_agent_*`
+  gateway tools** (`list`, `get`, `create`, `update`, `delete`, `handshake`,
+  `test`) — a paired remote agent could never open a conversation again, so a
+  CRUD surface for one was configuration theatre. This is a **model-facing
+  contract change**: an agent, preset, skill or automation that learned to call
+  those tool names will now get an unknown-tool error, and the gateway capability
+  floor moves accordingly. **Star Office** detection is retired in the same pass
+  (`POST /api/star-office/detect` and its DTOs) because its only entry point was
+  a card gated on OpenClaw conversations, so keeping the backend alive would have
+  left an unreachable feature; `nomifun-office`'s document snapshot, proxy and
+  watch-manager features are untouched. Two dead conversation endpoints are gone
+  as well — `GET /api/conversations/{id}/usage`, which mirrored the ACP SDK's
+  usage schema and returned nothing for every other engine while the UI's
+  context ring rendered from the message stream anyway, and
+  `GET /api/conversations/{id}/openclaw/runtime`, which had a route, a service
+  method and a bridge binding but no caller anywhere in the renderer. The removed
+  routes are pinned to 404 by an end-to-end test so they cannot quietly come
+  back. Removed DTOs, build-extras and route groups mean the **UI/API contract
+  version bumps again** (it was `18` before this change; see
+  `ui-api-contract-version.txt`).
+
+- **Custom agents and the engine market are gone too, because they only ever
+  described a third-party CLI.** A "custom agent" was a user-registered external
+  executable — the sole code path that created one hardcoded `agent_type: "acp"`
+  alongside `agent_source: "custom"`, so the two were inseparable and neither can
+  survive the collapse. `POST /api/agents/custom`, `POST
+  /api/agents/custom/try-connect` and `PATCH /api/agents/{id}/enabled` are
+  removed, and so is `POST /api/agents/health-check`, whose entire job was
+  answering "is that third-party CLI installed and launchable". The Settings ▸
+  引擎 pane loses its custom-agent list, its per-agent enable toggle, and the
+  **Agent Hub** market modal that installed ACP adapter extensions — that modal
+  filtered the hub index on an `acpAdapters` contribution the backend response no
+  longer even carries, so it could only ever have rendered its empty state.
+  `GET /api/agents`, `POST /api/agents/refresh` and `POST
+  /api/agents/provider-health-check` deliberately **survive** — they describe the
+  built-in engine and check *model providers*, which is a different question — and
+  an end-to-end test now pins both halves, so a future sweep that over-deletes
+  fails loudly instead of silently removing the only way to describe the engine.
+
+- **Third-party agent CLIs still work — in the terminal, and that is the whole
+  promise.** Claude Code, Codex and Gemini CLI remain fully usable through
+  **terminal mode**: an in-app PTY session running the real CLI as an ordinary
+  child process, with its own login and OAuth, its own approval prompts, and
+  NomiFun's capabilities injected through each CLI's *own* native config rather
+  than re-implemented behind an adapter. AutoWork can drive such a terminal turn
+  by turn. See [`docs/guides/terminal.md`](docs/guides/terminal.md). This is
+  honestly a different thing from the old in-conversation integration — the
+  backend owns the pseudo-terminal, not the turn state — and **no deeper
+  integration is planned or promised here.** Nothing beyond what that guide
+  documents is built. Separately and unchanged: the **inbound** direction still
+  works exactly as before, so you can point Claude Code, Cursor or your own agent
+  at NomiFun's authenticated `/mcp` front door and have it operate NomiFun as a
+  tool provider. That is the opposite arrow and was never part of ACP.
 
 ## v0.6.3 - 2026-08-15
 

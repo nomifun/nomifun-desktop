@@ -35,7 +35,7 @@ describe('scheduled task Agent option identity rendering', () => {
       agent_id: parseAgentId('0190f5fe-7c00-7a00-8000-000000000032'),
       name: 'Custom reviewer',
       icon: '👋🏽',
-      agent_type: 'acp',
+      agent_type: 'nomi',
       agent_source: 'custom',
       enabled: true,
       available: true,

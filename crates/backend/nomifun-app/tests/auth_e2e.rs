@@ -562,19 +562,6 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
         );
     }
 
-    // A secondary principal cannot select a process-backed Agent at all.
-    let forbidden_agent = app
-        .clone()
-        .oneshot(post_json_with_csrf(
-            "/api/conversations",
-            r#"{"type":"acp","extra":{"workspace":"/"}}"#,
-            &secondary_token,
-            &secondary_csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(forbidden_agent.status(), StatusCode::FORBIDDEN);
-
     // Nomi remains available as model-only conversation functionality, while
     // every forged host/collaboration field is replaced by server-owned safe
     // state before persistence.

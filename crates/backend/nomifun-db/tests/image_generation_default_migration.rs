@@ -85,7 +85,11 @@ async fn valid_legacy_default_is_normalized_and_renamed() {
         serde_json::from_str::<serde_json::Value>(&value).unwrap(),
         serde_json::json!({"provider_id": PROVIDER, "model": "image-model"})
     );
-    migrate_to(&pool, 32).await;
+    // Both contracts describe the FULLY migrated schema — `validate_id_schema_contract`
+    // in particular checks `PRODUCT_TABLES` as an exact set, so a database
+    // stopped at an intermediate version still has tables a later migration
+    // drops. Migrate to head before validating.
+    migrate_to(&pool, i64::MAX).await;
     nomifun_db::validate_id_schema_contract(&pool).await.unwrap();
     nomifun_db::validate_id_data_contract(&pool).await.unwrap();
 }
@@ -227,7 +231,7 @@ async fn malformed_canonical_is_removed_before_valid_legacy_is_migrated() {
                 .await
                 .unwrap();
         assert_eq!(legacy_count, 0);
-        migrate_to(&pool, 32).await;
+        migrate_to(&pool, i64::MAX).await;
         nomifun_db::validate_id_data_contract(&pool).await.unwrap();
     }
 }

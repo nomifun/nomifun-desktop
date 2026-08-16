@@ -183,8 +183,7 @@ const GuidPage: React.FC = () => {
   }, []);
 
   // --- Hooks ---
-  // Only nomi uses this provider-based model picker now (Gemini runs as a
-  // regular ACP backend with its own model selector).
+  // Nomi is the only engine, and it picks models from configured providers.
   const modelSelection = useGuidModelSelection('nomi');
   const { configuredPairs, allPairs, isLoading: isModelCatalogLoading } = useExecutionModelPool();
   const collaboratorReconciliation = useMemo(
@@ -303,7 +302,6 @@ const GuidPage: React.FC = () => {
     selectedAgentKey: agentSelection.selectedAgentKey,
     selectedAgentInfo: agentSelection.selectedAgentInfo,
     selectedMode: agentSelection.selectedMode,
-    selectedAcpModel: agentSelection.selectedAcpModel,
     current_model: modelSelection.current_model,
 
     // Agent helpers
@@ -726,10 +724,9 @@ const GuidPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveAgentType, advancedConfig.summon]);
 
-  // Agents that use configured model providers instead of ACP probe-based models.
-  // Only nomi now — Gemini runs as a regular ACP backend with ACP-cached models.
+  // Agents that use configured model providers for their model selection.
   const PROVIDER_BASED_AGENTS = new Set(['nomi']);
-  const isGeminiMode =
+  const isProviderModelMode =
     PROVIDER_BASED_AGENTS.has(effectiveAgentType) &&
     (!agentSelection.is_presetAgent || agentSelection.currentEffectiveAgentInfo.isAvailable);
 
@@ -746,13 +743,10 @@ const GuidPage: React.FC = () => {
   // Build the model selector node — a plain single-select model picker.
   const modelSelectorNode = (
     <GuidModelSelector
-      isGeminiMode={isGeminiMode}
+      isProviderModelMode={isProviderModelMode}
       modelList={modelSelection.modelList}
       current_model={modelSelection.current_model}
       setCurrentModel={modelSelection.setCurrentModel}
-      currentAcpCachedModelInfo={agentSelection.currentAcpCachedModelInfo}
-      selectedAcpModel={agentSelection.selectedAcpModel}
-      setSelectedAcpModel={agentSelection.setSelectedAcpModel}
     />
   );
   const collaboratorSelectorNode = (

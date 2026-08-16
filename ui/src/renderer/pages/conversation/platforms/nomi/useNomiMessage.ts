@@ -951,12 +951,8 @@ export const useNomiMessage = (
           }
           break;
         case 'permission':
-        case 'acp_permission':
           dispatchTurnIfOpen({ type: 'activity' });
-          // Backend nomi emits wire type 'acp_permission' but the payload is
-          // Confirmation-shaped (legacy), which matches MessagePermission, not
-          // MessageAcpPermission. Re-tag so transformMessage routes it correctly.
-          addOrUpdateMessage(transformMessage({ ...message, type: 'permission' }));
+          addOrUpdateMessage(transformMessage(message));
           break;
         case 'config_changed':
           onConfigChangedRef.current?.(message.data as Record<string, unknown>);

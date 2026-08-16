@@ -17,8 +17,8 @@ describe('renderConversationOption', () => {
     const option = renderConversationOption({
       id,
       name: '',
-      type: 'acp',
-      extra: { backend: 'claude', workspace: '/tmp/project' },
+      type: 'nomi',
+      extra: { workspace: '/tmp/project' },
     } as TChatConversation) as ReactElement<{
       title: string;
       children: ReactElement<{ title: string; idLabel: string }>;

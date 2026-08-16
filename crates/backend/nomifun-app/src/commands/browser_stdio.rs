@@ -10,7 +10,7 @@ use std::process::ExitCode;
 
 use nomifun_api_types::{
     BROWSER_CAPABILITY_DOMAIN, BROWSER_MCP_TOOL_NAMES, BrowserCapabilityClaims,
-    BrowserCapabilityOperation, BrowserCapabilityScope, BrowserCapabilitySurface,
+    BrowserCapabilityOperation, BrowserCapabilityScope,
     BrowserMcpConfig,
     browser_tool_operation,
 };
@@ -82,7 +82,7 @@ struct BrowserStdioServer {
     request_budget: super::stdio_common::ProcessRequestBudget,
 }
 
-/// Validate the immutable ACP audience, runtime scope, and two-level
+/// Validate the conversation-bound session, runtime scope, and two-level
 /// tool/operation allowlist before exposing any MCP method.
 fn validate_browser_claims(
     claims: &BrowserCapabilityClaims,
@@ -90,7 +90,6 @@ fn validate_browser_claims(
     claims.validate_renewable_shape()?;
     claims.scope.validate(&claims.session)?;
     if claims.session.kind != LoopbackSessionKind::Conversation
-        || !matches!(claims.scope.surface, BrowserCapabilitySurface::Acp)
         || !claims
             .scope
             .allows(BrowserCapabilityOperation::Manage)

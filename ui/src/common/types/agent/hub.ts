@@ -6,24 +6,6 @@ export type HubExtensionStatus =
   | 'update_available'
   | 'uninstalling';
 
-/**
- * Declarative contributes in hub index.
- * Each key mirrors ExtContributesSchemaBase but values are string ID arrays
- * indicating what capabilities the extension provides.
- */
-export type HubContributes = {
-  acpAdapters?: string[];
-  mcpServers?: string[];
-  presets?: string[];
-  agents?: string[];
-  skills?: string[];
-  channelPlugins?: string[];
-  webui?: string[];
-  themes?: string[];
-  settingsTabs?: string[];
-  modelProviders?: string[];
-};
-
 export interface IHubExtension {
   name: string; // Extension unique ID
   display_name: string; // UI display name
@@ -39,8 +21,6 @@ export interface IHubExtension {
   engines: {
     nomifun: string; // Minimum APP version requirement
   };
-  hubs: string[]; // Hub categories e.g. ["acpAdapters"]
-  contributes?: HubContributes;
   tags?: string[];
   bundled?: boolean; // Set at runtime by HubIndexManager for local bundled extensions
 }

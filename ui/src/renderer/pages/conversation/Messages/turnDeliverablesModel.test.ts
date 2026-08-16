@@ -6,12 +6,11 @@
 
 import { describe, expect, test } from 'bun:test';
 import type {
-  IMessageAcpToolCall,
   IMessageToolCall,
   IMessageToolGroup,
 } from '@/common/chat/chatLib';
 import { normalizeToolCallContent } from '@/common/chat/chatLib';
-import type { PersistedToolArtifact } from '@/common/types/platform/acpTypes';
+import type { PersistedToolArtifact } from '@/common/types/platform/toolCallTypes';
 import { parseMessageId, parsePersistedArtifactId } from '@/common/types/ids';
 import { parseDiff } from '@/renderer/utils/file/diffUtils';
 import {
@@ -60,28 +59,6 @@ const toolCall = (
     ...overrides,
   }) as unknown as IMessageToolCall;
 
-const acpToolCall = (
-  update: Partial<IMessageAcpToolCall['content']['update']>,
-  overrides: Partial<IMessageAcpToolCall> = {}
-): IMessageAcpToolCall =>
-  ({
-    id: 'local-2',
-    conversation_id: 'conv-1',
-    type: 'acp_tool_call',
-    message_id: MSG_2,
-    turn_id: TURN_1,
-    content: {
-      session_id: 'sess-1',
-      update: {
-        sessionUpdate: 'tool_call',
-        tool_call_id: 'acp-call-1',
-        status: 'completed',
-        ...update,
-      },
-    },
-    ...overrides,
-  }) as unknown as IMessageAcpToolCall;
-
 const toolGroup = (
   items: Array<Record<string, unknown>>,
   overrides: Partial<IMessageToolGroup> = {}
@@ -105,6 +82,24 @@ const WRITE_FILE_DIFF = [
   '+<html>',
   '+<body>snake</body>',
   '+</html>',
+].join('\n');
+
+const REPORT_DIFF_V1 = [
+  'diff --git a/outputs/report.html b/outputs/report.html',
+  '--- a/outputs/report.html',
+  '+++ b/outputs/report.html',
+  '@@ -0,0 +1,1 @@',
+  '+v1',
+].join('\n');
+
+const REPORT_DIFF_V2 = [
+  'diff --git a/outputs/report.html b/outputs/report.html',
+  '--- a/outputs/report.html',
+  '+++ b/outputs/report.html',
+  '@@ -1,1 +1,2 @@',
+  '-v1',
+  '+v2',
+  '+v3',
 ].join('\n');
 
 const candidate = (
@@ -438,83 +433,6 @@ describe('collectTurnDeliverables', () => {
     expect(result.size).toBe(0);
   });
 
-  test('collects ACP diff content with computed line counts', () => {
-    const result = collect([
-      candidate({
-        toolMessages: [
-          acpToolCall({
-            kind: 'edit',
-            content: [
-              { type: 'diff', path: `${WORKSPACE}/outputs/snake.html`, old_text: 'a\nb\n', new_text: 'a\nc\nd\n' },
-            ],
-          }),
-        ],
-      }),
-    ]);
-
-    const items = result.get(TURN_1);
-    expect(items).toHaveLength(1);
-    expect(items![0].relativePath).toBe('outputs/snake.html');
-    expect(items![0].tier).toBe('reported');
-    expect(items![0].insertions).toBe(2);
-    expect(items![0].deletions).toBe(1);
-    expect(items![0].diff?.includes('snake.html')).toBe(true);
-  });
-
-  test('collects ACP artifact content items as receipts', () => {
-    const result = collect([
-      candidate({
-        toolMessages: [
-          acpToolCall({
-            content: [
-              {
-                type: 'artifact',
-                artifact: artifact({
-                  kind: 'image',
-                  mime_type: 'image/webp',
-                  path: `${WORKSPACE}/outputs/acp-generated.webp`,
-                  relative_path: 'outputs/acp-generated.webp',
-                }),
-              },
-            ],
-          }),
-        ],
-      }),
-    ]);
-    const items = result.get(TURN_1);
-    expect(items).toHaveLength(1);
-    expect(items![0].tier).toBe('receipt');
-    expect(items![0].sha256).toBe('a'.repeat(64));
-    expect(isVerifiedImageDeliverable(items![0])).toBe(true);
-  });
-
-  test('falls back to ACP rawInput/locations for edit kind without diff content', () => {
-    const result = collect([
-      candidate({
-        toolMessages: [
-          acpToolCall({
-            kind: 'edit',
-            rawInput: { file_path: `${WORKSPACE}/outputs/x.ts` },
-            locations: [{ path: `${WORKSPACE}/outputs/y.ts` }],
-          }),
-        ],
-      }),
-    ]);
-    const items = result.get(TURN_1);
-    expect(items?.map((item) => item.relativePath).sort()).toEqual(['outputs/x.ts', 'outputs/y.ts']);
-  });
-
-  test('ignores ACP locations for non-edit kinds', () => {
-    const result = collect([
-      candidate({
-        toolMessages: [
-          acpToolCall({ kind: 'read', locations: [{ path: `${WORKSPACE}/outputs/y.ts` }] }),
-        ],
-      }),
-    ]);
-    expect(result.size).toBe(0);
-  });
-
   test('collects successful WriteFile tool_group results with diff stats', () => {
     const result = collect([
       candidate({
@@ -561,22 +479,24 @@ describe('collectTurnDeliverables', () => {
     const result = collect([
       candidate({
         toolMessages: [
-          acpToolCall({
-            kind: 'edit',
-            content: [
-              { type: 'diff', path: `${WORKSPACE}/outputs/report.html`, old_text: '', new_text: 'v1\n' },
-            ],
-          }),
-          acpToolCall(
+          toolGroup([
             {
-              tool_call_id: 'acp-call-2',
-              kind: 'edit',
-              content: [
-                { type: 'diff', path: 'outputs\\report.html', old_text: 'v1\n', new_text: 'v2\nv3\n' },
-              ],
+              call_id: 'g-1',
+              name: 'WriteFile',
+              status: 'Success',
+              description: '',
+              render_output_as_markdown: false,
+              result_display: { file_diff: REPORT_DIFF_V1, file_name: 'outputs/report.html' },
             },
-            { message_id: MSG_3 }
-          ),
+            {
+              call_id: 'g-2',
+              name: 'WriteFile',
+              status: 'Success',
+              description: '',
+              render_output_as_markdown: false,
+              result_display: { file_diff: REPORT_DIFF_V2, file_name: 'outputs/report.html' },
+            },
+          ]),
           toolCall({ artifacts: [artifact()] }),
         ],
       }),

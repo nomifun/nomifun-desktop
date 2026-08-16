@@ -27,10 +27,10 @@ export const createSetUploadFile = <T extends Record<string, unknown>>(
 const formatFileRef = (file_name: string): string => {
   const trimmed = file_name.trim();
   // Remove @ prefix if present (normalize)
-  // @ prefix is an internal implementation detail for ACP agents
+  // @ prefix is an internal implementation detail for the agent runtime
   // It will be added by the backend when needed
   // 移除 @ 前缀（如果存在）
-  // @ 前缀是 ACP agent 的内部实现细节，由后端按需添加
+  // @ 前缀是 agent 的内部实现细节，由后端按需添加
   const normalized = trimmed.startsWith('@') ? trimmed.slice(1) : trimmed;
   return normalized;
 };
@@ -44,7 +44,7 @@ interface UseSendBoxFilesProps {
 
 /**
  * 共享的SendBox文件处理逻辑
- * 消除ACP、Gemini、GUID三个组件间的代码重复
+ * 消除会话与 GUID 组件间的代码重复
  */
 export const useSendBoxFiles = ({ atPath, uploadFile, setAtPath, setUploadFile }: UseSendBoxFilesProps) => {
   // 处理拖拽或粘贴的文件

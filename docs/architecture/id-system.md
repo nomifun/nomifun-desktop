@@ -122,7 +122,7 @@ CREATE TABLE conversations (
 Examples of stable v3 entities include users, conversations, messages,
 terminal sessions, providers, requirements, agent executions and templates,
 Agent Execution Participant/Step/Attempt/Template Participant, knowledge
-bases, attachments, remote agents, user presets, workshop canvases/assets,
+bases, attachments, user presets, workshop canvases/assets,
 and Channel Plugin/User/Session. Requirements use `requirement_id` plus a
 human-facing `display_no`. The Agent Execution and Channel child entities use
 `participant_id`, `step_id`, `attempt_id`, `template_participant_id`,
@@ -244,9 +244,9 @@ tags, and singleton keys retain their domain-specific formats. Relationship
 and singleton tables still have an auto-increment `id`; business uniqueness is
 expressed with additional `UNIQUE` constraints.
 
-External identifiers such as `acp_session_id`, `platform_user_id`,
-`platform_chat_id`, `remote_task_id`, and provider request IDs remain opaque
-and are validated only against their source protocol.
+External identifiers such as `platform_user_id`, `platform_chat_id`, and
+provider request IDs remain opaque and are validated only against their source
+protocol.
 
 Request IDs, idempotency keys, capability nonces, workspace tokens, and other
 short-lived operation values are not entity IDs. They must use purpose-specific

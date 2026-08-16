@@ -301,7 +301,6 @@ impl RootTurnFixture {
             runtime_registry,
             repository.clone(),
             Arc::new(StubAgentMetadataRepo),
-            Arc::new(StubAcpSessionRepo::default()),
             Arc::new(crate::NoExecutionConversationBoundary),
         );
         let conversation = service

@@ -32,7 +32,6 @@ const UNCONDITIONAL_UUIDV7_BUSINESS_IDS: &[(&str, &str)] = &[
     ("knowledge_bases", "knowledge_base_id"),
     ("knowledge_bindings", "knowledge_binding_id"),
     ("attachments", "attachment_id"),
-    ("remote_agents", "remote_agent_id"),
     ("workshop_canvases", "canvas_id"),
     ("workshop_assets", "asset_id"),
     ("channel_plugins", "channel_plugin_id"),
@@ -113,7 +112,6 @@ async fn initialized_database_satisfies_the_v3_id_schema_contract() {
 /// loop, so a newly added table can silently skip the row-key contract
 /// entirely. Migration 024 added `ssh_hosts` and did exactly that.
 const EXPECTED_PRODUCT_TABLES: &[&str] = &[
-    "acp_session",
     "agent_execution_attempts",
     "agent_execution_events",
     "agent_execution_participants",
@@ -178,7 +176,6 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "provider_model_capabilities",
     "provider_models",
     "providers",
-    "remote_agents",
     "requirement_display_sequence",
     "requirement_pre_effect_abandon_guards",
     "requirement_tags",

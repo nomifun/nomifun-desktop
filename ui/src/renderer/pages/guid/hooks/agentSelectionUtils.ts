@@ -14,21 +14,11 @@ export async function savePreferredMode(agentKey: string, mode: string): Promise
     if (agentKey === 'nomi') {
       const config = configService.get('nomi.config');
       await configService.set('nomi.config', { ...config, preferredMode: mode });
-    } else if (agentKey !== 'custom') {
-      const config = configService.get('acp.config');
-      const backendConfig = config?.[agentKey as string] || {};
-      await configService.set('acp.config', { ...config, [agentKey]: { ...backendConfig, preferredMode: mode } });
     }
   } catch {
     /* silent */
   }
 }
-
-// NOTE: the former `savePreferredModelId` helper was removed on purpose:
-// ACP model choices are session-scoped. New conversations must initialize
-// from the agent CLI's local default config, so nothing may persist a
-// cross-conversation "preferred model" for ACP backends anymore. Stored
-// `acp.config[backend].preferredModelId` values from older builds are inert.
 
 /** Save default nomi provider/model so the Guid page restores it next session. */
 export async function saveNomiDefaultModel(provider_id: ProviderId, use_model: string): Promise<void> {
@@ -42,7 +32,7 @@ export async function saveNomiDefaultModel(provider_id: ProviderId, use_model: s
 /**
  * Get agent key for selection.
  *
- * Rows that are row-scoped (custom ACP / remote agents) use `agent_id` directly
+ * Rows that are row-scoped (custom agents) use `agent_id` directly
  * as the key — no namespace prefix. Builtin / internal agents keep `backend` or
  * `agent_type` as the key since there is only one row per type.
  *

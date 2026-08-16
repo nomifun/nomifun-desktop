@@ -832,10 +832,8 @@ impl SpokenReplyReducer {
             }
             AgentStreamEvent::Plan(_)
             | AgentStreamEvent::ToolCall(_)
-            | AgentStreamEvent::AcpToolCall(_)
             | AgentStreamEvent::ToolGroup(_)
-            | AgentStreamEvent::Permission(_)
-            | AgentStreamEvent::AcpPermission(_) => {
+            | AgentStreamEvent::Permission(_) => {
                 self.candidate.clear();
                 Vec::new()
             }

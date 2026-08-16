@@ -353,7 +353,6 @@ async fn query_empty_contributions_on_no_extensions() {
 
     assert!(registry.get_themes().await.is_empty());
     assert!(registry.get_presets().await.is_empty());
-    assert!(registry.get_acp_adapters().await.is_empty());
     assert!(registry.get_agents().await.is_empty());
     assert!(registry.get_mcp_servers().await.is_empty());
     assert!(registry.get_skills().await.is_empty());

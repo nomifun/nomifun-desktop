@@ -1,6 +1,6 @@
 # 通信
 
-NomiFun 的各个进程 —— SPA、嵌入式后端、agent CLI 与 MCP 服务器 —— 通过五条彼此独立的通道相互对话。它们的职责互不重叠，挑选合适通道的规则在客户端的适配层（`ui/src/common/adapter/`）以及服务端的路由与服务 crate 中得到了固化。
+NomiFun 的各个进程 —— SPA、嵌入式后端、终端子进程与 MCP 服务器 —— 通过五条彼此独立的通道相互对话。它们的职责互不重叠，挑选合适通道的规则在客户端的适配层（`ui/src/common/adapter/`）以及服务端的路由与服务 crate 中得到了固化。
 
 ## 五条通道
 
@@ -9,7 +9,7 @@ NomiFun 的各个进程 —— SPA、嵌入式后端、agent CLI 与 MCP 服务�
 | HTTP REST | UI ↔ 后端 | 所有请求/响应操作：CRUD、命令调用、文件操作 | `http://127.0.0.1:<port>/api/*` |
 | WebSocket | 后端 → UI（终端输入 / 心跳时反向） | 流式 agent token、终端输出、广播事件、会话产物 | `/ws` |
 | Tauri IPC | 仅 UI → 桌面外壳 | 浏览器没有等价物的操作系统外壳特性 | `@tauri-apps/api` 与 Tauri 插件 |
-| ACP（stdio） | 后端 ↔ agent CLI 子进程 | 一段会话的全部 agent 流量，发往 Claude / Codex / Gemini / Qwen / OpenCode 风格的运行时 | 通过 stdin/stdout 的换行分隔 JSON |
+| PTY（stdio） | 后端 ↔ 终端子进程 | 终端 session 的字节流，包含第三方 agent CLI | 伪终端 |
 | MCP（stdio 或 HTTP） | 后端 ↔ MCP 服务器，agent CLI ↔ MCP 服务器 | 工具调用、资源读取、提示词 | 派生进程或本地 HTTP |
 
 ## HTTP REST
@@ -105,9 +105,9 @@ Tauri 外壳采用**反向 IPC**：是 SPA 调用操作系统外壳，绝不反�
 
 少数操作没有 Tauri 等价物，已在浏览器中被有意**桩化**（Chrome DevTools Protocol、GPU 恢复、渲染进程日志通道、关闭至托盘）。这些操作在 `tauriShell.ts` 中标记为 `DEGRADE_STUB`，留给未来的 Tauri 移植。
 
-## ACP —— 通过 stdio 的 agent 运行时
+## 会话回合 —— 进程内的 nomi 引擎
 
-若干 CLI Agent —— Claude Code、Codex、Gemini CLI、Qwen、OpenCode —— 都实现了 **Agent Connection Protocol（ACP）**：在子进程 stdin/stdout 上承载 JSON 消息流。NomiFun 通过 PATH 上预置的 `bun` 运行时派生这些子进程。接缝 crate `nomifun-ai-agent` 持有 Agent 工厂和 `AgentRuntimeRegistry`；后者按 Conversation 缓存唯一的进程内 runtime handle。按 Agent 划分的元数据（握手响应、可用模型、取消路径）通过 `IAgentMetadataRepository` 存储于 SQLite。
+会话只有一个引擎：内置的 `nomi`。接缝 crate `nomifun-ai-agent` 持有 Agent 工厂和 `AgentRuntimeRegistry`；后者按 Conversation 缓存唯一的进程内 runtime handle。一个回合完整地在后端进程内执行，没有需要握手、也没有需要移交会话的子 agent CLI。
 
 进程内的流量如下：
 
@@ -115,11 +115,8 @@ Tauri 外壳采用**反向 IPC**：是 SPA 调用操作系统外壳，绝不反�
 SPA ──HTTP/WS──▶ nomifun-conversation ──▶ nomifun-ai-agent::AgentService
                                                       │
                                                       ▼
-                                              spawn child CLI
-                                                stdio = piped
-                                                      │
-                                                      ▼
-                                          nomi-protocol on stdin/stdout
+                                          nomi-agent engine turn
+                                            （providers / tools / MCP）
                                                       │
                                                       ▼
                                           stream tokens / tool calls
@@ -127,7 +124,9 @@ SPA ──HTTP/WS──▶ nomifun-conversation ──▶ nomifun-ai-agent::Agen
                               broadcast through nomifun-realtime to /ws
 ```
 
-`nomi-protocol` crate 定义了分帧与工具审批状态机；`nomifun-ai-agent::protocol::events::AgentStreamEvent` 把协议事件翻译成 SPA 能理解的 `WebSocketMessage`。
+`nomi-protocol` crate 定义了宿主/agent 的命令、事件与工具审批状态机；`nomifun-ai-agent::protocol::events::AgentStreamEvent` 把这些事件翻译成 SPA 能理解的 `WebSocketMessage`。
+
+第三方 agent CLI（Claude Code、Codex、Gemini CLI）不走这条通道：它们作为普通子进程运行在 `nomifun-terminal` 的 PTY session 里，后端持有伪终端而不解析它们的协议。见 [`../guides/terminal.zh.md`](../guides/terminal.zh.md)。
 
 ## MCP —— Model Context Protocol
 
@@ -182,7 +181,8 @@ profile、模型 / 人格选择与作用域能力。
 | 桌面 keep-awake | Tauri command |
 | 远程 MCP 工具调用 | `/mcp` 或 `/mcp-agent` |
 | 远程 REST 能力调用 | `/v1` |
-| ACP Agent 会话 | `nomifun-ai-agent` 管理的子进程 stdio |
-| ACP 会话内部知识搜索 | `mcp-knowledge-stdio` bridge |
+| 会话回合 | 进程内 `nomi` 引擎，token 流走 `/ws` |
+| 终端（含第三方 agent CLI） | `nomifun-terminal` 管理的 PTY 子进程 stdio |
+| session 内部知识搜索 | `mcp-knowledge-stdio` bridge |
 
-交叉参考：统一协作聚合与状态机见 [`agent-execution.zh.md`](agent-execution.zh.md)；数据与持久化层见 [`data-and-storage.md`](data-and-storage.zh.md)；ACP 协议细节（以及驱动子进程的引擎）见 [`agent-engine.md`](agent-engine.zh.md)；SPA 适配层见 [`frontend.md`](frontend.zh.md)。
+交叉参考：统一协作聚合与状态机见 [`agent-execution.zh.md`](agent-execution.zh.md)；数据与持久化层见 [`data-and-storage.md`](data-and-storage.zh.md)；引擎内部细节见 [`agent-engine.md`](agent-engine.zh.md)；SPA 适配层见 [`frontend.md`](frontend.zh.md)。

@@ -7,7 +7,7 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use common::{
-    acp_extra, acp_extra_with_workspace, body_json, build_app, delete_with_token,
+    nomi_extra, nomi_extra_with_workspace, body_json, build_app, delete_with_token,
     build_isolated_app_with_mock_agents, get_request, get_with_token, json_with_token,
     setup_and_login,
 };
@@ -18,25 +18,25 @@ const MISSING_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345679999";
 
 fn create_body(name: &str) -> serde_json::Value {
     json!({
-        "type": "acp",
+        "type": "nomi",
         "name": name,
-        "extra": acp_extra_with_workspace("/project")
+        "extra": nomi_extra_with_workspace("/project")
     })
 }
 
 fn create_body_with_extra(name: &str, extra: serde_json::Value) -> serde_json::Value {
-    let mut canonical_extra = acp_extra();
+    let mut canonical_extra = nomi_extra();
     canonical_extra
         .as_object_mut()
-        .expect("ACP fixture extra must be an object")
+        .expect("nomi fixture extra must be an object")
         .extend(
             extra
                 .as_object()
-                .expect("ACP fixture override must be an object")
+                .expect("nomi fixture override must be an object")
                 .clone(),
         );
     json!({
-        "type": "acp",
+        "type": "nomi",
         "name": name,
         "extra": canonical_extra
     })
@@ -74,7 +74,7 @@ async fn t1_1_create_conversation_success() {
     assert_eq!(json["success"], true);
     let data = &json["data"];
     assert_eq!(data["name"], "Code Review");
-    assert_eq!(data["type"], "acp");
+    assert_eq!(data["type"], "nomi");
     assert_eq!(data["status"], "pending");
     assert_eq!(data["source"], "nomifun");
     assert_eq!(data["pinned"], false);
@@ -95,18 +95,14 @@ async fn t1_2_create_various_agent_types() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let types = ["acp"];
-    for agent_type in types {
-        let body = json!({
-            "type": agent_type,
-            "extra": if agent_type == "acp" { acp_extra() } else { json!({}) }
-        });
-        let req = json_with_token("POST", "/api/conversations", body, &token, &csrf);
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED, "type={agent_type}");
-        let json = body_json(resp).await;
-        assert_eq!(json["data"]["type"], agent_type);
-    }
+    // `nomi` is the only conversation engine, so this is a one-element set
+    // rather than a loop over agent types.
+    let body = json!({ "type": "nomi", "extra": nomi_extra() });
+    let req = json_with_token("POST", "/api/conversations", body, &token, &csrf);
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let json = body_json(resp).await;
+    assert_eq!(json["data"]["type"], "nomi");
 }
 
 #[tokio::test]
@@ -115,11 +111,11 @@ async fn t1_3_create_with_optional_fields() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let body = json!({
-        "type": "acp",
+        "type": "nomi",
         "name": "Telegram Bot",
         "source": "telegram",
         "channel_chat_id": "user:123",
-        "extra": acp_extra()
+        "extra": nomi_extra()
     });
     let req = json_with_token("POST", "/api/conversations", body, &token, &csrf);
     let resp = app.oneshot(req).await.unwrap();
@@ -145,7 +141,7 @@ async fn t1_4_create_missing_required_field() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
     // model is optional — omitting it should succeed
-    let body = json!({ "type": "acp", "extra": acp_extra() });
+    let body = json!({ "type": "nomi", "extra": nomi_extra() });
     let req = json_with_token("POST", "/api/conversations", body, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -187,8 +183,8 @@ async fn t1_5b_create_accepts_interior_whitespace_and_rejects_edge_whitespace() 
     std::fs::create_dir_all(&workspace).unwrap();
 
     let body = json!({
-        "type": "acp",
-        "extra": acp_extra_with_workspace(workspace.to_string_lossy().into_owned())
+        "type": "nomi",
+        "extra": nomi_extra_with_workspace(workspace.to_string_lossy().into_owned())
     });
     let req = json_with_token("POST", "/api/conversations", body, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -201,8 +197,8 @@ async fn t1_5b_create_accepts_interior_whitespace_and_rejects_edge_whitespace() 
     // strips trailing spaces on lookup) and stays rejected.
     let edge_workspace = format!("{} ", temp.path().join("repo").to_string_lossy());
     let body = json!({
-        "type": "acp",
-        "extra": acp_extra_with_workspace(edge_workspace)
+        "type": "nomi",
+        "extra": nomi_extra_with_workspace(edge_workspace)
     });
     let req = json_with_token("POST", "/api/conversations", body, &token, &csrf);
     let resp = app.oneshot(req).await.unwrap();
@@ -347,10 +343,10 @@ async fn t2_4_list_source_filter() {
     }
 
     let tg_body = json!({
-        "type": "acp",
+        "type": "nomi",
         "name": "TG Conv",
         "source": "telegram",
-        "extra": acp_extra()
+        "extra": nomi_extra()
     });
     let req = json_with_token("POST", "/api/conversations", tg_body, &token, &csrf);
     app.clone().oneshot(req).await.unwrap();
@@ -668,15 +664,6 @@ async fn t5_1_delete_conversation() {
     .await
     .unwrap();
     nomifun_db::sqlx::query(
-        "INSERT INTO acp_session \
-         (conversation_id, agent_backend, agent_source) \
-         VALUES (?, 'acp', 'builtin')",
-    )
-    .bind(&id)
-    .execute(services.database.pool())
-    .await
-    .unwrap();
-    nomifun_db::sqlx::query(
         "INSERT INTO idmm_interventions \
          (intervention_id, user_id, target_kind, target_id, watch, at, signal, tier_used, action, outcome) \
          VALUES (?, ?, 'conversation', ?, 'fault', 1, 'test', 'rule_only', 'none', 'recorded')",
@@ -695,12 +682,11 @@ async fn t5_1_delete_conversation() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let orphan_counts: (i64, i64, i64, i64, i64) = nomifun_db::sqlx::query_as(
+    let orphan_counts: (i64, i64, i64, i64) = nomifun_db::sqlx::query_as(
         "SELECT \
             (SELECT COUNT(*) FROM messages WHERE conversation_id = ?1), \
             (SELECT COUNT(*) FROM conversation_artifacts WHERE conversation_id = ?1), \
             (SELECT COUNT(*) FROM message_correlations WHERE conversation_id = ?1), \
-            (SELECT COUNT(*) FROM acp_session WHERE conversation_id = ?1), \
             (SELECT COUNT(*) FROM idmm_interventions \
              WHERE target_kind = 'conversation' AND target_id = ?1)",
     )
@@ -710,7 +696,7 @@ async fn t5_1_delete_conversation() {
     .unwrap();
     assert_eq!(
         orphan_counts,
-        (0, 0, 0, 0, 0),
+        (0, 0, 0, 0),
         "conversation deletion must directly remove database-owned orphan rows"
     );
     let retained_receipt_projection: (Option<String>, Option<String>) =
@@ -773,9 +759,9 @@ async fn t6_2_clone_without_source() {
 
     let clone_body = json!({
         "conversation": {
-            "type": "acp",
+            "type": "nomi",
             "name": "Fresh Clone",
-            "extra": acp_extra()
+            "extra": nomi_extra()
         }
     });
     let req = json_with_token("POST", "/api/conversations/clone", clone_body, &token, &csrf);
@@ -784,7 +770,7 @@ async fn t6_2_clone_without_source() {
 
     let json = body_json(resp).await;
     assert_eq!(json["data"]["name"], "Fresh Clone");
-    assert_eq!(json["data"]["type"], "acp");
+    assert_eq!(json["data"]["type"], "nomi");
 }
 
 #[tokio::test]

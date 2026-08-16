@@ -53,27 +53,31 @@ integration normally flows through `nomifun-ai-agent`; feature-gated bridge
 surfaces in `nomifun-app` and `nomifun-gateway` directly depend on browser and
 computer-use crates to expose those capabilities as stdio/public tools.
 
-## Runtime Families
+## The One Runtime
 
-NomiFun supports several runtime families:
-
-- **Nomi engine**: in-tree engine from `nomi-agent`, with providers, built-in
-  tools, skills, MCP, memory, browser, and computer-use support.
-- **ACP-style CLI agents**: Claude Code, Codex, Gemini CLI, Qwen/OpenCode-style
-  integrations, and related CLIs managed by `nomifun-ai-agent`.
-- **Remote/Open capability surfaces**: external agents connect through
-  companion-token authenticated `/mcp`, `/mcp-agent`, or `/v1` fronts.
+NomiFun has exactly one conversation engine: the built-in **`nomi`** engine from
+`nomi-agent`, with providers, built-in tools, skills, MCP, memory, browser, and
+computer-use support. It runs in-process. There is no second adapter stack, no
+protocol negotiation with a foreign agent, and no child agent CLI that a
+conversation can be handed off to.
 
 The implementation source of truth for factory behavior is:
 
 - `crates/backend/nomifun-ai-agent/src/factory/nomi.rs`
-- `crates/backend/nomifun-ai-agent/src/factory/acp.rs`
-- `crates/backend/nomifun-ai-agent/src/factory/acp_assembler.rs`
+
+Two things that are *not* conversation engines but are often confused with one:
+
+- **Terminal sessions.** Third-party agent CLIs (Claude Code, Codex, Gemini CLI)
+  run as ordinary child processes inside `nomifun-terminal` PTY sessions. The
+  backend does not interpret their protocol or own their turn state; it owns the
+  pseudo-terminal. See [`../guides/terminal.md`](../guides/terminal.md).
+- **Public capability fronts.** External agents and scripts call *into* NomiFun
+  through companion-token authenticated `/mcp`, `/mcp-agent`, or `/v1`. That is
+  the inbound direction: NomiFun is the tool provider, not the engine host.
 
 ## MCP And Tool Injection
 
-MCP/tool availability is assembled per runtime and per session. It is not a
-single flat list.
+MCP/tool availability is assembled per session. It is not a single flat list.
 
 Common sources include:
 
@@ -83,7 +87,7 @@ Common sources include:
 - platform Gateway tools when the factory derives instance-owner authority,
 - Windows/open helper bridge,
 - feature-gated computer-use and browser-use stdio bridges,
-- runtime-native skills or first-message skill injection,
+- resolved skills from the engine's own `Skill` tool path,
 - Nomi's native tool registry.
 
 The platform Gateway is an internal capability transport, not a Conversation
@@ -97,25 +101,19 @@ process-private and are never stored in build-extra, Conversation or database
 rows; runtime teardown and process restart revoke them. Public and non-owner
 contexts fail closed and receive no host capability.
 
-When documenting tool availability, cite the factory files above rather than
-assuming all agents receive the same injected servers.
+When documenting tool availability, cite the factory file above rather than
+assuming every session receives the same injected servers — the set still varies
+by conversation configuration, mounted knowledge, and derived authority.
 
 ## Skills
 
-Skills are instruction/tool bundles whose materialization depends on runtime
-capability:
-
-- Nomi has a real `Skill` tool path in the engine.
-- Native CLI runtimes may receive symlinked/copied skill files or lightweight
-  first-message guidance when the runtime supports it.
-- Custom workspace or non-native paths can be summarized in a first-message
-  skill index.
+Skills are instruction/tool bundles. The `nomi` engine has a real `Skill` tool
+path in the engine, so a skill is resolved and invoked directly rather than
+being flattened into prompt text.
 
 Relevant source files:
 
 - `crates/backend/nomifun-extension/src/skill_service.rs`
-- `crates/backend/nomifun-ai-agent/src/capability/skill_manager/mod.rs`
-- `crates/backend/nomifun-ai-agent/src/capability/first_message_injector.rs`
 - `crates/agent/nomi-agent/src/skill_tool.rs`
 
 ## Session Flow
@@ -124,16 +122,16 @@ Relevant source files:
 UI request
   -> nomifun-conversation route/service
   -> nomifun-ai-agent AgentService / AgentRuntimeRegistry
-  -> runtime family factory
-  -> Nomi engine or external CLI process
+  -> nomi runtime factory
+  -> Nomi engine turn (in-process)
   -> AgentStreamEvent
   -> nomifun-realtime /ws
   -> renderer stream handlers
 ```
 
-Nomi-engine sessions run inside the process. ACP-style sessions spawn and manage
-child CLIs. Public remote capability calls enter through `nomifun-public` and
-the platform Gateway registry rather than the conversation HTTP route.
+Every conversation turn runs inside the process. Public remote capability calls
+enter through `nomifun-public` and the platform Gateway registry rather than the
+conversation HTTP route.
 
 ## Design Notes
 
@@ -141,3 +139,9 @@ Older specs describe the agent layer as mechanically extraction-ready and list
 only 11 crates. Those files are historical. The current code still keeps a
 strong boundary, but browser/computer bridge work and public gateway surfaces
 mean the real rule is “primary seam plus documented feature-gated exceptions.”
+
+Older specs and dated handoffs also describe several coexisting runtime families
+(ACP, OpenClaw Gateway, Nanobot, Remote Agent) and a factory that chose between
+them. Those engines were removed; only `nomi` remains. Read those documents as a
+record of why the seam is shaped the way it is, not as a description of the
+current dispatch path.

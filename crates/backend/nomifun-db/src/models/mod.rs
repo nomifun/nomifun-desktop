@@ -1,4 +1,3 @@
-mod acp_session;
 mod agent_metadata;
 mod agent_execution;
 mod agent_execution_template;
@@ -32,7 +31,6 @@ mod user;
 mod webhook;
 mod workshop;
 
-pub use acp_session::AcpSessionRow;
 pub use agent_metadata::{AgentMetadataRow, UpdateAgentHandshakeParams, UpsertAgentMetadataParams};
 pub use agent_execution::*;
 pub use agent_execution_template::*;

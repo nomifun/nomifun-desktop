@@ -14,7 +14,7 @@ use tower::ServiceExt;
 use nomifun_db::{ICronRepository, SqliteCronRepository};
 
 use common::{
-    GEMINI_AGENT_ID, acp_extra_with_workspace, body_json, build_app, delete_with_token,
+    nomi_extra_with_workspace, body_json, build_app, delete_with_token,
     get_request, get_with_token, json_with_token, setup_and_login,
 };
 
@@ -27,6 +27,11 @@ const TEST_CONV_3: &str = "0190f5fe-7c00-7a00-8abc-012345678903";
 const MISSING_CRON_JOB_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678999";
 const SECONDARY_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345679993";
 const FORGED_CUSTOM_AGENT_ID: &str = "0190f5fe-7c00-7a00-8abc-012345679994";
+/// Provider backing every owner-side nomi cron fixture. A nomi schedule has no
+/// engine to select, so its only remaining execution authority is a canonical
+/// provider/model pair — either on the bound conversation or in `agent_config`.
+const CRON_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345679992";
+const CRON_MODEL: &str = "cron-model";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -37,7 +42,7 @@ fn create_job_body(name: &str) -> serde_json::Value {
         "message": "test message",
         "conversation_id": TEST_CONV_1,
         "conversation_title": "Test Conv",
-        "agent_type": "acp",
+        "agent_type": "nomi",
         "created_by": "user"
     })
 }
@@ -48,7 +53,7 @@ fn create_at_job_body(name: &str, at_ms: i64) -> serde_json::Value {
         "schedule": { "kind": "at", "at_ms": at_ms, "description": "once" },
         "message": "at message",
         "conversation_id": TEST_CONV_1,
-        "agent_type": "acp",
+        "agent_type": "nomi",
         "created_by": "user"
     })
 }
@@ -59,7 +64,7 @@ fn create_cron_job_body(name: &str, expr: &str) -> serde_json::Value {
         "schedule": { "kind": "cron", "expr": expr },
         "message": "cron message",
         "conversation_id": TEST_CONV_1,
-        "agent_type": "acp",
+        "agent_type": "nomi",
         "created_by": "user"
     })
 }
@@ -107,11 +112,35 @@ fn run_now_request(
     )
 }
 
+/// Seed the provider/model pair every nomi cron fixture resolves against.
+/// Idempotent so a test may call it once per conversation it seeds.
+async fn seed_cron_provider(services: &nomifun_app::AppServices) {
+    let credentials_encrypted = common::encrypted_bearer_credentials();
+    sqlx::query(
+        "INSERT OR IGNORE INTO providers (\
+            provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
+            created_at, updated_at\
+         ) VALUES (?, 'openai', 'cron-fixture', 'https://example.invalid', 'bearer', ?, 1, 1, 1)",
+    )
+    .bind(CRON_PROVIDER_ID)
+    .bind(&credentials_encrypted)
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+    common::seed_openai_chat_model(services.database.pool(), CRON_PROVIDER_ID, CRON_MODEL).await;
+}
+
 /// Seed a minimal conversation row so a cron job carrying this logical
 /// `conversation_id` can be resolved by the application. The owner is
 /// resolved by application bootstrap from the database's
 /// `installation_identity` singleton.
+///
+/// The row carries a canonical `model` because nomi is the only engine left:
+/// a cron job bound to an existing nomi conversation takes its model from that
+/// conversation at run time, and `add_job` refuses to schedule one that has
+/// none.
 async fn seed_conversation(services: &nomifun_app::AppServices, id: &str) {
+    seed_cron_provider(services).await;
     let workspace = services
         .work_dir
         .join("cron-fixtures")
@@ -119,12 +148,20 @@ async fn seed_conversation(services: &nomifun_app::AppServices, id: &str) {
     std::fs::create_dir_all(&workspace).unwrap();
     sqlx::query(
         "INSERT INTO conversations \
-         (conversation_id, user_id, name, type, extra, created_at, updated_at) \
-         VALUES (?, ?, 'Seeded Conv', 'acp', ?, 0, 0)",
+         (conversation_id, user_id, name, type, model, extra, created_at, updated_at) \
+         VALUES (?, ?, 'Seeded Conv', 'nomi', ?, ?, 0, 0)",
     )
     .bind(id)
     .bind(services.authoritative_user_id.as_ref())
-    .bind(acp_extra_with_workspace(workspace.to_string_lossy().into_owned()).to_string())
+    .bind(
+        json!({
+            "provider_id": CRON_PROVIDER_ID,
+            "model": CRON_MODEL,
+            "use_model": CRON_MODEL,
+        })
+        .to_string(),
+    )
+    .bind(nomi_extra_with_workspace(workspace.to_string_lossy().into_owned()).to_string())
     .execute(services.database.pool())
     .await
     .unwrap();
@@ -189,14 +226,20 @@ async fn au3_authenticated_users_cannot_observe_or_mutate_each_others_cron_jobs(
     let (mut app, services) = build_app().await;
     let (owner_token, owner_csrf) =
         setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    seed_cron_provider(&services).await;
 
     let create_conversation = json_with_token(
         "POST",
         "/api/conversations",
         json!({
-            "type": "acp",
+            "type": "nomi",
             "name": "Owner Cron Conversation",
-            "extra": acp_extra_with_workspace("/project")
+            "model": {
+                "provider_id": CRON_PROVIDER_ID,
+                "model": CRON_MODEL,
+                "use_model": CRON_MODEL,
+            },
+            "extra": nomi_extra_with_workspace("/project")
         }),
         &owner_token,
         &owner_csrf,
@@ -436,7 +479,7 @@ async fn cj1_create_cron_job() {
     assert_eq!(data["message"], "test message");
     assert_eq!(data["execution_mode"], "existing");
     assert_eq!(data["metadata"]["conversation_id"], TEST_CONV_1);
-    assert_eq!(data["metadata"]["agent_type"], "acp");
+    assert_eq!(data["metadata"]["agent_type"], "nomi");
     assert_eq!(data["metadata"]["created_by"], "user");
 }
 
@@ -496,11 +539,11 @@ async fn cj3_create_missing_required_fields() {
     let invalid_bodies = vec![
         (
             "name",
-            json!({"schedule": {"kind": "every", "every_ms": 60000}, "conversation_id": TEST_CONV_1, "agent_type": "acp", "created_by": "user"}),
+            json!({"schedule": {"kind": "every", "every_ms": 60000}, "conversation_id": TEST_CONV_1, "agent_type": "nomi", "created_by": "user"}),
         ),
         (
             "schedule",
-            json!({"name": "X", "conversation_id": TEST_CONV_1, "agent_type": "acp", "created_by": "user"}),
+            json!({"name": "X", "conversation_id": TEST_CONV_1, "agent_type": "nomi", "created_by": "user"}),
         ),
         (
             "agent_type",
@@ -508,7 +551,7 @@ async fn cj3_create_missing_required_fields() {
         ),
         (
             "created_by",
-            json!({"name": "X", "schedule": {"kind": "every", "every_ms": 60000}, "conversation_id": TEST_CONV_1, "agent_type": "acp"}),
+            json!({"name": "X", "schedule": {"kind": "every", "every_ms": 60000}, "conversation_id": TEST_CONV_1, "agent_type": "nomi"}),
         ),
     ];
 
@@ -527,18 +570,19 @@ async fn cj3_create_missing_required_fields() {
 async fn cj3b_create_rejects_workspace_with_edge_whitespace_segment() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    seed_cron_provider(&services).await;
 
     let body = json!({
         "name": "Whitespace Workspace",
         "schedule": { "kind": "every", "every_ms": 60000, "description": "every minute" },
         "message": "test message",
-        "agent_type": "acp",
+        "agent_type": "nomi",
         "created_by": "user",
         "execution_mode": "new_conversation",
         "agent_config": {
-            "backend": "gemini",
-            "name": "Gemini CLI",
-            "custom_agent_id": GEMINI_AGENT_ID,
+            "name": "Nomi",
+            "provider_id": CRON_PROVIDER_ID,
+            "model": CRON_MODEL,
             "workspace": "/Users/zhoukai/Documents/Archive "
         }
     });
@@ -594,6 +638,7 @@ async fn cj5_get_nonexistent() {
 async fn cj5b_run_now_legacy_workspace_uses_runtime_edge_whitespace_code() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    seed_cron_provider(&services).await;
     let cron_repo = SqliteCronRepository::new(services.database.pool().clone());
     let now = nomifun_common::now_ms();
 
@@ -614,9 +659,9 @@ async fn cj5b_run_now_legacy_workspace_uses_runtime_edge_whitespace_code() {
             execution_mode: "new_conversation".into(),
             agent_config: Some(
                 json!({
-                    "backend": "gemini",
-                    "name": "Gemini CLI",
-                    "custom_agent_id": GEMINI_AGENT_ID,
+                    "name": "Nomi",
+                    "provider_id": CRON_PROVIDER_ID,
+                    "model": CRON_MODEL,
                     "workspace": "/Users/zhoukai/Documents/Archive "
                 })
                 .to_string(),
@@ -626,7 +671,7 @@ async fn cj5b_run_now_legacy_workspace_uses_runtime_edge_whitespace_code() {
             preset_snapshot: None,
             conversation_id: None,
             conversation_title: None,
-            agent_type: "acp".into(),
+            agent_type: "nomi".into(),
             created_by: "user".into(),
             skill_content: None,
             description: None,
@@ -778,7 +823,7 @@ async fn cj9b_update_schedule_preserves_existing_timezone_when_omitted() {
             "schedule": { "kind": "cron", "expr": "0 0 9 * * *", "tz": "Asia/Shanghai" },
             "message": "cron message",
             "conversation_id": TEST_CONV_1,
-            "agent_type": "acp",
+            "agent_type": "nomi",
             "created_by": "user"
         }),
     )
@@ -878,6 +923,7 @@ async fn rn0_run_now_requires_exactly_one_idempotency_key() {
 async fn rn1_run_now_returns_conversation_id_for_new_conversation_job() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    seed_cron_provider(&services).await;
     let workspace = std::env::current_dir()
         .expect("Cron E2E current directory")
         .to_string_lossy()
@@ -887,9 +933,14 @@ async fn rn1_run_now_returns_conversation_id_for_new_conversation_job() {
         "POST",
         "/api/conversations",
         json!({
-            "type": "acp",
+            "type": "nomi",
             "name": "Run Now Source",
-            "extra": acp_extra_with_workspace(workspace)
+            "model": {
+                "provider_id": CRON_PROVIDER_ID,
+                "model": CRON_MODEL,
+                "use_model": CRON_MODEL,
+            },
+            "extra": nomi_extra_with_workspace(workspace)
         }),
         &token,
         &csrf,
@@ -1142,7 +1193,7 @@ async fn sc6_cron_with_timezone() {
         "schedule": { "kind": "cron", "expr": "0 0 9 * * *", "tz": "Asia/Shanghai" },
         "message": "hello",
         "conversation_id": TEST_CONV_1,
-        "agent_type": "acp",
+        "agent_type": "nomi",
         "created_by": "user"
     });
 
@@ -1164,7 +1215,7 @@ async fn sc7_every_zero_interval() {
         "schedule": { "kind": "every", "every_ms": 0 },
         "message": "x",
         "conversation_id": TEST_CONV_1,
-        "agent_type": "acp",
+        "agent_type": "nomi",
         "created_by": "user"
     });
     let req = json_with_token("POST", "/api/cron/jobs", body, &token, &csrf);
@@ -1184,7 +1235,7 @@ async fn sc8_every_negative_interval() {
         "schedule": { "kind": "every", "every_ms": -1000 },
         "message": "x",
         "conversation_id": TEST_CONV_1,
-        "agent_type": "acp",
+        "agent_type": "nomi",
         "created_by": "user"
     });
     let req = json_with_token("POST", "/api/cron/jobs", body, &token, &csrf);

@@ -105,7 +105,7 @@ validating a field, classify it as one of these:
 | Technical row ID | The fixed local `id`; never crosses a repository or product boundary. |
 | Stable business ID | Named bare UUIDv7 for a product-addressable entity. |
 | Natural key | Domain-defined value such as a name, slug, URL, locale, or singleton key; preserve its format. |
-| External ID | Opaque value issued by a provider or protocol, such as a platform user/chat ID, ACP session ID, or remote task ID. |
+| External ID | Opaque value issued by a provider or protocol, such as a platform user/chat ID or an upstream provider request ID. |
 | Operation token | Request ID, idempotency key, nonce, workspace token, or receipt token; purpose-specific and not an entity identity. |
 | Document identity | Canvas node/edge or similar document-local identity; not a database primary key. |
 

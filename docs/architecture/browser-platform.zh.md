@@ -39,7 +39,7 @@ Chromium 可执行文件可来自系统 Chrome/Edge 或 managed source；来源�
 
 - Native Nomi 在 runtime 创建时获得主进程签发的 `BrowserLaneClient`；
 - Gateway 从认证的 conversation/runtime 上下文解析 `CallerIdentity`，再转发到 Hub；
-- ACP browser stdio 只持有短期、可续期且限定 audience/operation 的 loopback capability；
+- feature-gated 的 browser stdio bridge 只持有短期、可续期且限定 audience/operation 的 loopback capability；
 - 每次知识 URL 渲染使用一个事务级 Anonymous Lane；渲染器串行执行
   `navigate` 与 `rendered_html`，并在成功、错误、超时或取消后关闭该精确 Lane，
   不会在两次抓取之间长期占住页面；

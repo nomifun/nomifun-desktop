@@ -5,12 +5,10 @@
  */
 
 import type {
-  AcpPermissionRequest,
   PlanUpdate,
   PersistedToolArtifact,
   ToolCallContentItem,
-  ToolCallUpdate,
-} from '@/common/types/platform/acpTypes';
+} from '@/common/types/platform/toolCallTypes';
 import type { IKnowledgeWritebackEvent, IResponseMessage, IUserMessageCreatedEvent } from '../adapter/ipcBridge';
 import {
   parseConversationId,
@@ -31,7 +29,7 @@ export { joinLocalPath as joinPath } from '../utils/localPath';
 
 declare const confirmationCorrelationBrand: unique symbol;
 
-/** ACP confirmation correlation key; transient protocol identity, never a DB entity ID. */
+/** Confirmation correlation key; transient protocol identity, never a DB entity ID. */
 export type ConfirmationCorrelationId = string & {
   readonly [confirmationCorrelationBrand]: true;
 };
@@ -54,8 +52,6 @@ type TMessageType =
   | 'tool_group'
   | 'agent_status'
   | 'permission'
-  | 'acp_permission'
-  | 'acp_tool_call'
   | 'plan'
   | 'thinking'
   | 'available_commands';
@@ -325,11 +321,11 @@ export type IMessageToolGroup = IMessage<
   }>
 >;
 
-// Unified agent status message type for all ACP-based agents (Claude, Qwen, Codex, etc.)
+// Unified agent status message type for the native agent runtime.
 export type IMessageAgentStatus = IMessage<
   'agent_status',
   {
-    backend: string; // Agent identifier: 'claude', 'qwen', 'codex', 'remote', etc.
+    backend: string; // Agent identifier, e.g. 'nomi'
     status:
       | 'connecting'
       | 'connected'
@@ -339,52 +335,16 @@ export type IMessageAgentStatus = IMessage<
       | 'prepared'
       | 'disconnected'
       | 'error';
-    /** Display name for the agent (e.g. extension-contributed adapter name) / Agent 显示名称 */
+    /** Display name for the agent / Agent 显示名称 */
     agent_name?: string;
-    // Optional runtime metadata supplied by some ACP agents.
+    // Optional runtime metadata supplied by the agent.
     session_id?: string;
     is_connected?: boolean;
     has_active_session?: boolean;
   }
 >;
 
-export type IMessageAcpPermission = IMessage<'acp_permission', AcpPermissionRequest>;
-
 export type IMessagePermission = IMessage<'permission', IConfirmation>;
-
-export type IMessageAcpToolCall = IMessage<'acp_tool_call', ToolCallUpdate>;
-
-export const mergeAcpToolCallContent = (
-  existing: IMessageAcpToolCall['content'],
-  incoming: IMessageAcpToolCall['content']
-): IMessageAcpToolCall['content'] => {
-  const update = {
-    ...existing.update,
-    ...incoming.update,
-  };
-
-  // Tool failure is terminal in ACP. Besides protecting artifact-delivery
-  // failures, this prevents a malformed late partial update from repainting a
-  // failed call as completed in recovered/live renderer state.
-  if (existing.update.status === 'failed' || incoming.update.status === 'failed') {
-    update.status = 'failed';
-    if (update.content) {
-      update.content = update.content.filter(
-        (item) => item.type !== 'artifact' && item.type !== 'resource_link'
-      );
-    }
-  } else if (existing.update.status === 'completed' && incoming.update.status !== 'completed') {
-    // Terminal success is monotonic. A replayed/late partial frame must not
-    // downgrade a committed artifact delivery or discard its receipts.
-    Object.assign(update, existing.update, { status: 'completed' as const });
-  }
-
-  return {
-    ...existing,
-    ...incoming,
-    update,
-  };
-};
 
 type ResponseTextData = {
   content: unknown;
@@ -395,7 +355,7 @@ type ResponseTextData = {
   sender_name?: unknown;
   sender_backend?: unknown;
   /**
-   * Untrusted ACP wire field. It is validated into `ConversationId` by
+   * Untrusted wire field. It is validated into `ConversationId` by
    * `normalizeWireAgentMessageMetadata` before entering renderer state.
    */
   sender_conversation_id?: string;
@@ -417,12 +377,9 @@ const normalizeCronMessageMeta = (value: unknown): CronMessageMeta | undefined =
   };
 };
 
-/** External ACP event name; normalized immediately at the message boundary. */
-export const ACP_AGENT_MESSAGE_EVENT = 'teammate_message' as const;
-
 /**
- * Translate the external ACP collaboration wire fields into the renderer's
- * single Agent message shape. The legacy protocol name must not propagate
+ * Translate the external collaboration wire fields into the renderer's
+ * single Agent message shape. The wire field names must not propagate
  * beyond message-ingress adapters.
  */
 export const normalizeWireAgentMessageMetadata = (
@@ -668,7 +625,7 @@ export type IMessageThinking = IMessage<
   }
 >;
 
-// Available commands from ACP agents (Claude, etc.)
+// Available commands advertised by the agent runtime.
 export type AvailableCommand = {
   name: string;
   description: string;
@@ -690,8 +647,6 @@ export type TMessage =
   | IMessageToolGroup
   | IMessageAgentStatus
   | IMessagePermission
-  | IMessageAcpPermission
-  | IMessageAcpToolCall
   | IMessagePlan
   | IMessageThinking
   | IMessageAvailableCommands;
@@ -905,7 +860,7 @@ export const normalizeToolGroupContent = (value: unknown): IMessageToolGroup['co
       // ToolGroupEntry has no receipt or 2PC-marker fields. Historical
       // `result_display.img_url` therefore cannot prove delivery and must be
       // downgraded at message admission, before process summaries can render a
-      // green state. Verified outputs use the detailed ToolCall/ACP carriers.
+      // green state. Verified outputs use the detailed ToolCall carrier.
       const unverifiedLegacyImage =
         isObject(resultDisplay) &&
         'img_url' in resultDisplay &&
@@ -957,46 +912,6 @@ const normalizePermissionContent = (value: unknown): IConfirmation => {
     ...(data.action != null ? { action: toDisplayText(data.action) } : {}),
     ...(data.command_type != null ? { command_type: toDisplayText(data.command_type) } : {}),
     ...(data.screenshot != null ? { screenshot: toDisplayText(data.screenshot) } : {}),
-  };
-};
-
-const normalizeAcpPermissionOptionKind = (
-  value: unknown
-): AcpPermissionRequest['options'][number]['kind'] => {
-  switch (value) {
-    case 'allow_once':
-    case 'allow_always':
-    case 'reject_once':
-    case 'reject_always':
-      return value;
-    default:
-      return 'allow_once';
-  }
-};
-
-const normalizeAcpPermissionContent = (value: unknown): AcpPermissionRequest => {
-  const data = isObject(value) ? value : {};
-  const toolCall = isObject(data.tool_call) ? data.tool_call : {};
-  const rawInput = isObject(toolCall.raw_input)
-    ? Object.fromEntries(Object.entries(toolCall.raw_input).map(([key, entry]) => [key, entry]))
-    : undefined;
-
-  return {
-    session_id: toDisplayText(data.session_id),
-    options: Array.isArray(data.options)
-      ? data.options.filter(isObject).map((option, index) => ({
-          option_id: toDisplayText(option.option_id, `option_${index}`),
-          name: toDisplayText(option.name ?? option.label, `Option ${index + 1}`),
-          kind: normalizeAcpPermissionOptionKind(option.kind),
-        }))
-      : [],
-    tool_call: {
-      tool_call_id: toDisplayText(toolCall.tool_call_id ?? data.call_id),
-      ...(rawInput ? { raw_input: rawInput } : {}),
-      ...(toolCall.status != null ? { status: toDisplayText(toolCall.status) } : {}),
-      ...(toolCall.title != null ? { title: toDisplayText(toolCall.title) } : {}),
-      ...(toolCall.kind != null ? { kind: toDisplayText(toolCall.kind) } : {}),
-    },
   };
 };
 
@@ -1115,136 +1030,6 @@ export const normalizeToolCallContent = (
     ...(status ? { status } : {}),
     artifacts: invalidTerminalClaim ? [] : artifacts,
   } as IMessageToolCall['content'];
-};
-
-export const normalizeAcpToolCallContent = (
-  value: unknown,
-  persistedStatus?: unknown
-): IMessageAcpToolCall['content'] => {
-  if (!isObject(value)) return value as IMessageAcpToolCall['content'];
-  const update = isObject(value.update) ? value.update : undefined;
-  if (!update) return value as unknown as IMessageAcpToolCall['content'];
-  let effectiveStatus =
-    update.status === 'pending' ||
-    update.status === 'in_progress' ||
-    update.status === 'completed' ||
-    update.status === 'failed'
-      ? update.status
-      : undefined;
-  if (persistedStatus === 'error') {
-    effectiveStatus = 'failed';
-  } else if (
-    persistedStatus !== undefined &&
-    persistedStatus !== 'finish' &&
-    effectiveStatus === 'completed'
-  ) {
-    effectiveStatus = 'in_progress';
-  }
-  const terminalSuccess =
-    effectiveStatus === 'completed' && (persistedStatus === undefined || persistedStatus === 'finish');
-  const deliveryCommitted = persistedStatus === undefined || value.artifact_delivery_committed === true;
-  const committedTerminalSuccess = terminalSuccess && deliveryCommitted;
-  let invalidArtifactClaim = false;
-  const content = Array.isArray(update.content)
-    ? update.content
-      .filter(isObject)
-      .map((item): ToolCallContentItem | undefined => {
-        switch (item.type) {
-          case 'diff':
-            return {
-              type: 'diff',
-              path: toDisplayText(item.path),
-              ...(item.old_text != null ? { old_text: toDisplayText(item.old_text) } : {}),
-              new_text: toDisplayText(item.new_text),
-            };
-          case 'artifact': {
-            if (!terminalSuccess) return undefined;
-            if (!committedTerminalSuccess) {
-              invalidArtifactClaim = true;
-              return { type: 'artifact_error', message: 'Uncommitted artifact delivery' };
-            }
-            const artifact = normalizePersistedToolArtifact(item.artifact);
-            if (!artifact) {
-              invalidArtifactClaim = true;
-              return { type: 'artifact_error', message: 'Invalid or incomplete artifact receipt' };
-            }
-            return {
-              type: 'artifact',
-              artifact,
-              ...(item.source_uri != null ? { source_uri: toDisplayText(item.source_uri) } : {}),
-            };
-          }
-          case 'resource_link': {
-            if (!terminalSuccess) return undefined;
-            if (!committedTerminalSuccess) {
-              invalidArtifactClaim = true;
-              return { type: 'artifact_error', message: 'Uncommitted artifact delivery' };
-            }
-            const uri = normalizeDurableResourceUri(item.uri);
-            if (!uri) {
-              invalidArtifactClaim = true;
-              return { type: 'artifact_error', message: 'Invalid or unsafe resource link' };
-            }
-            return {
-              type: 'resource_link',
-              name: toDisplayText(item.name),
-              uri,
-              ...(item.title != null ? { title: toDisplayText(item.title) } : {}),
-              ...(item.description != null ? { description: toDisplayText(item.description) } : {}),
-              ...(item.mime_type != null ? { mime_type: toDisplayText(item.mime_type) } : {}),
-              ...(typeof item.size_bytes === 'number' && Number.isFinite(item.size_bytes)
-                ? { size_bytes: Math.max(0, item.size_bytes) }
-                : {}),
-            };
-          }
-          case 'terminal':
-            return { type: 'terminal', terminal_id: toDisplayText(item.terminal_id) };
-          case 'artifact_error':
-            return { type: 'artifact_error', message: toDisplayText(item.message) };
-          case 'content':
-          default:
-            return {
-              type: 'content',
-              content: {
-                type: 'text',
-                text: isObject(item.content) ? toDisplayText(item.content.text) : toDisplayText(item.content),
-              },
-            };
-        }
-      })
-      .filter((item): item is ToolCallContentItem => item !== undefined)
-    : undefined;
-
-  if (invalidArtifactClaim) {
-    effectiveStatus = 'failed';
-  }
-  const safeContent = invalidArtifactClaim
-    ? content?.filter((item) => item.type !== 'artifact' && item.type !== 'resource_link')
-    : content;
-
-  const {
-    status: _status,
-    title: _title,
-    kind: _kind,
-    content: _content,
-    ...partialUpdate
-  } = update;
-
-  return ({
-    ...value,
-    update: {
-      ...partialUpdate,
-      tool_call_id: toDisplayText(update.tool_call_id),
-      ...(effectiveStatus != null
-        ? { status: effectiveStatus as IMessageAcpToolCall['content']['update']['status'] }
-        : {}),
-      ...(update.title != null ? { title: toDisplayText(update.title) } : {}),
-      ...(update.kind != null
-        ? { kind: toDisplayText(update.kind) as IMessageAcpToolCall['content']['update']['kind'] }
-        : {}),
-      ...(safeContent ? { content: safeContent } : {}),
-    },
-  } as unknown) as IMessageAcpToolCall['content'];
 };
 
 const normalizeAgentStatusContent = (value: unknown): IMessageAgentStatus['content'] => {
@@ -1399,30 +1184,6 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         content: normalizePermissionContent(message.data),
       };
     }
-    case 'acp_permission': {
-      return {
-        id: uuid(),
-        type: 'acp_permission',
-        msg_id: message.msg_id,
-        ...turnIdentity,
-        position: 'left',
-        conversation_id: message.conversation_id,
-        created_at,
-        content: normalizeAcpPermissionContent(message.data),
-      };
-    }
-    case 'acp_tool_call': {
-      return {
-        id: uuid(),
-        type: 'acp_tool_call',
-        msg_id: message.msg_id,
-        ...turnIdentity,
-        position: 'left',
-        conversation_id: message.conversation_id,
-        created_at,
-        content: normalizeAcpToolCallContent(message.data),
-      };
-    }
     case 'plan': {
       return {
         id: uuid(),
@@ -1465,9 +1226,6 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
     case 'cron_trigger':
     case 'info': // Stream retry notifications and similar transient agent updates
     case 'system': // Cron system responses, ignored
-    case 'acp_model_info': // Model info updates, handled by AcpModelSelector
-    case 'codex_model_info': // Legacy Codex model info updates
-    case 'acp_context_usage': // Known engine event; no UI consumer, swallowed
     case 'request_trace': // Request trace events, logged to F12 console (not persisted)
       return undefined;
     default: {
@@ -1626,24 +1384,6 @@ export const composeMessage = (
       ) {
         const content = mergeToolCallContent(msg.content, message.content);
         return updateMessage(i, { ...msg, ...message, content });
-      }
-    }
-    // If no existing tool call found, add new one
-    return pushMessage(message);
-  }
-
-  // Handle acp_tool_call message merging
-  if (message.type === 'acp_tool_call') {
-    for (let i = 0, len = list.length; i < len; i++) {
-      const msg = list[i];
-      if (
-        msg.type === 'acp_tool_call' &&
-        msg.msg_id === message.msg_id &&
-        msg.content.update?.tool_call_id === message.content.update?.tool_call_id
-      ) {
-        // Create new object instead of mutating original
-        const merged = mergeAcpToolCallContent(msg.content, message.content);
-        return updateMessage(i, { ...msg, ...message, content: merged });
       }
     }
     // If no existing tool call found, add new one

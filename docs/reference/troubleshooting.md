@@ -80,9 +80,11 @@ The server pings every 30 s and considers a client dead at 60 s. If the network 
 
 ## "Agent CLI not found" and bun problems
 
-### Conversation fails immediately with "agent not available" / "command not found"
+### A terminal preset fails immediately with "command not found"
 
-The agent engine spawns ACP agent CLIs (`claude`, `codex`, `gemini`, `nomi`, `codebuddy`, …) and they must be on the **process** `PATH`. The process PATH is enhanced at startup (`nomifun_runtime::enhance_process_path`) but if the binary lives somewhere unusual it can still be missed.
+Terminal agent presets (`claude`, `codex`, `gemini`) launch a third-party CLI you
+installed yourself, and it must be on the **process** `PATH`. The process PATH is
+enhanced at startup (`nomifun_runtime::enhance_process_path`) but if the binary lives somewhere unusual it can still be missed.
 
 Run the doctor:
 
@@ -90,33 +92,35 @@ Run the doctor:
 nomicore doctor
 ```
 
-This hydrates the agent registry and probes every CLI on `$PATH`, printing a per-agent availability table. Run it from the same shell that launched the app to see exactly what the app sees. If an agent is missing, install its CLI or add its bin directory to `PATH` and restart.
+This probes every known agent CLI on `$PATH` and prints a per-agent availability
+table. Run it from the same shell that launched the app to see exactly what the
+app sees. If a CLI is missing, install it or add its bin directory to `PATH` and
+restart. Note that conversations do not depend on any of this — the built-in
+`nomi` engine is compiled into the binary.
 
 ### Under systemd: `bun: command not found`
 
-The agent engine requires **`bun ≥ 1.3.13`**. A `nologin` system account does not see `~/.bun/bin/`; install bun system-wide (`sudo install ~/.bun/bin/bun /usr/local/bin/bun`) or build with `NOMIFUN_EMBED_BUN=1` so bun is bundled into the binary and self-extracts into the data dir on first run. See [Web Server Deployment](../guides/web-server-deployment.md#bun-must-be-on-the-system-path) for the worked recipe.
+NomiFun bundles **`bun ≥ 1.3.13`** to launch MCP stdio servers and other Node-style child processes. A `nologin` system account does not see `~/.bun/bin/`; install bun system-wide (`sudo install ~/.bun/bin/bun /usr/local/bin/bun`) or build with `NOMIFUN_EMBED_BUN=1` so bun is bundled into the binary and self-extracts into the data dir on first run. See [Web Server Deployment](../guides/web-server-deployment.md#bun-must-be-on-the-system-path) for the worked recipe.
 
 Verify with `sudo -u nomifun -s -- which bun` after installing.
 
-### "bun runtime extraction" log line followed by no agent activity
+### "bun runtime extraction" log line followed by no MCP activity
 
-The embedded-bun build extracts bun into the data directory on first run. If extraction fails (typically permissions), the agent engine has no runtime. Check the data-dir for the bun binary, ensure the service user owns the data dir, and look in the log for the actual extraction error.
+The embedded-bun build extracts bun into the data directory on first run. If extraction fails (typically permissions), stdio MCP servers have no runtime to launch with. Check the data-dir for the bun binary, ensure the service user owns the data dir, and look in the log for the actual extraction error.
 
 ## Office preview
 
-### Word/Excel/PPT preview returns "LibreOffice not detected"
+### Word/Excel/PPT preview fails to start
 
-The `/api/star-office/detect` route probes the system for a LibreOffice install. The Office preview features (`/api/word-preview/*`, `/api/excel-preview/*`, `/api/ppt-preview/*`) need LibreOffice to render documents.
+The Office preview features (`/api/word-preview/*`, `/api/excel-preview/*`, `/api/ppt-preview/*`) spawn the `officecli` helper to render and watch a document. If it is not installed, the start call returns an "officecli not found" error.
 
-- Linux: `apt install libreoffice` (or distribution equivalent).
-- macOS: `brew install --cask libreoffice`.
-- Windows: install from libreoffice.org.
+Install it with `npm install -g officecli` (the backend can also run that install for you), make sure `npm` and the resulting `officecli` binary are on the **process** `PATH`, and restart the backend.
 
-After installing, restart the backend so it re-detects.
+> The old `POST /api/star-office/detect` route and the Star Office integration behind it were retired and no longer exist.
 
 ### Preview iframe stays blank
 
-The Office preview routes spawn LibreOffice subprocesses and proxy them via `/api/ppt-proxy/*` and `/api/office-watch-proxy/*`. These proxy routes are **public** (no auth) on purpose — the iframe content needs to load without sending the SPA's session cookie. If your reverse proxy strips the URL path components or applies auth at the edge to `/api/*`, exempt the proxy paths.
+The Office preview routes spawn `officecli` subprocesses and proxy them via `/api/ppt-proxy/*` and `/api/office-watch-proxy/*`. These proxy routes are **public** (no auth) on purpose — the iframe content needs to load without sending the SPA's session cookie. If your reverse proxy strips the URL path components or applies auth at the edge to `/api/*`, exempt the proxy paths.
 
 ## Data directory permissions
 

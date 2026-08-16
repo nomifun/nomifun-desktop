@@ -330,10 +330,9 @@ debug = false
 #   strip = true       drop residual symbol tables (also shrinks the non-Windows
 #                      appimage/deb/rpm/dmg artifacts).
 # NOT panic = "abort": the codebase relies on panic = "unwind" to isolate a
-# panicking tool from the agent process (nomi-agent/src/tool_execution.rs,
-# apps/desktop/src/main.rs catch_unwind boundaries) and a test asserts unwind
-# semantics (nomifun-ai-agent/src/protocol/acp.rs). Aborting would turn a single
-# tool panic into a full-process crash — a real behavior regression.
+# panicking tool from the agent process, at the catch_unwind boundaries in
+# nomi-agent/src/tool_execution.rs and apps/desktop/src/main.rs. Aborting would
+# turn a single tool panic into a full-process crash — a real behavior regression.
 [profile.release]
 opt-level = 3
 lto = "thin"

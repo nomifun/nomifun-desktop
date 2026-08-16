@@ -4,14 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AcpModelInfo } from '@/common/types/platform/acpTypes';
 import type { AgentSource } from '@/renderer/utils/model/agentTypes';
 import type { PresetReference } from '@/common/types/agent/presetTypes';
 
 /**
  * Available agent entry returned by the backend.
- * `agent_type` is the top-level discriminant (acp, nomi, etc.).
- * `backend` is only present when `agent_type === 'acp'` (claude, qwen, codex, …).
+ * `agent_type` is the top-level discriminant; only `nomi` remains.
  */
 export type AvailableAgent = {
   /**
@@ -55,5 +53,3 @@ export type EffectiveAgentInfo = {
   originalType: string;
   isAvailable: boolean;
 };
-
-export type { AcpModelInfo };

@@ -30,5 +30,19 @@
   "model": {
     "switchSuccess": "Model switched successfully",
     "switchFailed": "Failed to switch model"
+  },
+  "sendbox": {
+    "placeholder": "Send message to {{backend}}..."
+  },
+  "status": {
+    "connecting": "Connecting to {{agent}}...",
+    "connected": "Connected to {{agent}}",
+    "authenticated": "Authenticated with {{agent}}",
+    "session_active": "Active session with {{agent}}",
+    "error": "Connection error",
+    "unknown": "Unknown status"
+  },
+  "config": {
+    "reasoning_effort": "Reasoning Effort"
   }
 }

@@ -16,7 +16,7 @@ let lastAgentAutoRefreshAt = 0;
 let agentAutoRefreshPromise: Promise<void> | null = null;
 
 async function refreshDetectedAgentsCache(): Promise<void> {
-  await ipcBridge.acpConversation.refreshCustomAgents.invoke();
+  await ipcBridge.agentConversation.refreshCustomAgents.invoke();
   await mutate(DETECTED_AGENTS_SWR_KEY);
 }
 
@@ -53,7 +53,7 @@ export type UseAgentsResult = {
 /**
  * Canonical React hook for reading detected agents. All components/hooks that
  * need `/api/agents` data must consume this instead of calling
- * `ipcBridge.acpConversation.getAvailableAgents.invoke()` directly —
+ * `ipcBridge.agentConversation.getAvailableAgents.invoke()` directly —
  * SWR's cross-component de-dup only works when every subscriber shares the
  * same `DETECTED_AGENTS_SWR_KEY`.
  */

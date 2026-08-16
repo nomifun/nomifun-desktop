@@ -10,7 +10,6 @@ import {
   getAuthoritativeHydrationFence,
   shouldAcceptAuthoritativeStreamActivity,
 } from './useAuthoritativeTurnLifecycle';
-import { shouldApplyAcpStreamEventToTurn } from './acp/useAcpMessage';
 import {
   getNomiHydrationLifecycleFence,
   shouldApplyNomiStreamEventToTurn,
@@ -43,8 +42,8 @@ describe('Finished conversation remount authority', () => {
     let sendPostCount = 0;
     let busy = false;
 
-    // Nomi/ACP passive mount first performs an authoritative GET. Finished is
-    // a terminal snapshot and cannot trigger runtime preparation.
+    // Passive mount first performs an authoritative GET. Finished is a
+    // terminal snapshot and cannot trigger runtime preparation.
     expect(
       await warmupConversationForPassiveMount(conversationId, {
         getConversation: async () => finishedSnapshot,
@@ -57,7 +56,7 @@ describe('Finished conversation remount authority', () => {
     const simpleFence = getAuthoritativeHydrationFence(false);
     const nomiFence = getNomiHydrationLifecycleFence(false);
 
-    // Delayed old output cannot raise Remote/OpenClaw, Nomi, or ACP.
+    // Delayed old output cannot raise the authoritative or Nomi fence.
     expect(
       shouldAcceptAuthoritativeStreamActivity({
         closed: simpleFence.closed,
@@ -74,15 +73,6 @@ describe('Finished conversation remount authority', () => {
         awaitingBackendTurn: false,
       })
     ).toBe(false);
-    expect(
-      shouldApplyAcpStreamEventToTurn({
-        eventTurnId: completedTurnId,
-        activeTurnId: undefined,
-        turnClosed: true,
-        awaitingBackendTurn: false,
-      })
-    ).toBe(false);
-
     // A delayed old start remains behind exact active_turn_id verification.
     expect(
       classifyAuthoritativeTurnStart({

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use nomifun_ai_agent::artifact_store::{ArtifactStore, PersistedArtifact};
 use nomifun_ai_agent::protocol::events::{
-    ToolCallEventData, ToolCallStatus, validate_artifact_receipt_integrity,
+    ToolCallEventData, ToolCallStatus,
     validate_completed_artifact_contract,
 };
 use nomifun_api_types::{ConversationArtifactResponse, ConversationResponse, MessageResponse, MessageSearchItem};
@@ -170,7 +170,7 @@ pub(crate) fn parse_provider_with_model(s: &str) -> Result<ProviderWithModel, Ap
 
 /// Parse a DB string value into a typed enum via serde.
 ///
-/// e.g. `"acp"` → `AgentType::Acp`
+/// e.g. `"nomi"` → `AgentType::Nomi`
 pub fn string_to_enum<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, AppError> {
     serde_json::from_value(serde_json::Value::String(s.to_owned()))
         .map_err(|e| AppError::Internal(format!("Invalid enum value '{s}': {e}")))
@@ -257,8 +257,8 @@ const HISTORICAL_ARTIFACT_INVALID_MESSAGE: &str =
 
 /// Whether a persisted message needs artifact-integrity history auditing.
 ///
-/// Remote ACP `resource_link` values are intentionally excluded: they have no
-/// local bytes to verify and remain governed by URI validation in the client.
+/// Remote `resource_link` values are intentionally excluded: they have no local
+/// bytes to verify and remain governed by URI validation in the client.
 /// A malformed generic `artifacts` field is still a claim and is projected as
 /// failed rather than being silently treated as an empty successful batch.
 /// Completed high-signal tools also enter this path when the shared artifact
@@ -277,16 +277,6 @@ pub(crate) fn message_needs_artifact_history_audit(message: &MessageResponse) ->
                 });
             has_claim || generic_completed_artifact_contract_fails(message)
         }
-        MessageType::AcpToolCall => message
-            .content
-            .get("update")
-            .and_then(|update| update.get("content"))
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|items| {
-                items.iter().any(|item| {
-                    item.get("type").and_then(serde_json::Value::as_str) == Some("artifact")
-                })
-            }) || acp_completed_artifact_contract_fails(message),
         MessageType::ToolGroup => tool_group_completed_artifact_contract_fails(message),
         _ => false,
     }
@@ -311,12 +301,6 @@ pub(crate) fn project_historical_artifact_integrity(
         invalidate_historical_artifact_projection(message);
         return true;
     }
-    if message.r#type == MessageType::AcpToolCall
-        && acp_completed_artifact_contract_fails(message)
-    {
-        invalidate_historical_artifact_projection(message);
-        return true;
-    }
     if message.r#type == MessageType::ToolGroup
         && tool_group_completed_artifact_contract_fails(message)
     {
@@ -326,7 +310,6 @@ pub(crate) fn project_historical_artifact_integrity(
 
     let receipts = match message.r#type {
         MessageType::ToolCall => generic_artifact_receipts(message),
-        MessageType::AcpToolCall => acp_artifact_receipts(message),
         _ => None,
     };
     let Some(receipts) = receipts else {
@@ -413,83 +396,6 @@ fn generic_completed_artifact_contract_fails(message: &MessageResponse) -> bool 
     validate_completed_artifact_contract(&data).is_err()
 }
 
-/// ACP history carries tool identity in its title or raw input/output rather
-/// than a dedicated `name` field. Reconstruct the same identity set used by the
-/// live relay so an older external runtime cannot hydrate an empty successful
-/// image/export update merely because it omitted local receipt content.
-fn acp_completed_artifact_contract_fails(message: &MessageResponse) -> bool {
-    let Some(update) = message
-        .content
-        .get("update")
-        .and_then(serde_json::Value::as_object)
-    else {
-        return false;
-    };
-    if update.get("status").and_then(serde_json::Value::as_str) != Some("completed") {
-        return false;
-    }
-
-    let artifacts = match acp_artifact_receipts(message) {
-        Some(Ok(artifacts)) => artifacts,
-        Some(Err(())) => return true,
-        None => Vec::new(),
-    };
-    if validate_artifact_receipt_integrity("historical ACP artifact delivery", &artifacts).is_err() {
-        return true;
-    }
-    const IDENTITY_KEYS: &[&str] = &[
-        "tool",
-        "tool_name",
-        "toolName",
-        "name",
-        "operation",
-        "operation_name",
-        "operationName",
-    ];
-    let mut identities = update
-        .get("title")
-        .and_then(serde_json::Value::as_str)
-        .into_iter()
-        .collect::<Vec<_>>();
-    for value in [update.get("raw_input"), update.get("raw_output")]
-        .into_iter()
-        .flatten()
-    {
-        let Some(object) = value.as_object() else {
-            continue;
-        };
-        identities.extend(
-            IDENTITY_KEYS
-                .iter()
-                .filter_map(|key| object.get(*key).and_then(serde_json::Value::as_str)),
-        );
-    }
-    identities.sort_unstable();
-    identities.dedup();
-
-    identities.into_iter().any(|name| {
-        validate_completed_artifact_contract(&ToolCallEventData {
-            call_id: update
-                .get("tool_call_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("historical-acp-tool-call")
-                .to_owned(),
-            name: name.to_owned(),
-            args: update
-                .get("raw_input")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-            status: ToolCallStatus::Completed,
-            input: None,
-            output: None,
-            description: None,
-            artifacts: artifacts.clone(),
-            retry: None,
-        })
-        .is_err()
-    })
-}
-
 /// ToolGroup is a receipt-less legacy summary carrier. A completed entry whose
 /// identity creates an artifact obligation can never prove delivery on reload;
 /// current turns suppress such entries and persist the detailed ToolCall
@@ -551,30 +457,6 @@ fn generic_artifact_receipts(
             .map(|artifact| serde_json::from_value(artifact).map_err(|_| ()))
             .collect(),
     )
-}
-
-fn acp_artifact_receipts(
-    message: &MessageResponse,
-) -> Option<Result<Vec<PersistedArtifact>, ()>> {
-    let items = message
-        .content
-        .get("update")?
-        .get("content")?
-        .as_array()?;
-    let mut receipts = Vec::new();
-    for item in items {
-        if item.get("type").and_then(serde_json::Value::as_str) != Some("artifact") {
-            continue;
-        }
-        let Some(artifact) = item.get("artifact") else {
-            return Some(Err(()));
-        };
-        let Ok(receipt) = serde_json::from_value::<PersistedArtifact>(artifact.clone()) else {
-            return Some(Err(()));
-        };
-        receipts.push(receipt);
-    }
-    (!receipts.is_empty()).then_some(Ok(receipts))
 }
 
 fn invalidate_historical_artifact_projection(message: &mut MessageResponse) {
@@ -643,60 +525,14 @@ fn invalidate_historical_artifact_projection(message: &mut MessageResponse) {
         serde_json::Value::String(HISTORICAL_ARTIFACT_INVALID_MESSAGE.to_owned()),
     );
 
-    match message.r#type {
-        MessageType::ToolCall => {
-            content.insert("status".to_owned(), serde_json::json!("error"));
-            content.insert("artifacts".to_owned(), serde_json::json!([]));
-        }
-        MessageType::AcpToolCall => {
-            let Some(update) = content
-                .get_mut("update")
-                .and_then(serde_json::Value::as_object_mut)
-            else {
-                return;
-            };
-            update.insert("status".to_owned(), serde_json::json!("failed"));
-            let items = update
-                .entry("content".to_owned())
-                .or_insert_with(|| serde_json::json!([]));
-            let Some(items) = items.as_array_mut() else {
-                *items = serde_json::json!([]);
-                let Some(items) = items.as_array_mut() else {
-                    return;
-                };
-                items.push(serde_json::json!({
-                    "type": "artifact_error",
-                    "message": HISTORICAL_ARTIFACT_INVALID_MESSAGE,
-                }));
-                return;
-            };
-            items.retain(|item| {
-                !matches!(
-                    item.get("type").and_then(serde_json::Value::as_str),
-                    Some("artifact" | "resource_link")
-                )
-            });
-            if !items.iter().any(|item| {
-                item.get("type").and_then(serde_json::Value::as_str)
-                    == Some("artifact_error")
-                    && item.get("message").and_then(serde_json::Value::as_str)
-                        == Some(HISTORICAL_ARTIFACT_INVALID_MESSAGE)
-            }) {
-                items.push(serde_json::json!({
-                    "type": "artifact_error",
-                    "message": HISTORICAL_ARTIFACT_INVALID_MESSAGE,
-                }));
-            }
-        }
-        _ => {}
+    if message.r#type == MessageType::ToolCall {
+        content.insert("status".to_owned(), serde_json::json!("error"));
+        content.insert("artifacts".to_owned(), serde_json::json!([]));
     }
 }
 
 fn is_tool_message(msg_type: MessageType) -> bool {
-    matches!(
-        msg_type,
-        MessageType::ToolCall | MessageType::ToolGroup | MessageType::AcpToolCall
-    )
+    matches!(msg_type, MessageType::ToolCall | MessageType::ToolGroup)
 }
 
 fn truncate_large_strings(value: &mut serde_json::Value, max_chars: usize, truncated: &mut bool) {
@@ -941,7 +777,7 @@ mod tests {
     fn row_to_response_basic() {
         let model = json!({"provider_id": PROVIDER_ID, "model": "m1"});
         let row = make_row(
-            "acp",
+            "nomi",
             "pending",
             Some("nomifun"),
             Some(&model.to_string()),
@@ -949,7 +785,7 @@ mod tests {
         );
         let resp = row_to_response(row, Path::new("/tmp/data")).unwrap();
         assert!(ConversationId::try_from(resp.conversation_id.as_str()).is_ok());
-        assert_eq!(resp.r#type, AgentType::Acp);
+        assert_eq!(resp.r#type, AgentType::Nomi);
         assert_eq!(resp.status, ConversationStatus::Pending);
         assert_eq!(resp.source, Some(ConversationSource::Nomifun));
         assert_eq!(resp.model.unwrap().model, "m1");
@@ -959,7 +795,7 @@ mod tests {
 
     #[test]
     fn row_to_response_no_source() {
-        let row = make_row("acp", "running", None, None, "{}");
+        let row = make_row("nomi", "running", None, None, "{}");
         let resp = row_to_response(row, Path::new("/tmp/data")).unwrap();
         assert!(resp.source.is_none());
         assert!(resp.model.is_none());
@@ -980,7 +816,7 @@ mod tests {
             conversation_id,
             user_id: "user_1".into(),
             name: "Test".into(),
-            r#type: "acp".into(),
+            r#type: "nomi".into(),
             extra: "not-json".into(),
             delegation_policy: "automatic".into(),
             execution_model_pool: None,
@@ -1005,8 +841,8 @@ mod tests {
 
     #[test]
     fn string_to_enum_valid() {
-        let agent: AgentType = string_to_enum("acp").unwrap();
-        assert_eq!(agent, AgentType::Acp);
+        let agent: AgentType = string_to_enum("nomi").unwrap();
+        assert_eq!(agent, AgentType::Nomi);
 
         let status: ConversationStatus = string_to_enum("finished").unwrap();
         assert_eq!(status, ConversationStatus::Finished);
@@ -1045,7 +881,7 @@ mod tests {
     #[test]
     fn row_to_response_marks_workspace_inside_data_dir_as_temporary() {
         let row = make_row(
-            "acp",
+            "nomi",
             "pending",
             Some("nomifun"),
             None,
@@ -1058,7 +894,7 @@ mod tests {
     #[test]
     fn row_to_response_marks_workspace_outside_data_dir_as_non_temporary() {
         let row = make_row(
-            "acp",
+            "nomi",
             "pending",
             Some("nomifun"),
             None,
@@ -1070,7 +906,7 @@ mod tests {
 
     #[test]
     fn row_to_response_marks_missing_workspace_as_non_temporary() {
-        let row = make_row("acp", "pending", Some("nomifun"), None, r#"{}"#);
+        let row = make_row("nomi", "pending", Some("nomifun"), None, r#"{}"#);
         let resp = row_to_response(row, Path::new("/srv/nomifun-data")).unwrap();
         assert_eq!(resp.extra["is_temporary_workspace"], false);
     }
@@ -1099,7 +935,7 @@ mod tests {
             conversation_id,
             user_id: "user_1".into(),
             name: "Pinned".into(),
-            r#type: "acp".into(),
+            r#type: "nomi".into(),
             extra: "{}".into(),
             delegation_policy: "automatic".into(),
             execution_model_pool: None,
@@ -1208,7 +1044,7 @@ mod tests {
             created_at: 5000,
             conversation_id: conversation_id.clone(),
             conversation_name: "Test Conv".into(),
-            conversation_type: "acp".into(),
+            conversation_type: "nomi".into(),
             conversation_extra: r#"{"workspace":"/project"}"#.into(),
             conversation_delegation_policy: "prefer_parallel".into(),
             conversation_execution_model_pool: Some(
@@ -1235,7 +1071,7 @@ mod tests {
 
         assert_eq!(item.conversation.conversation_id, conversation_id);
         assert_eq!(item.conversation.name, "Test Conv");
-        assert_eq!(item.conversation.r#type, AgentType::Acp);
+        assert_eq!(item.conversation.r#type, AgentType::Nomi);
         assert_eq!(item.conversation.source, Some(ConversationSource::Nomifun));
         assert_eq!(
             item.conversation.delegation_policy,
@@ -1296,7 +1132,7 @@ mod tests {
             created_at: 5000,
             conversation_id: ConversationId::new().into_string(),
             conversation_name: "Test".into(),
-            conversation_type: "acp".into(),
+            conversation_type: "nomi".into(),
             conversation_extra: "not valid json".into(),
             conversation_delegation_policy: "automatic".into(),
             conversation_execution_model_pool: None,

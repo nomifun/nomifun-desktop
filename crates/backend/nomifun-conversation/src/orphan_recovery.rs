@@ -24,12 +24,6 @@ pub(crate) enum RunningOrphanDisposition {
     /// a fully-reaped durable process registry with no surviving entry for
     /// this Conversation.
     LocalContainedAuthority,
-    /// The backend's effect-bearing child process is durably registered at
-    /// spawn and unregistered only on proven tree exit.  Terminal proof =
-    /// verified boot reaping of every registry entry for this Conversation;
-    /// absence of entries is itself proof (the child never spawned, exited
-    /// with proof, or died under the same containment authorities as above).
-    RegisteredLocalProcessTree,
 }
 
 pub(crate) fn running_orphan_disposition(
@@ -46,9 +40,6 @@ pub(crate) fn running_orphan_disposition(
         value if value == AgentType::Nomi.serde_name() => {
             RunningOrphanDisposition::LocalContainedAuthority
         }
-        value if value == AgentType::Acp.serde_name() => {
-            RunningOrphanDisposition::RegisteredLocalProcessTree
-        }
         unknown => {
             return Err(AppError::Conflict(format!(
                 "Conversation uses unknown Agent backend '{unknown}'; refusing to finalize an unproven running turn"
@@ -64,16 +55,10 @@ mod tests {
 
     #[test]
     fn every_current_backend_requires_proof_after_restart() {
-        for (backend, disposition) in [
-            (
-                AgentType::Nomi.serde_name(),
-                RunningOrphanDisposition::LocalContainedAuthority,
-            ),
-            (
-                AgentType::Acp.serde_name(),
-                RunningOrphanDisposition::RegisteredLocalProcessTree,
-            ),
-        ] {
+        for (backend, disposition) in [(
+            AgentType::Nomi.serde_name(),
+            RunningOrphanDisposition::LocalContainedAuthority,
+        )] {
             assert_eq!(running_orphan_disposition(backend).unwrap(), disposition);
         }
     }

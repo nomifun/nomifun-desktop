@@ -10,7 +10,7 @@ callers and security models.
 | HTTP REST | UI/browser/client -> backend | CRUD, commands, setup, file operations, terminal input | `nomifun-app` route tree |
 | WebSocket `/ws` | backend <-> UI | Agent stream events, terminal output, broadcast events, heartbeats | `nomifun-realtime` |
 | Tauri IPC | SPA -> desktop shell | Desktop-only OS features | `apps/desktop/src/main.rs` + Tauri plugins |
-| ACP/agent stdio | backend <-> child CLI | External CLI-agent conversation traffic | `nomifun-ai-agent` |
+| PTY stdio | backend <-> child process | Terminal session bytes, including third-party agent CLIs | `nomifun-terminal` |
 | MCP stdio/HTTP | agent/backend/client <-> MCP server | Tools/resources/prompts | `nomi-mcp`, `nomifun-mcp`, `nomifun-public`, bridge subcommands |
 | Public Remote fronts | external agents/scripts -> backend | MCP tools or REST capability calls | `/mcp`, `/mcp-agent`, `/v1` |
 
@@ -87,7 +87,7 @@ The current `nomicore` CLI subcommands include:
 - `tools`
 - `call`
 
-MCP injection differs by runtime:
+MCP injection differs by session and by caller:
 
 - user MCP rows and OAuth-backed HTTP servers come from `nomifun-mcp`,
 - requirement and knowledge servers are scoped internal MCP servers,
@@ -126,8 +126,9 @@ associated profile, model/persona choices, and scoped capabilities.
 | Desktop keep-awake | Tauri command |
 | Remote MCP tool call | `/mcp` or `/mcp-agent` |
 | Remote REST capability call | `/v1` |
-| ACP Agent conversation | child process stdio managed by `nomifun-ai-agent` |
-| Internal knowledge search for ACP session | `mcp-knowledge-stdio` bridge |
+| Conversation turn | in-process `nomi` engine; tokens streamed over `/ws` |
+| Terminal (incl. third-party agent CLIs) | child process stdio over a PTY managed by `nomifun-terminal` |
+| Internal knowledge search for a session | `mcp-knowledge-stdio` bridge |
 
 See [`agent-execution.zh.md`](agent-execution.zh.md) for the collaboration
 aggregate, state transitions, event ordering, and three model-facing tools.

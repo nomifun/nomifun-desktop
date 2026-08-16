@@ -23,7 +23,7 @@ describe('useAgents detection refresh wiring', () => {
   test('refresh hits the backend refresh endpoint and then updates the shared SWR key', () => {
     const text = source();
 
-    expect(text.includes('ipcBridge.acpConversation.refreshCustomAgents.invoke()')).toBe(true);
+    expect(text.includes('ipcBridge.agentConversation.refreshCustomAgents.invoke()')).toBe(true);
     expect(text.includes('mutate(DETECTED_AGENTS_SWR_KEY)')).toBe(true);
   });
 });

@@ -898,27 +898,10 @@ const SendBox: React.FC<{
     },
     [conversationContext?.type, handleExternalSelectionAppend]
   );
-  useAddEventListener(
-    'acp.selected.file.append',
-    (items: FileSelectionItem[]) => {
-      if (conversationContext?.type === 'acp') {
-        handleExternalSelectionAppend(items);
-      }
-    },
-    [conversationContext?.type, handleExternalSelectionAppend]
-  );
-
   const emitSelectedFileAppend = useCallback(
     (item: FileOrFolderItem) => {
-      switch (conversationContext?.type) {
-        case 'nomi':
-          emitter.emit('nomi.selected.file.append', [item]);
-          break;
-        case 'acp':
-          emitter.emit('acp.selected.file.append', [item]);
-          break;
-        default:
-          break;
+      if (conversationContext?.type === 'nomi') {
+        emitter.emit('nomi.selected.file.append', [item]);
       }
     },
     [conversationContext?.type]
