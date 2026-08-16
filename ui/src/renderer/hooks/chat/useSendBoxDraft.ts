@@ -17,12 +17,6 @@ type Draft =
       uploadFile: string[];
     }
   | {
-      _type: 'openclaw-gateway';
-      content: string;
-      atPath: Array<string | FileOrFolderItem>;
-      uploadFile: string[];
-    }
-  | {
       _type: 'nomi';
       content: string;
       atPath: Array<string | FileOrFolderItem>;
@@ -38,7 +32,6 @@ type SendBoxDraftStore = {
 
 const store: SendBoxDraftStore = {
   acp: new Map(),
-  'openclaw-gateway': new Map(),
   nomi: new Map(),
 };
 
@@ -54,13 +47,6 @@ const setDraft = <K extends TChatConversation['type']>(
         store.acp.set(conversation_id, draft as Extract<Draft, { _type: 'acp' }>);
       } else {
         store.acp.delete(conversation_id);
-      }
-      break;
-    case 'openclaw-gateway':
-      if (draft) {
-        store['openclaw-gateway'].set(conversation_id, draft as Extract<Draft, { _type: 'openclaw-gateway' }>);
-      } else {
-        store['openclaw-gateway'].delete(conversation_id);
       }
       break;
     case 'nomi':
@@ -83,8 +69,6 @@ const getDraft = <K extends TChatConversation['type']>(
   switch (type) {
     case 'acp':
       return store.acp.get(conversation_id) as Extract<Draft, { _type: K }>;
-    case 'openclaw-gateway':
-      return store['openclaw-gateway'].get(conversation_id) as Extract<Draft, { _type: K }>;
     case 'nomi':
       return store.nomi.get(conversation_id) as Extract<Draft, { _type: K }>;
     default:

@@ -3,7 +3,6 @@ import { describe, expect, test } from 'bun:test';
 
 const source = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
 const platformSendBoxes = [
-  // remote/openclaw share the BasicRuntime implementation.
   '../../../pages/conversation/platforms/BasicRuntimeSendBox.tsx',
   '../../../pages/conversation/platforms/acp/AcpSendBox.tsx',
   '../../../pages/conversation/platforms/nomi/NomiSendBox.tsx',

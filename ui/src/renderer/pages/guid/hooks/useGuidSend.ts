@@ -112,7 +112,7 @@ export type GuidSendResult = {
 };
 
 /**
- * Hook that manages the send logic for all conversation types (openclaw/acp).
+ * Hook that manages the send logic for all conversation types (acp / nomi).
  */
 export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   const {
@@ -191,73 +191,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       .map((server) => toSessionMcpServer(server));
 
     const finalEffectiveAgentType = effectiveAgentType;
-
-    // OpenClaw Gateway path
-    if (selectedAgent === 'openclaw-gateway') {
-      const openclawAgentInfo = agentInfo || findAgentByKey(selectedAgentKey);
-      const openclawConversationParams = buildAgentConversationParams({
-        backend: openclawAgentInfo?.backend || 'openclaw-gateway',
-        name: entryPlan.conversationName,
-        agent_name: openclawAgentInfo?.name,
-        preset_id,
-        workspace: finalWorkspace,
-        model: current_model!,
-        cli_path: openclawAgentInfo?.cli_path,
-        custom_workspace: isCustomWorkspace,
-        is_preset,
-        extra: {
-          default_files: files,
-          runtime_validation: {
-            expected_workspace: finalWorkspace,
-            expected_backend: openclawAgentInfo?.backend,
-            expected_agent_name: openclawAgentInfo?.name,
-            expected_cli_path: openclawAgentInfo?.cli_path,
-            expected_model: current_model?.use_model,
-            switched_at: Date.now(),
-          },
-          preset_enabled_skills: enabled_skills_to_send,
-          exclude_auto_inject_skills: excludeBuiltinSkills,
-        },
-      });
-
-      try {
-        const conversation = await ipcBridge.conversation.create.invoke(openclawConversationParams);
-
-        if (!conversation || !conversation.id) {
-          Message.error(t('conversation.createFailed'));
-          return;
-        }
-        assertCreatedConversationPreset(conversation, preset_id);
-
-        // Push the Guid page's advanced drafts (knowledge/AutoWork/IDMM) onto
-        // the new conversation before navigating, so they are live when the
-        // conversation page consumes the initial message.
-        await applyAdvancedConfig?.(conversation.id);
-
-        emitter.emit('chat.history.refresh');
-
-        const initialMessage = {
-          conversation_id: conversation.id,
-          initial_admission_epoch: 0,
-          input,
-          files: files.length > 0 ? files : undefined,
-          idempotency_key: uuidv7(),
-        };
-        if (entryPlan.sendInitialMessage) {
-          sessionStorage.setItem(
-            sessionStorageKey('initial-message-openclaw', conversationTarget(conversation.id)),
-            JSON.stringify(initialMessage)
-          );
-        }
-
-        seedConversationCache(conversation);
-        await navigate(`/conversation/${conversation.id}`);
-      } catch (error: unknown) {
-        console.error('Failed to create OpenClaw conversation:', error);
-        throw error;
-      }
-      return;
-    }
 
     // Nomi path (direct selection or preset preset with nomi as main agent)
     if (selectedAgent === 'nomi' || (is_preset && finalEffectiveAgentType === 'nomi')) {

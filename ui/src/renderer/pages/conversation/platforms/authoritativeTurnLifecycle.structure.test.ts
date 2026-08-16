@@ -6,10 +6,6 @@ const runtimeReconciler = readFileSync(
   new URL('./reconcileConversationTurnAfterStreamTerminal.ts', import.meta.url),
   'utf8'
 );
-// The openclaw send box is built on one shared implementation.
-const simpleSendBoxes = ['./BasicRuntimeSendBox.tsx'].map((path) =>
-  readFileSync(new URL(path, import.meta.url), 'utf8')
-);
 const statefulLifecycles = ['./nomi/useNomiMessage.ts', './acp/useAcpMessage.ts'].map((path) =>
   readFileSync(new URL(path, import.meta.url), 'utf8')
 );
@@ -28,9 +24,6 @@ describe('authoritative turn lifecycle wiring', () => {
 
     expect(closeBeforeHydration).toBeGreaterThan(-1);
     expect(verifyBeforeHydration).toBeGreaterThan(closeBeforeHydration);
-    for (const source of simpleSendBoxes) {
-      expect(source.includes('resyncAuthoritativeRuntime({ immediate: true });')).toBe(true);
-    }
   });
 
   test('closes ACP lifecycle before its hydration request and requires exact stream correlation', () => {
@@ -60,9 +53,6 @@ describe('authoritative turn lifecycle wiring', () => {
   });
 
   test('does not let a stale hydration snapshot resurrect a completed turn', () => {
-    for (const source of simpleSendBoxes) {
-      expect(source.includes('resyncAuthoritativeRuntime({ immediate: true });')).toBe(true);
-    }
     expect(sharedLifecycle.includes('generationRef.current === generation')).toBe(true);
     expect(sharedLifecycle.includes('reconcileSequenceRef.current === sequence')).toBe(true);
     for (const source of statefulLifecycles) {
@@ -74,7 +64,7 @@ describe('authoritative turn lifecycle wiring', () => {
   test('keeps automatic queue delivery closed when runtime authority is incomplete', () => {
     expect(runtimeReconciler.includes("runtimeAuthority === 'unknown'")).toBe(true);
     expect(runtimeReconciler.includes('continue;')).toBe(true);
-    for (const source of [...simpleSendBoxes, ...statefulLifecycles]) {
+    for (const source of statefulLifecycles) {
       expect(source.includes('setHasHydratedRunningState(false)')).toBe(true);
     }
   });

@@ -13,4 +13,4 @@
  */
 
 /** Execution engine kinds — each uses a different protocol or runtime */
-export type DetectedAgentKind = 'acp' | 'nomi' | 'openclaw-gateway';
+export type DetectedAgentKind = 'acp' | 'nomi';

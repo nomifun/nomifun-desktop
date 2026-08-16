@@ -147,44 +147,6 @@ export type TChatConversation =
       >,
       'model'
     >
-  | Omit<
-      IChatConversation<
-        'openclaw-gateway',
-        {
-          workspace?: string;
-          backend?: string;
-          agent_name?: string;
-          custom_workspace?: boolean;
-          /** Gateway configuration */
-          gateway?: {
-            host?: string;
-            port?: number;
-            token?: string;
-            password?: string;
-            useExternalGateway?: boolean;
-            cli_path?: string;
-          };
-          /** Session key for resume */
-          sessionKey?: string;
-          /** Runtime validation snapshot used for post-switch strong checks */
-          runtimeValidation?: {
-            expectedWorkspace?: string;
-            expectedBackend?: string;
-            expectedAgentName?: string;
-            expectedCliPath?: string;
-            expectedModel?: string;
-            expectedIdentityHash?: string | null;
-            switchedAt?: number;
-          };
-          /** Skills snapshot for this conversation — authoritative list, written
-           * once at creation. Join with `GET /api/skills` for descriptions. */
-          skills?: string[];
-          /** Legacy marker for pre-provider-probe health-check conversations */
-          is_health_check?: boolean;
-        }
-      >,
-      'model'
-    >
   | IChatConversation<
       'nomi',
       {

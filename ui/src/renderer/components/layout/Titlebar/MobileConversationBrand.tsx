@@ -28,8 +28,6 @@ const MobileConversationBrand: React.FC<MobileConversationBrandProps> = ({ conve
       ? conversation.extra?.backend
       : conversation?.type === 'nomi'
         ? 'nomi'
-        : conversation?.type === 'openclaw-gateway'
-            ? 'openclaw-gateway'
             : undefined;
 
   const showLogo = Boolean(backend || preset);

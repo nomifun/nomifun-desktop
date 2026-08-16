@@ -646,7 +646,19 @@ export const conversation = {
   // 注意：不要往 body 里加任何 UpdateConversationRequest 之外的字段——该 DTO 是
   // `deny_unknown_fields`，多一个键整条 PATCH 直接 400。`extra` 恒为合并语义
   // （见 nomifun-conversation/src/service.rs 的 update），无需任何开关字段。
-  update: httpPatch<boolean, { conversation_id: ConversationId; updates: Partial<TChatConversation> & { pinned?: boolean } }>(
+  //
+  // `extra` 单独放宽为 Partial：它是合并语义，调用方本就只传要改的键，而
+  // `Partial<TChatConversation>` 作用在联合类型上时仍要求 `extra` 整体符合某一
+  // 分支。此前有一个全可选的分支意外充当了逃逸口，该分支随引擎删除后消失。
+  update: httpPatch<
+    boolean,
+    {
+      conversation_id: ConversationId;
+      updates: (Partial<TChatConversation> | { extra: Partial<TChatConversation['extra']> }) & {
+        pinned?: boolean;
+      };
+    }
+  >(
     (p) => `/api/conversations/${p.conversation_id}`,
     (p) => {
       const updates = p.updates as Record<string, unknown>;
@@ -1712,11 +1724,6 @@ export const mcpService = {
   loginMcpOAuth: httpPost<{ success: boolean; error?: string }, { server_url: string }>('/api/mcp/oauth/login'),
   logoutMcpOAuth: httpPost<void, { server_url: string }>('/api/mcp/oauth/logout'),
   getAuthenticatedServers: httpGet<string[], void>('/api/mcp/oauth/authenticated'),
-};
-
-export const openclawConversation = {
-  sendMessage: conversation.sendMessage,
-  responseStream: conversation.responseStream,
 };
 
 // ---------------------------------------------------------------------------
@@ -3161,7 +3168,7 @@ export interface IConfirmMessageParams {
 }
 
 export interface ICreateConversationParams {
-  type: 'acp' | 'codex' | 'openclaw-gateway' | 'nomi';
+  type: 'acp' | 'codex' | 'nomi';
   name?: string;
   model: TProviderWithModel;
   /** Backend-resolved reusable launch configuration. */

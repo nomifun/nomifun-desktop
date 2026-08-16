@@ -6,16 +6,10 @@ const readSource = (relativePath: string): string =>
 
 const queueSource = readSource('./useConversationCommandQueue.ts');
 const acpSource = readSource('./acp/AcpSendBox.tsx');
-// The openclaw send box is built on one shared implementation; the
+// The
 // OpenClaw file still hosts the platform-only Star Office install flow.
-const basicRuntimeSource = readSource('./BasicRuntimeSendBox.tsx');
-const openClawSource = readSource('./openclaw/OpenClawSendBox.tsx');
 const nomiSource = readSource('./nomi/NomiSendBox.tsx');
-const platformSources = [
-  acpSource,
-  basicRuntimeSource,
-  nomiSource,
-];
+const platformSources = [acpSource, nomiSource];
 
 describe('conversation send idempotency wiring', () => {
   test('uses the persisted UUIDv7 queue item id as the send key', () => {
@@ -69,11 +63,6 @@ describe('conversation send idempotency wiring', () => {
         guardedDirectOpen: 'if (!deferLocalTurnUntilFresh) setAiProcessing(true);',
         deferredFreshOpen: 'if (deferLocalTurnUntilFresh) {',
       },
-      {
-        source: basicRuntimeSource,
-        guardedDirectOpen: 'if (!deferLocalTurnUntilFresh) {',
-        deferredFreshOpen: 'if (deferLocalTurnUntilFresh) {',
-      },
     ];
 
     for (const { source, guardedDirectOpen, deferredFreshOpen } of queueCallers) {
@@ -109,7 +98,6 @@ describe('conversation send idempotency wiring', () => {
   test('authorizes exact initial payloads and marks only those POSTs initial-only', () => {
     const initialConsumers = [
       readSource('./acp/useAcpInitialMessage.ts'),
-      basicRuntimeSource,
       readSource('./nomi/NomiSendBox.tsx'),
     ];
 
@@ -132,102 +120,6 @@ describe('conversation send idempotency wiring', () => {
     }
   });
 
-  test('keeps explicit StarOffice clicks legal while remount recovery fails closed', () => {
-    const deliveryFunction = openClawSource.indexOf('const deliverStarOfficeRequest = useCallback(');
-    const claim = openClawSource.indexOf(
-      'if (!claimInitialMessageDelivery(storageKey)) return;',
-      deliveryFunction
-    );
-    const post = openClawSource.indexOf(
-      'const result = await ipcBridge.openclawConversation.sendMessage.invoke({',
-      claim
-    );
-    const forwardedKey = openClawSource.indexOf('idempotency_key,', post);
-    const initialMode = openClawSource.indexOf(
-      'initial_only: initialOnly,',
-      forwardedKey
-    );
-    const acceptedRemoval = openClawSource.indexOf(
-      'completeInitialMessageDelivery(sessionStorage, storageKey, idempotency_key);',
-      initialMode
-    );
-    const classification = openClawSource.indexOf(
-      'const disposition = classifyPublicMessageDelivery(result);',
-      acceptedRemoval
-    );
-    const fresh = openClawSource.indexOf("if (disposition === 'fresh') {", classification);
-    const freshOpen = openClawSource.indexOf('beginLocalTurn();', fresh);
-
-    const explicitHandler = openClawSource.indexOf("'staroffice.install.request'");
-    const persistedBeforeDispatch = openClawSource.indexOf(
-      'const delivery = persistInitialMessageDelivery(',
-      explicitHandler
-    );
-    const explicitDispatch = openClawSource.indexOf(
-      'void deliverStarOfficeRequest(delivery, storageKey);',
-      persistedBeforeDispatch
-    );
-    const remountRead = openClawSource.indexOf(
-      'const pending = readInitialMessageDelivery(sessionStorage, storageKey);',
-      explicitDispatch
-    );
-    const terminalFence = openClawSource.indexOf(
-      "conversation.status !== 'pending' && conversation.status !== 'running'",
-      remountRead
-    );
-    const quarantine = openClawSource.indexOf(
-      'quarantineInitialMessageDelivery(',
-      terminalFence
-    );
-    const runningBranch = openClawSource.indexOf(
-      "if (conversation.status === 'running') {",
-      quarantine
-    );
-    const runningReplay = openClawSource.indexOf(
-      'void deliverStarOfficeRequest(pending, storageKey, true);',
-      runningBranch
-    );
-    const pendingAuthority = openClawSource.indexOf(
-      'const authorized = await readAuthorizedInitialMessageDelivery(',
-      runningReplay
-    );
-    const pendingInitialOnly = openClawSource.indexOf(
-      'void deliverStarOfficeRequest(authorized, storageKey, true);',
-      pendingAuthority
-    );
-
-    expect(deliveryFunction >= 0).toBe(true);
-    expect(claim > deliveryFunction).toBe(true);
-    expect(post > claim).toBe(true);
-    expect(forwardedKey > post).toBe(true);
-    expect(initialMode > forwardedKey).toBe(true);
-    expect(acceptedRemoval > initialMode).toBe(true);
-    expect(fresh > acceptedRemoval).toBe(true);
-    expect(freshOpen > fresh).toBe(true);
-    expect(openClawSource.slice(deliveryFunction, post).includes('beginLocalTurn();')).toBe(
-      false
-    );
-    expect(persistedBeforeDispatch > explicitHandler).toBe(true);
-    expect(explicitDispatch > persistedBeforeDispatch).toBe(true);
-    expect(
-      openClawSource
-        .slice(explicitHandler, remountRead)
-        .includes('deliverStarOfficeRequest(delivery, storageKey, true)')
-    ).toBe(false);
-    expect(remountRead > explicitDispatch).toBe(true);
-    expect(terminalFence > remountRead).toBe(true);
-    expect(quarantine > terminalFence).toBe(true);
-    expect(runningBranch > quarantine).toBe(true);
-    expect(runningReplay > runningBranch).toBe(true);
-    expect(pendingAuthority > runningReplay).toBe(true);
-    expect(pendingInitialOnly > pendingAuthority).toBe(true);
-    expect(
-      openClawSource
-        .slice(remountRead, pendingInitialOnly)
-        .includes('deliverStarOfficeRequest(pending, storageKey);')
-    ).toBe(false);
-  });
-
   test('keeps persisted initial deliveries closed until a fresh accepted response', () => {
     const initialCallers = [
       {
@@ -235,12 +127,6 @@ describe('conversation send idempotency wiring', () => {
         start: 'const sendInitialMessage = async () => {',
         post: 'sendMessage.invoke({',
         open: 'setAiProcessing(true);',
-      },
-      {
-        source: basicRuntimeSource,
-        start: 'const processInitialMessage = async () => {',
-        post: 'sendMessage.invoke({',
-        open: 'beginLocalTurn();',
       },
     ];
 

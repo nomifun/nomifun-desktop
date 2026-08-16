@@ -50,9 +50,6 @@ export const getBackendKeyFromConversation = (conversation: TChatConversation): 
   if (conversation.type === 'acp') {
     return conversation.extra?.backend;
   }
-  if (conversation.type === 'openclaw-gateway') {
-    return conversation.extra?.backend || 'openclaw-gateway';
-  }
   return conversation.type;
 };
 
