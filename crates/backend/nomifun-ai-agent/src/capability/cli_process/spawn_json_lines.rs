@@ -22,7 +22,7 @@ impl CliAgentProcess {
     /// - Read stderr and buffer the last [`STDERR_BUFFER_MAX`] bytes
     /// - Monitor process exit
     ///
-    /// This is used by Gemini and OpenClaw agents.
+    /// Used by CLI agents that emit line-delimited JSON frames.
     pub async fn spawn(config: CommandSpec) -> Result<Self, AppError> {
         let mut cmd = CmdBuilder::new(&config.command);
         cmd.args(&config.args)

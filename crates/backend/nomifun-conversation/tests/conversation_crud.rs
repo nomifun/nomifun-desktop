@@ -321,7 +321,6 @@ async fn t1_2_create_each_agent_type() {
 
     let types = vec![
         ("acp", AgentType::Acp),
-        ("openclaw-gateway", AgentType::OpenclawGateway),
         ("nomi", AgentType::Nomi),
     ];
 

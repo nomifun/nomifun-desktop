@@ -5,7 +5,7 @@
 //!
 //! Session-scoped endpoints (mode / model / config / usage /
 //! agent-capabilities / slash-commands / side-question / workspace /
-//! openclaw-runtime) now live in the `nomifun-conversation` crate, where
+//! now live in the `nomifun-conversation` crate, where
 //! they dispatch through `AgentRuntimeHandle` via `ConversationService`.
 
 pub mod agent;

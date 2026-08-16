@@ -30,12 +30,6 @@ pub(crate) enum RunningOrphanDisposition {
     /// absence of entries is itself proof (the child never spawned, exited
     /// with proof, or died under the same containment authorities as above).
     RegisteredLocalProcessTree,
-    /// The backend registers a gateway process only when it self-spawned one;
-    /// external or port-attached gateways host work this process never owned,
-    /// so registry absence is ambiguous.  Terminal proof requires that entries
-    /// existed for this Conversation and every one was reaped with
-    /// exact-identity verification.
-    RegisteredGatewayAuthorityRequired,
 }
 
 pub(crate) fn running_orphan_disposition(
@@ -54,9 +48,6 @@ pub(crate) fn running_orphan_disposition(
         }
         value if value == AgentType::Acp.serde_name() => {
             RunningOrphanDisposition::RegisteredLocalProcessTree
-        }
-        value if value == AgentType::OpenclawGateway.serde_name() => {
-            RunningOrphanDisposition::RegisteredGatewayAuthorityRequired
         }
         unknown => {
             return Err(AppError::Conflict(format!(
@@ -81,10 +72,6 @@ mod tests {
             (
                 AgentType::Acp.serde_name(),
                 RunningOrphanDisposition::RegisteredLocalProcessTree,
-            ),
-            (
-                AgentType::OpenclawGateway.serde_name(),
-                RunningOrphanDisposition::RegisteredGatewayAuthorityRequired,
             ),
         ] {
             assert_eq!(running_orphan_disposition(backend).unwrap(), disposition);

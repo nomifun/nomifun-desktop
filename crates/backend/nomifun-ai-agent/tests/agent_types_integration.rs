@@ -140,7 +140,6 @@ fn agent_type_serde_all_variants() {
     // Verify that all AgentType variants serialize/deserialize correctly
     for (variant, expected_json) in [
         (AgentType::Acp, "\"acp\""),
-        (AgentType::OpenclawGateway, "\"openclaw-gateway\""),
         (AgentType::Nomi, "\"nomi\""),
     ] {
         let json = serde_json::to_string(&variant).unwrap();

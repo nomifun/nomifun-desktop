@@ -385,10 +385,7 @@ mod tests {
         // Every non-Nomi engine WITHOUT the requirement MCP injected: no tool bus
         // entry for the native requirement tools, so the prompt must NOT tell the
         // model to call them.
-        for at in [
-            AgentType::Acp,
-            AgentType::OpenclawGateway,
-        ] {
+        for at in [AgentType::Acp] {
             let p =
                 build_requirement_prompt("t", &req(), 7, CLAIM_TOKEN, at, false, &[]);
             assert!(
@@ -471,21 +468,12 @@ mod tests {
         // ACP only when the requirement MCP is enabled.
         assert!(!session_has_requirement_tools(AgentType::Acp, false));
         assert!(session_has_requirement_tools(AgentType::Acp, true));
-        // Other engines never have them, even with the flag set.
-        for at in [
-            AgentType::OpenclawGateway,
-        ] {
-            assert!(!session_has_requirement_tools(at, true), "{at:?}: no requirement tools");
-        }
     }
 
     #[test]
     fn has_native_requirement_tools_only_for_nomi() {
         assert!(has_native_requirement_tools(AgentType::Nomi));
-        for at in [
-            AgentType::Acp,
-            AgentType::OpenclawGateway,
-        ] {
+        for at in [AgentType::Acp] {
             assert!(
                 !has_native_requirement_tools(at),
                 "{at:?}: the native requirement tools are NOT registered for this engine"
