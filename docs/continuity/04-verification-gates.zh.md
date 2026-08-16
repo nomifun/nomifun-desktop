@@ -207,9 +207,6 @@ cargo test -p nomifun-db --lib id_schema_contract::tests:: --no-fail-fast
 cargo test -p nomifun-conversation --lib stream_relay::tests:: --no-fail-fast
 76 passed
 
-cargo test -p nomifun-conversation --test acp_artifact_turn_history
-3 passed
-
 cargo check --workspace --all-targets
 passed
 
