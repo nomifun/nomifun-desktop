@@ -6,7 +6,7 @@
 //! result in `ApiResponse`.
 //!
 //! Session-scoped operations (mode/model/config/usage/capabilities/
-//! slash-commands/side-question/workspace/openclaw-runtime) now live in
+//! slash-commands/side-question/workspace) now live in
 //! `nomifun-conversation::ConversationService`, which dispatches through
 //! `AgentRuntimeHandle`. This service retains only agent-catalog and
 //! ACP health-check responsibilities, plus support for the custom-agent

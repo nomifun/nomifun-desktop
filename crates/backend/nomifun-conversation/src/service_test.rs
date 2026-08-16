@@ -8433,7 +8433,6 @@ async fn background_reconcile_exact_live_owner_waits_without_settling_or_buildin
 async fn background_reconcile_external_backends_fail_closed_without_mutation() {
     for (index, backend) in [
         AgentType::Nomi.serde_name(),
-        AgentType::OpenclawGateway.serde_name(),
     ]
     .into_iter()
     .enumerate()
@@ -8702,7 +8701,6 @@ async fn boot_reconcile_quarantines_every_current_backend_without_terminal_proof
     for (index, backend) in [
         AgentType::Nomi.serde_name(),
         AgentType::Acp.serde_name(),
-        AgentType::OpenclawGateway.serde_name(),
     ]
     .into_iter()
     .enumerate()
@@ -11031,7 +11029,7 @@ async fn send_message_keeps_external_gateway_orphan_running_until_terminal_is_pr
             .iter_mut()
             .find(|row| row.conversation_id == conv.conversation_id)
             .unwrap();
-        row.r#type = AgentType::OpenclawGateway.serde_name().to_owned();
+        row.r#type = AgentType::Acp.serde_name().to_owned();
         row.status = Some("running".to_owned());
     }
     broadcaster.take_events();
@@ -14975,7 +14973,7 @@ async fn view_warmup_keeps_external_gateway_orphan_running_until_terminal_is_pro
             .iter_mut()
             .find(|row| row.conversation_id == conv.conversation_id)
             .unwrap();
-        row.r#type = AgentType::OpenclawGateway.serde_name().to_owned();
+        row.r#type = AgentType::Acp.serde_name().to_owned();
         row.status = Some("running".to_owned());
     }
     broadcaster.take_events();
@@ -15019,7 +15017,7 @@ async fn view_warmup_keeps_remote_orphan_running_until_terminal_is_proven() {
             .iter_mut()
             .find(|row| row.conversation_id == conv.conversation_id)
             .unwrap();
-        row.r#type = AgentType::OpenclawGateway.serde_name().to_owned();
+        row.r#type = AgentType::Acp.serde_name().to_owned();
         row.status = Some("running".to_owned());
     }
     broadcaster.take_events();

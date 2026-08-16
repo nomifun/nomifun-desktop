@@ -126,26 +126,6 @@ pub struct SnapshotContentResponse {
 }
 
 // ---------------------------------------------------------------------------
-// E. Star Office detection
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct DetectStarOfficeRequest {
-    #[serde(default)]
-    pub preferred_url: Option<String>,
-    #[serde(default)]
-    pub force: Option<bool>,
-    #[serde(default)]
-    pub timeout_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct StarOfficeDetectResponse {
-    pub url: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -586,56 +566,6 @@ mod tests {
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: SnapshotContentResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, resp);
-    }
-
-    // -- E. Star Office detection ---------------------------------------------
-
-    #[test]
-    fn detect_star_office_request_full() {
-        let raw = json!({
-            "preferred_url": "http://localhost:19000",
-            "force": true,
-            "timeout_ms": 2000
-        });
-        let req: DetectStarOfficeRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.preferred_url.as_deref(), Some("http://localhost:19000"));
-        assert_eq!(req.force, Some(true));
-        assert_eq!(req.timeout_ms, Some(2000));
-    }
-
-    #[test]
-    fn detect_star_office_request_empty() {
-        let raw = json!({});
-        let req: DetectStarOfficeRequest = serde_json::from_value(raw).unwrap();
-        assert!(req.preferred_url.is_none());
-        assert!(req.force.is_none());
-        assert!(req.timeout_ms.is_none());
-    }
-
-    #[test]
-    fn star_office_detect_response_found() {
-        let resp = StarOfficeDetectResponse {
-            url: Some("http://localhost:19000".into()),
-        };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["url"], "http://localhost:19000");
-    }
-
-    #[test]
-    fn star_office_detect_response_not_found() {
-        let resp = StarOfficeDetectResponse { url: None };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["url"], serde_json::Value::Null);
-    }
-
-    #[test]
-    fn star_office_detect_response_roundtrip() {
-        let resp = StarOfficeDetectResponse {
-            url: Some("http://localhost:18791".into()),
-        };
-        let json = serde_json::to_string(&resp).unwrap();
-        let parsed: StarOfficeDetectResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, resp);
     }
 }

@@ -21,7 +21,7 @@ use common::{body_json, get_request, json_with_token, setup_and_login};
 
 use nomifun_app::{AppConfig, AppServices, build_module_states, create_router_with_states};
 use nomifun_office::{
-    OfficeRouterState, OfficecliWatchManager, ProxyService, SnapshotService, StarOfficeDetector,
+    OfficeRouterState, OfficecliWatchManager, ProxyService, SnapshotService,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -95,13 +95,11 @@ fn build_test_office_state(data_dir: &std::path::Path, allowed_roots: Vec<std::p
     let wm = Arc::new(OfficecliWatchManager::new(spawner, bc));
 
     let snapshot = Arc::new(SnapshotService::new(data_dir));
-    let detector = Arc::new(StarOfficeDetector::local());
     let proxy = Arc::new(ProxyService::new(wm.clone()));
 
     OfficeRouterState {
         watch_manager: wm,
         snapshot_service: snapshot,
-        star_office_detector: detector,
         proxy_service: proxy,
         allowed_roots,
     }
@@ -133,7 +131,6 @@ async fn au2_unauthenticated_all_office_endpoints() {
         "/api/ppt-preview/start",
         "/api/preview-history/list",
         "/api/preview-history/save",
-        "/api/star-office/detect",
     ];
 
     for endpoint in endpoints {
@@ -478,39 +475,7 @@ async fn sh7_target_field_combination_different_hash() {
     );
 }
 
-// ── SO-1: Star Office detect — no service available ─────────────────
 
-#[tokio::test]
-async fn so1_detect_no_service() {
-    let (mut app, services, _tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
-
-    let body = json!({});
-    let req = json_with_token("POST", "/api/star-office/detect", body, &token, &csrf);
-    let resp = app.clone().oneshot(req).await.unwrap();
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert!(json["data"]["url"].is_null());
-}
-
-// ── SO-2: Star Office detect with preferred URL ─────────────────────
-
-#[tokio::test]
-async fn so2_detect_with_preferred_url() {
-    let (mut app, services, _tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
-
-    let body = json!({"preferred_url": "http://localhost:19000"});
-    let req = json_with_token("POST", "/api/star-office/detect", body, &token, &csrf);
-    let resp = app.clone().oneshot(req).await.unwrap();
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert!(json["data"]["url"].is_null());
-}
 
 // ── RP-2: PPT proxy SSRF protection ─────────────────────────────────
 

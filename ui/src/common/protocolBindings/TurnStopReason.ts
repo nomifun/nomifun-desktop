@@ -3,6 +3,6 @@
 /**
  * Cross-backend normalized "why did the turn end" reason. Deliberately NOT the
  * ACP SDK's `StopReason` so the shared event type does not couple to ACP
- * (nomi / openclaw / remote are not ACP); each backend maps its own outcome.
+ * (nomi is not ACP); each backend maps its own outcome.
  */
 export type TurnStopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled";

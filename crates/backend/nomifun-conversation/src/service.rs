@@ -3350,9 +3350,6 @@ impl ConversationService {
             RunningOrphanDisposition::RegisteredLocalProcessTree => {
                 OrphanProofRequirement::RegisteredLocalProcessTree
             }
-            RunningOrphanDisposition::RegisteredGatewayAuthorityRequired => {
-                OrphanProofRequirement::RegisteredGatewayAuthority
-            }
         };
         let decision = provider
             .prove_orphan_generation_terminal(
@@ -9088,13 +9085,6 @@ impl ConversationService {
                     break;
                 }
 
-                if let Some(session_key) = agent.get_session_key() {
-                    // This future may own an SQLite commit. Never cancel it on
-                    // an elapsed wall-clock budget: an unknown commit result
-                    // would let exact turn authority release while a late write
-                    // from this generation can still land.
-                    persist_session_key(&repo, &conv_id, &session_key).await;
-                }
                 if turn_token.is_cancelled() {
                     durable_completion = Some((
                         false,
@@ -12287,7 +12277,7 @@ fn project_preset_runtime_context(
             object.insert("preset_rules".to_owned(), context);
             object.remove("preset_context");
         }
-        AgentType::Acp | AgentType::OpenclawGateway => {
+        AgentType::Acp => {
             object.insert("preset_context".to_owned(), context);
             object.remove("preset_rules");
         }
@@ -13863,7 +13853,6 @@ mod tests {
     fn enum_to_db_agent_type() {
         use nomifun_common::AgentType;
         assert_eq!(enum_to_db(&AgentType::Acp).unwrap(), "acp");
-        assert_eq!(enum_to_db(&AgentType::OpenclawGateway).unwrap(), "openclaw-gateway");
     }
 
     #[test]

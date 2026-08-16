@@ -21,7 +21,6 @@ import { emitter } from '../../../utils/emitter';
 import AcpChat from '../platforms/acp/AcpChat';
 import ChatLayout, { type ChatLayoutProps } from './ChatLayout';
 import ChatSlider from './ChatSlider.tsx';
-import OpenClawChat from '../platforms/openclaw/OpenClawChat';
 import { saveNomiDefaultModel } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
 import { configService } from '@/common/config/configService';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
@@ -44,7 +43,6 @@ import type { TExecutionModelPool, TExecutionModelRef } from '@/common/types/age
 import { ExecutionProvider } from '../execution/ExecutionContext';
 import ExecutionConversationLayout from '../execution/ExecutionConversationLayout';
 import ReadOnlyConversationView from '../execution/ReadOnlyConversationView';
-import StarOfficeMonitorCard from '../platforms/openclaw/StarOfficeMonitorCard.tsx';
 import SshHostStatusPill from './SshHostStatusPill';
 import { useWorkspaceExtraTabs } from '../hooks/useWorkspaceExtraTabs';
 import { useExecutionModelPool } from '../execution/useExecutionModelPool';
@@ -570,17 +568,6 @@ const ChatConversation: React.FC<{
           ></AcpChat>
         );
       }
-      case 'openclaw-gateway':
-        return (
-          <OpenClawChat
-            key={conversation.id}
-            conversation_id={conversation.id}
-            workspace={conversation.extra?.workspace ?? ''}
-            cron_job_id={conversation.cron_job_id}
-            hideSendBox={hideSendBox}
-            loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
-          />
-        );
       default:
         return null;
     }
@@ -663,24 +650,14 @@ const ChatConversation: React.FC<{
     : isLoadingPreset
       ? {} // Still loading custom agents; avoid showing the backend logo prematurely.
       : {
-          backend:
-            conversation?.type === 'acp'
-              ? conversation?.extra?.backend
-              : // `nomi` conversations are handled by the early return above and can
-                // never reach this branch, so the chain starts at non-ACP types.
-                conversation?.type === 'openclaw-gateway'
-                  ? 'openclaw-gateway'
-                  : undefined,
+          // `nomi` conversations are handled by the early return above and can
+          // never reach this branch, so ACP is the only backend left to label.
+          backend: conversation?.type === 'acp' ? conversation?.extra?.backend : undefined,
           agent_name: conversationAgentName,
         };
 
   const headerExtraNode = (
     <div className='flex items-center gap-8px'>
-      {conversation?.type === 'openclaw-gateway' && (
-        <div className='shrink-0'>
-          <StarOfficeMonitorCard conversation_id={conversation.id} />
-        </div>
-      )}
       {conversation && (
         <div className='shrink-0'>
           <CronJobManager

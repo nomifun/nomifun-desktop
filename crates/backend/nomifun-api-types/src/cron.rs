@@ -50,7 +50,7 @@ pub struct CronAgentConfigDto {
     pub custom_agent_id: Option<String>,
     /// Reusable configuration preset selected for this scheduled task. This is
     /// deliberately independent from `custom_agent_id`, which identifies an
-    /// executable custom ACP/OpenClaw agent rather than a preset.
+    /// executable custom ACP agent rather than a preset.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

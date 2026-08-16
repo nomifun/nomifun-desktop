@@ -21,7 +21,7 @@ use std::path::PathBuf;
 pub enum AgentSource {
     /// Ships with the backend binary (no CLI install required — e.g. `nomi`).
     Internal,
-    /// Seeded from the migration (ACP vendors, openclaw).
+    /// Seeded from the migration (ACP vendors).
     Builtin,
     /// Installed from the extension hub.
     Extension,

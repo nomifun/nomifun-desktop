@@ -236,7 +236,7 @@ pub struct NomiResolvedConfig {
 mod tests {
     use super::*;
     use nomifun_api_types::{
-        AcpBuildExtra, AcpModelInfo, NomiBuildExtra, OpenClawGatewayConfig, SlashCommandItem,
+        AcpBuildExtra, AcpModelInfo, NomiBuildExtra, SlashCommandItem,
     };
     use serde_json::json;
 
@@ -369,14 +369,6 @@ mod tests {
         assert_eq!(json["command"], "/review");
     }
 
-    #[test]
-    fn openclaw_gateway_config_defaults() {
-        let json = json!({});
-        let config: OpenClawGatewayConfig = serde_json::from_value(json).unwrap();
-        assert!(!config.use_external_gateway);
-        assert!(config.host.is_none());
-        assert!(config.port.is_none());
-    }
 
     #[test]
     fn nomi_build_extra_serde_defaults() {

@@ -7,7 +7,6 @@ mod acp;
 pub(crate) mod construction_guard;
 mod context;
 pub(crate) mod nomi;
-mod openclaw;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -291,7 +290,7 @@ async fn build_agent(
         deps.authoritative_user_id.as_ref(),
     );
 
-    // External ACP/OpenClaw/Remote runtimes execute arbitrary code as
+    // The external ACP runtime executes arbitrary code as
     // the backend OS user.  Without an OS/container sandbox they can never be
     // made safe by hiding individual tools, so model-only principals are
     // rejected at the single factory boundary.  Nomi remains available under
@@ -306,7 +305,6 @@ async fn build_agent(
     let ctx = FactoryContext::resolve(&deps, &options).await?;
     match options.agent_type {
         AgentType::Acp => acp::build(deps, options, ctx).await,
-        AgentType::OpenclawGateway => openclaw::build(deps, options, ctx).await,
         AgentType::Nomi => nomi::build(deps, options, ctx, authority).await,
     }
 }

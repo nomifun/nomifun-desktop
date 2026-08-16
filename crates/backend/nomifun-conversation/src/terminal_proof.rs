@@ -24,10 +24,6 @@ pub enum OrphanProofRequirement {
     /// Effect-bearing child registered durably at spawn: proof = verified
     /// reaping of the Conversation's registry entries (absence is proof).
     RegisteredLocalProcessTree,
-    /// Gateway process registered only when self-spawned: proof requires
-    /// entries to have existed AND all to be reaped with identity
-    /// verification; registry absence is ambiguous and never proves.
-    RegisteredGatewayAuthority,
 }
 
 /// Outcome of one terminal-proof evaluation.
