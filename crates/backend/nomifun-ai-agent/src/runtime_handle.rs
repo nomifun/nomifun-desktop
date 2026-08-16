@@ -174,9 +174,6 @@ pub trait MockAgentRuntime: AgentRuntimeControl {
             "Model switching is not supported for this mock".into(),
         ))
     }
-    async fn get_usage(&self) -> Result<Option<serde_json::Value>, AppError> {
-        Ok(None)
-    }
     async fn get_slash_commands(&self) -> Result<Vec<SlashCommandItem>, AppError> {
         Ok(Vec::new())
     }
@@ -185,9 +182,6 @@ pub trait MockAgentRuntime: AgentRuntimeControl {
             status: "unsupported".into(),
             answer: None,
         })
-    }
-    async fn get_openclaw_runtime(&self) -> Result<serde_json::Value, AppError> {
-        Ok(serde_json::Value::Null)
     }
 }
 
@@ -567,29 +561,6 @@ impl AgentRuntimeHandle {
         }
     }
 
-    /// Returns the cached session usage as a snake_case JSON object. The
-    /// structure mirrors the ACP SDK `UsageUpdate` schema
-    /// (`used` / `size` / `cost` / `_meta`), normalised via
-    /// [`nomifun_common::normalize_keys_to_snake_case`] so keys land as
-    /// `used` / `size` / `cost` to match the Nomi wire convention —
-    /// `_meta` passes through verbatim.
-    ///
-    /// Non-ACP agents return `None`.
-    pub async fn get_usage(&self) -> Result<Option<serde_json::Value>, AppError> {
-        match self {
-            Self::Acp(m) => {
-                let Some(usage) = m.usage().await else { return Ok(None) };
-                let mut value = serde_json::to_value(usage)
-                    .map_err(|e| AppError::Internal(format!("Failed to serialize usage: {e}")))?;
-                nomifun_common::normalize_keys_to_snake_case(&mut value);
-                Ok(Some(value))
-            }
-            Self::Nomi(_) | Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => Ok(None),
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Mock(m) => m.get_usage().await,
-        }
-    }
-
     /// Slash commands available in the current session. Only ACP exposes
     /// a slash-command catalog; other variants report an empty list
     /// (the UI renders "no commands").
@@ -623,18 +594,6 @@ impl AgentRuntimeHandle {
             }
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.handle_side_question(req).await,
-        }
-    }
-
-    /// OpenClaw-specific runtime diagnostics. Only OpenClaw reports
-    /// diagnostics; other variants report `Value::Null` so diagnostic
-    /// UIs degrade gracefully.
-    pub async fn get_openclaw_runtime(&self) -> Result<serde_json::Value, AppError> {
-        match self {
-            Self::OpenClaw(m) => Ok(m.get_diagnostics().await),
-            Self::Acp(_) | Self::Nomi(_) | Self::Nanobot(_) | Self::Remote(_) => Ok(serde_json::Value::Null),
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Mock(m) => m.get_openclaw_runtime().await,
         }
     }
 }

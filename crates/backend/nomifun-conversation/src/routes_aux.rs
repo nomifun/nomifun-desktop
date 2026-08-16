@@ -22,7 +22,6 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
             "/api/conversations/{conversation_id}/slash-commands",
             get(get_slash_commands),
         )
-        .route("/api/conversations/{conversation_id}/usage", get(get_usage))
         .route(
             "/api/conversations/{conversation_id}/mode",
             get(get_mode).put(set_mode),
@@ -30,10 +29,6 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
         .route(
             "/api/conversations/{conversation_id}/model",
             get(get_model).put(set_model),
-        )
-        .route(
-            "/api/conversations/{conversation_id}/openclaw/runtime",
-            get(get_openclaw_runtime),
         )
         .route(
             "/api/conversations/{conversation_id}/workspace",
@@ -134,16 +129,6 @@ async fn set_model(
     Ok(Json(ApiResponse::success()))
 }
 
-async fn get_usage(
-    State(state): State<ConversationRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    Path(conversation_id): Path<ConversationId>,
-) -> Result<Json<ApiResponse<Option<serde_json::Value>>>, AppError> {
-    Ok(Json(ApiResponse::ok(
-        state.service.get_usage(&user.id, conversation_id.as_str()).await?,
-    )))
-}
-
 async fn side_question(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
@@ -167,19 +152,6 @@ async fn get_slash_commands(
         state
             .service
             .get_slash_commands(&user.id, conversation_id.as_str())
-            .await?,
-    )))
-}
-
-async fn get_openclaw_runtime(
-    State(state): State<ConversationRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    Path(conversation_id): Path<ConversationId>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .get_openclaw_runtime(&user.id, conversation_id.as_str())
             .await?,
     )))
 }
