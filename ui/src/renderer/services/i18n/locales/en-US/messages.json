@@ -85,6 +85,7 @@
   "fileChangesCount": "{{count}} File Changes",
   "turnDeliverables": {
     "title": "Generated {{count}} files",
+    "partialTitle": "Showing {{count}} changed files from this turn (scroll up to load the rest)",
     "imagesTitle": "Generated {{count}} images",
     "mixedTitle": "Generated {{count}} items",
     "showMore": "Show {{count}} more files",
