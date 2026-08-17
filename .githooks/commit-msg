@@ -1,5 +1,0 @@
-#!/bin/sh
-set -eu
-
-repo_root=$(git rev-parse --show-toplevel)
-exec "$repo_root/scripts/run-git-attribution-check.sh" current-message "$1"

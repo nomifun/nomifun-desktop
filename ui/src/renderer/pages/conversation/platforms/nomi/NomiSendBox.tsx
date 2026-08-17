@@ -643,9 +643,11 @@ const NomiSendBox: React.FC<{
         }
       } catch (error) {
         if (msg_id) removeMessageByMsgId(msg_id);
-        // Engine can't steer (non-Nomi) or the turn just ended → fall back to the
-        // pending queue so the interjection is never lost.
+        // Rethrow so the caller can divert the interjection into the persisted
+        // command queue. Swallowing here (as this used to) stranded the draft:
+        // the box had already been cleared, so the text was unrecoverable.
         Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
+        throw error;
       }
     },
     [
@@ -665,7 +667,18 @@ const NomiSendBox: React.FC<{
     if (!canSendFiles(filesToSend)) return;
     clearFiles();
     emitter.emit('nomi.selected.file.clear');
-    await executeSteer({ input: message, files: filesToSend });
+    try {
+      await executeSteer({ input: message, files: filesToSend });
+    } catch {
+      // Steering has no durable channel of its own: a failed delivery is simply
+      // gone. Divert into the same persisted command queue the normal send path
+      // uses when busy, so an offline click keeps both the text and the
+      // attachments instead of losing them to an error toast. This is the
+      // fallback the catch in executeSteer has always claimed to perform, and
+      // conversation.steer.fallbackQueued is the message written for it.
+      enqueue({ input: message, files: filesToSend });
+      Message.info(t('conversation.steer.fallbackQueued'));
+    }
   };
 
   const handleEditQueuedCommand = useCallback(

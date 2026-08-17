@@ -88,104 +88,12 @@ impl OpenAIProvider {
                         .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
 
                     if has_tool_results {
-                        // Each tool result becomes a separate "tool" role message.
-                        // The OpenAI wire format has no is_error flag, so failed
-                        // results are prefixed textually — otherwise the model
-                        // can't tell a tool error from successful output.
-                        for block in &msg.content {
-                            if let ContentBlock::ToolResult {
-                                tool_use_id,
-                                content,
-                                is_error,
-                                images,
-                            } = block
-                            {
-                                let content = if *is_error {
-                                    format!("[tool error] {content}")
-                                } else {
-                                    content.clone()
-                                };
-                                result.push(json!({
-                                    "role": "tool",
-                                    "tool_call_id": tool_use_id,
-                                    "content": content
-                                }));
-                                if let Some(img_msg) = tool_images_user_message(
-                                    tool_use_id,
-                                    images,
-                                    compat.supports_image(),
-                                ) {
-                                    result.push(img_msg);
-                                }
-                            }
-                        }
+                        push_tool_result_message(&mut result, msg, compat);
                     } else {
-                        // Check if the message contains any image blocks
-                        let has_images = msg
-                            .content
-                            .iter()
-                            .any(|b| matches!(b, ContentBlock::Image { .. }));
-
-                        if has_images {
-                            // Multimodal user message: build content array with
-                            // text and image_url parts.
-                            let mut parts: Vec<Value> = Vec::new();
-                            let mut stripped_images = 0usize;
-                            for block in &msg.content {
-                                match block {
-                                    ContentBlock::Text { text } => {
-                                        let text = strip_patterns_from_text(text, compat);
-                                        if !text.is_empty() {
-                                            parts.push(json!({
-                                                "type": "text",
-                                                "text": text
-                                            }));
-                                        }
-                                    }
-                                    ContentBlock::Image { media_type, data } => {
-                                        if compat.supports_image() {
-                                            parts.push(json!({
-                                                "type": "image_url",
-                                                "image_url": {
-                                                    "url": format!("data:{media_type};base64,{data}")
-                                                }
-                                            }));
-                                        } else {
-                                            stripped_images += 1;
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            if stripped_images > 0 {
-                                parts.push(json!({
-                                    "type": "text",
-                                    "text": "[图片已省略：当前模型不支持图片输入]"
-                                }));
-                            }
-                            result.push(json!({
-                                "role": "user",
-                                "content": parts
-                            }));
-                        } else {
-                            let text: String = msg
-                                .content
-                                .iter()
-                                .filter_map(|b| {
-                                    if let ContentBlock::Text { text } = b {
-                                        Some(text.as_str())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            let text = strip_patterns_from_text(&text, compat);
-                            result.push(json!({
-                                "role": "user",
-                                "content": text
-                            }));
-                        }
+                        result.push(json!({
+                            "role": "user",
+                            "content": user_message_content(msg, compat)
+                        }));
                     }
                 }
                 Role::Assistant => {
@@ -282,33 +190,7 @@ impl OpenAIProvider {
                     // Already handled above
                 }
                 Role::Tool => {
-                    for block in &msg.content {
-                        if let ContentBlock::ToolResult {
-                            tool_use_id,
-                            content,
-                            is_error,
-                            images,
-                        } = block
-                        {
-                            let content = if *is_error {
-                                format!("[tool error] {content}")
-                            } else {
-                                content.clone()
-                            };
-                            result.push(json!({
-                                "role": "tool",
-                                "tool_call_id": tool_use_id,
-                                "content": content
-                            }));
-                            if let Some(img_msg) = tool_images_user_message(
-                                tool_use_id,
-                                images,
-                                compat.supports_image(),
-                            ) {
-                                result.push(img_msg);
-                            }
-                        }
-                    }
+                    push_tool_result_message(&mut result, msg, compat);
                 }
             }
         }
@@ -472,6 +354,142 @@ fn tool_images_user_message(
         })
     }));
     Some(json!({ "role": "user", "content": parts }))
+}
+
+/// Build the `content` value for a user message that carries no tool results.
+///
+/// Returns a plain string when the message is text-only, and a multimodal parts
+/// array when it has images, because some OpenAI-compatible gateways reject a
+/// single-element parts array where a bare string is expected.
+fn user_message_content(msg: &Message, compat: &ProviderCompat) -> Value {
+    let has_images = msg
+        .content
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Image { .. }));
+
+    if !has_images {
+        let text = joined_text_blocks(&msg.content, compat);
+        return json!(text);
+    }
+
+    let mut parts: Vec<Value> = Vec::new();
+    let mut stripped_images = 0usize;
+    for block in &msg.content {
+        match block {
+            ContentBlock::Text { text } => {
+                let text = strip_patterns_from_text(text, compat);
+                if !text.is_empty() {
+                    parts.push(json!({ "type": "text", "text": text }));
+                }
+            }
+            ContentBlock::Image { media_type, data } => {
+                if compat.supports_image() {
+                    parts.push(json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:{media_type};base64,{data}")
+                        }
+                    }));
+                } else {
+                    stripped_images += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    if stripped_images > 0 {
+        parts.push(json!({
+            "type": "text",
+            "text": "[图片已省略：当前模型不支持图片输入]"
+        }));
+    }
+    json!(parts)
+}
+
+/// Serialize a message that carries tool results, preserving any sibling blocks.
+///
+/// Each result becomes its own `tool` role message. The OpenAI wire format has
+/// no is_error flag, so failed results are prefixed textually — otherwise the
+/// model can't tell a tool error from successful output.
+///
+/// Sibling `Text`/`Image` blocks on the same message are NOT part of the tool
+/// output: the engine appends mid-turn user steering, stagnation nudges, and
+/// abort notices as trailing blocks here rather than as a second consecutive
+/// user message. They ride in ONE follow-up user message emitted after all
+/// `tool` messages, because OpenAI requires each `tool_call_id` of the preceding
+/// assistant turn to be answered before any other role appears. Dropping them
+/// silently discarded the user's correction on the wire.
+fn push_tool_result_message(result: &mut Vec<Value>, msg: &Message, compat: &ProviderCompat) {
+    let mut image_parts: Vec<Value> = Vec::new();
+    for block in &msg.content {
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+            images,
+        } = block
+        {
+            let content = if *is_error {
+                format!("[tool error] {content}")
+            } else {
+                content.clone()
+            };
+            result.push(json!({
+                "role": "tool",
+                "tool_call_id": tool_use_id,
+                "content": content
+            }));
+            if let Some(img_msg) =
+                tool_images_user_message(tool_use_id, images, compat.supports_image())
+                && let Some(parts) = img_msg["content"].as_array()
+            {
+                image_parts.extend(parts.iter().cloned());
+            }
+        }
+    }
+
+    // One trailing user message carries both the tool images and any sibling
+    // blocks. Emitting them separately would produce two consecutive user
+    // messages, and nothing on the OpenAI path merges those.
+    let sibling = user_message_content(msg, compat);
+    let mut sibling_parts: Vec<Value> = match &sibling {
+        Value::String(text) if !text.is_empty() => vec![json!({ "type": "text", "text": text })],
+        Value::Array(parts) => parts.clone(),
+        _ => Vec::new(),
+    };
+
+    if image_parts.is_empty() {
+        // Text-only tail keeps the bare-string shape some gateways require.
+        if let Value::String(text) = &sibling
+            && !text.is_empty()
+        {
+            result.push(json!({ "role": "user", "content": text }));
+            return;
+        }
+        if !sibling_parts.is_empty() {
+            result.push(json!({ "role": "user", "content": sibling_parts }));
+        }
+        return;
+    }
+
+    image_parts.append(&mut sibling_parts);
+    result.push(json!({ "role": "user", "content": image_parts }));
+}
+
+/// Concatenate a message's `Text` blocks with compat strip patterns applied.
+fn joined_text_blocks(content: &[ContentBlock], compat: &ProviderCompat) -> String {
+    let text = content
+        .iter()
+        .filter_map(|b| {
+            if let ContentBlock::Text { text } = b {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    strip_patterns_from_text(&text, compat)
 }
 
 /// Strip configured patterns from text content
@@ -2853,6 +2871,198 @@ mod tests {
                 .unwrap()
                 .starts_with("data:image/png;base64,")
         );
+    }
+
+    #[test]
+    fn steer_text_riding_a_tool_result_message_survives_the_wire() {
+        use nomi_types::message::{ContentBlock, Message, Role};
+        // The engine appends a mid-turn steer as a trailing Text block ON the
+        // tool-result user message (engine "point A") to avoid two consecutive
+        // user messages. Serializing only the ToolResult would drop the user's
+        // correction entirely, and the next provider pass would silently obey
+        // the superseded instruction.
+        let messages = vec![Message::new(
+            Role::User,
+            vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: "slept 60s".to_string(),
+                    is_error: false,
+                    images: vec![],
+                },
+                ContentBlock::Text {
+                    text: "stop waiting, just reply STEER_OK".to_string(),
+                },
+            ],
+        )];
+        let compat = nomi_config::compat::ProviderCompat::openai_defaults();
+        let result = OpenAIProvider::build_messages(&messages, "", &compat, false);
+        assert_eq!(result.len(), 2, "tool result and steer text: {result:?}");
+        assert_eq!(result[0]["role"], "tool");
+        assert_eq!(result[0]["tool_call_id"], "call_1");
+        assert_eq!(result[0]["content"], "slept 60s");
+        assert_eq!(
+            result[1]["role"], "user",
+            "the steer must follow the tool result as its own user message"
+        );
+        assert_eq!(result[1]["content"], "stop waiting, just reply STEER_OK");
+    }
+
+    #[test]
+    fn stagnation_nudge_riding_a_tool_result_message_survives_the_wire() {
+        use nomi_types::message::{ContentBlock, Message, Role};
+        // The loop-stagnation guard uses the same trailing-Text slot as steering,
+        // so dropping it would silently disarm the guard on every
+        // OpenAI-compatible provider while it still works on Anthropic ones.
+        let messages = vec![Message::new(
+            Role::User,
+            vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: "same failure again".to_string(),
+                    is_error: true,
+                    images: vec![],
+                },
+                ContentBlock::Text {
+                    text: "You have repeated the same failing tool call.".to_string(),
+                },
+            ],
+        )];
+        let compat = nomi_config::compat::ProviderCompat::openai_defaults();
+        let result = OpenAIProvider::build_messages(&messages, "", &compat, false);
+        assert_eq!(result[0]["role"], "tool");
+        assert_eq!(result[0]["content"], "[tool error] same failure again");
+        assert_eq!(result[1]["role"], "user");
+        assert_eq!(
+            result[1]["content"],
+            "You have repeated the same failing tool call."
+        );
+    }
+
+    #[test]
+    fn tool_result_message_without_sibling_text_adds_no_user_message() {
+        use nomi_types::message::{ContentBlock, Message, Role};
+        // The common case must stay byte-identical: no empty user message may be
+        // appended after a plain tool result.
+        let messages = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".to_string(),
+                content: "ok".to_string(),
+                is_error: false,
+                images: vec![],
+            }],
+        )];
+        let compat = nomi_config::compat::ProviderCompat::openai_defaults();
+        let result = OpenAIProvider::build_messages(&messages, "", &compat, false);
+        assert_eq!(result.len(), 1, "no trailing user message: {result:?}");
+        assert_eq!(result[0]["role"], "tool");
+    }
+
+    #[test]
+    fn tool_role_message_also_preserves_sibling_text() {
+        use nomi_types::message::{ContentBlock, Message, Role};
+        // Persisted/compacted history can carry the same mixed shape under
+        // Role::Tool, which reaches a separate serialization branch.
+        let messages = vec![Message::new(
+            Role::Tool,
+            vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: "done".to_string(),
+                    is_error: false,
+                    images: vec![],
+                },
+                ContentBlock::Text {
+                    text: "actually, focus on Y".to_string(),
+                },
+            ],
+        )];
+        let compat = nomi_config::compat::ProviderCompat::openai_defaults();
+        let result = OpenAIProvider::build_messages(&messages, "", &compat, false);
+        assert_eq!(result.len(), 2, "{result:?}");
+        assert_eq!(result[0]["role"], "tool");
+        assert_eq!(result[1]["role"], "user");
+        assert_eq!(result[1]["content"], "actually, focus on Y");
+    }
+
+    #[test]
+    fn multiple_tool_results_carry_sibling_text_once_after_all_of_them() {
+        use nomi_types::message::{ContentBlock, Message, Role};
+        // Every tool_call_id in the preceding assistant turn must be answered
+        // before any other role appears, so the text goes after the last
+        // tool message — not interleaved between them.
+        let messages = vec![Message::new(
+            Role::User,
+            vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: "first".to_string(),
+                    is_error: false,
+                    images: vec![],
+                },
+                ContentBlock::Text {
+                    text: "steer one".to_string(),
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_2".to_string(),
+                    content: "second".to_string(),
+                    is_error: false,
+                    images: vec![],
+                },
+                ContentBlock::Text {
+                    text: "steer two".to_string(),
+                },
+            ],
+        )];
+        let compat = nomi_config::compat::ProviderCompat::openai_defaults();
+        let result = OpenAIProvider::build_messages(&messages, "", &compat, false);
+        assert_eq!(result.len(), 3, "{result:?}");
+        assert_eq!(result[0]["role"], "tool");
+        assert_eq!(result[0]["tool_call_id"], "call_1");
+        assert_eq!(result[1]["role"], "tool");
+        assert_eq!(result[1]["tool_call_id"], "call_2");
+        assert_eq!(result[2]["role"], "user");
+        assert_eq!(
+            result[2]["content"], "steer one\nsteer two",
+            "both trailing texts are preserved in order"
+        );
+    }
+
+    #[test]
+    fn tool_result_images_and_sibling_text_ride_in_one_user_message() {
+        use nomi_types::message::{ContentBlock, Message, Role};
+        // A steer that lands on a tool result carrying images must not create two
+        // consecutive user messages: nothing merges those on the OpenAI path, and
+        // strict gateways reject the shape.
+        let messages = vec![Message::new(
+            Role::User,
+            vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: "screenshot taken".to_string(),
+                    is_error: false,
+                    images: vec![nomi_types::tool::ToolImage {
+                        media_type: "image/png".to_string(),
+                        data: "aGVsbG8=".to_string(),
+                    }],
+                },
+                ContentBlock::Text {
+                    text: "stop and reply STEER_OK".to_string(),
+                },
+            ],
+        )];
+        let compat = nomi_config::compat::ProviderCompat::openai_defaults();
+        let result = OpenAIProvider::build_messages(&messages, "", &compat, false);
+        for pair in result.windows(2) {
+            assert!(
+                !(pair[0]["role"] == "user" && pair[1]["role"] == "user"),
+                "no consecutive user messages: {result:?}"
+            );
+        }
+        let joined = serde_json::to_string(&result).unwrap();
+        assert!(joined.contains("stop and reply STEER_OK"), "{joined}");
+        assert!(joined.contains("image_url"), "{joined}");
     }
 
     #[test]
