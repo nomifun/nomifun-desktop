@@ -16860,16 +16860,51 @@ async fn failover_successful_pre_response_recovery_surfaces_no_error_to_user() {
         "a recovered pre-response failover must not broadcast any WS error event"
     );
 
-    // (b) No error / `tips` row persisted for the turn — the swallowed fault was
-    // never written, so the conversation history shows only the recovered reply.
+    // (b) No error row persisted for the turn — the swallowed fault was never
+    // written, so the conversation history shows no failure. The audit receipt
+    // below is deliberately exempt: it records which model produced the answer,
+    // which is not an error surface and must survive precisely so a silent
+    // model switch stays accountable.
     let messages = repo.get_messages(&conv_id, 1, 50, SortOrder::Asc).await.unwrap().items;
     assert!(
-        !messages.iter().any(|message| message.r#type == "tips"),
-        "a recovered pre-response failover must not persist an error tips row"
+        !messages.iter().any(|message| {
+            message.r#type == "tips"
+                && serde_json::from_str::<serde_json::Value>(&message.content)
+                    .ok()
+                    .and_then(|c| c["source"].as_str().map(str::to_owned))
+                    .as_deref()
+                    != Some("model_failover")
+        }),
+        "a recovered pre-response failover must not persist any tips row other than the switch receipt"
     );
     assert!(
         !messages.iter().any(|message| message.status.as_deref() == Some("error")),
         "a recovered pre-response failover must not persist any error-status row"
+    );
+
+    // (c) The switch IS auditable: without this receipt the transcript is
+    // indistinguishable from a turn that never changed models.
+    let receipt = messages
+        .iter()
+        .find_map(|message| {
+            let content: serde_json::Value = serde_json::from_str(&message.content).ok()?;
+            (content["source"] == "model_failover").then_some(content)
+        })
+        .expect("a committed model switch persists an audit receipt");
+    assert_eq!(receipt["failed_model"], "m1", "{receipt}");
+    assert_eq!(receipt["next_model"], "m2", "{receipt}");
+    assert_eq!(receipt["switch"], 1);
+    assert_eq!(
+        receipt["reason"], "USER_LLM_PROVIDER_RATE_LIMITED",
+        "the receipt carries the classified fault, not raw provider text: {receipt}"
+    );
+    assert!(
+        receipt["reason"].as_str().is_some_and(|r| !r.is_empty()),
+        "the receipt names why the switch happened: {receipt}"
+    );
+    assert!(
+        receipt["turn_id"].as_str().is_some_and(|t| !t.is_empty()),
+        "the receipt is bound to a turn so reconnect can place it: {receipt}"
     );
     // Sanity: the backup model's reply WAS persisted (only the error was hidden).
     let recovered = messages

@@ -485,7 +485,7 @@ bun install        # 安装依赖（一次性）
 bun run dev        # 桌面应用开发（热重载）
 bun run dev:web    # web 宿主 + Vite 开发
 bun run build:ui   # 构建 SPA
-bun run check      # 前端 typecheck + i18n + 主题 + 脚本登记 门禁
+bun run check      # 前端 typecheck + i18n + 主题 + 脚本登记检查
 bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 ```
 
@@ -519,7 +519,6 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 | **运行（组装好的应用）** | |
 | `bun run serve:web` | 启动 Web 服务器，托管已构建的前端 |
 | **测试** | |
-| `bun run test:git-attribution` | Validate the repository-local human-only Git attribution policy. |
 | `bun run test` | 运行全部 Rust 测试（含 doctest） |
 | `bun run test:fast` | 用 nextest 快速跑 Rust 测试（日常） |
 | `bun run test:crate` | 运行单个 Rust crate：bun run test:crate <crate> [cargo 参数] |
@@ -527,11 +526,11 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 | `bun run test:desktop` | 运行桌面壳测试，不监听或打包 ui/dist 资源 |
 | `bun run test:browser` | 运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/nomi-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些） |
 | `bun run test:ui` | 运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx） |
-| **静态检查 / 门禁** | |
+| **静态检查** | |
 | `bun run check:process-runtime-boundary` | Enforce the supervised process runtime boundary and exact hand-off allowlist. |
 | `bun run check:browser-platform-boundary` | Enforce the single BrowserSessionHub ownership boundary and reject private browser launch paths. |
 | `bun run check:agent-vocabulary` | Enforce AgentExecution as the only active collaboration aggregate and permit only exact migration fences. |
-| `bun run check` | 聚合静态门禁：typecheck + i18n + 主题契约 + 图标导入 + 死 CSS 工具类 + 进程运行时边界 + Agent 词汇边界 + 脚本登记 |
+| `bun run check` | 聚合静态检查：typecheck + i18n + 主题契约 + 图标导入 + 死 CSS 工具类 + 进程运行时边界 + Agent 词汇边界 + 脚本登记 |
 | `bun run typecheck` | 前端 TypeScript 类型检查（tsc --noEmit） |
 | `bun run check:i18n` | 校验 i18n 类型与 locale 键是否一致 |
 | `bun run check:theme` | 校验预设 CSS 主题契约 |
@@ -540,7 +539,6 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 | **代码生成** | |
 | `bun run gen:i18n` | 由 locale 重新生成 i18n 类型声明 |
 | **维护 / 工具** | |
-| `bun run setup:git-hooks` | Enable this repository's human-only Git attribution hooks without changing global Git config. |
 | `bun run clean` | 深度回收构建空间（debug 产物 + flycheck + 旧安装包） |
 | `bun run seed:dev` | 用生产数据目录播种 dev 数据目录 |
 | `bun run bump` | 统一改版本号：根 Cargo.toml(真源) + package.json + ui + Cargo.lock，可选 --tag 提交并打 tag |

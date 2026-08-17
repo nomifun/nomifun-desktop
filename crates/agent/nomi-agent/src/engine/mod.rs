@@ -366,6 +366,10 @@ struct ToolEfficiencyStats {
     max_calls_in_model_turn: usize,
     exec_command_script_calls: usize,
     batch_read_files_requested: usize,
+    /// Model turns whose only tool call was a single-file `Read`. Distinguishes
+    /// "read one file because that is all that was needed" (fine, low count)
+    /// from walking a codebase one file per provider round trip (expensive).
+    lone_single_file_reads: usize,
     error_results: usize,
     skipped_after_prior_error: usize,
 }
@@ -390,6 +394,12 @@ impl ToolEfficiencyStats {
         self.model_turns_with_tools = self.model_turns_with_tools.saturating_add(1);
         self.total_tool_calls = self.total_tool_calls.saturating_add(calls.len());
         self.max_calls_in_model_turn = self.max_calls_in_model_turn.max(calls.len());
+        if let [(name, input)] = calls.as_slice()
+            && *name == "Read"
+            && input.get("file_paths").is_none()
+        {
+            self.lone_single_file_reads = self.lone_single_file_reads.saturating_add(1);
+        }
         for (name, input) in &calls {
             if *name == "exec_command" && input.get("script").is_some() {
                 self.exec_command_script_calls =
@@ -476,6 +486,7 @@ impl ToolEfficiencyStats {
             max_calls_in_model_turn = self.max_calls_in_model_turn,
             exec_command_script_calls = self.exec_command_script_calls,
             batch_read_files_requested = self.batch_read_files_requested,
+            lone_single_file_reads = self.lone_single_file_reads,
             tool_error_results = self.error_results,
             skipped_after_prior_error = self.skipped_after_prior_error,
             "agent tool efficiency summary"
@@ -1313,6 +1324,9 @@ impl AgentEngine {
         let mut tool_retry_tracker = ToolRetryTracker::default();
         let mut routed_tool_calls_seen = 0usize;
         let mut artifact_retry_blocked = false;
+        let mut spec_recheck_nudged = false;
+        let mut tool_error_budget_nudged = false;
+        let mut batch_read_nudged = false;
         loop {
             // Hard safety net: an unconfigured (`None`) max_turns still gets a
             // bounded cap so a runaway tool-call loop cannot run forever. A
@@ -1876,6 +1890,19 @@ impl AgentEngine {
             }
             assistant_content.extend(tool_calls.clone());
 
+            // A large pre-tool text block that this same round then wrote to a
+            // file is the model composing tool arguments in the open, not an
+            // answer. Only the copy that enters durable history is collapsed:
+            // it has already streamed to the user verbatim, and the tool call
+            // beside it still carries the full body.
+            if supersede_written_draft(&mut assistant_content) {
+                tracing::debug!(
+                    target: "nomi_agent",
+                    turn = turn + 1,
+                    "collapsed a pre-tool draft superseded by a file write in the same round"
+                );
+            }
+
             self.messages
                 .push(Message::now(Role::Assistant, assistant_content));
 
@@ -1921,6 +1948,32 @@ impl AgentEngine {
                     turn += 1;
                     continue; // don't return — run another turn toward the goal
                 }
+                // Verification gate: a claim of delivered spec-driven work whose
+                // spec was never re-read after editing began gets exactly one
+                // corrective pass. Mirrors the steering/goal continuations above,
+                // and fires at most once per turn so a model that stands by its
+                // claim still terminates.
+                if !spec_recheck_nudged
+                    && turn + 1 < limit
+                    && let Some(nudge) = unbacked_completion_claim(&assistant_text, &self.messages)
+                {
+                    tracing::warn!(
+                        target: "nomi_agent",
+                        turn = turn + 1,
+                        "completion claimed without re-reading the spec after editing — requesting a clause-by-clause recheck"
+                    );
+                    spec_recheck_nudged = true;
+                    self.messages.push(Message::now(
+                        Role::User,
+                        vec![ContentBlock::Text {
+                            text: nudge.to_owned(),
+                        }],
+                    ));
+                    self.save_session();
+                    turn += 1;
+                    continue;
+                }
+
                 self.save_session();
                 return Ok(AgentResult {
                     text: assistant_text,
@@ -2185,6 +2238,34 @@ impl AgentEngine {
                         text: crate::loop_guard::STAGNATION_ABORT.to_string(),
                     });
                 }
+            }
+            // Cost backstops. Both ride the same trailing-Text slot as the
+            // stagnation nudge and fire at most once per turn: they are course
+            // corrections, not limits, so repeating them every turn would only
+            // add context to a turn already spending too much of it.
+            if !tool_error_budget_nudged && efficiency.error_results >= TOOL_ERROR_BUDGET {
+                tracing::warn!(
+                    target: "nomi_agent",
+                    tool_error_results = efficiency.error_results,
+                    "tool error budget of {TOOL_ERROR_BUDGET} exhausted — injecting corrective nudge"
+                );
+                tool_error_budget_nudged = true;
+                tool_result_blocks.push(ContentBlock::Text {
+                    text: TOOL_ERROR_BUDGET_NUDGE.to_string(),
+                });
+            }
+            if !batch_read_nudged
+                && efficiency.lone_single_file_reads >= SINGLE_READ_NUDGE_THRESHOLD
+            {
+                tracing::info!(
+                    target: "nomi_agent",
+                    lone_single_file_reads = efficiency.lone_single_file_reads,
+                    "single-file reads dominate this turn — injecting batching nudge"
+                );
+                batch_read_nudged = true;
+                tool_result_blocks.push(ContentBlock::Text {
+                    text: BATCH_READ_NUDGE.to_string(),
+                });
             }
             // Steering interjection (point A): append any queued steer messages
             // as trailing Text blocks on THIS turn's tool-result message, so the
@@ -2652,6 +2733,340 @@ impl Drop for AgentEngine {
     }
 }
 
+/// Injected once when a turn tries to end by claiming verified completion of
+/// spec-driven work whose spec was never re-read after implementation began.
+///
+/// This targets the observed failure exactly. The model read README/QA_TASK in
+/// messages 10-12, then wrote code for 57 more messages without ever looking at
+/// the contract again; it invented its own CLI flags, wrote tests around the
+/// inventions, and truthfully reported that those tests passed. An
+/// exit-code check cannot catch that — `bun test` really did exit 0 — so the
+/// gate asks for the one thing that was actually missing: a clause-by-clause
+/// re-read of the spec before declaring the work deliverable.
+pub(crate) const SPEC_RECHECK_NUDGE: &str = "Verification gate: you are reporting this work as \
+complete, but you have not re-read the spec since you started editing files. Passing your own \
+tests is not evidence that the contract is met — tests written from memory tend to encode what you \
+built, not what was asked. Re-read the spec file(s) you were given now, list each required \
+behavior, and for each one state the concrete evidence that it works (the exact command and its \
+real output) or that it does not. If any clause is unmet or unverified, say so instead of \
+reporting the work as deliverable.";
+
+/// Phrases that assert verified completion. Matched case-insensitively against
+/// the final answer; Chinese is included because the observed false-green
+/// summary was written in Chinese.
+const COMPLETION_CLAIM_MARKERS: [&str; 14] = [
+    "tests pass",
+    "all pass",
+    "0 fail",
+    "ready to ship",
+    "ready to deliver",
+    "deliverable",
+    "全部通过",
+    "测试通过",
+    "全部保留且通过",
+    "可交付",
+    "类型检查通过",
+    "检查通过",
+    "已完成",
+    "交付总结",
+];
+
+/// Files that state requirements rather than implement them. A spec read is the
+/// only reliable signal that the turn had an external contract to satisfy.
+const SPEC_FILE_MARKERS: [&str; 6] = [
+    "readme",
+    "spec",
+    "task",
+    "requirement",
+    "contract",
+    "acceptance",
+];
+
+fn is_spec_path(path: &str) -> bool {
+    let lowered = path.to_lowercase();
+    let name = lowered
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(lowered.as_str());
+    name.ends_with(".md") && SPEC_FILE_MARKERS.iter().any(|m| name.contains(m))
+}
+
+/// Every path a tool call touched, paired with whether it read a spec and
+/// whether it mutated a file.
+fn spec_and_write_positions(messages: &[Message]) -> (Vec<usize>, Option<usize>) {
+    let mut spec_reads = Vec::new();
+    let mut first_write = None;
+    for (index, block) in messages
+        .iter()
+        .enumerate()
+        .flat_map(|(i, m)| m.content.iter().map(move |b| (i, b)))
+    {
+        let ContentBlock::ToolUse { name, input, .. } = block else {
+            continue;
+        };
+        let paths = input
+            .get("file_path")
+            .and_then(Value::as_str)
+            .map(|p| vec![p.to_owned()])
+            .or_else(|| {
+                input.get("file_paths").and_then(Value::as_array).map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+
+        if name == "Read" && paths.iter().any(|p| is_spec_path(p)) {
+            spec_reads.push(index);
+        }
+        if FILE_WRITE_TOOLS.contains(&name.as_str()) {
+            first_write.get_or_insert(index);
+        }
+    }
+    (spec_reads, first_write)
+}
+
+/// Returns the corrective nudge when `answer` reports verified completion of
+/// spec-driven work whose spec was not consulted after editing began.
+///
+/// Deliberately narrow, so it costs an extra turn only in the exact shape that
+/// produced a false-green delivery: it requires an explicit completion claim, a
+/// spec that was actually read, and file mutations that followed that read
+/// without any later re-read. Ordinary answers, questions, honest "this is
+/// unverified" reports, and read-only turns pass untouched.
+pub(crate) fn unbacked_completion_claim(
+    answer: &str,
+    messages: &[Message],
+) -> Option<&'static str> {
+    let lowered = answer.to_lowercase();
+    if !COMPLETION_CLAIM_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(marker))
+    {
+        return None;
+    }
+    let (spec_reads, first_write) = spec_and_write_positions(messages);
+    let first_write = first_write?;
+    if spec_reads.is_empty() || spec_reads.iter().any(|read| *read > first_write) {
+        return None;
+    }
+    Some(SPEC_RECHECK_NUDGE)
+}
+
+/// Cumulative failed tool results in one user turn before the engine stops
+/// absorbing them silently and tells the model to change course.
+///
+/// The stagnation guard only catches *repeated identical* failures, so a turn
+/// that fails ten different ways while making nominal forward progress never
+/// trips it — the observed 55-turn session absorbed exactly that: 10 tool errors
+/// out of 54 calls, 1.6M input tokens, and a wrong deliverable. This budget is a
+/// diversity-blind backstop: high enough that ordinary trial-and-error is
+/// untouched, low enough that a turn cannot quietly burn its whole budget on
+/// failures.
+const TOOL_ERROR_BUDGET: usize = 8;
+
+/// Injected once when the error budget is exhausted. Asks for a decision rather
+/// than forbidding retries, because the failures may still be recoverable.
+pub(crate) const TOOL_ERROR_BUDGET_NUDGE: &str = "Tool error budget: this turn has now produced \
+many failed tool results. Stop improvising individual retries. State what is actually blocking \
+you, then either fix the root cause with a materially different approach or report the blocker and \
+what you did verify — do not keep trying variations of the same failing calls.";
+
+/// Injected once when a turn keeps reading files one at a time.
+///
+/// `Read` accepts `file_paths` for several files in one call, and the guidance
+/// already says so, but the observed session issued 13 separate single-file
+/// reads across 13 model turns — each one re-sending the whole conversation.
+const SINGLE_READ_NUDGE_THRESHOLD: usize = 8;
+
+pub(crate) const BATCH_READ_NUDGE: &str = "Efficiency: you are reading files one per model turn, \
+and every turn re-sends the whole conversation. When you already know which files you need, pass \
+them together in one Read call via file_paths, and issue independent read-only calls in the same \
+turn instead of one at a time.";
+
+/// Minimum amount of already-written text before collapsing is worthwhile.
+/// Narration ("Let me write the test file now.") never reaches this, so it is
+/// always preserved verbatim.
+const MIN_SUPERSEDED_DRAFT_CHARS: usize = 400;
+
+/// Shortest line considered for removal. Trivial lines (`}`, `return;`) recur in
+/// unrelated files, so matching them would prove nothing about supersession.
+const MIN_SUPERSEDED_LINE_CHARS: usize = 8;
+
+/// Cap on the written body compared against a draft. Beyond this the substring
+/// scans stop being free, and a body this large is already unambiguous from its
+/// prefix.
+const MAX_COMPARED_WRITE_CHARS: usize = 262_144;
+
+/// Tools whose input body becomes a file on disk, making identical preceding
+/// text a superseded draft rather than an answer. A Bash command that echoes the
+/// same bytes is deliberately excluded: nothing was persisted, so the text may
+/// still be the substance of the reply.
+const FILE_WRITE_TOOLS: [&str; 3] = ["Write", "Edit", "ApplyPatch"];
+
+/// Collapse whitespace so a line still matches a body the model reindented while
+/// emitting tool arguments.
+fn whitespace_insensitive(text: &str) -> String {
+    text.split_whitespace().collect::<String>()
+}
+
+/// Every text body a file-write tool call would persist, with its target path.
+///
+/// `ApplyPatch` nests its bodies under `files[]`, so each shape is read
+/// explicitly rather than assuming one flat schema.
+fn written_bodies(block: &ContentBlock) -> Option<(String, String)> {
+    let ContentBlock::ToolUse { name, input, .. } = block else {
+        return None;
+    };
+    if !FILE_WRITE_TOOLS.contains(&name.as_str()) {
+        return None;
+    }
+
+    fn collect_bodies(target: &Value, into: &mut String) {
+        for key in ["content", "new_string"] {
+            if let Some(body) = target.get(key).and_then(Value::as_str) {
+                into.push_str(body);
+            }
+        }
+        if let Some(edits) = target.get("edits").and_then(Value::as_array) {
+            for edit in edits {
+                if let Some(body) = edit.get("new_string").and_then(Value::as_str) {
+                    into.push_str(body);
+                }
+            }
+        }
+    }
+
+    let mut bodies = String::new();
+    collect_bodies(input, &mut bodies);
+    let mut path = input
+        .get("file_path")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if let Some(files) = input.get("files").and_then(Value::as_array) {
+        for file in files {
+            collect_bodies(file, &mut bodies);
+            if path.is_empty()
+                && let Some(file_path) = file.get("file_path").and_then(Value::as_str)
+            {
+                path = file_path.to_owned();
+            }
+        }
+    }
+    if bodies.is_empty() {
+        return None;
+    }
+    if path.is_empty() {
+        path.push_str("the file");
+    }
+
+    let mut normalized = whitespace_insensitive(&bodies);
+    normalized.truncate(
+        (0..=MAX_COMPARED_WRITE_CHARS.min(normalized.len()))
+            .rev()
+            .find(|i| normalized.is_char_boundary(*i))
+            .unwrap_or(0),
+    );
+    Some((path, normalized))
+}
+
+/// Drop the lines of a pre-tool text block that a file-write tool in the SAME
+/// assistant round already persisted, leaving a short marker in their place.
+///
+/// Such lines are not an answer — they are the model composing tool arguments in
+/// the open. Left intact they are replayed to the provider on every later turn,
+/// so one 5 KB draft can cost tens of thousands of cumulative input tokens
+/// across a long coding session while adding nothing the tool call does not
+/// already carry.
+///
+/// Only lines that literally appear in the written body are removed, never the
+/// whole block: the engine coalesces a round's text deltas into a single block,
+/// so an explanation and a draft routinely share one block and discarding it
+/// wholesale would silently destroy the explanation. Returns whether anything
+/// was replaced.
+fn supersede_written_draft(content: &mut [ContentBlock]) -> bool {
+    let written: Vec<(String, String)> = content.iter().filter_map(written_bodies).collect();
+    if written.is_empty() {
+        return false;
+    }
+
+    let mut replaced = false;
+    for block in content.iter_mut() {
+        let ContentBlock::Text { text } = block else {
+            continue;
+        };
+        if text.chars().count() < MIN_SUPERSEDED_DRAFT_CHARS {
+            continue;
+        }
+
+        let mut kept: Vec<&str> = Vec::new();
+        let mut dropped_chars = 0usize;
+        let mut dropped_path: Option<&str> = None;
+        let mut marker_at = None;
+        for line in text.lines() {
+            let normalized = whitespace_insensitive(line);
+            let persisted = if normalized.chars().count() >= MIN_SUPERSEDED_LINE_CHARS {
+                written
+                    .iter()
+                    .find(|(_, body)| body.contains(normalized.as_str()))
+                    .map(|(path, _)| path.as_str())
+            } else {
+                // Short lines (`}`, `});`, blank) carry no evidence either way.
+                // Keeping them would strand a wall of orphaned punctuation after
+                // the marker; they are dropped along with the block they closed
+                // and only survive if no neighbouring line was persisted.
+                None
+            };
+            match persisted {
+                Some(path) => {
+                    dropped_chars += line.chars().count();
+                    dropped_path = Some(path);
+                    marker_at.get_or_insert(kept.len());
+                }
+                None => kept.push(line),
+            }
+        }
+
+        let (Some(path), Some(marker_at)) = (dropped_path, marker_at) else {
+            continue;
+        };
+        if dropped_chars < MIN_SUPERSEDED_DRAFT_CHARS {
+            continue;
+        }
+
+        // Structural leftovers of a removed block are noise, not content: a line
+        // too short to prove anything is only worth keeping if it still sits
+        // next to surviving prose.
+        let mut rebuilt: Vec<&str> = Vec::new();
+        for (index, line) in kept.iter().enumerate() {
+            let trivial = whitespace_insensitive(line).chars().count() < MIN_SUPERSEDED_LINE_CHARS;
+            let neighbours_substance = |i: usize| {
+                kept.get(i).is_some_and(|other: &&str| {
+                    whitespace_insensitive(other).chars().count() >= MIN_SUPERSEDED_LINE_CHARS
+                })
+            };
+            if trivial
+                && !neighbours_substance(index.wrapping_sub(1))
+                && !neighbours_substance(index + 1)
+            {
+                continue;
+            }
+            rebuilt.push(line);
+        }
+
+        let marker =
+            format!("[Draft omitted: this turn wrote it to {path}; see that tool call for the body.]");
+        let marker_at = marker_at.min(rebuilt.len());
+        rebuilt.insert(marker_at, &marker);
+        *text = rebuilt.join("\n");
+        replaced = true;
+    }
+    replaced
+}
+
 #[cfg(test)]
 mod set_config_tests;
 
@@ -2697,3 +3112,9 @@ mod transcript_tests;
 
 #[cfg(test)]
 mod tool_efficiency_tests;
+
+#[cfg(test)]
+mod superseded_draft_tests;
+
+#[cfg(test)]
+mod completion_evidence_tests;

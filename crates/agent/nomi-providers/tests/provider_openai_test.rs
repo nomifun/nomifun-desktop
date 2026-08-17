@@ -904,6 +904,166 @@ async fn openai_extra_body_preserves_unknown_fields_but_typed_fields_win() {
     assert!(body.get("reasoning_effort").is_none());
 }
 
+/// A mid-turn steer reaches the model on the wire.
+///
+/// The engine appends user steering as a trailing Text block on the tool-result
+/// message. Asserting on the serialized HTTP body (not just `build_messages`)
+/// is what proves the correction actually leaves the process: the previous
+/// serializer dropped it after the durable receipt had already been recorded as
+/// delivered, so the next provider pass obeyed the superseded instruction with
+/// no error anywhere.
+#[tokio::test]
+async fn steer_on_a_tool_result_message_reaches_the_provider_wire() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_sse_body(&[
+                &json!({"choices":[{"delta":{"content":"STEER_OK"},"finish_reason":null}]})
+                    .to_string(),
+                &json!({"choices":[{"delta":{},"finish_reason":"stop"}]}).to_string(),
+            ]),
+            "text/event-stream",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut request = make_request();
+    request.messages = vec![
+        Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "run the sleep command".to_string(),
+            }],
+        ),
+        Message::new(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "Bash".to_string(),
+                input: json!({ "command": "sleep 60" }),
+                extra: None,
+            }],
+        ),
+        // The shape the engine builds at steering "point A".
+        Message::new(
+            Role::User,
+            vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: "slept 60s".to_string(),
+                    is_error: false,
+                    images: vec![],
+                },
+                ContentBlock::Text {
+                    text: "stop waiting, just reply STEER_OK".to_string(),
+                },
+            ],
+        ),
+    ];
+
+    let provider = OpenAIProvider::new("test-key", &server.uri(), ProviderCompat::openai_defaults());
+    collect_events(provider.stream(&request).await.unwrap()).await;
+
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let sent = serde_json::to_string(&body["messages"]).unwrap();
+    assert!(
+        sent.contains("stop waiting, just reply STEER_OK"),
+        "the steer must be present in the request payload: {sent}"
+    );
+
+    let wire = body["messages"].as_array().unwrap();
+    let tool_index = wire
+        .iter()
+        .position(|m| m["role"] == "tool")
+        .expect("the tool result is on the wire");
+    let steer = &wire[tool_index + 1];
+    assert_eq!(
+        steer["role"], "user",
+        "the steer follows the answered tool call: {sent}"
+    );
+    assert_eq!(steer["content"], "stop waiting, just reply STEER_OK");
+    assert_eq!(
+        wire[tool_index]["tool_call_id"], "call_1",
+        "the assistant tool call is still answered before any other role"
+    );
+}
+
+/// The loop-stagnation guard's corrective nudge reaches the model on the wire.
+///
+/// The guard shares the trailing-Text slot with steering, so the same drop
+/// silently disarmed it on every OpenAI-compatible provider: the model was
+/// never told to stop repeating a failing call, and only the (also-dropped)
+/// abort text stood between that and burning the whole turn budget.
+#[tokio::test]
+async fn a_loop_guard_nudge_on_a_tool_result_message_reaches_the_provider_wire() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_sse_body(&[
+                &json!({"choices":[{"delta":{"content":"changing approach"},"finish_reason":null}]})
+                    .to_string(),
+                &json!({"choices":[{"delta":{},"finish_reason":"stop"}]}).to_string(),
+            ]),
+            "text/event-stream",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let nudge = "Loop guard: recent tool turns are making no progress";
+    let mut request = make_request();
+    request.messages = vec![
+        Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "fix the build".to_string(),
+            }],
+        ),
+        Message::new(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "Bash".to_string(),
+                input: json!({ "command": "bun test" }),
+                extra: None,
+            }],
+        ),
+        Message::new(
+            Role::User,
+            vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: "same failure again".to_string(),
+                    is_error: true,
+                    images: vec![],
+                },
+                ContentBlock::Text {
+                    text: nudge.to_string(),
+                },
+            ],
+        ),
+    ];
+
+    let provider = OpenAIProvider::new("test-key", &server.uri(), ProviderCompat::openai_defaults());
+    collect_events(provider.stream(&request).await.unwrap()).await;
+
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let sent = serde_json::to_string(&body["messages"]).unwrap();
+    assert!(
+        sent.contains(nudge),
+        "the loop-guard nudge must reach the model: {sent}"
+    );
+    assert!(
+        sent.contains("[tool error] same failure again"),
+        "the failing result keeps its error marker: {sent}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // test_openai_rate_limited
 // ---------------------------------------------------------------------------
