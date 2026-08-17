@@ -7,6 +7,7 @@
 import { MODEL_TASK_ORDER, MODEL_TRAIT_ORDER } from '@/common/modelCapabilities';
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
+import { ttsSupportsProviderParamVoice, ttsVoiceOptionsFor } from '@/renderer/components/model/ttsVoiceOptions';
 import { AutoComplete, Button, Checkbox, Input, Popconfirm, Select, Tag, Tooltip } from '@arco-design/web-react';
 import { DeleteFour, Down, Refresh, Right } from '@icon-park/react';
 import React, { useEffect, useId, useMemo, useState } from 'react';
@@ -40,10 +41,12 @@ import {
   isProtocolAuthSchemeAllowed,
   parseProviderParams,
   protocolDescriptorForDraft,
+  providerParamVoice,
   reconcileCapabilityRecommendations,
   removeCapabilityTask,
   resolveModelInputChange,
   requiresCrossOriginConsent,
+  withProviderParamVoice,
   type CapabilityEndpointDescriptor,
   type CapabilityEndpointField,
   type CapabilityValidationResult,
@@ -1034,6 +1037,54 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
                     })}
                   </div>
                 )}
+              </div>
+            )}
+
+            {capability.task === 'speech_synthesis' &&
+              ttsSupportsProviderParamVoice(capability.protocol) && (
+              <div className='space-y-6px'>
+                <div className='text-12px text-t-secondary'>
+                  {t('settings.modelAdvanced.defaultVoice', { defaultValue: '默认音色' })}
+                </div>
+                <Select
+                  showSearch
+                  allowCreate
+                  allowClear
+                  // `''`, never `undefined`: Arco's useMergeValue falls back to
+                  // its own internal state for an undefined value, which would
+                  // display a voice that was never written to the JSON.
+                  value={providerParamVoice(capability.providerParamsJson)}
+                  // While the raw JSON is unparseable the writer cannot merge a
+                  // voice into it without discarding what the user typed, so
+                  // the control would silently no-op. Say so instead.
+                  disabled={!providerParamsValid}
+                  placeholder={t('settings.modelAdvanced.defaultVoicePlaceholder', {
+                    defaultValue: '选择或输入供应商音色 id',
+                  })}
+                  options={ttsVoiceOptionsFor(capability.protocol, value.model).map((voice) => ({
+                    value: voice,
+                    label: voice,
+                  }))}
+                  onChange={(voice?: string) =>
+                    updateCapability(capability.task, {
+                      providerParamsJson: withProviderParamVoice(
+                        capability.providerParamsJson,
+                        voice ?? ''
+                      ),
+                    })
+                  }
+                  triggerProps={{ getPopupContainer: () => document.body }}
+                />
+                <div className='text-11px text-t-tertiary'>
+                  {providerParamsValid
+                    ? t('settings.modelAdvanced.defaultVoiceHint', {
+                        defaultValue:
+                          '部分供应商（如 StepFun）必须提供音色，否则语音合成会直接失败。留空则由每次请求自行指定。',
+                      })
+                    : t('settings.modelAdvanced.defaultVoiceUnavailable', {
+                        defaultValue: '下方的供应商参数 JSON 无效，修正后才能选择音色。',
+                      })}
+                </div>
               </div>
             )}
 
