@@ -85,6 +85,7 @@
   "fileChangesCount": "{{count}} 个文件变更",
   "turnDeliverables": {
     "title": "已生成 {{count}} 个文件",
+    "partialTitle": "显示本轮的 {{count}} 个改动文件（向上滚动加载其余）",
     "imagesTitle": "已生成 {{count}} 张图片",
     "mixedTitle": "已生成 {{count}} 个结果",
     "showMore": "再显示 {{count}} 个文件",

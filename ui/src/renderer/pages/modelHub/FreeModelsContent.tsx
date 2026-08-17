@@ -574,7 +574,7 @@ const FreeModelsContent: React.FC = () => {
                                   // A stale probe must not read as a current
                                   // latency measurement.
                                   <span className='text-t-secondary'>
-                                    {t('models.free.healthStale', {
+                                    {t('settings.modelHub.free.health.stale', {
                                       defaultValue: 'last checked {{time}}',
                                       time: new Date(healthResult.checkedAt).toLocaleTimeString(),
                                     })}

@@ -1395,6 +1395,7 @@
         "checkingHint": "正在进行真实模型调用，请稍候",
         "healthy": "可用",
         "healthyHint": "模型响应正常，延迟约 {{latency}}ms；点击可重新检测",
+        "stale": "上次检查 {{time}}",
         "unhealthy": "不可用",
         "unhealthyHint": "本次检测未获得有效响应；点击可重新检测",
         "unknown": "未检测",

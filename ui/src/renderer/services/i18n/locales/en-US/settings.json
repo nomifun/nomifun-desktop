@@ -1395,6 +1395,7 @@
         "checkingHint": "Making a real model request. Please wait.",
         "healthy": "Available",
         "healthyHint": "The model responded normally in about {{latency}}ms. Click to check again.",
+        "stale": "last checked {{time}}",
         "unhealthy": "Unavailable",
         "unhealthyHint": "No valid response was received. Click to check again.",
         "unknown": "Not checked",
