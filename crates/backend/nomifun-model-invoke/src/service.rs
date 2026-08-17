@@ -37,9 +37,16 @@ fn probe_png() -> Vec<u8> {
         .expect("embedded health-probe PNG is valid Base64")
 }
 
-/// A short, valid 16 kHz mono PCM16 WAV containing silence. Empty byte arrays
-/// are rejected before model validation by many ASR providers, which would
-/// make every correctly configured transcription model look unhealthy.
+/// A short, valid 16 kHz mono PCM16 WAV. Empty byte arrays are rejected before
+/// model validation by many ASR providers, which would make every correctly
+/// configured transcription model look unhealthy.
+///
+/// The samples are a quiet tone rather than digital silence, so the payload is
+/// representative audio instead of a buffer some providers special-case. Note
+/// this does not make the probe verify transcription quality: `probe` classifies
+/// on the outcome variant and never inspects the transcript, by design — it
+/// answers "did this endpoint/model/credential combination answer", and an
+/// empty transcript is a valid answer.
 fn probe_wav() -> Vec<u8> {
     const SAMPLE_RATE: u32 = 16_000;
     const SAMPLE_COUNT: u32 = 1_600; // 100 ms
@@ -57,7 +64,12 @@ fn probe_wav() -> Vec<u8> {
     wav.extend_from_slice(&16u16.to_le_bytes());
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&DATA_LEN.to_le_bytes());
-    wav.resize((44 + DATA_LEN) as usize, 0);
+    // 440 Hz at roughly -20 dBFS.
+    for index in 0..SAMPLE_COUNT {
+        let phase = 2.0 * std::f32::consts::PI * 440.0 * (index as f32) / (SAMPLE_RATE as f32);
+        let sample = (phase.sin() * 3_276.0) as i16;
+        wav.extend_from_slice(&sample.to_le_bytes());
+    }
     wav
 }
 
@@ -372,7 +384,7 @@ impl ModelInvokeService {
                 )
             })?;
             let (mut call, adapter) = self.resolve(m, task, placeholder).await?;
-            call.request = probe_request(task, &call.model_params)
+            call.request = probe_request_for_protocol(task, &call.model_params, &call.protocol)
                 .expect("a task with an initial one-shot probe remains one-shot");
             let redactor = call.connection.auth.secret_redactor();
             adapter
@@ -516,6 +528,41 @@ fn probe_request(
     task: ModelTask,
     params: &serde_json::Value,
 ) -> Option<TaskRequest> {
+    probe_request_for_protocol(task, params, "")
+}
+
+/// A protocol whose official API publishes stable system voices but which
+/// rejects a request carrying none. The catalog voice always wins; this only
+/// keeps a correctly configured model from failing its probe locally when the
+/// user has not set a default voice.
+///
+/// Keyed by protocol rather than platform, matching the UI's own suggestion
+/// table (`ttsVoiceOptions.ts`): one provider may host models served by
+/// different adapters.
+///
+/// Scope, deliberately: this substitution exists ONLY in the probe. It answers
+/// "is this endpoint/model/credential combination reachable", which is what a
+/// health check measures. It does NOT prove the generation path is configured:
+/// with an empty `provider_params.voice` AND no companion/global voice, real
+/// synthesis still fails locally in `build_tts_body`. The durable fix for that
+/// is the default-voice field in model management, which writes
+/// `provider_params.voice` — a value the adapter merges into every request
+/// (see `configured_catalog_voice_is_used_when_the_request_carries_none` in
+/// `adapters::stepfun`), so a configured model is consistent in both paths.
+fn probe_fallback_voice(protocol: &str) -> Option<&'static str> {
+    match protocol {
+        // An official StepFun system voice; the metered API and Step Plan
+        // share the same ids.
+        "stepfun.audio_speech" => Some("cixingnansheng"),
+        _ => None,
+    }
+}
+
+fn probe_request_for_protocol(
+    task: ModelTask,
+    params: &serde_json::Value,
+    protocol: &str,
+) -> Option<TaskRequest> {
     match task {
         ModelTask::ImageGeneration => Some(TaskRequest::ImageGeneration(ImageGenRequest {
             prompt: "health check".into(),
@@ -566,10 +613,19 @@ fn probe_request(
             // its probe merely because the real generation UI supplies voice
             // per request. Unknown providers/models remain None and therefore
             // fail closed rather than guessing an OpenAI voice.
-            voice: params
-                .get("voice")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
+            //
+            // The fallback applies only when NO voice key is configured. A key
+            // that is present but blank or non-string is broken configuration:
+            // substituting there would make the probe pass while real synthesis
+            // keeps failing on the same stored value.
+            voice: match params.get("voice") {
+                Some(configured) => configured
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|voice| !voice.is_empty())
+                    .map(str::to_string),
+                None => probe_fallback_voice(protocol).map(str::to_string),
+            },
             format: None,
             extra: json!({}),
         })),
@@ -709,6 +765,22 @@ mod tests {
         let wav = probe_wav();
         assert_eq!(&wav[..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
+
+        // The declared chunk sizes must match the bytes actually present: a
+        // truncated WAV (header promising samples it never wrote) is rejected
+        // by many decoders, which is exactly the false-unhealthy probe this
+        // asset exists to avoid.
+        let riff_size = u32::from_le_bytes(wav[4..8].try_into().unwrap()) as usize;
+        let data_len = u32::from_le_bytes(wav[40..44].try_into().unwrap()) as usize;
+        assert_eq!(riff_size, wav.len() - 8, "RIFF size must cover everything after it");
+        assert_eq!(data_len, wav.len() - 44, "data chunk size must match the payload");
+
+        // And the payload must carry a signal. Digital silence transcribes to
+        // nothing on a healthy model, so it cannot tell working from broken.
+        assert!(
+            wav[44..].iter().any(|byte| *byte != 0),
+            "probe audio must not be digital silence"
+        );
     }
 
     fn job(protocol: &str, config_revision: i64) -> JobHandle {
@@ -1008,6 +1080,109 @@ mod tests {
         assert!(report.message.as_deref().is_some_and(|message| message.contains("400")));
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1, "the tts probe must actually reach the wire");
+    }
+
+    /// StepFun rejects a voice-less TTS request locally, so before the
+    /// protocol-scoped fallback the probe failed with `InvalidParams` in a few
+    /// milliseconds without ever opening a socket — a correctly configured
+    /// model looked broken. The previous TTS probe test seeded platform
+    /// `openai`, so it never covered this path.
+    #[tokio::test]
+    async fn probe_stepfun_tts_without_configured_voice_still_reaches_the_wire() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .and(body_partial_json(json!({
+                "model": "step-tts-mini",
+                "input": "hi",
+                "voice": "cixingnansheng",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "audio/mpeg")
+                    .set_body_bytes(b"ID3-audio".to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let base = format!("{}/v1", server.uri().trim_end_matches('/'));
+        let pid = seed_provider_on(&pool, "stepfun", &base).await;
+        // provider_params "{}" is exactly the shipped default: no voice.
+        seed_model(&pool, &pid, "step-tts-mini", r#"["speech_synthesis"]"#, "{}", true).await;
+
+        let report =
+            svc.probe(&mref(&pid, "step-tts-mini"), ModelTask::SpeechSynthesis).await.unwrap();
+
+        assert!(report.healthy, "unexpected probe failure: {:?}", report.message);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "the stepfun tts probe must actually reach the wire");
+    }
+
+    /// The catalog voice must win over the fallback: the fallback exists only
+    /// to keep an unconfigured model probeable, never to override a choice.
+    #[tokio::test]
+    async fn probe_stepfun_tts_prefers_the_configured_voice_over_the_fallback() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .and(body_partial_json(json!({"voice": "tianmeinvsheng"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "audio/mpeg")
+                    .set_body_bytes(b"ID3-audio".to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let base = format!("{}/v1", server.uri().trim_end_matches('/'));
+        let pid = seed_provider_on(&pool, "stepfun", &base).await;
+        seed_model(
+            &pool,
+            &pid,
+            "step-tts-mini",
+            r#"["speech_synthesis"]"#,
+            r#"{"voice":"tianmeinvsheng"}"#,
+            true,
+        )
+        .await;
+
+        let report =
+            svc.probe(&mref(&pid, "step-tts-mini"), ModelTask::SpeechSynthesis).await.unwrap();
+
+        assert!(report.healthy, "unexpected probe failure: {:?}", report.message);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    /// A blank configured voice is broken configuration, not an absent one.
+    /// Substituting the fallback there would green the badge while every real
+    /// synthesis call keeps failing on the same stored value.
+    #[tokio::test]
+    async fn probe_stepfun_tts_does_not_paper_over_a_blank_configured_voice() {
+        let (svc, pool) = setup().await;
+        let pid = seed_provider_on(&pool, "stepfun", "http://127.0.0.1:1/v1").await;
+        seed_model(
+            &pool,
+            &pid,
+            "step-tts-mini",
+            r#"["speech_synthesis"]"#,
+            r#"{"voice":"   "}"#,
+            true,
+        )
+        .await;
+
+        let report =
+            svc.probe(&mref(&pid, "step-tts-mini"), ModelTask::SpeechSynthesis).await.unwrap();
+
+        assert!(!report.healthy);
+        assert!(
+            report.message.as_deref().is_some_and(|message| message.contains("voice")),
+            "unexpected message: {:?}",
+            report.message
+        );
     }
 
     #[tokio::test]

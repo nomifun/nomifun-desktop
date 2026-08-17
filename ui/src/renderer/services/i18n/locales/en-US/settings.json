@@ -1632,7 +1632,11 @@
     "crossOriginConsentRequired": "Confirm cross-origin credentials before saving this override.",
     "params": "Provider parameters JSON",
     "providerParamsOnly": "JSON object with provider-specific parameters only.",
-    "invalidParamsJson": "Provider parameters must be a JSON object."
+    "invalidParamsJson": "Provider parameters must be a JSON object.",
+    "defaultVoice": "Default voice",
+    "defaultVoicePlaceholder": "Select or enter a provider voice id",
+    "defaultVoiceHint": "Some providers (such as StepFun) require a voice; speech synthesis fails outright without one. Leave empty to supply it per request.",
+    "defaultVoiceUnavailable": "Fix the provider parameters JSON below before choosing a voice."
   },
   "connections": {
     "title": "Connections",

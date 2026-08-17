@@ -439,9 +439,64 @@ fn elapsed_ms(duration: Duration) -> u64 {
     duration.as_millis().try_into().unwrap_or(u64::MAX)
 }
 
+/// Map an `InvokeError` Display prefix (`"{kind:?}: …"`) onto a health-check
+/// kind.
+///
+/// This is a LAST RESORT, consulted only after the prose arms have failed to
+/// find anything more specific. The prefix is deliberately coarse: a 400 whose
+/// body reports an exhausted balance arrives as `InvalidParams` (see
+/// `transport::error_from_response`), and reporting that as "fix your request"
+/// instead of "top up the account" loses the actionable half of the diagnosis.
+///
+/// `Network` and `Timeout` are the exception and are matched EARLY by the
+/// caller: their prose arms overlap ("request timed out" reads as both), so the
+/// typed kind is strictly better information there.
+fn invoke_error_kind_prefix(message: &str) -> Option<ProviderHealthCheckErrorKind> {
+    use ProviderHealthCheckErrorKind as K;
+
+    match invoke_error_prefix(message)? {
+        // Local/config faults the operator can fix in model management.
+        "InvalidParams" | "Config" | "UnsupportedTask" | "NoAdapter" | "MissingConnection"
+        | "NotPollable" => Some(K::InvalidRequest),
+        // The provider answered, but not with something usable.
+        "ParseError" | "JobFailed" | "ContentPolicy" | "ProviderError" => Some(K::ApiError),
+        "QuotaExhausted" => Some(K::InsufficientQuota),
+        // Without a recognizable status this is still a credential rejection.
+        "Auth" => Some(K::Unauthorized),
+        "RateLimited" => Some(K::RateLimited),
+        _ => None,
+    }
+}
+
+/// The transport-level kinds whose prose arms are ambiguous, so the typed kind
+/// wins outright.
+fn invoke_error_transport_prefix(message: &str) -> Option<ProviderHealthCheckErrorKind> {
+    match invoke_error_prefix(message)? {
+        "Network" => Some(ProviderHealthCheckErrorKind::ConnectionError),
+        "Timeout" => Some(ProviderHealthCheckErrorKind::Timeout),
+        _ => None,
+    }
+}
+
+/// Extract a bare CamelCase `Kind:` prefix. Prose that merely contains a colon
+/// (`"provider returned 400: ..."`) has whitespace in the candidate and is
+/// rejected. This cannot prove the string came from `InvokeError`, which is why
+/// every mapping above is either a last resort or strictly more informative
+/// than the prose it replaces.
+fn invoke_error_prefix(message: &str) -> Option<&str> {
+    let (prefix, _) = message.split_once(':')?;
+    (!prefix.is_empty() && !prefix.contains(char::is_whitespace)).then_some(prefix)
+}
+
 pub(crate) fn classify_error(message: &str, is_timeout: bool) -> ProviderHealthCheckErrorKind {
     if is_timeout {
         return ProviderHealthCheckErrorKind::Timeout;
+    }
+
+    // Transport kinds first: their prose arms genuinely overlap, so the invoke
+    // layer's own classification is better than re-deriving it.
+    if let Some(kind) = invoke_error_transport_prefix(message) {
+        return kind;
     }
 
     let lower = message.to_lowercase();
@@ -506,7 +561,9 @@ pub(crate) fn classify_error(message: &str, is_timeout: bool) -> ProviderHealthC
         return ProviderHealthCheckErrorKind::ApiError;
     }
 
-    ProviderHealthCheckErrorKind::Unknown
+    // Last resort before Unknown: the invoke layer's own typed kind. Coarser
+    // than every arm above, which is why it runs last.
+    invoke_error_kind_prefix(message).unwrap_or(ProviderHealthCheckErrorKind::Unknown)
 }
 
 pub(crate) fn extract_http_status(message: &str) -> Option<u16> {
@@ -548,6 +605,89 @@ mod tests {
             classify_error("anything", true),
             ProviderHealthCheckErrorKind::Timeout
         );
+    }
+
+    /// `InvokeError`'s Display is `"{kind:?}: {message}"`, so the invoke layer's
+    /// own typed kinds arrive as a `Kind:` prefix. These were falling through to
+    /// `Unknown`, which is what made a local StepFun TTS parameter rejection and
+    /// a real upstream outage look identical in model management.
+    #[test]
+    fn classifies_typed_invoke_error_kind_prefixes() {
+        for (message, expected) in [
+            (
+                "InvalidParams: StepFun TTS requires a non-empty provider voice id",
+                ProviderHealthCheckErrorKind::InvalidRequest,
+            ),
+            (
+                "ParseError: StepFun ASR SSE produced no transcript (39 bytes)",
+                ProviderHealthCheckErrorKind::ApiError,
+            ),
+            (
+                "Config: resolved protocol has no injected submit endpoint",
+                ProviderHealthCheckErrorKind::InvalidRequest,
+            ),
+            (
+                "UnsupportedTask: adapter cannot serve task",
+                ProviderHealthCheckErrorKind::InvalidRequest,
+            ),
+            (
+                "Network: could not connect to upstream provider (dns error)",
+                ProviderHealthCheckErrorKind::ConnectionError,
+            ),
+            (
+                "Auth: provider rejected the api key",
+                ProviderHealthCheckErrorKind::Unauthorized,
+            ),
+            (
+                "QuotaExhausted: account balance is exhausted",
+                ProviderHealthCheckErrorKind::InsufficientQuota,
+            ),
+        ] {
+            assert_eq!(classify_error(message, false), expected, "message: {message}");
+        }
+    }
+
+    /// A `Timeout` kind must not be reported as a generic connection error: the
+    /// prose arm matches "request timed out" for both.
+    #[test]
+    fn timeout_kind_prefix_is_a_timeout_not_a_connection_error() {
+        assert_eq!(
+            classify_error("Timeout: upstream request timed out", false),
+            ProviderHealthCheckErrorKind::Timeout
+        );
+    }
+
+    /// A typed prefix must never outrank a MORE specific signal carried in the
+    /// message. `error_from_response` classifies 400/422 as `InvalidParams`, so
+    /// a 400 whose body says the account is out of credit still has to read as
+    /// a quota problem ("top up") rather than a request problem ("fix your
+    /// request"). Same for a `Config` error naming a missing provider.
+    #[test]
+    fn specific_message_signals_outrank_the_coarse_typed_prefix() {
+        for (message, expected) in [
+            (
+                "InvalidParams: provider returned 400: {\"error\":{\"code\":\"insufficient_quota\"}}",
+                ProviderHealthCheckErrorKind::InsufficientQuota,
+            ),
+            (
+                "InvalidParams: provider returned 429: slow down",
+                ProviderHealthCheckErrorKind::RateLimited,
+            ),
+            (
+                "ParseError: provider returned 429 Too Many Requests",
+                ProviderHealthCheckErrorKind::RateLimited,
+            ),
+            (
+                "Config: provider not found: 019ff453",
+                ProviderHealthCheckErrorKind::NotFound,
+            ),
+            (
+                "InvalidParams: provider returned 401: invalid api key",
+                ProviderHealthCheckErrorKind::Unauthorized,
+            ),
+        ] {
+            assert_eq!(classify_error(message, false), expected, "message: {message}");
+        }
     }
 
     #[test]
