@@ -707,6 +707,10 @@ const STEPFUN_FALLBACK_MODELS: &[&str] = &[
     // Dedicated one-shot speech models.
     "stepaudio-2.5-tts",
     "stepaudio-2.5-asr",
+    // The lighter dedicated TTS surface. Omitting it meant a user whose
+    // catalog fetch failed could not select it at all, even though it serves
+    // the same `stepfun.audio_speech` protocol.
+    "step-tts-mini",
     // Image generation plus editing.
     "step-image-edit-2",
 ];
@@ -1193,6 +1197,7 @@ mod tests {
                 "stepaudio-2.5-chat",
                 "stepaudio-2.5-tts",
                 "stepaudio-2.5-asr",
+                "step-tts-mini",
                 "step-image-edit-2",
             ]
         );
