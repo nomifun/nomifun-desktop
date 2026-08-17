@@ -64,6 +64,24 @@ const healthDotClass = (status: ManagedModelHealthResult['status'] | 'checking')
 };
 
 /**
+ * A probe result older than this no longer describes whether the model can carry
+ * an agent task right now.
+ *
+ * The probe is a single short request; a real turn can be rate-limited seconds
+ * later, and nothing writes that failure back into the stored health. A model
+ * observed once as healthy therefore stayed green indefinitely — one was still
+ * showing "available / 1770ms" after repeated real rate limits. Ageing the badge
+ * does not invent a status it cannot know; it stops presenting a stale
+ * observation as a current capability.
+ */
+const HEALTH_FRESHNESS_MS = 5 * 60 * 1000;
+
+const isHealthResultStale = (result: ManagedModelHealthResult | undefined, now: number): boolean =>
+  result?.status === 'healthy' &&
+  typeof result.checkedAt === 'number' &&
+  now - result.checkedAt > HEALTH_FRESHNESS_MS;
+
+/**
  * FreeModelsContent — management surface for the built-in
  * `nomifun-free-model` provider. The provider itself is projected into all
  * existing model selectors; this dedicated page owns service/catalog controls
@@ -543,13 +561,27 @@ const FreeModelsContent: React.FC = () => {
                                 aria-hidden='true'
                                 className={classNames(
                                   'size-6px shrink-0 rd-full',
-                                  healthDotClass(healthStatus)
+                                  isHealthResultStale(healthResult, Date.now())
+                                    ? 'bg-[var(--color-fill-4)]'
+                                    : healthDotClass(healthStatus)
                                 )}
                               />
                               <span>{healthLabel}</span>
-                              {!checking && healthResult?.status === 'healthy' && healthResult.latencyMs != null && (
-                                <span className='text-t-secondary'>{healthResult.latencyMs}ms</span>
-                              )}
+                              {!checking &&
+                                healthResult?.status === 'healthy' &&
+                                healthResult.latencyMs != null &&
+                                (isHealthResultStale(healthResult, Date.now()) ? (
+                                  // A stale probe must not read as a current
+                                  // latency measurement.
+                                  <span className='text-t-secondary'>
+                                    {t('models.free.healthStale', {
+                                      defaultValue: 'last checked {{time}}',
+                                      time: new Date(healthResult.checkedAt).toLocaleTimeString(),
+                                    })}
+                                  </span>
+                                ) : (
+                                  <span className='text-t-secondary'>{healthResult.latencyMs}ms</span>
+                                ))}
                             </span>
                           </Tooltip>
                         </div>

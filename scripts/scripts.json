@@ -4,19 +4,11 @@
     { "id": "build", "title": "构建（出制品）" },
     { "id": "serve", "title": "运行（组装好的应用）" },
     { "id": "test",  "title": "测试" },
-    { "id": "check", "title": "静态检查 / 门禁" },
+    { "id": "check", "title": "静态检查" },
     { "id": "gen",   "title": "代码生成" },
     { "id": "maint", "title": "维护 / 工具" }
   ],
   "scripts": {
-    "setup:git-hooks": {
-      "group": "maint",
-      "desc": "Enable this repository's human-only Git attribution hooks without changing global Git config."
-    },
-    "test:git-attribution": {
-      "group": "test",
-      "desc": "Validate the repository-local human-only Git attribution policy."
-    },
     "check:process-runtime-boundary": {
       "group": "check",
       "desc": "Enforce the supervised process runtime boundary and exact hand-off allowlist."
@@ -53,7 +45,7 @@
     "test:desktop":  { "group": "test",  "desc": "运行桌面壳测试，不监听或打包 ui/dist 资源" },
     "test:browser":  { "group": "test",  "desc": "运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/nomi-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些）" },
     "test:ui":       { "group": "test",  "desc": "运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx）" },
-    "check":         { "group": "check", "desc": "聚合静态门禁：typecheck + i18n + 主题契约 + 图标导入 + 死 CSS 工具类 + 进程运行时边界 + Agent 词汇边界 + 脚本登记" },
+    "check":         { "group": "check", "desc": "聚合静态检查：typecheck + i18n + 主题契约 + 图标导入 + 死 CSS 工具类 + 进程运行时边界 + Agent 词汇边界 + 脚本登记" },
     "typecheck":     { "group": "check", "desc": "前端 TypeScript 类型检查（tsc --noEmit）" },
     "check:i18n":    { "group": "check", "desc": "校验 i18n 类型与 locale 键是否一致" },
     "check:theme":   { "group": "check", "desc": "校验预设 CSS 主题契约" },

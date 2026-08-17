@@ -535,7 +535,7 @@
   "notFound": "Conversation not found or has been deleted",
   "steer": {
     "button": "Send now (interject into the running reply)",
-    "fallbackQueued": "This engine can't interject mid-reply — added to the queue instead."
+    "fallbackQueued": "Couldn't interject into the running reply — added to the queue instead, with your attachments."
   },
   "stop": {
     "failed": "Failed to stop the current task. Please try again."
