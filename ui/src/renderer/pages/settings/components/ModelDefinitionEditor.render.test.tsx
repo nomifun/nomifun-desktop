@@ -334,4 +334,61 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('data-protocol-auth-incompatible="true"')).toBe(true);
     expect(html.includes('header_key:&lt;name&gt;')).toBe(true);
   });
+
+  /**
+   * StepFun TTS rejects a request with no voice locally, so model management
+   * has to offer the field. Before this control the only way to set one was to
+   * hand-type `{"voice": …}` into the raw provider-params JSON.
+   */
+  test('offers a default-voice picker for speech synthesis, seeded from the persisted voice', () => {
+    const html = render({
+      model: 'step-tts-mini',
+      capabilities: [
+        {
+          ...emptyCapabilityDraft('speech_synthesis'),
+          protocol: 'stepfun.audio_speech',
+          providerParamsJson: '{"voice":"cixingnansheng"}',
+        },
+      ],
+    });
+
+    expect(html.includes('默认音色')).toBe(true);
+    // The persisted voice is shown as the current selection, not just a suggestion.
+    expect(html.includes('cixingnansheng')).toBe(true);
+  });
+
+  test('hides the voice picker for non-TTS tasks and for protocols that ignore a provider-params voice', () => {
+    const chatHtml = render({
+      model: 'step-3.7-flash',
+      capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: 'stepfun.chat' }],
+    });
+    expect(chatHtml.includes('默认音色')).toBe(false);
+
+    // deepgram.speak_rest encodes the voice in the model id, so a separate
+    // voice field would be a second, contradictory source of truth.
+    const deepgramHtml = render({
+      model: 'aura-asteria-en',
+      capabilities: [
+        { ...emptyCapabilityDraft('speech_synthesis'), protocol: 'deepgram.speak_rest' },
+      ],
+    });
+    expect(deepgramHtml.includes('默认音色')).toBe(false);
+
+    // These adapters read a differently-named field (voice_setting.voice_id,
+    // speaker, voice_id) or overwrite provider params with a typed default, so
+    // a saved `voice` key would silently never take effect.
+    for (const protocol of [
+      'minimax.t2a',
+      'volc.tts_v3',
+      'xai.tts',
+      'mimo.chat_tts',
+      'openai.audio_speech',
+    ]) {
+      const html = render({
+        model: 'some-tts-model',
+        capabilities: [{ ...emptyCapabilityDraft('speech_synthesis'), protocol }],
+      });
+      expect(html.includes('默认音色')).toBe(false);
+    }
+  });
 });

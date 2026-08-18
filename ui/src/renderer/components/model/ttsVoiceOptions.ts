@@ -90,3 +90,29 @@ export const ttsVoiceOptionsFor = (
 /** Providers whose selected TTS model id already identifies the voice. */
 export const ttsUsesModelIdAsVoice = (protocol: string | undefined): boolean =>
   protocol === 'deepgram.speak_rest';
+
+/**
+ * Protocols whose adapter reads a plain `voice` key out of the saved provider
+ * params, so a default voice stored as `provider_params.voice` actually
+ * reaches the request.
+ *
+ * Deliberately a short allowlist, verified against each adapter:
+ * - `stepfun.audio_speech` merges provider params and then requires a
+ *   non-empty `voice`, so the saved default is what makes it work at all.
+ * - `siliconflow.audio_speech` falls back to a configured `voice` when the
+ *   request carries none.
+ *
+ * Everything else is excluded on purpose. MiniMax nests
+ * `voice_setting.voice_id`, Volcengine uses `speaker` and xAI uses
+ * `voice_id`, so a flat `voice` key is a field they never read. OpenAI reads
+ * the right key but writes its typed value (defaulting to `alloy`) AFTER the
+ * provider params, which overwrites the saved default. In all of those cases
+ * a generic "default voice" box would look accepted and silently do nothing.
+ */
+const PROTOCOLS_WITH_PROVIDER_PARAM_VOICE = new Set([
+  'stepfun.audio_speech',
+  'siliconflow.audio_speech',
+]);
+
+export const ttsSupportsProviderParamVoice = (protocol: string | undefined): boolean =>
+  protocol !== undefined && PROTOCOLS_WITH_PROVIDER_PARAM_VOICE.has(protocol);

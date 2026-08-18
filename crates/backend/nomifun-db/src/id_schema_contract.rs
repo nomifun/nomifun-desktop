@@ -11,6 +11,38 @@ use sqlx::{Row, SqlitePool};
 
 use crate::error::DbError;
 
+/// The customer-service notes full-text index.
+///
+/// External-content FTS5 over `cs_notes.search_text` (migration 035), the
+/// lexical half of note recall. It is a virtual table, so it carries NONE of
+/// the row-key invariants the product tables below do — see
+/// [`FTS_SHADOW_TABLES`].
+pub(crate) const CS_NOTES_FTS_TABLE: &str = "cs_notes_fts";
+
+/// Shadow tables SQLite materializes for [`CS_NOTES_FTS_TABLE`].
+///
+/// These belong to the v3 baseline table SET (so the registry stays an exact
+/// equality check and a stray table is still caught), but they are EXEMPT from
+/// the per-table structural asserts because their shape is owned by SQLite,
+/// not by this repository: `cs_notes_fts` has no primary key at all, `_config`
+/// keys on `k` and is WITHOUT ROWID, `_data`/`_docsize` declare
+/// `id INTEGER PRIMARY KEY` without AUTOINCREMENT, and `_idx` uses a composite
+/// `(segid, term)` key. Four of the five would fail
+/// [`require_autoincrement_primary_key`]. Same treatment as the companion
+/// store's FTS baseline (`nomifun-companion/src/store.rs:709-717`).
+pub(crate) const FTS_SHADOW_TABLES: &[&str] = &[
+    "cs_notes_fts_config",
+    "cs_notes_fts_data",
+    "cs_notes_fts_docsize",
+    "cs_notes_fts_idx",
+];
+
+/// Every table that is an FTS virtual table or one of its shadow tables.
+#[cfg(test)]
+pub(crate) fn is_fts_table(name: &str) -> bool {
+    name == CS_NOTES_FTS_TABLE || FTS_SHADOW_TABLES.contains(&name)
+}
+
 pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "agent_execution_attempts",
     "agent_execution_events",
@@ -897,7 +929,15 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
     .await?
     .into_iter()
     .collect();
-    let expected_tables: BTreeSet<String> = PRODUCT_TABLES.iter().map(|value| (*value).to_owned()).collect();
+    // The FTS virtual table and its shadow tables belong to the baseline SET
+    // (so an unexpected table is still caught) but not to the structural loop
+    // below — SQLite owns their shape. See `FTS_SHADOW_TABLES`.
+    let expected_tables: BTreeSet<String> = PRODUCT_TABLES
+        .iter()
+        .chain(std::iter::once(&CS_NOTES_FTS_TABLE))
+        .chain(FTS_SHADOW_TABLES.iter())
+        .map(|value| (*value).to_owned())
+        .collect();
     if actual_tables != expected_tables {
         let missing = expected_tables.difference(&actual_tables).cloned().collect::<Vec<_>>();
         let extra = actual_tables.difference(&expected_tables).cloned().collect::<Vec<_>>();
@@ -909,6 +949,7 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
     for table in PRODUCT_TABLES {
         require_autoincrement_primary_key(pool, table).await?;
     }
+    validate_cs_notes_fts_contract(pool).await?;
     validate_no_physical_foreign_keys(pool).await?;
     validate_no_triggers(pool).await?;
     validate_no_row_id_columns(pool).await?;
@@ -1219,6 +1260,38 @@ async fn require_autoincrement_primary_key(pool: &SqlitePool, table: &str) -> Re
         return Err(DbError::Init(format!(
             "v3 schema table {table} must declare id INTEGER PRIMARY KEY AUTOINCREMENT"
         )));
+    }
+    Ok(())
+}
+
+/// Assert the customer-service notes FTS index still has the definition note
+/// recall depends on.
+///
+/// Every fragment here is load-bearing, and a silent edit degrades recall
+/// rather than failing loudly, which is why this is a boot assertion:
+/// - `content='cs_notes'` / `content_rowid='id'` make it external-content, so
+///   `cs_notes` stays the single source of truth for note text. Dropping them
+///   turns the index into a second, silently diverging copy.
+/// - `tokenize='trigram'` is what allows substring and CJK matching at all.
+///   Falling back to the default unicode61 tokenizer would break every
+///   Chinese query, since it splits on whitespace that Chinese does not use.
+async fn validate_cs_notes_fts_contract(pool: &SqlitePool) -> Result<(), DbError> {
+    let create_sql: Option<String> =
+        sqlx::query_scalar("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?")
+            .bind(CS_NOTES_FTS_TABLE)
+            .fetch_optional(pool)
+            .await?;
+    let create_sql = create_sql.ok_or_else(|| {
+        DbError::Init(format!("v3 schema is missing the FTS index table {CS_NOTES_FTS_TABLE}"))
+    })?;
+    // Collapse whitespace so the check is insensitive to DDL formatting.
+    let normalized = create_sql.split_whitespace().collect::<Vec<_>>().join("").to_ascii_lowercase();
+    for fragment in ["usingfts5", "content='cs_notes'", "content_rowid='id'", "tokenize='trigram'"] {
+        if !normalized.contains(fragment) {
+            return Err(DbError::Init(format!(
+                "v3 schema {CS_NOTES_FTS_TABLE} is missing the required definition fragment {fragment}"
+            )));
+        }
     }
     Ok(())
 }

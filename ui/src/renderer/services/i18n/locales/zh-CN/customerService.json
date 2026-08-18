@@ -81,6 +81,8 @@
     "kindFact": "业务事实",
     "content": "内容",
     "contentPlaceholder": "写下 FAQ / 话术 / 业务事实…",
+    "aliasesPlaceholder": "其他问法，每行一个，例如：这个软件\n多少钱",
+    "aliasesHint": "每行填一个访客可能的说法。当访客的问法与笔记正文用词完全不同时，靠它才能被搜到。",
     "scope": "范围",
     "private": "私有",
     "shared": "共享",
