@@ -1632,7 +1632,11 @@
     "crossOriginConsentRequired": "保存此覆盖地址前，请明确确认允许跨来源发送凭证。",
     "params": "供应商参数 JSON",
     "providerParamsOnly": "仅填写供应商专用参数的 JSON 对象。",
-    "invalidParamsJson": "供应商参数必须是 JSON 对象。"
+    "invalidParamsJson": "供应商参数必须是 JSON 对象。",
+    "defaultVoice": "默认音色",
+    "defaultVoicePlaceholder": "选择或输入供应商音色 id",
+    "defaultVoiceHint": "部分供应商（如 StepFun）必须提供音色，否则语音合成会直接失败。留空则由每次请求自行指定。",
+    "defaultVoiceUnavailable": "下方的供应商参数 JSON 无效，修正后才能选择音色。"
   },
   "connections": {
     "title": "连接档案",

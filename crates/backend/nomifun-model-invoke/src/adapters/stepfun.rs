@@ -272,6 +272,7 @@ fn asr_container_from_mime(mime: &str) -> Result<&'static str, InvokeError> {
         "audio/mpeg" | "audio/mp3" => Ok("mp3"),
         "audio/ogg" => Ok("ogg"),
         "audio/wav" | "audio/x-wav" | "audio/wave" => Ok("wav"),
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => Ok("m4a"),
         "audio/pcm" | "audio/l16" | "application/octet-stream" => Ok("pcm"),
         _ => Err(InvokeError::new(
             InvokeErrorKind::InvalidParams,
@@ -454,7 +455,19 @@ fn parse_asr_sse(bytes: &[u8]) -> Result<String, InvokeError> {
     let events = parse_sse_json(bytes, "StepFun ASR")?;
     let mut deltas = String::new();
     let mut final_text: Option<String> = None;
+    // A terminal `transcript.text.done` proves the provider finished the
+    // request. Tracked separately from `final_text` because the event may omit
+    // the `text` field entirely when nothing was said.
+    let mut saw_done = false;
+    // Event type names only (never payloads) so an unexpected response shape
+    // can be diagnosed from the error message alone.
+    let mut observed: Vec<String> = Vec::new();
     for event in events {
+        if let Some(name) = event_type(&event)
+            && !observed.iter().any(|seen| seen == name)
+        {
+            observed.push(name.to_owned());
+        }
         match event_type(&event) {
             Some("transcript.text.delta") => {
                 if let Some(delta) = event.data.get("delta").and_then(Value::as_str) {
@@ -462,6 +475,7 @@ fn parse_asr_sse(bytes: &[u8]) -> Result<String, InvokeError> {
                 }
             }
             Some("transcript.text.done") => {
+                saw_done = true;
                 if let Some(text) = event.data.get("text").and_then(Value::as_str) {
                     final_text = Some(text.to_owned());
                 }
@@ -473,10 +487,44 @@ fn parse_asr_sse(bytes: &[u8]) -> Result<String, InvokeError> {
         }
     }
 
+    // Silence and non-speech noise legitimately transcribe to nothing. Every
+    // sibling ASR adapter returns that as an empty transcript, and
+    // `SpeechServices::transcribe` documents it as a valid answer, so a
+    // completed stream must not be reported as a parse failure. Only a stream
+    // that produced neither content nor a terminal event is unexplained.
     final_text
         .filter(|text| !text.is_empty())
         .or_else(|| (!deltas.is_empty()).then_some(deltas))
-        .ok_or_else(|| InvokeError::parse("StepFun ASR SSE produced no transcript"))
+        .or_else(|| saw_done.then(String::new))
+        .ok_or_else(|| {
+            // Name the response shape instead of only the outcome: a body that
+            // is not SSE at all, or one using unknown event names, otherwise
+            // looks identical to a genuinely empty transcript. The body itself
+            // is never included — it can carry transcribed user speech.
+            InvokeError::parse(format!(
+                "StepFun ASR SSE produced no transcript ({})",
+                describe_asr_shape(bytes, &observed)
+            ))
+        })
+}
+
+/// Summarize an unusable ASR response without echoing its content.
+fn describe_asr_shape(bytes: &[u8], observed: &[String]) -> String {
+    if bytes.is_empty() {
+        return "empty response body".to_owned();
+    }
+    let mut parts = vec![format!("{} bytes", bytes.len())];
+    if observed.is_empty() {
+        // No `data:` line carried a JSON object with a recognizable type, so
+        // the body is probably not the SSE stream this adapter expects.
+        parts.push("no recognizable SSE transcript events".to_owned());
+        if looks_like_json(bytes) {
+            parts.push("body looks like plain JSON, not text/event-stream".to_owned());
+        }
+    } else {
+        parts.push(format!("event types seen: {}", observed.join(", ")));
+    }
+    parts.join("; ")
 }
 
 fn response_error(value: &Value, context: &str) -> Option<InvokeError> {
@@ -495,15 +543,24 @@ fn error_from_event(value: &Value, context: &str) -> InvokeError {
         .or_else(|| value.get("message").and_then(Value::as_str))
         .unwrap_or("provider emitted an error event");
     let signal = format!("{code} {message}").to_ascii_lowercase();
-    let kind = if signal.contains("quota") || signal.contains("insufficient_balance") {
+    // StepFun's documented error event is often flat Chinese prose with no
+    // `code`, so each class needs its Chinese signals alongside the English
+    // ones or every one of them collapses into `ProviderError` and callers
+    // lose the retry / re-auth / top-up distinction.
+    let has = |needles: &[&str]| needles.iter().any(|needle| signal.contains(needle));
+    let kind = if has(&["quota", "insufficient_balance", "余额", "额度", "欠费", "充值"]) {
         InvokeErrorKind::QuotaExhausted
-    } else if signal.contains("rate") && signal.contains("limit") {
+    } else if (signal.contains("rate") && signal.contains("limit"))
+        || has(&["限流", "过于频繁", "请求频率", "qps"])
+    {
         InvokeErrorKind::RateLimited
-    } else if signal.contains("auth") || signal.contains("api_key") || signal.contains("api key") {
+    } else if has(&["auth", "api_key", "api key", "密钥", "鉴权", "认证", "未授权", "token 无效"]) {
         InvokeErrorKind::Auth
-    } else if signal.contains("invalid") || signal.contains("parameter") || signal.contains("argument") {
+    } else if has(&["invalid", "parameter", "argument", "参数", "缺少", "不合法", "格式错误"]) {
         InvokeErrorKind::InvalidParams
-    } else if signal.contains("content") && (signal.contains("policy") || signal.contains("filter")) {
+    } else if (signal.contains("content") && (signal.contains("policy") || signal.contains("filter")))
+        || has(&["内容审核", "违规", "敏感"])
+    {
         InvokeErrorKind::ContentPolicy
     } else {
         InvokeErrorKind::ProviderError
@@ -818,6 +875,162 @@ mod tests {
         assert_eq!(text, "你好");
     }
 
+    /// Silence and background noise transcribe to nothing. The robot's speech
+    /// contract (`SpeechServices::transcribe`) documents an empty transcript as
+    /// a valid answer, and every sibling ASR adapter returns one, so a
+    /// completed stream must not surface as a parse failure.
+    #[tokio::test]
+    async fn asr_completed_stream_with_empty_text_is_an_empty_transcript_not_an_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/asr/sse"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "data: {\"type\":\"transcript.text.done\",\"text\":\"\"}\n\n",
+            ))
+            .mount(&server)
+            .await;
+        let call = asr_call(
+            &format!("{}/v1", server.uri()),
+            "stepaudio-2.5-asr",
+            asr("audio/wav", json!({})),
+        );
+        let result = StepFunAsrSseAdapter.submit(&test_http(), &call).await.unwrap();
+        let TaskOutcome::Done(TaskResult::Transcript { text, .. }) = result else {
+            panic!("expected transcript")
+        };
+        assert_eq!(text, "");
+    }
+
+    /// The terminal event may omit `text` entirely rather than send `""`.
+    #[tokio::test]
+    async fn asr_done_event_without_a_text_field_is_still_a_completed_transcript() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/asr/sse"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("data: {\"type\":\"transcript.text.done\"}\n\n"),
+            )
+            .mount(&server)
+            .await;
+        let call = asr_call(
+            &format!("{}/v1", server.uri()),
+            "stepaudio-2.5-asr",
+            asr("audio/wav", json!({})),
+        );
+        let result = StepFunAsrSseAdapter.submit(&test_http(), &call).await.unwrap();
+        let TaskOutcome::Done(TaskResult::Transcript { text, .. }) = result else {
+            panic!("expected transcript")
+        };
+        assert_eq!(text, "");
+    }
+
+    /// A response that never completed is still an error — but the message has
+    /// to name the shape, otherwise "no transcript" cannot be told apart from
+    /// a legitimately empty one. The body is never echoed: it may contain
+    /// transcribed user speech.
+    #[tokio::test]
+    async fn asr_unrecognized_response_shape_reports_the_shape_without_the_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/asr/sse"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string("{\"text\":\"secret user speech\"}"),
+            )
+            .mount(&server)
+            .await;
+        let call = asr_call(
+            &format!("{}/v1", server.uri()),
+            "stepaudio-2.5-asr",
+            asr("audio/wav", json!({})),
+        );
+        let error = StepFunAsrSseAdapter.submit(&test_http(), &call).await.unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::ParseError);
+        assert!(error.message.contains("plain JSON"), "{}", error.message);
+        assert!(
+            !error.message.contains("secret user speech"),
+            "response body must never be echoed: {}",
+            error.message
+        );
+    }
+
+    #[tokio::test]
+    async fn asr_empty_body_is_reported_as_an_empty_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/asr/sse"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&server)
+            .await;
+        let call = asr_call(
+            &format!("{}/v1", server.uri()),
+            "stepaudio-2.5-asr",
+            asr("audio/wav", json!({})),
+        );
+        let error = StepFunAsrSseAdapter.submit(&test_http(), &call).await.unwrap_err();
+        assert!(error.message.contains("empty response body"), "{}", error.message);
+    }
+
+    /// The robot speech path sends `voice: None` and relies on the catalog
+    /// default configured in model management, so the configured voice must
+    /// reach the wire without a typed per-request voice. This is what makes
+    /// the model-management field a real fix rather than a probe-only one.
+    #[tokio::test]
+    async fn configured_catalog_voice_is_used_when_the_request_carries_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .and(body_partial_json(json!({"voice": "tianmeinvsheng"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "audio/wav")
+                    .set_body_bytes(b"RIFF-result".to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut request = tts(json!({}));
+        let TaskRequest::SpeechSynthesis(ref mut typed) = request else { unreachable!() };
+        typed.voice = None; // exactly what RobotSpeech::synthesize sends with no slot voice
+        let mut call = tts_call(&format!("{}/v1", server.uri()), "step-tts-mini", request);
+        call.model_params = json!({"endpoint": "/audio/speech", "voice": "tianmeinvsheng"});
+
+        StepFunAudioSpeechAdapter.submit(&test_http(), &call).await.unwrap();
+    }
+
+    /// StepFun is a Chinese provider and its error events carry Chinese text,
+    /// often with no machine-readable `code`. Classifying on English substrings
+    /// alone degraded every one of those to `ProviderError`, losing the
+    /// retry / re-auth / top-up semantics callers branch on.
+    #[test]
+    fn error_events_classify_chinese_messages_and_the_flat_documented_shape() {
+        let cases = [
+            // Flat shape from the docs: type/meta/message, no `code`.
+            (json!({"type": "error", "message": "余额不足，请充值后重试"}), InvokeErrorKind::QuotaExhausted),
+            (json!({"type": "error", "message": "账户额度已用尽"}), InvokeErrorKind::QuotaExhausted),
+            (json!({"message": "请求过于频繁，请稍后再试"}), InvokeErrorKind::RateLimited),
+            (json!({"message": "触发限流"}), InvokeErrorKind::RateLimited),
+            (json!({"message": "API 密钥无效"}), InvokeErrorKind::Auth),
+            (json!({"message": "鉴权失败"}), InvokeErrorKind::Auth),
+            (json!({"message": "参数错误：缺少 model"}), InvokeErrorKind::InvalidParams),
+            (json!({"message": "内容审核未通过"}), InvokeErrorKind::ContentPolicy),
+            // English paths must keep working.
+            (json!({"code": "invalid_api_key", "message": "bad api key"}), InvokeErrorKind::Auth),
+            (json!({"message": "insufficient_quota"}), InvokeErrorKind::QuotaExhausted),
+            (json!({"message": "rate limit exceeded"}), InvokeErrorKind::RateLimited),
+            // Genuinely unclassifiable stays a provider error.
+            (json!({"message": "服务内部异常"}), InvokeErrorKind::ProviderError),
+        ];
+        for (value, expected) in cases {
+            let error = error_from_event(&value, "StepFun ASR SSE");
+            assert_eq!(error.kind, expected, "value: {value}");
+            assert!(error.message.starts_with("StepFun ASR SSE: "), "{}", error.message);
+        }
+    }
+
     #[tokio::test]
     async fn asr_sse_error_event_is_classified() {
         let server = MockServer::start().await;
@@ -849,6 +1062,32 @@ mod tests {
         let error = StepFunAudioSpeechAdapter.submit(&test_http(), &call).await.unwrap_err();
         assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
         assert_eq!(error.http_status, Some(422));
+    }
+
+    /// The browser dictation path records into a container chosen by the
+    /// browser, so every officially supported container must map. `webm` is
+    /// deliberately NOT accepted: StepFun does not list it, so guessing a
+    /// container would trade a clear local error for an opaque upstream one.
+    #[test]
+    fn asr_maps_every_official_container_and_rejects_unsupported_ones() {
+        for (mime, expected) in [
+            ("audio/wav", "wav"),
+            ("audio/x-wav", "wav"),
+            ("audio/mpeg", "mp3"),
+            ("audio/ogg", "ogg"),
+            ("audio/ogg;codecs=opus", "ogg"),
+            ("audio/mp4", "m4a"),
+            ("audio/m4a", "m4a"),
+            ("audio/x-m4a", "m4a"),
+            ("AUDIO/MP4", "m4a"),
+            ("audio/pcm", "pcm"),
+        ] {
+            assert_eq!(asr_container_from_mime(mime).unwrap(), expected, "mime {mime}");
+        }
+
+        let error = asr_container_from_mime("audio/webm;codecs=opus").unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+        assert!(error.message.contains("format.type"), "{}", error.message);
     }
 
     #[tokio::test]

@@ -19,10 +19,12 @@ import {
   isProtocolAuthSchemeAllowed,
   isDuplicateModelId,
   normalizeModelId,
+  providerParamVoice,
   reconcileCapabilityRecommendations,
   removeCapabilityTask,
   resolveModelInputChange,
   requiresCrossOriginConsent,
+  withProviderParamVoice,
   validateModelDefinition,
   type ModelCapabilityDraft,
   type ModelProtocolManifest,
@@ -605,5 +607,49 @@ describe('model id entry', () => {
     expect(normalizeModelId('  vendor/model-latest  ')).toBe('vendor/model-latest');
     expect(isDuplicateModelId(' vendor/model-latest ', ['vendor/model-latest'])).toBe(true);
     expect(isDuplicateModelId('Vendor/model-latest', ['vendor/model-latest'])).toBe(false);
+  });
+});
+
+/**
+ * A TTS adapter that requires a provider voice (StepFun) fails closed when
+ * `provider_params.voice` is missing, and the raw JSON textarea never hinted
+ * that a voice was needed. The dedicated control edits the same JSON so the
+ * two views can never disagree.
+ */
+describe('provider params voice', () => {
+  test('reads the voice out of the raw params JSON, tolerating blank and invalid input', () => {
+    expect(providerParamVoice('{"voice":"cixingnansheng"}')).toBe('cixingnansheng');
+    expect(providerParamVoice('{\n  "voice": "  tianmeinvsheng  "\n}')).toBe('tianmeinvsheng');
+    expect(providerParamVoice('')).toBe('');
+    expect(providerParamVoice('   ')).toBe('');
+    expect(providerParamVoice('{"speed":1.2}')).toBe('');
+    expect(providerParamVoice('not json')).toBe('');
+    // A non-string voice is not a usable id and must not be surfaced as one.
+    expect(providerParamVoice('{"voice":42}')).toBe('');
+  });
+
+  test('writes the voice back into the JSON while preserving unrelated params', () => {
+    const withSpeed = withProviderParamVoice('{"speed":1.25}', 'cixingnansheng');
+    expect(JSON.parse(withSpeed)).toEqual({ speed: 1.25, voice: 'cixingnansheng' });
+
+    // Round-trips through the reader.
+    expect(providerParamVoice(withSpeed)).toBe('cixingnansheng');
+
+    // Setting from empty produces a valid object, not a fragment.
+    expect(JSON.parse(withProviderParamVoice('', 'boyinnansheng'))).toEqual({
+      voice: 'boyinnansheng',
+    });
+  });
+
+  test('clearing the voice removes the key and collapses an otherwise empty object to blank', () => {
+    // Clearing must DELETE the key: an empty string would still fail the
+    // adapter's non-empty check while looking configured in the UI.
+    expect(JSON.parse(withProviderParamVoice('{"voice":"a","speed":1}', ''))).toEqual({ speed: 1 });
+    expect(withProviderParamVoice('{"voice":"a"}', '')).toBe('');
+    expect(withProviderParamVoice('{"voice":"a"}', '   ')).toBe('');
+  });
+
+  test('leaves malformed JSON untouched so a typo cannot silently discard the user text', () => {
+    expect(withProviderParamVoice('not json', 'cixingnansheng')).toBe('not json');
   });
 });
