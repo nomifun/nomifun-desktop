@@ -182,7 +182,11 @@ fn mime_for_speech_format(format: &str) -> &'static str {
 /// A plausible upload filename extension for the audio MIME (some providers
 /// sniff the extension rather than the part's content type).
 fn ext_for_audio_mime(mime: &str) -> &'static str {
-    match mime {
+    // Browsers report recording MIMEs with parameters ("audio/ogg;codecs=opus"),
+    // so match on the bare type or every parameterized value falls through to
+    // "bin" — an extension some providers sniff and reject.
+    let mime = mime.split(';').next().unwrap_or(mime).trim().to_ascii_lowercase();
+    match mime.as_str() {
         "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
         "audio/mpeg" | "audio/mp3" => "mp3",
         "audio/mp4" | "audio/m4a" | "audio/x-m4a" => "m4a",
@@ -250,6 +254,18 @@ mod tests {
         assert_eq!(ext_for_audio_mime("audio/flac"), "flac");
         assert_eq!(ext_for_audio_mime("audio/webm"), "webm");
         assert_eq!(ext_for_audio_mime("application/octet-stream"), "bin");
+    }
+
+    /// `MediaRecorder` reports the codec parameter, so browser dictation
+    /// uploads arrive as "audio/webm;codecs=opus". Matching the full string
+    /// would name the upload `audio.bin`, which some providers sniff.
+    #[test]
+    fn audio_ext_mapping_ignores_mime_parameters_and_case() {
+        assert_eq!(ext_for_audio_mime("audio/webm;codecs=opus"), "webm");
+        assert_eq!(ext_for_audio_mime("audio/ogg;codecs=opus"), "ogg");
+        assert_eq!(ext_for_audio_mime("audio/wav; charset=binary"), "wav");
+        assert_eq!(ext_for_audio_mime("AUDIO/MP4"), "m4a");
+        assert_eq!(ext_for_audio_mime("  audio/mpeg  "), "mp3");
     }
 
     #[tokio::test]
