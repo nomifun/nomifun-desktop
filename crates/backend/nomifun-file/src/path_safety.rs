@@ -69,6 +69,11 @@ pub fn validate_path_for_write(path: &str, allowed_roots: &[&Path]) -> Result<Pa
         .file_name()
         .ok_or_else(|| AppError::BadRequest(format!("path '{}' has no file name component", path)))?;
 
+    // Hygiene before containment: a drive-relative file name such as `c:evil`
+    // makes the `join` below discard `canonical_parent` outright, so proving the
+    // parent is inside the sandbox would tell us nothing about the result.
+    reject_unsafe_file_name(path, file_name)?;
+
     let canonical_parent = std::fs::canonicalize(parent)
         .map_err(|e| AppError::BadRequest(format!("cannot resolve parent of '{}': {}", path, e)))?;
 
@@ -84,7 +89,31 @@ pub fn validate_path_for_write(path: &str, allowed_roots: &[&Path]) -> Result<Pa
         )));
     }
 
-    Ok(canonical_parent.join(file_name))
+    let joined = canonical_parent.join(file_name);
+    // Belt and braces: containment was proven for `canonical_parent`, but it is
+    // `joined` that the caller writes to, and `join` is not guaranteed to extend
+    // the parent. Re-check the thing we actually return.
+    if !joined.starts_with(&canonical_parent) {
+        return Err(AppError::Forbidden(format!(
+            "path '{}' is outside the allowed sandbox",
+            path
+        )));
+    }
+    Ok(joined)
+}
+
+/// Reject a file-name component that `Path::join` would not treat as a plain
+/// child of its parent. Shared by both [`PathAuthority`] arms: containment is
+/// what `Unrestricted` drops, and this is path *hygiene*, which it keeps.
+fn reject_unsafe_file_name(path: &str, file_name: &std::ffi::OsStr) -> Result<(), AppError> {
+    let unsafe_name = file_name.to_str().is_none_or(is_unsafe_path_segment);
+    if unsafe_name {
+        return Err(AppError::BadRequest(format!(
+            "path '{}' has an invalid file name component",
+            path
+        )));
+    }
+    Ok(())
 }
 
 /// Check whether a raw path string contains suspicious traversal patterns.
@@ -98,6 +127,71 @@ pub fn has_traversal(path: &str) -> bool {
         || Path::new(path)
             .components()
             .any(|component| matches!(component, Component::ParentDir))
+}
+
+/// Reject a *single* path segment (a new file name, an id used as a directory)
+/// that would not stay a segment once joined onto a parent.
+///
+/// [`has_traversal`] plus a separator check is not enough on Windows:
+///
+/// - `"c:evil"` is a **drive-relative** path. `Path::is_absolute` reads `false`
+///   for it, so no absolute check fires, yet `parent.join("c:evil")` discards
+///   `parent` entirely and resolves against the current directory of drive C:.
+///   For a [`PathAuthority::Confined`] caller that walks the file straight out
+///   of the sandbox.
+/// - `"a.txt:x"` names an NTFS **alternate data stream** on `a.txt` rather than
+///   a file, so the bytes land on a hidden stream that `read_dir` never lists.
+///
+/// A colon cannot appear in a legal Windows file name at all, so rejecting it
+/// there costs nothing. On Unix it is an ordinary name byte and stays allowed —
+/// the drive-prefix shape is still rejected everywhere so that a name accepted
+/// on one platform cannot become an escape on another.
+///
+/// A lone `"."` is rejected because `parent.join(".")` resolves back to
+/// `parent`, aiming a per-entry operation at the whole directory.
+///
+/// The Windows-only rules below match `nomifun-knowledge`'s
+/// `validate_portable_path_component`, which is this repo's stricter
+/// portable-name gate; they are conditional here because this crate is a
+/// general-purpose file manager and all of these names are legal on Unix:
+///
+/// - A trailing `'.'` or `' '` is silently stripped by Win32, so `"a.txt."` and
+///   `"a.txt"` become the same file — a validated rename can clobber an
+///   unrelated one.
+/// - A reserved device name (`CON`, `NUL`, `COM1`…) opens the *device*, so the
+///   write appears to succeed, stores nothing, and never appears in `read_dir`.
+pub fn is_unsafe_path_segment(name: &str) -> bool {
+    if name.is_empty() || name == "." || name.contains('\0') || name.contains('/') || name.contains('\\') {
+        return true;
+    }
+    if has_traversal(name) {
+        return true;
+    }
+    let bytes = name.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return true;
+    }
+    if !cfg!(windows) {
+        return false;
+    }
+    if name.contains(':') || name.ends_with('.') || name.ends_with(' ') {
+        return true;
+    }
+    is_windows_reserved_device_name(name)
+}
+
+/// True for a Win32 reserved device name, with or without an extension
+/// (`NUL`, `nul.txt`, `COM1`). Matched case-insensitively on the basename.
+fn is_windows_reserved_device_name(name: &str) -> bool {
+    let basename = name.split_once('.').map_or(name, |(base, _)| base);
+    let lower = basename.trim_end().to_ascii_lowercase();
+    if matches!(lower.as_str(), "con" | "prn" | "aux" | "nul") {
+        return true;
+    }
+    lower
+        .strip_prefix("com")
+        .or_else(|| lower.strip_prefix("lpt"))
+        .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'))
 }
 
 /// The filesystem authority a single file operation runs under, resolved
@@ -157,6 +251,10 @@ pub fn validate_path_for_write_authority(
             let file_name = p
                 .file_name()
                 .ok_or_else(|| AppError::BadRequest(format!("path '{}' has no file name component", path)))?;
+            // `Unrestricted` drops root containment, not path hygiene: a
+            // drive-relative name would still silently relocate the write off
+            // the parent the caller named.
+            reject_unsafe_file_name(path, file_name)?;
             let canonical_parent = std::fs::canonicalize(parent)
                 .map_err(|e| AppError::BadRequest(format!("cannot resolve parent of '{}': {}", path, e)))?;
             Ok(canonical_parent.join(file_name))
@@ -296,6 +394,64 @@ mod tests {
         assert!(has_traversal("../etc/passwd"));
         assert!(has_traversal("/safe/../../etc"));
         assert!(has_traversal("a\0b"));
+    }
+
+    /// The parent can sit safely inside the sandbox while the *joined* result
+    /// does not: `join("c:evil.txt")` is drive-relative and discards the parent,
+    /// so `validate_path_for_write` used to return `Ok` with an escaped path.
+    /// `is_absolute()` reads `false` for it, so no absolute check would fire.
+    #[test]
+    fn validate_path_for_write_rejects_drive_relative_file_name() {
+        let sandbox = tempfile::tempdir().unwrap();
+        for bad in ["c:evil.txt", "C:evil.txt"] {
+            let attack = format!("{}{}{}", sandbox.path().display(), std::path::MAIN_SEPARATOR, bad);
+            assert!(!has_traversal(&attack), "premise: the traversal pre-check misses it");
+            let result = validate_path_for_write(&attack, &[sandbox.path()]);
+            assert!(result.is_err(), "must reject {attack:?}, got {result:?}");
+        }
+        // A legitimate not-yet-existing file in the same directory still works.
+        let ok = format!("{}{}ok.txt", sandbox.path().display(), std::path::MAIN_SEPARATOR);
+        let resolved = validate_path_for_write(&ok, &[sandbox.path()]).unwrap();
+        assert!(resolved.starts_with(fs::canonicalize(sandbox.path()).unwrap()));
+    }
+
+    /// Every `Ok` from the write validator must be inside the sandbox — the
+    /// property the callers actually rely on.
+    #[test]
+    fn validate_path_for_write_ok_results_stay_in_root() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(sandbox.path()).unwrap();
+        for name in ["plain.txt", "with space.md", "dotted.name.txt", ".hidden"] {
+            let candidate = format!("{}{}{}", sandbox.path().display(), std::path::MAIN_SEPARATOR, name);
+            if let Ok(resolved) = validate_path_for_write(&candidate, &[sandbox.path()]) {
+                assert!(resolved.starts_with(&root), "{name:?} escaped: {resolved:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn unsafe_path_segment_covers_windows_name_hazards() {
+        for bad in ["", ".", "..", "a/b", "a\\b", "c:evil", "C:evil", "a\0b"] {
+            assert!(is_unsafe_path_segment(bad), "must reject {bad:?}");
+        }
+        // A non-prefix colon is an NTFS stream on Windows, an ordinary byte on Unix.
+        assert_eq!(is_unsafe_path_segment("note.md:evil"), cfg!(windows));
+        // Trailing dot/space collapse onto a different file; device names swallow
+        // the write. Both are legal Unix names, so both are Windows-only rules.
+        for windows_only in ["a.txt.", "a.txt ", "NUL", "nul.txt", "CON", "com1", "LPT9"] {
+            assert_eq!(
+                is_unsafe_path_segment(windows_only),
+                cfg!(windows),
+                "{windows_only:?} must be rejected exactly on Windows"
+            );
+        }
+        // Names that merely resemble device names stay usable everywhere.
+        for ok in ["console.txt", "nulls.md", "com0", "com10", "lpt.md"] {
+            assert!(!is_unsafe_path_segment(ok), "must accept {ok:?}");
+        }
+        for ok in ["note.md", "with space.txt", ".hidden", "a.b.c"] {
+            assert!(!is_unsafe_path_segment(ok), "must accept {ok:?}");
+        }
     }
 
     #[test]

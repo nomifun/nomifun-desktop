@@ -874,10 +874,12 @@ pub async fn export_skill_with_symlink(
 ///
 /// Returns an error if the skill is built-in or does not exist.
 pub async fn delete_skill(paths: &SkillPaths, skill_name: &str) -> Result<(), ExtensionError> {
-    // Safety: reject path traversal
-    if skill_name.contains('/') || skill_name.contains('\\') || skill_name.contains("..") {
-        return Err(ExtensionError::PathTraversal(skill_name.to_string()));
-    }
+    // Safety: reject path traversal. Shares [`validate_filename`] rather than
+    // re-deriving the rules — this join feeds a *recursive delete*, so an
+    // escape here is the costliest in the module, and the inline check this
+    // replaced also let `""` and `"."` through, both of which resolve back to
+    // `user_skills_dir` itself.
+    validate_filename(skill_name)?;
 
     let user_path = paths.user_skills_dir.join(skill_name);
 
@@ -1027,7 +1029,7 @@ pub async fn materialize_skills_for_agent(
         if name.is_empty() {
             continue;
         }
-        if name.contains('/') || name.contains('\\') || name.contains("..") {
+        if validate_filename(name).is_err() {
             warn!(skill = %name, "skipping skill with invalid name");
             continue;
         }
@@ -1267,9 +1269,28 @@ async fn read_file_or_empty(path: &Path) -> Result<String, ExtensionError> {
     }
 }
 
-/// Validate a filename to prevent path traversal.
+/// Validate a filename to prevent path traversal. The name must be usable as a
+/// single path segment appended to a base directory.
+///
+/// `':'` is rejected outright. A leading `<letter>:` makes `base.join(name)`
+/// *drive-relative* on Windows: `Path::is_absolute("c:evil")` is `false`, so an
+/// absolute-path guard never fires, yet `join` discards the base and resolves
+/// against the current directory of that drive. A later `':'` opens an NTFS
+/// alternate data stream, where the bytes land on a hidden stream of a
+/// differently-named visible file and `Path::extension` reads the stream name
+/// instead of the file's. Neither is a legal Windows path segment, so this
+/// costs no usable name.
+///
+/// A lone `"."` is rejected because `base.join(".")` resolves back to `base`,
+/// which would aim a per-skill delete or write at the whole skills tree.
 fn validate_filename(name: &str) -> Result<(), ExtensionError> {
-    if name.contains('/') || name.contains('\\') || name.contains("..") || name.is_empty() {
+    if name.is_empty()
+        || name == "."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.contains(':')
+    {
         return Err(ExtensionError::PathTraversal(name.to_string()));
     }
     Ok(())
@@ -1279,11 +1300,17 @@ fn validate_filename(name: &str) -> Result<(), ExtensionError> {
 /// forward slashes (paths like `"auto-inject/cron/SKILL.md"` are
 /// normal) but forbids empty segments, backslashes, leading slash,
 /// absolute paths, and any `..` component.
+/// Rejects `':'` in any segment for the reasons given on [`validate_filename`]
+/// — note that `Path::new("z:x/y").is_absolute()` is `false` on Windows, so the
+/// absolute check below does not cover a drive prefix.
 fn validate_builtin_skill_path(rel: &str) -> Result<(), ExtensionError> {
     if rel.is_empty() || rel.contains('\\') || rel.contains("..") || rel.starts_with('/') {
         return Err(ExtensionError::PathTraversal(rel.to_string()));
     }
-    if rel.split('/').any(|seg| seg.is_empty()) {
+    if rel.contains(':') {
+        return Err(ExtensionError::PathTraversal(rel.to_string()));
+    }
+    if rel.split('/').any(|seg| seg.is_empty() || seg == ".") {
         return Err(ExtensionError::PathTraversal(rel.to_string()));
     }
     if Path::new(rel).is_absolute() {
@@ -1923,6 +1950,47 @@ mod tests {
     #[test]
     fn validate_filename_empty() {
         assert!(validate_filename("").is_err());
+    }
+
+    /// Every rejected name below survives the `/`, `\`, `..`, empty check set
+    /// yet still escapes — or widens — `base.join(name)` on Windows.
+    #[test]
+    fn validate_filename_rejects_drive_relative_ads_and_self() {
+        for bad in ["c:evil", "C:evil", "z:", "payload.exe:x.md", "."] {
+            assert!(validate_filename(bad).is_err(), "must reject {bad:?}");
+        }
+    }
+
+    /// The concrete escape: a drive-prefixed name must never leave the base.
+    /// `is_absolute()` is `false` for `c:evil`, which is why a name-level
+    /// rejection is the only guard that catches it.
+    #[test]
+    fn drive_relative_skill_name_cannot_escape_base() {
+        let base = Path::new("C:\\dest\\skills");
+        let bad = "c:evil";
+        assert!(!Path::new(bad).is_absolute(), "premise: reads as relative");
+        assert!(
+            !base.join(bad).starts_with(base),
+            "premise: join escapes the base, so validation must reject it"
+        );
+        assert!(validate_filename(bad).is_err());
+    }
+
+    /// A lone `"."` resolves `join` back to the base, which would aim
+    /// `delete_skill`'s recursive delete at the whole skills tree.
+    #[test]
+    fn dot_skill_name_would_resolve_to_the_base_itself() {
+        let base = Path::new("C:\\dest\\skills");
+        assert_eq!(base.join("."), Path::new("C:\\dest\\skills\\."));
+        assert!(validate_filename(".").is_err());
+    }
+
+    #[test]
+    fn validate_builtin_skill_path_rejects_drive_prefix_and_dot_segment() {
+        for bad in ["c:evil/SKILL.md", "skills/z:x", "skills/./SKILL.md", "."] {
+            assert!(validate_builtin_skill_path(bad).is_err(), "must reject {bad:?}");
+        }
+        assert!(validate_builtin_skill_path("code-review/SKILL.md").is_ok());
     }
 
     // -----------------------------------------------------------------------
