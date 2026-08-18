@@ -552,6 +552,25 @@ where
     }
 }
 
+/// Map the stored display-mode preference onto the Hub's visibility policy.
+///
+/// `external`/`headless` pin the mechanism and forbid the Hub from resolving it;
+/// `auto` delegates. Anything unrecognized resolves to `auto`, matching
+/// [`resolve_browser_display_mode`]'s fail-closed direction — which is silent,
+/// because `auto` still launches headless and only escalates for a moment that
+/// needs the user.
+#[cfg(feature = "browser-use")]
+fn browser_visibility_policy(
+    display_mode: &str,
+) -> nomifun_browser_platform::BrowserVisibilityPolicy {
+    use nomifun_browser_platform::BrowserVisibilityPolicy;
+    match display_mode {
+        "external" => BrowserVisibilityPolicy::AlwaysHeadful,
+        "headless" => BrowserVisibilityPolicy::AlwaysHeadless,
+        _ => BrowserVisibilityPolicy::Auto,
+    }
+}
+
 #[cfg(feature = "browser-use")]
 fn primary_host_is_headful(display_mode: &str) -> bool {
     // The trusted application-level preference is the only input that can
@@ -3209,6 +3228,12 @@ impl AppServices {
                 // constructing HostLaunchRequest; Anonymous/Replica/Isolated
                 // Hosts remain headless even in external display mode.
                 headful: primary_host_is_headful(display_mode),
+                // The policy is the separate axis deciding whether the Hub may
+                // resolve visibility per Lane at all. Without this the Hub would
+                // always see the `Auto` default, so a user who explicitly pinned
+                // `headless` would still get a window at an attended moment —
+                // exactly the override the design promises never happens.
+                visibility_policy: browser_visibility_policy(display_mode),
                 ..Default::default()
             };
             // Derive installation-wide throughput from this machine before
@@ -3837,6 +3862,27 @@ mod tests {
         assert!(!primary_host_is_headful("headless"));
         assert!(!primary_host_is_headful("auto"));
         assert!(!primary_host_is_headful("embedded"));
+
+        // The policy is the separate axis: it decides whether the Hub may resolve
+        // visibility per Lane at all. A pinned choice must forbid that.
+        use nomifun_browser_platform::BrowserVisibilityPolicy;
+        assert_eq!(
+            browser_visibility_policy("external"),
+            BrowserVisibilityPolicy::AlwaysHeadful
+        );
+        assert_eq!(
+            browser_visibility_policy("headless"),
+            BrowserVisibilityPolicy::AlwaysHeadless
+        );
+        assert_eq!(
+            browser_visibility_policy("auto"),
+            BrowserVisibilityPolicy::Auto
+        );
+        assert_eq!(
+            browser_visibility_policy("embedded"),
+            BrowserVisibilityPolicy::Auto,
+            "unrecognized state fails closed to auto, which still launches silently"
+        );
     }
 
     #[cfg(feature = "browser-use")]

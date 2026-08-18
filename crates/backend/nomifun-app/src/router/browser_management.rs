@@ -1303,6 +1303,16 @@ impl BrowserDisplayModeValueDto {
         self.pinned_visibility()
             .unwrap_or(BrowserVisibility::Headless)
     }
+
+    /// The platform-level policy this wire value selects.
+    fn policy(self) -> nomifun_browser_platform::BrowserVisibilityPolicy {
+        use nomifun_browser_platform::BrowserVisibilityPolicy;
+        match self {
+            Self::Headless => BrowserVisibilityPolicy::AlwaysHeadless,
+            Self::Auto => BrowserVisibilityPolicy::Auto,
+            Self::External => BrowserVisibilityPolicy::AlwaysHeadful,
+        }
+    }
 }
 
 /// The binary mechanism a managed Host is currently running with, reported
@@ -1532,11 +1542,22 @@ async fn run_display_mode_update_transaction(
     let _update_guard = state.display_mode_update_gate.lock().await;
     let hub = state.require_hub()?;
     let previous = hub.primary_visibility().await;
+    let previous_policy = hub.visibility_policy().await;
     // `Auto` hands ongoing control to the Hub but still needs a starting point,
     // and that point is silent: an Agent must never surface a window merely
     // because the user selected "let the browser decide".
     let requested = requested_mode.baseline_visibility();
-    let applied = hub.set_primary_visibility(requested).await?;
+    // Apply the policy too, or the Hub keeps resolving against the old one until
+    // the next restart — a user switching to "always silent" would still get a
+    // window at the next attended moment.
+    hub.set_visibility_policy(requested_mode.policy()).await;
+    let applied = match hub.set_primary_visibility(requested).await {
+        Ok(applied) => applied,
+        Err(error) => {
+            hub.set_visibility_policy(previous_policy).await;
+            return Err(error.into());
+        }
+    };
 
     if let Err(error) = state
         .preferences
@@ -1550,6 +1571,10 @@ async fn run_display_mode_update_transaction(
         .await
     {
         tracing::warn!(%error, "could not persist browser display mode");
+        // Roll the policy back with the mechanism. Leaving the new policy behind
+        // after a failed save would silently diverge the live Hub from what is
+        // stored and from what the API just told the client.
+        hub.set_visibility_policy(previous_policy).await;
         if let Err(rollback_error) = hub.set_primary_visibility(previous).await {
             tracing::error!(
                 %rollback_error,
@@ -3183,6 +3208,52 @@ mod tests {
                 .map(String::as_str),
             Some(BROWSER_DISPLAY_MODE_POLICY_VERSION)
         );
+    }
+
+    /// Switching the policy must take effect on the live Hub, not only after a
+    /// restart. Otherwise a user who selects "always silent" still gets a window
+    /// at the next attended moment.
+    #[tokio::test]
+    async fn display_mode_put_applies_the_policy_to_the_live_hub() {
+        let app = test_app(true).await;
+        assert_eq!(
+            app.hub.visibility_policy().await,
+            nomifun_browser_platform::BrowserVisibilityPolicy::Auto,
+            "a fresh install delegates visibility to the host"
+        );
+
+        for (mode, expected) in [
+            (
+                "headless",
+                nomifun_browser_platform::BrowserVisibilityPolicy::AlwaysHeadless,
+            ),
+            (
+                "external",
+                nomifun_browser_platform::BrowserVisibilityPolicy::AlwaysHeadful,
+            ),
+            (
+                "auto",
+                nomifun_browser_platform::BrowserVisibilityPolicy::Auto,
+            ),
+        ] {
+            let response = app
+                .router
+                .clone()
+                .oneshot(authorized_json_request(
+                    &app,
+                    "PUT",
+                    "/api/browser/display-mode",
+                    json!({"display_mode": mode}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "setting {mode} failed");
+            assert_eq!(
+                app.hub.visibility_policy().await,
+                expected,
+                "{mode} must reach the live Hub"
+            );
+        }
     }
 
     #[tokio::test]
