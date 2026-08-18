@@ -49,6 +49,9 @@ pub use repository::channel::UpdatePluginStatusParams;
 pub use repository::customer_service::{
     CsDialogueKey, ICustomerServiceRepository, UpdateCsAgentParams,
 };
+pub use repository::customer_service_search::{
+    CsNoteSearchHit, NoteMatchChannel, backfill_note_search_text, fts_rebuild, note_search_text,
+};
 pub use repository::SqliteCustomerServiceRepository;
 pub use repository::conversation::{
     ConversationDeliveryReceiptClaim, ConversationFilters, ConversationMessageProjection,

@@ -9,6 +9,7 @@ pub mod conversation;
 pub mod creation_task;
 pub mod cron;
 pub mod customer_service;
+pub mod customer_service_search;
 pub mod idmm_intervention;
 pub mod companion_token;
 pub mod knowledge;
