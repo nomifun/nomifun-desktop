@@ -5,7 +5,44 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
-No unreleased changes yet.
+- **Browser Use no longer mistakes a healthy browser for a leak.** An ordinary
+  single-agent session was getting its Lane force-closed within about one
+  sampling period (5s) of finishing page load, and was told the *user* had closed
+  the browser with retrying forbidden. Three defects compounded: per-task memory
+  was measured by summing Windows working sets across the Chromium process tree,
+  which counts pages shared between sibling processes once per process (measured
+  1.69x inflation on a nine-process tree — 283 MiB of 696 MiB counted
+  repeatedly); the 1 GiB per-task budget could not fit Chromium's fixed baseline
+  plus real pages, since an *idle* tree already measured ~700 MiB; and reclaim
+  escalated on the first over-budget sample with no protection for a task's only
+  Lane. Windows attribution now uses private commit charge, the budget is 2 GiB
+  (1.25 GiB when saving resources), sustained overage is required before any
+  reclaim, a task's last Lane is reserved for the top of the escalation, and the
+  outcome is reported as a distinct retryable error instead of blaming the user.
+  A genuine runaway still converges, just over ~30s rather than ~5s.
+
+- **The browser now decides when to show itself.** Display mode gains a third,
+  default option — 「智能判断」 / "Let the browser decide" — alongside the
+  existing always-silent and always-visible choices. Routine reading, searching
+  and extraction stay silent; a window appears only at a moment where you may
+  need to step in, such as a sign-in wall, a verification challenge, or a
+  consequential confirmation. Agents declare only *what kind of moment* they are
+  in and cannot pick the window mode or override your setting, so pinning
+  "silent" remains an absolute promise. Escalation is one-way and bounded per
+  lane, because switching visibility replaces the Chromium host process rather
+  than toggling a window. Existing installations keep an explicit visible-window
+  choice; the old silent default adopts the new automatic behaviour, and any
+  unversioned state fails closed to it (which still launches silently).
+
+  UI/API contract version bumped to 20: `GET /api/browser/display-mode` now
+  reports the user's `display_mode` policy and the read-only
+  `effective_visibility` mechanism separately, because with three policies the
+  mechanism no longer determines the policy. Design notes:
+  `docs/specs/2026-08-19-browser-memory-and-visibility-policy.zh.md`.
+
+  Honest limitation retained: per-task physical memory cannot be exactly
+  attributed on a shared Chromium host, so the per-task figure is an estimate
+  used for throttling — not an OS-level quota.
 
 ## v0.6.4 - 2026-08-18
 
