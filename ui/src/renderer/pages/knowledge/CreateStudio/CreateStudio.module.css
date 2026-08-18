@@ -1,5 +1,5 @@
 .modal :global(.arco-modal-content) {
-  padding: 10px 12px;
+  padding: var(--nomi-modal-block-padding) var(--nomi-modal-inline-padding) 10px;
 }
 
 .mobileModal :global(.arco-modal-content) {

@@ -787,7 +787,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
       className='w-[min(560px,calc(100vw-32px))] max-w-560px rd-16px'
       unmountOnExit
     >
-      <div className='overflow-y-auto px-24px pb-16px pr-18px max-h-[min(68vh,640px)]'>
+      <div className='overflow-y-auto pb-4px max-h-[min(68vh,640px)]'>
         <Form form={form} layout='vertical'>
           <FormItem
             label={t('cron.page.form.name')}

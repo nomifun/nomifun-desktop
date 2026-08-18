@@ -1,0 +1,196 @@
+/* Global modal visual contract.
+ * Loaded after theme styles so every Arco modal shares the same compact
+ * geometry while colors continue to come from the active theme. */
+
+:root {
+  --nomi-modal-radius: 14px;
+  --nomi-modal-control-radius: 8px;
+  --nomi-modal-inline-padding: 14px;
+  --nomi-modal-block-padding: 8px;
+  --nomi-modal-control-bg: color-mix(in srgb, var(--dialog-fill-0) 94%, var(--color-fill-2));
+}
+
+.arco-modal {
+  border: 1px solid var(--border-base);
+  border-radius: var(--nomi-modal-radius);
+  background-color: var(--dialog-fill-0);
+}
+
+/* FocusLock inserts an extra wrapper between the modal shell and its visual
+ * sections. Propagate the shell radius through that wrapper, then round only
+ * the sections touching an outer edge. This keeps dropdown popups unclipped. */
+.arco-modal > [data-focus-lock-disabled] {
+  border-radius: inherit;
+}
+
+.arco-modal .arco-modal-header:first-child,
+.arco-modal .arco-modal-content:first-child {
+  border-top-left-radius: inherit;
+  border-top-right-radius: inherit;
+  background-clip: padding-box;
+}
+
+.arco-modal .arco-modal-content:last-of-type,
+.arco-modal .arco-modal-footer {
+  border-bottom-right-radius: inherit;
+  border-bottom-left-radius: inherit;
+  background-clip: padding-box;
+}
+
+.arco-modal .arco-modal-header {
+  height: 40px;
+  padding: 0 var(--nomi-modal-inline-padding);
+}
+
+.arco-modal .arco-modal-content {
+  background-color: var(--dialog-fill-0);
+  padding: var(--nomi-modal-block-padding) var(--nomi-modal-inline-padding);
+}
+
+.arco-modal .arco-modal-footer {
+  background-color: var(--dialog-fill-0);
+  border-top: 1px solid var(--border-base);
+  padding: var(--nomi-modal-block-padding) var(--nomi-modal-inline-padding) 10px;
+}
+
+.arco-modal .arco-modal-footer > .arco-btn {
+  margin-left: 8px;
+}
+
+.arco-modal .arco-modal-close-icon {
+  top: 14px;
+  right: var(--nomi-modal-inline-padding);
+}
+
+/* NomiModal keeps its custom header/body/footer inside the shared compact
+ * content inset. Stretch only the divider to the same horizontal edge. */
+.nomifun-modal .nomifun-modal-footer:not(:empty) {
+  margin: 0 calc(0px - var(--nomi-modal-inline-padding));
+  border-top: 1px solid var(--border-base);
+  padding: var(--nomi-modal-block-padding) var(--nomi-modal-inline-padding) 0;
+}
+
+.arco-modal .arco-modal-title {
+  font-size: 15px;
+  font-weight: 550;
+}
+
+.arco-modal .arco-form-item {
+  margin-bottom: 12px;
+}
+
+.arco-modal .arco-form-item:last-child {
+  margin-bottom: 0;
+}
+
+.arco-modal .arco-btn {
+  border-radius: var(--nomi-modal-control-radius) !important;
+}
+
+.arco-modal
+  :is(
+    .arco-input,
+    .arco-input-inner-wrapper,
+    .arco-textarea,
+    .arco-select-view,
+    .arco-cascader-view,
+    .arco-tree-select-view,
+    .arco-picker,
+    .arco-input-number,
+    .arco-auto-complete,
+    .arco-mentions
+  ) {
+  border-radius: var(--nomi-modal-control-radius) !important;
+  background-color: var(--nomi-modal-control-bg) !important;
+}
+
+/* Preserve validation and focus colors; only idle controls receive the shared outline. */
+.arco-modal
+  .arco-input:not(.arco-input-disabled):not(.arco-input-error):not(.arco-input-warning):not(.arco-input-focus):not(
+    :focus
+  ),
+.arco-modal
+  .arco-input-inner-wrapper:not(.arco-input-inner-wrapper-disabled):not(.arco-input-inner-wrapper-error):not(
+    .arco-input-inner-wrapper-warning
+  ):not(.arco-input-inner-wrapper-focus),
+.arco-modal
+  .arco-textarea:not(.arco-textarea-disabled):not(.arco-textarea-error):not(.arco-textarea-warning):not(
+    .arco-textarea-focus
+  ):not(:focus),
+.arco-modal
+  .arco-select:not(.arco-select-disabled):not(.arco-select-error):not(.arco-select-warning):not(.arco-select-focused)
+  .arco-select-view,
+.arco-modal
+  .arco-cascader:not(.arco-cascader-disabled):not(.arco-cascader-error):not(.arco-cascader-warning):not(
+    .arco-cascader-focused
+  )
+  .arco-cascader-view,
+.arco-modal
+  .arco-tree-select:not(.arco-tree-select-disabled):not(.arco-tree-select-error):not(.arco-tree-select-warning):not(
+    .arco-tree-select-focused
+  )
+  .arco-tree-select-view,
+.arco-modal
+  .arco-picker:not(.arco-picker-disabled):not(.arco-picker-error):not(.arco-picker-warning):not(.arco-picker-focused),
+.arco-modal
+  .arco-input-number:not(.arco-input-number-disabled):not(.arco-input-number-error):not(
+    .arco-input-number-warning
+  ):not(.arco-input-number-focused) {
+  border-color: var(--color-border-3) !important;
+}
+
+.arco-modal
+  .arco-input:not(.arco-input-disabled):not(.arco-input-error):not(.arco-input-warning):not(.arco-input-focus):hover,
+.arco-modal
+  .arco-input-inner-wrapper:not(.arco-input-inner-wrapper-disabled):not(.arco-input-inner-wrapper-error):not(
+    .arco-input-inner-wrapper-warning
+  ):not(.arco-input-inner-wrapper-focus):hover,
+.arco-modal
+  .arco-textarea:not(.arco-textarea-disabled):not(.arco-textarea-error):not(.arco-textarea-warning):not(
+    .arco-textarea-focus
+  ):hover,
+.arco-modal
+  .arco-select:not(.arco-select-disabled):not(.arco-select-error):not(.arco-select-warning):not(
+    .arco-select-focused
+  ):hover
+  .arco-select-view,
+.arco-modal
+  .arco-cascader:not(.arco-cascader-disabled):not(.arco-cascader-error):not(.arco-cascader-warning):not(
+    .arco-cascader-focused
+  ):hover
+  .arco-cascader-view,
+.arco-modal
+  .arco-tree-select:not(.arco-tree-select-disabled):not(.arco-tree-select-error):not(.arco-tree-select-warning):not(
+    .arco-tree-select-focused
+  ):hover
+  .arco-tree-select-view,
+.arco-modal
+  .arco-picker:not(.arco-picker-disabled):not(.arco-picker-error):not(.arco-picker-warning):not(
+    .arco-picker-focused
+  ):hover,
+.arco-modal
+  .arco-input-number:not(.arco-input-number-disabled):not(.arco-input-number-error):not(
+    .arco-input-number-warning
+  ):not(.arco-input-number-focused):hover {
+  border-color: var(--color-border-4) !important;
+}
+
+/* Compact confirm dialogs without changing their confirm/cancel behavior. */
+.arco-modal.arco-modal-simple {
+  padding: 18px 24px 20px;
+}
+
+.arco-modal-simple .arco-modal-header {
+  height: auto;
+  margin-bottom: 14px;
+  padding: 0;
+}
+
+.arco-modal-simple .arco-modal-content {
+  padding: 0;
+}
+
+.arco-modal-simple .arco-modal-footer {
+  margin-top: 18px;
+  padding: 0;
+}
