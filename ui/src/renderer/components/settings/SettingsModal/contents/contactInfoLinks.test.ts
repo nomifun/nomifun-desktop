@@ -20,11 +20,11 @@ describe('public contact links', () => {
       'https://www.nomifun.com/contact',
       'https://github.com/nomifun/nomifun-tauri/issues',
       'https://github.com/nomifun/nomifun-tauri/releases',
-      '535526063@qq.com',
     ]) {
       expect(combined.includes(target)).toBe(true);
     }
 
+    expect(combined.includes('mailto:')).toBe(false);
     expect(aboutSource.includes('ABOUT_LINK_TARGET')).toBe(false);
   });
 

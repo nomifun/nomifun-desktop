@@ -11,7 +11,7 @@ import {
   splitToolReceiptTargets,
 } from './processFileTargetLabel';
 
-const workspaceRoot = '/Users/muri/Library/Application Support/NomiFun/Nomi-dev/conversations/nomi-temp-39';
+const workspaceRoot = '/Users/developer/Library/Application Support/NomiFun/Nomi-dev/conversations/nomi-temp-39';
 
 describe('process file target labels', () => {
   test('shows only the file name for absolute targets inside the current workspace', () => {
@@ -25,7 +25,7 @@ describe('process file target labels', () => {
   });
 
   test('keeps full absolute paths outside the current workspace', () => {
-    const target = '/Users/muri/Desktop/snake.html';
+    const target = '/Users/developer/Desktop/snake.html';
 
     expect(formatWorkspaceFileTarget(target, { workspaceRoots: [workspaceRoot] })).toEqual({
       label: target,

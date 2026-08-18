@@ -714,7 +714,7 @@ preferred channel.
 |---|---|
 | 🌐 **Website** | [www.nomifun.com](https://www.nomifun.com) |
 | 🐙 **Issues** | [github.com/nomifun/nomifun-desktop/issues](https://github.com/nomifun/nomifun-desktop/issues) |
-| ✉️ **Email** | [535526063@qq.com](mailto:535526063@qq.com) |
+| 📮 **Contact** | [www.nomifun.com/contact](https://www.nomifun.com/contact) |
 | 📕 **小红书 / RED** | [NomiFun](https://xhslink.com/m/4x6ti8n6cA1) |
 | 📺 **Bilibili** | [NomiFun](https://b23.tv/0UhgKDh) · [demo video](https://www.bilibili.com/video/BV1kwKZ6UE5X/) |
 | 🎵 **抖音 / Douyin** | [NomiFun](https://v.douyin.com/MDT5QVdYaJk/) |

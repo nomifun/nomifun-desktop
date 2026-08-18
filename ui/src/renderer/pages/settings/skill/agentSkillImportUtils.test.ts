@@ -17,20 +17,20 @@ import {
 const sources: ExternalAgentSkillSource[] = [
   {
     name: 'Claude Skills',
-    path: '/Users/muri/.claude/skills',
+    path: '/Users/developer/.claude/skills',
     source: 'claude',
     skill_count: 2,
     skills: [
-      { name: 'research', description: 'Deep research workflow', path: '/Users/muri/.claude/skills/research' },
-      { name: 'publish', description: 'Publish content', path: '/Users/muri/.claude/skills/publish' },
+      { name: 'research', description: 'Deep research workflow', path: '/Users/developer/.claude/skills/research' },
+      { name: 'publish', description: 'Publish content', path: '/Users/developer/.claude/skills/publish' },
     ],
   },
   {
     name: 'Codex / Agent Skills',
-    path: '/Users/muri/.agents/skills',
+    path: '/Users/developer/.agents/skills',
     source: 'agents',
     skill_count: 1,
-    skills: [{ name: 'research', description: 'Shared research workflow', path: '/Users/muri/.agents/skills/research' }],
+    skills: [{ name: 'research', description: 'Shared research workflow', path: '/Users/developer/.agents/skills/research' }],
   },
 ];
 
@@ -40,9 +40,9 @@ describe('agent skill import utilities', () => {
 
     expect(rows).toHaveLength(3);
     expect(rows.map((row) => row.key)).toEqual([
-      'claude::research::/Users/muri/.claude/skills/research',
-      'claude::publish::/Users/muri/.claude/skills/publish',
-      'agents::research::/Users/muri/.agents/skills/research',
+      'claude::research::/Users/developer/.claude/skills/research',
+      'claude::publish::/Users/developer/.claude/skills/publish',
+      'agents::research::/Users/developer/.agents/skills/research',
     ]);
     expect(rows[1].alreadyImported).toBe(true);
     expect(rows[2].sourceName).toBe('Codex / Agent Skills');
@@ -52,8 +52,8 @@ describe('agent skill import utilities', () => {
     const rows = buildAgentSkillRows(sources, new Set(['publish']));
 
     expect(defaultSelectedAgentSkillKeys(rows)).toEqual([
-      'claude::research::/Users/muri/.claude/skills/research',
-      'agents::research::/Users/muri/.agents/skills/research',
+      'claude::research::/Users/developer/.claude/skills/research',
+      'agents::research::/Users/developer/.agents/skills/research',
     ]);
   });
 

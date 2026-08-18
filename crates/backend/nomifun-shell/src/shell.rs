@@ -577,7 +577,7 @@ mod tests {
         let svc = ShellService::new(Arc::new(NoopSystemOpener));
         assert!(svc.launch("notepad", None).await.is_ok());
         assert!(svc.launch("C:\\tools\\report.pdf", Some("acrobat")).await.is_ok());
-        assert!(svc.launch("mailto:a@b.com", None).await.is_ok());
+        assert!(svc.launch("mailto:redacted@example.invalid", None).await.is_ok());
     }
 
     #[tokio::test]
