@@ -288,8 +288,21 @@ impl HubInstaller {
 // ---------------------------------------------------------------------------
 
 /// Validate an extension name to prevent path traversal attacks.
+/// Validate a hub extension name for use as a single path segment.
+///
+/// `':'` and a lone `"."` are rejected alongside the separators: `join("c:x")`
+/// is drive-relative on Windows (and `is_absolute` reads `false` for it), while
+/// `join(".")` resolves back to the parent directory. Both would point the
+/// `remove_dir_all` in the uninstall path outside — or above — the extension
+/// directory it means to remove.
 fn validate_hub_name(name: &str) -> Result<(), String> {
-    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+    if name.is_empty()
+        || name == "."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.contains(':')
+    {
         return Err(format!("Invalid extension name: '{name}'"));
     }
     Ok(())
@@ -421,6 +434,10 @@ mod tests {
         assert!(validate_hub_name("foo\\bar").is_err());
         assert!(validate_hub_name("").is_err());
         assert!(validate_hub_name("..").is_err());
+        // `join` would drop the base for these two and aim the uninstall
+        // `remove_dir_all` at a drive-relative path or the parent itself.
+        assert!(validate_hub_name("c:evil").is_err());
+        assert!(validate_hub_name(".").is_err());
     }
 
     #[test]

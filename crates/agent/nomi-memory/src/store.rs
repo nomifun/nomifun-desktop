@@ -63,7 +63,19 @@ pub fn write_memory(dir: &Path, entry: &MemoryEntry) -> Result<PathBuf> {
 ///
 /// A missing or unreadable file is a no-op (returns `Ok`): citations may name
 /// files that were renamed or removed, and that must not surface as an error.
+///
+/// `filename` arrives from model-generated text (the `<nomi-mem-citation>`
+/// block), so it is untrusted and is rejected unless it is a plain file name —
+/// see [`is_safe_memory_filename`]. Without that check `dir.join(filename)`
+/// would follow `../` out of the memory directory, and because
+/// [`parse_frontmatter`] falls back to "no frontmatter, whole file as body" for
+/// anything it cannot parse, *any* readable text file would round-trip through
+/// [`serialize_entry`] and be rewritten with injected frontmatter.
 pub fn bump_memory_usage(dir: &Path, filename: &str, now: DateTime<Utc>) -> Result<()> {
+    if !is_safe_memory_filename(filename) {
+        tracing::debug!(file = %filename, "ignoring citation with unsafe filename");
+        return Ok(());
+    }
     let path = dir.join(filename);
     // Missing / unreadable file = no-op. Citations can name stale filenames.
     let Ok(mut entry) = read_memory(&path) else {
@@ -74,6 +86,27 @@ pub fn bump_memory_usage(dir: &Path, filename: &str, now: DateTime<Utc>) -> Resu
     let content = serialize_entry(&entry);
     fs::write(&path, content)?;
     Ok(())
+}
+
+/// True when `name` is a plain `.md` file name that this store could itself
+/// have written, and so is safe to join onto the memory directory.
+///
+/// Deliberately a whitelist rather than a blocklist: [`generate_filename`]
+/// only ever emits `<type>_<sanitized_name>.md`, where [`sanitize_filename`]
+/// has already reduced the name to ASCII alphanumerics and `_`. Accepting just
+/// that shape rules out every path-escape construct at once — separators, `..`,
+/// a `c:` drive prefix (which `join` would treat as drive-relative, discarding
+/// `dir`, even though `is_absolute()` reads `false` for it), an NTFS
+/// `name:stream` suffix, a trailing dot or space, and reserved device names —
+/// without needing to enumerate them.
+fn is_safe_memory_filename(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".md") else {
+        return false;
+    };
+    !stem.is_empty()
+        && stem
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 // ---------------------------------------------------------------------------
@@ -531,5 +564,62 @@ mod tests {
 
         let read_back = read_memory(&path).unwrap();
         assert_eq!(read_back.content, body);
+    }
+
+    /// Citation filenames come from model-generated text. A traversing one must
+    /// not be joined onto the memory dir: `parse_frontmatter` treats anything it
+    /// cannot parse as "whole file is the body", so an arbitrary readable file
+    /// would be rewritten with injected frontmatter rather than left alone.
+    #[test]
+    fn bump_usage_ignores_unsafe_citation_filenames() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside_dir = tmp.path().join("outside");
+        let memory_dir = tmp.path().join("memories");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        std::fs::create_dir_all(&memory_dir).unwrap();
+
+        let victim = outside_dir.join("victim.md");
+        let original = "# Not a memory file\nimportant user content\n";
+        std::fs::write(&victim, original).unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 6, 14, 9, 30, 0).unwrap();
+        for hostile in [
+            "../outside/victim.md",
+            "..\\outside\\victim.md",
+            "sub/user_x.md",
+            "c:user_x.md",
+            "user_x.md:stream",
+            "user_x.md.",
+            "NUL",
+            "user_x.txt",
+            ".md",
+        ] {
+            bump_memory_usage(&memory_dir, hostile, now).unwrap();
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            original,
+            "a traversing citation must never rewrite a file outside the memory dir"
+        );
+    }
+
+    /// The guard must not reject the names the store itself writes.
+    #[test]
+    fn bump_usage_still_accepts_generated_filenames() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["hello world", "CJK-毛球-name", "with_underscores"] {
+            let entry = MemoryEntry::build(name, "desc", MemoryType::User, "body");
+            let path = write_memory(tmp.path(), &entry).unwrap();
+            let filename = path.file_name().unwrap().to_str().unwrap();
+            assert!(
+                is_safe_memory_filename(filename),
+                "store-generated {filename:?} must pass the citation guard"
+            );
+
+            let now = Utc.with_ymd_and_hms(2026, 6, 14, 9, 30, 0).unwrap();
+            bump_memory_usage(tmp.path(), filename, now).unwrap();
+            assert_eq!(read_memory(&path).unwrap().frontmatter.usage_count, Some(1));
+        }
     }
 }
