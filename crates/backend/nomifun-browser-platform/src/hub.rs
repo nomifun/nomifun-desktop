@@ -8043,6 +8043,15 @@ impl BrowserSessionHub {
         self.inner.config.read().await.visibility_policy
     }
 
+    /// Sets the installation's visibility policy.
+    ///
+    /// Policy only: this does not move a running Host. The caller pairs it with
+    /// [`Self::set_primary_visibility`] when the new policy also pins a
+    /// mechanism, so a live change takes effect without waiting for a restart.
+    pub async fn set_visibility_policy(&self, policy: BrowserVisibilityPolicy) {
+        self.inner.config.write().await.visibility_policy = policy;
+    }
+
     /// Acts on an Agent's declared presentation intent for one Lane.
     ///
     /// This is the Agent-facing half of the visibility design: the Agent says
