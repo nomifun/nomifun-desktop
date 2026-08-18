@@ -529,6 +529,50 @@ fn primary_host_is_headful(display_mode: &str) -> bool {
     display_mode == "external"
 }
 
+/// Per-process byte count used to attribute a managed Chromium process tree.
+///
+/// Chromium is deliberately multi-process: one browser process plus GPU,
+/// network/storage utilities, a crash handler, and one renderer per site
+/// instance. Attribution sums this value across the whole tree, so the metric
+/// has to be *additive* — a value that can be summed across sibling processes
+/// without counting the same physical memory twice.
+///
+/// On Windows the working set fails that test. `WorkingSetSize` counts every
+/// resident page a process maps, including pages **shared** with its siblings:
+/// `chrome.dll` and the other shared images are mapped into every child, so
+/// summing working sets charges those pages once per process. Measured on a
+/// nine-process Chromium tree, 41% of the summed working set was shared pages
+/// counted repeatedly (696 MiB summed working set against 413 MiB of private
+/// bytes). Attributing that inflated total to one task made an ordinary
+/// browsing session look like a leak and got its Lane reclaimed.
+///
+/// `sysinfo` exposes the private commit charge on Windows as
+/// `Process::virtual_memory` (it maps to `PROCESS_MEMORY_COUNTERS_EX::
+/// PrivateUsage`, not to an address-space size). Private commit is
+/// per-process-exclusive, so it is safe to sum.
+///
+/// On Linux and macOS `virtual_memory` really is the virtual address-space size
+/// (VSZ / `vsize`), which is meaningless here, and `sysinfo` exposes no
+/// proportional set size. Those platforms therefore keep the resident-set
+/// value. Summing RSS still over-counts shared pages, so tree totals there
+/// remain an upper bound rather than an exact figure; the per-task budget is
+/// sized to tolerate that.
+#[cfg(feature = "browser-use")]
+fn process_tree_attributable_bytes(process: &sysinfo::Process) -> u64 {
+    #[cfg(windows)]
+    {
+        // Windows: private commit charge (PrivateUsage). Additive across the
+        // tree because it excludes shared pages.
+        process.virtual_memory()
+    }
+    #[cfg(not(windows))]
+    {
+        // Unix: resident set size. `virtual_memory` is VSZ here and must not be
+        // substituted.
+        process.memory()
+    }
+}
+
 #[cfg(feature = "browser-use")]
 fn browser_process_tree_rss<I>(
     root_identities: &[nomifun_browser_platform::BrowserProcessIdentity],
@@ -1305,7 +1349,7 @@ fn sample_browser_resources(
             (
                 process.pid().as_u32(),
                 process.parent().map(|pid| pid.as_u32()),
-                process.memory(),
+                process_tree_attributable_bytes(process),
                 process.start_time(),
             )
         }),
