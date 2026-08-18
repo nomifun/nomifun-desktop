@@ -179,6 +179,9 @@ struct UpdateNoteRequest {
     kind: Option<String>,
     #[serde(default)]
     content: Option<String>,
+    /// Alternate phrasings, newline separated. Absent = leave unchanged.
+    #[serde(default)]
+    aliases: Option<String>,
     #[serde(default)]
     enabled: Option<bool>,
 }
@@ -193,7 +196,13 @@ async fn update_note(
     Ok(Json(ApiResponse::ok(
         state
             .service
-            .update_note(&cs_note_id, req.kind.as_deref(), req.content.as_deref(), req.enabled)
+            .update_note(
+                &cs_note_id,
+                req.kind.as_deref(),
+                req.content.as_deref(),
+                req.aliases.as_deref(),
+                req.enabled,
+            )
             .await?,
     )))
 }

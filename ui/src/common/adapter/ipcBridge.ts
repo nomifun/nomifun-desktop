@@ -5981,6 +5981,13 @@ export interface ICsNote {
   cs_agent_id: CsAgentId | null;
   kind: string;
   content: string;
+  /**
+   * Alternate phrasings visitors use for this question, newline separated.
+   *
+   * Keyword search cannot bridge a paraphrase that shares no words with the
+   * note, so these are the operator's way to make such phrasings findable.
+   */
+  aliases: string;
   enabled: boolean;
   created_at: number;
   updated_at: number;
@@ -6117,15 +6124,15 @@ export const customerService = {
     (notes) => notes.map(fromApiCsNote)
   ),
   createNote: withResponseMap(
-    httpPost<ICsNote, { cs_agent_id?: CsAgentId | null; kind?: string; content: string; enabled?: boolean }>(
+    httpPost<ICsNote, { cs_agent_id?: CsAgentId | null; kind?: string; content: string; aliases?: string; enabled?: boolean }>(
       '/api/customer-service/notes'
     ),
     fromApiCsNote
   ),
   patchNote: withResponseMap(
-    httpPatch<ICsNote, { cs_note_id: CsNoteId; kind?: string; content?: string; enabled?: boolean }>(
+    httpPatch<ICsNote, { cs_note_id: CsNoteId; kind?: string; content?: string; aliases?: string; enabled?: boolean }>(
       (p) => `/api/customer-service/notes/${p.cs_note_id}`,
-      (p) => ({ kind: p.kind, content: p.content, enabled: p.enabled })
+      (p) => ({ kind: p.kind, content: p.content, aliases: p.aliases, enabled: p.enabled })
     ),
     fromApiCsNote
   ),
