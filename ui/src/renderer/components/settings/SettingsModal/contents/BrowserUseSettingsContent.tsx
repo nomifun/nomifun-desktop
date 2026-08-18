@@ -595,8 +595,15 @@ const BrowserUseSettingsContent: React.FC = () => {
       // 'default'); the value is never persisted or written back.
       silent: configService.get('agent.browserUse.silent'),
     });
+    // The migration's type still admits the legacy `embedded` viewer value, which
+    // this control does not offer. Map it onto `auto`, matching the backend's
+    // fail-closed direction (auto still launches silently).
     setDisplayMode(
-      displayModeMigration.displayMode === 'external' ? 'external' : 'headless'
+      displayModeMigration.displayMode === 'external'
+        ? 'external'
+        : displayModeMigration.displayMode === 'headless'
+          ? 'headless'
+          : 'auto'
     );
     setSource((configService.get('agent.browserUse.source') as BrowserSource) ?? 'system');
     setPersistentLogin(storedPersistentLogin);
@@ -857,7 +864,8 @@ const BrowserUseSettingsContent: React.FC = () => {
       ) {
         return;
       }
-      const next: BrowserDisplayMode = value === 'external' ? 'external' : 'headless';
+      const next: BrowserDisplayMode =
+        value === 'external' ? 'external' : value === 'headless' ? 'headless' : 'auto';
       if (next === displayMode) return;
       displayModeSavingRef.current = true;
       setDisplayModeSaving(true);
@@ -1134,6 +1142,7 @@ const BrowserUseSettingsContent: React.FC = () => {
                       disabled={displayModeStatus !== 'ready' || displayModeSaving}
                       onChange={(value) => void handleDisplayModeChange(value)}
                     >
+                      <Radio value='auto'>{t('settings.browserDisplayModeAuto')}</Radio>
                       <Radio value='headless'>{t('settings.browserDisplayModeHeadless')}</Radio>
                       <Radio value='external'>{t('settings.browserDisplayModeExternal')}</Radio>
                     </RadioGroup>
