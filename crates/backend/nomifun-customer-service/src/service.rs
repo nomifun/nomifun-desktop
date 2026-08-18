@@ -89,6 +89,10 @@ pub struct CreateCsNoteInput {
     #[serde(default = "default_note_kind")]
     pub kind: String,
     pub content: String,
+    /// Alternate phrasings visitors use for this question, newline separated.
+    /// Optional — omitting it is the same as having none.
+    #[serde(default)]
+    pub aliases: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -287,6 +291,7 @@ impl CustomerServiceService {
             cs_agent_id: input.cs_agent_id,
             kind: input.kind,
             content: input.content,
+            aliases: input.aliases.unwrap_or_default(),
             enabled: input.enabled,
             created_at: now,
             updated_at: now,
@@ -305,6 +310,7 @@ impl CustomerServiceService {
         cs_note_id: &str,
         kind: Option<&str>,
         content: Option<&str>,
+        aliases: Option<&str>,
         enabled: Option<bool>,
     ) -> Result<CsNoteRow, AppError> {
         if let Some(content) = content
@@ -314,7 +320,7 @@ impl CustomerServiceService {
         }
         Ok(self
             .repo
-            .update_note(cs_note_id, kind, content, enabled, now_ms())
+            .update_note(cs_note_id, kind, content, aliases, enabled, now_ms())
             .await?)
     }
 
@@ -479,6 +485,7 @@ mod tests {
                 cs_agent_id: None,
                 kind: "faq".into(),
                 content: "  ".into(),
+                aliases: None,
                 enabled: true,
             })
             .await
@@ -491,6 +498,7 @@ mod tests {
                 cs_agent_id: Some("0190f5fe-7c00-7a00-8000-0000000000ff".into()),
                 kind: "faq".into(),
                 content: "x".into(),
+                aliases: None,
                 enabled: true,
             })
             .await
@@ -503,6 +511,7 @@ mod tests {
                 cs_agent_id: None,
                 kind: "faq".into(),
                 content: "退货政策".into(),
+                aliases: None,
                 enabled: true,
             })
             .await
@@ -512,6 +521,7 @@ mod tests {
                 cs_agent_id: Some(agent.cs_agent_id.clone()),
                 kind: "script".into(),
                 content: "话术".into(),
+                aliases: None,
                 enabled: true,
             })
             .await
@@ -522,7 +532,7 @@ mod tests {
         assert_eq!(visible.len(), 2);
 
         let updated = svc
-            .update_note(&private.cs_note_id, None, Some("新话术"), Some(false))
+            .update_note(&private.cs_note_id, None, Some("新话术"), None, Some(false))
             .await
             .unwrap();
         assert_eq!(updated.content, "新话术");
