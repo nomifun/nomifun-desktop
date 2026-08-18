@@ -1,13 +1,13 @@
 /**
  * DrawerPresetCard — Single-select preset card for PresetPickerDrawer.
  * Displays avatar, name, source badge, description, engine/model capsule, tag chips,
- * radio indicator (top-right), and hover "使用 →" CTA.
+ * and hover "使用 →" CTA.
  */
 import type { Preset, PresetReference, PresetTag } from '@/common/types/agent/presetTypes';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import PresetAvatar from '@/renderer/pages/settings/PresetSettings/PresetAvatar';
-import { CheckSmall, Right } from '@icon-park/react';
+import { Right } from '@icon-park/react';
 import styles from '../index.module.css';
 
 export type DrawerPresetCardProps = {
@@ -59,17 +59,6 @@ const DrawerPresetCard: React.FC<DrawerPresetCardProps> = ({
       onClick={() => onSelect(preset.preset_id)}
       onKeyDown={handleKeyDown}
     >
-      {/* Radio indicator */}
-      <span
-        className={[
-          styles.drawerCardStatus,
-          selected ? styles.drawerCardStatusSelected : '',
-        ].filter(Boolean).join(' ')}
-        aria-hidden='true'
-      >
-        {selected && <CheckSmall theme='filled' size={12} fill='currentColor' />}
-      </span>
-
       {/* Avatar */}
       <div className={styles.drawerIconTile}>
         <PresetAvatar preset={preset} size={40} avatarImageMap={avatarImageMap} />

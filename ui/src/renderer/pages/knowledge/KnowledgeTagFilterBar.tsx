@@ -237,6 +237,7 @@ const KnowledgeTagFilterBar: React.FC<KnowledgeTagFilterBarProps> = ({
             label={t('knowledge.filter.kindLabel', { defaultValue: '类型' })}
             value={kindFilter ? kindLabel(kindFilter) : allLabel}
             menu={kindMenu}
+            minWidthClass='min-w-116px'
           />
           <ToolbarSelect
             label={t('knowledge.filter.tagLabel', { defaultValue: '标签' })}
