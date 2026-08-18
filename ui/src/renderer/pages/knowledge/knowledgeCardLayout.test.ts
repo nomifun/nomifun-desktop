@@ -2,6 +2,16 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
 const cardSource = readFileSync(new URL('./KnowledgeCard.tsx', import.meta.url), 'utf8');
+const listPageSource = readFileSync(new URL('./KnowledgeListPage/index.tsx', import.meta.url), 'utf8');
+
+describe('Knowledge list grid layout', () => {
+  test('keeps cards compact enough for up to three responsive columns', () => {
+    expect(listPageSource.includes("minmax(min(290px, 100%), 1fr)")).toBe(true);
+    expect(listPageSource.includes('max-w-1180px')).toBe(true);
+    expect(listPageSource.includes('minmax(min(520px, 100%), 1fr)')).toBe(false);
+    expect(listPageSource.includes('minmax(330px, 1fr)')).toBe(false);
+  });
+});
 
 describe('KnowledgeCard footer layout', () => {
   test('uses a lightweight footer instead of a full-width recessed meta strip', () => {
