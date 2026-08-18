@@ -398,6 +398,42 @@ export const parseProviderParams = (
   }
 };
 
+/**
+ * Read `provider_params.voice` out of the raw JSON draft.
+ *
+ * Adapters that require a provider voice (StepFun) reject the request locally
+ * when it is absent, so the dedicated voice control reads and writes this same
+ * JSON rather than keeping a parallel draft field: two sources would let the
+ * textarea and the picker disagree about what is about to be saved.
+ *
+ * Returns `''` for blank, malformed, or non-string values — none of them are a
+ * usable voice id, and showing one as if it were would hide the real problem.
+ */
+export const providerParamVoice = (raw: string): string => {
+  const parsed = parseProviderParams(raw);
+  if (!parsed.ok) return '';
+  const voice = parsed.value.voice;
+  return typeof voice === 'string' ? voice.trim() : '';
+};
+
+/**
+ * Write `voice` into the raw JSON draft, preserving every other param.
+ *
+ * A blank voice DELETES the key: persisting `""` would still fail the
+ * adapter's non-empty check while looking configured in the UI. Malformed JSON
+ * is returned untouched so a typo in the textarea cannot silently discard what
+ * the user typed.
+ */
+export const withProviderParamVoice = (raw: string, voice: string): string => {
+  const parsed = parseProviderParams(raw);
+  if (!parsed.ok) return raw;
+  const trimmed = voice.trim();
+  const next = { ...parsed.value };
+  if (trimmed) next.voice = trimmed;
+  else delete next.voice;
+  return Object.keys(next).length > 0 ? JSON.stringify(next, null, 2) : '';
+};
+
 export const validateModelDefinition = (
   definition: ModelDefinitionDraft,
   manifests: ModelProtocolManifestMap,
