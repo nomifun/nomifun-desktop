@@ -96,11 +96,11 @@ export interface NomiModalProps extends Omit<ModalProps, 'title' | 'footer'> {
 
 // ==================== 样式常量 / Style Constants ====================
 
-const HEADER_BASE_CLASS = 'flex items-center justify-between pb-20px';
-const TITLE_BASE_CLASS = 'text-18px font-500 text-t-primary m-0';
+const HEADER_BASE_CLASS = 'flex items-center justify-between pb-8px';
+const TITLE_BASE_CLASS = 'text-16px font-500 text-t-primary m-0';
 const CLOSE_BUTTON_CLASS =
-  'w-32px h-32px flex items-center justify-center rd-8px transition-colors duration-200 cursor-pointer border-0 bg-transparent p-0 hover:bg-2 focus:outline-none';
-const FOOTER_BASE_CLASS = 'flex-shrink-0 bg-transparent';
+  'w-28px h-28px flex items-center justify-center rd-8px transition-colors duration-200 cursor-pointer border-0 bg-transparent p-0 hover:bg-2 focus:outline-none';
+const FOOTER_BASE_CLASS = 'nomifun-modal-footer flex-shrink-0 bg-transparent';
 
 /**
  * 自定义模态框组件 / Custom modal component
@@ -288,10 +288,10 @@ const NomiModal: React.FC<NomiModalProps> = ({
       const okLabel = props.okText ?? t('common.confirm', { defaultValue: 'Confirm' });
       return {
         render: () => (
-          <div className='flex justify-end gap-10px mt-10px'>
+          <div className='flex justify-end gap-8px'>
             {/* 默认按钮提供统一圆角，文案可通过 cancelText/okText 覆盖 */}
             {/* Default buttons ship with rounded corners; text can be overridden via cancelText/okText */}
-            <Button onClick={onCancel} className='px-20px min-w-80px' style={{ borderRadius: 8 }}>
+            <Button onClick={onCancel} className='px-16px min-w-72px' style={{ borderRadius: 8 }}>
               {cancelLabel}
             </Button>
             <Button
@@ -302,7 +302,7 @@ const NomiModal: React.FC<NomiModalProps> = ({
                 props.onOk?.(e instanceof MouseEvent ? e : undefined);
               }}
               loading={props.confirmLoading}
-              className='px-20px min-w-80px'
+              className='px-16px min-w-72px'
               style={{ borderRadius: 8 }}
             >
               {okLabel}

@@ -14,8 +14,8 @@ use nomifun_common::AppError;
 use nomifun_realtime::UserEventSink;
 
 use crate::path_safety::{
-    PathAuthority, has_traversal, validate_path, validate_path_authority, validate_path_for_write,
-    validate_path_for_write_authority, validate_path_with_extra_root,
+    PathAuthority, has_traversal, is_unsafe_path_segment, validate_path, validate_path_authority,
+    validate_path_for_write, validate_path_for_write_authority, validate_path_with_extra_root,
 };
 use crate::types::{
     ContentUpdateEvent, ContentUpdateOperation, CopyResult, DirOrFile, FileMetadata, WorkspaceFlatFile, ZipEntry,
@@ -323,6 +323,13 @@ impl FileService {
         if new_name.contains('/') || new_name.contains('\\') {
             return Err(AppError::BadRequest(format!(
                 "new name '{}' must not contain path separators",
+                new_name
+            )));
+        }
+
+        if is_unsafe_path_segment(new_name) {
+            return Err(AppError::BadRequest(format!(
+                "new name '{}' is not a valid file name",
                 new_name
             )));
         }
@@ -977,10 +984,17 @@ impl crate::traits::IFileService for FileService {
             )));
         }
 
-        // Validate optional conversation_id: no separators / traversal.
+        if is_unsafe_path_segment(file_name) {
+            return Err(AppError::BadRequest(format!(
+                "file name '{}' is not a valid file name",
+                file_name
+            )));
+        }
+
+        // Validate optional conversation_id: it becomes a directory segment.
         let conv_id = match conversation_id {
             Some(id) if !id.is_empty() => {
-                if has_traversal(id) || id.contains('/') || id.contains('\\') {
+                if is_unsafe_path_segment(id) {
                     return Err(AppError::BadRequest(format!(
                         "conversation id '{}' contains invalid characters",
                         id

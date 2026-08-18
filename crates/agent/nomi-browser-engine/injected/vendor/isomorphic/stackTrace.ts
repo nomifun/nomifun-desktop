@@ -2,7 +2,7 @@
  * The MIT License (MIT)
  * Modifications copyright (c) Microsoft Corporation.
  *
- * Copyright (c) 2016-2023 Isaac Z. Schlueter i@izs.me, James Talmage james@talmage.io (github.com/jamestalmage), and
+ * Copyright (c) 2016-2023 Isaac Z. Schlueter redacted@example.invalid, James Talmage redacted@example.invalid (github.com/jamestalmage), and
  * Contributors
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated

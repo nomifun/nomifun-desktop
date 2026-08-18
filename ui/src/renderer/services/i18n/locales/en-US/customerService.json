@@ -81,6 +81,8 @@
     "kindFact": "Business fact",
     "content": "Content",
     "contentPlaceholder": "Write an FAQ / script / business fact…",
+    "aliasesPlaceholder": "Alternate phrasings, one per line, e.g. this app\nhow much",
+    "aliasesHint": "One phrasing a visitor might use per line. These are what make a note findable when the visitor words the question differently from the note body.",
     "scope": "Scope",
     "private": "Private",
     "shared": "Shared",

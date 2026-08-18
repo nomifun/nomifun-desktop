@@ -12,7 +12,7 @@
 
 - 规范：`docs/superpowers/specs/2026-08-03-bridge-protocol-v1.md`（字段/算法/常量 BINDING）与设计 spec `2026-08-03-nomifun-mobile-bridge-design.md`
 - LAN 端口 25810（被占则系统分配）；中继默认 wss；单结果 ≤16KB 截断；事件 result_text ≤2048 字符；不转发 `message.stream`
-- 提交人必须是 `RiKa0-0 <2206491416@qq.com>`，无 AI 署名 trailer，不得 `--no-verify`；禁止 `.github/workflows/`
+- 提交人必须是 `NomiFun Contributor <nomifun@users.noreply.github.com>`，无 AI 署名 trailer，不得 `--no-verify`；禁止 `.github/workflows/`
 - 测试：`cargo test -p nomifun-bridge -- --test-threads=2`（本机内存有限）；全仓验证用 `cargo check --workspace`
 - 桌面既有事实（已核实）：`LOCAL_TRUST_HEADER = "x-nomi-local-trust"`（nomifun-auth/src/trust.rs:32）；`ApiResponse{success,data,message}`；`PaginatedResult{items,total,has_more}`；`AgentType` serde lowercase（"nomi"…）；`ConversationStatus` lowercase；`MessageType` snake_case（助手文本 = `type:"text"` 且 `position:"left"`）；事件名 `turn.completed` / `cron.job-executed`；`AppServices.event_bus: Arc<BroadcastEventBus>`（services.rs:973）；send 需 `idempotency-key` 头（≤128 可见 ASCII）
 

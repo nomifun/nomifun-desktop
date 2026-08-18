@@ -85,8 +85,8 @@ const CreateTextAssetModal: React.FC<CreateTextAssetModalProps> = ({ visible, co
       unmountOnExit
     >
       {holder}
-      <div className='flex flex-col gap-14px'>
-        <label className='flex flex-col gap-6px'>
+      <div className='flex flex-col gap-10px'>
+        <label className='flex flex-col gap-4px'>
           <span className='text-13px font-500 text-[var(--color-text-1)]'>
             {t('workshopAssets.newText.titleLabel', { defaultValue: '标题' })}
           </span>
@@ -98,21 +98,21 @@ const CreateTextAssetModal: React.FC<CreateTextAssetModalProps> = ({ visible, co
           />
         </label>
 
-        <label className='flex flex-col gap-6px'>
+        <label className='flex flex-col gap-4px'>
           <span className='text-13px font-500 text-[var(--color-text-1)]'>
             {t('workshopAssets.newText.contentLabel', { defaultValue: '内容' })}
           </span>
           <Input.TextArea
             value={content}
             onChange={setContent}
-            autoSize={{ minRows: 5, maxRows: 14 }}
+            autoSize={{ minRows: 4, maxRows: 14 }}
             placeholder={t('workshopAssets.newText.contentPlaceholder', {
               defaultValue: '输入文本内容，可用于沉淀常用提示词',
             })}
           />
         </label>
 
-        <label className='flex flex-col gap-6px'>
+        <label className='flex flex-col gap-4px'>
           <span className='text-13px font-500 text-[var(--color-text-1)]'>
             {t('workshopAssets.newText.collectionLabel', { defaultValue: '集合' })}
           </span>

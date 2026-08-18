@@ -109,7 +109,7 @@
 
 - 测试限并发:`cargo test -p <crate> -- --test-threads=2`;全量 `cargo nextest run --build-jobs 8 --test-threads 8 --features nomifun-ai-agent/test-support`（**少了那个 feature,`agent_types_integration` 这个 test 目标编译不过 → 整个 workspace 一个测试都跑不了**;注意 `cargo … | grep` 的退出码是 grep 的,别把 build 失败读成全绿）。**不在 /tmp 构建**。
 - 测试用独立高位端口 sshd + 独立密钥 + tempdir known_hosts,**绝不碰真实 `~/.ssh`**。夹具在 `crates/shared/nomi-ssh/tests/support/sshd.rs` 与 `crates/backend/nomifun-ssh/tests/support/`（后者能停/重启同端口 sshd,供重连测试）。
-- 提交:conventional commits、**人类署名 `RiKa0-0 <2206491416@qq.com>`、无 AI trailer、不 `--no-verify`**。
+- 提交:conventional commits、**人类署名 `NomiFun Contributor <nomifun@users.noreply.github.com>`、无 AI trailer、不 `--no-verify`**。
 - 完成前:`bun run check` 全绿;`.github/workflows/` 无 YAML;`git log` 署名审计。改 `ui-api-contract-version.txt` 必须跟一次 `bun run build:ui`。
 - 接线避坑:`nomifun-ai-agent` 不能依赖 `nomifun-ssh`（循环）——靠 `SshBackendProvider` seam;`nomifun-app` 是唯一同时依赖两者、构造真池的地方,且**只能构造一次**（`services.rs` 与 `router/state.rs` 曾各建一份互不可见的实例,已由 `ssh_pool_is_shared_between_routes_and_the_agent_factory` 钉住）。
 

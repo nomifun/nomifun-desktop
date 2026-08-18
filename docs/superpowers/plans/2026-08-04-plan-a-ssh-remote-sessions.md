@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **Git 署名必须是人类**:author/committer = `RiKa0-0 <2206491416@qq.com>`;**禁止** `Co-authored-by`/`Generated-by`/`Assisted-by` 等 AI trailer;**禁止** `--no-verify`;不改全局 git 配置(`AGENTS.md:28-54`)。
+- **Git 署名必须是人类**:author/committer = `NomiFun Contributor <nomifun@users.noreply.github.com>`;**禁止** `Co-authored-by`/`Generated-by`/`Assisted-by` 等 AI trailer;**禁止** `--no-verify`;不改全局 git 配置(`AGENTS.md:28-54`)。
 - **禁止 GitHub Actions**:不得在 `.github/workflows/` 新增任何 YAML;完成前 `ls .github/workflows` 只应有 `README.md`(`AGENTS.md:3-26`)。
 - **Conventional Commits**:`<type>(ssh): <祈使>`;每个 Task 末尾一个 commit。
 - **测试并发限制**:聚焦 crate 用 `cargo test -p <crate> -- --test-threads=2`;全量用 `cargo nextest run --build-jobs 8 --test-threads 8`(24 核无限制打爆 30G 内存)。**绝不在 `/tmp` 构建**(16G tmpfs → `ld` Bus error)。

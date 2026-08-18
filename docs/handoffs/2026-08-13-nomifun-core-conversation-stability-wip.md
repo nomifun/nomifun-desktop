@@ -28,7 +28,7 @@
 
 ## 2. 安全、仓库与 Git 硬边界
 
-- 工作目录：`C:\Users\MINISFORUM\code\nomifun\nomifun-desktop`
+- 工作目录：`C:\Users\Developer\code\nomifun\nomifun-desktop`
 - 当前分支：`main`，跟踪 `origin/main`
 - 分叉/冻结基线：`fae5658c22a7bb803088f664d4cc91c0a6d39383`
 - 当前修改全部未提交、未暂存；不要 reset、checkout 或覆盖任何文件。
@@ -44,12 +44,12 @@
 
 - 后端：`127.0.0.1:18787`
   - PID `29884`
-  - 命令：`target\debug\nomifun-web.exe --port 18787 --host 127.0.0.1 --data-dir C:\Users\MINISFORUM\AppData\Local\Temp\nomifun-stability-019ffa15\data --api-only --insecure-no-auth`
+  - 命令：`target\debug\nomifun-web.exe --port 18787 --host 127.0.0.1 --data-dir C:\Users\Developer\AppData\Local\Temp\nomifun-stability-019ffa15\data --api-only --insecure-no-auth`
   - **这是修改前编译的旧二进制，不代表当前源码行为。**
 - 前端 Vite：`127.0.0.1:5173`
   - Vite Node PID `4008`
   - 上层 Bun PID `26336`
-- 隔离运行根：`C:\Users\MINISFORUM\AppData\Local\Temp\nomifun-stability-019ffa15`
+- 隔离运行根：`C:\Users\Developer\AppData\Local\Temp\nomifun-stability-019ffa15`
   - 冻结时约 57 个文件、7.3 MiB。
 - 隔离 Coding 工作区：`C:\tmp\nomifun-stability-work-019ffa15`
   - 冻结时约 172 个文件、23.7 MiB。
@@ -444,7 +444,7 @@ bun run check
 只有修复后二次 E2E 和必要回归完成后，才清理隔离数据：
 
 ```powershell
-$dataRoot = 'C:\Users\MINISFORUM\AppData\Local\Temp\nomifun-stability-019ffa15'
+$dataRoot = 'C:\Users\Developer\AppData\Local\Temp\nomifun-stability-019ffa15'
 $workRoot = 'C:\tmp\nomifun-stability-work-019ffa15'
 Resolve-Path -LiteralPath $dataRoot
 Resolve-Path -LiteralPath $workRoot
@@ -474,7 +474,7 @@ Resolve-Path -LiteralPath $workRoot
 ## 12. 可直接复制给新 Agent 的启动指令
 
 ```text
-请接手 C:\Users\MINISFORUM\code\nomifun\nomifun-desktop 的 NomiFun 核心对话/Coding
+请接手 C:\Users\Developer\code\nomifun\nomifun-desktop 的 NomiFun 核心对话/Coding
 稳定性任务。先完整阅读：
 docs/handoffs/2026-08-13-nomifun-core-conversation-stability-wip.md
 

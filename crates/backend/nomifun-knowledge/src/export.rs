@@ -362,8 +362,10 @@ fn validate_manifest(manifest: &serde_json::Value) -> Result<(), AppError> {
 
 /// Sanitize a zip entry name into a safe relative path via the shared
 /// [`nomifun_common::zip_safe`] hardening. Knowledge packages embed real
-/// on-disk file names (which may legally contain `':'` on Unix), so only
-/// drive prefixes are rejected, not every `':'` byte.
+/// on-disk file names, which may legally contain `':'` on Unix, so on Unix
+/// only drive prefixes are rejected. On Windows `':'` means an alternate data
+/// stream, so the shared policy rejects it there — see
+/// [`zip_safe::ZipColonPolicy::RejectDrivePrefix`].
 fn safe_zip_entry_path(name: &str) -> Result<PathBuf, AppError> {
     zip_safe::safe_zip_entry_path(name, zip_safe::ZipColonPolicy::RejectDrivePrefix)
         .ok_or_else(|| AppError::BadRequest(format!("非法压缩包条目: {name}")))
@@ -609,5 +611,20 @@ mod tests {
         assert!(safe_zip_entry_path("files\\win.md").is_err());
         assert!(safe_zip_entry_path("").is_err());
         assert!(safe_zip_entry_path("C:/evil.md").is_err());
+    }
+
+    /// On Windows a `':'` names an alternate data stream, which defeats both the
+    /// `.md` whitelist below (`Path::extension` reads `Some("md")` for
+    /// `payload.exe:x.md`) and the containment check. Unix has no streams, so a
+    /// package exported there may legitimately carry such a name.
+    #[test]
+    fn safe_zip_entry_path_rejects_stream_names_on_windows() {
+        for name in ["files/payload.exe:x.md", "files/2026: plan.md"] {
+            assert_eq!(
+                safe_zip_entry_path(name).is_err(),
+                cfg!(windows),
+                "stream-style name must be rejected exactly on Windows: {name:?}"
+            );
+        }
     }
 }

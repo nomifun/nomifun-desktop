@@ -52,6 +52,12 @@ import KnowledgeRetrievalSettingsModal from '../KnowledgeRetrievalSettingsModal'
 import CreateStudio from '../CreateStudio';
 import type { StudioInitialKind } from '../CreateStudio/sourceTypes';
 
+// Keep the catalog compact and responsive: the existing 1180px page shell
+// caps the grid at three 290px+ cards, while auto-fill steps down to two and
+// one column only as the actual content area narrows. `min(..., 100%)` keeps
+// the single-column layout overflow-safe on small screens.
+const KNOWLEDGE_CARD_GRID_COLUMNS = 'repeat(auto-fill, minmax(min(290px, 100%), 1fr))';
+
 // ─── Filter pure function ────────────────────────────────────────────────────
 
 /**
@@ -466,7 +472,7 @@ const KnowledgeListPage: React.FC = () => {
         ) : (
           <>
             {/* Card grid */}
-            <div className='grid gap-16px' style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(330px, 1fr))' }}>
+            <div className='grid gap-16px' style={{ gridTemplateColumns: KNOWLEDGE_CARD_GRID_COLUMNS }}>
               {displayBases.map((base) => (
                 <KnowledgeCard
                   key={base.knowledge_base_id}

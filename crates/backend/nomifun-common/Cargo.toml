@@ -21,6 +21,7 @@ sha2.workspace = true
 tracing.workspace = true
 ts-rs.workspace = true
 tokio.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
