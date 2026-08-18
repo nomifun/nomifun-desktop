@@ -84,7 +84,7 @@ describe('Knowledge retrieval settings', () => {
 
   test('reduces the modal header, content, and footer vertical spacing', () => {
     expect(modalSource.includes('className={styles.modal}')).toBe(true);
-    expect(modalStyles.includes('height: 42px')).toBe(true);
-    expect(modalStyles.includes('padding: 10px 20px 12px')).toBe(true);
+    expect(modalStyles.includes('height: 40px')).toBe(true);
+    expect(modalStyles.includes('var(--nomi-modal-block-padding) var(--nomi-modal-inline-padding)')).toBe(true);
   });
 });

@@ -1,17 +1,19 @@
 .modal :global(.arco-modal-header) {
-  height: 42px;
+  height: 40px;
+  padding: 0 var(--nomi-modal-inline-padding);
 }
 
 .modal :global(.arco-modal-content) {
-  padding: 10px 20px 12px;
+  padding: var(--nomi-modal-block-padding) var(--nomi-modal-inline-padding) 10px;
 }
 
 .modal :global(.arco-modal-footer) {
-  padding: 10px 20px 12px;
+  padding: var(--nomi-modal-block-padding) var(--nomi-modal-inline-padding) 10px;
 }
 
 .modal :global(.arco-modal-close-icon) {
-  top: 15px;
+  top: 14px;
+  right: var(--nomi-modal-inline-padding);
 }
 
 .modalBody {
