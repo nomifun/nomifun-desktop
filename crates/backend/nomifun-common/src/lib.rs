@@ -22,6 +22,7 @@ pub mod paths;
 pub mod provider_lifecycle;
 pub mod provider_usage;
 pub mod stage_direction;
+pub mod text_search;
 mod timestamp;
 mod types;
 pub mod vision_registry;
