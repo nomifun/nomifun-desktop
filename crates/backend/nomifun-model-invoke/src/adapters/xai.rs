@@ -684,7 +684,10 @@ fn stt_options(call: &ResolvedCall, req: &AsrRequest) -> Result<Vec<(String, Str
 }
 
 fn extension_for_audio_mime(mime: &str) -> &'static str {
-    match mime {
+    // Browsers report recording MIMEs with parameters ("audio/ogg;codecs=opus"),
+    // so match on the bare type rather than dropping them all into "bin".
+    let mime = mime.split(';').next().unwrap_or(mime).trim().to_ascii_lowercase();
+    match mime.as_str() {
         "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
         "audio/mpeg" | "audio/mp3" => "mp3",
         "audio/mp4" | "audio/m4a" | "audio/x-m4a" => "m4a",
