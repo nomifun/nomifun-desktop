@@ -87,6 +87,19 @@ const TASK_RECLAIM_IDLE_EXPANSION_STREAK: u8 = 2;
 const TASK_RECLAIM_IDLE_ANY_STREAK: u8 = 3;
 const TASK_RECLAIM_ACTIVE_EXPANSION_STREAK: u8 = 4;
 const TASK_RECLAIM_ACTIVE_ANY_STREAK: u8 = 5;
+/// Consecutive over-budget samples required before *any* reclaim stage applies.
+///
+/// Task attribution on a shared Host is an estimate, and a browser legitimately
+/// sits at a high steady state: a few media-heavy tabs cost the same bytes
+/// whether or not anything is leaking. Escalating on the first sample made a
+/// normal session reclaimable roughly one sampling period (5s) after it finished
+/// loading its pages, because the severity/confidence accelerators alone reach
+/// an eligible stage with a streak of 1.
+///
+/// Requiring sustained overage is what separates "expensive" from "growing".
+/// The accelerators still shorten the *escalation* once this floor is met, so a
+/// genuine runaway is reclaimed promptly; it just cannot happen instantly.
+const TASK_RECLAIM_MIN_SUSTAINED_SAMPLES: u8 = 3;
 // A shared Chromium Host does not expose a trustworthy target -> native RSS
 // mapping.  Task attribution can therefore miss a one-page renderer leak when
 // many unrelated tasks share Primary/Anonymous.  Do not react to one noisy OS
@@ -903,6 +916,11 @@ struct LaneRecord {
     restart_from_epoch: AtomicU64,
     priority: LanePriority,
     frozen_at_ms: AtomicU64,
+    /// Set just before the platform closes this Lane to stay inside the task's
+    /// memory budget, so an in-flight operation reports the honest, retryable
+    /// [`BrowserErrorCode::TaskMemoryReclaimed`] instead of claiming the user
+    /// closed the browser.
+    memory_reclaimed: AtomicBool,
     workspace_hint: Option<String>,
 }
 
@@ -929,6 +947,7 @@ impl LaneRecord {
             restart_from_epoch: AtomicU64::new(0),
             priority,
             frozen_at_ms: AtomicU64::new(u64::MAX),
+            memory_reclaimed: AtomicBool::new(false),
             workspace_hint,
         }
     }
@@ -938,6 +957,15 @@ impl LaneRecord {
         snapshot.active_operation_count =
             self.active_operation_count.load(Ordering::Acquire);
         snapshot
+    }
+
+    /// The close reason for a Lane that is shutting down, so waiters report why.
+    fn closed_error(&self, lane_id: BrowserLaneId) -> BrowserPlatformError {
+        if self.memory_reclaimed.load(Ordering::Acquire) {
+            BrowserPlatformError::task_memory_reclaimed(lane_id)
+        } else {
+            lane_closed_error(lane_id)
+        }
     }
 }
 
@@ -7358,7 +7386,7 @@ impl BrowserSessionHub {
         // and the global semaphore is only a resource bound.
         let _lane_guard = tokio::select! {
             guard = lane.operation_gate.lock() => guard,
-            _ = lane.cancellation.cancelled() => return Err(lane_closed_error(lane_id.clone())),
+            _ = lane.cancellation.cancelled() => return Err(lane.closed_error(lane_id.clone())),
             _ = tokio::time::sleep_until(wait_deadline) => {
                 return Err(operation_queue_wait_timeout_error(Some(lane_id.clone())));
             }
@@ -7728,7 +7756,7 @@ impl BrowserSessionHub {
                     trusted_out_of_band_confirmation,
                 },
             ) => result,
-            _ = lane.cancellation.cancelled() => Err(lane_closed_error(lane_id.clone())),
+            _ = lane.cancellation.cancelled() => Err(lane.closed_error(lane_id.clone())),
         };
         if result
             .as_ref()
@@ -11945,6 +11973,13 @@ impl BrowserSessionHub {
                 }
                 let streak = streaks.entry(task_id.clone()).or_default();
                 *streak = streak.saturating_add(1);
+                // Hysteresis floor: an estimated attribution must stay over
+                // budget for several consecutive samples before it can reclaim
+                // anything. Without this, the accelerators below reach an
+                // eligible stage on the very first over-budget sample.
+                if *streak < TASK_RECLAIM_MIN_SUSTAINED_SAMPLES {
+                    continue;
+                }
                 let materially_over = attribution.shared_rss_estimate_bytes
                     > policy.max_task_memory_bytes.saturating_mul(3) / 2;
                 let severely_over = attribution.shared_rss_estimate_bytes
@@ -11960,6 +11995,7 @@ impl BrowserSessionHub {
                     0
                 };
                 let reclaim_stage = streak
+                    .saturating_sub(TASK_RECLAIM_MIN_SUSTAINED_SAMPLES.saturating_sub(1))
                     .saturating_add(confidence_acceleration)
                     .saturating_add(severity_acceleration);
                 if reclaim_stage >= TASK_RECLAIM_IDLE_EXPANSION_STREAK {
@@ -11973,6 +12009,7 @@ impl BrowserSessionHub {
         let mut first_error = None;
         for (task_id, reclaim_stage) in reclaim {
             let mut candidates = Vec::new();
+            let mut live_lane_count = 0usize;
             for lane in &records {
                 let snapshot = lane.current_snapshot().await;
                 if snapshot.caller.task_resource_family_key().as_str() != task_id
@@ -11986,6 +12023,7 @@ impl BrowserSessionHub {
                 {
                     continue;
                 }
+                live_lane_count = live_lane_count.saturating_add(1);
                 let expansion = lane.priority == LanePriority::Expansion
                     || is_crawl_identity(snapshot.identity_mode);
                 let active = snapshot.active_operation_count != 0;
@@ -12009,10 +12047,35 @@ impl BrowserSessionHub {
                     snapshot.lane_id,
                 ));
             }
+            // A task's last remaining Lane is its entire browser. Closing it on
+            // an *estimated* attribution is what made ordinary sessions appear
+            // to die at random, so it is reserved for the top of the escalation:
+            // the overage must have survived every earlier stage first. Sibling
+            // Lanes (a task that expanded) stay reclaimable at the normal
+            // stages.
+            //
+            // Note this deliberately does NOT also require a *severe* overage.
+            // Gating the last Lane on severity would make a single-Lane task
+            // with a sustained moderate overage permanently immune, and a single
+            // Lane is the common shape for an Agent task — that would be a leak
+            // hole, not a protection.
+            //
+            // `freeze_idle_lane_for_pressure` applies the same protection via
+            // `task_family_live_lane_count() <= 1`.
+            if live_lane_count <= 1 && reclaim_stage < TASK_RECLAIM_ACTIVE_ANY_STREAK {
+                continue;
+            }
             candidates.sort();
             let Some((_, _, _, _, lane_id)) = candidates.into_iter().next() else {
                 continue;
             };
+            // Mark the exact Lane before closing so an operation waiting on its
+            // cancellation token reports the memory-budget reason rather than
+            // "closed by user". This only annotates the close reason; the close
+            // itself and its exact cleanup authority are unchanged.
+            if let Some(lane) = self.inner.lanes.read().await.get(&lane_id) {
+                lane.memory_reclaimed.store(true, Ordering::Release);
+            }
             match self.close_lane(&lane_id).await {
                 Ok(result) => {
                     closed = closed.saturating_add(result.closed);
@@ -19367,11 +19430,29 @@ mod tests {
         // A severe estimate accelerates the watchdog, but it still first
         // offers idle expansion and idle-primary stages. An active Primary is
         // task-locally cancelled only after the overage remains sustained.
-        harness.hub.update_resource_telemetry(sample()).await;
-        harness.hub.update_resource_telemetry(sample()).await;
-        assert!(harness.hub.lane_snapshot_unchecked(&noisy_lane).await.is_some());
-        harness.hub.update_resource_telemetry(sample()).await;
-        assert!(harness.hub.lane_snapshot_unchecked(&noisy_lane).await.is_some());
+        // Attribution gives the noisy task ~464 MiB of the shared 700 MiB Host
+        // against its 256 MiB budget: materially over (>1.5x) but not severely
+        // over (>2x), and not exclusive, so the only accelerator is +1.
+        //
+        // The escalation is deliberately slow, because this attribution is an
+        // estimate and a browser may sit at a legitimately high steady state:
+        //   samples 1-2  hysteresis floor (TASK_RECLAIM_MIN_SUSTAINED_SAMPLES)
+        //                is not met yet, so nothing is reclaimable at all;
+        //   samples 3-5  stages 2..4 offer idle/expansion Lanes first. This
+        //                task's single Lane is active, and a task's *last* Lane
+        //                is reserved for the top stage, so it is protected;
+        //   sample 6     stage 5 (TASK_RECLAIM_ACTIVE_ANY_STREAK) is reached and
+        //                the active last Lane is finally reclaimed.
+        //
+        // That is ~30s of sustained overage at the default 5s sample period.
+        for _ in 0..5 {
+            harness.hub.update_resource_telemetry(sample()).await;
+            assert!(
+                harness.hub.lane_snapshot_unchecked(&noisy_lane).await.is_some(),
+                "an estimated overage must not reclaim a task's only active Lane \
+                 before the escalation reaches its top stage"
+            );
+        }
         harness.hub.update_resource_telemetry(sample()).await;
 
         assert!(harness.hub.lane_snapshot_unchecked(&noisy_lane).await.is_none());
@@ -19381,6 +19462,132 @@ mod tests {
             0,
             "task-local reclaim must not terminate a shared Primary Host"
         );
+    }
+
+    /// A browser that is merely *expensive* must not be treated as leaking.
+    ///
+    /// This is the regression for the user-visible defect: an ordinary session
+    /// sitting at a high but stable memory level was reclaimed within about one
+    /// sampling period, because the severity/confidence accelerators reached an
+    /// eligible stage with a streak of 1. A steady state must survive
+    /// indefinitely as long as it stays inside the budget.
+    #[tokio::test]
+    async fn steady_state_memory_inside_budget_is_never_reclaimed() {
+        let mut config = HubConfig::default();
+        // 2 GiB budget against a 1.5 GiB single-task Host: high, but legitimate.
+        config.resource_policy.max_task_memory_bytes = 2 * crate::resource::GIB;
+        let harness = harness_with_config(config);
+        let lane = open(&harness.client, "steady-state-primary").await;
+
+        let sample = || ResourceTelemetry {
+            total_memory_bytes: 16 * crate::resource::GIB,
+            available_memory_bytes: 12 * crate::resource::GIB,
+            chromium_rss_bytes: 3 * crate::resource::GIB / 2,
+            host_rss_by_process_id: HashMap::from([(
+                4_242,
+                3 * crate::resource::GIB / 2,
+            )]),
+            logical_cpus: 8,
+            ..Default::default()
+        };
+
+        for _ in 0..24 {
+            harness.hub.update_resource_telemetry(sample()).await;
+        }
+
+        assert!(
+            harness.hub.lane_snapshot_unchecked(&lane).await.is_some(),
+            "a session that stays inside its budget must never be reclaimed, \
+             however long it runs"
+        );
+    }
+
+    /// A task's only Lane is its entire browser, so an *estimated* attribution
+    /// may not close it until the escalation reaches its top stage. An idle
+    /// single-Lane task would otherwise be reclaimed at stage 3
+    /// (`TASK_RECLAIM_IDLE_ANY_STREAK`) — which is what killed sessions while
+    /// the Agent was waiting on the model between tool calls.
+    #[tokio::test]
+    async fn only_lane_of_a_task_survives_the_idle_reclaim_stages() {
+        let mut config = HubConfig::default();
+        config.resource_policy.max_task_memory_bytes = crate::resource::MIN_TASK_MEMORY_BYTES;
+        let harness = harness_with_config(config);
+        let lane = open(&harness.client, "sole-idle-primary").await;
+
+        // Idle: no in-flight operation, exactly as an Agent looks while it waits
+        // for the model to produce its next tool call.
+        let record = harness
+            .hub
+            .inner
+            .lanes
+            .read()
+            .await
+            .get(&lane)
+            .cloned()
+            .unwrap();
+        assert_eq!(record.active_operation_count.load(Ordering::Acquire), 0);
+
+        // Exclusive Host and severely over budget: the fastest possible
+        // escalation. Even so, stages 1..4 must not take the only Lane.
+        let sample = || ResourceTelemetry {
+            total_memory_bytes: 16 * crate::resource::GIB,
+            available_memory_bytes: 12 * crate::resource::GIB,
+            chromium_rss_bytes: crate::resource::GIB,
+            host_rss_by_process_id: HashMap::from([(4_242, crate::resource::GIB)]),
+            logical_cpus: 8,
+            ..Default::default()
+        };
+
+        // Samples 1-2 are below the hysteresis floor; sample 3 reaches stage
+        // 1+1+2=4, still short of the top stage reserved for a last Lane.
+        for _ in 0..3 {
+            harness.hub.update_resource_telemetry(sample()).await;
+            assert!(
+                harness.hub.lane_snapshot_unchecked(&lane).await.is_some(),
+                "the only Lane of a task must survive the idle reclaim stages"
+            );
+        }
+
+        // Sample 4 reaches stage 5 and the last Lane finally becomes eligible,
+        // so a genuine runaway is still bounded rather than immune.
+        harness.hub.update_resource_telemetry(sample()).await;
+        assert!(
+            harness.hub.lane_snapshot_unchecked(&lane).await.is_none(),
+            "a sustained severe overage must still converge"
+        );
+    }
+
+    /// Reclaim must not tell the caller the *user* closed the browser.
+    #[tokio::test]
+    async fn reclaimed_lane_reports_an_honest_retryable_memory_error() {
+        let mut config = HubConfig::default();
+        config.resource_policy.max_task_memory_bytes = crate::resource::MIN_TASK_MEMORY_BYTES;
+        let harness = harness_with_config(config);
+        let lane_id = open(&harness.client, "reclaim-error-primary").await;
+        let record = harness
+            .hub
+            .inner
+            .lanes
+            .read()
+            .await
+            .get(&lane_id)
+            .cloned()
+            .unwrap();
+
+        // Before reclaim marks it, a close is an ordinary user-initiated close.
+        assert_eq!(
+            record.closed_error(lane_id.clone()).code,
+            BrowserErrorCode::LaneClosedByUser
+        );
+
+        record.memory_reclaimed.store(true, Ordering::Release);
+        let error = record.closed_error(lane_id.clone());
+        assert_eq!(error.code, BrowserErrorCode::TaskMemoryReclaimed);
+        assert!(
+            error.retryable,
+            "an Agent must be allowed to reopen a Lane after a memory reclaim"
+        );
+        assert_eq!(error.metadata["reason"], "task_memory_budget");
     }
 
     #[tokio::test]

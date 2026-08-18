@@ -454,6 +454,10 @@ impl From<BrowserPlatformError> for BrowserApiError {
             | BrowserErrorCode::IdentityReplicaStale
             | BrowserErrorCode::NeedsPrimaryIdentity
             | BrowserErrorCode::PrimaryProfileStorageLimit => StatusCode::CONFLICT,
+            // The Lane was reclaimed to stay inside the task's memory budget.
+            // It is a capacity outcome, not a client mistake, and the caller may
+            // reopen a Lane and continue.
+            BrowserErrorCode::TaskMemoryReclaimed => StatusCode::TOO_MANY_REQUESTS,
             BrowserErrorCode::BrowserRestarted
             | BrowserErrorCode::BrowserUnavailable
             | BrowserErrorCode::BrowserShuttingDown => StatusCode::SERVICE_UNAVAILABLE,
