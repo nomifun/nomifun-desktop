@@ -1,0 +1,66 @@
+-- Intelligent hybrid recall for customer-service notes.
+--
+-- WHY: `search_notes` used to be `content LIKE '%query%'` — ONE contiguous
+-- literal substring, matched against a string the customer-service model
+-- generates non-deterministically, ordered by `created_at DESC` so relevance
+-- never participated in the ranking. Any inserted space, case change,
+-- full-width character or rephrasing missed a note that demonstrably existed:
+-- a note reading "Q：NomiFun是什么？" was not found by "NomiFun 是什么".
+--
+-- Replacing the storage layer alone does NOT fix that, which is the
+-- counter-intuitive part worth recording here. Feeding the model's raw string
+-- to FTS5 as a single phrase reproduces the bug exactly (verified: MATCH
+-- '"NomiFun是什么"' hits, MATCH '"NomiFun 是什么"' misses). The fix lives on the
+-- query side — `nomifun_common::text_search` normalizes and splits the query
+-- into OR-combined terms. This migration builds the index that makes those
+-- terms cheap to resolve and BM25-rankable.
+--
+-- TWO NEW COLUMNS
+--
+-- `search_text` is the materialized NFKC + lowercase folding of the note. It
+-- exists because FTS5's trigram tokenizer applies NO Unicode normalization, so
+-- indexing `content` directly would leave full-width and mixed-case variants
+-- unreachable. Materializing the folded text is the only way to guarantee the
+-- index side and the query side fold identically. The LIKE fallback channel
+-- also scans this column rather than `content`, for the same reason.
+--
+-- `aliases` holds owner-authored alternate phrasings, newline-separated. Pure
+-- lexical matching provably cannot bridge a paraphrase with zero shared
+-- vocabulary ("这个软件是干什么的" shares no term with a note about NomiFun),
+-- and this repository has no offline embedding capability at all
+-- (`KnowledgeEmbeddingConfig::Local {}` is keyword scoring, not vectors; no
+-- fastembed/candle/jieba in the lockfile). Operator-authored aliases are
+-- therefore the synonym channel: auditable, correctable, zero latency, and no
+-- provider dependency on a live reply path.
+--
+-- Both default to '' so existing rows stay valid; the boot-time backfill in
+-- `nomifun_db::customer_service_search` populates `search_text` and rebuilds
+-- the index. The backfill is Rust-side rather than SQL-side on purpose:
+-- SQLite's `lower()` does not fold CJK full-width forms, so doing it in SQL
+-- here would fork the normalization semantics away from the single Rust
+-- implementation that the query path uses.
+ALTER TABLE cs_notes ADD COLUMN search_text TEXT NOT NULL DEFAULT '';
+ALTER TABLE cs_notes ADD COLUMN aliases TEXT NOT NULL DEFAULT '';
+
+-- External-content FTS5 index over the folded text. `content=` makes this a
+-- view over `cs_notes` rather than a second copy of the data, so there is one
+-- source of truth for note content.
+--
+-- The v3 schema forbids triggers, so this index is NOT self-maintaining: every
+-- write path in `sqlite_customer_service.rs` calls the fts_index_* helpers
+-- explicitly, mirroring `nomifun-companion/src/store.rs:709-760`. The fts5
+-- 'delete' command requires the OLD indexed value; passing the new one raises
+-- "database disk image is malformed" while a subsequent 'integrity-check'
+-- still reports PASSED, i.e. it corrupts recall SILENTLY — reproducing this
+-- very bug. `update_note` therefore reads the old row, deletes with the old
+-- value, updates, and reinserts, all in one transaction.
+--
+-- Adding this virtual table also materializes four shadow tables
+-- (_data/_idx/_docsize/_config). They are registered in the product-table
+-- registry and exempted from the per-table row-key invariants in
+-- `id_schema_contract.rs`, because their shape is owned by SQLite: four of the
+-- five would otherwise fail the "id INTEGER PRIMARY KEY AUTOINCREMENT"
+-- assertion.
+CREATE VIRTUAL TABLE cs_notes_fts USING fts5(
+  search_text, content='cs_notes', content_rowid='id', tokenize='trigram'
+);

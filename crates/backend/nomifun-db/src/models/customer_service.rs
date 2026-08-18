@@ -104,6 +104,17 @@ pub struct CsNoteRow {
     pub cs_agent_id: Option<String>,
     pub kind: String,
     pub content: String,
+    /// Owner-authored alternate phrasings of the same question, newline
+    /// separated. Folded into the searchable text alongside `content`.
+    ///
+    /// This is the synonym channel for note recall. Purely lexical matching
+    /// provably cannot bridge a paraphrase that shares no vocabulary with the
+    /// note (「这个软件是干什么的」 against a note about NomiFun), and this
+    /// repository has no offline embedding capability to fall back on, so the
+    /// owner supplies the phrasings their visitors actually use. Auditable and
+    /// correctable, with no provider on the reply path.
+    #[serde(default)]
+    pub aliases: String,
     pub enabled: bool,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
