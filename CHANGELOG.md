@@ -5,6 +5,10 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+No unreleased changes yet.
+
+## v0.6.4 - 2026-08-18
+
 - **BREAKING CHANGE (agent engines / 引擎收敛为 `nomi`).** NomiFun shipped five
   conversation engines. It now ships one: the built-in native **`nomi`**
   executor. **ACP**, **OpenClaw Gateway**, **Nanobot** and **Remote Agent** are
