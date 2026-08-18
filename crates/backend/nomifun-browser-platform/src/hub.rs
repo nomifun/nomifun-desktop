@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,7 @@ use crate::{
     BrowserOverview, BrowserPlatformError, BrowserTaskDownloadAuthority,
     BrowserTaskDownloadReservation, BrowserTaskTabAuthority, BrowserTaskTabReservation,
     CallerIdentity, CanonicalIdentitySnapshot, BrowserVisibility,
+    BrowserPresentationIntent, BrowserVisibilityPolicy, may_escalate_lane_to_headful,
     CapturedIdentitySnapshot, Clock, CloseResult,
     DriverOperationContext, HostLaunchCleanupLease, HostLaunchCleanupTicket, HostLaunchRequest,
     IdentitySnapshotPayload,
@@ -218,6 +219,15 @@ pub struct HubConfig {
     pub primary_profile_policy: PrimaryProfilePolicy,
     pub owner_lease_ttl_ms: u64,
     pub headful: bool,
+    /// The user's visibility *policy*, which governs whether the platform may
+    /// resolve visibility per Lane at all.
+    ///
+    /// `headful` above remains the launch mechanism. This is the separate axis
+    /// that decides who owns that mechanism: pinned by the user, or delegated to
+    /// the trusted host. Defaults to `Auto` so a config predating the field
+    /// behaves like a fresh install.
+    #[serde(default)]
+    pub visibility_policy: BrowserVisibilityPolicy,
 }
 
 impl Default for HubConfig {
@@ -228,6 +238,7 @@ impl Default for HubConfig {
             primary_profile_policy: PrimaryProfilePolicy::default(),
             owner_lease_ttl_ms: 5 * 60_000,
             headful: false,
+            visibility_policy: BrowserVisibilityPolicy::default(),
         }
     }
 }
@@ -916,6 +927,12 @@ struct LaneRecord {
     restart_from_epoch: AtomicU64,
     priority: LanePriority,
     frozen_at_ms: AtomicU64,
+    /// Visibility escalations already spent on this Lane.
+    ///
+    /// Each one replaces the Chromium Host process, so the count is bounded by
+    /// [`MAX_LANE_VISIBILITY_ESCALATIONS`]. It lives on the Lane rather than the
+    /// task so a single runaway page cannot spend a sibling Lane's allowance.
+    visibility_escalations: AtomicU32,
     /// Set just before the platform closes this Lane to stay inside the task's
     /// memory budget, so an in-flight operation reports the honest, retryable
     /// [`BrowserErrorCode::TaskMemoryReclaimed`] instead of claiming the user
@@ -947,6 +964,7 @@ impl LaneRecord {
             restart_from_epoch: AtomicU64::new(0),
             priority,
             frozen_at_ms: AtomicU64::new(u64::MAX),
+            visibility_escalations: AtomicU32::new(0),
             memory_reclaimed: AtomicBool::new(false),
             workspace_hint,
         }
@@ -8018,6 +8036,111 @@ impl BrowserSessionHub {
         }
         self.inner.config.write().await.headful = desired_headful;
         Ok(visibility)
+    }
+
+    /// Returns the installation's visibility policy.
+    pub async fn visibility_policy(&self) -> BrowserVisibilityPolicy {
+        self.inner.config.read().await.visibility_policy
+    }
+
+    /// Acts on an Agent's declared presentation intent for one Lane.
+    ///
+    /// This is the Agent-facing half of the visibility design: the Agent says
+    /// *what kind of moment this is* and the trusted host decides whether that
+    /// warrants a window. The Agent cannot request `Headful` directly, so a
+    /// confused or compromised model cannot pin the browser into a state the
+    /// user did not allow — the same split as
+    /// [`crate::MODEL_IDENTITY_INPUT_FIELDS`] for identity.
+    ///
+    /// Advisory by design: declining to escalate is a normal outcome and returns
+    /// the unchanged snapshot rather than an error, so an Agent that reports an
+    /// attended moment under a pinned-silent policy simply continues headless.
+    /// The only errors are real failures (unknown Lane, revoked owner, a
+    /// transition that could not be applied).
+    ///
+    /// Escalation is one-way and bounded; see
+    /// [`may_escalate_lane_to_headful`] for the rules and why de-escalation is
+    /// deliberately absent.
+    pub async fn apply_lane_presentation_intent(
+        &self,
+        caller: &CallerIdentity,
+        lane_id: &BrowserLaneId,
+        intent: BrowserPresentationIntent,
+    ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
+        self.validate_caller(caller)?;
+        let lane = self
+            .inner
+            .lanes
+            .read()
+            .await
+            .get(lane_id)
+            .cloned()
+            .ok_or_else(|| BrowserPlatformError::lane_not_found(lane_id.clone()))?;
+        let snapshot = lane.current_snapshot().await;
+        let policy = self.inner.config.read().await.visibility_policy;
+        // Read the *Host's* actual visibility, not `config.headful`. A per-Lane
+        // transition deliberately leaves the installation default alone (see
+        // `set_lane_visibility_for_user`), so using the default here would treat
+        // an already-visible Host as silent and escalate again on every report
+        // until the bound was exhausted.
+        let host_key = HostKey::for_lane(
+            snapshot.identity_mode,
+            snapshot.identity_generation,
+            &snapshot.lane_id,
+        );
+        let current = match self.inner.host_slots.read().await.get(&host_key) {
+            Some(slot) if slot.is_headful() => BrowserVisibility::Headful,
+            // No slot yet means no Host has been published for this Lane, so
+            // there is nothing visible to the user.
+            _ => BrowserVisibility::Headless,
+        };
+
+        // Claim an escalation slot before doing any Host work, so a burst of
+        // concurrent attended reports cannot each pass the bound check and queue
+        // several process replacements.
+        let claimed = lane
+            .visibility_escalations
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                may_escalate_lane_to_headful(
+                    policy,
+                    intent,
+                    snapshot.identity_mode,
+                    current,
+                    used,
+                )
+                .then(|| used.saturating_add(1))
+            })
+            .is_ok();
+        if !claimed {
+            return Ok(snapshot);
+        }
+
+        // Bring the window to the front: the whole point of escalating is that
+        // the user is expected to look at it and possibly take over.
+        match self
+            .set_lane_visibility_and_maybe_focus_once(
+                &caller.user_id,
+                lane_id,
+                BrowserVisibility::Headful,
+                true,
+            )
+            .await
+        {
+            Ok(updated) => {
+                self.emit("lane_presentation_escalated", Some(&updated));
+                Ok(updated)
+            }
+            Err(error) => {
+                // Return the slot; a transition that never happened must not
+                // consume the Lane's small allowance.
+                lane.visibility_escalations
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                        Some(used.saturating_sub(1))
+                    })
+                    .ok();
+                Err(error)
+            }
+        }
     }
 
     /// Changes the live Primary Host visibility for an authenticated Lane.
@@ -15443,6 +15566,133 @@ mod tests {
             BrowserVisibility::Headless,
             "one foreground request must not mutate the installation default"
         );
+    }
+
+    /// An Agent reporting an attended moment gets a visible window under `Auto`,
+    /// and the escalation is bounded so a page that keeps tripping the risk
+    /// classifier cannot restart Chromium in a loop.
+    #[tokio::test]
+    async fn attended_intent_escalates_once_per_allowance_then_declines() {
+        let harness = harness();
+        let lane_id = open(&harness.client, "attended-primary").await;
+        let caller = harness.client.caller().clone();
+        assert_eq!(
+            harness.hub.visibility_policy().await,
+            BrowserVisibilityPolicy::Auto,
+            "Auto is the default policy"
+        );
+
+        // Routine work must never restart the browser to show a window.
+        harness
+            .hub
+            .apply_lane_presentation_intent(
+                &caller,
+                &lane_id,
+                BrowserPresentationIntent::Unattended,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !harness.hub.overview().await.hosts[0].headful,
+            "unattended work must stay silent"
+        );
+
+        // An attended moment earns the window.
+        harness
+            .hub
+            .apply_lane_presentation_intent(
+                &caller,
+                &lane_id,
+                BrowserPresentationIntent::Attended,
+            )
+            .await
+            .unwrap();
+        assert!(
+            harness.hub.overview().await.hosts[0].headful,
+            "an attended moment on Primary must surface a window"
+        );
+        assert_eq!(
+            harness.hub.primary_visibility().await,
+            BrowserVisibility::Headless,
+            "escalating one Lane must not mutate the installation default"
+        );
+
+        // Already visible: further reports are no-ops, not more restarts.
+        let epoch_after_first =
+            harness.client.status(&lane_id).await.unwrap().browser_epoch;
+        for _ in 0..4 {
+            harness
+                .hub
+                .apply_lane_presentation_intent(
+                    &caller,
+                    &lane_id,
+                    BrowserPresentationIntent::Attended,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            harness.client.status(&lane_id).await.unwrap().browser_epoch,
+            epoch_after_first,
+            "repeated attended reports must not each replace the Host"
+        );
+    }
+
+    /// A user who pinned silent is never overridden by the Agent.
+    #[tokio::test]
+    async fn attended_intent_cannot_override_an_explicit_silent_policy() {
+        let mut config = HubConfig::default();
+        config.visibility_policy = BrowserVisibilityPolicy::AlwaysHeadless;
+        let harness = harness_with_config(config);
+        let lane_id = open(&harness.client, "pinned-silent-primary").await;
+        let caller = harness.client.caller().clone();
+
+        let snapshot = harness
+            .hub
+            .apply_lane_presentation_intent(
+                &caller,
+                &lane_id,
+                BrowserPresentationIntent::Attended,
+            )
+            .await
+            .expect("a declined escalation is a normal outcome, not an error");
+
+        assert!(
+            !harness.hub.overview().await.hosts[0].headful,
+            "AlwaysHeadless is a promise the model does not get to override"
+        );
+        assert_eq!(snapshot.lane_id, lane_id);
+        assert_eq!(
+            snapshot.error_code, None,
+            "declining to escalate must not error the Lane"
+        );
+    }
+
+    /// The escalation must not be reachable through a revoked owner.
+    #[tokio::test]
+    async fn presentation_intent_revalidates_the_caller() {
+        let harness = harness();
+        let lane_id = open(&harness.client, "revoked-presentation").await;
+        let mut caller = harness.client.caller().clone();
+        // An expired capability is a real revocation vector: a queued or
+        // long-running Agent turn can outlive its grant.
+        caller.capability_expires_at_ms = 0;
+
+        let error = harness
+            .hub
+            .apply_lane_presentation_intent(
+                &caller,
+                &lane_id,
+                BrowserPresentationIntent::Attended,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            !harness.hub.overview().await.hosts[0].headful,
+            "an unauthorized caller must not be able to open a window"
+        );
+        assert_ne!(error.code, BrowserErrorCode::TaskMemoryReclaimed);
     }
 
     #[tokio::test]
