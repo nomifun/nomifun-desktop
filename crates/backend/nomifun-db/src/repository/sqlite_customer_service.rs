@@ -1,5 +1,6 @@
+use nomifun_common::text_search::NoteQueryTerms;
 use nomifun_common::{TimestampMs, validate_uuidv7};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 
 use crate::error::DbError;
 use crate::models::{
@@ -9,13 +10,18 @@ use crate::models::{
 use crate::repository::customer_service::{
     CsDialogueKey, ICustomerServiceRepository, UpdateCsAgentParams,
 };
+use crate::repository::customer_service_search::{
+    CsNoteSearchHit, fts_index_delete, fts_index_insert, list_note_topics, note_search_text,
+    search_notes_hybrid,
+};
 
 const AGENT_COLUMNS: &str = "cs_agent_id, name, greeting, persona, service_policy, provider_id, \
      model, knowledge_base_ids, enabled, max_concurrent, audit_retention_days, created_at, updated_at";
 const DIALOGUE_COLUMNS: &str = "cs_dialogue_id, cs_agent_id, channel_plugin_id, channel_user_id, \
      chat_id, state, created_at, last_activity";
 const MESSAGE_COLUMNS: &str = "cs_message_id, cs_dialogue_id, role, content, created_at";
-const NOTE_COLUMNS: &str = "cs_note_id, cs_agent_id, kind, content, enabled, created_at, updated_at";
+const NOTE_COLUMNS: &str =
+    "cs_note_id, cs_agent_id, kind, content, aliases, enabled, created_at, updated_at";
 
 fn canonical_id(kind: &str, value: &str) -> Result<(), DbError> {
     validate_uuidv7(value)
@@ -381,20 +387,41 @@ impl ICustomerServiceRepository for SqliteCustomerServiceRepository {
         if let Some(agent_id) = &row.cs_agent_id {
             canonical_id("cs_agent_id", agent_id)?;
         }
+        // Row insert and index insert share one transaction: a half-applied
+        // write would leave a note that exists but cannot be found, which is
+        // the exact failure mode this whole change exists to remove.
+        let search_text = note_search_text(&row.content, &row.aliases);
+        let mut tx = self.pool.begin().await?;
         let sql = format!(
-            "INSERT INTO cs_notes ({NOTE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?) \
-             RETURNING {NOTE_COLUMNS}"
+            "INSERT INTO cs_notes ({NOTE_COLUMNS}, search_text) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             RETURNING id, {NOTE_COLUMNS}"
         );
-        Ok(sqlx::query_as::<_, CsNoteRow>(&sql)
+        let inserted = sqlx::query(&sql)
             .bind(&row.cs_note_id)
             .bind(&row.cs_agent_id)
             .bind(&row.kind)
             .bind(&row.content)
+            .bind(&row.aliases)
             .bind(row.enabled)
             .bind(row.created_at)
             .bind(row.updated_at)
-            .fetch_one(&self.pool)
-            .await?)
+            .bind(&search_text)
+            .fetch_one(&mut *tx)
+            .await?;
+        let rowid: i64 = inserted.try_get("id")?;
+        fts_index_insert(&mut tx, rowid, &search_text).await?;
+        tx.commit().await?;
+        Ok(CsNoteRow {
+            cs_note_id: inserted.try_get("cs_note_id")?,
+            cs_agent_id: inserted.try_get("cs_agent_id")?,
+            kind: inserted.try_get("kind")?,
+            content: inserted.try_get("content")?,
+            aliases: inserted.try_get("aliases")?,
+            enabled: inserted.try_get("enabled")?,
+            created_at: inserted.try_get("created_at")?,
+            updated_at: inserted.try_get("updated_at")?,
+        })
     }
 
     async fn list_notes(&self, cs_agent_id: Option<&str>) -> Result<Vec<CsNoteRow>, DbError> {
@@ -423,23 +450,14 @@ impl ICustomerServiceRepository for SqliteCustomerServiceRepository {
     async fn search_notes(
         &self,
         cs_agent_id: &str,
-        query: &str,
+        terms: &NoteQueryTerms,
         limit: usize,
-    ) -> Result<Vec<CsNoteRow>, DbError> {
-        let escaped = query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-        let pattern = format!("%{escaped}%");
-        let sql = format!(
-            "SELECT {NOTE_COLUMNS} FROM cs_notes \
-             WHERE (cs_agent_id = ? OR cs_agent_id IS NULL) AND enabled = 1 \
-               AND content LIKE ? ESCAPE '\\' \
-             ORDER BY created_at DESC, id DESC LIMIT ?"
-        );
-        Ok(sqlx::query_as::<_, CsNoteRow>(&sql)
-            .bind(cs_agent_id)
-            .bind(&pattern)
-            .bind(limit as i64)
-            .fetch_all(&self.pool)
-            .await?)
+    ) -> Result<Vec<CsNoteSearchHit>, DbError> {
+        search_notes_hybrid(&self.pool, cs_agent_id, terms, limit).await
+    }
+
+    async fn note_topics(&self, cs_agent_id: &str, limit: usize) -> Result<Vec<String>, DbError> {
+        list_note_topics(&self.pool, cs_agent_id, limit).await
     }
 
     async fn update_note(
@@ -447,36 +465,77 @@ impl ICustomerServiceRepository for SqliteCustomerServiceRepository {
         cs_note_id: &str,
         kind: Option<&str>,
         content: Option<&str>,
+        aliases: Option<&str>,
         enabled: Option<bool>,
         now: TimestampMs,
     ) -> Result<CsNoteRow, DbError> {
+        let mut tx = self.pool.begin().await?;
+
+        // Read the CURRENT row first. The fts5 'delete' command must be given
+        // the value that was originally indexed; handing it the new value
+        // raises "database disk image is malformed" while a later
+        // 'integrity-check' still reports PASSED, so the note silently drops
+        // out of the index. Read old -> delete(old) -> update -> insert(new),
+        // in this order, inside one transaction.
+        let existing = sqlx::query("SELECT id, content, aliases, search_text FROM cs_notes WHERE cs_note_id = ?")
+            .bind(cs_note_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| DbError::NotFound(format!("cs note {cs_note_id}")))?;
+        let rowid: i64 = existing.try_get("id")?;
+        let old_search_text: String = existing.try_get("search_text")?;
+        let old_content: String = existing.try_get("content")?;
+        let old_aliases: String = existing.try_get("aliases")?;
+
+        let new_content = content.unwrap_or(&old_content);
+        let new_aliases = aliases.unwrap_or(&old_aliases);
+        let new_search_text = note_search_text(new_content, new_aliases);
+
+        fts_index_delete(&mut tx, rowid, &old_search_text).await?;
         let sql = format!(
             "UPDATE cs_notes SET \
                 kind = COALESCE(?, kind), \
                 content = COALESCE(?, content), \
+                aliases = COALESCE(?, aliases), \
                 enabled = COALESCE(?, enabled), \
+                search_text = ?, \
                 updated_at = ? \
              WHERE cs_note_id = ? RETURNING {NOTE_COLUMNS}"
         );
-        sqlx::query_as::<_, CsNoteRow>(&sql)
+        let updated = sqlx::query_as::<_, CsNoteRow>(&sql)
             .bind(kind)
             .bind(content)
+            .bind(aliases)
             .bind(enabled)
+            .bind(&new_search_text)
             .bind(now)
             .bind(cs_note_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await?
-            .ok_or_else(|| DbError::NotFound(format!("cs note {cs_note_id}")))
+            .ok_or_else(|| DbError::NotFound(format!("cs note {cs_note_id}")))?;
+        fts_index_insert(&mut tx, rowid, &new_search_text).await?;
+        tx.commit().await?;
+        Ok(updated)
     }
 
     async fn delete_note(&self, cs_note_id: &str) -> Result<(), DbError> {
-        let result = sqlx::query("DELETE FROM cs_notes WHERE cs_note_id = ?")
+        let mut tx = self.pool.begin().await?;
+        // Same contract as update: de-index with the OLD value before the row
+        // disappears, otherwise the index keeps a phantom entry pointing at a
+        // rowid that no longer exists.
+        let existing = sqlx::query("SELECT id, search_text FROM cs_notes WHERE cs_note_id = ?")
             .bind(cs_note_id)
-            .execute(&self.pool)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| DbError::NotFound(format!("cs note {cs_note_id}")))?;
+        let rowid: i64 = existing.try_get("id")?;
+        let old_search_text: String = existing.try_get("search_text")?;
+        fts_index_delete(&mut tx, rowid, &old_search_text).await?;
+        sqlx::query("DELETE FROM cs_notes WHERE cs_note_id = ?")
+            .bind(cs_note_id)
+            .execute(&mut *tx)
             .await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::NotFound(format!("cs note {cs_note_id}")));
-        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -535,6 +594,7 @@ impl ICustomerServiceRepository for SqliteCustomerServiceRepository {
 mod tests {
     use super::*;
     use crate::init_database_memory;
+    use nomifun_common::text_search::expand_query;
     use nomifun_common::{ChannelPluginId, ChannelUserId, generate_id};
 
     async fn repo() -> (crate::Database, SqliteCustomerServiceRepository) {
@@ -633,7 +693,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
 
         // Rebinding plugin_1 to B steals it from A (同 bot 重绑替换).
-        repo.replace_agent_bindings(&agent_b.cs_agent_id, &[plugin_1.clone()], 2)
+        repo.replace_agent_bindings(&agent_b.cs_agent_id, std::slice::from_ref(&plugin_1), 2)
             .await
             .unwrap();
         let owner = repo.binding_for_plugin(&plugin_1).await.unwrap().unwrap();
@@ -737,6 +797,7 @@ mod tests {
             cs_agent_id: owner,
             kind: "faq".into(),
             content: content.into(),
+            aliases: String::new(),
             enabled,
             created_at: 1,
             updated_at: 1,
@@ -758,20 +819,35 @@ mod tests {
         assert!(visible.iter().all(|note| note.cs_agent_id.as_deref() != Some(agent_b.cs_agent_id.as_str())));
         assert_eq!(repo.list_notes(None).await.unwrap().len(), 4);
 
-        // Search: enabled only, scope-filtered.
-        let hits = repo.search_notes(&agent_a.cs_agent_id, "发货", 10).await.unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].content, "A 私有 发货时间");
-        let shared_hits = repo.search_notes(&agent_b.cs_agent_id, "退货", 10).await.unwrap();
+        // Search: enabled only, scope-filtered. The disabled note and the other
+        // agent's note must stay invisible — losing either filter while
+        // swapping the index would surface retired or foreign answers.
+        let hits = repo
+            .search_notes(&agent_a.cs_agent_id, &expand_query("发货时间"), 10)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].note.content, "A 私有 发货时间");
+        let shared_hits = repo
+            .search_notes(&agent_b.cs_agent_id, &expand_query("退货政策"), 10)
+            .await
+            .unwrap();
         assert_eq!(shared_hits.len(), 1);
 
-        // LIKE metacharacters in the query are literals, not wildcards.
-        assert!(repo.search_notes(&agent_a.cs_agent_id, "%", 10).await.unwrap().is_empty());
+        // FTS5/LIKE metacharacters are literals, never wildcards or operators.
+        // Unquoted, several of these raise SQLite syntax errors rather than
+        // returning nothing, which would surface as a failed reply.
+        for hostile in ["%", "_", "*", "\"", "AND", "OR", "(", "a-b", "NEAR(x y)"] {
+            let result = repo
+                .search_notes(&agent_a.cs_agent_id, &expand_query(hostile), 10)
+                .await;
+            assert!(result.is_ok(), "{hostile:?} must not error: {result:?}");
+        }
 
         // Update and delete.
         let note = &repo.list_notes(Some(&agent_a.cs_agent_id)).await.unwrap()[0];
         let updated = repo
-            .update_note(&note.cs_note_id, Some("policy"), None, Some(false), 9)
+            .update_note(&note.cs_note_id, Some("policy"), None, None, Some(false), 9)
             .await
             .unwrap();
         assert_eq!(updated.kind, "policy");
@@ -781,6 +857,263 @@ mod tests {
             repo.delete_note(&note.cs_note_id).await.unwrap_err(),
             DbError::NotFound(_)
         ));
+    }
+
+    /// The regression suite for the reported bug.
+    ///
+    /// Each row is a real visitor phrasing that must reach the FAQ. Under the
+    /// old `content LIKE '%query%'` path the first four rows FAILED — a single
+    /// inserted space or a rephrase broke contiguity — which is exactly the
+    /// defect this table now pins.
+    #[tokio::test]
+    async fn visitor_phrasings_reach_the_expected_note() {
+        let (_db, repo) = repo().await;
+        let agent = repo.create_agent(&new_agent("A")).await.unwrap();
+        let owner = Some(agent.cs_agent_id.clone());
+
+        let note = |content: &str, aliases: &str| CsNoteRow {
+            cs_note_id: generate_id(),
+            cs_agent_id: owner.clone(),
+            kind: "faq".into(),
+            content: content.into(),
+            aliases: aliases.into(),
+            enabled: true,
+            created_at: 1,
+            updated_at: 1,
+        };
+        // Aliases carry the synonym cases: pure lexical matching cannot bridge
+        // a paraphrase that shares no vocabulary with the note.
+        let intro = repo
+            .create_note(&note(
+                "Q：NomiFun是什么？\nA：NomiFun 是本地优先的开源 AI 工作空间。",
+                "这个软件\n产品简介",
+            ))
+            .await
+            .unwrap();
+        let install = repo
+            .create_note(&note("Q：怎么安装？\nA：下载安装包后双击运行。", ""))
+            .await
+            .unwrap();
+        let price = repo
+            .create_note(&note("Q：收费吗？\nA：开源免费，MIT 协议。", "要钱\n价格\n多少钱"))
+            .await
+            .unwrap();
+
+        let cases: &[(&str, Option<&str>)] = &[
+            // The four originally reported failures.
+            ("@xxx  NomiFun是什么", Some(&intro.cs_note_id)),
+            ("@xxx  NomiFun 是什么", Some(&intro.cs_note_id)),
+            ("@xxx  nomifun是什么", Some(&intro.cs_note_id)),
+            ("@xxx 介绍一下 NomiFun", Some(&intro.cs_note_id)),
+            // Case and full-width folding.
+            ("@xxx NOMIFUN 能干什么？", Some(&intro.cs_note_id)),
+            ("@xxx ＮomiFun是什么？", Some(&intro.cs_note_id)),
+            // Paraphrase with no shared vocabulary — alias channel.
+            ("@xxx 这个软件是干什么的", Some(&intro.cs_note_id)),
+            // English query against a Chinese note.
+            ("@xxx what is nomifun", Some(&intro.cs_note_id)),
+            // Other notes, including particle stripping (免费吗 -> 免费).
+            ("@xxx 怎么安装", Some(&install.cs_note_id)),
+            ("@xxx 安装包在哪下载", Some(&install.cs_note_id)),
+            ("@xxx 免费吗", Some(&price.cs_note_id)),
+            ("@xxx 要钱吗", Some(&price.cs_note_id)),
+            ("@xxx 多少钱？", Some(&price.cs_note_id)),
+            // A true miss must stay a miss: recall must not become "everything".
+            ("@xxx 完全无关的问题zzz", None),
+            ("@xxx", None),
+            ("@xxx 是什么", None),
+        ];
+
+        for (query, expected) in cases {
+            let hits = repo
+                .search_notes(&agent.cs_agent_id, &expand_query(query), 10)
+                .await
+                .unwrap();
+            match expected {
+                Some(note_id) => {
+                    assert!(
+                        hits.iter().any(|hit| hit.note.cs_note_id == **note_id),
+                        "{query:?} must find the expected note, got {:?}",
+                        hits.iter().map(|h| &h.note.content).collect::<Vec<_>>()
+                    );
+                }
+                None => assert!(hits.is_empty(), "{query:?} must find nothing, got {hits:?}"),
+            }
+        }
+    }
+
+    /// The index is maintained by hand (v3 forbids triggers), and the fts5
+    /// `'delete'` command corrupts the index SILENTLY when handed the wrong
+    /// value — a later `'integrity-check'` still passes. So the write paths
+    /// keeping the index in step is itself the invariant worth pinning: a drift
+    /// here reproduces the original "note exists but cannot be found" bug.
+    #[tokio::test]
+    async fn write_paths_keep_the_full_text_index_in_step() {
+        let (_db, repo) = repo().await;
+        let agent = repo.create_agent(&new_agent("A")).await.unwrap();
+        let created = repo
+            .create_note(&CsNoteRow {
+                cs_note_id: generate_id(),
+                cs_agent_id: Some(agent.cs_agent_id.clone()),
+                kind: "faq".into(),
+                content: "Q：退款要多久？\nA：三个工作日内到账。".into(),
+                aliases: String::new(),
+                enabled: true,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .unwrap();
+
+        let find = |needle: &'static str, agent_id: String| {
+            let repo = repo.clone();
+            async move {
+                repo.search_notes(&agent_id, &expand_query(needle), 10).await.unwrap().len()
+            }
+        };
+
+        assert_eq!(find("退款要多久", agent.cs_agent_id.clone()).await, 1, "create must index");
+
+        // After an edit the old text must be gone and the new text findable. If
+        // 'delete' had been given the new value instead of the old one, the row
+        // would vanish from the index entirely and BOTH counts would be 0.
+        repo.update_note(
+            &created.cs_note_id,
+            None,
+            Some("Q：换货怎么处理？\nA：联系客服登记。"),
+            None,
+            None,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(find("退款要多久", agent.cs_agent_id.clone()).await, 0, "stale text must be de-indexed");
+        assert_eq!(find("换货怎么处理", agent.cs_agent_id.clone()).await, 1, "new text must be indexed");
+
+        // Adding an alias makes a previously-unmatchable phrasing reachable
+        // without touching the note body.
+        repo.update_note(&created.cs_note_id, None, None, Some("退换\n售后"), None, 3)
+            .await
+            .unwrap();
+        assert_eq!(find("售后", agent.cs_agent_id.clone()).await, 1, "alias must be searchable");
+        assert_eq!(find("换货怎么处理", agent.cs_agent_id.clone()).await, 1, "body still indexed");
+
+        // Delete removes it from the index, not just the table.
+        repo.delete_note(&created.cs_note_id).await.unwrap();
+        assert_eq!(find("换货怎么处理", agent.cs_agent_id.clone()).await, 0, "delete must de-index");
+    }
+
+    /// A disabled note must be invisible to search even though it is indexed,
+    /// and re-enabling must restore it. The `enabled` filter lives in the
+    /// retrieval SQL rather than the index, so it is the easiest guard to lose.
+    #[tokio::test]
+    async fn disabled_notes_are_never_searchable() {
+        let (_db, repo) = repo().await;
+        let agent = repo.create_agent(&new_agent("A")).await.unwrap();
+        let created = repo
+            .create_note(&CsNoteRow {
+                cs_note_id: generate_id(),
+                cs_agent_id: Some(agent.cs_agent_id.clone()),
+                kind: "faq".into(),
+                content: "Q：营业时间？\nA：全年无休。".into(),
+                aliases: String::new(),
+                enabled: true,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .unwrap();
+        let count = |agent_id: String| {
+            let repo = repo.clone();
+            async move {
+                repo.search_notes(&agent_id, &expand_query("营业时间"), 10).await.unwrap().len()
+            }
+        };
+        assert_eq!(count(agent.cs_agent_id.clone()).await, 1);
+
+        repo.update_note(&created.cs_note_id, None, None, None, Some(false), 2).await.unwrap();
+        assert_eq!(count(agent.cs_agent_id.clone()).await, 0, "disabled must not surface");
+
+        repo.update_note(&created.cs_note_id, None, None, None, Some(true), 3).await.unwrap();
+        assert_eq!(count(agent.cs_agent_id.clone()).await, 1, "re-enabling restores it");
+    }
+
+    /// The backfill is what makes migration 035 safe for existing notes: rows
+    /// created before it have an empty `search_text` and are absent from the
+    /// index, so without it every pre-existing note would become unfindable —
+    /// turning a recall bug into a total recall outage.
+    #[tokio::test]
+    async fn backfill_indexes_rows_written_before_the_index_existed() {
+        let (_db, repo) = repo().await;
+        let agent = repo.create_agent(&new_agent("A")).await.unwrap();
+
+        // Simulate a pre-migration row: inserted directly, so neither
+        // `search_text` nor the index knows about it.
+        sqlx::query(
+            "INSERT INTO cs_notes (cs_note_id, cs_agent_id, kind, content, aliases, enabled, created_at, updated_at, search_text) \
+             VALUES (?, ?, 'faq', ?, '', 1, 1, 1, '')",
+        )
+        .bind(generate_id())
+        .bind(&agent.cs_agent_id)
+        .bind("Q：ＮomiFun是什么？\nA：本地优先的开源工作空间。")
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        let terms = expand_query("nomifun是什么");
+        assert!(
+            repo.search_notes(&agent.cs_agent_id, &terms, 10).await.unwrap().is_empty(),
+            "a pre-migration row starts out unindexed"
+        );
+
+        let rewritten = crate::repository::customer_service_search::backfill_note_search_text(&repo.pool)
+            .await
+            .unwrap();
+        assert_eq!(rewritten, 1);
+        assert_eq!(
+            repo.search_notes(&agent.cs_agent_id, &terms, 10).await.unwrap().len(),
+            1,
+            "backfill must make it findable, including the full-width variant"
+        );
+
+        // Idempotent: a second run rewrites nothing.
+        let again = crate::repository::customer_service_search::backfill_note_search_text(&repo.pool)
+            .await
+            .unwrap();
+        assert_eq!(again, 0);
+    }
+
+    /// Topics back the "nothing matched, but here is what exists" reply, so the
+    /// model can re-query instead of telling the visitor there is no answer.
+    #[tokio::test]
+    async fn note_topics_summarize_visible_notes() {
+        let (_db, repo) = repo().await;
+        let agent = repo.create_agent(&new_agent("A")).await.unwrap();
+        for (content, enabled) in [
+            ("Q：怎么退货？\nA：七天无理由。", true),
+            ("Q：怎么换货？\nA：联系客服。", true),
+            ("Q：已下架的问题？\nA：无。", false),
+        ] {
+            repo.create_note(&CsNoteRow {
+                cs_note_id: generate_id(),
+                cs_agent_id: Some(agent.cs_agent_id.clone()),
+                kind: "faq".into(),
+                content: content.into(),
+                aliases: String::new(),
+                enabled,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .unwrap();
+        }
+        let topics = repo.note_topics(&agent.cs_agent_id, 10).await.unwrap();
+        assert!(topics.iter().any(|t| t == "怎么退货？"), "{topics:?}");
+        assert!(topics.iter().any(|t| t == "怎么换货？"), "{topics:?}");
+        assert!(
+            !topics.iter().any(|t| t.contains("已下架")),
+            "disabled notes must not be advertised: {topics:?}"
+        );
     }
 
     #[tokio::test]
@@ -801,6 +1134,7 @@ mod tests {
             cs_agent_id: Some(agent.cs_agent_id.clone()),
             kind: "faq".into(),
             content: "private".into(),
+            aliases: String::new(),
             enabled: true,
             created_at: 1,
             updated_at: 1,
@@ -812,6 +1146,7 @@ mod tests {
             cs_agent_id: None,
             kind: "faq".into(),
             content: "shared".into(),
+            aliases: String::new(),
             enabled: true,
             created_at: 1,
             updated_at: 1,

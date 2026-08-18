@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn different_devices_are_rejected() {
         assert_eq!(
-            classify(Some("/Users/muri/Apps/NomiFun.app"), Some(9), Some(7)),
+            classify(Some("/Users/developer/Apps/NomiFun.app"), Some(9), Some(7)),
             InstallDecision::Unsupported(UpdaterInstallReason::CrossDevice),
         );
     }

@@ -6138,6 +6138,7 @@ dependencies = [
  "tokio",
  "tracing",
  "ts-rs",
+ "unicode-normalization",
  "uuid",
  "windows-sys 0.61.2",
 ]

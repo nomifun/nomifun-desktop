@@ -583,7 +583,7 @@ async fn cj3b_create_rejects_workspace_with_edge_whitespace_segment() {
             "name": "Nomi",
             "provider_id": CRON_PROVIDER_ID,
             "model": CRON_MODEL,
-            "workspace": "/Users/zhoukai/Documents/Archive "
+            "workspace": "/Users/developer/Documents/Archive "
         }
     });
 
@@ -662,7 +662,7 @@ async fn cj5b_run_now_legacy_workspace_uses_runtime_edge_whitespace_code() {
                     "name": "Nomi",
                     "provider_id": CRON_PROVIDER_ID,
                     "model": CRON_MODEL,
-                    "workspace": "/Users/zhoukai/Documents/Archive "
+                    "workspace": "/Users/developer/Documents/Archive "
                 })
                 .to_string(),
             ),

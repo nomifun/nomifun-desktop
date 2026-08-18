@@ -13,7 +13,7 @@
 
 ## Global Constraints
 
-- Git 署名：绝不让 AI 出现在 author / committer / co-author；绝不加 `Co-authored-by` / `Generated-by` / `Assisted-by` 等 trailer；不得 `--no-verify`；作者固定 `RiKa0-0 <2206491416@qq.com>`（仓库 `git config` 已是该值，直接 `git commit` 即可）。
+- Git 署名：绝不让 AI 出现在 author / committer / co-author；绝不加 `Co-authored-by` / `Generated-by` / `Assisted-by` 等 trailer；不得 `--no-verify`；作者固定 `NomiFun Contributor <nomifun@users.noreply.github.com>`（仓库 `git config` 已是该值，直接 `git commit` 即可）。
 - 绝不在 `.github/workflows/` 下创建任何文件。
 - commit message 用英文 conventional commits；本计划正文中文，代码 / 标识符 / commit message 英文。
 - 本仓库 Linux 全量测试有 14 个既有失败。任务内**只跑目标包 / 目标文件**的测试，绝不跑 `bun run test` / `cargo test` 全量。

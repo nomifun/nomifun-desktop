@@ -1207,6 +1207,8 @@ export type I18nKey =
   | 'customerService.fields.servicePolicy'
   | 'customerService.fields.servicePolicyPlaceholder'
   | 'customerService.notes.add'
+  | 'customerService.notes.aliasesHint'
+  | 'customerService.notes.aliasesPlaceholder'
   | 'customerService.notes.close'
   | 'customerService.notes.content'
   | 'customerService.notes.contentPlaceholder'

@@ -10,20 +10,27 @@
 
 @container knowledge-toolbar (max-width: 900px) {
   .desktopActions {
-    min-width: 114px;
+    min-width: 120px;
+    gap: 0 !important;
   }
 
-  .desktopActions:focus-within {
-    min-width: 260px;
+  /* Reserve the expanded search width only while the search input itself is
+     focused. The outer toolbar can then wrap this flex item as a unit instead
+     of letting the input overflow across the filter controls. */
+  .desktopActions:has(.desktopSearchInput:focus) {
+    min-width: 270px;
   }
 
   .desktopSearch {
     position: relative;
     flex: none;
     justify-content: center;
-    width: 34px !important;
+    width: 30px !important;
     padding: 0 !important;
     gap: 0 !important;
+    color: var(--color-text-1) !important;
+    border-color: transparent !important;
+    background: transparent !important;
     transition: width 160ms ease, border-color 160ms ease;
   }
 
@@ -31,11 +38,13 @@
     justify-content: flex-start;
     width: 180px !important;
     padding: 0 11px !important;
+    border-color: rgb(var(--primary-6)) !important;
   }
 
   .desktopSearchIcon {
     position: relative;
     z-index: 1;
+    color: var(--color-text-1) !important;
     pointer-events: none;
   }
 
@@ -59,9 +68,21 @@
 
   .desktopIconAction {
     justify-content: center;
-    width: 34px;
+    width: 30px;
     padding: 0 !important;
     gap: 0 !important;
+    color: var(--color-text-1) !important;
+    border-color: transparent !important;
+    background: transparent !important;
+  }
+
+  .desktopIconAction .actionIcon,
+  .desktopIconAction .actionIcon svg {
+    color: var(--color-text-1) !important;
+  }
+
+  .desktopIconAction:focus-visible {
+    border-color: rgb(var(--primary-6)) !important;
   }
 
   .desktopActionLabel {

@@ -7,8 +7,8 @@
 - 专项分支：`codex/browser-use-task-resource-hardening`
 - 分叉基线：`fa493e1f21fad8dcacbd4c4cb3feb842d285f312`
 - 仓库：`https://github.com/nomifun/nomifun-tauri.git`
-- 本机工作目录：`C:\Users\rika0\code\nomifun\nomifun-tauri`
-- Git 归属：仓库本地设置为 `RiKa0-0 <2206491416@qq.com>`；`.githooks` 已启用。不得使用 AI/模型/机器人身份提交，也不得增加 AI attribution trailer。
+- 本机工作目录：`C:\Users\Developer\code\nomifun\nomifun-tauri`
+- Git 归属：仓库本地设置为 `NomiFun Contributor <nomifun@users.noreply.github.com>`；`.githooks` 已启用。不得使用 AI/模型/机器人身份提交，也不得增加 AI attribution trailer。
 - 仓库硬规则：绝对禁止 `.github/workflows/*.yml` 和 `.github/workflows/*.yaml`。本检查点归档前应再次确认数量为 0。
 
 本分支的目标不是把全局浏览器资源固定卡在 1 GiB。正确目标是：
@@ -483,7 +483,7 @@ Get-CimInstance Win32_Process |
 
 ## 8. 当前已知环境残留
 
-- `C:\Users\rika0\AppData\Local\Temp\.tmpOmCP6h`
+- `C:\Users\Developer\AppData\Local\Temp\.tmpOmCP6h`
 - 当前测得约 85,709,895 bytes，主要是被强杀的 Chrome-for-Testing 下载 `.staging/.../chrome.part` 和 acquire lock。
 - 这是测试进程被硬终止、绕过 Rust Drop 后留下的旧临时目录；新代码已有 staging guard 和 stale sweep。
 - 本轮两次按精确绝对路径尝试删除都被执行策略拒绝，没有绕过，也没有声称已经删除。接手者可在允许的终端中先验证路径确实位于 `%LOCALAPPDATA%\Temp`，再手工删除该精确目录。

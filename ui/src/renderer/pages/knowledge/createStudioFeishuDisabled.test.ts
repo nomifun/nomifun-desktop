@@ -38,7 +38,7 @@ describe('CreateStudio Feishu creation gate', () => {
       ok: false,
       messageKey: 'knowledge.studio.localFolderRequired',
     });
-    expect(canSubmitStudioSourceConfig('local', { rootPath: '/Users/muri/docs' })).toEqual({ ok: true });
+    expect(canSubmitStudioSourceConfig('local', { rootPath: '/Users/developer/docs' })).toEqual({ ok: true });
     expect(canSubmitStudioSourceConfig('blank', {})).toEqual({ ok: true });
   });
 

@@ -13,6 +13,7 @@ import TaskModelSelect, {
   type TaskModelSelection,
 } from '@/renderer/components/model/TaskModelSelect';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
+import styles from './KnowledgeRetrievalSettingsModal.module.css';
 
 type ModelChoice = Pick<TaskModelSelection, 'provider_id' | 'model'>;
 type StageDraft =
@@ -132,19 +133,21 @@ const KnowledgeRetrievalSettingsModal: React.FC<KnowledgeRetrievalSettingsModalP
     if (!draft) return null;
     const value = draft[stage];
     return (
-      <section className='flex flex-col gap-10px rounded-10px border border-solid border-[var(--color-border-2)] p-14px'>
-        <div className='flex flex-wrap items-start justify-between gap-12px'>
-          <div className='min-w-0 flex-1'>
-            <div className='text-14px font-600 text-[var(--color-text-1)]'>
+      <section className={styles.stageCard}>
+        <div className={styles.stageHeader}>
+          <div className={styles.stageCopy}>
+            <div className={styles.stageTitle}>
               {t(`knowledge.retrieval.${stage}Title`)}
             </div>
-            <div className='mt-3px text-12px leading-18px text-[var(--color-text-3)]'>
+            <div className={styles.stageHint}>
               {t(`knowledge.retrieval.${stage}Hint`)}
             </div>
           </div>
           <Radio.Group
             type='button'
+            direction='vertical'
             size='small'
+            className={styles.modeGroup}
             value={value.mode}
             onChange={(mode: 'local' | 'remote') =>
               setDraft((current) =>
@@ -162,25 +165,27 @@ const KnowledgeRetrievalSettingsModal: React.FC<KnowledgeRetrievalSettingsModalP
           </Radio.Group>
         </div>
         {value.mode === 'remote' && (
-          <TaskModelSelect
-            task={stage}
-            value={value.model}
-            onChange={(model) =>
-              setDraft((current) =>
-                current
-                  ? {
-                      ...current,
-                      [stage]: {
-                        mode: 'remote',
-                        model: { provider_id: model.provider_id, model: model.model },
-                      },
-                    }
-                  : current
-              )
-            }
-            size='small'
-            emptyHint={t(`knowledge.retrieval.${stage}Empty`)}
-          />
+          <div className={styles.modelSelector}>
+            <TaskModelSelect
+              task={stage}
+              value={value.model}
+              onChange={(model) =>
+                setDraft((current) =>
+                  current
+                    ? {
+                        ...current,
+                        [stage]: {
+                          mode: 'remote',
+                          model: { provider_id: model.provider_id, model: model.model },
+                        },
+                      }
+                    : current
+                )
+              }
+              size='small'
+              emptyHint={t(`knowledge.retrieval.${stage}Empty`)}
+            />
+          </div>
         )}
       </section>
     );
@@ -188,6 +193,7 @@ const KnowledgeRetrievalSettingsModal: React.FC<KnowledgeRetrievalSettingsModalP
 
   return (
     <Modal
+      className={styles.modal}
       title={t('knowledge.retrieval.title')}
       visible={visible}
       confirmLoading={saving}
@@ -205,8 +211,8 @@ const KnowledgeRetrievalSettingsModal: React.FC<KnowledgeRetrievalSettingsModalP
       unmountOnExit
     >
       <Spin loading={loading} className='w-full'>
-        <div className='flex min-h-180px flex-col gap-12px'>
-          <p className='m-0 text-12px leading-18px text-[var(--color-text-3)]'>
+        <div className={styles.modalBody}>
+          <p className={styles.intro}>
             {t('knowledge.retrieval.description')}
           </p>
           {renderMode('embedding')}

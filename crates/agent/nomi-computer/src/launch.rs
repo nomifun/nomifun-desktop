@@ -450,7 +450,7 @@ mod tests {
         assert!(validate_agent_web_target("C:\\Windows\\notepad.exe").is_ok());
         assert!(validate_agent_web_target("QQ音乐").is_ok());
         assert!(validate_agent_web_target("/home/user/file.txt").is_ok());
-        assert!(validate_agent_web_target("mailto:a@b.com").is_ok());
+        assert!(validate_agent_web_target("mailto:redacted@example.invalid").is_ok());
     }
 
     #[test]
@@ -490,7 +490,7 @@ mod tests {
     fn is_url_classifies_schemes_not_drive_paths() {
         assert!(is_url("https://example.com"));
         assert!(is_url("http://x"));
-        assert!(is_url("mailto:a@b.com"));
+        assert!(is_url("mailto:redacted@example.invalid"));
         assert!(is_url("microsoft-edge:https://x"));
         assert!(!is_url("C:\\Program Files\\x.exe")); // drive letter, not a scheme
         assert!(!is_url("QQ音乐"));

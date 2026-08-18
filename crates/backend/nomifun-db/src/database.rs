@@ -322,6 +322,7 @@ async fn init_database_memory_inner(
     // In-memory DBs are not shared across processes, so no advisory lock is
     // needed (and there is no on-disk path we could create one against).
     run_migrations(&pool).await?;
+    backfill_cs_note_search_text(&pool).await?;
     crate::id_schema_contract::validate_id_schema_contract(&pool).await?;
     ensure_installation_owner(&pool, requested_owner_user_id.as_deref()).await?;
     crate::id_schema_contract::validate_id_data_contract(&pool).await?;
@@ -364,6 +365,7 @@ async fn try_init_file(path: &Path) -> Result<Database, DbError> {
 
     let setup = async {
         run_migrations(&pool).await?;
+        backfill_cs_note_search_text(&pool).await?;
         crate::id_schema_contract::validate_id_schema_contract(&pool).await?;
         ensure_installation_owner(&pool, None).await?;
         crate::id_schema_contract::validate_id_data_contract(&pool).await
@@ -395,6 +397,25 @@ fn migrate_lock_path(db_path: &Path) -> PathBuf {
     };
     p.set_file_name(new_name);
     p
+}
+
+/// Populate `cs_notes.search_text` for any note whose folded text is stale, and
+/// rebuild the notes full-text index.
+///
+/// Runs after migrations on every boot. Migration 035 adds `search_text` with a
+/// `''` default and cannot fill it itself: SQLite's `lower()` does not fold CJK
+/// full-width forms, so filling it in SQL would fork the normalization
+/// semantics away from the single Rust implementation the query path uses, and
+/// a mismatch there silently loses exactly the recall this change adds.
+///
+/// Idempotent and a no-op once every row is current, so the steady-state cost
+/// is one scan of a small owner-maintained table.
+async fn backfill_cs_note_search_text(pool: &SqlitePool) -> Result<(), DbError> {
+    let rewritten = crate::repository::customer_service_search::backfill_note_search_text(pool).await?;
+    if rewritten > 0 {
+        info!("Rebuilt customer-service note search index for {rewritten} note(s)");
+    }
+    Ok(())
 }
 
 async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {

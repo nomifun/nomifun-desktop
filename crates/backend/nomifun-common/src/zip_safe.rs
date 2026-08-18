@@ -11,11 +11,14 @@
 //! Deliberately `zip`-crate-free: callers pass the entry *name* and *unix
 //! mode*, so this lowest-layer crate does not grow a `zip` dependency.
 //!
-//! A fourth, in-memory extraction with its own bounded budget lives in
-//! `nomifun-workshop`'s `archive.rs` (`enclosed_name`-based); keep the two in
-//! sync when the policy changes.
+//! Two further extractions carry their own bounded budgets and do not use this
+//! module; keep them in sync when the policy changes:
+//! `nomi-browser-engine`'s `acquire.rs` (`enclosed_name`-based, writes to disk)
+//! and `nomifun-ai-agent`'s `artifact_store.rs` `valid_zip` (in-memory
+//! validation only — it never writes, so its raw entry names are not paths).
 
-use std::path::{Component, Path, PathBuf};
+use std::ffi::{OsStr, OsString};
+use std::path::{Component, MAIN_SEPARATOR_STR, Path, PathBuf};
 
 /// How `':'` bytes in entry names are treated by [`safe_zip_entry_path`].
 ///
@@ -27,9 +30,18 @@ pub enum ZipColonPolicy {
     /// Reject any `':'` byte anywhere in the entry name. Strictest; for
     /// packages whose own exporter never writes one (companion bundles).
     RejectAll,
-    /// Reject only `<letter>:` drive prefixes at the start of the first
-    /// component; later `':'` bytes stay legal (knowledge exports embed real
-    /// on-disk file names, which may legally contain `':'` on Unix).
+    /// Reject `<letter>:` drive prefixes, plus — on Windows only — every other
+    /// `':'` byte as well.
+    ///
+    /// Knowledge exports embed real on-disk file names, which may legally
+    /// contain `':'` on Unix, so a Unix host keeps accepting `a:b.md`. Windows
+    /// cannot: there `name:stream` opens an *alternate data stream* on `name`
+    /// rather than a file called `name:stream`. That makes a non-prefix colon
+    /// unsafe in both directions — `payload.exe:x.md` slips past an extension
+    /// whitelist (`Path::extension` reads `Some("md")`) while writing into a
+    /// stream on `payload.exe`, and a legitimately colon-named Unix export
+    /// would land in a stream that is invisible to `read_dir` and reads back
+    /// empty. Rejecting is what turns that silent loss into a real error.
     RejectDrivePrefix,
 }
 
@@ -41,34 +53,61 @@ pub fn safe_zip_entry_path(name: &str, colon_policy: ZipColonPolicy) -> Option<P
     if name.is_empty() || name.contains('\\') {
         return None;
     }
-    if colon_policy == ZipColonPolicy::RejectAll && name.contains(':') {
+    // `RejectDrivePrefix` still bans every ':' on Windows, where a non-prefix
+    // colon means an alternate data stream rather than a file name (see
+    // `ZipColonPolicy::RejectDrivePrefix`). The drive-prefix check below then
+    // covers both policies on Unix, where ':' is an ordinary name byte.
+    if name.contains(':') && (colon_policy == ZipColonPolicy::RejectAll || cfg!(windows)) {
         return None;
     }
     let path = Path::new(name);
     if path.is_absolute() {
         return None;
     }
-    let mut safe_path = PathBuf::new();
-    let mut saw_normal = false;
+    let mut parts: Vec<&OsStr> = Vec::new();
     for component in path.components() {
         match component {
             Component::Normal(part) => {
-                if !saw_normal {
+                if parts.is_empty() {
                     // Held byte-wise on every platform (see ZipColonPolicy).
                     let first = part.to_string_lossy();
                     let bytes = first.as_bytes();
                     if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
                         return None;
                     }
-                    saw_normal = true;
                 }
-                safe_path.push(part);
+                parts.push(part);
             }
             Component::CurDir => {}
             _ => return None,
         }
     }
-    if safe_path.as_os_str().is_empty() {
+    if parts.is_empty() {
+        return None;
+    }
+    // Joined by hand rather than with `PathBuf::push`: `push` re-parses each
+    // component as a path, so on Windows a *later* `a:b.md` reads as a
+    // drive-relative `Prefix::Disk` and replaces the whole buffer
+    // (`files/a:b.md` -> `a:b.md`), turning a contained entry into one that
+    // `destination.join(..)` resolves outside the destination — zip-slip.
+    //
+    // Given the checks above (no backslash, and no `':'` on Windows) no
+    // surviving component can still re-parse as a prefix, so today this is
+    // defense in depth rather than the primary guard — the colon rejection is.
+    // It is kept because it is what makes the containment property hold
+    // *locally*, without depending on those earlier checks staying exactly as
+    // strict: loosening the colon policy would make `push` unsafe again.
+    let mut joined = OsString::new();
+    for (index, part) in parts.into_iter().enumerate() {
+        if index > 0 {
+            joined.push(MAIN_SEPARATOR_STR);
+        }
+        joined.push(part);
+    }
+    let safe_path = PathBuf::from(joined);
+    // Defense in depth: re-parsing the assembled path must still yield a
+    // prefix-free relative path, so callers' `destination.join(..)` stays put.
+    if safe_path.is_absolute() || safe_path.components().any(|c| !matches!(c, Component::Normal(_))) {
         return None;
     }
     Some(safe_path)
@@ -205,13 +244,128 @@ mod tests {
 
     #[test]
     fn colon_policy_diverges_only_on_non_prefix_colons() {
-        // A ':' beyond the drive-prefix position is a legal Unix file name…
-        assert_eq!(
-            safe_zip_entry_path("files/a:b.md", ZipColonPolicy::RejectDrivePrefix).unwrap(),
-            PathBuf::from("files/a:b.md")
-        );
-        // …but the strict policy rejects every ':' byte.
+        // The strict policy rejects every ':' byte on every platform.
         assert!(safe_zip_entry_path("files/a:b.md", ZipColonPolicy::RejectAll).is_none());
+
+        // `RejectDrivePrefix` diverges only on Unix, where ':' is an ordinary
+        // name byte. On Windows `a:b.md` names an alternate data stream on `a`,
+        // so it is rejected under both policies.
+        let rel = safe_zip_entry_path("files/a:b.md", ZipColonPolicy::RejectDrivePrefix);
+        if cfg!(windows) {
+            assert!(rel.is_none(), "Windows must reject an ADS-style entry name");
+            return;
+        }
+        let rel = rel.expect("a non-prefix ':' is a legal Unix file name");
+        assert_eq!(rel, PathBuf::from("files/a:b.md"));
+
+        // The parent must survive: `PathBuf::push("a:b.md")` on Windows reads a
+        // drive-relative prefix and would replace the buffer, yielding a bare
+        // `a:b.md` that escapes the destination on join (see the join comment).
+        assert_eq!(rel.parent(), Some(Path::new("files")));
+        assert_eq!(rel.components().count(), 2);
+        let joined = Path::new("dest").join(&rel);
+        assert!(
+            joined.starts_with("dest"),
+            "sanitized entry must stay inside the destination: {joined:?}"
+        );
+    }
+
+    /// The ADS bypass that motivates the Windows arm of `RejectDrivePrefix`:
+    /// `Path::extension` reads `Some("md")` for `payload.exe:x.md`, so a `.md`
+    /// whitelist alone would admit a write into a stream on `payload.exe`.
+    #[test]
+    fn ads_style_name_never_passes_an_extension_whitelist() {
+        let name = "files/payload.exe:x.md";
+        assert_eq!(
+            Path::new(name).extension().and_then(|e| e.to_str()),
+            Some("md"),
+            "premise of this test: the ADS suffix mimics a .md extension"
+        );
+        assert!(safe_zip_entry_path(name, ZipColonPolicy::RejectAll).is_none());
+        let rel = safe_zip_entry_path(name, ZipColonPolicy::RejectDrivePrefix);
+        assert_eq!(
+            rel.is_none(),
+            cfg!(windows),
+            "the ADS name must be rejected exactly where streams exist: {rel:?}"
+        );
+    }
+
+    /// On Unix a `<letter>:` sequence past the first component is a legal name
+    /// that must nonetheless never escape on join. On Windows every such name
+    /// is a stream reference and is rejected outright.
+    #[test]
+    fn safe_path_keeps_deep_drive_like_components_contained() {
+        for name in ["files/c:/evil.md", "a/b/z:x", "files/c:"] {
+            let rel = safe_zip_entry_path(name, ZipColonPolicy::RejectDrivePrefix);
+            if cfg!(windows) {
+                assert!(rel.is_none(), "Windows must reject stream-style name: {name:?}");
+                continue;
+            }
+            let rel = rel.unwrap_or_else(|| panic!("must accept legal deep name: {name:?}"));
+            assert!(
+                rel.is_relative() && rel.components().all(|c| matches!(c, Component::Normal(_))),
+                "sanitized {name:?} must stay prefix-free relative: {rel:?}"
+            );
+            let joined = Path::new("dest").join(&rel);
+            assert!(
+                joined.starts_with("dest"),
+                "sanitized {name:?} escaped the destination: {joined:?}"
+            );
+            assert!(rel.starts_with(name.split('/').next().unwrap()), "lost the parent of {name:?}");
+        }
+    }
+
+    /// Regression guard for path assembly. Deliberately does NOT use a `':'`
+    /// name: the colon policy rejects those on Windows *before* the join runs,
+    /// so a colon-based test here would pass even with the original
+    /// `PathBuf::push` bug reinstated — it would mask the defect it claims to
+    /// pin. (Verified by mutation: reinstating `push` leaves this suite green,
+    /// because with colons and backslashes already rejected no component can
+    /// re-parse as a prefix. See the join comment — that code is now defense in
+    /// depth, and the colon rejection is the load-bearing guard.)
+    ///
+    /// What this does pin is the containment property every caller relies on:
+    /// an accepted name keeps all of its components and stays inside the
+    /// destination on join.
+    #[test]
+    fn join_preserves_every_component_on_both_platforms() {
+        for name in ["files/notes/deep/a.md", "a/b/c/d/e.md", "files/plain.md"] {
+            for policy in [ZipColonPolicy::RejectAll, ZipColonPolicy::RejectDrivePrefix] {
+                let rel = safe_zip_entry_path(name, policy)
+                    .unwrap_or_else(|| panic!("must accept {name:?} under {policy:?}"));
+                assert_eq!(
+                    rel.components().count(),
+                    name.split('/').count(),
+                    "join lost a component of {name:?}: {rel:?}"
+                );
+                assert_eq!(rel, PathBuf::from(name.replace('/', MAIN_SEPARATOR_STR)));
+                assert!(rel.is_relative(), "{rel:?} must stay relative");
+                let joined = Path::new("dest").join(&rel);
+                assert!(joined.starts_with("dest"), "{name:?} escaped: {joined:?}");
+            }
+        }
+    }
+
+    /// The `PathBuf::push` hazard itself, asserted against the standard library
+    /// rather than against our sanitizer, so the reason the hand-rolled join
+    /// exists stays documented and checked. If a future Rust stopped replacing
+    /// the buffer here, this would flag that the hand-join is no longer needed.
+    #[test]
+    #[cfg(windows)]
+    fn push_replaces_the_buffer_on_a_drive_relative_component() {
+        let mut built = PathBuf::new();
+        built.push("files");
+        built.push("a:b.md");
+        assert_eq!(
+            built,
+            PathBuf::from("a:b.md"),
+            "premise of the hand-rolled join: push() drops the parent here"
+        );
+        assert!(!built.is_absolute(), "and is_absolute() does not catch it");
+        assert!(
+            !Path::new("C:\\dest").join(&built).starts_with("C:\\dest"),
+            "which is what makes it a zip-slip escape"
+        );
     }
 
     #[test]

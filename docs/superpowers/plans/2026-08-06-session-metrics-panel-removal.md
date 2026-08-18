@@ -10,13 +10,13 @@
 
 ## Global Constraints
 
-- **Git 署名（AGENTS.md，强制）**：作者/提交者必须是人类（本机 git user `muri <2206491416@qq.com>`）；**禁止**任何 AI 署名 trailer（`Co-Authored-By` 等）；**禁止** `--no-verify`。
+- **Git 署名（AGENTS.md，强制）**：作者/提交者必须是人类（本机 git user `NomiFun Contributor <nomifun@users.noreply.github.com>`）；**禁止**任何 AI 署名 trailer（`Co-Authored-By` 等）；**禁止** `--no-verify`。
 - **禁止**在 `.github/workflows/` 创建任何 workflow 文件（AGENTS.md）。
 - `ui/src/renderer/services/i18n/i18n-keys.d.ts` 是生成物：只能跑 `bun run gen:i18n`，**不得手改**。
 - `ui/src/common/protocolBindings/*.ts` 是 ts-rs 生成物：由 `cargo test` 再生成，**不得手改**。
 - **不** bump `ui-api-contract-version.txt`（构建一致性闩，UI 与后端同发）。
 - Commit message 风格照仓库历史：`type(scope): subject`，英文。
-- 所有命令在仓库根 `C:/Users/MINISFORUM/code/nomifun/multi/1` 执行。
+- 所有命令在仓库根 `C:/Users/developer/code/nomifun/multi/1` 执行。
 
 ---
 
@@ -615,7 +615,7 @@ Expected: 全部 PASS。跑完确认 `git status` 无未预期的 binding diff�
 ls .github/workflows/ 2>/dev/null; git log --format='%an <%ae> %s' origin/main..HEAD
 ```
 
-Expected: workflows 目录不存在或为空；所有提交作者为 `muri <2206491416@qq.com>`，subject 无 AI 署名 trailer。
+Expected: workflows 目录不存在或为空；所有提交作者为 `NomiFun Contributor <nomifun@users.noreply.github.com>`，subject 无 AI 署名 trailer。
 
 - [ ] **Step 4: 手工冒烟（需人工确认）**
 
