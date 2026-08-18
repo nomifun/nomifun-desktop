@@ -65,7 +65,7 @@ describe('sidebarDisplayPreferences', () => {
   });
 
   test('formats workpath labels for folder, full path, and two-line strategies', () => {
-    const path = '/Users/muri/code/nomifun/nomifun-tauri';
+    const path = '/Users/developer/code/nomifun/nomifun-tauri';
 
     expect(formatWorkpathDisplay(path, 'nomifun-tauri', 'folder')).toEqual({
       kind: 'single',
@@ -80,7 +80,7 @@ describe('sidebarDisplayPreferences', () => {
     expect(formatWorkpathDisplay(path, 'nomifun-tauri', 'folderWithPath')).toEqual({
       kind: 'twoLine',
       primary: 'nomifun-tauri',
-      secondary: '/Users/muri/code/nomifun',
+      secondary: '/Users/developer/code/nomifun',
       tooltip: path,
     });
   });

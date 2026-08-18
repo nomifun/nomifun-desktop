@@ -41,7 +41,7 @@
 4. **绝不伪造 `reaped`**:`channel 关闭 && (exit-status || exit-signal)` = Reaped;其余一律 `Lost`,且 `Lost` 是真实 teardown 失败。
 5. **edition 2024**:裸 trait object 是硬错误,一律写 `Arc<dyn Trait>`。
 6. **`private_event_boundary.rs` 是 substring 扫描**(见 V6):新 `events.rs` 里连注释都不能出现 `EventBroadcaster` / `WebSocketManager`。
-7. **署名**:每个 commit 作者与提交者均为 `RiKa0-0 <2206491416@qq.com>`,conventional commits,无 AI trailer,不 `--no-verify`,`.github/workflows/` 下不新增任何文件。
+7. **署名**:每个 commit 作者与提交者均为 `NomiFun Contributor <nomifun@users.noreply.github.com>`,conventional commits,无 AI trailer,不 `--no-verify`,`.github/workflows/` 下不新增任何文件。
 8. **测试**:`cargo test -p <crate> -- --test-threads=2`;全量 `cargo nextest run --build-jobs 8 --test-threads 8`;**不在 /tmp 构建**;集成测试起独立高位端口 sshd + 独立密钥(`crates/shared/nomi-ssh/tests/support/sshd.rs`),**绝不碰真实 `~/.ssh`**(known_hosts 一律用 tempdir);无 sshd 时诚实 SKIP,不假通过。
 9. **每个 commit 边界都必须编译通过且测试通过**。凡是拓宽 trait 签名的步骤,必须在**同一个 commit 内**改完所有调用点(V3 的两个点)。
 
@@ -272,7 +272,7 @@ bun run build:ui       # contract 5→6 之后必须跑
 
 # 规矩审计
 ls .github/workflows   # 只应有 README.md
-git log --format='%an <%ae>' -40 | sort -u   # 只应出现 RiKa0-0 <2206491416@qq.com>
+git log --format='%an <%ae>' -40 | sort -u   # 只应出现 NomiFun Contributor <nomifun@users.noreply.github.com>
 ```
 
 ---

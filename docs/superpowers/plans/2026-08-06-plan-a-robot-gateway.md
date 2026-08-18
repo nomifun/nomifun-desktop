@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- **Git 署名**：绝不让 AI 出现在 author / committer / co-author；绝不添加 `Co-authored-by`、`Generated-by`、`Assisted-by` 等 trailer；不得使用 `--no-verify`。作者与提交者统一为 `RiKa0-0 <2206491416@qq.com>`。
+- **Git 署名**：绝不让 AI 出现在 author / committer / co-author；绝不添加 `Co-authored-by`、`Generated-by`、`Assisted-by` 等 trailer；不得使用 `--no-verify`。作者与提交者统一为 `NomiFun Contributor <nomifun@users.noreply.github.com>`。
 - **绝不**在 `.github/workflows/` 下创建、恢复或重命名任何文件。
 - commit message 用英文 conventional commits；本计划正文为中文，代码、标识符、commit message 为英文。
 - **测试范围**：本仓库 Linux 全量测试有 14 个既有失败，且全量需 `--features nomifun-ai-agent/test-support` 并限制并发。**任务内只跑目标包**：`cargo test -p nomifun-robot`。禁止在任务步骤里跑全量测试。
@@ -8924,4 +8924,3 @@ Plan A Task 1..19 ────────────┘
 5. 让伙伴「向左看」「抬头」「回中」→ 云台按限位动作（需 Plan C 的固件已烧录）。
 6. 按住说话（manual 模式）→ 松手即结束一轮，播完回到待机而非继续聆听。
 7. 拔掉设备电源 → UI 的机器人状态在数秒内变为离线；重新上电后自动恢复（无需重新绑定）。
-

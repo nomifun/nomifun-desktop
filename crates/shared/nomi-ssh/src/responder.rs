@@ -131,7 +131,7 @@ mod tests {
             // a nested ssh to a third host
             "rika@other-host's password: ",
             // git push over https
-            "Password for 'https://rika@github.com': ",
+            "Password for 'https://github.com': ",
             // psql
             "Password for user postgres: ",
             // a prompt that arrives after the command printed something

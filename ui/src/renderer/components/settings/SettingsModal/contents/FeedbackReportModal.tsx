@@ -19,8 +19,6 @@ export const NOMIFUN_PUBLIC_LINKS = {
   issues: 'https://github.com/nomifun/nomifun-tauri/issues',
   releases: 'https://github.com/nomifun/nomifun-tauri/releases',
   baiduPan: 'https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA',
-  email: '535526063@qq.com',
-  emailHref: 'mailto:535526063@qq.com',
 } as const;
 
 const COPYRIGHT = '© 2025-2026 NomiFun · www.nomifun.com';
@@ -46,15 +44,6 @@ const CONTACT_ITEMS = [
     value: NOMIFUN_PUBLIC_LINKS.officialWebsite,
     url: NOMIFUN_PUBLIC_LINKS.officialWebsite,
     copyValue: NOMIFUN_PUBLIC_LINKS.officialWebsite,
-  },
-  {
-    labelKey: 'settings.contactEmail',
-    fallbackLabel: '邮箱',
-    value: NOMIFUN_PUBLIC_LINKS.email,
-    url: NOMIFUN_PUBLIC_LINKS.emailHref,
-    copyValue: NOMIFUN_PUBLIC_LINKS.email,
-    trailingKey: 'settings.contactEmailPending',
-    trailingFallback: '、（待补充中）……',
   },
 ] as const;
 

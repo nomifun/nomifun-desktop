@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-1. **固件仓库不是 git 仓库**（`/home/rika/src/xiaozhi/xiaozhi-yuntai` 下无 `.git`）。本计划**任何步骤都不得使用 git 命令**（no `git status` / `git diff` / `git add` / `git commit` / `git stash`）。每个任务的收尾是**编译验证**，不是提交。
+1. **固件仓库不是 git 仓库**（`/home/developer/src/xiaozhi/xiaozhi-yuntai` 下无 `.git`）。本计划**任何步骤都不得使用 git 命令**（no `git status` / `git diff` / `git add` / `git commit` / `git stash`）。每个任务的收尾是**编译验证**，不是提交。
 2. **所有改动限定在 `main/boards/esp32-s3n16r8-emoji/` 内。** 严禁改动 `main/mcp_server.h` / `main/mcp_server.cc` / `main/protocols/*` / `main/application.cc` / `main/display/*` / `main/CMakeLists.txt` / `sdkconfig`。本计划只新增 1 个头文件 + 修改 `emoji_board.cc` 4 处。
 3. **工具名是跨仓库契约，逐字写死，不得改名、不得增删**：`self.gimbal.look`、`self.gimbal.set`、`self.gimbal.get_position`。参数名同样是契约：`direction`、`pan`、`tilt`。nomifun 侧 MCP 桥按这些名字对接。
 4. **限位值以 `main/boards/esp32-s3n16r8-emoji/board_config.h:36-41` 的宏为唯一真相**：`SERVO_MIN_X`(=50) / `SERVO_MAX_X`(=130) / `SERVO_MIN_Y`(=70) / `SERVO_MAX_Y`(=110) / `SERVO_CENTER_X`(=90) / `SERVO_CENTER_Y`(=90)。新代码里**不得出现 50/130/70/110 这些字面量**，包括工具描述文本（描述在运行期用 `std::to_string(宏)` 拼出来，保证限位一改描述就跟着改）。
@@ -49,7 +49,7 @@ command -v idf.py
 
 # 2) 现有 build/ 是在 Windows 上生成的（build/CMakeCache.txt 里 CMAKE_HOME_DIRECTORY 是
 #    D:/oldxiaozhi/... ），Linux 下直接构建会因源码目录不匹配报错。改名保留，不要删：
-cd /home/rika/src/xiaozhi/xiaozhi-yuntai
+cd /home/developer/src/xiaozhi/xiaozhi-yuntai
 [ -f build/CMakeCache.txt ] && grep -q 'D:/' build/CMakeCache.txt && mv build build.win.bak
 
 # 3) 构建（不要跑 set-target，见 Global Constraints #7）
@@ -105,11 +105,11 @@ idf.py build
 ### Task 1: 云台动作队列与 worker 任务（新建 `gimbal_mcp_tools.h` + 板级接线）
 
 **Files:**
-- Create: `/home/rika/src/xiaozhi/xiaozhi-yuntai/main/boards/esp32-s3n16r8-emoji/gimbal_mcp_tools.h`
-- Modify: `/home/rika/src/xiaozhi/xiaozhi-yuntai/main/boards/esp32-s3n16r8-emoji/emoji_board.cc:13`（新增 include）
-- Modify: `/home/rika/src/xiaozhi/xiaozhi-yuntai/main/boards/esp32-s3n16r8-emoji/emoji_board.cc:96-101`（新增成员）
-- Modify: `/home/rika/src/xiaozhi/xiaozhi-yuntai/main/boards/esp32-s3n16r8-emoji/emoji_board.cc:274-277`（`InitializeIot()` 落点）
-- Modify: `/home/rika/src/xiaozhi/xiaozhi-yuntai/main/boards/esp32-s3n16r8-emoji/emoji_board.cc:344-350`（析构）
+- Create: `/home/developer/src/xiaozhi/xiaozhi-yuntai/main/boards/esp32-s3n16r8-emoji/gimbal_mcp_tools.h`
+- Modify: `/home/developer/src/xiaozhi/xiaozhi-yuntai/main/boards/esp32-s3n16r8-emoji/emoji_board.cc:13`（新增 include）
+- Modify: `/home/developer/src/xiaozhi/xiaozhi-yuntai/main/boards/esp32-s3n16r8-emoji/emoji_board.cc:96-101`（新增成员）
+- Modify: `/home/developer/src/xiaozhi/xiaozhi-yuntai/main/boards/esp32-s3n16r8-emoji/emoji_board.cc:274-277`（`InitializeIot()` 落点）
+- Modify: `/home/developer/src/xiaozhi/xiaozhi-yuntai/main/boards/esp32-s3n16r8-emoji/emoji_board.cc:344-350`（析构）
 
 **Interfaces:**
 - Consumes: `ServoController::HeadMove(int x_offset, int y_offset, int servo_delay = SERVO_DELAY)`；`ServoController::GetCurrentXAngle() const` / `GetCurrentYAngle() const`；`board_config.h` 的 `SERVO_MIN_X/MAX_X/MIN_Y/MAX_Y/CENTER_X/CENTER_Y/SERVO_DELAY`；FreeRTOS `xQueueCreate/xQueueSend/xQueueReceive/xTaskCreate/vQueueDelete/vTaskDelete`。
@@ -138,7 +138,7 @@ idf.py build
 
 - [ ] **Step 2: 实现**
 
-新建 `/home/rika/src/xiaozhi/xiaozhi-yuntai/main/boards/esp32-s3n16r8-emoji/gimbal_mcp_tools.h`，内容如下（本任务先不含 `RegisterMcpTools()`，Task 2 再补）：
+新建 `/home/developer/src/xiaozhi/xiaozhi-yuntai/main/boards/esp32-s3n16r8-emoji/gimbal_mcp_tools.h`，内容如下（本任务先不含 `RegisterMcpTools()`，Task 2 再补）：
 
 ```cpp
 /**
@@ -378,7 +378,7 @@ Expected：
 ### Task 2: 注册 `self.gimbal.look` / `self.gimbal.set` / `self.gimbal.get_position`
 
 **Files:**
-- Modify: `/home/rika/src/xiaozhi/xiaozhi-yuntai/main/boards/esp32-s3n16r8-emoji/gimbal_mcp_tools.h`（`Initialize()` 尾部改为调用 `RegisterMcpTools()`；新增私有方法 `RegisterMcpTools()`）
+- Modify: `/home/developer/src/xiaozhi/xiaozhi-yuntai/main/boards/esp32-s3n16r8-emoji/gimbal_mcp_tools.h`（`Initialize()` 尾部改为调用 `RegisterMcpTools()`；新增私有方法 `RegisterMcpTools()`）
 
 **Interfaces:**
 - Consumes: `McpServer::GetInstance()`（`main/mcp_server.h:254-257`）；`McpServer::AddTool(const std::string&, const std::string&, const PropertyList&, std::function<ReturnValue(const PropertyList&)>)`（`main/mcp_server.h:261`）；`PropertyList(const std::vector<Property>&)`（`main/mcp_server.h:130`）；`Property(const std::string&, PropertyType)`（`:35`）；`Property(const std::string&, PropertyType, int min, int max)`（`:45`）；`Property::value<T>()`（`:70-73`）；`using ReturnValue = std::variant<bool,int,std::string>`（`:16`）。
@@ -547,7 +547,7 @@ Expected：
 - [ ] **Step 2: 实现（执行验证命令）**
 
 ```bash
-cd /home/rika/src/xiaozhi/xiaozhi-yuntai
+cd /home/developer/src/xiaozhi/xiaozhi-yuntai
 
 # 环境探测：决定走路径 A 还是 B
 echo "IDF_PATH=${IDF_PATH:-<empty>}"; command -v idf.py || echo "no idf.py on PATH"
@@ -626,7 +626,7 @@ Expected：
 
 ```bash
 # ---- 烧录（Linux 侧，ESP-IDF 可用时）----
-cd /home/rika/src/xiaozhi/xiaozhi-yuntai
+cd /home/developer/src/xiaozhi/xiaozhi-yuntai
 . "$HOME/esp/esp-idf/export.sh"
 ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null          # 确认串口号
 idf.py -p /dev/ttyACM0 flash monitor              # 退出 monitor: Ctrl+]

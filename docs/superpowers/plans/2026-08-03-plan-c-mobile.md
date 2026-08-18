@@ -13,7 +13,7 @@
 - 规范：`~/src/nomifun-tauri/docs/superpowers/specs/2026-08-03-bridge-protocol-v1.md`（BINDING）
 - 手机端不存过程数据：事件环形缓冲 ≤50 条、每条摘要 ≤8KB；RPC 超时 15s；列表 limit ≤50
 - Base64 标准字母表带 padding（QR/桥接串用 base64url no-pad）；device_id = SHA-512(pk) 前 8 字节 hex
-- 仓库 `/home/rika/src/nomifun-mobile`；git author `RiKa0-0 <2206491416@qq.com>`；无 AI 署名；禁止 `.github/workflows/`
+- 仓库 `/home/developer/src/nomifun-mobile`；git author `NomiFun Contributor <nomifun@users.noreply.github.com>`；无 AI 署名；禁止 `.github/workflows/`
 - `src/core/**` 禁止 import 任何 `uni.*` / Vue —— 平台 API 一律通过注入的接口（`WebSocketLike`、`HttpProbe`、`StorageLike`）
 
 ---
@@ -26,10 +26,10 @@
 - [ ] **Step 1: 创建项目**
 
 ```bash
-cd /home/rika/src
+cd /home/developer/src
 npx degit dcloudio/uni-preset-vue#vite-ts nomifun-mobile
 cd nomifun-mobile
-git init -b main && git config user.name "RiKa0-0" && git config user.email "2206491416@qq.com"
+git init -b main && git config user.name "NomiFun Contributor" && git config user.email "nomifun@users.noreply.github.com"
 ```
 
 若 degit 失败（网络/模板变动），手工脚手架：`package.json` 参照 uni-app 官方 vite-ts 模板（deps：`@dcloudio/uni-app`、`@dcloudio/uni-components`、`@dcloudio/uni-h5`、`vue`、`pinia`；devDeps：`@dcloudio/vite-plugin-uni`、`@dcloudio/types`、`vite`、`typescript`、`vue-tsc`；scripts：`"dev:h5": "uni"`、`"build:h5": "uni build"`），`vite.config.ts` 用 `uni()` 插件，`src/main.ts`/`src/App.vue`/`src/pages.json`/`src/manifest.json` 按 uni-app 最小骨架。
@@ -400,5 +400,5 @@ export async function probeLan(selfIpHint: string | null, probe: HttpProbe, port
 - [ ] **Step 1: README**（中文：项目定位、架构图（core/平台适配/页面三层）、开发 `npm run dev:h5`、构建 `npm run build:h5`、App 端 HBuilderX 云打包指引（导入项目 → manifest 配置 appid → 云打包；`uni.scanCode`/`connectSocket` 权限说明）、协议文档指针、H5 限制说明（https 页面无法混合内容访问 http LAN 探测——建议 H5 走中继或以 http 服务页面））
 - [ ] **Step 2: 验收清单**（`docs/h5-acceptance.md`：配对（扫码/粘贴/LAN 扫描×3）、发指令收完成反馈、确认项批准、cron 全 CRUD+runNow、断线回退中继、重放防护（重复事件不重复入库）、存储上限（events≤50））
 - [ ] **Step 3: 全量测试** — Run: `npm test`；Expected: 全 PASS（互操作向量存在时不得 skip）
-- [ ] **Step 4: 作者合规** — `git log --format='%an <%ae>' | sort -u` 仅 `RiKa0-0 <2206491416@qq.com>`；`ls .github/workflows 2>/dev/null` 为空
+- [ ] **Step 4: 作者合规** — `git log --format='%an <%ae>' | sort -u` 仅 `NomiFun Contributor <nomifun@users.noreply.github.com>`；`ls .github/workflows 2>/dev/null` 为空
 - [ ] **Step 5: Commit** — `git add -A && git commit -m "docs: readme and h5 acceptance checklist"`

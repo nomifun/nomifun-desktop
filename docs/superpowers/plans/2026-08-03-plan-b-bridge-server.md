@@ -13,7 +13,7 @@
 - 规范文档（字段/常量/算法不得偏离）：`nomifun-tauri/docs/superpowers/specs/2026-08-03-bridge-protocol-v1.md` §3
 - 默认监听 `0.0.0.0:21190`；auth = `hex(HMAC-SHA256(key=utf8(server_key), msg=utf8(id + ":" + ts)))`；时钟偏差 ±300_000ms
 - 单帧 ≤ 64 KB；每连接 30 帧/秒；90s 空闲断开；同 id 重复注册顶替旧连接
-- 仓库位置 `/home/rika/src/nomifun-bridge-server`（与 nomifun-tauri 同级）；git author/committer 必须是 `RiKa0-0 <2206491416@qq.com>`；提交信息不得含任何 AI 署名 trailer；禁止创建 `.github/workflows/`
+- 仓库位置 `/home/developer/src/nomifun-bridge-server`（与 nomifun-tauri 同级）；git author/committer 必须是 `NomiFun Contributor <nomifun@users.noreply.github.com>`；提交信息不得含任何 AI 署名 trailer；禁止创建 `.github/workflows/`
 - 测试命令统一 `cargo test`（本机内存有限，必要时 `-- --test-threads=2`）
 
 ---
@@ -29,9 +29,9 @@
 - [ ] **Step 1: 创建项目**
 
 ```bash
-mkdir -p /home/rika/src/nomifun-bridge-server && cd /home/rika/src/nomifun-bridge-server
+mkdir -p /home/developer/src/nomifun-bridge-server && cd /home/developer/src/nomifun-bridge-server
 git init -b main
-git config user.name "RiKa0-0" && git config user.email "2206491416@qq.com"
+git config user.name "NomiFun Contributor" && git config user.email "nomifun@users.noreply.github.com"
 ```
 
 `Cargo.toml`:
@@ -85,7 +85,7 @@ Expected: 无错误
 
 ```bash
 git add -A && git commit -m "chore: scaffold nomifun-bridge-server crate"
-git log -1 --format='%an <%ae>'   # 必须输出 RiKa0-0 <2206491416@qq.com>
+git log -1 --format='%an <%ae>'   # 必须输出 NomiFun Contributor <nomifun@users.noreply.github.com>
 ```
 
 ### Task 2: 控制帧协议类型（proto.rs）
@@ -877,7 +877,7 @@ git add -A && git commit -m "chore: dockerfile, compose and deployment docs"
 - [ ] **Step 1: 全量测试** — Run: `cargo test -- --test-threads=2`；Expected: 全 PASS
 - [ ] **Step 2: clippy** — Run: `cargo clippy -- -D warnings`；修复所有告警后重跑
 - [ ] **Step 3: 确认无 GitHub Actions** — Run: `ls .github/workflows 2>/dev/null; true`；Expected: 不存在
-- [ ] **Step 4: 确认作者合规** — Run: `git log --format='%an <%ae>' | sort -u`；Expected: 仅 `RiKa0-0 <2206491416@qq.com>`
+- [ ] **Step 4: 确认作者合规** — Run: `git log --format='%an <%ae>' | sort -u`；Expected: 仅 `NomiFun Contributor <nomifun@users.noreply.github.com>`
 - [ ] **Step 5: Commit（如有 clippy 修复）**
 
 ```bash

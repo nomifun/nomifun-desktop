@@ -46,7 +46,7 @@ mod tests {
 
     #[test]
     fn normalizes_hosts_and_real_public_suffixes() {
-        assert_eq!(host_of("https://User:pw@Sub.X.COM:8443/a"), Some("sub.x.com".into()));
+        assert_eq!(host_of("https://User:redacted@Sub.X.COM:8443/a"), Some("sub.x.com".into()));
         assert_eq!(etld_plus_one("https://www.a.co.uk"), Some("a.co.uk".into()));
         assert_ne!(etld_plus_one("a.co.uk"), etld_plus_one("b.co.uk"));
         assert!(same_etld_plus_one("login.x.com", "https://x.com"));
