@@ -49,7 +49,7 @@ const Section: React.FC<{ title: string; extra?: React.ReactNode; children: Reac
 type NoteModalMode = 'create' | 'edit' | 'view';
 
 const NOTE_PAGE_SIZE = 5;
-const EMPTY_NOTE_DRAFT = { kind: 'faq', content: '', shared: false };
+const EMPTY_NOTE_DRAFT = { kind: 'faq', content: '', aliases: '', shared: false };
 
 /**
  * 客服详情页（/customer-service/:cs_agent_id）：身份与话术编辑、模型与知识库、
@@ -144,6 +144,7 @@ const CsAgentDetailPage: React.FC = () => {
     setNoteDraft({
       kind: note.kind,
       content: note.content,
+      aliases: note.aliases ?? '',
       shared: note.cs_agent_id === null,
     });
     setNoteModalOpen(true);
@@ -163,6 +164,7 @@ const CsAgentDetailPage: React.FC = () => {
           cs_note_id: activeNote.cs_note_id,
           kind: noteDraft.kind,
           content: noteDraft.content,
+          aliases: noteDraft.aliases,
         });
         Message.success(t('customerService.notes.updated', { defaultValue: '笔记已更新' }));
       } else {
@@ -170,6 +172,7 @@ const CsAgentDetailPage: React.FC = () => {
           cs_agent_id: noteDraft.shared ? null : csAgentId,
           kind: noteDraft.kind,
           content: noteDraft.content,
+          aliases: noteDraft.aliases,
           enabled: true,
         });
         Message.success(t('customerService.notes.created', { defaultValue: '笔记已创建' }));
@@ -609,6 +612,20 @@ const CsAgentDetailPage: React.FC = () => {
             readOnly={noteModalMode === 'view'}
             onChange={(value) => setNoteDraft((d) => ({ ...d, content: value }))}
           />
+          <Input.TextArea
+            autoSize={{ minRows: 2, maxRows: 6 }}
+            value={noteDraft.aliases}
+            placeholder={t('customerService.notes.aliasesPlaceholder', {
+              defaultValue: '其他问法，每行一个，例如：这个软件\n多少钱',
+            })}
+            readOnly={noteModalMode === 'view'}
+            onChange={(value) => setNoteDraft((d) => ({ ...d, aliases: value }))}
+          />
+          <span className='text-12px text-t-tertiary'>
+            {t('customerService.notes.aliasesHint', {
+              defaultValue: '每行填一个访客可能的说法。当访客的问法与笔记正文用词完全不同时，靠它才能被搜到。',
+            })}
+          </span>
           <label className='flex items-center gap-8px text-13px text-t-secondary'>
             <Checkbox
               checked={noteDraft.shared}
