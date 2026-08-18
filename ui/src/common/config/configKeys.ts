@@ -2,11 +2,11 @@ import type { SpeechToTextConfig, TextToSpeechConfig } from '@/common/types/prov
 import type { ICssTheme } from '@/common/config/storage';
 import type { CompanionId, ProviderId } from '@/common/types/ids';
 
-// `headless` (default) and `external` are the two supported user policies;
-// `embedded` remains in the read type only so installations can migrate the
-// removed viewer's persisted value. New product code persists only
-// `headless` or `external`.
-export type BrowserDisplayMode = 'embedded' | 'external' | 'headless';
+// `auto` (default), `headless` and `external` are the three supported user
+// policies; `embedded` remains in the read type only so installations can
+// migrate the removed viewer's persisted value. New product code persists only
+// `auto`, `headless` or `external`.
+export type BrowserDisplayMode = 'embedded' | 'external' | 'headless' | 'auto';
 
 export type ConfigKeyMap = {
   'google.config': {

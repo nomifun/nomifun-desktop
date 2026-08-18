@@ -20,7 +20,21 @@ export type BrowserLaneLifecycleState = FutureValue<
 >;
 export type BrowserIdentityMode = FutureValue<'primary' | 'anonymous' | 'authenticated_replica' | 'isolated'>;
 export type BrowserResourcePressureState = FutureValue<'normal' | 'pressured' | 'critical'>;
-export type BrowserDisplayMode = 'headless' | 'external';
+/**
+ * The user's visibility *policy*.
+ *
+ * `headless` and `external` pin the browser silent or visible; `auto` (the
+ * default) lets the trusted host decide per lane, keeping routine agent work
+ * silent and surfacing a window only when the user needs to step in.
+ */
+export type BrowserDisplayMode = 'headless' | 'auto' | 'external';
+/**
+ * The binary mechanism a managed host is running with right now.
+ *
+ * Reported separately from the policy because it cannot be inferred from it:
+ * both `auto` and `headless` present as `headless`.
+ */
+export type BrowserEffectiveVisibility = 'headless' | 'headful';
 
 export interface IBrowserLaneOwner {
   user_id?: string | null;
@@ -116,6 +130,16 @@ export interface IBrowserBackgroundResult {
 /** Installation-wide default visibility policy, owned and persisted by the backend. */
 export interface IBrowserDisplayModePolicy {
   display_mode: BrowserDisplayMode;
+  /**
+   * What the managed host is actually running with now. Read-only: `PUT` accepts
+   * `display_mode` alone and rejects a client-supplied value here.
+   *
+   * Optional because a backend predating the policy/mechanism split omits it.
+   * `normalizeBrowserDisplayModePolicy` always populates it on the real response
+   * path; treat an absent value as unknown and assume silent, which is the safe
+   * direction.
+   */
+  effective_visibility?: BrowserEffectiveVisibility;
 }
 
 export interface IBrowserCapacityOverview {
