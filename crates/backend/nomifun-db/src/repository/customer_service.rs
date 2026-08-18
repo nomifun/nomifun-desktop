@@ -1,10 +1,12 @@
 use nomifun_common::TimestampMs;
+use nomifun_common::text_search::NoteQueryTerms;
 
 use crate::error::DbError;
 use crate::models::{
     CsAgentRow, CsAuditEventRow, CsChannelBindingRow, CsDialogueRow, CsMessageRow, CsNoteRow,
     NewCsAgentRow,
 };
+use crate::repository::customer_service_search::CsNoteSearchHit;
 
 /// Identity triple that pins a visitor dialogue lane (一人一线).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,21 +138,39 @@ pub trait ICustomerServiceRepository: Send + Sync {
     /// `None` lists ALL notes (management surface).
     async fn list_notes(&self, cs_agent_id: Option<&str>) -> Result<Vec<CsNoteRow>, DbError>;
 
-    /// Enabled notes visible to one agent whose content matches `query`
-    /// (case-insensitive LIKE), newest first, capped at `limit`.
+    /// Ranked hybrid search over the enabled notes visible to one agent.
+    ///
+    /// `terms` come from [`nomifun_common::text_search::expand_query`], which
+    /// normalizes and splits the caller's natural-language query. Passing
+    /// pre-expanded terms rather than a raw string is deliberate: the previous
+    /// signature took a `&str` and matched it as one contiguous `LIKE` pattern,
+    /// so a model-generated query with an extra space missed notes that
+    /// existed. The type now makes the expansion step unskippable.
+    ///
+    /// Empty `terms` yield no hits — a query with no signal must match nothing,
+    /// never everything.
     async fn search_notes(
         &self,
         cs_agent_id: &str,
-        query: &str,
+        terms: &NoteQueryTerms,
         limit: usize,
-    ) -> Result<Vec<CsNoteRow>, DbError>;
+    ) -> Result<Vec<CsNoteSearchHit>, DbError>;
 
-    /// Patch `kind`/`content`/`enabled` of a note. `DbError::NotFound` if absent.
+    /// One-line topic labels for the notes visible to one agent, newest first.
+    ///
+    /// Backs the "nothing matched, but here is what exists" reply, so a model
+    /// that guessed the wrong keywords can see the available subjects and
+    /// re-query instead of telling the visitor there is no answer.
+    async fn note_topics(&self, cs_agent_id: &str, limit: usize) -> Result<Vec<String>, DbError>;
+
+    /// Patch `kind`/`content`/`aliases`/`enabled` of a note. `DbError::NotFound`
+    /// if absent. Keeps the full-text index in step with the row.
     async fn update_note(
         &self,
         cs_note_id: &str,
         kind: Option<&str>,
         content: Option<&str>,
+        aliases: Option<&str>,
         enabled: Option<bool>,
         now: TimestampMs,
     ) -> Result<CsNoteRow, DbError>;
