@@ -131,6 +131,14 @@ describe('Guid preset picker visual system', () => {
     expect(description.includes('-webkit-line-clamp: 1')).toBe(true);
   });
 
+  test('keeps the checkbox on Skills without rendering it on preset cards', () => {
+    const preset = readSource(new URL('./DrawerPresetCard.tsx', import.meta.url));
+    const skill = readSource(new URL('./DrawerSkillCard.tsx', import.meta.url));
+
+    expect(preset.includes('styles.drawerCardStatus')).toBe(false);
+    expect(skill.includes('styles.drawerCardStatus')).toBe(true);
+  });
+
   test('keeps the drawer search field compact instead of a nested white box', () => {
     const css = readSource(new URL('../index.module.css', import.meta.url));
 

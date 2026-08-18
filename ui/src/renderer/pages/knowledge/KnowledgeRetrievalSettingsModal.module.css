@@ -1,0 +1,127 @@
+.modal :global(.arco-modal-header) {
+  height: 42px;
+}
+
+.modal :global(.arco-modal-content) {
+  padding: 10px 20px 12px;
+}
+
+.modal :global(.arco-modal-footer) {
+  padding: 10px 20px 12px;
+}
+
+.modal :global(.arco-modal-close-icon) {
+  top: 15px;
+}
+
+.modalBody {
+  display: flex;
+  min-height: 180px;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.intro {
+  margin: 0;
+  border-radius: 9px;
+  padding: 8px 10px;
+  color: var(--color-text-3);
+  background: var(--color-fill-1);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.stageCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--color-border-3);
+  border-radius: 10px;
+  padding: 12px;
+  background: transparent;
+}
+
+.stageHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 148px;
+  gap: 14px;
+  align-items: start;
+}
+
+.stageCopy {
+  min-width: 0;
+}
+
+.stageTitle {
+  color: var(--color-text-1);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.stageHint {
+  margin-top: 3px;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.modeGroup {
+  box-sizing: border-box;
+  display: grid !important;
+  width: 148px;
+  gap: 5px;
+  padding: 0 !important;
+}
+
+.modeGroup :global(.arco-radio-button) {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 26px;
+  margin: 0 !important;
+  border: 1px solid var(--color-border-2);
+  border-radius: 7px !important;
+  color: var(--color-text-2);
+  background: var(--color-bg-1);
+  font-size: 12px;
+  line-height: 24px !important;
+  text-align: center;
+}
+
+.modeGroup :global(.arco-radio-button-inner) {
+  padding: 0 8px !important;
+  white-space: nowrap;
+}
+
+.modeGroup :global(.arco-radio-button::after) {
+  display: none;
+}
+
+.modeGroup :global(.arco-radio-button:hover) {
+  border-color: var(--color-border-3);
+  background: var(--color-fill-2);
+}
+
+.modeGroup :global(.arco-radio-button.arco-radio-checked) {
+  border-color: rgba(var(--primary-6), 0.38);
+  color: var(--color-text-1) !important;
+  background: rgba(var(--primary-6), 0.1) !important;
+  font-weight: 600;
+}
+
+.modelSelector {
+  border-top: 1px solid var(--color-border-2);
+  padding-top: 8px;
+}
+
+@media (max-width: 560px) {
+  .stageHeader {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .modeGroup {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+}
