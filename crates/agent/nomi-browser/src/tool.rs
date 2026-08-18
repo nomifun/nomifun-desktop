@@ -35,8 +35,8 @@ use nomifun_browser_platform::BrowserLaneClient;
 #[cfg(test)]
 use nomifun_browser_platform::{
     BrowserIdentityMode, BrowserLaneId, BrowserLaneSnapshot, BrowserOperation,
-    BrowserOperationKind, BrowserOperationResult, BrowserPlatformError, CloseResult,
-    LaneLifecycleState, OpenLaneOutcome,
+    BrowserOperationKind, BrowserOperationResult, BrowserPlatformError,
+    BrowserPresentationIntent, CloseResult, LaneLifecycleState, OpenLaneOutcome,
 };
 use crate::extract::{self, ExtractModel, ExtractModelRef, ExtractSchema};
 use crate::managed::{
@@ -2740,6 +2740,7 @@ impl Tool for BrowserTool {
                 },
                 "lane_id": { "type": "string", "description": "Optional Lane handle returned by browser_open/browser_fork/browser_list. Existing actions use the caller's default Lane when omitted." },
                 "lane_name": { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[A-Za-z0-9_-]+$", "description": "Short model-chosen Lane name for browser_open/browser_fork. Trusted owner identity is supplied by the host and cannot be set here." },
+                "presentation": { "type": "string", "enum": ["unattended", "attended"], "description": "Whether this work needs the user's eyes. Omit (or \"unattended\") for routine reading, searching and extraction — the browser stays silent. Use \"attended\" when the user may need to see the page or take over: a sign-in or verification wall, a CAPTCHA, or a consequential confirmation. This declares INTENT, not a window mode: the host decides whether to actually show a window based on the user's own setting, and may decline. Accepted on browser_open/browser_fork and on any existing-lane action." },
                 "urls": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string" }, "description": "HTTP(S) URLs for browser_crawl_many. One ordered result is returned per URL." },
                 "concurrency": {
                     "description": "Bounded browser_crawl_many concurrency: \"auto\" (default) or an integer 1-8. Hub capacity may admit fewer and report queued.",
@@ -3164,6 +3165,7 @@ pub(crate) mod tests {
         opens: Mutex<Vec<(Option<String>, BrowserIdentityMode, Option<String>)>>,
         operations: Mutex<Vec<(BrowserLaneId, BrowserOperation)>>,
         closes: Mutex<Vec<BrowserLaneId>>,
+        presentation_intents: Mutex<Vec<(BrowserLaneId, BrowserPresentationIntent)>>,
         lanes: Mutex<Vec<BrowserLaneSnapshot>>,
         sequence: AtomicU64,
         open_lifecycle: Mutex<Option<LaneLifecycleState>>,
@@ -3395,6 +3397,20 @@ pub(crate) mod tests {
                 already_closed: closed == 0,
                 ..Default::default()
             })
+        }
+
+        async fn apply_presentation_intent(
+            &self,
+            lane_id: &BrowserLaneId,
+            intent: BrowserPresentationIntent,
+        ) -> Result<(), BrowserPlatformError> {
+            // A fake has no Chromium Host and therefore no window; record the
+            // forwarded report so a test can assert on it.
+            self.presentation_intents
+                .lock()
+                .unwrap()
+                .push((lane_id.clone(), intent));
+            Ok(())
         }
     }
 
