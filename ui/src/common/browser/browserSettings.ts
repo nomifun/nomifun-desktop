@@ -9,13 +9,16 @@ import type { BrowserDisplayMode } from '@/common/config/configKeys';
 
 export type { BrowserDisplayMode } from '@/common/config/configKeys';
 
-// The two supported display modes are trusted installation-level preferences:
-// `headless` (default) launches routine Primary work with Chromium
-// `--headless=new`; `external` is the user's explicit choice to make the
-// Primary Host default-visible. The live owner API applies the policy; Agent
-// tool input can never select the mode.
-export const BROWSER_DISPLAY_MODES = ['headless', 'external'] as const;
-export const BROWSER_DISPLAY_MODE_POLICY_VERSION = 2 as const;
+// The three supported display modes are trusted installation-level preferences:
+// `auto` (default) lets the trusted host resolve visibility per lane — routine
+// work stays silent and a window appears only when the user may need to step in;
+// `headless` pins silent even at such a moment; `external` makes the Primary
+// Host default-visible. The live owner API applies the policy; Agent tool input
+// can only declare intent, never select the mode.
+export const BROWSER_DISPLAY_MODES = ['headless', 'auto', 'external'] as const;
+export const BROWSER_DISPLAY_MODE_POLICY_VERSION = 3 as const;
+/** Previous lineage. A v2 marker proves the stored mode was a real choice. */
+export const BROWSER_DISPLAY_MODE_PREVIOUS_POLICY_VERSION = 2 as const;
 
 export type BrowserDisplayModeMigration = {
   displayMode: BrowserDisplayMode;
@@ -24,7 +27,7 @@ export type BrowserDisplayModeMigration = {
 };
 
 export function isBrowserDisplayMode(value: unknown): value is (typeof BROWSER_DISPLAY_MODES)[number] {
-  return value === 'headless' || value === 'external';
+  return value === 'headless' || value === 'auto' || value === 'external';
 }
 
 /**
@@ -34,11 +37,13 @@ export function isBrowserDisplayMode(value: unknown): value is (typeof BROWSER_D
  * exercise without a renderer or backend. This is only a fail-safe renderer
  * fallback; the live owner API remains authoritative.
  *
- * Version 2 is the lineage boundary for an explicit user visibility choice.
- * A valid mode is preserved only when the marker is exactly v2. Every
- * unversioned, old-version, legacy-silent, missing, or malformed state fails
- * closed to headless so an old inferred `external` value cannot reopen a
- * foreground operating-system window.
+ * Migration mirrors the backend's `resolve_browser_display_mode`. A v3 marker
+ * plus a valid mode is authoritative. A v2 marker proves a deliberate choice, so
+ * an explicit `external` is preserved while v2's universal `headless` default
+ * adopts `auto`. Every unversioned, older, legacy-silent, missing or malformed
+ * state fails closed to `auto` — which still launches silently — so an old
+ * *inferred* `external` value cannot reopen a foreground operating-system
+ * window.
  */
 export function migrateBrowserDisplayMode(input: {
   displayMode?: unknown;
@@ -61,8 +66,21 @@ export function migrateBrowserDisplayMode(input: {
     };
   }
 
+  // Only a v2 marker proves the stored value was an explicit user choice, so it
+  // is the only lineage allowed to carry a visible window forward.
+  const isPreviousVersion =
+    normalizedVersion === BROWSER_DISPLAY_MODE_PREVIOUS_POLICY_VERSION ||
+    normalizedVersion === String(BROWSER_DISPLAY_MODE_PREVIOUS_POLICY_VERSION);
+  if (isPreviousVersion && input.displayMode === 'external') {
+    return {
+      displayMode: 'external',
+      shouldPersist: true,
+      source: 'lineage',
+    };
+  }
+
   return {
-    displayMode: 'headless',
+    displayMode: 'auto',
     shouldPersist: true,
     source:
       input.displayMode === undefined &&

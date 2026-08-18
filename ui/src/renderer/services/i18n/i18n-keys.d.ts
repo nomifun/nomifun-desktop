@@ -3107,6 +3107,7 @@ export type I18nKey =
   | 'settings.bedrock.sessionTokenHint'
   | 'settings.bedrock.testConnection'
   | 'settings.browserDisplayMode'
+  | 'settings.browserDisplayModeAuto'
   | 'settings.browserDisplayModeDesc'
   | 'settings.browserDisplayModeEmbedded'
   | 'settings.browserDisplayModeExternal'

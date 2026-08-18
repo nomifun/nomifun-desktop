@@ -60,15 +60,18 @@ export type ConfigKeyMap = {
   // Read by the backend agent factory per session.
   'agent.browserUse': boolean | undefined;
   // Application-level browser default visibility policy. New installs persist
-  // `headless` (silent Agent browsing); the user may explicitly choose
-  // `external` (default-visible Primary). Historical `embedded`, unversioned,
-  // and legacy `agent.browserUse.silent` state all fail closed to `headless`.
-  // Agent tool input can never select the mode.
+  // `auto` (the host resolves visibility per lane, staying silent for routine
+  // work); the user may pin `headless` (never visible) or `external`
+  // (default-visible Primary). Historical `embedded`, unversioned, and legacy
+  // `agent.browserUse.silent` state all fail closed to `auto`, which still
+  // launches silently. Agent tool input can only declare intent, never select
+  // the mode.
   'agent.browserUse.displayMode': BrowserDisplayMode | undefined;
-  // Lineage marker for an explicit visibility policy. Only v2 plus a valid
-  // displayMode may be shown as a trusted local fallback; the live owner API
-  // remains authoritative.
-  'agent.browserUse.displayModeVersion': 2 | undefined;
+  // Lineage marker for an explicit visibility policy. Only the current version
+  // plus a valid displayMode is authoritative as a local fallback; a v2 marker
+  // is still recognized so an explicit `external` survives migration. The live
+  // owner API remains authoritative.
+  'agent.browserUse.displayModeVersion': 2 | 3 | undefined;
   // Legacy compatibility read only. New settings code must not write this key.
   // Visibility migration no longer derives an external window from this key.
   // Elastic crawl/replica/isolated hosts choose headless execution internally.
