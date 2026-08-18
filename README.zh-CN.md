@@ -617,7 +617,7 @@ GitHub Issues。
 |---|---|
 | 🌐 **官网** | [www.nomifun.com](https://www.nomifun.com) |
 | 🐙 **问题反馈** | [github.com/nomifun/nomifun-desktop/issues](https://github.com/nomifun/nomifun-desktop/issues) |
-| ✉️ **邮箱** | [www.nomifun.com/contact](https://www.nomifun.com/contact) |
+| 📮 **联系页** | [www.nomifun.com/contact](https://www.nomifun.com/contact) |
 | 📕 **小红书** | [NomiFun](https://xhslink.com/m/4x6ti8n6cA1) |
 | 📺 **哔哩哔哩** | [NomiFun](https://b23.tv/0UhgKDh) · [演示视频](https://www.bilibili.com/video/BV1kwKZ6UE5X/) |
 | 🎵 **抖音** | [NomiFun](https://v.douyin.com/MDT5QVdYaJk/) |
