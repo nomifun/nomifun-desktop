@@ -13046,6 +13046,22 @@ impl BrowserLaneClient {
             .close_owner_lanes(&self.caller.owner_lease_id)
             .await
     }
+
+    /// Reports this Agent's presentation intent for one of its Lanes.
+    ///
+    /// Gated on `Manage` like the other Lane-lifecycle operations: surfacing a
+    /// window is a visible change to the user's desktop, not a page interaction.
+    pub async fn apply_presentation_intent(
+        &self,
+        lane_id: &BrowserLaneId,
+        intent: BrowserPresentationIntent,
+    ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
+        self.hub
+            .require_operation(&self.caller, BrowserOperationKind::Manage)?;
+        self.hub
+            .apply_lane_presentation_intent(&self.caller, lane_id, intent)
+            .await
+    }
 }
 
 fn outcome_for_snapshot(

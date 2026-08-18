@@ -16,7 +16,7 @@ use nomi_types::tool::{ToolImage, ToolResult};
 use nomifun_browser_platform::{
     BrowserIdentityMode, BrowserLaneClient, BrowserLaneId, BrowserLaneSnapshot,
     BrowserOperation, BrowserOperationKind, BrowserOperationResult, BrowserPlatformError,
-    CloseResult, LaneLifecycleState, OpenLaneOutcome,
+    BrowserPresentationIntent, CloseResult, LaneLifecycleState, OpenLaneOutcome,
 };
 use serde_json::{Value, json};
 
@@ -104,6 +104,22 @@ pub(crate) trait BrowserLaneClientPort: Send + Sync {
     ) -> Result<CloseResult, BrowserPlatformError>;
 
     async fn close_all(&self) -> Result<CloseResult, BrowserPlatformError>;
+
+    /// Report the Agent's declared presentation intent for one Lane.
+    ///
+    /// Deliberately has **no default implementation**: a defaulted trait method
+    /// silently inherited by every test fake has bitten this crate before (see
+    /// the `profile_footprint` fail-closed incident in the 2026-08-04 hardening
+    /// handoff). Each implementor states its own behaviour.
+    ///
+    /// Returns `()` rather than a snapshot because the call is advisory — the
+    /// trusted host may decline, and the Agent's next `status`/`observe` reports
+    /// the authoritative state either way.
+    async fn apply_presentation_intent(
+        &self,
+        lane_id: &BrowserLaneId,
+        intent: BrowserPresentationIntent,
+    ) -> Result<(), BrowserPlatformError>;
 }
 
 #[async_trait]
@@ -156,6 +172,16 @@ impl BrowserLaneClientPort for BrowserLaneClient {
 
     async fn close_all(&self) -> Result<CloseResult, BrowserPlatformError> {
         BrowserLaneClient::close_all(self).await
+    }
+
+    async fn apply_presentation_intent(
+        &self,
+        lane_id: &BrowserLaneId,
+        intent: BrowserPresentationIntent,
+    ) -> Result<(), BrowserPlatformError> {
+        BrowserLaneClient::apply_presentation_intent(self, lane_id, intent)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -297,6 +323,43 @@ impl ManagedBrowserFacade {
 
 /// Shared open/fork dispatch for every managed surface.
 ///
+/// Parse the Agent's declared presentation intent.
+///
+/// The model states *what kind of moment* this is; it may not name a mechanism.
+/// `headless`/`headful`/`external`/`visible` are therefore rejected rather than
+/// quietly accepted, so a model that guesses the wrong vocabulary gets told
+/// instead of silently falling back to routine.
+///
+/// An absent field means routine work, which is the overwhelmingly common case.
+pub(crate) fn parse_presentation_intent(
+    input: &Value,
+) -> Result<BrowserPresentationIntent, String> {
+    let Some(raw) = input.get("presentation") else {
+        return Ok(BrowserPresentationIntent::Unattended);
+    };
+    let Some(text) = raw.as_str() else {
+        return Err(
+            "Browser input field `presentation` must be the string \"attended\" or \
+             \"unattended\"."
+                .to_owned(),
+        );
+    };
+    match text.trim().to_ascii_lowercase().as_str() {
+        "attended" => Ok(BrowserPresentationIntent::Attended),
+        "unattended" => Ok(BrowserPresentationIntent::Unattended),
+        "headless" | "headful" | "external" | "visible" | "silent" | "background"
+        | "foreground" => Err(format!(
+            "Browser input field `presentation` selects trusted host visibility policy \
+             and does not accept `{text}`. Declare the intent instead: \"attended\" when \
+             the user may need to see or take over (a sign-in wall, a challenge, a \
+             consequential confirmation), otherwise \"unattended\"."
+        )),
+        other => Err(format!(
+            "Unsupported `presentation` value `{other}`. Use \"attended\" or \"unattended\"."
+        )),
+    }
+}
+
 /// Only the platform-error `context` differs per surface (the native tool
 /// reports fork failures as "Forking a browser Lane failed"; the facade uses
 /// one open context for both), so the caller resolves it. `lane_sequence`
@@ -321,6 +384,10 @@ pub(crate) async fn open_lane(
         None => None,
     };
     let workspace_hint = workspace_dir.map(|path| path.to_string_lossy().into_owned());
+    let intent = match parse_presentation_intent(input) {
+        Ok(intent) => intent,
+        Err(message) => return ToolResult::error(message),
+    };
     match client
         // Model-facing open/fork always uses the trusted live Primary
         // identity. The model may choose only the logical lane name;
@@ -330,6 +397,20 @@ pub(crate) async fn open_lane(
     {
         Ok(outcome) => {
             let lane = outcome.lane();
+            // Report the intent after the Lane exists, so the trusted host can
+            // resolve visibility against a real Lane. It is advisory: a declined
+            // escalation is not an open failure, and the Agent's work proceeds
+            // silently, so a reporting error must not fail the open.
+            if intent == BrowserPresentationIntent::Attended
+                && let Err(error) = client
+                    .apply_presentation_intent(&lane.lane_id, intent)
+                    .await
+            {
+                tracing::debug!(
+                    code = ?error.code,
+                    "the declared browser presentation intent was not applied"
+                );
+            }
             ToolResult::text(pretty_json(&json!({
                 "ok": true,
                 "action": if fork { "browser_fork" } else { "browser_open" },
@@ -461,6 +542,27 @@ pub(crate) async fn execute_existing_operation(
     };
     if lane.lifecycle_state != LaneLifecycleState::Running {
         return lane_operation_not_dispatched_result(action, &lane);
+    }
+
+    // An attended moment can be discovered mid-task — the Agent navigates, hits
+    // a sign-in wall, and only then needs the user. Report it before dispatching
+    // so the window is up by the time the user is asked to act. Advisory: the
+    // trusted host may decline (a pinned-silent policy, a spent allowance), and
+    // the operation proceeds either way.
+    match parse_presentation_intent(input) {
+        Ok(BrowserPresentationIntent::Attended) => {
+            if let Err(error) = client
+                .apply_presentation_intent(&lane.lane_id, BrowserPresentationIntent::Attended)
+                .await
+            {
+                tracing::debug!(
+                    code = ?error.code,
+                    "the declared browser presentation intent was not applied"
+                );
+            }
+        }
+        Ok(BrowserPresentationIntent::Unattended) => {}
+        Err(message) => return ToolResult::error(message),
     }
 
     let operation = BrowserOperation {
@@ -2322,6 +2424,9 @@ pub(crate) fn sanitize_operation_input(input: &Value) -> Value {
     sanitized.remove("lane_id");
     sanitized.remove("lane_name");
     sanitized.remove("expected_browser_epoch");
+    // Host visibility policy, consumed by `execute_existing_operation` before
+    // dispatch. It is not an action parameter and must not reach the driver.
+    sanitized.remove("presentation");
     sanitized.remove(OUT_OF_BAND_CONFIRMED_KEY);
     for field in TRUSTED_OWNER_INPUT_FIELDS {
         sanitized.remove(*field);
@@ -2699,6 +2804,7 @@ mod tests {
         opens: Mutex<Vec<(Option<String>, BrowserIdentityMode, Option<String>)>>,
         operations: Mutex<Vec<(BrowserLaneId, BrowserOperation)>>,
         closes: Mutex<Vec<BrowserLaneId>>,
+        presentation_intents: Mutex<Vec<(BrowserLaneId, BrowserPresentationIntent)>>,
         lanes: Mutex<Vec<BrowserLaneSnapshot>>,
         sequence: AtomicU64,
         open_lifecycle: Mutex<Option<LaneLifecycleState>>,
@@ -3006,6 +3112,21 @@ mod tests {
                 ));
             }
             self.close_all_for_test().await
+        }
+
+        async fn apply_presentation_intent(
+            &self,
+            lane_id: &BrowserLaneId,
+            intent: BrowserPresentationIntent,
+        ) -> Result<(), BrowserPlatformError> {
+            // A fake has no Chromium Host and therefore no window. Record the
+            // report so a test can assert what the tool layer forwarded, and
+            // accept it; the real resolution lives in the Hub.
+            self.presentation_intents
+                .lock()
+                .unwrap()
+                .push((lane_id.clone(), intent));
+            Ok(())
         }
     }
 
@@ -4323,5 +4444,128 @@ mod tests {
         assert_eq!(operations[0].1.action, "navigate");
         assert!(!operations[0].1.may_modify_identity);
         assert!(!operations[1].1.may_modify_identity);
+    }
+
+    #[test]
+    fn presentation_intent_accepts_intent_and_rejects_a_mechanism() {
+        assert_eq!(
+            parse_presentation_intent(&json!({})).unwrap(),
+            BrowserPresentationIntent::Unattended,
+            "routine work is the default"
+        );
+        assert_eq!(
+            parse_presentation_intent(&json!({"presentation": "attended"})).unwrap(),
+            BrowserPresentationIntent::Attended
+        );
+        assert_eq!(
+            parse_presentation_intent(&json!({"presentation": " Attended "})).unwrap(),
+            BrowserPresentationIntent::Attended,
+            "case and padding must not change the meaning"
+        );
+
+        // The model states intent, never a mechanism. Guessing the wrong
+        // vocabulary must be reported, not silently downgraded to routine.
+        for mechanism in ["headless", "headful", "external", "visible", "foreground"] {
+            let error = parse_presentation_intent(&json!({"presentation": mechanism}))
+                .expect_err(mechanism);
+            assert!(
+                error.contains("does not accept"),
+                "{mechanism} should be rejected as a mechanism: {error}"
+            );
+        }
+        assert!(parse_presentation_intent(&json!({"presentation": "wat"})).is_err());
+        assert!(parse_presentation_intent(&json!({"presentation": true})).is_err());
+    }
+
+    #[tokio::test]
+    async fn attended_open_forwards_the_intent_and_routine_open_does_not() {
+        let client = Arc::new(FakeLaneClient::default());
+        let sequence = AtomicU64::new(0);
+        open_lane(
+            client.as_ref(),
+            None,
+            &sequence,
+            &json!({"lane_name": "attended", "presentation": "attended"}),
+            false,
+            "Opening a browser Lane failed",
+        )
+        .await;
+        assert_eq!(
+            client
+                .presentation_intents
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, intent)| *intent)
+                .collect::<Vec<_>>(),
+            vec![BrowserPresentationIntent::Attended]
+        );
+
+        // Routine work must not spend a report at all: the Hub's escalation
+        // allowance is small and each one replaces the Chromium Host.
+        client.presentation_intents.lock().unwrap().clear();
+        open_lane(
+            client.as_ref(),
+            None,
+            &sequence,
+            &json!({"lane_name": "routine"}),
+            false,
+            "Opening a browser Lane failed",
+        )
+        .await;
+        assert!(client.presentation_intents.lock().unwrap().is_empty());
+    }
+
+    /// `presentation` is host policy consumed before dispatch; it must not reach
+    /// the driver as if it were an action parameter.
+    #[tokio::test]
+    async fn presentation_is_stripped_from_the_dispatched_operation() {
+        let client = Arc::new(FakeLaneClient::default());
+        let lane = client.snapshot("attended-exec", BrowserIdentityMode::Primary);
+        client.lanes.lock().unwrap().push(lane.clone());
+
+        let result = execute_existing_operation(
+            client.as_ref(),
+            None,
+            "observe",
+            &json!({"lane_id": lane.lane_id.as_str(), "presentation": "attended"}),
+            false,
+        )
+        .await;
+        assert!(!result.is_error, "{result:?}");
+
+        let operations = client.operations.lock().unwrap();
+        assert_eq!(operations.len(), 1);
+        assert!(
+            operations[0].1.input.get("presentation").is_none(),
+            "presentation must be sanitized out of the driver operation"
+        );
+        assert_eq!(
+            client.presentation_intents.lock().unwrap().len(),
+            1,
+            "the intent must still have been reported to the host"
+        );
+    }
+
+    /// A rejected `presentation` must stop the call rather than silently run the
+    /// action with the wrong visibility assumption.
+    #[tokio::test]
+    async fn invalid_presentation_rejects_the_operation_without_dispatching() {
+        let client = Arc::new(FakeLaneClient::default());
+        let lane = client.snapshot("bad-presentation", BrowserIdentityMode::Primary);
+        client.lanes.lock().unwrap().push(lane.clone());
+
+        let result = execute_existing_operation(
+            client.as_ref(),
+            None,
+            "observe",
+            &json!({"lane_id": lane.lane_id.as_str(), "presentation": "headful"}),
+            false,
+        )
+        .await;
+
+        assert!(result.is_error);
+        assert!(client.operations.lock().unwrap().is_empty());
+        assert!(client.presentation_intents.lock().unwrap().is_empty());
     }
 }
