@@ -8,6 +8,7 @@ import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
 import { MODEL_TRAIT_ORDER } from '@/common/modelCapabilities';
 import type {
+  EndpointRootShape,
   ModelProtocolManifestResponse,
   ProtocolDescriptor,
   ProtocolEndpointDescriptor,
@@ -34,6 +35,7 @@ export type CapabilityEndpointDescriptor = ProtocolEndpointDescriptor;
 export type CapabilityProtocolDescriptor = ProtocolDescriptor;
 export type CapabilityProtocolRecommendation = ProtocolRecommendation;
 export type ModelProtocolManifest = ModelProtocolManifestResponse;
+export type CapabilityRootShape = EndpointRootShape;
 
 export type ModelProtocolManifestMap = Partial<Record<ModelTask, ModelProtocolManifest>>;
 
@@ -346,6 +348,103 @@ export const endpointDescriptorValue = (
       return capability.realtimeEndpoint || descriptor.default_value || '';
   }
   return '';
+};
+
+/**
+ * Does this path segment name an API version? Mirrors Rust
+ * `url_algebra::is_version_segment`.
+ */
+const isVersionSegment = (segment: string): boolean =>
+  /^v\d[a-z0-9]*$/i.test(segment);
+
+const pathSegments = (path: string): string[] => path.split('/').filter((segment) => segment.length > 0);
+
+const isAbsoluteUrl = (value: string): boolean => {
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const rootPathSegments = (baseUrl: string): string[] | undefined => {
+  try {
+    return pathSegments(new URL(baseUrl.trim()).pathname);
+  } catch {
+    return undefined;
+  }
+};
+
+/** Does any path segment of this root name an API version? */
+export const rootDeclaresVersion = (baseUrl: string): boolean =>
+  (rootPathSegments(baseUrl) ?? []).some(isVersionSegment);
+
+/**
+ * Is this base URL shaped the way the protocol's endpoint template expects?
+ * Mirrors Rust `url_algebra::root_matches_shape`.
+ */
+export const rootMatchesShape = (baseUrl: string, shape: EndpointRootShape): boolean =>
+  shape === 'versioned_root' ? rootDeclaresVersion(baseUrl) : !rootDeclaresVersion(baseUrl);
+
+/**
+ * Join a connection root and an endpoint template, collapsing a duplicated
+ * version seam exactly once.
+ *
+ * A deliberate second implementation of Rust `url_algebra::join_endpoint`: a
+ * live per-keystroke preview cannot round-trip to the backend. Both are locked
+ * to the shared `url_join_cases.json` fixture so they cannot drift.
+ */
+export const joinEndpointUrl = (baseUrl: string, endpoint: string): string => {
+  const template = endpoint.trim();
+  // An absolute endpoint wins verbatim — the escape hatch for a provider whose
+  // real path genuinely repeats a version segment.
+  if (isAbsoluteUrl(template)) return template;
+
+  const root = baseUrl.trim().replace(/\/+$/, '');
+  const tailIndex = template.search(/[?#]/);
+  const templatePath = tailIndex >= 0 ? template.slice(0, tailIndex) : template;
+  const tail = tailIndex >= 0 ? template.slice(tailIndex) : '';
+  const templateSegments = pathSegments(templatePath);
+  const rootSegments = rootPathSegments(root) ?? [];
+
+  let drop = 0;
+  const max = Math.min(rootSegments.length, templateSegments.length);
+  for (let take = max; take >= 1; take -= 1) {
+    const rootTail = rootSegments.slice(rootSegments.length - take);
+    const matches = rootTail.every(
+      (segment, index) => segment.toLowerCase() === templateSegments[index]?.toLowerCase()
+    );
+    // Only a version seam is de-duplicated: a repeated non-version segment
+    // (`/videos` + `/videos/{id}`) is a real path.
+    if (matches && rootTail.some(isVersionSegment)) {
+      drop = take;
+      break;
+    }
+  }
+
+  const remaining = templateSegments.slice(drop);
+  return remaining.length === 0 ? `${root}${tail}` : `${root}/${remaining.join('/')}${tail}`;
+};
+
+/**
+ * The exact URL a request will hit for one capability endpoint.
+ *
+ * This value previously appeared nowhere in the UI, which is why a user could
+ * pair a base URL ending in `/v1` with a documented path of
+ * `/v1/chat/completions` and only discover the doubled segment as a 404.
+ */
+export const resolvedCapabilityUrl = (
+  capability: ModelCapabilityDraft,
+  descriptor: CapabilityEndpointDescriptor,
+  manifest: ModelProtocolManifest | undefined,
+  providerBaseUrl: string,
+  connections: readonly ProviderConnectionDescriptor[] = []
+): string => {
+  const base = effectiveBaseUrl(capability, manifest, providerBaseUrl, connections);
+  const template = endpointDescriptorValue(capability, descriptor);
+  if (!base.trim() || !template.trim()) return '';
+  return joinEndpointUrl(base, template);
 };
 
 const urlOrigin = (value: string): string | undefined => {

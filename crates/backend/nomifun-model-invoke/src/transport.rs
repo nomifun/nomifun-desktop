@@ -52,7 +52,7 @@ where
         // for empty credentials.
         let mut response = auth.apply(build()?)?.send().await.map_err(net_err)?;
         response.extensions_mut().insert(redactor);
-        return Ok(response);
+        return reject_non_api_response(response);
     }
     let last = secrets.len() - 1;
     for (idx, secret) in secrets.iter().enumerate() {
@@ -61,9 +61,26 @@ where
         if idx < last && is_rotation_status(resp.status()) {
             continue; // this key was refused/throttled — try the next one
         }
-        return Ok(resp);
+        return reject_non_api_response(resp);
     }
     unreachable!("rotation loop always returns on the last key")
+}
+
+/// Fail a response whose content type shows it is a document, not an API payload.
+///
+/// Placed on the single shared send path so every adapter — and
+/// [`crate::service::ModelInvokeService::probe`] — inherits it. Without this, a
+/// gateway that serves its SPA at a near-miss path returns `200 OK` with HTML
+/// and each adapter's own JSON decode fails with a message about parsing, which
+/// reads as a provider bug rather than a wrong address.
+fn reject_non_api_response(response: reqwest::Response) -> Result<reqwest::Response, InvokeError> {
+    match nomifun_net::api_response::is_non_api_content_type(response.headers()) {
+        Some(content_type) => Err(InvokeError::non_api_response(
+            response.status().as_u16(),
+            &content_type,
+        )),
+        None => Ok(response),
+    }
 }
 
 /// `POST url` with a JSON body through key rotation.
@@ -1023,5 +1040,69 @@ mod tests {
         let error = read_body_capped(resp, 5).await.unwrap_err();
         assert_eq!(error.kind, InvokeErrorKind::ProviderError);
         assert!(error.message.contains("exceeded size cap"));
+    }
+
+    /// A gateway serving its SPA at a near-miss path answers `200 OK` with HTML.
+    /// Status-only checks accepted that and the failure surfaced later as a
+    /// parse/stream complaint about the model instead of the address.
+    #[tokio::test]
+    async fn html_success_is_rejected_as_a_non_api_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("<!doctype html><html><body>gateway</body></html>", "text/html"),
+            )
+            .mount(&server)
+            .await;
+        let auth = AuthMaterial {
+            scheme: AuthScheme::Bearer,
+            credentials: json!({"api_keys": ["k"]}),
+        };
+        let error = post_json(
+            &reqwest::Client::new(),
+            &format!("{}/chat/completions", server.uri()),
+            Duration::from_secs(5),
+            &auth,
+            &json!({}),
+        )
+        .await
+        .expect_err("an HTML body must not be accepted as an API response");
+        assert_eq!(error.kind, InvokeErrorKind::NonApiResponse);
+        assert_eq!(error.http_status, Some(200));
+        assert!(
+            error.message.contains("web page"),
+            "diagnosis must point at the address: {}",
+            error.message
+        );
+    }
+
+    /// The gate keys on content type, not on status, so a normal JSON error
+    /// response still reaches the adapter's own classification untouched.
+    #[tokio::test]
+    async fn json_responses_pass_the_non_api_gate_at_any_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_json(json!({"code": "INVALID_API_KEY"})),
+            )
+            .mount(&server)
+            .await;
+        let auth = AuthMaterial {
+            scheme: AuthScheme::Bearer,
+            credentials: json!({"api_keys": ["k"]}),
+        };
+        let response = post_json(
+            &reqwest::Client::new(),
+            &format!("{}/v1/chat/completions", server.uri()),
+            Duration::from_secs(5),
+            &auth,
+            &json!({}),
+        )
+        .await
+        .expect("a JSON body must reach the caller for normal classification");
+        assert_eq!(response.status(), 401);
     }
 }

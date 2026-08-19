@@ -140,7 +140,7 @@ pub(crate) async fn fetch_deepgram_catalog(
     api_key: &str,
 ) -> Result<DeepgramCatalog, AppError> {
     let base = ensure_v1_path(base_url);
-    let url = format!("{}/models", base.trim_end_matches('/'));
+    let url = nomifun_model_invoke::join_endpoint(&base, "/models");
     let resp = client
         .get(&url)
         .header("Authorization", format!("Token {api_key}"))
@@ -284,7 +284,7 @@ pub(super) async fn fetch_openai_compatible_with_auth(
     base_url: &str,
     auth: &AuthMaterial,
 ) -> Result<Vec<ModelInfo>, AppError> {
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let url = nomifun_model_invoke::join_endpoint(base_url, "/models");
     let request = apply_catalog_auth(client.get(&url), auth)?;
     let resp = request
         .timeout(REQUEST_TIMEOUT)
@@ -331,7 +331,7 @@ async fn fetch_anthropic(
     base_url: &str,
     api_key: &str,
 ) -> Result<Vec<ModelInfo>, AppError> {
-    let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    let url = nomifun_model_invoke::join_endpoint(base_url, "/v1/models");
     let result = client
         .get(&url)
         .header("x-api-key", api_key)
@@ -384,7 +384,7 @@ async fn fetch_gemini(
     base_url: &str,
     api_key: &str,
 ) -> Result<Vec<ModelInfo>, AppError> {
-    let url = format!("{}/v1beta/models", base_url.trim_end_matches('/'));
+    let url = nomifun_model_invoke::join_endpoint(base_url, "/v1beta/models");
     let resp = client
         .get(&url)
         .header("x-goog-api-key", api_key)
@@ -798,13 +798,12 @@ async fn fetch_new_api(
 }
 
 /// Ensure the URL path ends with `/v1`.
+///
+/// Delegates to the shared URL algebra so this crate has exactly one `/v1`
+/// policy. The join is idempotent: a root that already ends in `/v1` is
+/// returned unchanged rather than doubled.
 fn ensure_v1_path(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with("/v1") {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}/v1")
-    }
+    nomifun_model_invoke::join_endpoint(base_url, "/v1")
 }
 
 // ---------------------------------------------------------------------------

@@ -1,3 +1,4 @@
+pub mod api_response;
 pub mod egress;
 pub mod proxy;
 pub mod secret_redaction;

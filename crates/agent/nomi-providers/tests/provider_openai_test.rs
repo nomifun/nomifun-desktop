@@ -199,6 +199,75 @@ async fn openai_gateway_does_not_schema_retry_an_unrelated_500() {
     server.verify().await;
 }
 
+/// A gateway that serves its web UI at a near-miss path answers `200 OK` with
+/// HTML. That used to be fed to the SSE reader, which dropped every non-`data:`
+/// line and reported a truncated stream — a retryable error, so one click became
+/// three POSTs to the wrong URL and the user was told the model misbehaved.
+#[tokio::test]
+async fn html_success_is_reported_as_a_wrong_address_after_exactly_one_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(
+                "<!doctype html><html lang=\"zh-CN\"><head><title>Gateway</title></head></html>",
+                "text/html",
+            ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = OpenAIProvider::new(
+        "test-key",
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+    );
+    let error = provider.stream(&make_request()).await.unwrap_err();
+    assert!(
+        matches!(error, ProviderError::NonApiResponse { .. }),
+        "expected a wrong-address diagnosis, got {error:?}"
+    );
+    assert!(!error.is_retryable(), "a wrong URL must not be retried");
+    // `expect(1)` above is the assertion that matters: no amplification.
+    server.verify().await;
+}
+
+/// A genuine truncated stream must still be retried, so the wrong-address case
+/// and the transient-failure case stay distinguishable. Errors raised after the
+/// stream opens are delivered as `LlmEvent::Error`, not as a `stream()` failure.
+#[tokio::test]
+async fn a_real_truncated_sse_stream_is_still_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "data: {\"choices\":[{\"delta\":{}}]}\n\n",
+            "text/event-stream",
+        ))
+        .expect(3)
+        .mount(&server)
+        .await;
+    let provider = OpenAIProvider::new(
+        "test-key",
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+    );
+    let events = collect_events(provider.stream(&make_request()).await.unwrap()).await;
+    let error = events
+        .iter()
+        .find_map(|event| match event {
+            LlmEvent::Error(message) => Some(message.clone()),
+            _ => None,
+        })
+        .expect("a truncated stream must surface an error event");
+    assert!(
+        error.contains("truncated"),
+        "a body that did produce SSE events is a truncation: {error}"
+    );
+    // `expect(3)` is the assertion that matters: truncation still retries.
+    server.verify().await;
+}
+
 #[tokio::test]
 async fn openai_chat_error_never_exposes_raw_or_percent_encoded_runtime_key() {
     let server = MockServer::start().await;

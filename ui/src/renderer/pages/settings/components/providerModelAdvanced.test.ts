@@ -53,6 +53,7 @@ const manifest = (
   protocols: [
     {
       protocol_id: protocolId,
+      root_shape: 'versioned_root' as const,
       supported_tasks: [task],
       executor: 'model_invoke',
       transport: task === 'realtime_conversation' ? 'websocket' : 'http',
@@ -78,6 +79,7 @@ const manifest = (
           method: task === 'realtime_conversation' ? null : 'POST',
           default_value:
             task === 'realtime_conversation' ? 'wss://api.stepfun.com/v1/realtime' : '/audio/speech',
+          root_shape: 'versioned_root' as const,
           allowed_placeholders: [],
           required_placeholders: [],
           editable: true,

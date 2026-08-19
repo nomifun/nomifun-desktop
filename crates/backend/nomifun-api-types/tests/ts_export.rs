@@ -3,14 +3,17 @@ use std::path::Path;
 use ts_rs::{Config, TS};
 
 use nomifun_api_types::{
-    AuthSchemeDescriptor, CapabilityHealth, CloneProviderRequest, HealthStatus,
+    AuthSchemeDescriptor, CapabilityHealth, CloneProviderRequest, EndpointRootShape, HealthStatus,
     KnowledgeEmbeddingConfig, KnowledgeRerankConfig, KnowledgeRetrievalConfig,
     ModelProtocolManifestResponse, ModelTask, ModelTrait, PlatformPresetDescriptor,
     ProtocolDefaultConnection, ProtocolDescriptor, ProtocolEndpointDescriptor,
     ProtocolEndpointPurpose, ProtocolExecutorKind, ProtocolRecommendation, ProtocolScope,
-    ProtocolTaskDescriptor, ProtocolTransportKind, ProviderConnectionInput,
+    ProbeCandidateResult, ProbeProviderConnectionAnonymousRequest, ProbeProviderConnectionRequest,
+    ProbeProviderConnectionResponse, ProtocolTaskDescriptor, ProtocolTransportKind,
+    ProviderConnectionInput,
     ProviderConnectionResponse, ProviderHealthCheckErrorKind, ProviderHealthCheckRequest,
     ProviderHealthCheckResponse, ProviderModelCapabilityInput, ProviderModelCapabilityResponse,
+    ProviderReachability,
     ProviderModelInput, ProviderModelKeyRequest, ProviderModelResponse,
     SaveProviderConnectionRequest, SaveProviderModelRequest,
 };
@@ -38,6 +41,15 @@ fn export_provider_domain_bindings() {
     export_binding_if_changed::<ProviderHealthCheckErrorKind>("ProviderHealthCheckErrorKind.ts");
     export_binding_if_changed::<ProviderHealthCheckRequest>("ProviderHealthCheckRequest.ts");
     export_binding_if_changed::<ProviderHealthCheckResponse>("ProviderHealthCheckResponse.ts");
+    export_binding_if_changed::<ProviderReachability>("ProviderReachability.ts");
+    export_binding_if_changed::<ProbeCandidateResult>("ProbeCandidateResult.ts");
+    export_binding_if_changed::<ProbeProviderConnectionRequest>("ProbeProviderConnectionRequest.ts");
+    export_binding_if_changed::<ProbeProviderConnectionAnonymousRequest>(
+        "ProbeProviderConnectionAnonymousRequest.ts",
+    );
+    export_binding_if_changed::<ProbeProviderConnectionResponse>(
+        "ProbeProviderConnectionResponse.ts",
+    );
     export_binding_if_changed::<CapabilityHealth>("CapabilityHealth.ts");
     export_binding_if_changed::<ProviderModelCapabilityInput>("ProviderModelCapabilityInput.ts");
     export_binding_if_changed::<ProviderModelCapabilityResponse>(
@@ -55,6 +67,7 @@ fn export_provider_domain_bindings() {
     export_binding_if_changed::<ProtocolTransportKind>("ProtocolTransportKind.ts");
     export_binding_if_changed::<ProtocolScope>("ProtocolScope.ts");
     export_binding_if_changed::<ProtocolEndpointPurpose>("ProtocolEndpointPurpose.ts");
+    export_binding_if_changed::<EndpointRootShape>("EndpointRootShape.ts");
     export_binding_if_changed::<ProtocolEndpointDescriptor>("ProtocolEndpointDescriptor.ts");
     export_binding_if_changed::<ProtocolDefaultConnection>("ProtocolDefaultConnection.ts");
     export_binding_if_changed::<ProtocolDescriptor>("ProtocolDescriptor.ts");
@@ -131,4 +144,21 @@ fn generated_shapes_mirror_single_source_wire_contract() {
     assert!(connection.contains("connection_role: string | null"));
     assert!(connection.contains("auth_scheme: string"));
     assert!(connection.contains("requires_credentials: boolean"));
+
+    // The version-boundary convention must reach the UI: it is the only thing
+    // that tells a custom provider whether `/v1` belongs in its base URL, and a
+    // custom-scope manifest ships no default connection to infer it from.
+    let endpoint = ProtocolEndpointDescriptor::export_to_string(&cfg).unwrap();
+    assert!(
+        endpoint.contains("root_shape: EndpointRootShape,"),
+        "got: {endpoint}"
+    );
+    let root_shape = EndpointRootShape::export_to_string(&cfg).unwrap();
+    assert!(root_shape.contains("\"versioned_root\""), "got: {root_shape}");
+    assert!(root_shape.contains("\"origin_root\""), "got: {root_shape}");
+    let protocol = ProtocolDescriptor::export_to_string(&cfg).unwrap();
+    assert!(
+        protocol.contains("root_shape: EndpointRootShape | null"),
+        "got: {protocol}"
+    );
 }

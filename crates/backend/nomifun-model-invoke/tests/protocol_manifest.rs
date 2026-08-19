@@ -62,6 +62,7 @@ fn fake_descriptor(id: &str) -> ProtocolDescriptor {
         platforms: vec![],
         default_connections: vec![],
         endpoints: vec![],
+        root_shape: None,
     }
 }
 
@@ -272,11 +273,9 @@ fn all_recommended_lifecycle_urls_match_the_locked_official_matrix() {
             }
             let base = recommendation.default_base_url.as_deref().expect("network base URL");
             for endpoint in descriptor.endpoints {
-                let mut url = format!(
-                    "{}/{}",
-                    base.trim_end_matches('/'),
-                    endpoint.default_value.trim_start_matches('/')
-                );
+                // Compose through the production joiner so this snapshot cannot
+                // stay green while the real URL assembly regresses.
+                let mut url = nomifun_model_invoke::join_endpoint(base, &endpoint.default_value);
                 if descriptor.transport == ProtocolTransportKind::Websocket {
                     if let Some(tail) = url.strip_prefix("https://") {
                         url = format!("wss://{tail}");

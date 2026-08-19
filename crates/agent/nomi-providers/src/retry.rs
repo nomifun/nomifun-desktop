@@ -101,6 +101,7 @@ pub async fn send_and_check(
         .await
         .map_err(ProviderError::from)?;
 
+    let response = crate::reject_non_api_response(response)?;
     let status = response.status();
     if !status.is_success() {
         let body_text = crate::read_provider_error_body(response, redactor).await;

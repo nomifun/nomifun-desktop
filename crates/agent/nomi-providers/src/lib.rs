@@ -80,6 +80,14 @@ pub enum ProviderError {
     /// that separate empty/partial distinction.
     #[error("Provider stream truncated: {0}")]
     StreamTruncated(String),
+    /// The address answered with a document instead of an API payload — a
+    /// gateway serving its web UI at a near-miss path. Never retryable: the
+    /// same wrong URL will answer the same way.
+    #[error("Provider returned a web page, not an API response{}: {message}", content_type.as_ref().map(|value| format!(" (content-type {value})")).unwrap_or_default())]
+    NonApiResponse {
+        content_type: Option<String>,
+        message: String,
+    },
 }
 
 impl ProviderError {
@@ -105,6 +113,13 @@ impl ProviderError {
             Self::StreamTruncated(message) => {
                 Self::StreamTruncated(redactor.redact(&message))
             }
+            Self::NonApiResponse {
+                content_type,
+                message,
+            } => Self::NonApiResponse {
+                content_type,
+                message: redactor.redact(&message),
+            },
         }
     }
 
@@ -210,6 +225,29 @@ pub(crate) fn is_api_key_rotation_error(error: &ProviderError) -> bool {
     )
 }
 
+/// Reject a response whose content type shows the address served a document.
+///
+/// Applied before the status check so a `200 OK` HTML page — what an
+/// OpenAI-compatible gateway returns for a near-miss path such as
+/// `/chat/completions` when it wants `/v1/chat/completions` — is reported as a
+/// wrong address instead of flowing into the SSE reader, which discards every
+/// non-`data:` line and then blames the model for a truncated stream.
+pub(crate) fn reject_non_api_response(
+    response: reqwest::Response,
+) -> Result<reqwest::Response, ProviderError> {
+    match nomifun_net::api_response::is_non_api_content_type(response.headers()) {
+        Some(content_type) => Err(ProviderError::NonApiResponse {
+            content_type: Some(content_type),
+            message: format!(
+                "HTTP {} — {}",
+                response.status().as_u16(),
+                nomifun_net::api_response::NON_API_DIAGNOSTIC
+            ),
+        }),
+        None => Ok(response),
+    }
+}
+
 /// Send the initial streaming request with bounded transient-failure retry.
 ///
 /// Shared by the API-key-based providers (Anthropic, OpenAI, Gemini): posts `body`
@@ -229,6 +267,7 @@ pub(crate) async fn send_initial(
             .json(body)
             .send()
             .await?;
+        let response = reject_non_api_response(response)?;
         let status = response.status();
         if status.is_success() {
             return Ok(response);

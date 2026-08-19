@@ -51,6 +51,7 @@ import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import { consumePendingDeepLink } from '@/renderer/hooks/system/useDeepLink';
 import { isManagedModelProvider } from '@/common/types/provider/managedModelService';
 import { reorderById, reorderStrings } from './modelProviderOrdering';
+import { healthFailureHeadline } from './healthFailureHeadline';
 import {
   capabilityInputFromResponse,
   type ProviderModelCapabilityInput,
@@ -712,8 +713,23 @@ const ModelModalContent: React.FC = () => {
         });
       } else {
         Message.error({
-          content: `${platform.name} - ${modelName}: ${t('common.failed')} - ${errorMessage}`,
-          duration: 5000,
+          content: (
+            <span data-health-error-kind={result.error_kind} data-health-http-status={result.http_status}>
+              {`${platform.name} - ${modelName}: ${healthFailureHeadline(t, result)}`}
+              <br />
+              {errorMessage}
+              {result.attempted_url && (
+                <>
+                  <br />
+                  <span className='text-t-tertiary break-all'>
+                    {t('settings.modelAdvanced.resolvedUrl', { defaultValue: '实际请求地址' })}:{' '}
+                    {result.attempted_url}
+                  </span>
+                </>
+              )}
+            </span>
+          ),
+          duration: 8000,
         });
       }
     } catch (error: unknown) {

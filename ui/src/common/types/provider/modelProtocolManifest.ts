@@ -9,6 +9,7 @@
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 
 export type { AuthSchemeDescriptor } from '@/common/protocolBindings/AuthSchemeDescriptor';
+export type { EndpointRootShape } from '@/common/protocolBindings/EndpointRootShape';
 export type { ModelProtocolManifestResponse } from '@/common/protocolBindings/ModelProtocolManifestResponse';
 export type { PlatformPresetDescriptor } from '@/common/protocolBindings/PlatformPresetDescriptor';
 export type { ProtocolDefaultConnection } from '@/common/protocolBindings/ProtocolDefaultConnection';

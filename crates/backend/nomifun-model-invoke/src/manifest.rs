@@ -8,10 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nomifun_api_types::ModelTask;
 pub use nomifun_api_types::{
-    AuthSchemeDescriptor, ModelProtocolManifestResponse, PlatformPresetDescriptor,
-    ProtocolDefaultConnection, ProtocolDescriptor, ProtocolEndpointDescriptor,
-    ProtocolEndpointPurpose, ProtocolExecutorKind, ProtocolRecommendation, ProtocolScope,
-    ProtocolTaskDescriptor, ProtocolTransportKind,
+    AuthSchemeDescriptor, EndpointRootShape, ModelProtocolManifestResponse,
+    PlatformPresetDescriptor, ProtocolDefaultConnection, ProtocolDescriptor,
+    ProtocolEndpointDescriptor, ProtocolEndpointPurpose, ProtocolExecutorKind,
+    ProtocolRecommendation, ProtocolScope, ProtocolTaskDescriptor, ProtocolTransportKind,
 };
 
 use crate::adapter::AdapterRegistry;
@@ -133,6 +133,43 @@ impl ProtocolManifestRegistry {
                         "protocol descriptor {id:?} default endpoint {:?} does not satisfy its placeholder contract",
                         endpoint.field
                     )));
+                }
+                // The declared version convention must match the template it
+                // describes. Without this, `root_shape` could silently disagree
+                // with `default_value` and the UI would state the wrong rule —
+                // which is exactly the class of defect this field exists to end.
+                let template_is_versioned = endpoint
+                    .default_value
+                    .split(['?', '#'])
+                    .next()
+                    .unwrap_or_default()
+                    .split('/')
+                    .any(crate::url_algebra::is_version_segment);
+                let declared_origin_root =
+                    endpoint.root_shape == nomifun_api_types::EndpointRootShape::OriginRoot;
+                if template_is_versioned != declared_origin_root {
+                    return Err(InvokeError::config(format!(
+                        "protocol descriptor {id:?} endpoint {:?} declares {:?} but its template {:?} says otherwise",
+                        endpoint.field, endpoint.root_shape, endpoint.default_value
+                    )));
+                }
+                if endpoint.root_shape != descriptor.endpoints[0].root_shape {
+                    return Err(InvokeError::config(format!(
+                        "protocol descriptor {id:?} mixes endpoint root shapes; one protocol has one convention"
+                    )));
+                }
+            }
+            // A shipped default connection must satisfy its own protocol's
+            // convention, or the preset would hand the user a root that cannot
+            // work with the endpoint template it is paired with.
+            if let Some(shape) = descriptor.endpoints.first().map(|first| first.root_shape) {
+                for connection in &descriptor.default_connections {
+                    if !crate::url_algebra::root_matches_shape(&connection.base_url, shape) {
+                        return Err(InvokeError::config(format!(
+                            "protocol descriptor {id:?} default connection for preset {:?} has base_url {:?}, which contradicts {shape:?}",
+                            connection.preset, connection.base_url
+                        )));
+                    }
                 }
             }
             if by_id.insert(id.clone(), descriptor).is_some() {
@@ -310,8 +347,14 @@ struct EndpointSpec {
     method: Option<&'static str>,
     default_value: &'static str,
     editable: bool,
+    /// Which half of the URL owns the API version segment. Enforced against
+    /// `default_value` by [`ProtocolManifestRegistry::try_new`], so a template
+    /// and its declaration cannot drift apart.
+    root: EndpointRootShape,
 }
 
+/// An endpoint whose template is version-free, so the connection root must
+/// carry the version (`https://host/v1` + `/chat/completions`).
 const fn endpoint(
     task: ModelTask,
     field: &'static str,
@@ -319,7 +362,35 @@ const fn endpoint(
     method: &'static str,
     default_value: &'static str,
 ) -> EndpointSpec {
-    EndpointSpec { task, field, purpose, method: Some(method), default_value, editable: true }
+    EndpointSpec {
+        task,
+        field,
+        purpose,
+        method: Some(method),
+        default_value,
+        editable: true,
+        root: EndpointRootShape::VersionedRoot,
+    }
+}
+
+/// An endpoint whose template carries the version itself, so the connection
+/// root must be version-free (`https://host` + `/v1/messages`).
+const fn origin_endpoint(
+    task: ModelTask,
+    field: &'static str,
+    purpose: ProtocolEndpointPurpose,
+    method: &'static str,
+    default_value: &'static str,
+) -> EndpointSpec {
+    EndpointSpec {
+        task,
+        field,
+        purpose,
+        method: Some(method),
+        default_value,
+        editable: true,
+        root: EndpointRootShape::OriginRoot,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -392,43 +463,43 @@ use ProtocolTransportKind::{Http, Sdk, Websocket};
 
 const PROTOCOL_SPECS: &[ProtocolSpec] = &[
     ProtocolSpec { id: "openai.chat_text", tasks: &[Chat], executor: Agent, transport: Http, scopes: ALL_SCOPES, platforms: OPENAI_CHAT_PLATFORMS, connection_role: None, endpoints: &[endpoint(Chat, "endpoint", Submit, "POST", "/chat/completions")] },
-    ProtocolSpec { id: "anthropic.messages", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["anthropic"], connection_role: None, endpoints: &[endpoint(Chat, "endpoint", Submit, "POST", "/v1/messages")] },
+    ProtocolSpec { id: "anthropic.messages", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["anthropic"], connection_role: None, endpoints: &[origin_endpoint(Chat, "endpoint", Submit, "POST", "/v1/messages")] },
     ProtocolSpec { id: "bedrock.anthropic_messages", tasks: &[Chat], executor: Agent, transport: Sdk, scopes: NATIVE_ONLY, platforms: &["bedrock"], connection_role: None, endpoints: &[] },
-    ProtocolSpec { id: "gemini.generate_text", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini"], connection_role: None, endpoints: &[endpoint(Chat, "endpoint", Submit, "POST", "/v1beta/models/{model}:streamGenerateContent?alt=sse")] },
+    ProtocolSpec { id: "gemini.generate_text", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini"], connection_role: None, endpoints: &[origin_endpoint(Chat, "endpoint", Submit, "POST", "/v1beta/models/{model}:streamGenerateContent?alt=sse")] },
     ProtocolSpec { id: "openai.images", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "ctyun"], connection_role: None, endpoints: &[
         endpoint(ImageGeneration, "endpoint", Submit, "POST", "/images/generations"),
         endpoint(ImageEdit, "endpoint", Submit, "POST", "/images/edits"),
     ] },
     ProtocolSpec { id: "openai.videos", tasks: &[VideoGeneration], executor: AsyncJob, transport: Http, scopes: ALL_SCOPES, platforms: &["openai"], connection_role: None, endpoints: &[
         endpoint(VideoGeneration, "endpoint", Submit, "POST", "/videos"),
-        EndpointSpec { task: VideoGeneration, field: "poll_endpoint", purpose: Poll, method: Some("GET"), default_value: "/videos/{id}", editable: true },
-        EndpointSpec { task: VideoGeneration, field: "content_endpoint", purpose: Content, method: Some("GET"), default_value: "/videos/{id}/content", editable: true },
+        endpoint(VideoGeneration, "poll_endpoint", Poll, "GET", "/videos/{id}"),
+        endpoint(VideoGeneration, "content_endpoint", Content, "GET", "/videos/{id}/content"),
     ] },
     ProtocolSpec { id: "openai.embeddings", tasks: &[Embedding], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "novita", "openrouter", "siliconflow", "ppio", "infiniai", "qianfan", "hunyuan", "hunyuan-global", "ctyun", "zhipu"], connection_role: None, endpoints: &[endpoint(Embedding, "endpoint", Submit, "POST", "/embeddings")] },
     ProtocolSpec { id: "generic.rerank", tasks: &[Rerank], executor: ModelInvoke, transport: Http, scopes: COMPAT_CUSTOM, platforms: &["siliconflow", "ppio", "qianfan", "ctyun", "zhipu"], connection_role: None, endpoints: &[endpoint(Rerank, "endpoint", Submit, "POST", "/rerank")] },
     ProtocolSpec { id: "openai.audio_transcriptions", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "siliconflow"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/audio/transcriptions")] },
     ProtocolSpec { id: "openai.audio_speech", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/audio/speech")] },
     ProtocolSpec { id: "gemini.generate_content", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini"], connection_role: None, endpoints: &[
-        endpoint(ImageGeneration, "endpoint", Submit, "POST", "/v1beta/models/{model}:generateContent"),
-        endpoint(ImageEdit, "endpoint", Submit, "POST", "/v1beta/models/{model}:generateContent"),
+        origin_endpoint(ImageGeneration, "endpoint", Submit, "POST", "/v1beta/models/{model}:generateContent"),
+        origin_endpoint(ImageEdit, "endpoint", Submit, "POST", "/v1beta/models/{model}:generateContent"),
     ] },
-    ProtocolSpec { id: "deepgram.listen", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["deepgram"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/v1/listen")] },
-    ProtocolSpec { id: "deepgram.speak_rest", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["deepgram"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/v1/speak")] },
+    ProtocolSpec { id: "deepgram.listen", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["deepgram"], connection_role: None, endpoints: &[origin_endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/v1/listen")] },
+    ProtocolSpec { id: "deepgram.speak_rest", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["deepgram"], connection_role: None, endpoints: &[origin_endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/v1/speak")] },
     ProtocolSpec { id: "ark.images", tasks: &[ImageGeneration], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["ark", "volcengine"], connection_role: None, endpoints: &[endpoint(ImageGeneration, "endpoint", Submit, "POST", "/images/generations")] },
     ProtocolSpec { id: "ark.video_jobs", tasks: &[VideoGeneration], executor: AsyncJob, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["ark", "volcengine"], connection_role: None, endpoints: &[
         endpoint(VideoGeneration, "endpoint", Submit, "POST", "/contents/generations/tasks"),
-        EndpointSpec { task: VideoGeneration, field: "poll_endpoint", purpose: Poll, method: Some("GET"), default_value: "/contents/generations/tasks/{id}", editable: true },
+        endpoint(VideoGeneration, "poll_endpoint", Poll, "GET", "/contents/generations/tasks/{id}"),
     ] },
     ProtocolSpec { id: "volc.asr_file", tasks: &[SpeechRecognition], executor: AsyncJob, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["ark", "volcengine"], connection_role: Some("voice"), endpoints: &[
-        EndpointSpec { task: SpeechRecognition, field: "endpoint", purpose: Submit, method: Some("POST"), default_value: "/api/v3/auc/bigmodel/submit", editable: true },
-        EndpointSpec { task: SpeechRecognition, field: "poll_endpoint", purpose: Poll, method: Some("POST"), default_value: "/api/v3/auc/bigmodel/query", editable: true },
+        origin_endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/api/v3/auc/bigmodel/submit"),
+        origin_endpoint(SpeechRecognition, "poll_endpoint", Poll, "POST", "/api/v3/auc/bigmodel/query"),
     ] },
-    ProtocolSpec { id: "volc.tts_v3", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["ark", "volcengine"], connection_role: Some("voice"), endpoints: &[EndpointSpec { task: SpeechSynthesis, field: "endpoint", purpose: Submit, method: Some("POST"), default_value: "/api/v3/tts/unidirectional", editable: true }] },
+    ProtocolSpec { id: "volc.tts_v3", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["ark", "volcengine"], connection_role: Some("voice"), endpoints: &[origin_endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/api/v3/tts/unidirectional")] },
     ProtocolSpec { id: "dashscope.images", tasks: &[ImageGeneration], executor: AsyncJob, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["dashscope"], connection_role: None, endpoints: &[
-        endpoint(ImageGeneration, "endpoint", Submit, "POST", "/api/v1/services/aigc/text2image/image-synthesis"),
-        EndpointSpec { task: ImageGeneration, field: "poll_endpoint", purpose: Poll, method: Some("GET"), default_value: "/api/v1/tasks/{id}", editable: true },
+        origin_endpoint(ImageGeneration, "endpoint", Submit, "POST", "/api/v1/services/aigc/text2image/image-synthesis"),
+        origin_endpoint(ImageGeneration, "poll_endpoint", Poll, "GET", "/api/v1/tasks/{id}"),
     ] },
-    ProtocolSpec { id: "dashscope.embeddings", tasks: &[Embedding], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["dashscope"], connection_role: None, endpoints: &[endpoint(Embedding, "endpoint", Submit, "POST", "/api/v1/services/embeddings/text-embedding/text-embedding")] },
+    ProtocolSpec { id: "dashscope.embeddings", tasks: &[Embedding], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["dashscope"], connection_role: None, endpoints: &[origin_endpoint(Embedding, "endpoint", Submit, "POST", "/api/v1/services/embeddings/text-embedding/text-embedding")] },
     ProtocolSpec { id: "minimax.t2a", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["minimax"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/t2a_v2")] },
     ProtocolSpec { id: "mimo.chat_asr", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["mimo"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/chat/completions")] },
     ProtocolSpec { id: "mimo.chat_tts", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["mimo"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/chat/completions")] },
@@ -785,6 +856,7 @@ fn owned_endpoint(protocol_id: &str, spec: EndpointSpec) -> ProtocolEndpointDesc
         purpose: spec.purpose,
         method: spec.method.map(str::to_owned),
         default_value: spec.default_value.to_owned(),
+        root_shape: spec.root,
         allowed_placeholders,
         required_placeholders,
         editable: spec.editable,
@@ -815,6 +887,16 @@ fn owned_protocol(spec: ProtocolSpec) -> ProtocolDescriptor {
             });
         }
     }
+    let endpoints = spec
+        .endpoints
+        .iter()
+        .copied()
+        .map(|endpoint| owned_endpoint(spec.id, endpoint))
+        .collect::<Vec<_>>();
+    // Every endpoint of one protocol shares a convention (enforced by
+    // `ProtocolManifestRegistry::try_new`), so the protocol-level shape is just
+    // the first endpoint's. `sdk` transports build no URL and declare none.
+    let root_shape = endpoints.first().map(|endpoint| endpoint.root_shape);
     ProtocolDescriptor {
         protocol_id: spec.id.to_owned(),
         supported_tasks: spec.tasks.to_vec(),
@@ -827,12 +909,8 @@ fn owned_protocol(spec: ProtocolSpec) -> ProtocolDescriptor {
         scopes: spec.scopes.to_vec(),
         platforms: spec.platforms.iter().map(|value| (*value).to_owned()).collect(),
         default_connections,
-        endpoints: spec
-            .endpoints
-            .iter()
-            .copied()
-            .map(|endpoint| owned_endpoint(spec.id, endpoint))
-            .collect(),
+        endpoints,
+        root_shape,
     }
 }
 
@@ -931,6 +1009,7 @@ pub fn protocol_task_descriptor(
             .into_iter()
             .filter(|endpoint| endpoint.task == task)
             .collect(),
+        root_shape: descriptor.root_shape,
     })
 }
 
@@ -1061,6 +1140,7 @@ mod tests {
             platforms: vec![],
             default_connections: vec![],
             endpoints: vec![],
+            root_shape: None,
         }
     }
 
@@ -1083,6 +1163,7 @@ mod tests {
             purpose: Submit,
             method: Some("POST".to_owned()),
             default_value: "/chat/completions".to_owned(),
+            root_shape: EndpointRootShape::VersionedRoot,
             allowed_placeholders: vec![],
             required_placeholders: vec![],
             editable: true,
@@ -1468,11 +1549,10 @@ mod tests {
         let descriptor = protocol_task_descriptor(&recommendation.protocol_id, view.requested_task)
             .expect("recommended protocol descriptor");
         let base = recommendation.default_base_url.as_deref().expect("recommended base URL");
-        let mut joined = format!(
-            "{}/{}",
-            base.trim_end_matches('/'),
-            endpoint.default_value.trim_start_matches('/')
-        );
+        // Compose through the production joiner, not a test-local copy: a
+        // snapshot built by a second implementation would stay green even if
+        // the real joiner regressed.
+        let mut joined = crate::url_algebra::join_endpoint(base, &endpoint.default_value);
         if descriptor.transport == Websocket {
             if let Some(tail) = joined.strip_prefix("https://") {
                 joined = format!("wss://{tail}");

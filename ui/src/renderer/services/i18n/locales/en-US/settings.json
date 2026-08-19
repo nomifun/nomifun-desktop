@@ -1636,7 +1636,14 @@
     "defaultVoice": "Default voice",
     "defaultVoicePlaceholder": "Select or enter a provider voice id",
     "defaultVoiceHint": "Some providers (such as StepFun) require a voice; speech synthesis fails outright without one. Leave empty to supply it per request.",
-    "defaultVoiceUnavailable": "Fix the provider parameters JSON below before choosing a voice."
+    "defaultVoiceUnavailable": "Fix the provider parameters JSON below before choosing a voice.",
+    "baseUrlOverrideToggle": "Override the Base URL for this modality",
+    "baseUrlInherited": "Inheriting the provider's URL. Tick the box above to store a task-level override.",
+    "rootShapeVersioned": "This protocol expects the Base URL to carry the version segment (e.g. …/v1); the request path does not.",
+    "rootShapeOrigin": "This protocol’s request path carries the version segment, so the Base URL should be the host root (no /v1).",
+    "rootShapeMismatchVersioned": "This Base URL has no version segment; most providers require it to end in /v1.",
+    "rootShapeMismatchOrigin": "This Base URL carries a version segment and so does the protocol path; the duplicate is collapsed automatically.",
+    "resolvedUrl": "Request URL"
   },
   "connections": {
     "title": "Connections",
@@ -1676,5 +1683,20 @@
     "deleted": "Connection profile deleted",
     "voiceHint": "Speech recognition/synthesis needs a dedicated voice connection profile (role: voice).",
     "voiceHintAction": "Configure voice connection"
+  },
+  "health": {
+    "unauthorized": "Address reachable, but the key was rejected (401)",
+    "forbidden": "Address reachable, but this key lacks permission (403)",
+    "invalidAuthorizationHeader": "This provider does not accept that authorization header format",
+    "notFound": "No such address (404) — check the Base URL and the request path",
+    "nonApiResponse": "This address served a web page, not an API — the Base URL is probably missing its version segment",
+    "insufficientQuota": "Address and key are valid, but the account is out of quota",
+    "rateLimited": "Address and key are valid, but the request was rate limited (429)",
+    "timeout": "The request timed out",
+    "connectionError": "Could not connect — check network, DNS and proxy",
+    "awsCredentials": "AWS credentials are missing or invalid",
+    "invalidRequest": "The provider rejected the request as invalid",
+    "apiError": "The provider returned an error",
+    "unknown": "The failure could not be classified"
   }
 }

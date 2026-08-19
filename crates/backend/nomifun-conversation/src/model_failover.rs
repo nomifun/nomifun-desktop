@@ -285,6 +285,9 @@ mod tests {
                 status,
                 latency: None,
                 error: None,
+                error_kind: None,
+                http_status: None,
+                attempted_url: None,
             })
             .unwrap()
         });

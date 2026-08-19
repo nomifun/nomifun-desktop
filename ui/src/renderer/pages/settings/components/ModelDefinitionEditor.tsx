@@ -46,6 +46,8 @@ import {
   removeCapabilityTask,
   resolveModelInputChange,
   requiresCrossOriginConsent,
+  resolvedCapabilityUrl,
+  rootMatchesShape,
   withProviderParamVoice,
   type CapabilityEndpointDescriptor,
   type CapabilityEndpointField,
@@ -612,6 +614,10 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
           (protocol) => protocol.protocol_id === capability.protocol
         );
         const actualBaseUrl = effectiveBaseUrl(capability, manifest, providerBaseUrl, connections);
+        // Which half of the URL owns the version segment. Built-in presets ship
+        // a matching default connection; a custom provider does not, so stating
+        // this is the only way it learns the convention.
+        const rootShape = sdkTransport ? undefined : descriptor?.root_shape ?? undefined;
         const crossOrigin = requiresCrossOriginConsent(capability, manifest, providerBaseUrl, connections);
         const providerParamsValid = parseProviderParams(capability.providerParamsJson).ok;
         const endpointDescriptors =
@@ -848,9 +854,30 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
                 <div className='text-12px text-t-secondary'>
                   {t('settings.modelAdvanced.baseUrl', { defaultValue: 'Base URL' })}
                 </div>
+                <Checkbox
+                  checked={Boolean(capability.baseUrlOverride)}
+                  data-base-url-override-toggle={capability.task}
+                  onChange={(checked) =>
+                    updateCapability(capability.task, {
+                      // Promotion is explicit and user-initiated. Seeding the
+                      // inherited value into `value` instead would let a single
+                      // keystroke freeze a copy of the provider's Base URL that
+                      // then wins at request time forever.
+                      baseUrlOverride: checked ? actualBaseUrl : '',
+                    })
+                  }
+                >
+                  <span className='text-12px'>
+                    {t('settings.modelAdvanced.baseUrlOverrideToggle', {
+                      defaultValue: '为该模态单独指定 Base URL',
+                    })}
+                  </span>
+                </Checkbox>
                 <div className='flex items-center gap-8px'>
                   <Input
-                    value={actualBaseUrl}
+                    value={capability.baseUrlOverride}
+                    placeholder={actualBaseUrl}
+                    disabled={!capability.baseUrlOverride}
                     status={!actualBaseUrl ? 'error' : undefined}
                     onChange={(baseUrlOverride) => updateCapability(capability.task, { baseUrlOverride })}
                     data-effective-base-url={actualBaseUrl}
@@ -866,10 +893,32 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
                 <div className='text-11px text-t-tertiary'>
                   {capability.baseUrlOverride
                     ? t('settings.modelAdvanced.baseUrlOverridden', { defaultValue: '当前为任务级覆盖值。' })
-                    : t('settings.modelAdvanced.baseUrlEffective', {
-                        defaultValue: '当前显示实际生效的供应商或协议推荐地址。',
+                    : t('settings.modelAdvanced.baseUrlInherited', {
+                        defaultValue: '继承供应商地址；勾选上方选项才会写入任务级覆盖。',
                       })}
                 </div>
+                {rootShape && (
+                  <div className='text-11px text-t-tertiary' data-root-shape={rootShape}>
+                    {rootShape === 'versioned_root'
+                      ? t('settings.modelAdvanced.rootShapeVersioned', {
+                          defaultValue: '该协议要求 Base URL 自带版本段（如 …/v1），请求路径不带版本。',
+                        })
+                      : t('settings.modelAdvanced.rootShapeOrigin', {
+                          defaultValue: '该协议的请求路径自带版本段，Base URL 请填到域名根（不要带 /v1）。',
+                        })}
+                  </div>
+                )}
+                {rootShape && actualBaseUrl.trim() && !rootMatchesShape(actualBaseUrl, rootShape) && (
+                  <div className='text-11px text-warning-6' role='alert' data-root-shape-mismatch={rootShape}>
+                    {rootShape === 'versioned_root'
+                      ? t('settings.modelAdvanced.rootShapeMismatchVersioned', {
+                          defaultValue: '当前 Base URL 没有版本段，多数供应商需要以 /v1 结尾。',
+                        })
+                      : t('settings.modelAdvanced.rootShapeMismatchOrigin', {
+                          defaultValue: '当前 Base URL 含版本段，而该协议的路径也会带版本；重复的版本段会被自动去重。',
+                        })}
+                  </div>
+                )}
               </div>
             )}
 
@@ -948,19 +997,31 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
             </div>
 
             {[...endpointFields].map((field) => {
-              const endpointDescriptor = endpointDescriptors.find((endpoint) => endpoint.field === field) ?? {
-                task: capability.task,
-                field,
-                purpose: 'submit' as const,
-                method: null,
-                default_value: '',
-                allowed_placeholders: [],
-                required_placeholders: [],
-                editable: true,
-              };
+              const endpointDescriptor: CapabilityEndpointDescriptor =
+                endpointDescriptors.find((endpoint) => endpoint.field === field) ?? {
+                  task: capability.task,
+                  field,
+                  purpose: 'submit' as const,
+                  method: null,
+                  default_value: '',
+                  // No manifest entry means no declared convention; assume the
+                  // root carries the version, which is the OpenAI-compatible
+                  // majority and matches an empty template.
+                  root_shape: 'versioned_root' as const,
+                  allowed_placeholders: [],
+                  required_placeholders: [],
+                  editable: true,
+                };
               const key = draftKeyForEndpoint(field);
               const effectiveValue = endpointDescriptorValue(capability, endpointDescriptor);
               const overrideValue = capability[key];
+              const resolvedUrl = resolvedCapabilityUrl(
+                capability,
+                endpointDescriptor,
+                manifest,
+                providerBaseUrl,
+                connections
+              );
               return (
                 <div key={field} className='space-y-6px'>
                   <div className='flex items-center gap-6px text-12px text-t-secondary'>
@@ -969,10 +1030,17 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
                   </div>
                   <div className='flex items-center gap-8px'>
                     <Input
-                      value={effectiveValue}
+                      // The protocol default is a PLACEHOLDER, never a value.
+                      // Rendering it as the value made it look like the user's
+                      // own setting, inviting a "correction" to the provider's
+                      // documented `/v1/...` path — the edit that used to
+                      // manufacture a doubled version segment.
+                      value={overrideValue}
+                      placeholder={effectiveValue}
                       readOnly={!endpointDescriptor.editable}
                       onChange={(next) => updateCapability(capability.task, { [key]: next })}
                       data-endpoint-field={field}
+                      data-endpoint-override={Boolean(overrideValue)}
                     />
                     {endpointDescriptor.editable && (
                       <Button
@@ -984,6 +1052,15 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
                       </Button>
                     )}
                   </div>
+                  {resolvedUrl && (
+                    <div
+                      className='text-11px text-t-tertiary break-all'
+                      data-resolved-endpoint-url={field}
+                    >
+                      {t('settings.modelAdvanced.resolvedUrl', { defaultValue: '实际请求地址' })}:{' '}
+                      <span className='text-t-secondary'>{resolvedUrl}</span>
+                    </div>
+                  )}
                 </div>
               );
             })}

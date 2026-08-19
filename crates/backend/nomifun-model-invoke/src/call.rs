@@ -305,38 +305,48 @@ impl ResolvedTaskConfig {
                     self.protocol, self.task
                 ))
             })?;
-        let endpoint = expand_protocol_endpoint_template(
+        resolve_submit_url(
+            &self.connection,
             &self.protocol,
             self.task,
-            "endpoint",
             endpoint,
             &self.model,
-        )?;
-        validate_credentialed_url(
-            &self.connection,
             self.transport.allow_cross_origin_credentials,
-            &endpoint,
-            "endpoint",
-            CredentialedUrlKind::Http,
-            true,
-        )?;
-        Ok(resolve_endpoint(&self.connection.base_url, &endpoint))
+        )
     }
 }
 
-/// Append a relative endpoint to a configured root while preserving version
-/// prefixes such as `/v1`, `/v2` or `/api/v4`. Absolute endpoints win exactly.
+/// Expand, validate and join one submit endpoint against a connection root.
+///
+/// This is the single authority shared by [`ResolvedTaskConfig::http_endpoint`],
+/// [`ResolvedCall::endpoint_url`] and the provider-level connection probe. A
+/// probe that built its own URL could report a reachable endpoint that real
+/// inference then 404s on, so there is deliberately only one implementation.
+pub fn resolve_submit_url(
+    connection: &ResolvedConnection,
+    protocol: &str,
+    task: nomifun_api_types::ModelTask,
+    endpoint_template: &str,
+    model: &str,
+    allow_cross_origin_credentials: bool,
+) -> Result<String, InvokeError> {
+    let endpoint =
+        expand_protocol_endpoint_template(protocol, task, "endpoint", endpoint_template, model)?;
+    validate_credentialed_url(
+        connection,
+        allow_cross_origin_credentials,
+        &endpoint,
+        "endpoint",
+        CredentialedUrlKind::Http,
+        true,
+    )?;
+    Ok(resolve_endpoint(&connection.base_url, &endpoint))
+}
+
+/// Append a relative endpoint to a configured root, collapsing a duplicated
+/// version seam. Absolute endpoints win exactly. See [`crate::url_algebra`].
 pub(crate) fn resolve_endpoint(base_url: &str, endpoint: &str) -> String {
-    let endpoint = endpoint.trim();
-    if reqwest::Url::parse(endpoint).is_ok() {
-        endpoint.to_owned()
-    } else {
-        format!(
-            "{}/{}",
-            base_url.trim().trim_end_matches('/'),
-            endpoint.trim_start_matches('/')
-        )
-    }
+    crate::url_algebra::join_endpoint(base_url, endpoint)
 }
 
 /// One task invocation, fully resolved against one capability and connection.
@@ -371,25 +381,17 @@ impl ResolvedCall {
                     self.protocol
                 ))
             })?;
-        let endpoint = expand_protocol_endpoint_template(
+        resolve_submit_url(
+            &self.connection,
             &self.protocol,
             self.task,
-            "endpoint",
             endpoint,
             &self.model,
-        )?;
-        validate_credentialed_url(
-            &self.connection,
             self.model_params
                 .get("allow_cross_origin_credentials")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
-            &endpoint,
-            "endpoint",
-            CredentialedUrlKind::Http,
-            true,
-        )?;
-        Ok(resolve_endpoint(&self.connection.base_url, &endpoint))
+        )
     }
 
     /// Revalidate an adapter-produced or persisted polling URL immediately
@@ -439,6 +441,17 @@ mod tests {
         assert_eq!(
             resolve_endpoint("https://api.example/v2/", "/chat/completions"),
             "https://api.example/v2/chat/completions"
+        );
+    }
+
+    /// A user who pastes the version into BOTH halves — the documented base URL
+    /// plus the documented request path — used to get `/v1/v1/chat/completions`
+    /// and a bare 404 with no indication of which half was wrong.
+    #[test]
+    fn doubled_version_seam_does_not_reach_the_wire() {
+        assert_eq!(
+            resolve_endpoint("https://www.cheapapi.xin/v1", "/v1/chat/completions"),
+            "https://www.cheapapi.xin/v1/chat/completions"
         );
     }
 

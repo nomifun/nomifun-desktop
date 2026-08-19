@@ -158,6 +158,9 @@ impl From<nomifun_model_invoke::InvokeError> for CreationError {
             K::InvalidParams => "invalid_params",
             K::Timeout => "timeout",
             K::Config | K::MissingConnection => "config",
+            // A document body means the configured address is wrong, which the
+            // operator fixes in provider settings — not an upstream fault.
+            K::NonApiResponse => "config",
             K::NoAdapter => "adapter_unavailable",
             K::Auth
             | K::ProviderError
