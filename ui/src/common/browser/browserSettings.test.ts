@@ -9,6 +9,7 @@ import type { ConfigKeyMap } from '@/common/config/configKeys';
 import {
   BROWSER_DISPLAY_MODES,
   BROWSER_DISPLAY_MODE_POLICY_VERSION,
+  BROWSER_DISPLAY_MODE_PREVIOUS_POLICY_VERSION,
   buildBrowserResourcePolicyAdvancedSaveRequest,
   buildBrowserResourcePolicyPresetRequest,
   isBrowserDisplayMode,
@@ -17,36 +18,41 @@ import {
 } from './browserSettings';
 
 describe('migrateBrowserDisplayMode', () => {
-  test('keeps the renderer config schema on the backend v2 lineage marker', () => {
+  test('keeps the renderer config schema on the backend lineage marker', () => {
     const configVersion: NonNullable<
       ConfigKeyMap['agent.browserUse.displayModeVersion']
     > = BROWSER_DISPLAY_MODE_POLICY_VERSION;
 
-    expect(configVersion).toBe(2);
+    expect(configVersion).toBe(3);
+    // The previous marker must stay representable: migration still reads it to
+    // decide whether a stored `external` was a real choice.
+    const previous: NonNullable<
+      ConfigKeyMap['agent.browserUse.displayModeVersion']
+    > = BROWSER_DISPLAY_MODE_PREVIOUS_POLICY_VERSION;
+    expect(previous).toBe(2);
   });
 
-  test('publishes headless and external as the two user policies', () => {
-    expect(BROWSER_DISPLAY_MODES).toEqual(['headless', 'external']);
+  test('publishes headless, auto and external as the three user policies', () => {
+    expect(BROWSER_DISPLAY_MODES).toEqual(['headless', 'auto', 'external']);
     expect(isBrowserDisplayMode('headless')).toBe(true);
+    expect(isBrowserDisplayMode('auto')).toBe(true);
     expect(isBrowserDisplayMode('external')).toBe(true);
     expect(isBrowserDisplayMode('embedded')).toBe(false);
   });
 
-  test('preserves valid choices only across the v2 lineage boundary', () => {
-    expect(
-      migrateBrowserDisplayMode({
-        displayMode: 'headless',
-        displayModeVersion: BROWSER_DISPLAY_MODE_POLICY_VERSION,
-      })
-    ).toEqual({
-      displayMode: 'headless',
-      shouldPersist: false,
-      source: 'displayMode',
-    });
+  test('preserves valid choices under the current lineage marker', () => {
+    for (const displayMode of ['headless', 'auto', 'external'] as const) {
+      expect(
+        migrateBrowserDisplayMode({
+          displayMode,
+          displayModeVersion: BROWSER_DISPLAY_MODE_POLICY_VERSION,
+        })
+      ).toEqual({ displayMode, shouldPersist: false, source: 'displayMode' });
+    }
     expect(
       migrateBrowserDisplayMode({
         displayMode: 'external',
-        displayModeVersion: '  "2"  ',
+        displayModeVersion: '  "3"  ',
       })
     ).toEqual({
       displayMode: 'external',
@@ -55,7 +61,38 @@ describe('migrateBrowserDisplayMode', () => {
     });
   });
 
-  test('fails every unversioned or old-version value closed to headless', () => {
+  test('carries a v2 explicit external choice forward instead of silencing it', () => {
+    // A v2 marker proves the user deliberately chose a visible window, so the
+    // new auto default must not take it away.
+    for (const version of [BROWSER_DISPLAY_MODE_PREVIOUS_POLICY_VERSION, '2', '  "2"  ']) {
+      expect(
+        migrateBrowserDisplayMode({
+          displayMode: 'external',
+          displayModeVersion: version,
+        })
+      ).toEqual({
+        displayMode: 'external',
+        shouldPersist: true,
+        source: 'lineage',
+      });
+    }
+  });
+
+  test("moves v2's universal headless default onto auto", () => {
+    // v2 persisted `headless` for every installation, so it reflects the old
+    // default rather than a deliberate "never show me a window".
+    expect(
+      migrateBrowserDisplayMode({
+        displayMode: 'headless',
+        displayModeVersion: BROWSER_DISPLAY_MODE_PREVIOUS_POLICY_VERSION,
+      })
+    ).toEqual({ displayMode: 'auto', shouldPersist: true, source: 'lineage' });
+  });
+
+  test('fails every unversioned or older value closed to auto', () => {
+    // Crucially this includes an unversioned `external`, which may have been
+    // *inferred* from the removed `silent=false` setting rather than chosen. It
+    // must not reopen a foreground window. `auto` still launches silently.
     for (const input of [
       { displayMode: 'external' },
       { displayMode: 'headless' },
@@ -67,22 +104,22 @@ describe('migrateBrowserDisplayMode', () => {
       { silent: true },
     ]) {
       expect(migrateBrowserDisplayMode(input)).toEqual({
-        displayMode: 'headless',
+        displayMode: 'auto',
         shouldPersist: true,
         source: 'lineage',
       });
     }
   });
 
-  test('defaults a fresh install to headless and requests persistence', () => {
+  test('defaults a fresh install to auto and requests persistence', () => {
     expect(migrateBrowserDisplayMode({})).toEqual({
-      displayMode: 'headless',
+      displayMode: 'auto',
       shouldPersist: true,
       source: 'default',
     });
   });
 
-  test('repairs malformed v2 state to headless', () => {
+  test('repairs malformed current-version state to auto', () => {
     for (const displayMode of ['embedded', 'visible', null, undefined]) {
       expect(
         migrateBrowserDisplayMode({
@@ -91,7 +128,7 @@ describe('migrateBrowserDisplayMode', () => {
           silent: false,
         })
       ).toEqual({
-        displayMode: 'headless',
+        displayMode: 'auto',
         shouldPersist: true,
         source: 'lineage',
       });

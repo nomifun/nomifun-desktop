@@ -318,10 +318,22 @@ const normalizeBrowserDisplayModePolicy = (raw: unknown): IBrowserDisplayModePol
   const displayMode =
     firstString(value, 'display_mode', 'mode') ??
     firstString(root, 'display_mode', 'mode');
-  if (displayMode !== 'headless' && displayMode !== 'external') {
+  if (displayMode !== 'headless' && displayMode !== 'auto' && displayMode !== 'external') {
     throw new Error('The browser manager returned an invalid display mode.');
   }
-  return { display_mode: displayMode };
+  const effective =
+    firstString(value, 'effective_visibility') ??
+    firstString(root, 'effective_visibility');
+  // A backend predating the policy/mechanism split reports only the policy. Deriving
+  // the mechanism from a pinned policy is exact; `auto` runs silently until the
+  // host escalates, so headless is both the correct baseline and the safe default.
+  const effectiveVisibility =
+    effective === 'headless' || effective === 'headful'
+      ? effective
+      : displayMode === 'external'
+        ? 'headful'
+        : 'headless';
+  return { display_mode: displayMode, effective_visibility: effectiveVisibility };
 };
 
 export const browserSession = {

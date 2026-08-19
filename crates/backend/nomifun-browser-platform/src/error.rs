@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use thiserror::Error;
 
 use crate::BrowserLaneId;
@@ -21,6 +21,11 @@ pub enum BrowserErrorCode {
     NeedsPrimaryIdentity,
     PrimaryProfileStorageLimit,
     LaneNotFound,
+    /// The Lane was closed by the platform to stay inside the task's memory
+    /// budget. It is distinct from [`BrowserErrorCode::LaneClosedByUser`]: the
+    /// user did nothing, and the caller may legitimately open a new Lane and
+    /// continue, so it is retryable.
+    TaskMemoryReclaimed,
     OperationNotAllowed,
     BrowserUnavailable,
     BrowserShuttingDown,
@@ -86,5 +91,22 @@ impl BrowserPlatformError {
             true,
             "Retry after the application is ready.",
         )
+    }
+
+    /// The Lane was reclaimed to keep the task inside its memory budget.
+    ///
+    /// Reporting this as [`BrowserErrorCode::LaneClosedByUser`] told callers the
+    /// user had closed the browser and that retrying was pointless. Both were
+    /// wrong, and an Agent had no way to recover from it.
+    pub fn task_memory_reclaimed(lane_id: BrowserLaneId) -> Self {
+        Self::new(
+            BrowserErrorCode::TaskMemoryReclaimed,
+            "The browser lane was closed to stay within this task's memory budget.",
+            true,
+            "Open a new browser lane to continue. If this keeps happening, raise \
+             the per-task memory budget in Browser Use settings.",
+        )
+        .for_lane(lane_id)
+        .with_metadata(json!({ "closed": true, "reason": "task_memory_budget" }))
     }
 }

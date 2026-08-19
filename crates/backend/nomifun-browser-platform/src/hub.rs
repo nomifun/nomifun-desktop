@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,7 @@ use crate::{
     BrowserOverview, BrowserPlatformError, BrowserTaskDownloadAuthority,
     BrowserTaskDownloadReservation, BrowserTaskTabAuthority, BrowserTaskTabReservation,
     CallerIdentity, CanonicalIdentitySnapshot, BrowserVisibility,
+    BrowserPresentationIntent, BrowserVisibilityPolicy, may_escalate_lane_to_headful,
     CapturedIdentitySnapshot, Clock, CloseResult,
     DriverOperationContext, HostLaunchCleanupLease, HostLaunchCleanupTicket, HostLaunchRequest,
     IdentitySnapshotPayload,
@@ -87,6 +88,19 @@ const TASK_RECLAIM_IDLE_EXPANSION_STREAK: u8 = 2;
 const TASK_RECLAIM_IDLE_ANY_STREAK: u8 = 3;
 const TASK_RECLAIM_ACTIVE_EXPANSION_STREAK: u8 = 4;
 const TASK_RECLAIM_ACTIVE_ANY_STREAK: u8 = 5;
+/// Consecutive over-budget samples required before *any* reclaim stage applies.
+///
+/// Task attribution on a shared Host is an estimate, and a browser legitimately
+/// sits at a high steady state: a few media-heavy tabs cost the same bytes
+/// whether or not anything is leaking. Escalating on the first sample made a
+/// normal session reclaimable roughly one sampling period (5s) after it finished
+/// loading its pages, because the severity/confidence accelerators alone reach
+/// an eligible stage with a streak of 1.
+///
+/// Requiring sustained overage is what separates "expensive" from "growing".
+/// The accelerators still shorten the *escalation* once this floor is met, so a
+/// genuine runaway is reclaimed promptly; it just cannot happen instantly.
+const TASK_RECLAIM_MIN_SUSTAINED_SAMPLES: u8 = 3;
 // A shared Chromium Host does not expose a trustworthy target -> native RSS
 // mapping.  Task attribution can therefore miss a one-page renderer leak when
 // many unrelated tasks share Primary/Anonymous.  Do not react to one noisy OS
@@ -205,6 +219,15 @@ pub struct HubConfig {
     pub primary_profile_policy: PrimaryProfilePolicy,
     pub owner_lease_ttl_ms: u64,
     pub headful: bool,
+    /// The user's visibility *policy*, which governs whether the platform may
+    /// resolve visibility per Lane at all.
+    ///
+    /// `headful` above remains the launch mechanism. This is the separate axis
+    /// that decides who owns that mechanism: pinned by the user, or delegated to
+    /// the trusted host. Defaults to `Auto` so a config predating the field
+    /// behaves like a fresh install.
+    #[serde(default)]
+    pub visibility_policy: BrowserVisibilityPolicy,
 }
 
 impl Default for HubConfig {
@@ -215,6 +238,7 @@ impl Default for HubConfig {
             primary_profile_policy: PrimaryProfilePolicy::default(),
             owner_lease_ttl_ms: 5 * 60_000,
             headful: false,
+            visibility_policy: BrowserVisibilityPolicy::default(),
         }
     }
 }
@@ -903,6 +927,17 @@ struct LaneRecord {
     restart_from_epoch: AtomicU64,
     priority: LanePriority,
     frozen_at_ms: AtomicU64,
+    /// Visibility escalations already spent on this Lane.
+    ///
+    /// Each one replaces the Chromium Host process, so the count is bounded by
+    /// [`MAX_LANE_VISIBILITY_ESCALATIONS`]. It lives on the Lane rather than the
+    /// task so a single runaway page cannot spend a sibling Lane's allowance.
+    visibility_escalations: AtomicU32,
+    /// Set just before the platform closes this Lane to stay inside the task's
+    /// memory budget, so an in-flight operation reports the honest, retryable
+    /// [`BrowserErrorCode::TaskMemoryReclaimed`] instead of claiming the user
+    /// closed the browser.
+    memory_reclaimed: AtomicBool,
     workspace_hint: Option<String>,
 }
 
@@ -929,6 +964,8 @@ impl LaneRecord {
             restart_from_epoch: AtomicU64::new(0),
             priority,
             frozen_at_ms: AtomicU64::new(u64::MAX),
+            visibility_escalations: AtomicU32::new(0),
+            memory_reclaimed: AtomicBool::new(false),
             workspace_hint,
         }
     }
@@ -938,6 +975,15 @@ impl LaneRecord {
         snapshot.active_operation_count =
             self.active_operation_count.load(Ordering::Acquire);
         snapshot
+    }
+
+    /// The close reason for a Lane that is shutting down, so waiters report why.
+    fn closed_error(&self, lane_id: BrowserLaneId) -> BrowserPlatformError {
+        if self.memory_reclaimed.load(Ordering::Acquire) {
+            BrowserPlatformError::task_memory_reclaimed(lane_id)
+        } else {
+            lane_closed_error(lane_id)
+        }
     }
 }
 
@@ -7358,7 +7404,7 @@ impl BrowserSessionHub {
         // and the global semaphore is only a resource bound.
         let _lane_guard = tokio::select! {
             guard = lane.operation_gate.lock() => guard,
-            _ = lane.cancellation.cancelled() => return Err(lane_closed_error(lane_id.clone())),
+            _ = lane.cancellation.cancelled() => return Err(lane.closed_error(lane_id.clone())),
             _ = tokio::time::sleep_until(wait_deadline) => {
                 return Err(operation_queue_wait_timeout_error(Some(lane_id.clone())));
             }
@@ -7728,7 +7774,7 @@ impl BrowserSessionHub {
                     trusted_out_of_band_confirmation,
                 },
             ) => result,
-            _ = lane.cancellation.cancelled() => Err(lane_closed_error(lane_id.clone())),
+            _ = lane.cancellation.cancelled() => Err(lane.closed_error(lane_id.clone())),
         };
         if result
             .as_ref()
@@ -7990,6 +8036,120 @@ impl BrowserSessionHub {
         }
         self.inner.config.write().await.headful = desired_headful;
         Ok(visibility)
+    }
+
+    /// Returns the installation's visibility policy.
+    pub async fn visibility_policy(&self) -> BrowserVisibilityPolicy {
+        self.inner.config.read().await.visibility_policy
+    }
+
+    /// Sets the installation's visibility policy.
+    ///
+    /// Policy only: this does not move a running Host. The caller pairs it with
+    /// [`Self::set_primary_visibility`] when the new policy also pins a
+    /// mechanism, so a live change takes effect without waiting for a restart.
+    pub async fn set_visibility_policy(&self, policy: BrowserVisibilityPolicy) {
+        self.inner.config.write().await.visibility_policy = policy;
+    }
+
+    /// Acts on an Agent's declared presentation intent for one Lane.
+    ///
+    /// This is the Agent-facing half of the visibility design: the Agent says
+    /// *what kind of moment this is* and the trusted host decides whether that
+    /// warrants a window. The Agent cannot request `Headful` directly, so a
+    /// confused or compromised model cannot pin the browser into a state the
+    /// user did not allow — the same split as
+    /// [`crate::MODEL_IDENTITY_INPUT_FIELDS`] for identity.
+    ///
+    /// Advisory by design: declining to escalate is a normal outcome and returns
+    /// the unchanged snapshot rather than an error, so an Agent that reports an
+    /// attended moment under a pinned-silent policy simply continues headless.
+    /// The only errors are real failures (unknown Lane, revoked owner, a
+    /// transition that could not be applied).
+    ///
+    /// Escalation is one-way and bounded; see
+    /// [`may_escalate_lane_to_headful`] for the rules and why de-escalation is
+    /// deliberately absent.
+    pub async fn apply_lane_presentation_intent(
+        &self,
+        caller: &CallerIdentity,
+        lane_id: &BrowserLaneId,
+        intent: BrowserPresentationIntent,
+    ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
+        self.validate_caller(caller)?;
+        let lane = self
+            .inner
+            .lanes
+            .read()
+            .await
+            .get(lane_id)
+            .cloned()
+            .ok_or_else(|| BrowserPlatformError::lane_not_found(lane_id.clone()))?;
+        let snapshot = lane.current_snapshot().await;
+        let policy = self.inner.config.read().await.visibility_policy;
+        // Read the *Host's* actual visibility, not `config.headful`. A per-Lane
+        // transition deliberately leaves the installation default alone (see
+        // `set_lane_visibility_for_user`), so using the default here would treat
+        // an already-visible Host as silent and escalate again on every report
+        // until the bound was exhausted.
+        let host_key = HostKey::for_lane(
+            snapshot.identity_mode,
+            snapshot.identity_generation,
+            &snapshot.lane_id,
+        );
+        let current = match self.inner.host_slots.read().await.get(&host_key) {
+            Some(slot) if slot.is_headful() => BrowserVisibility::Headful,
+            // No slot yet means no Host has been published for this Lane, so
+            // there is nothing visible to the user.
+            _ => BrowserVisibility::Headless,
+        };
+
+        // Claim an escalation slot before doing any Host work, so a burst of
+        // concurrent attended reports cannot each pass the bound check and queue
+        // several process replacements.
+        let claimed = lane
+            .visibility_escalations
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                may_escalate_lane_to_headful(
+                    policy,
+                    intent,
+                    snapshot.identity_mode,
+                    current,
+                    used,
+                )
+                .then(|| used.saturating_add(1))
+            })
+            .is_ok();
+        if !claimed {
+            return Ok(snapshot);
+        }
+
+        // Bring the window to the front: the whole point of escalating is that
+        // the user is expected to look at it and possibly take over.
+        match self
+            .set_lane_visibility_and_maybe_focus_once(
+                &caller.user_id,
+                lane_id,
+                BrowserVisibility::Headful,
+                true,
+            )
+            .await
+        {
+            Ok(updated) => {
+                self.emit("lane_presentation_escalated", Some(&updated));
+                Ok(updated)
+            }
+            Err(error) => {
+                // Return the slot; a transition that never happened must not
+                // consume the Lane's small allowance.
+                lane.visibility_escalations
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                        Some(used.saturating_sub(1))
+                    })
+                    .ok();
+                Err(error)
+            }
+        }
     }
 
     /// Changes the live Primary Host visibility for an authenticated Lane.
@@ -11945,6 +12105,13 @@ impl BrowserSessionHub {
                 }
                 let streak = streaks.entry(task_id.clone()).or_default();
                 *streak = streak.saturating_add(1);
+                // Hysteresis floor: an estimated attribution must stay over
+                // budget for several consecutive samples before it can reclaim
+                // anything. Without this, the accelerators below reach an
+                // eligible stage on the very first over-budget sample.
+                if *streak < TASK_RECLAIM_MIN_SUSTAINED_SAMPLES {
+                    continue;
+                }
                 let materially_over = attribution.shared_rss_estimate_bytes
                     > policy.max_task_memory_bytes.saturating_mul(3) / 2;
                 let severely_over = attribution.shared_rss_estimate_bytes
@@ -11960,6 +12127,7 @@ impl BrowserSessionHub {
                     0
                 };
                 let reclaim_stage = streak
+                    .saturating_sub(TASK_RECLAIM_MIN_SUSTAINED_SAMPLES.saturating_sub(1))
                     .saturating_add(confidence_acceleration)
                     .saturating_add(severity_acceleration);
                 if reclaim_stage >= TASK_RECLAIM_IDLE_EXPANSION_STREAK {
@@ -11973,6 +12141,7 @@ impl BrowserSessionHub {
         let mut first_error = None;
         for (task_id, reclaim_stage) in reclaim {
             let mut candidates = Vec::new();
+            let mut live_lane_count = 0usize;
             for lane in &records {
                 let snapshot = lane.current_snapshot().await;
                 if snapshot.caller.task_resource_family_key().as_str() != task_id
@@ -11986,6 +12155,7 @@ impl BrowserSessionHub {
                 {
                     continue;
                 }
+                live_lane_count = live_lane_count.saturating_add(1);
                 let expansion = lane.priority == LanePriority::Expansion
                     || is_crawl_identity(snapshot.identity_mode);
                 let active = snapshot.active_operation_count != 0;
@@ -12009,10 +12179,35 @@ impl BrowserSessionHub {
                     snapshot.lane_id,
                 ));
             }
+            // A task's last remaining Lane is its entire browser. Closing it on
+            // an *estimated* attribution is what made ordinary sessions appear
+            // to die at random, so it is reserved for the top of the escalation:
+            // the overage must have survived every earlier stage first. Sibling
+            // Lanes (a task that expanded) stay reclaimable at the normal
+            // stages.
+            //
+            // Note this deliberately does NOT also require a *severe* overage.
+            // Gating the last Lane on severity would make a single-Lane task
+            // with a sustained moderate overage permanently immune, and a single
+            // Lane is the common shape for an Agent task — that would be a leak
+            // hole, not a protection.
+            //
+            // `freeze_idle_lane_for_pressure` applies the same protection via
+            // `task_family_live_lane_count() <= 1`.
+            if live_lane_count <= 1 && reclaim_stage < TASK_RECLAIM_ACTIVE_ANY_STREAK {
+                continue;
+            }
             candidates.sort();
             let Some((_, _, _, _, lane_id)) = candidates.into_iter().next() else {
                 continue;
             };
+            // Mark the exact Lane before closing so an operation waiting on its
+            // cancellation token reports the memory-budget reason rather than
+            // "closed by user". This only annotates the close reason; the close
+            // itself and its exact cleanup authority are unchanged.
+            if let Some(lane) = self.inner.lanes.read().await.get(&lane_id) {
+                lane.memory_reclaimed.store(true, Ordering::Release);
+            }
             match self.close_lane(&lane_id).await {
                 Ok(result) => {
                     closed = closed.saturating_add(result.closed);
@@ -12858,6 +13053,22 @@ impl BrowserLaneClient {
             .require_operation(&self.caller, BrowserOperationKind::Manage)?;
         self.hub
             .close_owner_lanes(&self.caller.owner_lease_id)
+            .await
+    }
+
+    /// Reports this Agent's presentation intent for one of its Lanes.
+    ///
+    /// Gated on `Manage` like the other Lane-lifecycle operations: surfacing a
+    /// window is a visible change to the user's desktop, not a page interaction.
+    pub async fn apply_presentation_intent(
+        &self,
+        lane_id: &BrowserLaneId,
+        intent: BrowserPresentationIntent,
+    ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
+        self.hub
+            .require_operation(&self.caller, BrowserOperationKind::Manage)?;
+        self.hub
+            .apply_lane_presentation_intent(&self.caller, lane_id, intent)
             .await
     }
 }
@@ -15380,6 +15591,133 @@ mod tests {
             BrowserVisibility::Headless,
             "one foreground request must not mutate the installation default"
         );
+    }
+
+    /// An Agent reporting an attended moment gets a visible window under `Auto`,
+    /// and the escalation is bounded so a page that keeps tripping the risk
+    /// classifier cannot restart Chromium in a loop.
+    #[tokio::test]
+    async fn attended_intent_escalates_once_per_allowance_then_declines() {
+        let harness = harness();
+        let lane_id = open(&harness.client, "attended-primary").await;
+        let caller = harness.client.caller().clone();
+        assert_eq!(
+            harness.hub.visibility_policy().await,
+            BrowserVisibilityPolicy::Auto,
+            "Auto is the default policy"
+        );
+
+        // Routine work must never restart the browser to show a window.
+        harness
+            .hub
+            .apply_lane_presentation_intent(
+                &caller,
+                &lane_id,
+                BrowserPresentationIntent::Unattended,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !harness.hub.overview().await.hosts[0].headful,
+            "unattended work must stay silent"
+        );
+
+        // An attended moment earns the window.
+        harness
+            .hub
+            .apply_lane_presentation_intent(
+                &caller,
+                &lane_id,
+                BrowserPresentationIntent::Attended,
+            )
+            .await
+            .unwrap();
+        assert!(
+            harness.hub.overview().await.hosts[0].headful,
+            "an attended moment on Primary must surface a window"
+        );
+        assert_eq!(
+            harness.hub.primary_visibility().await,
+            BrowserVisibility::Headless,
+            "escalating one Lane must not mutate the installation default"
+        );
+
+        // Already visible: further reports are no-ops, not more restarts.
+        let epoch_after_first =
+            harness.client.status(&lane_id).await.unwrap().browser_epoch;
+        for _ in 0..4 {
+            harness
+                .hub
+                .apply_lane_presentation_intent(
+                    &caller,
+                    &lane_id,
+                    BrowserPresentationIntent::Attended,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            harness.client.status(&lane_id).await.unwrap().browser_epoch,
+            epoch_after_first,
+            "repeated attended reports must not each replace the Host"
+        );
+    }
+
+    /// A user who pinned silent is never overridden by the Agent.
+    #[tokio::test]
+    async fn attended_intent_cannot_override_an_explicit_silent_policy() {
+        let mut config = HubConfig::default();
+        config.visibility_policy = BrowserVisibilityPolicy::AlwaysHeadless;
+        let harness = harness_with_config(config);
+        let lane_id = open(&harness.client, "pinned-silent-primary").await;
+        let caller = harness.client.caller().clone();
+
+        let snapshot = harness
+            .hub
+            .apply_lane_presentation_intent(
+                &caller,
+                &lane_id,
+                BrowserPresentationIntent::Attended,
+            )
+            .await
+            .expect("a declined escalation is a normal outcome, not an error");
+
+        assert!(
+            !harness.hub.overview().await.hosts[0].headful,
+            "AlwaysHeadless is a promise the model does not get to override"
+        );
+        assert_eq!(snapshot.lane_id, lane_id);
+        assert_eq!(
+            snapshot.error_code, None,
+            "declining to escalate must not error the Lane"
+        );
+    }
+
+    /// The escalation must not be reachable through a revoked owner.
+    #[tokio::test]
+    async fn presentation_intent_revalidates_the_caller() {
+        let harness = harness();
+        let lane_id = open(&harness.client, "revoked-presentation").await;
+        let mut caller = harness.client.caller().clone();
+        // An expired capability is a real revocation vector: a queued or
+        // long-running Agent turn can outlive its grant.
+        caller.capability_expires_at_ms = 0;
+
+        let error = harness
+            .hub
+            .apply_lane_presentation_intent(
+                &caller,
+                &lane_id,
+                BrowserPresentationIntent::Attended,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            !harness.hub.overview().await.hosts[0].headful,
+            "an unauthorized caller must not be able to open a window"
+        );
+        assert_ne!(error.code, BrowserErrorCode::TaskMemoryReclaimed);
     }
 
     #[tokio::test]
@@ -19367,11 +19705,29 @@ mod tests {
         // A severe estimate accelerates the watchdog, but it still first
         // offers idle expansion and idle-primary stages. An active Primary is
         // task-locally cancelled only after the overage remains sustained.
-        harness.hub.update_resource_telemetry(sample()).await;
-        harness.hub.update_resource_telemetry(sample()).await;
-        assert!(harness.hub.lane_snapshot_unchecked(&noisy_lane).await.is_some());
-        harness.hub.update_resource_telemetry(sample()).await;
-        assert!(harness.hub.lane_snapshot_unchecked(&noisy_lane).await.is_some());
+        // Attribution gives the noisy task ~464 MiB of the shared 700 MiB Host
+        // against its 256 MiB budget: materially over (>1.5x) but not severely
+        // over (>2x), and not exclusive, so the only accelerator is +1.
+        //
+        // The escalation is deliberately slow, because this attribution is an
+        // estimate and a browser may sit at a legitimately high steady state:
+        //   samples 1-2  hysteresis floor (TASK_RECLAIM_MIN_SUSTAINED_SAMPLES)
+        //                is not met yet, so nothing is reclaimable at all;
+        //   samples 3-5  stages 2..4 offer idle/expansion Lanes first. This
+        //                task's single Lane is active, and a task's *last* Lane
+        //                is reserved for the top stage, so it is protected;
+        //   sample 6     stage 5 (TASK_RECLAIM_ACTIVE_ANY_STREAK) is reached and
+        //                the active last Lane is finally reclaimed.
+        //
+        // That is ~30s of sustained overage at the default 5s sample period.
+        for _ in 0..5 {
+            harness.hub.update_resource_telemetry(sample()).await;
+            assert!(
+                harness.hub.lane_snapshot_unchecked(&noisy_lane).await.is_some(),
+                "an estimated overage must not reclaim a task's only active Lane \
+                 before the escalation reaches its top stage"
+            );
+        }
         harness.hub.update_resource_telemetry(sample()).await;
 
         assert!(harness.hub.lane_snapshot_unchecked(&noisy_lane).await.is_none());
@@ -19381,6 +19737,132 @@ mod tests {
             0,
             "task-local reclaim must not terminate a shared Primary Host"
         );
+    }
+
+    /// A browser that is merely *expensive* must not be treated as leaking.
+    ///
+    /// This is the regression for the user-visible defect: an ordinary session
+    /// sitting at a high but stable memory level was reclaimed within about one
+    /// sampling period, because the severity/confidence accelerators reached an
+    /// eligible stage with a streak of 1. A steady state must survive
+    /// indefinitely as long as it stays inside the budget.
+    #[tokio::test]
+    async fn steady_state_memory_inside_budget_is_never_reclaimed() {
+        let mut config = HubConfig::default();
+        // 2 GiB budget against a 1.5 GiB single-task Host: high, but legitimate.
+        config.resource_policy.max_task_memory_bytes = 2 * crate::resource::GIB;
+        let harness = harness_with_config(config);
+        let lane = open(&harness.client, "steady-state-primary").await;
+
+        let sample = || ResourceTelemetry {
+            total_memory_bytes: 16 * crate::resource::GIB,
+            available_memory_bytes: 12 * crate::resource::GIB,
+            chromium_rss_bytes: 3 * crate::resource::GIB / 2,
+            host_rss_by_process_id: HashMap::from([(
+                4_242,
+                3 * crate::resource::GIB / 2,
+            )]),
+            logical_cpus: 8,
+            ..Default::default()
+        };
+
+        for _ in 0..24 {
+            harness.hub.update_resource_telemetry(sample()).await;
+        }
+
+        assert!(
+            harness.hub.lane_snapshot_unchecked(&lane).await.is_some(),
+            "a session that stays inside its budget must never be reclaimed, \
+             however long it runs"
+        );
+    }
+
+    /// A task's only Lane is its entire browser, so an *estimated* attribution
+    /// may not close it until the escalation reaches its top stage. An idle
+    /// single-Lane task would otherwise be reclaimed at stage 3
+    /// (`TASK_RECLAIM_IDLE_ANY_STREAK`) — which is what killed sessions while
+    /// the Agent was waiting on the model between tool calls.
+    #[tokio::test]
+    async fn only_lane_of_a_task_survives_the_idle_reclaim_stages() {
+        let mut config = HubConfig::default();
+        config.resource_policy.max_task_memory_bytes = crate::resource::MIN_TASK_MEMORY_BYTES;
+        let harness = harness_with_config(config);
+        let lane = open(&harness.client, "sole-idle-primary").await;
+
+        // Idle: no in-flight operation, exactly as an Agent looks while it waits
+        // for the model to produce its next tool call.
+        let record = harness
+            .hub
+            .inner
+            .lanes
+            .read()
+            .await
+            .get(&lane)
+            .cloned()
+            .unwrap();
+        assert_eq!(record.active_operation_count.load(Ordering::Acquire), 0);
+
+        // Exclusive Host and severely over budget: the fastest possible
+        // escalation. Even so, stages 1..4 must not take the only Lane.
+        let sample = || ResourceTelemetry {
+            total_memory_bytes: 16 * crate::resource::GIB,
+            available_memory_bytes: 12 * crate::resource::GIB,
+            chromium_rss_bytes: crate::resource::GIB,
+            host_rss_by_process_id: HashMap::from([(4_242, crate::resource::GIB)]),
+            logical_cpus: 8,
+            ..Default::default()
+        };
+
+        // Samples 1-2 are below the hysteresis floor; sample 3 reaches stage
+        // 1+1+2=4, still short of the top stage reserved for a last Lane.
+        for _ in 0..3 {
+            harness.hub.update_resource_telemetry(sample()).await;
+            assert!(
+                harness.hub.lane_snapshot_unchecked(&lane).await.is_some(),
+                "the only Lane of a task must survive the idle reclaim stages"
+            );
+        }
+
+        // Sample 4 reaches stage 5 and the last Lane finally becomes eligible,
+        // so a genuine runaway is still bounded rather than immune.
+        harness.hub.update_resource_telemetry(sample()).await;
+        assert!(
+            harness.hub.lane_snapshot_unchecked(&lane).await.is_none(),
+            "a sustained severe overage must still converge"
+        );
+    }
+
+    /// Reclaim must not tell the caller the *user* closed the browser.
+    #[tokio::test]
+    async fn reclaimed_lane_reports_an_honest_retryable_memory_error() {
+        let mut config = HubConfig::default();
+        config.resource_policy.max_task_memory_bytes = crate::resource::MIN_TASK_MEMORY_BYTES;
+        let harness = harness_with_config(config);
+        let lane_id = open(&harness.client, "reclaim-error-primary").await;
+        let record = harness
+            .hub
+            .inner
+            .lanes
+            .read()
+            .await
+            .get(&lane_id)
+            .cloned()
+            .unwrap();
+
+        // Before reclaim marks it, a close is an ordinary user-initiated close.
+        assert_eq!(
+            record.closed_error(lane_id.clone()).code,
+            BrowserErrorCode::LaneClosedByUser
+        );
+
+        record.memory_reclaimed.store(true, Ordering::Release);
+        let error = record.closed_error(lane_id.clone());
+        assert_eq!(error.code, BrowserErrorCode::TaskMemoryReclaimed);
+        assert!(
+            error.retryable,
+            "an Agent must be allowed to reopen a Lane after a memory reclaim"
+        );
+        assert_eq!(error.metadata["reason"], "task_memory_budget");
     }
 
     #[tokio::test]

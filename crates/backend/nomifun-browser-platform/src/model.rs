@@ -365,6 +365,116 @@ impl BrowserVisibility {
     }
 }
 
+/// The user's visibility *policy*, which is a different axis from
+/// [`BrowserVisibility`] (the binary mechanism a Host is launched with).
+///
+/// `AlwaysHeadless` and `AlwaysHeadful` pin the mechanism. `Auto` delegates it,
+/// per Lane, to [`resolve_lane_visibility`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserVisibilityPolicy {
+    /// Never show a window, even at a moment that wants supervision.
+    AlwaysHeadless,
+    /// Let the trusted host decide. The default.
+    #[default]
+    Auto,
+    /// Always launch the Primary Host visible.
+    AlwaysHeadful,
+}
+
+/// What the Agent declares about a piece of browser work.
+///
+/// This is an *intent*, not a mechanism: the model never selects headless or
+/// headful directly, exactly as it never selects an identity or profile. The
+/// trusted host maps intent to mechanism, so a compromised or confused model
+/// cannot pin the browser into a state the user did not allow.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserPresentationIntent {
+    /// Routine work the user does not need to watch: reading, searching,
+    /// extracting. The default, because most browsing is this.
+    #[default]
+    Unattended,
+    /// Work where the user may need to see or take over — a sign-in wall, a
+    /// challenge, a consequential confirmation.
+    Attended,
+}
+
+/// Resolve the visibility a Lane should launch with.
+///
+/// Kept pure so the policy is testable as a truth table rather than only
+/// reachable through a Chromium launch.
+///
+/// The asymmetry is deliberate. Under `Auto` the host may escalate toward a
+/// *visible* window, because being able to see and take over is the safe
+/// direction; it never spontaneously hides work. And a user's explicit
+/// `AlwaysHeadless` outranks any Agent intent: "never show me a window" is a
+/// promise the model does not get to override.
+///
+/// Only Primary carries the user's real logged-in identity, so it is the only
+/// mode where an attended moment is meaningful. Anonymous and replica/isolated
+/// Lanes stay silent — an Anonymous Lane that hits a sign-in wall should be
+/// reported through `NeedsPrimaryIdentity`, not by opening a window on a profile
+/// that has no way to sign in.
+pub fn resolve_lane_visibility(
+    policy: BrowserVisibilityPolicy,
+    intent: BrowserPresentationIntent,
+    identity_mode: BrowserIdentityMode,
+) -> BrowserVisibility {
+    match policy {
+        BrowserVisibilityPolicy::AlwaysHeadless => BrowserVisibility::Headless,
+        BrowserVisibilityPolicy::AlwaysHeadful => BrowserVisibility::Headful,
+        BrowserVisibilityPolicy::Auto => {
+            match (intent, identity_mode) {
+                (
+                    BrowserPresentationIntent::Attended,
+                    BrowserIdentityMode::Primary,
+                ) => BrowserVisibility::Headful,
+                _ => BrowserVisibility::Headless,
+            }
+        }
+    }
+}
+
+/// Whether a *running* Lane may be escalated from silent to visible.
+///
+/// Separate from [`resolve_lane_visibility`] because a mid-flight change is not
+/// free: it replaces the Chromium Host process, and for Primary that rebinds
+/// every live Primary Lane under a fresh browser epoch. Deciding at open time is
+/// free; deciding again later is not, so this must stay hard to trigger.
+///
+/// The rules, in order:
+/// 1. Only `Auto` escalates. `AlwaysHeadless` promised the user no window;
+///    `AlwaysHeadful` is already visible.
+/// 2. Only Primary. See [`resolve_lane_visibility`].
+/// 3. Only toward visible. There is no de-escalation path here on purpose:
+///    hiding work the user is already watching is a transparency regression,
+///    while surfacing it is the safe direction.
+/// 4. Only for a genuinely attended moment.
+/// 5. Only within a bounded number of transitions per Lane, so a misbehaving
+///    model or a page that repeatedly trips the risk classifier cannot restart
+///    the browser in a loop.
+pub fn may_escalate_lane_to_headful(
+    policy: BrowserVisibilityPolicy,
+    intent: BrowserPresentationIntent,
+    identity_mode: BrowserIdentityMode,
+    current: BrowserVisibility,
+    escalations_already_used: u32,
+) -> bool {
+    policy == BrowserVisibilityPolicy::Auto
+        && identity_mode == BrowserIdentityMode::Primary
+        && current == BrowserVisibility::Headless
+        && intent == BrowserPresentationIntent::Attended
+        && escalations_already_used < MAX_LANE_VISIBILITY_ESCALATIONS
+}
+
+/// Visibility escalations allowed per Lane.
+///
+/// Each one is a Chromium Host replacement, so this is intentionally small. A
+/// Lane that needs the user's attention more than twice is a Lane that should
+/// simply have been opened visible.
+pub const MAX_LANE_VISIBILITY_ESCALATIONS: u32 = 2;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaneLifecycleState {
@@ -558,6 +668,139 @@ pub struct CloseResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The full open-time truth table, so the policy is reviewable in one place.
+    #[test]
+    fn lane_visibility_resolution_truth_table() {
+        use BrowserIdentityMode::{Anonymous, Isolated, Primary};
+        use BrowserPresentationIntent::{Attended, Unattended};
+        use BrowserVisibility::{Headful, Headless};
+        use BrowserVisibilityPolicy::{AlwaysHeadful, AlwaysHeadless, Auto};
+
+        // An explicit "never show me a window" outranks any Agent intent.
+        for intent in [Unattended, Attended] {
+            for mode in [Primary, Anonymous, Isolated] {
+                assert_eq!(
+                    resolve_lane_visibility(AlwaysHeadless, intent, mode),
+                    Headless,
+                    "AlwaysHeadless must never yield a window ({intent:?}, {mode:?})"
+                );
+            }
+        }
+
+        // An explicit "always show me" is equally absolute.
+        for intent in [Unattended, Attended] {
+            assert_eq!(
+                resolve_lane_visibility(AlwaysHeadful, intent, Primary),
+                Headful
+            );
+        }
+
+        // Auto: only an attended moment on the user's real identity is visible.
+        assert_eq!(resolve_lane_visibility(Auto, Attended, Primary), Headful);
+        assert_eq!(resolve_lane_visibility(Auto, Unattended, Primary), Headless);
+        // Anonymous has no way to sign in, so a window there helps nobody; the
+        // Agent should be told it needs Primary instead.
+        assert_eq!(resolve_lane_visibility(Auto, Attended, Anonymous), Headless);
+        assert_eq!(resolve_lane_visibility(Auto, Attended, Isolated), Headless);
+
+        // Routine browsing is silent by default, which is the common case.
+        assert_eq!(
+            resolve_lane_visibility(
+                BrowserVisibilityPolicy::default(),
+                BrowserPresentationIntent::default(),
+                Primary
+            ),
+            Headless
+        );
+    }
+
+    #[test]
+    fn escalation_is_one_way_bounded_and_respects_an_explicit_silent_policy() {
+        use BrowserIdentityMode::{Anonymous, Primary};
+        use BrowserPresentationIntent::{Attended, Unattended};
+        use BrowserVisibility::{Headful, Headless};
+        use BrowserVisibilityPolicy::{AlwaysHeadful, AlwaysHeadless, Auto};
+
+        // The one allowed escalation.
+        assert!(may_escalate_lane_to_headful(
+            Auto, Attended, Primary, Headless, 0
+        ));
+
+        // A user who pinned silent is never overridden by the model.
+        assert!(!may_escalate_lane_to_headful(
+            AlwaysHeadless,
+            Attended,
+            Primary,
+            Headless,
+            0
+        ));
+        // Already visible: nothing to do.
+        assert!(!may_escalate_lane_to_headful(
+            AlwaysHeadful,
+            Attended,
+            Primary,
+            Headful,
+            0
+        ));
+        // Routine work must not restart the browser to show a window.
+        assert!(!may_escalate_lane_to_headful(
+            Auto, Unattended, Primary, Headless, 0
+        ));
+        // Non-Primary stays silent.
+        assert!(!may_escalate_lane_to_headful(
+            Auto, Attended, Anonymous, Headless, 0
+        ));
+        // There is no de-escalation path: a visible Lane is never hidden here.
+        assert!(!may_escalate_lane_to_headful(
+            Auto, Unattended, Primary, Headful, 0
+        ));
+
+        // Bounded, so a page that keeps tripping the risk classifier cannot
+        // restart Chromium in a loop.
+        assert!(may_escalate_lane_to_headful(
+            Auto,
+            Attended,
+            Primary,
+            Headless,
+            MAX_LANE_VISIBILITY_ESCALATIONS - 1
+        ));
+        assert!(!may_escalate_lane_to_headful(
+            Auto,
+            Attended,
+            Primary,
+            Headless,
+            MAX_LANE_VISIBILITY_ESCALATIONS
+        ));
+        assert!(!may_escalate_lane_to_headful(
+            Auto,
+            Attended,
+            Primary,
+            Headless,
+            MAX_LANE_VISIBILITY_ESCALATIONS + 7
+        ));
+    }
+
+    /// The wire form is part of the UI/Agent contract.
+    #[test]
+    fn visibility_policy_and_intent_serialize_as_snake_case() {
+        assert_eq!(
+            serde_json::to_value(BrowserVisibilityPolicy::AlwaysHeadless).unwrap(),
+            serde_json::json!("always_headless")
+        );
+        assert_eq!(
+            serde_json::to_value(BrowserVisibilityPolicy::Auto).unwrap(),
+            serde_json::json!("auto")
+        );
+        assert_eq!(
+            serde_json::to_value(BrowserPresentationIntent::Attended).unwrap(),
+            serde_json::json!("attended")
+        );
+        assert_eq!(
+            serde_json::to_value(BrowserPresentationIntent::Unattended).unwrap(),
+            serde_json::json!("unattended")
+        );
+    }
 
     #[test]
     fn lane_name_is_normalized_and_bounded() {
