@@ -14,9 +14,11 @@ import { blurActiveElement } from '@renderer/utils/ui/focus';
 import { isDesktopShell } from '@renderer/utils/platform';
 import { useBrowserOverview } from '@renderer/pages/browser/useBrowserInventory';
 import { parseSessionRoute } from '@renderer/utils/routes/sessionRoute';
+import { CREATIVE_STUDIO_ROOT_PATH } from '@renderer/pages/creativeStudio/app/routes';
 import {
   SiderAssetLibraryEntry,
   SiderBrowserEntry,
+  SiderCreativeStudioEntry,
   SiderPresetEntry,
   SiderSkillsEntry,
   SiderConversationEntry,
@@ -30,7 +32,6 @@ import {
   SiderRequirementsEntry,
   SiderScheduledEntry,
   SiderSectionHeader,
-  SiderWorkshopEntry,
 } from './SiderNav';
 import SiderFooter from './SiderFooter';
 
@@ -112,7 +113,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleKnowledgeClick = () => navTo('/knowledge');
   const handleAssetLibraryClick = () => navTo('/assets');
   const handleNomiClick = () => navTo('/nomi');
-  const handleWorkshopClick = () => navTo('/workshop');
+  const handleCreativeStudioClick = () => navTo(CREATIVE_STUDIO_ROOT_PATH);
   const handleMiniAppsClick = () => navTo('/mini-apps');
   const handleCustomerServiceClick = () => navTo('/customer-service');
   const handlePresetClick = () => navTo('/presets');
@@ -207,13 +208,13 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleNomiClick}
             />
-            {/* Creative Workshop (创意工坊) — infinite-canvas AI creation surface */}
-            <SiderWorkshopEntry
+            {/* Creative Studio (创意工坊) — rebuilt full-screen creation product */}
+            <SiderCreativeStudioEntry
               isMobile={isMobile}
-              isActive={pathname.startsWith('/workshop')}
+              isActive={pathname.startsWith(CREATIVE_STUDIO_ROOT_PATH)}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
-              onClick={handleWorkshopClick}
+              onClick={handleCreativeStudioClick}
             />
             {/* 小程序 (Mini-apps) — solidified single-file web tools, opened instantly */}
             <SiderMiniAppsEntry
