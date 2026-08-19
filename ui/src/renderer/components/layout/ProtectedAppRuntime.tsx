@@ -11,6 +11,8 @@ import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
 import AppThemeRuntime from '@renderer/components/layout/AppThemeRuntime';
 import AppLoader from '@renderer/components/layout/AppLoader';
 import { useAuth } from '@renderer/hooks/context/AuthContext';
+import { useDeepLink } from '@renderer/hooks/system/useDeepLink';
+import { useNotificationClick } from '@renderer/hooks/system/useNotificationClick';
 import { useCompanionWindowsSync } from '@renderer/hooks/useCompanionWindowsSync';
 import { useTrayLabels } from '@renderer/hooks/useTrayLabels';
 
@@ -35,12 +37,21 @@ const ProtectedAppRuntime: React.FC = () => {
   return (
     <>
       <AppThemeRuntime />
+      <ProtectedNavigationRuntime />
       <CompanionNavigateListener />
       <CompanionWindowsSyncMount />
       <TrayLabelsMount />
       <Outlet />
     </>
   );
+};
+
+// Native deep links and notification clicks are application navigation inputs,
+// so they must survive switches between the workbench and focused products.
+const ProtectedNavigationRuntime: React.FC = () => {
+  useDeepLink();
+  useNotificationClick();
+  return null;
 };
 
 // Owns the native desktop-companion window set from the main window: reconciles one

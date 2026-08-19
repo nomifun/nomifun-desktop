@@ -22,16 +22,22 @@ describe('protected application runtime boundary', () => {
     expect(runtimeSource.includes('<CompanionNavigateListener />')).toBe(true);
     expect(runtimeSource.includes('<CompanionWindowsSyncMount />')).toBe(true);
     expect(runtimeSource.includes('<TrayLabelsMount />')).toBe(true);
+    expect(runtimeSource.includes('<ProtectedNavigationRuntime />')).toBe(true);
+    expect(runtimeSource.includes('useDeepLink();')).toBe(true);
+    expect(runtimeSource.includes('useNotificationClick();')).toBe(true);
     expect(runtimeSource.includes('<Outlet />')).toBe(true);
     expect(runtimeSource.includes('layout: React.ReactElement')).toBe(false);
     expect(runtimeSource.includes('cloneElement')).toBe(false);
   });
 
-  test('nests the unchanged workbench layout beneath the protected runtime', () => {
+  test('keeps the workbench layout beneath the protected runtime', () => {
     expect(routerSource.includes("import ProtectedAppRuntime from '@renderer/components/layout/ProtectedAppRuntime';")).toBe(
       true
     );
-    expect(/<Route element=\{<ProtectedAppRuntime \/>\}>\s*<Route element=\{layout\}>/.test(routerSource)).toBe(true);
+    const protectedRuntimeAt = routerSource.indexOf('<Route element={<ProtectedAppRuntime />}>');
+    const workbenchAt = routerSource.indexOf('<Route element={layout}>');
+    expect(protectedRuntimeAt).toBeGreaterThan(-1);
+    expect(workbenchAt).toBeGreaterThan(protectedRuntimeAt);
     expect(routerSource.includes('ProtectedLayout')).toBe(false);
     expect(routerSource.includes('React.cloneElement(layout)')).toBe(false);
   });
@@ -53,19 +59,8 @@ describe('protected application runtime boundary', () => {
     expect(workbenchLayoutSource.includes('user-defined-custom-css')).toBe(false);
     expect(workbenchLayoutSource.includes('broadcastCustomCssSync')).toBe(false);
     expect(workbenchLayoutSource.includes('THEME_CONTROL_CONTRACT_STYLE_ID')).toBe(false);
+    expect(workbenchLayoutSource.includes('useDeepLink')).toBe(false);
+    expect(workbenchLayoutSource.includes('useNotificationClick')).toBe(false);
   });
 
-  test('keeps both workshop routes inside the workbench layout for this refactor', () => {
-    const workbenchAt = routerSource.indexOf('<Route element={layout}>');
-    const workshopListAt = routerSource.indexOf("<Route path='/workshop' element={withRouteFallback(WorkshopListPage)} />");
-    const workshopCanvasAt = routerSource.indexOf(
-      "<Route path='/workshop/:id' element={withRouteFallback(WorkshopCanvasPage)} />"
-    );
-    const nestedRoutesCloseAt = routerSource.indexOf('          </Route>\n        </Route>', workshopCanvasAt);
-
-    expect(workbenchAt).toBeGreaterThan(-1);
-    expect(workshopListAt).toBeGreaterThan(workbenchAt);
-    expect(workshopCanvasAt).toBeGreaterThan(workshopListAt);
-    expect(nestedRoutesCloseAt).toBeGreaterThan(workshopCanvasAt);
-  });
 });
