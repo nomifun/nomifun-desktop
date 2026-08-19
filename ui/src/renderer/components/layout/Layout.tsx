@@ -17,8 +17,6 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { LayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { NavigationHistoryProvider } from '@renderer/hooks/context/NavigationHistoryContext';
 import { WebuiServerProvider } from '@renderer/hooks/context/WebuiServerContext';
-import { useDeepLink } from '@renderer/hooks/system/useDeepLink';
-import { useNotificationClick } from '@renderer/hooks/system/useNotificationClick';
 import {
   reportNoUpdateAvailable,
   reportUpdateAvailable,
@@ -142,8 +140,6 @@ const Layout: React.FC<{
   const updateAvailability = useUpdateAvailability();
   const { onClick } = useDebug();
   const { contextHolder: directorySelectionContextHolder } = useDirectorySelection();
-  useDeepLink();
-  useNotificationClick();
   const navigate = useNavigate();
   useConversationShortcuts({ navigate });
   const location = useLocation();
