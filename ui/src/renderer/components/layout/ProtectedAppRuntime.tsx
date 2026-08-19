@@ -8,6 +8,7 @@ import React, { useEffect } from 'react';
 import { Navigate, Outlet, useNavigate } from 'react-router-dom';
 
 import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
+import AppThemeRuntime from '@renderer/components/layout/AppThemeRuntime';
 import AppLoader from '@renderer/components/layout/AppLoader';
 import { useAuth } from '@renderer/hooks/context/AuthContext';
 import { useCompanionWindowsSync } from '@renderer/hooks/useCompanionWindowsSync';
@@ -33,6 +34,7 @@ const ProtectedAppRuntime: React.FC = () => {
 
   return (
     <>
+      <AppThemeRuntime />
       <CompanionNavigateListener />
       <CompanionWindowsSyncMount />
       <TrayLabelsMount />

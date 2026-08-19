@@ -5,8 +5,6 @@
  */
 
 import { ipcBridge } from '@/common';
-import { configService } from '@/common/config/configService';
-import type { ICssTheme } from '@/common/config/storage';
 import PwaPullToRefresh from '@/renderer/components/layout/PwaPullToRefresh';
 import Titlebar from '@/renderer/components/layout/Titlebar';
 import InstantHoverTooltip from '@/renderer/components/base/InstantHoverTooltip';
@@ -27,18 +25,9 @@ import {
   useUpdateAvailability,
 } from '@renderer/hooks/system/useUpdateAvailability';
 import { useDirectorySelection } from '@renderer/hooks/file/useDirectorySelection';
-import { processCustomCss } from '@renderer/utils/theme/customCssProcessor';
-import {
-  ensureThemeControlContract,
-  removeThemeControlContract,
-  THEME_CONTROL_CONTRACT_STYLE_ID,
-} from '@renderer/utils/theme/themeControlContract';
-import { broadcastCustomCssSync } from '@renderer/utils/theme/themeBroadcast';
 import { cleanupSiderTooltips } from '@renderer/utils/ui/siderTooltip';
 import { useConversationShortcuts } from '@renderer/hooks/ui/useConversationShortcuts';
 import { isDesktopShell } from '@renderer/utils/platform';
-import { computeCssSyncDecision, resolveCssByActiveTheme } from '@renderer/utils/theme/themeCssSync';
-import { DEFAULT_THEME_ID } from '@renderer/pages/settings/DisplaySettings/presets';
 import '@renderer/styles/layout.css';
 
 const SidebarIcon: React.FC<{ size?: number; strokeWidth?: number }> = ({ size = 18, strokeWidth = 4 }) => (
@@ -149,7 +138,6 @@ const Layout: React.FC<{
   const [viewportWidth, setViewportWidth] = useState<number>(() =>
     typeof window === 'undefined' ? 390 : window.innerWidth
   );
-  const [customCss, setCustomCss] = useState<string>('');
   const [shouldMountUpdateModal, setShouldMountUpdateModal] = useState(false);
   const updateAvailability = useUpdateAvailability();
   const { onClick } = useDebug();
@@ -170,8 +158,6 @@ const Layout: React.FC<{
     location.pathname.startsWith('/terminal/');
   const collapsedRef = useRef(collapsed);
   const railWidthRef = useRef(railWidth);
-  const lastCssRef = useRef('');
-  const lastUiCssUpdateAtRef = useRef(0);
   const dragStateRef = useRef<{ active: boolean; startX: number; startWidth: number }>({
     active: false,
     startX: 0,
@@ -180,157 +166,6 @@ const Layout: React.FC<{
   const dragRafRef = useRef<number | null>(null);
   const dragPendingWidthRef = useRef<number | null>(null);
   const draggingSiderElRef = useRef<Element | null>(null);
-
-  const loadAndHealCustomCss = useCallback(async () => {
-    try {
-      const [savedCssRaw, savedActiveThemeId, savedThemes] = await Promise.all([
-        configService.get('customCss'),
-        configService.get('css.activeThemeId'),
-        configService.get('css.themes'),
-      ]);
-
-      // 无显式选择时回退到系统默认主题，使新用户/无偏好用户从首启即应用默认主题（而非空 CSS）。
-      // Fall back to the system default theme when none is selected, so fresh users apply it from first paint.
-      const activeThemeId = savedActiveThemeId || DEFAULT_THEME_ID;
-
-      const decision = computeCssSyncDecision({
-        savedCss: savedCssRaw || '',
-        activeThemeId,
-        savedThemes: (savedThemes || []) as ICssTheme[],
-        currentUiCss: customCss,
-        lastUiCssUpdateAt: lastUiCssUpdateAtRef.current,
-      });
-
-      if (decision.shouldSkipApply) {
-        return;
-      }
-
-      let effectiveCss = decision.effectiveCss;
-
-      // If the active theme resolved to empty CSS and there IS a saved activeThemeId
-      // (but it no longer matches any known theme), fall back to the system default and persist.
-      if (!effectiveCss && activeThemeId && activeThemeId !== DEFAULT_THEME_ID) {
-        const defaultCss = resolveCssByActiveTheme(DEFAULT_THEME_ID, (savedThemes || []) as ICssTheme[]);
-        effectiveCss = defaultCss;
-        // Persist the fallback so Layout doesn't keep retrying
-        await Promise.all([
-          configService.set('css.activeThemeId', DEFAULT_THEME_ID),
-          configService.set('customCss', effectiveCss),
-        ]).catch((error) => {
-          console.warn('Failed to persist theme fallback:', error);
-        });
-      } else if (decision.shouldHealStorage) {
-        await configService.set('customCss', effectiveCss).catch((error) => {
-          console.warn('Failed to heal custom CSS from active theme:', error);
-        });
-      }
-
-      setCustomCss(effectiveCss);
-      if (lastCssRef.current !== effectiveCss) {
-        lastCssRef.current = effectiveCss;
-        window.dispatchEvent(new CustomEvent('custom-css-updated', { detail: { customCss: effectiveCss } }));
-      }
-    } catch (error) {
-      console.error('Failed to load or heal custom CSS:', error);
-    }
-  }, [customCss]);
-
-  // 加载并监听自定义 CSS 配置 / Load & watch custom CSS configuration
-  useEffect(() => {
-    void loadAndHealCustomCss();
-
-    const handleCssUpdate = (event: CustomEvent) => {
-      if (event.detail?.customCss !== undefined) {
-        const css = event.detail.customCss || '';
-        lastCssRef.current = css;
-        lastUiCssUpdateAtRef.current = Date.now();
-        setCustomCss(css);
-      }
-    };
-    const handleStorageChange = (event: StorageEvent) => {
-      if (event.key && (event.key.includes('customCss') || event.key.includes('css.activeThemeId'))) {
-        void loadAndHealCustomCss();
-      }
-    };
-
-    window.addEventListener('custom-css-updated', handleCssUpdate as EventListener);
-    window.addEventListener('storage', handleStorageChange);
-
-    return () => {
-      window.removeEventListener('custom-css-updated', handleCssUpdate as EventListener);
-      window.removeEventListener('storage', handleStorageChange);
-    };
-  }, [loadAndHealCustomCss]);
-
-  // Re-sync theme css on route changes, because some settings pages do not mount CssThemeSettings.
-  useEffect(() => {
-    void loadAndHealCustomCss();
-  }, [location.pathname, location.search, location.hash, loadAndHealCustomCss]);
-
-  // 注入自定义 CSS / Inject custom CSS into document head
-  useEffect(() => {
-    const styleId = 'user-defined-custom-css';
-
-    // 跨窗口同步：把当前生效的 customCss 广播给不挂 Layout 的独立窗口（桌宠），
-    // 使其气泡/输入框 chrome 实时跟随氛围预设。这是 customCss 变化的单一汇聚点
-    // （apply/heal/clear 都经 setCustomCss 流到本 effect），空串也广播以便对端清除。
-    broadcastCustomCssSync(customCss);
-
-    if (!customCss) {
-      document.getElementById(styleId)?.remove();
-      ensureThemeControlContract();
-      return;
-    }
-
-    const wrappedCss = processCustomCss(customCss);
-
-    const ensureStyleAtEnd = () => {
-      let styleEl = document.getElementById(styleId) as HTMLStyleElement | null;
-      const controlStyle = document.getElementById(THEME_CONTROL_CONTRACT_STYLE_ID);
-
-      if (
-        styleEl &&
-        styleEl.textContent === wrappedCss &&
-        styleEl.nextElementSibling === controlStyle &&
-        controlStyle === document.head.lastElementChild
-      ) {
-        return;
-      }
-
-      styleEl?.remove();
-      controlStyle?.remove();
-      styleEl = document.createElement('style');
-      styleEl.id = styleId;
-      styleEl.type = 'text/css';
-      styleEl.textContent = wrappedCss;
-      document.head.appendChild(styleEl);
-      ensureThemeControlContract();
-    };
-
-    ensureStyleAtEnd();
-
-    const observer = new MutationObserver((mutations) => {
-      const hasNewStyle = mutations.some((mutation) =>
-        Array.from(mutation.addedNodes).some((node) => node.nodeName === 'STYLE' || node.nodeName === 'LINK')
-      );
-
-      if (hasNewStyle) {
-        const element = document.getElementById(styleId);
-        const controlStyle = document.getElementById(THEME_CONTROL_CONTRACT_STYLE_ID);
-        if (element && (element.nextElementSibling !== controlStyle || controlStyle !== document.head.lastElementChild)) {
-          ensureStyleAtEnd();
-        }
-      }
-    });
-
-    observer.observe(document.head, { childList: true });
-
-    return () => {
-      observer.disconnect();
-      document.getElementById(styleId)?.remove();
-      removeThemeControlContract();
-    };
-  }, [customCss]);
 
   // 检测移动端并响应窗口大小变化
   useEffect(() => {
