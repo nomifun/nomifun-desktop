@@ -15,6 +15,16 @@ use common::{
     setup_and_login,
 };
 
+/// Normalize a path so two spellings of the same location compare equal.
+///
+/// On Windows the API returns a canonicalized path (a `\?\` verbatim path)
+/// while paths the test builds locally are plain, so comparing them directly
+/// compares spellings rather than locations.
+fn norm(path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    let path = path.as_ref();
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 const APP_HTML: &str = "<!doctype html><html><body><h1>Pomodoro</h1><script>var x=1;</script></body></html>";
 
 fn timer_app_body() -> serde_json::Value {
@@ -461,9 +471,11 @@ async fn publishing_promotes_the_working_copy_into_the_served_document() {
     let source_path = provision_workspace(&app, &miniapp_id, &token, &csrf).await;
     let source = std::path::PathBuf::from(&source_path);
     assert_eq!(
-        source,
-        nomifun_miniapp::miniapp_workspace_dir(&services.work_dir, &miniapp_id)
-            .join(nomifun_miniapp::MINIAPP_SOURCE_FILE)
+        norm(&source),
+        norm(
+            nomifun_miniapp::miniapp_workspace_dir(&services.work_dir, &miniapp_id)
+                .join(nomifun_miniapp::MINIAPP_SOURCE_FILE)
+        )
     );
     assert_eq!(
         std::fs::read_to_string(&source).expect("working copy on disk"),
@@ -647,7 +659,7 @@ async fn provisioning_the_workspace_returns_an_absolute_source_path_and_is_idemp
         Some(nomifun_miniapp::MINIAPP_SOURCE_FILE)
     );
     assert!(
-        source.starts_with(nomifun_miniapp::miniapps_root(&services.work_dir)),
+        norm(source).starts_with(norm(nomifun_miniapp::miniapps_root(&services.work_dir))),
         "the source must stay under the mini-app root: {source_path}"
     );
     // Materialized from the published snapshot, so the model has something to read.

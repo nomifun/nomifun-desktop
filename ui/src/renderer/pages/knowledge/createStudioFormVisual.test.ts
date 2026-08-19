@@ -19,7 +19,10 @@ describe('CreateStudio form visual design', () => {
 
   test('keeps the dialog and configuration cards compact without changing the form structure', () => {
     expect(studioSource.includes("className={[styles.modal, isMobile ? styles.mobileModal : ''].filter(Boolean).join(' ')}")).toBe(true);
-    expect(studioStyles.includes('padding: 10px 12px')).toBe(true);
+    // Compact padding is expressed through the shared modal contract now,
+    // not a literal value duplicated per modal.
+    expect(studioStyles.includes('var(--nomi-modal-block-padding)')).toBe(true);
+    expect(studioStyles.includes('var(--nomi-modal-inline-padding)')).toBe(true);
     expect(studioSource.includes('knowledge-studio-config-panel min-h-0 flex-1 overflow-y-auto bg-[var(--color-fill-1)] p-16px')).toBe(true);
     expect(studioSource.includes('knowledge-studio-basic-card mb-12px')).toBe(true);
     expect(studioSource.includes("'knowledge-studio-field rounded-14px bg-[var(--color-bg-2)] p-10px")).toBe(true);

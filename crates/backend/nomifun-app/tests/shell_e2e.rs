@@ -103,7 +103,7 @@ async fn create_provider(
             "name": name,
             "base_url": base_url,
             "auth_scheme": auth_scheme,
-            "api_key": api_key,
+            "credentials": { "api_keys": [api_key] },
             "enabled": true,
             "initial_model": {
                 "model": model,
@@ -390,7 +390,7 @@ async fn st7_stt_api_failure() {
         &csrf,
         "openai",
         "Failing Speech Provider",
-        &mock_server.uri(),
+        &format!("{}/v1", mock_server.uri()),
         "sk-fake-key",
         "whisper-1",
     )
@@ -495,7 +495,7 @@ async fn st1_openai_transcription_success() {
         &csrf,
         "openai",
         "Speech Provider",
-        &mock_server.uri(),
+        &format!("{}/v1", mock_server.uri()),
         "sk-test-key",
         "whisper-1",
     )
@@ -614,7 +614,7 @@ async fn st11_configured_provider_is_resolved_by_id() {
         &csrf,
         "custom",
         "Speech Provider",
-        &mock_server.uri(),
+        &format!("{}/v1", mock_server.uri()),
         "sk-from-provider",
         "whisper-1",
     )
@@ -727,7 +727,7 @@ async fn st10_language_hint_passed() {
         &csrf,
         "openai",
         "Speech Provider",
-        &mock_server.uri(),
+        &format!("{}/v1", mock_server.uri()),
         "sk-test-key",
         "whisper-1",
     )

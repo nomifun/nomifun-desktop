@@ -88,12 +88,10 @@ const AboutModalContent: React.FC = () => {
       url: NOMIFUN_PUBLIC_LINKS.officialWebsite,
       icon: <Right theme='outline' size='16' />,
     },
-    {
-      title: t('settings.contactEmail'),
-      detail: `${NOMIFUN_PUBLIC_LINKS.email}${t('settings.contactEmailPending')}`,
-      url: NOMIFUN_PUBLIC_LINKS.emailHref,
-      icon: <Right theme='outline' size='16' />,
-    },
+    // No email row here: `contactInfoLinks.test.ts` forbids mail-scheme links
+    // anywhere in these surfaces, so the public contact page above is the single
+    // channel. Reinstating an address would either reintroduce that link form or
+    // ship a mailbox nobody watches.
   ];
 
   return (
