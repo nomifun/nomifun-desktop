@@ -170,22 +170,22 @@ export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
   return (
     <div
       className={[
-        'group relative flex flex-col gap-8px rounded-16px border border-solid',
-        'border-[var(--color-border-2)] bg-[var(--color-bg-2)] px-18px pt-18px pb-8px box-border cursor-pointer',
-        'min-h-188px',
+        'group relative flex flex-col gap-6px rounded-16px border border-solid',
+        'border-[var(--color-border-2)] bg-[var(--color-bg-2)] px-14px pt-14px pb-6px box-border cursor-pointer',
+        'min-h-172px',
         'transition-all duration-160',
         'hover:border-[var(--color-border-3)] hover:shadow-[0_14px_38px_rgba(0,0,0,0.15)] hover:-translate-y-2px',
       ].join(' ')}
       onClick={() => onOpen?.(base)}
     >
       {/* Header: icon + name + badges */}
-      <div className='flex items-center gap-12px'>
+      <div className='flex items-center gap-10px'>
         <KindIcon kind={base.kind} config={kindConfig} />
         <div className='min-w-0 flex-1'>
           <div className='text-15px font-700 leading-[1.3] text-[var(--color-text-1)] truncate'>
             {base.name}
           </div>
-          <div className='flex flex-wrap gap-6px mt-4px'>
+          <div className='mt-3px flex flex-wrap gap-5px'>
             {/* Kind badge */}
             <span
               className={[
@@ -219,8 +219,8 @@ export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
       {/* User tags row */}
       <TagChips tags={base.tags} tagMap={tagMap} />
 
-      <div className='knowledge-card-footer mt-auto flex min-h-26px items-center gap-10px'>
-        <div className='knowledge-card-meta flex min-w-0 flex-wrap items-center gap-7px text-12px leading-16px text-[var(--color-text-3)]'>
+      <div className='knowledge-card-footer mt-auto flex min-h-24px items-center gap-8px'>
+        <div className='knowledge-card-meta flex min-w-0 flex-wrap items-center gap-6px text-12px leading-16px text-[var(--color-text-3)]'>
           {metaItems.map((item, index) => (
             <React.Fragment key={`${item}-${index}`}>
               {index > 0 && <i className='h-3px w-3px rounded-full bg-[var(--color-fill-4)]' aria-hidden='true' />}

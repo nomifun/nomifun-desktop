@@ -100,7 +100,6 @@ const FeedbackReportModal: React.FC<FeedbackReportModalProps> = ({ visible, onCa
               >
                 <span className='break-all'>
                   {item.value}
-                  {'trailingKey' in item ? t(item.trailingKey, item.trailingFallback) : ''}
                 </span>
               </button>
               <CopyIconButton
