@@ -1049,9 +1049,17 @@ pub(crate) mod tests {
         // The guard must not invent a second layout: the shared formula in
         // `nomifun-common` is what every other reader of the tree (the app's e2e,
         // a relocation sweep) derives the path with.
+        // `workspace_dir` resolves through the filesystem, which on Windows
+        // returns a `\\?\` verbatim path, while the formula builds a plain one
+        // for a directory that need not exist yet — so `canonicalize` cannot
+        // normalize both sides. Compare with the prefix removed instead.
+        let plain = |path: std::path::PathBuf| {
+            let text = path.to_string_lossy().into_owned();
+            std::path::PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned())
+        };
         assert_eq!(
-            fixture.service.workspace_dir(id.as_str()).expect("resolve"),
-            miniapp_workspace_dir(fixture._root.path(), id.as_str())
+            plain(fixture.service.workspace_dir(id.as_str()).expect("resolve")),
+            plain(miniapp_workspace_dir(fixture._root.path(), id.as_str()))
         );
     }
 

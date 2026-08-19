@@ -191,8 +191,17 @@ async fn full_system_flow_e2e() {
         json!({
             "platform": "openai",
             "name": "OpenAI",
-            "base_url": "https://api.openai.com",
-            "api_key": "sk-proj-test-key-1234"
+            "base_url": "https://api.openai.com/v1",
+            "auth_scheme": "bearer",
+            "credentials": { "api_keys": ["sk-proj-test-key-1234"] },
+            "initial_model": {
+                "model": "gpt-4o",
+                "capabilities": [{
+                    "task": "chat",
+                    "protocol": "openai.chat_text",
+                    "connection_role": "default"
+                }]
+            }
         }),
         &token,
         &csrf,
@@ -201,7 +210,9 @@ async fn full_system_flow_e2e() {
     assert_eq!(resp.status(), StatusCode::CREATED);
     let json = body_json(resp).await;
     let provider_id = json["data"]["provider_id"].as_str().unwrap().to_string();
-    assert_eq!(json["data"]["api_key"], "sk-proj-test-key-1234");
+    // Credentials are write-only: the response reports only that they exist.
+    assert_eq!(json["data"]["has_credentials"], true);
+    assert!(json["data"].get("api_key").is_none());
 
     // 7. List providers
     let resp = app

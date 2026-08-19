@@ -329,6 +329,11 @@ fn split_args(value: &str) -> Vec<String> {
 /// we have no business guessing. Percent tokens (`%d`, `%r`, …) are likewise
 /// left alone. Either way the user sees the path they actually wrote, and the key
 /// simply reads as unavailable at import time.
+///
+/// Joined with `/` rather than `Path::join`, which on Windows would splice a
+/// `\` into an otherwise `/`-separated config value and yield
+/// `/home/user\.ssh/id_ed25519`. This value is an OpenSSH config path — the
+/// separator OpenSSH writes and reads is `/`, and Windows accepts it too.
 fn expand_tilde(path: &str, home: Option<&Path>) -> String {
     let Some(home) = home else {
         return path.to_string();
@@ -337,7 +342,10 @@ fn expand_tilde(path: &str, home: Option<&Path>) -> String {
         return home.display().to_string();
     }
     match path.strip_prefix("~/") {
-        Some(rest) => home.join(rest).display().to_string(),
+        Some(rest) => {
+            let home = home.display().to_string();
+            format!("{}/{rest}", home.trim_end_matches(['/', '\\']))
+        }
         None => path.to_string(),
     }
 }
