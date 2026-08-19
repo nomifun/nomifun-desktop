@@ -16,7 +16,7 @@
 use std::time::{Duration, Instant};
 
 use nomifun_api_types::{
-    EndpointRootShape, ModelTask, ProbeCandidateResult, ProbeProviderConnectionAnonymousRequest,
+    ModelTask, ProbeCandidateResult, ProbeProviderConnectionAnonymousRequest,
     ProbeProviderConnectionRequest, ProbeProviderConnectionResponse, ProviderHealthCheckErrorKind,
     ProviderReachability,
 };

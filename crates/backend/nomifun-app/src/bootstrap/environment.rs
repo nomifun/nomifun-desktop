@@ -779,6 +779,19 @@ mod tests {
         }
     }
 
+    /// Serialize tests that drive `prepare_v3_data_layer`.
+    ///
+    /// That path writes PROCESS-GLOBAL env vars (`NOMIFUN_DATA_DIR`,
+    /// `NOMIFUN_WORK_DIR`, `NOMIFUN_STORAGE_GENERATION`). Rust runs tests as
+    /// parallel threads inside one process, so two of these racing each other
+    /// overwrite one another's paths and a test then reads a sibling's data dir —
+    /// which is why they passed when filtered down and failed only in the full
+    /// workspace run, where the whole binary's tests share the process.
+    async fn env_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        LOCK.lock().await
+    }
+
     #[tokio::test]
     async fn probe_accepts_database_created_from_all_embedded_migrations() {
         let dir = tempfile::tempdir().unwrap();
@@ -889,6 +902,7 @@ mod tests {
 
     #[tokio::test]
     async fn finalized_current_database_is_ready_for_doctor() {
+        let _env = env_guard().await;
         let data = tempfile::tempdir().unwrap();
         let path = data.path().join("nomifun-backend.db");
         let database = nomifun_db::init_database(&path).await.unwrap();
@@ -1022,6 +1036,7 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_reset_overrides_current_receipt_and_retires_managed_side_store() {
+        let _env = env_guard().await;
         let data = tempfile::tempdir().unwrap();
         let config = test_config(data.path(), data.path());
         let database = nomifun_db::init_database(&config.database_path()).await.unwrap();
@@ -1073,6 +1088,7 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_publishes_receipt_only_after_side_store_bootstrap_succeeds() {
+        let _env = env_guard().await;
         let data = tempfile::tempdir().unwrap();
         let config = test_config(data.path(), data.path());
         std::fs::write(config.database_path(), b"old database").unwrap();
@@ -1126,6 +1142,7 @@ mod tests {
 
     #[tokio::test]
     async fn forged_receipt_retires_legacy_database_before_writable_init() {
+        let _env = env_guard().await;
         let data = tempfile::tempdir().unwrap();
         let path = data.path().join("nomifun-backend.db");
         let options = SqliteConnectOptions::new()
@@ -1247,6 +1264,7 @@ mod tests {
 
     #[tokio::test]
     async fn work_root_change_plan_resumes_after_request_clear_crash_gap() {
+        let _env = env_guard().await;
         let data = tempfile::tempdir().unwrap();
         let old_work = tempfile::tempdir().unwrap();
         let new_work = tempfile::tempdir().unwrap();
@@ -1321,6 +1339,7 @@ mod tests {
 
     #[tokio::test]
     async fn finalized_database_rejects_a_different_resolved_work_root() {
+        let _env = env_guard().await;
         let data = tempfile::tempdir().unwrap();
         let first_work = tempfile::tempdir().unwrap();
         let second_work = tempfile::tempdir().unwrap();
