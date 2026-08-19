@@ -1282,7 +1282,9 @@ mod tests {
         .unwrap();
         send_audio(&tx, 300, true).await;
         send_audio(&tx, 900, false).await;
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        // Wait for the reply's terminal frame, not a fixed duration: a
+        // wall-clock bound races the pipeline whenever the machine is busy.
+        await_frame(&written, |frame| frame["state"] == "stop").await;
         drop(tx);
         task.await.unwrap();
 
