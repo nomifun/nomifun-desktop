@@ -1,16 +1,5 @@
 /* Titlebar + window controls */
 
-/* Close-button hover/active color (Windows/Linux window controls). Follows the
-   active theme's `--danger` token so it stays coherent in dark / neon / frosted
-   presets, instead of the hardcoded Windows red that ignored `data-theme`. The
-   classic Windows red is kept only as the ultimate fallback if a theme somehow
-   omits `--danger`. `--window-close-danger-active` is a slightly darker shade
-   for the :active press, derived from the same token. */
-:root {
-  --window-close-danger: var(--danger, #e81123);
-  --window-close-danger-active: color-mix(in srgb, var(--danger, #c10f1f) 80%, #000);
-}
-
 .app-titlebar {
   display: flex;
   align-items: center;
@@ -217,45 +206,4 @@
 .app-titlebar__button--mobile svg {
   width: 18px !important;
   height: 18px !important;
-}
-
-.app-window-controls {
-  display: flex;
-  align-items: stretch;
-  align-self: stretch;
-  -webkit-app-region: no-drag;
-}
-
-.app-window-controls__button {
-  width: 40px;
-  /* Match the parent titlebar height so system buttons go edge-to-edge
-     like native Windows chrome. */
-  height: 100%;
-  align-self: stretch;
-  border: none;
-  background: transparent;
-  color: var(--text-primary);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: background-color 0.18s ease;
-}
-
-.app-window-controls__button:hover {
-  background-color: rgba(128, 128, 128, 0.2);
-}
-
-.app-window-controls__button:active {
-  background-color: rgba(128, 128, 128, 0.3);
-}
-
-.app-window-controls__button--close:hover {
-  background-color: var(--window-close-danger);
-  color: #fff;
-}
-
-.app-window-controls__button--close:active {
-  background-color: var(--window-close-danger-active);
-  color: #fff;
 }

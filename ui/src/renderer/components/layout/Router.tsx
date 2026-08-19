@@ -4,6 +4,7 @@ import AppLoader from '@renderer/components/layout/AppLoader';
 import ProtectedAppRuntime from '@renderer/components/layout/ProtectedAppRuntime';
 import RouteErrorBoundary from '@renderer/components/layout/RouteErrorBoundary';
 import { useAuth } from '@renderer/hooks/context/AuthContext';
+import { CREATIVE_STUDIO_ROOT_PATH } from '@renderer/pages/creativeStudio/app/routes';
 const Conversation = React.lazy(() => import('@renderer/pages/conversation'));
 const Guid = React.lazy(() => import('@renderer/pages/guid'));
 const PresetSettings = React.lazy(() => import('@renderer/pages/settings/PresetSettings'));
@@ -31,8 +32,12 @@ const CustomerServiceRosterPage = React.lazy(() => import('@renderer/pages/custo
 const CustomerServiceDetailPage = React.lazy(() => import('@renderer/pages/customerService/CsAgentDetailPage'));
 const KnowledgeListPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeListPage'));
 const KnowledgeDetailPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeDetailPage'));
-const WorkshopListPage = React.lazy(() => import('@renderer/pages/workshop'));
-const WorkshopCanvasPage = React.lazy(() => import('@renderer/pages/workshop/CanvasPage'));
+const CreativeStudioFocusShell = React.lazy(
+  () => import('@renderer/pages/creativeStudio/app/CreativeStudioFocusShell')
+);
+const CreativeStudioHomePage = React.lazy(
+  () => import('@renderer/pages/creativeStudio/app/CreativeStudioHomePage')
+);
 const MiniAppsListPage = React.lazy(() => import('@renderer/pages/miniApps'));
 const MiniAppRunnerPage = React.lazy(() => import('@renderer/pages/miniApps/RunnerPage'));
 const AssetLibraryPage = React.lazy(() => import('@renderer/pages/assets'));
@@ -131,6 +136,10 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
         {/* The desktop-companion window route: fullscreen transparent, no app layout/sidebar. */}
         <Route path='/companion' element={withRouteFallback(CompanionPage)} />
         <Route element={<ProtectedAppRuntime />}>
+          {/* Creative Studio is a focused product: no workbench rail, shortcuts, or pull-to-refresh shell. */}
+          <Route path={CREATIVE_STUDIO_ROOT_PATH} element={withRouteFallback(CreativeStudioFocusShell)}>
+            <Route index element={withRouteFallback(CreativeStudioHomePage)} />
+          </Route>
           <Route element={layout}>
             <Route index element={<Navigate to='/guid' replace />} />
             {/* Models, presets, skills, and MCP are independent top-level capabilities. */}
@@ -191,9 +200,6 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/knowledge/:id' element={withRouteFallback(KnowledgeDetailPage)} />
             {/* 资产库 (Asset Library) — platform-level management of workshop assets. */}
             <Route path='/assets' element={withRouteFallback(AssetLibraryPage)} />
-            {/* 创意工坊 (Creative Workshop) — infinite-canvas AI visual creation. */}
-            <Route path='/workshop' element={withRouteFallback(WorkshopListPage)} />
-            <Route path='/workshop/:id' element={withRouteFallback(WorkshopCanvasPage)} />
             {/* 小程序 (Mini-apps) — the solidified library and its full-page runner. */}
             <Route path='/mini-apps' element={withRouteFallback(MiniAppsListPage)} />
             <Route path='/mini-apps/:id' element={withRouteFallback(MiniAppRunnerPage)} />
