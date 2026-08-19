@@ -23,7 +23,23 @@ export const NOMIFUN_PUBLIC_LINKS = {
 
 const COPYRIGHT = '© 2025-2026 NomiFun · www.nomifun.com';
 
-const CONTACT_ITEMS = [
+/**
+ * One contact row. `trailingKey`/`trailingFallback` are optional so a channel
+ * can carry a suffix (e.g. "pending") without every other row having to declare
+ * one — previously the list was a narrowed `as const` union in which no member
+ * had the field at all, so the render site could not compile.
+ */
+interface ContactItem {
+  labelKey: string;
+  fallbackLabel: string;
+  value: string;
+  url: string;
+  copyValue: string;
+  trailingKey?: string;
+  trailingFallback?: string;
+}
+
+const CONTACT_ITEMS: readonly ContactItem[] = [
   {
     labelKey: 'settings.contactAddress',
     fallbackLabel: '联系地址',
@@ -45,7 +61,7 @@ const CONTACT_ITEMS = [
     url: NOMIFUN_PUBLIC_LINKS.officialWebsite,
     copyValue: NOMIFUN_PUBLIC_LINKS.officialWebsite,
   },
-] as const;
+];
 
 type FeedbackReportModalProps = {
   visible: boolean;
@@ -100,7 +116,7 @@ const FeedbackReportModal: React.FC<FeedbackReportModalProps> = ({ visible, onCa
               >
                 <span className='break-all'>
                   {item.value}
-                  {'trailingKey' in item ? t(item.trailingKey, item.trailingFallback) : ''}
+                  {item.trailingKey ? t(item.trailingKey, item.trailingFallback ?? '') : ''}
                 </span>
               </button>
               <CopyIconButton
