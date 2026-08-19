@@ -497,7 +497,7 @@ const KnowledgeListPage: React.FC = () => {
                 }}
                 className={[
                   'flex flex-col items-center justify-center gap-8px cursor-pointer select-none',
-                  'min-h-188px rounded-16px',
+                  'min-h-172px box-border rounded-16px',
                   'border border-dashed border-[var(--color-border-3)] bg-transparent',
                   'text-[var(--color-text-3)]',
                   'hover:border-[var(--color-primary-light-3)] hover:text-primary-6 hover:bg-[var(--color-primary-light-1)]',

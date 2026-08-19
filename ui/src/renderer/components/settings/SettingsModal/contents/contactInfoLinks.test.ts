@@ -25,6 +25,7 @@ describe('public contact links', () => {
     }
 
     expect(combined.includes('mailto:')).toBe(false);
+    expect(aboutSource.includes('NOMIFUN_PUBLIC_LINKS.email')).toBe(false);
     expect(aboutSource.includes('ABOUT_LINK_TARGET')).toBe(false);
   });
 
@@ -46,5 +47,15 @@ describe('public contact links', () => {
     expect(contactSource.includes("<Info theme='outline' size='28' />")).toBe(false);
     expect(contactSource.includes("bg-fill-2 px-12px py-10px")).toBe(false);
     expect(contactSource.includes('>↗<')).toBe(false);
+  });
+
+  test('keeps the About page links vertically compact', () => {
+    const aboutSource = readSource(new URL('./AboutModalContent.tsx', import.meta.url));
+
+    expect(aboutSource.includes("items-center pb-12px")).toBe(true);
+    expect(aboutSource.includes("<Divider className='my-8px' />")).toBe(true);
+    expect(aboutSource.includes("flex flex-col gap-0")).toBe(true);
+    expect(aboutSource.includes("px-12px py-8px rd-8px")).toBe(true);
+    expect(aboutSource.includes("px-16px py-12px rd-8px")).toBe(false);
   });
 });

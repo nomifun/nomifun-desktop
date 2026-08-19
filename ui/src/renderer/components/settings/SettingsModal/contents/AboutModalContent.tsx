@@ -88,12 +88,6 @@ const AboutModalContent: React.FC = () => {
       url: NOMIFUN_PUBLIC_LINKS.officialWebsite,
       icon: <Right theme='outline' size='16' />,
     },
-    {
-      title: t('settings.contactEmail'),
-      detail: `${NOMIFUN_PUBLIC_LINKS.email}${t('settings.contactEmailPending')}`,
-      url: NOMIFUN_PUBLIC_LINKS.emailHref,
-      icon: <Right theme='outline' size='16' />,
-    },
   ];
 
   return (
@@ -104,7 +98,7 @@ const AboutModalContent: React.FC = () => {
       >
         <div className='flex flex-col max-w-500px mx-auto'>
           {/* App Info Section */}
-          <div className='flex flex-col items-center pb-24px'>
+          <div className='flex flex-col items-center pb-12px'>
             <Typography.Title heading={3} className='text-24px font-bold text-t-primary mb-8px'>
               NomiFun
             </Typography.Title>
@@ -152,14 +146,14 @@ const AboutModalContent: React.FC = () => {
           </div>
 
           {/* Divider */}
-          <Divider className='my-16px' />
+          <Divider className='my-8px' />
 
           {/* Links Section */}
-          <div className='flex flex-col gap-4px pt-8px'>
+          <div className='flex flex-col gap-0'>
             {linkItems.map((item, index) => (
               <div
                 key={index}
-                className='flex items-center justify-between px-16px py-12px rd-8px hover:bg-fill-2 transition-all cursor-pointer group'
+                className='flex items-center justify-between px-12px py-8px rd-8px hover:bg-fill-2 transition-all cursor-pointer group'
                 onClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
