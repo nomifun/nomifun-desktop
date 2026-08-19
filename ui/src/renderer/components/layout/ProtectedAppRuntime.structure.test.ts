@@ -11,6 +11,8 @@ const readSource = (url: URL) => readFileSync(url, 'utf8');
 
 const runtimeSource = readSource(new URL('./ProtectedAppRuntime.tsx', import.meta.url));
 const routerSource = readSource(new URL('./Router.tsx', import.meta.url));
+const themeRuntimeSource = readSource(new URL('./AppThemeRuntime.tsx', import.meta.url));
+const workbenchLayoutSource = readSource(new URL('./Layout.tsx', import.meta.url));
 
 describe('protected application runtime boundary', () => {
   test('owns authentication and application-wide desktop effects without a visible layout', () => {
@@ -32,6 +34,25 @@ describe('protected application runtime boundary', () => {
     expect(/<Route element=\{<ProtectedAppRuntime \/>\}>\s*<Route element=\{layout\}>/.test(routerSource)).toBe(true);
     expect(routerSource.includes('ProtectedLayout')).toBe(false);
     expect(routerSource.includes('React.cloneElement(layout)')).toBe(false);
+  });
+
+  test('keeps the application theme alive above every protected routed layout', () => {
+    const themeRuntimeAt = runtimeSource.indexOf('<AppThemeRuntime />');
+    const routedLayoutAt = runtimeSource.indexOf('<Outlet />');
+
+    expect(themeRuntimeAt).toBeGreaterThan(-1);
+    expect(routedLayoutAt).toBeGreaterThan(themeRuntimeAt);
+    expect(themeRuntimeSource.includes("const CUSTOM_CSS_STYLE_ID = 'user-defined-custom-css';")).toBe(true);
+    expect(themeRuntimeSource.includes('broadcastCustomCssSync(customCss);')).toBe(true);
+    expect(themeRuntimeSource.includes('ensureThemeControlContract();')).toBe(true);
+    expect(themeRuntimeSource.includes('observer.observe(document.head, { childList: true });')).toBe(true);
+  });
+
+  test('leaves the visible workbench layout free of application theme ownership', () => {
+    expect(workbenchLayoutSource.includes('loadAndHealCustomCss')).toBe(false);
+    expect(workbenchLayoutSource.includes('user-defined-custom-css')).toBe(false);
+    expect(workbenchLayoutSource.includes('broadcastCustomCssSync')).toBe(false);
+    expect(workbenchLayoutSource.includes('THEME_CONTROL_CONTRACT_STYLE_ID')).toBe(false);
   });
 
   test('keeps both workshop routes inside the workbench layout for this refactor', () => {
