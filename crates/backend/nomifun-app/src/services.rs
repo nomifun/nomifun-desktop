@@ -387,12 +387,14 @@ struct BrowserStartupPreferences {
 impl Default for BrowserStartupPreferences {
     fn default() -> Self {
         Self {
-            // New installs default to truly silent Agent browsing: routine
-            // Browser Use launches Chromium `--headless=new` and never opens
-            // an operating-system window. A user may explicitly choose the
-            // `external` default-visible policy in Settings; the removed
-            // embedded viewer is never selected as a presentation surface.
-            display_mode: "headless",
+            // New installs let the trusted host choose per Lane: routine Agent
+            // browsing launches Chromium `--headless=new` and never opens an
+            // operating-system window, but a moment that needs the user's
+            // supervision may surface one. A user may still pin `headless`
+            // (never visible) or `external` (always visible) in Settings; the
+            // removed embedded viewer is never selected as a presentation
+            // surface.
+            display_mode: "auto",
             source: "system".to_owned(),
             full_power: false,
             persistent_login: true,
@@ -402,30 +404,57 @@ impl Default for BrowserStartupPreferences {
 
 /// Resolve the trusted application-level browser visibility policy.
 ///
-/// The two supported values are user preferences, not Agent capabilities:
-/// `headless` (default) keeps routine Primary work invisible; `external` is a
-/// user's explicit choice to launch the Primary Host with a visible window.
-/// Version 2 makes an external window an explicitly user-selected policy.
-/// Any pre-versioned value (including a historical `external` value inferred
-/// from the removed `silent=false` setting) is migrated once to `headless`.
-/// Once the v2 marker is present, either valid user choice is preserved.
-/// Missing or malformed v2 state fails closed to `headless` and is repaired.
+/// The three supported values are user preferences, not Agent capabilities:
+/// - `headless` keeps every Primary launch invisible, and forbids the Agent from
+///   surfacing a window even at an attended moment.
+/// - `auto` (default) lets the trusted host decide per Lane from the Agent's
+///   declared intent and the action's risk tier: routine work stays silent, and
+///   a moment that needs supervision (a login wall, an irreversible action) may
+///   open a window. The Agent proposes; the host decides.
+/// - `external` launches the Primary Host with a visible window unconditionally.
+///
+/// Version 3 introduces `auto` and makes it the default. Migration is lineage
+/// aware, because not every stored `external` is a trustworthy user choice:
+/// - **Unversioned** (pre-v2) state migrates to `auto` and never preserves
+///   `external`. A pre-v2 `external` may have been *inferred* from the removed
+///   `silent=false` setting rather than chosen, and version 2 deliberately
+///   stopped such state from opening an operating-system window. That decision
+///   is preserved here.
+/// - **Version 2** state carries a real user choice, so an explicit `external`
+///   is preserved — a user who opted into a visible window never silently loses
+///   it — while `headless`, which was version 2's default for every
+///   installation, moves to `auto`. That direction is safe: `auto` still keeps
+///   routine browsing silent and only adds the ability to surface a window when
+///   the user genuinely needs to intervene. Anyone who wants "never visible" can
+///   still select `headless` explicitly.
+///
+/// Malformed or missing state at the current version fails closed to `auto` and
+/// is repaired.
 #[cfg(feature = "browser-use")]
 fn resolve_browser_display_mode(
     display_mode: Option<&str>,
     policy_version: Option<&str>,
 ) -> (&'static str, bool) {
-    let is_current_version = policy_version
-        .map(|value| value.trim().trim_matches('"') == BROWSER_DISPLAY_MODE_POLICY_VERSION)
-        .unwrap_or(false);
+    let version = policy_version.map(|value| value.trim().trim_matches('"'));
+    let stored = display_mode.map(|value| value.trim().trim_matches('"'));
+    let is_current_version = version == Some(BROWSER_DISPLAY_MODE_POLICY_VERSION);
     if !is_current_version {
-        return ("headless", true);
+        // Only a version-2 marker proves the stored value was an explicit user
+        // choice. Anything older is not trustworthy as an opt-in to a visible
+        // window and must not resurrect one.
+        return match (version, stored) {
+            (Some(BROWSER_DISPLAY_MODE_PREVIOUS_POLICY_VERSION), Some("external")) => {
+                ("external", true)
+            }
+            _ => ("auto", true),
+        };
     }
 
-    match display_mode.map(|value| value.trim().trim_matches('"')) {
+    match stored {
         Some("headless") => ("headless", false),
         Some("external") => ("external", false),
-        _ => ("headless", true),
+        Some("auto") => ("auto", false),
+        _ => ("auto", true),
     }
 }
 
@@ -435,7 +464,11 @@ pub(crate) const BROWSER_DISPLAY_MODE_PREF_KEY: &str = "agent.browserUse.display
 pub(crate) const BROWSER_DISPLAY_MODE_VERSION_PREF_KEY: &str =
     "agent.browserUse.displayModeVersion";
 #[cfg(feature = "browser-use")]
-pub(crate) const BROWSER_DISPLAY_MODE_POLICY_VERSION: &str = "2";
+pub(crate) const BROWSER_DISPLAY_MODE_POLICY_VERSION: &str = "3";
+/// The previous policy lineage. A marker of this version proves the stored mode
+/// was an explicit version-2 user choice, which migration is allowed to preserve.
+#[cfg(feature = "browser-use")]
+pub(crate) const BROWSER_DISPLAY_MODE_PREVIOUS_POLICY_VERSION: &str = "2";
 
 #[cfg(feature = "browser-use")]
 const BROWSER_STARTUP_PREFERENCE_KEYS: [&str; 5] = [
@@ -519,6 +552,25 @@ where
     }
 }
 
+/// Map the stored display-mode preference onto the Hub's visibility policy.
+///
+/// `external`/`headless` pin the mechanism and forbid the Hub from resolving it;
+/// `auto` delegates. Anything unrecognized resolves to `auto`, matching
+/// [`resolve_browser_display_mode`]'s fail-closed direction — which is silent,
+/// because `auto` still launches headless and only escalates for a moment that
+/// needs the user.
+#[cfg(feature = "browser-use")]
+fn browser_visibility_policy(
+    display_mode: &str,
+) -> nomifun_browser_platform::BrowserVisibilityPolicy {
+    use nomifun_browser_platform::BrowserVisibilityPolicy;
+    match display_mode {
+        "external" => BrowserVisibilityPolicy::AlwaysHeadful,
+        "headless" => BrowserVisibilityPolicy::AlwaysHeadless,
+        _ => BrowserVisibilityPolicy::Auto,
+    }
+}
+
 #[cfg(feature = "browser-use")]
 fn primary_host_is_headful(display_mode: &str) -> bool {
     // The trusted application-level preference is the only input that can
@@ -526,7 +578,56 @@ fn primary_host_is_headful(display_mode: &str) -> bool {
     // request parameters have no path into this policy. Non-Primary Hosts
     // stay headless regardless, and explicit foregrounding remains a separate
     // trusted Host transition owned by the Hub.
+    //
+    // `auto` is deliberately *not* headful at startup: it starts silent and lets
+    // the Hub surface a window only when a Lane reaches a moment that needs the
+    // user's supervision. Only an explicit `external` preference launches
+    // visible unconditionally.
     display_mode == "external"
+}
+
+/// Per-process byte count used to attribute a managed Chromium process tree.
+///
+/// Chromium is deliberately multi-process: one browser process plus GPU,
+/// network/storage utilities, a crash handler, and one renderer per site
+/// instance. Attribution sums this value across the whole tree, so the metric
+/// has to be *additive* — a value that can be summed across sibling processes
+/// without counting the same physical memory twice.
+///
+/// On Windows the working set fails that test. `WorkingSetSize` counts every
+/// resident page a process maps, including pages **shared** with its siblings:
+/// `chrome.dll` and the other shared images are mapped into every child, so
+/// summing working sets charges those pages once per process. Measured on a
+/// nine-process Chromium tree, 41% of the summed working set was shared pages
+/// counted repeatedly (696 MiB summed working set against 413 MiB of private
+/// bytes). Attributing that inflated total to one task made an ordinary
+/// browsing session look like a leak and got its Lane reclaimed.
+///
+/// `sysinfo` exposes the private commit charge on Windows as
+/// `Process::virtual_memory` (it maps to `PROCESS_MEMORY_COUNTERS_EX::
+/// PrivateUsage`, not to an address-space size). Private commit is
+/// per-process-exclusive, so it is safe to sum.
+///
+/// On Linux and macOS `virtual_memory` really is the virtual address-space size
+/// (VSZ / `vsize`), which is meaningless here, and `sysinfo` exposes no
+/// proportional set size. Those platforms therefore keep the resident-set
+/// value. Summing RSS still over-counts shared pages, so tree totals there
+/// remain an upper bound rather than an exact figure; the per-task budget is
+/// sized to tolerate that.
+#[cfg(feature = "browser-use")]
+fn process_tree_attributable_bytes(process: &sysinfo::Process) -> u64 {
+    #[cfg(windows)]
+    {
+        // Windows: private commit charge (PrivateUsage). Additive across the
+        // tree because it excludes shared pages.
+        process.virtual_memory()
+    }
+    #[cfg(not(windows))]
+    {
+        // Unix: resident set size. `virtual_memory` is VSZ here and must not be
+        // substituted.
+        process.memory()
+    }
 }
 
 #[cfg(feature = "browser-use")]
@@ -1305,7 +1406,7 @@ fn sample_browser_resources(
             (
                 process.pid().as_u32(),
                 process.parent().map(|pid| pid.as_u32()),
-                process.memory(),
+                process_tree_attributable_bytes(process),
                 process.start_time(),
             )
         }),
@@ -3127,6 +3228,12 @@ impl AppServices {
                 // constructing HostLaunchRequest; Anonymous/Replica/Isolated
                 // Hosts remain headless even in external display mode.
                 headful: primary_host_is_headful(display_mode),
+                // The policy is the separate axis deciding whether the Hub may
+                // resolve visibility per Lane at all. Without this the Hub would
+                // always see the `Auto` default, so a user who explicitly pinned
+                // `headless` would still get a window at an attended moment —
+                // exactly the override the design promises never happens.
+                visibility_policy: browser_visibility_policy(display_mode),
                 ..Default::default()
             };
             // Derive installation-wide throughput from this machine before
@@ -3692,52 +3799,90 @@ mod tests {
     #[cfg(feature = "browser-use")]
     #[test]
     fn browser_display_mode_migration_is_authoritative_and_persistable() {
-        // Only a versioned explicit user choice is preserved.
+        // A stored value under the current v3 marker is authoritative.
         assert_eq!(
-            resolve_browser_display_mode(Some("headless"), Some("2")),
+            resolve_browser_display_mode(Some("headless"), Some("3")),
             ("headless", false)
         );
         assert_eq!(
-            resolve_browser_display_mode(Some("external"), Some("\"2\"")),
+            resolve_browser_display_mode(Some("external"), Some("\"3\"")),
             ("external", false)
         );
-        // Every unversioned historical value converges once to the silent
-        // default, including the previous inferred external setting.
+        assert_eq!(
+            resolve_browser_display_mode(Some("auto"), Some("3")),
+            ("auto", false)
+        );
+        // A version-2 marker proves an explicit choice: an external opt-in is
+        // preserved, while v2's universal `headless` default adopts `auto`.
+        assert_eq!(
+            resolve_browser_display_mode(Some("external"), Some("\"2\"")),
+            ("external", true)
+        );
+        assert_eq!(
+            resolve_browser_display_mode(Some("headless"), Some("2")),
+            ("auto", true)
+        );
+        // Every unversioned historical value converges once on `auto`, including
+        // the previous *inferred* external setting, which was never a real user
+        // choice and must not resurrect an operating-system window.
         assert_eq!(
             resolve_browser_display_mode(Some("external"), None),
-            ("headless", true)
+            ("auto", true)
+        );
+        assert_eq!(
+            resolve_browser_display_mode(Some("external"), Some("1")),
+            ("auto", true)
         );
         assert_eq!(
             resolve_browser_display_mode(Some("headless"), Some("1")),
-            ("headless", true)
+            ("auto", true)
         );
-        assert_eq!(
-            resolve_browser_display_mode(None, None),
-            ("headless", true)
-        );
+        assert_eq!(resolve_browser_display_mode(None, None), ("auto", true));
         // Missing or invalid mode under the current marker is repaired.
         assert_eq!(
-            resolve_browser_display_mode(Some("embedded"), Some("2")),
-            ("headless", true)
+            resolve_browser_display_mode(Some("embedded"), Some("3")),
+            ("auto", true)
         );
         assert_eq!(
-            resolve_browser_display_mode(Some("invalid"), Some("2")),
-            ("headless", true)
+            resolve_browser_display_mode(Some("invalid"), Some("3")),
+            ("auto", true)
         );
         assert_eq!(
-            resolve_browser_display_mode(None, Some("2")),
-            ("headless", true),
-            "a marker without a valid mode fails safe to silent headless"
+            resolve_browser_display_mode(None, Some("3")),
+            ("auto", true),
+            "a marker without a valid mode fails safe to the auto default"
         );
         assert_eq!(
-            resolve_browser_display_mode(Some("  \"headless\"  "), Some("  \"2\"  ")),
+            resolve_browser_display_mode(Some("  \"headless\"  "), Some("  \"3\"  ")),
             ("headless", false)
         );
-        // Only the user's explicit external policy launches a visible
-        // Primary Host; everything else stays truly headless.
+        // Only the user's explicit external policy launches a visible Primary
+        // Host. `auto` starts silent and lets the Hub surface a window later.
         assert!(primary_host_is_headful("external"));
         assert!(!primary_host_is_headful("headless"));
+        assert!(!primary_host_is_headful("auto"));
         assert!(!primary_host_is_headful("embedded"));
+
+        // The policy is the separate axis: it decides whether the Hub may resolve
+        // visibility per Lane at all. A pinned choice must forbid that.
+        use nomifun_browser_platform::BrowserVisibilityPolicy;
+        assert_eq!(
+            browser_visibility_policy("external"),
+            BrowserVisibilityPolicy::AlwaysHeadful
+        );
+        assert_eq!(
+            browser_visibility_policy("headless"),
+            BrowserVisibilityPolicy::AlwaysHeadless
+        );
+        assert_eq!(
+            browser_visibility_policy("auto"),
+            BrowserVisibilityPolicy::Auto
+        );
+        assert_eq!(
+            browser_visibility_policy("embedded"),
+            BrowserVisibilityPolicy::Auto,
+            "unrecognized state fails closed to auto, which still launches silently"
+        );
     }
 
     #[cfg(feature = "browser-use")]
@@ -3757,7 +3902,7 @@ mod tests {
 
     #[cfg(feature = "browser-use")]
     #[tokio::test]
-    async fn browser_display_mode_migrates_unversioned_external_to_headless_once() {
+    async fn browser_display_mode_migrates_unversioned_external_to_auto_once() {
         let repo = BrowserPreferenceTestRepository::with_rows(&[
             (BROWSER_DISPLAY_MODE_PREF_KEY, "\"external\""),
             ("agent.browserUse.source", "\"system\""),
@@ -3765,15 +3910,16 @@ mod tests {
 
         let preferences = load_browser_startup_preferences(&repo).await;
         assert_eq!(
-            preferences.display_mode, "headless",
-            "unversioned external state must not keep opening an operating-system window"
+            preferences.display_mode, "auto",
+            "unversioned external state was never an explicit user choice, so it \
+             must not keep opening an operating-system window"
         );
         assert_eq!(
             repo.writes(),
             vec![
                 (
                     BROWSER_DISPLAY_MODE_PREF_KEY.to_owned(),
-                    "\"headless\"".to_owned()
+                    "\"auto\"".to_owned()
                 ),
                 (
                     BROWSER_DISPLAY_MODE_VERSION_PREF_KEY.to_owned(),
@@ -3783,11 +3929,62 @@ mod tests {
         );
     }
 
+    /// A user who explicitly opted into a visible window under version 2 keeps
+    /// it; the new `auto` default must not silently take it away.
     #[cfg(feature = "browser-use")]
     #[tokio::test]
-    async fn browser_display_mode_preserves_versioned_explicit_external() {
+    async fn browser_display_mode_preserves_version_two_explicit_external() {
         let repo = BrowserPreferenceTestRepository::with_rows(&[
             (BROWSER_DISPLAY_MODE_PREF_KEY, "\"external\""),
+            (
+                BROWSER_DISPLAY_MODE_VERSION_PREF_KEY,
+                BROWSER_DISPLAY_MODE_PREVIOUS_POLICY_VERSION,
+            ),
+        ]);
+
+        let preferences = load_browser_startup_preferences(&repo).await;
+        assert_eq!(preferences.display_mode, "external");
+        assert_eq!(
+            repo.writes(),
+            vec![
+                (
+                    BROWSER_DISPLAY_MODE_PREF_KEY.to_owned(),
+                    "\"external\"".to_owned()
+                ),
+                (
+                    BROWSER_DISPLAY_MODE_VERSION_PREF_KEY.to_owned(),
+                    BROWSER_DISPLAY_MODE_POLICY_VERSION.to_owned()
+                ),
+            ],
+            "the preserved choice is restamped with the current lineage marker"
+        );
+    }
+
+    /// Version 2's `headless` was the default for every installation rather than
+    /// a deliberate "never show me a window", so it adopts the new `auto`
+    /// default.
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_display_mode_migrates_version_two_headless_default_to_auto() {
+        let repo = BrowserPreferenceTestRepository::with_rows(&[
+            (BROWSER_DISPLAY_MODE_PREF_KEY, "\"headless\""),
+            (
+                BROWSER_DISPLAY_MODE_VERSION_PREF_KEY,
+                BROWSER_DISPLAY_MODE_PREVIOUS_POLICY_VERSION,
+            ),
+        ]);
+
+        let preferences = load_browser_startup_preferences(&repo).await;
+        assert_eq!(preferences.display_mode, "auto");
+    }
+
+    /// An explicit `headless` under the *current* lineage is a real "never show
+    /// me a window" choice and is preserved verbatim.
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_display_mode_preserves_current_explicit_headless() {
+        let repo = BrowserPreferenceTestRepository::with_rows(&[
+            (BROWSER_DISPLAY_MODE_PREF_KEY, "\"headless\""),
             (
                 BROWSER_DISPLAY_MODE_VERSION_PREF_KEY,
                 BROWSER_DISPLAY_MODE_POLICY_VERSION,
@@ -3795,23 +3992,23 @@ mod tests {
         ]);
 
         let preferences = load_browser_startup_preferences(&repo).await;
-        assert_eq!(preferences.display_mode, "external");
+        assert_eq!(preferences.display_mode, "headless");
         assert!(repo.writes().is_empty());
     }
 
     #[cfg(feature = "browser-use")]
     #[tokio::test]
-    async fn fresh_install_persists_headless_display_mode() {
+    async fn fresh_install_persists_auto_display_mode() {
         let repo = BrowserPreferenceTestRepository::with_rows(&[]);
 
         let preferences = load_browser_startup_preferences(&repo).await;
-        assert_eq!(preferences.display_mode, "headless");
+        assert_eq!(preferences.display_mode, "auto");
         assert_eq!(
             repo.writes(),
             vec![
                 (
                     BROWSER_DISPLAY_MODE_PREF_KEY.to_owned(),
-                    "\"headless\"".to_owned()
+                    "\"auto\"".to_owned()
                 ),
                 (
                     BROWSER_DISPLAY_MODE_VERSION_PREF_KEY.to_owned(),
@@ -3823,7 +4020,7 @@ mod tests {
 
     #[cfg(feature = "browser-use")]
     #[tokio::test]
-    async fn invalid_display_mode_is_repaired_to_headless() {
+    async fn invalid_display_mode_is_repaired_to_auto() {
         let repo = BrowserPreferenceTestRepository::with_rows(&[
             (BROWSER_DISPLAY_MODE_PREF_KEY, "\"visible\""),
             (
@@ -3833,20 +4030,21 @@ mod tests {
         ]);
 
         let preferences = load_browser_startup_preferences(&repo).await;
-        assert_eq!(preferences.display_mode, "headless");
+        assert_eq!(preferences.display_mode, "auto");
         assert_eq!(
             repo.writes(),
             vec![
                 (
                     BROWSER_DISPLAY_MODE_PREF_KEY.to_owned(),
-                    "\"headless\"".to_owned()
+                    "\"auto\"".to_owned()
                 ),
                 (
                     BROWSER_DISPLAY_MODE_VERSION_PREF_KEY.to_owned(),
                     BROWSER_DISPLAY_MODE_POLICY_VERSION.to_owned()
                 ),
             ],
-            "malformed configuration must converge to the silent headless default"
+            "malformed configuration must converge on the auto default, which \
+             still launches silently"
         );
     }
 

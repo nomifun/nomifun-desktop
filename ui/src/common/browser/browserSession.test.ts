@@ -93,16 +93,68 @@ describe('browserSession display-mode policy', () => {
 
       expect(await browserSession.displayMode.get.invoke()).toEqual({
         display_mode: 'headless',
+        // This fake backend predates the policy/mechanism split and sends no
+        // `effective_visibility`, so it is derived from the pinned policy.
+        effective_visibility: 'headless',
       });
       expect(
         await browserSession.displayMode.put.invoke({ display_mode: 'external' })
-      ).toEqual({ display_mode: 'external' });
+      ).toEqual({ display_mode: 'external', effective_visibility: 'headful' });
 
       expect(requests[0]?.url.endsWith('/api/browser/display-mode')).toBe(true);
       expect(requests[0]?.method).toBe('GET');
       expect(requests[1]?.method).toBe('PUT');
       expect(JSON.parse(String(requests[1]?.body))).toEqual({
         display_mode: 'external',
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test('reports the auto policy and the separately measured effective visibility', async () => {
+    try {
+      globalThis.fetch = (() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              success: true,
+              // `auto` currently running silently. The mechanism cannot be
+              // derived from the policy here, which is why the backend reports
+              // it separately.
+              data: { display_mode: 'auto', effective_visibility: 'headless' },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        )) as typeof fetch;
+
+      expect(await browserSession.displayMode.get.invoke()).toEqual({
+        display_mode: 'auto',
+        effective_visibility: 'headless',
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test('honors an escalated effective visibility while the policy stays auto', async () => {
+    try {
+      globalThis.fetch = (() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              success: true,
+              // The host escalated to a visible window for an attended moment;
+              // the user's policy is unchanged.
+              data: { display_mode: 'auto', effective_visibility: 'headful' },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        )) as typeof fetch;
+
+      expect(await browserSession.displayMode.get.invoke()).toEqual({
+        display_mode: 'auto',
+        effective_visibility: 'headful',
       });
     } finally {
       globalThis.fetch = realFetch;

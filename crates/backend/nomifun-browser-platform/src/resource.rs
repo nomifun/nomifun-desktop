@@ -15,9 +15,16 @@ pub const MIN_BROWSER_MEMORY_RATIO: f64 = 0.1;
 pub const MAX_BROWSER_MEMORY_RATIO: f64 = 0.8;
 pub const MIN_TASK_MEMORY_BYTES: u64 = 256 * MIB;
 pub const MAX_TASK_MEMORY_BYTES: u64 = 16 * GIB;
-pub const AUTOMATIC_TASK_MEMORY_BYTES: u64 = GIB;
-pub const RESOURCE_SAVING_TASK_MEMORY_BYTES: u64 = 768 * MIB;
-pub const HIGH_CONCURRENCY_TASK_MEMORY_BYTES: u64 = GIB;
+// A managed Chromium Host costs several hundred MiB before it renders anything:
+// the browser process, the GPU process, network/storage utilities and the crash
+// handler all exist independently of page content. A task that is alone on a
+// Host is attributed that entire baseline, so the budget has to cover the
+// baseline *plus* real pages. A 1 GiB budget did not: an idle nine-process
+// Chromium tree already measured ~700 MiB, leaving no room for content and
+// getting ordinary sessions reclaimed within seconds.
+pub const AUTOMATIC_TASK_MEMORY_BYTES: u64 = 2 * GIB;
+pub const RESOURCE_SAVING_TASK_MEMORY_BYTES: u64 = 5 * GIB / 4;
+pub const HIGH_CONCURRENCY_TASK_MEMORY_BYTES: u64 = 2 * GIB;
 pub const MAX_TASK_ACTIVE_OPERATIONS: usize = 16;
 pub const MAX_TASK_OPEN_LANES: usize = 32;
 pub const MAX_TASK_TABS: usize = 64;

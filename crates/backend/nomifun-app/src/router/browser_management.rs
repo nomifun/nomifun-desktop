@@ -454,6 +454,10 @@ impl From<BrowserPlatformError> for BrowserApiError {
             | BrowserErrorCode::IdentityReplicaStale
             | BrowserErrorCode::NeedsPrimaryIdentity
             | BrowserErrorCode::PrimaryProfileStorageLimit => StatusCode::CONFLICT,
+            // The Lane was reclaimed to stay inside the task's memory budget.
+            // It is a capacity outcome, not a client mistake, and the caller may
+            // reopen a Lane and continue.
+            BrowserErrorCode::TaskMemoryReclaimed => StatusCode::TOO_MANY_REQUESTS,
             BrowserErrorCode::BrowserRestarted
             | BrowserErrorCode::BrowserUnavailable
             | BrowserErrorCode::BrowserShuttingDown => StatusCode::SERVICE_UNAVAILABLE,
@@ -1268,25 +1272,67 @@ async fn close_all(
     Ok(Json(ApiResponse::ok(hub.close_all().await?)))
 }
 
+/// The user's visibility **policy**.
+///
+/// This is deliberately not the same axis as [`BrowserVisibility`], which is the
+/// binary *mechanism* a Chromium Host is currently launched with. `Headless` and
+/// `External` pin the mechanism; `Auto` delegates it to the trusted host, which
+/// keeps routine Agent work silent and may surface a window only at a moment
+/// that needs the user's supervision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum BrowserDisplayModeValueDto {
     Headless,
+    Auto,
     External,
 }
 
 impl BrowserDisplayModeValueDto {
-    fn from_visibility(visibility: BrowserVisibility) -> Self {
-        match visibility {
-            BrowserVisibility::Headless => Self::Headless,
-            BrowserVisibility::Headful => Self::External,
+    /// The visibility this policy pins, or `None` when the trusted host decides.
+    fn pinned_visibility(self) -> Option<BrowserVisibility> {
+        match self {
+            Self::Headless => Some(BrowserVisibility::Headless),
+            Self::External => Some(BrowserVisibility::Headful),
+            Self::Auto => None,
         }
     }
 
-    fn visibility(self) -> BrowserVisibility {
+    /// The visibility a Host adopts when this policy is applied. `Auto` starts
+    /// silent and is escalated later by the Hub, so it baselines to headless.
+    fn baseline_visibility(self) -> BrowserVisibility {
+        self.pinned_visibility()
+            .unwrap_or(BrowserVisibility::Headless)
+    }
+
+    /// The platform-level policy this wire value selects.
+    fn policy(self) -> nomifun_browser_platform::BrowserVisibilityPolicy {
+        use nomifun_browser_platform::BrowserVisibilityPolicy;
         match self {
-            Self::Headless => BrowserVisibility::Headless,
-            Self::External => BrowserVisibility::Headful,
+            Self::Headless => BrowserVisibilityPolicy::AlwaysHeadless,
+            Self::Auto => BrowserVisibilityPolicy::Auto,
+            Self::External => BrowserVisibilityPolicy::AlwaysHeadful,
+        }
+    }
+}
+
+/// The binary mechanism a managed Host is currently running with, reported
+/// separately from the policy so a client can render "Auto (currently silent)"
+/// instead of guessing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BrowserEffectiveVisibilityDto {
+    // Silent is the fail-safe default: a value that was never populated must not
+    // claim a window is open.
+    #[default]
+    Headless,
+    Headful,
+}
+
+impl BrowserEffectiveVisibilityDto {
+    fn from_visibility(visibility: BrowserVisibility) -> Self {
+        match visibility {
+            BrowserVisibility::Headless => Self::Headless,
+            BrowserVisibility::Headful => Self::Headful,
         }
     }
 }
@@ -1294,6 +1340,25 @@ impl BrowserDisplayModeValueDto {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BrowserDisplayModeDto {
+    display_mode: BrowserDisplayModeValueDto,
+    /// What the managed Host is actually running with right now. Reported so a
+    /// client can show "Auto (currently silent)" rather than inferring policy
+    /// from mechanism — an inference that is impossible, because both `Auto` and
+    /// `Headless` present as headless.
+    ///
+    /// Read-only: `PUT` accepts only `display_mode`.
+    #[serde(skip_deserializing)]
+    effective_visibility: BrowserEffectiveVisibilityDto,
+}
+
+/// The request body for `PUT`, which accepts the policy alone.
+///
+/// `effective_visibility` is derived state and must not be settable; a separate
+/// type keeps `deny_unknown_fields` able to reject it instead of silently
+/// ignoring a client that tries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserDisplayModeRequestDto {
     display_mode: BrowserDisplayModeValueDto,
 }
 
@@ -1306,21 +1371,50 @@ async fn get_display_mode(
     // a storage failure.
     let _update_guard = state.display_mode_update_gate.lock().await;
     let hub = state.require_hub()?;
+    let effective = hub.primary_visibility().await;
     Ok(Json(ApiResponse::ok(BrowserDisplayModeDto {
-        display_mode: BrowserDisplayModeValueDto::from_visibility(
-            hub.primary_visibility().await,
-        ),
+        display_mode: stored_display_mode_policy(&state).await,
+        effective_visibility: BrowserEffectiveVisibilityDto::from_visibility(effective),
     })))
+}
+
+/// The persisted visibility policy.
+///
+/// Startup already migrates and repairs this value, so a GET stays purely
+/// observational: it reports what is stored and never writes. Unreadable or
+/// unrecognized state reports the `Auto` default, matching
+/// `resolve_browser_display_mode`'s fail-closed direction (which is silent).
+async fn stored_display_mode_policy(
+    state: &BrowserManagementState,
+) -> BrowserDisplayModeValueDto {
+    let Ok(rows) = state
+        .preferences
+        .get_by_keys(&[BROWSER_DISPLAY_MODE_PREF_KEY])
+        .await
+    else {
+        return BrowserDisplayModeValueDto::Auto;
+    };
+    rows.iter()
+        .find(|row| row.key == BROWSER_DISPLAY_MODE_PREF_KEY)
+        .and_then(|row| {
+            match row.value.trim().trim_matches('"') {
+                "headless" => Some(BrowserDisplayModeValueDto::Headless),
+                "auto" => Some(BrowserDisplayModeValueDto::Auto),
+                "external" => Some(BrowserDisplayModeValueDto::External),
+                _ => None,
+            }
+        })
+        .unwrap_or(BrowserDisplayModeValueDto::Auto)
 }
 
 async fn put_display_mode(
     State(state): State<BrowserManagementState>,
     Extension(_user): Extension<CurrentUser>,
-    body: Result<Json<BrowserDisplayModeDto>, JsonRejection>,
+    body: Result<Json<BrowserDisplayModeRequestDto>, JsonRejection>,
 ) -> Result<Json<ApiResponse<BrowserDisplayModeDto>>, BrowserApiError> {
     let Json(request) = body.map_err(|_| {
         BrowserApiError::invalid_display_mode(
-            "The browser display mode body must contain only display_mode with value headless or external.",
+            "The browser display mode body must contain only display_mode with value headless, auto, or external.",
         )
     })?;
     let mut start_worker = None;
@@ -1448,8 +1542,22 @@ async fn run_display_mode_update_transaction(
     let _update_guard = state.display_mode_update_gate.lock().await;
     let hub = state.require_hub()?;
     let previous = hub.primary_visibility().await;
-    let requested = requested_mode.visibility();
-    let applied = hub.set_primary_visibility(requested).await?;
+    let previous_policy = hub.visibility_policy().await;
+    // `Auto` hands ongoing control to the Hub but still needs a starting point,
+    // and that point is silent: an Agent must never surface a window merely
+    // because the user selected "let the browser decide".
+    let requested = requested_mode.baseline_visibility();
+    // Apply the policy too, or the Hub keeps resolving against the old one until
+    // the next restart — a user switching to "always silent" would still get a
+    // window at the next attended moment.
+    hub.set_visibility_policy(requested_mode.policy()).await;
+    let applied = match hub.set_primary_visibility(requested).await {
+        Ok(applied) => applied,
+        Err(error) => {
+            hub.set_visibility_policy(previous_policy).await;
+            return Err(error.into());
+        }
+    };
 
     if let Err(error) = state
         .preferences
@@ -1463,6 +1571,10 @@ async fn run_display_mode_update_transaction(
         .await
     {
         tracing::warn!(%error, "could not persist browser display mode");
+        // Roll the policy back with the mechanism. Leaving the new policy behind
+        // after a failed save would silently diverge the live Hub from what is
+        // stored and from what the API just told the client.
+        hub.set_visibility_policy(previous_policy).await;
         if let Err(rollback_error) = hub.set_primary_visibility(previous).await {
             tracing::error!(
                 %rollback_error,
@@ -1473,7 +1585,11 @@ async fn run_display_mode_update_transaction(
     }
 
     Ok(BrowserDisplayModeDto {
-        display_mode: BrowserDisplayModeValueDto::from_visibility(applied),
+        // The stored policy is authoritative for `display_mode`; it cannot be
+        // recovered from the applied visibility because `Auto` and `Headless`
+        // both baseline to headless.
+        display_mode: requested_mode,
+        effective_visibility: BrowserEffectiveVisibilityDto::from_visibility(applied),
     })
 }
 
@@ -3031,7 +3147,11 @@ mod tests {
             .unwrap();
         assert_eq!(initial.status(), StatusCode::OK);
         let initial = response_json(initial).await;
-        assert_eq!(initial["data"]["display_mode"], "headless");
+        // An installation with no stored choice reports the `auto` default, and
+        // reports the mechanism separately: `auto` runs silently until the Hub
+        // has a reason to surface a window.
+        assert_eq!(initial["data"]["display_mode"], "auto");
+        assert_eq!(initial["data"]["effective_visibility"], "headless");
 
         let updated = app
             .router
@@ -3052,6 +3172,7 @@ mod tests {
             "display mode update failed: {updated}"
         );
         assert_eq!(updated["data"]["display_mode"], "external");
+        assert_eq!(updated["data"]["effective_visibility"], "headful");
         assert_eq!(
             app.hub.primary_visibility().await,
             BrowserVisibility::Headful,
@@ -3086,6 +3207,141 @@ mod tests {
                 .get(BROWSER_DISPLAY_MODE_VERSION_PREF_KEY)
                 .map(String::as_str),
             Some(BROWSER_DISPLAY_MODE_POLICY_VERSION)
+        );
+    }
+
+    /// Switching the policy must take effect on the live Hub, not only after a
+    /// restart. Otherwise a user who selects "always silent" still gets a window
+    /// at the next attended moment.
+    #[tokio::test]
+    async fn display_mode_put_applies_the_policy_to_the_live_hub() {
+        let app = test_app(true).await;
+        assert_eq!(
+            app.hub.visibility_policy().await,
+            nomifun_browser_platform::BrowserVisibilityPolicy::Auto,
+            "a fresh install delegates visibility to the host"
+        );
+
+        for (mode, expected) in [
+            (
+                "headless",
+                nomifun_browser_platform::BrowserVisibilityPolicy::AlwaysHeadless,
+            ),
+            (
+                "external",
+                nomifun_browser_platform::BrowserVisibilityPolicy::AlwaysHeadful,
+            ),
+            (
+                "auto",
+                nomifun_browser_platform::BrowserVisibilityPolicy::Auto,
+            ),
+        ] {
+            let response = app
+                .router
+                .clone()
+                .oneshot(authorized_json_request(
+                    &app,
+                    "PUT",
+                    "/api/browser/display-mode",
+                    json!({"display_mode": mode}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "setting {mode} failed");
+            assert_eq!(
+                app.hub.visibility_policy().await,
+                expected,
+                "{mode} must reach the live Hub"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn display_mode_auto_is_accepted_and_baselines_to_a_silent_host() {
+        let app = test_app(true).await;
+
+        // Pin a visible window first, so the switch to `auto` has something to
+        // move away from.
+        let pinned = app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                &app,
+                "PUT",
+                "/api/browser/display-mode",
+                json!({"display_mode": "external"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(pinned.status(), StatusCode::OK);
+        assert_eq!(
+            app.hub.primary_visibility().await,
+            BrowserVisibility::Headful
+        );
+
+        let response = app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                &app,
+                "PUT",
+                "/api/browser/display-mode",
+                json!({"display_mode": "auto"}),
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::OK, "auto must be accepted: {body}");
+        assert_eq!(body["data"]["display_mode"], "auto");
+        // Selecting "let the browser decide" must not leave a window open: the
+        // Agent has to earn a visible window at an attended moment.
+        assert_eq!(body["data"]["effective_visibility"], "headless");
+        assert_eq!(
+            app.hub.primary_visibility().await,
+            BrowserVisibility::Headless
+        );
+
+        let persisted = app
+            .preferences
+            .get_by_keys(&[BROWSER_DISPLAY_MODE_PREF_KEY])
+            .await
+            .unwrap();
+        assert_eq!(
+            persisted
+                .iter()
+                .find(|row| row.key == BROWSER_DISPLAY_MODE_PREF_KEY)
+                .map(|row| row.value.as_str()),
+            Some("\"auto\""),
+            "the auto policy must be persisted, not inferred from the mechanism"
+        );
+    }
+
+    /// `effective_visibility` is derived state. A client that tries to set it
+    /// must be rejected rather than silently ignored.
+    #[tokio::test]
+    async fn display_mode_put_rejects_a_client_supplied_effective_visibility() {
+        let app = test_app(true).await;
+
+        let response = app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                &app,
+                "PUT",
+                "/api/browser/display-mode",
+                json!({"display_mode": "auto", "effective_visibility": "headful"}),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "invalid_browser_display_mode");
+        assert_eq!(
+            app.hub.primary_visibility().await,
+            BrowserVisibility::Headless,
+            "a rejected request must not change the live Host"
         );
     }
 
@@ -3298,12 +3554,17 @@ mod tests {
             .await
             .expect("GET must finish after rollback releases the gate")
             .expect("GET handler must return the rolled-back display mode");
+        let get_data = get_response
+            .data
+            .expect("GET response must contain display mode");
+        // The write failed, so no policy was ever committed and the stored value
+        // is still the `auto` default...
+        assert_eq!(get_data.display_mode, BrowserDisplayModeValueDto::Auto);
+        // ...while the live mechanism was rolled back off the visible window.
         assert_eq!(
-            get_response
-                .data
-                .expect("GET response must contain display mode")
-                .display_mode,
-            BrowserDisplayModeValueDto::Headless
+            get_data.effective_visibility,
+            BrowserEffectiveVisibilityDto::Headless,
+            "a failed PUT must leave no visible window behind"
         );
         assert_eq!(
             app.hub.primary_visibility().await,
