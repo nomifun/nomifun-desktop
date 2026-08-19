@@ -10,7 +10,7 @@
  */
 import type { IKnowledgeTag } from '@/common/adapter/ipcBridge';
 import { Input, Modal, Popconfirm, Popover } from '@arco-design/web-react';
-import { Check, Close, CloseSmall, Plus } from '@icon-park/react';
+import { Check, Close, CloseSmall, DownOne, Plus } from '@icon-park/react';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -55,12 +55,13 @@ const ColorPicker: React.FC<{
   value?: string;
   onChange: (color: string) => void;
 }> = ({ value, onChange }) => (
-  <div className='flex flex-wrap items-center gap-6px'>
+  <div className='grid grid-cols-4 gap-6px' role='group'>
     {PRESET_COLORS.map((color) => (
       <div
         key={color}
         role='button'
         tabIndex={0}
+        aria-pressed={value === color}
         onClick={() => onChange(color)}
         onKeyDown={(event) => {
           if (event.key === 'Enter' || event.key === ' ') {
@@ -68,14 +69,15 @@ const ColorPicker: React.FC<{
             onChange(color);
           }
         }}
-        className='flex h-20px w-20px cursor-pointer items-center justify-center rounded-full transition-all'
+        className='flex h-14px w-14px cursor-pointer items-center justify-center rounded-full border border-solid border-transparent transition-[transform,box-shadow] hover:scale-110 focus-visible:outline-none'
         style={{
           backgroundColor: color,
-          outline: value === color ? '2px solid rgb(var(--primary-6))' : 'none',
-          outlineOffset: 2,
+          boxShadow: value === color
+            ? '0 0 0 1px var(--color-bg-2), 0 0 0 2px rgba(var(--primary-6), 0.72)'
+            : '0 0 0 1px rgba(0, 0, 0, 0.06)',
         }}
       >
-        {value === color && <Check theme='outline' size={10} strokeWidth={4} fill='#fff' />}
+        {value === color && <Check theme='outline' size={7} strokeWidth={4} fill='#fff' />}
       </div>
     ))}
   </div>
@@ -118,7 +120,7 @@ const TagChip: React.FC<{
         popupVisible={colorOpen}
         onVisibleChange={(open) => !busy && setColorOpen(open)}
         content={
-          <div className='p-2px' onClick={(event) => event.stopPropagation()}>
+          <div className='-mx-8px -my-6px' onClick={(event) => event.stopPropagation()}>
             <ColorPicker
               value={tag.color}
               onChange={(color) => {
@@ -241,6 +243,7 @@ const KnowledgeTagManagementModal: React.FC<KnowledgeTagManagementModalProps> = 
   const [busy, setBusy] = useState(false);
   const [newLabel, setNewLabel] = useState('');
   const [newColor, setNewColor] = useState<string | undefined>(undefined);
+  const [newColorOpen, setNewColorOpen] = useState(false);
 
   const handleCreate = async () => {
     const label = newLabel.trim();
@@ -341,9 +344,55 @@ const KnowledgeTagManagementModal: React.FC<KnowledgeTagManagementModalProps> = 
         )}
       </div>
 
-      <div className='flex flex-col gap-8px border-0 border-t border-solid border-[var(--color-border-2)] pt-12px'>
-        <div className='flex items-center gap-8px'>
-          <ColorDot color={newColor} />
+      <div className='flex flex-col gap-8px border-0 border-t border-solid border-[var(--color-border-2)] pt-10px'>
+        <div className='flex items-center gap-6px'>
+          <Popover
+            trigger='click'
+            position='bl'
+            popupVisible={newColorOpen}
+            onVisibleChange={(open) => !busy && setNewColorOpen(open)}
+            content={
+              <div className='-mx-8px -my-6px' onClick={(event) => event.stopPropagation()}>
+                <ColorPicker
+                  value={newColor}
+                  onChange={(color) => {
+                    setNewColor(color);
+                    setNewColorOpen(false);
+                  }}
+                />
+              </div>
+            }
+          >
+            <div
+              role='button'
+              tabIndex={busy ? -1 : 0}
+              aria-expanded={newColorOpen}
+              data-testid='kb-tag-add-color'
+              onKeyDown={(event) => {
+                if ((event.key === 'Enter' || event.key === ' ') && !busy) {
+                  event.preventDefault();
+                  setNewColorOpen((open) => !open);
+                }
+              }}
+              className={[
+                'grid h-22px w-22px flex-shrink-0 place-items-center rounded-full border border-solid',
+                'cursor-pointer transition-[transform,box-shadow] hover:scale-105 focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_rgba(var(--primary-6),0.18)]',
+                busy ? 'cursor-not-allowed opacity-50' : '',
+              ].join(' ')}
+              style={{
+                color: 'var(--color-text-2)',
+                backgroundColor: newColor
+                  ? `color-mix(in srgb, ${newColor} 16%, var(--color-bg-2))`
+                  : 'rgba(var(--primary-6), 0.12)',
+                borderColor: newColor
+                  ? `color-mix(in srgb, ${newColor} 30%, var(--color-border-2))`
+                  : 'rgba(var(--primary-6), 0.16)',
+              }}
+              title={t('knowledge.tags.changeColor', { defaultValue: 'Change color' })}
+            >
+              <DownOne theme='filled' size={10} strokeWidth={2} fill='currentColor' />
+            </div>
+          </Popover>
           <Input
             size='small'
             value={newLabel}
@@ -366,23 +415,20 @@ const KnowledgeTagManagementModal: React.FC<KnowledgeTagManagementModalProps> = 
               }
             }}
             className={[
-              'inline-flex h-30px flex-shrink-0 cursor-pointer items-center gap-4px rounded-8px px-10px text-12px font-medium leading-none',
+              'inline-flex h-26px flex-shrink-0 cursor-pointer items-center gap-3px rounded-8px px-8px text-11px font-medium leading-none',
               'border border-solid transition-all duration-150',
               newLabel.trim() && !busy
                 ? 'border-primary-6 bg-primary-6 text-white hover:opacity-90'
                 : 'cursor-not-allowed border-[var(--color-border-2)] bg-[var(--color-fill-2)] text-[var(--color-text-3)]',
             ].join(' ')}
           >
-            <span className='inline-flex h-14px w-14px flex-none items-center justify-center leading-none [&_svg]:block'>
-              <Plus theme='outline' size={13} strokeWidth={3} fill='currentColor' className='block' />
+            <span className='inline-flex h-12px w-12px flex-none items-center justify-center leading-none [&_svg]:block'>
+              <Plus theme='outline' size={11} strokeWidth={3} fill='currentColor' className='block' />
             </span>
-            <span className='inline-flex h-16px items-center leading-16px'>
+            <span className='inline-flex h-14px items-center leading-14px'>
               {t('common.add', { defaultValue: 'Add' })}
             </span>
           </div>
-        </div>
-        <div className='pl-22px'>
-          <ColorPicker value={newColor} onChange={setNewColor} />
         </div>
       </div>
     </Modal>
