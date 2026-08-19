@@ -32,6 +32,7 @@ import sessionList from './sessionList.json';
 import modelFailover from './modelFailover.json';
 import agentExecution from './agentExecution.json';
 import collaboration from './collaboration.json';
+import creativeStudio from './creativeStudio.json';
 import workshop from './workshop.json';
 import workshopCanvas from './workshopCanvas.json';
 import workshopAssets from './workshopAssets.json';
@@ -72,6 +73,7 @@ export default {
   modelFailover,
   agentExecution,
   collaboration,
+  creativeStudio,
   workshop,
   workshopCanvas,
   workshopAssets,

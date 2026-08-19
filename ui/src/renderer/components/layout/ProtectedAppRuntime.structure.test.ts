@@ -13,6 +13,12 @@ const runtimeSource = readSource(new URL('./ProtectedAppRuntime.tsx', import.met
 const routerSource = readSource(new URL('./Router.tsx', import.meta.url));
 const themeRuntimeSource = readSource(new URL('./AppThemeRuntime.tsx', import.meta.url));
 const workbenchLayoutSource = readSource(new URL('./Layout.tsx', import.meta.url));
+const focusShellSource = readSource(
+  new URL('../../pages/creativeStudio/app/CreativeStudioFocusShell.tsx', import.meta.url)
+);
+const focusTopBarSource = readSource(
+  new URL('../../pages/creativeStudio/app/CreativeStudioTopBar.tsx', import.meta.url)
+);
 
 describe('protected application runtime boundary', () => {
   test('owns authentication and application-wide desktop effects without a visible layout', () => {
@@ -61,6 +67,41 @@ describe('protected application runtime boundary', () => {
     expect(workbenchLayoutSource.includes('THEME_CONTROL_CONTRACT_STYLE_ID')).toBe(false);
     expect(workbenchLayoutSource.includes('useDeepLink')).toBe(false);
     expect(workbenchLayoutSource.includes('useNotificationClick')).toBe(false);
+  });
+
+  test('routes the rebuilt workshop through a focused shell beside the workbench layout', () => {
+    const protectedRuntimeAt = routerSource.indexOf('<Route element={<ProtectedAppRuntime />}>');
+    const focusRouteAt = routerSource.indexOf(
+      '<Route path={CREATIVE_STUDIO_ROOT_PATH} element={withRouteFallback(CreativeStudioFocusShell)}>'
+    );
+    const workbenchAt = routerSource.indexOf('<Route element={layout}>');
+
+    expect(protectedRuntimeAt).toBeGreaterThan(-1);
+    expect(focusRouteAt).toBeGreaterThan(protectedRuntimeAt);
+    expect(workbenchAt).toBeGreaterThan(focusRouteAt);
+    expect(routerSource.includes("import('@renderer/pages/workshop')")).toBe(false);
+    expect(routerSource.includes("import('@renderer/pages/workshop/CanvasPage')")).toBe(false);
+  });
+
+  test('keeps the focus shell free of workbench-only chrome and exposes a stable return path', () => {
+    expect(focusShellSource.includes('void navigate(WORKBENCH_HOME_PATH, { replace: true });')).toBe(true);
+    expect(focusShellSource.includes('data-creative-studio-focus-shell')).toBe(true);
+    expect(focusShellSource.includes("classNames('creative-studio-root', styles.shell)")).toBe(true);
+    expect(focusShellSource.includes("id='creative-studio-portal-root'")).toBe(true);
+    expect(focusShellSource.includes('<CreativeStudioTopBar')).toBe(true);
+    expect(focusShellSource.includes('<Outlet />')).toBe(true);
+    expect(focusShellSource.includes('PwaPullToRefresh')).toBe(false);
+    expect(focusShellSource.includes('<Sider')).toBe(false);
+    expect(focusShellSource.includes('LayoutContext')).toBe(false);
+  });
+
+  test('gives the focused product independent draggable window chrome', () => {
+    expect(focusTopBarSource.includes('data-creative-studio-top-bar')).toBe(true);
+    expect(focusTopBarSource.includes('data-tauri-drag-region')).toBe(true);
+    expect(focusTopBarSource.includes('ipcBridge.windowControls.toggleMaximize.invoke()')).toBe(true);
+    expect(focusTopBarSource.includes('{showWindowControls && <WindowControls />}')).toBe(true);
+    expect(focusTopBarSource.includes('useLayoutContext')).toBe(false);
+    expect(focusTopBarSource.includes('useNavigationHistory')).toBe(false);
   });
 
 });
