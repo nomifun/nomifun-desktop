@@ -574,6 +574,11 @@ impl ManagedModelService {
                 .latency_ms
                 .map(|latency| i64::try_from(latency).unwrap_or(i64::MAX)),
             error: result.message.clone(),
+            // Managed catalogs report a coarse status only; there is no upstream
+            // response or address to attribute a failure to.
+            error_kind: None,
+            http_status: None,
+            attempted_url: None,
         };
         let json = match serde_json::to_string(&health) {
             Ok(json) => json,

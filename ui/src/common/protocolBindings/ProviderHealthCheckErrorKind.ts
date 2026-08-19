@@ -3,4 +3,4 @@
 /**
  * Coarse failure category for provider/model health checks.
  */
-export type ProviderHealthCheckErrorKind = "timeout" | "invalid_authorization_header" | "unauthorized" | "forbidden" | "not_found" | "insufficient_quota" | "aws_credentials" | "invalid_request" | "rate_limited" | "connection_error" | "api_error" | "unknown";
+export type ProviderHealthCheckErrorKind = "timeout" | "invalid_authorization_header" | "unauthorized" | "forbidden" | "not_found" | "insufficient_quota" | "aws_credentials" | "invalid_request" | "rate_limited" | "connection_error" | "api_error" | "non_api_response" | "unknown";

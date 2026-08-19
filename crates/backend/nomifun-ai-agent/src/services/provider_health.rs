@@ -61,8 +61,7 @@ impl ProviderHealthCheckService {
         let platform = resolved.platform.clone();
         let model = resolved.model.clone();
 
-        let response = if task == ModelTask::Chat {
-            let config = self.resolve_probe_config(&provider_id, &model).await?;
+        let response = if task == ModelTask::Chat {            let config = self.resolve_probe_config(&provider_id, &model).await?;
             run_probe(provider_id, platform, model, task, config).await?
         } else {
             info!(
@@ -120,6 +119,17 @@ impl ProviderHealthCheckService {
                 ),
             }
         };
+        // Stamp the address once, here, rather than threading it through every
+        // response builder. Both branches resolve their URL from this same
+        // `resolved` value, so this is the URL the probe actually requested —
+        // and it is the fact that separates "wrong base URL" from "bad key".
+        // Query material is redacted: Gemini and `query_key:` schemes carry
+        // credentials there.
+        let mut response = response;
+        response.attempted_url = resolved
+            .http_endpoint()
+            .ok()
+            .map(|url| nomifun_net::secret_redaction::redact_url_queries(&url));
         log_health_check_result(&response);
         persist_probe_outcome(
             self.invoke.provider_model_capability_repo().as_ref(),
@@ -187,6 +197,11 @@ pub(crate) async fn persist_probe_outcome(
         status: response.status,
         latency: Some(i64::try_from(response.elapsed_ms).unwrap_or(i64::MAX)),
         error: response.message.clone(),
+        // Carry the discriminators through. Narrowing to `error` here is what
+        // made a stored 404 and a stored 401 indistinguishable after the fact.
+        error_kind: response.error_kind,
+        http_status: response.http_status,
+        attempted_url: response.attempted_url.clone(),
     };
     let json = match serde_json::to_string(&health) {
         Ok(json) => json,
@@ -283,6 +298,7 @@ async fn run_probe(
                 error_kind: None,
                 http_status: None,
                 timeout_stage: None,
+                attempted_url: None,
             };
             log_health_check_result(&response);
             Ok(response)
@@ -339,6 +355,7 @@ fn healthy_response(
         error_kind: None,
         http_status: None,
         timeout_stage: None,
+        attempted_url: None,
     }
 }
 
@@ -359,6 +376,7 @@ fn log_health_check_result(response: &ProviderHealthCheckResponse) {
             error_kind = ?response.error_kind,
             http_status = ?response.http_status,
             timeout_stage = ?response.timeout_stage,
+            attempted_url = ?response.attempted_url,
             "Provider health check failed"
         ),
     }
@@ -432,6 +450,7 @@ fn unhealthy_response(
         error_kind: Some(error_kind),
         http_status,
         timeout_stage,
+        attempted_url: None,
     }
 }
 
@@ -460,6 +479,7 @@ fn invoke_error_kind_prefix(message: &str) -> Option<ProviderHealthCheckErrorKin
         | "NotPollable" => Some(K::InvalidRequest),
         // The provider answered, but not with something usable.
         "ParseError" | "JobFailed" | "ContentPolicy" | "ProviderError" => Some(K::ApiError),
+        "NonApiResponse" => Some(K::NonApiResponse),
         "QuotaExhausted" => Some(K::InsufficientQuota),
         // Without a recognizable status this is still a credential rejection.
         "Auth" => Some(K::Unauthorized),
@@ -500,6 +520,13 @@ pub(crate) fn classify_error(message: &str, is_timeout: bool) -> ProviderHealthC
     }
 
     let lower = message.to_lowercase();
+    // A document body is a wrong-address symptom and must be recognized before
+    // the status/prose arms: both lanes phrase it with "provider returned", so
+    // it would otherwise be filed as a generic upstream API error and the one
+    // actionable fact — that this URL serves a web page — would be lost.
+    if lower.contains("web page, not an api response") {
+        return ProviderHealthCheckErrorKind::NonApiResponse;
+    }
     // Upstream statuses arrive in two shapes: the agent engine's "api error
     // NNN" and the invoke layer's "provider returned NNN <reason>".
     let mentions_status = |code: u16| {

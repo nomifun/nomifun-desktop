@@ -1,0 +1,89 @@
+{
+  "comment": "Shared contract for url_algebra::join_endpoint (Rust) and joinEndpointUrl (TS). A live per-keystroke URL preview cannot round-trip to the backend, so the two implementations are locked to this file rather than to each other.",
+  "cases": [
+    {
+      "why": "the reported 404: version pasted into both halves collapses to one",
+      "base": "https://www.cheapapi.xin/v1",
+      "endpoint": "/v1/chat/completions",
+      "expected": "https://www.cheapapi.xin/v1/chat/completions"
+    },
+    {
+      "why": "anthropic template carries the version, versioned root collapses it",
+      "base": "https://api.anthropic.com/v1",
+      "endpoint": "/v1/messages",
+      "expected": "https://api.anthropic.com/v1/messages"
+    },
+    {
+      "why": "multi-segment version prefix collapses as a unit",
+      "base": "https://ark.example.com/api/v3",
+      "endpoint": "/api/v3/contents/generations/tasks",
+      "expected": "https://ark.example.com/api/v3/contents/generations/tasks"
+    },
+    {
+      "why": "version-free template is appended unchanged (the openai.chat_text contract)",
+      "base": "https://www.cheapapi.xin/v1",
+      "endpoint": "/chat/completions",
+      "expected": "https://www.cheapapi.xin/v1/chat/completions"
+    },
+    {
+      "why": "a versioned root that is not /v1 is left alone",
+      "base": "https://open.bigmodel.cn/api/paas/v4",
+      "endpoint": "/chat/completions",
+      "expected": "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    },
+    {
+      "why": "origin root plus versioned template is the anthropic happy path",
+      "base": "https://api.anthropic.com",
+      "endpoint": "/v1/messages",
+      "expected": "https://api.anthropic.com/v1/messages"
+    },
+    {
+      "why": "gemini keeps its version, its placeholder and its query",
+      "base": "https://generativelanguage.googleapis.com",
+      "endpoint": "/v1beta/models/{model}:streamGenerateContent?alt=sse",
+      "expected": "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse"
+    },
+    {
+      "why": "a repeated NON-version segment is a real path and must not collapse",
+      "base": "https://api.example.com/videos",
+      "endpoint": "/videos/{id}",
+      "expected": "https://api.example.com/videos/videos/{id}"
+    },
+    {
+      "why": "two different paths that each contain a version stay distinct",
+      "base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "endpoint": "/api/v1/services/embeddings/text-embedding/text-embedding",
+      "expected": "https://dashscope.aliyuncs.com/compatible-mode/v1/api/v1/services/embeddings/text-embedding/text-embedding"
+    },
+    {
+      "why": "trailing slash on the root and no leading slash on the template",
+      "base": "https://api.example.com/v1/",
+      "endpoint": "chat/completions",
+      "expected": "https://api.example.com/v1/chat/completions"
+    },
+    {
+      "why": "query tail is preserved byte for byte",
+      "base": "https://api.example.com",
+      "endpoint": "/realtime?model={model}",
+      "expected": "https://api.example.com/realtime?model={model}"
+    },
+    {
+      "why": "collapsing everything leaves the root plus the query",
+      "base": "https://api.example.com/v1",
+      "endpoint": "/v1?alt=sse",
+      "expected": "https://api.example.com/v1?alt=sse"
+    },
+    {
+      "why": "an absolute endpoint wins verbatim, the escape hatch for odd providers",
+      "base": "https://api.example.com/v1",
+      "endpoint": "https://other.example.com/v1/v1/odd",
+      "expected": "https://other.example.com/v1/v1/odd"
+    },
+    {
+      "why": "uppercase version still de-duplicates rather than doubling",
+      "base": "https://api.example.com/V1",
+      "endpoint": "/v1/chat/completions",
+      "expected": "https://api.example.com/V1/chat/completions"
+    }
+  ]
+}

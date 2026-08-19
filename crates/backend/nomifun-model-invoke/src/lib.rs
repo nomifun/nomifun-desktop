@@ -25,6 +25,7 @@ pub mod routes_table;
 pub mod service;
 pub mod transport;
 pub mod types;
+pub mod url_algebra;
 
 pub use adapter::{AdapterRegistry, ProtocolAdapter};
 pub use adapters::{
@@ -34,7 +35,7 @@ pub use adapters::{
 pub use auth::{AuthMaterial, AuthScheme};
 pub use call::{
     ResolvedCall, ResolvedConnection, ResolvedTaskConfig, ResolvedTaskTransport,
-    validate_credentialed_target_url,
+    resolve_submit_url, validate_credentialed_target_url,
 };
 pub use error::{InvokeError, InvokeErrorKind};
 pub use manifest::{
@@ -63,4 +64,8 @@ pub use types::{
     AsrRequest, EmbedRequest, ImageEditRequest, ImageGenRequest, InputAsset, JobHandle,
     ModelRef, ProducedAsset, ProducedData, RerankRequest, RerankResult, TaskOutcome, TaskRequest, TaskResult,
     TtsRequest, VideoGenRequest,
+};
+pub use url_algebra::{
+    ROOT_VERSION_SUFFIXES, is_version_segment, join_endpoint, root_candidates,
+    root_declares_version, root_matches_shape,
 };

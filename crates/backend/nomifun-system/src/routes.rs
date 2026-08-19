@@ -10,6 +10,8 @@ use nomifun_api_types::{
     FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, ManagedModel,
     ManagedModelHealthBatchResult, ModelTask,
     ManagedModelHealthResult, ManagedModelServiceStatus, SaveProviderConnectionRequest,
+    ProbeProviderConnectionAnonymousRequest, ProbeProviderConnectionRequest,
+    ProbeProviderConnectionResponse,
     ProviderConnectionResponse,
     ProviderModelKeyRequest, ProviderModelResponse, ProviderResponse, SaveProviderModelRequest,
     SetManagedModelEnabledRequest,
@@ -87,6 +89,7 @@ pub fn system_routes(state: SystemRouterState) -> Router {
         // axum matches the literal instead of treating "fetch-models" as a
         // provider id.
         .route("/api/providers/fetch-models", post(fetch_models_anonymous))
+        .route("/api/providers/probe-connection", post(probe_connection_anonymous))
         .route("/api/model-protocols", get(list_model_protocols))
         .route("/api/model-services/free/status", get(get_free_model_status))
         .route("/api/model-services/free/models", get(get_free_models))
@@ -123,6 +126,10 @@ pub fn system_routes(state: SystemRouterState) -> Router {
         .route(
             "/api/providers/{provider_id}/models",
             post(fetch_models),
+        )
+        .route(
+            "/api/providers/{provider_id}/probe-connection",
+            post(probe_connection),
         )
         // One configuration write surface: PUT atomically saves model metadata
         // and replaces its complete task-capability set.
@@ -335,6 +342,37 @@ async fn fetch_models_anonymous(
 ) -> Result<Json<ApiResponse<FetchModelsResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let result = state.model_fetch_service.fetch_models_anonymous(&req).await?;
+    Ok(Json(ApiResponse::ok(result)))
+}
+
+/// Reachability test for one provider's configured connection root.
+///
+/// Unlike the per-model health check this needs no model or capability row, so a
+/// freshly created custom provider can be validated before anything is built on
+/// top of it.
+async fn probe_connection(
+    State(state): State<SystemRouterState>,
+    Path(provider_id): Path<String>,
+    body: Result<Json<ProbeProviderConnectionRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<ProbeProviderConnectionResponse>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let result = state
+        .model_fetch_service
+        .probe_connection(&provider_id, &req)
+        .await?;
+    Ok(Json(ApiResponse::ok(result)))
+}
+
+/// Reachability test for a proposed connection, before the provider is saved.
+async fn probe_connection_anonymous(
+    State(state): State<SystemRouterState>,
+    body: Result<Json<ProbeProviderConnectionAnonymousRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<ProbeProviderConnectionResponse>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let result = state
+        .model_fetch_service
+        .probe_connection_anonymous(&req)
+        .await?;
     Ok(Json(ApiResponse::ok(result)))
 }
 

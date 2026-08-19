@@ -48,6 +48,7 @@ const manifest = (task: ModelTask): ModelProtocolManifest => ({
   protocols: [
     {
       protocol_id: `stepfun.${task}`,
+      root_shape: 'versioned_root' as const,
       supported_tasks: [task],
       executor: task === 'realtime_conversation' ? 'realtime_session' : 'model_invoke',
       transport: task === 'realtime_conversation' ? 'websocket' : 'http',
@@ -73,6 +74,7 @@ const manifest = (task: ModelTask): ModelProtocolManifest => ({
           method: task === 'realtime_conversation' ? null : 'POST',
           default_value:
             task === 'realtime_conversation' ? 'wss://api.stepfun.com/v1/realtime' : `/v1/${task}`,
+          root_shape: 'versioned_root' as const,
           allowed_placeholders: [],
           required_placeholders: [],
           editable: true,
@@ -85,7 +87,8 @@ const manifest = (task: ModelTask): ModelProtocolManifest => ({
                 purpose: 'content' as const,
                 method: 'GET',
                 default_value: '/v1/videos/{id}/content',
-                allowed_placeholders: ['id'],
+                root_shape: 'versioned_root' as const,
+          allowed_placeholders: ['id'],
                 required_placeholders: ['id'],
                 editable: true,
               },
@@ -155,8 +158,69 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('/v1/videos/{id}/content')).toBe(true);
   });
 
-  test('puts the model type before one unified catalog and free-text model input', () => {
-    const html = render({ model: '', capabilities: [] }, manifests, 'bearer', [], {
+  /**
+   * An inherited value must be rendered as a PLACEHOLDER, never as the input's
+   * value. Rendering it as the value is what let a single keystroke promote
+   * inheritance into a frozen `base_url_override` — after which editing the
+   * provider's Base URL had no effect on this capability at all.
+   */
+  test('an un-overridden capability shows inherited values as placeholders, not values', () => {
+    const definition: ModelDefinitionDraft = {
+      model: 'm',
+      capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: 'stepfun.chat' }],
+    };
+    const html = render(definition);
+
+    // The provider URL appears, but only as a placeholder.
+    expect(html.includes('placeholder="https://api.stepfun.com/v1"')).toBe(true);
+    expect(html.includes('value="https://api.stepfun.com/v1"')).toBe(false);
+    // Until the user opts in, the field cannot be typed into at all — the
+    // structural guarantee that inheritance cannot be promoted by accident.
+    expect(html.includes('data-base-url-override-toggle="chat"')).toBe(true);
+    expect(html.includes('data-effective-base-url="https://api.stepfun.com/v1"')).toBe(true);
+
+    // Same rule for the endpoint: the manifest default is a placeholder.
+    expect(html.includes('placeholder="/v1/chat"')).toBe(true);
+    expect(html.includes('value="/v1/chat"')).toBe(false);
+    expect(html.includes('data-endpoint-override="false"')).toBe(true);
+  });
+
+  /**
+   * The joined URL had no representation in the UI, so a doubled version
+   * segment was invisible until it came back as a 404.
+   */
+  test('the capability card previews the exact request URL with the version seam collapsed', () => {
+    const definition: ModelDefinitionDraft = {
+      model: 'm',
+      capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: 'stepfun.chat' }],
+    };
+    const html = render(definition);
+
+    expect(html.includes('data-resolved-endpoint-url="endpoint"')).toBe(true);
+    // base `…/v1` + template `/v1/chat` is exactly the pairing that used to
+    // produce `/v1/v1/…`; the preview must show the collapsed truth.
+    expect(html.includes('https://api.stepfun.com/v1/chat')).toBe(true);
+    expect(html.includes('/v1/v1/')).toBe(false);
+  });
+
+  test('an explicit override is rendered as the input value and is editable', () => {
+    const definition: ModelDefinitionDraft = {
+      model: 'm',
+      capabilities: [
+        {
+          ...emptyCapabilityDraft('chat'),
+          protocol: 'stepfun.chat',
+          baseUrlOverride: 'https://override.example.com/v1',
+        },
+      ],
+    };
+    const html = render(definition);
+
+    expect(html.includes('value="https://override.example.com/v1"')).toBe(true);
+    expect(html.includes('data-effective-base-url="https://override.example.com/v1"')).toBe(true);
+  });
+
+  test('puts the model type before one unified catalog and free-text model input', () => {    const html = render({ model: '', capabilities: [] }, manifests, 'bearer', [], {
       catalogSuggestions: [
         {
           value: 'chat-model',

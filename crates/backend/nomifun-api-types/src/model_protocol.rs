@@ -43,6 +43,27 @@ pub enum ProtocolEndpointPurpose {
     Session,
 }
 
+/// Which half of a request URL carries the provider's API version segment.
+///
+/// The two variants are mutually exclusive, and every HTTP protocol picks one.
+/// Nothing in the wire format can infer this: `/chat/completions` and
+/// `/v1/messages` are both valid endpoint templates, and the only difference is
+/// whether the connection root is expected to end in `/v1` already. Stating it
+/// here is what lets a custom provider be told the convention instead of having
+/// to guess it — the manifest deliberately withholds `default_connections` from
+/// custom-scope providers, but endpoint descriptors always reach them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+pub enum EndpointRootShape {
+    /// The connection base URL must carry the version segment (`https://host/v1`);
+    /// the endpoint template is version-free (`/chat/completions`).
+    VersionedRoot,
+    /// The connection base URL must be version-free (`https://host`); the
+    /// endpoint template carries the version (`/v1/messages`, `/v1beta/...`).
+    OriginRoot,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 pub struct ProtocolEndpointDescriptor {
@@ -51,6 +72,8 @@ pub struct ProtocolEndpointDescriptor {
     pub purpose: ProtocolEndpointPurpose,
     pub method: Option<String>,
     pub default_value: String,
+    /// Which half of the URL owns the version segment for this endpoint.
+    pub root_shape: EndpointRootShape,
     /// The complete placeholder vocabulary accepted by this protocol field.
     pub allowed_placeholders: Vec<String>,
     /// Alternatives of which at least one must occur in every configured
@@ -87,6 +110,9 @@ pub struct ProtocolDescriptor {
     pub platforms: Vec<String>,
     pub default_connections: Vec<ProtocolDefaultConnection>,
     pub endpoints: Vec<ProtocolEndpointDescriptor>,
+    /// The shape shared by every endpoint of this protocol. `None` for `sdk`
+    /// transports, which build no URL at all.
+    pub root_shape: Option<EndpointRootShape>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -97,6 +123,9 @@ pub struct ProtocolTaskDescriptor {
     pub executor: ProtocolExecutorKind,
     pub transport: ProtocolTransportKind,
     pub endpoints: Vec<ProtocolEndpointDescriptor>,
+    /// The shape shared by every endpoint of this protocol. `None` for `sdk`
+    /// transports, which build no URL at all.
+    pub root_shape: Option<EndpointRootShape>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

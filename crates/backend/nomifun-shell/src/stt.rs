@@ -126,6 +126,10 @@ fn stt_error_from_invoke(error: InvokeError) -> SttError {
         | K::MissingConnection
         | K::InvalidParams
         | K::NotPollable
+        // A document body means the configured address is wrong — a local
+        // configuration fault. In practice this arm is unreachable because
+        // `NonApiResponse` always carries the upstream status handled above.
+        | K::NonApiResponse
         | K::Config => SttError::Unknown(error.to_string()),
     }
 }

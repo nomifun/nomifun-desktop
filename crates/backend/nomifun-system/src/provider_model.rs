@@ -573,6 +573,9 @@ fn resolve_http_endpoint(base: &Url, value: &str, field: &str) -> Result<Url, Ap
     Ok(url)
 }
 
+/// Join a relative endpoint onto the connection root using the same algebra the
+/// runtime uses. Save-time and runtime previously carried two independent
+/// implementations of this join that had to stay byte-identical by hand.
 fn resolve_relative_url(base: &Url, value: &str, field: &str) -> Result<Url, AppError> {
     let relative = value.trim();
     if relative.is_empty() || relative.starts_with('?') || relative.starts_with('#') {
@@ -585,11 +588,7 @@ fn resolve_relative_url(base: &Url, value: &str, field: &str) -> Result<Url, App
             "{field} must not be a scheme-relative URL"
         )));
     }
-    let combined = format!(
-        "{}/{}",
-        base.as_str().trim_end_matches('/'),
-        relative.trim_start_matches('/')
-    );
+    let combined = nomifun_model_invoke::join_endpoint(base.as_str(), relative);
     Url::parse(&combined)
         .map_err(|error| AppError::BadRequest(format!("{field} is not a valid relative URL: {error}")))
 }

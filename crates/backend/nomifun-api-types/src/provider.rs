@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ModelTask, ModelTrait};
+use crate::{EndpointRootShape, ModelTask, ModelTrait};
 
 /// Health status values for a model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -28,6 +28,10 @@ pub enum ProviderHealthCheckErrorKind {
     RateLimited,
     ConnectionError,
     ApiError,
+    /// The address answered with a web page instead of an API payload — a wrong
+    /// path, not a provider fault. Distinct from `NotFound` because the HTTP
+    /// status is usually `200`.
+    NonApiResponse,
     Unknown,
 }
 
@@ -70,6 +74,13 @@ pub struct ProviderHealthCheckResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub timeout_stage: Option<String>,
+    /// The URL this check actually requested, with query material redacted.
+    ///
+    /// Without it a wrong base URL and a rejected key are indistinguishable in
+    /// the UI: both render as a failure with upstream prose and no address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attempted_url: Option<String>,
 }
 
 /// AWS Bedrock authentication method.
@@ -220,11 +231,117 @@ pub struct FetchModelsAnonymousRequest {
     pub try_fix: bool,
 }
 
+/// How conclusively a connection root answered a reachability probe.
+///
+/// The three-state result exists because a binary pass/fail cannot express the
+/// most common real situation: the address is correct and the credential is not.
+/// A 401/403 proves an endpoint exists and is enforcing auth, so it confirms the
+/// URL even though the request failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderReachability {
+    /// The endpoint answered as an API.
+    Reachable,
+    /// The endpoint exists and rejected the credential (401/403).
+    CredentialsRejected,
+    /// No API at this address: 404, a document body, or a transport failure.
+    Unreachable,
+}
+
+/// One candidate root's probe outcome, in deterministic probe order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+pub struct ProbeCandidateResult {
+    pub base_url: String,
+    pub attempted_url: String,
+    pub reachability: ProviderReachability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub http_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub content_type: Option<String>,
+}
+
+/// Request body for `POST /api/providers/{provider_id}/probe-connection`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(deny_unknown_fields)]
+pub struct ProbeProviderConnectionRequest {
+    /// Protocol whose endpoint template defines the path to probe. Required for
+    /// custom providers, which get no recommendation to fall back on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub task: Option<ModelTask>,
+    /// Probe alternative roots when the configured one is unreachable.
+    #[serde(default = "default_true")]
+    pub probe_candidates: bool,
+}
+
+/// Request body for `POST /api/providers/probe-connection` (anonymous).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(deny_unknown_fields)]
+pub struct ProbeProviderConnectionAnonymousRequest {
+    pub platform: String,
+    pub base_url: String,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_non_empty_string")]
+    pub auth_scheme: String,
+    #[ts(type = "unknown")]
+    pub credentials: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub task: Option<ModelTask>,
+    #[serde(default = "default_true")]
+    pub probe_candidates: bool,
+}
+
+/// Response for both probe-connection routes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+pub struct ProbeProviderConnectionResponse {
+    pub reachability: ProviderReachability,
+    pub protocol: String,
+    pub task: ModelTask,
+    /// Which half of the URL the chosen protocol expects to carry the version.
+    pub root_shape: EndpointRootShape,
+    /// The exact URL requested, with query material redacted.
+    pub attempted_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub http_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error_kind: Option<ProviderHealthCheckErrorKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub message: Option<String>,
+    #[ts(type = "number")]
+    pub elapsed_ms: u64,
+    /// A root that answered better than the configured one, offered for one-click
+    /// adoption. This is what the previously-discarded `fixed_base_url` should
+    /// always have been.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub suggested_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<ProbeCandidateResult>,
+}
+
 /// A fetched model entry with one fixed wire shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct ModelInfo {
-    pub id: String,
+pub struct ModelInfo {    pub id: String,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -100,6 +100,11 @@ import {
   type UpdateProviderRequest,
 } from '../types/provider/providerApi';
 import type {
+  ProbeProviderConnectionAnonymousRequest,
+  ProbeProviderConnectionRequest,
+  ProbeProviderConnectionResponse,
+} from '../types/provider/providerProbe';
+import type {
   ModelProtocolManifestRequest,
   ModelProtocolManifestResponse,
 } from '../types/provider/modelProtocolManifest';
@@ -1371,10 +1376,25 @@ export const mode = {
   /**
    * Pre-create form preview — anonymous fetch-models (T1b).
    * Takes credentials in the body, no provider row required. Used by
-   * AddPlatformModal / EditModeModal / ApiKeyEditorModal while the
-   * dropdown is still being populated.
+   * AddPlatformModal / EditModeModal while the dropdown is still being
+   * populated.
    */
   fetchModelList: httpPost<FetchModelsResponse, FetchModelsAnonymousRequest>('/api/providers/fetch-models'),
+  /**
+   * Reachability test for a saved provider's connection root. Needs no model or
+   * capability row, so it can answer before anything is configured on top.
+   */
+  probeProviderConnection: httpPost<
+    ProbeProviderConnectionResponse,
+    { provider_id: ProviderId } & ProbeProviderConnectionRequest
+  >(
+    (p) => `/api/providers/${p.provider_id}/probe-connection`,
+    (p) => ({ protocol: p.protocol, task: p.task, probe_candidates: p.probe_candidates })
+  ),
+  /** The same test for a proposed connection, before the provider is saved. */
+  probeConnection: httpPost<ProbeProviderConnectionResponse, ProbeProviderConnectionAnonymousRequest>(
+    '/api/providers/probe-connection'
+  ),
 };
 
 // ---------------------------------------------------------------------------

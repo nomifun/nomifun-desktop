@@ -39,6 +39,10 @@ pub enum InvokeErrorKind {
     Timeout,
     /// Provider response could not be understood.
     ParseError,
+    /// The URL answered with a document (HTML/XML) instead of an API payload —
+    /// almost always a wrong path, not a provider fault. Kept distinct from
+    /// [`InvokeErrorKind::ParseError`] so the diagnosis can name the address.
+    NonApiResponse,
     /// Poll was requested on an adapter/job that cannot be polled.
     NotPollable,
     /// Local provider/connection configuration is incomplete or invalid.
@@ -248,6 +252,23 @@ impl InvokeError {
         Self::new(InvokeErrorKind::ParseError, msg)
     }
 
+    /// The configured URL served a document instead of an API payload.
+    ///
+    /// Carries the upstream status so a `200 OK` HTML page is still reported as
+    /// what it is: the wrong address, answered successfully.
+    pub fn non_api_response(status: u16, content_type: &str) -> Self {
+        Self {
+            http_status: Some(status),
+            ..Self::new(
+                InvokeErrorKind::NonApiResponse,
+                format!(
+                    "provider returned {status} with content-type {content_type}: {}",
+                    nomifun_net::api_response::NON_API_DIAGNOSTIC
+                ),
+            )
+        }
+    }
+
     /// The default `ProtocolAdapter::poll` failure ([`InvokeErrorKind::NotPollable`]).
     pub fn not_pollable() -> Self {
         Self::new(InvokeErrorKind::NotPollable, "this adapter does not support polling")
@@ -282,6 +303,9 @@ impl From<InvokeError> for nomifun_common::AppError {
             QuotaExhausted => AppError::BadGateway(msg),
             // The provider answered something we could not understand.
             ParseError => AppError::BadGateway(msg),
+            // The configured address served a web page. This is a configuration
+            // fault the operator can fix, not an upstream outage.
+            NonApiResponse => AppError::BadRequest(msg),
             // The model does not declare the requested task — a bad client request.
             UnsupportedTask => AppError::BadRequest(msg),
             // Caller-supplied parameters are malformed.

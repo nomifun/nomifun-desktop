@@ -1,4 +1,5 @@
 mod fetchers;
+mod probe;
 mod url_fixer;
 
 use std::sync::Arc;

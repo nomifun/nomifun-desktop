@@ -895,6 +895,12 @@ async fn process_sse_stream(
     let mut buffer = Vec::new();
     let mut stream = response.bytes_stream();
     let mut emitted_content = false;
+    // Whether the body ever looked like SSE at all. A body with no `data:` line
+    // is not a truncated stream — it is not a stream. Blaming truncation there
+    // points at the model instead of the address and, because truncation is
+    // retryable, turns one click into three requests to the wrong URL.
+    let mut saw_data_line = false;
+    let mut first_bytes: Vec<u8> = Vec::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = match chunk {
@@ -909,6 +915,10 @@ async fn process_sse_stream(
             }
         };
         buffer.extend_from_slice(&chunk);
+        if first_bytes.len() < 64 {
+            let want = 64 - first_bytes.len();
+            first_bytes.extend_from_slice(&chunk[..chunk.len().min(want)]);
+        }
 
         // Process complete lines
         while let Some(line_end) = buffer.iter().position(|byte| *byte == b'\n') {
@@ -929,6 +939,7 @@ async fn process_sse_stream(
             }
 
             if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
+                saw_data_line = true;
                 // Raw upstream events are untrusted diagnostics and may echo
                 // credentials. They also contain private conversation text.
                 tracing::debug!(target: "nomi_providers", "sse event received");
@@ -1044,9 +1055,23 @@ async fn process_sse_stream(
         }
         StreamOutcome::Ok
     } else {
-        let error = ProviderError::StreamTruncated(
-            "OpenAI-compatible stream ended before finish_reason".to_string(),
-        );
+        // A body that never produced one SSE event is a wrong-address symptom,
+        // not a truncated stream. Reported as non-retryable so the same wrong
+        // URL is not requested twice more.
+        let error = if !saw_data_line {
+            ProviderError::NonApiResponse {
+                content_type: None,
+                message: if nomifun_net::api_response::looks_like_markup(&first_bytes) {
+                    nomifun_net::api_response::NON_API_DIAGNOSTIC.to_string()
+                } else {
+                    "the response contained no server-sent events".to_string()
+                },
+            }
+        } else {
+            ProviderError::StreamTruncated(
+                "OpenAI-compatible stream ended before finish_reason".to_string(),
+            )
+        };
         if emitted_content {
             StreamOutcome::FailedPartial(error)
         } else {

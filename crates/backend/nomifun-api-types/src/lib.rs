@@ -165,10 +165,10 @@ pub use mcp_bridge::{
     RequirementMcpConfig, ScopedMcpChildBootstrap, ScopedMcpChildConfig, browser_tool_operation,
 };
 pub use model_protocol::{
-    AuthSchemeDescriptor, ModelProtocolManifestResponse, PlatformPresetDescriptor,
-    ProtocolDefaultConnection, ProtocolDescriptor, ProtocolEndpointDescriptor,
-    ProtocolEndpointPurpose, ProtocolExecutorKind, ProtocolRecommendation, ProtocolScope,
-    ProtocolTaskDescriptor, ProtocolTransportKind,
+    AuthSchemeDescriptor, EndpointRootShape, ModelProtocolManifestResponse,
+    PlatformPresetDescriptor, ProtocolDefaultConnection, ProtocolDescriptor,
+    ProtocolEndpointDescriptor, ProtocolEndpointPurpose, ProtocolExecutorKind,
+    ProtocolRecommendation, ProtocolScope, ProtocolTaskDescriptor, ProtocolTransportKind,
 };
 pub use model_task::{ModelTask, ModelTrait, infer_catalog_tasks_and_traits};
 pub use office::{
@@ -188,8 +188,9 @@ pub use preset::{
 pub use provider::{
     BedrockAuthMethod, BedrockConfig, CloneProviderRequest, CreateProviderRequest,
     FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, HealthStatus, ModelInfo,
-    ProviderHealthCheckErrorKind, ProviderHealthCheckRequest, ProviderHealthCheckResponse,
-    ProviderResponse, UpdateProviderRequest,
+    ProbeCandidateResult, ProbeProviderConnectionAnonymousRequest, ProbeProviderConnectionRequest,
+    ProbeProviderConnectionResponse, ProviderHealthCheckErrorKind, ProviderHealthCheckRequest,
+    ProviderHealthCheckResponse, ProviderReachability, ProviderResponse, UpdateProviderRequest,
 };
 pub use provider_connection::{
     ProviderConnectionInput, ProviderConnectionResponse, SaveProviderConnectionRequest,

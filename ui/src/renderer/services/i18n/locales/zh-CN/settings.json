@@ -1636,7 +1636,14 @@
     "defaultVoice": "默认音色",
     "defaultVoicePlaceholder": "选择或输入供应商音色 id",
     "defaultVoiceHint": "部分供应商（如 StepFun）必须提供音色，否则语音合成会直接失败。留空则由每次请求自行指定。",
-    "defaultVoiceUnavailable": "下方的供应商参数 JSON 无效，修正后才能选择音色。"
+    "defaultVoiceUnavailable": "下方的供应商参数 JSON 无效，修正后才能选择音色。",
+    "baseUrlOverrideToggle": "为该模态单独指定 Base URL",
+    "baseUrlInherited": "继承供应商地址；勾选上方选项才会写入任务级覆盖。",
+    "rootShapeVersioned": "该协议要求 Base URL 自带版本段（如 …/v1），请求路径不带版本。",
+    "rootShapeOrigin": "该协议的请求路径自带版本段，Base URL 请填到域名根（不要带 /v1）。",
+    "rootShapeMismatchVersioned": "当前 Base URL 没有版本段，多数供应商需要以 /v1 结尾。",
+    "rootShapeMismatchOrigin": "当前 Base URL 含版本段，而该协议的路径也会带版本；重复的版本段会被自动去重。",
+    "resolvedUrl": "实际请求地址"
   },
   "connections": {
     "title": "连接档案",
@@ -1676,5 +1683,20 @@
     "deleted": "连接档案已删除",
     "voiceHint": "语音识别/合成需要独立的语音连接档案（role: voice）",
     "voiceHintAction": "配置语音连接"
+  },
+  "health": {
+    "unauthorized": "地址可达，但密钥被拒绝（401）",
+    "forbidden": "地址可达，但该密钥无权限（403）",
+    "invalidAuthorizationHeader": "鉴权头格式不被该供应商接受",
+    "notFound": "该地址不存在（404）——请检查 Base URL 与请求路径",
+    "nonApiResponse": "该地址返回的是网页而非 API——Base URL 很可能少了版本段",
+    "insufficientQuota": "地址与密钥有效，但账户额度不足",
+    "rateLimited": "地址与密钥有效，但触发了限流（429）",
+    "timeout": "请求超时",
+    "connectionError": "无法建立连接——请检查网络、DNS 或代理",
+    "awsCredentials": "AWS 凭据无效或缺失",
+    "invalidRequest": "请求被供应商判定为非法",
+    "apiError": "供应商返回了错误",
+    "unknown": "失败原因未能归类"
   }
 }

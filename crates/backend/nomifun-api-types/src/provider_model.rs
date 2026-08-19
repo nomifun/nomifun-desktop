@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::model_task::{ModelTask, ModelTrait};
-use crate::provider::HealthStatus;
+use crate::provider::{HealthStatus, ProviderHealthCheckErrorKind};
 
 fn empty_object() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
@@ -135,6 +135,11 @@ pub struct ProviderModelCapabilityInput {
 }
 
 /// Latest health observation for one task-scoped capability.
+///
+/// The diagnostic fields are all optional so a row written by an older build
+/// (`status`/`latency`/`error` only) still deserializes under
+/// `deny_unknown_fields`; no migration is needed because the column is opaque
+/// JSON.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
 #[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(deny_unknown_fields)]
@@ -146,6 +151,18 @@ pub struct CapabilityHealth {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub error: Option<String>,
+    /// Why it failed, as a machine-readable category. Persisting only `error`
+    /// meant a 404 and a 401 were indistinguishable once the check was over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error_kind: Option<ProviderHealthCheckErrorKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub http_status: Option<u16>,
+    /// The URL that was requested, with query material redacted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attempted_url: Option<String>,
 }
 
 /// Persisted task-scoped capability returned with its owning model.
