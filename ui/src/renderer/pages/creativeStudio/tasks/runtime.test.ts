@@ -6,11 +6,14 @@
 
 import { describe, expect, test } from 'bun:test';
 
+import { BackendHttpError } from '@/common/adapter/httpBridge';
+
 import { createEmptyCreativeProjectDocument } from '../domain/schema';
 import type { CreativeProjectDocument } from '../domain/schema';
 import type { CreativeTaskPort } from './port';
 import {
   CreativeTaskPollTimeoutError,
+  CreativeTaskProgressGuard,
   CreativeTaskRequestFence,
   pendingCreativeTaskReferences,
   pollCreativeTask,
@@ -160,6 +163,19 @@ describe('creative task polling', () => {
     expect(error instanceof CreativeTaskContractError).toBe(true);
     expect((error as CreativeTaskContractError).code).toBe('ownership_mismatch');
   });
+
+  test('rejects a backend status regression instead of repainting running as queued', async () => {
+    const sequence = [task('running'), task('queued')];
+    const error = await caught(
+      pollCreativeTask(
+        portWithGet(async () => sequence.shift() ?? task('queued')),
+        reference,
+        { intervalMs: 0, wait: async () => undefined }
+      )
+    );
+    expect(error instanceof CreativeTaskContractError).toBe(true);
+    expect((error as CreativeTaskContractError).field).toBe('status');
+  });
 });
 describe('pending task recovery', () => {
   test('derives exact pending references from canonical config-node ownership', () => {
@@ -262,6 +278,60 @@ describe('pending task recovery', () => {
     expect(recovery.outputs).toEqual([
       { taskId: TASK_ID, projectId: PROJECT_ID, nodeId: NODE_ID, assetIds: [ASSET_ID] },
     ]);
+    expect(recovery.issues).toEqual([]);
+  });
+
+  test('isolates a missing orphan without discarding another recoverable task', async () => {
+    const secondReference: CreativeTaskReference = {
+      ...reference,
+      taskId: SECOND_TASK_ID,
+      nodeId: '0190f5fe-7c00-7a00-8000-000000000017',
+    };
+    const port = portWithGet(async (requested) => {
+      if (requested.taskId === TASK_ID) {
+        throw new BackendHttpError({
+          method: 'GET',
+          path: `/api/creation/tasks/${TASK_ID}`,
+          status: 404,
+          body: { error: 'missing' },
+        });
+      }
+      return task('succeeded', {
+        taskId: SECOND_TASK_ID,
+        nodeId: secondReference.nodeId,
+      });
+    });
+    const recovery = await recoverPendingCreativeTasks(port, [reference, secondReference]);
+
+    expect(recovery.tasks.map((entry) => entry.taskId)).toEqual([SECOND_TASK_ID]);
+    expect(recovery.outputs.map((entry) => entry.taskId)).toEqual([SECOND_TASK_ID]);
+    expect(recovery.issues).toHaveLength(1);
+    expect(recovery.issues[0]?.reference.taskId).toBe(TASK_ID);
+    expect(recovery.issues[0]?.kind).toBe('orphaned');
+  });
+});
+
+describe('CreativeTaskProgressGuard', () => {
+  test('keeps every terminal status irreversible and immutable', () => {
+    const guard = new CreativeTaskProgressGuard();
+    guard.observe(task('succeeded'));
+    let statusError: unknown;
+    try {
+      guard.observe(task('canceled'));
+    } catch (error) {
+      statusError = error;
+    }
+    expect(statusError instanceof CreativeTaskContractError).toBe(true);
+
+    const immutable = new CreativeTaskProgressGuard();
+    immutable.observe(task('failed'));
+    let mutationError: unknown;
+    try {
+      immutable.observe(task('failed', { attempt: 2 }));
+    } catch (error) {
+      mutationError = error;
+    }
+    expect(mutationError instanceof CreativeTaskContractError).toBe(true);
   });
 });
 

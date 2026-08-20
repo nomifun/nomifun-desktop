@@ -5,7 +5,7 @@
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use serde::Deserialize;
@@ -42,6 +42,8 @@ fn default_role() -> String {
 #[derive(Deserialize)]
 struct CreateTaskRequest {
     #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
     canvas_id: Option<String>,
     #[serde(default)]
     node_id: Option<String>,
@@ -57,25 +59,59 @@ struct CreateTaskRequest {
 async fn create_task(
     State(state): State<CreationRouterState>,
     Extension(_user): Extension<CurrentUser>,
+    headers: HeaderMap,
     body: Result<Json<CreateTaskRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let task = state
-        .service
-        .create_task(NewCreationTask {
-            canvas_id: req.canvas_id,
-            node_id: req.node_id,
-            provider_id: req.provider_id,
-            model: req.model,
-            capability: req.capability,
-            params: req.params,
-            inputs: req
-                .inputs
-                .into_iter()
-                .map(|i| CreationInput { asset_id: i.asset_id, role: i.role })
-                .collect(),
+    let task_request = NewCreationTask {
+        canvas_id: req.canvas_id,
+        node_id: req.node_id,
+        provider_id: req.provider_id,
+        model: req.model,
+        capability: req.capability,
+        params: req.params,
+        inputs: req
+            .inputs
+            .into_iter()
+            .map(|i| CreationInput { asset_id: i.asset_id, role: i.role })
+            .collect(),
+    };
+    let mut idempotency_values = headers.get_all("idempotency-key").iter();
+    let idempotency_value = idempotency_values.next();
+    if idempotency_values.next().is_some() {
+        return Err(AppError::BadRequest(
+            "Idempotency-Key must be sent exactly once".into(),
+        ));
+    }
+    let idempotency_key = idempotency_value
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::to_owned)
+                .map_err(|_| AppError::BadRequest("Idempotency-Key must be visible ASCII".into()))
         })
-        .await?;
+        .transpose()?;
+    let task = match req.project_id {
+        Some(project_id) => {
+            let idempotency_key = idempotency_key.ok_or_else(|| {
+                AppError::BadRequest(
+                    "Creative Studio task creation requires Idempotency-Key".into(),
+                )
+            })?;
+            state
+                .service
+                .create_creative_project_task(project_id, idempotency_key, task_request)
+                .await?
+        }
+        None => {
+            if idempotency_key.is_some() {
+                return Err(AppError::BadRequest(
+                    "Idempotency-Key is reserved for canonical project_id task creation".into(),
+                ));
+            }
+            state.service.create_task(task_request).await?
+        }
+    };
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(task))))
 }
 

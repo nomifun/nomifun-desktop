@@ -24,6 +24,7 @@ const NODE_ID = '0190f5fe-7c00-7a00-8000-000000000002';
 const PROVIDER_ID = '0190f5fe-7c00-7a00-8000-000000000003';
 const TASK_ID = '0190f5fe-7c00-7a00-8000-000000000004';
 const ASSET_ID = '0190f5fe-7c00-7a00-8000-000000000005';
+const IDEMPOTENCY_KEY = '0190f5fe-7c00-7a00-8000-000000000006';
 
 const identity: CreativeTaskIdentity = {
   projectId: PROJECT_ID,
@@ -41,7 +42,8 @@ function wireTask(
   const terminal = status === 'succeeded' || status === 'failed' || status === 'canceled';
   return {
     creation_task_id: TASK_ID,
-    canvas_id: PROJECT_ID,
+    project_id: PROJECT_ID,
+    canvas_id: null,
     node_id: NODE_ID,
     provider_id: PROVIDER_ID,
     model: 'image-model-v1',
@@ -61,6 +63,7 @@ function wireTask(
 function createInput(overrides: Partial<CreateCreativeTaskInput> = {}): CreateCreativeTaskInput {
   return {
     ...identity,
+    idempotencyKey: IDEMPOTENCY_KEY,
     parameters: { prompt: 'Aurora', count: 1 },
     inputs: [{ assetId: ASSET_ID, role: 'reference' }],
     ...overrides,
@@ -78,11 +81,11 @@ async function caught(promise: Promise<unknown>): Promise<unknown> {
 
 describe('CreativeTaskClient', () => {
   test('sends the exact creation wire body and maps the response to camelCase', async () => {
-    const calls: Array<{ body: unknown; signal?: AbortSignal }> = [];
+    const calls: Array<{ body: unknown; idempotencyKey: string; signal?: AbortSignal }> = [];
     const api: CreationTaskWireApi = {
-      create: async (body, signal) => {
-        calls.push({ body, signal });
-        return wireTask();
+      create: async (body, idempotencyKey, signal) => {
+        calls.push({ body, idempotencyKey, signal });
+        return wireTask('queued', { creation_task_id: idempotencyKey });
       },
       get: async () => wireTask(),
       cancel: async () => wireTask('canceled'),
@@ -93,8 +96,9 @@ describe('CreativeTaskClient', () => {
     expect(calls).toEqual([
       {
         signal,
+        idempotencyKey: IDEMPOTENCY_KEY,
         body: {
-          canvas_id: PROJECT_ID,
+          project_id: PROJECT_ID,
           node_id: NODE_ID,
           provider_id: PROVIDER_ID,
           model: 'image-model-v1',
@@ -105,7 +109,7 @@ describe('CreativeTaskClient', () => {
       },
     ]);
     expect(task).toEqual({
-      taskId: TASK_ID,
+      taskId: IDEMPOTENCY_KEY,
       ...identity,
       parameters: { prompt: 'Aurora', count: 1 },
       status: 'queued',
@@ -153,6 +157,50 @@ describe('CreativeTaskClient', () => {
     expect((identityError as CreativeTaskContractError).code).toBe('identity_mismatch');
   });
 
+  test('rejects a create response that does not echo the submission idempotency key', async () => {
+    const client = new CreativeTaskClient({
+      create: async () => wireTask(),
+      get: async () => wireTask(),
+      cancel: async () => wireTask('canceled'),
+    });
+    const error = await caught(client.create(createInput()));
+
+    expect(error instanceof CreativeTaskContractError).toBe(true);
+    expect((error as CreativeTaskContractError).code).toBe('identity_mismatch');
+    expect((error as CreativeTaskContractError).field).toBe('taskId');
+  });
+
+  test('reuses the exact header key for concurrent StrictMode-style duplicate calls', async () => {
+    const keys: string[] = [];
+    const client = new CreativeTaskClient({
+      create: async (_body, key) => {
+        keys.push(key);
+        return wireTask('queued', { creation_task_id: key });
+      },
+      get: async () => wireTask(),
+      cancel: async () => wireTask('canceled'),
+    });
+    const input = createInput();
+    const [first, second] = await Promise.all([client.create(input), client.create(input)]);
+
+    expect(keys).toEqual([IDEMPOTENCY_KEY, IDEMPOTENCY_KEY]);
+    expect(first.taskId).toBe(IDEMPOTENCY_KEY);
+    expect(second.taskId).toBe(IDEMPOTENCY_KEY);
+  });
+
+  test('requires cancel to return the authoritative terminal race winner', async () => {
+    const client = new CreativeTaskClient({
+      create: async (_body, key) => wireTask('queued', { creation_task_id: key }),
+      get: async () => wireTask('running'),
+      cancel: async () => wireTask('running'),
+    });
+    const error = await caught(client.cancel({ taskId: TASK_ID, ...identity }));
+
+    expect(error instanceof CreativeTaskContractError).toBe(true);
+    expect((error as CreativeTaskContractError).code).toBe('invalid_response');
+    expect((error as CreativeTaskContractError).field).toBe('status');
+  });
+
   test('fails closed on unknown status and impossible result/error states', () => {
     const cases = [
       wireTask('queued', { status: 'done' }),
@@ -195,7 +243,7 @@ describe('HttpCreationTaskApi', () => {
     });
     const signal = new AbortController().signal;
 
-    await api.create({ provider_id: PROVIDER_ID }, signal);
+    await api.create({ provider_id: PROVIDER_ID }, IDEMPOTENCY_KEY, signal);
     await api.get(TASK_ID, signal);
     await api.cancel(TASK_ID, signal);
 
@@ -207,6 +255,9 @@ describe('HttpCreationTaskApi', () => {
     expect(calls.map((call) => call.init?.method)).toEqual(['POST', 'GET', 'POST']);
     expect(calls.every((call) => call.init?.signal === signal)).toBe(true);
     expect((calls[0]?.init?.headers as Record<string, string>)['x-test-auth']).toBe('present');
+    expect((calls[0]?.init?.headers as Record<string, string>)['Idempotency-Key']).toBe(
+      IDEMPOTENCY_KEY
+    );
   });
 
   test('aborts before transport and never returns a fabricated task', async () => {

@@ -16,14 +16,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use nomifun_common::{
-    AppError, CreationTaskId, ProviderId, WorkshopAssetId, WorkshopCanvasId, WorkshopNodeId,
-    now_ms, validate_uuidv7,
+    AppError, CreationTaskId, CreativeStudioProjectId, ProviderId, WorkshopAssetId,
+    WorkshopCanvasId, WorkshopNodeId, now_ms, validate_uuidv7,
 };
 #[cfg(test)]
 use nomifun_common::generate_id;
 use nomifun_db::{
-    CreateCreationTaskParams, CreationTaskRow, ICreationTaskRepository,
-    ListCreationTasksParams, UpdateCreationTaskParams,
+    CreateCreationTaskParams, CreateCreativeProjectTaskParams, CreationTaskRow,
+    ICreationTaskRepository, ListCreationTasksParams, UpdateCreationTaskParams,
 };
 use nomifun_model_invoke::{
     ImageEditRequest, ImageGenRequest, InputAsset, InvokeErrorKind, JobHandle,
@@ -31,6 +31,7 @@ use nomifun_model_invoke::{
     TaskRequest, TaskResult, TtsRequest, VideoGenRequest,
 };
 use nomifun_net::egress::{SafeHttpClient, SafeHttpError, SafeHttpErrorKind, redacted_url};
+use serde::Serialize;
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
@@ -186,6 +187,23 @@ fn param_text_max_tokens(params: &Value) -> Result<u32, CreationError> {
         })
 }
 
+fn canonical_json(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(canonical_json).collect()),
+        Value::Object(values) => {
+            let mut entries = values.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical_json(value)))
+                    .collect(),
+            )
+        }
+        scalar => scalar,
+    }
+}
+
 /// Map a creation capability + opaque params + loaded inputs onto the invoke
 /// layer's typed [`TaskRequest`]. The full params object rides along as
 /// `extra` so protocol-specific knobs (`max_tokens`, `steps`, …) stay
@@ -279,6 +297,53 @@ pub struct NewCreationTask {
     /// Opaque parameter map (prompt/size/quality/…).
     pub params: Value,
     pub inputs: Vec<CreationInput>,
+}
+
+struct PreparedCreationTask {
+    canvas_id: Option<String>,
+    node_id: Option<String>,
+    provider_id: String,
+    model: String,
+    capability: MediaCapability,
+    params: Value,
+    params_json: String,
+    required_artifact_count: usize,
+    inputs: Vec<CreationInput>,
+}
+
+#[derive(Serialize)]
+struct CanonicalCreativeTaskRequest<'a> {
+    project_id: &'a str,
+    node_id: &'a str,
+    provider_id: &'a str,
+    model: &'a str,
+    capability: &'a str,
+    params: &'a Value,
+    inputs: &'a [CreationInput],
+}
+
+impl PreparedCreationTask {
+    fn into_worker_job(
+        self,
+        creation_task_id: String,
+        project_id: Option<String>,
+        submitted_at: i64,
+    ) -> WorkerJob {
+        WorkerJob {
+            creation_task_id,
+            project_id,
+            canvas_id: self.canvas_id,
+            node_id: self.node_id,
+            provider_id: self.provider_id,
+            model: self.model,
+            capability: self.capability,
+            params: self.params,
+            required_artifact_count: self.required_artifact_count,
+            inputs: self.inputs,
+            submitted_at,
+            remote_task_id: None,
+        }
+    }
 }
 
 /// A produced artifact ready for persistence: resolved bytes (URL artifacts are
@@ -376,6 +441,7 @@ pub trait AssetSource: Send + Sync {
 /// The persisted fields a worker needs to run (or resume) one task.
 struct WorkerJob {
     creation_task_id: String,
+    project_id: Option<String>,
     canvas_id: Option<String>,
     node_id: Option<String>,
     provider_id: String,
@@ -525,10 +591,11 @@ impl CreationService {
     // Public surface (routes)
     // -----------------------------------------------------------------------
 
-    /// Enqueue a task (`queued`), spawn its worker, and return the queued task.
-    /// The worker resolves the provider, loads inputs, runs the adapter, and
-    /// drives the state machine to a terminal state asynchronously.
-    pub async fn create_task(self: &Arc<Self>, req: NewCreationTask) -> Result<CreationTask, AppError> {
+    async fn prepare_task(
+        &self,
+        req: NewCreationTask,
+        require_live_provider: bool,
+    ) -> Result<PreparedCreationTask, AppError> {
         let capability = MediaCapability::parse(&req.capability).ok_or_else(|| {
             AppError::BadRequest(format!(
                 "unknown capability '{}' (expected t2i|i2i|inpaint|t2v|i2v|v2v|tts|text)",
@@ -540,7 +607,8 @@ impl CreationService {
         let provider_id = ProviderId::parse(req.provider_id)
             .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?
             .into_string();
-        if let Some(invoke) = &self.invoke
+        if require_live_provider
+            && let Some(invoke) = &self.invoke
             && invoke.provider_repo().find_by_id(&provider_id).await?.is_none()
         {
             return Err(AppError::NotFound(format!(
@@ -572,41 +640,137 @@ impl CreationService {
                 Ok(CreationInput { asset_id, role: input.role })
             })
             .collect::<Result<Vec<_>, AppError>>()?;
-
-        let params_json = serde_json::to_string(&req.params)
+        let params = canonical_json(req.params);
+        let params_json = serde_json::to_string(&params)
             .map_err(|e| AppError::BadRequest(format!("invalid params json: {e}")))?;
+
+        Ok(PreparedCreationTask {
+            canvas_id,
+            node_id,
+            provider_id,
+            model: req.model,
+            capability,
+            params,
+            params_json,
+            required_artifact_count,
+            inputs,
+        })
+    }
+
+    /// Enqueue a task (`queued`), spawn its worker, and return the queued task.
+    /// The worker resolves the provider, loads inputs, runs the adapter, and
+    /// drives the state machine to a terminal state asynchronously.
+    pub async fn create_task(self: &Arc<Self>, req: NewCreationTask) -> Result<CreationTask, AppError> {
+        let prepared = self.prepare_task(req, true).await?;
         let creation_task_id = CreationTaskId::new().into_string();
         let now = now_ms();
         let row = self
             .repo
             .create_task(CreateCreationTaskParams {
                 creation_task_id: &creation_task_id,
-                canvas_id: canvas_id.as_deref(),
-                node_id: node_id.as_deref(),
-                provider_id: &provider_id,
-                model: &req.model,
-                capability: capability.as_str(),
-                params: &params_json,
+                canvas_id: prepared.canvas_id.as_deref(),
+                node_id: prepared.node_id.as_deref(),
+                provider_id: &prepared.provider_id,
+                model: &prepared.model,
+                capability: prepared.capability.as_str(),
+                params: &prepared.params_json,
                 status: TaskStatus::Queued.as_str(),
                 submitted_at: now,
             })
             .await?;
 
-        self.spawn(WorkerJob {
-            creation_task_id,
-            canvas_id,
-            node_id,
-            provider_id,
-            model: req.model,
-            capability,
-            params: req.params,
-            required_artifact_count,
-            inputs,
-            submitted_at: now,
-            remote_task_id: None,
-        });
+        self.spawn(prepared.into_worker_job(creation_task_id, None, now));
 
         row.try_into()
+    }
+
+    /// Canonical Creative Studio create. The UUIDv7 Idempotency-Key is also the
+    /// task business id, making response-loss retries durable across reloads
+    /// and process restarts. Only the transaction's `inserted` result may spawn
+    /// a worker.
+    pub async fn create_creative_project_task(
+        self: &Arc<Self>,
+        project_id: String,
+        idempotency_key: String,
+        req: NewCreationTask,
+    ) -> Result<CreationTask, AppError> {
+        let creation_task_id = CreationTaskId::parse(idempotency_key)
+            .map_err(|error| AppError::BadRequest(format!("invalid Idempotency-Key: {error}")))?
+            .into_string();
+        let project_id = CreativeStudioProjectId::parse(project_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid project_id: {error}")))?
+            .into_string();
+        if req.canvas_id.is_some() {
+            return Err(AppError::BadRequest(
+                "Creative Studio tasks use project_id and must not send canvas_id".into(),
+            ));
+        }
+        if !req.params.is_object() {
+            return Err(AppError::BadRequest(
+                "Creative Studio task params must be a JSON object".into(),
+            ));
+        }
+        // The atomic repository operation validates current project/provider
+        // state only for a brand-new key. Skipping the eager provider lookup
+        // here keeps an exact historical replay readable after retirement.
+        let prepared = self.prepare_task(req, false).await?;
+        let node_id = prepared.node_id.as_deref().ok_or_else(|| {
+            AppError::BadRequest("Creative Studio tasks require node_id".into())
+        })?;
+        if prepared.model.trim() != prepared.model {
+            return Err(AppError::BadRequest(
+                "Creative Studio model must be already normalized".into(),
+            ));
+        }
+        if let Some(input) = prepared.inputs.iter().find(|input| {
+            !matches!(
+                input.role.as_str(),
+                "reference" | "mask" | "first_frame" | "last_frame" | "video" | "audio"
+            )
+        }) {
+            return Err(AppError::BadRequest(format!(
+                "unsupported Creative Studio input role '{}'",
+                input.role
+            )));
+        }
+        let request_fingerprint = serde_json::to_string(&CanonicalCreativeTaskRequest {
+            project_id: &project_id,
+            node_id,
+            provider_id: &prepared.provider_id,
+            model: &prepared.model,
+            capability: prepared.capability.as_str(),
+            params: &prepared.params,
+            inputs: &prepared.inputs,
+        })
+        .map_err(|error| AppError::BadRequest(format!("invalid canonical creation request: {error}")))?;
+        let now = now_ms();
+        let outcome = self
+            .repo
+            .get_or_create_creative_project_task(CreateCreativeProjectTaskParams {
+                creation_task_id: &creation_task_id,
+                project_id: &project_id,
+                node_id,
+                provider_id: &prepared.provider_id,
+                model: &prepared.model,
+                capability: prepared.capability.as_str(),
+                params: &prepared.params_json,
+                request_fingerprint: &request_fingerprint,
+                status: TaskStatus::Queued.as_str(),
+                submitted_at: now,
+            })
+            .await?;
+        if outcome.inserted {
+            self.spawn(prepared.into_worker_job(
+                creation_task_id,
+                Some(project_id),
+                now,
+            ));
+            return outcome.row.try_into();
+        }
+        let mut rows = self.audit_rows_for_output(vec![outcome.row]).await?;
+        rows.pop()
+            .expect("one idempotent task remains after artifact audit")
+            .try_into()
     }
 
     pub async fn get_task(&self, creation_task_id: &str) -> Result<CreationTask, AppError> {
@@ -899,6 +1063,7 @@ impl CreationService {
                     Ok((capability, params, required_artifact_count)) => {
                         self.spawn(WorkerJob {
                             creation_task_id: row.creation_task_id.clone(),
+                            project_id: row.project_id,
                             canvas_id: row.canvas_id,
                             node_id: row.node_id,
                             provider_id: row.provider_id,
@@ -1551,6 +1716,9 @@ fn build_origin(job: &WorkerJob) -> Value {
             Value::String(job.creation_task_id.as_str().to_owned()),
         ),
     ]);
+    if let Some(project_id) = &job.project_id {
+        origin.insert("project_id".into(), Value::String(project_id.clone()));
+    }
     if let Some(canvas_id) = &job.canvas_id {
         origin.insert("canvas_id".into(), Value::String(canvas_id.clone()));
     }
@@ -1578,10 +1746,10 @@ mod tests {
     use super::*;
     use nomifun_api_types::ModelTask;
     use nomifun_db::{
-        CreationTaskRow, DbError, IProviderRepository, NewProviderModel,
+        CreationTaskRow, DbError, IProviderRepository, IWorkshopRepository, NewProviderModel,
         NewProviderModelCapability, SqliteCreationTaskRepository,
         SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
-        SqliteProviderModelRepository, SqliteProviderRepository,
+        SqliteProviderModelRepository, SqliteProviderRepository, SqliteWorkshopRepository,
     };
     use nomifun_model_invoke::{AdapterRegistry, InvokeError, ProtocolAdapter, ResolvedCall};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2272,6 +2440,96 @@ mod tests {
             params: json!({"prompt": "a cat", "count": 1}),
             inputs: vec![],
         }
+    }
+
+    async fn seed_creative_project(pool: &nomifun_db::SqlitePool) -> String {
+        let project_id = CreativeStudioProjectId::new().into_string();
+        let document = json!({
+            "schema": "nomifun.creative-studio/v1",
+            "projectId": project_id,
+            "nodes": []
+        });
+        SqliteWorkshopRepository::new(pool.clone())
+            .create_creative_project(
+                &project_id,
+                "Creation Service Test",
+                &document.to_string(),
+                0,
+            )
+            .await
+            .unwrap();
+        project_id
+    }
+
+    fn creative_task(provider_id: &str, node_id: &str, prompt: &str) -> NewCreationTask {
+        NewCreationTask {
+            canvas_id: None,
+            node_id: Some(node_id.to_owned()),
+            provider_id: provider_id.to_owned(),
+            model: "test-model".into(),
+            capability: "t2i".into(),
+            params: json!({"prompt": prompt, "count": 1}),
+            inputs: vec![],
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn creative_project_response_loss_retry_has_one_worker_authority() {
+        let adapter = MockAdapter::sync("openai.images");
+        let h = harness(adapter.clone(), "openai").await;
+        let project_id = seed_creative_project(h._db.pool()).await;
+        let node_id = WorkshopNodeId::new().into_string();
+        let idempotency_key = CreationTaskId::new().into_string();
+
+        let first_service = h.svc.clone();
+        let retry_service = h.svc.clone();
+        let first = first_service.create_creative_project_task(
+            project_id.clone(),
+            idempotency_key.clone(),
+            creative_task(&h.provider_id, &node_id, "Aurora"),
+        );
+        let retry = retry_service.create_creative_project_task(
+            project_id.clone(),
+            idempotency_key.clone(),
+            creative_task(&h.provider_id, &node_id, "Aurora"),
+        );
+        let (first, retry) = tokio::join!(first, retry);
+        let first = first.unwrap();
+        let retry = retry.unwrap();
+        assert_eq!(first.creation_task_id, idempotency_key);
+        assert_eq!(retry.creation_task_id, idempotency_key);
+        assert_eq!(first.project_id.as_deref(), Some(project_id.as_str()));
+        assert!(first.canvas_id.is_none());
+
+        let done = wait_terminal(&h.svc, &idempotency_key).await;
+        assert_eq!(done.status, "succeeded");
+        assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(h.sink.count.load(Ordering::SeqCst), 1);
+
+        let response_loss_retry = h
+            .svc
+            .create_creative_project_task(
+                project_id.clone(),
+                idempotency_key.clone(),
+                creative_task(&h.provider_id, &node_id, "Aurora"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response_loss_retry.status, "succeeded");
+        assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 1);
+
+        let conflict = h
+            .svc
+            .create_creative_project_task(
+                project_id,
+                idempotency_key,
+                creative_task(&h.provider_id, &node_id, "Different request"),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(&conflict, AppError::Conflict(_)));
+        assert_eq!(conflict.status_code(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -3120,6 +3378,7 @@ mod tests {
         let provider_id = ProviderId::new().into_string();
         let job = WorkerJob {
             creation_task_id: creation_task_id.clone(),
+            project_id: None,
             canvas_id: Some(canvas_id.clone()),
             node_id: Some(node_id.clone()),
             provider_id: provider_id.clone(),
@@ -3150,6 +3409,7 @@ mod tests {
     fn build_origin_omits_absent_optional_ids_instead_of_writing_null() {
         let job = WorkerJob {
             creation_task_id: CreationTaskId::new().into_string(),
+            project_id: None,
             canvas_id: None,
             node_id: None,
             provider_id: ProviderId::new().into_string(),

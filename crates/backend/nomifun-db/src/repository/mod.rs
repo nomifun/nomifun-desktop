@@ -76,7 +76,8 @@ pub(crate) use client_preference::{
 };
 pub use conversation::IConversationRepository;
 pub use creation_task::{
-    CreateCreationTaskParams, ICreationTaskRepository, ListCreationTasksParams, UpdateCreationTaskParams,
+    CreateCreationTaskParams, CreateCreativeProjectTaskParams, ICreationTaskRepository,
+    IdempotentCreationTask, ListCreationTasksParams, UpdateCreationTaskParams,
 };
 pub use cron::ICronRepository;
 pub use idmm_intervention::{
