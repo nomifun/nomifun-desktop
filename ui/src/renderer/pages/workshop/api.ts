@@ -7,7 +7,8 @@
 /**
  * Creative Workshop REST client.
  *
- * Talks to `nomifun-workshop` (`/api/workshop/*`) and `nomifun-creation`
+ * Talks to `nomifun-workshop` (`/api/workshop/canvases*` and
+ * `/api/creative-studio/assets*`) and `nomifun-creation`
  * (`/api/creation/*`) over the same HTTP channel the rest of the app uses:
  * `httpRequest` from the shared `httpBridge` (base-URL resolution for desktop vs
  * WebUI, local-trust / CSRF headers, `{ success, data }` envelope unwrapping, and
@@ -56,7 +57,7 @@ import type {
  * `thumb_url`, or a canvas `thumbnail_url`) to an absolute URL usable in
  * `<img src>` / `<video src>`.
  *
- * The backend returns same-origin relative paths like `/api/workshop/files/{id}`.
+ * The backend returns same-origin relative paths like `/api/creative-studio/files/{id}`.
  * WebUI (same-origin) can use them verbatim, but the desktop webview must prefix
  * the loopback backend origin. Absolute URLs (or empty values) are passed through.
  */
@@ -70,7 +71,7 @@ export function resolveWorkshopUrl(path: string | null | undefined): string | nu
 /** Build the binary serve URL for an asset (optionally its thumbnail). */
 export function workshopFileUrl(assetId: AssetId, thumb = false): string {
   const suffix = thumb ? '?thumb=1' : '';
-  return `${getBaseUrl()}/api/workshop/files/${encodeURIComponent(assetId)}${suffix}`;
+  return `${getBaseUrl()}/api/creative-studio/files/${encodeURIComponent(assetId)}${suffix}`;
 }
 
 function normalizeCanvasMeta(meta: WorkshopCanvasMeta): WorkshopCanvasMeta {
@@ -224,13 +225,15 @@ export async function listAssets(query: ListAssetsQuery = {}): Promise<ListAsset
     page: query.page,
     page_size: query.page_size,
   });
-  const res = await httpRequest<ListAssetsResponse>('GET', `/api/workshop/assets${qs}`);
+  const res = await httpRequest<ListAssetsResponse>('GET', `/api/creative-studio/assets${qs}`);
   return { items: (res?.items ?? []).map(normalizeAsset), total: res?.total ?? 0 };
 }
 
 /** Register a text asset (or existing content) in the library. */
 export async function createTextAsset(body: CreateTextAssetBody): Promise<WorkshopAsset> {
-  return normalizeAsset(await httpRequest<WorkshopAsset>('POST', '/api/workshop/assets', body));
+  return normalizeAsset(
+    await httpRequest<WorkshopAsset>('POST', '/api/creative-studio/assets', body)
+  );
 }
 
 /** Partially edit an asset's metadata (title/collection/tags/in_library). */
@@ -238,7 +241,7 @@ export async function patchAsset(asset_id: AssetId, patch: PatchAssetBody): Prom
   return normalizeAsset(
     await httpRequest<WorkshopAsset>(
       'PATCH',
-      `/api/workshop/assets/${encodeURIComponent(asset_id)}`,
+      `/api/creative-studio/assets/${encodeURIComponent(asset_id)}`,
       patch
     )
   );
@@ -246,7 +249,10 @@ export async function patchAsset(asset_id: AssetId, patch: PatchAssetBody): Prom
 
 /** Delete an asset (index row + on-disk file). */
 export async function deleteAsset(asset_id: AssetId): Promise<void> {
-  await httpRequest<void>('DELETE', `/api/workshop/assets/${encodeURIComponent(asset_id)}`);
+  await httpRequest<void>(
+    'DELETE',
+    `/api/creative-studio/assets/${encodeURIComponent(asset_id)}`
+  );
 }
 
 /**
@@ -254,10 +260,11 @@ export async function deleteAsset(asset_id: AssetId): Promise<void> {
  * management). A blank `to` ungroups the affected assets. Returns rows updated.
  */
 export async function renameCollection(from: string, to: string): Promise<number> {
-  const res = await httpRequest<{ updated: number }>('POST', '/api/workshop/collections/rename', {
-    from,
-    to,
-  });
+  const res = await httpRequest<{ updated: number }>(
+    'POST',
+    '/api/creative-studio/collections/rename',
+    { from, to }
+  );
   return res?.updated ?? 0;
 }
 
@@ -294,7 +301,7 @@ export function uploadAsset(file: File, hooks: UploadAssetHooks = {}): Promise<W
 
   return new Promise<WorkshopAsset>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${getBaseUrl()}/api/workshop/assets/upload`);
+    xhr.open('POST', `${getBaseUrl()}/api/creative-studio/assets/upload`);
 
     for (const [name, value] of Object.entries(buildBackendAuthHeaders('POST'))) {
       xhr.setRequestHeader(name, value);

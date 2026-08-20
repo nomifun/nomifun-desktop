@@ -165,7 +165,7 @@ function uploadWorkshopAsset(
     if (metadata.in_library !== undefined) form.append('in_library', metadata.in_library ? '1' : '0');
 
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', resolveBackendUrl('/api/workshop/assets/upload'));
+    xhr.open('POST', resolveBackendUrl('/api/creative-studio/assets/upload'));
     for (const [name, value] of Object.entries(buildBackendAuthHeaders('POST'))) {
       xhr.setRequestHeader(name, value);
     }
@@ -227,7 +227,7 @@ export const workshopAssetApi: WorkshopAssetApi = {
   async list(query = {}) {
     const response = await httpRequest<WorkshopAssetListDto>(
       'GET',
-      `/api/workshop/assets${queryString(query)}`
+      `/api/creative-studio/assets${queryString(query)}`
     );
     return { items: response?.items ?? [], total: response?.total ?? 0 };
   },
@@ -235,32 +235,36 @@ export const workshopAssetApi: WorkshopAssetApi = {
   upload: uploadWorkshopAsset,
 
   createText(input) {
-    return httpRequest<WorkshopAssetDto>('POST', '/api/workshop/assets', input);
+    return httpRequest<WorkshopAssetDto>('POST', '/api/creative-studio/assets', input);
   },
 
   update(assetId, patch) {
     return httpRequest<WorkshopAssetDto>(
       'PATCH',
-      `/api/workshop/assets/${encodeURIComponent(assetId)}`,
+      `/api/creative-studio/assets/${encodeURIComponent(assetId)}`,
       patch
     );
   },
 
   async remove(assetId) {
-    await httpRequest<void>('DELETE', `/api/workshop/assets/${encodeURIComponent(assetId)}`);
+    await httpRequest<void>(
+      'DELETE',
+      `/api/creative-studio/assets/${encodeURIComponent(assetId)}`
+    );
   },
 
   async renameCollection(from, to) {
-    const response = await httpRequest<{ updated: number }>('POST', '/api/workshop/collections/rename', {
-      from,
-      to,
-    });
+    const response = await httpRequest<{ updated: number }>(
+      'POST',
+      '/api/creative-studio/collections/rename',
+      { from, to }
+    );
     return response?.updated ?? 0;
   },
 
   fileUrl(assetId, thumbnail = false) {
     return resolveBackendUrl(
-      `/api/workshop/files/${encodeURIComponent(assetId)}${thumbnail ? '?thumb=1' : ''}`
+      `/api/creative-studio/files/${encodeURIComponent(assetId)}${thumbnail ? '?thumb=1' : ''}`
     );
   },
 };

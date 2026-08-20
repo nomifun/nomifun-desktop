@@ -20,7 +20,7 @@ async fn workshop_file_channel_serves_without_auth() {
     // Register a text asset (authenticated management route).
     let create = json_with_token(
         "POST",
-        "/api/workshop/assets",
+        "/api/creative-studio/assets",
         serde_json::json!({ "kind": "text", "title": "notes", "text_content": "hello workshop" }),
         &token,
         &csrf,
@@ -39,7 +39,7 @@ async fn workshop_file_channel_serves_without_auth() {
     // Serve it back over the PUBLIC channel with no auth header / cookie.
     let resp = app
         .clone()
-        .oneshot(get_request(&format!("/api/workshop/files/{asset_id}")))
+        .oneshot(get_request(&format!("/api/creative-studio/files/{asset_id}")))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "public file serve must not require auth");
@@ -65,7 +65,7 @@ async fn workshop_public_serve_missing_is_404_not_auth_rejected() {
     let (app, _services) = build_app().await;
 
     for uri in [
-        "/api/workshop/files/0190f5fe-7c00-7a00-8000-000000009991",
+        "/api/creative-studio/files/0190f5fe-7c00-7a00-8000-000000009991",
         "/api/workshop/canvas-thumbs/0190f5fe-7c00-7a00-8000-000000009992",
     ] {
         let resp = app.clone().oneshot(get_request(uri)).await.unwrap();
@@ -84,7 +84,10 @@ async fn workshop_public_serve_missing_is_404_not_auth_rejected() {
 async fn workshop_management_routes_still_require_auth() {
     let (app, _services) = build_app().await;
 
-    for uri in ["/api/workshop/canvases", "/api/workshop/assets"] {
+    for uri in [
+        "/api/workshop/canvases",
+        "/api/creative-studio/assets",
+    ] {
         let resp = app.clone().oneshot(get_request(uri)).await.unwrap();
         assert!(
             resp.status() == StatusCode::UNAUTHORIZED || resp.status() == StatusCode::FORBIDDEN,

@@ -28,8 +28,8 @@ const asset = (id: string, kind: CreativeAsset['kind']): CreativeAsset => ({
   inLibrary: true,
   textContent: kind === 'text' ? 'A reusable creative prompt' : null,
   origin: null,
-  originalUrl: `/api/workshop/files/${id}`,
-  thumbnailUrl: kind === 'image' ? `/api/workshop/files/${id}?thumb=1` : null,
+  originalUrl: `/api/creative-studio/files/${id}`,
+  thumbnailUrl: kind === 'image' ? `/api/creative-studio/files/${id}?thumb=1` : null,
   createdAt: 1_777_000_000_000,
   updatedAt: 1_777_000_000_000,
 });
@@ -88,7 +88,7 @@ describe('CreativeAssetLibrary', () => {
     for (const kind of ['image', 'video', 'audio', 'text']) {
       expect(html.includes(`data-asset-kind="${kind}"`)).toBe(true);
     }
-    expect(html.includes('/api/workshop/files/asset-0?thumb=1')).toBe(true);
+    expect(html.includes('/api/creative-studio/files/asset-0?thumb=1')).toBe(true);
     expect(html.includes('data-asset-media-state="audio"')).toBe(true);
     expect(html.includes('audio/example')).toBe(true);
     expect(html.includes('A reusable creative prompt')).toBe(true);

@@ -19,7 +19,7 @@ function VideoNodeImpl({ id, data, selected }: NodeProps<VideoFlowNode>) {
   const { t } = useTranslation();
   const api = useCanvasNode();
   const [hover, setHover] = useState(false);
-  // The `/api/workshop/files/{id}` serve route is auth-exempt (see
+  // The `/api/creative-studio/files/{id}` serve route is auth-exempt (see
   // `workshop_public_routes`), so a bare `<video src>` reaches it on both desktop
   // and WebUI — no blob loader needed, and this streams via HTTP range requests
   // (seek-friendly) instead of buffering the whole file into an object URL.

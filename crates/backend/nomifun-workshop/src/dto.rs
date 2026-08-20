@@ -1,5 +1,5 @@
-//! Wire DTOs for the `/api/workshop/*` surface (contract §3.1/§3.2). All fields
-//! are snake_case (serde default) per the wire contract. These are response
+//! Wire DTOs for the Creative Studio asset and legacy workshop canvas surfaces.
+//! All fields are snake_case (serde default) per the wire contract. These are response
 //! shapes the frontend `types.ts` mirrors; the domain crate owns them (the
 //! shared `api-types` crate is not in this module's ownership).
 
@@ -81,11 +81,11 @@ impl TryFrom<WorkshopAssetRow> for WorkshopAsset {
                     row.asset_id
                 ))
             })?;
-        let url = format!("/api/workshop/files/{}", row.asset_id);
+        let url = format!("/api/creative-studio/files/{}", row.asset_id);
         let thumb_url = row
             .thumb_rel_path
             .as_ref()
-            .map(|_| format!("/api/workshop/files/{}?thumb=1", row.asset_id));
+            .map(|_| format!("/api/creative-studio/files/{}?thumb=1", row.asset_id));
         Ok(Self {
             asset_id: row.asset_id,
             kind: row.kind,
@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(dto.origin.unwrap()["prompt"], "cat");
         assert_eq!(
             dto.url,
-            "/api/workshop/files/0190f5fe-7c00-7a00-8000-000000000001"
+            "/api/creative-studio/files/0190f5fe-7c00-7a00-8000-000000000001"
         );
         assert!(dto.thumb_url.is_none());
     }

@@ -90,7 +90,7 @@ export interface WorkshopAsset {
   /** Text body for `kind = "text"` assets, else null. */
   text_content: string | null;
   origin: WorkshopAssetOrigin | null;
-  /** Binary serve URL — `/api/workshop/files/{id}`. */
+  /** Binary serve URL — `/api/creative-studio/files/{id}`. */
   url: string;
   /** Thumbnail serve URL, or null when none. */
   thumb_url: string | null;
@@ -141,7 +141,7 @@ export interface PatchCanvasBody {
   title: string;
 }
 
-/** `GET /api/workshop/assets` query params. */
+/** `GET /api/creative-studio/assets` query params. */
 export interface ListAssetsQuery {
   kind?: WorkshopAssetKind;
   collection?: string;
@@ -161,7 +161,7 @@ export interface ListAssetsQuery {
   page_size?: number;
 }
 
-/** `POST /api/workshop/assets` body — registers a text asset. */
+/** `POST /api/creative-studio/assets` body — registers a text asset. */
 export interface CreateTextAssetBody {
   kind: 'text';
   title: string;
@@ -170,7 +170,7 @@ export interface CreateTextAssetBody {
   tags?: string[];
 }
 
-/** `PATCH /api/workshop/assets/{asset_id}` body — partial edit. */
+/** `PATCH /api/creative-studio/assets/{asset_id}` body — partial edit. */
 export interface PatchAssetBody {
   title?: string;
   collection?: string | null;
@@ -211,7 +211,7 @@ export interface PutDocResponse {
   updated_at: number;
 }
 
-/** `GET /api/workshop/assets` response. */
+/** `GET /api/creative-studio/assets` response. */
 export interface ListAssetsResponse {
   items: WorkshopAsset[];
   total: number;
