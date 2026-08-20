@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { createInstance } from 'i18next';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -42,8 +43,8 @@ const renderFocusShell = (path = CREATIVE_STUDIO_ROOT_PATH) =>
   );
 
 describe('Creative Studio focus shell', () => {
-  test('coordinates shell navigation with the active canvas CAS gate', async () => {
-    const source = await Bun.file(new URL('./CreativeStudioFocusShell.tsx', import.meta.url)).text();
+  test('coordinates shell navigation with the active canvas CAS gate', () => {
+    const source = readFileSync(new URL('./CreativeStudioFocusShell.tsx', import.meta.url), 'utf8');
 
     expect(source.includes('requestCreativeCanvasProductBeforeLeave')).toBe(true);
     expect(source.includes('navigateAfterCanvasFlush')).toBe(true);
