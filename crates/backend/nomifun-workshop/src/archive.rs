@@ -787,9 +787,10 @@ pub(crate) fn collect_document_asset_ids(
             CreativeNodeData::Audio(data) => {
                 insert_optional_asset(&mut asset_ids, data.asset_id.as_deref())?
             }
-            CreativeNodeData::Text(_)
-            | CreativeNodeData::Director(_)
-            | CreativeNodeData::Group(_) => {}
+            CreativeNodeData::Director(data) => {
+                insert_optional_asset(&mut asset_ids, data.scene_id.as_deref())?
+            }
+            CreativeNodeData::Text(_) | CreativeNodeData::Group(_) => {}
         }
     }
     Ok(asset_ids)
@@ -831,9 +832,8 @@ fn remap_node_asset_ids(
             remap_optional_asset(&mut data.poster_asset_id, asset_ids)
         }
         CreativeNodeData::Audio(data) => remap_optional_asset(&mut data.asset_id, asset_ids),
-        CreativeNodeData::Text(_)
-        | CreativeNodeData::Director(_)
-        | CreativeNodeData::Group(_) => Ok(()),
+        CreativeNodeData::Director(data) => remap_optional_asset(&mut data.scene_id, asset_ids),
+        CreativeNodeData::Text(_) | CreativeNodeData::Group(_) => Ok(()),
     }
 }
 
@@ -913,6 +913,7 @@ mod tests {
 
     const PROJECT_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000701";
     const ASSET_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000702";
+    const DIRECTOR_SCENE_ASSET_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000705";
 
     fn image_document() -> CreativeProjectDocument {
         let mut document = CreativeProjectDocument::empty(PROJECT_ID.into());
@@ -986,6 +987,54 @@ mod tests {
         }
     }
 
+    fn director_document() -> CreativeProjectDocument {
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.into());
+        let director: CreativeNode = serde_json::from_value(serde_json::json!({
+            "id": "director-node",
+            "type": "director",
+            "position": { "x": 0, "y": 0 },
+            "size": { "width": 640, "height": 360 },
+            "groupId": null,
+            "zIndex": 1,
+            "locked": false,
+            "data": {
+                "sceneId": DIRECTOR_SCENE_ASSET_ID,
+                "cameraId": null,
+                "timelineMs": 0,
+                "durationMs": 5000
+            }
+        }))
+        .unwrap();
+        document.nodes = vec![director];
+        document
+    }
+
+    fn director_scene_asset_snapshot() -> CreativeArchiveAssetSnapshot {
+        let text = r#"{"schema":"nomifun.director/v1","version":1}"#;
+        CreativeArchiveAssetSnapshot {
+            row: WorkshopAssetRow {
+                id: 2,
+                asset_id: DIRECTOR_SCENE_ASSET_ID.into(),
+                kind: "text".into(),
+                title: "3D 导演场景".into(),
+                collection: None,
+                tags: r#"["director-scene"]"#.into(),
+                rel_path: None,
+                thumb_rel_path: None,
+                mime: None,
+                width: None,
+                height: None,
+                bytes: Some(text.len() as i64),
+                text_content: Some(text.into()),
+                in_library: false,
+                origin: None,
+                created_at: 10,
+                updated_at: 20,
+            },
+            bytes: text.as_bytes().to_vec(),
+        }
+    }
+
     #[test]
     fn v1_archive_round_trips_and_remaps_every_owned_identity() {
         let bytes = build_creative_project_archive(
@@ -1019,6 +1068,33 @@ mod tests {
         assert_ne!(remapped.assets[0].metadata.asset_id, ASSET_ID);
         assert!(WorkshopAssetId::parse(&remapped.assets[0].metadata.asset_id).is_ok());
         assert_eq!(remapped.document.nodes[0].node_type, CreativeNodeType::Image);
+    }
+
+    #[test]
+    fn director_scene_sidecar_round_trips_and_remaps_its_asset_pointer() {
+        let bytes = build_creative_project_archive(
+            "3D 导演项目",
+            &director_document(),
+            vec![director_scene_asset_snapshot()],
+            30,
+        )
+        .unwrap();
+        let parsed = parse_creative_project_archive(&bytes).unwrap();
+        assert_eq!(parsed.assets.len(), 1);
+        assert_eq!(parsed.assets[0].metadata.asset_id, DIRECTOR_SCENE_ASSET_ID);
+        assert_eq!(parsed.assets[0].metadata.kind, "text");
+
+        let imported_project = "0190f5fe-7c00-7a00-8abc-000000000706";
+        let remapped = remap_creative_archive_for_import(parsed, imported_project).unwrap();
+        let CreativeNodeData::Director(director) = &remapped.document.nodes[0].data else {
+            panic!("expected Director node")
+        };
+        assert_eq!(
+            director.scene_id.as_deref(),
+            Some(remapped.assets[0].metadata.asset_id.as_str())
+        );
+        assert_ne!(director.scene_id.as_deref(), Some(DIRECTOR_SCENE_ASSET_ID));
+        assert!(WorkshopAssetId::parse(&remapped.assets[0].metadata.asset_id).is_ok());
     }
 
     #[test]
