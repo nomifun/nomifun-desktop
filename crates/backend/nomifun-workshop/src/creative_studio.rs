@@ -603,6 +603,7 @@ impl CreativeAudioNodeData {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreativeDirectorNodeData {
+    /// Asset ID of the hidden canonical DirectorState v1 text sidecar.
     pub scene_id: Option<String>,
     pub camera_id: Option<String>,
     pub timeline_ms: f64,
