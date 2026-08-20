@@ -54,6 +54,11 @@ describe('Creative Studio v1 document contract', () => {
     expect(document.connections).toEqual([]);
     expect(document.viewport.zoom).toBe(1);
     expect(document.background).toBe('lines');
+    expect(document.panels).toEqual({
+      left: { open: true, width: 216, activeView: 'canvas' },
+      right: { open: false, width: 340, activeView: 'assistant' },
+      bottom: { open: false, height: 240, activeView: 'history' },
+    });
   });
 
   test('rejects legacy or future schema markers without fallback conversion', () => {

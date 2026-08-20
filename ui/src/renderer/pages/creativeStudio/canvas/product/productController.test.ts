@@ -7,12 +7,17 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { CreativeAsset } from '../../assets';
+import { createEmptyCreativeProjectDocument } from '../../domain';
 import { canvasCommands, canvasReducer, createInitialCanvasState } from '../core';
 import { createCreativeCanvasProductNode } from './nodeFactory';
 import {
   canLeaveCreativeCanvasAfterFlush,
+  creativeCanvasProductPanelViews,
   creativeCanvasProductSelectionCapabilities,
   resolveCreativeNodeAssetPresentation,
+  withCreativeCanvasBottomView,
+  withCreativeCanvasLeftView,
+  withCreativeCanvasRightView,
 } from './productController';
 
 const VIEWPORT = { width: 1200, height: 800 };
@@ -38,6 +43,35 @@ const asset = (overrides: Partial<CreativeAsset> = {}): CreativeAsset => ({
 });
 
 describe('Creative Canvas product controller helpers', () => {
+  test('projects and updates canonical panel views without losing persisted dimensions', () => {
+    const document = createEmptyCreativeProjectDocument(
+      '019b0000-0000-7000-8000-000000000001'
+    );
+    const initial = structuredClone(document.panels);
+
+    const left = withCreativeCanvasLeftView(initial, 'assets');
+    const right = withCreativeCanvasRightView(left, 'properties');
+    const bottom = withCreativeCanvasBottomView(right, 'timeline');
+    const closed = withCreativeCanvasRightView(bottom, null);
+
+    expect(creativeCanvasProductPanelViews(initial)).toEqual({
+      left: 'canvas',
+      right: null,
+      bottom: null,
+    });
+    expect(creativeCanvasProductPanelViews(bottom)).toEqual({
+      left: 'assets',
+      right: 'properties',
+      bottom: 'timeline',
+    });
+    expect(creativeCanvasProductPanelViews(closed).right).toBeNull();
+    expect(closed.right.activeView).toBe('properties');
+    expect(closed.left.width).toBe(initial.left.width);
+    expect(closed.right.width).toBe(initial.right.width);
+    expect(closed.bottom.height).toBe(initial.bottom.height);
+    expect(initial).toEqual(document.panels);
+  });
+
   test('derives grouping and deletion affordances from canonical selection', () => {
     let state = createInitialCanvasState();
     const first = createCreativeCanvasProductNode('text', state, VIEWPORT);

@@ -84,15 +84,20 @@ describe('Creative Canvas product presentation panels', () => {
     expect(html.includes('节点已锁定')).toBe(true);
   });
 
-  test('shows exact selected-node properties and the read-only reducer boundary', () => {
-    const html = renderToStaticMarkup(<CreativeCanvasPropertiesPanel state={state()} />);
+  test('shows exact selected-node properties and canonical editable controls', () => {
+    const html = renderToStaticMarkup(
+      <CreativeCanvasPropertiesPanel state={state()} onUpdateNode={noop} />
+    );
 
     expect(html.includes('data-properties-node-kind="text"')).toBe(true);
     expect(html.includes('雨夜里的第一幕')).toBe(true);
     expect(html.includes('280 × 180')).toBe(true);
     expect(html.includes('markdown')).toBe(true);
     expect(html.includes('18px')).toBe(true);
-    expect(html.includes('尚未提供属性 patch 命令')).toBe(true);
+    expect(html.includes('aria-label="编辑节点属性"')).toBe(true);
+    expect(html.includes('<textarea')).toBe(true);
+    expect(html.includes('雨夜里的第一幕</textarea>')).toBe(true);
+    expect(html.includes('锁定节点')).toBe(true);
   });
 
   test('renders honest empty and multi-selection property states', () => {
@@ -113,6 +118,12 @@ describe('Creative Canvas product presentation panels', () => {
     expect(empty.includes('未选择节点')).toBe(true);
     expect(multiple.includes('已选择 2 个节点')).toBe(true);
     expect((multiple.match(/<button/g) ?? []).length).toBe(2);
+  });
+
+  test('states the disconnected update boundary when no command owner is supplied', () => {
+    const html = renderToStaticMarkup(<CreativeCanvasPropertiesPanel state={state()} />);
+    expect(html.includes('未连接 canonical 更新命令')).toBe(true);
+    expect(html.includes('aria-label="编辑节点属性"')).toBe(false);
   });
 
   test('history exposes only actual undo and redo snapshot counts', () => {

@@ -18,6 +18,7 @@ import type {
   CreativeCanvasConnection,
   CreativeCanvasNode,
   CreativeProjectDetail,
+  CreativeStudioPanelState,
 } from '../../domain';
 import {
   type CreativeProjectRepository,
@@ -42,10 +43,14 @@ import {
 import {
   canvasStateFromProjectDocument,
   canvasSurfaceBackground,
+  canonicalCreativePendingTaskIds,
   classifyCreativeCanvasLoadState,
+  creativeStudioPanelStateEqual,
   fitCanvasViewport,
   isCanvasKeyboardTarget,
   projectDocumentFromCanvasState,
+  projectDocumentWithCanvasPanels,
+  projectDocumentWithPendingTaskIds,
 } from './editorModel';
 import {
   canvasEditorInteractionReducer,
@@ -77,6 +82,8 @@ export interface CreativeCanvasEditorContext {
   state: CanvasState;
   save: CanvasCasSaveSnapshot;
   tool: CanvasInteractionTool;
+  /** Authoritative task ids persisted in the canonical project document. */
+  pendingTaskIds: readonly string[];
   flush(): Promise<CanvasCasFlushResult>;
   reloadRemote(): Promise<boolean>;
 }
@@ -90,12 +97,19 @@ export interface CreativeCanvasEditorHandle {
   dispatch(command: CanvasCommand): CanvasState;
   /** Update the canonical document background and queue it through the same CAS controller. */
   setBackground(background: CreativeCanvasBackground): void;
+  /** Update persisted product panel state through the same canonical CAS document. */
+  setPanels(panels: CreativeStudioPanelState): void;
+  /** Durably persist a task id before submission so a later mount can recover it. */
+  addPendingTask(taskId: string): Promise<void>;
+  /** Durably remove a terminal or confirmed-orphan task id from the canonical feed. */
+  removePendingTask(taskId: string): Promise<void>;
   /** Route guards must await this before leaving the editor. */
   flush(): Promise<CanvasCasFlushResult>;
   /** Explicitly discard local state and reload the authoritative remote revision. */
   reloadRemote(): Promise<boolean>;
   getState(): CanvasState;
   getSaveState(): CanvasCasSaveSnapshot;
+  getPendingTaskIds(): readonly string[];
 }
 
 export interface CreativeCanvasEditorProps {
@@ -121,6 +135,8 @@ export interface CreativeCanvasEditorProps {
   renderError?: (error: Error, retry: () => Promise<CreativeProjectDetail | undefined>) => React.ReactNode;
   onStateChange?: (state: CanvasState) => void;
   onSaveStateChange?: (save: CanvasCasSaveSnapshot) => void;
+  /** Fires after hydration and after each canonical task-feed mutation. */
+  onPendingTaskIdsChange?: (taskIds: readonly string[]) => void;
 }
 
 const resolveSlot = (
@@ -176,6 +192,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       renderError = defaultError,
       onStateChange,
       onSaveStateChange,
+      onPendingTaskIdsChange,
     },
     ref
   ) => {
@@ -187,7 +204,9 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
     );
     const [state, setState] = useState<CanvasState>(() => createInitialCanvasState());
     const [background, setBackgroundState] = useState<CreativeCanvasBackground>('lines');
+    const [pendingTaskIds, setPendingTaskIdsState] = useState<readonly string[] | null>(null);
     const stateRef = useRef(state);
+    const pendingTaskIdsRef = useRef<readonly string[]>([]);
     const baseDocumentRef = useRef<CreativeProjectDetail['document'] | null>(null);
     const loadedProjectIdRef = useRef<string | null>(null);
     const hydratedSaveControllerRef = useRef<typeof saveController | null>(null);
@@ -214,6 +233,8 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         stateRef.current = next;
         setState(next);
         setBackgroundState(detail.document.background);
+        pendingTaskIdsRef.current = [...detail.document.pendingTaskIds];
+        setPendingTaskIdsState(pendingTaskIdsRef.current);
         saveController.reset(detail.project.revision, detail.document);
         pasteSequenceRef.current = 0;
         setInteraction({ type: 'gesture/end' });
@@ -225,6 +246,8 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       loadedProjectIdRef.current = null;
       baseDocumentRef.current = null;
       hydratedSaveControllerRef.current = null;
+      pendingTaskIdsRef.current = [];
+      setPendingTaskIdsState(null);
     }, [projectId]);
 
     useEffect(() => {
@@ -282,8 +305,82 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       [saveController]
     );
 
+    const setPanels = useCallback(
+      (nextPanels: CreativeStudioPanelState) => {
+        const currentBase = baseDocumentRef.current;
+        if (!currentBase || creativeStudioPanelStateEqual(currentBase.panels, nextPanels)) {
+          return;
+        }
+
+        const nextDocument = projectDocumentWithCanvasPanels(
+          currentBase,
+          stateRef.current,
+          nextPanels
+        );
+        baseDocumentRef.current = nextDocument;
+        saveController.queue(nextDocument);
+      },
+      [saveController]
+    );
+
+    const setCanonicalPendingTaskIds = useCallback(
+      (requestedTaskIds: readonly string[]) => {
+        const currentBase = baseDocumentRef.current;
+        if (!currentBase) throw new Error('Creative canvas document is not hydrated');
+        const nextTaskIds = canonicalCreativePendingTaskIds(requestedTaskIds);
+        if (
+          nextTaskIds.length === currentBase.pendingTaskIds.length &&
+          nextTaskIds.every((taskId, index) => taskId === currentBase.pendingTaskIds[index])
+        ) {
+          return;
+        }
+
+        const nextDocument = projectDocumentWithPendingTaskIds(
+          currentBase,
+          stateRef.current,
+          nextTaskIds
+        );
+        baseDocumentRef.current = nextDocument;
+        pendingTaskIdsRef.current = nextTaskIds;
+        setPendingTaskIdsState(nextTaskIds);
+        saveController.queue(nextDocument);
+      },
+      [saveController]
+    );
+
+    const addPendingTask = useCallback(
+      async (taskId: string) => {
+        setCanonicalPendingTaskIds([
+          ...pendingTaskIdsRef.current,
+          taskId,
+        ]);
+        const result = await saveController.flush();
+        if (result.status === 'conflict' || result.status === 'error') {
+          throw result.error;
+        }
+      },
+      [saveController, setCanonicalPendingTaskIds]
+    );
+
+    const removePendingTask = useCallback(
+      async (taskId: string) => {
+        const [canonicalTaskId] = canonicalCreativePendingTaskIds([taskId]);
+        setCanonicalPendingTaskIds(
+          pendingTaskIdsRef.current.filter((candidate) => candidate !== canonicalTaskId)
+        );
+        const result = await saveController.flush();
+        if (result.status === 'conflict' || result.status === 'error') {
+          throw result.error;
+        }
+      },
+      [saveController, setCanonicalPendingTaskIds]
+    );
+
     useEffect(() => onStateChange?.(state), [onStateChange, state]);
     useEffect(() => onSaveStateChange?.(saveSnapshot), [onSaveStateChange, saveSnapshot]);
+    useEffect(() => {
+      if (pendingTaskIds !== null) onPendingTaskIdsChange?.([...pendingTaskIds]);
+    }, [onPendingTaskIdsChange, pendingTaskIds]);
 
     useEffect(() => {
       const beforeUnload = () => {
@@ -298,12 +395,24 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       () => ({
         dispatch: applyCommand,
         setBackground,
+        setPanels,
+        addPendingTask,
+        removePendingTask,
         flush: () => saveController.flush(),
         reloadRemote,
         getState: () => stateRef.current,
         getSaveState: () => saveController.getSnapshot(),
+        getPendingTaskIds: () => [...pendingTaskIdsRef.current],
       }),
-      [applyCommand, reloadRemote, saveController, setBackground]
+      [
+        addPendingTask,
+        applyCommand,
+        reloadRemote,
+        removePendingTask,
+        saveController,
+        setBackground,
+        setPanels,
+      ]
     );
 
     const localClientPoint = useCallback((clientX: number, clientY: number) => {
@@ -539,6 +648,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       state,
       save: saveSnapshot,
       tool,
+      pendingTaskIds: pendingTaskIds ?? baseDocument.pendingTaskIds,
       flush,
       reloadRemote,
     };

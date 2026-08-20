@@ -21,6 +21,7 @@ type WithHistory<T> = T & { history: CanvasHistoryMeta };
 
 export type CanvasCommand =
   | WithHistory<{ type: 'node/add'; node: CanvasGraphNode }>
+  | WithHistory<{ type: 'node/update'; node: CanvasGraphNode }>
   | WithHistory<{
       type: 'node/move';
       nodeIds?: string[];
@@ -77,6 +78,23 @@ export const canvasCommands = {
     options: { at?: number } = {}
   ): CanvasCommand {
     return { type: 'node/add', node, history: history(options.at) };
+  },
+
+  /**
+   * Replace one canonical node without changing its identity or kind.
+   *
+   * Requiring a complete discriminated node keeps data fields type-safe and
+   * avoids ambiguous deep-merge semantics for the per-kind `data` union.
+   */
+  updateNode(
+    node: CanvasGraphNode,
+    options: { at?: number; mergeKey?: string } = {}
+  ): CanvasCommand {
+    return {
+      type: 'node/update',
+      node,
+      history: history(options.at, options.mergeKey),
+    };
   },
 
   moveNodes(

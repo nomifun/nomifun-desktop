@@ -102,8 +102,8 @@ const asset = (overrides: Partial<CreativeAsset> = {}): CreativeAsset => ({
   inLibrary: true,
   textContent: null,
   origin: null,
-  originalUrl: '/api/workshop/files/asset-real-1',
-  thumbnailUrl: '/api/workshop/files/asset-real-1?thumb=1',
+  originalUrl: '/api/creative-studio/files/asset-real-1',
+  thumbnailUrl: '/api/creative-studio/files/asset-real-1?thumb=1',
   createdAt: 1,
   updatedAt: 2,
   ...overrides,
@@ -243,7 +243,7 @@ describe('real library insertion helpers', () => {
 
     for (const node of [image, video, audio, text]) {
       const persisted = JSON.stringify(node);
-      expect(persisted.includes('/api/workshop/files/')).toBe(false);
+      expect(persisted.includes('/api/creative-studio/files/')).toBe(false);
       expect(persisted.includes('thumb=1')).toBe(false);
       expect(UUID_V7.test(node.id)).toBe(true);
     }

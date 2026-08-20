@@ -145,6 +145,13 @@ function moveNodeIds(state: CanvasState, requested: readonly string[]): Set<stri
   return movable;
 }
 
+function sameCanvasNode(
+  current: CanvasDocument['nodes'][number],
+  next: CanvasDocument['nodes'][number]
+): boolean {
+  return JSON.stringify(current) === JSON.stringify(next);
+}
+
 function deleteSelection(state: CanvasState, command: Extract<CanvasCommand, { type: 'selection/delete' }>): CanvasState {
   const requestedNodeIds = command.nodeIds ?? state.selection.nodeIds;
   const deletedNodeIds = new Set(requestedNodeIds);
@@ -218,6 +225,29 @@ export function canvasReducer(state: CanvasState, command: CanvasCommand): Canva
           nodeIds: [command.node.id],
         }
       );
+    }
+
+    case 'node/update': {
+      const index = state.document.nodes.findIndex((node) => node.id === command.node.id);
+      if (index < 0) return state;
+      const current = state.document.nodes[index];
+      if (current.type !== command.node.type || sameCanvasNode(current, command.node)) {
+        return state;
+      }
+      if (command.node.type === 'group' && command.node.groupId !== null) return state;
+      if (
+        command.node.type !== 'group' &&
+        command.node.groupId !== null &&
+        !state.document.nodes.some(
+          (node) => node.id === command.node.groupId && node.type === 'group'
+        )
+      ) {
+        return state;
+      }
+
+      const nodes = [...state.document.nodes];
+      nodes[index] = structuredClone(command.node);
+      return recordDocument(state, { ...state.document, nodes }, command.history);
     }
 
     case 'node/move': {

@@ -5,7 +5,13 @@
  */
 
 import type { CreativeAsset } from '../../assets';
-import type { CreativeCanvasNode } from '../../domain';
+import type {
+  CreativeBottomPanelView,
+  CreativeCanvasNode,
+  CreativeLeftPanelView,
+  CreativeRightPanelView,
+  CreativeStudioPanelState,
+} from '../../domain';
 import type { CanvasCasFlushResult } from '../editor';
 import type { CreativeNodeAssetPresentation } from '../nodes';
 import type { CanvasState } from '../core';
@@ -14,6 +20,60 @@ export interface CreativeCanvasProductSelectionCapabilities {
   hasSelection: boolean;
   canGroup: boolean;
   groupIds: string[];
+}
+
+export interface CreativeCanvasProductPanelViews {
+  left: CreativeLeftPanelView;
+  right: CreativeRightPanelView | null;
+  bottom: CreativeBottomPanelView | null;
+}
+
+export function creativeCanvasProductPanelViews(
+  panels: CreativeStudioPanelState
+): CreativeCanvasProductPanelViews {
+  return {
+    left: panels.left.activeView,
+    right: panels.right.open ? panels.right.activeView : null,
+    bottom: panels.bottom.open ? panels.bottom.activeView : null,
+  };
+}
+
+export function withCreativeCanvasLeftView(
+  panels: CreativeStudioPanelState,
+  view: CreativeLeftPanelView
+): CreativeStudioPanelState {
+  return {
+    ...panels,
+    left: { ...panels.left, open: true, activeView: view },
+  };
+}
+
+export function withCreativeCanvasRightView(
+  panels: CreativeStudioPanelState,
+  view: CreativeRightPanelView | null
+): CreativeStudioPanelState {
+  return {
+    ...panels,
+    right: {
+      ...panels.right,
+      open: view !== null,
+      activeView: view ?? panels.right.activeView,
+    },
+  };
+}
+
+export function withCreativeCanvasBottomView(
+  panels: CreativeStudioPanelState,
+  view: CreativeBottomPanelView | null
+): CreativeStudioPanelState {
+  return {
+    ...panels,
+    bottom: {
+      ...panels.bottom,
+      open: view !== null,
+      activeView: view ?? panels.bottom.activeView,
+    },
+  };
 }
 
 export function creativeCanvasProductSelectionCapabilities(

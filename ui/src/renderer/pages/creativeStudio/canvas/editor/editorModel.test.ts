@@ -16,9 +16,13 @@ import { testEdge, testNode, testUuid } from '../core/testFixtures';
 import {
   canvasStateFromProjectDocument,
   canvasSurfaceBackground,
+  canonicalCreativePendingTaskIds,
   classifyCreativeCanvasLoadState,
+  creativeStudioPanelStateEqual,
   fitCanvasViewport,
   projectDocumentFromCanvasState,
+  projectDocumentWithCanvasPanels,
+  projectDocumentWithPendingTaskIds,
 } from './editorModel';
 
 const PROJECT_ID = testUuid(200);
@@ -124,6 +128,61 @@ describe('creative canvas editor model', () => {
         canvasSurfaceBackground(background)
       )
     ).toEqual(['dots', 'lines', 'blank']);
+  });
+
+  test('round-trips canonical panel state without dropping reducer-owned canvas changes', () => {
+    const base = createEmptyCreativeProjectDocument(PROJECT_ID);
+    const node = testNode('text', 207, { x: 40, y: 60 });
+    const state = createInitialCanvasState({
+      document: { nodes: [node], connections: [] },
+      viewport: { x: 18, y: 22, zoom: 1.25 },
+    });
+    const panels = {
+      left: { ...base.panels.left, width: 216, activeView: 'assets' as const },
+      right: { ...base.panels.right, open: true, activeView: 'properties' as const },
+      bottom: { ...base.panels.bottom, open: true, activeView: 'history' as const },
+    };
+
+    const saved = projectDocumentWithCanvasPanels(base, state, panels);
+    const reloaded = structuredClone(saved);
+
+    expect(reloaded.panels).toEqual(panels);
+    expect(reloaded.nodes).toEqual([node]);
+    expect(reloaded.viewport).toEqual({ x: 18, y: 22, zoom: 1.25 });
+    expect(creativeStudioPanelStateEqual(reloaded.panels, panels)).toBe(true);
+    expect(creativeStudioPanelStateEqual(reloaded.panels, base.panels)).toBe(false);
+    expect(base.panels).not.toEqual(panels);
+  });
+
+  test('persists a canonical unique pending-task recovery feed with current canvas state', () => {
+    const base = createEmptyCreativeProjectDocument(PROJECT_ID);
+    const firstTaskId = testUuid(208);
+    const secondTaskId = testUuid(209);
+    const node = testNode('config', 210);
+    const state = createInitialCanvasState({
+      document: { nodes: [node], connections: [] },
+      viewport: { x: 3, y: 4, zoom: 1.1 },
+    });
+
+    const saved = projectDocumentWithPendingTaskIds(
+      base,
+      state,
+      [firstTaskId, secondTaskId, firstTaskId]
+    );
+
+    expect(saved.pendingTaskIds).toEqual([firstTaskId, secondTaskId]);
+    expect(saved.nodes).toEqual([node]);
+    expect(saved.viewport).toEqual({ x: 3, y: 4, zoom: 1.1 });
+    expect(canonicalCreativePendingTaskIds([firstTaskId, firstTaskId])).toEqual([
+      firstTaskId,
+    ]);
+    let invalidTaskIdError: unknown;
+    try {
+      canonicalCreativePendingTaskIds(['not-a-task-id']);
+    } catch (error) {
+      invalidTaskIdError = error;
+    }
+    expect(invalidTaskIdError instanceof TypeError).toBe(true);
   });
 
   test('fits graph bounds with padding and centers an empty canvas', () => {

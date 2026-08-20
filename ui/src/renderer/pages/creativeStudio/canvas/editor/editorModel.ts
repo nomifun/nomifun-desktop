@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { parseCreationTaskId } from '@/common/types/ids';
+
 import {
   boundsForGraphNodes,
   clampCanvasZoom,
@@ -16,6 +18,7 @@ import type {
   CreativeProjectDetail,
   CreativeProjectDocument,
   CreativeSize,
+  CreativeStudioPanelState,
 } from '../../domain';
 import { isCreativeProjectRepositoryError } from '../../services';
 import type { CanvasBackgroundMode } from '../components';
@@ -65,6 +68,53 @@ export function projectDocumentFromCanvasState(
     nodes: structuredClone(state.document.nodes),
     connections: structuredClone(state.document.connections),
   };
+}
+
+export function creativeStudioPanelStateEqual(
+  left: CreativeStudioPanelState,
+  right: CreativeStudioPanelState
+): boolean {
+  return (
+    left.left.open === right.left.open &&
+    left.left.width === right.left.width &&
+    left.left.activeView === right.left.activeView &&
+    left.right.open === right.right.open &&
+    left.right.width === right.right.width &&
+    left.right.activeView === right.right.activeView &&
+    left.bottom.open === right.bottom.open &&
+    left.bottom.height === right.bottom.height &&
+    left.bottom.activeView === right.bottom.activeView
+  );
+}
+
+/** Merge panel chrome and reducer-owned canvas fields into one canonical save unit. */
+export function projectDocumentWithCanvasPanels(
+  base: CreativeProjectDocument,
+  state: CanvasState,
+  panels: CreativeStudioPanelState
+): CreativeProjectDocument {
+  return projectDocumentFromCanvasState(
+    { ...base, panels: structuredClone(panels) },
+    state
+  );
+}
+
+export function canonicalCreativePendingTaskIds(
+  taskIds: readonly string[]
+): string[] {
+  return [...new Set(taskIds.map((taskId) => String(parseCreationTaskId(taskId))))];
+}
+
+/** Merge the recovery feed with the latest reducer state as one CAS document. */
+export function projectDocumentWithPendingTaskIds(
+  base: CreativeProjectDocument,
+  state: CanvasState,
+  taskIds: readonly string[]
+): CreativeProjectDocument {
+  return projectDocumentFromCanvasState(
+    { ...base, pendingTaskIds: canonicalCreativePendingTaskIds(taskIds) },
+    state
+  );
 }
 
 export function canvasSurfaceBackground(
