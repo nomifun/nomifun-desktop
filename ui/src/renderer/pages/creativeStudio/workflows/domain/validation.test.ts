@@ -68,6 +68,26 @@ describe('workflow v1 validation and parser', () => {
     if (!unsafeResult.ok) expect(unsafeResult.error.message.includes('image inputs')).toBe(true);
   });
 
+  test('keeps image generation settings provider-scoped and task-exact', () => {
+    const workflow = createWorkflowFixture();
+    const generate = workflow.steps.find((step) => step.kind === 'generate-images');
+    if (!generate || generate.kind !== 'generate-images') throw new Error('missing generation step');
+    generate.generation.model = {
+      providerId: IDS.history,
+      model: 'gpt-image-test',
+      task: 'image_generation',
+    };
+    const mismatch = validateWorkflowDefinition(workflow);
+    expect(mismatch.ok).toBe(false);
+    if (!mismatch.ok) expect(mismatch.error.path.includes('generation.model.task')).toBe(true);
+
+    generate.generation.model.task = 'image_edit';
+    generate.generation.width = 1025;
+    const dimensions = validateWorkflowDefinition(workflow);
+    expect(dimensions.ok).toBe(false);
+    if (!dimensions.ok) expect(dimensions.error.path.includes('generation.width')).toBe(true);
+  });
+
   test('validates typed inputs and renders structured templates without string substitution', () => {
     const workflow = createWorkflowFixture();
     const missing = validateWorkflowInputsForDefinition(workflow, []);

@@ -25,6 +25,7 @@ pub mod creative_studio;
 pub mod routes;
 pub mod service;
 pub mod state;
+pub mod workflow;
 
 pub use agent_ops::{AddNodeSpec, AgentOp, AppliedOp, OpDisposition, PendingOp};
 pub use creative_studio::{
@@ -32,6 +33,7 @@ pub use creative_studio::{
     MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
 };
 pub use dto::{WorkshopAsset, WorkshopCanvasMeta};
+pub use workflow::{CreativeWorkflowDefinitionV1, MAX_WORKFLOW_DEFINITION_BYTES};
 pub use routes::{workshop_public_routes, workshop_routes};
 pub use service::WorkshopService;
 pub use state::WorkshopRouterState;

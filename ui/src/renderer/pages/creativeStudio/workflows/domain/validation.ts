@@ -304,7 +304,13 @@ function validateStep(value: unknown, path: string) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return issue('invalid-value', path, 'expected a workflow step');
   const kind = (value as UnknownRecord).kind;
   const base = ['id', 'name', 'dependsOn', 'enabled', 'kind'];
-  const keys = kind === 'render-template' || kind === 'draft-prompts' ? [...base, 'templateId'] : kind === 'generate-images' ? [...base, 'promptSource', 'referenceVariableIds'] : kind === 'record-history' ? [...base, 'sourceStepIds'] : null;
+  const keys = kind === 'render-template' || kind === 'draft-prompts'
+    ? [...base, 'templateId']
+    : kind === 'generate-images'
+      ? [...base, 'promptSource', 'referenceVariableIds', 'generation']
+      : kind === 'record-history'
+        ? [...base, 'sourceStepIds']
+        : null;
   if (!keys) return issue('invalid-value', `${path}.kind`, 'unsupported workflow step');
   const record = asRecord(value, path, keys);
   if (isIssue(record)) return record;
@@ -315,6 +321,48 @@ function validateStep(value: unknown, path: string) {
   if (kind === 'record-history') return stringList(record.sourceStepIds, `${path}.sourceStepIds`, WORKFLOW_LIMITS.steps, true);
   const refs = stringList(record.referenceVariableIds, `${path}.referenceVariableIds`, WORKFLOW_LIMITS.variables, true);
   if (refs) return refs;
+  const generation = asRecord(record.generation, `${path}.generation`, [
+    'model',
+    'quality',
+    'width',
+    'height',
+    'imagesPerPrompt',
+  ]);
+  if (isIssue(generation)) return generation;
+  if (generation.model !== null) {
+    const model = asRecord(generation.model, `${path}.generation.model`, [
+      'providerId',
+      'model',
+      'task',
+    ]);
+    if (isIssue(model)) return model;
+    const modelError = id(model.providerId, `${path}.generation.model.providerId`)
+      ?? text(model.model, `${path}.generation.model.model`, 512);
+    if (modelError) return modelError;
+    if (model.task !== 'image_generation' && model.task !== 'image_edit') {
+      return issue('invalid-value', `${path}.generation.model.task`, 'unsupported image model task');
+    }
+  }
+  if (!['auto', 'high', 'medium', 'low'].includes(generation.quality as string)) {
+    return issue('invalid-value', `${path}.generation.quality`, 'unsupported image quality');
+  }
+  for (const key of ['width', 'height'] as const) {
+    if (
+      !Number.isSafeInteger(generation[key])
+      || (generation[key] as number) < 64
+      || (generation[key] as number) > 8192
+      || (generation[key] as number) % 16 !== 0
+    ) {
+      return issue('invalid-value', `${path}.generation.${key}`, 'image dimensions must be 64..8192 and aligned to 16 pixels');
+    }
+  }
+  if (
+    !Number.isSafeInteger(generation.imagesPerPrompt)
+    || (generation.imagesPerPrompt as number) < 1
+    || (generation.imagesPerPrompt as number) > 6
+  ) {
+    return issue('invalid-value', `${path}.generation.imagesPerPrompt`, 'imagesPerPrompt must be between 1 and 6');
+  }
   if (!record.promptSource || typeof record.promptSource !== 'object' || Array.isArray(record.promptSource)) return issue('invalid-value', `${path}.promptSource`, 'expected a prompt source');
   const sourceKind = (record.promptSource as UnknownRecord).kind;
   const source = asRecord(record.promptSource, `${path}.promptSource`, sourceKind === 'template' ? ['kind', 'templateId'] : sourceKind === 'prompt-drafts' ? ['kind', 'stepId'] : []);

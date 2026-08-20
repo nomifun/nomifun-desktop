@@ -122,10 +122,30 @@ export type WorkflowImagePromptSource =
   | { kind: 'template'; templateId: WorkflowTemplateId }
   | { kind: 'prompt-drafts'; stepId: WorkflowStepId };
 
+export type WorkflowImageTask = 'image_generation' | 'image_edit';
+
+export interface WorkflowImageModelBinding {
+  providerId: string;
+  model: string;
+  task: WorkflowImageTask;
+}
+
+export type WorkflowImageQuality = 'auto' | 'high' | 'medium' | 'low';
+
+/** Provider-neutral settings persisted with the workflow definition. */
+export interface WorkflowImageGenerationSettings {
+  model: WorkflowImageModelBinding | null;
+  quality: WorkflowImageQuality;
+  width: number;
+  height: number;
+  imagesPerPrompt: number;
+}
+
 export interface WorkflowGenerateImagesStep extends WorkflowStepBase {
   kind: 'generate-images';
   promptSource: WorkflowImagePromptSource;
   referenceVariableIds: WorkflowVariableId[];
+  generation: WorkflowImageGenerationSettings;
 }
 
 export interface WorkflowRecordHistoryStep extends WorkflowStepBase {

@@ -1,5 +1,7 @@
 use crate::error::DbError;
-use crate::models::{CreativeStudioProjectRow, WorkshopAssetRow, WorkshopCanvasRow};
+use crate::models::{
+    CreativeStudioProjectRow, CreativeStudioWorkflowRow, WorkshopAssetRow, WorkshopCanvasRow,
+};
 
 /// Data access for the 创意工坊 (Creative Workshop) domain: canonical Creative
 /// Studio projects plus the legacy canvas index and shared asset library.
@@ -23,6 +25,21 @@ pub trait IWorkshopRepository: Send + Sync {
         provider_id: &str,
         model: &str,
     ) -> Result<bool, DbError>;
+
+    /// Check one enabled Provider/model/task capability. Workflow definitions
+    /// persist exact NomiFun task bindings rather than inferring modality from
+    /// a model name.
+    async fn provider_model_supports_task(
+        &self,
+        provider_id: &str,
+        model: &str,
+        task: &str,
+    ) -> Result<bool, DbError> {
+        let _ = (provider_id, model, task);
+        Err(DbError::Init(
+            "task-scoped provider model validation is unavailable in this repository".into(),
+        ))
+    }
 
     // ---- canonical Creative Studio projects ----
 
@@ -79,6 +96,59 @@ pub trait IWorkshopRepository: Send + Sync {
     /// Hard-delete one canonical project row. Managed assets are not deleted:
     /// they have their own library lifecycle and may be shared by projects.
     async fn delete_creative_project(&self, project_id: &str) -> Result<(), DbError>;
+
+    // ---- canonical Creative Studio workflows ----
+
+    /// Every workflow definition, newest-updated first.
+    async fn list_creative_workflows(&self) -> Result<Vec<CreativeStudioWorkflowRow>, DbError> {
+        Err(DbError::Init(
+            "creative studio workflow persistence is unavailable in this repository".into(),
+        ))
+    }
+
+    /// One workflow definition by business ID, or `None`.
+    async fn get_creative_workflow(
+        &self,
+        workflow_id: &str,
+    ) -> Result<Option<CreativeStudioWorkflowRow>, DbError> {
+        let _ = workflow_id;
+        Err(DbError::Init(
+            "creative studio workflow persistence is unavailable in this repository".into(),
+        ))
+    }
+
+    /// Insert revision one of a closed workflow definition.
+    async fn create_creative_workflow(
+        &self,
+        row: &CreativeStudioWorkflowRow,
+    ) -> Result<CreativeStudioWorkflowRow, DbError> {
+        let _ = row;
+        Err(DbError::Init(
+            "creative studio workflow persistence is unavailable in this repository".into(),
+        ))
+    }
+
+    /// Compare-and-swap the definition. The replacement row must carry
+    /// `expected_revision + 1`.
+    async fn save_creative_workflow(
+        &self,
+        workflow_id: &str,
+        expected_revision: i64,
+        row: &CreativeStudioWorkflowRow,
+    ) -> Result<CreativeStudioWorkflowRow, DbError> {
+        let _ = (workflow_id, expected_revision, row);
+        Err(DbError::Init(
+            "creative studio workflow persistence is unavailable in this repository".into(),
+        ))
+    }
+
+    /// Hard-delete one workflow definition.
+    async fn delete_creative_workflow(&self, workflow_id: &str) -> Result<(), DbError> {
+        let _ = workflow_id;
+        Err(DbError::Init(
+            "creative studio workflow persistence is unavailable in this repository".into(),
+        ))
+    }
 
     // ---- canvases ----
 

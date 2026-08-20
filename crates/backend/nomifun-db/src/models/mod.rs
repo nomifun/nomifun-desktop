@@ -87,5 +87,6 @@ pub use terminal_turn::TerminalTurnAdmissionRow;
 pub use user::User;
 pub use webhook::WebhookRow;
 pub use workshop::{
-    CreationTaskRow, CreativeStudioProjectRow, WorkshopAssetRow, WorkshopCanvasRow,
+    CreationTaskRow, CreativeStudioProjectRow, CreativeStudioWorkflowRow, WorkshopAssetRow,
+    WorkshopCanvasRow,
 };

@@ -8,12 +8,12 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use nomifun_common::{
-    AppError, CreativeStudioProjectId, ProviderId, SharedProviderLifecycleBarrier,
-    WorkshopAssetId, WorkshopCanvasId, now_ms,
+    AppError, CreativeStudioProjectId, CreativeStudioWorkflowId, ProviderId,
+    SharedProviderLifecycleBarrier, WorkshopAssetId, WorkshopCanvasId, now_ms,
 };
 use nomifun_db::{
-    AssetSort, CreativeStudioProjectRow, IWorkshopRepository, ListAssetsParams, UpdateAssetParams,
-    WorkshopAssetRow,
+    AssetSort, CreativeStudioProjectRow, IWorkshopRepository, ListAssetsParams,
+    UpdateAssetParams, WorkshopAssetRow,
 };
 use serde_json::Value;
 
@@ -30,6 +30,7 @@ use crate::creative_studio::{
 #[cfg(test)]
 use crate::creative_studio::CREATIVE_STUDIO_SCHEMA;
 use crate::dto::{WorkshopAsset, WorkshopCanvasMeta};
+use crate::workflow::{CreativeWorkflowDefinitionV1, parse_workflow_row};
 use crate::{
     DEFAULT_DOC, MAX_ASSET_BYTES, MAX_DOC_BYTES, WORKSHOP_REL_DIR, docscan, fsio, imagemeta,
     thumbnail,
@@ -435,6 +436,204 @@ impl WorkshopService {
     pub async fn delete_creative_project(&self, project_id: &str) -> Result<(), AppError> {
         validate_creative_project_id(project_id)?;
         self.repo.delete_creative_project(project_id).await?;
+        Ok(())
+    }
+
+    // ---- canonical Creative Studio workflows ----
+
+    pub async fn list_creative_workflows(
+        &self,
+    ) -> Result<Vec<CreativeWorkflowDefinitionV1>, AppError> {
+        self.repo
+            .list_creative_workflows()
+            .await?
+            .into_iter()
+            .map(|row| {
+                parse_workflow_row(&row).map_err(|error| {
+                    AppError::Internal(format!(
+                        "stored creative studio workflow {} is corrupt: {error}",
+                        row.workflow_id
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    pub async fn get_creative_workflow(
+        &self,
+        workflow_id: &str,
+    ) -> Result<CreativeWorkflowDefinitionV1, AppError> {
+        validate_creative_workflow_id(workflow_id)?;
+        let row = self
+            .repo
+            .get_creative_workflow(workflow_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "creative studio workflow {workflow_id} not found"
+                ))
+            })?;
+        parse_workflow_row(&row).map_err(|error| {
+            AppError::Internal(format!(
+                "stored creative studio workflow {workflow_id} is corrupt: {error}"
+            ))
+        })
+    }
+
+    pub async fn create_creative_workflow(
+        &self,
+        mut definition: CreativeWorkflowDefinitionV1,
+    ) -> Result<CreativeWorkflowDefinitionV1, AppError> {
+        validate_creative_workflow_id(&definition.id)?;
+        if definition.revision != 1 {
+            return Err(AppError::BadRequest(
+                "a creative studio workflow must start at revision 1".into(),
+            ));
+        }
+        if self.repo.get_creative_workflow(&definition.id).await?.is_some() {
+            return Err(AppError::Conflict(format!(
+                "creative studio workflow {} already exists",
+                definition.id
+            )));
+        }
+        let now = now_ms();
+        definition.metadata.created_at = now;
+        definition.metadata.updated_at = now;
+        definition
+            .validate()
+            .map_err(|error| AppError::BadRequest(format!("invalid workflow definition: {error}")))?;
+        self.validate_creative_workflow_assets(&definition).await?;
+        self.validate_creative_workflow_models(&definition).await?;
+        let row = definition
+            .to_row()
+            .map_err(|error| AppError::BadRequest(format!("invalid workflow definition: {error}")))?;
+        let saved = self.repo.create_creative_workflow(&row).await?;
+        parse_workflow_row(&saved).map_err(|error| {
+            AppError::Internal(format!(
+                "created creative studio workflow {} is corrupt: {error}",
+                saved.workflow_id
+            ))
+        })
+    }
+
+    pub async fn save_creative_workflow(
+        &self,
+        workflow_id: &str,
+        expected_revision: &str,
+        mut definition: CreativeWorkflowDefinitionV1,
+    ) -> Result<CreativeWorkflowDefinitionV1, AppError> {
+        validate_creative_workflow_id(workflow_id)?;
+        let expected_revision = parse_creative_workflow_revision(expected_revision)?;
+        let current_row = self
+            .repo
+            .get_creative_workflow(workflow_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "creative studio workflow {workflow_id} not found"
+                ))
+            })?;
+        let current = parse_workflow_row(&current_row).map_err(|error| {
+            AppError::Internal(format!(
+                "stored creative studio workflow {workflow_id} is corrupt: {error}"
+            ))
+        })?;
+        if definition.id != workflow_id {
+            return Err(AppError::BadRequest(
+                "workflow definition id must match its route id".into(),
+            ));
+        }
+        if definition.revision != expected_revision + 1 {
+            return Err(AppError::BadRequest(
+                "workflow definition revision must increment expectedRevision exactly once".into(),
+            ));
+        }
+        definition.metadata.created_at = current.metadata.created_at;
+        definition.metadata.updated_at = now_ms();
+        definition
+            .validate()
+            .map_err(|error| AppError::BadRequest(format!("invalid workflow definition: {error}")))?;
+        self.validate_creative_workflow_assets(&definition).await?;
+        self.validate_creative_workflow_models(&definition).await?;
+        let replacement = definition
+            .to_row()
+            .map_err(|error| AppError::BadRequest(format!("invalid workflow definition: {error}")))?;
+        let saved = self
+            .repo
+            .save_creative_workflow(workflow_id, expected_revision, &replacement)
+            .await?;
+        parse_workflow_row(&saved).map_err(|error| {
+            AppError::Internal(format!(
+                "saved creative studio workflow {workflow_id} is corrupt: {error}"
+            ))
+        })
+    }
+
+    pub async fn delete_creative_workflow(&self, workflow_id: &str) -> Result<(), AppError> {
+        validate_creative_workflow_id(workflow_id)?;
+        self.repo.delete_creative_workflow(workflow_id).await?;
+        Ok(())
+    }
+
+    async fn validate_creative_workflow_assets(
+        &self,
+        definition: &CreativeWorkflowDefinitionV1,
+    ) -> Result<(), AppError> {
+        for asset_id in definition.collect_asset_ids() {
+            WorkshopAssetId::parse(asset_id).map_err(|error| {
+                AppError::BadRequest(format!(
+                    "workflow references invalid asset id {asset_id:?}: {error}"
+                ))
+            })?;
+            let asset = self.repo.get_asset(asset_id).await?.ok_or_else(|| {
+                AppError::Conflict(format!("workflow references missing asset {asset_id}"))
+            })?;
+            if asset.kind != "image" {
+                return Err(AppError::Conflict(format!(
+                    "workflow reference {asset_id} must identify an image asset"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    async fn validate_creative_workflow_models(
+        &self,
+        definition: &CreativeWorkflowDefinitionV1,
+    ) -> Result<(), AppError> {
+        let _provider_guard = self.provider_read_guard().await;
+        self.validate_creative_workflow_models_under_guard(definition)
+            .await
+    }
+
+    async fn validate_creative_workflow_models_under_guard(
+        &self,
+        definition: &CreativeWorkflowDefinitionV1,
+    ) -> Result<(), AppError> {
+        for binding in definition.image_model_bindings() {
+            ProviderId::parse(&binding.provider_id).map_err(|error| {
+                AppError::BadRequest(format!(
+                    "workflow references invalid provider id {:?}: {error}",
+                    binding.provider_id
+                ))
+            })?;
+            if !self
+                .repo
+                .provider_model_supports_task(
+                    &binding.provider_id,
+                    &binding.model,
+                    binding.task.as_str(),
+                )
+                .await?
+            {
+                return Err(AppError::Conflict(format!(
+                    "workflow model binding {}/{} does not provide enabled task {}",
+                    binding.provider_id,
+                    binding.model,
+                    binding.task.as_str()
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1092,13 +1291,13 @@ impl WorkshopService {
     }
 
     /// Remove one Provider/model selection from every canonical Creative
-    /// Studio config node. The Provider deletion coordinator invokes this while
-    /// holding the process-wide lifecycle write guard, so compliant project
-    /// saves cannot race the scan. Each changed project is replaced with its
-    /// repository CAS: a conflict fails closed instead of overwriting a newer
-    /// document, and the revision bump forces stale editors to reload the
-    /// cleared selection. The overall scan is idempotent; retired legacy canvas
-    /// files remain inert and are neither read nor rewritten.
+    /// Studio config node and workflow generation step. The Provider deletion
+    /// coordinator invokes this while holding the process-wide lifecycle write
+    /// guard, so compliant saves cannot race the scan. Each changed project or
+    /// workflow is replaced with its repository CAS: a conflict fails closed
+    /// instead of overwriting a newer revision. The overall scan is idempotent;
+    /// retired legacy canvas files remain inert and are neither read nor
+    /// rewritten.
     pub async fn clear_provider_references_under_lifecycle_write_guard(
         &self,
         provider_id: &str,
@@ -1152,6 +1351,54 @@ impl WorkshopService {
                     connection_count,
                     now_ms(),
                 )
+                .await?;
+        }
+        for workflow_row in self.repo.list_creative_workflows().await? {
+            let mut workflow = parse_workflow_row(&workflow_row).map_err(|error| {
+                AppError::Conflict(format!(
+                    "creative studio workflow {} is corrupt during provider cleanup: {error}",
+                    workflow_row.workflow_id
+                ))
+            })?;
+            let mut changed = false;
+            for step in &mut workflow.steps {
+                let crate::workflow::CreativeWorkflowStep::GenerateImages {
+                    generation,
+                    ..
+                } = step
+                else {
+                    continue;
+                };
+                if generation
+                    .model
+                    .as_ref()
+                    .is_some_and(|binding| binding.provider_id == provider_id)
+                {
+                    generation.model = None;
+                    changed = true;
+                }
+            }
+            if !changed {
+                continue;
+            }
+            workflow.revision = workflow_row.revision + 1;
+            workflow.metadata.updated_at = now_ms();
+            workflow.validate().map_err(|error| {
+                AppError::Conflict(format!(
+                    "creative studio workflow {} is invalid after provider cleanup: {error}",
+                    workflow.id
+                ))
+            })?;
+            self.validate_creative_workflow_models_under_guard(&workflow)
+                .await?;
+            let replacement = workflow.to_row().map_err(|error| {
+                AppError::Conflict(format!(
+                    "creative studio workflow {} cannot be saved after provider cleanup: {error}",
+                    workflow.id
+                ))
+            })?;
+            self.repo
+                .save_creative_workflow(&workflow.id, workflow_row.revision, &replacement)
                 .await?;
         }
         Ok(())
@@ -1388,6 +1635,20 @@ impl WorkshopService {
             .get_asset(id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("workshop asset {id} not found")))?;
+        for workflow_row in self.repo.list_creative_workflows().await? {
+            let workflow = parse_workflow_row(&workflow_row).map_err(|error| {
+                AppError::Internal(format!(
+                    "stored creative studio workflow {} is corrupt: {error}",
+                    workflow_row.workflow_id
+                ))
+            })?;
+            if workflow.collect_asset_ids().contains(id) {
+                return Err(AppError::Conflict(format!(
+                    "asset {id} is referenced by workflow {}",
+                    workflow.id
+                )));
+            }
+        }
         self.repo.delete_asset(id).await?;
         for rel in [row.rel_path.as_deref(), row.thumb_rel_path.as_deref()].into_iter().flatten() {
             let abs = self.data_dir.join(rel);
@@ -1447,6 +1708,12 @@ fn validate_creative_project_id(project_id: &str) -> Result<(), AppError> {
         })
 }
 
+fn validate_creative_workflow_id(workflow_id: &str) -> Result<(), AppError> {
+    CreativeStudioWorkflowId::parse(workflow_id)
+        .map(|_| ())
+        .map_err(|error| AppError::BadRequest(format!("invalid workflow id: {error}")))
+}
+
 fn normalize_creative_project_title(
     title: Option<&str>,
     allow_default: bool,
@@ -1479,6 +1746,18 @@ fn parse_creative_project_revision(revision: &str) -> Result<i64, AppError> {
     if parsed < 1 || parsed.to_string() != revision {
         return Err(AppError::BadRequest(
             "expectedRevision must be a canonical positive decimal string".into(),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn parse_creative_workflow_revision(revision: &str) -> Result<i64, AppError> {
+    let parsed = revision.parse::<i64>().map_err(|_| {
+        AppError::BadRequest("expectedRevision must be a positive decimal integer".into())
+    })?;
+    if parsed < 1 || parsed.to_string() != revision {
+        return Err(AppError::BadRequest(
+            "expectedRevision must be a positive canonical decimal integer".into(),
         ));
     }
     Ok(parsed)
@@ -1613,6 +1892,11 @@ fn classify_mime(mime: &str) -> Result<(&'static str, String), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workflow::{
+        CreativeWorkflowMetadata, CreativeWorkflowOutputPlan, CreativeWorkflowPromptSource,
+        CreativeWorkflowStep, CreativeWorkflowTemplate, CreativeWorkflowTemplateSegment,
+        CreativeWorkflowVariable, CreativeWorkflowVisibility,
+    };
     use nomifun_common::{
         ProviderLifecycleBarrier, WorkshopCanvasId, WorkshopEdgeId, WorkshopNodeId,
     };
@@ -1669,6 +1953,149 @@ mod tests {
         .unwrap();
     }
 
+    fn workflow_definition() -> CreativeWorkflowDefinitionV1 {
+        let workflow_id = CreativeStudioWorkflowId::new().into_string();
+        let variable_id = nomifun_common::generate_id();
+        let template_id = nomifun_common::generate_id();
+        let render_id = nomifun_common::generate_id();
+        let generate_id = nomifun_common::generate_id();
+        CreativeWorkflowDefinitionV1 {
+            id: workflow_id,
+            revision: 1,
+            metadata: CreativeWorkflowMetadata {
+                name: "电商海报".into(),
+                description: "固定结构".into(),
+                category: "电商".into(),
+                visibility: CreativeWorkflowVisibility::Private,
+                tags: vec!["海报".into()],
+                created_at: 0,
+                updated_at: 0,
+            },
+            output: CreativeWorkflowOutputPlan::SingleImage,
+            variables: vec![CreativeWorkflowVariable::Text {
+                id: variable_id.clone(),
+                key: "product_name".into(),
+                label: "产品名称".into(),
+                description: String::new(),
+                required: true,
+                default_value: None,
+                placeholder: String::new(),
+                min_length: 0,
+                max_length: 200,
+            }],
+            templates: vec![CreativeWorkflowTemplate {
+                id: template_id.clone(),
+                name: "主提示词".into(),
+                segments: vec![
+                    CreativeWorkflowTemplateSegment::Text { text: "为 ".into() },
+                    CreativeWorkflowTemplateSegment::Variable { variable_id },
+                    CreativeWorkflowTemplateSegment::Text { text: " 生成海报".into() },
+                ],
+            }],
+            steps: vec![
+                CreativeWorkflowStep::RenderTemplate {
+                    id: render_id.clone(),
+                    name: "渲染提示词".into(),
+                    depends_on: Vec::new(),
+                    enabled: true,
+                    template_id: template_id.clone(),
+                },
+                CreativeWorkflowStep::GenerateImages {
+                    id: generate_id,
+                    name: "生成图片".into(),
+                    depends_on: vec![render_id],
+                    enabled: true,
+                    prompt_source: CreativeWorkflowPromptSource::Template { template_id },
+                    reference_variable_ids: Vec::new(),
+                    generation: crate::workflow::CreativeWorkflowImageGenerationSettings {
+                        model: None,
+                        quality: crate::workflow::CreativeWorkflowImageQuality::Auto,
+                        width: 1024,
+                        height: 1024,
+                        images_per_prompt: 1,
+                    },
+                },
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn creative_workflow_service_persists_closed_definitions_with_cas() {
+        let (service, _dir) = service().await;
+        let created = service
+            .create_creative_workflow(workflow_definition())
+            .await
+            .unwrap();
+        assert_eq!(created.revision, 1);
+        assert!(created.metadata.created_at > 0);
+        assert_eq!(
+            service.list_creative_workflows().await.unwrap(),
+            vec![created.clone()]
+        );
+
+        let mut replacement = created.clone();
+        replacement.revision = 2;
+        replacement.metadata.name = "高端电商海报".into();
+        let saved = service
+            .save_creative_workflow(&created.id, "1", replacement.clone())
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, 2);
+        assert_eq!(saved.metadata.name, "高端电商海报");
+        assert_eq!(saved.metadata.created_at, created.metadata.created_at);
+
+        let stale = service
+            .save_creative_workflow(&created.id, "1", replacement)
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, AppError::Conflict(_)));
+
+        service.delete_creative_workflow(&created.id).await.unwrap();
+        assert!(matches!(
+            service.get_creative_workflow(&created.id).await.unwrap_err(),
+            AppError::NotFound(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn creative_workflow_model_binding_requires_one_enabled_exact_task() {
+        let (service, _dir, database) = service_with_database_and_lifecycle(None).await;
+        let provider_id = ProviderId::new().into_string();
+        let mut definition = workflow_definition();
+        if let CreativeWorkflowStep::GenerateImages { generation, .. } = &mut definition.steps[1] {
+            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+                provider_id: provider_id.clone(),
+                model: "image-model".into(),
+                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+            });
+        }
+        assert!(matches!(
+            service.create_creative_workflow(definition.clone()).await,
+            Err(AppError::Conflict(_))
+        ));
+
+        insert_provider(&database, &provider_id).await;
+        insert_provider_model(&database, &provider_id, "image-model").await;
+        assert!(matches!(
+            service.create_creative_workflow(definition.clone()).await,
+            Err(AppError::Conflict(_))
+        ));
+
+        nomifun_db::sqlx::query(
+            "INSERT INTO provider_model_capabilities \
+             (provider_id, model, task, traits, protocol, connection_role, \
+              allow_cross_origin_credentials, provider_params, created_at, updated_at) \
+             VALUES (?, 'image-model', 'image_generation', '[]', 'openai.images', \
+                     'default', 0, '{}', 1, 1)",
+        )
+        .bind(&provider_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let created = service.create_creative_workflow(definition).await.unwrap();
+        assert_eq!(created.image_model_bindings().count(), 1);
+    }
+
     async fn insert_provider_model(
         db: &nomifun_db::Database,
         provider_id: &str,
@@ -1681,6 +2108,26 @@ mod tests {
         )
         .bind(provider_id)
         .bind(model)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn insert_provider_model_capability(
+        db: &nomifun_db::Database,
+        provider_id: &str,
+        model: &str,
+        task: &str,
+    ) {
+        nomifun_db::sqlx::query(
+            "INSERT INTO provider_model_capabilities \
+                (provider_id, model, task, traits, protocol, connection_role, \
+                 allow_cross_origin_credentials, provider_params, created_at, updated_at) \
+             VALUES (?, ?, ?, '[]', 'openai.images', 'default', 0, '{}', 1, 1)",
+        )
+        .bind(provider_id)
+        .bind(model)
+        .bind(task)
         .execute(db.pool())
         .await
         .unwrap();
@@ -2342,6 +2789,20 @@ mod tests {
         insert_provider(&db, other_provider_id).await;
         insert_provider_model(&db, target_provider_id, "delete-me").await;
         insert_provider_model(&db, other_provider_id, "keep-me").await;
+        insert_provider_model_capability(
+            &db,
+            target_provider_id,
+            "delete-me",
+            "image_generation",
+        )
+        .await;
+        insert_provider_model_capability(
+            &db,
+            other_provider_id,
+            "keep-me",
+            "image_generation",
+        )
+        .await;
         let project = svc.create_creative_project(Some("provider cleanup".into())).await.unwrap();
         let mut document = CreativeProjectDocument::empty(project.project_id.clone());
         document.nodes.push(creative_config_node(
@@ -2358,10 +2819,45 @@ mod tests {
             .await
             .unwrap();
 
+        let mut target_workflow = workflow_definition();
+        if let CreativeWorkflowStep::GenerateImages { generation, .. } =
+            &mut target_workflow.steps[1]
+        {
+            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+                provider_id: target_provider_id.into(),
+                model: "delete-me".into(),
+                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+            });
+        }
+        let target_workflow = svc
+            .create_creative_workflow(target_workflow)
+            .await
+            .unwrap();
+        let mut surviving_workflow = workflow_definition();
+        if let CreativeWorkflowStep::GenerateImages { generation, .. } =
+            &mut surviving_workflow.steps[1]
+        {
+            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+                provider_id: other_provider_id.into(),
+                model: "keep-me".into(),
+                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+            });
+        }
+        let surviving_workflow = svc
+            .create_creative_workflow(surviving_workflow)
+            .await
+            .unwrap();
+
         let _write_guard = barrier.write().await;
         svc.clear_provider_references_under_lifecycle_write_guard(target_provider_id)
             .await
             .unwrap();
+        let cleaned_once = svc
+            .get_creative_workflow(&target_workflow.id)
+            .await
+            .unwrap();
+        assert_eq!(cleaned_once.revision, 2);
+        assert_eq!(cleaned_once.image_model_bindings().count(), 0);
         svc.clear_provider_references_under_lifecycle_write_guard(target_provider_id)
             .await
             .unwrap();
@@ -2378,6 +2874,24 @@ mod tests {
         };
         assert_eq!(surviving.provider_id.as_deref(), Some(other_provider_id));
         assert_eq!(surviving.model.as_deref(), Some("keep-me"));
+
+        let cleaned_twice = svc
+            .get_creative_workflow(&target_workflow.id)
+            .await
+            .unwrap();
+        assert_eq!(cleaned_twice.revision, 2);
+        assert_eq!(cleaned_twice.image_model_bindings().count(), 0);
+        let surviving_workflow = svc
+            .get_creative_workflow(&surviving_workflow.id)
+            .await
+            .unwrap();
+        assert_eq!(surviving_workflow.revision, 1);
+        let surviving_binding = surviving_workflow
+            .image_model_bindings()
+            .next()
+            .expect("unrelated workflow binding must survive provider cleanup");
+        assert_eq!(surviving_binding.provider_id, other_provider_id);
+        assert_eq!(surviving_binding.model, "keep-me");
     }
 
     #[tokio::test]
