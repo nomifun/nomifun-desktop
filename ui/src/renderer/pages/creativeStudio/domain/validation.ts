@@ -566,12 +566,22 @@ const parseSummaryAt = (
   code: CreativeStudioContractErrorCode
 ): CreativeProjectSummary => {
   const record = asRecord(value, path, code);
-  exactKeys(record, ['projectId', 'title', 'revision', 'nodeCount', 'createdAt', 'updatedAt'], [], path, code);
+  exactKeys(
+    record,
+    ['projectId', 'title', 'revision', 'nodeCount', 'connectionCount', 'createdAt', 'updatedAt'],
+    [],
+    path,
+    code
+  );
   return {
     projectId: asProjectId(record.projectId, `${path}.projectId`, code),
     title: asString(record.title, `${path}.title`, code, { maxLength: 1_000 }),
     revision: asRevision(record.revision, `${path}.revision`, code),
     nodeCount: asNumber(record.nodeCount, `${path}.nodeCount`, code, { min: 0, integer: true }),
+    connectionCount: asNumber(record.connectionCount, `${path}.connectionCount`, code, {
+      min: 0,
+      integer: true,
+    }),
     createdAt: asNumber(record.createdAt, `${path}.createdAt`, code, { min: 0, integer: true }),
     updatedAt: asNumber(record.updatedAt, `${path}.updatedAt`, code, { min: 0, integer: true }),
   };
@@ -619,7 +629,7 @@ export function parseCreativeProjectDocument(
   const chatSessions = asArray(record.chatSessions, '$.chatSessions', code, parseChatSession);
   const pendingTaskIds = asIdArray(record.pendingTaskIds, '$.pendingTaskIds', code);
   const nodeIds = nodes.map((node) => node.id);
-  const nodeIdSet = new Set(nodeIds);
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const chatIds = chatSessions.map((chat) => chat.id);
   assertUnique(nodeIds, '$.nodes[].id', code);
   assertUnique(connections.map((connection) => connection.id), '$.connections[].id', code);
@@ -627,17 +637,43 @@ export function parseCreativeProjectDocument(
   assertUnique(pendingTaskIds, '$.pendingTaskIds', code);
   for (const [index, node] of nodes.entries()) {
     if (node.groupId === null) continue;
-    const group = nodes.find((candidate) => candidate.id === node.groupId);
-    if (!group || group.type !== 'group' || group.id === node.id) {
+    const group = nodeById.get(node.groupId);
+    if (node.type === 'group' || !group || group.type !== 'group' || group.id === node.id) {
       fail(code, `$.nodes[${index}].groupId`, 'id of another group node');
     }
   }
+  const directedConnections = new Set<string>();
   for (const [index, connection] of connections.entries()) {
-    if (!nodeIdSet.has(connection.sourceNodeId)) {
+    const source =
+      nodeById.get(connection.sourceNodeId) ??
       fail(code, `$.connections[${index}].sourceNodeId`, 'existing node id');
-    }
-    if (!nodeIdSet.has(connection.targetNodeId)) {
+    const target =
+      nodeById.get(connection.targetNodeId) ??
       fail(code, `$.connections[${index}].targetNodeId`, 'existing node id');
+    if (source.id === target.id) {
+      fail(code, `$.connections[${index}].targetNodeId`, 'node id different from sourceNodeId');
+    }
+    const directedKey = `${source.id}\u0000${target.id}`;
+    if (directedConnections.has(directedKey)) {
+      fail(code, `$.connections[${index}]`, 'unique directed node pair');
+    }
+    directedConnections.add(directedKey);
+    if (source.type === 'group' || target.type === 'group') {
+      fail(code, `$.connections[${index}]`, 'connection between non-group nodes');
+    }
+    if (source.type === 'config' && target.type === 'config') {
+      fail(code, `$.connections[${index}]`, 'connection other than config to config');
+    }
+    if (source.type === 'director') {
+      fail(code, `$.connections[${index}].sourceNodeId`, 'non-director source node');
+    }
+    if (target.type === 'director' && source.type !== 'image' && source.type !== 'panorama') {
+      fail(code, `$.connections[${index}].sourceNodeId`, 'image or panorama source for director');
+    }
+  }
+  for (const [index, chat] of chatSessions.entries()) {
+    if (chat.updatedAt < chat.createdAt) {
+      fail(code, `$.chatSessions[${index}].updatedAt`, 'timestamp not earlier than createdAt');
     }
   }
   const activeChatId = asNullableId(record.activeChatId, '$.activeChatId', code);
@@ -691,6 +727,9 @@ export function parseCreativeProjectDetailResponse(value: unknown): CreativeProj
   const document = parseCreativeProjectDocument(record.document, project.projectId);
   if (project.nodeCount !== document.nodes.length) {
     fail(code, '$.project.nodeCount', 'document.nodes.length');
+  }
+  if (project.connectionCount !== document.connections.length) {
+    fail(code, '$.project.connectionCount', 'document.connections.length');
   }
   return { project, document };
 }
