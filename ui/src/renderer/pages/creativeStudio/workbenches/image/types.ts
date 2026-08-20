@@ -7,6 +7,13 @@
 export type ImageWorkbenchLayout = 'side' | 'bottom';
 export type ImageWorkbenchInterfaceMode = 'images' | 'responses';
 export type ImageWorkbenchQuality = 'auto' | 'high' | 'medium' | 'low';
+export type ImageWorkbenchTaskState =
+  | 'idle'
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'canceled';
 
 /** Exact NomiFun model identity. Display labels never become request identity. */
 export interface ImageWorkbenchModelIdentity {
@@ -47,10 +54,18 @@ export interface ImageWorkbenchReference {
 
 interface ImageWorkbenchResultBase {
   id: string;
+  /** Runtime task identity remains distinct from the generated asset identity. */
+  taskId: string;
   prompt: string;
+  model: ImageWorkbenchModelIdentity;
   modelLabel: string;
   createdAtLabel?: string;
   durationLabel?: string;
+}
+
+export interface ImageWorkbenchQueuedResult extends ImageWorkbenchResultBase {
+  status: 'queued';
+  statusLabel?: string;
 }
 
 export interface ImageWorkbenchRunningResult extends ImageWorkbenchResultBase {
@@ -61,6 +76,8 @@ export interface ImageWorkbenchRunningResult extends ImageWorkbenchResultBase {
 
 export interface ImageWorkbenchSucceededResult extends ImageWorkbenchResultBase {
   status: 'succeeded';
+  /** Stable generated asset identity; the URL is a caller-resolved presentation detail. */
+  assetId: string;
   imageUrl: string;
   alt: string;
   width?: number;
@@ -74,13 +91,20 @@ export interface ImageWorkbenchFailedResult extends ImageWorkbenchResultBase {
   errorDetail?: string;
 }
 
+export interface ImageWorkbenchCanceledResult extends ImageWorkbenchResultBase {
+  status: 'canceled';
+  message?: string;
+}
+
 export type ImageWorkbenchResult =
+  | ImageWorkbenchQueuedResult
   | ImageWorkbenchRunningResult
   | ImageWorkbenchSucceededResult
-  | ImageWorkbenchFailedResult;
+  | ImageWorkbenchFailedResult
+  | ImageWorkbenchCanceledResult;
 
 export interface ImageWorkbenchTaskSummary {
-  state: 'idle' | 'running' | 'succeeded' | 'failed';
+  state: ImageWorkbenchTaskState;
   pendingCount: number;
   message?: string;
 }

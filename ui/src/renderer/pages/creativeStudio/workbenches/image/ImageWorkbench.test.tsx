@@ -64,7 +64,9 @@ const renderWorkbench = (overrides: Partial<ImageWorkbenchProps> = {}) =>
 
 const resultBase = {
   id: 'result-1',
+  taskId: 'task-1',
   prompt: '一座被晨雾包围的未来城市',
+  model: { providerId: 'provider-a', model: 'image-model' },
   modelLabel: 'Provider A · Image Model',
   createdAtLabel: '刚刚',
 };
@@ -99,14 +101,23 @@ describe('ImageWorkbench visual states', () => {
     expect(html.includes('2 个生成中')).toBe(true);
   });
 
-  test('renders running and failed cards without invented media', () => {
+  test('renders queued, running, failed and canceled cards without invented media', () => {
     const results: ImageWorkbenchResult[] = [
-      { ...resultBase, status: 'running', progress: 46 },
+      { ...resultBase, status: 'queued' },
+      { ...resultBase, id: 'result-2', taskId: 'task-2', status: 'running', progress: 46 },
       {
         ...resultBase,
-        id: 'result-2',
+        id: 'result-3',
+        taskId: 'task-3',
         status: 'failed',
         errorMessage: '模型暂时不可用',
+      },
+      {
+        ...resultBase,
+        id: 'result-4',
+        taskId: 'task-4',
+        status: 'canceled',
+        message: '用户已取消任务',
       },
     ];
     const html = renderWorkbench({
@@ -115,11 +126,18 @@ describe('ImageWorkbench visual states', () => {
       onRetryResult: noop,
     });
 
+    expect(html.includes('data-image-result-state="queued"')).toBe(true);
     expect(html.includes('data-image-result-state="running"')).toBe(true);
     expect(html.includes('data-image-result-state="failed"')).toBe(true);
+    expect(html.includes('data-image-result-state="canceled"')).toBe(true);
+    expect(html.includes('排队中')).toBe(true);
     expect(html.includes('生成中')).toBe(true);
     expect(html.includes('生成失败')).toBe(true);
+    expect(html.includes('已取消')).toBe(true);
     expect(html.includes('模型暂时不可用')).toBe(true);
+    expect(html.includes('用户已取消任务')).toBe(true);
+    expect(html.includes('data-provider-id="provider-a"')).toBe(true);
+    expect(html.includes('data-model="image-model"')).toBe(true);
     expect(html.includes('<img')).toBe(false);
   });
 
@@ -132,6 +150,7 @@ describe('ImageWorkbench visual states', () => {
         {
           ...resultBase,
           status: 'succeeded',
+          assetId: 'asset-result-1',
           imageUrl: 'https://media.invalid/result.png',
           alt: '生成的未来城市',
           width: 1536,
@@ -147,6 +166,14 @@ describe('ImageWorkbench visual states', () => {
     expect(html.includes('生成的未来城市')).toBe(true);
     expect(html.includes('1536 × 1024 · 2.4 MB')).toBe(true);
     expect(html.includes('data:image')).toBe(false);
+  });
+
+  test('keeps queued and canceled task summaries distinct from running and failed', () => {
+    const queued = renderWorkbench({ task: { state: 'queued', pendingCount: 2 } });
+    const canceled = renderWorkbench({ task: { state: 'canceled', pendingCount: 0 } });
+
+    expect(queued.includes('2 个排队中')).toBe(true);
+    expect(canceled.includes('最近任务已取消')).toBe(true);
   });
 });
 

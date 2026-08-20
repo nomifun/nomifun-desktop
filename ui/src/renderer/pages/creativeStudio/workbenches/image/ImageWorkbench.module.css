@@ -571,7 +571,9 @@
 }
 
 .successVisual,
+.queuedVisual,
 .failedVisual,
+.canceledVisual,
 .runningVisual {
   position: relative;
   aspect-ratio: 4 / 3;
@@ -619,7 +621,9 @@
 }
 
 .runningVisual,
-.failedVisual {
+.queuedVisual,
+.failedVisual,
+.canceledVisual {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -629,21 +633,25 @@
   text-align: center;
 }
 
-.runningVisual {
+.runningVisual,
+.queuedVisual {
   color: var(--color-text-3);
 }
 
-.runningVisual > :not(.runningPattern) {
+.runningVisual > :not(.runningPattern),
+.queuedVisual > :not(.runningPattern) {
   position: relative;
   z-index: 1;
 }
 
-.runningVisual strong {
+.runningVisual strong,
+.queuedVisual strong {
   color: var(--color-text-2);
   font-size: 13px;
 }
 
-.runningVisual > span {
+.runningVisual > span,
+.queuedVisual > span {
   font-size: 11px;
 }
 
@@ -678,6 +686,28 @@
   overflow: hidden;
   max-width: 260px;
   color: color-mix(in srgb, rgb(var(--danger-6)) 82%, var(--color-text-2));
+  font-size: 11px;
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.canceledVisual {
+  border-bottom: 1px solid var(--color-border-2);
+  background: color-mix(in srgb, var(--color-fill-2) 70%, var(--color-bg-1));
+  color: var(--color-text-3);
+}
+
+.canceledVisual strong {
+  color: var(--color-text-2);
+  font-size: 13px;
+}
+
+.canceledVisual > span {
+  display: -webkit-box;
+  overflow: hidden;
+  max-width: 260px;
+  color: var(--color-text-3);
   font-size: 11px;
   line-height: 1.55;
   -webkit-box-orient: vertical;

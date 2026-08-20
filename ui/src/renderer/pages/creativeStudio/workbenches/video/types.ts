@@ -9,6 +9,12 @@ import type { ReactNode } from 'react';
 export type VideoWorkbenchLayout = 'side' | 'bottom';
 export type VideoReferenceKind = 'image' | 'video' | 'audio';
 
+/** Exact NomiFun catalog coordinate for the `video_generation` task. */
+export interface VideoWorkbenchModelIdentity {
+  providerId: string;
+  model: string;
+}
+
 export interface VideoWorkbenchReference {
   id: string;
   kind: VideoReferenceKind;
@@ -24,13 +30,21 @@ export interface VideoWorkbenchChoice {
 
 interface VideoWorkbenchTaskBase {
   id: string;
+  /** Runtime task identity remains distinct from the generated asset identity. */
+  taskId: string;
   prompt: string;
   createdAtLabel: string;
+  model: VideoWorkbenchModelIdentity;
   modelLabel: string;
   resolutionLabel: string;
   sizeLabel: string;
   durationLabel: string;
   taskCount: number;
+}
+
+export interface QueuedVideoWorkbenchTask extends VideoWorkbenchTaskBase {
+  status: 'queued';
+  statusLabel?: string;
 }
 
 export interface RunningVideoWorkbenchTask extends VideoWorkbenchTaskBase {
@@ -39,8 +53,10 @@ export interface RunningVideoWorkbenchTask extends VideoWorkbenchTaskBase {
   elapsedLabel?: string;
 }
 
-export interface SuccessfulVideoWorkbenchTask extends VideoWorkbenchTaskBase {
-  status: 'success';
+export interface SucceededVideoWorkbenchTask extends VideoWorkbenchTaskBase {
+  status: 'succeeded';
+  /** Stable generated asset identity; the URL is a caller-resolved presentation detail. */
+  assetId: string;
   /** A successful task must provide a real playable URL; the view never fakes one. */
   videoUrl: string;
   posterUrl?: string;
@@ -53,10 +69,17 @@ export interface FailedVideoWorkbenchTask extends VideoWorkbenchTaskBase {
   errorDetail?: string;
 }
 
+export interface CanceledVideoWorkbenchTask extends VideoWorkbenchTaskBase {
+  status: 'canceled';
+  message?: string;
+}
+
 export type VideoWorkbenchTask =
+  | QueuedVideoWorkbenchTask
   | RunningVideoWorkbenchTask
-  | SuccessfulVideoWorkbenchTask
-  | FailedVideoWorkbenchTask;
+  | SucceededVideoWorkbenchTask
+  | FailedVideoWorkbenchTask
+  | CanceledVideoWorkbenchTask;
 
 export interface VideoWorkbenchProps {
   layout: VideoWorkbenchLayout;
@@ -104,4 +127,11 @@ export interface VideoWorkbenchProps {
   className?: string;
 }
 
-export type VideoResultsState = 'empty' | 'running' | 'success' | 'failed' | 'mixed';
+export type VideoResultsState =
+  | 'empty'
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'canceled'
+  | 'mixed';

@@ -13,13 +13,16 @@ export {
   videoResultsState,
 } from './presentation';
 export type {
+  CanceledVideoWorkbenchTask,
   FailedVideoWorkbenchTask,
+  QueuedVideoWorkbenchTask,
   RunningVideoWorkbenchTask,
-  SuccessfulVideoWorkbenchTask,
+  SucceededVideoWorkbenchTask,
   VideoReferenceKind,
   VideoResultsState,
   VideoWorkbenchChoice,
   VideoWorkbenchLayout,
+  VideoWorkbenchModelIdentity,
   VideoWorkbenchProps,
   VideoWorkbenchReference,
   VideoWorkbenchTask,

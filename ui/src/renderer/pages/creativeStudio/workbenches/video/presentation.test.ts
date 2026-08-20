@@ -18,6 +18,7 @@ import type { VideoWorkbenchTask } from './types';
 const taskBase = {
   prompt: '镜头缓慢推进',
   createdAtLabel: '08/20 14:30',
+  model: { providerId: 'provider-a', model: 'video-model' },
   modelLabel: 'video-model',
   resolutionLabel: '1080P',
   sizeLabel: '16:9',
@@ -28,31 +29,52 @@ const taskBase = {
 const running = (id: string): VideoWorkbenchTask => ({
   ...taskBase,
   id,
+  taskId: `task-${id}`,
   status: 'running',
   progress: 42,
 });
 
-const success = (id: string): VideoWorkbenchTask => ({
+const succeeded = (id: string): VideoWorkbenchTask => ({
   ...taskBase,
   id,
-  status: 'success',
+  taskId: `task-${id}`,
+  status: 'succeeded',
+  assetId: `asset-${id}`,
   videoUrl: `https://example.invalid/${id}.mp4`,
 });
 
 const failed = (id: string): VideoWorkbenchTask => ({
   ...taskBase,
   id,
+  taskId: `task-${id}`,
   status: 'failed',
   error: 'generation failed',
 });
 
+const queued = (id: string): VideoWorkbenchTask => ({
+  ...taskBase,
+  id,
+  taskId: `task-${id}`,
+  status: 'queued',
+});
+
+const canceled = (id: string): VideoWorkbenchTask => ({
+  ...taskBase,
+  id,
+  taskId: `task-${id}`,
+  status: 'canceled',
+  message: 'canceled by user',
+});
+
 describe('videoResultsState', () => {
-  test('keeps empty, running, success, failed and mixed states explicit', () => {
+  test('keeps every backend status and mixed state explicit', () => {
     expect(videoResultsState([])).toBe('empty');
+    expect(videoResultsState([queued('a')])).toBe('queued');
     expect(videoResultsState([running('a'), running('b')])).toBe('running');
-    expect(videoResultsState([success('a')])).toBe('success');
+    expect(videoResultsState([succeeded('a')])).toBe('succeeded');
     expect(videoResultsState([failed('a')])).toBe('failed');
-    expect(videoResultsState([running('a'), success('b'), failed('c')])).toBe('mixed');
+    expect(videoResultsState([canceled('a')])).toBe('canceled');
+    expect(videoResultsState([running('a'), succeeded('b'), failed('c')])).toBe('mixed');
   });
 });
 
