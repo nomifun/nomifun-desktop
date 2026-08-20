@@ -60,10 +60,25 @@ explicit user choice.
 ## Product integrations left above this boundary
 
 Node creation palettes, handles for creating connections, media preview and
-asset resolution, model selection/execution, task progress, chat, and inspector
+asset resolution, model selection/execution, task progress, Agent transport, and inspector
 forms remain route/product responsibilities. They should dispatch canonical
 core commands or update the canonical project document; no legacy workshop
 schema adapter belongs in the editor.
+
+## Agent session references
+
+Conversation contents remain owned by NomiFun, while the project document keeps
+only validated session/model/message references and one durable pending-turn
+fence. Product code must call and await
+`persistAgentSessions(sessions, activeSessionId)` before submitting a turn and
+again after authoritative history reconciliation. The method merges with the
+latest canvas reducer state, validates the complete canonical v1 document,
+flushes immediately, and rejects on CAS or transport failure.
+
+`onAgentSessionsChange` publishes hydration and local durable mutations;
+`getAgentSessions()` and `getActiveAgentSessionId()` expose the same snapshot to
+imperative transport adapters. No Agent adapter may write project state outside
+this Editor/CAS boundary.
 
 ## Pending task recovery feed
 

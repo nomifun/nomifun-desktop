@@ -17,6 +17,7 @@ import type {
   CreativeCanvasBackground,
   CreativeCanvasConnection,
   CreativeCanvasNode,
+  CreativeChatSessionReference,
   CreativeProjectDetail,
   CreativeStudioPanelState,
 } from '../../domain';
@@ -69,6 +70,7 @@ import {
   fitCanvasViewport,
   isCanvasKeyboardTarget,
   projectDocumentFromCanvasState,
+  projectDocumentWithAgentSessions,
   projectDocumentWithCanvasPanels,
   projectDocumentWithPendingTaskIds,
 } from './editorModel';
@@ -111,6 +113,9 @@ export interface CreativeCanvasEditorContext {
   tool: CanvasInteractionTool;
   /** Authoritative task ids persisted in the canonical project document. */
   pendingTaskIds: readonly string[];
+  /** Canonical NomiFun Agent session references persisted with the project. */
+  agentSessions: readonly CreativeChatSessionReference[];
+  activeAgentSessionId: string | null;
   flush(): Promise<CanvasCasFlushResult>;
   reloadRemote(): Promise<boolean>;
 }
@@ -130,6 +135,11 @@ export interface CreativeCanvasEditorHandle {
   addPendingTask(taskId: string): Promise<void>;
   /** Durably remove a terminal or confirmed-orphan task id from the canonical feed. */
   removePendingTask(taskId: string): Promise<void>;
+  /** Validate and durably persist Agent references before or after a transport turn. */
+  persistAgentSessions(
+    sessions: readonly CreativeChatSessionReference[],
+    activeSessionId: string | null
+  ): Promise<void>;
   /** Route guards must await this before leaving the editor. */
   flush(): Promise<CanvasCasFlushResult>;
   /** Explicitly discard local state and reload the authoritative remote revision. */
@@ -137,6 +147,8 @@ export interface CreativeCanvasEditorHandle {
   getState(): CanvasState;
   getSaveState(): CanvasCasSaveSnapshot;
   getPendingTaskIds(): readonly string[];
+  getAgentSessions(): readonly CreativeChatSessionReference[];
+  getActiveAgentSessionId(): string | null;
 }
 
 export interface CreativeCanvasEditorProps {
@@ -166,6 +178,11 @@ export interface CreativeCanvasEditorProps {
   onIntegrationIntent?: (intent: CanvasIntegrationIntent) => void | Promise<void>;
   /** Fires after hydration and after each canonical task-feed mutation. */
   onPendingTaskIdsChange?: (taskIds: readonly string[]) => void;
+  /** Fires after hydration and each durable Agent reference mutation. */
+  onAgentSessionsChange?: (
+    sessions: readonly CreativeChatSessionReference[],
+    activeSessionId: string | null
+  ) => void;
 }
 
 const resolveSlot = (
@@ -255,6 +272,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       onSaveStateChange,
       onIntegrationIntent,
       onPendingTaskIdsChange,
+      onAgentSessionsChange,
     },
     ref
   ) => {
@@ -267,8 +285,14 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
     const [state, setState] = useState<CanvasState>(() => createInitialCanvasState());
     const [background, setBackgroundState] = useState<CreativeCanvasBackground>('lines');
     const [pendingTaskIds, setPendingTaskIdsState] = useState<readonly string[] | null>(null);
+    const [agentSessions, setAgentSessionsState] = useState<
+      readonly CreativeChatSessionReference[] | null
+    >(null);
+    const [activeAgentSessionId, setActiveAgentSessionId] = useState<string | null>(null);
     const stateRef = useRef(state);
     const pendingTaskIdsRef = useRef<readonly string[]>([]);
+    const agentSessionsRef = useRef<readonly CreativeChatSessionReference[]>([]);
+    const activeAgentSessionIdRef = useRef<string | null>(null);
     const baseDocumentRef = useRef<CreativeProjectDetail['document'] | null>(null);
     const loadedProjectIdRef = useRef<string | null>(null);
     const hydratedSaveControllerRef = useRef<typeof saveController | null>(null);
@@ -297,6 +321,10 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         setBackgroundState(detail.document.background);
         pendingTaskIdsRef.current = [...detail.document.pendingTaskIds];
         setPendingTaskIdsState(pendingTaskIdsRef.current);
+        agentSessionsRef.current = structuredClone(detail.document.chatSessions);
+        activeAgentSessionIdRef.current = detail.document.activeChatId;
+        setAgentSessionsState(agentSessionsRef.current);
+        setActiveAgentSessionId(activeAgentSessionIdRef.current);
         saveController.reset(detail.project.revision, detail.document);
         pasteSequenceRef.current = 0;
         setInteraction({ type: 'gesture/end' });
@@ -310,6 +338,10 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       hydratedSaveControllerRef.current = null;
       pendingTaskIdsRef.current = [];
       setPendingTaskIdsState(null);
+      agentSessionsRef.current = [];
+      activeAgentSessionIdRef.current = null;
+      setAgentSessionsState(null);
+      setActiveAgentSessionId(null);
     }, [projectId]);
 
     useEffect(() => {
@@ -453,11 +485,43 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       [saveController, setCanonicalPendingTaskIds]
     );
 
+    const persistAgentSessions = useCallback(
+      async (
+        requestedSessions: readonly CreativeChatSessionReference[],
+        requestedActiveSessionId: string | null
+      ) => {
+        const currentBase = baseDocumentRef.current;
+        if (!currentBase) throw new Error('Creative canvas document is not hydrated');
+        const nextDocument = projectDocumentWithAgentSessions(
+          currentBase,
+          stateRef.current,
+          requestedSessions,
+          requestedActiveSessionId
+        );
+        baseDocumentRef.current = nextDocument;
+        agentSessionsRef.current = structuredClone(nextDocument.chatSessions);
+        activeAgentSessionIdRef.current = nextDocument.activeChatId;
+        setAgentSessionsState(agentSessionsRef.current);
+        setActiveAgentSessionId(activeAgentSessionIdRef.current);
+        saveController.queue(nextDocument);
+        const result = await saveController.flush();
+        if (result.status === 'conflict' || result.status === 'error') {
+          throw result.error;
+        }
+      },
+      [saveController]
+    );
+
     useEffect(() => onStateChange?.(state), [onStateChange, state]);
     useEffect(() => onSaveStateChange?.(saveSnapshot), [onSaveStateChange, saveSnapshot]);
     useEffect(() => {
       if (pendingTaskIds !== null) onPendingTaskIdsChange?.([...pendingTaskIds]);
     }, [onPendingTaskIdsChange, pendingTaskIds]);
+    useEffect(() => {
+      if (agentSessions !== null) {
+        onAgentSessionsChange?.(structuredClone(agentSessions), activeAgentSessionId);
+      }
+    }, [activeAgentSessionId, agentSessions, onAgentSessionsChange]);
 
     useEffect(() => {
       const beforeUnload = () => {
@@ -475,15 +539,19 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         setPanels,
         addPendingTask,
         removePendingTask,
+        persistAgentSessions,
         flush: () => saveController.flush(),
         reloadRemote,
         getState: () => stateRef.current,
         getSaveState: () => saveController.getSnapshot(),
         getPendingTaskIds: () => [...pendingTaskIdsRef.current],
+        getAgentSessions: () => structuredClone(agentSessionsRef.current),
+        getActiveAgentSessionId: () => activeAgentSessionIdRef.current,
       }),
       [
         addPendingTask,
         applyCommand,
+        persistAgentSessions,
         reloadRemote,
         removePendingTask,
         saveController,
@@ -921,6 +989,9 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       save: saveSnapshot,
       tool,
       pendingTaskIds: pendingTaskIds ?? baseDocument.pendingTaskIds,
+      agentSessions: agentSessions ?? baseDocument.chatSessions,
+      activeAgentSessionId:
+        agentSessions === null ? baseDocument.activeChatId : activeAgentSessionId,
       flush,
       reloadRemote,
     };

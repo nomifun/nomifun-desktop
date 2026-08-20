@@ -15,11 +15,13 @@ import {
 } from '../core';
 import type {
   CreativeCanvasBackground,
+  CreativeChatSessionReference,
   CreativeProjectDetail,
   CreativeProjectDocument,
   CreativeSize,
   CreativeStudioPanelState,
 } from '../../domain';
+import { parseCreativeProjectDocument } from '../../domain';
 import { isCreativeProjectRepositoryError } from '../../services';
 import type { CanvasBackgroundMode } from '../components';
 
@@ -114,6 +116,26 @@ export function projectDocumentWithPendingTaskIds(
   return projectDocumentFromCanvasState(
     { ...base, pendingTaskIds: canonicalCreativePendingTaskIds(taskIds) },
     state
+  );
+}
+
+/** Merge NomiFun-owned Agent references with the latest reducer state as one validated CAS unit. */
+export function projectDocumentWithAgentSessions(
+  base: CreativeProjectDocument,
+  state: CanvasState,
+  sessions: readonly CreativeChatSessionReference[],
+  activeChatId: string | null
+): CreativeProjectDocument {
+  return parseCreativeProjectDocument(
+    projectDocumentFromCanvasState(
+      {
+        ...base,
+        chatSessions: structuredClone([...sessions]),
+        activeChatId,
+      },
+      state
+    ),
+    base.projectId
   );
 }
 
