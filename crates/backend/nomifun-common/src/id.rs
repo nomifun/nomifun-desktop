@@ -354,6 +354,10 @@ define_entity_id!(
     WorkshopCanvasId
 );
 define_entity_id!(
+    /// Globally unique canonical Creative Studio project identifier.
+    CreativeStudioProjectId
+);
+define_entity_id!(
     /// Globally unique customer-service agent (客服员工) identifier.
     CsAgentId
 );

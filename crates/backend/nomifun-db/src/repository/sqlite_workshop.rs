@@ -2,7 +2,7 @@ use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 use serde_json::Value;
 
 use crate::error::DbError;
-use crate::models::{WorkshopAssetRow, WorkshopCanvasRow};
+use crate::models::{CreativeStudioProjectRow, WorkshopAssetRow, WorkshopCanvasRow};
 use crate::repository::IWorkshopRepository;
 use crate::repository::workshop::{AssetSort, ListAssetsParams, UpdateAssetParams};
 
@@ -128,6 +128,143 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         .bind(provider_id)
         .fetch_one(&self.pool)
         .await?)
+    }
+
+    // ---- canonical Creative Studio projects ----
+
+    async fn list_creative_projects(&self) -> Result<Vec<CreativeStudioProjectRow>, DbError> {
+        let rows = sqlx::query_as::<_, CreativeStudioProjectRow>(
+            "SELECT * FROM creative_studio_projects ORDER BY updated_at DESC, id DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for row in &rows {
+            nomifun_common::validate_uuidv7(&row.project_id).map_err(|error| {
+                DbError::Conflict(format!(
+                    "creative studio project_id {:?} is not a canonical UUIDv7: {error}",
+                    row.project_id
+                ))
+            })?;
+        }
+        Ok(rows)
+    }
+
+    async fn get_creative_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<CreativeStudioProjectRow>, DbError> {
+        let row = sqlx::query_as::<_, CreativeStudioProjectRow>(
+            "SELECT * FROM creative_studio_projects WHERE project_id = ?",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = &row {
+            nomifun_common::validate_uuidv7(&row.project_id).map_err(|error| {
+                DbError::Conflict(format!(
+                    "creative studio project_id {:?} is not a canonical UUIDv7: {error}",
+                    row.project_id
+                ))
+            })?;
+        }
+        Ok(row)
+    }
+
+    async fn create_creative_project(
+        &self,
+        project_id: &str,
+        title: &str,
+        document_json: &str,
+        now: i64,
+    ) -> Result<CreativeStudioProjectRow, DbError> {
+        nomifun_common::validate_uuidv7(project_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio project_id {project_id:?} is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        let row = sqlx::query_as::<_, CreativeStudioProjectRow>(
+            "INSERT INTO creative_studio_projects \
+                (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+             VALUES (?, ?, 1, 0, 0, ?, ?, ?) RETURNING *",
+        )
+        .bind(project_id)
+        .bind(title)
+        .bind(document_json)
+        .bind(now)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    async fn rename_creative_project(
+        &self,
+        project_id: &str,
+        title: &str,
+        now: i64,
+    ) -> Result<CreativeStudioProjectRow, DbError> {
+        let row = sqlx::query_as::<_, CreativeStudioProjectRow>(
+            "UPDATE creative_studio_projects SET title = ?, updated_at = ? \
+             WHERE project_id = ? RETURNING *",
+        )
+        .bind(title)
+        .bind(now)
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            DbError::NotFound(format!("creative studio project '{project_id}' not found"))
+        })?;
+        Ok(row)
+    }
+
+    async fn save_creative_project(
+        &self,
+        project_id: &str,
+        expected_revision: i64,
+        document_json: &str,
+        node_count: i64,
+        connection_count: i64,
+        now: i64,
+    ) -> Result<CreativeStudioProjectRow, DbError> {
+        let row = sqlx::query_as::<_, CreativeStudioProjectRow>(
+            "UPDATE creative_studio_projects \
+             SET document_json = ?, node_count = ?, connection_count = ?, \
+                 revision = revision + 1, updated_at = ? \
+             WHERE project_id = ? AND revision = ? RETURNING *",
+        )
+        .bind(document_json)
+        .bind(node_count)
+        .bind(connection_count)
+        .bind(now)
+        .bind(project_id)
+        .bind(expected_revision)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = row {
+            return Ok(row);
+        }
+        if self.get_creative_project(project_id).await?.is_none() {
+            return Err(DbError::NotFound(format!(
+                "creative studio project '{project_id}' not found"
+            )));
+        }
+        Err(DbError::Conflict(format!(
+            "creative studio project '{project_id}' revision conflict"
+        )))
+    }
+
+    async fn delete_creative_project(&self, project_id: &str) -> Result<(), DbError> {
+        let result = sqlx::query("DELETE FROM creative_studio_projects WHERE project_id = ?")
+            .bind(project_id)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!(
+                "creative studio project '{project_id}' not found"
+            )));
+        }
+        Ok(())
     }
 
     // ---- canvases ----
@@ -551,6 +688,7 @@ mod tests {
     const ASSET_C1: &str = "0190f5fe-7c00-7a00-8abc-000000000161";
     const ASSET_C2: &str = "0190f5fe-7c00-7a00-8abc-000000000162";
     const ASSET_C3: &str = "0190f5fe-7c00-7a00-8abc-000000000163";
+    const CREATIVE_PROJECT_A: &str = "0190f5fe-7c00-7a00-8abc-000000000171";
 
     async fn repo() -> (SqliteWorkshopRepository, crate::Database) {
         let db = init_database_memory().await.unwrap();
@@ -578,6 +716,63 @@ mod tests {
             created_at: 1000,
             updated_at: 1000,
         }
+    }
+
+    #[tokio::test]
+    async fn creative_project_crud_and_revision_compare_and_swap() {
+        let (repo, _db) = repo().await;
+        let initial_doc = format!(
+            r#"{{"schema":"nomifun.creative-studio/v1","projectId":"{CREATIVE_PROJECT_A}","nodes":[]}}"#
+        );
+        let created = repo
+            .create_creative_project(CREATIVE_PROJECT_A, "新项目", &initial_doc, 100)
+            .await
+            .unwrap();
+        assert_eq!(created.revision, 1);
+        assert_eq!(created.node_count, 0);
+        assert_eq!(created.connection_count, 0);
+
+        let renamed = repo
+            .rename_creative_project(CREATIVE_PROJECT_A, "重命名", 110)
+            .await
+            .unwrap();
+        assert_eq!(renamed.title, "重命名");
+        assert_eq!(renamed.revision, 1, "metadata rename must not invalidate autosave");
+
+        let changed_doc = format!(
+            r#"{{"schema":"nomifun.creative-studio/v1","projectId":"{CREATIVE_PROJECT_A}","nodes":[{{}}]}}"#
+        );
+        let saved = repo
+            .save_creative_project(CREATIVE_PROJECT_A, 1, &changed_doc, 1, 2, 120)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, 2);
+        assert_eq!(saved.node_count, 1);
+        assert_eq!(saved.connection_count, 2);
+
+        let stale = repo
+            .save_creative_project(CREATIVE_PROJECT_A, 1, &initial_doc, 0, 0, 130)
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, DbError::Conflict(_)));
+        assert_eq!(
+            repo.get_creative_project(CREATIVE_PROJECT_A)
+                .await
+                .unwrap()
+                .unwrap()
+                .document_json,
+            changed_doc,
+            "a stale writer must not replace the canonical document"
+        );
+
+        repo.delete_creative_project(CREATIVE_PROJECT_A)
+            .await
+            .unwrap();
+        assert!(repo
+            .get_creative_project(CREATIVE_PROJECT_A)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

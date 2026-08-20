@@ -145,6 +145,7 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "conversation_mcp_servers",
     "conversations",
     "creation_tasks",
+    "creative_studio_projects",
     "cron_job_runs",
     "cron_jobs",
     "cron_run_reservations",

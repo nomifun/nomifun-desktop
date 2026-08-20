@@ -1,18 +1,27 @@
-//! [`WorkshopService`] — the single handle the `/api/workshop/*` routes talk
-//! to. Owns canvas CRUD + opaque-doc read/write, asset store/list/patch/delete,
-//! and traversal-safe file serving. Canvas bodies + asset binaries live on disk
-//! under the data dir; index rows live in `nomifun-db` via [`IWorkshopRepository`].
+//! [`WorkshopService`] — the single handle used by `/api/creative-studio/*`
+//! project routes and `/api/workshop/*` asset/legacy-canvas routes. Canonical
+//! project documents live in SQLite; legacy canvas bodies and asset binaries
+//! remain under the service data directory.
 
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use nomifun_common::{
-    AppError, ProviderId, SharedProviderLifecycleBarrier, WorkshopAssetId, WorkshopCanvasId, now_ms,
+    AppError, CreativeStudioProjectId, ProviderId, SharedProviderLifecycleBarrier,
+    WorkshopAssetId, WorkshopCanvasId, now_ms,
 };
-use nomifun_db::{AssetSort, IWorkshopRepository, ListAssetsParams, UpdateAssetParams, WorkshopAssetRow};
+use nomifun_db::{
+    AssetSort, CreativeStudioProjectRow, IWorkshopRepository, ListAssetsParams, UpdateAssetParams,
+    WorkshopAssetRow,
+};
 use serde_json::Value;
 
+use crate::creative_studio::{
+    CreativeProjectDocument, CreativeProjectSummary, MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
+};
+#[cfg(test)]
+use crate::creative_studio::CREATIVE_STUDIO_SCHEMA;
 use crate::dto::{WorkshopAsset, WorkshopCanvasMeta};
 use crate::{
     DEFAULT_DOC, MAX_ASSET_BYTES, MAX_DOC_BYTES, WORKSHOP_REL_DIR, docscan, fsio, imagemeta,
@@ -23,6 +32,12 @@ use crate::{
 pub struct CanvasWithDoc {
     pub meta: WorkshopCanvasMeta,
     pub doc: Value,
+}
+
+/// A canonical Creative Studio project and its validated v1 document.
+pub struct CreativeProjectWithDocument {
+    pub project: CreativeProjectSummary,
+    pub document: CreativeProjectDocument,
 }
 
 /// A paginated asset listing.
@@ -109,6 +124,9 @@ pub struct AssetPatch {
 /// on the next pass and gets reclaimed then. 10 minutes ≫ the max
 /// write+thumbnail latency and the 800ms autosave debounce.
 const GC_GRACE_MS: i64 = 10 * 60 * 1000;
+
+const DEFAULT_CREATIVE_PROJECT_TITLE: &str = "未命名画布";
+const MAX_CREATIVE_PROJECT_TITLE_CHARS: usize = 1_000;
 
 pub struct WorkshopService {
     repo: Arc<dyn IWorkshopRepository>,
@@ -204,6 +222,113 @@ impl WorkshopService {
 
     // ---- canvases ----
 
+    // Canonical Creative Studio project methods intentionally live beside,
+    // rather than inside, the legacy canvas methods below. They share the Rust
+    // service/repository infrastructure but never read or rewrite the retired
+    // schema.
+
+    pub async fn list_creative_projects(
+        &self,
+    ) -> Result<Vec<CreativeProjectSummary>, AppError> {
+        Ok(self
+            .repo
+            .list_creative_projects()
+            .await?
+            .into_iter()
+            .map(CreativeProjectSummary::from)
+            .collect())
+    }
+
+    pub async fn create_creative_project(
+        &self,
+        title: Option<String>,
+    ) -> Result<CreativeProjectSummary, AppError> {
+        let project_id = CreativeStudioProjectId::new().into_string();
+        let title = normalize_creative_project_title(title.as_deref(), true)?;
+        let document = CreativeProjectDocument::empty(project_id.clone());
+        document
+            .validate_for_project(&project_id)
+            .map_err(|error| AppError::Internal(format!("invalid default creative project: {error}")))?;
+        let document_json = serialize_creative_project_document(&document)?;
+        let row = self
+            .repo
+            .create_creative_project(&project_id, &title, &document_json, now_ms())
+            .await?;
+        Ok(row.into())
+    }
+
+    pub async fn get_creative_project(
+        &self,
+        project_id: &str,
+    ) -> Result<CreativeProjectWithDocument, AppError> {
+        validate_creative_project_id(project_id)?;
+        let row = self
+            .repo
+            .get_creative_project(project_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "creative studio project {project_id} not found"
+                ))
+            })?;
+        let document = parse_stored_creative_project_row(&row)?;
+        Ok(CreativeProjectWithDocument {
+            project: row.into(),
+            document,
+        })
+    }
+
+    pub async fn rename_creative_project(
+        &self,
+        project_id: &str,
+        title: &str,
+    ) -> Result<CreativeProjectSummary, AppError> {
+        validate_creative_project_id(project_id)?;
+        let title = normalize_creative_project_title(Some(title), false)?;
+        Ok(self
+            .repo
+            .rename_creative_project(project_id, &title, now_ms())
+            .await?
+            .into())
+    }
+
+    pub async fn save_creative_project(
+        &self,
+        project_id: &str,
+        expected_revision: &str,
+        document: &CreativeProjectDocument,
+    ) -> Result<CreativeProjectSummary, AppError> {
+        validate_creative_project_id(project_id)?;
+        let expected_revision = parse_creative_project_revision(expected_revision)?;
+        document
+            .validate_for_project(project_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid creative project document: {error}")))?;
+        let document_json = serialize_creative_project_document(document)?;
+        let node_count = i64::try_from(document.nodes.len())
+            .map_err(|_| AppError::BadRequest("creative project has too many nodes".into()))?;
+        let connection_count = i64::try_from(document.connections.len()).map_err(|_| {
+            AppError::BadRequest("creative project has too many connections".into())
+        })?;
+        Ok(self
+            .repo
+            .save_creative_project(
+                project_id,
+                expected_revision,
+                &document_json,
+                node_count,
+                connection_count,
+                now_ms(),
+            )
+            .await?
+            .into())
+    }
+
+    pub async fn delete_creative_project(&self, project_id: &str) -> Result<(), AppError> {
+        validate_creative_project_id(project_id)?;
+        self.repo.delete_creative_project(project_id).await?;
+        Ok(())
+    }
+
     pub async fn list_canvases(&self) -> Result<Vec<WorkshopCanvasMeta>, AppError> {
         Ok(self.repo.list_canvases().await?.into_iter().map(WorkshopCanvasMeta::from).collect())
     }
@@ -212,6 +337,9 @@ impl WorkshopService {
     /// managed canvas/asset file. Any failure makes the current dataset
     /// incompatible; callers must retire/reset it as a whole.
     pub async fn audit_managed_data_on_boot(&self) -> Result<(), AppError> {
+        for project in self.repo.list_creative_projects().await? {
+            parse_stored_creative_project_row(&project)?;
+        }
         let canvases = self.repo.list_canvases().await?;
         let mut referenced_assets = BTreeSet::new();
         for canvas in &canvases {
@@ -1037,6 +1165,110 @@ impl WorkshopService {
     }
 }
 
+fn validate_creative_project_id(project_id: &str) -> Result<(), AppError> {
+    nomifun_common::validate_uuidv7(project_id)
+        .map(|_| ())
+        .map_err(|error| {
+            AppError::BadRequest(format!(
+                "creative studio project id must be a canonical UUIDv7: {error}"
+            ))
+        })
+}
+
+fn normalize_creative_project_title(
+    title: Option<&str>,
+    allow_default: bool,
+) -> Result<String, AppError> {
+    let title = title.map(str::trim).filter(|value| !value.is_empty());
+    let title = match title {
+        Some(title) => title,
+        None if allow_default => DEFAULT_CREATIVE_PROJECT_TITLE,
+        None => return Err(AppError::BadRequest("title must not be empty".into())),
+    };
+    if title.encode_utf16().count() > MAX_CREATIVE_PROJECT_TITLE_CHARS {
+        return Err(AppError::BadRequest(format!(
+            "title is too long (max {MAX_CREATIVE_PROJECT_TITLE_CHARS} UTF-16 code units)"
+        )));
+    }
+    Ok(title.to_owned())
+}
+
+fn parse_creative_project_revision(revision: &str) -> Result<i64, AppError> {
+    if revision.is_empty() || revision.starts_with('0') || !revision.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(AppError::BadRequest(
+            "expectedRevision must be a canonical positive decimal string".into(),
+        ));
+    }
+    let parsed = revision.parse::<i64>().map_err(|_| {
+        AppError::BadRequest(
+            "expectedRevision must be a canonical positive decimal string".into(),
+        )
+    })?;
+    if parsed < 1 || parsed.to_string() != revision {
+        return Err(AppError::BadRequest(
+            "expectedRevision must be a canonical positive decimal string".into(),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn serialize_creative_project_document(
+    document: &CreativeProjectDocument,
+) -> Result<String, AppError> {
+    let json = serde_json::to_string(document)
+        .map_err(|error| AppError::BadRequest(format!("invalid creative project document: {error}")))?;
+    if json.len() > MAX_CREATIVE_PROJECT_DOCUMENT_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "creative project document is too large: {} bytes (max {MAX_CREATIVE_PROJECT_DOCUMENT_BYTES})",
+            json.len()
+        )));
+    }
+    Ok(json)
+}
+
+fn parse_stored_creative_project_document(
+    document_json: &str,
+    project_id: &str,
+) -> Result<CreativeProjectDocument, AppError> {
+    let document = serde_json::from_str::<CreativeProjectDocument>(document_json).map_err(|error| {
+        AppError::Internal(format!(
+            "managed creative studio project {project_id} has an invalid v1 document: {error}"
+        ))
+    })?;
+    document.validate_for_project(project_id).map_err(|error| {
+        AppError::Internal(format!(
+            "managed creative studio project {project_id} violates the v1 contract: {error}"
+        ))
+    })?;
+    Ok(document)
+}
+
+fn parse_stored_creative_project_row(
+    row: &CreativeStudioProjectRow,
+) -> Result<CreativeProjectDocument, AppError> {
+    let document =
+        parse_stored_creative_project_document(&row.document_json, &row.project_id)?;
+    let node_count = i64::try_from(document.nodes.len()).map_err(|_| {
+        AppError::Internal(format!(
+            "managed creative studio project {} has too many nodes",
+            row.project_id
+        ))
+    })?;
+    let connection_count = i64::try_from(document.connections.len()).map_err(|_| {
+        AppError::Internal(format!(
+            "managed creative studio project {} has too many connections",
+            row.project_id
+        ))
+    })?;
+    if row.node_count != node_count || row.connection_count != connection_count {
+        return Err(AppError::Internal(format!(
+            "managed creative studio project {} summary counts do not match its document",
+            row.project_id
+        )));
+    }
+    Ok(document)
+}
+
 #[cfg(test)]
 fn default_doc_value() -> Value {
     serde_json::from_str(DEFAULT_DOC).expect("DEFAULT_DOC is valid json")
@@ -1174,6 +1406,203 @@ mod tests {
         b.extend_from_slice(&1u32.to_be_bytes());
         b.extend_from_slice(&[8, 6, 0, 0, 0]);
         b
+    }
+
+    fn document_with_one_text_node(project_id: &str, label: &str) -> CreativeProjectDocument {
+        serde_json::from_value(serde_json::json!({
+            "schema": CREATIVE_STUDIO_SCHEMA,
+            "projectId": project_id,
+            "viewport": { "x": 0, "y": 0, "zoom": 1 },
+            "background": "dots",
+            "nodes": [{
+                "id": "node-a",
+                "type": "text",
+                "position": { "x": 10, "y": 20 },
+                "size": { "width": 320, "height": 180 },
+                "groupId": null,
+                "zIndex": 1,
+                "locked": false,
+                "data": {
+                    "text": label,
+                    "format": "plain",
+                    "fontSize": 16,
+                    "textAlign": "left"
+                }
+            }],
+            "connections": [],
+            "chatSessions": [],
+            "activeChatId": null,
+            "panels": {
+                "left": { "open": true, "width": 320, "activeView": "canvas" },
+                "right": { "open": true, "width": 360, "activeView": "assistant" },
+                "bottom": { "open": false, "height": 240, "activeView": "timeline" }
+            },
+            "pendingTaskIds": []
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn creative_project_crud_isolated_from_legacy_canvases() {
+        let (svc, _dir) = service().await;
+        let legacy = svc.create_canvas(Some("旧画布".into())).await.unwrap();
+        assert!(svc.list_creative_projects().await.unwrap().is_empty());
+
+        let created = svc
+            .create_creative_project(Some("  新项目  ".into()))
+            .await
+            .unwrap();
+        assert_eq!(created.title, "新项目");
+        assert_eq!(created.revision, "1");
+        assert_eq!(created.node_count, 0);
+        assert_eq!(created.connection_count, 0);
+        assert!(CreativeStudioProjectId::parse(&created.project_id).is_ok());
+
+        let detail = svc.get_creative_project(&created.project_id).await.unwrap();
+        assert_eq!(detail.document.schema, CREATIVE_STUDIO_SCHEMA);
+        assert_eq!(detail.document.project_id, created.project_id);
+        assert_eq!(svc.list_canvases().await.unwrap()[0].canvas_id, legacy.canvas_id);
+
+        let renamed = svc
+            .rename_creative_project(&created.project_id, "  重命名  ")
+            .await
+            .unwrap();
+        assert_eq!(renamed.title, "重命名");
+        assert_eq!(renamed.revision, "1", "rename must not invalidate autosave");
+
+        let mut document = document_with_one_text_node(&created.project_id, "first");
+        document.nodes.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "node-b",
+                "type": "image",
+                "position": { "x": 400, "y": 20 },
+                "size": { "width": 320, "height": 180 },
+                "groupId": null,
+                "zIndex": 2,
+                "locked": false,
+                "data": {
+                    "assetId": null,
+                    "caption": "",
+                    "alt": "",
+                    "fit": "cover",
+                    "naturalSize": null
+                }
+            }))
+            .unwrap(),
+        );
+        document
+            .connections
+            .push(crate::creative_studio::CreativeConnection {
+                id: "connection-a".into(),
+                source_node_id: "node-a".into(),
+                target_node_id: "node-b".into(),
+                source_handle: None,
+                target_handle: None,
+            });
+        let saved = svc
+            .save_creative_project(&created.project_id, "1", &document)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, "2");
+        assert_eq!(saved.node_count, 2);
+        assert_eq!(saved.connection_count, 1);
+
+        let saved_detail = svc.get_creative_project(&created.project_id).await.unwrap();
+        assert_eq!(
+            saved_detail.project.node_count as usize,
+            saved_detail.document.nodes.len()
+        );
+        assert_eq!(
+            saved_detail.project.connection_count as usize,
+            saved_detail.document.connections.len()
+        );
+
+        let stale = svc
+            .save_creative_project(&created.project_id, "1", &document)
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, AppError::Conflict(_)));
+
+        svc.delete_creative_project(&created.project_id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            svc.get_creative_project(&created.project_id).await,
+            Err(AppError::NotFound(_))
+        ));
+        assert!(svc.get_canvas(&legacy.canvas_id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn creative_project_save_rejects_wrong_contract_and_oversize() {
+        let (svc, _dir) = service().await;
+        let created = svc.create_creative_project(None).await.unwrap();
+        assert_eq!(created.title, "未命名画布");
+
+        let mut wrong_schema = document_with_one_text_node(&created.project_id, "bad");
+        wrong_schema.schema = "1".into();
+        assert!(matches!(
+            svc.save_creative_project(&created.project_id, "1", &wrong_schema)
+                .await,
+            Err(AppError::BadRequest(_))
+        ));
+
+        let mut wrong_project = document_with_one_text_node(&created.project_id, "bad");
+        wrong_project.project_id = CreativeStudioProjectId::new().into_string();
+        assert!(matches!(
+            svc.save_creative_project(&created.project_id, "1", &wrong_project)
+                .await,
+            Err(AppError::BadRequest(_))
+        ));
+
+        let mut oversize = document_with_one_text_node(&created.project_id, "large");
+        let crate::creative_studio::CreativeNodeData::Text(text) = &mut oversize.nodes[0].data
+        else {
+            panic!("fixture must contain a text node");
+        };
+        text.text = "x".repeat(MAX_CREATIVE_PROJECT_DOCUMENT_BYTES);
+        assert!(matches!(
+            svc.save_creative_project(&created.project_id, "1", &oversize)
+                .await,
+            Err(AppError::BadRequest(_))
+        ));
+        assert_eq!(
+            svc.get_creative_project(&created.project_id)
+                .await
+                .unwrap()
+                .project
+                .revision,
+            "1"
+        );
+    }
+
+    #[tokio::test]
+    async fn creative_project_concurrent_save_allows_exactly_one_winner() {
+        let (svc, _dir) = service().await;
+        let created = svc.create_creative_project(None).await.unwrap();
+        let first = document_with_one_text_node(&created.project_id, "first");
+        let second = document_with_one_text_node(&created.project_id, "second");
+        let (left, right) = tokio::join!(
+            svc.save_creative_project(&created.project_id, "1", &first),
+            svc.save_creative_project(&created.project_id, "1", &second),
+        );
+        let results = [left, right];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(AppError::Conflict(_))))
+                .count(),
+            1
+        );
+        assert_eq!(
+            svc.get_creative_project(&created.project_id)
+                .await
+                .unwrap()
+                .project
+                .revision,
+            "2"
+        );
     }
 
     #[tokio::test]

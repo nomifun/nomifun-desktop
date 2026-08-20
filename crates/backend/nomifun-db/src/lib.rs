@@ -21,7 +21,7 @@ pub use models::{
     AgentExecutionTemplateRow,
     AgentMetadataRow,
     ConversationArtifactRow, IdmmActionReservationRow,
-    CreateKnowledgeTagParams, CreationTaskRow, CronJobRunRow, CronRunReservationRow,
+    CreateKnowledgeTagParams, CreationTaskRow, CreativeStudioProjectRow, CronJobRunRow, CronRunReservationRow,
     KnowledgeBaseRow, KnowledgeBindingRow,
     KnowledgeTagRow, SkillTagRow, TagSettingRow, TerminalSessionRow, TerminalTurnAdmissionRow,
     UpdateAgentHandshakeParams,
