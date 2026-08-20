@@ -38,7 +38,13 @@ Import the lightweight coordination function from
 `@renderer/pages/creativeStudio/canvas/product/beforeLeave` so the focused
 shell does not eagerly load the product route chunk.
 
-Panel open/view changes are currently session-local because the Editor handle
-has no canonical panel-state command. Background changes do use the Editor's
-CAS port. Agent, workflows, and global timeline remain explicit unavailable
-states until their production ownership/data adapters exist.
+Panel open/view changes call the Editor's canonical `setPanels` port; saved
+width/height values also drive the product layout. Properties dispatch the
+type-safe core `node/update` command and therefore participate in normal undo,
+CAS save, conflict, and reload behavior. Background changes use the same CAS
+port. Agent, workflows, and global timeline remain explicit unavailable states
+until their production ownership/data adapters exist.
+
+The Editor also exposes the canonical pending-task recovery feed described in
+`../editor/WIRING.md`. This product does not currently instantiate a workbench
+runtime, so it intentionally does not fabricate `initialResumeRequests`.

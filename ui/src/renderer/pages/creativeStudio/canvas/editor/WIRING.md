@@ -31,6 +31,11 @@ updates the canonical base document and queues the complete document through
 the same save controller. Product routes must not synthesize keyboard events or
 maintain a second canvas store.
 
+Panel chrome uses `setPanels(nextPanels)`, and inspector edits dispatch the
+complete discriminated node returned by `canvasCommands.updateNode(...)`.
+Both paths merge with the latest reducer-owned nodes and viewport before they
+queue the same full-document CAS save.
+
 `renderNode` receives the canonical node, its selected state, `onActivate`, and
 pointer props for the product's chosen drag handle. `renderEdge` receives the
 canonical connection plus its resolved source and target nodes. Top, left,
@@ -59,3 +64,32 @@ asset resolution, model selection/execution, task progress, chat, and inspector
 forms remain route/product responsibilities. They should dispatch canonical
 core commands or update the canonical project document; no legacy workshop
 schema adapter belongs in the editor.
+
+## Pending task recovery feed
+
+The canonical `pendingTaskIds` array is owned by this same Editor/CAS boundary.
+A workbench controller must await `addPendingTask(taskId)` before POST, then
+await `removePendingTask(taskId)` only after a terminal task or a confirmed 404
+orphan. Both methods flush immediately and reject on CAS/transport failure, so
+the runtime cannot continue past a merely queued local mutation.
+`onPendingTaskIdsChange` fires once after remote hydration and after
+each local feed mutation; `getPendingTaskIds()` provides the same snapshot to
+imperative adapters.
+
+For a future standalone workbench route, build `initialResumeRequests` only
+after the hydration callback, using real config-node identity/model/capability
+data plus the returned IDs. Wire the runtime's `onPendingTask` and
+`onSettledTask` to the two Editor methods above; its orphan callback returns
+`true` only after `removePendingTask` resolves:
+
+```tsx
+onPendingTask: (reference) => editor.addPendingTask(reference.taskId),
+onSettledTask: (task) => editor.removePendingTask(task.taskId),
+onRecoveryFailure: async (reference) => {
+  await editor.removePendingTask(reference.taskId);
+  return true;
+},
+```
+
+The canvas product does not currently mount a workbench runtime, so this seam
+does not claim automatic recovery is active here.

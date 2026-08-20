@@ -255,8 +255,8 @@ export interface CreativeProjectDetailResponse extends CreativeProjectDetail {}
 export type SaveCreativeProjectResponse = CreativeProjectResponse;
 
 export const DEFAULT_CREATIVE_STUDIO_PANELS: CreativeStudioPanelState = {
-  left: { open: true, width: 288, activeView: 'canvas' },
-  right: { open: true, width: 340, activeView: 'assistant' },
+  left: { open: true, width: 216, activeView: 'canvas' },
+  right: { open: false, width: 340, activeView: 'assistant' },
   bottom: { open: false, height: 240, activeView: 'history' },
 };
 

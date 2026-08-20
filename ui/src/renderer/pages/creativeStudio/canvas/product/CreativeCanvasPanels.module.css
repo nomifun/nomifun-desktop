@@ -202,6 +202,15 @@
   font-weight: 650;
 }
 
+.outlineEmpty {
+  margin: 0;
+  padding: 4px 12px;
+  color: var(--color-text-4);
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+}
+
 .selectionList {
   display: flex;
   padding: 8px;
@@ -286,6 +295,80 @@
   padding: 10px;
   border-radius: 9px;
   background: var(--color-fill-1);
+}
+
+.editorForm {
+  display: flex;
+  margin: 4px 14px 0;
+  padding: 12px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 10px;
+  background: var(--color-bg-1);
+  flex-direction: column;
+  gap: 10px;
+}
+
+.editorForm h3 {
+  margin: 0;
+  color: var(--color-text-2);
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.editorField {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--color-text-3);
+  font-size: 10px;
+}
+
+.editorField input:not([type='checkbox']):not([type='range']),
+.editorField select,
+.editorField textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--color-border-2);
+  border-radius: 7px;
+  outline: none;
+  background: var(--color-fill-1);
+  color: var(--color-text-1);
+  font: inherit;
+  font-size: 11px;
+}
+
+.editorField input:not([type='checkbox']):not([type='range']),
+.editorField select {
+  height: 30px;
+  padding: 0 8px;
+}
+
+.editorField textarea {
+  min-height: 58px;
+  padding: 7px 8px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.editorField input:focus-visible,
+.editorField select:focus-visible,
+.editorField textarea:focus-visible {
+  border-color: rgb(var(--primary-6));
+  box-shadow: 0 0 0 2px rgba(var(--primary-6), 0.15);
+}
+
+.editorField input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: rgb(var(--primary-6));
+}
+
+.editorField input[type='range'] {
+  width: 100%;
+  margin: 2px 0;
+  accent-color: rgb(var(--primary-6));
 }
 
 .historyPanel {

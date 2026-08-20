@@ -5,7 +5,6 @@
  */
 
 import {
-  BranchOne,
   FileText,
   Group,
   History,
@@ -144,7 +143,7 @@ export const CreativeCanvasOutlinePanel: React.FC<CreativeCanvasOutlinePanelProp
       </header>
 
       {nodes.length === 0 ? (
-        <PanelEmpty icon={<BranchOne {...iconProps} />} title='画布还没有节点' description='从底部工具栏添加第一个节点。' />
+        <p className={styles.outlineEmpty} role='status'>画布暂无节点</p>
       ) : (
         <div className={styles.outlineList} role='list' aria-label='画布节点'>
           {nodes.map((node) => {
@@ -299,16 +298,421 @@ const NodeDataProperties: React.FC<{ node: CreativeCanvasNode; memberCount: numb
   }
 };
 
+interface PropertyEditorFieldProps {
+  label: string;
+  children: React.ReactNode;
+}
+
+const PropertyEditorField: React.FC<PropertyEditorFieldProps> = ({ label, children }) => (
+  <label className={styles.editorField}>
+    <span>{label}</span>
+    {children}
+  </label>
+);
+
+interface NodeDataEditorProps {
+  node: CreativeCanvasNode;
+  onUpdate(node: CreativeCanvasNode, field: string): void;
+}
+
+const finiteNumber = (
+  value: number,
+  fallback: number,
+  minimum: number,
+  maximum = Number.POSITIVE_INFINITY
+): number => (Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback);
+
+const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
+  switch (node.type) {
+    case 'text':
+      return (
+        <>
+          <PropertyEditorField label='内容'>
+            <textarea
+              value={node.data.text}
+              rows={5}
+              onChange={(event) =>
+                onUpdate(
+                  { ...node, data: { ...node.data, text: event.currentTarget.value } },
+                  'text'
+                )
+              }
+            />
+          </PropertyEditorField>
+          <PropertyEditorField label='格式'>
+            <select
+              value={node.data.format}
+              onChange={(event) =>
+                onUpdate(
+                  {
+                    ...node,
+                    data: {
+                      ...node.data,
+                      format: event.currentTarget.value as typeof node.data.format,
+                    },
+                  },
+                  'format'
+                )
+              }
+            >
+              <option value='plain'>纯文本</option>
+              <option value='markdown'>Markdown</option>
+            </select>
+          </PropertyEditorField>
+          <PropertyEditorField label='字号'>
+            <input
+              type='number'
+              min={8}
+              max={256}
+              value={node.data.fontSize}
+              onChange={(event) =>
+                onUpdate(
+                  {
+                    ...node,
+                    data: {
+                      ...node.data,
+                      fontSize: finiteNumber(
+                        event.currentTarget.valueAsNumber,
+                        node.data.fontSize,
+                        8,
+                        256
+                      ),
+                    },
+                  },
+                  'fontSize'
+                )
+              }
+            />
+          </PropertyEditorField>
+          <PropertyEditorField label='对齐'>
+            <select
+              value={node.data.textAlign}
+              onChange={(event) =>
+                onUpdate(
+                  {
+                    ...node,
+                    data: {
+                      ...node.data,
+                      textAlign: event.currentTarget.value as typeof node.data.textAlign,
+                    },
+                  },
+                  'textAlign'
+                )
+              }
+            >
+              <option value='left'>左对齐</option>
+              <option value='center'>居中</option>
+              <option value='right'>右对齐</option>
+            </select>
+          </PropertyEditorField>
+        </>
+      );
+    case 'image':
+      return (
+        <>
+          <PropertyEditorField label='说明'>
+            <textarea
+              value={node.data.caption}
+              rows={3}
+              onChange={(event) =>
+                onUpdate(
+                  { ...node, data: { ...node.data, caption: event.currentTarget.value } },
+                  'caption'
+                )
+              }
+            />
+          </PropertyEditorField>
+          <PropertyEditorField label='替代文本'>
+            <input
+              value={node.data.alt}
+              onChange={(event) =>
+                onUpdate(
+                  { ...node, data: { ...node.data, alt: event.currentTarget.value } },
+                  'alt'
+                )
+              }
+            />
+          </PropertyEditorField>
+          <PropertyEditorField label='适配方式'>
+            <select
+              value={node.data.fit}
+              onChange={(event) =>
+                onUpdate(
+                  {
+                    ...node,
+                    data: {
+                      ...node.data,
+                      fit: event.currentTarget.value as typeof node.data.fit,
+                    },
+                  },
+                  'fit'
+                )
+              }
+            >
+              <option value='contain'>完整显示</option>
+              <option value='cover'>填满裁切</option>
+            </select>
+          </PropertyEditorField>
+        </>
+      );
+    case 'panorama':
+      return (
+        <>
+          {([
+            ['水平视角', 'yaw', -360, 360],
+            ['垂直视角', 'pitch', -90, 90],
+            ['视野', 'fieldOfView', 10, 150],
+          ] as const).map(([label, field, min, max]) => (
+            <PropertyEditorField key={field} label={label}>
+              <input
+                type='number'
+                min={min}
+                max={max}
+                value={node.data[field]}
+                onChange={(event) =>
+                  onUpdate(
+                    {
+                      ...node,
+                      data: {
+                        ...node.data,
+                        [field]: finiteNumber(
+                          event.currentTarget.valueAsNumber,
+                          node.data[field],
+                          min,
+                          max
+                        ),
+                      },
+                    },
+                    field
+                  )
+                }
+              />
+            </PropertyEditorField>
+          ))}
+        </>
+      );
+    case 'video':
+      return (
+        <>
+          {([
+            ['自动播放', 'autoplay'],
+            ['循环播放', 'loop'],
+            ['静音', 'muted'],
+          ] as const).map(([label, field]) => (
+            <PropertyEditorField key={field} label={label}>
+              <input
+                type='checkbox'
+                checked={node.data[field]}
+                onChange={(event) =>
+                  onUpdate(
+                    { ...node, data: { ...node.data, [field]: event.currentTarget.checked } },
+                    field
+                  )
+                }
+              />
+            </PropertyEditorField>
+          ))}
+        </>
+      );
+    case 'audio':
+      return (
+        <>
+          <PropertyEditorField label='标题'>
+            <input
+              value={node.data.title}
+              onChange={(event) =>
+                onUpdate(
+                  { ...node, data: { ...node.data, title: event.currentTarget.value } },
+                  'title'
+                )
+              }
+            />
+          </PropertyEditorField>
+          <PropertyEditorField label='循环播放'>
+            <input
+              type='checkbox'
+              checked={node.data.loop}
+              onChange={(event) =>
+                onUpdate(
+                  { ...node, data: { ...node.data, loop: event.currentTarget.checked } },
+                  'loop'
+                )
+              }
+            />
+          </PropertyEditorField>
+          <PropertyEditorField label={`音量 ${Math.round(node.data.volume * 100)}%`}>
+            <input
+              type='range'
+              min={0}
+              max={1}
+              step={0.01}
+              value={node.data.volume}
+              onChange={(event) =>
+                onUpdate(
+                  {
+                    ...node,
+                    data: {
+                      ...node.data,
+                      volume: finiteNumber(
+                        event.currentTarget.valueAsNumber,
+                        node.data.volume,
+                        0,
+                        1
+                      ),
+                    },
+                  },
+                  'volume'
+                )
+              }
+            />
+          </PropertyEditorField>
+        </>
+      );
+    case 'config':
+      return (
+        <>
+          <PropertyEditorField label='提示词'>
+            <textarea
+              value={node.data.prompt}
+              rows={5}
+              onChange={(event) =>
+                onUpdate(
+                  { ...node, data: { ...node.data, prompt: event.currentTarget.value } },
+                  'prompt'
+                )
+              }
+            />
+          </PropertyEditorField>
+          <PropertyEditorField label='负面提示词'>
+            <textarea
+              value={node.data.negativePrompt}
+              rows={3}
+              onChange={(event) =>
+                onUpdate(
+                  {
+                    ...node,
+                    data: { ...node.data, negativePrompt: event.currentTarget.value },
+                  },
+                  'negativePrompt'
+                )
+              }
+            />
+          </PropertyEditorField>
+        </>
+      );
+    case 'director':
+      return (
+        <>
+          <PropertyEditorField label='当前时间 (ms)'>
+            <input
+              type='number'
+              min={0}
+              max={node.data.durationMs}
+              value={node.data.timelineMs}
+              onChange={(event) =>
+                onUpdate(
+                  {
+                    ...node,
+                    data: {
+                      ...node.data,
+                      timelineMs: finiteNumber(
+                        event.currentTarget.valueAsNumber,
+                        node.data.timelineMs,
+                        0,
+                        node.data.durationMs
+                      ),
+                    },
+                  },
+                  'timelineMs'
+                )
+              }
+            />
+          </PropertyEditorField>
+          <PropertyEditorField label='时长 (ms)'>
+            <input
+              type='number'
+              min={0}
+              value={node.data.durationMs}
+              onChange={(event) => {
+                const durationMs = finiteNumber(
+                  event.currentTarget.valueAsNumber,
+                  node.data.durationMs,
+                  0
+                );
+                onUpdate(
+                  {
+                    ...node,
+                    data: {
+                      ...node.data,
+                      durationMs,
+                      timelineMs: Math.min(node.data.timelineMs, durationMs),
+                    },
+                  },
+                  'durationMs'
+                );
+              }}
+            />
+          </PropertyEditorField>
+        </>
+      );
+    case 'group':
+      return (
+        <>
+          <PropertyEditorField label='标题'>
+            <input
+              value={node.data.title}
+              onChange={(event) =>
+                onUpdate(
+                  { ...node, data: { ...node.data, title: event.currentTarget.value } },
+                  'title'
+                )
+              }
+            />
+          </PropertyEditorField>
+          <PropertyEditorField label='颜色'>
+            <input
+              value={node.data.color ?? ''}
+              placeholder='未设置'
+              onChange={(event) =>
+                onUpdate(
+                  {
+                    ...node,
+                    data: { ...node.data, color: event.currentTarget.value.trim() || null },
+                  },
+                  'color'
+                )
+              }
+            />
+          </PropertyEditorField>
+          <PropertyEditorField label='折叠'>
+            <input
+              type='checkbox'
+              checked={node.data.collapsed}
+              onChange={(event) =>
+                onUpdate(
+                  { ...node, data: { ...node.data, collapsed: event.currentTarget.checked } },
+                  'collapsed'
+                )
+              }
+            />
+          </PropertyEditorField>
+        </>
+      );
+  }
+};
+
 export interface CreativeCanvasPropertiesPanelProps {
   state: CanvasState;
   onSelectNode?: (nodeId: string) => void;
+  onUpdateNode?: (node: CreativeCanvasNode, field: string) => void;
   className?: string;
 }
 
-/** Canonical node inspector. Editing is intentionally absent until the reducer owns patch commands. */
+/** Canonical node inspector. Every edit is delegated to the reducer-owned node/update command. */
 export const CreativeCanvasPropertiesPanel: React.FC<CreativeCanvasPropertiesPanelProps> = ({
   state,
   onSelectNode,
+  onUpdateNode,
   className,
 }) => {
   const selectedIds = new Set(state.selection.nodeIds);
@@ -368,7 +772,26 @@ export const CreativeCanvasPropertiesPanel: React.FC<CreativeCanvasPropertiesPan
                 <PropertyRow label='锁定' value={booleanValue(node.locked)} />
                 <NodeDataProperties node={node} memberCount={memberCount} />
               </dl>
-              <p className={styles.readOnlyNote}>当前 reducer 尚未提供属性 patch 命令，因此这里不会绕过画布状态直接修改文档。</p>
+              {onUpdateNode ? (
+                <div className={styles.editorForm} aria-label='编辑节点属性'>
+                  <h3>编辑</h3>
+                  <PropertyEditorField label='锁定节点'>
+                    <input
+                      type='checkbox'
+                      checked={node.locked}
+                      onChange={(event) =>
+                        onUpdateNode(
+                          { ...node, locked: event.currentTarget.checked },
+                          'locked'
+                        )
+                      }
+                    />
+                  </PropertyEditorField>
+                  <NodeDataEditor node={node} onUpdate={onUpdateNode} />
+                </div>
+              ) : (
+                <p className={styles.readOnlyNote}>当前属性面板未连接 canonical 更新命令。</p>
+              )}
             </div>
           );
         })()

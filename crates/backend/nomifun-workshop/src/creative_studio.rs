@@ -695,11 +695,11 @@ impl Default for CreativePanels {
         Self {
             left: CreativeLeftPanel {
                 open: true,
-                width: 288.0,
+                width: 216.0,
                 active_view: CreativeLeftView::Canvas,
             },
             right: CreativeRightPanel {
-                open: true,
+                open: false,
                 width: 340.0,
                 active_view: CreativeRightView::Assistant,
             },
@@ -1006,6 +1006,12 @@ mod tests {
         assert_eq!(value["schema"], CREATIVE_STUDIO_SCHEMA);
         assert_eq!(value["projectId"], PROJECT_ID);
         assert_eq!(value["background"], "lines");
+        assert_eq!(value["panels"]["left"]["open"], true);
+        assert_eq!(value["panels"]["left"]["width"], 216.0);
+        assert_eq!(value["panels"]["left"]["activeView"], "canvas");
+        assert_eq!(value["panels"]["right"]["open"], false);
+        assert_eq!(value["panels"]["right"]["width"], 340.0);
+        assert_eq!(value["panels"]["right"]["activeView"], "assistant");
         assert!(value.get("pendingTaskIds").unwrap().is_array());
         assert_eq!(serde_json::from_value::<CreativeProjectDocument>(value).unwrap(), doc);
     }

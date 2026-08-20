@@ -21,6 +21,54 @@ import {
 } from './testFixtures';
 
 describe('Creative Studio selection and movement reducer', () => {
+  test('updates a complete type-safe node as one undoable canonical edit', () => {
+    const node = testNode('text', 1);
+    let state = createInitialCanvasState({ document: testDocument([node]) });
+    state = canvasReducer(state, canvasCommands.setSelection([node.id]));
+    state = canvasReducer(
+      state,
+      canvasCommands.updateNode(
+        {
+          ...node,
+          locked: true,
+          data: { ...node.data, text: '持久化后的标题', fontSize: 24 },
+        },
+        { at: 10, mergeKey: `property:${node.id}:text` }
+      )
+    );
+
+    expect(state.document.nodes[0]).toMatchObject({
+      id: node.id,
+      type: 'text',
+      locked: true,
+      data: { text: '持久化后的标题', fontSize: 24 },
+    });
+    expect(state.selection.nodeIds).toEqual([node.id]);
+    expect(state.history.past).toHaveLength(1);
+
+    state = canvasReducer(state, canvasCommands.undo());
+    expect(state.document.nodes[0]).toEqual(node);
+  });
+
+  test('rejects missing, kind-changing, and invalid-group node replacements', () => {
+    const node = testNode('text', 1);
+    const image = testNode('image', 1);
+    const missing = testNode('text', 2);
+    const state = createInitialCanvasState({ document: testDocument([node]) });
+
+    expect(canvasReducer(state, canvasCommands.updateNode(missing, { at: 1 }))).toBe(state);
+    expect(canvasReducer(state, canvasCommands.updateNode(image, { at: 2 }))).toBe(state);
+    expect(
+      canvasReducer(
+        state,
+        canvasCommands.updateNode(
+          { ...node, groupId: '0190f5fe-7c00-7000-8000-000000000999' },
+          { at: 3 }
+        )
+      )
+    ).toBe(state);
+  });
+
   test('box-selects intersecting nodes with replace, add, and toggle modes', () => {
     const first = testNode('text', 1, { x: 0, y: 0, width: 100, height: 80 });
     const second = testNode('image', 2, { x: 200, y: 0, width: 100, height: 80 });

@@ -12,6 +12,31 @@
   background: var(--color-bg-1);
 }
 
+.root :global([data-creative-canvas-chrome]) {
+  grid-template-columns:
+    var(--creative-canvas-left-panel-width, 216px)
+    minmax(0, 1fr)
+    var(--creative-canvas-right-panel-width, 340px);
+}
+
+.root :global([data-creative-canvas-chrome][data-right-view='closed']) {
+  grid-template-columns:
+    var(--creative-canvas-left-panel-width, 216px)
+    minmax(0, 1fr)
+    0;
+}
+
+.root :global([data-creative-canvas-chrome] > section[aria-label='编辑历史']),
+.root :global([data-creative-canvas-chrome] > section[aria-label='时间线']) {
+  height: min(60vh, var(--creative-canvas-bottom-panel-height, 240px));
+}
+
+@media (min-width: 1181px) {
+  .root :global([data-creative-canvas-chrome][data-right-view='closed'] [role='toolbar'][aria-label='画布工具栏']) {
+    transform: translate(clamp(0px, 10vw, 142px), -4px);
+  }
+}
+
 .canvasHost {
   position: relative;
 }

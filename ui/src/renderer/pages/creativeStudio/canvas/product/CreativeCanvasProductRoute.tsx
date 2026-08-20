@@ -23,22 +23,17 @@ import {
   useCreativeAssets,
 } from '../../assets';
 import { CREATIVE_STUDIO_PROJECTS_PATH } from '../../app/routes';
-import type {
-  CreativeBottomPanelView,
-  CreativeCanvasBackground,
-  CreativeCanvasNodeKind,
-  CreativeLeftPanelView,
-  CreativeRightPanelView,
-  CreativeSize,
+import {
+  DEFAULT_CREATIVE_STUDIO_PANELS,
+  type CreativeCanvasBackground,
+  type CreativeCanvasNode,
+  type CreativeCanvasNodeKind,
+  type CreativeSize,
+  type CreativeStudioPanelState,
 } from '../../domain';
 import type { PromptLibrarySelection } from '../../prompts';
 import { useCreativeProject } from '../../services';
-import {
-  CreativeCanvasChrome,
-  type CreativeCanvasBottomView,
-  type CreativeCanvasLeftView,
-  type CreativeCanvasRightView,
-} from '../chrome';
+import { CreativeCanvasChrome } from '../chrome';
 import type { CanvasInteractionTool } from '../components';
 import {
   canRedoCanvas,
@@ -79,8 +74,12 @@ import {
 } from './nodeFactory';
 import {
   canLeaveCreativeCanvasAfterFlush,
+  creativeCanvasProductPanelViews,
   creativeCanvasProductSelectionCapabilities,
   resolveCreativeNodeAssetPresentation,
+  withCreativeCanvasBottomView,
+  withCreativeCanvasLeftView,
+  withCreativeCanvasRightView,
 } from './productController';
 import { registerCreativeCanvasProductBeforeLeave } from './beforeLeave';
 import styles from './CreativeCanvasProductRoute.module.css';
@@ -190,6 +189,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
 
   const editorRef = useRef<CreativeCanvasEditorHandle>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
+  const panelsRef = useRef<CreativeStudioPanelState>(
+    structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS)
+  );
   const hydratedPanelsRef = useRef<{ projectId: string; revision: string } | null>(null);
   const hydratedBackgroundRef = useRef<{ projectId: string; revision: string } | null>(null);
   const knownAssetsRef = useRef<ReadonlyMap<string, CreativeAsset>>(new Map());
@@ -201,9 +203,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [viewportSize, setViewportSize] = useState<CreativeSize>(FALLBACK_VIEWPORT_SIZE);
   const [miniMapOpen, setMiniMapOpen] = useState(false);
   const [miniMapDragging, setMiniMapDragging] = useState(false);
-  const [leftView, setLeftView] = useState<CreativeCanvasLeftView>('canvas');
-  const [rightView, setRightView] = useState<CreativeCanvasRightView | null>('assistant');
-  const [bottomView, setBottomView] = useState<CreativeCanvasBottomView | null>(null);
+  const [panels, setPanels] = useState<CreativeStudioPanelState>(() =>
+    structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS)
+  );
   const [nodeMenuOpen, setNodeMenuOpen] = useState(false);
   const [backgroundMenuOpen, setBackgroundMenuOpen] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
@@ -242,6 +244,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, []);
 
   useLayoutEffect(() => {
+    const defaultPanels = structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS);
+    panelsRef.current = defaultPanels;
+    setPanels(defaultPanels);
     hydratedPanelsRef.current = null;
     hydratedBackgroundRef.current = null;
     setCanvasState(null);
@@ -274,17 +279,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
       (save.status === 'idle' && hydrated.revision !== detail.project.revision);
     if (!shouldHydratePanels) return;
 
-    setLeftView(detail.document.panels.left.activeView as CreativeLeftPanelView);
-    setRightView(
-      detail.document.panels.right.open
-        ? (detail.document.panels.right.activeView as CreativeRightPanelView)
-        : null
-    );
-    setBottomView(
-      detail.document.panels.bottom.open
-        ? (detail.document.panels.bottom.activeView as CreativeBottomPanelView)
-        : null
-    );
+    const nextPanels = structuredClone(detail.document.panels);
+    panelsRef.current = nextPanels;
+    setPanels(nextPanels);
     hydratedPanelsRef.current = {
       projectId,
       revision: detail.project.revision,
@@ -294,6 +291,33 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const dispatch = useCallback((command: Parameters<CreativeCanvasEditorHandle['dispatch']>[0]) => {
     return editorRef.current?.dispatch(command) ?? null;
   }, []);
+
+  const persistPanels = useCallback((nextPanels: CreativeStudioPanelState) => {
+    panelsRef.current = nextPanels;
+    setPanels(nextPanels);
+    editorRef.current?.setPanels(nextPanels);
+  }, []);
+
+  const handleLeftViewChange = useCallback(
+    (view: CreativeStudioPanelState['left']['activeView']) => {
+      persistPanels(withCreativeCanvasLeftView(panelsRef.current, view));
+    },
+    [persistPanels]
+  );
+
+  const handleRightViewChange = useCallback(
+    (view: CreativeStudioPanelState['right']['activeView'] | null) => {
+      persistPanels(withCreativeCanvasRightView(panelsRef.current, view));
+    },
+    [persistPanels]
+  );
+
+  const handleBottomViewChange = useCallback(
+    (view: CreativeStudioPanelState['bottom']['activeView'] | null) => {
+      persistPanels(withCreativeCanvasBottomView(panelsRef.current, view));
+    },
+    [persistPanels]
+  );
 
   const addNode = useCallback(
     (kind: CreativeCanvasNodeKind) => {
@@ -391,6 +415,17 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [dispatch]
   );
 
+  const handleUpdateNode = useCallback(
+    (node: CreativeCanvasNode, field: string) => {
+      dispatch(
+        canvasCommands.updateNode(node, {
+          mergeKey: `property:${node.id}:${field}`,
+        })
+      );
+    },
+    [dispatch]
+  );
+
   const handleToggleAsset = useCallback((assetId: string) => {
     setSelectedAssetIds((current) => {
       const next = new Set(current);
@@ -453,6 +488,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const projectTitle = project.detail?.project.title ?? (project.isLoading ? '正在载入项目…' : '画布项目');
   const saveMessage = save.error?.message ?? notice ?? undefined;
   const compact = viewportSize.width < 760;
+  const panelViews = creativeCanvasProductPanelViews(panels);
+  const canvasLayoutStyle = {
+    '--creative-canvas-left-panel-width': `${panels.left.open ? panels.left.width : 0}px`,
+    '--creative-canvas-right-panel-width': `${panels.right.width}px`,
+    '--creative-canvas-bottom-panel-height': `${panels.bottom.height}px`,
+  } as React.CSSProperties;
 
   const renderCanvasState = canvasState;
   const canvasOutline = renderCanvasState ? (
@@ -473,6 +514,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     <CreativeCanvasPropertiesPanel
       state={renderCanvasState}
       onSelectNode={(nodeId) => dispatch(canvasCommands.setSelection([nodeId]))}
+      onUpdateNode={handleUpdateNode}
     />
   ) : (
     <CreativeCanvasUnavailablePanel
@@ -497,7 +539,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
   );
 
   return (
-    <main className={styles.root} data-creative-canvas-product-route data-project-id={projectId}>
+    <main
+      className={styles.root}
+      style={canvasLayoutStyle}
+      data-creative-canvas-product-route
+      data-project-id={projectId}
+    >
       <CreativeCanvasChrome
         projectTitle={projectTitle}
         saveStatus={save.status}
@@ -507,9 +554,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
         canUndo={Boolean(canvasState && canUndoCanvas(canvasState))}
         canRedo={Boolean(canvasState && canRedoCanvas(canvasState))}
         isMiniMapOpen={miniMapOpen}
-        leftView={leftView}
-        rightView={rightView}
-        bottomView={bottomView}
+        leftView={panelViews.left}
+        rightView={panelViews.right}
+        bottomView={panelViews.bottom}
         nodeMenuOpen={nodeMenuOpen}
         backgroundMenuOpen={backgroundMenuOpen}
         compact={compact}
@@ -524,9 +571,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
         onRedo={() => dispatch(canvasCommands.redo())}
         onFitView={handleFit}
         onToggleMiniMap={() => setMiniMapOpen((open) => !open)}
-        onLeftViewChange={setLeftView}
-        onRightViewChange={setRightView}
-        onBottomViewChange={setBottomView}
+        onLeftViewChange={handleLeftViewChange}
+        onRightViewChange={handleRightViewChange}
+        onBottomViewChange={handleBottomViewChange}
         slots={{
           canvas: (
             <div ref={canvasHostRef} className={styles.canvasHost}>

@@ -159,4 +159,52 @@ describe('CanvasCasSaveController', () => {
     expect((await controller.flush()).status).toBe('saved');
     expect(revisions).toEqual(['10', '11']);
   });
+
+  test('keeps a pending-task mutation blocked on conflict until explicit remote reload', async () => {
+    const taskId = '019b0000-0000-7000-8000-000000000003';
+    const attemptedDocuments: ReturnType<typeof createEmptyCreativeProjectDocument>[] = [];
+    const controller = new CanvasCasSaveController(async (_revision, document) => {
+      attemptedDocuments.push(structuredClone(document));
+      throw new CreativeProjectRepositoryError({
+        kind: 'revision-conflict',
+        message: 'remote task feed changed',
+      });
+    });
+    const baseline = createEmptyCreativeProjectDocument(PROJECT_ID);
+    controller.reset('20', baseline);
+    controller.queue({ ...baseline, pendingTaskIds: [taskId] });
+
+    expect((await controller.flush()).status).toBe('conflict');
+    expect(attemptedDocuments[0].pendingTaskIds).toEqual([taskId]);
+    expect(controller.getSnapshot().hasPendingChanges).toBe(true);
+
+    const remote = { ...baseline, pendingTaskIds: [] };
+    controller.reset('21', remote);
+    expect(controller.getSnapshot()).toEqual({
+      status: 'idle',
+      revision: '21',
+      hasPendingChanges: false,
+      error: null,
+    });
+  });
+
+  test('retries the same durable pending-task document after a transport error', async () => {
+    const taskId = '019b0000-0000-7000-8000-000000000004';
+    let calls = 0;
+    const controller = new CanvasCasSaveController(async (_revision, document) => {
+      calls += 1;
+      expect(document.pendingTaskIds).toEqual([taskId]);
+      if (calls === 1) throw new Error('offline');
+      return { revision: '31' };
+    });
+    const baseline = createEmptyCreativeProjectDocument(PROJECT_ID);
+    controller.reset('30', baseline);
+    controller.queue({ ...baseline, pendingTaskIds: [taskId] });
+
+    expect((await controller.flush()).status).toBe('error');
+    expect(controller.getSnapshot().hasPendingChanges).toBe(true);
+    expect((await controller.flush()).status).toBe('saved');
+    expect(calls).toBe(2);
+    expect(controller.getSnapshot().revision).toBe('31');
+  });
 });

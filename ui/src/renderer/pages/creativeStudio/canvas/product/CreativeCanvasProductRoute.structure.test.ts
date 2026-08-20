@@ -20,6 +20,11 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('<CreativeCanvasChrome')).toBe(true);
     expect(source.includes('<CreativeCanvasEditor')).toBe(true);
     expect(source.includes('editorRef.current?.dispatch')).toBe(true);
+    expect(source.includes('editorRef.current?.setPanels')).toBe(true);
+    expect(source.includes('creativeCanvasProductPanelViews(panels)')).toBe(true);
+    expect(source.includes('withCreativeCanvasRightView')).toBe(true);
+    expect(source.includes('canvasCommands.updateNode(node')).toBe(true);
+    expect(source.includes('onUpdateNode={handleUpdateNode}')).toBe(true);
     expect(source.includes('useReducer(')).toBe(false);
     expect(source.includes('canvasReducer(')).toBe(false);
     expect(source.includes('export default CreativeCanvasProductRoute')).toBe(true);
