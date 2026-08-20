@@ -45,7 +45,7 @@ export interface CreativeStudioTopBarProps {
 }
 
 interface NavigationItem {
-  section: Exclude<CreativeStudioSection, 'canvas' | 'audio'>;
+  section: Exclude<CreativeStudioSection, 'canvas' | 'director' | 'audio'>;
   path: string;
   label: string;
   icon: React.ReactNode;
@@ -66,7 +66,7 @@ const CreativeStudioTopBar: React.FC<CreativeStudioTopBarProps> = ({
   const macRuntime = desktopRuntime && isMacOS();
   const showWindowControls = desktopRuntime && !macRuntime;
   const section = creativeStudioSectionForPath(location.pathname);
-  const activeSection = section === 'canvas' ? 'projects' : section;
+  const activeSection = section === 'canvas' || section === 'director' ? 'projects' : section;
   const themeToggleLabel = theme === 'light'
     ? t('settings.darkMode', { defaultValue: '深色' })
     : t('settings.lightMode', { defaultValue: '浅色' });

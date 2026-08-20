@@ -11,6 +11,7 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 
 import { useThemeContext } from '@renderer/hooks/context/ThemeContext';
 import { requestCreativeCanvasProductBeforeLeave } from '@renderer/pages/creativeStudio/canvas/product/beforeLeave';
+import { requestCreativeDirectorProductBeforeLeave } from '@renderer/pages/creativeStudio/director/product/beforeLeave';
 
 import styles from './CreativeStudioFocusShell.module.css';
 import CreativeStudioTopBar from './CreativeStudioTopBar';
@@ -24,16 +25,23 @@ const CreativeStudioFocusShell: React.FC = () => {
   const { theme, setTheme } = useThemeContext();
   const section = creativeStudioSectionForPath(location.pathname);
 
-  const navigateAfterCanvasFlush = useCallback(async (path: string, replace = false) => {
-    if (!(await requestCreativeCanvasProductBeforeLeave())) return;
-    void navigate(path, { replace });
-  }, [navigate]);
-  const navigateWithinStudio = useCallback((path: string) => {
-    void navigateAfterCanvasFlush(path);
-  }, [navigateAfterCanvasFlush]);
+  const navigateAfterProductFlush = useCallback(
+    async (path: string, replace = false) => {
+      if (!(await requestCreativeCanvasProductBeforeLeave())) return;
+      if (!(await requestCreativeDirectorProductBeforeLeave())) return;
+      void navigate(path, { replace });
+    },
+    [navigate]
+  );
+  const navigateWithinStudio = useCallback(
+    (path: string) => {
+      void navigateAfterProductFlush(path);
+    },
+    [navigateAfterProductFlush]
+  );
   const returnToWorkbench = useCallback(() => {
-    void navigateAfterCanvasFlush(WORKBENCH_HOME_PATH, true);
-  }, [navigateAfterCanvasFlush]);
+    void navigateAfterProductFlush(WORKBENCH_HOME_PATH, true);
+  }, [navigateAfterProductFlush]);
   const toggleTheme = useCallback(() => {
     void setTheme(theme === 'light' ? 'dark' : 'light');
   }, [setTheme, theme]);
