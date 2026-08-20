@@ -1,6 +1,7 @@
 use crate::error::DbError;
 use crate::models::{
-    CreativeStudioProjectRow, CreativeStudioWorkflowRow, WorkshopAssetRow, WorkshopCanvasRow,
+    CreativeStudioProjectRow, CreativeStudioWorkflowRow, CreativeStudioWorkflowRunRow,
+    WorkshopAssetRow, WorkshopCanvasRow,
 };
 
 /// Data access for the 创意工坊 (Creative Workshop) domain: canonical Creative
@@ -147,6 +148,57 @@ pub trait IWorkshopRepository: Send + Sync {
         let _ = workflow_id;
         Err(DbError::Init(
             "creative studio workflow persistence is unavailable in this repository".into(),
+        ))
+    }
+
+    // ---- canonical Creative Studio workflow runs ----
+
+    /// Durable runs, newest-updated first. When `workflow_id` is present the
+    /// result is restricted to that exact pinned definition family.
+    async fn list_creative_workflow_runs(
+        &self,
+        workflow_id: Option<&str>,
+    ) -> Result<Vec<CreativeStudioWorkflowRunRow>, DbError> {
+        let _ = workflow_id;
+        Err(DbError::Init(
+            "creative studio workflow run persistence is unavailable in this repository".into(),
+        ))
+    }
+
+    /// One durable workflow run by business ID, or `None`.
+    async fn get_creative_workflow_run(
+        &self,
+        workflow_run_id: &str,
+    ) -> Result<Option<CreativeStudioWorkflowRunRow>, DbError> {
+        let _ = workflow_run_id;
+        Err(DbError::Init(
+            "creative studio workflow run persistence is unavailable in this repository".into(),
+        ))
+    }
+
+    /// Insert revision one of a closed workflow-run aggregate.
+    async fn create_creative_workflow_run(
+        &self,
+        row: &CreativeStudioWorkflowRunRow,
+        referenced_asset_ids: &[String],
+    ) -> Result<CreativeStudioWorkflowRunRow, DbError> {
+        let _ = (row, referenced_asset_ids);
+        Err(DbError::Init(
+            "creative studio workflow run persistence is unavailable in this repository".into(),
+        ))
+    }
+
+    /// Compare-and-swap a workflow-run aggregate. The replacement must carry
+    /// the same identity and `expected_revision + 1`.
+    async fn save_creative_workflow_run(
+        &self,
+        workflow_run_id: &str,
+        expected_revision: i64,
+        row: &CreativeStudioWorkflowRunRow,
+    ) -> Result<CreativeStudioWorkflowRunRow, DbError> {
+        let _ = (workflow_run_id, expected_revision, row);
+        Err(DbError::Init(
+            "creative studio workflow run persistence is unavailable in this repository".into(),
         ))
     }
 

@@ -3,7 +3,8 @@ use serde_json::Value;
 
 use crate::error::DbError;
 use crate::models::{
-    CreativeStudioProjectRow, CreativeStudioWorkflowRow, WorkshopAssetRow, WorkshopCanvasRow,
+    CreativeStudioProjectRow, CreativeStudioWorkflowRow, CreativeStudioWorkflowRunRow,
+    WorkshopAssetRow, WorkshopCanvasRow,
 };
 use crate::repository::IWorkshopRepository;
 use crate::repository::workshop::{AssetSort, ListAssetsParams, UpdateAssetParams};
@@ -119,6 +120,53 @@ fn validate_asset_rows(rows: &[WorkshopAssetRow]) -> Result<(), DbError> {
         validate_asset_row(row)?;
     }
     Ok(())
+}
+
+fn validate_creative_workflow_run_row_ids(
+    row: &CreativeStudioWorkflowRunRow,
+) -> Result<(), DbError> {
+    nomifun_common::CreativeStudioWorkflowRunId::parse(&row.workflow_run_id).map_err(|error| {
+        DbError::Conflict(format!(
+            "creative studio workflow_run_id {:?} is not a canonical UUIDv7: {error}",
+            row.workflow_run_id
+        ))
+    })?;
+    nomifun_common::CreativeStudioWorkflowId::parse(&row.workflow_id).map_err(|error| {
+        DbError::Conflict(format!(
+            "creative studio workflow_id {:?} is not a canonical UUIDv7: {error}",
+            row.workflow_id
+        ))
+    })?;
+    Ok(())
+}
+
+fn workflow_run_json_references_asset(
+    aggregate_json: &str,
+    asset_id: &str,
+) -> Result<bool, DbError> {
+    fn contains(value: &Value, asset_id: &str) -> bool {
+        match value {
+            Value::Object(object) => object.iter().any(|(key, value)| {
+                match key.as_str() {
+                    "assetId" | "defaultAssetId" => value.as_str() == Some(asset_id),
+                    "assetIds" | "defaultAssetIds" | "referenceAssetIds"
+                    | "resultAssetIds" => value.as_array().is_some_and(|values| {
+                        values.iter().any(|value| value.as_str() == Some(asset_id))
+                    }),
+                    _ => contains(value, asset_id),
+                }
+            }),
+            Value::Array(values) => values.iter().any(|value| contains(value, asset_id)),
+            _ => false,
+        }
+    }
+
+    let aggregate: Value = serde_json::from_str(aggregate_json).map_err(|error| {
+        DbError::Conflict(format!(
+            "stored creative studio workflow run has invalid aggregate JSON: {error}"
+        ))
+    })?;
+    Ok(contains(&aggregate, asset_id))
 }
 
 #[async_trait::async_trait]
@@ -519,6 +567,169 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         Ok(())
     }
 
+    // ---- canonical Creative Studio workflow runs ----
+
+    async fn list_creative_workflow_runs(
+        &self,
+        workflow_id: Option<&str>,
+    ) -> Result<Vec<CreativeStudioWorkflowRunRow>, DbError> {
+        let rows = if let Some(workflow_id) = workflow_id {
+            nomifun_common::CreativeStudioWorkflowId::parse(workflow_id).map_err(|error| {
+                DbError::Conflict(format!(
+                    "creative studio workflow_id {workflow_id:?} is not a canonical UUIDv7: {error}"
+                ))
+            })?;
+            sqlx::query_as::<_, CreativeStudioWorkflowRunRow>(
+                "SELECT * FROM creative_studio_workflow_runs \
+                 WHERE workflow_id = ? ORDER BY updated_at DESC, id DESC",
+            )
+            .bind(workflow_id)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, CreativeStudioWorkflowRunRow>(
+                "SELECT * FROM creative_studio_workflow_runs ORDER BY updated_at DESC, id DESC",
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+        for row in &rows {
+            validate_creative_workflow_run_row_ids(row)?;
+        }
+        Ok(rows)
+    }
+
+    async fn get_creative_workflow_run(
+        &self,
+        workflow_run_id: &str,
+    ) -> Result<Option<CreativeStudioWorkflowRunRow>, DbError> {
+        nomifun_common::CreativeStudioWorkflowRunId::parse(workflow_run_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio workflow_run_id {workflow_run_id:?} is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        let row = sqlx::query_as::<_, CreativeStudioWorkflowRunRow>(
+            "SELECT * FROM creative_studio_workflow_runs WHERE workflow_run_id = ?",
+        )
+        .bind(workflow_run_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = row.as_ref() {
+            validate_creative_workflow_run_row_ids(row)?;
+        }
+        Ok(row)
+    }
+
+    async fn create_creative_workflow_run(
+        &self,
+        row: &CreativeStudioWorkflowRunRow,
+        referenced_asset_ids: &[String],
+    ) -> Result<CreativeStudioWorkflowRunRow, DbError> {
+        validate_creative_workflow_run_row_ids(row)?;
+        if row.revision != 1 {
+            return Err(DbError::Conflict(
+                "a creative studio workflow run must start at revision 1".into(),
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        for asset_id in referenced_asset_ids {
+            nomifun_common::WorkshopAssetId::parse(asset_id).map_err(|error| {
+                DbError::Conflict(format!(
+                    "creative studio workflow run asset_id {asset_id:?} is not a canonical UUIDv7: {error}"
+                ))
+            })?;
+            let locked = sqlx::query(
+                "UPDATE workshop_assets SET updated_at = updated_at \
+                 WHERE asset_id = ? AND kind = 'image'",
+            )
+            .bind(asset_id)
+            .execute(&mut *tx)
+            .await?;
+            if locked.rows_affected() == 0 {
+                return Err(DbError::Conflict(format!(
+                    "creative studio workflow run reference '{asset_id}' is missing or is not an image"
+                )));
+            }
+        }
+        sqlx::query(
+            "INSERT INTO creative_studio_workflow_runs \
+                (workflow_run_id, workflow_id, workflow_revision, revision, status, \
+                 step_ids_json, aggregate_json, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(workflow_run_id) DO NOTHING",
+        )
+        .bind(&row.workflow_run_id)
+        .bind(&row.workflow_id)
+        .bind(row.workflow_revision)
+        .bind(row.revision)
+        .bind(&row.status)
+        .bind(&row.step_ids_json)
+        .bind(&row.aggregate_json)
+        .bind(row.created_at)
+        .bind(row.updated_at)
+        .execute(&mut *tx)
+        .await?;
+        let persisted = sqlx::query_as::<_, CreativeStudioWorkflowRunRow>(
+            "SELECT * FROM creative_studio_workflow_runs WHERE workflow_run_id = ?",
+        )
+        .bind(&row.workflow_run_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| {
+            DbError::Init(format!(
+                "creative studio workflow run {} vanished after idempotent insert",
+                row.workflow_run_id
+            ))
+        })?;
+        validate_creative_workflow_run_row_ids(&persisted)?;
+        tx.commit().await?;
+        Ok(persisted)
+    }
+
+    async fn save_creative_workflow_run(
+        &self,
+        workflow_run_id: &str,
+        expected_revision: i64,
+        row: &CreativeStudioWorkflowRunRow,
+    ) -> Result<CreativeStudioWorkflowRunRow, DbError> {
+        validate_creative_workflow_run_row_ids(row)?;
+        if row.workflow_run_id != workflow_run_id || row.revision != expected_revision + 1 {
+            return Err(DbError::Conflict(
+                "creative studio workflow run replacement must preserve its ID and increment revision once"
+                    .into(),
+            ));
+        }
+        let saved = sqlx::query_as::<_, CreativeStudioWorkflowRunRow>(
+            "UPDATE creative_studio_workflow_runs \
+             SET revision = ?, status = ?, step_ids_json = ?, aggregate_json = ?, updated_at = ? \
+             WHERE workflow_run_id = ? AND revision = ? RETURNING *",
+        )
+        .bind(row.revision)
+        .bind(&row.status)
+        .bind(&row.step_ids_json)
+        .bind(&row.aggregate_json)
+        .bind(row.updated_at)
+        .bind(workflow_run_id)
+        .bind(expected_revision)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(saved) = saved {
+            return Ok(saved);
+        }
+        if self
+            .get_creative_workflow_run(workflow_run_id)
+            .await?
+            .is_none()
+        {
+            return Err(DbError::NotFound(format!(
+                "creative studio workflow run '{workflow_run_id}' not found"
+            )));
+        }
+        Err(DbError::Conflict(format!(
+            "creative studio workflow run '{workflow_run_id}' revision conflict"
+        )))
+    }
+
     // ---- canvases ----
 
     async fn list_canvases(&self) -> Result<Vec<WorkshopCanvasRow>, DbError> {
@@ -870,6 +1081,18 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         if locked.rows_affected() == 0 {
             return Err(DbError::NotFound(format!("workshop asset '{id}' not found")));
         }
+        let workflow_runs: Vec<(String, String)> = sqlx::query_as(
+            "SELECT workflow_run_id, aggregate_json FROM creative_studio_workflow_runs",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        for (workflow_run_id, aggregate_json) in workflow_runs {
+            if workflow_run_json_references_asset(&aggregate_json, id)? {
+                return Err(DbError::Conflict(format!(
+                    "workshop asset '{id}' is referenced by creative studio workflow run '{workflow_run_id}'"
+                )));
+            }
+        }
         let referencing_tasks: Vec<(i64, String)> = sqlx::query_as(
             "SELECT DISTINCT task.id, task.result_asset_ids \
              FROM creation_tasks task, json_each(task.result_asset_ids) item \
@@ -942,6 +1165,8 @@ mod tests {
     const ASSET_C3: &str = "0190f5fe-7c00-7a00-8abc-000000000163";
     const CREATIVE_PROJECT_A: &str = "0190f5fe-7c00-7a00-8abc-000000000171";
     const CREATIVE_WORKFLOW_A: &str = "0190f5fe-7c00-7a00-8abc-000000000172";
+    const CREATIVE_WORKFLOW_RUN_A: &str = "0190f5fe-7c00-7a00-8abc-000000000173";
+    const CREATIVE_WORKFLOW_STEP_A: &str = "0190f5fe-7c00-7a00-8abc-000000000174";
 
     async fn repo() -> (SqliteWorkshopRepository, crate::Database) {
         let db = init_database_memory().await.unwrap();
@@ -1087,6 +1312,102 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn creative_workflow_run_crud_filter_and_revision_compare_and_swap() {
+        let (repo, _db) = repo().await;
+        let aggregate = |revision: i64, status: &str| {
+            serde_json::json!({
+                "kind": "nomifun.creative-studio.workflow-run",
+                "version": 1,
+                "revision": revision,
+                "workflowSnapshot": {
+                    "id": CREATIVE_WORKFLOW_A,
+                    "revision": 3
+                },
+                "request": {
+                    "id": CREATIVE_WORKFLOW_RUN_A,
+                    "workflowId": CREATIVE_WORKFLOW_A,
+                    "workflowRevision": 3,
+                    "referenceAssetIds": [ASSET_1]
+                },
+                "record": {
+                    "requestId": CREATIVE_WORKFLOW_RUN_A,
+                    "workflowId": CREATIVE_WORKFLOW_A,
+                    "status": status
+                }
+            })
+            .to_string()
+        };
+        let requested_row = CreativeStudioWorkflowRunRow {
+            id: 0,
+            workflow_run_id: CREATIVE_WORKFLOW_RUN_A.into(),
+            workflow_id: CREATIVE_WORKFLOW_A.into(),
+            workflow_revision: 3,
+            revision: 1,
+            status: "requested".into(),
+            step_ids_json: serde_json::to_string(&[CREATIVE_WORKFLOW_STEP_A]).unwrap(),
+            aggregate_json: aggregate(1, "requested"),
+            created_at: 100,
+            updated_at: 100,
+        };
+        let missing_asset = repo
+            .create_creative_workflow_run(&requested_row, &[ASSET_1.into()])
+            .await
+            .unwrap_err();
+        assert!(matches!(missing_asset, DbError::Conflict(_)));
+        repo.create_asset(&sample_asset(0, ASSET_1, "image", "run input"))
+            .await
+            .unwrap();
+        let created = repo
+            .create_creative_workflow_run(&requested_row, &[ASSET_1.into()])
+            .await
+            .unwrap();
+        assert_eq!(created.revision, 1);
+        assert!(matches!(
+            repo.delete_asset(ASSET_1).await,
+            Err(DbError::Conflict(message)) if message.contains(CREATIVE_WORKFLOW_RUN_A)
+        ));
+        assert_eq!(
+            repo.list_creative_workflow_runs(Some(CREATIVE_WORKFLOW_A))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let replacement = CreativeStudioWorkflowRunRow {
+            revision: 2,
+            status: "queued".into(),
+            aggregate_json: aggregate(2, "queued"),
+            updated_at: 110,
+            ..created
+        };
+        let saved = repo
+            .save_creative_workflow_run(CREATIVE_WORKFLOW_RUN_A, 1, &replacement)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, 2);
+        assert_eq!(saved.status, "queued");
+
+        let stale = repo
+            .save_creative_workflow_run(CREATIVE_WORKFLOW_RUN_A, 1, &replacement)
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, DbError::Conflict(_)));
+        let missing = repo
+            .save_creative_workflow_run(
+                "0190f5fe-7c00-7a00-8abc-000000000175",
+                1,
+                &CreativeStudioWorkflowRunRow {
+                    workflow_run_id: "0190f5fe-7c00-7a00-8abc-000000000175".into(),
+                    ..replacement
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(missing, DbError::NotFound(_)));
     }
 
     #[tokio::test]
