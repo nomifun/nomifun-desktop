@@ -1,0 +1,54 @@
+.layer {
+  --product-edge-color: color-mix(in srgb, rgb(var(--primary-6)) 44%, var(--color-border-3));
+  --product-edge-width: 1.8px;
+
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+}
+
+.visiblePath {
+  pointer-events: none;
+  stroke: var(--product-edge-color);
+  stroke-width: var(--product-edge-width);
+  stroke-linecap: round;
+  opacity: 0.82;
+  transition:
+    stroke 120ms ease,
+    stroke-width 120ms ease,
+    opacity 120ms ease,
+    filter 120ms ease;
+}
+
+.hitPath {
+  pointer-events: stroke;
+  cursor: pointer;
+  stroke: transparent;
+  stroke-width: 18px;
+  outline: none;
+}
+
+.layer[data-edge-selected='true'] {
+  --product-edge-color: rgb(var(--primary-6));
+  --product-edge-width: 2.8px;
+}
+
+.layer[data-edge-selected='true'] .visiblePath,
+.layer:has(.hitPath:hover) .visiblePath,
+.layer:has(.hitPath:focus-visible) .visiblePath {
+  opacity: 1;
+  filter: drop-shadow(0 0 5px rgba(var(--primary-6), 0.42));
+}
+
+.layer:has(.hitPath:hover) {
+  --product-edge-width: 2.6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .visiblePath {
+    transition: none;
+  }
+}
