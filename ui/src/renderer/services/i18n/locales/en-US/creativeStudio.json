@@ -3,21 +3,12 @@
   "focus": {
     "backToWorkbench": "Back to workbench"
   },
-  "home": {
-    "eyebrow": "CREATIVE STUDIO",
-    "headline": "Turn every idea into an infinite canvas",
-    "description": "Organize assets, connect nodes, and create images, video, and sound through NomiFun's unified model capabilities in a focused full-screen workspace.",
-    "canvas": {
-      "title": "Infinite canvas",
-      "description": "Zoom, pan, and arrange the context of your work."
-    },
-    "nodes": {
-      "title": "Multimodal nodes",
-      "description": "Connect text, images, video, and sound naturally."
-    },
-    "models": {
-      "title": "Unified models",
-      "description": "Choose exact capabilities from the NomiFun model hub."
-    }
+  "navigation": {
+    "label": "Creative Studio",
+    "projects": "My canvases",
+    "image": "Image studio",
+    "video": "Video studio",
+    "prompts": "Prompt library",
+    "assets": "My assets"
   }
 }

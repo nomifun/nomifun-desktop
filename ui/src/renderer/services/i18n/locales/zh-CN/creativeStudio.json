@@ -3,21 +3,12 @@
   "focus": {
     "backToWorkbench": "返回工作台"
   },
-  "home": {
-    "eyebrow": "CREATIVE STUDIO",
-    "headline": "把灵感铺展成一张无限画布",
-    "description": "在独立的全屏创作空间里组织素材、连接节点，并通过 NomiFun 统一的模型能力完成图片、视频与声音创作。",
-    "canvas": {
-      "title": "自由画布",
-      "description": "缩放、平移与编排创作上下文。"
-    },
-    "nodes": {
-      "title": "多模态节点",
-      "description": "让文本、图片、视频与声音自然连接。"
-    },
-    "models": {
-      "title": "统一模型",
-      "description": "从 NomiFun 的模型中心精确选择能力。"
-    }
+  "navigation": {
+    "label": "创意工坊",
+    "projects": "我的画布",
+    "image": "生图工作台",
+    "video": "视频创作台",
+    "prompts": "提示词库",
+    "assets": "我的素材"
   }
 }
