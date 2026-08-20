@@ -24,6 +24,7 @@ const summary = (projectId = PROJECT_ID) => ({
   title: '产品视觉探索',
   revision: '12',
   nodeCount: 0,
+  connectionCount: 0,
   createdAt: 1_770_000_000_000,
   updatedAt: 1_770_000_100_000,
 });
@@ -116,14 +117,24 @@ describe('Creative Studio v1 document contract', () => {
       locked: false,
       data: { text: '镜头描述', format: 'markdown', fontSize: 16, textAlign: 'left' },
     };
+    const image: CreativeCanvasNode = {
+      id: 'image-1',
+      type: 'image',
+      position: { x: 360, y: 60 },
+      size: { width: 320, height: 240 },
+      groupId: group.id,
+      zIndex: 2,
+      locked: false,
+      data: { assetId: null, caption: '', alt: '', fit: 'contain', naturalSize: null },
+    };
     const document = {
       ...createEmptyCreativeProjectDocument(PROJECT_ID),
-      nodes: [group, text],
+      nodes: [group, text, image],
       connections: [
         {
           id: 'edge-1',
-          sourceNodeId: group.id,
-          targetNodeId: text.id,
+          sourceNodeId: text.id,
+          targetNodeId: image.id,
           sourceHandle: null,
           targetHandle: null,
         },
@@ -138,6 +149,69 @@ describe('Creative Studio v1 document contract', () => {
       () => parseCreativeProjectDocument(missingTarget),
       'INVALID_DOCUMENT',
       '$.connections[0].targetNodeId'
+    );
+  });
+
+  test('rejects graph states the editor cannot create', () => {
+    const image: CreativeCanvasNode = {
+      id: 'image-1',
+      type: 'image',
+      position: { x: 0, y: 0 },
+      size: { width: 320, height: 240 },
+      groupId: null,
+      zIndex: 0,
+      locked: false,
+      data: { assetId: null, caption: '', alt: '', fit: 'contain', naturalSize: null },
+    };
+    const director: CreativeCanvasNode = {
+      id: 'director-1',
+      type: 'director',
+      position: { x: 400, y: 0 },
+      size: { width: 360, height: 300 },
+      groupId: null,
+      zIndex: 1,
+      locked: false,
+      data: { sceneId: null, cameraId: null, timelineMs: 0, durationMs: 0 },
+    };
+    const valid = {
+      ...createEmptyCreativeProjectDocument(PROJECT_ID),
+      nodes: [image, director],
+      connections: [
+        {
+          id: 'edge-1',
+          sourceNodeId: image.id,
+          targetNodeId: director.id,
+          sourceHandle: null,
+          targetHandle: null,
+        },
+      ],
+    };
+
+    expect(parseCreativeProjectDocument(valid).connections).toHaveLength(1);
+
+    const selfConnected = structuredClone(valid);
+    selfConnected.connections[0].targetNodeId = image.id;
+    expectContractError(
+      () => parseCreativeProjectDocument(selfConnected),
+      'INVALID_DOCUMENT',
+      '$.connections[0].targetNodeId'
+    );
+
+    const directorOutput = structuredClone(valid);
+    directorOutput.connections[0].sourceNodeId = director.id;
+    directorOutput.connections[0].targetNodeId = image.id;
+    expectContractError(
+      () => parseCreativeProjectDocument(directorOutput),
+      'INVALID_DOCUMENT',
+      '$.connections[0].sourceNodeId'
+    );
+
+    const duplicate = structuredClone(valid);
+    duplicate.connections.push({ ...duplicate.connections[0], id: 'edge-2' });
+    expectContractError(
+      () => parseCreativeProjectDocument(duplicate),
+      'INVALID_DOCUMENT',
+      '$.connections[1]'
     );
   });
 
@@ -181,6 +255,15 @@ describe('Creative Studio project wire contract', () => {
       () => parseCreativeProjectDetailResponse({ project: { ...summary(), nodeCount: 1 }, document }),
       'INVALID_RESPONSE',
       '$.project.nodeCount'
+    );
+    expectContractError(
+      () =>
+        parseCreativeProjectDetailResponse({
+          project: { ...summary(), connectionCount: 1 },
+          document,
+        }),
+      'INVALID_RESPONSE',
+      '$.project.connectionCount'
     );
   });
 

@@ -20,6 +20,7 @@ const summary = {
   title: 'Untitled canvas',
   revision: '1',
   nodeCount: 0,
+  connectionCount: 0,
   createdAt: 1_770_000_000_000,
   updatedAt: 1_770_000_000_000,
 };

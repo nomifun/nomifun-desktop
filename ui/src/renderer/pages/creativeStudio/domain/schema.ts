@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ModelTask } from '@/common/config/storage';
+
 /** Canonical persistence marker for the rebuilt Creative Studio product. */
 export const CREATIVE_STUDIO_DOCUMENT_SCHEMA = 'nomifun.creative-studio/v1' as const;
 
@@ -36,12 +38,10 @@ export interface CreativeViewport extends CreativePoint {
   zoom: number;
 }
 
-export type CreativeModelTask =
-  | 'chat'
-  | 'image_generation'
-  | 'image_edit'
-  | 'video_generation'
-  | 'speech_synthesis';
+export type CreativeModelTask = Extract<
+  ModelTask,
+  'chat' | 'image_generation' | 'image_edit' | 'video_generation' | 'speech_synthesis'
+>;
 
 export type CreativeGenerationStatus =
   | 'idle'
@@ -217,6 +217,7 @@ export interface CreativeProjectSummary {
   /** Decimal, monotonic document revision used for compare-and-swap saves. */
   revision: string;
   nodeCount: number;
+  connectionCount: number;
   /** Unix epoch milliseconds. */
   createdAt: number;
   /** Unix epoch milliseconds. */

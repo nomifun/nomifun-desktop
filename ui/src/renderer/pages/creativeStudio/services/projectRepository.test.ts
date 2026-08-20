@@ -23,6 +23,7 @@ const project = {
   title: 'Project',
   revision: '1',
   nodeCount: 0,
+  connectionCount: 0,
   createdAt: 100,
   updatedAt: 200,
 };
