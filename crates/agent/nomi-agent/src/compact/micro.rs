@@ -233,6 +233,7 @@ mod tests {
             role: Role::Assistant,
             content: blocks,
             timestamp: Some(ts),
+            provider_round_id: None,
         }
     }
 

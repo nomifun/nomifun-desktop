@@ -5,12 +5,14 @@
  */
 
 import type { IMessageTips } from '@/common/chat/chatLib';
+import { ipcBridge } from '@/common';
+import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { toDisplayText } from '@/common/chat/displayText';
-import { Collapse, Tag } from '@arco-design/web-react';
+import { Collapse, Message, Tag } from '@arco-design/web-react';
 import { Attention, CheckOne } from '@icon-park/react';
 import { theme } from '@/platform';
 import classNames from 'classnames';
-import React, { useMemo } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import MarkdownView from '@renderer/components/Markdown';
 import FeedbackButton from '@renderer/components/base/FeedbackButton';
@@ -68,6 +70,8 @@ const useErrorRetry = (message: IMessageTips): (() => void) | null => {
   const messageList = useMessageList();
   return useMemo(() => {
     if (message.content.type !== 'error') return null;
+    if (message.content.recovery) return null;
+    if (message.content.error?.retryable === false) return null;
     if (conversationContext?.type !== 'nomi') return null;
     if (conversationContext.readOnly === true) return null;
     if (conversationContext.isProcessing === true) return null;
@@ -81,7 +85,74 @@ const useErrorRetry = (message: IMessageTips): (() => void) | null => {
     const { text } = parseMessageFileMarker(rawContent, 'right');
     if (!text.trim()) return null;
     return () => emitter.emit('sendbox.edit', { msgId: retryMessageId, createdAt: retryCreatedAt, content: text });
-  }, [conversationContext, message.content.type, message.created_at, messageList]);
+  }, [conversationContext, message.content, message.created_at, messageList]);
+};
+
+type ContinueState = 'idle' | 'pending' | 'accepted' | 'stale';
+
+const useTruncatedContinuation = (message: IMessageTips) => {
+  const { t } = useTranslation();
+  const conversationContext = useConversationContextSafe();
+  const [state, setState] = useState<ContinueState>('idle');
+  const recovery = message.content.recovery;
+  const expectedUiErrorCode =
+    recovery?.failure_code === 'output_truncated'
+      ? 'OUTPUT_TRUNCATED'
+      : recovery?.failure_code === 'turn_requests_exhausted'
+        ? 'TURN_REQUESTS_EXHAUSTED'
+        : undefined;
+  const visible = Boolean(
+    message.content.type === 'error' &&
+      message.content.error?.retryable === true &&
+      recovery &&
+      message.content.error.code === expectedUiErrorCode &&
+      conversationContext?.type === 'nomi' &&
+      conversationContext.readOnly !== true
+  );
+  const disabled =
+    !visible || conversationContext?.isProcessing === true || state === 'pending' || state === 'accepted' || state === 'stale';
+
+  const continueTurn = useCallback(async () => {
+    if (!recovery || !conversationContext || disabled) return;
+    setState('pending');
+    try {
+      await ipcBridge.conversation.continueTruncated.invoke({
+        conversation_id: conversationContext.conversation_id,
+        source_message_id: recovery.source_message_id,
+        // One source failure owns exactly one continuation operation. The
+        // stable key absorbs double-clicks, transport retries, and remounts.
+        idempotency_key: recovery.source_message_id,
+      });
+      setState('accepted');
+    } catch (error) {
+      if (isBackendHttpError(error) && error.status === 409) {
+        setState('stale');
+        Message.warning(
+          t('conversation.truncation.stale', {
+            defaultValue: 'This interrupted turn has already been superseded.',
+          })
+        );
+        return;
+      }
+      setState('idle');
+      Message.error(
+        t('conversation.truncation.failed', {
+          defaultValue: 'Could not continue the interrupted turn.',
+        })
+      );
+    }
+  }, [conversationContext, disabled, recovery, t]);
+
+  const label =
+    state === 'pending'
+      ? t('conversation.truncation.continuing', { defaultValue: 'Continuing…' })
+      : state === 'accepted'
+        ? t('conversation.truncation.accepted', { defaultValue: 'Continuation started' })
+        : state === 'stale'
+          ? t('conversation.truncation.superseded', { defaultValue: 'Already superseded' })
+          : t('conversation.truncation.continue', { defaultValue: 'Continue execution' });
+
+  return { visible, disabled, label, continueTurn };
 };
 
 const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
@@ -91,11 +162,24 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
   const structuredError = type === 'error' ? message.content.error : undefined;
   const { json, data } = useFormatContent(content);
   const retry = useErrorRetry(message);
+  const continuation = useTruncatedContinuation(message);
   const retryButton = retry ? (
     <button type='button' className='message-error-note__retry' data-testid='message-error-retry' onClick={retry}>
       {t('common.retry', { defaultValue: 'Retry' })}
     </button>
   ) : null;
+  const continueButton = continuation.visible ? (
+    <button
+      type='button'
+      className='message-error-note__retry'
+      data-testid='message-error-continue-truncated'
+      disabled={continuation.disabled}
+      onClick={() => void continuation.continueTurn()}
+    >
+      {continuation.label}
+    </button>
+  ) : null;
+  const recoveryButton = continueButton ?? retryButton;
 
   const displayContent = json ? '' : content;
   const shouldShowFeedback = type === 'error';
@@ -188,7 +272,7 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
                   )}
                   {shouldShowFeedback && (
                     <div className='message-error-note__actions'>
-                      {retryButton}
+                      {recoveryButton}
                       <FeedbackButton className='message-error-note__feedback' />
                     </div>
                   )}
@@ -215,7 +299,7 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
           </div>
           {type === 'error' && (
             <div className='flex justify-end items-center gap-8px'>
-              {retryButton}
+              {recoveryButton}
               <FeedbackButton />
             </div>
           )}
@@ -235,7 +319,7 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
         </div>
         {shouldShowFeedback && (
           <div className='flex justify-end items-center gap-8px'>
-            {retryButton}
+            {recoveryButton}
             <FeedbackButton />
           </div>
         )}

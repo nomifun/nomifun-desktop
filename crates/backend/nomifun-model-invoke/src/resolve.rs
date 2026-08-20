@@ -440,6 +440,11 @@ impl ModelInvokeService {
                 "model capability context_limit must be positive",
             ));
         }
+        if capability.output_limit.is_some_and(|value| value <= 0) {
+            return Err(InvokeError::config(
+                "model capability output_limit must be positive",
+            ));
+        }
 
         Ok(ResolvedTaskConfig {
             provider_id: provider.provider_id,
@@ -453,6 +458,7 @@ impl ModelInvokeService {
             transport,
             provider_params,
             context_limit: capability.context_limit,
+            output_limit: capability.output_limit,
             bedrock_config: provider.bedrock_config,
         })
     }

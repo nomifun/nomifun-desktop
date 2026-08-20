@@ -20,8 +20,8 @@ use crate::artifact_store::{
 };
 use crate::protocol::events::{
     AgentStatusEventData, AgentStreamEvent, ErrorEventData, FinishEventData, PlanEventData,
-    StartEventData, TextEventData, ThinkingEventData, TipType, TipsEventData, ToolCallEventData,
-    ToolCallRetryData, ToolCallStatus,
+    OutputDiscardedEventData, StartEventData, TextEventData, ThinkingEventData, TipType,
+    TipsEventData, ToolCallEventData, ToolCallRetryData, ToolCallStatus,
 };
 
 pub struct BackendOutputSink {
@@ -50,6 +50,10 @@ pub struct BackendOutputSink {
     /// automatic continuations share this state; only the manager's accepted
     /// turn boundary begins/seals it.
     artifact_delivery_turn: Mutex<ArtifactDeliveryTurn>,
+    /// Receipt-gated prose length at the most recent non-destructive Start.
+    /// Internal retries truncate to this exact boundary instead of erasing a
+    /// valid prefix retained across a host-steering pass.
+    held_text_checkpoint: Mutex<Option<usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -693,6 +697,7 @@ impl BackendOutputSink {
             active_tool_calls: Mutex::new(HashMap::new()),
             tool_result_contexts: Mutex::new(HashMap::new()),
             artifact_delivery_turn: Mutex::new(ArtifactDeliveryTurn::default()),
+            held_text_checkpoint: Mutex::new(None),
         }
     }
 
@@ -2260,22 +2265,6 @@ impl BackendOutputSink {
         self.abort_artifact_delivery_turn_with_reason(reason);
     }
 
-    /// Fail any active call defensively before a MaxTokens retry. The engine no
-    /// longer publishes partial provider deltas, so this is normally a no-op;
-    /// retaining the cleanup prevents an already-published committed call from
-    /// leaking into a following stream after an unexpected terminal path.
-    pub(crate) fn truncate_active_tool_calls_for_auto_continue(&self, reason: &str) {
-        let output = format!(
-            "The provider response ended at {reason}; this incomplete tool call was not executed. The task is continuing in a new stream."
-        );
-        self.terminate_active_tool_calls(
-            ToolCallStatus::Error,
-            output,
-            "Tool call truncated",
-            "Failed to resolve active tool calls before automatic continuation",
-        );
-    }
-
     /// Citation reflow: parse the `<nomi-mem-citation>` block from the turn's
     /// final assistant text and bump each cited memory file's usage stats.
     /// Silent on every failure — a stale citation or unreadable file must
@@ -2816,9 +2805,67 @@ impl OutputSink for BackendOutputSink {
         if let Ok(mut buf) = self.turn_text.lock() {
             buf.clear();
         }
+        let held_text_len = self
+            .artifact_delivery_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .held_text
+            .len();
+        *self
+            .held_text_checkpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(held_text_len);
         let _ = self
             .event_tx
             .send(AgentStreamEvent::Start(StartEventData { session_id: None }));
+    }
+
+    fn emit_output_discarded(&self, _msg_id: &str, restart_attempt: u32) {
+        self.fail_active_tool_calls(
+            "The model output was discarded before the tool call reached a terminal state.",
+        );
+        self.turn_text
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        let checkpoint = *self
+            .held_text_checkpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut turn = self
+            .artifact_delivery_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(checkpoint) = checkpoint else {
+            drop(turn);
+            let _ = self.event_tx.send(AgentStreamEvent::Error(
+                ErrorEventData::legacy(
+                    "The model discarded receipt-gated output without a stream-start checkpoint",
+                    None,
+                ),
+            ));
+            return;
+        };
+        if checkpoint > turn.held_text.len() || !turn.held_text.is_char_boundary(checkpoint) {
+            drop(turn);
+            let _ = self.event_tx.send(AgentStreamEvent::Error(
+                ErrorEventData::legacy(
+                    "The receipt-gated output checkpoint no longer matched the provisional text",
+                    None,
+                ),
+            ));
+            return;
+        }
+        turn.held_text.truncate(checkpoint);
+        let retained_len = turn.held_text.len();
+        drop(turn);
+        *self
+            .held_text_checkpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(retained_len);
+        let _ = self.event_tx.send(AgentStreamEvent::OutputDiscarded(
+            OutputDiscardedEventData { restart_attempt },
+        ));
     }
 
     fn emit_stream_end(
@@ -3056,48 +3103,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_continue_marks_active_tool_as_truncated_not_completed() {
-        let (sink, mut rx) = make_sink();
-        sink.emit_tool_call(
-            "call_write_1",
-            "Write",
-            r#"{"file_path":"/tmp/index.html"}"#,
-        );
-        let _running = rx.try_recv().unwrap();
-
-        sink.truncate_active_tool_calls_for_auto_continue("output token limit");
-
-        match rx.try_recv().unwrap() {
-            AgentStreamEvent::ToolCall(data) => {
-                assert_eq!(data.call_id, "nomi-call_write_1");
-                assert_eq!(data.name, "Write");
-                assert_eq!(data.status, ToolCallStatus::Error);
-                assert_eq!(data.input.as_ref().unwrap()["file_path"], "/tmp/index.html");
-                assert!(
-                    data.output
-                        .as_deref()
-                        .unwrap()
-                        .contains("incomplete tool call was not executed")
-                );
-            }
-            other => panic!("Expected ToolCall, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn auto_continue_ignores_finished_tool() {
-        let (sink, mut rx) = make_sink();
-        sink.emit_tool_call("call_read_1", "Read", r#"{"path":"/tmp/a.txt"}"#);
-        let _running = rx.try_recv().unwrap();
-        sink.emit_tool_result("call_read_1", "Read", false, "ok");
-        let _completed = rx.try_recv().unwrap();
-
-        sink.truncate_active_tool_calls_for_auto_continue("output token limit");
-
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
     fn fail_active_tool_calls_marks_pending_tool_error_and_drains_it() {
         let (sink, mut rx) = make_sink();
         sink.emit_tool_call(
@@ -3122,7 +3127,7 @@ mod tests {
             other => panic!("Expected ToolCall, got {:?}", other),
         }
 
-        sink.truncate_active_tool_calls_for_auto_continue("output token limit");
+        sink.fail_active_tool_calls("a second attempt at the same call");
         assert!(rx.try_recv().is_err(), "a failed call must not be recovered twice");
     }
 
@@ -3272,6 +3277,54 @@ mod tests {
             AgentStreamEvent::Start(_) => {}
             other => panic!("Expected Start, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn output_discard_restores_held_text_checkpoint_and_clears_tool_survivors() {
+        let (sink, mut rx) = make_sink();
+        sink.begin_artifact_delivery_turn();
+        sink.require_image_artifact_for_turn().unwrap();
+        sink.emit_stream_start("msg-1");
+        assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::Start(_)));
+        sink.emit_text_delta("retained prefix", "msg-1");
+        assert!(rx.try_recv().is_err(), "receipt-gated text stays provisional");
+        // Host steering establishes the boundary without erasing the already
+        // accepted receipt-gated prefix.
+        sink.emit_stream_start("msg-1");
+        assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::Start(_)));
+        sink.emit_text_delta("discard me", "msg-1");
+        sink.turn_text.lock().unwrap().push_str("citation draft");
+        sink.emit_tool_call("running", "Read", "{}");
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentStreamEvent::ToolCall(ToolCallEventData {
+                status: ToolCallStatus::Running,
+                ..
+            })
+        ));
+
+        sink.emit_output_discarded("msg-1", 2);
+
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentStreamEvent::ToolCall(ToolCallEventData {
+                status: ToolCallStatus::Error,
+                ..
+            })
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentStreamEvent::OutputDiscarded(OutputDiscardedEventData {
+                restart_attempt: 2,
+            })
+        ));
+        assert!(sink.active_tool_calls.lock().unwrap().is_empty());
+        assert!(sink.turn_text.lock().unwrap().is_empty());
+        let turn = sink.artifact_delivery_turn.lock().unwrap();
+        assert!(turn.active);
+        assert!(turn.required_contract.is_some());
+        assert!(turn.hold_text_until_verified);
+        assert_eq!(turn.held_text, "retained prefix");
     }
 
     #[test]
@@ -4778,7 +4831,7 @@ mod tests {
             }
             other => panic!("expected Plan, got {other:?}"),
         }
-        sink.truncate_active_tool_calls_for_auto_continue("max_tokens");
+        sink.fail_active_tool_calls("a later lifecycle boundary");
         // The successful plan result must settle the source tool without
         // emitting a synthetic continuation recovery later.
         assert!(rx.try_recv().is_err());
@@ -4861,7 +4914,7 @@ mod tests {
 
         // The plan result must settle the active call so no synthetic
         // recovery frame is emitted at a later lifecycle boundary.
-        sink.truncate_active_tool_calls_for_auto_continue("max_tokens");
+        sink.fail_active_tool_calls("a later lifecycle boundary");
         assert!(rx.try_recv().is_err());
     }
 

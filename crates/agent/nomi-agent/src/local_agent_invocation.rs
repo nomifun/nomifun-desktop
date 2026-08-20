@@ -14,7 +14,7 @@ use nomi_tools::grep::GrepTool;
 use nomi_tools::read::ReadTool;
 use nomi_tools::registry::ToolRegistry;
 use nomi_tools::write::WriteTool;
-use nomi_types::message::TokenUsage;
+use nomi_types::message::{StopReason, TokenUsage};
 
 use crate::context_contributor::ContextContributor;
 use crate::engine::AgentEngine;
@@ -174,7 +174,6 @@ impl LocalAgentInvocationRunner {
     fn config_for_invocation(&self, invocation: &AgentInvocationInput) -> Config {
         let mut config = self.base_config.clone();
         config.max_turns = Some(invocation.max_turns);
-        config.max_tokens = invocation.max_tokens;
         if let Some(system_prompt) = invocation.system_prompt.clone() {
             config.system_prompt = Some(system_prompt);
         }
@@ -548,6 +547,14 @@ where
 
 /// Map a timeout-wrapped turn outcome to an AgentInvocationOutput. Extracted so
 /// the timeout/error/success mapping is unit-testable without a live engine.
+///
+/// A delegate that stopped on the output ceiling or its per-turn request budget
+/// did NOT complete its assignment, so it is reported as an error even though it
+/// returned `Ok`: the caller decides what to do about an unfinished delegate,
+/// and silently presenting a truncated answer as a finished one is how a parent
+/// turn builds on work that was never done. Its partial text, usage and turn
+/// count are preserved — the text is still evidence, and the tokens were really
+/// spent, so discarding the accounting would under-report the bill.
 fn map_agent_invocation_outcome(
     name: String,
     outcome: Result<
@@ -557,13 +564,50 @@ fn map_agent_invocation_outcome(
     timeout_secs: u64,
 ) -> AgentInvocationOutput {
     match outcome {
-        Ok(Ok(result)) => AgentInvocationOutput {
-            name,
-            text: result.text,
-            usage: result.usage,
-            turns: result.turns,
-            is_error: false,
-        },
+        Ok(Ok(result)) => {
+            let incomplete = match result.stop_reason {
+                StopReason::MaxTokens => {
+                    Some("stopped at its output token ceiling before finishing")
+                }
+                StopReason::MaxTurns => {
+                    Some("exhausted its per-turn provider-request budget before finishing")
+                }
+                StopReason::Refusal => Some("was refused by the provider before finishing"),
+                // A delegate whose round restarted after the output ceiling, was
+                // cut off mid state-changing call, had such tools available, and
+                // still completed no state-changing effect has not done the work
+                // its text claims. The parent must not build on it. Gated on all
+                // four machine facts so a plan-mode or Info-only delegate — which
+                // structurally cannot produce a state-changing effect — is never
+                // judged for producing none.
+                StopReason::EndTurn
+                    if result.rounds > 1
+                        && result.state_changing_tools_advertised
+                        && result.cutoff_state_changing > 0
+                        && result.effects_ok == 0 =>
+                {
+                    Some(
+                        "restarted after its output token ceiling and never completed the \
+                         state-changing tool call it was cut off from",
+                    )
+                }
+                StopReason::EndTurn | StopReason::ToolUse => None,
+            };
+            AgentInvocationOutput {
+                name,
+                text: match incomplete {
+                    Some(reason) => format!(
+                        "Delegated Agent {reason}; the work below is INCOMPLETE and must not be \
+                         treated as a finished result:\n\n{}",
+                        result.text
+                    ),
+                    None => result.text,
+                },
+                usage: result.usage,
+                turns: result.turns,
+                is_error: incomplete.is_some(),
+            }
+        }
         Ok(Err(e)) => AgentInvocationOutput {
             name,
             text: format!("Delegated Agent error: {}", e),
@@ -981,7 +1025,7 @@ mod phase7_tests {
             api_key: "sk-test".into(),
             base_url: "http://localhost:0".into(),
             model: "gpt-test-model".into(),
-            max_tokens: 1024,
+            output_max_tokens: Some(1024),
             max_turns: Some(5),
             system_prompt: None,
             project_instructions: Default::default(),
@@ -1056,7 +1100,6 @@ mod phase7_tests {
             name: name.to_owned(),
             prompt: format!("task for {name}"),
             max_turns: 5,
-            max_tokens: 1024,
             system_prompt: None,
             model: None,
             effort: None,
@@ -1320,11 +1363,76 @@ mod phase7_tests {
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
                 turns: 3,
+                rounds: 1,
+                effects_ok: 0,
+                cutoff_state_changing: 0,
+                state_changing_tools_advertised: true,
             }));
         let r = map_agent_invocation_outcome("a".to_string(), ok, 300);
         assert!(!r.is_error);
         assert_eq!(r.text, "done");
         assert_eq!(r.turns, 3);
+    }
+
+    fn restarted(
+        rounds: usize,
+        effects_ok: usize,
+        cutoff_state_changing: usize,
+        state_changing_tools_advertised: bool,
+    ) -> Result<Result<AgentResult, AgentError>, tokio::time::error::Elapsed> {
+        Ok(Ok(AgentResult {
+            text: "Created miniapp.html.".to_string(),
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+            turns: 1,
+            rounds,
+            effects_ok,
+            cutoff_state_changing,
+            state_changing_tools_advertised,
+        }))
+    }
+
+    /// The short false completion claim A1 provably cannot see: `EndTurn` with
+    /// non-empty text. Only the four-fact conjunction catches it.
+    #[test]
+    fn a_restarted_delegate_that_completed_no_state_changing_call_is_incomplete() {
+        let r = map_agent_invocation_outcome("a".to_string(), restarted(2, 0, 1, true), 300);
+        assert!(r.is_error);
+        assert!(
+            r.text.contains("never completed the state-changing tool call"),
+            "text: {}",
+            r.text
+        );
+        assert!(r.text.contains("Created miniapp.html."), "partial text is evidence and is kept");
+    }
+
+    #[test]
+    fn a_delegate_that_never_restarted_is_not_judged() {
+        let r = map_agent_invocation_outcome("a".to_string(), restarted(1, 0, 1, true), 300);
+        assert!(!r.is_error, "text: {}", r.text);
+    }
+
+    /// Plan mode and model-only runtimes advertise only Info tools, so they can
+    /// never produce a state-changing effect. Judging them for producing none
+    /// would convert every completed plan-mode turn into a hard failure.
+    #[test]
+    fn a_delegate_with_no_state_changing_tools_advertised_is_not_judged() {
+        let r = map_agent_invocation_outcome("a".to_string(), restarted(2, 0, 1, false), 300);
+        assert!(!r.is_error, "text: {}", r.text);
+    }
+
+    /// A restart driven by an open plan or a prior effect — rather than by a
+    /// truncated state-changing call — is not evidence of an abandoned write.
+    #[test]
+    fn a_delegate_with_no_truncated_state_changing_call_is_not_judged() {
+        let r = map_agent_invocation_outcome("a".to_string(), restarted(2, 0, 0, true), 300);
+        assert!(!r.is_error, "text: {}", r.text);
+    }
+
+    #[test]
+    fn a_restarted_delegate_that_did_change_state_is_not_judged() {
+        let r = map_agent_invocation_outcome("a".to_string(), restarted(2, 1, 1, true), 300);
+        assert!(!r.is_error, "text: {}", r.text);
     }
 
     #[test]
@@ -1616,7 +1724,6 @@ mod phase7_tests {
             name: "test-agent".to_string(),
             prompt: "do the task".to_string(),
             max_turns: 5,
-            max_tokens: 1024,
             system_prompt: Some("you are helpful".to_string()),
             model: None,
             effort: None,
@@ -1625,6 +1732,22 @@ mod phase7_tests {
         };
         assert_eq!(config.name, "test-agent");
         assert_eq!(config.max_turns, 5);
+    }
+
+    #[test]
+    fn delegated_agent_inherits_the_session_output_ceiling() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut base = test_config();
+        base.output_max_tokens = Some(12_345);
+        let runner = LocalAgentInvocationRunner::new(
+            Arc::new(SequenceProvider::new(&["done"])),
+            base,
+            cwd.path().to_path_buf(),
+        );
+
+        let child = runner.config_for_invocation(&invocation("child"));
+
+        assert_eq!(child.output_max_tokens, Some(12_345));
     }
 
     #[tokio::test]

@@ -766,6 +766,10 @@ impl ChannelMessageService {
     /// (e.g., internal status updates, thinking traces).
     pub fn process_stream_event(event: &AgentStreamEvent) -> Option<StreamAction> {
         match event {
+            AgentStreamEvent::Start(_) => Some(StreamAction::StartCheckpoint),
+            AgentStreamEvent::OutputDiscarded(data) => Some(StreamAction::DiscardOutput {
+                restart_attempt: data.restart_attempt,
+            }),
             AgentStreamEvent::Text(data) => Some(StreamAction::AppendText(data.content.clone())),
             AgentStreamEvent::Finish(data)
                 if matches!(
@@ -838,8 +842,7 @@ impl ChannelMessageService {
             // with no options is unanswerable, so it is dropped (None).
             AgentStreamEvent::Permission(data) => confirmation_to_decision(data.confirmation()),
             // Events that don't produce user-facing messages
-            AgentStreamEvent::Start(_)
-            | AgentStreamEvent::Tips(_)
+            AgentStreamEvent::Tips(_)
             | AgentStreamEvent::ToolGroup(_)
             | AgentStreamEvent::AgentStatus(_)
             | AgentStreamEvent::Plan(_)
@@ -1008,6 +1011,11 @@ pub struct SendResult {
 /// Actions derived from agent stream events.
 #[derive(Debug, Clone)]
 pub enum StreamAction {
+    /// Establish a non-destructive text checkpoint. Repeated starts are used by
+    /// host steering and deliberately retain the already-visible prefix.
+    StartCheckpoint,
+    /// Retract text appended since the most recent start checkpoint.
+    DiscardOutput { restart_attempt: u32 },
     /// Append text content to the current response.
     AppendText(String),
     /// Streaming finished.
@@ -1541,9 +1549,23 @@ mod tests {
     }
 
     #[test]
-    fn start_event_produces_none() {
+    fn start_and_discard_events_produce_checkpoint_actions() {
         let event = AgentStreamEvent::Start(StartEventData { session_id: None });
-        assert!(ChannelMessageService::process_stream_event(&event).is_none());
+        assert!(matches!(
+            ChannelMessageService::process_stream_event(&event),
+            Some(StreamAction::StartCheckpoint)
+        ));
+        let event = AgentStreamEvent::OutputDiscarded(
+            nomifun_ai_agent::protocol::events::OutputDiscardedEventData {
+                restart_attempt: 2,
+            },
+        );
+        assert!(matches!(
+            ChannelMessageService::process_stream_event(&event),
+            Some(StreamAction::DiscardOutput {
+                restart_attempt: 2
+            })
+        ));
     }
 
     #[test]

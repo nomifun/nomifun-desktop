@@ -13,6 +13,7 @@ import { DeleteFour, Down, Refresh, Right } from '@icon-park/react';
 import React, { useEffect, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ContextLimitSelect } from './ContextLimitSelect';
+import { OutputLimitInput } from './OutputLimitInput';
 import {
   compactCapabilityUrlSummary,
   createCapabilityDisclosureState,
@@ -41,6 +42,7 @@ import {
   isProtocolAuthSchemeAllowed,
   parseProviderParams,
   patchCapabilityDraft,
+  providerParamChainRounds,
   protocolDescriptorForDraft,
   providerParamVoice,
   reconcileCapabilityRecommendations,
@@ -50,6 +52,7 @@ import {
   resolvedCapabilityUrl,
   rootMatchesShape,
   withProviderParamVoice,
+  withProviderParamChainRounds,
   type CapabilityEndpointDescriptor,
   type CapabilityEndpointField,
   type CapabilityValidationResult,
@@ -667,6 +670,10 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
           !descriptor ||
           !selectedAuthScheme ||
           isProtocolAuthSchemeAllowed(selectedAuthScheme, descriptor.allowed_auth_schemes);
+        const outputLimitRequired = descriptor?.requires_output_ceiling ?? false;
+        const outputLimitMissing =
+          outputLimitRequired &&
+          !(typeof capability.outputLimit === 'number' && capability.outputLimit > 0);
         const recommendedConnection = descriptor?.default_connections.find(
           (connection) => (connection.connection_role ?? 'default') === selectedRole
         );
@@ -1130,6 +1137,23 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
               />
             </div>
 
+            <div className='space-y-6px'>
+              <div className='text-12px text-t-secondary'>
+                {t('settings.outputLimit', { defaultValue: 'Max output tokens' })}
+              </div>
+              <OutputLimitInput
+                value={capability.outputLimit}
+                onChange={(outputLimit) => updateCapability(capability.task, { outputLimit })}
+              />
+              {outputLimitMissing && (
+                <div className='text-11px text-danger-6' role='alert' data-output-limit-required>
+                  {t('settings.outputLimitRequired', {
+                    defaultValue: 'This protocol requires an explicit max output token value.',
+                  })}
+                </div>
+              )}
+            </div>
+
             {crossOrigin && (
               <div className='rounded-8px bg-warning-1 p-10px space-y-6px'>
                 <Checkbox
@@ -1200,7 +1224,43 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
               </div>
             )}
 
-            <div className='space-y-6px'>
+            {capability.protocol === 'openai.responses' && (
+              <div
+                className='rounded-8px bg-fill-1 p-10px space-y-6px'
+                data-chain-rounds-control
+                data-chain-rounds-json-valid={providerParamsValid ? 'true' : 'false'}
+                data-chain-rounds-enabled={providerParamChainRounds(capability.providerParamsJson) ? 'true' : 'false'}
+              >
+                <Checkbox
+                  checked={providerParamChainRounds(capability.providerParamsJson)}
+                  disabled={!providerParamsValid}
+                  onChange={(enabled) =>
+                    updateCapability(capability.task, {
+                      providerParamsJson: withProviderParamChainRounds(
+                        capability.providerParamsJson,
+                        enabled
+                      ),
+                    })
+                  }
+                >
+                  {t('settings.modelAdvanced.chainRounds', {
+                    defaultValue: 'Chain turns with previous_response_id (sets store: true)',
+                  })}
+                </Checkbox>
+                <div className={`text-11px ${providerParamsValid ? 'text-t-tertiary' : 'text-danger-6'}`}>
+                  {providerParamsValid
+                    ? t('settings.modelAdvanced.chainRoundsRetention', {
+                        defaultValue:
+                          'Opt-in: provider-retained response data may be kept for at least 30 days. previous_response_id links rounds but does not reduce billed input tokens.',
+                      })
+                    : t('settings.modelAdvanced.chainRoundsUnavailable', {
+                        defaultValue: 'Fix the provider parameters JSON below before changing this option.',
+                      })}
+                </div>
+              </div>
+            )}
+
+            <div className='space-y-6px' data-provider-params-json>
               <div className='text-12px text-t-secondary'>
                 {t('settings.modelAdvanced.params', { defaultValue: '供应商参数 JSON' })}
               </div>

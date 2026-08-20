@@ -20,12 +20,14 @@ import {
   isDuplicateModelId,
   normalizeModelId,
   patchCapabilityDraft,
+  providerParamChainRounds,
   providerParamVoice,
   reconcileCapabilityRecommendations,
   removeCapabilityTask,
   resolveModelInputChange,
   requiresCrossOriginConsent,
   withProviderParamVoice,
+  withProviderParamChainRounds,
   validateModelDefinition,
   type ModelCapabilityDraft,
   type ModelProtocolManifest,
@@ -58,6 +60,7 @@ const manifest = (
       supported_tasks: [task],
       executor: 'model_invoke',
       transport: task === 'realtime_conversation' ? 'websocket' : 'http',
+      requires_output_ceiling: false,
       allowed_auth_schemes: ['bearer'],
       scopes: [],
       platforms: ['stepfun'],
@@ -364,6 +367,7 @@ describe('model definition capability selection', () => {
       allowCrossOriginCredentials: true,
       providerParamsJson: '{"voice":"alloy"}',
       contextLimit: 32_000,
+      outputLimit: 8_192,
     };
 
     expect(changeCapabilityProtocol(current, current.protocol, taskManifest)).toEqual({
@@ -509,6 +513,34 @@ describe('capability validation and serialization', () => {
     expect(result.valid).toBe(true);
   });
 
+  test('requires an output limit only when the selected protocol declares it mandatory', () => {
+    const chatManifest = manifest('chat', 'anthropic.messages');
+    chatManifest.protocols[0].requires_output_ceiling = true;
+    const chat = reconcileCapabilityRecommendations([emptyCapabilityDraft('chat')], {
+      chat: chatManifest,
+    })[0];
+
+    expect(
+      validateModelDefinition(
+        { model: 'claude', capabilities: [chat] },
+        { chat: chatManifest },
+        'https://api.anthropic.com'
+      ).errors.some(
+        (error) => error.task === 'chat' && error.code === 'output_ceiling_required'
+      )
+    ).toBe(true);
+
+    expect(
+      validateModelDefinition(
+        { model: 'claude', capabilities: [{ ...chat, outputLimit: 8_192 }] },
+        { chat: chatManifest },
+        'https://api.anthropic.com'
+      ).errors.some(
+        (error) => error.task === 'chat' && error.code === 'output_ceiling_required'
+      )
+    ).toBe(false);
+  });
+
   test('serializes multiple capabilities as typed task records', () => {
     const definition = {
       model: 'step-audio-latest',
@@ -519,6 +551,7 @@ describe('capability validation and serialization', () => {
           endpoint: '/v1/audio/speech',
           providerParamsJson: '{"voice":"cixingnansheng"}',
           contextLimit: 32000,
+          outputLimit: 16384,
         },
         {
           ...emptyCapabilityDraft('realtime_conversation'),
@@ -543,6 +576,7 @@ describe('capability validation and serialization', () => {
         endpoint: '/v1/audio/speech',
         provider_params: { voice: 'cixingnansheng' },
         context_limit: 32000,
+        output_limit: 16384,
       },
       {
         task: 'realtime_conversation',
@@ -572,6 +606,7 @@ describe('capability validation and serialization', () => {
         allow_cross_origin_credentials: true,
         provider_params: { voice: 'alloy' },
         context_limit: 4096,
+        output_limit: 8192,
       })
     ).toEqual({
       task: 'speech_synthesis',
@@ -587,6 +622,7 @@ describe('capability validation and serialization', () => {
       allowCrossOriginCredentials: true,
       providerParamsJson: '{\n  "voice": "alloy"\n}',
       contextLimit: 4096,
+      outputLimit: 8192,
     });
   });
 });
@@ -734,5 +770,42 @@ describe('provider params voice', () => {
 
   test('leaves malformed JSON untouched so a typo cannot silently discard the user text', () => {
     expect(withProviderParamVoice('not json', 'cixingnansheng')).toBe('not json');
+  });
+});
+
+describe('openai.responses round chaining provider param', () => {
+  test('reads only an explicit boolean true opt-in', () => {
+    expect(providerParamChainRounds('{"chain_rounds":true}')).toBe(true);
+    expect(providerParamChainRounds('{"chain_rounds":false}')).toBe(false);
+    expect(providerParamChainRounds('{"chain_rounds":"true"}')).toBe(false);
+    expect(providerParamChainRounds('{"temperature":0.2}')).toBe(false);
+    expect(providerParamChainRounds('not json')).toBe(false);
+  });
+
+  test('writes true and preserves every unrelated provider param', () => {
+    const updated = withProviderParamChainRounds(
+      '{"temperature":0.2,"nested":{"keep":true}}',
+      true
+    );
+    expect(JSON.parse(updated)).toEqual({
+      temperature: 0.2,
+      nested: { keep: true },
+      chain_rounds: true,
+    });
+    expect(providerParamChainRounds(updated)).toBe(true);
+  });
+
+  test('disabled deletes the key and collapses an otherwise empty object', () => {
+    expect(JSON.parse(withProviderParamChainRounds('{"chain_rounds":true,"temperature":0.2}', false))).toEqual({
+      temperature: 0.2,
+    });
+    expect(withProviderParamChainRounds('{"chain_rounds":false}', false)).toBe('');
+    expect(withProviderParamChainRounds('{"chain_rounds":true}', false)).toBe('');
+  });
+
+  test('leaves malformed input byte-identical', () => {
+    const malformed = ' {\n  "chain_rounds": tru';
+    expect(withProviderParamChainRounds(malformed, true)).toBe(malformed);
+    expect(withProviderParamChainRounds(malformed, false)).toBe(malformed);
   });
 });

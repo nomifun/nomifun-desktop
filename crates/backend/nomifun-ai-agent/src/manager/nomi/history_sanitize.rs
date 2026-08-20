@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use nomi_types::message::{ContentBlock, Message, Role};
+use nomi_types::message::{ContentBlock, Message, Role, clear_provider_round_ids};
 
 const HISTORICAL_IMAGE_NOTE: &str =
     "(Image attachment omitted during historical session recovery; capture a fresh observation if needed.)";
@@ -56,6 +56,12 @@ pub fn sanitize_session_messages(
     messages: &mut Vec<Message>,
     provider_changed: bool,
 ) -> SessionRepairStats {
+    // Desktop app resume may rebuild the provider connection, credentials, or
+    // capability selection independently of the durable transcript. Clear its
+    // saved cursors (including the empty-history path) instead of linking a
+    // newly resolved runtime to an identity owned by the prior one. Direct CLI
+    // sessions have a separate stale-parent negotiation contract.
+    clear_provider_round_ids(messages);
     if messages.is_empty() {
         return SessionRepairStats::default();
     }
@@ -251,9 +257,14 @@ mod tests {
     #[test]
     fn keeps_regular_assistant_text_message() {
         let mut messages = vec![user_text("hi"), assistant_text("hello there")];
+        messages[1].provider_round_id = Some("resp_from_previous_process".to_owned());
         let removed = sanitize_session_messages(&mut messages, false).removed_messages;
         assert_eq!(removed, 0);
         assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[1].provider_round_id, None,
+            "app resume rebuilds from local history and never reuses a persisted cursor"
+        );
     }
 
     #[test]

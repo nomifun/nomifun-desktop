@@ -105,8 +105,8 @@ pub(crate) async fn replace_for_model_tx(
                 (provider_id, model, task, traits, protocol, connection_role, \
                  base_url_override, endpoint, poll_endpoint, content_endpoint, \
                  realtime_endpoint, allow_cross_origin_credentials, provider_params, \
-                 context_limit, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 context_limit, output_limit, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(provider_id, model, task) DO UPDATE SET \
                  health = NULL, \
                  health_checked_at = NULL, \
@@ -121,6 +121,7 @@ pub(crate) async fn replace_for_model_tx(
                  allow_cross_origin_credentials = excluded.allow_cross_origin_credentials, \
                  provider_params = excluded.provider_params, \
                  context_limit = excluded.context_limit, \
+                 output_limit = excluded.output_limit, \
                  updated_at = excluded.updated_at \
              WHERE NOT ( \
                  provider_model_capabilities.traits IS excluded.traits AND \
@@ -134,7 +135,8 @@ pub(crate) async fn replace_for_model_tx(
                  provider_model_capabilities.allow_cross_origin_credentials \
                      IS excluded.allow_cross_origin_credentials AND \
                  provider_model_capabilities.provider_params IS excluded.provider_params AND \
-                 provider_model_capabilities.context_limit IS excluded.context_limit \
+                 provider_model_capabilities.context_limit IS excluded.context_limit AND \
+                 provider_model_capabilities.output_limit IS excluded.output_limit \
              )",
         )
         .bind(provider_id)
@@ -151,6 +153,7 @@ pub(crate) async fn replace_for_model_tx(
         .bind(capability.allow_cross_origin_credentials)
         .bind(capability.provider_params)
         .bind(capability.context_limit)
+        .bind(capability.output_limit)
         .bind(now)
         .bind(now)
         .execute(&mut **transaction)

@@ -102,6 +102,8 @@ pub struct ProtocolDescriptor {
     pub supported_tasks: Vec<ModelTask>,
     pub executor: ProtocolExecutorKind,
     pub transport: ProtocolTransportKind,
+    /// Whether this protocol's request body requires an explicit output limit.
+    pub requires_output_ceiling: bool,
     /// Persisted auth schemes accepted by this protocol executor. Parameterized
     /// generic transports use `header_key:<name>` / `query_key:<param>` as
     /// wildcard vocabulary; Agent protocols list their exact required scheme.

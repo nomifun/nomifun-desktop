@@ -138,6 +138,7 @@ fn managed_graph_models(
                 allow_cross_origin_credentials: false,
                 provider_params: "{}",
                 context_limit: None,
+                output_limit: None,
             },
         })
         .collect()

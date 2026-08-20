@@ -95,6 +95,48 @@ describe('knowledge writeback attempt ordering', () => {
 });
 
 describe('transformMessage runtime field normalization', () => {
+  test('retains only a valid truncated-turn recovery capability on live tips', () => {
+    const recovered = transformMessage(
+      baseWire({
+        type: 'tips',
+        data: {
+          content: 'cut off',
+          type: 'error',
+          error: { message: 'cut off', code: 'OUTPUT_TRUNCATED', retryable: true },
+          recovery: {
+            kind: 'continue_truncated',
+            source_message_id: SECOND_MESSAGE_ID,
+            failure_code: 'output_truncated',
+          },
+        },
+      })
+    );
+    expect(recovered?.type).toBe('tips');
+    if (recovered?.type !== 'tips') throw new Error('expected tips');
+    expect(recovered.content.recovery).toEqual({
+      kind: 'continue_truncated',
+      source_message_id: SECOND_MESSAGE_ID,
+      failure_code: 'output_truncated',
+    });
+
+    const malformed = transformMessage(
+      baseWire({
+        type: 'tips',
+        data: {
+          content: 'cut off',
+          type: 'error',
+          recovery: {
+            kind: 'continue_truncated',
+            source_message_id: 'not-a-message-id',
+            failure_code: 'output_truncated',
+          },
+        },
+      })
+    );
+    if (malformed?.type !== 'tips') throw new Error('expected tips');
+    expect(malformed.content.recovery).toBeUndefined();
+  });
+
   test('generic tool failure is absorbing across a late completed artifact frame', () => {
     const failed = transformMessage(
       baseWire({

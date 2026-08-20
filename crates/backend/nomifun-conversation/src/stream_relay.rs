@@ -9,14 +9,16 @@ use futures_util::FutureExt;
 use nomifun_ai_agent::{
     AgentSendError, AgentStreamEvent,
     artifact_store::{
-        ArtifactRecoveryEnvelope, ArtifactRecoveryOwner, ArtifactRecoverySource,
-        ArtifactRecoveryState, ArtifactStore, PersistedArtifact,
+        ArtifactRecoveryOwner, ArtifactRecoverySource, ArtifactRecoveryState, ArtifactStore,
+        PersistedArtifact,
     },
     protocol::events::{
         FinishEventData, PlanEventData, TextEventData, ThinkingEventData, TurnStopReason,
         tool_call::{ToolCallEventData, ToolCallStatus, validate_completed_artifact_contract},
     },
 };
+#[cfg(test)]
+use nomifun_ai_agent::artifact_store::ArtifactRecoveryEnvelope;
 
 use crate::response_middleware::{ICronService, MessageMiddleware, MiddlewareResult};
 use crate::runtime_state::{AgentTurnCancellation, ConversationRuntimeStateService};
@@ -42,6 +44,8 @@ const MAX_TERMINAL_ACTIVE_ITEMS: usize = 256;
 const ARTIFACT_DELIVERY_COMMITTED_FIELD: &str = "artifact_delivery_committed";
 const ARTIFACT_DELIVERY_PENDING_OUTPUT: &str =
     "Artifact delivery is pending final turn validation";
+const OUTPUT_TRUNCATED_UI_CODE: &str = "OUTPUT_TRUNCATED";
+const TURN_REQUESTS_EXHAUSTED_UI_CODE: &str = "TURN_REQUESTS_EXHAUSTED";
 
 /// A relay owns the producer-side in-process leases for its exact wire until
 /// every terminal path (including task cancellation/drop) exits. Dropping the
@@ -161,6 +165,19 @@ struct TextSegmentState {
 #[derive(Debug, Clone)]
 struct PersistedTextSegment {
     id: String,
+}
+
+/// Exact relay-visible text boundary established by `Start`. The engine uses
+/// `OutputDiscarded` only for an in-turn restart; restoring this snapshot keeps
+/// host steering's repeated `Start` non-destructive while retracting precisely
+/// the filtered bytes produced by the failed attempt.
+#[derive(Debug, Clone)]
+struct OutputCheckpoint {
+    full_text_len: usize,
+    text_segments_len: usize,
+    active_text: Option<TextSegmentState>,
+    stage_filter: StageDirectionFilter,
+    emitted_response: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1643,6 +1660,10 @@ impl RelayTerminal {
 /// background tokio task until the agent finishes or errors out.
 pub struct StreamRelay {
     conversation_id: String,
+    /// Durable identity of the user message whose public delivery receipt owns
+    /// this turn. Only receipt-backed public sends set it; background/internal
+    /// turns leave it absent and can never advertise a continuation action.
+    source_user_message_id: Option<String>,
     /// Stable identity of the user-visible logical turn. This remains fixed
     /// across model failover and system continuations.
     root_turn_id: String,
@@ -1779,6 +1800,7 @@ impl StreamRelay {
         let root_turn_id = msg_id.clone();
         Self {
             conversation_id,
+            source_user_message_id: None,
             root_turn_id,
             turn_root_ready: AtomicBool::new(false),
             msg_id,
@@ -1818,6 +1840,20 @@ impl StreamRelay {
     pub fn with_root_turn_id(mut self, turn_id: impl Into<String>) -> Self {
         self.root_turn_id = turn_id.into();
         self.turn_root_ready.store(false, Ordering::Release);
+        self
+    }
+
+    /// Attach the receipt-authoritative public user message that an explicit
+    /// truncated-turn continuation must address. Invalid identities fail
+    /// closed to no recovery surface rather than emitting an unusable action.
+    pub fn with_source_user_message_id(mut self, source_message_id: Option<String>) -> Self {
+        self.source_user_message_id = source_message_id.filter(|message_id| {
+            let valid = MessageId::parse(message_id).is_ok();
+            if !valid {
+                warn!(%message_id, "Ignoring invalid truncated-turn source message identity");
+            }
+            valid
+        });
         self
     }
 
@@ -2138,6 +2174,7 @@ impl StreamRelay {
         let mut stage_filter = StageDirectionFilter::default();
         let mut text_segments: Vec<PersistedTextSegment> = Vec::new();
         let mut active_text: Option<TextSegmentState> = None;
+        let mut output_checkpoint: Option<OutputCheckpoint> = None;
         let mut active_thinking: Option<ThinkingSegmentState> = None;
         let mut active_tool_calls: HashMap<String, ToolCallEventData> = HashMap::new();
         let mut completed_artifact_tool_calls: HashMap<String, ToolCallEventData> = HashMap::new();
@@ -2158,6 +2195,7 @@ impl StreamRelay {
         // switching to faults that produced NO visible output (no duplicate
         // text, no duplicate tool side effect / billing).
         let mut emitted_response = false;
+        let mut retained_non_text_response_since_checkpoint = false;
         let mut committed_artifact_count = 0usize;
         let mut send_error_done = send_error_rx.is_none();
 
@@ -2304,6 +2342,60 @@ impl StreamRelay {
                     }
 
                     match &event {
+                        AgentStreamEvent::Start(_) => {
+                            retained_non_text_response_since_checkpoint = false;
+                            output_checkpoint = Some(OutputCheckpoint {
+                                full_text_len: full_text_buffer.len(),
+                                text_segments_len: text_segments.len(),
+                                active_text: active_text
+                                    .as_ref()
+                                    .filter(|segment| !segment.buffer.is_empty())
+                                    .cloned(),
+                                stage_filter: stage_filter.clone(),
+                                emitted_response,
+                            });
+                            self.forward_to_websocket(&event);
+                        }
+                        AgentStreamEvent::OutputDiscarded(_) => {
+                            let Some(checkpoint) = output_checkpoint.as_ref() else {
+                                fatal_tracking_error = Some(
+                                    "The model discarded provisional output without a stream-start checkpoint"
+                                        .to_owned(),
+                                );
+                                continue;
+                            };
+                            let rollback_ok = self
+                                .ordered_event_side_effect(
+                                    "rollback_discarded_output",
+                                    self.rollback_discarded_output(
+                                        checkpoint,
+                                        &mut active_text,
+                                        &mut text_segments,
+                                        &mut full_text_buffer,
+                                        &mut active_thinking,
+                                        &mut stage_filter,
+                                    ),
+                                )
+                                .await;
+                            if !rollback_ok {
+                                fatal_tracking_error = Some(
+                                    "The discarded model output could not be retracted durably"
+                                        .to_owned(),
+                                );
+                                continue;
+                            }
+                            emitted_response = checkpoint.emitted_response
+                                || retained_non_text_response_since_checkpoint;
+                            retained_non_text_response_since_checkpoint = false;
+                            self.forward_to_websocket(&event);
+                            output_checkpoint = Some(OutputCheckpoint {
+                                full_text_len: full_text_buffer.len(),
+                                text_segments_len: text_segments.len(),
+                                active_text: active_text.clone(),
+                                stage_filter: stage_filter.clone(),
+                                emitted_response,
+                            });
+                        }
                         AgentStreamEvent::Thinking(data) => {
                             if data.status.as_deref() == Some("done") {
                                 let _ = self
@@ -2319,6 +2411,7 @@ impl StreamRelay {
                             // externally visible — once it streams we are no
                             // longer pre-response, so the failover seam stands down.
                             emitted_response = true;
+                            retained_non_text_response_since_checkpoint = true;
                             let _ = self
                                 .ordered_event_side_effect(
                                     "close_text_before_thinking",
@@ -2733,6 +2826,7 @@ impl StreamRelay {
                             // externally-visible action with a side effect — no
                             // failover after this, or the tool would re-run.
                             emitted_response = true;
+                            retained_non_text_response_since_checkpoint = true;
                             let has_artifact_delivery =
                                 data.status == ToolCallStatus::Completed && !data.artifacts.is_empty();
                             let active_contract_source = active_tool_calls.get(&data.call_id).cloned();
@@ -2928,6 +3022,7 @@ impl StreamRelay {
                             // Plan D4: see ToolCall — a tool group is a visible,
                             // side-effecting action; block failover.
                             emitted_response = true;
+                            retained_non_text_response_since_checkpoint = true;
                             let artifact_contract_errors = tool_group_artifact_contract_errors(
                                 entries,
                                 &completed_artifact_tool_calls,
@@ -3028,6 +3123,7 @@ impl StreamRelay {
                         }
                         AgentStreamEvent::Plan(data) => {
                             emitted_response = true;
+                            retained_non_text_response_since_checkpoint = true;
                             let _ = self
                                 .ordered_event_side_effect(
                                     "complete_thinking_before_plan",
@@ -3305,6 +3401,7 @@ impl StreamRelay {
     fn event_kind(event: &AgentStreamEvent) -> &'static str {
         match event {
             AgentStreamEvent::Start(_) => "Start",
+            AgentStreamEvent::OutputDiscarded(_) => "OutputDiscarded",
             AgentStreamEvent::Text(_) => "Text",
             AgentStreamEvent::Tips(_) => "Tips",
             AgentStreamEvent::Thinking(_) => "Thinking",
@@ -3692,6 +3789,179 @@ impl StreamRelay {
         })
     }
 
+    /// Retract every text projection produced after `checkpoint`.
+    ///
+    /// Repository acknowledgements precede live replacements. If any durable
+    /// correction fails, the caller converts the stream into a fail-closed
+    /// terminal instead of allowing stale draft text to reach finalization.
+    async fn rollback_discarded_output(
+        &self,
+        checkpoint: &OutputCheckpoint,
+        active_text: &mut Option<TextSegmentState>,
+        text_segments: &mut Vec<PersistedTextSegment>,
+        full_text_buffer: &mut String,
+        active_thinking: &mut Option<ThinkingSegmentState>,
+        stage_filter: &mut StageDirectionFilter,
+    ) -> bool {
+        if checkpoint.full_text_len > full_text_buffer.len()
+            || !full_text_buffer.is_char_boundary(checkpoint.full_text_len)
+            || checkpoint.text_segments_len > text_segments.len()
+        {
+            error!(
+                checkpoint_text_len = checkpoint.full_text_len,
+                current_text_len = full_text_buffer.len(),
+                checkpoint_segments = checkpoint.text_segments_len,
+                current_segments = text_segments.len(),
+                "Discarded-output checkpoint no longer matches relay state"
+            );
+            return false;
+        }
+
+        let checkpoint_id = checkpoint
+            .active_text
+            .as_ref()
+            .map(|segment| segment.id.as_str());
+        let finalized_suffix = &text_segments[checkpoint.text_segments_len..];
+        let current_active = active_text.as_ref();
+        let checkpoint_became_durable = checkpoint.active_text.as_ref().is_some_and(|segment| {
+            segment.record_created
+                || finalized_suffix
+                    .iter()
+                    .any(|persisted| persisted.id == segment.id)
+                || current_active
+                    .is_some_and(|current| current.id == segment.id && current.record_created)
+        });
+
+        let mut invalid_durable_ids = HashSet::new();
+        for segment in finalized_suffix {
+            if Some(segment.id.as_str()) != checkpoint_id {
+                invalid_durable_ids.insert(segment.id.clone());
+            }
+        }
+        if let Some(current) = current_active
+            && Some(current.id.as_str()) != checkpoint_id
+            && current.record_created
+        {
+            invalid_durable_ids.insert(current.id.clone());
+        }
+
+        if let Some(segment) = checkpoint.active_text.as_ref()
+            && checkpoint_became_durable
+        {
+            let update = MessageRowUpdate {
+                content: Some(
+                    json!({
+                        "content": segment.buffer,
+                        "turn_id": &self.root_turn_id,
+                    })
+                    .to_string(),
+                ),
+                status: Some(Some("work".to_owned())),
+                hidden: Some(false),
+            };
+            if let Err(error) = self.repo.update_message(&segment.id, &update).await {
+                error!(
+                    error = %ErrorChain(&error),
+                    message_id = %segment.id,
+                    "Failed to restore the retained text prefix"
+                );
+                return false;
+            }
+        }
+
+        for id in &invalid_durable_ids {
+            let update = MessageRowUpdate {
+                content: None,
+                status: Some(Some("error".to_owned())),
+                hidden: Some(true),
+            };
+            if let Err(error) = self.repo.update_message(id, &update).await {
+                error!(
+                    error = %ErrorChain(&error),
+                    message_id = %id,
+                    "Failed to hide a discarded text segment"
+                );
+                return false;
+            }
+        }
+
+        let invalid_live_id = current_active
+            .filter(|current| Some(current.id.as_str()) != checkpoint_id)
+            .map(|current| current.id.clone());
+
+        let discarded_thinking = active_thinking.as_ref().cloned();
+        if let Some(segment) = discarded_thinking.as_ref()
+            && !segment.buffer.is_empty()
+        {
+            let duration_ms = segment
+                .completed_duration_ms
+                .unwrap_or_else(|| (now_ms() - segment.started_at).max(0) as u64);
+            let row = MessageRow {
+                id: 0,
+                message_id: segment.id.clone(),
+                conversation_id: self.conversation_id.clone(),
+                msg_id: Some(segment.id.clone()),
+                r#type: "thinking".to_owned(),
+                content: json!({
+                    "content": segment.buffer,
+                    "status": "done",
+                    "duration_ms": duration_ms,
+                    "turn_id": &self.root_turn_id,
+                })
+                .to_string(),
+                position: Some("left".to_owned()),
+                status: Some("error".to_owned()),
+                hidden: true,
+                created_at: segment.started_at,
+            };
+            if !self
+                .insert_stream_message_with_reconciliation(&row, "discard_active_thinking")
+                .await
+            {
+                error!(
+                    message_id = %segment.id,
+                    "Failed to persist discarded active thinking as hidden"
+                );
+                return false;
+            }
+        }
+
+        full_text_buffer.truncate(checkpoint.full_text_len);
+        text_segments.truncate(checkpoint.text_segments_len);
+        *active_text = checkpoint.active_text.clone().map(|mut segment| {
+            segment.record_created = checkpoint_became_durable;
+            segment.flush_counter = 0;
+            segment
+        });
+        *active_thinking = None;
+        *stage_filter = checkpoint.stage_filter.clone();
+
+        let invalid_live_needs_projection = invalid_live_id
+            .filter(|id| !invalid_durable_ids.contains(id));
+        for id in invalid_durable_ids {
+            self.send_final_text_override(&id, "", true);
+        }
+        if let Some(id) = invalid_live_needs_projection {
+            self.send_final_text_override(&id, "", true);
+        }
+        if let Some(segment) = active_text.as_ref() {
+            self.send_final_text_override(&segment.id, &segment.buffer, false);
+        }
+        if let Some(segment) = discarded_thinking {
+            let duration_ms = segment
+                .completed_duration_ms
+                .unwrap_or_else(|| (now_ms() - segment.started_at).max(0) as u64);
+            self.send_thinking_override(
+                &segment.id,
+                "",
+                Some("done"),
+                Some(duration_ms),
+                true,
+            );
+        }
+        true
+    }
+
     /// Finalize assistant text on stream end and apply middleware rewrites.
     #[tracing::instrument(skip_all)]
     async fn finalize(
@@ -3720,7 +3990,21 @@ impl StreamRelay {
             committed_artifact_count,
         };
         let cancelled = Self::is_cancelled_finish(event);
-        let failed_terminal = matches!(event, AgentStreamEvent::Error(_)) || cancelled;
+        // A terminal whose stop reason proves the turn did not deliver is an
+        // INTERRUPTED response, exactly like an Error or a cancellation. The
+        // policy stated below for those two applies verbatim: a truncated draft
+        // is an unfinished thought, so its embedded cron directives must not be
+        // stripped and executed (the cron matcher is a prefix regex, so half a
+        // sentence can trip it), and it must not emit middleware continuations
+        // that mint a fresh turn and overwrite this turn's honest failure
+        // receipt. Only the `Error`/`cancelled` half of this predicate used to
+        // hold, which is how a turn cut off at its output ceiling could still
+        // drive a continuation whose success verdict replaced the truthful one.
+        let incomplete_finish = matches!(event, AgentStreamEvent::Finish(data)
+            if crate::relay_error_code::incomplete_stop_code(data.stop_reason).is_some());
+        let failed_terminal = matches!(event, AgentStreamEvent::Error(_))
+            || cancelled
+            || incomplete_finish;
         let status = if matches!(event, AgentStreamEvent::Error(_)) || cancelled {
             "error"
         } else {
@@ -3737,6 +4021,10 @@ impl StreamRelay {
         {
             self.persist_error_tips(terminal_message_id, data).await;
         }
+        if let AgentStreamEvent::Finish(data) = event {
+            self.persist_and_broadcast_truncated_recovery_tip(data)
+                .await;
+        }
 
         if !text.is_empty() {
             if !text_persistence_complete {
@@ -3748,13 +4036,35 @@ impl StreamRelay {
                 return outcome;
             }
             if failed_terminal {
-                // Error/cancelled partial output is evidence of an interrupted
-                // response, not a completed instruction stream. Preserve the
-                // already-durable raw text row with status=error, but do not
+                // Error/cancelled/incomplete partial output is evidence of an
+                // interrupted response, not a completed instruction stream.
+                // Preserve the already-durable raw text row, but do not
                 // strip/execute embedded cron commands, emit continuations, or
-                // expose it as final-text/writeback material.
+                // expose it as writeback material.
                 if suppress_error {
                     outcome.suppressed_error = Some(event.clone());
+                }
+                if incomplete_finish {
+                    // An incomplete Finish differs from an Error terminal in one
+                    // way that matters downstream: its text is real prose the user
+                    // already read, not an aborted fragment. Carry it as
+                    // `final_text` so the receipt's `result_text` still explains
+                    // what happened — cron run history and the cross-conversation
+                    // delivery notice both render a human reason from
+                    // `result_error.or(result_text)`, and both columns would
+                    // otherwise be NULL for a truncated turn, degrading it to
+                    // "unknown error".
+                    //
+                    // Safe for every verdict that consumes it: `turn_succeeded`
+                    // is false regardless because `incomplete_stop_code` is
+                    // `Some`, `map_turn_failure` reports that code ahead of any
+                    // empty-text check, and the knowledge write-back is gated on
+                    // the same stop-reason predicate. `final_text_msg_id` stays
+                    // `None`, so nothing can target this text for a rewrite.
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        outcome.final_text = Some(trimmed.to_owned());
+                    }
                 }
                 return outcome;
             }
@@ -3866,6 +4176,93 @@ impl StreamRelay {
         }
 
         outcome
+    }
+
+    fn truncated_recovery_tip(
+        stop_reason: Option<TurnStopReason>,
+    ) -> Option<(&'static str, &'static str, &'static str)> {
+        match stop_reason {
+            Some(TurnStopReason::MaxTokens) => Some((
+                crate::relay_error_code::OUTPUT_TRUNCATED,
+                OUTPUT_TRUNCATED_UI_CODE,
+                "The model reached its output limit before the task finished.",
+            )),
+            Some(TurnStopReason::MaxTurnRequests) => Some((
+                crate::relay_error_code::TURN_REQUESTS_EXHAUSTED,
+                TURN_REQUESTS_EXHAUSTED_UI_CODE,
+                "The turn exhausted its model request budget before the task finished.",
+            )),
+            _ => None,
+        }
+    }
+
+    /// Materialize the explicit-continue surface only after its durable row is
+    /// acknowledged. The row identity is minted once and reused by the live
+    /// projection, so reconnect hydration cannot create a duplicate tip.
+    async fn persist_and_broadcast_truncated_recovery_tip(&self, data: &FinishEventData) {
+        let Some(source_message_id) = self.source_user_message_id.as_deref() else {
+            return;
+        };
+        let Some((failure_code, error_code, message)) =
+            Self::truncated_recovery_tip(data.stop_reason)
+        else {
+            return;
+        };
+
+        let message_id = ConversationService::mint_msg_id();
+        let created_at = now_ms();
+        let live_data = json!({
+            "content": message,
+            "type": "error",
+            "error": {
+                "message": message,
+                "code": error_code,
+                "retryable": true,
+            },
+            "recovery": {
+                "kind": "continue_truncated",
+                "source_message_id": source_message_id,
+                "failure_code": failure_code,
+            },
+        });
+        let mut persisted_content = live_data.clone();
+        persisted_content
+            .as_object_mut()
+            .expect("truncated recovery tip is an object")
+            .insert("turn_id".to_owned(), json!(self.root_turn_id));
+        let row = MessageRow {
+            id: 0,
+            message_id: message_id.clone(),
+            conversation_id: self.conversation_id.clone(),
+            msg_id: Some(message_id.clone()),
+            r#type: "tips".to_owned(),
+            content: persisted_content.to_string(),
+            position: Some("left".to_owned()),
+            status: Some("error".to_owned()),
+            hidden: false,
+            created_at,
+        };
+        if !self
+            .insert_stream_message_with_reconciliation(&row, "create_truncated_recovery_tip")
+            .await
+        {
+            error!(
+                %source_message_id,
+                %failure_code,
+                "Suppressing truncated-turn recovery projection because persistence failed"
+            );
+            return;
+        }
+
+        self.broadcast_stream_payload(json!({
+            "conversation_id": self.conv_id(),
+            "msg_id": message_id,
+            "type": "tips",
+            "data": live_data,
+            "status": "error",
+            "hidden": false,
+            "created_at": created_at,
+        }));
     }
 
     /// Persist a terminal provider error as a `tips` message row (the "no text,
@@ -5506,6 +5903,29 @@ impl StreamRelay {
         self.forward_to_websocket_with_msg_id(msg_id, &thinking_done);
     }
 
+    fn send_thinking_override(
+        &self,
+        msg_id: &str,
+        content: &str,
+        status: Option<&str>,
+        duration: Option<u64>,
+        hidden: bool,
+    ) {
+        self.broadcast_stream_payload(json!({
+            "conversation_id": self.conv_id(),
+            "msg_id": msg_id,
+            "type": "thinking",
+            "data": {
+                "content": content,
+                "subject": null,
+                "duration": duration,
+                "status": status,
+            },
+            "hidden": hidden,
+            "replace": true,
+        }));
+    }
+
     async fn process_final_text(&self, text: &str) -> MiddlewareResult {
         let middleware = MessageMiddleware::new(
             self.cron_service
@@ -5772,7 +6192,8 @@ impl ICronService for SharedCronService {
 mod tests {
     use super::*;
     use nomifun_ai_agent::protocol::events::{
-        ErrorEventData, FinishEventData, PlanEventData, TextEventData, ThinkingEventData,
+        ErrorEventData, FinishEventData, OutputDiscardedEventData, PlanEventData, StartEventData,
+        TextEventData, ThinkingEventData,
     };
     use nomifun_common::{ConversationId, MessageId, PersistedArtifactId};
     use nomifun_db::DbError;
@@ -6806,6 +7227,312 @@ mod tests {
 
         let content: serde_json::Value = serde_json::from_str(&msg.content).unwrap();
         assert_eq!(content["content"], "Hello World");
+    }
+
+    #[tokio::test]
+    async fn discarded_output_rolls_back_to_the_latest_steering_start_without_splitting_the_prefix() {
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(TestUserEventBus::new(64));
+        let mut events = bus.subscribe();
+        let (tx, _) = broadcast::channel(64);
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo.clone(),
+            bus,
+            None,
+        );
+        let rx = tx.subscribe();
+
+        tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "retained prefix ".into(),
+        }))
+        .unwrap();
+        // Host steering starts another provider pass but deliberately keeps the
+        // current bubble. Only output after this checkpoint may be retracted.
+        tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "discarded draft".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::OutputDiscarded(
+            OutputDiscardedEventData { restart_attempt: 2 },
+        ))
+        .unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "replacement".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+
+        let outcome = relay.consume(rx).await;
+        assert_eq!(outcome.terminal, RelayTerminal::Finish);
+        assert_eq!(outcome.final_text.as_deref(), Some("retained prefix replacement"));
+        let rows = repo.take_inserts();
+        let text = rows.iter().find(|row| row.r#type == "text").unwrap();
+        let content: Value = serde_json::from_str(&text.content).unwrap();
+        assert_eq!(content["content"], "retained prefix replacement");
+
+        let projected: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(projected.iter().any(|event| {
+            event.name == "message.stream"
+                && event.data["type"] == "content"
+                && event.data["replace"] == true
+                && event.data["data"]["content"] == "retained prefix "
+        }));
+        assert!(projected.iter().any(|event| {
+            event.name == "message.stream"
+                && event.data["type"] == "output_discarded"
+                && event.data["data"]["restart_attempt"] == 2
+        }));
+    }
+
+    #[tokio::test]
+    async fn discarded_output_retracts_a_flushed_row_before_the_replacement_is_finalized() {
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(TestUserEventBus::new(128));
+        let mut events = bus.subscribe();
+        let (tx, _) = broadcast::channel(128);
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo.clone(),
+            bus,
+            None,
+        );
+        let rx = tx.subscribe();
+
+        tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "keep".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
+        for _ in 0..FLUSH_INTERVAL {
+            tx.send(AgentStreamEvent::Text(TextEventData {
+                content: "x".into(),
+            }))
+            .unwrap();
+        }
+        tx.send(AgentStreamEvent::OutputDiscarded(
+            OutputDiscardedEventData { restart_attempt: 2 },
+        ))
+        .unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "done".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+
+        let outcome = relay.consume(rx).await;
+        assert_eq!(outcome.final_text.as_deref(), Some("keepdone"));
+        let updates = repo.take_updates();
+        let rollback = updates
+            .iter()
+            .find_map(|(_, update)| {
+                let content = update.content.as_deref()?;
+                let parsed: Value = serde_json::from_str(content).ok()?;
+                (parsed["content"] == "keep"
+                    && update.status.as_ref().and_then(|status| status.as_deref()) == Some("work"))
+                    .then_some(parsed)
+            })
+            .expect("the flushed draft row must be restored to the acknowledged prefix");
+        assert_eq!(rollback["content"], "keep");
+        let projected: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(projected.iter().any(|event| {
+            event.data["type"] == "content"
+                && event.data["replace"] == true
+                && event.data["data"]["content"] == "keep"
+        }));
+    }
+
+    #[tokio::test]
+    async fn repeated_discards_and_robot_filter_restore_the_filtered_checkpoint() {
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(TestUserEventBus::new(64));
+        let (tx, _) = broadcast::channel(64);
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo,
+            bus,
+            None,
+        )
+        .with_robot_session(true);
+        let rx = tx.subscribe();
+
+        tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "hello ".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "[winking]draft one".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::OutputDiscarded(
+            OutputDiscardedEventData { restart_attempt: 2 },
+        ))
+        .unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "【laughs】draft two".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::OutputDiscarded(
+            OutputDiscardedEventData { restart_attempt: 3 },
+        ))
+        .unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "[smiles]answer".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+
+        let outcome = relay.consume(rx).await;
+        assert_eq!(outcome.terminal, RelayTerminal::Finish);
+        assert_eq!(outcome.final_text.as_deref(), Some("hello answer"));
+    }
+
+    #[tokio::test]
+    async fn discard_restores_the_robot_filters_pending_boundary_not_raw_provider_bytes() {
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(TestUserEventBus::new(64));
+        let (tx, _) = broadcast::channel(64);
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo,
+            bus,
+            None,
+        )
+        .with_robot_session(true);
+        let rx = tx.subscribe();
+
+        tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "keep [".into(),
+        }))
+        .unwrap();
+        // Start ends the legal text run, so its unmatched '[' is released and
+        // belongs to the retained checkpoint.
+        tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
+        // This unmatched opener belongs only to the failed attempt. Discard is
+        // itself the non-Text boundary that flushes it before rollback.
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "[winking".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::OutputDiscarded(
+            OutputDiscardedEventData { restart_attempt: 2 },
+        ))
+        .unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "[smiles]answer".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+
+        let outcome = relay.consume(rx).await;
+        assert_eq!(outcome.final_text.as_deref(), Some("keep [answer"));
+    }
+
+    #[tokio::test]
+    async fn discard_hides_failed_thinking_and_closes_its_live_spinner() {
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(TestUserEventBus::new(64));
+        let mut events = bus.subscribe();
+        let (tx, _) = broadcast::channel(64);
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo.clone(),
+            bus,
+            None,
+        );
+        let rx = tx.subscribe();
+
+        tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
+        tx.send(AgentStreamEvent::Thinking(ThinkingEventData {
+            content: "discarded reasoning".into(),
+            subject: None,
+            duration: None,
+            status: None,
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::OutputDiscarded(
+            OutputDiscardedEventData { restart_attempt: 2 },
+        ))
+        .unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "answer".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+
+        let outcome = relay.consume(rx).await;
+        assert_eq!(outcome.final_text.as_deref(), Some("answer"));
+        assert!(repo.take_inserts().iter().any(|row| {
+            row.r#type == "thinking"
+                && row.hidden
+                && row.status.as_deref() == Some("error")
+                && serde_json::from_str::<Value>(&row.content).is_ok_and(|content| {
+                    content["content"] == "discarded reasoning"
+                        && content["status"] == "done"
+                })
+        }));
+        let projected: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(projected.iter().any(|event| {
+            event.data["type"] == "thinking"
+                && event.data["replace"] == true
+                && event.data["hidden"] == true
+                && event.data["data"]["status"] == "done"
+                && event.data["data"]["content"] == ""
+        }));
+    }
+
+    #[tokio::test]
+    async fn failed_discard_persistence_terminates_before_later_success_events() {
+        let repo = Arc::new(RecordingRepo::new());
+        repo.fail_next_message_update();
+        let bus = Arc::new(TestUserEventBus::new(128));
+        let (tx, _) = broadcast::channel(128);
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo,
+            bus,
+            None,
+        );
+        let rx = tx.subscribe();
+
+        tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
+        for _ in 0..FLUSH_INTERVAL {
+            tx.send(AgentStreamEvent::Text(TextEventData {
+                content: "draft".into(),
+            }))
+            .unwrap();
+        }
+        tx.send(AgentStreamEvent::OutputDiscarded(
+            OutputDiscardedEventData { restart_attempt: 2 },
+        ))
+        .unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "must not win".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+
+        let outcome = relay.consume(rx).await;
+        assert!(matches!(outcome.terminal, RelayTerminal::Error { .. }));
+        assert!(outcome.final_text.is_none());
     }
 
     #[tokio::test(start_paused = true)]
@@ -8208,6 +8935,63 @@ mod tests {
         let content: serde_json::Value = serde_json::from_str(update.content.as_deref().expect("updated content")).unwrap();
         assert_eq!(content["status"], "error");
         assert_eq!(content["output"], "The turn ended before this tool completed: max_tokens");
+    }
+
+    /// Production regression, session 01a0189e: a medium coding task streamed
+    /// 82,586 bytes of prose, made ZERO tool calls, hit the output token ceiling
+    /// on all three passes, and was then recorded as `result_ok = 1` with
+    /// `result_error = NULL`. Nothing the user asked for reached the disk.
+    ///
+    /// The relay behaved correctly — it carried `stop_reason` on the outcome —
+    /// but the receipt adjudicator only looked at the terminal and the text, so
+    /// non-empty prose *was* the proof of success. This drives the real relay and
+    /// pins the whole verdict path: a truncated turn is a retryable, resumable
+    /// FAILURE that names its own cause, no matter how much text it produced.
+    #[tokio::test]
+    async fn a_turn_truncated_by_the_output_ceiling_is_never_adjudicated_as_success() {
+        use nomifun_ai_agent::protocol::events::TurnStopReason;
+
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(TestUserEventBus::new(64));
+        let (tx, _) = broadcast::channel(64);
+
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo.clone(),
+            bus.clone(),
+            None,
+        );
+        let rx = tx.subscribe();
+
+        // The exact production shape: a lot of prose, not one tool call.
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "Here is the complete mini toolbox implementation: ".repeat(64),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData {
+            session_id: None,
+            stop_reason: Some(TurnStopReason::MaxTokens),
+        }))
+        .unwrap();
+
+        let outcome = relay.consume(rx).await;
+
+        // The relay's own classification is unchanged: Finish is still Finish.
+        // That is precisely why the stop reason has to reach the adjudicator.
+        assert_eq!(outcome.terminal, RelayTerminal::Finish);
+        assert_eq!(outcome.stop_reason, Some(TurnStopReason::MaxTokens));
+
+        assert!(
+            !crate::relay_error_code::turn_succeeded(&outcome, 0),
+            "a turn stopped at the output ceiling produced nothing the user asked for"
+        );
+        assert_eq!(
+            crate::relay_error_code::map_turn_failure(&outcome, 0),
+            Some(("output_truncated".to_owned(), true)),
+            "the receipt must name the ceiling and mark it resumable, not claim empty_final_text"
+        );
     }
 
     #[tokio::test]
@@ -10741,6 +11525,264 @@ mod tests {
         assert_eq!(
             replacement.unwrap().data["data"]["content"].as_str().map(str::trim),
             Some("Hello")
+        );
+    }
+
+    /// A turn the provider cut short at its output ceiling is an INTERRUPTED
+    /// response, so its half-written draft must not be treated as a completed
+    /// instruction stream. Two independent defects rode on that:
+    ///
+    /// 1. the cron matcher is a bare prefix regex with no closing tag, so half a
+    ///    sentence containing the token used to be stripped and EXECUTED;
+    /// 2. any middleware system response minted a fresh continuation turn, and
+    ///    `durable_completion` is reassigned unconditionally per iteration — so
+    ///    the continuation's success verdict replaced this turn's honest
+    ///    `output_truncated` receipt, restoring `result_ok = 1` with nothing on
+    ///    disk.
+    #[tokio::test]
+    async fn truncated_finishes_persist_and_broadcast_one_canonical_recovery_tip() {
+        for (stop_reason, failure_code, error_code) in [
+            (
+                TurnStopReason::MaxTokens,
+                crate::relay_error_code::OUTPUT_TRUNCATED,
+                OUTPUT_TRUNCATED_UI_CODE,
+            ),
+            (
+                TurnStopReason::MaxTurnRequests,
+                crate::relay_error_code::TURN_REQUESTS_EXHAUSTED,
+                TURN_REQUESTS_EXHAUSTED_UI_CODE,
+            ),
+        ] {
+            let repo = Arc::new(RecordingRepo::new());
+            let bus = Arc::new(TestUserEventBus::new(32));
+            let mut ws_rx = bus.subscribe();
+            let (tx, _) = broadcast::channel(32);
+            let relay = StreamRelay::new(
+                test_conversation_id(),
+                TEST_ASSISTANT_MESSAGE_ID.into(),
+                TEST_USER_ID.into(),
+                repo.clone(),
+                bus,
+                None,
+            )
+            .with_root_turn_id(TEST_TURN_A)
+            .with_source_user_message_id(Some(TEST_TURN_B.to_owned()));
+            let rx = tx.subscribe();
+            tx.send(AgentStreamEvent::Finish(FinishEventData {
+                stop_reason: Some(stop_reason),
+                ..Default::default()
+            }))
+            .unwrap();
+
+            let outcome = relay.consume(rx).await;
+            assert_eq!(outcome.stop_reason, Some(stop_reason));
+
+            let rows = repo.take_inserts();
+            let tips = rows
+                .iter()
+                .filter(|row| row.r#type == "tips")
+                .collect::<Vec<_>>();
+            assert_eq!(tips.len(), 1);
+            let tip = tips[0];
+            MessageId::parse(&tip.message_id).expect("tip identity is canonical");
+            assert_eq!(tip.msg_id.as_deref(), Some(tip.message_id.as_str()));
+            assert_eq!(tip.status.as_deref(), Some("error"));
+
+            let hydrated = crate::convert::row_to_message_response(tip.clone())
+                .expect("recovery tip hydrates through the public message boundary");
+            assert_eq!(hydrated.message_id, tip.message_id);
+            assert_eq!(hydrated.msg_id.as_deref(), Some(tip.message_id.as_str()));
+            assert_eq!(hydrated.content["turn_id"], TEST_TURN_A);
+            assert_eq!(hydrated.content["type"], "error");
+            assert_eq!(hydrated.content["error"]["code"], error_code);
+            assert_eq!(hydrated.content["error"]["retryable"], true);
+            assert_eq!(
+                hydrated.content["recovery"],
+                json!({
+                    "kind": "continue_truncated",
+                    "source_message_id": TEST_TURN_B,
+                    "failure_code": failure_code,
+                })
+            );
+
+            let projected = std::iter::from_fn(|| ws_rx.try_recv().ok()).collect::<Vec<_>>();
+            let live_tip_index = projected
+                .iter()
+                .position(|event| {
+                    event.name == "message.stream" && event.data["type"] == "tips"
+                })
+                .expect("durable recovery tip is broadcast");
+            let finish_index = projected
+                .iter()
+                .position(|event| {
+                    event.name == "message.stream" && event.data["type"] == "finish"
+                })
+                .expect("finish is broadcast");
+            assert!(live_tip_index < finish_index);
+            let live_tip = &projected[live_tip_index].data;
+            assert_eq!(live_tip["msg_id"], tip.message_id);
+            assert_eq!(live_tip["turn_id"], TEST_TURN_A);
+            assert_eq!(live_tip["data"]["error"]["code"], error_code);
+            assert_eq!(live_tip["data"]["error"]["retryable"], true);
+            assert_eq!(live_tip["data"]["recovery"], hydrated.content["recovery"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_tip_requires_both_an_eligible_finish_and_a_source_receipt() {
+        let cases = [
+            (
+                None,
+                AgentStreamEvent::Finish(FinishEventData {
+                    stop_reason: Some(TurnStopReason::MaxTokens),
+                    ..Default::default()
+                }),
+            ),
+            (
+                Some(TEST_TURN_B),
+                AgentStreamEvent::Finish(FinishEventData {
+                    stop_reason: Some(TurnStopReason::EndTurn),
+                    ..Default::default()
+                }),
+            ),
+            (
+                Some(TEST_TURN_B),
+                AgentStreamEvent::Finish(FinishEventData {
+                    stop_reason: Some(TurnStopReason::Refusal),
+                    ..Default::default()
+                }),
+            ),
+            (
+                Some(TEST_TURN_B),
+                AgentStreamEvent::Error(ErrorEventData::legacy("provider failed", None)),
+            ),
+        ];
+
+        for (source_message_id, terminal) in cases {
+            let repo = Arc::new(RecordingRepo::new());
+            let bus = Arc::new(TestUserEventBus::new(16));
+            let mut ws_rx = bus.subscribe();
+            let (tx, _) = broadcast::channel(16);
+            let relay = StreamRelay::new(
+                test_conversation_id(),
+                TEST_ASSISTANT_MESSAGE_ID.into(),
+                TEST_USER_ID.into(),
+                repo.clone(),
+                bus,
+                None,
+            )
+            .with_source_user_message_id(source_message_id.map(str::to_owned));
+            let rx = tx.subscribe();
+            tx.send(terminal).unwrap();
+            relay.consume(rx).await;
+
+            assert!(repo.take_inserts().iter().all(|row| {
+                row.r#type != "tips"
+                    || serde_json::from_str::<Value>(&row.content)
+                        .is_ok_and(|content| content.get("recovery").is_none())
+            }));
+            assert!(std::iter::from_fn(|| ws_rx.try_recv().ok()).all(|event| {
+                event.data["type"] != "tips"
+                    || event.data["data"].get("recovery").is_none()
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_tip_is_not_broadcast_without_a_persistence_ack() {
+        let repo = Arc::new(RecordingRepo::new());
+        repo.fail_next_message_insert();
+        let bus = Arc::new(TestUserEventBus::new(16));
+        let mut ws_rx = bus.subscribe();
+        let (tx, _) = broadcast::channel(16);
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo.clone(),
+            bus,
+            None,
+        )
+        .with_source_user_message_id(Some(TEST_TURN_B.to_owned()));
+        let rx = tx.subscribe();
+        tx.send(AgentStreamEvent::Finish(FinishEventData {
+            stop_reason: Some(TurnStopReason::MaxTokens),
+            ..Default::default()
+        }))
+        .unwrap();
+
+        let outcome = relay.consume(rx).await;
+        assert_eq!(outcome.stop_reason, Some(TurnStopReason::MaxTokens));
+        assert!(repo.take_inserts().iter().all(|row| row.r#type != "tips"));
+        assert!(std::iter::from_fn(|| ws_rx.try_recv().ok())
+            .all(|event| event.data["type"] != "tips"));
+    }
+
+    #[tokio::test]
+    async fn a_truncated_draft_never_runs_middleware_or_emits_a_continuation() {
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(TestUserEventBus::new(64));
+        let (tx, _) = broadcast::channel(64);
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo.clone(),
+            bus.clone(),
+            Some(Arc::new(MockCronService)),
+        );
+
+        let rx = tx.subscribe();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "Hello [CRON_LIST]".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData {
+            stop_reason: Some(TurnStopReason::MaxTokens),
+            ..Default::default()
+        }))
+        .unwrap();
+
+        let outcome = relay.consume(rx).await;
+
+        assert!(
+            outcome.system_responses.is_empty(),
+            "a truncated draft must not drive a continuation turn: {:?}",
+            outcome.system_responses
+        );
+        // The prose IS carried as final_text, unstripped: cron run history and the
+        // cross-conversation delivery notice both render a human reason from
+        // `result_error.or(result_text)`, so dropping it would degrade a truncated
+        // turn to "unknown error".
+        assert_eq!(
+            outcome.final_text.as_deref(),
+            Some("Hello [CRON_LIST]"),
+            "the raw prose explains the failure and is never middleware-processed"
+        );
+        assert!(
+            outcome.final_text_msg_id.is_none(),
+            "no rewrite happened, so nothing may target this text for write-back"
+        );
+        assert_eq!(outcome.stop_reason, Some(TurnStopReason::MaxTokens));
+        assert!(matches!(outcome.terminal, RelayTerminal::Finish));
+
+        // The receipt stays honest and specifically resumable: the incomplete
+        // stop reason is reported as itself, ahead of any empty-text check, and
+        // carrying final_text cannot flip the verdict.
+        assert_eq!(
+            crate::relay_error_code::map_turn_failure(&outcome, 0),
+            Some((crate::relay_error_code::OUTPUT_TRUNCATED.to_owned(), true))
+        );
+        assert!(!crate::relay_error_code::turn_succeeded(&outcome, 0));
+
+        // The already-streamed prose stays durable on its own row: the user still
+        // sees what the model produced, it just is not a delivered result.
+        let inserts = repo.take_inserts();
+        assert_eq!(inserts.len(), 1);
+        assert!(
+            inserts[0].content.contains("[CRON_LIST]"),
+            "the raw row is preserved verbatim, unstripped: {}",
+            inserts[0].content
         );
     }
 

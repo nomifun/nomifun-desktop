@@ -16,7 +16,7 @@ use nomifun_api_types::{
 };
 use nomifun_common::{AgentType, ProviderWithModel};
 use nomifun_ai_agent::AgentRuntimeRegistry;
-use nomifun_ai_agent::protocol::events::AgentStreamEvent;
+use nomifun_ai_agent::protocol::events::{AgentStreamEvent, TurnStopReason};
 use nomifun_conversation::ConversationService;
 use nomifun_db::IClientPreferenceRepository;
 use nomifun_robot::endpoint::{EndpointAdvertiser, LanAdvertiser, LanEndpointSnapshot};
@@ -32,7 +32,7 @@ use nomifun_robot::wiring::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 
 const ROBOT_VISION_MAX_TOKENS: u32 = 512;
 
@@ -701,35 +701,20 @@ impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
         let (tx, rx) = mpsc::channel(64);
         // The keyed send admits synchronously but builds a cold runtime in its
         // own background task, so the stream is attached after admission.
-        let stream = if delivery.completed {
-            None
-        } else {
-            wait_for_runtime_subscription(&self.runtime_registry, conversation_id).await
-        };
-        tokio::spawn(async move {
-            let Some(mut stream) = stream else {
-                let _ = tx.send(TurnEvent::Done).await;
-                return;
-            };
-            let mut reducer = SpokenReplyReducer::default();
-            'stream: loop {
-                match stream.recv().await {
-                    Ok(event) => {
-                        for reduced in reducer.push(event) {
-                            let terminal = matches!(reduced, TurnEvent::Done | TurnEvent::Failed { .. });
-                            if tx.send(reduced).await.is_err() || terminal {
-                                break 'stream;
-                            }
-                        }
-                    }
-                    // A lagged or closed broadcast ends the turn rather than
-                    // leaving the device listening to nothing forever.
-                    Err(_) => {
-                        let _ = tx.send(TurnEvent::Done).await;
+        if delivery.completed {
+            let events = completed_robot_delivery_events(&delivery);
+            tokio::spawn(async move {
+                for event in events {
+                    if tx.send(event).await.is_err() {
                         break;
                     }
                 }
-            }
+            });
+            return Ok(rx);
+        }
+        let stream = wait_for_runtime_subscription(&self.runtime_registry, conversation_id).await;
+        tokio::spawn(async move {
+            relay_optional_robot_turn_stream(stream, tx).await;
         });
         Ok(rx)
     }
@@ -777,8 +762,8 @@ impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
 /// A copy of the channel domain's own helper (`nomifun-channel`'s
 /// `wait_for_runtime_subscription`, which is private to that crate): registration
 /// happens before prompt dispatch, so polling until it appears is what makes a
-/// cold-start turn observable. A timeout degrades streaming only and never
-/// retries the model turn.
+/// cold-start turn observable. A timeout is reported as an ambiguous failure
+/// and never retries the possibly side-effecting model turn.
 async fn wait_for_runtime_subscription(
     runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     conversation_id: &str,
@@ -799,6 +784,93 @@ async fn wait_for_runtime_subscription(
     }
 }
 
+fn completed_robot_delivery_events(
+    delivery: &nomifun_conversation::IdempotentMessageDelivery,
+) -> Vec<TurnEvent> {
+    match delivery.result_ok {
+        Some(true) => {
+            let mut events = Vec::with_capacity(2);
+            if let Some(text) = delivery
+                .result_text
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+            {
+                events.push(TurnEvent::Text(text.to_owned()));
+            }
+            events.push(TurnEvent::Done);
+            events
+        }
+        Some(false) => vec![robot_stream_failure(
+            delivery
+                .result_error
+                .as_deref()
+                .unwrap_or("The admitted robot turn failed without an error message"),
+        )],
+        None => vec![robot_stream_failure(
+            "The completed robot turn had no authoritative result",
+        )],
+    }
+}
+
+fn robot_stream_failure(message: impl Into<String>) -> TurnEvent {
+    TurnEvent::Failed {
+        message: message.into(),
+        // An absent/lagged stream cannot prove provider ownership and must not
+        // automatically replay a possibly side-effecting turn on a fallback.
+        provider_fault: false,
+    }
+}
+
+async fn relay_optional_robot_turn_stream(
+    stream: Option<broadcast::Receiver<AgentStreamEvent>>,
+    tx: mpsc::Sender<TurnEvent>,
+) {
+    let Some(stream) = stream else {
+        let _ = tx
+            .send(robot_stream_failure(
+                "Robot could not attach to the admitted agent turn",
+            ))
+            .await;
+        return;
+    };
+    relay_robot_turn_stream(stream, tx).await;
+}
+
+async fn relay_robot_turn_stream(
+    mut stream: broadcast::Receiver<AgentStreamEvent>,
+    tx: mpsc::Sender<TurnEvent>,
+) {
+    let mut reducer = SpokenReplyReducer::default();
+    'stream: loop {
+        match stream.recv().await {
+            Ok(event) => {
+                for reduced in reducer.push(event) {
+                    let terminal = matches!(reduced, TurnEvent::Done | TurnEvent::Failed { .. });
+                    if tx.send(reduced).await.is_err() || terminal {
+                        break 'stream;
+                    }
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                let _ = tx
+                    .send(robot_stream_failure(format!(
+                        "Robot missed {skipped} agent stream event(s)"
+                    )))
+                    .await;
+                break;
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                let _ = tx
+                    .send(robot_stream_failure(
+                        "Agent stream closed without a terminal event",
+                    ))
+                    .await;
+                break;
+            }
+        }
+    }
+}
+
 /// Reduce the agent's rich event stream to the final spoken reply.
 ///
 /// Nomi can emit visible narration before each tool call ("let me check"), as
@@ -809,13 +881,40 @@ async fn wait_for_runtime_subscription(
 #[derive(Default)]
 struct SpokenReplyReducer {
     candidate: String,
+    output_checkpoint: Option<usize>,
 }
 
 impl SpokenReplyReducer {
     fn push(&mut self, event: AgentStreamEvent) -> Vec<TurnEvent> {
         match event {
             AgentStreamEvent::Start(_) => {
-                self.candidate.clear();
+                self.output_checkpoint = Some(self.candidate.len());
+                Vec::new()
+            }
+            AgentStreamEvent::OutputDiscarded(data) => {
+                let Some(checkpoint) = self.output_checkpoint else {
+                    self.candidate.clear();
+                    return vec![TurnEvent::Failed {
+                        message: format!(
+                            "Attempt {} discarded output without a robot stream checkpoint",
+                            data.restart_attempt
+                        ),
+                        provider_fault: false,
+                    }];
+                };
+                if checkpoint > self.candidate.len()
+                    || !self.candidate.is_char_boundary(checkpoint)
+                {
+                    self.candidate.clear();
+                    self.output_checkpoint = None;
+                    return vec![TurnEvent::Failed {
+                        message: "Discarded output checkpoint no longer matched the robot reply"
+                            .to_owned(),
+                        provider_fault: false,
+                    }];
+                }
+                self.candidate.truncate(checkpoint);
+                self.output_checkpoint = Some(self.candidate.len());
                 Vec::new()
             }
             AgentStreamEvent::Text(data) => {
@@ -827,6 +926,9 @@ impl SpokenReplyReducer {
                 // it is not the start of a new model pass.
                 if data.status.as_deref() != Some("done") {
                     self.candidate.clear();
+                    if self.output_checkpoint.is_some() {
+                        self.output_checkpoint = Some(0);
+                    }
                 }
                 Vec::new()
             }
@@ -835,10 +937,16 @@ impl SpokenReplyReducer {
             | AgentStreamEvent::ToolGroup(_)
             | AgentStreamEvent::Permission(_) => {
                 self.candidate.clear();
+                if self.output_checkpoint.is_some() {
+                    self.output_checkpoint = Some(0);
+                }
                 Vec::new()
             }
-            AgentStreamEvent::Finish(_) => {
+            AgentStreamEvent::Finish(data)
+                if matches!(data.stop_reason, None | Some(TurnStopReason::EndTurn)) =>
+            {
                 let answer = std::mem::take(&mut self.candidate);
+                self.output_checkpoint = None;
                 let mut reduced = Vec::with_capacity(2);
                 if !answer.trim().is_empty() {
                     reduced.push(TurnEvent::Text(answer));
@@ -846,8 +954,28 @@ impl SpokenReplyReducer {
                 reduced.push(TurnEvent::Done);
                 reduced
             }
+            AgentStreamEvent::Finish(data) => {
+                self.candidate.clear();
+                self.output_checkpoint = None;
+                let reason = match data.stop_reason {
+                    Some(TurnStopReason::MaxTokens) => "maximum output tokens reached",
+                    Some(TurnStopReason::MaxTurnRequests) => "maximum tool requests reached",
+                    Some(TurnStopReason::Refusal) => "the model refused the request",
+                    Some(TurnStopReason::Cancelled) => "the turn was cancelled",
+                    Some(TurnStopReason::EndTurn) | None => {
+                        unreachable!("normal finish was handled above")
+                    }
+                };
+                vec![TurnEvent::Failed {
+                    message: format!(
+                        "The turn ended before its requested output was completed: {reason}"
+                    ),
+                    provider_fault: false,
+                }]
+            }
             AgentStreamEvent::Error(data) => {
                 self.candidate.clear();
+                self.output_checkpoint = None;
                 // `provider_fault` decides whether a fallback-model retry makes
                 // sense. The platform already classifies upstream ownership.
                 let provider_fault = matches!(
@@ -1097,6 +1225,98 @@ mod tests {
     }
 
     #[test]
+    fn non_success_finish_never_releases_a_truncated_spoken_reply() {
+        use nomifun_ai_agent::protocol::events::{FinishEventData, TextEventData};
+
+        for stop_reason in [
+            TurnStopReason::MaxTokens,
+            TurnStopReason::MaxTurnRequests,
+            TurnStopReason::Refusal,
+            TurnStopReason::Cancelled,
+        ] {
+            let mut reducer = SpokenReplyReducer::default();
+            assert!(
+                reducer
+                    .push(AgentStreamEvent::Text(TextEventData {
+                        content: "unfinished draft".to_owned(),
+                    }))
+                    .is_empty()
+            );
+
+            let reduced = reducer.push(AgentStreamEvent::Finish(FinishEventData {
+                session_id: None,
+                stop_reason: Some(stop_reason),
+            }));
+            assert!(
+                matches!(
+                    reduced.as_slice(),
+                    [TurnEvent::Failed {
+                        provider_fault: false,
+                        ..
+                    }]
+                ),
+                "{stop_reason:?} must not be spoken or reported as Done: {reduced:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_robot_stream_fails_closed_instead_of_reporting_done() {
+        let (tx, mut rx) = mpsc::channel(1);
+        relay_optional_robot_turn_stream(None, tx).await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::Failed {
+                provider_fault: false,
+                ..
+            })
+        ));
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn lagged_robot_stream_fails_closed_instead_of_reporting_done() {
+        use nomifun_ai_agent::protocol::events::StartEventData;
+
+        let (source, stream) = broadcast::channel(1);
+        source
+            .send(AgentStreamEvent::Start(StartEventData::default()))
+            .unwrap();
+        source
+            .send(AgentStreamEvent::Start(StartEventData::default()))
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(1);
+        relay_robot_turn_stream(stream, tx).await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::Failed {
+                provider_fault: false,
+                ..
+            })
+        ));
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn closed_robot_stream_without_terminal_fails_closed() {
+        let (source, stream) = broadcast::channel(1);
+        drop(source);
+        let (tx, mut rx) = mpsc::channel(1);
+        relay_robot_turn_stream(stream, tx).await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::Failed {
+                provider_fault: false,
+                ..
+            })
+        ));
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[test]
     fn thinking_is_never_spoken_and_text_waits_for_finish() {
         use nomifun_ai_agent::protocol::events::{TextEventData, ThinkingEventData};
 
@@ -1126,6 +1346,57 @@ mod tests {
         assert_eq!(
             reducer.push(AgentStreamEvent::Finish(Default::default())),
             vec![TurnEvent::Text("在呢".to_owned()), TurnEvent::Done]
+        );
+    }
+
+    #[test]
+    fn discarded_attempt_keeps_the_latest_start_prefix_out_of_tts_until_finish() {
+        use nomifun_ai_agent::protocol::events::{
+            OutputDiscardedEventData, StartEventData, TextEventData,
+        };
+
+        let mut reducer = SpokenReplyReducer::default();
+        assert!(
+            reducer
+                .push(AgentStreamEvent::Start(StartEventData::default()))
+                .is_empty()
+        );
+        assert!(
+            reducer
+                .push(AgentStreamEvent::Text(TextEventData {
+                    content: "前缀".to_owned(),
+                }))
+                .is_empty()
+        );
+        assert!(
+            reducer
+                .push(AgentStreamEvent::Start(StartEventData::default()))
+                .is_empty()
+        );
+        assert!(
+            reducer
+                .push(AgentStreamEvent::Text(TextEventData {
+                    content: "废弃草稿".to_owned(),
+                }))
+                .is_empty()
+        );
+        assert!(
+            reducer
+                .push(AgentStreamEvent::OutputDiscarded(
+                    OutputDiscardedEventData { restart_attempt: 2 },
+                ))
+                .is_empty()
+        );
+        assert!(
+            reducer
+                .push(AgentStreamEvent::Text(TextEventData {
+                    content: "答案".to_owned(),
+                }))
+                .is_empty()
+        );
+        assert_eq!(
+            reducer.push(AgentStreamEvent::Finish(Default::default())),
+            vec![TurnEvent::Text("前缀答案".to_owned()), TurnEvent::Done]
         );
     }
 

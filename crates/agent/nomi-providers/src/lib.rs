@@ -3,6 +3,7 @@ pub mod anthropic_shared;
 pub mod bedrock;
 pub mod gemini;
 pub mod openai;
+pub mod openai_responses;
 pub mod retry;
 pub mod vertex;
 
@@ -41,11 +42,51 @@ fn merge_json_value(target: &mut Value, incoming: &Value) {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum OutputCeilingLocation<'a> {
+    /// A top-level protocol field. The dynamic field covers OpenAI-compatible
+    /// providers that rename `max_tokens`.
+    Top { dynamic: Option<&'a str> },
+    /// Gemini nests its ceiling under generationConfig.maxOutputTokens.
+    GeminiGenerationConfig,
+}
+
+const CANONICAL_OUTPUT_CEILING_KEYS: &[&str] = &[
+    "max_tokens",
+    "max_completion_tokens",
+    "maxOutputTokens",
+    "max_output_tokens",
+];
+
 /// Merge provider-native body extensions first, then recursively overlay the
-/// serializer's typed protocol body. Unknown extensions survive while typed
-/// model/messages/tools/token fields always remain authoritative.
-pub(crate) fn request_body_with_extra(compat: &ProviderCompat, typed: Value) -> Value {
-    let mut body = Value::Object(compat.extra_body());
+/// serializer's typed protocol body. Every known output-ceiling escape hatch
+/// is stripped before the merge: the typed request field is the only authority,
+/// and `None` must remain absence rather than inheriting an opaque extra.
+pub(crate) fn request_body_with_extra(
+    compat: &ProviderCompat,
+    ceiling: OutputCeilingLocation<'_>,
+    typed: Value,
+) -> Value {
+    let mut extra = compat.extra_body();
+    for key in CANONICAL_OUTPUT_CEILING_KEYS {
+        extra.remove(*key);
+    }
+    match ceiling {
+        OutputCeilingLocation::Top { dynamic } => {
+            if let Some(key) = dynamic {
+                extra.remove(key);
+            }
+        }
+        OutputCeilingLocation::GeminiGenerationConfig => {
+            if let Some(Value::Object(generation_config)) = extra.get_mut("generationConfig") {
+                generation_config.remove("maxOutputTokens");
+                if generation_config.is_empty() {
+                    extra.remove("generationConfig");
+                }
+            }
+        }
+    }
+    let mut body = Value::Object(extra);
     merge_json_value(&mut body, &typed);
     body
 }
@@ -59,6 +100,8 @@ pub trait LlmProvider: Send + Sync {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
+    #[error("Provider configuration error: {0}")]
+    Config(String),
     #[error("HTTP error: {0}")]
     Http(reqwest::Error),
     #[error("API error {status}: {message}")]
@@ -95,6 +138,7 @@ impl ProviderError {
     /// crosses the provider boundary or is written to a log/health record.
     pub(crate) fn redacted(self, redactor: &SecretRedactor) -> Self {
         match self {
+            Self::Config(message) => Self::Config(redactor.redact(&message)),
             Self::Http(error) => Self::Http(error.without_url()),
             Self::Api { status, message } => Self::Api {
                 status,
@@ -157,6 +201,37 @@ impl ProviderError {
                 && ["oneof", "allof", "anyof"]
                     .iter()
                     .any(|keyword| lower.contains(keyword)))
+    }
+
+    /// Whether an API rejection narrowly identifies an expired or otherwise
+    /// unavailable Responses API parent. Generic 404s must never enter this
+    /// path: they usually mean the configured endpoint does not serve
+    /// `/responses`, not that a response cursor went stale.
+    pub(crate) fn is_stale_previous_response(&self) -> bool {
+        let ProviderError::Api {
+            status: 400 | 404,
+            message,
+        } = self
+        else {
+            return false;
+        };
+        let lower = message.to_ascii_lowercase();
+        let names_parent = lower.contains("previous_response_id")
+            || lower.contains("previous response")
+            || lower.contains("previous_response");
+        let unavailable = [
+            "not found",
+            "not_found",
+            "does not exist",
+            "missing",
+            "expired",
+            "deleted",
+            "no longer available",
+            "unable to locate",
+        ]
+        .iter()
+        .any(|signal| lower.contains(signal));
+        names_parent && unavailable
     }
 
     /// A number of otherwise OpenAI-compatible gateways implement streaming
@@ -614,6 +689,13 @@ pub fn create_provider(config: &Config) -> Arc<dyn LlmProvider> {
             &config.base_url,
             compat,
         )),
+        ProviderType::OpenAIResponses => Arc::new(
+            openai_responses::OpenAIResponsesProvider::new(
+                &config.api_key,
+                &config.base_url,
+                compat,
+            ),
+        ),
         ProviderType::Gemini => Arc::new(gemini::GeminiProvider::new(
             &config.api_key,
             &config.base_url,
@@ -708,9 +790,10 @@ mod retryable_tests {
             system: String::new(),
             messages: Vec::new(),
             tools: Vec::new(),
-            max_tokens: 1,
+            max_tokens: Some(1),
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         }
     }
 
@@ -935,6 +1018,31 @@ mod retryable_tests {
         assert!(ProviderError::StreamTruncated("x".to_string()).is_retryable());
         assert!(!ProviderError::PromptTooLong("x".to_string()).is_retryable());
         assert!(!ProviderError::Parse("x".to_string()).is_retryable());
+    }
+
+    #[test]
+    fn stale_responses_parent_classifier_is_narrow() {
+        let error = |status, message: &str| ProviderError::Api {
+            status,
+            message: message.to_owned(),
+        };
+        assert!(
+            error(404, "previous_response_id resp_old was not found")
+                .is_stale_previous_response()
+        );
+        assert!(
+            error(400, "Previous response has expired")
+                .is_stale_previous_response()
+        );
+        assert!(
+            !error(404, "POST /v1/responses not found").is_stale_previous_response(),
+            "a wrong endpoint must never trigger a full-history resend"
+        );
+        assert!(
+            !error(400, "previous_response_id is malformed").is_stale_previous_response(),
+            "only unavailable cursors are safe to negotiate away"
+        );
+        assert!(!error(500, "previous_response_id not found").is_stale_previous_response());
     }
 
     #[test]

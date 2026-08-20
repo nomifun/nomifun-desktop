@@ -67,7 +67,13 @@ impl BedrockProvider {
         }
     }
 
-    fn build_request_body(&self, request: &LlmRequest) -> Value {
+    fn build_request_body(&self, request: &LlmRequest) -> Result<Value, ProviderError> {
+        let max_tokens = request.max_tokens.ok_or_else(|| {
+            ProviderError::Config(
+                "bedrock.anthropic_messages requires an explicit output ceiling; pass --max-tokens (or set [default].max_tokens) in the CLI, or set Max output tokens on the desktop model capability"
+                    .into(),
+            )
+        })?;
         let system = if self.cache_enabled {
             json!([{
                 "type": "text",
@@ -80,7 +86,7 @@ impl BedrockProvider {
 
         let mut body = json!({
             "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": request.max_tokens,
+            "max_tokens": max_tokens,
             "system": system,
             "messages": anthropic_shared::build_messages(&request.messages, &self.compat)
         });
@@ -109,7 +115,11 @@ impl BedrockProvider {
             });
         }
 
-        let mut body = crate::request_body_with_extra(&self.compat, body);
+        let mut body = crate::request_body_with_extra(
+            &self.compat,
+            crate::OutputCeilingLocation::Top { dynamic: None },
+            body,
+        );
         let object = body
             .as_object_mut()
             .expect("typed Bedrock Anthropic request body is an object");
@@ -124,7 +134,7 @@ impl BedrockProvider {
         if request.thinking.is_none() {
             object.remove("thinking");
         }
-        body
+        Ok(body)
     }
 
     fn build_url(&self, model: &str) -> String {
@@ -272,7 +282,7 @@ impl LlmProvider for BedrockProvider {
         request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         let url = self.build_url(&request.model);
-        let body = self.build_request_body(request);
+        let body = self.build_request_body(request)?;
 
         tracing::debug!(target: "nomi_providers", body = %serde_json::to_string_pretty(&body).unwrap_or_default(), "outgoing request");
 
@@ -742,17 +752,42 @@ mod tests {
                 }),
                 deferred: false,
             }],
-            max_tokens: 16,
+            max_tokens: Some(16),
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         };
 
-        let body = provider.build_request_body(&request);
+        let body = provider.build_request_body(&request).unwrap();
         let schema = &body["tools"][0]["input_schema"];
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"].get("file_path").is_some());
         assert!(schema["properties"].get("file_paths").is_some());
         assert!(schema.get("oneOf").is_none());
+    }
+
+    #[test]
+    fn bedrock_rejects_an_omitted_output_ceiling_before_transport() {
+        let provider = BedrockProvider::new(
+            "us-east-1",
+            AwsCredentials::Environment,
+            false,
+            ProviderCompat::bedrock_defaults(),
+        );
+        let request = LlmRequest {
+            model: "anthropic.claude-test".into(),
+            system: "test".into(),
+            messages: vec![],
+            tools: vec![],
+            max_tokens: None,
+            thinking: None,
+            reasoning_effort: None,
+            retain_provider_round: false,
+        };
+
+        let error = provider.build_request_body(&request).unwrap_err();
+        assert!(matches!(error, ProviderError::Config(message) if
+            message.contains("--max-tokens") && message.contains("desktop")));
     }
 
     #[test]
@@ -792,11 +827,12 @@ mod tests {
                 }],
             )],
             tools: vec![],
-            max_tokens: 64,
+            max_tokens: Some(64),
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         };
-        let body = provider.build_request_body(&request);
+        let body = provider.build_request_body(&request).unwrap();
         assert_eq!(body["anthropic_version"], "bedrock-2023-05-31");
         assert_eq!(body["max_tokens"], 64);
         assert_eq!(body["system"], "typed system");
@@ -878,7 +914,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bedrock_max_tokens_drops_staged_call_and_is_not_overwritten_by_end_turn() {
+    async fn bedrock_max_tokens_reports_a_staged_call_as_truncated_not_executable() {
         let response = bedrock_response(&[
             r#"{"type":"message_start","message":{"usage":{"input_tokens":1}}}"#,
             r#"{"type":"content_block_start","content_block":{"type":"tool_use","id":"call_truncated","name":"update_base","input":{"kb_id":"kb_1"}}}"#,
@@ -897,10 +933,18 @@ mod tests {
         }
 
         assert!(matches!(outcome, anthropic_shared::StreamOutcome::Ok));
+        // Bedrock inherits the truncation stash for free by reusing
+        // `parse_sse_data`; the staged call must never be executable, but its
+        // identity must survive as a fact for the resumable round.
         assert!(events.iter().all(|event| !matches!(event, LlmEvent::ToolUse { .. })));
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2, "one truncation fact plus the terminal Done");
         assert!(matches!(
-            events[0],
+            &events[0],
+            LlmEvent::ToolUseTruncated { id, name, .. }
+                if id == "call_truncated" && name == "update_base"
+        ));
+        assert!(matches!(
+            events[1],
             LlmEvent::Done {
                 stop_reason: StopReason::MaxTokens,
                 ..

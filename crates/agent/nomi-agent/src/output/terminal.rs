@@ -39,6 +39,12 @@ impl OutputSink for TerminalSink {
         // Terminal mode: no explicit stream start marker
     }
 
+    fn emit_output_discarded(&self, _msg_id: &str, restart_attempt: u32) {
+        self.formatter.session_info(&format!(
+            "Discarded incomplete output; restarting attempt {restart_attempt}"
+        ));
+    }
+
     fn emit_stream_end(
         &self,
         _msg_id: &str,

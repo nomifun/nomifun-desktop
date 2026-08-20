@@ -5,16 +5,16 @@
 //! then replaces the full history with a compact boundary marker and the
 //! summary.  A circuit breaker prevents runaway retries.
 
-use nomi_config::compact::CompactConfig;
+use nomi_config::compact::{CompactConfig, window_output_unit};
 use nomi_providers::{LlmProvider, ProviderError};
 use nomi_types::compact::{CompactMetadata, CompactTrigger};
 use nomi_types::llm::{LlmEvent, LlmRequest, ThinkingConfig};
-use nomi_types::message::{ContentBlock, Message, Role, TokenUsage};
+use nomi_types::message::{ContentBlock, Message, Role, StopReason, TokenUsage};
 use tokio::sync::mpsc;
 
 use super::prompt::{
     COMPACT_SYSTEM_PROMPT, build_compact_prompt, build_summary_content,
-    compact_max_output_tokens, format_compact_summary,
+    format_compact_summary,
 };
 use super::state::CompactState;
 
@@ -123,9 +123,10 @@ pub async fn autocompact(
             system: COMPACT_SYSTEM_PROMPT.to_string(),
             messages: conv_messages.clone(),
             tools: vec![],
-            max_tokens: compact_max_output_tokens(config.context_window),
+            max_tokens: Some(window_output_unit(config.context_window)),
             thinking: Some(ThinkingConfig::Disabled),
             reasoning_effort: None,
+            retain_provider_round: false,
         };
 
         match provider.stream(&request).await {
@@ -221,19 +222,104 @@ async fn collect_stream_text(
     mut rx: mpsc::Receiver<LlmEvent>,
 ) -> Result<(String, TokenUsage), CompactError> {
     let mut text = String::new();
+    let mut terminal: Option<(StopReason, TokenUsage)> = None;
 
     while let Some(event) = rx.recv().await {
+        if terminal.is_some() {
+            return Err(CompactError::StreamError(
+                "provider emitted an event after terminal Done during autocompaction".to_owned(),
+            ));
+        }
         match event {
             LlmEvent::TextDelta(delta) => text.push_str(&delta),
-            LlmEvent::Done { usage, .. } => return Ok((text, usage)),
+            LlmEvent::Done { stop_reason, usage } => terminal = Some((stop_reason, usage)),
             LlmEvent::Error(e) => return Err(CompactError::StreamError(e)),
-            // Ignore thinking deltas and tool calls (shouldn't happen in compact)
-            _ => {}
+            LlmEvent::ToolUse { .. }
+            | LlmEvent::ToolUseDelta { .. }
+            | LlmEvent::ToolUseTruncated { .. } => {
+                return Err(CompactError::StreamError(
+                    "provider emitted a tool call for a tool-less autocompaction request"
+                        .to_owned(),
+                ));
+            }
+            LlmEvent::ProviderRoundId(_) => {
+                return Err(CompactError::StreamError(
+                    "provider emitted a retained round id for a non-retainable autocompaction request"
+                        .to_owned(),
+                ));
+            }
+            // Reasoning is not the requested summary payload. It can be
+            // observed without making the terminal visible text successful.
+            LlmEvent::ThinkingDelta(_) | LlmEvent::ThinkingSignature(_) => {}
         }
     }
 
-    // Channel closed without a Done event
-    Err(CompactError::EmptyResponse)
+    let Some((stop_reason, usage)) = terminal else {
+        return Err(CompactError::StreamError(
+            "provider stream ended without terminal Done during autocompaction".to_owned(),
+        ));
+    };
+    if stop_reason != StopReason::EndTurn {
+        return Err(CompactError::StreamError(format!(
+            "provider stopped autocompaction with {stop_reason:?}"
+        )));
+    }
+    if text.trim().is_empty() {
+        return Err(CompactError::EmptyResponse);
+    }
+    Ok((text, usage))
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    async fn collect(events: Vec<LlmEvent>) -> Result<(String, TokenUsage), CompactError> {
+        let (tx, rx) = mpsc::channel(events.len().max(1));
+        for event in events {
+            tx.send(event).await.unwrap();
+        }
+        drop(tx);
+        collect_stream_text(rx).await
+    }
+
+    fn done(stop_reason: StopReason) -> LlmEvent {
+        LlmEvent::Done {
+            stop_reason,
+            usage: TokenUsage::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn autocompact_stream_commits_only_a_clean_nonempty_end_turn() {
+        let (text, _) = collect(vec![
+            LlmEvent::TextDelta("complete summary".to_owned()),
+            done(StopReason::EndTurn),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(text, "complete summary");
+
+        for events in [
+            vec![
+                LlmEvent::TextDelta("partial".to_owned()),
+                done(StopReason::MaxTokens),
+            ],
+            vec![LlmEvent::TextDelta("partial".to_owned())],
+            vec![
+                LlmEvent::TextDelta("candidate".to_owned()),
+                done(StopReason::EndTurn),
+                LlmEvent::TextDelta("poison".to_owned()),
+            ],
+            vec![
+                LlmEvent::TextDelta("candidate".to_owned()),
+                LlmEvent::ProviderRoundId("unexpected".to_owned()),
+                done(StopReason::EndTurn),
+            ],
+        ] {
+            assert!(collect(events).await.is_err());
+        }
+    }
 }
 
 /// Truncate the oldest ~20% of messages for PTL retry.
