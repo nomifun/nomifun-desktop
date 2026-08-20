@@ -10,15 +10,18 @@ import {
   CREATIVE_STUDIO_ASSETS_PATH,
   CREATIVE_STUDIO_AUDIO_PATH,
   CREATIVE_STUDIO_CANVAS_PROJECT_PATTERN,
+  CREATIVE_STUDIO_DIRECTOR_PROJECT_PATTERN,
   CREATIVE_STUDIO_IMAGE_PATH,
   CREATIVE_STUDIO_PROJECTS_PATH,
   CREATIVE_STUDIO_PROMPTS_PATH,
   CREATIVE_STUDIO_ROOT_PATH,
   CREATIVE_STUDIO_VIDEO_PATH,
   creativeStudioCanvasProjectPath,
+  creativeStudioDirectorProjectPath,
   creativeStudioSectionForPath,
   isCreativeStudioPath,
   matchCreativeStudioCanvasProjectPath,
+  matchCreativeStudioDirectorProjectPath,
 } from './routes';
 
 describe('Creative Studio routes', () => {
@@ -26,11 +29,21 @@ describe('Creative Studio routes', () => {
     expect(CREATIVE_STUDIO_ROOT_PATH).toBe('/workshop');
     expect(CREATIVE_STUDIO_PROJECTS_PATH).toBe('/workshop');
     expect(CREATIVE_STUDIO_CANVAS_PROJECT_PATTERN).toBe('/workshop/canvas/:projectId');
+    expect(CREATIVE_STUDIO_DIRECTOR_PROJECT_PATTERN).toBe('/workshop/director/:projectId');
     expect(CREATIVE_STUDIO_IMAGE_PATH).toBe('/workshop/image');
     expect(CREATIVE_STUDIO_VIDEO_PATH).toBe('/workshop/video');
     expect(CREATIVE_STUDIO_AUDIO_PATH).toBe('/workshop/audio');
     expect(CREATIVE_STUDIO_PROMPTS_PATH).toBe('/workshop/prompts');
     expect(CREATIVE_STUDIO_ASSETS_PATH).toBe('/workshop/assets');
+  });
+
+  test('builds and matches encoded Director project links', () => {
+    const path = creativeStudioDirectorProjectPath('  project/一  ');
+
+    expect(path).toBe('/workshop/director/project%2F%E4%B8%80');
+    expect(matchCreativeStudioDirectorProjectPath(`${path}/?camera=primary#timeline`)).toEqual({
+      projectId: 'project/一',
+    });
   });
 
   test('builds and matches encoded canvas project links', () => {
@@ -54,11 +67,15 @@ describe('Creative Studio routes', () => {
     expect(matchCreativeStudioCanvasProjectPath('/workshop/canvas')).toBe(null);
     expect(matchCreativeStudioCanvasProjectPath('/workshop/canvas/a/extra')).toBe(null);
     expect(matchCreativeStudioCanvasProjectPath('/workshop/canvas/%E0%A4%A')).toBe(null);
+    expect(matchCreativeStudioDirectorProjectPath('/workshop/director')).toBe(null);
+    expect(matchCreativeStudioDirectorProjectPath('/workshop/director/a/extra')).toBe(null);
+    expect(matchCreativeStudioDirectorProjectPath('/workshop/director/%E0%A4%A')).toBe(null);
   });
 
   test('matches only exact product sections', () => {
     expect(creativeStudioSectionForPath('/workshop')).toBe('projects');
     expect(creativeStudioSectionForPath('/workshop/canvas/project-1')).toBe('canvas');
+    expect(creativeStudioSectionForPath('/workshop/director/project-1')).toBe('director');
     expect(creativeStudioSectionForPath('/workshop/image?draft=1')).toBe('image');
     expect(creativeStudioSectionForPath('/workshop/video/')).toBe('video');
     expect(creativeStudioSectionForPath('/workshop/audio')).toBe('audio');

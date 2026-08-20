@@ -47,7 +47,7 @@ describe('Creative Studio application navigation structure', () => {
     expect(topBarSource.includes("<SunOne theme='outline' size={17}")).toBe(true);
   });
 
-  test('routes every product-shell exit through the canvas CAS leave gate', () => {
+  test('routes every product-shell exit through the shared product CAS leave gate', () => {
     expect(topBarSource.includes('onNavigate: (path: string) => void')).toBe(true);
     expect(topBarSource.includes('onNavigate(CREATIVE_STUDIO_PROJECTS_PATH)')).toBe(true);
     expect(topBarSource.includes('onNavigate(item.path)')).toBe(true);
