@@ -198,6 +198,7 @@ export interface WorkflowRunRequest {
   requestedAt: number;
   output: WorkflowOutputPlan;
   inputs: WorkflowInputValue[];
+  referenceAssetIds: WorkflowAssetId[];
 }
 
 export type WorkflowPromptDraftStatus = 'pending-review' | 'approved' | 'rejected';
@@ -245,6 +246,20 @@ export interface WorkflowRunRecord {
   startedAt: number | null;
   completedAt: number | null;
   failure: WorkflowRunFailure | null;
+}
+
+/**
+ * Server-authoritative durable run. The definition and request are immutable
+ * snapshots; only the revisioned execution projection may advance.
+ */
+export interface WorkflowRunAggregateV1 {
+  kind: 'nomifun.creative-studio.workflow-run';
+  version: 1;
+  revision: number;
+  workflowSnapshot: WorkflowDefinitionV1;
+  request: WorkflowRunRequest;
+  promptDrafts: WorkflowPromptDraft[];
+  record: WorkflowRunRecord;
 }
 
 export interface WorkflowWorkspaceDocumentV1 {

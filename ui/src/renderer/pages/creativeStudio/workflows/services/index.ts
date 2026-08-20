@@ -28,3 +28,13 @@ export type {
   CreativeWorkflowRepository,
   CreativeWorkflowRepositoryErrorKind,
 } from './workflowRepository';
+export {
+  CREATIVE_STUDIO_WORKFLOW_RUNS_ENDPOINT,
+  createCreativeWorkflowRunApi,
+  creativeWorkflowRunApi,
+} from './workflowRunApi';
+export type {
+  CreateCreativeWorkflowRunRequest,
+  CreativeWorkflowRunApi,
+  SaveCreativeWorkflowRunRequest,
+} from './workflowRunApi';

@@ -16,6 +16,15 @@ export {
   renderWorkflowTemplate,
 } from './model';
 export { workflowReducer } from './reducer';
+export {
+  WORKFLOW_RUN_KIND,
+  WORKFLOW_RUN_LIMITS,
+  cloneWorkflowRunAggregate,
+  expectedWorkflowRunResultCount,
+  expectedWorkflowRunTaskCount,
+  validateWorkflowRunAggregate,
+  validateWorkflowRunTransition,
+} from './runAggregate';
 export { exportWorkflowWorkspaceV1, parseWorkflowWorkspaceV1 } from './serialization';
 export {
   WORKFLOW_LIMITS,
@@ -24,6 +33,7 @@ export {
   isWorkflowBusinessId,
   isWorkflowTerminalStatus,
   validateWorkflowDefinition,
+  validateWorkflowInputValues,
   validateWorkflowInputsForDefinition,
   validateWorkflowOutput,
   validateWorkflowWorkspaceDocument,
