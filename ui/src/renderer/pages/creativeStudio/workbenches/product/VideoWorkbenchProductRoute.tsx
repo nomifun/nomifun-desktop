@@ -8,6 +8,7 @@ import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import {
+  CreativeAssetPickerModal,
   creativeAssetClient,
   useCreativeAssets,
   type CreativeAsset,
@@ -34,7 +35,6 @@ import {
   STANDALONE_VIDEO_MAX_CONCURRENT_TASKS,
 } from './ownership';
 import {
-  ReferenceAssetPicker,
   StandaloneWorkbenchPage,
   useStandaloneWorkbenchScope,
 } from './shared';
@@ -289,13 +289,16 @@ const OwnedVideoWorkbench: React.FC<{
         <div className={styles.runtimeNotice} role='alert'>{persistence.resumeError?.message ?? error}</div>
       ) : null}
       <VideoWorkbench {...props} />
-      <ReferenceAssetPicker
+      <CreativeAssetPickerModal
         open={pickerOpen}
         assets={assets.assets}
         acceptedKinds={['image', 'video']}
         selectedIds={referenceIds}
         loading={assets.loading}
+        loadingMore={assets.loadingMore}
         hasMore={assets.hasMore}
+        error={assets.error ?? assets.mutationError}
+        uploading={assets.mutating}
         onToggle={(asset: CreativeAsset) =>
           setReferenceIds((ids) => {
             if (ids.includes(asset.id)) return ids.filter((id) => id !== asset.id);
@@ -304,7 +307,34 @@ const OwnedVideoWorkbench: React.FC<{
           })
         }
         onLoadMore={() => void assets.loadMore()}
-        onClose={() => setPickerOpen(false)}
+        onRetry={() => void assets.reload()}
+        onUploadFiles={(files) => {
+          void Promise.all(
+            files.map((file) => assets.upload(file, {
+              title: file.name,
+              tags: ['workbench-reference'],
+              inLibrary: true,
+            }))
+          )
+            .then((uploaded) => {
+              const firstKind = uploaded[0]?.kind;
+              if (!firstKind) return;
+              if (uploaded.some((asset) => asset.kind !== firstKind)) {
+                setError('一次视频任务只能使用同一种兼容参考素材。');
+              }
+              const compatible = uploaded.filter((asset) => asset.kind === firstKind);
+              setReferenceIds((ids) => {
+                const existing = ids.flatMap(
+                  (id) => assets.assets.find((asset) => asset.id === id) ?? []
+                );
+                return existing.some((asset) => asset.kind !== firstKind)
+                  ? compatible.map((asset) => asset.id)
+                  : [...new Set([...ids, ...compatible.map((asset) => asset.id)])];
+              });
+            })
+            .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+        }}
+        onCancel={() => setPickerOpen(false)}
       />
     </>
   );

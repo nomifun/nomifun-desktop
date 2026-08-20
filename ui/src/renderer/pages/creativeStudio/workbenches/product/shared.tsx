@@ -4,11 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Button, Modal, Spin } from '@arco-design/web-react';
+import { Spin } from '@arco-design/web-react';
 import React, { useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
-import type { CreativeAsset, CreativeAssetKind } from '../../assets';
 import { CREATIVE_STUDIO_PROJECTS_PATH } from '../../app/routes';
 import type { CreativeProjectDetail, CreativeProjectSummary } from '../../domain';
 import {
@@ -142,78 +141,3 @@ export const StandaloneWorkbenchPage: React.FC<{
     <div className={styles.workbench}>{children}</div>
   </div>
 );
-
-export interface ReferenceAssetPickerProps {
-  open: boolean;
-  assets: readonly CreativeAsset[];
-  acceptedKinds: readonly CreativeAssetKind[];
-  selectedIds: readonly string[];
-  loading: boolean;
-  hasMore: boolean;
-  onToggle(asset: CreativeAsset): void;
-  onLoadMore(): void;
-  onClose(): void;
-}
-
-export const ReferenceAssetPicker: React.FC<ReferenceAssetPickerProps> = ({
-  open,
-  assets,
-  acceptedKinds,
-  selectedIds,
-  loading,
-  hasMore,
-  onToggle,
-  onLoadMore,
-  onClose,
-}) => {
-  const compatible = assets.filter((asset) => acceptedKinds.includes(asset.kind));
-  return (
-    <Modal
-      visible={open}
-      title='选择真实素材'
-      footer={null}
-      autoFocus={false}
-      focusLock
-      unmountOnExit
-      getPopupContainer={() => document.getElementById('creative-studio-portal-root') ?? document.body}
-      onCancel={onClose}
-    >
-      {loading ? (
-        <div className={styles.pickerEmpty}><Spin /></div>
-      ) : compatible.length === 0 ? (
-        <div className={styles.pickerEmpty}>素材库中没有兼容素材。</div>
-      ) : (
-        <div className={styles.pickerList}>
-          {compatible.map((asset) => {
-            const selected = selectedIds.includes(asset.id);
-            const preview = asset.thumbnailUrl ?? asset.originalUrl;
-            return (
-              <button
-                key={asset.id}
-                type='button'
-                className={styles.pickerItem}
-                data-selected={selected}
-                onClick={() => onToggle(asset)}
-              >
-                {asset.kind === 'image' ? (
-                  <img src={preview} alt='' />
-                ) : (
-                  <span className={styles.pickerMediaPlaceholder}>{asset.kind}</span>
-                )}
-                <strong>{asset.title}</strong>
-                <span>{selected ? '已选择' : '点击选择'}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-      <div className={styles.pickerFooter}>
-        <span>只使用素材库返回的真实资源。</span>
-        <div>
-          {hasMore ? <Button onClick={onLoadMore}>加载更多</Button> : null}
-          <Button type='primary' onClick={onClose}>完成</Button>
-        </div>
-      </div>
-    </Modal>
-  );
-};

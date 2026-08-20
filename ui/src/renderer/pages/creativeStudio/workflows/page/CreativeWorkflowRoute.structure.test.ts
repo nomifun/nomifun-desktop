@@ -22,5 +22,8 @@ describe('Creative Workflow route composition', () => {
     expect(route.includes("navigate('/models')")).toBe(true);
     expect(route.includes('useCreativeWorkflowRuntime')).toBe(true);
     expect(route.includes('creativeAssetClient')).toBe(true);
+    expect(route.includes('useCreativeAssetPickerDialog')).toBe(true);
+    expect(route.includes('initialSelectedIds: selectedAssetIds')).toBe(true);
+    expect(route.includes("acceptedKinds: ['image']")).toBe(true);
   });
 });

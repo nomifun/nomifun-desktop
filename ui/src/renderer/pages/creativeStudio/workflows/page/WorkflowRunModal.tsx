@@ -32,9 +32,15 @@ export interface WorkflowRunModalProps {
   workflow: WorkflowDefinitionV1 | null;
   runner?: CreativeWorkflowRunnerPort;
   onClose: () => void;
-  onPickAssets?: (variable: WorkflowVariable) => Promise<string[]>;
-  onPickReferenceAssets?: () => Promise<string[]>;
-  onUploadReferenceImages?: (files: readonly File[]) => Promise<string[]>;
+  onPickAssets?: (
+    variable: WorkflowVariable,
+    selectedAssetIds: readonly string[]
+  ) => Promise<string[] | null>;
+  onPickReferenceAssets?: (selectedAssetIds: readonly string[]) => Promise<string[] | null>;
+  onUploadReferenceImages?: (
+    files: readonly File[],
+    selectedAssetIds: readonly string[]
+  ) => Promise<string[]>;
 }
 
 function initialInput(variable: WorkflowVariable): WorkflowInputValue {
@@ -81,7 +87,10 @@ const WorkflowInputControl: React.FC<{
   input: WorkflowInputValue;
   disabled: boolean;
   onChange: (input: WorkflowInputValue) => void;
-  onPickAssets?: (variable: WorkflowVariable) => Promise<string[]>;
+  onPickAssets?: (
+    variable: WorkflowVariable,
+    selectedAssetIds: readonly string[]
+  ) => Promise<string[] | null>;
 }> = ({ variable, input, disabled, onChange, onPickAssets }) => {
   if (
     (variable.type === 'text' || variable.type === 'multiline-text') &&
@@ -142,9 +151,9 @@ const WorkflowInputControl: React.FC<{
           disabled={disabled || !onPickAssets}
           title={onPickAssets ? undefined : '素材选择器尚未连接'}
           onClick={() =>
-            void onPickAssets?.(variable).then((assetIds) =>
-              onChange({ ...input, assetId: assetIds[0] ?? null })
-            )
+            void onPickAssets?.(variable, input.assetId ? [input.assetId] : []).then((assetIds) => {
+              if (assetIds) onChange({ ...input, assetId: assetIds[0] ?? null });
+            })
           }
         >
           从我的素材选择
@@ -161,9 +170,9 @@ const WorkflowInputControl: React.FC<{
           disabled={disabled || !onPickAssets}
           title={onPickAssets ? undefined : '素材选择器尚未连接'}
           onClick={() =>
-            void onPickAssets?.(variable).then((assetIds) =>
-              onChange({ ...input, assetIds })
-            )
+            void onPickAssets?.(variable, input.assetIds).then((assetIds) => {
+              if (assetIds) onChange({ ...input, assetIds });
+            })
           }
         >
           从我的素材选择
@@ -320,7 +329,9 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
                   disabled={submitting || !onPickReferenceAssets}
                   title={onPickReferenceAssets ? undefined : '素材选择器尚未连接'}
                   onClick={() =>
-                    void onPickReferenceAssets?.().then(setReferenceAssetIds)
+                    void onPickReferenceAssets?.(referenceAssetIds).then((assetIds) => {
+                      if (assetIds) setReferenceAssetIds(assetIds);
+                    })
                   }
                 >
                   我的素材
@@ -345,7 +356,7 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
                 const files = [...(event.currentTarget.files ?? [])];
                 event.currentTarget.value = '';
                 if (files.length === 0 || !onUploadReferenceImages) return;
-                void onUploadReferenceImages(files).then(setReferenceAssetIds);
+                void onUploadReferenceImages(files, referenceAssetIds).then(setReferenceAssetIds);
               }}
             />
             <div className={styles.referencePlaceholder}>
