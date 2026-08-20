@@ -1,0 +1,111 @@
+.controls {
+  display: flex;
+  min-width: 0;
+  height: 42px;
+  align-items: center;
+  gap: 3px;
+  padding: 5px 6px;
+  border: 1px solid color-mix(in srgb, var(--color-border-2) 88%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-bg-2) 88%, transparent);
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.15);
+  color: var(--color-text-2);
+  backdrop-filter: blur(18px) saturate(135%);
+}
+
+.iconButton,
+.percentageButton {
+  display: grid;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    background-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.iconButton {
+  width: 30px;
+}
+
+.percentageButton {
+  min-width: 50px;
+  padding: 0 7px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.iconButton:hover:not(:disabled),
+.percentageButton:hover:not(:disabled) {
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
+}
+
+.iconButton[data-active='true'] {
+  background: rgba(var(--primary-6), 0.12);
+  color: rgb(var(--primary-6));
+  box-shadow: inset 0 0 0 1px rgba(var(--primary-6), 0.18);
+}
+
+.iconButton:focus-visible,
+.percentageButton:focus-visible,
+.slider:focus-visible {
+  outline: 2px solid rgba(var(--primary-6), 0.55);
+  outline-offset: 2px;
+}
+
+.iconButton:disabled,
+.percentageButton:disabled,
+.slider:disabled {
+  cursor: default;
+  opacity: 0.38;
+}
+
+.divider {
+  width: 1px;
+  height: 18px;
+  flex: 0 0 1px;
+  margin: 0 2px;
+  background: var(--color-border-2);
+}
+
+.slider {
+  width: clamp(72px, 9vw, 118px);
+  height: 18px;
+  margin: 0 3px;
+  flex: 0 1 118px;
+  cursor: pointer;
+  accent-color: rgb(var(--primary-6));
+}
+
+@media (max-width: 640px) {
+  .controls {
+    height: 40px;
+    max-width: calc(100vw - 20px);
+    padding: 4px 5px;
+  }
+
+  .slider {
+    display: none;
+  }
+
+  .divider {
+    margin-inline: 1px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .iconButton,
+  .percentageButton {
+    transition: none;
+  }
+}

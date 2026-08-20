@@ -1,0 +1,24 @@
+.frame {
+  position: relative;
+  width: clamp(190px, 17vw, 240px);
+  aspect-ratio: 3 / 2;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-border-2) 88%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-bg-2) 90%, transparent);
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.18);
+  color: var(--color-text-2);
+  backdrop-filter: blur(18px) saturate(135%);
+}
+
+@media (max-width: 1024px) {
+  .frame {
+    width: 200px;
+  }
+}
+
+@media (max-width: 640px) {
+  .frame {
+    width: min(208px, calc(100vw - 20px));
+  }
+}
