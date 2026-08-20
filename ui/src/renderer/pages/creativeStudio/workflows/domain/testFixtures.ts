@@ -84,6 +84,13 @@ export function createWorkflowFixture(series = false): WorkflowDefinitionV1 {
           enabled: true,
           promptSource: { kind: 'template', templateId: IDS.template },
           referenceVariableIds: [IDS.imageVariable],
+          generation: {
+            model: null,
+            quality: 'auto',
+            width: 1024,
+            height: 1024,
+            imagesPerPrompt: 1,
+          },
         },
         {
           id: IDS.historyStep,
@@ -116,6 +123,13 @@ export function createWorkflowFixture(series = false): WorkflowDefinitionV1 {
         enabled: true,
         promptSource: { kind: 'prompt-drafts', stepId: IDS.draftStep },
         referenceVariableIds: [IDS.imageVariable],
+        generation: {
+          model: null,
+          quality: 'auto',
+          width: 1024,
+          height: 1024,
+          imagesPerPrompt: 1,
+        },
       },
       {
         id: IDS.historyStep,

@@ -20,6 +20,25 @@ pub struct CreativeStudioProjectRow {
     pub updated_at: TimestampMs,
 }
 
+/// Row mapping for a canonical Creative Studio workflow definition.
+///
+/// The JSON body is validated by `nomifun-workshop`; indexed metadata is kept
+/// beside it for deterministic list/search views without accepting a second
+/// source of truth.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CreativeStudioWorkflowRow {
+    pub id: i64,
+    pub workflow_id: String,
+    pub revision: i64,
+    pub name: String,
+    pub description: String,
+    pub category: String,
+    pub visibility: String,
+    pub definition_json: String,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
 /// Row mapping for the `workshop_canvases` table (创意工坊 画布轻索引).
 ///
 /// The canvas *body* (nodes/edges/viewport/settings) lives in a file

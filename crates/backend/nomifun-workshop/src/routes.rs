@@ -38,6 +38,7 @@ use crate::creative_studio::{CreativeProjectDocument, CreativeProjectSummary};
 use crate::dto::{WorkshopAsset, WorkshopCanvasMeta};
 use crate::service::{AssetPatch, AssetQuery, NewAssetUpload, NewTextAsset};
 use crate::state::WorkshopRouterState;
+use crate::workflow::{CreativeWorkflowDefinitionV1, MAX_WORKFLOW_DEFINITION_BYTES};
 
 pub fn workshop_routes(state: WorkshopRouterState) -> Router {
     // The asset upload route carries its own (larger) body limit. Disable the
@@ -59,6 +60,21 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         ))
         .with_state(state.clone());
 
+    let workflow_write_router = Router::new()
+        .route(
+            "/api/creative-studio/workflows",
+            post(create_creative_workflow),
+        )
+        .route(
+            "/api/creative-studio/workflows/{workflow_id}",
+            axum::routing::put(save_creative_workflow),
+        )
+        .layer(DefaultBodyLimit::disable())
+        .layer(RequestBodyLimitLayer::new(
+            MAX_WORKFLOW_DEFINITION_BYTES + 64 * 1024,
+        ))
+        .with_state(state.clone());
+
     Router::new()
         .route(
             "/api/creative-studio/projects",
@@ -77,6 +93,14 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         .route(
             "/api/creative-studio/projects/{project_id}/archive",
             get(export_creative_project_archive),
+        )
+        .route(
+            "/api/creative-studio/workflows",
+            get(list_creative_workflows),
+        )
+        .route(
+            "/api/creative-studio/workflows/{workflow_id}",
+            get(get_creative_workflow).delete(delete_creative_workflow),
         )
         .route("/api/workshop/canvases", get(list_canvases).post(create_canvas))
         .route(
@@ -105,6 +129,7 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
             post(rename_collection),
         )
         .with_state(state)
+        .merge(workflow_write_router)
         .merge(archive_import_router)
         .merge(upload_router)
 }
@@ -241,6 +266,97 @@ async fn delete_creative_project(
     Path(project_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     state.service.delete_creative_project(&project_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── canonical Creative Studio workflows ────────────────────────────────────
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreativeWorkflowListResponse {
+    workflows: Vec<CreativeWorkflowDefinitionV1>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreativeWorkflowResponse {
+    workflow: CreativeWorkflowDefinitionV1,
+}
+
+async fn list_creative_workflows(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<CreativeWorkflowListResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(CreativeWorkflowListResponse {
+        workflows: state.service.list_creative_workflows().await?,
+    })))
+}
+
+async fn get_creative_workflow(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(workflow_id): Path<String>,
+) -> Result<Json<ApiResponse<CreativeWorkflowResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(CreativeWorkflowResponse {
+        workflow: state.service.get_creative_workflow(&workflow_id).await?,
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateCreativeWorkflowRequest {
+    workflow: CreativeWorkflowDefinitionV1,
+}
+
+async fn create_creative_workflow(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    body: Result<Json<CreateCreativeWorkflowRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, AppError> {
+    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let workflow = state
+        .service
+        .create_creative_workflow(request.workflow)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::ok(CreativeWorkflowResponse { workflow })),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SaveCreativeWorkflowRequest {
+    expected_revision: String,
+    workflow: CreativeWorkflowDefinitionV1,
+}
+
+async fn save_creative_workflow(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(workflow_id): Path<String>,
+    body: Result<Json<SaveCreativeWorkflowRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CreativeWorkflowResponse>>, AppError> {
+    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let workflow = state
+        .service
+        .save_creative_workflow(
+            &workflow_id,
+            &request.expected_revision,
+            request.workflow,
+        )
+        .await?;
+    Ok(Json(ApiResponse::ok(CreativeWorkflowResponse {
+        workflow,
+    })))
+}
+
+async fn delete_creative_workflow(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(workflow_id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    state.service.delete_creative_workflow(&workflow_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -759,6 +875,11 @@ mod tests {
 
     use super::*;
     use crate::WorkshopService;
+    use crate::workflow::{
+        CreativeWorkflowMetadata, CreativeWorkflowOutputPlan, CreativeWorkflowPromptSource,
+        CreativeWorkflowStep, CreativeWorkflowTemplate, CreativeWorkflowTemplateSegment,
+        CreativeWorkflowVariable, CreativeWorkflowVisibility,
+    };
 
     async fn test_state() -> (WorkshopRouterState, CurrentUser, tempfile::TempDir) {
         let database = nomifun_db::init_database_memory().await.unwrap();
@@ -771,6 +892,71 @@ mod tests {
             username: "owner".into(),
         };
         (WorkshopRouterState::new(service), user, data_dir)
+    }
+
+    fn workflow_definition() -> CreativeWorkflowDefinitionV1 {
+        let variable_id = nomifun_common::generate_id();
+        let template_id = nomifun_common::generate_id();
+        let render_id = nomifun_common::generate_id();
+        let generate_id = nomifun_common::generate_id();
+        CreativeWorkflowDefinitionV1 {
+            id: nomifun_common::CreativeStudioWorkflowId::new().into_string(),
+            revision: 1,
+            metadata: CreativeWorkflowMetadata {
+                name: "电商海报".into(),
+                description: "固定结构".into(),
+                category: "电商".into(),
+                visibility: CreativeWorkflowVisibility::Private,
+                tags: Vec::new(),
+                created_at: 0,
+                updated_at: 0,
+            },
+            output: CreativeWorkflowOutputPlan::SingleImage,
+            variables: vec![CreativeWorkflowVariable::Text {
+                id: variable_id.clone(),
+                key: "product_name".into(),
+                label: "产品名称".into(),
+                description: String::new(),
+                required: true,
+                default_value: None,
+                placeholder: String::new(),
+                min_length: 0,
+                max_length: 200,
+            }],
+            templates: vec![CreativeWorkflowTemplate {
+                id: template_id.clone(),
+                name: "主提示词".into(),
+                segments: vec![
+                    CreativeWorkflowTemplateSegment::Text { text: "为 ".into() },
+                    CreativeWorkflowTemplateSegment::Variable { variable_id },
+                    CreativeWorkflowTemplateSegment::Text { text: " 生成海报".into() },
+                ],
+            }],
+            steps: vec![
+                CreativeWorkflowStep::RenderTemplate {
+                    id: render_id.clone(),
+                    name: "渲染提示词".into(),
+                    depends_on: Vec::new(),
+                    enabled: true,
+                    template_id: template_id.clone(),
+                },
+                CreativeWorkflowStep::GenerateImages {
+                    id: generate_id,
+                    name: "生成图片".into(),
+                    depends_on: vec![render_id],
+                    enabled: true,
+                    prompt_source: CreativeWorkflowPromptSource::Template { template_id },
+                    reference_variable_ids: Vec::new(),
+                    generation: crate::workflow::CreativeWorkflowImageGenerationSettings {
+                        model: None,
+                        quality: crate::workflow::CreativeWorkflowImageQuality::Auto,
+                        width: 1024,
+                        height: 1024,
+                        images_per_prompt: 1,
+                    },
+                },
+            ],
+        }
     }
 
     #[tokio::test]
@@ -861,6 +1047,96 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(gone, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn creative_workflow_routes_cover_canonical_crud() {
+        let (state, user, _data_dir) = test_state().await;
+        let app = workshop_routes(state).layer(Extension(user));
+        let definition = workflow_definition();
+        let workflow_id = definition.id.clone();
+
+        let create_body = serde_json::to_vec(&serde_json::json!({ "workflow": definition }))
+            .unwrap();
+        let created = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/creative-studio/workflows")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(create_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let listed = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/creative-studio/workflows")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+
+        let detail = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/creative-studio/workflows/{workflow_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail.status(), StatusCode::OK);
+        let detail_body = axum::body::to_bytes(detail.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let detail_json: serde_json::Value = serde_json::from_slice(&detail_body).unwrap();
+        let mut replacement: CreativeWorkflowDefinitionV1 = serde_json::from_value(
+            detail_json["data"]["workflow"].clone(),
+        )
+        .unwrap();
+        replacement.revision = 2;
+        replacement.metadata.name = "高端海报".into();
+
+        let saved = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/creative-studio/workflows/{workflow_id}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "expectedRevision": "1",
+                            "workflow": replacement,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
+
+        let deleted = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/creative-studio/workflows/{workflow_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]

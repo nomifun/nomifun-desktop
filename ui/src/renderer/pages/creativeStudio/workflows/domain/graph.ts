@@ -126,6 +126,14 @@ export function validateWorkflowGraph(workflow: WorkflowDefinitionV1): WorkflowV
           };
         }
       }
+      const expectedTask = step.referenceVariableIds.length > 0 ? 'image_edit' : 'image_generation';
+      if (step.generation.model && step.generation.model.task !== expectedTask) {
+        return {
+          code: 'invalid-value',
+          path: `$.steps[${stepIndex}].generation.model.task`,
+          message: `generation model must use ${expectedTask}`,
+        };
+      }
       if (step.promptSource.kind === 'template') {
         if (!templates.has(step.promptSource.templateId)) {
           return {

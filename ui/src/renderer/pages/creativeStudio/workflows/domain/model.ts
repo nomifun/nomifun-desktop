@@ -48,6 +48,10 @@ export function cloneWorkflowDefinition(workflow: WorkflowDefinitionV1): Workflo
           dependsOn: [...step.dependsOn],
           promptSource: { ...step.promptSource },
           referenceVariableIds: [...step.referenceVariableIds],
+          generation: {
+            ...step.generation,
+            model: step.generation.model ? { ...step.generation.model } : null,
+          },
         };
       }
       if (step.kind === 'record-history') {

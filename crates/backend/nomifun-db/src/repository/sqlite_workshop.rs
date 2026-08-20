@@ -2,7 +2,9 @@ use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 use serde_json::Value;
 
 use crate::error::DbError;
-use crate::models::{CreativeStudioProjectRow, WorkshopAssetRow, WorkshopCanvasRow};
+use crate::models::{
+    CreativeStudioProjectRow, CreativeStudioWorkflowRow, WorkshopAssetRow, WorkshopCanvasRow,
+};
 use crate::repository::IWorkshopRepository;
 use crate::repository::workshop::{AssetSort, ListAssetsParams, UpdateAssetParams};
 
@@ -143,6 +145,31 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         )
         .bind(provider_id)
         .bind(model)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    async fn provider_model_supports_task(
+        &self,
+        provider_id: &str,
+        model: &str,
+        task: &str,
+    ) -> Result<bool, DbError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(\
+                SELECT 1 \
+                FROM provider_models model_row \
+                JOIN providers provider ON provider.provider_id = model_row.provider_id \
+                JOIN provider_model_capabilities capability \
+                  ON capability.provider_id = model_row.provider_id \
+                 AND capability.model = model_row.model \
+                WHERE model_row.provider_id = ? AND model_row.model = ? \
+                  AND capability.task = ? AND model_row.enabled = 1 AND provider.enabled = 1\
+            )",
+        )
+        .bind(provider_id)
+        .bind(model)
+        .bind(task)
         .fetch_one(&self.pool)
         .await?)
     }
@@ -355,6 +382,138 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound(format!(
                 "creative studio project '{project_id}' not found"
+            )));
+        }
+        Ok(())
+    }
+
+    // ---- canonical Creative Studio workflows ----
+
+    async fn list_creative_workflows(&self) -> Result<Vec<CreativeStudioWorkflowRow>, DbError> {
+        let rows = sqlx::query_as::<_, CreativeStudioWorkflowRow>(
+            "SELECT * FROM creative_studio_workflows ORDER BY updated_at DESC, id DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for row in &rows {
+            nomifun_common::CreativeStudioWorkflowId::parse(&row.workflow_id).map_err(
+                |error| {
+                    DbError::Conflict(format!(
+                        "creative studio workflow_id {:?} is not a canonical UUIDv7: {error}",
+                        row.workflow_id
+                    ))
+                },
+            )?;
+        }
+        Ok(rows)
+    }
+
+    async fn get_creative_workflow(
+        &self,
+        workflow_id: &str,
+    ) -> Result<Option<CreativeStudioWorkflowRow>, DbError> {
+        let row = sqlx::query_as::<_, CreativeStudioWorkflowRow>(
+            "SELECT * FROM creative_studio_workflows WHERE workflow_id = ?",
+        )
+        .bind(workflow_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = &row {
+            nomifun_common::CreativeStudioWorkflowId::parse(&row.workflow_id).map_err(
+                |error| {
+                    DbError::Conflict(format!(
+                        "creative studio workflow_id {:?} is not a canonical UUIDv7: {error}",
+                        row.workflow_id
+                    ))
+                },
+            )?;
+        }
+        Ok(row)
+    }
+
+    async fn create_creative_workflow(
+        &self,
+        row: &CreativeStudioWorkflowRow,
+    ) -> Result<CreativeStudioWorkflowRow, DbError> {
+        nomifun_common::CreativeStudioWorkflowId::parse(&row.workflow_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio workflow_id {:?} is not a canonical UUIDv7: {error}",
+                row.workflow_id
+            ))
+        })?;
+        if row.revision != 1 {
+            return Err(DbError::Conflict(
+                "a creative studio workflow must start at revision 1".into(),
+            ));
+        }
+        Ok(sqlx::query_as::<_, CreativeStudioWorkflowRow>(
+            "INSERT INTO creative_studio_workflows \
+                (workflow_id, revision, name, description, category, visibility, definition_json, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
+        )
+        .bind(&row.workflow_id)
+        .bind(row.revision)
+        .bind(&row.name)
+        .bind(&row.description)
+        .bind(&row.category)
+        .bind(&row.visibility)
+        .bind(&row.definition_json)
+        .bind(row.created_at)
+        .bind(row.updated_at)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    async fn save_creative_workflow(
+        &self,
+        workflow_id: &str,
+        expected_revision: i64,
+        row: &CreativeStudioWorkflowRow,
+    ) -> Result<CreativeStudioWorkflowRow, DbError> {
+        if row.workflow_id != workflow_id || row.revision != expected_revision + 1 {
+            return Err(DbError::Conflict(
+                "creative studio workflow replacement must preserve its ID and increment revision once"
+                    .into(),
+            ));
+        }
+        let saved = sqlx::query_as::<_, CreativeStudioWorkflowRow>(
+            "UPDATE creative_studio_workflows \
+             SET revision = ?, name = ?, description = ?, category = ?, visibility = ?, \
+                 definition_json = ?, updated_at = ? \
+             WHERE workflow_id = ? AND revision = ? RETURNING *",
+        )
+        .bind(row.revision)
+        .bind(&row.name)
+        .bind(&row.description)
+        .bind(&row.category)
+        .bind(&row.visibility)
+        .bind(&row.definition_json)
+        .bind(row.updated_at)
+        .bind(workflow_id)
+        .bind(expected_revision)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(saved) = saved {
+            return Ok(saved);
+        }
+        if self.get_creative_workflow(workflow_id).await?.is_none() {
+            return Err(DbError::NotFound(format!(
+                "creative studio workflow '{workflow_id}' not found"
+            )));
+        }
+        Err(DbError::Conflict(format!(
+            "creative studio workflow '{workflow_id}' revision conflict"
+        )))
+    }
+
+    async fn delete_creative_workflow(&self, workflow_id: &str) -> Result<(), DbError> {
+        let result = sqlx::query("DELETE FROM creative_studio_workflows WHERE workflow_id = ?")
+            .bind(workflow_id)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!(
+                "creative studio workflow '{workflow_id}' not found"
             )));
         }
         Ok(())
@@ -782,6 +941,7 @@ mod tests {
     const ASSET_C2: &str = "0190f5fe-7c00-7a00-8abc-000000000162";
     const ASSET_C3: &str = "0190f5fe-7c00-7a00-8abc-000000000163";
     const CREATIVE_PROJECT_A: &str = "0190f5fe-7c00-7a00-8abc-000000000171";
+    const CREATIVE_WORKFLOW_A: &str = "0190f5fe-7c00-7a00-8abc-000000000172";
 
     async fn repo() -> (SqliteWorkshopRepository, crate::Database) {
         let db = init_database_memory().await.unwrap();
@@ -863,6 +1023,67 @@ mod tests {
             .unwrap();
         assert!(repo
             .get_creative_project(CREATIVE_PROJECT_A)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn creative_workflow_crud_and_revision_compare_and_swap() {
+        let (repo, _db) = repo().await;
+        let definition = format!(
+            r#"{{"id":"{CREATIVE_WORKFLOW_A}","revision":1,"metadata":{{"name":"海报","description":"","category":"电商","visibility":"private","tags":[],"createdAt":100,"updatedAt":100}},"output":{{"kind":"single-image"}},"variables":[],"templates":[],"steps":[]}}"#
+        );
+        let created = repo
+            .create_creative_workflow(&CreativeStudioWorkflowRow {
+                id: 0,
+                workflow_id: CREATIVE_WORKFLOW_A.into(),
+                revision: 1,
+                name: "海报".into(),
+                description: String::new(),
+                category: "电商".into(),
+                visibility: "private".into(),
+                definition_json: definition,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .await
+            .unwrap();
+        assert_eq!(created.revision, 1);
+
+        let changed = CreativeStudioWorkflowRow {
+            id: created.id,
+            workflow_id: CREATIVE_WORKFLOW_A.into(),
+            revision: 2,
+            name: "海报 2".into(),
+            description: "更新".into(),
+            category: "营销".into(),
+            visibility: "public".into(),
+            definition_json: format!(
+                r#"{{"id":"{CREATIVE_WORKFLOW_A}","revision":2,"metadata":{{"name":"海报 2"}}}}"#
+            ),
+            created_at: 100,
+            updated_at: 200,
+        };
+        let saved = repo
+            .save_creative_workflow(CREATIVE_WORKFLOW_A, 1, &changed)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, 2);
+        assert_eq!(saved.name, "海报 2");
+
+        let stale = repo
+            .save_creative_workflow(CREATIVE_WORKFLOW_A, 1, &changed)
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, DbError::Conflict(_)));
+        assert_eq!(repo.list_creative_workflows().await.unwrap().len(), 1);
+
+        repo.delete_creative_workflow(CREATIVE_WORKFLOW_A)
+            .await
+            .unwrap();
+        assert!(repo
+            .get_creative_workflow(CREATIVE_WORKFLOW_A)
             .await
             .unwrap()
             .is_none());
