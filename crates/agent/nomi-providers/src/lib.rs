@@ -41,11 +41,51 @@ fn merge_json_value(target: &mut Value, incoming: &Value) {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum OutputCeilingLocation<'a> {
+    /// A top-level protocol field. The dynamic field covers OpenAI-compatible
+    /// providers that rename `max_tokens`.
+    Top { dynamic: Option<&'a str> },
+    /// Gemini nests its ceiling under generationConfig.maxOutputTokens.
+    GeminiGenerationConfig,
+}
+
+const CANONICAL_OUTPUT_CEILING_KEYS: &[&str] = &[
+    "max_tokens",
+    "max_completion_tokens",
+    "maxOutputTokens",
+    "max_output_tokens",
+];
+
 /// Merge provider-native body extensions first, then recursively overlay the
-/// serializer's typed protocol body. Unknown extensions survive while typed
-/// model/messages/tools/token fields always remain authoritative.
-pub(crate) fn request_body_with_extra(compat: &ProviderCompat, typed: Value) -> Value {
-    let mut body = Value::Object(compat.extra_body());
+/// serializer's typed protocol body. Every known output-ceiling escape hatch
+/// is stripped before the merge: the typed request field is the only authority,
+/// and `None` must remain absence rather than inheriting an opaque extra.
+pub(crate) fn request_body_with_extra(
+    compat: &ProviderCompat,
+    ceiling: OutputCeilingLocation<'_>,
+    typed: Value,
+) -> Value {
+    let mut extra = compat.extra_body();
+    for key in CANONICAL_OUTPUT_CEILING_KEYS {
+        extra.remove(*key);
+    }
+    match ceiling {
+        OutputCeilingLocation::Top { dynamic } => {
+            if let Some(key) = dynamic {
+                extra.remove(key);
+            }
+        }
+        OutputCeilingLocation::GeminiGenerationConfig => {
+            if let Some(Value::Object(generation_config)) = extra.get_mut("generationConfig") {
+                generation_config.remove("maxOutputTokens");
+                if generation_config.is_empty() {
+                    extra.remove("generationConfig");
+                }
+            }
+        }
+    }
+    let mut body = Value::Object(extra);
     merge_json_value(&mut body, &typed);
     body
 }
@@ -59,6 +99,8 @@ pub trait LlmProvider: Send + Sync {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
+    #[error("Provider configuration error: {0}")]
+    Config(String),
     #[error("HTTP error: {0}")]
     Http(reqwest::Error),
     #[error("API error {status}: {message}")]
@@ -95,6 +137,7 @@ impl ProviderError {
     /// crosses the provider boundary or is written to a log/health record.
     pub(crate) fn redacted(self, redactor: &SecretRedactor) -> Self {
         match self {
+            Self::Config(message) => Self::Config(redactor.redact(&message)),
             Self::Http(error) => Self::Http(error.without_url()),
             Self::Api { status, message } => Self::Api {
                 status,
@@ -708,7 +751,7 @@ mod retryable_tests {
             system: String::new(),
             messages: Vec::new(),
             tools: Vec::new(),
-            max_tokens: 1,
+            max_tokens: Some(1),
             thinking: None,
             reasoning_effort: None,
         }

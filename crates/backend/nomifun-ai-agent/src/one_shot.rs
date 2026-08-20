@@ -128,7 +128,7 @@ async fn tool_loop(
             system: req.system_prompt.clone(),
             messages: messages.clone(),
             tools: tool_defs.clone(),
-            max_tokens: ONE_SHOT_MAX_TOKENS,
+            max_tokens: Some(ONE_SHOT_MAX_TOKENS),
             thinking: None,
             reasoning_effort: None,
         };

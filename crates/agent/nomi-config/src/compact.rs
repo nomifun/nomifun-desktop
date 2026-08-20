@@ -10,8 +10,9 @@ pub struct CompactConfig {
     #[serde(default = "default_context_window")]
     pub context_window: usize,
 
-    /// Tokens reserved for output generation.
-    /// Subtracted from `context_window` to get the effective input budget.
+    /// Input headroom reserved for one response. It is floored from the context
+    /// window and may be raised by a declared output ceiling, but is never
+    /// defined by that ceiling.
     #[serde(default = "default_output_reserve")]
     pub output_reserve: usize,
 
@@ -134,7 +135,18 @@ pub fn resolve_context_window(context_limit: Option<u64>, default_window: usize)
     }
 }
 
-/// Fit the response and compaction budgets inside the resolved context window.
+/// One response's structural share of a context window.
+///
+/// This remains defined when the provider output ceiling is omitted, and is
+/// shared by request compaction and summary generation so their budgets cannot
+/// drift apart.
+pub fn window_output_unit(context_window: usize) -> u32 {
+    u32::try_from((context_window / 8).max(1))
+        .unwrap_or(u32::MAX)
+        .min(20_000)
+}
+
+/// Fit an optional request ceiling and compaction budgets inside the window.
 ///
 /// Nomi's defaults target a 200k context window. Reusing them unchanged for a
 /// small provider can reserve more tokens than the provider accepts before the
@@ -142,21 +154,27 @@ pub fn resolve_context_window(context_limit: Option<u64>, default_window: usize)
 /// one quarter of the window. Oversized compaction defaults are reduced to a
 /// response-sized output reserve plus an eighth-window autocompact buffer,
 /// while already-balanced custom settings are preserved.
-pub fn fit_context_budget(config: &mut CompactConfig, requested_max_tokens: u32) -> u32 {
+pub fn fit_context_budget(
+    config: &mut CompactConfig,
+    declared_output_limit: Option<u32>,
+) -> Option<u32> {
     let context_window = config.context_window.max(1);
-    let output_cap = (context_window / 4).max(1);
-    let output_cap_u32 = u32::try_from(output_cap).unwrap_or(u32::MAX);
-    let max_tokens = requested_max_tokens.min(output_cap_u32);
+    let output_cap = u32::try_from((context_window / 4).max(1)).unwrap_or(u32::MAX);
+    let request_ceiling = declared_output_limit.map(|limit| limit.min(output_cap));
+    let permitted = request_ceiling.map_or(0usize, |limit| limit as usize);
+    let structural = window_output_unit(context_window) as usize;
 
-    // The compactor must reserve at least as much as the provider may emit.
-    config.output_reserve = config.output_reserve.max(max_tokens as usize);
+    config.output_reserve = config
+        .output_reserve
+        .max(structural)
+        .max(permitted);
 
     if config
         .output_reserve
         .saturating_add(config.autocompact_buffer)
         > context_window / 2
     {
-        config.output_reserve = max_tokens as usize;
+        config.output_reserve = structural.max(permitted);
         config.autocompact_buffer = config
             .autocompact_buffer
             .min((context_window / 8).max(1));
@@ -166,7 +184,7 @@ pub fn fit_context_budget(config: &mut CompactConfig, requested_max_tokens: u32)
         .emergency_buffer
         .min((context_window / 16).max(1));
 
-    max_tokens
+    request_ceiling
 }
 
 #[cfg(test)]
@@ -334,7 +352,7 @@ cache_diagnostics = true
     fn context_budget_preserves_balanced_large_window_defaults() {
         let mut cfg = CompactConfig::default();
 
-        assert_eq!(fit_context_budget(&mut cfg, 8192), 8192);
+        assert_eq!(fit_context_budget(&mut cfg, Some(8192)), Some(8192));
         assert_eq!(cfg.output_reserve, 20_000);
         assert_eq!(cfg.autocompact_buffer, 13_000);
         assert_eq!(cfg.emergency_buffer, 3_000);
@@ -347,7 +365,7 @@ cache_diagnostics = true
             ..Default::default()
         };
 
-        assert_eq!(fit_context_budget(&mut cfg, 8192), 8192);
+        assert_eq!(fit_context_budget(&mut cfg, Some(8192)), Some(8192));
         assert_eq!(cfg.output_reserve, 8192);
         assert_eq!(cfg.autocompact_buffer, 8192);
         assert_eq!(cfg.emergency_buffer, 3_000);
@@ -360,7 +378,7 @@ cache_diagnostics = true
             ..Default::default()
         };
 
-        assert_eq!(fit_context_budget(&mut cfg, 8192), 1024);
+        assert_eq!(fit_context_budget(&mut cfg, Some(8192)), Some(1024));
         assert_eq!(cfg.output_reserve, 1024);
         assert_eq!(cfg.autocompact_buffer, 512);
         assert_eq!(cfg.emergency_buffer, 256);
@@ -376,9 +394,49 @@ cache_diagnostics = true
             ..Default::default()
         };
 
-        assert_eq!(fit_context_budget(&mut cfg, 4096), 4096);
+        assert_eq!(fit_context_budget(&mut cfg, Some(4096)), Some(4096));
         assert_eq!(cfg.output_reserve, 6000);
         assert_eq!(cfg.autocompact_buffer, 4000);
         assert_eq!(cfg.emergency_buffer, 1000);
+    }
+
+    #[test]
+    fn window_output_unit_scales_with_context_window() {
+        assert_eq!(window_output_unit(4096), 512);
+        assert_eq!(window_output_unit(8192), 1024);
+        assert_eq!(window_output_unit(32_000), 4000);
+        assert_eq!(window_output_unit(200_000), 20_000);
+        assert_eq!(window_output_unit(1_000_000), 20_000);
+    }
+
+    #[test]
+    fn undeclared_ceiling_keeps_nonzero_window_derived_headroom() {
+        for (window, expected_reserve, expected_buffer) in [
+            (200_000, 20_000, 13_000),
+            (128_000, 20_000, 13_000),
+            (65_536, 8192, 8192),
+            (32_000, 4000, 4000),
+            (4096, 512, 512),
+        ] {
+            let mut cfg = CompactConfig {
+                context_window: window,
+                ..Default::default()
+            };
+            assert_eq!(fit_context_budget(&mut cfg, None), None);
+            assert_eq!(cfg.output_reserve, expected_reserve, "window={window}");
+            assert_eq!(cfg.autocompact_buffer, expected_buffer, "window={window}");
+        }
+    }
+
+    #[test]
+    fn explicit_zero_reserve_is_repaired_from_the_window() {
+        let mut cfg = CompactConfig {
+            context_window: 32_000,
+            output_reserve: 0,
+            ..Default::default()
+        };
+
+        assert_eq!(fit_context_budget(&mut cfg, None), None);
+        assert_eq!(cfg.output_reserve, window_output_unit(32_000) as usize);
     }
 }

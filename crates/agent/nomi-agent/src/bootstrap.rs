@@ -25,7 +25,7 @@ use crate::session::Session;
 struct SessionExtractModel {
     provider: Arc<dyn LlmProvider>,
     model: String,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
 }
 
 #[cfg(feature = "browser-use")]
@@ -81,7 +81,7 @@ impl nomi_browser::extract::ExtractModel for SessionExtractModel {
 struct SessionVisualLocator {
     provider: Arc<dyn LlmProvider>,
     model: String,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
 }
 
 #[cfg(feature = "browser-use")]
@@ -813,7 +813,7 @@ impl AgentBootstrap {
             let extract_model = Arc::new(SessionExtractModel {
                 provider: provider.clone(),
                 model: self.config.model.clone(),
-                max_tokens: self.config.max_tokens,
+                max_tokens: self.config.output_max_tokens,
             });
             browser_tool = browser_tool.with_extract_model(extract_model);
             // P7B: visual fallback opt-in (LIVE pref `agent.browserUse.visualFallback`, default
@@ -826,7 +826,7 @@ impl AgentBootstrap {
                 let locator = Arc::new(SessionVisualLocator {
                     provider: provider.clone(),
                     model: self.config.model.clone(),
-                    max_tokens: self.config.max_tokens,
+                    max_tokens: self.config.output_max_tokens,
                 });
                 browser_tool = browser_tool
                     .with_visual_locator(locator)

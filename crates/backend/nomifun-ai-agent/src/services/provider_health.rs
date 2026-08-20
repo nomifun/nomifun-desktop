@@ -156,7 +156,7 @@ impl ProviderHealthCheckService {
                 "You are a provider health probe. Reply with exactly OK and do not use tools."
                     .into(),
             ),
-            max_tokens: 16,
+            output_ceiling: Some(16),
             max_turns: Some(1),
             context_limit: fields.context_limit.map(|value| value as u64),
             compat_overrides: fields.compat_overrides,
@@ -394,7 +394,7 @@ async fn build_probe_engine(config_extra: NomiResolvedConfig) -> Result<AgentEng
         api_key: Some(config_extra.api_key),
         base_url: config_extra.base_url,
         model: Some(config_extra.model),
-        max_tokens: Some(config_extra.max_tokens),
+        max_tokens: config_extra.output_ceiling,
         max_turns: config_extra.max_turns,
         system_prompt: config_extra.system_prompt,
         profile: None,

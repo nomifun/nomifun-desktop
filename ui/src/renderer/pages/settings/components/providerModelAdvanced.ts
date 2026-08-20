@@ -53,6 +53,7 @@ export interface ModelCapabilityDraft {
   allowCrossOriginCredentials: boolean;
   providerParamsJson: string;
   contextLimit?: number;
+  outputLimit?: number;
 }
 
 export interface ModelDefinitionDraft {
@@ -88,6 +89,7 @@ export type CapabilityValidationError =
   | 'connection_role_required'
   | 'connection_missing'
   | 'base_url_required'
+  | 'output_ceiling_required'
   | 'cross_origin_consent_required'
   | 'invalid_provider_params';
 
@@ -120,6 +122,7 @@ export const emptyCapabilityDraft = (task: ModelTask): ModelCapabilityDraft => (
   allowCrossOriginCredentials: false,
   providerParamsJson: '',
   contextLimit: undefined,
+  outputLimit: undefined,
 });
 
 export const capabilityDraftFromResponse = (capability: {
@@ -135,6 +138,7 @@ export const capabilityDraftFromResponse = (capability: {
   allow_cross_origin_credentials?: boolean;
   provider_params?: unknown;
   context_limit?: number;
+  output_limit?: number;
 }): ModelCapabilityDraft => ({
   task: capability.task,
   traits: capability.traits ?? [],
@@ -151,6 +155,7 @@ export const capabilityDraftFromResponse = (capability: {
       ? JSON.stringify(capability.provider_params, null, 2)
       : '',
   contextLimit: capability.context_limit,
+  outputLimit: capability.output_limit,
 });
 
 /** Append one task without disturbing any existing task draft. */
@@ -565,6 +570,16 @@ export const validateModelDefinition = (
       errors.push({ task: capability.task, code: 'protocol_not_registered' });
     }
     const descriptor = protocolDescriptorForDraft(capability, manifest);
+    if (
+      descriptor?.requires_output_ceiling &&
+      !(
+        typeof capability.outputLimit === 'number' &&
+        Number.isFinite(capability.outputLimit) &&
+        capability.outputLimit > 0
+      )
+    ) {
+      errors.push({ task: capability.task, code: 'output_ceiling_required' });
+    }
     const selectedAuthScheme =
       capability.connectionRole.trim() === 'default'
         ? providerAuthScheme
@@ -640,6 +655,9 @@ export const capabilityInputFromDraft = (
     ...(Object.keys(providerParams.value).length > 0 ? { provider_params: providerParams.value } : {}),
     ...(capability.contextLimit && capability.contextLimit > 0
       ? { context_limit: capability.contextLimit }
+      : {}),
+    ...(capability.outputLimit && capability.outputLimit > 0
+      ? { output_limit: capability.outputLimit }
       : {}),
   };
 };

@@ -39,8 +39,7 @@ impl MockLlmProvider {
                 usage: TokenUsage {
                     input_tokens: 100,
                     output_tokens: 50,
-                    cache_creation_tokens: 0,
-                    cache_read_tokens: 0,
+                    ..Default::default()
                 },
             },
         ];
@@ -63,8 +62,7 @@ impl MockLlmProvider {
                 usage: TokenUsage {
                     input_tokens: 80,
                     output_tokens: 30,
-                    cache_creation_tokens: 0,
-                    cache_read_tokens: 0,
+                    ..Default::default()
                 },
             },
         ];
@@ -246,7 +244,7 @@ pub fn test_config() -> Config {
         api_key: "test-key".to_string(),
         base_url: "http://localhost:0".to_string(),
         model: "test-model".to_string(),
-        max_tokens: 4096,
+        output_max_tokens: Some(4096),
         max_turns: Some(10),
         system_prompt: Some("You are a test assistant.".to_string()),
         project_instructions: Default::default(),

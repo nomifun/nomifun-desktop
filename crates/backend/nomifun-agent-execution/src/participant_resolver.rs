@@ -774,6 +774,7 @@ mod tests {
             allow_cross_origin_credentials: false,
             provider_params: "{}".to_owned(),
             context_limit: None,
+            output_limit: None,
             health: None,
             health_checked_at: None,
             created_at: 1,

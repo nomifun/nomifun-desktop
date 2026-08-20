@@ -15569,6 +15569,7 @@ impl StubProviderModelCapabilityRepo {
                     allow_cross_origin_credentials: false,
                     provider_params: "{}".into(),
                     context_limit: None,
+                    output_limit: None,
                     health: None,
                     health_checked_at: None,
                     created_at: 0,

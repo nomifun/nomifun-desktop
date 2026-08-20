@@ -109,6 +109,10 @@ pub struct TurnCompletedEventData {
     pub input_tokens: u64,
     #[ts(type = "number")]
     pub output_tokens: u64,
+    /// Provider-reported reasoning tokens; a subset of output_tokens.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub reasoning_tokens: u64,
     /// Current context occupancy (last request's prompt tokens). Gauge numerator.
     #[serde(default)]
     #[ts(type = "number")]
@@ -390,6 +394,7 @@ mod tests {
             elapsed_ms: 1234,
             input_tokens: 500,
             output_tokens: 250,
+            reasoning_tokens: 125,
             context_tokens: 8000,
             context_window: 100_000,
         });
@@ -398,6 +403,7 @@ mod tests {
         assert_eq!(json["data"]["elapsed_ms"], 1234);
         assert_eq!(json["data"]["input_tokens"], 500);
         assert_eq!(json["data"]["output_tokens"], 250);
+        assert_eq!(json["data"]["reasoning_tokens"], 125);
         assert_eq!(json["data"]["context_tokens"], 8000);
         assert_eq!(json["data"]["context_window"], 100_000);
 
@@ -414,7 +420,7 @@ mod tests {
         assert!(matches!(
             back,
             AgentStreamEvent::TurnCompleted(d)
-                if d.context_tokens == 0 && d.context_window == 0
+                if d.reasoning_tokens == 0 && d.context_tokens == 0 && d.context_window == 0
         ));
     }
 

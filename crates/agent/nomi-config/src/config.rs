@@ -185,8 +185,10 @@ pub struct DefaultConfig {
     #[serde(default = "default_provider")]
     pub provider: String,
     pub model: Option<String>,
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
+    /// Explicit CLI/TOML output ceiling. `None` lets protocols that support
+    /// omission use their provider default; required protocols reject it.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
     #[serde(default)]
     pub max_turns: Option<usize>,
     pub system_prompt: Option<String>,
@@ -197,7 +199,7 @@ impl Default for DefaultConfig {
         Self {
             provider: default_provider(),
             model: None,
-            max_tokens: default_max_tokens(),
+            max_tokens: None,
             max_turns: None,
             system_prompt: None,
         }
@@ -444,9 +446,6 @@ impl Default for SessionConfig {
 fn default_provider() -> String {
     "anthropic".to_string()
 }
-fn default_max_tokens() -> u32 {
-    8192
-}
 fn default_allow_list() -> Vec<String> {
     vec!["Read".into(), "Grep".into(), "Glob".into()]
 }
@@ -479,7 +478,8 @@ pub struct Config {
     pub api_key: String,
     pub base_url: String,
     pub model: String,
-    pub max_tokens: u32,
+    /// Effective output ceiling for requests. `None` means omit the field.
+    pub output_max_tokens: Option<u32>,
     pub max_turns: Option<usize>,
     pub system_prompt: Option<String>,
     pub project_instructions: ProjectInstructionsConfig,
@@ -508,6 +508,15 @@ pub enum ProviderType {
 }
 
 impl ProviderType {
+    /// Whether this protocol requires an explicit output ceiling on the wire.
+    /// Exhaustive so every future provider adapter must make the choice.
+    pub fn requires_output_ceiling(self) -> bool {
+        match self {
+            ProviderType::Anthropic | ProviderType::Bedrock | ProviderType::Vertex => true,
+            ProviderType::OpenAI | ProviderType::Gemini => false,
+        }
+    }
+
     fn default_base_url(self) -> &'static str {
         match self {
             ProviderType::Anthropic => "https://api.anthropic.com",
@@ -603,7 +612,7 @@ impl Config {
             .or(merged.default.model.clone())
             .unwrap_or_else(|| provider.default_model().into());
 
-        let max_tokens = cli.max_tokens.unwrap_or(merged.default.max_tokens);
+        let output_max_tokens = cli.max_tokens.or(merged.default.max_tokens);
         let max_turns = cli.max_turns.or(merged.default.max_turns);
 
         let system_prompt = cli
@@ -643,7 +652,7 @@ impl Config {
             api_key,
             base_url,
             model,
-            max_tokens,
+            output_max_tokens,
             max_turns,
             system_prompt,
             project_instructions,
@@ -1046,11 +1055,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
             global.default.provider
         },
         model: project.default.model.or(global.default.model),
-        max_tokens: if project.default.max_tokens != default_max_tokens() {
-            project.default.max_tokens
-        } else {
-            global.default.max_tokens
-        },
+        max_tokens: project.default.max_tokens.or(global.default.max_tokens),
         max_turns: project.default.max_turns.or(global.default.max_turns),
         system_prompt: project
             .default
@@ -1307,7 +1312,7 @@ fn apply_profile(mut config: ConfigFile, profile_name: &str) -> anyhow::Result<C
         config.default.model = Some(model);
     }
     if let Some(max_tokens) = profile.max_tokens {
-        config.default.max_tokens = max_tokens;
+        config.default.max_tokens = Some(max_tokens);
     }
     if let Some(max_turns) = profile.max_turns {
         config.default.max_turns = Some(max_turns);
@@ -1362,7 +1367,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = r#"# nomi configuration
 [default]
 provider = "anthropic"            # built-in provider or custom alias from [providers.<name>]
 # model = "claude-sonnet-4-20250514"
-max_tokens = 8192
+# max_tokens = 8192               # required by anthropic/bedrock/vertex; optional otherwise
 # max_turns = 30                  # optional: omit for unlimited turns
 # system_prompt = "..."          # optional custom system prompt
 
@@ -1573,6 +1578,20 @@ mod tests {
     }
 
     #[test]
+    fn output_ceiling_requirement_follows_protocol_contract() {
+        for provider in [
+            ProviderType::Anthropic,
+            ProviderType::Bedrock,
+            ProviderType::Vertex,
+        ] {
+            assert!(provider.requires_output_ceiling(), "{provider:?}");
+        }
+        for provider in [ProviderType::OpenAI, ProviderType::Gemini] {
+            assert!(!provider.requires_output_ceiling(), "{provider:?}");
+        }
+    }
+
+    #[test]
     fn test_provider_alias_resolves_to_builtin_provider() {
         let mut providers = HashMap::new();
         providers.insert(
@@ -1660,7 +1679,7 @@ mod tests {
             default: DefaultConfig {
                 provider: "anthropic".to_string(),
                 model: Some("global-model".to_string()),
-                max_tokens: 4096,
+                max_tokens: Some(4096),
                 max_turns: Some(10),
                 system_prompt: Some("global prompt".to_string()),
             },
@@ -1670,7 +1689,7 @@ mod tests {
             default: DefaultConfig {
                 provider: "openai".to_string(), // non-default -> overrides global
                 model: Some("project-model".to_string()),
-                max_tokens: 2048,   // non-default -> overrides global
+                max_tokens: Some(2048), // explicit -> overrides global
                 max_turns: Some(5), // non-default -> overrides global
                 system_prompt: Some("project prompt".to_string()),
             },
@@ -1681,7 +1700,7 @@ mod tests {
 
         assert_eq!(merged.default.provider, "openai");
         assert_eq!(merged.default.model, Some("project-model".to_string()));
-        assert_eq!(merged.default.max_tokens, 2048);
+        assert_eq!(merged.default.max_tokens, Some(2048));
         assert_eq!(merged.default.max_turns, Some(5));
         assert_eq!(
             merged.default.system_prompt,
@@ -1696,13 +1715,13 @@ mod tests {
             default: DefaultConfig {
                 provider: "openai".to_string(),
                 model: Some("global-model".to_string()),
-                max_tokens: 1024,
+                max_tokens: Some(1024),
                 max_turns: Some(5),
                 system_prompt: Some("global prompt".to_string()),
             },
             ..Default::default()
         };
-        // Project stays at built-in defaults (provider = "anthropic", max_tokens = 8192, max_turns = None)
+        // Project stays at built-in defaults (provider = "anthropic", max_tokens = None).
         let project = ConfigFile::default();
 
         let merged = merge_config_files(global, project);
@@ -1710,7 +1729,7 @@ mod tests {
         // provider: project default "anthropic" == default_provider() -> use global "openai"
         assert_eq!(merged.default.provider, "openai");
         assert_eq!(merged.default.model, Some("global-model".to_string()));
-        assert_eq!(merged.default.max_tokens, 1024);
+        assert_eq!(merged.default.max_tokens, Some(1024));
         assert_eq!(merged.default.max_turns, Some(5));
         assert_eq!(
             merged.default.system_prompt,
@@ -1724,7 +1743,7 @@ mod tests {
         let merged = merge_config_files(ConfigFile::default(), ConfigFile::default());
 
         assert_eq!(merged.default.provider, default_provider());
-        assert_eq!(merged.default.max_tokens, default_max_tokens());
+        assert_eq!(merged.default.max_tokens, None);
         assert_eq!(merged.default.max_turns, None);
         assert!(merged.default.model.is_none());
         assert!(merged.providers.is_empty());
@@ -2022,7 +2041,7 @@ allow = ["commit", "review-pr", "db:*"]
         let config: ConfigFile = toml::from_str("").unwrap();
 
         assert_eq!(config.default.provider, "anthropic");
-        assert_eq!(config.default.max_tokens, 8192);
+        assert_eq!(config.default.max_tokens, None);
         assert_eq!(config.default.max_turns, None);
         assert!(config.default.model.is_none());
         assert!(config.providers.is_empty());
@@ -2049,7 +2068,7 @@ prompt_caching = false
 
         assert_eq!(config.default.provider, "openai");
         assert_eq!(config.default.model, Some("gpt-4o".to_string()));
-        assert_eq!(config.default.max_tokens, 4096);
+        assert_eq!(config.default.max_tokens, Some(4096));
 
         let openai = config.providers.get("openai").unwrap();
         assert_eq!(openai.api_key.as_deref(), Some("sk-test-key"));
@@ -2542,7 +2561,7 @@ max_tokens = 1234
         };
 
         let config = Config::resolve(&cli_args).unwrap();
-        assert_eq!(config.max_tokens, 1234);
+        assert_eq!(config.output_max_tokens, Some(1234));
         assert_eq!(
             config.project_instructions.project_doc_fallback_filenames,
             vec!["TEAM_GUIDE.md", ".agents.md"]

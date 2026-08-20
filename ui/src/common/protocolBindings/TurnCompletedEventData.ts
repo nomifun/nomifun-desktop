@@ -9,6 +9,10 @@ export type TurnCompletedEventData = {
  */
 elapsed_ms: number, input_tokens: number, output_tokens: number, 
 /**
+ * Provider-reported reasoning tokens; a subset of output_tokens.
+ */
+reasoning_tokens: number,
+/**
  * Current context occupancy (last request's prompt tokens). Gauge numerator.
  */
 context_tokens: number, 

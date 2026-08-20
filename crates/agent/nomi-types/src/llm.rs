@@ -10,7 +10,9 @@ pub struct LlmRequest {
     pub system: String,
     pub messages: Vec<crate::message::Message>,
     pub tools: Vec<ToolDef>,
-    pub max_tokens: u32,
+    /// Output-token ceiling to put on the provider request. `None` means the
+    /// serializer must omit the field and let the provider apply its default.
+    pub max_tokens: Option<u32>,
     /// Optional: thinking config (Anthropic extended thinking)
     pub thinking: Option<ThinkingConfig>,
     /// Optional: reasoning effort for OpenAI reasoning models (low/medium/high)
@@ -87,6 +89,7 @@ mod tests {
         let usage = TokenUsage {
             input_tokens: 10,
             output_tokens: 20,
+            reasoning_tokens: 0,
             cache_creation_tokens: 0,
             cache_read_tokens: 5,
         };

@@ -444,6 +444,16 @@ fn allowed_auth_schemes(spec: ProtocolSpec) -> &'static [&'static str] {
     }
 }
 
+/// Whether a Chat protocol's wire schema mandates an explicit output ceiling.
+/// Kept exhaustive over the registered Anthropic-family Agent protocols and
+/// pinned against the runtime ProviderType policy by nomifun-ai-agent tests.
+pub fn protocol_requires_output_ceiling(protocol_id: &str) -> bool {
+    matches!(
+        protocol_id,
+        "anthropic.messages" | "bedrock.anthropic_messages"
+    )
+}
+
 const OPENAI_CHAT_PLATFORMS: &[&str] = &[
     "openai", "deepseek", "mimo", "mimo-token-plan-cn", "mimo-token-plan-sgp",
     "mimo-token-plan-ams", "minimax", "minimax-code", "minimax-coding-plan", "novita",
@@ -748,14 +758,40 @@ pub fn validate_provider_params_for_protocol(
         ));
     }
     if task == Chat {
-        if object.contains_key("max_tokens_field")
-            && object
-                .get("max_tokens_field")
-                .and_then(serde_json::Value::as_str)
-                .is_none_or(|value| value.trim().is_empty())
+        let configured_ceiling_key = match object.get("max_tokens_field") {
+            None => None,
+            Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
+                Some(value.trim())
+            }
+            Some(_) => {
+                return Err(InvokeError::config(
+                    "Chat provider_params.max_tokens_field must be a non-empty string",
+                ));
+            }
+        };
+        const OUTPUT_CEILING_KEYS: &[&str] = &[
+            "max_tokens",
+            "max_completion_tokens",
+            "maxOutputTokens",
+            "max_output_tokens",
+        ];
+        let shadow_key = OUTPUT_CEILING_KEYS
+            .iter()
+            .copied()
+            .find(|key| object.contains_key(*key))
+            .or_else(|| configured_ceiling_key.filter(|key| object.contains_key(*key)));
+        if let Some(key) = shadow_key {
+            return Err(InvokeError::config(format!(
+                "Chat provider_params must not set {key:?}; use the capability's output_limit field"
+            )));
+        }
+        if object
+            .get("generationConfig")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|config| config.contains_key("maxOutputTokens"))
         {
             return Err(InvokeError::config(
-                "Chat provider_params.max_tokens_field must be a non-empty string",
+                "Chat provider_params must not set generationConfig.maxOutputTokens; use the capability's output_limit field",
             ));
         }
         if object.contains_key("require_reasoning_content")
@@ -902,6 +938,7 @@ fn owned_protocol(spec: ProtocolSpec) -> ProtocolDescriptor {
         supported_tasks: spec.tasks.to_vec(),
         executor: spec.executor,
         transport: spec.transport,
+        requires_output_ceiling: protocol_requires_output_ceiling(spec.id),
         allowed_auth_schemes: allowed_auth_schemes(spec)
             .iter()
             .map(|value| (*value).to_owned())
@@ -1135,6 +1172,7 @@ mod tests {
             supported_tasks: vec![Chat],
             executor: Agent,
             transport: Http,
+            requires_output_ceiling: false,
             allowed_auth_schemes: vec!["bearer".to_owned()],
             scopes: vec![ProtocolScope::Custom],
             platforms: vec![],
@@ -1289,6 +1327,37 @@ mod tests {
                     .is_err()
             );
         }
+
+        for ceiling in [
+            serde_json::json!({"max_tokens":8192}),
+            serde_json::json!({"max_completion_tokens":8192}),
+            serde_json::json!({"maxOutputTokens":8192}),
+            serde_json::json!({"max_output_tokens":8192}),
+            serde_json::json!({"max_tokens_field":"custom_limit","custom_limit":8192}),
+            serde_json::json!({"generationConfig":{"maxOutputTokens":8192}}),
+        ] {
+            let error =
+                validate_provider_params_for_protocol("openai.chat_text", Chat, &ceiling)
+                    .unwrap_err();
+            assert!(error.message.contains("output_limit"), "{error:?}");
+        }
+
+        validate_provider_params_for_protocol(
+            "siliconflow.audio_speech",
+            SpeechSynthesis,
+            &serde_json::json!({"max_tokens":128}),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn output_ceiling_requirement_matches_registered_chat_protocols() {
+        assert!(protocol_requires_output_ceiling("anthropic.messages"));
+        assert!(protocol_requires_output_ceiling(
+            "bedrock.anthropic_messages"
+        ));
+        assert!(!protocol_requires_output_ceiling("openai.chat_text"));
+        assert!(!protocol_requires_output_ceiling("gemini.generate_text"));
     }
 
     #[test]

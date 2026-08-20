@@ -57,6 +57,7 @@ const manifest = (
       supported_tasks: [task],
       executor: 'model_invoke',
       transport: task === 'realtime_conversation' ? 'websocket' : 'http',
+      requires_output_ceiling: false,
       allowed_auth_schemes: ['bearer'],
       scopes: [],
       platforms: ['stepfun'],
@@ -288,6 +289,7 @@ describe('model definition capability selection', () => {
       allowCrossOriginCredentials: true,
       providerParamsJson: '{"voice":"alloy"}',
       contextLimit: 32_000,
+      outputLimit: 8_192,
     };
 
     expect(changeCapabilityProtocol(current, current.protocol, taskManifest)).toBe(current);
@@ -429,6 +431,34 @@ describe('capability validation and serialization', () => {
     expect(result.valid).toBe(true);
   });
 
+  test('requires an output limit only when the selected protocol declares it mandatory', () => {
+    const chatManifest = manifest('chat', 'anthropic.messages');
+    chatManifest.protocols[0].requires_output_ceiling = true;
+    const chat = reconcileCapabilityRecommendations([emptyCapabilityDraft('chat')], {
+      chat: chatManifest,
+    })[0];
+
+    expect(
+      validateModelDefinition(
+        { model: 'claude', capabilities: [chat] },
+        { chat: chatManifest },
+        'https://api.anthropic.com'
+      ).errors.some(
+        (error) => error.task === 'chat' && error.code === 'output_ceiling_required'
+      )
+    ).toBe(true);
+
+    expect(
+      validateModelDefinition(
+        { model: 'claude', capabilities: [{ ...chat, outputLimit: 8_192 }] },
+        { chat: chatManifest },
+        'https://api.anthropic.com'
+      ).errors.some(
+        (error) => error.task === 'chat' && error.code === 'output_ceiling_required'
+      )
+    ).toBe(false);
+  });
+
   test('serializes multiple capabilities as typed task records', () => {
     const definition = {
       model: 'step-audio-latest',
@@ -439,6 +469,7 @@ describe('capability validation and serialization', () => {
           endpoint: '/v1/audio/speech',
           providerParamsJson: '{"voice":"cixingnansheng"}',
           contextLimit: 32000,
+          outputLimit: 16384,
         },
         {
           ...emptyCapabilityDraft('realtime_conversation'),
@@ -463,6 +494,7 @@ describe('capability validation and serialization', () => {
         endpoint: '/v1/audio/speech',
         provider_params: { voice: 'cixingnansheng' },
         context_limit: 32000,
+        output_limit: 16384,
       },
       {
         task: 'realtime_conversation',
@@ -492,6 +524,7 @@ describe('capability validation and serialization', () => {
         allow_cross_origin_credentials: true,
         provider_params: { voice: 'alloy' },
         context_limit: 4096,
+        output_limit: 8192,
       })
     ).toEqual({
       task: 'speech_synthesis',
@@ -506,6 +539,7 @@ describe('capability validation and serialization', () => {
       allowCrossOriginCredentials: true,
       providerParamsJson: '{\n  "voice": "alloy"\n}',
       contextLimit: 4096,
+      outputLimit: 8192,
     });
   });
 });

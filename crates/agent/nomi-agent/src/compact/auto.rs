@@ -5,7 +5,7 @@
 //! then replaces the full history with a compact boundary marker and the
 //! summary.  A circuit breaker prevents runaway retries.
 
-use nomi_config::compact::CompactConfig;
+use nomi_config::compact::{CompactConfig, window_output_unit};
 use nomi_providers::{LlmProvider, ProviderError};
 use nomi_types::compact::{CompactMetadata, CompactTrigger};
 use nomi_types::llm::{LlmEvent, LlmRequest, ThinkingConfig};
@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use super::prompt::{
     COMPACT_SYSTEM_PROMPT, build_compact_prompt, build_summary_content,
-    compact_max_output_tokens, format_compact_summary,
+    format_compact_summary,
 };
 use super::state::CompactState;
 
@@ -123,7 +123,7 @@ pub async fn autocompact(
             system: COMPACT_SYSTEM_PROMPT.to_string(),
             messages: conv_messages.clone(),
             tools: vec![],
-            max_tokens: compact_max_output_tokens(config.context_window),
+            max_tokens: Some(window_output_unit(config.context_window)),
             thinking: Some(ThinkingConfig::Disabled),
             reasoning_effort: None,
         };

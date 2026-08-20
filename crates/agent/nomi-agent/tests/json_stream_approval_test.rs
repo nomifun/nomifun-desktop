@@ -23,8 +23,7 @@ fn token_usage(input: u64, output: u64) -> TokenUsage {
     TokenUsage {
         input_tokens: input,
         output_tokens: output,
-        cache_creation_tokens: 0,
-        cache_read_tokens: 0,
+        ..Default::default()
     }
 }
 

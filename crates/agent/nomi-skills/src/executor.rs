@@ -84,7 +84,6 @@ pub async fn execute_fork_with_shell(
         name: skill.name.clone(),
         prompt,
         max_turns: 10,
-        max_tokens: 16384,
         system_prompt: None,
         model: skill.model.clone(),
         effort: skill.effort.map(effort_to_string),
@@ -727,18 +726,6 @@ mod phase7_tests {
             .unwrap();
         let config = delegation_backend.take_input();
         assert_eq!(config.max_turns, 10);
-    }
-
-    // TC-7.46: AgentInvocationInput.max_tokens defaults to 16384.
-    #[tokio::test]
-    async fn tc_7_46_max_tokens_default_is_16384() {
-        let skill = make_fork_skill("tokens-fork", "content");
-        let delegation_backend = MockInvocationRunner::success("ok");
-        execute_fork(&skill, None, None, "/tmp", &delegation_backend)
-            .await
-            .unwrap();
-        let config = delegation_backend.take_input();
-        assert_eq!(config.max_tokens, 16384);
     }
 
     // TC-7.47: AgentInvocationInput.system_prompt defaults to None.
