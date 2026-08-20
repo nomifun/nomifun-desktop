@@ -1,0 +1,301 @@
+.assetPanel,
+.promptPanel {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  color: var(--color-text-1);
+}
+
+.assetPanel,
+.assetHeader,
+.filters,
+.assetCard,
+.assetFooter,
+.assetHeader > div,
+.assetCopy {
+  display: flex;
+}
+
+.assetPanel {
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.assetHeader {
+  min-height: 58px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-border-2);
+}
+
+.assetHeader > div,
+.assetCopy {
+  min-width: 0;
+  flex-direction: column;
+}
+
+.assetHeader strong {
+  font-size: 13px;
+}
+
+.assetHeader span,
+.assetCopy span,
+.endLabel {
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.assetHeader button,
+.state button,
+.assetCard,
+.assetFooter button {
+  appearance: none;
+  border: 0;
+  font: inherit;
+}
+
+.assetHeader button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-2);
+  cursor: pointer;
+}
+
+.assetHeader button:hover:not(:disabled),
+.secondaryButton:hover:not(:disabled) {
+  background: var(--color-fill-2);
+}
+
+.filters {
+  flex: 0 0 auto;
+  gap: 6px;
+  padding: 10px;
+  border-bottom: 1px solid var(--color-border-2);
+}
+
+.searchField {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  height: 34px;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: var(--color-fill-1);
+  color: var(--color-text-3);
+}
+
+.searchField input,
+.kindField select {
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--color-text-1);
+  font: inherit;
+  font-size: 12px;
+}
+
+.searchField input {
+  width: 100%;
+}
+
+.kindField {
+  height: 34px;
+  flex: 0 0 86px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--color-fill-1);
+}
+
+.kindField select {
+  width: 100%;
+}
+
+.assetBody {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 10px;
+}
+
+.state {
+  display: flex;
+  min-height: 180px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  padding: 20px;
+  color: var(--color-text-3);
+  font-size: 12px;
+  text-align: center;
+}
+
+.state strong {
+  color: var(--color-text-2);
+}
+
+.state button {
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
+  cursor: pointer;
+}
+
+.assetGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.assetCard {
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  border-radius: 10px;
+  background: var(--color-fill-1);
+  color: var(--color-text-2);
+  cursor: pointer;
+  text-align: left;
+}
+
+.assetCard:hover:not(:disabled) {
+  background: var(--color-fill-2);
+}
+
+.assetCard[data-selected='true'] {
+  box-shadow: inset 0 0 0 2px rgba(var(--primary-6), 0.7);
+}
+
+.assetPreview {
+  display: grid;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 7px;
+  background: var(--color-fill-2);
+  color: var(--color-text-3);
+}
+
+.assetPreview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.assetCopy {
+  gap: 2px;
+}
+
+.assetCopy strong {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assetFooter {
+  min-height: 52px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--color-border-2);
+}
+
+.assetFooter button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.secondaryButton {
+  background: transparent;
+  color: var(--color-text-2);
+}
+
+.insertButton {
+  background: rgb(var(--primary-6));
+  color: #fff;
+}
+
+.assetHeader button:disabled,
+.assetCard:disabled,
+.assetFooter button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.endLabel {
+  max-width: 140px;
+}
+
+.promptPanel {
+  overflow: hidden;
+}
+
+.promptPanel > * {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.spin {
+  animation: creative-product-spin 0.9s linear infinite;
+}
+
+@keyframes creative-product-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 1180px) {
+  .assetGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .filters {
+    flex-direction: column;
+  }
+
+  .kindField {
+    flex-basis: 32px;
+  }
+}
