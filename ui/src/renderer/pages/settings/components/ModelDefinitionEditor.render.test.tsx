@@ -456,4 +456,73 @@ describe('unified model definition editor rendering and interactions', () => {
       expect(html.includes('默认音色')).toBe(false);
     }
   });
+
+  test('shows Responses round chaining only for openai.responses and before raw provider params', () => {
+    const responsesManifest = manifest('chat');
+    responsesManifest.recommendation!.protocol_id = 'openai.responses';
+    responsesManifest.protocols[0] = {
+      ...responsesManifest.protocols[0],
+      protocol_id: 'openai.responses',
+      platforms: ['openai'],
+    };
+    const html = render(
+      {
+        model: 'gpt-5.4',
+        capabilities: [
+          {
+            ...emptyCapabilityDraft('chat'),
+            protocol: 'openai.responses',
+            providerParamsJson: '{"chain_rounds":true,"temperature":0.2}',
+          },
+        ],
+      },
+      { ...manifests, chat: responsesManifest }
+    );
+
+    const chainRounds = html.indexOf('data-chain-rounds-control="true"');
+    const rawParams = html.indexOf('data-provider-params-json="true"');
+    expect(chainRounds).toBeGreaterThan(-1);
+    expect(rawParams).toBeGreaterThan(chainRounds);
+    expect(html.includes('data-chain-rounds-enabled="true"')).toBe(true);
+    expect(html.includes('store: true')).toBe(true);
+    expect(html.includes('至少 30 天')).toBe(true);
+    expect(html.includes('不会减少计费的输入 tokens')).toBe(true);
+
+    const otherProtocol = render({
+      model: 'step-3.7-flash',
+      capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: 'stepfun.chat' }],
+    });
+    expect(otherProtocol.includes('data-chain-rounds-control')).toBe(false);
+  });
+
+  test('disables the Responses round-chaining checkbox while raw JSON is invalid', () => {
+    const responsesManifest = manifest('chat');
+    responsesManifest.recommendation!.protocol_id = 'openai.responses';
+    responsesManifest.protocols[0] = {
+      ...responsesManifest.protocols[0],
+      protocol_id: 'openai.responses',
+      platforms: ['openai'],
+    };
+    const html = render(
+      {
+        model: 'gpt-5.4',
+        capabilities: [
+          {
+            ...emptyCapabilityDraft('chat'),
+            protocol: 'openai.responses',
+            providerParamsJson: ' {"chain_rounds": tru',
+          },
+        ],
+      },
+      { ...manifests, chat: responsesManifest }
+    );
+    const start = html.indexOf('data-chain-rounds-control="true"');
+    const end = html.indexOf('data-provider-params-json="true"', start);
+    const control = html.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(control.includes('data-chain-rounds-json-valid="false"')).toBe(true);
+    expect(control.includes('disabled=""')).toBe(true);
+    expect(control.includes('修正后才能更改此选项')).toBe(true);
+  });
 });

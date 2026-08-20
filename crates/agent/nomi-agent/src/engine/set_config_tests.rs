@@ -68,6 +68,7 @@ impl OutputSink for ArtifactIdentityOutput {
         }
     }
     fn emit_stream_start(&self, _: &str) {}
+    fn emit_output_discarded(&self, _: &str, _: u32) {}
     fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
     fn emit_error(&self, _: &str) {}
     fn emit_info(&self, _: &str) {}
@@ -95,6 +96,7 @@ impl OutputSink for ToolLifecycleRecordingOutput {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
     fn emit_stream_start(&self, _: &str) {}
+    fn emit_output_discarded(&self, _: &str, _: u32) {}
     fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
     fn emit_error(&self, _: &str) {}
     fn emit_info(&self, _: &str) {}
@@ -569,6 +571,7 @@ impl OutputSink for DeliveredMediaOutput {
         }
     }
     fn emit_stream_start(&self, _: &str) {}
+    fn emit_output_discarded(&self, _: &str, _: u32) {}
     fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
     fn emit_error(&self, _: &str) {}
     fn emit_info(&self, _: &str) {}
@@ -593,6 +596,7 @@ impl OutputSink for FailedMediaOutput {
         }
     }
     fn emit_stream_start(&self, _: &str) {}
+    fn emit_output_discarded(&self, _: &str, _: u32) {}
     fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
     fn emit_error(&self, _: &str) {}
     fn emit_info(&self, _: &str) {}
@@ -2845,6 +2849,9 @@ impl LlmProvider for DraftThenWriteProvider {
                 })
                 .await;
             let _ = tx
+                .send(LlmEvent::ProviderRoundId("resp_superseded".to_owned()))
+                .await;
+            let _ = tx
                 .send(LlmEvent::Done {
                     stop_reason: nomi_types::message::StopReason::ToolUse,
                     usage: Default::default(),
@@ -2878,6 +2885,7 @@ async fn a_draft_written_in_the_same_round_does_not_stay_in_engine_history() {
         ));
     }
     let mut engine = make_engine("draft-write");
+    engine.compat.chain_rounds = Some(true);
     engine.provider = Arc::new(DraftThenWriteProvider {
         calls: std::sync::atomic::AtomicUsize::new(0),
         draft: draft.clone(),
@@ -2926,5 +2934,9 @@ async fn a_draft_written_in_the_same_round_does_not_stay_in_engine_history() {
             .iter()
             .any(|b| matches!(b, ContentBlock::ToolUse { name, .. } if name == "Write")),
         "the Write call still carries the real body"
+    );
+    assert_eq!(
+        assistant.provider_round_id, None,
+        "a host-rewritten assistant round must not retain a provider cursor"
     );
 }

@@ -20,8 +20,8 @@ use crate::artifact_store::{
 };
 use crate::protocol::events::{
     AgentStatusEventData, AgentStreamEvent, ErrorEventData, FinishEventData, PlanEventData,
-    StartEventData, TextEventData, ThinkingEventData, TipType, TipsEventData, ToolCallEventData,
-    ToolCallRetryData, ToolCallStatus,
+    OutputDiscardedEventData, StartEventData, TextEventData, ThinkingEventData, TipType,
+    TipsEventData, ToolCallEventData, ToolCallRetryData, ToolCallStatus,
 };
 
 pub struct BackendOutputSink {
@@ -50,6 +50,10 @@ pub struct BackendOutputSink {
     /// automatic continuations share this state; only the manager's accepted
     /// turn boundary begins/seals it.
     artifact_delivery_turn: Mutex<ArtifactDeliveryTurn>,
+    /// Receipt-gated prose length at the most recent non-destructive Start.
+    /// Internal retries truncate to this exact boundary instead of erasing a
+    /// valid prefix retained across a host-steering pass.
+    held_text_checkpoint: Mutex<Option<usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -693,6 +697,7 @@ impl BackendOutputSink {
             active_tool_calls: Mutex::new(HashMap::new()),
             tool_result_contexts: Mutex::new(HashMap::new()),
             artifact_delivery_turn: Mutex::new(ArtifactDeliveryTurn::default()),
+            held_text_checkpoint: Mutex::new(None),
         }
     }
 
@@ -2800,9 +2805,67 @@ impl OutputSink for BackendOutputSink {
         if let Ok(mut buf) = self.turn_text.lock() {
             buf.clear();
         }
+        let held_text_len = self
+            .artifact_delivery_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .held_text
+            .len();
+        *self
+            .held_text_checkpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(held_text_len);
         let _ = self
             .event_tx
             .send(AgentStreamEvent::Start(StartEventData { session_id: None }));
+    }
+
+    fn emit_output_discarded(&self, _msg_id: &str, restart_attempt: u32) {
+        self.fail_active_tool_calls(
+            "The model output was discarded before the tool call reached a terminal state.",
+        );
+        self.turn_text
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        let checkpoint = *self
+            .held_text_checkpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut turn = self
+            .artifact_delivery_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(checkpoint) = checkpoint else {
+            drop(turn);
+            let _ = self.event_tx.send(AgentStreamEvent::Error(
+                ErrorEventData::legacy(
+                    "The model discarded receipt-gated output without a stream-start checkpoint",
+                    None,
+                ),
+            ));
+            return;
+        };
+        if checkpoint > turn.held_text.len() || !turn.held_text.is_char_boundary(checkpoint) {
+            drop(turn);
+            let _ = self.event_tx.send(AgentStreamEvent::Error(
+                ErrorEventData::legacy(
+                    "The receipt-gated output checkpoint no longer matched the provisional text",
+                    None,
+                ),
+            ));
+            return;
+        }
+        turn.held_text.truncate(checkpoint);
+        let retained_len = turn.held_text.len();
+        drop(turn);
+        *self
+            .held_text_checkpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(retained_len);
+        let _ = self.event_tx.send(AgentStreamEvent::OutputDiscarded(
+            OutputDiscardedEventData { restart_attempt },
+        ));
     }
 
     fn emit_stream_end(
@@ -3214,6 +3277,54 @@ mod tests {
             AgentStreamEvent::Start(_) => {}
             other => panic!("Expected Start, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn output_discard_restores_held_text_checkpoint_and_clears_tool_survivors() {
+        let (sink, mut rx) = make_sink();
+        sink.begin_artifact_delivery_turn();
+        sink.require_image_artifact_for_turn().unwrap();
+        sink.emit_stream_start("msg-1");
+        assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::Start(_)));
+        sink.emit_text_delta("retained prefix", "msg-1");
+        assert!(rx.try_recv().is_err(), "receipt-gated text stays provisional");
+        // Host steering establishes the boundary without erasing the already
+        // accepted receipt-gated prefix.
+        sink.emit_stream_start("msg-1");
+        assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::Start(_)));
+        sink.emit_text_delta("discard me", "msg-1");
+        sink.turn_text.lock().unwrap().push_str("citation draft");
+        sink.emit_tool_call("running", "Read", "{}");
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentStreamEvent::ToolCall(ToolCallEventData {
+                status: ToolCallStatus::Running,
+                ..
+            })
+        ));
+
+        sink.emit_output_discarded("msg-1", 2);
+
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentStreamEvent::ToolCall(ToolCallEventData {
+                status: ToolCallStatus::Error,
+                ..
+            })
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentStreamEvent::OutputDiscarded(OutputDiscardedEventData {
+                restart_attempt: 2,
+            })
+        ));
+        assert!(sink.active_tool_calls.lock().unwrap().is_empty());
+        assert!(sink.turn_text.lock().unwrap().is_empty());
+        let turn = sink.artifact_delivery_turn.lock().unwrap();
+        assert!(turn.active);
+        assert!(turn.required_contract.is_some());
+        assert!(turn.hold_text_until_verified);
+        assert_eq!(turn.held_text, "retained prefix");
     }
 
     #[test]

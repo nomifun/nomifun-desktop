@@ -6,7 +6,7 @@ use std::sync::Arc;
 use nomi_config::config::{CliArgs, Config};
 use nomi_providers::{LlmProvider, ProviderError, create_provider};
 use nomi_types::llm::{LlmEvent, LlmRequest};
-use nomi_types::message::{ContentBlock, Message, Role};
+use nomi_types::message::{ContentBlock, Message, Role, StopReason};
 use nomifun_api_types::{ModelTask, ModelTrait};
 use nomifun_common::{AppError, ProviderId};
 use nomifun_model_invoke::{
@@ -114,6 +114,19 @@ pub(crate) async fn resolve_provider_fields(
                 None,
             )
         }
+        "openai.responses" => {
+            if task.connection.auth.scheme != AuthScheme::Bearer {
+                return Err(AppError::BadRequest(
+                    "openai.responses requires a bearer-auth connection".into(),
+                ));
+            }
+            (
+                "openai-responses".to_owned(),
+                agent_api_keys(&task.connection.auth)?,
+                Some(task.http_endpoint().map_err(invoke_error_to_app_error)?),
+                None,
+            )
+        }
         "anthropic.messages" => {
             if !matches!(
                 &task.connection.auth.scheme,
@@ -165,7 +178,7 @@ pub(crate) async fn resolve_provider_fields(
         }
         protocol => {
             return Err(AppError::BadRequest(format!(
-                "Unsupported Chat protocol {protocol:?}; expected openai.chat_text, anthropic.messages, gemini.generate_text or bedrock.anthropic_messages"
+                "Unsupported Chat protocol {protocol:?}; expected openai.chat_text, openai.responses, anthropic.messages, gemini.generate_text or bedrock.anthropic_messages"
             )));
         }
     };
@@ -195,6 +208,20 @@ pub(crate) async fn resolve_provider_fields(
         }
         None => None,
     };
+    let chain_rounds = match provider_body.remove("chain_rounds") {
+        Some(serde_json::Value::Bool(value)) if task.protocol == "openai.responses" => Some(value),
+        Some(serde_json::Value::Bool(_)) => {
+            return Err(AppError::BadRequest(
+                "Chat provider_params.chain_rounds is supported only by openai.responses".into(),
+            ));
+        }
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "openai.responses provider_params.chain_rounds must be a boolean".into(),
+            ));
+        }
+        None => None,
+    };
 
     let compat_overrides = NomiCompatOverrides {
         // The resolver passes Nomi a complete task endpoint.
@@ -206,6 +233,7 @@ pub(crate) async fn resolve_provider_fields(
         )),
         max_tokens_field,
         require_reasoning_content,
+        chain_rounds,
         extra_body: (!provider_body.is_empty()).then_some(provider_body),
     };
 
@@ -268,6 +296,9 @@ pub async fn resolve_provider_config(
     if let Some(required) = fields.compat_overrides.require_reasoning_content {
         config.compat.require_reasoning_content = Some(required);
     }
+    if let Some(chain_rounds) = fields.compat_overrides.chain_rounds {
+        config.compat.chain_rounds = Some(chain_rounds);
+    }
     config.compat.extra_body = fields.compat_overrides.extra_body;
     // One-shot consumers include robot vision, so the same persisted Chat
     // trait must govern provider serialization here as in long-lived agents.
@@ -325,6 +356,7 @@ pub async fn streaming_completion(
         max_tokens: Some(max_tokens),
         thinking: None,
         reasoning_effort: None,
+        retain_provider_round: false,
     };
 
     let rx = provider.stream(&request).await.map_err(provider_error_to_app_error)?;
@@ -358,6 +390,7 @@ pub async fn streaming_completion_text_or_reasoning(
         max_tokens: Some(max_tokens),
         thinking: None,
         reasoning_effort: None,
+        retain_provider_round: false,
     };
 
     let rx = provider.stream(&request).await.map_err(provider_error_to_app_error)?;
@@ -383,29 +416,61 @@ async fn drain_text_response_with(
     mut on_delta: impl FnMut(&str) + Send,
 ) -> Result<String, AppError> {
     let mut output = String::new();
+    let mut terminal: Option<StopReason> = None;
 
     while let Some(event) = rx.recv().await {
+        if terminal.is_some() {
+            return Err(AppError::BadGateway(
+                "LLM stream protocol violation: event emitted after terminal Done".into(),
+            ));
+        }
         match event {
             LlmEvent::TextDelta(delta) => {
                 on_delta(&delta);
                 output.push_str(&delta);
             }
-            LlmEvent::Done { .. } => return Ok(output),
+            LlmEvent::Done { stop_reason, .. } => terminal = Some(stop_reason),
             LlmEvent::Error(msg) => {
                 return Err(AppError::BadGateway(format!("LLM stream error: {msg}")));
             }
-            // Ignore thinking deltas, tool use, and signatures for one-shot
-            _ => {}
+            LlmEvent::ThinkingDelta(_) | LlmEvent::ThinkingSignature(_) => {}
+            LlmEvent::ToolUse { .. }
+            | LlmEvent::ToolUseDelta { .. }
+            | LlmEvent::ToolUseTruncated { .. } => {
+                return Err(AppError::BadGateway(
+                    "LLM stream protocol violation: tool output was emitted for a tool-free one-shot request"
+                        .into(),
+                ));
+            }
+            LlmEvent::ProviderRoundId(_) => {
+                return Err(AppError::BadGateway(
+                    "LLM stream protocol violation: provider round id was emitted for a non-retainable one-shot request"
+                        .into(),
+                ));
+            }
         }
     }
 
-    // Channel closed without a Done event
-    if output.is_empty() {
-        Err(AppError::BadGateway(
-            "LLM stream ended without producing a response".into(),
-        ))
-    } else {
-        Ok(output)
+    match terminal {
+        None => Err(AppError::BadGateway(
+            "LLM stream ended without a terminal Done event".into(),
+        )),
+        Some(StopReason::EndTurn) if !output.trim().is_empty() => Ok(output),
+        Some(StopReason::EndTurn) => Err(AppError::BadGateway(
+            "LLM EndTurn contained no visible response".into(),
+        )),
+        Some(StopReason::MaxTokens) => Err(AppError::BadGateway(
+            "LLM output was truncated before the one-shot completion finished".into(),
+        )),
+        Some(StopReason::Refusal) => {
+            Err(AppError::BadGateway("LLM refused the one-shot completion".into()))
+        }
+        Some(StopReason::ToolUse) => Err(AppError::BadGateway(
+            "LLM stream protocol violation: ToolUse ended a tool-free one-shot request".into(),
+        )),
+        Some(StopReason::MaxTurns) => Err(AppError::BadGateway(
+            "LLM stream protocol violation: provider emitted engine-only MaxTurns".into(),
+        )),
     }
 }
 
@@ -428,8 +493,14 @@ async fn drain_text_or_reasoning(
 ) -> Result<String, AppError> {
     let mut text = String::new();
     let mut reasoning = String::new();
+    let mut terminal: Option<StopReason> = None;
 
     while let Some(event) = rx.recv().await {
+        if terminal.is_some() {
+            return Err(AppError::BadGateway(
+                "LLM stream protocol violation: event emitted after terminal Done".into(),
+            ));
+        }
         match event {
             LlmEvent::TextDelta(delta) => {
                 on_delta(DeltaKind::Text, &delta);
@@ -439,25 +510,49 @@ async fn drain_text_or_reasoning(
                 on_delta(DeltaKind::Reasoning, &delta);
                 reasoning.push_str(&delta);
             }
-            LlmEvent::Done { .. } => {
-                return Ok(if text.trim().is_empty() { reasoning } else { text });
-            }
+            LlmEvent::Done { stop_reason, .. } => terminal = Some(stop_reason),
             LlmEvent::Error(msg) => {
                 return Err(AppError::BadGateway(format!("LLM stream error: {msg}")));
             }
-            // Ignore tool use and thinking signatures.
-            _ => {}
+            LlmEvent::ThinkingSignature(_) => {}
+            LlmEvent::ToolUse { .. }
+            | LlmEvent::ToolUseDelta { .. }
+            | LlmEvent::ToolUseTruncated { .. } => {
+                return Err(AppError::BadGateway(
+                    "LLM stream protocol violation: tool output was emitted for a tool-free planner request"
+                        .into(),
+                ));
+            }
+            LlmEvent::ProviderRoundId(_) => {
+                return Err(AppError::BadGateway(
+                    "LLM stream protocol violation: provider round id was emitted for a non-retainable planner request"
+                        .into(),
+                ));
+            }
         }
     }
 
-    // Channel closed without a Done event: prefer text, else reasoning.
-    let out = if text.trim().is_empty() { reasoning } else { text };
-    if out.is_empty() {
-        Err(AppError::BadGateway(
-            "LLM stream ended without producing a response".into(),
-        ))
-    } else {
-        Ok(out)
+    let output = if text.trim().is_empty() { reasoning } else { text };
+    match terminal {
+        None => Err(AppError::BadGateway(
+            "LLM stream ended without a terminal Done event".into(),
+        )),
+        Some(StopReason::EndTurn) if !output.trim().is_empty() => Ok(output),
+        Some(StopReason::EndTurn) => Err(AppError::BadGateway(
+            "LLM EndTurn contained neither visible text nor reasoning".into(),
+        )),
+        Some(StopReason::MaxTokens) => Err(AppError::BadGateway(
+            "LLM output was truncated before the planner completion finished".into(),
+        )),
+        Some(StopReason::Refusal) => {
+            Err(AppError::BadGateway("LLM refused the planner completion".into()))
+        }
+        Some(StopReason::ToolUse) => Err(AppError::BadGateway(
+            "LLM stream protocol violation: ToolUse ended a tool-free planner request".into(),
+        )),
+        Some(StopReason::MaxTurns) => Err(AppError::BadGateway(
+            "LLM stream protocol violation: provider emitted engine-only MaxTurns".into(),
+        )),
     }
 }
 
@@ -541,7 +636,11 @@ mod provider_resolution_tests {
                     provider_id: Some(case.provider_id),
                     // Deliberately unrelated: platform must never select the
                     // serializer, authentication or endpoint.
-                    platform: "unrelated-platform",
+                    platform: if case.protocol == "openai.responses" {
+                        "openai"
+                    } else {
+                        "unrelated-platform"
+                    },
                     name: "Protocol seam test",
                     base_url: case.base_url,
                     auth_scheme: case.auth_scheme,
@@ -598,6 +697,40 @@ mod provider_resolution_tests {
         assert_eq!(fields.compat_overrides.require_reasoning_content, Some(true));
         assert_eq!(fields.context_limit, Some(131_072));
         assert_eq!(fields.compat_overrides.supports_image, Some(false));
+    }
+
+    #[tokio::test]
+    async fn exact_openai_responses_capability_resolves_and_consumes_the_chain_control() {
+        let fields = resolve_case(ChatCase {
+            provider_id: "0190f5fe-7c00-7a00-8000-000000000106",
+            protocol: "openai.responses",
+            auth_scheme: "bearer",
+            base_url: "https://api.openai.com/v1",
+            base_url_override: None,
+            endpoint: Some("/responses"),
+            traits: r#"["vision_input"]"#,
+            credentials: r#"{"api_keys":["test-secret"]}"#,
+            provider_params: r#"{"chain_rounds":true,"temperature":0.2}"#,
+            bedrock_config: None,
+        })
+        .await;
+        assert_eq!(fields.provider, "openai-responses");
+        assert_eq!(fields.base_url.as_deref(), Some("https://api.openai.com/v1/responses"));
+        assert_eq!(fields.compat_overrides.api_path.as_deref(), Some(""));
+        assert_eq!(fields.compat_overrides.chain_rounds, Some(true));
+        assert_eq!(
+            fields.compat_overrides.extra_body.as_ref().unwrap()["temperature"],
+            serde_json::json!(0.2)
+        );
+        assert!(
+            !fields
+                .compat_overrides
+                .extra_body
+                .as_ref()
+                .unwrap()
+                .contains_key("chain_rounds"),
+            "local retention control must never leak into the provider body"
+        );
     }
 
     #[tokio::test]
@@ -731,6 +864,7 @@ mod tests {
         })
         .await
         .unwrap();
+        drop(tx);
 
         let result = drain_text_response(rx).await.unwrap();
         assert_eq!(result, "Hello, world!");
@@ -749,13 +883,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_text_response_returns_partial_on_channel_close() {
+    async fn drain_text_response_rejects_partial_channel_close() {
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         tx.send(LlmEvent::TextDelta("partial output".into())).await.unwrap();
         drop(tx); // close channel without Done
 
-        let result = drain_text_response(rx).await.unwrap();
-        assert_eq!(result, "partial output");
+        let error = drain_text_response(rx).await.unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::BadGateway(message) if message.contains("without a terminal Done")
+        ));
     }
 
     #[tokio::test]
@@ -765,6 +902,79 @@ mod tests {
 
         let result = drain_text_response(rx).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn text_drain_never_turns_a_non_success_terminal_into_delivery() {
+        let cases = [
+            (StopReason::MaxTokens, "truncated"),
+            (StopReason::Refusal, "refused"),
+            (StopReason::ToolUse, "ToolUse"),
+            (StopReason::MaxTurns, "MaxTurns"),
+        ];
+        for (stop_reason, expected) in cases {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tx.send(LlmEvent::TextDelta("plausible but uncommitted".into()))
+                .await
+                .unwrap();
+            tx.send(LlmEvent::Done {
+                stop_reason,
+                usage: Default::default(),
+            })
+            .await
+            .unwrap();
+            drop(tx);
+
+            let error = drain_text_response(rx).await.unwrap_err();
+            assert!(
+                matches!(&error, AppError::BadGateway(message) if message.contains(expected)),
+                "{stop_reason:?}: {error:?}"
+            );
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        tx.send(LlmEvent::TextDelta("answer".into())).await.unwrap();
+        tx.send(LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        })
+        .await
+        .unwrap();
+        tx.send(LlmEvent::TextDelta("poison".into())).await.unwrap();
+        drop(tx);
+        let error = drain_text_response(rx).await.unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::BadGateway(message) if message.contains("after terminal Done")
+        ));
+    }
+
+    #[tokio::test]
+    async fn text_drain_rejects_truncated_tool_evidence_and_empty_end_turn() {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        tx.send(LlmEvent::ToolUseTruncated {
+            id: "call_cut".into(),
+            name: "Write".into(),
+            argument_bytes: 99,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        assert!(drain_text_response(rx).await.is_err());
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        tx.send(LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        let error = drain_text_response(rx).await.unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::BadGateway(message) if message.contains("no visible response")
+        ));
     }
 
     #[test]
@@ -787,6 +997,7 @@ mod tests {
         })
         .await
         .unwrap();
+        drop(tx);
 
         let result = drain_text_or_reasoning(rx, |_, _| {}).await.unwrap();
         assert_eq!(result, r#"{"tasks":[{"title":"A","spec":"a","depends_on":[]}]}"#);
@@ -805,8 +1016,30 @@ mod tests {
         })
         .await
         .unwrap();
+        drop(tx);
 
         let result = drain_text_or_reasoning(rx, |_, _| {}).await.unwrap();
         assert_eq!(result, "real answer");
+    }
+
+    #[tokio::test]
+    async fn reasoning_drain_rejects_truncated_planner_json() {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        tx.send(LlmEvent::ThinkingDelta(r#"{"tasks":[{"title":"partial""#.into()))
+            .await
+            .unwrap();
+        tx.send(LlmEvent::Done {
+            stop_reason: StopReason::MaxTokens,
+            usage: Default::default(),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let error = drain_text_or_reasoning(rx, |_, _| {}).await.unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::BadGateway(message) if message.contains("truncated")
+        ));
     }
 }

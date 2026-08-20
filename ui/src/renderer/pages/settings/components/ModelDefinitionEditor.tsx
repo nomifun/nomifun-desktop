@@ -41,6 +41,7 @@ import {
   isDuplicateModelId,
   isProtocolAuthSchemeAllowed,
   parseProviderParams,
+  providerParamChainRounds,
   protocolDescriptorForDraft,
   providerParamVoice,
   reconcileCapabilityRecommendations,
@@ -50,6 +51,7 @@ import {
   resolvedCapabilityUrl,
   rootMatchesShape,
   withProviderParamVoice,
+  withProviderParamChainRounds,
   type CapabilityEndpointDescriptor,
   type CapabilityEndpointField,
   type CapabilityValidationResult,
@@ -1187,7 +1189,43 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
               </div>
             )}
 
-            <div className='space-y-6px'>
+            {capability.protocol === 'openai.responses' && (
+              <div
+                className='rounded-8px bg-fill-1 p-10px space-y-6px'
+                data-chain-rounds-control
+                data-chain-rounds-json-valid={providerParamsValid ? 'true' : 'false'}
+                data-chain-rounds-enabled={providerParamChainRounds(capability.providerParamsJson) ? 'true' : 'false'}
+              >
+                <Checkbox
+                  checked={providerParamChainRounds(capability.providerParamsJson)}
+                  disabled={!providerParamsValid}
+                  onChange={(enabled) =>
+                    updateCapability(capability.task, {
+                      providerParamsJson: withProviderParamChainRounds(
+                        capability.providerParamsJson,
+                        enabled
+                      ),
+                    })
+                  }
+                >
+                  {t('settings.modelAdvanced.chainRounds', {
+                    defaultValue: 'Chain turns with previous_response_id (sets store: true)',
+                  })}
+                </Checkbox>
+                <div className={`text-11px ${providerParamsValid ? 'text-t-tertiary' : 'text-danger-6'}`}>
+                  {providerParamsValid
+                    ? t('settings.modelAdvanced.chainRoundsRetention', {
+                        defaultValue:
+                          'Opt-in: provider-retained response data may be kept for at least 30 days. previous_response_id links rounds but does not reduce billed input tokens.',
+                      })
+                    : t('settings.modelAdvanced.chainRoundsUnavailable', {
+                        defaultValue: 'Fix the provider parameters JSON below before changing this option.',
+                      })}
+                </div>
+              </div>
+            )}
+
+            <div className='space-y-6px' data-provider-params-json>
               <div className='text-12px text-t-secondary'>
                 {t('settings.modelAdvanced.params', { defaultValue: '供应商参数 JSON' })}
               </div>

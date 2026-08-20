@@ -123,7 +123,7 @@ pub fn strip_stage_directions(text: &str) -> String {
 ///
 /// Withheld bytes are never dropped: whoever ends the text run must call
 /// [`StageDirectionFilter::flush`], which releases them verbatim.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct StageDirectionFilter {
     /// A possible stage direction under construction, always at most
     /// [`MAX_WITHHELD_BYTES`] long and always valid UTF-8 — deltas arrive as

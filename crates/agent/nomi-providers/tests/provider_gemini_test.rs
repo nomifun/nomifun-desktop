@@ -22,6 +22,7 @@ fn minimal_request() -> LlmRequest {
         max_tokens: Some(512),
         thinking: None,
         reasoning_effort: None,
+        retain_provider_round: false,
     }
 }
 

@@ -11,7 +11,9 @@ use nomi_protocol::events::ToolCategory;
 use nomi_providers::{LlmProvider, ProviderError};
 use nomi_tools::registry::ToolRegistry;
 use nomi_types::llm::{LlmEvent, LlmRequest};
-use nomi_types::message::{ContentBlock, Message, Role, StopReason, TokenUsage};
+use nomi_types::message::{
+    ContentBlock, Message, Role, StopReason, TokenUsage, clear_provider_round_ids,
+};
 use nomi_types::skill_types::{ContextModifier, PlanModeTransition, effort_to_string};
 use serde_json::Value;
 use tracing::Instrument;
@@ -69,6 +71,7 @@ const STREAM_IDLE_ACTIVITY_AFTER: Duration = Duration::from_millis(1_200);
 /// call, so rejecting the first call beyond this bound keeps the oversized
 /// turn out of both approval and execution paths.
 const MAX_PROVIDER_TURN_TOOL_CALLS: usize = 128;
+const MAX_PROVIDER_ROUND_ID_BYTES: usize = 512;
 
 #[derive(Debug, Clone)]
 struct InvalidArgumentRetryCandidate {
@@ -1508,6 +1511,7 @@ impl AgentEngine {
                 max_tokens: self.output_max_tokens,
                 thinking: self.thinking.clone(),
                 reasoning_effort: self.current_reasoning_effort.clone(),
+                retain_provider_round: self.compat.chain_rounds(),
             };
 
             efficiency.observe_model_turn_attempt();
@@ -1516,6 +1520,7 @@ impl AgentEngine {
             let mut assistant_text = String::new();
             let mut thinking_text = String::new();
             let mut thinking_signature: Option<String> = None;
+            let mut provider_round_id: Option<String> = None;
             let mut tool_calls: Vec<ContentBlock> = Vec::new();
             let mut previewed_tool_calls: BTreeMap<String, String> = BTreeMap::new();
             let mut stop_reason = StopReason::EndTurn;
@@ -1524,6 +1529,11 @@ impl AgentEngine {
             // that produced it, and carrying a stale one forward would render a
             // wrong fact into the next attempt's prompt.
             let mut truncated_calls: Vec<round::LedgerCutoff> = Vec::new();
+            // Cursor safety is stricter than the restart ledger: even a
+            // malformed/unadvertised truncated call means the retained remote
+            // response may contain an unresolved function call and therefore
+            // cannot be a legal parent.
+            let mut saw_truncated_tool_use = false;
             let mut turn_usage = TokenUsage::default();
             let mut done_count = 0_u8;
 
@@ -1557,6 +1567,20 @@ impl AgentEngine {
                     efficiency.observe_calls(&self.tools, &tool_calls);
                     return Err(AgentError::ApiError(
                         "provider stream protocol violation: event emitted after terminal Done"
+                            .to_string(),
+                    ));
+                }
+                if provider_round_id.is_some()
+                    && !matches!(&event, LlmEvent::Done { .. })
+                {
+                    // ProviderRoundId is a commit attachment, not stream
+                    // content. Requiring it immediately before Done prevents
+                    // a provider from attaching a parent identity and then
+                    // appending local-only text/tool state that the linked
+                    // remote response might not contain.
+                    efficiency.observe_calls(&self.tools, &tool_calls);
+                    return Err(AgentError::ApiError(
+                        "provider stream protocol violation: provider round id was not immediately followed by terminal Done"
                             .to_string(),
                     ));
                 }
@@ -1766,6 +1790,7 @@ impl AgentEngine {
                         name,
                         argument_bytes,
                     } => {
+                        saw_truncated_tool_use = true;
                         // NOT a tool call. It is never dispatched, never enters
                         // `tool_calls`, and is never schema-validated — the
                         // provider is reporting that its output ceiling cut this
@@ -1795,6 +1820,32 @@ impl AgentEngine {
                     }
                     LlmEvent::ThinkingSignature(signature) => {
                         thinking_signature = Some(signature);
+                    }
+                    LlmEvent::ProviderRoundId(round_id) => {
+                        if !request.retain_provider_round {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(
+                                "provider stream protocol violation: provider round id was emitted for a non-retainable request"
+                                    .to_string(),
+                            ));
+                        }
+                        if round_id.is_empty()
+                            || round_id.trim() != round_id
+                            || round_id.len() > MAX_PROVIDER_ROUND_ID_BYTES
+                        {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(
+                                "provider stream protocol violation: provider round id is empty, untrimmed, or oversized"
+                                    .to_string(),
+                            ));
+                        }
+                        if provider_round_id.replace(round_id).is_some() {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(
+                                "provider stream protocol violation: provider emitted more than one round id"
+                                    .to_string(),
+                            ));
+                        }
                     }
                     LlmEvent::Done {
                         stop_reason: sr,
@@ -1849,6 +1900,23 @@ impl AgentEngine {
             };
             if let Some(error) = terminal_shape_error {
                 return Err(AgentError::ApiError(error.to_string()));
+            }
+            if saw_truncated_tool_use && stop_reason != StopReason::MaxTokens {
+                return Err(AgentError::ApiError(
+                    "provider stream protocol violation: truncated tool evidence requires MaxTokens Done"
+                        .to_string(),
+                ));
+            }
+            if provider_round_id.is_some()
+                && (saw_truncated_tool_use
+                    || stop_reason == StopReason::Refusal
+                    || (stop_reason == StopReason::MaxTokens
+                        && !previewed_tool_calls.is_empty()))
+            {
+                return Err(AgentError::ApiError(
+                    "provider stream protocol violation: terminal response exposed an unsafe round id"
+                        .to_string(),
+                ));
             }
 
             // Assignment is performed once for every completed provider round,
@@ -1984,7 +2052,8 @@ impl AgentEngine {
             // answer. Only the copy that enters durable history is collapsed:
             // it has already streamed to the user verbatim, and the tool call
             // beside it still carries the full body.
-            if supersede_written_draft(&mut assistant_content) {
+            let draft_superseded = supersede_written_draft(&mut assistant_content);
+            if draft_superseded {
                 tracing::debug!(
                     target: "nomi_agent",
                     turn = turn + 1,
@@ -1992,8 +2061,11 @@ impl AgentEngine {
                 );
             }
 
-            self.messages
-                .push(Message::now(Role::Assistant, assistant_content));
+            let mut assistant_message = Message::now(Role::Assistant, assistant_content);
+            if !draft_superseded {
+                assistant_message.provider_round_id = provider_round_id;
+            }
+            self.messages.push(assistant_message);
 
             // Adopt this pass's cutoffs unconditionally, before any restart
             // decision. Recording them only on the restart path would drop the
@@ -2099,10 +2171,15 @@ impl AgentEngine {
                             .push(Message::now(Role::User, vec![ContentBlock::Text { text }]));
                     }
                     // Fail-closed settlement of any tool card the truncated pass
-                    // published but never completed, plus a reset of the per-turn
-                    // citation buffer. A repeat Start under the same msg_id is
-                    // documented as benign for the UI.
-                    self.output.emit_stream_start(&self.current_msg_id);
+                    // published but never completed, plus an explicit retraction
+                    // boundary for every provisional text sink. `Start` remains
+                    // non-destructive because host steering deliberately shares
+                    // the current response bubble.
+                    self.output.emit_output_discarded(
+                        &self.current_msg_id,
+                        u32::try_from(round.attempt)
+                            .expect("round attempts are bounded below u32::MAX"),
+                    );
                     // Round N's rollback floor: the requirement, not the draft.
                     *safe_messages = self.messages.clone();
                     self.save_session();
@@ -2631,6 +2708,7 @@ impl AgentEngine {
     fn prune_old_tool_images(&mut self) {
         let mut remaining_count = self.max_recent_images.min(MAX_PROVIDER_REQUEST_IMAGES);
         let mut remaining_data_bytes = MAX_PROVIDER_REQUEST_IMAGE_DATA_BYTES;
+        let mut changed = false;
         for msg in self.messages.iter_mut().rev() {
             for block in msg.content.iter_mut().rev() {
                 if let ContentBlock::ToolResult {
@@ -2650,12 +2728,16 @@ impl AgentEngine {
                     let retained = images.len();
                     let removed = original_len - retained;
                     if removed > 0 {
+                        changed = true;
                         content.push_str(&format!(
                             "\n(Only the first {retained} image attachment(s) in this tool result remain; {removed} later attachment(s) were omitted by the recent-image/provider payload budget.)"
                         ));
                     }
                 }
             }
+        }
+        if changed {
+            clear_provider_round_ids(&mut self.messages);
         }
     }
 
@@ -2665,6 +2747,7 @@ impl AgentEngine {
     /// enough to tell the next model to capture a fresh view.
     fn strip_tool_images_after_provider_error(&mut self) {
         const NOTE: &str = "(Image attachment omitted after provider error recovery; capture a fresh observation if needed.)";
+        let mut changed = false;
         for message in &mut self.messages {
             for block in &mut message.content {
                 let ContentBlock::ToolResult { content, images, .. } = block else {
@@ -2673,12 +2756,16 @@ impl AgentEngine {
                 if images.is_empty() {
                     continue;
                 }
+                changed = true;
                 images.clear();
                 if !content.contains(NOTE) {
                     content.push('\n');
                     content.push_str(NOTE);
                 }
             }
+        }
+        if changed {
+            clear_provider_round_ids(&mut self.messages);
         }
     }
 
@@ -2714,6 +2801,9 @@ impl AgentEngine {
             }
             message.content = redacted;
         }
+        if changed {
+            clear_provider_round_ids(&mut self.messages);
+        }
         changed
     }
 
@@ -2727,6 +2817,7 @@ impl AgentEngine {
         if micro::should_microcompact(&self.messages, &self.compact_config) {
             let result = micro::microcompact(&mut self.messages, &self.compact_config);
             if result.cleared_count > 0 {
+                clear_provider_round_ids(&mut self.messages);
                 self.output.emit_info(&format!(
                     "Microcompact: cleared {} tool results (~{} tokens freed)",
                     result.cleared_count, result.estimated_tokens_freed

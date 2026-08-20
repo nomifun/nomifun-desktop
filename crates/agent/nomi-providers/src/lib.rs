@@ -3,6 +3,7 @@ pub mod anthropic_shared;
 pub mod bedrock;
 pub mod gemini;
 pub mod openai;
+pub mod openai_responses;
 pub mod retry;
 pub mod vertex;
 
@@ -200,6 +201,37 @@ impl ProviderError {
                 && ["oneof", "allof", "anyof"]
                     .iter()
                     .any(|keyword| lower.contains(keyword)))
+    }
+
+    /// Whether an API rejection narrowly identifies an expired or otherwise
+    /// unavailable Responses API parent. Generic 404s must never enter this
+    /// path: they usually mean the configured endpoint does not serve
+    /// `/responses`, not that a response cursor went stale.
+    pub(crate) fn is_stale_previous_response(&self) -> bool {
+        let ProviderError::Api {
+            status: 400 | 404,
+            message,
+        } = self
+        else {
+            return false;
+        };
+        let lower = message.to_ascii_lowercase();
+        let names_parent = lower.contains("previous_response_id")
+            || lower.contains("previous response")
+            || lower.contains("previous_response");
+        let unavailable = [
+            "not found",
+            "not_found",
+            "does not exist",
+            "missing",
+            "expired",
+            "deleted",
+            "no longer available",
+            "unable to locate",
+        ]
+        .iter()
+        .any(|signal| lower.contains(signal));
+        names_parent && unavailable
     }
 
     /// A number of otherwise OpenAI-compatible gateways implement streaming
@@ -657,6 +689,13 @@ pub fn create_provider(config: &Config) -> Arc<dyn LlmProvider> {
             &config.base_url,
             compat,
         )),
+        ProviderType::OpenAIResponses => Arc::new(
+            openai_responses::OpenAIResponsesProvider::new(
+                &config.api_key,
+                &config.base_url,
+                compat,
+            ),
+        ),
         ProviderType::Gemini => Arc::new(gemini::GeminiProvider::new(
             &config.api_key,
             &config.base_url,
@@ -754,6 +793,7 @@ mod retryable_tests {
             max_tokens: Some(1),
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         }
     }
 
@@ -978,6 +1018,31 @@ mod retryable_tests {
         assert!(ProviderError::StreamTruncated("x".to_string()).is_retryable());
         assert!(!ProviderError::PromptTooLong("x".to_string()).is_retryable());
         assert!(!ProviderError::Parse("x".to_string()).is_retryable());
+    }
+
+    #[test]
+    fn stale_responses_parent_classifier_is_narrow() {
+        let error = |status, message: &str| ProviderError::Api {
+            status,
+            message: message.to_owned(),
+        };
+        assert!(
+            error(404, "previous_response_id resp_old was not found")
+                .is_stale_previous_response()
+        );
+        assert!(
+            error(400, "Previous response has expired")
+                .is_stale_previous_response()
+        );
+        assert!(
+            !error(404, "POST /v1/responses not found").is_stale_previous_response(),
+            "a wrong endpoint must never trigger a full-history resend"
+        );
+        assert!(
+            !error(400, "previous_response_id is malformed").is_stale_previous_response(),
+            "only unavailable cursors are safe to negotiate away"
+        );
+        assert!(!error(500, "previous_response_id not found").is_stale_previous_response());
     }
 
     #[test]

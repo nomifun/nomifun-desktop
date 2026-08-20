@@ -94,6 +94,12 @@ interface IChatConversation<T, Extra> {
 // Token 使用统计数据类型
 export interface TokenUsageData {
   total_tokens: number;
+  /** Model input for the completed turn. */
+  input_tokens?: number;
+  /** Model output for the completed turn. Includes provider-accounted reasoning when applicable. */
+  output_tokens?: number;
+  /** Provider-reported reasoning subset/detail. Never added to total_tokens a second time. */
+  reasoning_tokens?: number;
   /** Current context occupancy (gauge numerator). */
   context_tokens?: number;
   /** Effective context budget (gauge denominator). */

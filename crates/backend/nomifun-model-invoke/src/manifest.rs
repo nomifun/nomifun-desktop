@@ -426,7 +426,7 @@ fn allowed_auth_schemes(spec: ProtocolSpec) -> &'static [&'static str] {
         // Agent executors enforce these exact schemes before constructing the
         // provider client; advertising broader transport vocabulary would make
         // a model save successfully and fail on its first invocation.
-        "openai.chat_text" => &["bearer"],
+        "openai.chat_text" | "openai.responses" => &["bearer"],
         "anthropic.messages" => &["header_key:x-api-key"],
         "gemini.generate_text" => &["header_key:x-goog-api-key"],
         "bedrock.anthropic_messages" => &["bedrock"],
@@ -473,6 +473,7 @@ use ProtocolTransportKind::{Http, Sdk, Websocket};
 
 const PROTOCOL_SPECS: &[ProtocolSpec] = &[
     ProtocolSpec { id: "openai.chat_text", tasks: &[Chat], executor: Agent, transport: Http, scopes: ALL_SCOPES, platforms: OPENAI_CHAT_PLATFORMS, connection_role: None, endpoints: &[endpoint(Chat, "endpoint", Submit, "POST", "/chat/completions")] },
+    ProtocolSpec { id: "openai.responses", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_ONLY, platforms: &["openai"], connection_role: None, endpoints: &[endpoint(Chat, "endpoint", Submit, "POST", "/responses")] },
     ProtocolSpec { id: "anthropic.messages", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["anthropic"], connection_role: None, endpoints: &[origin_endpoint(Chat, "endpoint", Submit, "POST", "/v1/messages")] },
     ProtocolSpec { id: "bedrock.anthropic_messages", tasks: &[Chat], executor: Agent, transport: Sdk, scopes: NATIVE_ONLY, platforms: &["bedrock"], connection_role: None, endpoints: &[] },
     ProtocolSpec { id: "gemini.generate_text", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini"], connection_role: None, endpoints: &[origin_endpoint(Chat, "endpoint", Submit, "POST", "/v1beta/models/{model}:streamGenerateContent?alt=sse")] },
@@ -662,6 +663,40 @@ pub fn validate_endpoint_template(
                 .join(", ")
         )));
     }
+    validate_openai_chat_endpoint_owner(protocol_id, value)?;
+    Ok(())
+}
+
+fn validate_openai_chat_endpoint_owner(
+    protocol_id: &str,
+    value: &str,
+) -> Result<(), InvokeError> {
+    if !matches!(protocol_id, "openai.chat_text" | "openai.responses") {
+        return Ok(());
+    }
+    let without_suffix = value
+        .trim()
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default();
+    let path = reqwest::Url::parse(without_suffix)
+        .ok()
+        .map(|url| url.path().to_owned())
+        .unwrap_or_else(|| without_suffix.to_owned());
+    let path = path.trim_end_matches('/').to_ascii_lowercase();
+    let is_responses = path == "responses" || path.ends_with("/responses");
+    let is_chat_completions =
+        path == "chat/completions" || path.ends_with("/chat/completions");
+    if protocol_id == "openai.chat_text" && is_responses {
+        return Err(InvokeError::config(
+            "openai.chat_text cannot target a /responses endpoint; select openai.responses",
+        ));
+    }
+    if protocol_id == "openai.responses" && is_chat_completions {
+        return Err(InvokeError::config(
+            "openai.responses cannot target a /chat/completions endpoint; select openai.chat_text",
+        ));
+    }
     Ok(())
 }
 
@@ -691,6 +726,7 @@ fn provider_params_encoding(
         | ("xai.stt", SpeechRecognition) => ScalarFields,
 
         ("openai.chat_text", Chat)
+        | ("openai.responses", Chat)
         | ("anthropic.messages", Chat)
         | ("bedrock.anthropic_messages", Chat)
         | ("gemini.generate_text", Chat)
@@ -756,6 +792,18 @@ pub fn validate_provider_params_for_protocol(
         return Err(InvokeError::config(
             "stepfun.images provider_params field \"generation_option_keys\" is not a provider request field",
         ));
+    }
+    if let Some(chain_rounds) = object.get("chain_rounds") {
+        if protocol_id != "openai.responses" || task != Chat {
+            return Err(InvokeError::config(
+                "provider_params.chain_rounds is supported only by openai.responses Chat capabilities",
+            ));
+        }
+        if !chain_rounds.is_boolean() {
+            return Err(InvokeError::config(
+                "openai.responses provider_params.chain_rounds must be a boolean",
+            ));
+        }
     }
     if task == Chat {
         let configured_ceiling_key = match object.get("max_tokens_field") {
@@ -1000,6 +1048,7 @@ pub fn try_default_protocol_registry() -> Result<ProtocolManifestRegistry, Invok
             ProtocolExecutorKind::Agent => matches!(
                 descriptor.protocol_id.as_str(),
                 "openai.chat_text"
+                    | "openai.responses"
                     | "anthropic.messages"
                     | "bedrock.anthropic_messages"
                     | "gemini.generate_text"
@@ -1219,6 +1268,7 @@ mod tests {
         assert!(registry.get("anthropic.messages").is_some());
         assert!(registry.get("bedrock.anthropic_messages").is_some());
         assert!(registry.get("gemini.generate_text").is_some());
+        assert!(registry.get("openai.responses").is_some());
     }
 
     #[test]
@@ -1351,12 +1401,38 @@ mod tests {
     }
 
     #[test]
+    fn response_chaining_is_a_typed_responses_only_chat_control() {
+        for value in [serde_json::json!(true), serde_json::json!(false)] {
+            validate_provider_params_for_protocol(
+                "openai.responses",
+                Chat,
+                &serde_json::json!({"chain_rounds": value}),
+            )
+            .unwrap();
+        }
+        for (protocol, task, value) in [
+            ("openai.responses", Chat, serde_json::json!("true")),
+            ("openai.chat_text", Chat, serde_json::json!(true)),
+            ("openai.images", ImageGeneration, serde_json::json!(true)),
+        ] {
+            let error = validate_provider_params_for_protocol(
+                protocol,
+                task,
+                &serde_json::json!({"chain_rounds": value}),
+            )
+            .unwrap_err();
+            assert!(error.message.contains("chain_rounds"), "{error:?}");
+        }
+    }
+
+    #[test]
     fn output_ceiling_requirement_matches_registered_chat_protocols() {
         assert!(protocol_requires_output_ceiling("anthropic.messages"));
         assert!(protocol_requires_output_ceiling(
             "bedrock.anthropic_messages"
         ));
         assert!(!protocol_requires_output_ceiling("openai.chat_text"));
+        assert!(!protocol_requires_output_ceiling("openai.responses"));
         assert!(!protocol_requires_output_ceiling("gemini.generate_text"));
     }
 
@@ -1451,10 +1527,57 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_endpoints_cannot_cross_protocol_owners() {
+        for responses_path in [
+            "/responses",
+            "/RESPONSES/?trace=1#fragment",
+            "https://api.example.test/v1/responses?trace=1",
+        ] {
+            let error = validate_endpoint_template(
+                "openai.chat_text",
+                Chat,
+                "endpoint",
+                responses_path,
+            )
+            .unwrap_err();
+            assert!(error.message.contains("openai.responses"), "{error:?}");
+        }
+        for chat_path in [
+            "/chat/completions",
+            "/CHAT/COMPLETIONS/?trace=1#fragment",
+            "https://api.example.test/v1/chat/completions?trace=1",
+        ] {
+            let error = validate_endpoint_template(
+                "openai.responses",
+                Chat,
+                "endpoint",
+                chat_path,
+            )
+            .unwrap_err();
+            assert!(error.message.contains("openai.chat_text"), "{error:?}");
+        }
+        validate_endpoint_template(
+            "openai.chat_text",
+            Chat,
+            "endpoint",
+            "/vendor/custom-chat",
+        )
+        .unwrap();
+        validate_endpoint_template(
+            "openai.responses",
+            Chat,
+            "endpoint",
+            "/vendor/custom-responses",
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn protocol_auth_schemes_match_strict_agents_and_flexible_http_transport() {
         let registry = default_protocol_registry();
         for (protocol, expected) in [
             ("openai.chat_text", vec!["bearer"]),
+            ("openai.responses", vec!["bearer"]),
             ("anthropic.messages", vec!["header_key:x-api-key"]),
             ("gemini.generate_text", vec!["header_key:x-goog-api-key"]),
             ("bedrock.anthropic_messages", vec!["bedrock"]),
@@ -1539,6 +1662,18 @@ mod tests {
                 "openai.chat_text"
             ]
         );
+    }
+
+    #[test]
+    fn openai_exposes_native_responses_without_changing_the_chat_recommendation() {
+        let view = protocol_manifest_for("OpenAI", Chat);
+        assert!(
+            view.protocols
+                .iter()
+                .any(|descriptor| descriptor.protocol_id == "openai.responses")
+        );
+        let recommendation = view.recommendation.expect("OpenAI Chat recommendation");
+        assert_eq!(recommendation.protocol_id, "openai.chat_text");
     }
 
     #[test]

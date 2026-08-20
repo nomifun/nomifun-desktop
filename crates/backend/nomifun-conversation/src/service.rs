@@ -106,6 +106,12 @@ const KNOWLEDGE_AUTOGEN_MODEL_PREF_KEY: &str = "knowledge.autogenModel";
 const DELETE_CORE_GRACE: Duration = Duration::from_secs(5);
 const DELETE_CLEANUP_ITEM_GRACE: Duration = Duration::from_secs(5);
 const TURN_WRITEBACK_CANCEL_GRACE: Duration = Duration::from_secs(10);
+const TRUNCATED_CONTINUATION_INSTRUCTION: &str =
+    "Continue the interrupted task from the durable conversation and workspace state. \
+Inspect the existing transcript, tool receipts, and files before acting. Complete only work that \
+is still outstanding; do not repeat already completed state-changing actions, and do not treat the \
+discarded draft as a completed result. Verify the requested deliverables before claiming success. \
+The original user requirement follows verbatim:";
 
 tokio::task_local! {
     static DELETED_CRON_JOB_IDS: Arc<[String]>;
@@ -287,6 +293,35 @@ enum MessageSendAuthority {
     /// The atomic edit/resubmit receipt owns a destructive rewind/truncate
     /// workflow and its replacement turn.
     EditResubmit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicTurnDeliveryPayload {
+    content: String,
+    files: Vec<String>,
+    inject_skills: Vec<String>,
+    hidden: bool,
+    origin: Option<String>,
+    channel_platform: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TruncatedContinuationReceiptPayload {
+    workflow: String,
+    source_message_id: String,
+    source_error_code: String,
+    original_delivery: PublicTurnDeliveryPayload,
+    delivery: PublicTurnDeliveryPayload,
+}
+
+#[derive(Debug, Clone)]
+struct TruncatedContinuationAdmission {
+    source_message_id: String,
+    source_request_payload: String,
+    source_error_code: String,
+    original_delivery: PublicTurnDeliveryPayload,
 }
 
 impl MessageSendAuthority {
@@ -689,6 +724,10 @@ struct DurableDeliveryLease {
     kind: String,
     request_payload: String,
     execution_authority: Option<AgentExecutionTurnAuthority>,
+    /// True only when this receipt can be addressed by the public
+    /// continue-truncated endpoint. Internal/background authorities must not
+    /// surface a recovery action that the endpoint will reject.
+    truncated_recovery_eligible: bool,
     /// The receipt INSERT winner already atomically advanced the Conversation
     /// lifecycle to Running in the same SQLite writer transaction.
     durable_admitted: bool,
@@ -1735,6 +1774,16 @@ impl ConversationService {
         format!("public-turn:v1:{user_id}:{conversation_id}:{idempotency_key}")
     }
 
+    fn public_truncated_continuation_operation_id(
+        user_id: &str,
+        conversation_id: &str,
+        idempotency_key: &str,
+    ) -> String {
+        format!(
+            "public-truncation-continue:v1:{user_id}:{conversation_id}:{idempotency_key}"
+        )
+    }
+
     fn public_steer_operation_id(
         user_id: &str,
         conversation_id: &str,
@@ -1835,6 +1884,27 @@ impl ConversationService {
             "hidden": req.hidden,
             "origin": &req.origin,
             "channel_platform": &req.channel_platform,
+        })
+        .to_string()
+    }
+
+    fn truncated_continuation_request_payload(
+        req: &SendMessageRequest,
+        admission: &TruncatedContinuationAdmission,
+    ) -> String {
+        serde_json::json!({
+            "workflow": "continue-truncated",
+            "source_message_id": &admission.source_message_id,
+            "source_error_code": &admission.source_error_code,
+            "original_delivery": &admission.original_delivery,
+            "delivery": {
+                "content": &req.content,
+                "files": &req.files,
+                "inject_skills": &req.inject_skills,
+                "hidden": req.hidden,
+                "origin": &req.origin,
+                "channel_platform": &req.channel_platform,
+            },
         })
         .to_string()
     }
@@ -6562,6 +6632,7 @@ impl ConversationService {
             false,
             None,
             None,
+            None,
         )
         .await
     }
@@ -6600,6 +6671,7 @@ impl ConversationService {
             runtime_build_lease,
             true,
             false,
+            None,
             None,
             None,
         )
@@ -6661,6 +6733,190 @@ impl ConversationService {
                 false,
                 None,
                 None,
+                None,
+        )
+        .await
+    }
+
+    /// Starts one explicit continuation of the latest retryable truncation.
+    ///
+    /// The client supplies only the immutable source message identity and an
+    /// idempotency key. The original requirement and attachments are recovered
+    /// from the server-owned receipt, then re-admitted as a new hidden public
+    /// turn without rewinding any transcript or mutating the failed receipt.
+    pub async fn continue_truncated_turn_with_idempotency_key(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        source_message_id: &str,
+        idempotency_key: &str,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+    ) -> Result<IdempotentMessageDelivery, AppError> {
+        validate_public_idempotency_key(idempotency_key)?;
+        MessageId::parse(source_message_id).map_err(|error| {
+            AppError::BadRequest(format!(
+                "Invalid truncated-turn source message id '{source_message_id}': {error}"
+            ))
+        })?;
+        let conversation_key = parse_conv_id(conversation_id)?;
+        let runtime_build_lease =
+            self.begin_public_runtime_preparation(conversation_key, user_id)?;
+        self.conversation_repo
+            .get(conversation_key)
+            .await?
+            .filter(|row| row.user_id == user_id)
+            .ok_or_else(|| {
+                AppError::NotFound(format!("Conversation {conversation_id} not found"))
+            })?;
+        runtime_build_lease.ensure_active()?;
+        self.ensure_not_retained_execution_attempt(user_id, conversation_key)
+            .await?;
+        runtime_build_lease.ensure_active()?;
+
+        let source = self
+            .conversation_repo
+            .get_turn_delivery_receipt_by_message_id(
+                user_id,
+                conversation_key,
+                source_message_id,
+            )
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "Truncated turn source message {source_message_id} was not found"
+                ))
+            })?;
+        let source_error_code = source
+            .result_error_code
+            .as_deref()
+            .filter(|code| matches!(*code, "output_truncated" | "turn_requests_exhausted"))
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                AppError::Conflict(
+                    "The selected turn is not an eligible truncated failure".to_owned(),
+                )
+            })?;
+        if source.status != "completed"
+            || source.result_ok != Some(false)
+            || source.result_error_retryable != Some(true)
+        {
+            return Err(AppError::Conflict(
+                "The selected turn is not a completed retryable failure".to_owned(),
+            ));
+        }
+
+        let public_turn_prefix =
+            format!("public-turn:v1:{user_id}:{conversation_key}:");
+        let public_continuation_prefix =
+            format!("public-truncation-continue:v1:{user_id}:{conversation_key}:");
+        let original_delivery = if source
+            .operation_id
+            .strip_prefix(&public_turn_prefix)
+            .is_some_and(|suffix| !suffix.is_empty())
+        {
+            // Owner-visible initial delivery intentionally shares this durable
+            // authority and typed payload with later public turns. It has the
+            // same explicit-continuation semantics; internal/AutoWork payloads
+            // remain excluded by their distinct schemas and namespaces.
+            serde_json::from_str::<PublicTurnDeliveryPayload>(&source.request_payload)
+                .map_err(|error| {
+                    AppError::Conflict(format!(
+                        "Public turn receipt has an invalid v1 delivery payload: {error}"
+                    ))
+                })?
+        } else if source
+            .operation_id
+            .strip_prefix(&public_continuation_prefix)
+            .is_some_and(|suffix| !suffix.is_empty())
+        {
+            let continuation = serde_json::from_str::<TruncatedContinuationReceiptPayload>(
+                &source.request_payload,
+            )
+            .map_err(|error| {
+                AppError::Conflict(format!(
+                    "Truncated continuation receipt has an invalid v1 payload: {error}"
+                ))
+            })?;
+            let expected_delivery_content = format!(
+                "{TRUNCATED_CONTINUATION_INSTRUCTION}\n\n{}",
+                continuation.original_delivery.content
+            );
+            if continuation.workflow != "continue-truncated"
+                || !matches!(
+                    continuation.source_error_code.as_str(),
+                    "output_truncated" | "turn_requests_exhausted"
+                )
+                || MessageId::parse(&continuation.source_message_id).is_err()
+                || !continuation.delivery.hidden
+                || !continuation.delivery.inject_skills.is_empty()
+                || continuation.delivery.origin.is_some()
+                || continuation.delivery.channel_platform.is_some()
+                || continuation.delivery.files != continuation.original_delivery.files
+                || continuation.delivery.content != expected_delivery_content
+            {
+                return Err(AppError::Conflict(
+                    "Truncated continuation receipt does not match the strict v1 workflow"
+                        .to_owned(),
+                ));
+            }
+            continuation.original_delivery
+        } else {
+            return Err(AppError::Conflict(
+                "Only owner public turns and their explicit continuations may be continued"
+                    .to_owned(),
+            ));
+        };
+        if (original_delivery.content.trim().is_empty() && original_delivery.files.is_empty())
+            || original_delivery.hidden
+            || original_delivery.origin.is_some()
+            || original_delivery.channel_platform.is_some()
+        {
+            return Err(AppError::Conflict(
+                "Truncated continuation source is not an owner-visible public request"
+                    .to_owned(),
+            ));
+        }
+
+        let req = SendMessageRequest {
+            content: format!(
+                "{TRUNCATED_CONTINUATION_INSTRUCTION}\n\n{}",
+                original_delivery.content
+            ),
+            files: original_delivery.files.clone(),
+            // Skill installation is a state-changing effect. The established
+            // Conversation skill state remains available; never replay the
+            // source turn's injection list.
+            inject_skills: Vec::new(),
+            hidden: true,
+            origin: None,
+            channel_platform: None,
+        };
+        let admission = TruncatedContinuationAdmission {
+            source_message_id: source_message_id.to_owned(),
+            source_request_payload: source.request_payload,
+            source_error_code,
+            original_delivery,
+        };
+        let operation_id = Self::public_truncated_continuation_operation_id(
+            user_id,
+            conversation_key,
+            idempotency_key,
+        );
+        self.send_message_idempotent_with_lease(
+            user_id,
+            conversation_id,
+            &operation_id,
+            req,
+            runtime_registry,
+            MessageSendAuthority::OwnerInteractive,
+            None,
+            None,
+            runtime_build_lease,
+            true,
+            false,
+            Some(admission),
+            None,
+            None,
         )
         .await
     }
@@ -6718,6 +6974,7 @@ impl ConversationService {
             runtime_build_lease,
             true,
             true,
+            None,
             None,
             None,
         )
@@ -7030,6 +7287,7 @@ impl ConversationService {
                 runtime_build_lease,
                 true,
                 false,
+                None,
                 Some(runtime_preparation),
                 Some(observer_tx),
             )
@@ -7066,6 +7324,7 @@ impl ConversationService {
         runtime_build_lease: RuntimeBuildLease,
         promote_before_execution: bool,
         initial_delivery: bool,
+        truncated_continuation: Option<TruncatedContinuationAdmission>,
         runtime_preparation: Option<BackgroundTurnRuntimePreparation>,
         runtime_observer: Option<
             oneshot::Sender<(AgentRuntimeHandle, broadcast::Receiver<AgentStreamEvent>)>,
@@ -7081,6 +7340,17 @@ impl ConversationService {
                     .to_owned(),
             ));
         }
+        if truncated_continuation.is_some()
+            && (execution_authority.is_some()
+                || autowork_authority.is_some()
+                || initial_delivery
+                || send_authority != MessageSendAuthority::OwnerInteractive)
+        {
+            return Err(AppError::Conflict(
+                "truncated-turn continuation cannot carry another turn authority"
+                    .to_owned(),
+            ));
+        }
         if initial_delivery
             && (execution_authority.is_some()
                 || autowork_authority.is_some()
@@ -7091,18 +7361,29 @@ impl ConversationService {
                     .to_owned(),
             ));
         }
+        let truncated_recovery_eligible = send_authority == MessageSendAuthority::OwnerInteractive
+            && execution_authority.is_none()
+            && autowork_authority.is_none()
+            && (truncated_continuation.is_some()
+                || (!req.hidden
+                    && req.origin.is_none()
+                    && req.channel_platform.is_none()));
         let request_payload = match (
             execution_authority.as_ref(),
             autowork_authority.as_ref(),
+            truncated_continuation.as_ref(),
         ) {
-            (Some(authority), None) => {
+            (Some(authority), None, None) => {
                 Self::agent_execution_turn_delivery_request_payload(&req, authority)
             }
-            (None, Some(authority)) => {
+            (None, Some(authority), None) => {
                 Self::autowork_turn_delivery_request_payload(&req, authority)
             }
-            (None, None) => Self::turn_delivery_request_payload(&req),
-            (Some(_), Some(_)) => unreachable!("conflicting authority rejected above"),
+            (None, None, Some(admission)) => {
+                Self::truncated_continuation_request_payload(&req, admission)
+            }
+            (None, None, None) => Self::turn_delivery_request_payload(&req),
+            _ => unreachable!("conflicting authority rejected above"),
         };
         // Every existing receipt is an at-most-once execution boundary across
         // process restart. `accepted` is deliberately absorbing too: the old
@@ -7275,8 +7556,11 @@ impl ConversationService {
                 guard_generation,
                 owner,
             });
-            let claim_result = match autowork_authority.as_ref() {
-                Some(authority) => {
+            let claim_result = match (
+                autowork_authority.as_ref(),
+                truncated_continuation.as_ref(),
+            ) {
+                (Some(authority), None) => {
                     self.conversation_repo
                         .claim_autowork_turn_delivery_receipt_and_admit_with_candidate(
                             user_id,
@@ -7290,7 +7574,23 @@ impl ConversationService {
                         )
                         .await
                 }
-                None if initial_delivery => {
+                (None, Some(admission)) => {
+                    self.conversation_repo
+                        .claim_truncated_continuation_receipt_and_admit_with_candidate(
+                            user_id,
+                            conversation_key,
+                            operation_id,
+                            &candidate_message_id,
+                            &request_payload,
+                            &admission.source_message_id,
+                            &admission.source_request_payload,
+                            &admission.source_error_code,
+                            expected_admission_epoch,
+                            now_ms(),
+                        )
+                        .await
+                }
+                (None, None) if initial_delivery => {
                     self.conversation_repo
                         .claim_initial_turn_delivery_receipt_and_admit_with_candidate(
                             user_id,
@@ -7303,7 +7603,7 @@ impl ConversationService {
                         )
                         .await
                 }
-                None => {
+                (None, None) => {
                     self.conversation_repo
                         .claim_turn_delivery_receipt_and_admit_with_candidate(
                             user_id,
@@ -7316,6 +7616,7 @@ impl ConversationService {
                         )
                         .await
                 }
+                (Some(_), Some(_)) => unreachable!("conflicting authority rejected above"),
             };
             let claim = match claim_result {
                 Ok(claim) => claim,
@@ -7396,6 +7697,7 @@ impl ConversationService {
             kind: "turn".to_owned(),
             request_payload: request_payload.clone(),
             execution_authority,
+            truncated_recovery_eligible,
             durable_admitted: true,
             admission_epoch: Some(expected_admitted_epoch),
             guard_key: operation_guard_key.clone(),
@@ -8378,6 +8680,10 @@ impl ConversationService {
         // agent-internal tracing all share one identifier per turn.
         let user_msg_id_ret = user_msg_id.clone();
         let source_user_message_id = user_msg_id.clone();
+        let truncated_recovery_source_message_id = durable_delivery
+            .as_ref()
+            .filter(|delivery| delivery.truncated_recovery_eligible)
+            .map(|delivery| delivery.message_id.clone());
         let stable_turn_id = first_turn_msg_id.clone();
         let owner_turn_generation = turn_handle.turn_id();
         let owner_conversation_id = conversation_key.clone();
@@ -8718,6 +9024,7 @@ impl ConversationService {
                     cron_service.clone(),
                 )
                 .with_root_turn_id(stable_turn_id.clone())
+                .with_source_user_message_id(truncated_recovery_source_message_id.clone())
                 .with_cancellation(turn_cancellation.clone())
                 .with_companion_context(companion, companion_id.clone())
                 .with_origin(origin.clone())
@@ -10848,6 +11155,7 @@ impl ConversationService {
             kind: "turn".to_owned(),
             request_payload: request_payload.clone(),
             execution_authority: None,
+            truncated_recovery_eligible: false,
             durable_admitted: true,
             admission_epoch: Some(admitted_admission_epoch),
             guard_key,

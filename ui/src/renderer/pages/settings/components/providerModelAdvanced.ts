@@ -538,6 +538,29 @@ export const withProviderParamVoice = (raw: string, voice: string): string => {
   return Object.keys(next).length > 0 ? JSON.stringify(next, null, 2) : '';
 };
 
+/** Read the explicit Responses round-chaining opt-in from provider params. */
+export const providerParamChainRounds = (raw: string): boolean => {
+  const parsed = parseProviderParams(raw);
+  return parsed.ok && parsed.value.chain_rounds === true;
+};
+
+/**
+ * Toggle Responses round chaining in the one canonical provider-params JSON.
+ *
+ * Disabled is represented by an absent key, not `false`: omission keeps the
+ * protocol's privacy-preserving default authoritative. Malformed JSON is
+ * returned byte-for-byte so this structured control can never erase a user's
+ * unfinished raw edit.
+ */
+export const withProviderParamChainRounds = (raw: string, enabled: boolean): string => {
+  const parsed = parseProviderParams(raw);
+  if (!parsed.ok) return raw;
+  const next = { ...parsed.value };
+  if (enabled) next.chain_rounds = true;
+  else delete next.chain_rounds;
+  return Object.keys(next).length > 0 ? JSON.stringify(next, null, 2) : '';
+};
+
 export const validateModelDefinition = (
   definition: ModelDefinitionDraft,
   manifests: ModelProtocolManifestMap,

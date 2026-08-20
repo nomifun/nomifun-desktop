@@ -22,6 +22,9 @@ pub use tool_call::{
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum AgentStreamEvent {
     Start(StartEventData),
+    /// The current attempt's provisional assistant output was rejected and the
+    /// engine is restarting from the most recent `Start` checkpoint.
+    OutputDiscarded(OutputDiscardedEventData),
     #[serde(rename = "content")]
     Text(TextEventData),
     Tips(TipsEventData),
@@ -52,6 +55,15 @@ pub enum AgentStreamEvent {
 pub struct StartEventData {
     #[serde(default)]
     pub session_id: Option<String>,
+}
+
+/// Data for the `OutputDiscarded` event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+pub struct OutputDiscardedEventData {
+    /// One-based round attempt that will produce the replacement output.
+    #[ts(type = "number")]
+    pub restart_attempt: u32,
 }
 
 /// Data for the `SessionAssigned` event.
@@ -166,6 +178,7 @@ mod tests {
     #[test]
     fn export_protocol_bindings() {
         export_binding_if_changed::<StartEventData>("StartEventData.ts");
+        export_binding_if_changed::<OutputDiscardedEventData>("OutputDiscardedEventData.ts");
         export_binding_if_changed::<SessionAssignedEventData>("SessionAssignedEventData.ts");
         export_binding_if_changed::<FinishEventData>("FinishEventData.ts");
         export_binding_if_changed::<TurnCompletedEventData>("TurnCompletedEventData.ts");
@@ -432,6 +445,12 @@ mod tests {
         // variant's tag changes here, the frontend must change in lockstep.
         let cases: Vec<(AgentStreamEvent, &str)> = vec![
             (AgentStreamEvent::Start(StartEventData::default()), "start"),
+            (
+                AgentStreamEvent::OutputDiscarded(OutputDiscardedEventData {
+                    restart_attempt: 2,
+                }),
+                "output_discarded",
+            ),
             (AgentStreamEvent::Text(TextEventData { content: "x".into() }), "content"),
             (
                 AgentStreamEvent::Tips(TipsEventData { content: "x".into(), tip_type: TipType::Warning }),
