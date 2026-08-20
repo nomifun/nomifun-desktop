@@ -62,7 +62,12 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
     const credentialsCanBePreserved = data?.has_credentials === true;
     const accessKeysRequired =
       isBedrock && bedrockAuthMethod === 'accessKey' && !credentialsCanBePreserved;
-    const manifestState = useModelProtocolManifests(data?.platform, [], 'chat', data?.base_url);
+    const manifestState = useModelProtocolManifests({
+      preset: data?.platform,
+      tasks: [],
+      bootstrapTask: 'chat',
+      baseUrlHint: data?.base_url,
+    });
     const providerManifest = manifestState.manifests.chat;
     const authSchemeOptions = providerManifest?.auth_schemes.map((item) => item.scheme) ?? [];
     const providerLogo = useMemo(

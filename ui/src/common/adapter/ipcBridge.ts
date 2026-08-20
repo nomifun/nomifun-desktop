@@ -1443,6 +1443,7 @@ export const modelProtocol = {
     (p) => {
       const query = new URLSearchParams({ preset: p.preset, task: p.task });
       if (p.base_url) query.set('base_url', p.base_url);
+      if (p.model) query.set('model', p.model);
       return `/api/model-protocols?${query.toString()}`;
     }
   ),

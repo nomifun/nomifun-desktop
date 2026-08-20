@@ -211,6 +211,7 @@ mod protocol_manifest_tests {
             preset: Some("StepFun-Plan".to_owned()),
             platform: None,
             base_url: None,
+            model: None,
             task: ModelTask::RealtimeConversation,
         }))
         .await
@@ -223,11 +224,33 @@ mod protocol_manifest_tests {
     }
 
     #[tokio::test]
+    async fn model_protocol_manifest_handler_forwards_custom_model_hint() {
+        let Json(response) = list_model_protocols(Query(ModelProtocolManifestQuery {
+            preset: Some("custom".to_owned()),
+            platform: None,
+            base_url: Some("https://gateway.example/v1".to_owned()),
+            model: Some("user-entered-model".to_owned()),
+            task: ModelTask::ImageEdit,
+        }))
+        .await
+        .expect("manifest response");
+        let recommendation = response
+            .data
+            .expect("manifest data")
+            .recommendation
+            .expect("custom model recommendation");
+        assert_eq!(recommendation.protocol_id, "openai.images");
+        assert_eq!(recommendation.connection_role, None);
+        assert_eq!(recommendation.default_base_url, None);
+    }
+
+    #[tokio::test]
     async fn model_protocol_manifest_handler_requires_preset_or_platform() {
         let error = list_model_protocols(Query(ModelProtocolManifestQuery {
             preset: None,
             platform: None,
             base_url: None,
+            model: None,
             task: ModelTask::Chat,
         }))
         .await
@@ -245,6 +268,10 @@ struct ModelProtocolManifestQuery {
     /// Stored provider base URL, used to disambiguate regional presets that
     /// share a canonical platform id (for example SiliconFlow CN/global).
     base_url: Option<String>,
+    /// Optional configuration-time model id. The manifest never parses this
+    /// value; a non-blank id only enables the safe generic recommendation for
+    /// the `custom` preset.
+    model: Option<String>,
     task: ModelTask,
 }
 
@@ -257,9 +284,10 @@ async fn list_model_protocols(
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| AppError::BadRequest("preset query parameter is required".into()))?;
     Ok(Json(ApiResponse::ok(
-        nomifun_model_invoke::protocol_manifest_for_connection(
+        nomifun_model_invoke::protocol_manifest_for_model_connection(
             &preset,
             query.base_url.as_deref(),
+            query.model.as_deref(),
             query.task,
         ),
     )))

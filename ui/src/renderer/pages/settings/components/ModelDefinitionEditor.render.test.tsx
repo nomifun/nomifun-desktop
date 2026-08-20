@@ -283,6 +283,7 @@ describe('unified model definition editor rendering and interactions', () => {
       model: 'step-ready',
       capabilities: ['chat', 'video_generation'].map((task) => ({
         ...emptyCapabilityDraft(task as ModelTask),
+        transportSource: 'persisted' as const,
         protocol: `stepfun.${task}`,
       })),
     };
@@ -303,6 +304,7 @@ describe('unified model definition editor rendering and interactions', () => {
       model: 'step-needs-attention',
       capabilities: ['chat', 'video_generation', 'speech_synthesis'].map((task) => ({
         ...emptyCapabilityDraft(task as ModelTask),
+        transportSource: 'persisted' as const,
         protocol: `stepfun.${task}`,
       })),
     };
@@ -397,6 +399,49 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('data-protocol-auth-schemes="true"')).toBe(true);
     expect(html.includes('data-protocol-auth-incompatible="true"')).toBe(true);
     expect(html.includes('header_key:&lt;name&gt;')).toBe(true);
+  });
+
+  test('treats the backend-recommended Custom compatibility protocol as ready', () => {
+    const chatManifest = manifest('chat');
+    const customProtocol: ModelProtocolManifest['protocols'][number] = {
+      ...chatManifest.protocols[0],
+      protocol_id: 'openai.chat_text',
+      scopes: ['official_compat', 'custom'],
+      platforms: ['openai'],
+      default_connections: [],
+    };
+    const customManifest: ModelProtocolManifest = {
+      ...chatManifest,
+      preset: 'custom',
+      platform: 'custom',
+      platform_default_base_url: null,
+      requires_user_input: true,
+      recommendation: {
+        protocol_id: customProtocol.protocol_id,
+        connection_role: null,
+        default_base_url: null,
+        default_auth_scheme: 'bearer',
+        base_url_override_required: false,
+      },
+      protocols: [customProtocol],
+    };
+    const html = render(
+      {
+        model: 'gateway/model',
+        capabilities: [
+          {
+            ...emptyCapabilityDraft('chat'),
+            transportSource: 'recommendation',
+            protocol: customProtocol.protocol_id,
+          },
+        ],
+      },
+      { chat: customManifest }
+    );
+
+    expect(html.includes('默认配置已就绪')).toBe(true);
+    expect(html.includes('当前供应商推荐')).toBe(true);
+    expect(html.includes('data-generic-protocol-warning="true"')).toBe(false);
   });
 
   /**

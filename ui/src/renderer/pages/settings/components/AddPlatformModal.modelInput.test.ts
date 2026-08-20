@@ -28,8 +28,9 @@ describe('AddPlatformModal unified model input flow', () => {
     expect(unifiedInputSource.includes('onSelect=')).toBe(true);
     expect(unifiedInputSource.includes('onChange=')).toBe(true);
     expect(unifiedInputSource.includes('onBlur=')).toBe(false);
-    expect(editorSource.includes('addCapabilityTask(value.capabilities, task)')).toBe(true);
-    expect(editorSource.includes('removeCapabilityTask(value.capabilities, task)')).toBe(true);
+    expect(editorSource.includes('addCapabilityTask(current.capabilities, task)')).toBe(true);
+    expect(editorSource.includes('removeCapabilityTask(current.capabilities, task)')).toBe(true);
+    expect(editorSource.includes('onChange((current) =>')).toBe(true);
     expect(editorSource.indexOf('data-primary-model-task-picker')).toBeLessThan(
       editorSource.indexOf('data-unified-model-input')
     );
@@ -44,7 +45,9 @@ describe('AddPlatformModal unified model input flow', () => {
   });
 
   test('gets operational defaults only from the backend preset manifest', () => {
-    expect(addSource.includes("useModelProtocolManifests(preset, tasks, 'chat')")).toBe(true);
+    expect(addSource.includes('useModelProtocolManifests({')).toBe(true);
+    expect(addSource.includes("bootstrapTask: 'chat'")).toBe(true);
+    expect(addSource.includes('modelHint: definition.model')).toBe(true);
     expect(addSource.includes('providerManifest.platform_default_base_url')).toBe(true);
     expect(addSource.includes('providerManifest.default_auth_scheme')).toBe(true);
     expect(addSource.includes('providerManifest?.auth_schemes')).toBe(true);

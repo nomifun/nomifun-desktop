@@ -39,9 +39,10 @@ fn openai_route(task: ModelTask) -> Option<TaskRoute> {
 
 /// Return the verified configuration recommendation for `(platform, task)`.
 ///
-/// `None` means there is no safe default. In particular, `custom` and
-/// `new-api` intentionally have no recommendation: users must select and
-/// persist a protocol explicitly.
+/// `None` means there is no unconditional platform default. In particular,
+/// `custom` and `new-api` stay absent here so runtime probes never guess a
+/// protocol. The model-aware configuration manifest may separately recommend
+/// a registry-verified generic protocol for `custom`; callers must persist it.
 pub fn preset_protocol_recommendation(platform: &str, task: ModelTask) -> Option<TaskRoute> {
     use ModelTask::*;
 
@@ -194,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_gateways_have_no_implicit_protocol_defaults() {
+    fn custom_gateways_have_no_unconditional_preset_defaults() {
         for platform in ["custom", "new-api"] {
             for task in [
                 Chat,
