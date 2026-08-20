@@ -17,7 +17,7 @@
 //! extract `CurrentUser` (see the note on the public router).
 
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Extension, Json, Multipart, Path, Query, State};
 use axum::http::{StatusCode, header};
@@ -33,6 +33,7 @@ use nomifun_common::{AppError, WorkshopAssetId, WorkshopCanvasId};
 
 use crate::MAX_ASSET_BYTES;
 use crate::agent_ops::PendingOp;
+use crate::archive::MAX_CREATIVE_ARCHIVE_COMPRESSED_BYTES;
 use crate::creative_studio::{CreativeProjectDocument, CreativeProjectSummary};
 use crate::dto::{WorkshopAsset, WorkshopCanvasMeta};
 use crate::service::{AssetPatch, AssetQuery, NewAssetUpload, NewTextAsset};
@@ -45,6 +46,17 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         .route("/api/workshop/assets/upload", post(upload_asset))
         .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(MAX_ASSET_BYTES))
+        .with_state(state.clone());
+
+    let archive_import_router = Router::new()
+        .route(
+            "/api/creative-studio/projects/import",
+            post(import_creative_project_archive),
+        )
+        .layer(DefaultBodyLimit::disable())
+        .layer(RequestBodyLimitLayer::new(
+            MAX_CREATIVE_ARCHIVE_COMPRESSED_BYTES,
+        ))
         .with_state(state.clone());
 
     Router::new()
@@ -61,6 +73,10 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         .route(
             "/api/creative-studio/projects/{project_id}/document",
             axum::routing::put(save_creative_project),
+        )
+        .route(
+            "/api/creative-studio/projects/{project_id}/archive",
+            get(export_creative_project_archive),
         )
         .route("/api/workshop/canvases", get(list_canvases).post(create_canvas))
         .route(
@@ -83,6 +99,7 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         )
         .route("/api/workshop/collections/rename", post(rename_collection))
         .with_state(state)
+        .merge(archive_import_router)
         .merge(upload_router)
 }
 
@@ -219,6 +236,44 @@ async fn delete_creative_project(
 ) -> Result<StatusCode, AppError> {
     state.service.delete_creative_project(&project_id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn export_creative_project_archive(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(project_id): Path<String>,
+) -> Result<Response, AppError> {
+    let archive = state
+        .service
+        .export_creative_project_archive(&project_id)
+        .await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, archive.mime.to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", archive.file_name),
+            ),
+            (header::CACHE_CONTROL, "no-store".to_owned()),
+        ],
+        Body::from(archive.bytes),
+    )
+        .into_response())
+}
+
+async fn import_creative_project_archive(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    bytes: Bytes,
+) -> Result<impl IntoResponse, AppError> {
+    let project = state
+        .service
+        .import_creative_project_archive(bytes.to_vec())
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::ok(CreativeProjectResponse { project })),
+    ))
 }
 
 // ── canvases ────────────────────────────────────────────────────────────────
@@ -799,5 +854,56 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(gone, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn creative_project_archive_handlers_return_real_zip_and_imported_project() {
+        let (state, user, _data_dir) = test_state().await;
+        let project = state
+            .service
+            .create_creative_project(Some("路由归档".into()))
+            .await
+            .unwrap();
+
+        let exported = export_creative_project_archive(
+            State(state.clone()),
+            Extension(user.clone()),
+            Path(project.project_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(exported.status(), StatusCode::OK);
+        assert_eq!(
+            exported.headers().get(header::CONTENT_TYPE).unwrap(),
+            crate::archive::CREATIVE_STUDIO_ARCHIVE_MIME
+        );
+        assert!(
+            exported
+                .headers()
+                .get(header::CONTENT_DISPOSITION)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .ends_with(".nomifun-canvas.zip\"")
+        );
+        let archive_bytes = axum::body::to_bytes(
+            exported.into_body(),
+            MAX_CREATIVE_ARCHIVE_COMPRESSED_BYTES,
+        )
+        .await
+        .unwrap();
+
+        let imported = import_creative_project_archive(
+            State(state.clone()),
+            Extension(user),
+            archive_bytes,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(imported.status(), StatusCode::CREATED);
+        let projects = state.service.list_creative_projects().await.unwrap();
+        assert_eq!(projects.len(), 2);
+        assert_ne!(projects[0].project_id, projects[1].project_id);
     }
 }

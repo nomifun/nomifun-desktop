@@ -29,6 +29,10 @@ mime_guess.workspace = true
 # with the workspace's `png`, `default-features = false` inherited). No root
 # Cargo.toml change.
 image = { workspace = true, features = ["jpeg", "gif", "webp"] }
+zip.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

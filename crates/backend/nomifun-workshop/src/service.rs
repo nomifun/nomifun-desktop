@@ -17,6 +17,12 @@ use nomifun_db::{
 };
 use serde_json::Value;
 
+use crate::archive::{
+    CREATIVE_STUDIO_ARCHIVE_MIME, CreativeArchiveAssetSnapshot,
+    build_creative_project_archive, collect_document_asset_ids,
+    parse_creative_project_archive, remap_creative_archive_for_import,
+    sanitized_archive_origin,
+};
 use crate::creative_studio::{
     CreativeProjectDocument, CreativeProjectSummary, MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
 };
@@ -38,6 +44,13 @@ pub struct CanvasWithDoc {
 pub struct CreativeProjectWithDocument {
     pub project: CreativeProjectSummary,
     pub document: CreativeProjectDocument,
+}
+
+/// A completed, bounded Creative Studio v1 project archive.
+pub struct CreativeProjectArchive {
+    pub file_name: String,
+    pub mime: &'static str,
+    pub bytes: Vec<u8>,
 }
 
 /// A paginated asset listing.
@@ -65,6 +78,46 @@ struct BinaryAsset {
     tags: Option<Vec<String>>,
     in_library: bool,
     origin: Option<Value>,
+}
+
+/// Files are published before the SQLite import transaction so committed rows
+/// never point at absent media. Any early return or task cancellation removes
+/// the staged final paths; a successful DB commit disarms the guard.
+struct CreativeArchiveFileRollback {
+    paths: Vec<PathBuf>,
+    committed: bool,
+}
+
+impl CreativeArchiveFileRollback {
+    fn new() -> Self {
+        Self {
+            paths: Vec::new(),
+            committed: false,
+        }
+    }
+
+    fn track(&mut self, path: PathBuf) {
+        self.paths.push(path);
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for CreativeArchiveFileRollback {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        for path in &self.paths {
+            if let Err(error) = std::fs::remove_file(path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(path = %path.display(), %error, "failed to roll back creative archive asset file");
+            }
+        }
+    }
 }
 
 /// A multipart asset upload (binary + optional metadata).
@@ -327,6 +380,155 @@ impl WorkshopService {
         validate_creative_project_id(project_id)?;
         self.repo.delete_creative_project(project_id).await?;
         Ok(())
+    }
+
+    pub async fn export_creative_project_archive(
+        &self,
+        project_id: &str,
+    ) -> Result<CreativeProjectArchive, AppError> {
+        let detail = self.get_creative_project(project_id).await?;
+        let asset_ids = collect_document_asset_ids(&detail.document)?;
+        let mut assets = Vec::with_capacity(asset_ids.len());
+        for asset_id in asset_ids {
+            let row = self
+                .repo
+                .get_asset(&asset_id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Conflict(format!(
+                        "creative project {project_id} references missing asset {asset_id}"
+                    ))
+                })?;
+            let bytes = self
+                .read_original(&row)
+                .await
+                .map_err(|error| match error {
+                    AppError::NotFound(message) => AppError::Conflict(format!(
+                        "creative project {project_id} asset cannot be exported: {message}"
+                    )),
+                    other => other,
+                })?
+                .0;
+            assets.push(CreativeArchiveAssetSnapshot { row, bytes });
+        }
+        let title = detail.project.title;
+        let document = detail.document;
+        let archive_bytes = tokio::task::spawn_blocking(move || {
+            build_creative_project_archive(&title, &document, assets, now_ms())
+        })
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!("creative project archive worker failed: {error}"))
+        })??;
+        Ok(CreativeProjectArchive {
+            file_name: format!("creative-studio-{project_id}.nomifun-canvas.zip"),
+            mime: CREATIVE_STUDIO_ARCHIVE_MIME,
+            bytes: archive_bytes,
+        })
+    }
+
+    pub async fn import_creative_project_archive(
+        &self,
+        archive_bytes: Vec<u8>,
+    ) -> Result<CreativeProjectSummary, AppError> {
+        let project_id = CreativeStudioProjectId::new().into_string();
+        let remap_project_id = project_id.clone();
+        let archive = tokio::task::spawn_blocking(move || {
+            let parsed = parse_creative_project_archive(&archive_bytes)?;
+            remap_creative_archive_for_import(parsed, &remap_project_id)
+        })
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!("creative project archive worker failed: {error}"))
+        })??;
+
+        let title = normalize_creative_project_title(Some(&archive.title), false)?;
+        let document_json = serialize_creative_project_document(&archive.document)?;
+        let node_count = i64::try_from(archive.document.nodes.len())
+            .map_err(|_| AppError::BadRequest("creative project has too many nodes".into()))?;
+        let connection_count = i64::try_from(archive.document.connections.len()).map_err(|_| {
+            AppError::BadRequest("creative project has too many connections".into())
+        })?;
+        let now = now_ms();
+        let mut rollback = CreativeArchiveFileRollback::new();
+        let mut asset_rows = Vec::with_capacity(archive.assets.len());
+        for asset in archive.assets {
+            let metadata = asset.metadata;
+            let tags = serde_json::to_string(&metadata.tags).map_err(|error| {
+                AppError::Internal(format!("encode imported creative asset tags: {error}"))
+            })?;
+            let origin = sanitized_archive_origin(metadata.origin)?;
+            let (rel_path, mime, bytes, text_content) = if metadata.kind == "text" {
+                let text = String::from_utf8(asset.bytes).map_err(|_| {
+                    AppError::BadRequest(format!(
+                        "creative archive text asset {} is not valid UTF-8",
+                        metadata.asset_id
+                    ))
+                })?;
+                (None, None, None, Some(text))
+            } else {
+                let (classified_kind, ext) = classify_mime(&metadata.mime)?;
+                if classified_kind != metadata.kind {
+                    return Err(AppError::BadRequest(format!(
+                        "creative archive asset {} kind does not match MIME type",
+                        metadata.asset_id
+                    )));
+                }
+                let disk_name = format!("{}.{}", metadata.asset_id, ext);
+                let rel_path = format!("{WORKSHOP_REL_DIR}/assets/{disk_name}");
+                fsio::save_bytes_atomic(&self.assets_dir(), &disk_name, &asset.bytes)
+                    .await
+                    .map_err(|error| {
+                        AppError::Internal(format!(
+                            "write imported creative asset {}: {error}",
+                            metadata.asset_id
+                        ))
+                    })?;
+                rollback.track(self.data_dir.join(&rel_path));
+                (
+                    Some(rel_path),
+                    Some(metadata.mime),
+                    Some(asset.bytes.len() as i64),
+                    None,
+                )
+            };
+            asset_rows.push(WorkshopAssetRow {
+                id: 0,
+                asset_id: metadata.asset_id,
+                kind: metadata.kind,
+                title: metadata.title,
+                collection: metadata.collection,
+                tags,
+                rel_path,
+                thumb_rel_path: None,
+                mime,
+                width: metadata.width,
+                height: metadata.height,
+                bytes,
+                text_content,
+                in_library: metadata.in_library,
+                origin,
+                created_at: now,
+                updated_at: now,
+            });
+        }
+        let project_row = CreativeStudioProjectRow {
+            id: 0,
+            project_id,
+            title,
+            revision: 1,
+            node_count,
+            connection_count,
+            document_json,
+            created_at: now,
+            updated_at: now,
+        };
+        let imported = self
+            .repo
+            .import_creative_project_with_assets(&project_row, &asset_rows)
+            .await?;
+        rollback.commit();
+        Ok(imported.into())
     }
 
     pub async fn list_canvases(&self) -> Result<Vec<WorkshopCanvasMeta>, AppError> {
@@ -1442,6 +1644,27 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn creative_archive_file_guard_removes_uncommitted_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let rolled_back = dir.path().join("rolled-back.bin");
+        std::fs::write(&rolled_back, b"asset").unwrap();
+        {
+            let mut guard = CreativeArchiveFileRollback::new();
+            guard.track(rolled_back.clone());
+        }
+        assert!(!rolled_back.exists());
+
+        let committed = dir.path().join("committed.bin");
+        std::fs::write(&committed, b"asset").unwrap();
+        {
+            let mut guard = CreativeArchiveFileRollback::new();
+            guard.track(committed.clone());
+            guard.commit();
+        }
+        assert!(committed.exists());
+    }
+
     #[tokio::test]
     async fn creative_project_crud_isolated_from_legacy_canvases() {
         let (svc, _dir) = service().await;
@@ -1531,6 +1754,151 @@ mod tests {
             Err(AppError::NotFound(_))
         ));
         assert!(svc.get_canvas(&legacy.canvas_id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn creative_project_archive_round_trip_copies_assets_and_remaps_graph() {
+        let (svc, _dir) = service().await;
+        let image_bytes = png_1x1();
+        let image = svc
+            .ingest_asset_bytes(
+                image_bytes.clone(),
+                "image/png",
+                "归档图片",
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        let text = svc
+            .create_text_asset(NewTextAsset {
+                title: "归档文本".into(),
+                text_content: "portable prompt".into(),
+                collection: Some("归档".into()),
+                tags: Some(vec!["prompt".into()]),
+                in_library: Some(false),
+            })
+            .await
+            .unwrap();
+        let project = svc
+            .create_creative_project(Some("可移植项目".into()))
+            .await
+            .unwrap();
+        let document: CreativeProjectDocument = serde_json::from_value(serde_json::json!({
+            "schema": CREATIVE_STUDIO_SCHEMA,
+            "projectId": project.project_id,
+            "viewport": { "x": 0, "y": 0, "zoom": 1 },
+            "background": "lines",
+            "nodes": [
+                {
+                    "id": "image-node",
+                    "type": "image",
+                    "position": { "x": 0, "y": 0 },
+                    "size": { "width": 320, "height": 180 },
+                    "groupId": null,
+                    "zIndex": 1,
+                    "locked": false,
+                    "data": {
+                        "assetId": image.asset_id,
+                        "caption": "",
+                        "alt": "asset",
+                        "fit": "contain",
+                        "naturalSize": null
+                    }
+                },
+                {
+                    "id": "config-node",
+                    "type": "config",
+                    "position": { "x": 400, "y": 0 },
+                    "size": { "width": 320, "height": 180 },
+                    "groupId": null,
+                    "zIndex": 2,
+                    "locked": false,
+                    "data": {
+                        "task": "image_generation",
+                        "capability": "text-to-image",
+                        "providerId": null,
+                        "model": null,
+                        "prompt": "portable",
+                        "negativePrompt": "",
+                        "parameters": {},
+                        "inputAssetIds": [text.asset_id],
+                        "taskId": null,
+                        "resultAssetIds": [],
+                        "status": "idle",
+                        "errorMessage": null
+                    }
+                }
+            ],
+            "connections": [{
+                "id": "edge-a",
+                "sourceNodeId": "image-node",
+                "targetNodeId": "config-node",
+                "sourceHandle": null,
+                "targetHandle": null
+            }],
+            "chatSessions": [],
+            "activeChatId": null,
+            "panels": {
+                "left": { "open": true, "width": 320, "activeView": "canvas" },
+                "right": { "open": true, "width": 360, "activeView": "assistant" },
+                "bottom": { "open": false, "height": 240, "activeView": "history" }
+            },
+            "pendingTaskIds": []
+        }))
+        .unwrap();
+        svc.save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+
+        let exported = svc
+            .export_creative_project_archive(&project.project_id)
+            .await
+            .unwrap();
+        assert_eq!(exported.mime, CREATIVE_STUDIO_ARCHIVE_MIME);
+        assert!(exported.file_name.ends_with(".nomifun-canvas.zip"));
+        let imported = svc
+            .import_creative_project_archive(exported.bytes)
+            .await
+            .unwrap();
+        assert_ne!(imported.project_id, project.project_id);
+        assert_eq!(imported.title, "可移植项目");
+        assert_eq!(imported.revision, "1");
+
+        let imported_detail = svc
+            .get_creative_project(&imported.project_id)
+            .await
+            .unwrap();
+        assert_ne!(imported_detail.document.nodes[0].id, "image-node");
+        assert_ne!(imported_detail.document.connections[0].id, "edge-a");
+        assert_eq!(
+            imported_detail.document.connections[0].source_node_id,
+            imported_detail.document.nodes[0].id
+        );
+        let crate::creative_studio::CreativeNodeData::Image(imported_image) =
+            &imported_detail.document.nodes[0].data
+        else {
+            panic!("expected imported image node")
+        };
+        let imported_image_id = imported_image.asset_id.as_deref().unwrap();
+        assert_ne!(imported_image_id, image.asset_id);
+        assert_eq!(
+            svc.read_asset_bytes(imported_image_id).await.unwrap().0,
+            image_bytes
+        );
+        let crate::creative_studio::CreativeNodeData::Config(imported_config) =
+            &imported_detail.document.nodes[1].data
+        else {
+            panic!("expected imported config node")
+        };
+        assert_ne!(imported_config.input_asset_ids[0], text.asset_id);
+        assert_eq!(
+            svc.read_asset_bytes(&imported_config.input_asset_ids[0])
+                .await
+                .unwrap()
+                .0,
+            b"portable prompt"
+        );
     }
 
     #[tokio::test]

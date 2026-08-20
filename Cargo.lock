@@ -6910,6 +6910,7 @@ name = "nomifun-workshop"
 version = "0.6.4"
 dependencies = [
  "axum",
+ "hex",
  "image",
  "mime_guess",
  "nomifun-api-types",
@@ -6919,10 +6920,13 @@ dependencies = [
  "schemars 1.2.1",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tower-http",
  "tracing",
+ "uuid",
+ "zip 2.4.2",
 ]
 
 [[package]]

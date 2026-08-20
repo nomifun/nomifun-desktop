@@ -254,6 +254,82 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         )))
     }
 
+    async fn import_creative_project_with_assets(
+        &self,
+        project: &CreativeStudioProjectRow,
+        assets: &[WorkshopAssetRow],
+    ) -> Result<CreativeStudioProjectRow, DbError> {
+        nomifun_common::validate_uuidv7(&project.project_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "imported creative studio project_id {:?} is not a canonical UUIDv7: {error}",
+                project.project_id
+            ))
+        })?;
+        if project.revision != 1 || project.node_count < 0 || project.connection_count < 0 {
+            return Err(DbError::Conflict(
+                "imported creative studio project must start at revision 1 with non-negative counts"
+                    .into(),
+            ));
+        }
+        validate_asset_rows(assets)?;
+        for asset in assets {
+            let references = origin_references(asset.origin.as_deref())?;
+            if references.provider_id.is_some()
+                || references.canvas_id.is_some()
+                || references.creation_task_id.is_some()
+            {
+                return Err(DbError::Conflict(format!(
+                    "imported creative studio asset {} contains a nonportable durable origin reference",
+                    asset.asset_id
+                )));
+            }
+        }
+
+        let mut tx = self.pool.begin().await?;
+        for asset in assets {
+            sqlx::query(
+                "INSERT INTO workshop_assets \
+                    (asset_id, kind, title, collection, tags, rel_path, thumb_rel_path, mime, width, height, bytes, \
+                     text_content, in_library, origin, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&asset.asset_id)
+            .bind(&asset.kind)
+            .bind(&asset.title)
+            .bind(&asset.collection)
+            .bind(&asset.tags)
+            .bind(&asset.rel_path)
+            .bind(&asset.thumb_rel_path)
+            .bind(&asset.mime)
+            .bind(asset.width)
+            .bind(asset.height)
+            .bind(asset.bytes)
+            .bind(&asset.text_content)
+            .bind(asset.in_library)
+            .bind(&asset.origin)
+            .bind(asset.created_at)
+            .bind(asset.updated_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+        let imported = sqlx::query_as::<_, CreativeStudioProjectRow>(
+            "INSERT INTO creative_studio_projects \
+                (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+             VALUES (?, ?, 1, ?, ?, ?, ?, ?) RETURNING *",
+        )
+        .bind(&project.project_id)
+        .bind(&project.title)
+        .bind(project.node_count)
+        .bind(project.connection_count)
+        .bind(&project.document_json)
+        .bind(project.created_at)
+        .bind(project.updated_at)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(imported)
+    }
+
     async fn delete_creative_project(&self, project_id: &str) -> Result<(), DbError> {
         let result = sqlx::query("DELETE FROM creative_studio_projects WHERE project_id = ?")
             .bind(project_id)
@@ -773,6 +849,44 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn creative_archive_import_rolls_back_project_and_assets_together() {
+        let (repo, _db) = repo().await;
+        let document_json = format!(
+            r#"{{"schema":"nomifun.creative-studio/v1","projectId":"{CREATIVE_PROJECT_A}","nodes":[]}}"#
+        );
+        let project = CreativeStudioProjectRow {
+            id: 0,
+            project_id: CREATIVE_PROJECT_A.into(),
+            title: "原子导入".into(),
+            revision: 1,
+            node_count: 0,
+            connection_count: 0,
+            document_json,
+            created_at: 100,
+            updated_at: 100,
+        };
+        let first = sample_asset(0, ASSET_1, "image", "first");
+        let duplicate = sample_asset(0, ASSET_1, "image", "duplicate");
+
+        let error = repo
+            .import_creative_project_with_assets(&project, &[first, duplicate])
+            .await
+            .unwrap_err();
+        assert!(matches!(error, DbError::Query(_)));
+        assert!(
+            repo.get_creative_project(CREATIVE_PROJECT_A)
+                .await
+                .unwrap()
+                .is_none(),
+            "project insert must roll back with the asset failure"
+        );
+        assert!(
+            repo.get_asset(ASSET_1).await.unwrap().is_none(),
+            "the first asset insert must also roll back"
+        );
     }
 
     #[tokio::test]
