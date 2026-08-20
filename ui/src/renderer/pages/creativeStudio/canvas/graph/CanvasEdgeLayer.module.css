@@ -1,0 +1,94 @@
+.layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+  color: var(--color-text-3);
+}
+
+.edge {
+  --creative-edge-color: color-mix(in srgb, rgb(var(--primary-6)) 44%, var(--color-border-3));
+  --creative-edge-width: 1.8px;
+  --creative-edge-opacity: 0.78;
+}
+
+.visiblePath {
+  pointer-events: none;
+  stroke: var(--creative-edge-color);
+  stroke-width: var(--creative-edge-width);
+  stroke-linecap: round;
+  opacity: var(--creative-edge-opacity);
+  transition:
+    stroke 120ms ease,
+    stroke-width 120ms ease,
+    opacity 120ms ease,
+    filter 120ms ease;
+}
+
+.hitPath {
+  stroke: transparent;
+  stroke-width: 18px;
+  pointer-events: stroke;
+  cursor: default;
+  outline: none;
+}
+
+.edge[data-edge-interactive='true'] .hitPath {
+  cursor: pointer;
+}
+
+.edge[data-edge-highlighted='true'] {
+  --creative-edge-color: rgb(var(--primary-6));
+  --creative-edge-width: 2.4px;
+  --creative-edge-opacity: 1;
+}
+
+.edge[data-edge-selected='true'] {
+  --creative-edge-color: rgb(var(--primary-6));
+  --creative-edge-width: 2.8px;
+  --creative-edge-opacity: 1;
+}
+
+.edge[data-edge-selected='true'] .visiblePath,
+.edge:has(.hitPath:focus-visible) .visiblePath {
+  filter: drop-shadow(0 0 5px rgba(var(--primary-6), 0.42));
+}
+
+.edge[data-edge-upstream='true'] {
+  --creative-edge-color: rgb(var(--success-6));
+  --creative-edge-width: 2.25px;
+  --creative-edge-opacity: 0.96;
+}
+
+.edge[data-edge-downstream='true'] {
+  --creative-edge-color: rgb(var(--warning-6));
+  --creative-edge-width: 2.25px;
+  --creative-edge-opacity: 0.96;
+}
+
+.edge[data-edge-error='true'] {
+  --creative-edge-color: rgb(var(--danger-6));
+  --creative-edge-width: 2.5px;
+  --creative-edge-opacity: 1;
+}
+
+.edge[data-edge-error='true'] .visiblePath {
+  stroke-dasharray: 7 5;
+}
+
+.edge[data-edge-dimmed='true'] {
+  --creative-edge-opacity: 0.22;
+}
+
+.edge:has(.hitPath:hover):not([data-edge-dimmed='true']) {
+  --creative-edge-width: 2.6px;
+  --creative-edge-opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .visiblePath {
+    transition: none;
+  }
+}
