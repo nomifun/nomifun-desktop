@@ -30,7 +30,7 @@ pub use execution_conversation_boundary::{
     ConversationExecutionProjection, ExecutionConversationBoundary, NoExecutionConversationBoundary,
     RepositoryExecutionConversationBoundary,
 };
-pub use routes::conversation_routes;
+pub use routes::{conversation_routes, creative_studio_agent_session_routes};
 pub use routes_aux::conversation_ops_routes;
 pub use service::{
     ConversationService, ConversationSupervisionHook, DELIVERY_NOTIFY_ORIGIN,

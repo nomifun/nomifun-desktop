@@ -74,7 +74,10 @@ pub use client_preference::{IClientPreferenceRepository, KNOWLEDGE_RETRIEVAL_KEY
 pub(crate) use client_preference::{
     provider_preference_delete_action, ProviderPreferenceDeleteAction,
 };
-pub use conversation::IConversationRepository;
+pub use conversation::{
+    IConversationRepository, ResolveCreativeStudioAgentSessionParams,
+    ResolvedCreativeStudioAgentSession,
+};
 pub use creation_task::{
     CreateCreationTaskParams, CreateCreativeProjectTaskParams, ICreationTaskRepository,
     IdempotentCreationTask, ListCreationTasksParams, UpdateCreationTaskParams,

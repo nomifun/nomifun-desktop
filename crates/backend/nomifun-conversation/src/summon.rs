@@ -160,6 +160,8 @@ impl ConversationService {
             .await?
             .filter(|row| row.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+        self.ensure_not_creative_studio_agent_session(user_id, conv_id, "summon-changed")
+            .await?;
         self.ensure_not_retained_execution_attempt(user_id, conv_id)
             .await?;
 
