@@ -16,6 +16,7 @@ import {
   CREATIVE_STUDIO_PROMPTS_PATH,
   CREATIVE_STUDIO_ROOT_PATH,
   CREATIVE_STUDIO_VIDEO_PATH,
+  CREATIVE_STUDIO_WORKFLOWS_PATH,
   creativeStudioCanvasProjectPath,
   creativeStudioDirectorProjectPath,
   creativeStudioSectionForPath,
@@ -35,6 +36,7 @@ describe('Creative Studio routes', () => {
     expect(CREATIVE_STUDIO_AUDIO_PATH).toBe('/workshop/audio');
     expect(CREATIVE_STUDIO_PROMPTS_PATH).toBe('/workshop/prompts');
     expect(CREATIVE_STUDIO_ASSETS_PATH).toBe('/workshop/assets');
+    expect(CREATIVE_STUDIO_WORKFLOWS_PATH).toBe('/workshop/workflows');
   });
 
   test('builds and matches encoded Director project links', () => {
@@ -81,6 +83,7 @@ describe('Creative Studio routes', () => {
     expect(creativeStudioSectionForPath('/workshop/audio')).toBe('audio');
     expect(creativeStudioSectionForPath('/workshop/prompts')).toBe('prompts');
     expect(creativeStudioSectionForPath('/workshop/assets#recent')).toBe('assets');
+    expect(creativeStudioSectionForPath('/workshop/workflows?category=all')).toBe('workflows');
     expect(creativeStudioSectionForPath('/workshop-other')).toBe(null);
     expect(creativeStudioSectionForPath('/workshop/image/draft')).toBe(null);
     expect(isCreativeStudioPath('/workshop/video')).toBe(true);
