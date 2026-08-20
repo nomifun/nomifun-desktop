@@ -17,9 +17,9 @@ pub trait ICreationTaskRepository: Send + Sync {
     /// row is returned only when its persisted canonical request fingerprint
     /// is byte-for-byte identical; reusing a key for another request is a
     /// conflict. `inserted` is the sole authority for spawning a worker.
-    async fn get_or_create_creative_project_task(
+    async fn get_or_create_creative_task(
         &self,
-        params: CreateCreativeProjectTaskParams<'_>,
+        params: CreateCreativeTaskParams<'_>,
     ) -> Result<IdempotentCreationTask, DbError> {
         let _ = params;
         Err(DbError::Init(
@@ -81,14 +81,28 @@ pub struct IdempotentCreationTask {
     pub inserted: bool,
 }
 
-/// Canonical Creative Studio create parameters. Unlike the legacy insert,
-/// ownership is a `creative_studio_projects.project_id`, and the exact
-/// canonical request is persisted for durable idempotency comparison.
+/// Strict canonical Creative Studio task owner. No field is shared between
+/// the two branches, so callers cannot accidentally reinterpret a workflow
+/// step as a canvas node.
+#[derive(Debug, Clone, Copy)]
+pub enum CreativeTaskOwnerRef<'a> {
+    CanvasNode {
+        project_id: &'a str,
+        node_id: &'a str,
+    },
+    WorkflowStep {
+        workflow_id: &'a str,
+        workflow_run_id: &'a str,
+        workflow_step_id: &'a str,
+    },
+}
+
+/// Canonical Creative Studio create parameters. The exact tagged owner and
+/// request are persisted for durable idempotency comparison.
 #[derive(Debug)]
-pub struct CreateCreativeProjectTaskParams<'a> {
+pub struct CreateCreativeTaskParams<'a> {
     pub creation_task_id: &'a str,
-    pub project_id: &'a str,
-    pub node_id: &'a str,
+    pub owner: CreativeTaskOwnerRef<'a>,
     pub provider_id: &'a str,
     pub model: &'a str,
     pub capability: &'a str,

@@ -125,8 +125,11 @@ describe('standalone workbench ownership', () => {
     );
     const reference: CreativeTaskReference = {
       taskId: TASK_ID,
-      projectId: PROJECT_ID,
-      nodeId: node.id,
+      owner: {
+        kind: 'canvas_node',
+        projectId: PROJECT_ID,
+        nodeId: node.id,
+      },
       providerId: PROVIDER_ID,
       model: 'image-real',
       task: 'image_generation',
@@ -166,8 +169,11 @@ describe('standalone workbench ownership', () => {
     }, fixture.repository);
     const reference: CreativeTaskReference = {
       taskId: TASK_ID,
-      projectId: PROJECT_ID,
-      nodeId: node.id,
+      owner: {
+        kind: 'canvas_node',
+        projectId: PROJECT_ID,
+        nodeId: node.id,
+      },
       providerId: PROVIDER_ID,
       model: 'video-real',
       task: 'video_generation',

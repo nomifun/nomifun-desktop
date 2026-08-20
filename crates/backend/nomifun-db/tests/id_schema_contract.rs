@@ -51,6 +51,7 @@ const UNCONDITIONAL_UUIDV7_BUSINESS_IDS: &[(&str, &str)] = &[
     ("webhooks", "webhook_id"),
     ("creation_tasks", "creation_task_id"),
     ("creative_studio_agent_sessions", "session_id"),
+    ("creative_studio_workflow_runs", "workflow_run_id"),
     ("creative_studio_workflows", "workflow_id"),
     ("conversation_artifacts", "conversation_artifact_id"),
     ("idmm_action_reservations", "reservation_id"),
@@ -149,6 +150,7 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "creation_tasks",
     "creative_studio_agent_sessions",
     "creative_studio_projects",
+    "creative_studio_workflow_runs",
     "creative_studio_workflows",
     "cron_job_runs",
     "cron_jobs",
@@ -457,6 +459,8 @@ async fn runtime_v3_schema_has_no_physical_foreign_keys_or_cascades_and_only_gua
             "trg_requirements_pre_effect_abandon_guard_insert",
             "trg_terminal_turn_admissions_open_insert_guard",
             "trg_terminal_turn_admissions_open_update_guard",
+            "validate_creative_asset_origin_insert",
+            "validate_creative_asset_origin_update",
         ],
         "v3 schema permits only registered guard triggers"
     );
@@ -1094,6 +1098,105 @@ async fn remaining_uuid_logical_links_and_json_registry_enforce_text_values() {
             "uppercase creation_task_id",
             serde_json::json!({
                 "creation_task_id": nomifun_common::generate_id().to_ascii_uppercase()
+            }),
+        ),
+    ] {
+        assert!(
+            sqlx::query(
+                "INSERT INTO workshop_assets \
+                 (asset_id, kind, title, origin, created_at, updated_at) \
+                 VALUES (?, 'image', ?, ?, 1, 1)",
+            )
+            .bind(nomifun_common::generate_id())
+            .bind(label)
+            .bind(invalid_origin.to_string())
+            .execute(pool)
+            .await
+            .is_err(),
+            "{label} must be rejected"
+        );
+    }
+
+    let project_id = nomifun_common::generate_id();
+    let node_id = nomifun_common::generate_id();
+    let canvas_owner_asset_id = nomifun_common::generate_id();
+    sqlx::query(
+        "INSERT INTO workshop_assets \
+         (asset_id, kind, title, origin, created_at, updated_at) \
+         VALUES (?, 'image', 'canvas owner origin', ?, 1, 1)",
+    )
+    .bind(&canvas_owner_asset_id)
+    .bind(serde_json::json!({
+        "project_id": project_id,
+        "node_id": node_id
+    }).to_string())
+    .execute(pool)
+    .await
+    .expect("canonical canvas-node asset owner");
+    assert!(
+        sqlx::query("UPDATE workshop_assets SET origin = ? WHERE asset_id = ?")
+            .bind(serde_json::json!({"project_id": project_id}).to_string())
+            .bind(&canvas_owner_asset_id)
+            .execute(pool)
+            .await
+            .is_err(),
+        "origin updates must enforce the same tagged owner contract"
+    );
+
+    let workflow_id = nomifun_common::generate_id();
+    let workflow_run_id = nomifun_common::generate_id();
+    let workflow_step_id = nomifun_common::generate_id();
+    sqlx::query(
+        "INSERT INTO workshop_assets \
+         (asset_id, kind, title, origin, created_at, updated_at) \
+         VALUES (?, 'image', 'workflow owner origin', ?, 1, 1)",
+    )
+    .bind(nomifun_common::generate_id())
+    .bind(serde_json::json!({
+        "workflow_id": workflow_id,
+        "workflow_run_id": workflow_run_id,
+        "workflow_step_id": workflow_step_id
+    }).to_string())
+    .execute(pool)
+    .await
+    .expect("canonical workflow-step asset owner");
+
+    for (label, invalid_origin) in [
+        (
+            "project without node",
+            serde_json::json!({"project_id": nomifun_common::generate_id()}),
+        ),
+        (
+            "partial workflow owner",
+            serde_json::json!({
+                "workflow_id": nomifun_common::generate_id(),
+                "workflow_run_id": nomifun_common::generate_id()
+            }),
+        ),
+        (
+            "mixed owner branches",
+            serde_json::json!({
+                "project_id": nomifun_common::generate_id(),
+                "node_id": nomifun_common::generate_id(),
+                "workflow_id": nomifun_common::generate_id(),
+                "workflow_run_id": nomifun_common::generate_id(),
+                "workflow_step_id": nomifun_common::generate_id()
+            }),
+        ),
+        (
+            "non-v7 workflow step",
+            serde_json::json!({
+                "workflow_id": nomifun_common::generate_id(),
+                "workflow_run_id": nomifun_common::generate_id(),
+                "workflow_step_id": "550e8400-e29b-41d4-a716-446655440000"
+            }),
+        ),
+        (
+            "retired camel-case workflow owner",
+            serde_json::json!({
+                "workflowId": nomifun_common::generate_id(),
+                "workflowRunId": nomifun_common::generate_id(),
+                "workflowStepId": nomifun_common::generate_id()
             }),
         ),
     ] {

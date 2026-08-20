@@ -13,6 +13,7 @@ import {
   assertTaskCapabilityPair,
   isCreativeTaskCapability,
   isTerminalCreativeTaskStatus,
+  sameCreativeTaskOwner,
 } from './types';
 import type {
   CreativeTask,
@@ -162,18 +163,11 @@ export function assertCreativeTaskReference(
       'taskId'
     );
   }
-  if (task.projectId !== reference.projectId) {
+  if (!sameCreativeTaskOwner(task.owner, reference.owner)) {
     throw new CreativeTaskContractError(
       'ownership_mismatch',
-      `Creative task ${task.taskId} does not belong to project ${reference.projectId}`,
-      'projectId'
-    );
-  }
-  if (task.nodeId !== reference.nodeId) {
-    throw new CreativeTaskContractError(
-      'ownership_mismatch',
-      `Creative task ${task.taskId} does not belong to node ${reference.nodeId}`,
-      'nodeId'
+      `Creative task ${task.taskId} does not belong to the expected owner`,
+      'owner'
     );
   }
   for (const field of ['providerId', 'model', 'task', 'capability'] as const) {
@@ -233,8 +227,7 @@ export function projectCreativeTaskOutput(task: CreativeTask): CreativeTaskOutpu
   }
   return {
     taskId: task.taskId,
-    projectId: task.projectId,
-    nodeId: task.nodeId,
+    owner: { ...task.owner },
     assetIds: [...task.resultAssetIds],
   };
 }
@@ -285,8 +278,11 @@ export function pendingCreativeTaskReferences(
     assertTaskCapabilityPair(data.task, data.capability);
     return {
       taskId,
-      projectId: document.projectId,
-      nodeId: owner.id,
+      owner: {
+        kind: 'canvas_node',
+        projectId: document.projectId,
+        nodeId: owner.id,
+      },
       providerId: data.providerId,
       model: data.model,
       task: data.task,

@@ -386,8 +386,7 @@ describe("Creative workbench controller", () => {
     const plan = imagePlan();
     const reference: CreativeTaskReference = {
       taskId: plan.input.idempotencyKey,
-      projectId: plan.input.projectId,
-      nodeId: plan.input.nodeId,
+      owner: { ...plan.input.owner },
       providerId: plan.input.providerId,
       model: plan.input.model,
       task: plan.input.task,
@@ -437,8 +436,7 @@ describe("Creative workbench controller", () => {
       input: CreateCreativeTaskInput,
     ): CreativeTaskReference => ({
       taskId: input.idempotencyKey,
-      projectId: input.projectId,
-      nodeId: input.nodeId,
+      owner: { ...input.owner },
       providerId: input.providerId,
       model: input.model,
       task: input.task,

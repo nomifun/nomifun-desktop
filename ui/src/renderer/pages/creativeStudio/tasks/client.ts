@@ -26,6 +26,7 @@ import {
   isCreativeTaskCapability,
   isTerminalCreativeTaskStatus,
   modelTaskForCapability,
+  sameCreativeTaskOwner,
 } from './types';
 import type {
   CreateCreativeTaskInput,
@@ -34,6 +35,7 @@ import type {
   CreativeTaskCapability,
   CreativeTaskError,
   CreativeTaskIdentity,
+  CreativeTaskOwner,
   CreativeTaskInputRole,
   CreativeTaskReference,
   CreativeTaskStatus,
@@ -68,7 +70,7 @@ export interface CreationTaskWireApi {
   cancel(taskId: string, signal?: AbortSignal): Promise<unknown>;
 }
 
-function parseCreativeProjectId(
+function parseCreativeOwnerId(
   value: unknown,
   field: string,
   code: 'invalid_request' | 'invalid_response' = 'invalid_response'
@@ -76,7 +78,7 @@ function parseCreativeProjectId(
   if (typeof value !== 'string' || !CANONICAL_UUID_V7.test(value)) {
     throw new CreativeTaskContractError(
       code,
-      `Invalid Creative Studio ${field}`,
+      `Invalid Creative Studio task owner ${field}`,
       field
     );
   }
@@ -168,6 +170,53 @@ function requireRecord(value: unknown, field: string): Record<string, unknown> {
     );
   }
   return value;
+}
+
+function requireExactKeys(
+  record: Record<string, unknown>,
+  keys: readonly string[],
+  field: string
+): void {
+  const expected = new Set(keys);
+  const unknown = Object.keys(record).find((key) => !expected.has(key));
+  const missing = keys.find((key) => !(key in record));
+  if (unknown || missing) {
+    throw new CreativeTaskContractError(
+      'invalid_response',
+      `Invalid creative task ${field} fields`,
+      unknown ? `${field}.${unknown}` : `${field}.${missing}`
+    );
+  }
+}
+
+function parseOwner(value: unknown): CreativeTaskOwner {
+  const owner = requireRecord(value, 'owner');
+  if (owner.kind === 'canvas_node') {
+    requireExactKeys(owner, ['kind', 'project_id', 'node_id'], 'owner');
+    return {
+      kind: 'canvas_node',
+      projectId: parseCreativeOwnerId(owner.project_id, 'owner.project_id'),
+      nodeId: String(parseWorkshopNodeId(owner.node_id)),
+    };
+  }
+  if (owner.kind === 'workflow_step') {
+    requireExactKeys(
+      owner,
+      ['kind', 'workflow_id', 'workflow_run_id', 'workflow_step_id'],
+      'owner'
+    );
+    return {
+      kind: 'workflow_step',
+      workflowId: parseCreativeOwnerId(owner.workflow_id, 'owner.workflow_id'),
+      workflowRunId: parseCreativeOwnerId(owner.workflow_run_id, 'owner.workflow_run_id'),
+      workflowStepId: parseCreativeOwnerId(owner.workflow_step_id, 'owner.workflow_step_id'),
+    };
+  }
+  throw new CreativeTaskContractError(
+    'ownership_mismatch',
+    `Unknown Creative Studio task owner: ${String(owner.kind)}`,
+    'owner.kind'
+  );
 }
 
 function requireString(value: unknown, field: string): string {
@@ -328,18 +377,11 @@ function assertExpectedTask(task: CreativeTask, expected: CreativeTaskReference 
       'taskId'
     );
   }
-  if (task.projectId !== expected.projectId) {
+  if (!sameCreativeTaskOwner(task.owner, expected.owner)) {
     throw new CreativeTaskContractError(
       'ownership_mismatch',
-      `Creative task ${task.taskId} does not belong to project ${expected.projectId}`,
-      'projectId'
-    );
-  }
-  if (task.nodeId !== expected.nodeId) {
-    throw new CreativeTaskContractError(
-      'ownership_mismatch',
-      `Creative task ${task.taskId} does not belong to node ${expected.nodeId}`,
-      'nodeId'
+      `Creative task ${task.taskId} does not belong to the expected owner`,
+      'owner'
     );
   }
   for (const field of ['providerId', 'model', 'task', 'capability'] as const) {
@@ -359,29 +401,29 @@ export function mapCreationTaskWire(
   expected?: CreativeTaskReference | CreativeTaskIdentity
 ): CreativeTask {
   const wire = requireRecord(value, 'response');
+  requireExactKeys(
+    wire,
+    [
+      'creation_task_id',
+      'owner',
+      'provider_id',
+      'model',
+      'capability',
+      'params',
+      'status',
+      'error',
+      'result_asset_ids',
+      'attempt',
+      'submitted_at',
+      'started_at',
+      'finished_at',
+    ],
+    'response'
+  );
   const capability = parseCapability(wire.capability);
-  const projectId = wire.project_id === null
-    ? null
-    : parseCreativeProjectId(wire.project_id, 'project_id');
-  const nodeId = wire.node_id === null ? null : String(parseWorkshopNodeId(wire.node_id));
-  if (projectId === null || nodeId === null) {
-    throw new CreativeTaskContractError(
-      'ownership_mismatch',
-      'Creative Studio tasks require both project_id and node_id ownership',
-      projectId === null ? 'project_id' : 'node_id'
-    );
-  }
-  if (wire.canvas_id !== null) {
-    throw new CreativeTaskContractError(
-      'ownership_mismatch',
-      'Creative Studio tasks must not carry legacy canvas_id ownership',
-      'canvas_id'
-    );
-  }
   const task: CreativeTask = {
     taskId: String(parseCreationTaskId(wire.creation_task_id)),
-    projectId,
-    nodeId,
+    owner: parseOwner(wire.owner),
     providerId: String(parseProviderId(wire.provider_id)),
     model: requireNonBlankString(wire.model, 'model'),
     task: modelTaskForCapability(capability),
@@ -400,6 +442,30 @@ export function mapCreationTaskWire(
   return task;
 }
 
+function normalizeOwner(owner: CreativeTaskOwner): CreativeTaskOwner {
+  if (owner.kind === 'canvas_node') {
+    return {
+      kind: 'canvas_node',
+      projectId: parseCreativeOwnerId(owner.projectId, 'owner.projectId', 'invalid_request'),
+      nodeId: String(parseWorkshopNodeId(owner.nodeId)),
+    };
+  }
+  return {
+    kind: 'workflow_step',
+    workflowId: parseCreativeOwnerId(owner.workflowId, 'owner.workflowId', 'invalid_request'),
+    workflowRunId: parseCreativeOwnerId(
+      owner.workflowRunId,
+      'owner.workflowRunId',
+      'invalid_request'
+    ),
+    workflowStepId: parseCreativeOwnerId(
+      owner.workflowStepId,
+      'owner.workflowStepId',
+      'invalid_request'
+    ),
+  };
+}
+
 function normalizeIdentity(identity: CreativeTaskIdentity): CreativeTaskIdentity {
   const capability = parseCapability(identity.capability);
   if (!CREATION_MODEL_TASKS.has(identity.task)) {
@@ -411,12 +477,27 @@ function normalizeIdentity(identity: CreativeTaskIdentity): CreativeTaskIdentity
   }
   assertTaskCapabilityPair(identity.task, capability);
   return {
-    projectId: parseCreativeProjectId(identity.projectId, 'projectId', 'invalid_request'),
-    nodeId: String(parseWorkshopNodeId(identity.nodeId)),
+    owner: normalizeOwner(identity.owner),
     providerId: String(parseProviderId(identity.providerId)),
     model: requireNonBlankString(identity.model, 'model'),
     task: identity.task,
     capability,
+  };
+}
+
+function ownerWire(owner: CreativeTaskOwner): Record<string, string> {
+  if (owner.kind === 'canvas_node') {
+    return {
+      kind: owner.kind,
+      project_id: owner.projectId,
+      node_id: owner.nodeId,
+    };
+  }
+  return {
+    kind: owner.kind,
+    workflow_id: owner.workflowId,
+    workflow_run_id: owner.workflowRunId,
+    workflow_step_id: owner.workflowStepId,
   };
 }
 
@@ -451,8 +532,7 @@ function toCreateTaskBody(input: CreateCreativeTaskInput): {
     identity,
     idempotencyKey: String(parseCreationTaskId(input.idempotencyKey)),
     body: {
-      project_id: identity.projectId,
-      node_id: identity.nodeId,
+      owner: ownerWire(identity.owner),
       provider_id: identity.providerId,
       model: identity.model,
       capability: identity.capability,
@@ -480,7 +560,7 @@ async function responseBody(response: Response): Promise<unknown> {
   }
 }
 
-/** Signal-aware HTTP adapter for the existing creation routes. */
+/** Signal-aware HTTP adapter for the canonical Creative Studio task routes. */
 export class HttpCreationTaskApi implements CreationTaskWireApi {
   private readonly fetchImpl: typeof fetch;
   private readonly baseUrl: () => string;
@@ -543,7 +623,7 @@ export class HttpCreationTaskApi implements CreationTaskWireApi {
   }
 
   create(body: unknown, idempotencyKey: string, signal?: AbortSignal): Promise<unknown> {
-    return this.request('POST', '/api/creation/tasks', body, signal, {
+    return this.request('POST', '/api/creative-studio/tasks', body, signal, {
       'Idempotency-Key': idempotencyKey,
     });
   }
@@ -551,7 +631,7 @@ export class HttpCreationTaskApi implements CreationTaskWireApi {
   get(taskId: string, signal?: AbortSignal): Promise<unknown> {
     return this.request(
       'GET',
-      `/api/creation/tasks/${encodeURIComponent(taskId)}`,
+      `/api/creative-studio/tasks/${encodeURIComponent(taskId)}`,
       undefined,
       signal
     );
@@ -560,7 +640,7 @@ export class HttpCreationTaskApi implements CreationTaskWireApi {
   cancel(taskId: string, signal?: AbortSignal): Promise<unknown> {
     return this.request(
       'POST',
-      `/api/creation/tasks/${encodeURIComponent(taskId)}/cancel`,
+      `/api/creative-studio/tasks/${encodeURIComponent(taskId)}/cancel`,
       undefined,
       signal
     );

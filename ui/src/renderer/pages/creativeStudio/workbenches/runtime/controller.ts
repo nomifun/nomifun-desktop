@@ -12,6 +12,7 @@ import {
   creativeTaskReference,
   isTerminalCreativeTaskStatus,
   pollCreativeTask,
+  sameCreativeTaskOwner,
 } from "../../tasks";
 import type {
   CreateCreativeTaskInput,
@@ -105,6 +106,7 @@ function cloneInput(input: CreateCreativeTaskInput): CreateCreativeTaskInput {
 function cloneTask(task: CreativeTask): CreativeTask {
   return {
     ...task,
+    owner: { ...task.owner },
     parameters: structuredClone(task.parameters),
     error: task.error ? { ...task.error } : null,
     resultAssetIds: [...task.resultAssetIds],
@@ -116,8 +118,7 @@ function pendingReference(
 ): CreativeTaskReference {
   return {
     taskId: input.idempotencyKey,
-    projectId: input.projectId,
-    nodeId: input.nodeId,
+    owner: { ...input.owner },
     providerId: input.providerId,
     model: input.model,
     task: input.task,
@@ -214,14 +215,14 @@ function assertRetryIdentity(
 ): void {
   const input = request.retryInput;
   if (!input) return;
-  for (const field of [
-    "projectId",
-    "nodeId",
-    "providerId",
-    "model",
-    "task",
-    "capability",
-  ] as const) {
+  if (!sameCreativeTaskOwner(input.owner, request.reference.owner)) {
+    throw new CreativeWorkbenchRuntimeError(
+      "model_not_compatible",
+      "Resume retryInput owner does not match its task reference",
+      "retryInput.owner",
+    );
+  }
+  for (const field of ["providerId", "model", "task", "capability"] as const) {
     if (input[field] !== request.reference[field]) {
       throw new CreativeWorkbenchRuntimeError(
         "model_not_compatible",
