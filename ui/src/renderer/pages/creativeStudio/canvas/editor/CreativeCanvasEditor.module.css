@@ -41,7 +41,7 @@
 .saveState[data-canvas-save-status='conflict'],
 .saveState[data-canvas-save-status='error'] {
   border-color: color-mix(in srgb, var(--color-danger-light-4) 70%, var(--color-border-2));
-  color: var(--color-danger-6);
+  color: rgb(var(--danger-6));
 }
 
 .saveState button,
