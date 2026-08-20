@@ -107,7 +107,7 @@ impl PresetService {
     async fn sync_catalog(&self) -> Result<(), AppError> {
         let _guard = self.catalog_sync.lock().await;
 
-        self.ensure_builtin_tags().await?;
+        self.ensure_builtin_tags_locked().await?;
         let tag_ids_by_key = self
             .tag_repo
             .list()
@@ -126,7 +126,12 @@ impl PresetService {
         Ok(())
     }
 
-    async fn ensure_builtin_tags(&self) -> Result<(), AppError> {
+    /// Materialize bundled tags while the caller holds `catalog_sync`.
+    ///
+    /// Keeping every catalog entry point behind the same lock makes the
+    /// read-before-create sequence safe without treating unrelated database
+    /// conflicts as success.
+    async fn ensure_builtin_tags_locked(&self) -> Result<(), AppError> {
         for tag in self.builtin.tags() {
             validate_preset_tag_key(&tag.key)?;
             if self.tag_repo.get_by_key(&tag.key).await?.is_none() {
@@ -468,7 +473,8 @@ impl PresetService {
     }
 
     pub async fn list_tags(&self) -> Result<Vec<PresetTagResponse>, AppError> {
-        self.ensure_builtin_tags().await?;
+        let _guard = self.catalog_sync.lock().await;
+        self.ensure_builtin_tags_locked().await?;
         Ok(merge_preset_tags(
             self.builtin.tags(),
             self.tag_repo.list().await?,
@@ -873,6 +879,193 @@ fn remove_files_with_stem(dir:&std::path::Path,id:&str){if let Ok(entries)=std::
 #[cfg(test)]
 mod tag_key_tests {
     use super::*;
+    use std::future::Future;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::task::Poll;
+
+    use nomifun_db::{
+        DbError, SqliteAgentMetadataRepository, SqlitePresetRepository,
+        SqlitePresetStateRepository, SqliteProviderModelCapabilityRepository,
+        SqliteProviderModelRepository, SqliteProviderRepository,
+    };
+    use nomifun_extension::ExtensionStateStore;
+    use nomifun_realtime::BroadcastEventBus;
+    use tempfile::TempDir;
+    use tokio::sync::{Notify, Semaphore};
+
+    struct CoordinatedTagRepository {
+        rows: StdMutex<Vec<nomifun_db::PresetTagRow>>,
+        block_first_create: AtomicBool,
+        first_create_waiting: AtomicBool,
+        create_attempts: AtomicUsize,
+        first_create_started: Notify,
+        release_first_create: Semaphore,
+    }
+
+    impl CoordinatedTagRepository {
+        fn new() -> Self {
+            Self {
+                rows: StdMutex::new(Vec::new()),
+                block_first_create: AtomicBool::new(true),
+                first_create_waiting: AtomicBool::new(false),
+                create_attempts: AtomicUsize::new(0),
+                first_create_started: Notify::new(),
+                release_first_create: Semaphore::new(0),
+            }
+        }
+
+        async fn wait_for_first_create(&self) {
+            self.first_create_started.notified().await;
+        }
+
+        fn release_first_create(&self) {
+            self.release_first_create.add_permits(1);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl IPresetTagRepository for CoordinatedTagRepository {
+        async fn list(&self) -> Result<Vec<nomifun_db::PresetTagRow>, DbError> {
+            Ok(self.rows.lock().expect("tag rows lock").clone())
+        }
+
+        async fn get(
+            &self,
+            preset_tag_id: &str,
+        ) -> Result<Option<nomifun_db::PresetTagRow>, DbError> {
+            Ok(self
+                .rows
+                .lock()
+                .expect("tag rows lock")
+                .iter()
+                .find(|row| row.preset_tag_id == preset_tag_id)
+                .cloned())
+        }
+
+        async fn get_by_key(
+            &self,
+            key: &str,
+        ) -> Result<Option<nomifun_db::PresetTagRow>, DbError> {
+            Ok(self
+                .rows
+                .lock()
+                .expect("tag rows lock")
+                .iter()
+                .find(|row| row.key == key)
+                .cloned())
+        }
+
+        async fn create(
+            &self,
+            params: &CreatePresetTagParams<'_>,
+        ) -> Result<nomifun_db::PresetTagRow, DbError> {
+            self.create_attempts.fetch_add(1, Ordering::AcqRel);
+            if self.block_first_create.swap(false, Ordering::AcqRel) {
+                self.first_create_waiting.store(true, Ordering::Release);
+                self.first_create_started.notify_one();
+                let permit = self
+                    .release_first_create
+                    .acquire()
+                    .await
+                    .expect("test semaphore remains open");
+                permit.forget();
+                self.first_create_waiting.store(false, Ordering::Release);
+            } else if self.first_create_waiting.load(Ordering::Acquire) {
+                return Err(DbError::Conflict(format!(
+                    "Preset tag '{}' already exists",
+                    params.key
+                )));
+            }
+
+            let mut rows = self.rows.lock().expect("tag rows lock");
+            if rows.iter().any(|row| row.key == params.key) {
+                return Err(DbError::Conflict(format!(
+                    "Preset tag '{}' already exists",
+                    params.key
+                )));
+            }
+            let row = nomifun_db::PresetTagRow {
+                id: rows.len() as i64 + 1,
+                preset_tag_id: params.preset_tag_id.to_owned(),
+                key: params.key.to_owned(),
+                dimension: params.dimension.to_owned(),
+                label: params.label.to_owned(),
+                sort_order: params.sort_order,
+                created_at: nomifun_common::now_ms(),
+            };
+            rows.push(row.clone());
+            Ok(row)
+        }
+
+        async fn update(
+            &self,
+            preset_tag_id: &str,
+            params: &UpdatePresetTagParams<'_>,
+        ) -> Result<Option<nomifun_db::PresetTagRow>, DbError> {
+            let mut rows = self.rows.lock().expect("tag rows lock");
+            let Some(row) = rows
+                .iter_mut()
+                .find(|row| row.preset_tag_id == preset_tag_id)
+            else {
+                return Ok(None);
+            };
+            if let Some(label) = params.label {
+                row.label = label.to_owned();
+            }
+            if let Some(sort_order) = params.sort_order {
+                row.sort_order = sort_order;
+            }
+            Ok(Some(row.clone()))
+        }
+
+        async fn delete(&self, preset_tag_id: &str) -> Result<bool, DbError> {
+            let mut rows = self.rows.lock().expect("tag rows lock");
+            let original_len = rows.len();
+            rows.retain(|row| row.preset_tag_id != preset_tag_id);
+            Ok(rows.len() != original_len)
+        }
+    }
+
+    async fn service_with_coordinated_tag_repository(
+        temp: &TempDir,
+        tag_repo: Arc<CoordinatedTagRepository>,
+    ) -> Arc<PresetService> {
+        std::fs::write(
+            temp.path().join("presets.json"),
+            r#"{"version":"test","presets":[]}"#,
+        )
+        .expect("write preset fixture");
+        std::fs::write(
+            temp.path().join("tags.json"),
+            r#"{"tags":[{"key":"office","dimension":"scenario","label":"Office","sort_order":1}]}"#,
+        )
+        .expect("write tag fixture");
+
+        let database = nomifun_db::init_database_memory()
+            .await
+            .expect("initialize test database");
+        let pool = database.pool().clone();
+        let extension_registry = ExtensionRegistry::new(
+            ExtensionStateStore::new(temp.path().join("extension-states.json")),
+            Arc::new(BroadcastEventBus::new(8)),
+            "test".to_owned(),
+        );
+        Arc::new(PresetService::new(
+            Arc::new(SqlitePresetRepository::new(pool.clone())),
+            Arc::new(SqlitePresetStateRepository::new(pool.clone())),
+            tag_repo,
+            Arc::new(SqliteAgentMetadataRepository::new(pool.clone())),
+            Arc::new(SqliteProviderRepository::new(pool.clone())),
+            Arc::new(SqliteProviderModelRepository::new(pool.clone())),
+            Arc::new(SqliteProviderModelCapabilityRepository::new(pool)),
+            Arc::new(BuiltinPresetRegistry::load_from_dir(
+                temp.path().to_path_buf(),
+            )),
+            extension_registry,
+            temp.path().to_path_buf(),
+        ))
+    }
 
     #[test]
     fn tag_key_is_slugified_from_label() {
@@ -970,5 +1163,38 @@ mod tag_key_tests {
         assert!(tags.iter().any(|tag| tag.key == "office" && tag.builtin));
         assert!(tags.iter().any(|tag| tag.key == "custom" && !tag.builtin));
         assert!(tags.iter().all(|tag| validate_preset_tag_id(&tag.preset_tag_id).is_ok()));
+    }
+
+    #[tokio::test]
+    async fn preset_and_tag_lists_serialize_first_catalog_materialization() {
+        let temp = TempDir::new().expect("temp dir");
+        let tag_repo = Arc::new(CoordinatedTagRepository::new());
+        let service = service_with_coordinated_tag_repository(&temp, tag_repo.clone()).await;
+
+        let preset_service = service.clone();
+        let preset_list = tokio::spawn(async move { preset_service.list().await });
+        tag_repo.wait_for_first_create().await;
+
+        let mut tag_list = Box::pin(service.list_tags());
+        let first_tag_list_poll = std::future::poll_fn(|context| {
+            Poll::Ready(tag_list.as_mut().poll(context))
+        })
+        .await;
+
+        tag_repo.release_first_create();
+        let presets = preset_list
+            .await
+            .expect("preset list task")
+            .expect("preset list succeeds");
+        let tags = match first_tag_list_poll {
+            Poll::Ready(result) => result,
+            Poll::Pending => tag_list.await,
+        }
+        .expect("tag list succeeds");
+
+        assert!(presets.is_empty());
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].key, "office");
+        assert_eq!(tag_repo.create_attempts.load(Ordering::Acquire), 1);
     }
 }
