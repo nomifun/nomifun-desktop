@@ -63,7 +63,13 @@ impl VertexProvider {
         )
     }
 
-    fn build_request_body(&self, request: &LlmRequest) -> Value {
+    fn build_request_body(&self, request: &LlmRequest) -> Result<Value, ProviderError> {
+        let max_tokens = request.max_tokens.ok_or_else(|| {
+            ProviderError::Config(
+                "vertex anthropic protocol requires an explicit output ceiling; pass --max-tokens (or set [default].max_tokens) in the CLI, or set Max output tokens on the desktop model capability"
+                    .into(),
+            )
+        })?;
         let system = if self.cache_enabled {
             json!([{
                 "type": "text",
@@ -76,7 +82,7 @@ impl VertexProvider {
 
         let mut body = json!({
             "anthropic_version": "vertex-2023-10-16",
-            "max_tokens": request.max_tokens,
+            "max_tokens": max_tokens,
             "system": system,
             "messages": anthropic_shared::build_messages(&request.messages, &self.compat),
             "stream": true
@@ -97,7 +103,7 @@ impl VertexProvider {
             });
         }
 
-        body
+        Ok(body)
     }
 
     async fn get_access_token(&self) -> Result<String, ProviderError> {
@@ -255,7 +261,7 @@ impl LlmProvider for VertexProvider {
         request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         let url = self.build_url(&request.model);
-        let body = self.build_request_body(request);
+        let body = self.build_request_body(request)?;
 
         tracing::debug!(target: "nomi_providers", body = %serde_json::to_string_pretty(&body).unwrap_or_default(), "outgoing request");
 
@@ -345,6 +351,35 @@ impl LlmProvider for VertexProvider {
         });
 
         Ok(rx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vertex_rejects_an_omitted_output_ceiling_before_authentication() {
+        let provider = VertexProvider::new(
+            "project",
+            "us-central1",
+            GcpAuth::ApplicationDefault,
+            false,
+            ProviderCompat::anthropic_defaults(),
+        );
+        let request = LlmRequest {
+            model: "claude-test".into(),
+            system: "test".into(),
+            messages: vec![],
+            tools: vec![],
+            max_tokens: None,
+            thinking: None,
+            reasoning_effort: None,
+        };
+
+        let error = provider.build_request_body(&request).unwrap_err();
+        assert!(matches!(error, ProviderError::Config(message) if
+            message.contains("--max-tokens") && message.contains("desktop")));
     }
 }
 

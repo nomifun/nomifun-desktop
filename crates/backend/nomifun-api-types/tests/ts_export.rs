@@ -121,6 +121,10 @@ fn generated_shapes_mirror_single_source_wire_contract() {
         capability.contains("context_limit?: number,"),
         "got: {capability}"
     );
+    assert!(
+        capability.contains("output_limit?: number,"),
+        "got: {capability}"
+    );
 
     let response = ProviderModelResponse::export_to_string(&cfg).unwrap();
     assert!(response.contains("capabilities: Array<ProviderModelCapabilityResponse>"));
@@ -159,6 +163,10 @@ fn generated_shapes_mirror_single_source_wire_contract() {
     let protocol = ProtocolDescriptor::export_to_string(&cfg).unwrap();
     assert!(
         protocol.contains("root_shape: EndpointRootShape | null"),
+        "got: {protocol}"
+    );
+    assert!(
+        protocol.contains("requires_output_ceiling: boolean"),
         "got: {protocol}"
     );
 }

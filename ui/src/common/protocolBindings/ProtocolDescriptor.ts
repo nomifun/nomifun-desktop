@@ -9,6 +9,10 @@ import type { ProtocolTransportKind } from "./ProtocolTransportKind";
 
 export type ProtocolDescriptor = { protocol_id: string, supported_tasks: Array<ModelTask>, executor: ProtocolExecutorKind, transport: ProtocolTransportKind, 
 /**
+ * Whether this protocol's request body requires an explicit output limit.
+ */
+requires_output_ceiling: boolean,
+/**
  * Persisted auth schemes accepted by this protocol executor. Parameterized
  * generic transports use `header_key:<name>` / `query_key:<param>` as
  * wildcard vocabulary; Agent protocols list their exact required scheme.

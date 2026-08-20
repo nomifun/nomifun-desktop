@@ -30,7 +30,7 @@ fn make_request() -> LlmRequest {
             }],
         )],
         tools: vec![],
-        max_tokens: 512,
+        max_tokens: Some(512),
         thinking: None,
         reasoning_effort: None,
     }

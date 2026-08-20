@@ -52,6 +52,7 @@ const manifest = (task: ModelTask): ModelProtocolManifest => ({
       supported_tasks: [task],
       executor: task === 'realtime_conversation' ? 'realtime_session' : 'model_invoke',
       transport: task === 'realtime_conversation' ? 'websocket' : 'http',
+      requires_output_ceiling: false,
       allowed_auth_schemes: ['bearer'],
       scopes: ['native'],
       platforms: ['stepfun'],

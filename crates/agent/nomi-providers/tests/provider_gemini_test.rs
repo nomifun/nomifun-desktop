@@ -19,7 +19,7 @@ fn minimal_request() -> LlmRequest {
             }],
         )],
         tools: Vec::new(),
-        max_tokens: 512,
+        max_tokens: Some(512),
         thinking: None,
         reasoning_effort: None,
     }
@@ -124,7 +124,7 @@ async fn native_extra_body_preserves_unknown_fields_but_typed_fields_win() {
         .respond_with(
             ResponseTemplate::new(200).set_body_raw(text_sse(), "text/event-stream"),
         )
-        .expect(1)
+        .expect(2)
         .mount(&server)
         .await;
 
@@ -151,6 +151,9 @@ async fn native_extra_body_preserves_unknown_fields_but_typed_fields_win() {
         compat,
     );
     collect_events(provider.stream(&minimal_request()).await.unwrap()).await;
+    let mut omitted = minimal_request();
+    omitted.max_tokens = None;
+    collect_events(provider.stream(&omitted).await.unwrap()).await;
 
     let requests = server.received_requests().await.unwrap();
     let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
@@ -163,6 +166,13 @@ async fn native_extra_body_preserves_unknown_fields_but_typed_fields_win() {
     assert_eq!(
         body["systemInstruction"]["parts"][0]["text"],
         "You are helpful."
+    );
+    let omitted_body: Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert_eq!(omitted_body["generationConfig"]["temperature"], 0.45);
+    assert!(
+        omitted_body["generationConfig"]
+            .get("maxOutputTokens")
+            .is_none()
     );
 }
 

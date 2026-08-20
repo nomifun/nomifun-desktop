@@ -111,6 +111,8 @@ pub enum StopReason {
     MaxTokens,
     /// Hit max_turns limit
     MaxTurns,
+    /// Provider refused to fulfill the request (for example content policy).
+    Refusal,
 }
 
 /// Token usage statistics
@@ -118,6 +120,10 @@ pub enum StopReason {
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Reasoning tokens reported as a subset/detail of output usage. This is
+    /// tracked separately and must not be added to `output_tokens` again.
+    #[serde(default)]
+    pub reasoning_tokens: u64,
     #[serde(default)]
     pub cache_creation_tokens: u64,
     #[serde(default)]

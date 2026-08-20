@@ -155,10 +155,11 @@ impl GeminiProvider {
 
         let mut body = json!({
             "contents": contents,
-            "generationConfig": {
-                "maxOutputTokens": request.max_tokens
-            }
+            "generationConfig": {}
         });
+        if let Some(limit) = request.max_tokens {
+            body["generationConfig"]["maxOutputTokens"] = json!(limit);
+        }
         let has_system_instruction = !system_parts.is_empty();
         if has_system_instruction {
             body["systemInstruction"] = json!({ "parts": system_parts });
@@ -171,7 +172,11 @@ impl GeminiProvider {
                 )?
             }]);
         }
-        let mut body = crate::request_body_with_extra(&self.compat, body);
+        let mut body = crate::request_body_with_extra(
+            &self.compat,
+            crate::OutputCeilingLocation::GeminiGenerationConfig,
+            body,
+        );
         let object = body
             .as_object_mut()
             .expect("typed Gemini request body is an object");
@@ -180,6 +185,13 @@ impl GeminiProvider {
         object.remove("model");
         if request.tools.is_empty() {
             object.remove("tools");
+        }
+        if object
+            .get("generationConfig")
+            .and_then(Value::as_object)
+            .is_some_and(serde_json::Map::is_empty)
+        {
+            object.remove("generationConfig");
         }
         if !has_system_instruction {
             object.remove("systemInstruction");
@@ -504,6 +516,7 @@ struct GeminiStreamState {
     call_ids: HashSet<String>,
     input_tokens: u64,
     output_tokens: u64,
+    reasoning_tokens: u64,
     cache_read_tokens: u64,
     finish_reason: Option<String>,
     stop_reason: Option<StopReason>,
@@ -517,6 +530,7 @@ impl GeminiStreamState {
             call_ids: HashSet::new(),
             input_tokens: 0,
             output_tokens: 0,
+            reasoning_tokens: 0,
             cache_read_tokens: 0,
             finish_reason: None,
             stop_reason: None,
@@ -787,6 +801,7 @@ impl GeminiStreamState {
             usage: TokenUsage {
                 input_tokens: self.input_tokens,
                 output_tokens: self.output_tokens,
+                reasoning_tokens: self.reasoning_tokens,
                 cache_creation_tokens: 0,
                 cache_read_tokens: self.cache_read_tokens,
             },
@@ -828,6 +843,7 @@ fn update_usage(
     let candidate_tokens =
         usage_u64(usage, "candidatesTokenCount")?.unwrap_or(state.output_tokens);
     let thought_tokens = usage_u64(usage, "thoughtsTokenCount")?.unwrap_or(0);
+    state.reasoning_tokens = thought_tokens;
     state.output_tokens = candidate_tokens.checked_add(thought_tokens).ok_or_else(|| {
         ProviderError::Parse("Gemini returned overflowing output token usage".to_owned())
     })?;

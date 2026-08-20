@@ -42,6 +42,7 @@ pub(crate) struct ResolvedProviderFields {
     pub compat_overrides: NomiCompatOverrides,
     pub bedrock_config: Option<nomi_config::config::BedrockConfig>,
     pub context_limit: Option<i64>,
+    pub output_limit: Option<i64>,
 }
 
 fn invoke_error_to_app_error(error: nomifun_model_invoke::InvokeError) -> AppError {
@@ -216,6 +217,7 @@ pub(crate) async fn resolve_provider_fields(
         compat_overrides,
         bedrock_config,
         context_limit: task.context_limit,
+        output_limit: task.output_limit,
     })
 }
 
@@ -320,7 +322,7 @@ pub async fn streaming_completion(
         system: system.to_owned(),
         messages,
         tools: vec![],
-        max_tokens,
+        max_tokens: Some(max_tokens),
         thinking: None,
         reasoning_effort: None,
     };
@@ -353,7 +355,7 @@ pub async fn streaming_completion_text_or_reasoning(
         system: system.to_owned(),
         messages,
         tools: vec![],
-        max_tokens,
+        max_tokens: Some(max_tokens),
         thinking: None,
         reasoning_effort: None,
     };

@@ -6,4 +6,4 @@ import type { ModelTrait } from "./ModelTrait";
 /**
  * Persisted task-scoped capability returned with its owning model.
  */
-export type ProviderModelCapabilityResponse = { task: ModelTask, traits: Array<ModelTrait>, protocol: string, connection_role: string, base_url_override?: string, endpoint?: string, poll_endpoint?: string, content_endpoint?: string, realtime_endpoint?: string, allow_cross_origin_credentials: boolean, provider_params: unknown, context_limit?: number, health?: CapabilityHealth, health_checked_at?: number, created_at: number, updated_at: number, };
+export type ProviderModelCapabilityResponse = { task: ModelTask, traits: Array<ModelTrait>, protocol: string, connection_role: string, base_url_override?: string, endpoint?: string, poll_endpoint?: string, content_endpoint?: string, realtime_endpoint?: string, allow_cross_origin_credentials: boolean, provider_params: unknown, context_limit?: number, output_limit?: number, health?: CapabilityHealth, health_checked_at?: number, created_at: number, updated_at: number, };

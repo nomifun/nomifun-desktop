@@ -57,7 +57,17 @@ impl AnthropicProvider {
         Ok(headers)
     }
 
-    fn build_request_body(&self, request: &LlmRequest, sanitize_tool_schemas: bool) -> Value {
+    fn build_request_body(
+        &self,
+        request: &LlmRequest,
+        sanitize_tool_schemas: bool,
+    ) -> Result<Value, ProviderError> {
+        let max_tokens = request.max_tokens.ok_or_else(|| {
+            ProviderError::Config(
+                "anthropic.messages requires an explicit output ceiling; pass --max-tokens (or set [default].max_tokens) in the CLI, or set Max output tokens on the desktop model capability"
+                    .into(),
+            )
+        })?;
         // Build system prompt with optional cache_control
         let system = if self.cache_enabled {
             json!([{
@@ -71,7 +81,7 @@ impl AnthropicProvider {
 
         let mut body = json!({
             "model": request.model,
-            "max_tokens": request.max_tokens,
+            "max_tokens": max_tokens,
             "system": system,
             "messages": anthropic_shared::build_messages(&request.messages, &self.compat),
             "stream": true
@@ -100,7 +110,11 @@ impl AnthropicProvider {
             });
         }
 
-        let mut body = crate::request_body_with_extra(&self.compat, body);
+        let mut body = crate::request_body_with_extra(
+            &self.compat,
+            crate::OutputCeilingLocation::Top { dynamic: None },
+            body,
+        );
         let object = body
             .as_object_mut()
             .expect("typed Anthropic request body is an object");
@@ -110,7 +124,7 @@ impl AnthropicProvider {
         if request.thinking.is_none() {
             object.remove("thinking");
         }
-        body
+        Ok(body)
     }
 
     async fn send_initial_with_key_rotation(
@@ -149,7 +163,7 @@ impl LlmProvider for AnthropicProvider {
         );
         let client = crate::http_client()?;
         let sanitize_tool_schemas = self.should_sanitize_tool_schemas();
-        let mut body = self.build_request_body(request, sanitize_tool_schemas);
+        let mut body = self.build_request_body(request, sanitize_tool_schemas)?;
 
         tracing::debug!(target: "nomi_providers", body = %serde_json::to_string_pretty(&body).unwrap_or_default(), "outgoing request");
 
@@ -172,7 +186,7 @@ impl LlmProvider for AnthropicProvider {
                     status,
                     "provider rejected tool schemas; retrying with Bedrock-compatible schema roots"
                 );
-                body = self.build_request_body(request, true);
+                body = self.build_request_body(request, true)?;
                 let (response, headers) = self
                     .send_initial_with_key_rotation(&client, &url, &body)
                     .await?;

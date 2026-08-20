@@ -57,6 +57,7 @@ fn fake_descriptor(id: &str) -> ProtocolDescriptor {
         supported_tasks: vec![ModelTask::Chat],
         executor: ProtocolExecutorKind::Agent,
         transport: ProtocolTransportKind::Http,
+        requires_output_ceiling: false,
         allowed_auth_schemes: vec!["bearer".to_owned()],
         scopes: vec![ProtocolScope::Custom],
         platforms: vec![],

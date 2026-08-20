@@ -20,6 +20,7 @@ use nomi_config::hooks::HooksConfig;
 use nomi_mcp::config::McpConfig;
 use nomi_providers::create_provider;
 use nomi_tools::registry::ToolRegistry;
+use nomi_types::message::StopReason;
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -61,7 +62,7 @@ fn config(base_url: &str, cwd: &str) -> Config {
         api_key: "test-key".to_string(),
         base_url: base_url.to_string(),
         model: "step-3.7-flash".to_string(),
-        max_tokens: 2048,
+        output_max_tokens: Some(2048),
         max_turns: Some(12),
         system_prompt: Some("You are a coding agent.".to_string()),
         project_instructions: Default::default(),
@@ -136,6 +137,65 @@ async fn scripted_server(scripted: Vec<String>) -> (MockServer, RecordingRespond
         .mount(&server)
         .await;
     (server, responder)
+}
+
+/// C1 production shape: an undeclared OpenAI-compatible output ceiling stays
+/// absent across Config -> AgentEngine -> compat merge -> HTTP, and a real
+/// provider `length` terminal remains an honest MaxTokens result with the
+/// provider's reasoning-token detail intact.
+#[tokio::test]
+async fn omitted_ceiling_cannot_be_revived_and_length_keeps_reasoning_usage() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cwd = dir.path().to_string_lossy().to_string();
+    let truncated = sse(&[json!({
+        "choices": [{ "delta": {}, "finish_reason": "length" }],
+        "usage": {
+            "prompt_tokens": 32,
+            "completion_tokens": 24_576,
+            "completion_tokens_details": { "reasoning_tokens": 23_904 }
+        }
+    })]);
+    let (server, responder) = scripted_server(vec![truncated]).await;
+
+    let mut cfg = config(&server.uri(), &cwd);
+    cfg.output_max_tokens = None;
+    cfg.compat.max_tokens_field = Some("tokenBudget".to_owned());
+    cfg.compat.extra_body = Some(
+        json!({
+            "max_tokens": 1,
+            "max_completion_tokens": 2,
+            "maxOutputTokens": 3,
+            "max_output_tokens": 4,
+            "tokenBudget": 5,
+            "temperature": 0.2
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    let mut engine = engine(&cfg, ToolRegistry::new(), dir.path());
+
+    let result = engine
+        .execute_turn("produce miniapp.html", "m-output-ceiling-e2e")
+        .await
+        .expect("a token ceiling is a terminal outcome, not a transport error");
+
+    assert_eq!(result.stop_reason, StopReason::MaxTokens);
+    assert_eq!(result.usage.output_tokens, 24_576);
+    assert_eq!(result.usage.reasoning_tokens, 23_904);
+
+    let bodies = responder.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    for key in [
+        "max_tokens",
+        "max_completion_tokens",
+        "maxOutputTokens",
+        "max_output_tokens",
+        "tokenBudget",
+    ] {
+        assert!(bodies[0].get(key).is_none(), "{key} escaped onto the wire");
+    }
+    assert_eq!(bodies[0]["temperature"], 0.2);
 }
 
 /// NOMI-BAD-002, end to end: a steer that arrives while a tool is running must

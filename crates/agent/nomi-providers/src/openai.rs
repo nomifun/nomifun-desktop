@@ -276,7 +276,9 @@ impl OpenAIProvider {
         if include_stream_usage {
             body["stream_options"] = json!({ "include_usage": true });
         }
-        body[max_tokens_field] = json!(request.max_tokens);
+        if let Some(limit) = request.max_tokens {
+            body[max_tokens_field] = json!(limit);
+        }
 
         if !request.tools.is_empty() {
             body["tools"] = json!(Self::build_tools(
@@ -289,7 +291,13 @@ impl OpenAIProvider {
             body["reasoning_effort"] = json!(effort);
         }
 
-        let mut body = crate::request_body_with_extra(&self.compat, body);
+        let mut body = crate::request_body_with_extra(
+            &self.compat,
+            crate::OutputCeilingLocation::Top {
+                dynamic: Some(max_tokens_field),
+            },
+            body,
+        );
         let object = body
             .as_object_mut()
             .expect("typed OpenAI request body is an object");
@@ -643,6 +651,7 @@ struct StreamState {
     tool_calls: Vec<ToolCallAccumulator>,
     input_tokens: u64,
     output_tokens: u64,
+    reasoning_tokens: u64,
     /// Cache-read (prompt-cache hit) tokens reported by the provider, if any.
     /// Informational: surfaced into the Done event's usage so the cache-hit rate
     /// is observable for domestic OpenAI-compatible providers (DeepSeek/GLM/Qwen/…)
@@ -672,6 +681,7 @@ impl StreamState {
             tool_calls: Vec::new(),
             input_tokens: 0,
             output_tokens: 0,
+            reasoning_tokens: 0,
             cache_read_tokens: 0,
             pending_done: None,
             finish_reason: None,
@@ -716,7 +726,7 @@ impl StreamState {
         };
 
         let mut events = Vec::new();
-        if matches!(stop_reason, StopReason::MaxTokens) {
+        if matches!(stop_reason, StopReason::MaxTokens | StopReason::Refusal) {
             self.tool_calls.clear();
         } else if !self.tool_calls.is_empty() || matches!(stop_reason, StopReason::ToolUse) {
             if self.tool_calls.is_empty() {
@@ -740,6 +750,7 @@ impl StreamState {
             usage: TokenUsage {
                 input_tokens: self.input_tokens,
                 output_tokens: self.output_tokens,
+                reasoning_tokens: self.reasoning_tokens,
                 cache_creation_tokens: 0,
                 cache_read_tokens: self.cache_read_tokens,
             },
@@ -1330,6 +1341,8 @@ fn update_stream_usage(json: &Value, state: &mut StreamState) -> Result<(), Stri
             optional_usage_u64(usage, "inputTokens")?.unwrap_or(state.input_tokens);
         state.output_tokens = optional_usage_u64(usage, "outputTokens")?
             .unwrap_or(state.output_tokens);
+        state.reasoning_tokens = optional_usage_u64(usage, "reasoningTokens")?
+            .unwrap_or(state.reasoning_tokens);
         let cache_read = optional_usage_u64(usage, "cacheReadTokens")?
             .unwrap_or(state.cache_read_tokens);
         state.input_tokens = input.checked_add(cache_read).ok_or_else(|| {
@@ -1356,6 +1369,18 @@ fn update_stream_usage(json: &Value, state: &mut StreamState) -> Result<(), Stri
     })?;
     state.output_tokens =
         optional_usage_u64(usage, "completion_tokens")?.unwrap_or(state.output_tokens);
+
+    state.reasoning_tokens = match usage.get("completion_tokens_details") {
+        None | Some(Value::Null) => state.reasoning_tokens,
+        Some(Value::Object(details)) => optional_usage_u64(details, "reasoning_tokens")?
+            .unwrap_or(state.reasoning_tokens),
+        Some(_) => {
+            return Err(
+                "OpenAI-compatible provider returned non-object completion_tokens_details"
+                    .to_string(),
+            );
+        }
+    };
 
     let detail_cached = match usage.get("prompt_tokens_details") {
         None | Some(Value::Null) => 0,
@@ -1399,9 +1424,12 @@ fn provider_error_detail(error: &Value) -> String {
 fn normalize_finish_reason(reason: &str) -> Result<&'static str, String> {
     if reason.eq_ignore_ascii_case("stop")
         || reason.eq_ignore_ascii_case("end_turn")
-        || reason.eq_ignore_ascii_case("content_filter")
     {
         Ok("stop")
+    } else if reason.eq_ignore_ascii_case("content_filter")
+        || reason.eq_ignore_ascii_case("refusal")
+    {
+        Ok("refusal")
     } else if reason.eq_ignore_ascii_case("tool_calls")
         || reason.eq_ignore_ascii_case("function_call")
     {
@@ -1773,6 +1801,13 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
                 state.tool_calls.clear();
                 state.pending_done = Some(LlmEvent::Done {
                     stop_reason: StopReason::MaxTokens,
+                    usage: TokenUsage::default(),
+                });
+            }
+            "refusal" => {
+                state.tool_calls.clear();
+                state.pending_done = Some(LlmEvent::Done {
+                    stop_reason: StopReason::Refusal,
                     usage: TokenUsage::default(),
                 });
             }
@@ -3188,7 +3223,7 @@ mod tests {
                 }],
             )],
             tools: vec![],
-            max_tokens: 16,
+            max_tokens: Some(16),
             thinking: None,
             reasoning_effort: None,
         }
@@ -3361,7 +3396,7 @@ mod tests {
             system: String::new(),
             messages: vec![],
             tools: vec![],
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             thinking: None,
             reasoning_effort: None,
         };
@@ -3382,13 +3417,88 @@ mod tests {
             system: String::new(),
             messages: vec![],
             tools: vec![],
-            max_tokens: 2048,
+            max_tokens: Some(2048),
             thinking: None,
             reasoning_effort: None,
         };
         let body = provider.build_request_body(&req, provider.should_sanitize_tool_schemas(), true);
         assert_eq!(body["max_completion_tokens"], 2048);
         assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn omitted_output_ceiling_cannot_be_restored_by_compat_extra_body() {
+        let mut compat = ProviderCompat {
+            max_tokens_field: Some("tokenBudget".into()),
+            ..Default::default()
+        };
+        compat.extra_body = Some(
+            json!({
+                "max_tokens": 1,
+                "max_completion_tokens": 2,
+                "maxOutputTokens": 3,
+                "max_output_tokens": 4,
+                "tokenBudget": 5,
+                "temperature": 0.2
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let provider = OpenAIProvider::new("key", "http://localhost", compat);
+        let mut request = simple_request();
+        request.max_tokens = None;
+
+        let body = provider.build_request_body(
+            &request,
+            provider.should_sanitize_tool_schemas(),
+            true,
+        );
+
+        for key in [
+            "max_tokens",
+            "max_completion_tokens",
+            "maxOutputTokens",
+            "max_output_tokens",
+            "tokenBudget",
+        ] {
+            assert!(body.get(key).is_none(), "{key} must stay absent");
+        }
+        assert_eq!(body["temperature"], 0.2);
+    }
+
+    #[test]
+    fn content_filter_finish_reason_maps_to_refusal() {
+        let mut state = StreamState::new();
+        let events = parse_sse_chunk(
+            r#"{"choices":[{"delta":{},"finish_reason":"content_filter"}]}"#,
+            &mut state,
+            true,
+        );
+        assert!(events.is_empty());
+        assert!(matches!(
+            state.flush_done(),
+            Some(LlmEvent::Done {
+                stop_reason: StopReason::Refusal,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn usage_records_reasoning_as_an_output_subset() {
+        let mut state = StreamState::new();
+        let events = parse_sse_chunk(
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":13,"completion_tokens_details":{"reasoning_tokens":11}}}"#,
+            &mut state,
+            true,
+        );
+        assert!(events.is_empty());
+        let Some(LlmEvent::Done { usage, .. }) = state.flush_done() else {
+            panic!("expected Done");
+        };
+        assert_eq!(usage.output_tokens, 13);
+        assert_eq!(usage.reasoning_tokens, 11);
     }
 
     #[test]

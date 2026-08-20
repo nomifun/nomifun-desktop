@@ -28,10 +28,25 @@ fn minimal_request() -> LlmRequest {
             }],
         )],
         tools: vec![],
-        max_tokens: 1024,
+        max_tokens: Some(1024),
         thinking: None,
         reasoning_effort: None,
     }
+}
+
+#[tokio::test]
+async fn anthropic_requires_an_explicit_output_ceiling_before_http() {
+    let mut request = minimal_request();
+    request.max_tokens = None;
+    let provider = AnthropicProvider::new(
+        "test-key",
+        "http://127.0.0.1:1",
+        ProviderCompat::anthropic_defaults(),
+    );
+
+    let error = provider.stream(&request).await.unwrap_err();
+
+    assert!(matches!(error, ProviderError::Config(message) if message.contains("--max-tokens") && message.contains("Max output tokens")));
 }
 
 /// Build a complete SSE body for a simple text response.

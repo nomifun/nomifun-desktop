@@ -11,7 +11,9 @@ use nomifun_db::{
     SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
     SqliteProviderModelRepository, SqliteProviderRepository, init_database_memory,
 };
-use nomifun_model_invoke::{AdapterRegistry, ModelInvokeService, default_adapters};
+use nomifun_model_invoke::{
+    AdapterRegistry, ModelInvokeService, default_adapters, protocol_requires_output_ceiling,
+};
 
 const TEST_KEY: [u8; 32] = [0x4C; 32];
 const OPENAI_ID: &str = "0190f5fe-7c00-7a00-8000-000000000011";
@@ -186,6 +188,10 @@ async fn capability_endpoints_and_sdk_config_reach_the_matching_nomi_serializer(
     .unwrap();
     assert_eq!(openai.provider, ProviderType::OpenAI);
     assert_eq!(
+        openai.provider.requires_output_ceiling(),
+        protocol_requires_output_ceiling("openai.chat_text")
+    );
+    assert_eq!(
         openai.base_url,
         "https://gateway.openai.example/tenant/chat?api-version=2026-08-11"
     );
@@ -206,6 +212,10 @@ async fn capability_endpoints_and_sdk_config_reach_the_matching_nomi_serializer(
     .unwrap();
     assert_eq!(anthropic.provider, ProviderType::Anthropic);
     assert_eq!(
+        anthropic.provider.requires_output_ceiling(),
+        protocol_requires_output_ceiling("anthropic.messages")
+    );
+    assert_eq!(
         anthropic.base_url,
         "https://gateway.anthropic.example/tenant/messages?api-version=2026-08-11"
     );
@@ -223,6 +233,10 @@ async fn capability_endpoints_and_sdk_config_reach_the_matching_nomi_serializer(
     .unwrap();
     assert_eq!(gemini.provider, ProviderType::Gemini);
     assert_eq!(
+        gemini.provider.requires_output_ceiling(),
+        protocol_requires_output_ceiling("gemini.generate_text")
+    );
+    assert_eq!(
         gemini.base_url,
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-contract:streamGenerateContent?alt=sse"
     );
@@ -239,6 +253,10 @@ async fn capability_endpoints_and_sdk_config_reach_the_matching_nomi_serializer(
     .await
     .unwrap();
     assert_eq!(bedrock.provider, ProviderType::Bedrock);
+    assert_eq!(
+        bedrock.provider.requires_output_ceiling(),
+        protocol_requires_output_ceiling("bedrock.anthropic_messages")
+    );
     assert!(bedrock.base_url.is_empty());
     assert!(bedrock.compat.api_path.is_none());
     assert_eq!(bedrock.compat.extra_body.as_ref().unwrap()["top_k"], 11);

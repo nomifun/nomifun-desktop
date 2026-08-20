@@ -16,11 +16,10 @@ use nomi_types::message::TokenUsage;
 use nomi_types::tool::{JsonSchema, ToolResult};
 
 const DEFAULT_AGENT_MAX_TURNS: usize = 200;
-const DEFAULT_AGENT_MAX_TOKENS: u32 = 4096;
 
 const DESCRIPTION: &str = concat!(
     "Start one embedded Agent Execution with strategy=parallel. It synchronously invokes ",
-    "1-16 Agents (200 turns and 4096 output tokens each) and returns the same ",
+    "1-16 Agents (200 turns each, inheriting the session output limit) and returns the same ",
     "execution_id/status/message receipt as a platform execution, plus terminal results. ",
     "Sibling progress is coordinated by the host without adding another model tool. ",
     "Use synthesize=true to add a read-only consolidation pass. Dependency DAGs and ",
@@ -101,7 +100,6 @@ impl Tool for LocalDelegateTool {
                         name: "synthesizer".to_owned(),
                         prompt: build_synthesis_prompt(&results),
                         max_turns: DEFAULT_AGENT_MAX_TURNS,
-                        max_tokens: DEFAULT_AGENT_MAX_TOKENS,
                         system_prompt: None,
                         model: None,
                         effort: None,
@@ -158,7 +156,6 @@ fn task_invocation(task: AgentDelegationTask) -> AgentInvocationInput {
         name,
         prompt: apply_agent_role_context(prompt, role.as_deref()),
         max_turns: DEFAULT_AGENT_MAX_TURNS,
-        max_tokens: DEFAULT_AGENT_MAX_TOKENS,
         system_prompt: None,
         model: None,
         effort: None,
@@ -223,6 +220,7 @@ fn completed(
     let usage = all_outputs.clone().fold(TokenUsage::default(), |mut total, output| {
         total.input_tokens += output.usage.input_tokens;
         total.output_tokens += output.usage.output_tokens;
+        total.reasoning_tokens += output.usage.reasoning_tokens;
         total.cache_creation_tokens += output.usage.cache_creation_tokens;
         total.cache_read_tokens += output.usage.cache_read_tokens;
         total
@@ -281,9 +279,16 @@ mod tests {
 
     #[test]
     fn description_exposes_one_execution_contract_and_capacity() {
-        for required in ["16", "parallel", "200", "4096", "execution_id/status/message"] {
+        for required in [
+            "16",
+            "parallel",
+            "200",
+            "inheriting the session output limit",
+            "execution_id/status/message",
+        ] {
             assert!(DESCRIPTION.contains(required), "missing {required}: {DESCRIPTION}");
         }
+        assert!(!DESCRIPTION.contains("4096"));
         assert!(!DESCRIPTION.contains(&["local", "immediate"].join("_")));
         assert!(!DESCRIPTION.contains(&["persistent", "execution"].join("_")));
         assert!(!DESCRIPTION.contains("execution mode"));
@@ -415,6 +420,22 @@ mod tests {
         assert!(receipt.get("mode").is_none());
         assert!(receipt.get("execution_mode").is_none());
         assert!(!result.is_error);
+    }
+
+    #[test]
+    fn embedded_receipt_aggregates_reasoning_usage() {
+        let mut first = output("A", "done", false);
+        first.usage.reasoning_tokens = 7;
+        let mut synthesis = output("synthesis", "done", false);
+        synthesis.usage.reasoning_tokens = 11;
+
+        let result = completed(
+            AgentExecutionId::new().into_string(),
+            &[first],
+            Some(&synthesis),
+        );
+        let payload: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(payload["result"]["summary"]["usage"]["reasoning_tokens"], 18);
     }
 
     #[test]

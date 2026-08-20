@@ -741,6 +741,7 @@ pub fn parse_sse_data(event_type: &str, data: &str, state: &mut StreamState) -> 
             let usage = TokenUsage {
                 input_tokens: state.input_tokens,
                 output_tokens: state.output_tokens,
+                reasoning_tokens: 0,
                 cache_creation_tokens: state.cache_creation_tokens,
                 cache_read_tokens: state.cache_read_tokens,
             };
@@ -783,6 +784,15 @@ pub fn parse_sse_data(event_type: &str, data: &str, state: &mut StreamState) -> 
                     state.reset_current_block();
                     state.pending_done = Some(LlmEvent::Done {
                         stop_reason: StopReason::MaxTokens,
+                        usage,
+                    });
+                    Vec::new()
+                }
+                "refusal" => {
+                    state.pending_tool_calls.clear();
+                    state.reset_current_block();
+                    state.pending_done = Some(LlmEvent::Done {
+                        stop_reason: StopReason::Refusal,
                         usage,
                     });
                     Vec::new()
@@ -1834,7 +1844,7 @@ mod tests {
 
     #[test]
     fn unsupported_anthropic_stop_reasons_fail_closed_without_tools() {
-        for reason in ["pause_turn", "refusal", "future_reason"] {
+        for reason in ["pause_turn", "future_reason"] {
             let mut state = started_state();
             let data = json!({ "delta": { "stop_reason": reason } }).to_string();
             let events = parse_sse_data("message_delta", &data, &mut state);
@@ -1851,6 +1861,30 @@ mod tests {
             )));
             assert!(state.fatal_error());
         }
+    }
+
+    #[test]
+    fn anthropic_refusal_is_a_terminal_refusal_not_a_clean_end_turn() {
+        let mut state = started_state();
+        let events = parse_sse_data(
+            "message_delta",
+            r#"{"delta":{"stop_reason":"refusal"},"usage":{"output_tokens":4}}"#,
+            &mut state,
+        );
+        assert!(events.is_empty());
+
+        let events = parse_sse_data(
+            "message_stop",
+            r#"{"type":"message_stop"}"#,
+            &mut state,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [LlmEvent::Done {
+                stop_reason: StopReason::Refusal,
+                ..
+            }]
+        ));
     }
 
     #[test]

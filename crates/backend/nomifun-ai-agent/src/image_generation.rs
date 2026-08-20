@@ -169,7 +169,7 @@ pub async fn classify_image_generation_intent_with_model(
             }],
         )],
         tools: Vec::new(),
-        max_tokens: 96,
+        max_tokens: Some(96),
         thinking: None,
         reasoning_effort: None,
     };
@@ -1534,7 +1534,7 @@ mod tests {
             assert_eq!(requests.len(), 1);
             assert!(requests[0].tools.is_empty());
             assert!(requests[0].thinking.is_none());
-            assert_eq!(requests[0].max_tokens, 96);
+            assert_eq!(requests[0].max_tokens, Some(96));
             let payload = match &requests[0].messages[0].content[..] {
                 [ContentBlock::Text { text }] => text,
                 other => panic!("unexpected classifier payload: {other:?}"),

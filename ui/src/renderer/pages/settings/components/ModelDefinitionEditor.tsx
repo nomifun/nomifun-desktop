@@ -13,6 +13,7 @@ import { DeleteFour, Down, Refresh, Right } from '@icon-park/react';
 import React, { useEffect, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ContextLimitSelect } from './ContextLimitSelect';
+import { OutputLimitInput } from './OutputLimitInput';
 import {
   compactCapabilityUrlSummary,
   createCapabilityDisclosureState,
@@ -641,6 +642,10 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
           !descriptor ||
           !selectedAuthScheme ||
           isProtocolAuthSchemeAllowed(selectedAuthScheme, descriptor.allowed_auth_schemes);
+        const outputLimitRequired = descriptor?.requires_output_ceiling ?? false;
+        const outputLimitMissing =
+          outputLimitRequired &&
+          !(typeof capability.outputLimit === 'number' && capability.outputLimit > 0);
         const recommendedConnection = descriptor?.default_connections.find(
           (connection) => (connection.connection_role ?? 'default') === selectedRole
         );
@@ -1093,6 +1098,23 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
                 value={capability.contextLimit}
                 onChange={(contextLimit) => updateCapability(capability.task, { contextLimit })}
               />
+            </div>
+
+            <div className='space-y-6px'>
+              <div className='text-12px text-t-secondary'>
+                {t('settings.outputLimit', { defaultValue: 'Max output tokens' })}
+              </div>
+              <OutputLimitInput
+                value={capability.outputLimit}
+                onChange={(outputLimit) => updateCapability(capability.task, { outputLimit })}
+              />
+              {outputLimitMissing && (
+                <div className='text-11px text-danger-6' role='alert' data-output-limit-required>
+                  {t('settings.outputLimitRequired', {
+                    defaultValue: 'This protocol requires an explicit max output token value.',
+                  })}
+                </div>
+              )}
             </div>
 
             {crossOrigin && (

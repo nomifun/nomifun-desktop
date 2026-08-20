@@ -118,7 +118,6 @@ export type TChatConversation = IChatConversation<
     /** Session-only MCP server snapshot persisted at creation time. */
     session_mcp_servers?: ISessionMcpServer[];
     /** Max tokens per response */
-    maxTokens?: number;
     /** Max agentic turns */
     maxTurns?: number;
     /** Persisted session mode for resume support */
