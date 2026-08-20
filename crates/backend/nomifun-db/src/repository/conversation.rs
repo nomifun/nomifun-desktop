@@ -250,7 +250,7 @@ pub trait IConversationRepository: Send + Sync {
 
     /// Resolve the server-owned Creative Studio ownership marker for a
     /// Conversation. Public Conversation update/delete paths use this to
-    /// reject mutations that must instead be orchestrated by the product
+    /// reject mutations that must instead be coordinated by the product
     /// session lifecycle.
     async fn find_creative_studio_agent_session_by_conversation(
         &self,
