@@ -42,8 +42,16 @@ Panel open/view changes call the Editor's canonical `setPanels` port; saved
 width/height values also drive the product layout. Properties dispatch the
 type-safe core `node/update` command and therefore participate in normal undo,
 CAS save, conflict, and reload behavior. Background changes use the same CAS
-port. Agent, workflows, and global timeline remain explicit unavailable states
-until their production ownership/data adapters exist.
+port. The right-side Agent uses the owner-only Creative Studio session resolver,
+the real NomiFun Conversation REST/WebSocket transport, and Editor-owned CAS for
+session references and response-loss fences. Route exit first stops and settles
+an active exclusive Agent turn, then flushes the Editor. Workflows and the global
+timeline remain explicit unavailable states until their production adapters exist.
+
+The source geometry is canonical for views that currently have no resize handle:
+the left library is 280px and opening Agent normalizes the right panel to 390px.
+The Agent supplies its own single header; the generic right-panel tab header is
+shown only for properties so the product never renders stacked title bars.
 
 The Editor also exposes the canonical pending-task recovery feed described in
 `../editor/WIRING.md`. This product does not currently instantiate a workbench

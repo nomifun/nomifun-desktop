@@ -28,6 +28,9 @@ export interface CreativeCanvasProductPanelViews {
   bottom: CreativeBottomPanelView | null;
 }
 
+export const CREATIVE_CANVAS_SOURCE_LEFT_PANEL_WIDTH = 280;
+export const CREATIVE_CANVAS_SOURCE_AGENT_PANEL_WIDTH = 390;
+
 export function creativeCanvasProductPanelViews(
   panels: CreativeStudioPanelState
 ): CreativeCanvasProductPanelViews {
@@ -44,7 +47,12 @@ export function withCreativeCanvasLeftView(
 ): CreativeStudioPanelState {
   return {
     ...panels,
-    left: { ...panels.left, open: true, activeView: view },
+    left: {
+      ...panels.left,
+      open: true,
+      width: CREATIVE_CANVAS_SOURCE_LEFT_PANEL_WIDTH,
+      activeView: view,
+    },
   };
 }
 
@@ -57,6 +65,10 @@ export function withCreativeCanvasRightView(
     right: {
       ...panels.right,
       open: view !== null,
+      width:
+        view === 'assistant'
+          ? CREATIVE_CANVAS_SOURCE_AGENT_PANEL_WIDTH
+          : panels.right.width,
       activeView: view ?? panels.right.activeView,
     },
   };

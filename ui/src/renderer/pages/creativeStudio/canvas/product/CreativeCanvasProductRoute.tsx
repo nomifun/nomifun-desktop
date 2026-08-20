@@ -33,6 +33,7 @@ import {
   type CreativeCanvasBackground,
   type CreativeCanvasNode,
   type CreativeCanvasNodeKind,
+  type CreativeChatSessionReference,
   type CreativeSize,
   type CreativeStudioPanelState,
 } from '../../domain';
@@ -67,12 +68,14 @@ import {
   type CanvasIntegrationIntent,
 } from '../interactions';
 import { CreativeNodeView } from '../nodes';
+import CreativeCanvasAgentPanel, {
+  type CreativeCanvasAgentPanelHandle,
+} from './agent/CreativeCanvasAgentPanel';
 import CreativeCanvasConnectionEdge from './CreativeCanvasConnectionEdge';
 import CreativeCanvasInteractionOverlays, {
   type CreativeCanvasContextMenuState,
 } from './CreativeCanvasInteractionOverlays';
 import {
-  CreativeCanvasAssistantUnwiredPanel,
   CreativeCanvasHistoryPanel,
   CreativeCanvasOutlinePanel,
   CreativeCanvasPropertiesPanel,
@@ -126,6 +129,11 @@ interface ProductCreateNodeMenuState {
 interface PendingPanoramaChoice {
   asset: CreativeAsset;
   worldPosition: CanvasPoint;
+}
+
+interface AgentDocumentState {
+  sessions: readonly CreativeChatSessionReference[];
+  activeSessionId: string | null;
 }
 
 const iconProps = {
@@ -269,6 +277,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const project = useCreativeProject(projectId || null);
 
   const editorRef = useRef<CreativeCanvasEditorHandle>(null);
+  const agentPanelRef = useRef<CreativeCanvasAgentPanelHandle>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const panelsRef = useRef<CreativeStudioPanelState>(
     structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS)
@@ -300,6 +309,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [createNodeMenu, setCreateNodeMenu] = useState<ProductCreateNodeMenuState | null>(null);
   const [pendingPanoramaChoice, setPendingPanoramaChoice] = useState<PendingPanoramaChoice | null>(null);
   const [assetImportBusy, setAssetImportBusy] = useState(false);
+  const [agentDocumentState, setAgentDocumentState] = useState<AgentDocumentState | null>(null);
 
   const assetQuery = useMemo(
     () => ({
@@ -342,6 +352,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setCreateNodeMenu(null);
     setPendingPanoramaChoice(null);
     setAssetImportBusy(false);
+    setAgentDocumentState(null);
     assetImportBusyRef.current = false;
     knownAssetsRef.current = new Map();
   }, [projectId]);
@@ -447,10 +458,40 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, []);
 
   const flushBeforeLeave = useCallback(async (): Promise<boolean> => {
+    if (!(await agentPanelRef.current?.prepareToLeave() ?? true)) return false;
     const editor = editorRef.current;
     if (!editor) return true;
     return canLeaveCreativeCanvasAfterFlush(await editor.flush());
   }, []);
+
+  const handlePersistAgentSessions = useCallback(
+    async (
+      sessions: readonly CreativeChatSessionReference[],
+      activeSessionId: string | null
+    ) => {
+      const editor = editorRef.current;
+      if (!editor) throw new Error('画布尚未载入，无法保存 Agent 会话。');
+      await editor.persistAgentSessions(sessions, activeSessionId);
+    },
+    []
+  );
+
+  const handleAgentSessionsChange = useCallback(
+    (
+      sessions: readonly CreativeChatSessionReference[],
+      activeSessionId: string | null
+    ) => {
+      setAgentDocumentState({
+        sessions: structuredClone([...sessions]),
+        activeSessionId,
+      });
+    },
+    []
+  );
+
+  const handleOpenModelSettings = useCallback(async () => {
+    if (await flushBeforeLeave()) navigate('/models?section=models');
+  }, [flushBeforeLeave, navigate]);
 
   const dismissInteractionOverlays = useCallback(() => {
     setContextMenu(null);
@@ -1033,6 +1074,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 onToggleMiniMap={() => setMiniMapOpen((open) => !open)}
                 onStateChange={setCanvasState}
                 onSaveStateChange={setSave}
+                onAgentSessionsChange={handleAgentSessionsChange}
                 onIntegrationIntent={(intent) => void handleIntegrationIntent(intent)}
                 renderNode={({
                   node,
@@ -1154,7 +1196,19 @@ const CreativeCanvasProductRoute: React.FC = () => {
             workflows: <CreativeCanvasWorkflowUnwiredPanel />,
           },
           right: {
-            assistant: <CreativeCanvasAssistantUnwiredPanel />,
+            assistant: (
+              <CreativeCanvasAgentPanel
+                ref={agentPanelRef}
+                projectId={projectId}
+                hydrated={agentDocumentState !== null}
+                sessions={agentDocumentState?.sessions ?? []}
+                activeSessionId={agentDocumentState?.activeSessionId ?? null}
+                disabled={productDisabled}
+                onPersist={handlePersistAgentSessions}
+                onCollapse={() => handleRightViewChange(null)}
+                onOpenModelSettings={() => void handleOpenModelSettings()}
+              />
+            ),
             properties,
           },
           bottom: {

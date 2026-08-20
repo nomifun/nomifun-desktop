@@ -478,6 +478,39 @@ describe('NomiCreativeStudioAgentChatPort', () => {
     expect(transport.responseListeners.size).toBe(0);
   });
 
+  test('stop-confirms a correlated stream error before exposing it as terminal', async () => {
+    const transport = new FakeTransport();
+    transport.snapshots = [
+      idleSnapshot(),
+      idleSnapshot({ authority: 'processing', activeTurnId: turnId }),
+      idleSnapshot({ authority: 'processing', activeTurnId: turnId }),
+    ];
+    transport.onSend = () => {
+      queueMicrotask(() => {
+        transport.emitStarted(turnStarted());
+        transport.emitResponse({
+          type: 'error',
+          data: { message: 'rate limited' },
+          msg_id: assistantMessageId,
+          turn_id: turnId,
+          conversation_id: conversationId,
+        });
+      });
+    };
+    const port = createNomiCreativeStudioAgentChatPort({
+      resolveSession: matchingResolver(),
+      transport,
+      turnStartTimeoutMs: 100,
+    });
+
+    const events = await collect(port.runTurn(request(new AbortController().signal)));
+
+    expect(events[0]?.type).toBe('activity');
+    expect(events[1]?.type).toBe('failed');
+    expect(transport.stopCalls).toEqual([conversationId]);
+    expect(transport.responseListeners.size).toBe(0);
+  });
+
   test('fails closed when a replacement cannot be represented as append-only deltas', async () => {
     const transport = new FakeTransport();
     transport.snapshots = [

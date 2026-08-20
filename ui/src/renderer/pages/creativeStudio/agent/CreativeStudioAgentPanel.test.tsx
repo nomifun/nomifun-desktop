@@ -62,7 +62,8 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     expect(html.includes('收起 Agent 面板')).toBe(true);
     expect(html.includes('data-agent-panel-state="empty"')).toBe(true);
     expect(html.includes('从一个想法开始')).toBe(true);
-    expect(html.includes('描述创作目标，或让我继续操作画布')).toBe(true);
+    expect(html.includes('描述创作目标，或继续讨论当前方案')).toBe(true);
+    expect(html.includes('直接操作当前画布')).toBe(false);
   });
 
   test('renders controlled history, loading and load-failure states', () => {
@@ -118,6 +119,13 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     expect(html.includes('data-agent-message-status="stopped"')).toBe(true);
     expect(html.includes('已停止')).toBe(true);
     expect(html.includes('这是一个成功回复')).toBe(false);
+  });
+
+  test('locks the model picker after a dedicated conversation has selected its model', () => {
+    const html = renderPanel({ modelLocked: true });
+
+    expect(html.includes('data-agent-model-locked="true"')).toBe(true);
+    expect(html.includes('会话模型已锁定：chat-model')).toBe(true);
   });
 });
 

@@ -522,6 +522,8 @@ export function createNomiCreativeStudioAgentChatPort(
             }
 
             if (event.type === 'error') {
+              await transport.stopAndConfirm(binding.conversationId);
+              admittedNonTerminalTurn = false;
               yield {
                 type: 'failed',
                 code: 'NOMI_STREAM_ERROR',
