@@ -44,6 +44,9 @@ const CreativeStudioPromptsRoute = React.lazy(
 const CreativeStudioAssetsRoute = React.lazy(
   () => import('@renderer/pages/creativeStudio/assets/page/CreativeAssetLibraryPage')
 );
+const CreativeStudioCanvasRoute = React.lazy(
+  () => import('@renderer/pages/creativeStudio/canvas/product')
+);
 const MiniAppsListPage = React.lazy(() => import('@renderer/pages/miniApps'));
 const MiniAppRunnerPage = React.lazy(() => import('@renderer/pages/miniApps/RunnerPage'));
 const AssetLibraryPage = React.lazy(() => import('@renderer/pages/assets'));
@@ -145,6 +148,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
           {/* Creative Studio is a focused product: no workbench rail, shortcuts, or pull-to-refresh shell. */}
           <Route path={CREATIVE_STUDIO_ROOT_PATH} element={withRouteFallback(CreativeStudioFocusShell)}>
             <Route index element={withRouteFallback(CreativeStudioProjectsRoute)} />
+            <Route path='canvas/:projectId' element={withRouteFallback(CreativeStudioCanvasRoute)} />
             <Route path='prompts' element={withRouteFallback(CreativeStudioPromptsRoute)} />
             <Route path='assets' element={withRouteFallback(CreativeStudioAssetsRoute)} />
           </Route>
