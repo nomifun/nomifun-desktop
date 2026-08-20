@@ -41,6 +41,9 @@ const CreativeStudioProjectsRoute = React.lazy(
 const CreativeStudioPromptsRoute = React.lazy(
   () => import('@renderer/pages/creativeStudio/prompts/page/CreativeStudioPromptsRoute')
 );
+const CreativeStudioAssetsRoute = React.lazy(
+  () => import('@renderer/pages/creativeStudio/assets/page/CreativeAssetLibraryPage')
+);
 const MiniAppsListPage = React.lazy(() => import('@renderer/pages/miniApps'));
 const MiniAppRunnerPage = React.lazy(() => import('@renderer/pages/miniApps/RunnerPage'));
 const AssetLibraryPage = React.lazy(() => import('@renderer/pages/assets'));
@@ -143,6 +146,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
           <Route path={CREATIVE_STUDIO_ROOT_PATH} element={withRouteFallback(CreativeStudioFocusShell)}>
             <Route index element={withRouteFallback(CreativeStudioProjectsRoute)} />
             <Route path='prompts' element={withRouteFallback(CreativeStudioPromptsRoute)} />
+            <Route path='assets' element={withRouteFallback(CreativeStudioAssetsRoute)} />
           </Route>
           <Route element={layout}>
             <Route index element={<Navigate to='/guid' replace />} />
