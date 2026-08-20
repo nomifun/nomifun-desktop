@@ -15,3 +15,8 @@ export type {
   CreativeWorkflowRunRequest,
   WorkflowRunModalProps,
 } from './WorkflowRunModal';
+export { default as WorkflowRunCenter } from './WorkflowRunCenter';
+export type {
+  CreativeWorkflowRunCenterPort,
+  WorkflowRunCenterProps,
+} from './WorkflowRunCenter';

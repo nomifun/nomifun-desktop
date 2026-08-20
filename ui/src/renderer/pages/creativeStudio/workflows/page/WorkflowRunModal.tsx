@@ -21,7 +21,6 @@ import { draftPromptsStep, generationStep } from './workflowViewModel';
 export interface CreativeWorkflowRunRequest {
   workflow: WorkflowDefinitionV1;
   inputs: WorkflowInputValue[];
-  renderedPrompt: string;
   referenceAssetIds: string[];
 }
 
@@ -258,7 +257,6 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
       await runner.start({
         workflow,
         inputs,
-        renderedPrompt: prompt.value,
         referenceAssetIds,
       });
       Message.success('工作流任务已提交');

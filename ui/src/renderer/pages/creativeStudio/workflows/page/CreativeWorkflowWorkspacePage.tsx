@@ -32,6 +32,9 @@ import WorkflowEditorModal from './WorkflowEditorModal';
 import WorkflowRunModal, {
   type CreativeWorkflowRunnerPort,
 } from './WorkflowRunModal';
+import WorkflowRunCenter, {
+  type CreativeWorkflowRunCenterPort,
+} from './WorkflowRunCenter';
 import {
   createBlankWorkflow,
   duplicateWorkflow,
@@ -45,6 +48,7 @@ type WorkflowAction = 'save' | 'copy' | 'delete' | null;
 export interface CreativeWorkflowWorkspacePageProps {
   repository?: CreativeWorkflowRepository;
   runner?: CreativeWorkflowRunnerPort;
+  runCenter?: CreativeWorkflowRunCenterPort;
   initialWorkflows?: readonly WorkflowDefinitionV1[];
   autoLoad?: boolean;
   onCreateWithAgent?: () => void;
@@ -163,6 +167,7 @@ const WorkflowCard: React.FC<{
 const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps> = ({
   repository = creativeWorkflowRepository,
   runner,
+  runCenter,
   initialWorkflows = [],
   autoLoad = true,
   onCreateWithAgent,
@@ -409,6 +414,8 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
             ))}
           </section>
         )}
+
+        {runCenter ? <WorkflowRunCenter port={runCenter} /> : null}
       </div>
 
       <WorkflowEditorModal

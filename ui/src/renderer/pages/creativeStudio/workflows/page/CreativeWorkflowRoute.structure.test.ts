@@ -20,5 +20,7 @@ describe('Creative Workflow route composition', () => {
     expect(page.includes('localforage')).toBe(false);
     expect(page.includes('/api/v1/workflows')).toBe(false);
     expect(route.includes("navigate('/models')")).toBe(true);
+    expect(route.includes('useCreativeWorkflowRuntime')).toBe(true);
+    expect(route.includes('creativeAssetClient')).toBe(true);
   });
 });
