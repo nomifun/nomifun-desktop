@@ -14,6 +14,7 @@ import {
   Loading,
   MagicWand,
   SettingTwo,
+  Time,
   Upload,
 } from '@icon-park/react';
 import { Button, Input, InputNumber, Radio, Select, Tag, Tooltip } from '@arco-design/web-react';
@@ -450,7 +451,16 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
     onGenerate,
   } = props;
   const canGenerate = !disabled && prompt.trim().length > 0 && settings.model !== null;
-  const generateLabel = task.pendingCount > 0 ? `${task.pendingCount} 个生成中` : '开始创作';
+  const pendingLabel = task.state === 'queued' ? '排队中' : '生成中';
+  const generateLabel = task.pendingCount > 0 ? `${task.pendingCount} 个${pendingLabel}` : '开始创作';
+  const generateIcon =
+    task.state === 'queued' ? (
+      <Time />
+    ) : task.state === 'running' ? (
+      <Loading className={styles.spin} />
+    ) : (
+      <MagicWand />
+    );
 
   if (layout === 'bottom') {
     return (
@@ -489,7 +499,7 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
             </Tooltip>
             <Button
               type='primary'
-              icon={task.state === 'running' ? <Loading className={styles.spin} /> : <MagicWand />}
+              icon={generateIcon}
               disabled={!canGenerate}
               onClick={onGenerate}
             >
@@ -611,11 +621,11 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
           type='primary'
           long
           size='large'
-          icon={task.state === 'running' ? <Loading className={styles.spin} /> : <MagicWand />}
+          icon={generateIcon}
           disabled={!canGenerate}
           onClick={onGenerate}
         >
-          {task.pendingCount > 0 ? `继续提交（${task.pendingCount} 个生成中）` : '开始生成'}
+          {task.pendingCount > 0 ? `继续提交（${task.pendingCount} 个${pendingLabel}）` : '开始生成'}
         </Button>
       </footer>
     </aside>

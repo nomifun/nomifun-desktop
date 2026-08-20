@@ -286,7 +286,9 @@ const VideoWorkbenchComposer: React.FC<ComposerProps> = ({
   onOpenPromptLibrary,
   tasks,
 }) => {
-  const pendingCount = tasks.filter((task) => task.status === 'running').length;
+  const pendingCount = tasks.filter(
+    (task) => task.status === 'queued' || task.status === 'running'
+  ).length;
   const disabled = submitDisabled || prompt.trim().length === 0;
   const settings = {
     modelSlot,
@@ -362,7 +364,7 @@ const VideoWorkbenchComposer: React.FC<ComposerProps> = ({
                 icon={<Play />}
                 onClick={onGenerate}
               >
-                {pendingCount ? `${pendingCount} 个生成中` : '开始创作'}
+                {pendingCount ? `${pendingCount} 个处理中` : '开始创作'}
               </Button>
             </div>
           </div>
@@ -422,7 +424,7 @@ const VideoWorkbenchComposer: React.FC<ComposerProps> = ({
 
       <footer className={styles.composerFooter}>
         <div>
-          {pendingCount ? <span>{pendingCount} 个任务正在生成</span> : <span>准备就绪</span>}
+          {pendingCount ? <span>{pendingCount} 个任务正在处理</span> : <span>准备就绪</span>}
         </div>
         <Button
           type='primary'

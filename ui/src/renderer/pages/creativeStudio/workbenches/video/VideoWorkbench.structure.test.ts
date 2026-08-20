@@ -31,7 +31,8 @@ describe('VideoWorkbench controlled boundary', () => {
   });
 
   test('requires real media for successful results and never ships sample URLs', () => {
-    expect(types.includes("status: 'success'")).toBe(true);
+    expect(types.includes("status: 'succeeded'")).toBe(true);
+    expect(types.includes('assetId: string')).toBe(true);
     expect(types.includes('videoUrl: string')).toBe(true);
     expect(results.includes('<video')).toBe(true);
     expect(results.includes('data:video')).toBe(false);
@@ -39,12 +40,25 @@ describe('VideoWorkbench controlled boundary', () => {
   });
 
   test('exposes the requested result states and task selection/deletion', () => {
+    for (const status of ['queued', 'running', 'succeeded', 'failed', 'canceled']) {
+      expect(types.includes(`status: '${status}'`)).toBe(true);
+    }
     expect(results.includes("data-video-result-state='empty'")).toBe(true);
     expect(results.includes('data-video-result-state={task.status}')).toBe(true);
     expect(results.includes('toggleVideoTaskSelection')).toBe(true);
     expect(results.includes('toggleAllVideoTasks')).toBe(true);
     expect(results.includes('onDeleteTasks(visibleSelectedIds)')).toBe(true);
     expect(results.includes('onDeleteTasks([task.id])')).toBe(true);
+    expect(results.includes("if (task.status === 'queued') return '排队中'")).toBe(true);
+    expect(results.includes("if (task.status === 'canceled') return <CanceledVisual task={task} />")).toBe(true);
+  });
+
+  test('preserves exact model identity separately from display labels', () => {
+    expect(types.includes('model: VideoWorkbenchModelIdentity')).toBe(true);
+    expect(types.includes('providerId: string')).toBe(true);
+    expect(types.includes('model: string')).toBe(true);
+    expect(results.includes('data-provider-id={task.model.providerId}')).toBe(true);
+    expect(results.includes('data-model={task.model.model}')).toBe(true);
   });
 
   test('keeps references, task parameters and advanced parameters behind callbacks/slots', () => {

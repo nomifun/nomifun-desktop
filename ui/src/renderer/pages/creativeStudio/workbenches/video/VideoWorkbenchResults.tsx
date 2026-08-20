@@ -6,6 +6,7 @@
 
 import {
   Check,
+  CloseOne,
   CloseSmall,
   Copy,
   Delete,
@@ -15,6 +16,7 @@ import {
   Loading,
   Plus,
   Refresh,
+  Time,
   VideoTwo,
 } from '@icon-park/react';
 import { Button, Checkbox, Progress, Tag } from '@arco-design/web-react';
@@ -44,9 +46,11 @@ type ResultsProps = Pick<
 >;
 
 const taskStatusLabel = (task: VideoWorkbenchTask): string => {
+  if (task.status === 'queued') return '排队中';
   if (task.status === 'running') return '生成中';
-  if (task.status === 'success') return '成功';
-  return '失败';
+  if (task.status === 'succeeded') return '成功';
+  if (task.status === 'failed') return '失败';
+  return '已取消';
 };
 
 const TaskMeta: React.FC<{
@@ -68,7 +72,7 @@ const TaskMeta: React.FC<{
     </div>
     <div className={styles.taskTags}>
       <Tag>{task.createdAtLabel}</Tag>
-      <Tag>{task.modelLabel}</Tag>
+      <Tag title={`${task.model.providerId}/${task.model.model}`}>{task.modelLabel}</Tag>
       <Tag>{task.sizeLabel}</Tag>
       <Tag>{task.resolutionLabel}</Tag>
       <Tag>{task.durationLabel}</Tag>
@@ -102,8 +106,21 @@ const RunningVisual: React.FC<{ task: Extract<VideoWorkbenchTask, { status: 'run
   );
 };
 
+const QueuedVisual: React.FC<{
+  task: Extract<VideoWorkbenchTask, { status: 'queued' }>;
+}> = ({ task }) => (
+  <div className={styles.queuedVisual}>
+    <div className={styles.runningPattern} aria-hidden='true' />
+    <div className={styles.runningCenter}>
+      <Time size={27} />
+      <strong>{task.statusLabel || '排队中'}</strong>
+      <span>等待模型开始处理</span>
+    </div>
+  </div>
+);
+
 const SuccessVisual: React.FC<{
-  task: Extract<VideoWorkbenchTask, { status: 'success' }>;
+  task: Extract<VideoWorkbenchTask, { status: 'succeeded' }>;
 }> = ({ task }) => (
   <div className={styles.successVisual}>
     <video
@@ -131,9 +148,21 @@ const FailedVisual: React.FC<{
   </div>
 );
 
+const CanceledVisual: React.FC<{
+  task: Extract<VideoWorkbenchTask, { status: 'canceled' }>;
+}> = ({ task }) => (
+  <div className={styles.canceledVisual}>
+    <CloseOne size={30} />
+    <strong>已取消</strong>
+    <span>{task.message || '任务已取消，没有生成视频'}</span>
+  </div>
+);
+
 const TaskVisual: React.FC<{ task: VideoWorkbenchTask }> = ({ task }) => {
-  if (task.status === 'success') return <SuccessVisual task={task} />;
+  if (task.status === 'queued') return <QueuedVisual task={task} />;
+  if (task.status === 'succeeded') return <SuccessVisual task={task} />;
   if (task.status === 'failed') return <FailedVisual task={task} />;
+  if (task.status === 'canceled') return <CanceledVisual task={task} />;
   return <RunningVisual task={task} />;
 };
 
@@ -153,14 +182,14 @@ const TaskActions: React.FC<{
             载入
           </Button>
         ) : null}
-        {task.status === 'failed' && onInspectTask ? (
+        {(task.status === 'failed' || task.status === 'canceled') && onInspectTask ? (
           <Button size='mini' onClick={() => onInspectTask(task.id)}>
             详情
           </Button>
         ) : null}
       </div>
       <div>
-        {task.status === 'failed' && onRetryTask ? (
+        {(task.status === 'failed' || task.status === 'canceled') && onRetryTask ? (
           <Button
             size='mini'
             status='danger'
@@ -170,7 +199,7 @@ const TaskActions: React.FC<{
             重试
           </Button>
         ) : null}
-        {task.status === 'success' && onDownloadTask ? (
+        {task.status === 'succeeded' && onDownloadTask ? (
           <Button
             size='mini'
             icon={<Download />}
@@ -199,7 +228,9 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
   const taskIds = tasks.map((task) => task.id);
   const visibleSelectedIds = selectedTaskIds.filter((id) => taskIds.includes(id));
   const allSelected = tasks.length > 0 && tasks.every((task) => selectedTaskIds.includes(task.id));
-  const pendingCount = tasks.filter((task) => task.status === 'running').length;
+  const pendingCount = tasks.filter(
+    (task) => task.status === 'queued' || task.status === 'running'
+  ).length;
 
   return (
     <section
@@ -213,7 +244,7 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
           <History size={17} />
           <h2>全部成果</h2>
           <Tag>{tasks.length}</Tag>
-          {pendingCount ? <Tag color='arcoblue'>{pendingCount} 个生成中</Tag> : null}
+          {pendingCount ? <Tag color='arcoblue'>{pendingCount} 个处理中</Tag> : null}
         </div>
         <div className={styles.resultsActions}>
           {onNewSession ? (
@@ -260,6 +291,8 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
                 key={task.id}
                 className={styles.resultCard}
                 data-video-result-state={task.status}
+                data-provider-id={task.model.providerId}
+                data-model={task.model.model}
                 data-selected={selected || undefined}
               >
                 <div className={styles.cardOverlayActions}>

@@ -6,6 +6,7 @@
 
 import {
   Check,
+  CloseOne,
   CloseSmall,
   Delete,
   Error,
@@ -13,6 +14,7 @@ import {
   Loading,
   Pic,
   Refresh,
+  Time,
 } from '@icon-park/react';
 import { Button, Checkbox, Progress, Tag } from '@arco-design/web-react';
 import React from 'react';
@@ -33,11 +35,28 @@ interface ImageWorkbenchResultsProps {
   onRetryResult?(resultId: string): void;
 }
 
+const taskStateLabel = (task: ImageWorkbenchTaskSummary): string | null => {
+  switch (task.state) {
+    case 'queued':
+      return `${task.pendingCount} 个排队中`;
+    case 'running':
+      return `${task.pendingCount} 个生成中`;
+    case 'succeeded':
+      return '任务已完成';
+    case 'failed':
+      return '最近任务失败';
+    case 'canceled':
+      return '最近任务已取消';
+    default:
+      return null;
+  }
+};
+
 const TaskMeta: React.FC<{ result: ImageWorkbenchResult }> = ({ result }) => (
   <div className={styles.resultMeta}>
     <p title={result.prompt}>{result.prompt}</p>
     <div>
-      <Tag>{result.modelLabel}</Tag>
+      <Tag title={`${result.model.providerId}/${result.model.model}`}>{result.modelLabel}</Tag>
       {result.createdAtLabel ? <Tag>{result.createdAtLabel}</Tag> : null}
       {result.durationLabel ? <Tag>{result.durationLabel}</Tag> : null}
     </div>
@@ -80,6 +99,32 @@ const ResultVisual: React.FC<{
     );
   }
 
+  if (result.status === 'canceled') {
+    return (
+      <div className={styles.canceledVisual}>
+        <CloseOne size={30} />
+        <strong>已取消</strong>
+        <span>{result.message || '任务已取消，没有生成图片'}</span>
+        {onRetryResult ? (
+          <Button size='small' icon={<Refresh />} onClick={() => onRetryResult(result.id)}>
+            重新生成
+          </Button>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (result.status === 'queued') {
+    return (
+      <div className={styles.queuedVisual}>
+        <div className={styles.runningPattern} aria-hidden='true' />
+        <Time size={26} />
+        <strong>{result.statusLabel || '排队中'}</strong>
+        <span>等待模型开始处理</span>
+      </div>
+    );
+  }
+
   return (
     <div className={styles.runningVisual}>
       <div className={styles.runningPattern} aria-hidden='true' />
@@ -104,14 +149,9 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
   onRetryResult,
 }) => {
   const allSelected = results.length > 0 && results.every((result) => selectedResultIds.includes(result.id));
-  const stateLabel =
-    task.state === 'running'
-      ? `${task.pendingCount} 个生成中`
-      : task.state === 'failed'
-        ? '最近任务失败'
-        : task.state === 'succeeded'
-          ? '任务已完成'
-          : null;
+  const stateLabel = taskStateLabel(task);
+  const stateTone =
+    task.state === 'failed' ? 'red' : task.state === 'canceled' ? 'gray' : 'arcoblue';
 
   return (
     <section className={styles.resultsPanel} data-image-workbench-results data-result-count={results.length}>
@@ -120,7 +160,7 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
           <History />
           <h2>全部结果</h2>
           <Tag>{results.length}</Tag>
-          {stateLabel ? <Tag color={task.state === 'failed' ? 'red' : 'arcoblue'}>{stateLabel}</Tag> : null}
+          {stateLabel ? <Tag color={stateTone}>{stateLabel}</Tag> : null}
         </div>
         <div className={styles.resultsActions}>
           <Button
@@ -160,6 +200,8 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
                 key={result.id}
                 className={styles.resultCard}
                 data-image-result-state={result.status}
+                data-provider-id={result.model.providerId}
+                data-model={result.model.model}
                 data-selected={selected || undefined}
               >
                 <div className={styles.resultSelection}>
