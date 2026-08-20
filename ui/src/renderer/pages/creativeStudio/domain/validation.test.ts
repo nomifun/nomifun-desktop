@@ -18,6 +18,10 @@ import {
 
 const PROJECT_ID = '0198f8bb-8424-7b3d-8f17-bc6a1676f112';
 const OTHER_PROJECT_ID = '0198f8bb-8424-7b3d-8f17-bc6a1676f113';
+const CHAT_ID = '0198f8bb-8424-7b3d-8f17-bc6a1676f114';
+const IDEMPOTENCY_KEY = '0198f8bb-8424-7b3d-8f17-bc6a1676f115';
+const USER_MESSAGE_ID = '0198f8bb-8424-7b3d-8f17-bc6a1676f116';
+const ASSISTANT_MESSAGE_ID = '0198f8bb-8424-7b3d-8f17-bc6a1676f117';
 
 const summary = (projectId = PROJECT_ID) => ({
   projectId,
@@ -71,6 +75,56 @@ describe('Creative Studio v1 document contract', () => {
       () => parseCreativeProjectDocument(document),
       'SCHEMA_MISMATCH',
       '$.schema'
+    );
+  });
+
+  test('pins Agent model, recovery fence, and completed message pairs in the document', () => {
+    const pending = createEmptyCreativeProjectDocument(PROJECT_ID);
+    pending.chatSessions = [
+      {
+        id: CHAT_ID,
+        title: '海报创作',
+        messageIds: [],
+        model: { providerId: '0198f8bb-8424-7b3d-8f17-bc6a1676f118', model: 'gpt-5' },
+        pendingTurn: {
+          idempotencyKey: IDEMPOTENCY_KEY,
+          prompt: '生成一张海报',
+          createdAt: 20,
+        },
+        createdAt: 10,
+        updatedAt: 20,
+      },
+    ];
+    pending.activeChatId = CHAT_ID;
+    expect(parseCreativeProjectDocument(pending)).toEqual(pending);
+
+    const completed = structuredClone(pending);
+    completed.chatSessions[0]!.messageIds = [USER_MESSAGE_ID, ASSISTANT_MESSAGE_ID];
+    completed.chatSessions[0]!.pendingTurn = null;
+    expect(parseCreativeProjectDocument(completed)).toEqual(completed);
+
+    const missingModel = structuredClone(pending);
+    missingModel.chatSessions[0]!.model = null;
+    expectContractError(
+      () => parseCreativeProjectDocument(missingModel),
+      'INVALID_DOCUMENT',
+      '$.chatSessions[0].model'
+    );
+
+    const halfPair = structuredClone(completed);
+    halfPair.chatSessions[0]!.messageIds = [USER_MESSAGE_ID];
+    expectContractError(
+      () => parseCreativeProjectDocument(halfPair),
+      'INVALID_DOCUMENT',
+      '$.chatSessions[0].messageIds'
+    );
+
+    const inactivePending = structuredClone(pending);
+    inactivePending.activeChatId = null;
+    expectContractError(
+      () => parseCreativeProjectDocument(inactivePending),
+      'INVALID_DOCUMENT',
+      '$.activeChatId'
     );
   });
 

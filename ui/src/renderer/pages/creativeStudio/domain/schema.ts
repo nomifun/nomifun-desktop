@@ -166,11 +166,29 @@ export interface CreativeCanvasConnection {
   targetHandle: string | null;
 }
 
+export interface CreativeChatModelReference {
+  providerId: string;
+  model: string;
+}
+
+/**
+ * Durable response-loss fence for exactly one in-flight Agent turn. The
+ * idempotency key is persisted before the Conversation API is called, so a
+ * remount can replay the same operation instead of creating a duplicate turn.
+ */
+export interface CreativeChatPendingTurn {
+  idempotencyKey: string;
+  prompt: string;
+  createdAt: number;
+}
+
 /** Conversation content remains owned by NomiFun; the canvas stores stable references only. */
 export interface CreativeChatSessionReference {
   id: string;
   title: string;
   messageIds: string[];
+  model: CreativeChatModelReference | null;
+  pendingTurn: CreativeChatPendingTurn | null;
   createdAt: number;
   updatedAt: number;
 }
