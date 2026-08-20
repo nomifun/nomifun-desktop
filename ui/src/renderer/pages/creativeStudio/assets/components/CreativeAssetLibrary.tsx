@@ -13,18 +13,21 @@ import {
   EditTwo,
   Error,
   GridNine,
+  Left,
   List,
   Loading,
   Pic,
   Plus,
+  Right,
   Search,
   Text,
+  Tray,
   Upload,
   VideoTwo,
   Voice,
 } from '@icon-park/react';
 import classNames from 'classnames';
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useId, useMemo, useRef, useState } from 'react';
 
 import type { CreativeAsset, CreativeAssetKind } from '../types';
 import CreativeAssetMedia, { creativeAssetKindIcon } from './CreativeAssetMedia';
@@ -33,8 +36,10 @@ import type {
   CreativeAssetAction,
   CreativeAssetBatchAction,
   CreativeAssetKindFilter,
+  CreativeAssetLibraryAppearance,
   CreativeAssetLibraryLabels,
   CreativeAssetLibraryState,
+  CreativeAssetPagination,
   CreativeAssetScope,
   CreativeAssetUploadItem,
   CreativeAssetViewMode,
@@ -54,14 +59,20 @@ export interface CreativeAssetLibraryProps {
   className?: string;
   locale?: string;
   uploadAccept?: string;
+  uploadHint?: string;
+  appearance?: CreativeAssetLibraryAppearance;
+  selectable?: boolean;
+  pagination?: CreativeAssetPagination;
   labels?: Partial<CreativeAssetLibraryLabels>;
   onSearchChange: (value: string) => void;
+  onSearchSubmit?: (value: string) => void;
   onKindChange: (kind: CreativeAssetKindFilter) => void;
   onScopeChange: (scope: CreativeAssetScope) => void;
   onViewChange: (view: CreativeAssetViewMode) => void;
   onSelectionChange: (selectedIds: ReadonlySet<string>) => void;
   onUploadFiles?: (files: readonly File[]) => void;
   onCreateText?: () => void;
+  onRenameCollection?: () => void;
   onOpenAsset?: CreativeAssetAction;
   onEditAsset?: CreativeAssetAction;
   onDownloadAsset?: CreativeAssetAction;
@@ -82,6 +93,17 @@ const KIND_FILTERS: Array<{ value: CreativeAssetKindFilter; icon: React.ReactNod
   { value: 'audio', icon: <Voice theme='outline' size={15} fill='currentColor' strokeWidth={3} /> },
   { value: 'text', icon: <Text theme='outline' size={15} fill='currentColor' strokeWidth={3} /> },
 ];
+
+const SOURCE_KIND_ORDER: CreativeAssetKindFilter[] = ['all', 'text', 'image', 'video', 'audio'];
+
+export function submitCreativeAssetLibrarySearch(
+  event: Pick<React.FormEvent<HTMLFormElement>, 'preventDefault'>,
+  search: string,
+  onSearchSubmit?: (value: string) => void
+): void {
+  event.preventDefault();
+  onSearchSubmit?.(search);
+}
 
 const formatBytes = (bytes: number | null): string => {
   if (bytes == null || bytes < 0 || !Number.isFinite(bytes)) return '—';
@@ -120,6 +142,7 @@ interface AssetItemProps {
   asset: CreativeAsset;
   view: CreativeAssetViewMode;
   selected: boolean;
+  selectable: boolean;
   disabled: boolean;
   locale?: string;
   labels: CreativeAssetLibraryLabels;
@@ -134,6 +157,7 @@ const AssetItem: React.FC<AssetItemProps> = ({
   asset,
   view,
   selected,
+  selectable,
   disabled,
   locale,
   labels,
@@ -151,13 +175,15 @@ const AssetItem: React.FC<AssetItemProps> = ({
       data-asset-kind={asset.kind}
       data-selected={selected || undefined}
     >
-      <label className={styles.assetSelect} title={labels.select}>
-        <input type='checkbox' checked={selected} disabled={disabled} onChange={onToggle} />
-        <span aria-hidden='true'>
-          <Check theme='outline' size={13} fill='currentColor' strokeWidth={4} />
-        </span>
-        <span className={styles.srOnly}>{labels.select}</span>
-      </label>
+      {selectable ? (
+        <label className={styles.assetSelect} title={labels.select}>
+          <input type='checkbox' checked={selected} disabled={disabled} onChange={onToggle} />
+          <span aria-hidden='true'>
+            <Check theme='outline' size={13} fill='currentColor' strokeWidth={4} />
+          </span>
+          <span className={styles.srOnly}>{labels.select}</span>
+        </label>
+      ) : null}
 
       <button
         type='button'
@@ -250,14 +276,20 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
   className,
   locale,
   uploadAccept = 'image/*,video/*',
+  uploadHint,
+  appearance = 'default',
+  selectable = true,
+  pagination,
   labels: labelOverrides,
   onSearchChange,
+  onSearchSubmit,
   onKindChange,
   onScopeChange,
   onViewChange,
   onSelectionChange,
   onUploadFiles,
   onCreateText,
+  onRenameCollection,
   onOpenAsset,
   onEditAsset,
   onDownloadAsset,
@@ -272,11 +304,12 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
 }) => {
   const labels = { ...DEFAULT_CREATIVE_ASSET_LIBRARY_LABELS, ...labelOverrides };
   const inputRef = useRef<HTMLInputElement>(null);
+  const uploadHintId = useId();
   const [dragDepth, setDragDepth] = useState(0);
   const busy = disabled || state.mutating;
   const selectedAssets = useMemo(
-    () => state.assets.filter((asset) => selectedIds.has(asset.id)),
-    [state.assets, selectedIds]
+    () => selectable ? state.assets.filter((asset) => selectedIds.has(asset.id)) : [],
+    [selectable, state.assets, selectedIds]
   );
   const allVisibleSelected = state.assets.length > 0 && state.assets.every((asset) => selectedIds.has(asset.id));
   const filtered = search.trim().length > 0 || kind !== 'all';
@@ -297,6 +330,13 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
       : state.assets.length === 0
         ? 'empty'
         : 'ready';
+  const sourceAppearance = appearance === 'source-page';
+  const kindFilters = sourceAppearance
+    ? SOURCE_KIND_ORDER.map((filter) => KIND_FILTERS.find((option) => option.value === filter)!)
+    : KIND_FILTERS;
+  const totalPages = pagination
+    ? Math.max(1, Math.ceil(Math.max(0, pagination.total) / Math.max(1, pagination.pageSize)))
+    : 1;
 
   const toggleAsset = (assetId: string) => {
     const next = new Set(selectedIds);
@@ -324,122 +364,194 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
       data-asset-view={view}
       data-asset-scope={scope}
       data-asset-state={visibleState}
+      data-asset-appearance={appearance}
       aria-busy={state.loading || state.loadingMore || state.mutating}
       onDragEnter={(event) => {
-        if (!onUploadFiles || !event.dataTransfer.types.includes('Files')) return;
+        if (busy || !onUploadFiles || !event.dataTransfer.types.includes('Files')) return;
         event.preventDefault();
         setDragDepth((depth) => depth + 1);
       }}
       onDragOver={(event) => {
-        if (!onUploadFiles || !event.dataTransfer.types.includes('Files')) return;
+        if (busy || !onUploadFiles || !event.dataTransfer.types.includes('Files')) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = 'copy';
       }}
       onDragLeave={(event) => {
-        if (!onUploadFiles || !event.dataTransfer.types.includes('Files')) return;
+        if (busy || !onUploadFiles || !event.dataTransfer.types.includes('Files')) return;
         event.preventDefault();
         setDragDepth((depth) => Math.max(0, depth - 1));
       }}
       onDrop={(event) => {
-        if (!onUploadFiles) return;
+        if (busy || !onUploadFiles) return;
         event.preventDefault();
         setDragDepth(0);
         acceptFiles(event.dataTransfer.files);
       }}
     >
-      <header className={styles.header}>
-        <div className={styles.titleBlock}>
-          <h1>{labels.title}</h1>
-          <p>{labels.description}</p>
-        </div>
-        <div className={styles.primaryActions}>
-          {onCreateText ? (
-            <button type='button' className={styles.secondaryButton} disabled={busy} onClick={onCreateText}>
-              <Plus theme='outline' size={16} fill='currentColor' strokeWidth={3} />
-              <span>{labels.createText}</span>
-            </button>
+      <div className={styles.frame}>
+        <header className={styles.header}>
+          <div className={styles.titleBlock}>
+            <h1>{labels.title}</h1>
+            <p>{labels.description}</p>
+          </div>
+          {!sourceAppearance ? (
+            <div className={styles.primaryActions}>
+              {onCreateText ? (
+                <button type='button' className={styles.secondaryButton} disabled={busy} onClick={onCreateText}>
+                  <Plus theme='outline' size={16} fill='currentColor' strokeWidth={3} />
+                  <span>{labels.createText}</span>
+                </button>
+              ) : null}
+              {onUploadFiles ? (
+                <button
+                  type='button'
+                  className={styles.primaryButton}
+                  disabled={busy}
+                  title={uploadHint}
+                  aria-describedby={uploadHint ? uploadHintId : undefined}
+                  onClick={() => inputRef.current?.click()}
+                >
+                  <Upload theme='outline' size={16} fill='currentColor' strokeWidth={3} />
+                  <span>{labels.upload}</span>
+                </button>
+              ) : null}
+              {uploadHint ? <span id={uploadHintId} className={styles.srOnly}>{uploadHint}</span> : null}
+            </div>
           ) : null}
-          {onUploadFiles ? (
-            <button type='button' className={styles.primaryButton} disabled={busy} onClick={() => inputRef.current?.click()}>
-              <Upload theme='outline' size={16} fill='currentColor' strokeWidth={3} />
-              <span>{labels.upload}</span>
-            </button>
-          ) : null}
-        </div>
-      </header>
+        </header>
 
       <div className={styles.toolbar}>
-        <label className={styles.searchBox}>
-          <Search theme='outline' size={17} fill='currentColor' strokeWidth={3} />
-          <input
-            type='search'
-            value={search}
-            placeholder={labels.searchPlaceholder}
-            disabled={disabled}
-            onChange={(event) => onSearchChange(event.target.value)}
-          />
-          {search ? (
-            <button type='button' aria-label={labels.clearSearch} onClick={() => onSearchChange('')}>
-              <Close theme='outline' size={14} fill='currentColor' strokeWidth={3} />
-            </button>
-          ) : null}
-        </label>
-
-        <div className={styles.scopeSwitch} role='group' aria-label={labels.scopeFilter}>
-          {(['library', 'canvas'] as const).map((value) => (
-            <button
-              key={value}
-              type='button'
-              aria-pressed={scope === value}
+        {sourceAppearance ? (
+          <form
+            className={styles.searchBox}
+            role='search'
+            onSubmit={(event) => submitCreativeAssetLibrarySearch(event, search, onSearchSubmit)}
+          >
+            <Search theme='outline' size={17} fill='currentColor' strokeWidth={3} />
+            <input
+              type='search'
+              aria-label={labels.search}
+              value={search}
+              placeholder={labels.searchPlaceholder}
               disabled={disabled}
-              onClick={() => onScopeChange(value)}
+              onChange={(event) => onSearchChange(event.target.value)}
+            />
+            {search ? (
+              <button type='button' className={styles.clearSearchButton} aria-label={labels.clearSearch} onClick={() => onSearchChange('')}>
+                <Close theme='outline' size={14} fill='currentColor' strokeWidth={3} />
+              </button>
+            ) : null}
+            <button
+              type='submit'
+              className={styles.sourceSearchButton}
+              aria-label={labels.search}
+              disabled={disabled}
             >
-              {value === 'library' ? labels.libraryScope : labels.canvasScope}
+              <Search theme='outline' size={18} fill='currentColor' strokeWidth={3} />
             </button>
-          ))}
-        </div>
+          </form>
+        ) : (
+          <>
+            <label className={styles.searchBox}>
+              <Search theme='outline' size={17} fill='currentColor' strokeWidth={3} />
+              <input
+                type='search'
+                aria-label={labels.search}
+                value={search}
+                placeholder={labels.searchPlaceholder}
+                disabled={disabled}
+                onChange={(event) => onSearchChange(event.target.value)}
+              />
+              {search ? (
+                <button type='button' aria-label={labels.clearSearch} onClick={() => onSearchChange('')}>
+                  <Close theme='outline' size={14} fill='currentColor' strokeWidth={3} />
+                </button>
+              ) : null}
+            </label>
 
-        <div className={styles.viewSwitch} role='group' aria-label={labels.viewFilter}>
-          <button
-            type='button'
-            aria-label={labels.gridView}
-            title={labels.gridView}
-            aria-pressed={view === 'grid'}
-            onClick={() => onViewChange('grid')}
-          >
-            <GridNine theme='outline' size={16} fill='currentColor' strokeWidth={3} />
-          </button>
-          <button
-            type='button'
-            aria-label={labels.listView}
-            title={labels.listView}
-            aria-pressed={view === 'list'}
-            onClick={() => onViewChange('list')}
-          >
-            <List theme='outline' size={16} fill='currentColor' strokeWidth={3} />
-          </button>
-        </div>
+            <div className={styles.scopeSwitch} role='group' aria-label={labels.scopeFilter}>
+              {(['library', 'canvas'] as const).map((value) => (
+                <button
+                  key={value}
+                  type='button'
+                  aria-pressed={scope === value}
+                  disabled={disabled}
+                  onClick={() => onScopeChange(value)}
+                >
+                  {value === 'library' ? labels.libraryScope : labels.canvasScope}
+                </button>
+              ))}
+            </div>
+
+            <div className={styles.viewSwitch} role='group' aria-label={labels.viewFilter}>
+              <button
+                type='button'
+                aria-label={labels.gridView}
+                title={labels.gridView}
+                aria-pressed={view === 'grid'}
+                onClick={() => onViewChange('grid')}
+              >
+                <GridNine theme='outline' size={16} fill='currentColor' strokeWidth={3} />
+              </button>
+              <button
+                type='button'
+                aria-label={labels.listView}
+                title={labels.listView}
+                aria-pressed={view === 'list'}
+                onClick={() => onViewChange('list')}
+              >
+                <List theme='outline' size={16} fill='currentColor' strokeWidth={3} />
+              </button>
+            </div>
+          </>
+        )}
       </div>
 
       <div className={styles.filterRow}>
-        <div className={styles.kindFilters} role='group' aria-label={labels.kindFilter}>
-          {KIND_FILTERS.map((option) => (
-            <button
-              key={option.value}
-              type='button'
-              aria-pressed={kind === option.value}
-              disabled={disabled}
-              onClick={() => onKindChange(option.value)}
-            >
-              <span aria-hidden='true'>{option.icon}</span>
-              {labels[option.value]}
-            </button>
-          ))}
+        <div className={styles.sourceFilterGroup}>
+          {sourceAppearance ? <span className={styles.sourceFilterLabel}>{labels.kindFilter}</span> : null}
+          <div className={styles.kindFilters} role='group' aria-label={labels.kindFilter}>
+            {kindFilters.map((option) => (
+              <button
+                key={option.value}
+                type='button'
+                aria-pressed={kind === option.value}
+                disabled={disabled}
+                onClick={() => onKindChange(option.value)}
+              >
+                <span aria-hidden='true'>{option.icon}</span>
+                {labels[option.value]}
+              </button>
+            ))}
+          </div>
         </div>
-        <span className={styles.resultCount}>{labels.resultCount(state.assets.length, state.total)}</span>
+        {sourceAppearance ? (
+          <div className={styles.sourceActions}>
+            {onRenameCollection ? (
+              <button type='button' disabled={busy} onClick={onRenameCollection}>{labels.renameCollection}</button>
+            ) : null}
+            {onUploadFiles ? (
+              <button
+                type='button'
+                disabled={busy}
+                title={uploadHint}
+                aria-describedby={uploadHint ? uploadHintId : undefined}
+                onClick={() => inputRef.current?.click()}
+              >
+                {labels.upload}
+              </button>
+            ) : null}
+            {onCreateText ? (
+              <button type='button' disabled={busy} onClick={onCreateText}>{labels.createText}</button>
+            ) : null}
+            {uploadHint ? <span id={uploadHintId} className={styles.srOnly}>{uploadHint}</span> : null}
+          </div>
+        ) : (
+          <span className={styles.resultCount}>{labels.resultCount(state.assets.length, state.total)}</span>
+        )}
       </div>
 
-      {selectedAssets.length > 0 ? (
+      {selectable && selectedAssets.length > 0 ? (
         <div className={styles.selectionBar} data-asset-selection-bar>
           <strong>{labels.selectedCount(selectedAssets.length)}</strong>
           <button type='button' className={styles.textButton} disabled={busy} onClick={selectAllVisible}>
@@ -503,10 +615,14 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
         ) : visibleState === 'empty' ? (
           <div className={styles.statePanel} data-empty-filtered={filtered || undefined}>
             <span className={styles.stateIcon} aria-hidden='true'>
-              {kind === 'all' ? <AllApplication theme='outline' size={28} fill='currentColor' strokeWidth={3} /> : creativeAssetKindIcon(kind, 28)}
+              {sourceAppearance ? (
+                <Tray theme='outline' size={48} fill='currentColor' strokeWidth={2} />
+              ) : kind === 'all' ? (
+                <AllApplication theme='outline' size={28} fill='currentColor' strokeWidth={3} />
+              ) : creativeAssetKindIcon(kind, 28)}
             </span>
             <strong>{emptyTitle}</strong>
-            <p>{emptyDescription}</p>
+            {emptyDescription ? <p>{emptyDescription}</p> : null}
           </div>
         ) : (
           <div className={view === 'grid' ? styles.assetGrid : styles.assetList}>
@@ -515,7 +631,8 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
                 key={asset.id}
                 asset={asset}
                 view={view}
-                selected={selectedIds.has(asset.id)}
+                selected={selectable && selectedIds.has(asset.id)}
+                selectable={selectable}
                 disabled={busy}
                 locale={locale}
                 labels={labels}
@@ -544,6 +661,34 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
             </button>
           </div>
         ) : null}
+      </div>
+
+      {sourceAppearance && pagination ? (
+        <nav className={styles.sourcePagination} aria-label={labels.pagination}>
+          <button
+            type='button'
+            aria-label={labels.previousPage}
+            disabled={pagination.loading || pagination.page <= 1}
+            onClick={() => pagination.onPageChange(pagination.page - 1)}
+          >
+            <Left theme='outline' size={13} fill='currentColor' strokeWidth={3} />
+          </button>
+          <span className={styles.sourcePageNumber} aria-current='page'>{pagination.page}</span>
+          <button
+            type='button'
+            aria-label={labels.nextPage}
+            disabled={pagination.loading || pagination.page >= totalPages}
+            onClick={() => pagination.onPageChange(pagination.page + 1)}
+          >
+            {pagination.loading ? (
+              <Loading theme='outline' size={13} fill='currentColor' strokeWidth={3} />
+            ) : (
+              <Right theme='outline' size={13} fill='currentColor' strokeWidth={3} />
+            )}
+          </button>
+          <span className={styles.sourcePageSize}>{labels.pageSize(pagination.pageSize)}</span>
+        </nav>
+      ) : null}
       </div>
 
       <CreativeAssetUploadQueue

@@ -9,44 +9,10 @@
   color: var(--color-text-1);
 }
 
-.capabilityBar {
-  display: flex;
-  min-width: 0;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  box-sizing: border-box;
-  padding: 9px 28px;
-  border-bottom: 1px solid var(--color-border-1);
-  background: color-mix(in srgb, rgb(var(--primary-6)) 5%, var(--color-bg-1));
-}
-
-.capabilityBar p {
-  margin: 0;
-  color: var(--color-text-2);
-  font-size: 12px;
-  line-height: 1.55;
-}
-
-.capabilityBar strong {
-  color: var(--color-text-1);
-  font-weight: 650;
-}
-
 .library {
   min-height: 0;
   height: auto;
   flex: 1;
-}
-
-/* The global library has no canvas context and the backend has no atomic
-   batch mutation API. Keep those presentational-only affordances out of this
-   route instead of pretending non-library assets are canvas-specific. */
-.library [aria-label='creative-studio-global-scope-fixed'],
-.library [data-asset-selection-bar],
-.library [data-asset-id] > label:first-child {
-  display: none;
 }
 
 .modalForm,
@@ -156,20 +122,6 @@
   background: var(--color-fill-2);
   color: var(--color-text-2);
   font-size: 11px;
-}
-
-@media (max-width: 680px) {
-  .capabilityBar {
-    align-items: flex-start;
-    padding: 9px 16px;
-  }
-}
-
-@media (max-width: 480px) {
-  .capabilityBar {
-    flex-direction: column;
-    gap: 6px;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

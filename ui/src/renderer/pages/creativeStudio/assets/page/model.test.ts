@@ -10,7 +10,12 @@ import type { CreativeAsset } from '../types';
 import {
   CREATIVE_ASSET_MANUAL_UPLOAD_LIMIT_BYTES,
   buildGlobalCreativeAssetQuery,
+  creativeAssetCacheIsComplete,
   creativeAssetDownloadName,
+  creativeAssetPageCount,
+  creativeAssetPageSlice,
+  creativeAssetPageSliceFromCompleteCache,
+  creativeAssetQuerySearch,
   normalizeCreativeAssetEditDraft,
   normalizeCreativeTextAssetForm,
   validateCreativeAssetManualUpload,
@@ -32,6 +37,43 @@ describe('creative asset library route model', () => {
       search: undefined,
       sort: 'updated_desc',
     });
+  });
+
+  test('lets an explicit Enter submission flush ahead of the pending debounce value', () => {
+    expect(creativeAssetQuerySearch('old debounce', 'submitted now')).toBe('submitted now');
+    expect(creativeAssetQuerySearch('old debounce', '')).toBe('');
+    expect(creativeAssetQuerySearch('debounced value', null)).toBe('debounced value');
+  });
+
+  test('computes real ten-item pages from a fully synchronized backend cache', () => {
+    const items = Array.from({ length: 14 }, (_, index) => index + 1);
+    expect(creativeAssetPageCount(0, 10)).toBe(1);
+    expect(creativeAssetPageCount(14, 10)).toBe(2);
+    expect(creativeAssetPageSlice(items, 1, 10)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(creativeAssetPageSlice(items, 2, 10)).toEqual([11, 12, 13, 14]);
+  });
+
+  test('never exposes a stale second page while reload has only restored backend page one', () => {
+    const firstBackendPage = Array.from({ length: 10 }, (_, index) => index + 1);
+    const fullySynchronized = Array.from({ length: 20 }, (_, index) => index + 1);
+
+    expect(creativeAssetCacheIsComplete(firstBackendPage.length, 20)).toBe(false);
+    expect(creativeAssetPageSliceFromCompleteCache(firstBackendPage, 20, 2, 10)).toEqual([]);
+    expect(creativeAssetCacheIsComplete(fullySynchronized.length, 20)).toBe(true);
+    expect(creativeAssetPageSliceFromCompleteCache(fullySynchronized, 20, 2, 10)).toEqual([
+      11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+    ]);
+  });
+
+  test('reflows a complete cache across the deletion boundary without losing the next item', () => {
+    const fullySynchronized = Array.from({ length: 12 }, (_, index) => `asset-${index + 1}`);
+    const afterDeletingFirst = fullySynchronized.slice(1);
+
+    expect(creativeAssetPageSliceFromCompleteCache(afterDeletingFirst, 11, 1, 10)).toEqual([
+      'asset-2', 'asset-3', 'asset-4', 'asset-5', 'asset-6',
+      'asset-7', 'asset-8', 'asset-9', 'asset-10', 'asset-11',
+    ]);
+    expect(creativeAssetPageSliceFromCompleteCache(afterDeletingFirst, 11, 2, 10)).toEqual(['asset-12']);
   });
 
   test('enforces the visible manual-upload capability contract before calling the backend', () => {

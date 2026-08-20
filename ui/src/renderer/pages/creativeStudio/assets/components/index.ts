@@ -15,8 +15,10 @@ export type { CreateCreativeTextAssetModalProps } from './CreateCreativeTextAsse
 export type {
   CreateTextAssetLabels,
   CreativeAssetKindFilter,
+  CreativeAssetLibraryAppearance,
   CreativeAssetLibraryLabels,
   CreativeAssetLibraryState,
+  CreativeAssetPagination,
   CreativeAssetScope,
   CreativeAssetUploadItem,
   CreativeAssetUploadStatus,
