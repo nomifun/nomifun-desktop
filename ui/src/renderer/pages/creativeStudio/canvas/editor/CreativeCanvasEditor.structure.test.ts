@@ -28,9 +28,12 @@ describe('CreativeCanvasEditor composition contract', () => {
     expect(editorSource.includes('CreativeNodeView')).toBe(false);
   });
 
-  test('exposes flush and explicit remote reload without force-overwrite behavior', () => {
+  test('exposes canonical command/background control plus conflict-safe persistence', () => {
     for (const token of [
       'useImperativeHandle',
+      'dispatch: applyCommand',
+      'setBackground',
+      'saveController.queue(projectDocumentFromCanvasState(nextBase, stateRef.current))',
       'flush: () => saveController.flush()',
       'reloadRemote',
       "saveSnapshot.status === 'conflict'",
