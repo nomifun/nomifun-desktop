@@ -8827,11 +8827,7 @@ impl ConversationService {
                         false,
                         outcome.final_text.clone(),
                         Some("Agent event stream integrity was lost".to_owned()),
-                        relay_error_code::map_turn_failure(
-                            &outcome.terminal,
-                            None,
-                            committed_artifact_count,
-                        ),
+                        relay_error_code::map_turn_failure(&outcome, committed_artifact_count),
                     ));
                     final_turn_writeback = None;
                     break;
@@ -9039,21 +9035,13 @@ impl ConversationService {
                         .await;
                 }
 
-                let result_ok = relay_error_code::turn_succeeded(
-                    &outcome.terminal,
-                    outcome.final_text.as_deref(),
-                    committed_artifact_count,
-                );
+                let result_ok = relay_error_code::turn_succeeded(&outcome, committed_artifact_count);
                 durable_completion = Some((
                     result_ok,
                     outcome.final_text.clone(),
                     (!matches!(outcome.terminal, RelayTerminal::Finish))
                         .then(|| format!("{:?}", outcome.terminal)),
-                    relay_error_code::map_turn_failure(
-                        &outcome.terminal,
-                        outcome.final_text.as_deref(),
-                        committed_artifact_count,
-                    ),
+                    relay_error_code::map_turn_failure(&outcome, committed_artifact_count),
                 ));
 
                 if turn_token.is_cancelled() {
@@ -9068,7 +9056,15 @@ impl ConversationService {
                 }
 
                 if outcome.system_responses.is_empty() {
+                    // A turn the provider cut short never becomes durable
+                    // knowledge. Its visible text is by construction an
+                    // unfinished thought — half a sentence, a half-written file
+                    // body, a plan it never executed — so distilling it would
+                    // poison the knowledge base with claims the turn itself did
+                    // not stand behind. Only a clean EndTurn is write-back
+                    // material; the same predicate the receipt verdict uses.
                     if matches!(outcome.terminal, RelayTerminal::Finish)
+                        && relay_error_code::incomplete_stop_code(outcome.stop_reason).is_none()
                         && let Some(final_text) = outcome.final_text.clone()
                         && let Some(final_text_msg_id) = outcome.final_text_msg_id.clone()
                         && let Some((knowledge_service, request)) = service.build_turn_writeback_request(

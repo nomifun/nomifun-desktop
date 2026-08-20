@@ -14,7 +14,7 @@ use nomi_tools::grep::GrepTool;
 use nomi_tools::read::ReadTool;
 use nomi_tools::registry::ToolRegistry;
 use nomi_tools::write::WriteTool;
-use nomi_types::message::TokenUsage;
+use nomi_types::message::{StopReason, TokenUsage};
 
 use crate::context_contributor::ContextContributor;
 use crate::engine::AgentEngine;
@@ -548,6 +548,14 @@ where
 
 /// Map a timeout-wrapped turn outcome to an AgentInvocationOutput. Extracted so
 /// the timeout/error/success mapping is unit-testable without a live engine.
+///
+/// A delegate that stopped on the output ceiling or its per-turn request budget
+/// did NOT complete its assignment, so it is reported as an error even though it
+/// returned `Ok`: the caller decides what to do about an unfinished delegate,
+/// and silently presenting a truncated answer as a finished one is how a parent
+/// turn builds on work that was never done. Its partial text, usage and turn
+/// count are preserved — the text is still evidence, and the tokens were really
+/// spent, so discarding the accounting would under-report the bill.
 fn map_agent_invocation_outcome(
     name: String,
     outcome: Result<
@@ -557,13 +565,31 @@ fn map_agent_invocation_outcome(
     timeout_secs: u64,
 ) -> AgentInvocationOutput {
     match outcome {
-        Ok(Ok(result)) => AgentInvocationOutput {
-            name,
-            text: result.text,
-            usage: result.usage,
-            turns: result.turns,
-            is_error: false,
-        },
+        Ok(Ok(result)) => {
+            let incomplete = match result.stop_reason {
+                StopReason::MaxTokens => {
+                    Some("stopped at its output token ceiling before finishing")
+                }
+                StopReason::MaxTurns => {
+                    Some("exhausted its per-turn provider-request budget before finishing")
+                }
+                StopReason::EndTurn | StopReason::ToolUse => None,
+            };
+            AgentInvocationOutput {
+                name,
+                text: match incomplete {
+                    Some(reason) => format!(
+                        "Delegated Agent {reason}; the work below is INCOMPLETE and must not be \
+                         treated as a finished result:\n\n{}",
+                        result.text
+                    ),
+                    None => result.text,
+                },
+                usage: result.usage,
+                turns: result.turns,
+                is_error: incomplete.is_some(),
+            }
+        }
         Ok(Err(e)) => AgentInvocationOutput {
             name,
             text: format!("Delegated Agent error: {}", e),

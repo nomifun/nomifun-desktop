@@ -8210,6 +8210,63 @@ mod tests {
         assert_eq!(content["output"], "The turn ended before this tool completed: max_tokens");
     }
 
+    /// Production regression, session 01a0189e: a medium coding task streamed
+    /// 82,586 bytes of prose, made ZERO tool calls, hit the output token ceiling
+    /// on all three passes, and was then recorded as `result_ok = 1` with
+    /// `result_error = NULL`. Nothing the user asked for reached the disk.
+    ///
+    /// The relay behaved correctly — it carried `stop_reason` on the outcome —
+    /// but the receipt adjudicator only looked at the terminal and the text, so
+    /// non-empty prose *was* the proof of success. This drives the real relay and
+    /// pins the whole verdict path: a truncated turn is a retryable, resumable
+    /// FAILURE that names its own cause, no matter how much text it produced.
+    #[tokio::test]
+    async fn a_turn_truncated_by_the_output_ceiling_is_never_adjudicated_as_success() {
+        use nomifun_ai_agent::protocol::events::TurnStopReason;
+
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(TestUserEventBus::new(64));
+        let (tx, _) = broadcast::channel(64);
+
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo.clone(),
+            bus.clone(),
+            None,
+        );
+        let rx = tx.subscribe();
+
+        // The exact production shape: a lot of prose, not one tool call.
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "Here is the complete mini toolbox implementation: ".repeat(64),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData {
+            session_id: None,
+            stop_reason: Some(TurnStopReason::MaxTokens),
+        }))
+        .unwrap();
+
+        let outcome = relay.consume(rx).await;
+
+        // The relay's own classification is unchanged: Finish is still Finish.
+        // That is precisely why the stop reason has to reach the adjudicator.
+        assert_eq!(outcome.terminal, RelayTerminal::Finish);
+        assert_eq!(outcome.stop_reason, Some(TurnStopReason::MaxTokens));
+
+        assert!(
+            !crate::relay_error_code::turn_succeeded(&outcome, 0),
+            "a turn stopped at the output ceiling produced nothing the user asked for"
+        );
+        assert_eq!(
+            crate::relay_error_code::map_turn_failure(&outcome, 0),
+            Some(("output_truncated".to_owned(), true)),
+            "the receipt must name the ceiling and mark it resumable, not claim empty_final_text"
+        );
+    }
+
     #[tokio::test]
     async fn run_scopes_tool_message_identity_to_the_turn() {
         use nomifun_ai_agent::protocol::events::tool_call::{ToolCallEventData, ToolCallStatus};
