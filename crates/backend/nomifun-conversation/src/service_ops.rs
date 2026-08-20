@@ -53,6 +53,8 @@ impl ConversationService {
     ) -> Result<(), AppError> {
         self.require_owned_conversation(user_id, conversation_id)
             .await?;
+        self.ensure_not_creative_studio_agent_session(user_id, conversation_id, "mode-changed")
+            .await?;
         if req.mode.trim().is_empty() {
             return Err(AppError::BadRequest("mode must not be empty".into()));
         }
@@ -78,6 +80,8 @@ impl ConversationService {
         req: SetModelRequest,
     ) -> Result<(), AppError> {
         self.require_owned_conversation(user_id, conversation_id)
+            .await?;
+        self.ensure_not_creative_studio_agent_session(user_id, conversation_id, "model-changed")
             .await?;
         if req.model_id.trim().is_empty() {
             return Err(AppError::BadRequest("model_id must not be empty".into()));

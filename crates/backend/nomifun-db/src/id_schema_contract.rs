@@ -71,6 +71,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "conversation_mcp_servers",
     "conversations",
     "creation_tasks",
+    "creative_studio_agent_sessions",
     "creative_studio_projects",
     "cron_job_runs",
     "cron_run_reservations",
@@ -146,6 +147,7 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("conversation_artifacts", "conversation_artifact_id"),
     ("conversations", "conversation_id"),
     ("creation_tasks", "creation_task_id"),
+    ("creative_studio_agent_sessions", "session_id"),
     ("creative_studio_projects", "project_id"),
     ("cron_job_runs", "cron_job_run_id"),
     ("cron_run_reservations", "cron_job_run_id"),
@@ -223,6 +225,7 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("creation_tasks", "creation_task_id"),
     ("creation_tasks", "node_id"),
     ("creation_tasks", "remote_task_id"),
+    ("creative_studio_agent_sessions", "session_id"),
     ("creative_studio_projects", "project_id"),
     ("cs_agents", "cs_agent_id"),
     ("cs_dialogues", "cs_dialogue_id"),
@@ -697,6 +700,10 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     // creation itself still locks and validates a live project row.
     text_ref!("creation_tasks", "project_id" => "creative_studio_projects", "project_id", true, "idx_creation_tasks_project_id", KeepHistory),
     text_ref!("creation_tasks", "provider_id" => "providers", "provider_id", false, "idx_creation_tasks_provider_id", Restrict),
+    text_ref!("creative_studio_agent_sessions", "owner_id" => "users", "user_id", false, "idx_creative_agent_sessions_owner", Restrict),
+    text_ref!("creative_studio_agent_sessions", "project_id" => "creative_studio_projects", "project_id", false, "idx_creative_agent_sessions_project", Restrict),
+    text_ref!("creative_studio_agent_sessions", "conversation_id" => "conversations", "conversation_id", false, "idx_creative_agent_sessions_conversation", Restrict)
+        .with_aggregate_scope("parent.user_id = child.owner_id"),
     text_ref!("idmm_action_reservations", "user_id" => "users", "user_id", false, "idx_idmm_action_reservations_user_id", Cascade),
     text_ref!("idmm_action_reservations", "conversation_id" => "conversations", "conversation_id", false, "idx_idmm_action_reservations_conversation_id", Cascade)
         .with_aggregate_scope("parent.user_id = child.user_id"),

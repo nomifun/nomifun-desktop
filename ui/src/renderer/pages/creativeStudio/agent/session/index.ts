@@ -7,15 +7,19 @@
 export {
   CreativeStudioAgentSessionController,
   createCreativeStudioAgentSessionResolver,
-} from './controller';
+} from "./controller";
 export {
   CREATIVE_STUDIO_AGENT_SESSION_BACKEND_GAP,
   CreativeStudioAgentSessionBackendUnavailableError,
   createFailClosedCreativeStudioAgentSessionPort,
-} from './failClosedPort';
+} from "./failClosedPort";
+export {
+  createNomiCreativeStudioAgentSessionHttpPort,
+  type CreativeStudioAgentSessionHttpTransport,
+} from "./httpPort";
 export {
   CreativeStudioAgentSessionResolutionError,
   type CreativeStudioAgentSessionPersistencePort,
   type CreativeStudioAgentSessionPersistenceRequest,
   type CreativeStudioAgentSessionResolutionErrorCode,
-} from './types';
+} from "./types";

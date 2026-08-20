@@ -24,7 +24,9 @@ use nomifun_customer_service::customer_service_routes;
 use nomifun_miniapp::{miniapp_public_routes, miniapp_routes};
 use nomifun_workshop::{workshop_public_routes, workshop_routes};
 use nomifun_creation::creation_routes;
-use nomifun_conversation::{conversation_ops_routes, conversation_routes};
+use nomifun_conversation::{
+    conversation_ops_routes, conversation_routes, creative_studio_agent_session_routes,
+};
 use nomifun_cron::cron_routes;
 use nomifun_extension::{extension_routes, hub_routes, skill_routes};
 use nomifun_file::file_routes;
@@ -732,6 +734,12 @@ pub fn create_router_with_all_state(
     let conversation_authenticated = conversation_routes(states.conversation.clone())
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
+    let creative_studio_agent_session_authenticated = protect_instance_owner(
+        creative_studio_agent_session_routes(states.conversation.clone()),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
+
     let conversation_ops_authenticated = conversation_ops_routes(states.conversation)
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
@@ -1090,6 +1098,7 @@ pub fn create_router_with_all_state(
         .merge(knowledge_registration_read_authenticated)
         .merge(knowledge_registration_write_local)
         .merge(conversation_authenticated)
+        .merge(creative_studio_agent_session_authenticated)
         .merge(conversation_ops_authenticated)
         .merge(ssh_host_authenticated)
         .merge(miniapp_authenticated)

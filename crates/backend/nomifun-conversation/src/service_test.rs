@@ -550,6 +550,14 @@ impl IConversationRepository for MockRepo {
         Ok(rows.iter().find(|r| r.conversation_id == id).cloned())
     }
 
+    async fn find_creative_studio_agent_session_by_conversation(
+        &self,
+        _owner_id: &str,
+        _conversation_id: &str,
+    ) -> Result<Option<nomifun_db::models::CreativeStudioAgentSessionBindingRow>, DbError> {
+        Ok(None)
+    }
+
     async fn has_accepted_delivery_receipt_operation_prefix(
         &self,
         user_id: &str,
