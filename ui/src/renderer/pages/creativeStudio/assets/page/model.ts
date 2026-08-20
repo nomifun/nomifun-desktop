@@ -38,6 +38,39 @@ export interface CreativeCollectionRenameDraft {
   to: string;
 }
 
+export function creativeAssetQuerySearch(debounced: string, submitted: string | null): string {
+  return submitted ?? debounced;
+}
+
+export function creativeAssetPageCount(total: number, pageSize: number): number {
+  const normalizedTotal = Math.max(0, Math.trunc(Number.isFinite(total) ? total : 0));
+  const normalizedPageSize = Math.max(1, Math.trunc(Number.isFinite(pageSize) ? pageSize : 1));
+  return Math.max(1, Math.ceil(normalizedTotal / normalizedPageSize));
+}
+
+export function creativeAssetPageSlice<T>(items: readonly T[], page: number, pageSize: number): T[] {
+  const normalizedPageSize = Math.max(1, Math.trunc(Number.isFinite(pageSize) ? pageSize : 1));
+  const normalizedPage = Math.max(1, Math.trunc(Number.isFinite(page) ? page : 1));
+  const start = (normalizedPage - 1) * normalizedPageSize;
+  return items.slice(start, start + normalizedPageSize);
+}
+
+export function creativeAssetCacheIsComplete(loaded: number, total: number): boolean {
+  const normalizedLoaded = Math.max(0, Math.trunc(Number.isFinite(loaded) ? loaded : 0));
+  const normalizedTotal = Math.max(0, Math.trunc(Number.isFinite(total) ? total : 0));
+  return normalizedLoaded >= normalizedTotal;
+}
+
+export function creativeAssetPageSliceFromCompleteCache<T>(
+  items: readonly T[],
+  total: number,
+  page: number,
+  pageSize: number
+): T[] {
+  if (!creativeAssetCacheIsComplete(items.length, total)) return [];
+  return creativeAssetPageSlice(items, page, pageSize);
+}
+
 export const EMPTY_CREATIVE_TEXT_ASSET_FORM: CreativeTextAssetFormValue = {
   title: '',
   textContent: '',

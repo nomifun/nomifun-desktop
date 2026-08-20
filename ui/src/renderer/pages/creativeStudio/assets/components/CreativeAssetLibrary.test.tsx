@@ -10,7 +10,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { CreativeAsset } from '../types';
-import CreativeAssetLibrary from './CreativeAssetLibrary';
+import CreativeAssetLibrary, { submitCreativeAssetLibrarySearch } from './CreativeAssetLibrary';
 import CreativeAssetUploadQueue from './CreativeAssetUploadQueue';
 import { DEFAULT_CREATIVE_ASSET_LIBRARY_LABELS } from './types';
 import type { CreativeAssetLibraryState } from './types';
@@ -166,11 +166,72 @@ describe('CreativeAssetLibrary', () => {
     expect(html.includes('too large')).toBe(true);
   });
 
+  test('renders the explicit source-page appearance without changing the default panel contract', () => {
+    const html = renderLibrary({
+      appearance: 'source-page',
+      selectable: false,
+      selectedIds: new Set(),
+      labels: {
+        title: '我的素材',
+        description: '收藏常用素材，按类型和标题快速查找。',
+        kindFilter: '类型',
+      },
+      uploadHint: '图片和视频，单文件最大 64 MB',
+      pagination: {
+        page: 1,
+        pageSize: 10,
+        total: 14,
+        onPageChange: () => undefined,
+      },
+      onRenameCollection: () => undefined,
+    });
+
+    expect(html.includes('data-asset-appearance="source-page"')).toBe(true);
+    expect(html.includes('<h1>我的素材</h1>')).toBe(true);
+    expect(html.includes('role="search"')).toBe(true);
+    expect(html.includes('type="search" aria-label="搜索"')).toBe(true);
+    expect(html.includes('aria-label="素材范围"')).toBe(false);
+    expect(html.includes('aria-label="显示方式"')).toBe(false);
+    expect(html.includes('type="checkbox"')).toBe(false);
+    expect(html.includes('重命名合集')).toBe(true);
+    expect(html.includes('图片和视频，单文件最大 64 MB')).toBe(true);
+    expect(html.includes('aria-label="素材分页"')).toBe(true);
+    expect(html.includes('10 条/页')).toBe(true);
+    expect(html.indexOf('>文本</button>')).toBeLessThan(html.indexOf('>图片</button>'));
+  });
+
+  test('fully disables selection and source pagination outside their explicit contracts', () => {
+    const nonSelectable = renderLibrary({
+      selectable: false,
+      selectedIds: new Set(['asset-0', 'asset-1']),
+    });
+    expect(nonSelectable.includes('type="checkbox"')).toBe(false);
+    expect(nonSelectable.includes('data-asset-selection-bar')).toBe(false);
+
+    const defaultWithSourcePaginationProps = renderLibrary({
+      pagination: { page: 1, pageSize: 10, total: 14, onPageChange: () => undefined },
+    });
+    expect(defaultWithSourcePaginationProps.includes('aria-label="素材分页"')).toBe(false);
+  });
+
+  test('submits the controlled search immediately for Enter and the search button', () => {
+    let prevented = false;
+    let submitted = '';
+    submitCreativeAssetLibrarySearch(
+      { preventDefault: () => { prevented = true; } },
+      'hero title',
+      (value) => { submitted = value; }
+    );
+    expect(prevented).toBe(true);
+    expect(submitted).toBe('hero title');
+  });
+
   test('keeps compact and reduced-motion layouts explicit', () => {
     const css = readFileSync(new URL('./CreativeAssetLibrary.module.css', import.meta.url), 'utf8');
     expect(css.includes('@media (max-width: 820px)')).toBe(true);
     expect(css.includes('@media (max-width: 560px)')).toBe(true);
     expect(css.includes('@media (hover: none)')).toBe(true);
     expect(css.includes('@media (prefers-reduced-motion: reduce)')).toBe(true);
+    expect(css.includes("[data-asset-appearance='source-page']")).toBe(true);
   });
 });

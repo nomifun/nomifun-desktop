@@ -10,6 +10,15 @@ import type { UseCreativeAssetsResult } from '../useCreativeAssets';
 export type CreativeAssetKindFilter = 'all' | CreativeAssetKind;
 export type CreativeAssetScope = 'library' | 'canvas';
 export type CreativeAssetViewMode = 'grid' | 'list';
+export type CreativeAssetLibraryAppearance = 'default' | 'source-page';
+
+export interface CreativeAssetPagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  loading?: boolean;
+  onPageChange: (page: number) => void;
+}
 
 export type CreativeAssetLibraryState = Pick<
   UseCreativeAssetsResult,
@@ -62,6 +71,12 @@ export interface CreativeAssetLibraryLabels {
   listView: string;
   upload: string;
   createText: string;
+  renameCollection: string;
+  search: string;
+  pagination: string;
+  previousPage: string;
+  nextPage: string;
+  pageSize: (size: number) => string;
   dropFiles: string;
   loading: string;
   loadingMore: string;
@@ -137,6 +152,12 @@ export const DEFAULT_CREATIVE_ASSET_LIBRARY_LABELS: CreativeAssetLibraryLabels =
   listView: '列表视图',
   upload: '上传素材',
   createText: '新建文本',
+  renameCollection: '重命名合集',
+  search: '搜索',
+  pagination: '素材分页',
+  previousPage: '上一页',
+  nextPage: '下一页',
+  pageSize: (size) => `${size} 条/页`,
   dropFiles: '释放文件以上传',
   loading: '正在加载素材',
   loadingMore: '正在加载更多',

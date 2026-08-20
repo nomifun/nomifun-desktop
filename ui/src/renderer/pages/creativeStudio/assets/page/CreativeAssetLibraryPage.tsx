@@ -14,7 +14,6 @@ import {
 } from '../components';
 import type {
   CreativeAssetKindFilter,
-  CreativeAssetScope,
   CreativeAssetViewMode,
   CreativeTextAssetFormValue,
 } from '../components';
@@ -25,8 +24,12 @@ import {
   CREATIVE_ASSET_MANUAL_UPLOAD_ACCEPT,
   EMPTY_CREATIVE_TEXT_ASSET_FORM,
   buildGlobalCreativeAssetQuery,
+  creativeAssetCacheIsComplete,
   creativeAssetDownloadName,
   creativeAssetEditDraft,
+  creativeAssetPageCount,
+  creativeAssetPageSliceFromCompleteCache,
+  creativeAssetQuerySearch,
   manualUploadRejectionMessage,
   normalizeCreativeAssetEditDraft,
   normalizeCreativeTextAssetForm,
@@ -36,8 +39,8 @@ import {
 import type { CreativeAssetEditDraft, CreativeCollectionRenameDraft } from './model';
 import { useCreativeAssetUploadQueue } from './useCreativeAssetUploadQueue';
 
-const GLOBAL_SCOPE_ARIA_LABEL = 'creative-studio-global-scope-fixed';
 const EMPTY_SELECTION = new Set<string>();
+const SOURCE_ASSET_PAGE_SIZE = 10;
 const DEFAULT_EDIT_DRAFT: CreativeAssetEditDraft = {
   title: '',
   collection: '',
@@ -214,15 +217,54 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
 }) => {
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search, 220);
+  const [submittedSearch, setSubmittedSearch] = useState<string | null>(null);
   const [kind, setKind] = useState<CreativeAssetKindFilter>('all');
   const [view, setView] = useState<CreativeAssetViewMode>('grid');
+  const [page, setPage] = useState(1);
+  const querySearch = creativeAssetQuerySearch(debouncedSearch, submittedSearch);
 
   const query = useMemo(
-    () => buildGlobalCreativeAssetQuery(debouncedSearch, kind),
-    [debouncedSearch, kind]
+    () => buildGlobalCreativeAssetQuery(querySearch, kind),
+    [kind, querySearch]
   );
-  const library = useCreativeAssets({ client, query });
+  const library = useCreativeAssets({ client, query, pageSize: SOURCE_ASSET_PAGE_SIZE });
   const uploads = useCreativeAssetUploadQueue(library.upload);
+  const cacheComplete = !library.loading
+    && !library.error
+    && creativeAssetCacheIsComplete(library.assets.length, library.total);
+  const totalPages = creativeAssetPageCount(library.total, SOURCE_ASSET_PAGE_SIZE);
+  const visiblePage = Math.min(page, totalPages);
+
+  useEffect(() => {
+    setPage(1);
+  }, [kind, querySearch]);
+
+  useEffect(() => {
+    if (!cacheComplete) return;
+    setPage((current) => Math.min(current, totalPages));
+  }, [cacheComplete, totalPages]);
+
+  useEffect(() => {
+    if (library.error || library.loading || library.loadingMore || !library.hasMore) return;
+    void library.loadMore();
+  }, [library.error, library.hasMore, library.loadMore, library.loading, library.loadingMore]);
+
+  const visibleAssets = cacheComplete
+    ? creativeAssetPageSliceFromCompleteCache(
+        library.assets,
+        library.total,
+        visiblePage,
+        SOURCE_ASSET_PAGE_SIZE
+      )
+    : [];
+  const pageState = {
+    ...library,
+    assets: visibleAssets,
+    loading: !library.error && !cacheComplete,
+    loadingMore: !library.error && !cacheComplete,
+    mutating: library.mutating || !cacheComplete,
+    hasMore: false,
+  };
 
   const [textModalOpen, setTextModalOpen] = useState(false);
   const [textDraft, setTextDraft] = useState<CreativeTextAssetFormValue>(EMPTY_CREATIVE_TEXT_ASSET_FORM);
@@ -343,26 +385,23 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
     }
   };
 
+  const openRenameCollection = (): void => {
+    setRenameError(null);
+    setRenameOpen(true);
+  };
+
+  const handlePageChange = (nextPage: number): void => {
+    if (!cacheComplete || nextPage < 1 || nextPage > totalPages) return;
+    setPage(nextPage);
+  };
+
   return (
     <main className={styles.root} data-creative-asset-library-page>
-      <aside className={styles.capabilityBar} role='note' data-asset-upload-limits>
-        <p><strong>手动上传：</strong>支持图片和视频，单文件最大 64 MB；暂不支持手动上传音频。</p>
-        <Button
-          size='mini'
-          type='text'
-          disabled={library.mutating}
-          onClick={() => {
-            setRenameError(null);
-            setRenameOpen(true);
-          }}
-        >
-          重命名合集
-        </Button>
-      </aside>
-
       <CreativeAssetLibrary
         className={styles.library}
-        state={library}
+        appearance='source-page'
+        selectable={false}
+        state={pageState}
         search={search}
         kind={kind}
         scope='library'
@@ -371,13 +410,35 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         selectedIds={EMPTY_SELECTION}
         uploads={uploads.items}
         uploadAccept={CREATIVE_ASSET_MANUAL_UPLOAD_ACCEPT}
-        labels={{
-          scopeFilter: GLOBAL_SCOPE_ARIA_LABEL,
-          searchPlaceholder: '搜索素材标题',
+        uploadHint='支持图片和视频，单文件最大 64 MB；暂不支持手动上传音频。'
+        pagination={{
+          page: visiblePage,
+          pageSize: SOURCE_ASSET_PAGE_SIZE,
+          total: library.total,
+          loading: !cacheComplete,
+          onPageChange: handlePageChange,
         }}
-        onSearchChange={setSearch}
+        labels={{
+          title: '我的素材',
+          description: '收藏常用素材，按类型和标题快速查找。',
+          searchPlaceholder: '搜索素材标题',
+          kindFilter: '类型',
+          emptyTitle: '没有找到素材',
+          emptyDescription: '',
+          filteredEmptyTitle: '没有找到素材',
+          filteredEmptyDescription: '',
+        }}
+        onSearchChange={(value) => {
+          setSearch(value);
+          setSubmittedSearch(null);
+        }}
+        onSearchSubmit={(value) => {
+          setSearch(value);
+          setSubmittedSearch(value);
+          setPage(1);
+        }}
         onKindChange={setKind}
-        onScopeChange={(_scope: CreativeAssetScope) => undefined}
+        onScopeChange={() => undefined}
         onViewChange={setView}
         onSelectionChange={() => undefined}
         onUploadFiles={handleUploadFiles}
@@ -386,6 +447,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
           setTextDraft(EMPTY_CREATIVE_TEXT_ASSET_FORM);
           setTextModalOpen(true);
         }}
+        onRenameCollection={openRenameCollection}
         onOpenAsset={setPreviewAsset}
         onEditAsset={openEdit}
         onDownloadAsset={downloadAsset}
