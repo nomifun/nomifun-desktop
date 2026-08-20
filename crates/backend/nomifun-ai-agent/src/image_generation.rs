@@ -205,7 +205,9 @@ pub async fn classify_image_generation_intent_with_model(
                 LlmEvent::Error(error) => {
                     return Err(format!("image-intent provider stream failed: {error}"));
                 }
-                LlmEvent::ToolUse { .. } | LlmEvent::ToolUseDelta { .. } => {
+                LlmEvent::ToolUse { .. }
+                | LlmEvent::ToolUseDelta { .. }
+                | LlmEvent::ToolUseTruncated { .. } => {
                     return Err(
                         "image-intent provider emitted a tool call for a no-tool request"
                             .to_owned(),

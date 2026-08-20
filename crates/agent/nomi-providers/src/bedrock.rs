@@ -911,7 +911,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bedrock_max_tokens_drops_staged_call_and_is_not_overwritten_by_end_turn() {
+    async fn bedrock_max_tokens_reports_a_staged_call_as_truncated_not_executable() {
         let response = bedrock_response(&[
             r#"{"type":"message_start","message":{"usage":{"input_tokens":1}}}"#,
             r#"{"type":"content_block_start","content_block":{"type":"tool_use","id":"call_truncated","name":"update_base","input":{"kb_id":"kb_1"}}}"#,
@@ -930,10 +930,18 @@ mod tests {
         }
 
         assert!(matches!(outcome, anthropic_shared::StreamOutcome::Ok));
+        // Bedrock inherits the truncation stash for free by reusing
+        // `parse_sse_data`; the staged call must never be executable, but its
+        // identity must survive as a fact for the resumable round.
         assert!(events.iter().all(|event| !matches!(event, LlmEvent::ToolUse { .. })));
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2, "one truncation fact plus the terminal Done");
         assert!(matches!(
-            events[0],
+            &events[0],
+            LlmEvent::ToolUseTruncated { id, name, .. }
+                if id == "call_truncated" && name == "update_base"
+        ));
+        assert!(matches!(
+            events[1],
             LlmEvent::Done {
                 stop_reason: StopReason::MaxTokens,
                 ..

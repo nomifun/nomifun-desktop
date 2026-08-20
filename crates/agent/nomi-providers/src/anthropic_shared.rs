@@ -259,6 +259,14 @@ pub struct StreamState {
     /// `message_delta` is too early: a later malformed/truncated tail must never
     /// leave an executable call in the engine.
     pending_tool_calls: Vec<LlmEvent>,
+    /// Tool calls the ceiling cut off, converted to non-executable
+    /// `ToolUseTruncated` facts and released at `message_stop` ahead of the
+    /// terminal `Done`. Staged separately from `pending_tool_calls` so that
+    /// vector is left EMPTY on a truncated terminal: the terminal-shape check
+    /// at `message_stop` requires `pending_tool_calls.is_empty()` for every
+    /// non-`ToolUse` stop reason, so moving the entries out (rather than
+    /// keeping them) is what preserves that invariant.
+    truncated_tool_calls: Vec<LlmEvent>,
     /// Done is staged at `message_delta` and atomically released with any tool
     /// calls only when the protocol's `message_stop` commit marker arrives.
     pending_done: Option<LlmEvent>,
@@ -289,6 +297,7 @@ impl StreamState {
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
             pending_tool_calls: Vec::new(),
+            truncated_tool_calls: Vec::new(),
             pending_done: None,
             terminal_seen: false,
             fatal_error: false,
@@ -305,6 +314,7 @@ impl StreamState {
 
     fn protocol_error(&mut self, message: impl Into<String>) -> Vec<LlmEvent> {
         self.pending_tool_calls.clear();
+        self.truncated_tool_calls.clear();
         self.pending_done = None;
         self.reset_current_block();
         self.fatal_error = true;
@@ -779,8 +789,38 @@ pub fn parse_sse_data(event_type: &str, data: &str, state: &mut StreamState) -> 
                 "max_tokens" => {
                     // Even a syntactically complete earlier call belongs to a
                     // truncated response and must not execute. This mirrors the
-                    // OpenAI `finish_reason: length` policy.
-                    state.pending_tool_calls.clear();
+                    // OpenAI `finish_reason: length` policy. But its identity is
+                    // a fact the resumable round needs, so MOVE each staged call
+                    // (and the in-flight tool block, if any) into the
+                    // non-executable truncated stash instead of dropping it.
+                    //
+                    // `mem::take` rather than a copy-then-clear is load-bearing:
+                    // the terminal-shape check at `message_stop` rejects the
+                    // stream unless `pending_tool_calls` is EMPTY for a
+                    // non-`ToolUse` terminal.
+                    for staged in std::mem::take(&mut state.pending_tool_calls) {
+                        if let LlmEvent::ToolUse {
+                            id, name, input, ..
+                        } = staged
+                        {
+                            let argument_bytes =
+                                serde_json::to_string(&input).map_or(0, |json| json.len());
+                            state.truncated_tool_calls.push(LlmEvent::ToolUseTruncated {
+                                id,
+                                name,
+                                argument_bytes,
+                            });
+                        }
+                    }
+                    if state.current_block_type.as_deref() == Some("tool_use")
+                        && !state.tool_name.trim().is_empty()
+                    {
+                        state.truncated_tool_calls.push(LlmEvent::ToolUseTruncated {
+                            id: std::mem::take(&mut state.tool_id),
+                            name: std::mem::take(&mut state.tool_name),
+                            argument_bytes: state.tool_input_json.len(),
+                        });
+                    }
                     state.reset_current_block();
                     state.pending_done = Some(LlmEvent::Done {
                         stop_reason: StopReason::MaxTokens,
@@ -840,6 +880,12 @@ pub fn parse_sse_data(event_type: &str, data: &str, state: &mut StreamState) -> 
 
             state.terminal_seen = true;
             let mut events = std::mem::take(&mut state.pending_tool_calls);
+            // Non-executable truncation facts ride out on the same commit, ahead
+            // of the terminal Done — the engine rejects any event that arrives
+            // after a Done as a protocol violation. Exactly one of these two
+            // vectors is ever non-empty: `pending_tool_calls` on a `ToolUse`
+            // terminal, `truncated_tool_calls` on a `max_tokens` one.
+            events.append(&mut state.truncated_tool_calls);
             events.push(done);
             events
         }
@@ -1550,7 +1596,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_max_tokens_discards_even_a_complete_staged_tool_call() {
+    fn anthropic_max_tokens_reports_a_complete_staged_tool_call_as_truncated() {
         let mut state = started_state();
         parse_sse_data(
             "content_block_start",
@@ -1565,18 +1611,94 @@ mod tests {
             &mut state,
         )
         .is_empty());
+        // `pending_tool_calls` must be left EMPTY by the max_tokens arm: the
+        // terminal-shape check below requires it for any non-ToolUse terminal.
+        // The staged call is MOVED into the truncation stash, not copied.
         let events = parse_sse_data(
             "message_stop",
             r#"{"type":"message_stop"}"#,
             &mut state,
         );
 
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2, "one truncation fact plus the terminal Done");
         assert!(events.iter().all(|event| !matches!(event, LlmEvent::ToolUse { .. })));
+        assert!(matches!(
+            &events[0],
+            LlmEvent::ToolUseTruncated { id, name, argument_bytes }
+                if id == "call_complete" && name == "update_base" && *argument_bytes > 0
+        ));
+        assert!(matches!(
+            events[1],
+            LlmEvent::Done {
+                stop_reason: StopReason::MaxTokens,
+                ..
+            }
+        ));
+    }
+
+    /// The ceiling usually lands mid-arguments, before `content_block_stop`, so
+    /// the in-flight block never reaches `pending_tool_calls` at all. That call
+    /// is the one a resumable round most needs to know about.
+    #[test]
+    fn anthropic_max_tokens_reports_an_in_flight_tool_block_as_truncated() {
+        let mut state = started_state();
+        parse_sse_data(
+            "content_block_start",
+            r#"{"content_block":{"type":"tool_use","id":"call_partial","name":"Write","input":{}}}"#,
+            &mut state,
+        );
+        parse_sse_data(
+            "content_block_delta",
+            r#"{"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"/tmp/a.html\""}}"#,
+            &mut state,
+        );
+        // No content_block_stop: the ceiling cut the stream mid-block.
+        assert!(parse_sse_data(
+            "message_delta",
+            r#"{"delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":99}}"#,
+            &mut state,
+        )
+        .is_empty());
+        let events = parse_sse_data("message_stop", r#"{"type":"message_stop"}"#, &mut state);
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            LlmEvent::ToolUseTruncated { id, name, argument_bytes }
+                if id == "call_partial" && name == "Write" && *argument_bytes > 0
+        ));
+        assert!(matches!(
+            events[1],
+            LlmEvent::Done {
+                stop_reason: StopReason::MaxTokens,
+                ..
+            }
+        ));
+    }
+
+    /// A refusal is not resumable work, so its staged calls stay discarded.
+    #[test]
+    fn anthropic_refusal_discards_a_staged_tool_call_without_reporting_a_cutoff() {
+        let mut state = started_state();
+        parse_sse_data(
+            "content_block_start",
+            r#"{"content_block":{"type":"tool_use","id":"call_complete","name":"update_base","input":{"kb_id":"kb_1"}}}"#,
+            &mut state,
+        );
+        assert!(parse_sse_data("content_block_stop", r#"{}"#, &mut state).is_empty());
+        assert!(parse_sse_data(
+            "message_delta",
+            r#"{"delta":{"stop_reason":"refusal"},"usage":{"output_tokens":9}}"#,
+            &mut state,
+        )
+        .is_empty());
+        let events = parse_sse_data("message_stop", r#"{"type":"message_stop"}"#, &mut state);
+
+        assert_eq!(events.len(), 1);
         assert!(matches!(
             events[0],
             LlmEvent::Done {
-                stop_reason: StopReason::MaxTokens,
+                stop_reason: StopReason::Refusal,
                 ..
             }
         ));

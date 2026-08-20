@@ -125,6 +125,17 @@ impl Respond for RecordingResponder {
     }
 }
 
+/// The `messages` array of one recorded request body. On the OpenAI-compatible
+/// wire the system prompt is `messages[0]` with `role: "system"`, not a top-level
+/// field, so a test that wants to separate host bookkeeping from the conversation
+/// has to split on the role.
+fn restarted_messages(body: &Value) -> Vec<Value> {
+    body["messages"]
+        .as_array()
+        .cloned()
+        .expect("a recorded chat body has a messages array")
+}
+
 async fn scripted_server(scripted: Vec<String>) -> (MockServer, RecordingResponder) {
     let server = MockServer::start().await;
     let responder = RecordingResponder {
@@ -196,6 +207,243 @@ async fn omitted_ceiling_cannot_be_revived_and_length_keeps_reasoning_usage() {
         assert!(bodies[0].get(key).is_none(), "{key} escaped onto the wire");
     }
     assert_eq!(bodies[0]["temperature"], 0.2);
+}
+
+/// B1, the observed production shape: prose truncated at the ceiling with no tool
+/// ever called must NOT restart. The deleted host-side auto-continue spent three
+/// full ceilings here (`output_tokens = 24576 = 3 x 8192`) re-generating prose
+/// after an English "continue where you left off" prompt, and then recorded the
+/// turn as a success. Re-running an identical request against an identical
+/// ceiling can only reproduce the identical result.
+#[tokio::test]
+async fn a_prose_only_truncation_costs_exactly_one_pass_and_keeps_its_text() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cwd = dir.path().to_string_lossy().to_string();
+    let truncated = sse(&[
+        json!({ "choices": [{ "delta": { "content": "Here is the toolbox, in full: <html>" }, "finish_reason": null }] }),
+        json!({ "choices": [{ "delta": {}, "finish_reason": "length" }] }),
+    ]);
+    let (server, responder) = scripted_server(vec![truncated]).await;
+
+    let cfg = config(&server.uri(), &cwd);
+    let mut registry = ToolRegistry::new();
+    // A state-changing tool IS advertised, so this is not a vacuous pass: the
+    // restart is declined for want of carry-forward evidence, not for want of
+    // tools.
+    registry.register(Box::new(nomi_tools::write::WriteTool::new(None)));
+    let mut engine = engine(&cfg, registry, dir.path());
+
+    let result = engine
+        .execute_turn("build a综合 toolbox", "m-b1-prose-only")
+        .await
+        .expect("a token ceiling is a terminal outcome, not a transport error");
+
+    assert_eq!(result.stop_reason, StopReason::MaxTokens);
+    assert_eq!(result.rounds, 1, "no carry-forward evidence means no restart");
+    assert_eq!(result.effects_ok, 0);
+    assert_eq!(result.cutoff_state_changing, 0);
+    assert!(
+        result.state_changing_tools_advertised,
+        "Write was advertised; the restart was declined on evidence, not capability"
+    );
+    assert!(
+        result.text.contains("Here is the toolbox"),
+        "the already-visible prose stays durable evidence: {}",
+        result.text
+    );
+    assert_eq!(
+        responder.calls.load(Ordering::SeqCst),
+        1,
+        "the 2nd and 3rd ceilings of the observed trace must never be spent"
+    );
+}
+
+/// B1, the recoverable shape: a tool call the ceiling cut off mid-arguments must
+/// restart the round against the ORIGINAL requirement, carrying the model's own
+/// declared plan forward on the SYSTEM channel — and the truncated draft must
+/// leave the provider request entirely rather than being handed back for
+/// continuation.
+#[tokio::test]
+async fn a_truncated_tool_call_restarts_against_the_original_requirement() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cwd = dir.path().to_string_lossy().to_string();
+
+    // Pass 1 declares a plan. Pass 2 streams prose and is cut off mid-Write.
+    // Pass 3 is the restarted round.
+    let plan = tool_call(
+        "call-plan",
+        "update_plan",
+        json!({
+            "plan": [
+                { "step": "scaffold the toolbox layout", "status": "completed" },
+                { "step": "write miniapp.html", "status": "in_progress" }
+            ]
+        }),
+    );
+    let truncated_write = sse(&[
+        json!({ "choices": [{ "delta": { "content": "I will inline the whole file: <html><body>" }, "finish_reason": null }] }),
+        json!({ "choices": [{ "delta": { "tool_calls": [{
+            "index": 0,
+            "id": "call-write",
+            "type": "function",
+            "function": { "name": "Write", "arguments": "{\"file_path\":\"miniapp.html\",\"content\":\"<html><body>" }
+        }] }, "finish_reason": null }] }),
+        json!({ "choices": [{ "delta": {}, "finish_reason": "length" }] }),
+    ]);
+    let (server, responder) =
+        scripted_server(vec![plan, truncated_write, text_then_stop("stopped")]).await;
+
+    let cfg = config(&server.uri(), &cwd);
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(nomi_tools::update_plan::UpdatePlanTool::new()));
+    registry.register(Box::new(nomi_tools::write::WriteTool::new(None)));
+    let mut engine = engine(&cfg, registry, dir.path());
+
+    let requirement = "produce miniapp.html for the toolbox";
+    let result = engine
+        .execute_turn(requirement, "m-b1-resumable")
+        .await
+        .expect("a restarted round is a normal outcome");
+
+    assert_eq!(result.rounds, 2, "the truncated Write must earn one restart");
+    assert_eq!(
+        result.cutoff_state_changing, 1,
+        "Write is state-changing, so the abandoned obligation is machine-provable"
+    );
+
+    let bodies = responder.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 3, "one restart, not a fresh turn budget");
+    let messages = restarted_messages(&bodies[2]);
+
+    // Round facts travel on the SYSTEM channel. A user message would pollute the
+    // durable transcript and teach the model that host bookkeeping is user input.
+    // On the OpenAI-compatible wire the system channel is `messages[0]`.
+    let system = messages
+        .iter()
+        .find(|m| m["role"] == "system")
+        .and_then(|m| m["content"].as_str())
+        .expect("the restarted request carries a system message");
+    assert!(system.contains("[resumable round 2/3]"), "system: {system}");
+    assert!(system.contains("ALREADY DECLARED"));
+    assert!(system.contains("[x] scaffold the toolbox layout"));
+    assert!(system.contains("[>] write miniapp.html"));
+    assert!(system.contains("WHAT WAS CUT OFF"));
+    assert!(system.contains("Write ("), "the cutoff names the tool: {system}");
+    assert!(
+        !system.contains(requirement),
+        "the requirement is the tail user message, never duplicated into system"
+    );
+
+    let conversation = messages
+        .iter()
+        .filter(|m| m["role"] != "system")
+        .cloned()
+        .collect::<Vec<_>>();
+    let conversation_json =
+        serde_json::to_string(&conversation).expect("conversation serializes");
+    assert!(
+        !conversation_json.contains("I will inline the whole file"),
+        "the truncated draft must leave the provider request entirely: {conversation_json}"
+    );
+    assert!(
+        !conversation_json.contains("Automatic continuation"),
+        "the deleted host continuation prompt must not come back"
+    );
+    assert_eq!(
+        conversation_json.matches(requirement).count(),
+        2,
+        "the accepted root user message is preserved and the requirement is \
+         re-stated at the tail — a restart removes ONE assistant draft and never \
+         a user message: {conversation_json}"
+    );
+    assert_eq!(
+        conversation
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .count(),
+        1,
+        "only the update_plan call survives; the truncated draft is gone: \
+         {conversation_json}"
+    );
+    let last = conversation.last().expect("a restarted request has messages");
+    assert_eq!(
+        last["role"], "user",
+        "the restart re-states the requirement where the model will act on it"
+    );
+    assert!(
+        serde_json::to_string(&last["content"])
+            .expect("content serializes")
+            .contains(requirement),
+        "tail: {last}"
+    );
+}
+
+/// B1's attempt cap is the engine's, and it is absolute: three passes at one
+/// requirement, regardless of `max_turns`. The deleted host loop multiplied
+/// instead — each host continuation re-entered the engine and reset its loop
+/// guard, permitting `3 x max_turns` provider passes.
+#[tokio::test]
+async fn a_round_that_keeps_truncating_stops_at_three_passes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cwd = dir.path().to_string_lossy().to_string();
+
+    let truncated_write = || {
+        sse(&[
+            json!({ "choices": [{ "delta": { "tool_calls": [{
+                "index": 0,
+                "id": "call-write",
+                "type": "function",
+                "function": { "name": "Write", "arguments": "{\"file_path\":\"a.html\",\"content\":\"<htm" }
+            }] }, "finish_reason": null }] }),
+            json!({ "choices": [{ "delta": {}, "finish_reason": "length" }] }),
+        ])
+    };
+    let (server, responder) = scripted_server(vec![
+        truncated_write(),
+        truncated_write(),
+        truncated_write(),
+    ])
+    .await;
+
+    let cfg = config(&server.uri(), &cwd);
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(nomi_tools::write::WriteTool::new(None)));
+    let mut engine = engine(&cfg, registry, dir.path());
+
+    let result = engine
+        .execute_turn("write a.html", "m-b1-cap")
+        .await
+        .expect("exhausting the attempt cap is a terminal outcome, not an error");
+
+    assert_eq!(result.stop_reason, StopReason::MaxTokens);
+    assert_eq!(result.rounds, 3, "MAX_ROUND_ATTEMPTS bounds the round");
+    assert_eq!(
+        responder.calls.load(Ordering::SeqCst),
+        3,
+        "exactly 3 passes, NOT 3 x max_turns"
+    );
+    // The cap is reported as an honest MaxTokens so the receipt stays retryable
+    // and specifically resumable, rather than becoming a hard failure here.
+    assert_eq!(result.effects_ok, 0);
+    assert_eq!(result.cutoff_state_changing, 3);
+
+    // The complement of the tool-result shape: when the requirement is ALREADY
+    // the tail after the draft is popped, it must not be re-pushed. Otherwise
+    // every restart would send the same request twice in a row and pay for it.
+    let bodies = responder.bodies.lock().unwrap();
+    for (pass, body) in bodies.iter().enumerate() {
+        let conversation = restarted_messages(body)
+            .into_iter()
+            .filter(|m| m["role"] != "system")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            conversation.len(),
+            1,
+            "pass {pass} must carry the single requirement message, not a growing \
+             stack of duplicates: {conversation:?}"
+        );
+        assert_eq!(conversation[0]["role"], "user");
+    }
 }
 
 /// NOMI-BAD-002, end to end: a steer that arrives while a tool is running must

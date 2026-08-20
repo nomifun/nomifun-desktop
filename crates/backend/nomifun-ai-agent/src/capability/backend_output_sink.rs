@@ -2260,22 +2260,6 @@ impl BackendOutputSink {
         self.abort_artifact_delivery_turn_with_reason(reason);
     }
 
-    /// Fail any active call defensively before a MaxTokens retry. The engine no
-    /// longer publishes partial provider deltas, so this is normally a no-op;
-    /// retaining the cleanup prevents an already-published committed call from
-    /// leaking into a following stream after an unexpected terminal path.
-    pub(crate) fn truncate_active_tool_calls_for_auto_continue(&self, reason: &str) {
-        let output = format!(
-            "The provider response ended at {reason}; this incomplete tool call was not executed. The task is continuing in a new stream."
-        );
-        self.terminate_active_tool_calls(
-            ToolCallStatus::Error,
-            output,
-            "Tool call truncated",
-            "Failed to resolve active tool calls before automatic continuation",
-        );
-    }
-
     /// Citation reflow: parse the `<nomi-mem-citation>` block from the turn's
     /// final assistant text and bump each cited memory file's usage stats.
     /// Silent on every failure — a stale citation or unreadable file must
@@ -3056,48 +3040,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_continue_marks_active_tool_as_truncated_not_completed() {
-        let (sink, mut rx) = make_sink();
-        sink.emit_tool_call(
-            "call_write_1",
-            "Write",
-            r#"{"file_path":"/tmp/index.html"}"#,
-        );
-        let _running = rx.try_recv().unwrap();
-
-        sink.truncate_active_tool_calls_for_auto_continue("output token limit");
-
-        match rx.try_recv().unwrap() {
-            AgentStreamEvent::ToolCall(data) => {
-                assert_eq!(data.call_id, "nomi-call_write_1");
-                assert_eq!(data.name, "Write");
-                assert_eq!(data.status, ToolCallStatus::Error);
-                assert_eq!(data.input.as_ref().unwrap()["file_path"], "/tmp/index.html");
-                assert!(
-                    data.output
-                        .as_deref()
-                        .unwrap()
-                        .contains("incomplete tool call was not executed")
-                );
-            }
-            other => panic!("Expected ToolCall, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn auto_continue_ignores_finished_tool() {
-        let (sink, mut rx) = make_sink();
-        sink.emit_tool_call("call_read_1", "Read", r#"{"path":"/tmp/a.txt"}"#);
-        let _running = rx.try_recv().unwrap();
-        sink.emit_tool_result("call_read_1", "Read", false, "ok");
-        let _completed = rx.try_recv().unwrap();
-
-        sink.truncate_active_tool_calls_for_auto_continue("output token limit");
-
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
     fn fail_active_tool_calls_marks_pending_tool_error_and_drains_it() {
         let (sink, mut rx) = make_sink();
         sink.emit_tool_call(
@@ -3122,7 +3064,7 @@ mod tests {
             other => panic!("Expected ToolCall, got {:?}", other),
         }
 
-        sink.truncate_active_tool_calls_for_auto_continue("output token limit");
+        sink.fail_active_tool_calls("a second attempt at the same call");
         assert!(rx.try_recv().is_err(), "a failed call must not be recovered twice");
     }
 
@@ -4778,7 +4720,7 @@ mod tests {
             }
             other => panic!("expected Plan, got {other:?}"),
         }
-        sink.truncate_active_tool_calls_for_auto_continue("max_tokens");
+        sink.fail_active_tool_calls("a later lifecycle boundary");
         // The successful plan result must settle the source tool without
         // emitting a synthetic continuation recovery later.
         assert!(rx.try_recv().is_err());
@@ -4861,7 +4803,7 @@ mod tests {
 
         // The plan result must settle the active call so no synthetic
         // recovery frame is emitted at a later lifecycle boundary.
-        sink.truncate_active_tool_calls_for_auto_continue("max_tokens");
+        sink.fail_active_tool_calls("a later lifecycle boundary");
         assert!(rx.try_recv().is_err());
     }
 

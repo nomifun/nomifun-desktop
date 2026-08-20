@@ -9096,6 +9096,23 @@ impl ConversationService {
                     final_turn_writeback = None;
                     break;
                 }
+                // `durable_completion` is declared outside this loop and
+                // reassigned unconditionally on every iteration, so a
+                // continuation's verdict REPLACES the previous pass's. A turn the
+                // provider cut short must therefore never continue: its honest
+                // failure receipt is the turn's outcome, and letting a follow-up
+                // pass overwrite it is how a truncated turn that wrote nothing to
+                // disk was recorded as a success. Same predicate as the
+                // write-back gate above, for the same reason.
+                //
+                // Belt-and-braces: widening `failed_terminal` in the relay
+                // already keeps `system_responses` empty for these terminals, so
+                // this should be unreachable today. It is kept so that any future
+                // path producing system responses on an incomplete terminal
+                // cannot silently resurrect the overwrite.
+                if relay_error_code::incomplete_stop_code(outcome.stop_reason).is_some() {
+                    break;
+                }
                 continuation_count += 1;
                 let next_turn_msg_id = Self::mint_msg_id();
                 pending_send = Some((
