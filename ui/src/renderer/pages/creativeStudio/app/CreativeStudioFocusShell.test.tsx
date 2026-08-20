@@ -42,6 +42,14 @@ const renderFocusShell = (path = CREATIVE_STUDIO_ROOT_PATH) =>
   );
 
 describe('Creative Studio focus shell', () => {
+  test('coordinates shell navigation with the active canvas CAS gate', async () => {
+    const source = await Bun.file(new URL('./CreativeStudioFocusShell.tsx', import.meta.url)).text();
+
+    expect(source.includes('requestCreativeCanvasProductBeforeLeave')).toBe(true);
+    expect(source.includes('navigateAfterCanvasFlush')).toBe(true);
+    expect(source.includes('onNavigate={navigateWithinStudio}')).toBe(true);
+  });
+
   test('renders source product navigation and the isolated route boundary', () => {
     const html = renderFocusShell();
 

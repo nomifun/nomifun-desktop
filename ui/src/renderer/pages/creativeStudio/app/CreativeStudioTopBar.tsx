@@ -40,6 +40,7 @@ export interface CreativeStudioTopBarProps {
   backLabel: string;
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
+  onNavigate: (path: string) => void;
   onBack: () => void;
 }
 
@@ -56,6 +57,7 @@ const CreativeStudioTopBar: React.FC<CreativeStudioTopBarProps> = ({
   backLabel,
   theme,
   onToggleTheme,
+  onNavigate,
   onBack,
 }) => {
   const { t } = useTranslation();
@@ -124,6 +126,10 @@ const CreativeStudioTopBar: React.FC<CreativeStudioTopBarProps> = ({
           className={styles.brand}
           aria-label={title}
           data-creative-studio-brand
+          onClick={(event) => {
+            event.preventDefault();
+            onNavigate(CREATIVE_STUDIO_PROJECTS_PATH);
+          }}
         >
           <FolderOpen theme='outline' size={20} fill='currentColor' strokeWidth={3} />
           <span>{title}</span>
@@ -143,6 +149,10 @@ const CreativeStudioTopBar: React.FC<CreativeStudioTopBarProps> = ({
                 data-active={active || undefined}
                 data-creative-studio-navigation={item.section}
                 aria-current={active ? 'page' : undefined}
+                onClick={(event) => {
+                  event.preventDefault();
+                  onNavigate(item.path);
+                }}
               >
                 {item.icon}
                 <span>{item.label}</span>
