@@ -84,6 +84,20 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
     expect(html.includes('aria-label="适应内容"')).toBe(true);
     expect(html.includes('aria-label="打开小地图"')).toBe(true);
     expect(html.includes('aria-pressed="true"')).toBe(true);
+    expect(html.includes('data-right-panel-header')).toBe(false);
+  });
+
+  test('keeps a header for properties while the Agent owns its source header', () => {
+    const properties = renderChrome({
+      rightView: 'properties',
+      slots: {
+        ...baseProps().slots,
+        right: { properties: <div>PROPERTIES PANEL</div> },
+      },
+    });
+
+    expect(properties.includes('data-right-panel-header="properties"')).toBe(true);
+    expect(properties.includes('PROPERTIES PANEL')).toBe(true);
   });
 
   test('renders four left views, two right views, and two bottom views', () => {

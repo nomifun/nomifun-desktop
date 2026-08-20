@@ -14,7 +14,6 @@ import styles from './CreativeStudioAgentPanel.module.css';
 import type { CreativeStudioAgentPanelProps } from './types';
 
 const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props) => {
-  const activeHasMessages = props.messages.length > 0;
   const panelDisabled = props.disabled === true || props.loadState !== 'ready';
 
   const renderBody = () => {
@@ -79,7 +78,7 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
             <Magic theme='outline' size='21' />
           </div>
           <strong>从一个想法开始</strong>
-          <span>描述故事、宣传片或现有素材，Agent 会与你沟通并直接操作当前画布</span>
+          <span>描述故事、宣传片或现有素材，Agent 会通过 NomiFun 模型与你沟通</span>
         </div>
       );
     }
@@ -121,7 +120,11 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
               type='text'
               shape='circle'
               size='small'
-              disabled={!activeHasMessages || props.isRunning || props.loadState !== 'ready'}
+              disabled={
+                props.activeSessionId === null ||
+                props.isRunning ||
+                props.loadState !== 'ready'
+              }
               aria-label='新对话'
               icon={<Plus theme='outline' size='16' />}
               onClick={() => {
@@ -149,6 +152,7 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
         <CreativeStudioAgentComposer
           draft={props.draft}
           model={props.model}
+          modelLocked={props.modelLocked === true}
           isRunning={props.isRunning}
           disabled={panelDisabled}
           onDraftChange={props.onDraftChange}

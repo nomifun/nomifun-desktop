@@ -14,14 +14,14 @@
 
 .root :global([data-creative-canvas-chrome]) {
   grid-template-columns:
-    var(--creative-canvas-left-panel-width, 216px)
+    var(--creative-canvas-left-panel-width, 280px)
     minmax(0, 1fr)
-    var(--creative-canvas-right-panel-width, 340px);
+    var(--creative-canvas-right-panel-width, 390px);
 }
 
 .root :global([data-creative-canvas-chrome][data-right-view='closed']) {
   grid-template-columns:
-    var(--creative-canvas-left-panel-width, 216px)
+    var(--creative-canvas-left-panel-width, 280px)
     minmax(0, 1fr)
     0;
 }

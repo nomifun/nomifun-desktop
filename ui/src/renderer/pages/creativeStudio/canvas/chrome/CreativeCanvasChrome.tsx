@@ -370,30 +370,32 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
           data-canvas-no-zoom
           {...chromeEventProps}
         >
-          <header className={styles.panelHeader}>
-            <div className={styles.panelTabs} role='tablist' aria-label='右侧面板'>
-              {(['assistant', 'properties'] as const).map((view) => (
-                <button
-                  key={view}
-                  type='button'
-                  role='tab'
-                  aria-selected={props.rightView === view}
-                  data-active={props.rightView === view || undefined}
-                  disabled={props.disabled}
-                  onClick={() => props.onRightViewChange(view)}
-                >
-                  {rightIcon(view)}
-                  <span>{RIGHT_LABELS[view]}</span>
-                </button>
-              ))}
-            </div>
-            <ChromeIconButton
-              label='关闭右侧面板'
-              icon={<Close {...iconProps} />}
-              disabled={props.disabled}
-              onClick={() => props.onRightViewChange(null)}
-            />
-          </header>
+          {props.rightView === 'properties' ? (
+            <header className={styles.panelHeader} data-right-panel-header='properties'>
+              <div className={styles.panelTabs} role='tablist' aria-label='右侧面板'>
+                {(['assistant', 'properties'] as const).map((view) => (
+                  <button
+                    key={view}
+                    type='button'
+                    role='tab'
+                    aria-selected={props.rightView === view}
+                    data-active={props.rightView === view || undefined}
+                    disabled={props.disabled}
+                    onClick={() => props.onRightViewChange(view)}
+                  >
+                    {rightIcon(view)}
+                    <span>{RIGHT_LABELS[view]}</span>
+                  </button>
+                ))}
+              </div>
+              <ChromeIconButton
+                label='关闭右侧面板'
+                icon={<Close {...iconProps} />}
+                disabled={props.disabled}
+                onClick={() => props.onRightViewChange(null)}
+              />
+            </header>
+          ) : null}
           <div className={styles.panelBody} role='tabpanel' data-right-panel-body={props.rightView}>
             {rightSlot}
           </div>

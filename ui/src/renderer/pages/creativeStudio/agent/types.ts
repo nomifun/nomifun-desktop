@@ -72,6 +72,8 @@ export interface CreativeStudioAgentPanelProps {
   messages: readonly CreativeStudioAgentMessage[];
   draft: string;
   model: CreativeModelSelectionRef | null;
+  /** A dedicated NomiFun conversation cannot change model after its first turn. */
+  modelLocked?: boolean;
   isRunning: boolean;
   errorMessage?: string;
   disabled?: boolean;

@@ -11,6 +11,8 @@ import { createEmptyCreativeProjectDocument } from '../../domain';
 import { canvasCommands, canvasReducer, createInitialCanvasState } from '../core';
 import { createCreativeCanvasProductNode } from './nodeFactory';
 import {
+  CREATIVE_CANVAS_SOURCE_AGENT_PANEL_WIDTH,
+  CREATIVE_CANVAS_SOURCE_LEFT_PANEL_WIDTH,
   canLeaveCreativeCanvasAfterFlush,
   creativeCanvasProductPanelViews,
   creativeCanvasProductSelectionCapabilities,
@@ -66,10 +68,20 @@ describe('Creative Canvas product controller helpers', () => {
     });
     expect(creativeCanvasProductPanelViews(closed).right).toBeNull();
     expect(closed.right.activeView).toBe('properties');
-    expect(closed.left.width).toBe(initial.left.width);
+    expect(closed.left.width).toBe(CREATIVE_CANVAS_SOURCE_LEFT_PANEL_WIDTH);
     expect(closed.right.width).toBe(initial.right.width);
     expect(closed.bottom.height).toBe(initial.bottom.height);
     expect(initial).toEqual(document.panels);
+
+    const staleGeometry = {
+      ...initial,
+      left: { ...initial.left, width: 216 },
+      right: { ...initial.right, width: 340 },
+    };
+    const sourceLeft = withCreativeCanvasLeftView(staleGeometry, 'canvas');
+    const assistant = withCreativeCanvasRightView(staleGeometry, 'assistant');
+    expect(sourceLeft.left.width).toBe(CREATIVE_CANVAS_SOURCE_LEFT_PANEL_WIDTH);
+    expect(assistant.right.width).toBe(CREATIVE_CANVAS_SOURCE_AGENT_PANEL_WIDTH);
   });
 
   test('derives grouping and deletion affordances from canonical selection', () => {
