@@ -16,12 +16,12 @@ import {
 } from '../../assets';
 import {
   createNomiPromptLibraryPort,
-  PromptLibraryPage,
   type PromptLibraryItem,
   type PromptLibraryPort,
   type PromptLibrarySelection,
 } from '..';
 import PromptLibraryDetails, { type PromptCopyState } from './PromptLibraryDetails';
+import StandalonePromptLibraryPage from './StandalonePromptLibraryPage';
 import {
   copyStandalonePrompt,
   type PromptClipboardWriter,
@@ -85,10 +85,9 @@ export const CreativeStudioPromptsRoute: React.FC<CreativeStudioPromptsRouteProp
 
   return (
     <>
-      <PromptLibraryPage
+      <StandalonePromptLibraryPage
         port={promptPort}
         title='提示词中心'
-        description='汇集 NomiFun 对话预设与已加入素材库的文本素材。选择卡片查看完整内容并复制。'
         selectedId={selected?.id ?? null}
         onSelect={selectPrompt}
       />
