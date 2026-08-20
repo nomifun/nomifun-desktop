@@ -375,6 +375,7 @@ mod tests {
             max_tokens: None,
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         };
 
         let error = provider.build_request_body(&request).unwrap_err();

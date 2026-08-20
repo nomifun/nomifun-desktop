@@ -9,8 +9,10 @@ import { describe, expect, test } from 'bun:test';
 import type { TMessage } from '@/common/chat/chatLib';
 import { parseConversationId, parseMessageId, type ConversationId } from '@/common/types/ids';
 import {
+  composeMessageForTest,
   drainPendingMessageUpdates,
   mergeFetchedMessagesForConversation,
+  normalizeDbMessage,
 } from './hooks';
 
 const source = readFileSync(new URL('./hooks.ts', import.meta.url), 'utf8');
@@ -37,6 +39,62 @@ const textMessage = (
 };
 
 describe('message visibility across batching and conversation switches', () => {
+  test('authoritative empty replacement hides an earlier non-tail draft in place', () => {
+    const segmentId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000031');
+    const draft: TMessage = {
+      id: 'draft-local',
+      msg_id: segmentId,
+      conversation_id: conversationA,
+      type: 'text',
+      position: 'left',
+      status: 'work',
+      content: { content: 'discarded draft' },
+      created_at: 1,
+    };
+    const later = textMessage(conversationA, '32', 'later process row', 2);
+    const replacement: TMessage = {
+      id: 'replacement-local',
+      msg_id: segmentId,
+      conversation_id: conversationA,
+      type: 'text',
+      position: 'left',
+      status: 'finish',
+      hidden: true,
+      content: { content: '', replace: true },
+      created_at: 3,
+    };
+
+    const merged = composeMessageForTest(replacement, [draft, later]);
+    expect(merged).toHaveLength(2);
+    expect(merged[0].id).toBe('draft-local');
+    expect(merged[0].hidden).toBe(true);
+    expect(merged[0].status).toBe('finish');
+    expect(merged[0].type === 'text' && merged[0].content.content).toBe('');
+  });
+
+  test('rehydrates truncated recovery metadata from a persisted tips row', () => {
+    const sourceMessageId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000033');
+    const persisted = normalizeDbMessage({
+      id: 'persisted-tip',
+      msg_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000000034'),
+      conversation_id: conversationA,
+      type: 'tips',
+      position: 'center',
+      content: {
+        content: 'output truncated',
+        type: 'error',
+        error: { message: 'output truncated', code: 'OUTPUT_TRUNCATED', retryable: true },
+        recovery: {
+          kind: 'continue_truncated',
+          source_message_id: sourceMessageId,
+          failure_code: 'output_truncated',
+        },
+      } as any,
+    });
+    if (persisted.type !== 'tips') throw new Error('expected tips');
+    expect(persisted.content.recovery?.source_message_id).toBe(sourceMessageId);
+  });
+
   test('drains a queued message synchronously and exactly once', () => {
     const sent = textMessage(conversationA, '01', 'persist me', 1);
     const pendingRef = { current: [{ message: sent, add: false }] };

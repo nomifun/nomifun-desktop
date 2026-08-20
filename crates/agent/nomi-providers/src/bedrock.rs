@@ -755,6 +755,7 @@ mod tests {
             max_tokens: Some(16),
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         };
 
         let body = provider.build_request_body(&request).unwrap();
@@ -781,6 +782,7 @@ mod tests {
             max_tokens: None,
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         };
 
         let error = provider.build_request_body(&request).unwrap_err();
@@ -828,6 +830,7 @@ mod tests {
             max_tokens: Some(64),
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         };
         let body = provider.build_request_body(&request).unwrap();
         assert_eq!(body["anthropic_version"], "bedrock-2023-05-31");

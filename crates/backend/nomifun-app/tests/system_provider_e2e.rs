@@ -49,6 +49,7 @@ async fn provider_full_crud_with_auth() {
                     "task": "chat",
                     "protocol": "anthropic.messages",
                     "connection_role": "default",
+                    "output_limit": 8192,
                     "provider_params": {}
                 }]
             },

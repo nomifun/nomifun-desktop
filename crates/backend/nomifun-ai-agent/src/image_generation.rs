@@ -172,6 +172,7 @@ pub async fn classify_image_generation_intent_with_model(
         max_tokens: Some(96),
         thinking: None,
         reasoning_effort: None,
+        retain_provider_round: false,
     };
 
     let classify = async {
@@ -182,6 +183,11 @@ pub async fn classify_image_generation_intent_with_model(
         let mut output = String::new();
         let mut done = false;
         while let Some(event) = stream.recv().await {
+            if done {
+                return Err(
+                    "image-intent provider emitted an event after terminal Done".to_owned(),
+                );
+            }
             match event {
                 LlmEvent::TextDelta(delta) => {
                     if output.len().saturating_add(delta.len()) > IMAGE_INTENT_MAX_OUTPUT_BYTES {
@@ -213,7 +219,14 @@ pub async fn classify_image_generation_intent_with_model(
                             .to_owned(),
                     );
                 }
-                LlmEvent::ThinkingDelta(_) | LlmEvent::ThinkingSignature(_) => {}
+                LlmEvent::ThinkingDelta(_)
+                | LlmEvent::ThinkingSignature(_) => {}
+                LlmEvent::ProviderRoundId(_) => {
+                    return Err(
+                        "image-intent provider emitted a retained round id for a non-retainable request"
+                            .to_owned(),
+                    );
+                }
             }
         }
         if !done {
@@ -1202,14 +1215,24 @@ mod tests {
     struct FailingPreferenceRepository;
 
     struct IntentProvider {
-        output: String,
+        events: Vec<LlmEvent>,
         requests: Mutex<Vec<LlmRequest>>,
     }
 
     impl IntentProvider {
         fn new(output: impl Into<String>) -> Self {
+            Self::with_events(vec![
+                LlmEvent::TextDelta(output.into()),
+                LlmEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Default::default(),
+                },
+            ])
+        }
+
+        fn with_events(events: Vec<LlmEvent>) -> Self {
             Self {
-                output: output.into(),
+                events,
                 requests: Mutex::new(Vec::new()),
             }
         }
@@ -1222,16 +1245,10 @@ mod tests {
             request: &LlmRequest,
         ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
             self.requests.lock().unwrap().push(request.clone());
-            let (tx, rx) = tokio::sync::mpsc::channel(4);
-            tx.send(LlmEvent::TextDelta(self.output.clone()))
-                .await
-                .unwrap();
-            tx.send(LlmEvent::Done {
-                stop_reason: StopReason::EndTurn,
-                usage: Default::default(),
-            })
-            .await
-            .unwrap();
+            let (tx, rx) = tokio::sync::mpsc::channel(self.events.len().max(1));
+            for event in self.events.clone() {
+                tx.send(event).await.unwrap();
+            }
             Ok(rx)
         }
     }
@@ -1565,6 +1582,44 @@ mod tests {
             .await
             .unwrap_err();
             assert!(error.contains("invalid image-intent JSON"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn isolated_intent_pass_rejects_cursor_and_post_terminal_data() {
+        for events in [
+            vec![
+                LlmEvent::TextDelta(r#"{"intent":"creation"}"#.to_owned()),
+                LlmEvent::ProviderRoundId("unexpected".to_owned()),
+                LlmEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Default::default(),
+                },
+            ],
+            vec![
+                LlmEvent::TextDelta(r#"{"intent":"creation"}"#.to_owned()),
+                LlmEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Default::default(),
+                },
+                LlmEvent::TextDelta("poison".to_owned()),
+            ],
+        ] {
+            let error = classify_image_generation_intent_with_model(
+                Arc::new(IntentProvider::with_events(events)),
+                "chat-model".to_owned(),
+                "ambiguous",
+                None,
+                "",
+                r#"{"count":0,"extensions":[]}"#,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error.contains("non-retainable request")
+                    || error.contains("after terminal Done"),
+                "{error}"
+            );
         }
     }
 

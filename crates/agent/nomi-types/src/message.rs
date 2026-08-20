@@ -69,6 +69,11 @@ pub struct Message {
     /// whether old tool results should be cleared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<DateTime<Utc>>,
+    /// Opaque provider-side identity for the round that produced this
+    /// assistant message. It is valid only while the already-sent message
+    /// prefix remains byte-for-byte equivalent at the provider boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_round_id: Option<String>,
 }
 
 impl Message {
@@ -78,6 +83,7 @@ impl Message {
             role,
             content,
             timestamp: None,
+            provider_round_id: None,
         }
     }
 
@@ -87,8 +93,19 @@ impl Message {
             role,
             content,
             timestamp: Some(Utc::now()),
+            provider_round_id: None,
         }
     }
+}
+
+/// Drop every provider round cursor after an in-place history rewrite.
+/// Returns whether at least one cursor was removed.
+pub fn clear_provider_round_ids(messages: &mut [Message]) -> bool {
+    let mut changed = false;
+    for message in messages {
+        changed |= message.provider_round_id.take().is_some();
+    }
+    changed
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -477,6 +494,7 @@ mod tests {
         let json = r#"{"role":"user","content":[{"type":"text","text":"hi"}]}"#;
         let msg: Message = serde_json::from_str(json).unwrap();
         assert!(msg.timestamp.is_none());
+        assert!(msg.provider_round_id.is_none());
     }
 
     #[test]
@@ -492,6 +510,26 @@ mod tests {
             !json.contains("timestamp"),
             "None timestamp should be omitted via skip_serializing_if"
         );
+        assert!(!json.contains("provider_round_id"));
+    }
+
+    #[test]
+    fn provider_round_id_roundtrips_and_can_be_cleared_after_history_rewrite() {
+        let mut messages = vec![
+            Message {
+                provider_round_id: Some("resp_123".to_owned()),
+                ..Message::new(Role::Assistant, vec![])
+            },
+            Message::new(Role::User, vec![]),
+        ];
+        let value = serde_json::to_value(&messages[0]).unwrap();
+        assert_eq!(value["provider_round_id"], "resp_123");
+        let restored: Message = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.provider_round_id.as_deref(), Some("resp_123"));
+
+        assert!(clear_provider_round_ids(&mut messages));
+        assert!(messages.iter().all(|message| message.provider_round_id.is_none()));
+        assert!(!clear_provider_round_ids(&mut messages));
     }
 
     // --- ContentBlock::Image ---

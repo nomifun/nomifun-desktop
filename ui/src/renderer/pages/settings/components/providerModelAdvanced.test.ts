@@ -19,12 +19,14 @@ import {
   isProtocolAuthSchemeAllowed,
   isDuplicateModelId,
   normalizeModelId,
+  providerParamChainRounds,
   providerParamVoice,
   reconcileCapabilityRecommendations,
   removeCapabilityTask,
   resolveModelInputChange,
   requiresCrossOriginConsent,
   withProviderParamVoice,
+  withProviderParamChainRounds,
   validateModelDefinition,
   type ModelCapabilityDraft,
   type ModelProtocolManifest,
@@ -687,5 +689,42 @@ describe('provider params voice', () => {
 
   test('leaves malformed JSON untouched so a typo cannot silently discard the user text', () => {
     expect(withProviderParamVoice('not json', 'cixingnansheng')).toBe('not json');
+  });
+});
+
+describe('openai.responses round chaining provider param', () => {
+  test('reads only an explicit boolean true opt-in', () => {
+    expect(providerParamChainRounds('{"chain_rounds":true}')).toBe(true);
+    expect(providerParamChainRounds('{"chain_rounds":false}')).toBe(false);
+    expect(providerParamChainRounds('{"chain_rounds":"true"}')).toBe(false);
+    expect(providerParamChainRounds('{"temperature":0.2}')).toBe(false);
+    expect(providerParamChainRounds('not json')).toBe(false);
+  });
+
+  test('writes true and preserves every unrelated provider param', () => {
+    const updated = withProviderParamChainRounds(
+      '{"temperature":0.2,"nested":{"keep":true}}',
+      true
+    );
+    expect(JSON.parse(updated)).toEqual({
+      temperature: 0.2,
+      nested: { keep: true },
+      chain_rounds: true,
+    });
+    expect(providerParamChainRounds(updated)).toBe(true);
+  });
+
+  test('disabled deletes the key and collapses an otherwise empty object', () => {
+    expect(JSON.parse(withProviderParamChainRounds('{"chain_rounds":true,"temperature":0.2}', false))).toEqual({
+      temperature: 0.2,
+    });
+    expect(withProviderParamChainRounds('{"chain_rounds":false}', false)).toBe('');
+    expect(withProviderParamChainRounds('{"chain_rounds":true}', false)).toBe('');
+  });
+
+  test('leaves malformed input byte-identical', () => {
+    const malformed = ' {\n  "chain_rounds": tru';
+    expect(withProviderParamChainRounds(malformed, true)).toBe(malformed);
+    expect(withProviderParamChainRounds(malformed, false)).toBe(malformed);
   });
 });

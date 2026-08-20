@@ -3407,6 +3407,7 @@ mod tests {
             max_tokens: Some(16),
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         }
     }
 
@@ -3580,6 +3581,7 @@ mod tests {
             max_tokens: Some(1024),
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         };
         let body = provider.build_request_body(&req, provider.should_sanitize_tool_schemas(), true);
         assert_eq!(body["max_tokens"], 1024);
@@ -3601,6 +3603,7 @@ mod tests {
             max_tokens: Some(2048),
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         };
         let body = provider.build_request_body(&req, provider.should_sanitize_tool_schemas(), true);
         assert_eq!(body["max_completion_tokens"], 2048);

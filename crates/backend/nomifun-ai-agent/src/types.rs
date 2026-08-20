@@ -102,6 +102,9 @@ pub struct NomiCompatOverrides {
     pub supports_image: Option<bool>,
     /// Some(true) = gateway requires assistant reasoning_content placeholders.
     pub require_reasoning_content: Option<bool>,
+    /// Explicit opt-in for OpenAI Responses provider-side round retention.
+    /// Request builders still apply their own lifecycle gate.
+    pub chain_rounds: Option<bool>,
     /// Provider-native request body fields after local Agent controls have
     /// been removed. Typed serializer fields overwrite conflicts at send time.
     pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,

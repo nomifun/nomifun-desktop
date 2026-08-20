@@ -131,6 +131,7 @@ async fn tool_loop(
             max_tokens: Some(ONE_SHOT_MAX_TOKENS),
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         };
         let mut rx = provider
             .stream(&request)
@@ -138,44 +139,102 @@ async fn tool_loop(
             .map_err(|error| AppError::BadGateway(format!("LLM provider error: {error}")))?;
 
         let mut text = String::new();
+        let mut thinking = String::new();
+        let mut thinking_signature: Option<String> = None;
         let mut tool_uses: Vec<(String, String, serde_json::Value, Option<serde_json::Value>)> =
             Vec::new();
-        let mut done = false;
+        let mut terminal: Option<StopReason> = None;
+        let mut saw_truncated_tool_use = false;
         while let Some(event) = rx.recv().await {
+            if terminal.is_some() {
+                return Err(AppError::BadGateway(
+                    "LLM stream protocol violation: event emitted after terminal Done".into(),
+                ));
+            }
             match event {
                 LlmEvent::TextDelta(delta) => text.push_str(&delta),
+                LlmEvent::ThinkingDelta(delta) => thinking.push_str(&delta),
+                LlmEvent::ThinkingSignature(signature) => {
+                    thinking_signature = Some(signature);
+                }
                 LlmEvent::ToolUse { id, name, input, extra } => {
                     tool_uses.push((id, name, input, extra));
                 }
+                LlmEvent::ToolUseTruncated { .. } => {
+                    // This is pass-level evidence, never an executable call.
+                    // Keep consuming only to validate the provider terminal;
+                    // the adjudication below fails regardless of draft text.
+                    saw_truncated_tool_use = true;
+                }
                 LlmEvent::Done { stop_reason, .. } => {
-                    done = true;
-                    if stop_reason != StopReason::ToolUse {
-                        // A model may still have emitted tool_use blocks; only
-                        // an explicit non-tool stop with no pending calls ends
-                        // the turn.
-                        if tool_uses.is_empty() {
-                            return finish(text);
-                        }
-                    }
-                    break;
+                    terminal = Some(stop_reason);
                 }
                 LlmEvent::Error(message) => {
                     return Err(AppError::BadGateway(format!("LLM stream error: {message}")));
                 }
-                _ => {}
+                LlmEvent::ProviderRoundId(_) => {
+                    return Err(AppError::BadGateway(
+                        "LLM stream protocol violation: provider round id was emitted for a non-retainable one-shot request"
+                            .into(),
+                    ));
+                }
+                LlmEvent::ToolUseDelta { .. } => {}
             }
         }
-        if tool_uses.is_empty() {
-            if !done && text.is_empty() {
+
+        let stop_reason = terminal.ok_or_else(|| {
+            AppError::BadGateway(
+                "LLM stream ended without a terminal Done event".into(),
+            )
+        })?;
+        if saw_truncated_tool_use {
+            return Err(AppError::BadGateway(
+                "LLM output was truncated while generating a one-shot tool call".into(),
+            ));
+        }
+        match stop_reason {
+            StopReason::EndTurn => {
+                if !tool_uses.is_empty() {
+                    return Err(AppError::BadGateway(
+                        "LLM stream protocol violation: EndTurn contained tool calls".into(),
+                    ));
+                }
+                return finish(text);
+            }
+            StopReason::ToolUse => {
+                if tool_uses.is_empty() {
+                    return Err(AppError::BadGateway(
+                        "LLM stream protocol violation: ToolUse contained no complete tool calls"
+                            .into(),
+                    ));
+                }
+            }
+            StopReason::MaxTokens => {
                 return Err(AppError::BadGateway(
-                    "LLM stream ended without producing a response".into(),
+                    "LLM output was truncated before the one-shot turn completed".into(),
                 ));
             }
-            return finish(text);
+            StopReason::Refusal => {
+                return Err(AppError::BadGateway(
+                    "LLM refused the one-shot turn".into(),
+                ));
+            }
+            StopReason::MaxTurns => {
+                return Err(AppError::BadGateway(
+                    "LLM stream protocol violation: provider emitted engine-only MaxTurns"
+                        .into(),
+                ));
+            }
         }
 
         // Assistant message replaying the model's tool calls (and any text).
         let mut assistant_blocks: Vec<ContentBlock> = Vec::new();
+        if !thinking.is_empty() || thinking_signature.is_some() {
+            assistant_blocks.push(ContentBlock::Thinking {
+                thinking,
+                signature: thinking_signature,
+            });
+        }
         if !text.is_empty() {
             assistant_blocks.push(ContentBlock::Text { text: text.clone() });
         }
@@ -334,6 +393,8 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let provider = ScriptedProvider::new(vec![
             vec![
+                LlmEvent::ThinkingDelta("opaque reasoning preview".into()),
+                LlmEvent::ThinkingSignature("responses:v1:encrypted".into()),
                 LlmEvent::ToolUse {
                     id: "call_1".into(),
                     name: "knowledge_search".into(),
@@ -376,6 +437,17 @@ mod tests {
         );
         let rounds = provider.seen_messages.lock().unwrap();
         let followup = &rounds[1];
+        let assistant = followup
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Assistant)
+            .expect("the tool round is replayed");
+        assert!(matches!(
+            &assistant.content[0],
+            ContentBlock::Thinking { thinking, signature }
+                if thinking == "opaque reasoning preview"
+                    && signature.as_deref() == Some("responses:v1:encrypted")
+        ), "unexpected tool-round assistant content: {:?}", assistant.content);
         let last = followup.last().unwrap();
         assert!(matches!(
             &last.content[0],
@@ -395,6 +467,82 @@ mod tests {
             .unwrap();
         assert_eq!(text, "plain");
         assert_eq!(provider.seen_tool_names.lock().unwrap()[0], Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn only_a_well_formed_end_turn_is_deliverable() {
+        let cases = vec![
+            (
+                "max tokens with draft text",
+                vec![LlmEvent::TextDelta("draft".into()), done(StopReason::MaxTokens)],
+                "truncated",
+            ),
+            (
+                "refusal with visible text",
+                vec![LlmEvent::TextDelta("cannot comply".into()), done(StopReason::Refusal)],
+                "refused",
+            ),
+            (
+                "provider-only max turns",
+                vec![LlmEvent::TextDelta("draft".into()), done(StopReason::MaxTurns)],
+                "MaxTurns",
+            ),
+            (
+                "ToolUse without a complete call",
+                vec![done(StopReason::ToolUse)],
+                "no complete tool calls",
+            ),
+            (
+                "text without Done",
+                vec![LlmEvent::TextDelta("unterminated".into())],
+                "without a terminal Done",
+            ),
+            (
+                "event after Done",
+                vec![
+                    LlmEvent::TextDelta("committed?".into()),
+                    done(StopReason::EndTurn),
+                    LlmEvent::TextDelta("poison".into()),
+                ],
+                "after terminal Done",
+            ),
+            (
+                "truncated tool arguments",
+                vec![
+                    LlmEvent::ToolUseTruncated {
+                        id: "call_cut".into(),
+                        name: "knowledge_search".into(),
+                        argument_bytes: 21,
+                    },
+                    done(StopReason::MaxTokens),
+                ],
+                "truncated while generating a one-shot tool call",
+            ),
+            (
+                "EndTurn carrying a complete tool call",
+                vec![
+                    LlmEvent::ToolUse {
+                        id: "call_wrong_terminal".into(),
+                        name: "knowledge_search".into(),
+                        input: serde_json::json!({"query": "x"}),
+                        extra: None,
+                    },
+                    done(StopReason::EndTurn),
+                ],
+                "EndTurn contained tool calls",
+            ),
+        ];
+
+        for (label, events, expected) in cases {
+            let provider = ScriptedProvider::new(vec![events]);
+            let error = run_one_shot_turn_with_provider(provider, request(vec![], 30))
+                .await
+                .expect_err(label);
+            assert!(
+                matches!(&error, AppError::BadGateway(message) if message.contains(expected)),
+                "{label}: {error:?}"
+            );
+        }
     }
 
     /// 模型索要白名单之外的工具 ⇒ 错误 ToolResult，绝不触达任何执行面。

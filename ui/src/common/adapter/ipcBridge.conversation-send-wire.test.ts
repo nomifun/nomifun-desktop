@@ -58,6 +58,8 @@ describe('conversation send-message wire contract', () => {
                 result_ok: false,
                 result_text: 'terminal result',
                 result_error: 'provider failed',
+                result_error_code: 'output_truncated',
+                result_error_retryable: true,
               },
             }),
             { status: 202, headers: { 'Content-Type': 'application/json' } }
@@ -77,6 +79,8 @@ describe('conversation send-message wire contract', () => {
         result_ok: false,
         result_text: 'terminal result',
         result_error: 'provider failed',
+        result_error_code: 'output_truncated',
+        result_error_retryable: true,
       });
     } finally {
       globalThis.fetch = realFetch;
@@ -94,6 +98,8 @@ describe('conversation send-message wire contract', () => {
       result_ok: true,
       result_text: 'already delivered',
       result_error: null,
+      result_error_code: null,
+      result_error_retryable: null,
     };
     try {
       globalThis.fetch = (() =>
@@ -126,6 +132,59 @@ describe('conversation send-message wire contract', () => {
     }
   });
 
+  test('continues a truncated source through its dedicated bodyless idempotent route', async () => {
+    const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000212');
+    const sourceMessageId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000213');
+    const idempotencyKey = '0190f5fe-7c00-7a00-8000-000000000214';
+    try {
+      globalThis.fetch = ((input: URL | RequestInfo, init?: RequestInit) => {
+        expect(
+          String(input).includes(
+            `/api/conversations/${conversationId}/messages/${sourceMessageId}/continue-truncated`
+          )
+        ).toBe(true);
+        expect(init?.method).toBe('POST');
+        expect(new Headers(init?.headers).get('Idempotency-Key')).toBe(idempotencyKey);
+        expect(init?.body).toBeUndefined();
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              success: true,
+              data: {
+                msg_id: '0190f5fe-7c00-7a00-8000-000000000215',
+                replayed: false,
+                completed: false,
+                result_ok: null,
+                result_text: null,
+                result_error: null,
+              },
+            }),
+            { status: 202, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }) as unknown as typeof fetch;
+
+      const result = await conversation.continueTruncated.invoke({
+        conversation_id: conversationId,
+        source_message_id: sourceMessageId,
+        idempotency_key: idempotencyKey,
+      });
+
+      expect(result).toEqual({
+        msg_id: '0190f5fe-7c00-7a00-8000-000000000215',
+        replayed: false,
+        completed: false,
+        result_ok: null,
+        result_text: null,
+        result_error: null,
+        result_error_code: null,
+        result_error_retryable: null,
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   test('fails closed when a legacy response omits replay authority', async () => {
     const msgId = '0190f5fe-7c00-7a00-8000-000000000204';
     try {
@@ -153,6 +212,8 @@ describe('conversation send-message wire contract', () => {
         result_ok: null,
         result_text: null,
         result_error: null,
+        result_error_code: null,
+        result_error_retryable: null,
       });
     } finally {
       globalThis.fetch = realFetch;

@@ -2128,6 +2128,7 @@ async fn wait_for_conversation_receipt_with_renewal(
     renew.tick().await;
     let mut receipts = interval(CONVERSATION_RECEIPT_POLL_INTERVAL);
     let mut event_note = String::new();
+    let mut event_note_checkpoint: Option<String> = None;
 
     let wait = async {
         loop {
@@ -2209,13 +2210,11 @@ async fn wait_for_conversation_receipt_with_renewal(
                     }
                 } => {
                     match event {
-                        Ok(AgentStreamEvent::Text(text)) => {
-                            append_bounded(&mut event_note, &text.content);
-                        }
-                        Ok(AgentStreamEvent::Error(error)) => {
-                            append_bounded(&mut event_note, &error.message);
-                        }
-                        Ok(_) => {}
+                        Ok(event) => observe_event_note(
+                            &mut event_note,
+                            &mut event_note_checkpoint,
+                            event,
+                        ),
                         Err(broadcast::error::RecvError::Closed) => {
                             // Receipt polling remains authoritative even if a
                             // runtime is torn down before this observer runs.
@@ -2278,6 +2277,36 @@ fn append_bounded(buf: &mut String, chunk: &str) {
             cut += 1;
         }
         buf.drain(..cut);
+    }
+}
+
+fn observe_event_note(
+    event_note: &mut String,
+    checkpoint: &mut Option<String>,
+    event: AgentStreamEvent,
+) {
+    match event {
+        AgentStreamEvent::Start(_) => {
+            *checkpoint = Some(event_note.clone());
+        }
+        AgentStreamEvent::OutputDiscarded(data) => {
+            if let Some(retained) = checkpoint.as_ref() {
+                event_note.clone_from(retained);
+                *checkpoint = Some(event_note.clone());
+            } else {
+                event_note.clear();
+                append_bounded(
+                    event_note,
+                    &format!(
+                        "Attempt {} discarded output without an AutoWork stream checkpoint",
+                        data.restart_attempt
+                    ),
+                );
+            }
+        }
+        AgentStreamEvent::Text(text) => append_bounded(event_note, &text.content),
+        AgentStreamEvent::Error(error) => append_bounded(event_note, &error.message),
+        _ => {}
     }
 }
 
@@ -2909,6 +2938,55 @@ mod tests {
         assert_eq!(failure_backoff(100), Duration::from_secs(30), "stays capped");
         // Never zero —a failure must always insert some delay before re-claim.
         assert!(failure_backoff(1) > Duration::ZERO);
+    }
+
+    #[test]
+    fn autowork_event_note_retracts_only_text_after_the_latest_start() {
+        use nomifun_ai_agent::protocol::events::{
+            OutputDiscardedEventData, StartEventData, TextEventData,
+        };
+
+        let mut note = String::new();
+        let mut checkpoint = None;
+        observe_event_note(
+            &mut note,
+            &mut checkpoint,
+            AgentStreamEvent::Start(StartEventData::default()),
+        );
+        observe_event_note(
+            &mut note,
+            &mut checkpoint,
+            AgentStreamEvent::Text(TextEventData {
+                content: "prefix ".to_owned(),
+            }),
+        );
+        observe_event_note(
+            &mut note,
+            &mut checkpoint,
+            AgentStreamEvent::Start(StartEventData::default()),
+        );
+        observe_event_note(
+            &mut note,
+            &mut checkpoint,
+            AgentStreamEvent::Text(TextEventData {
+                content: "discarded".to_owned(),
+            }),
+        );
+        observe_event_note(
+            &mut note,
+            &mut checkpoint,
+            AgentStreamEvent::OutputDiscarded(OutputDiscardedEventData {
+                restart_attempt: 2,
+            }),
+        );
+        observe_event_note(
+            &mut note,
+            &mut checkpoint,
+            AgentStreamEvent::Text(TextEventData {
+                content: "answer".to_owned(),
+            }),
+        );
+        assert_eq!(note, "prefix answer");
     }
 
     #[test]
