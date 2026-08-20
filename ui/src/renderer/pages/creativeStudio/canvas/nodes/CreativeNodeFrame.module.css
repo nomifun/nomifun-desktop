@@ -1,0 +1,299 @@
+.frame {
+  --creative-node-accent: rgb(var(--primary-6));
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  box-sizing: border-box;
+  flex-direction: column;
+  overflow: visible;
+  border: 1px solid color-mix(in srgb, var(--creative-node-accent) 20%, var(--color-border-2));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--color-bg-2) 96%, transparent);
+  box-shadow: 0 7px 24px rgba(0, 0, 0, 0.12);
+  color: var(--color-text-1);
+  outline: none;
+  transition:
+    border-color 130ms ease,
+    box-shadow 130ms ease,
+    opacity 130ms ease;
+  backdrop-filter: blur(16px) saturate(120%);
+}
+
+.frame[data-node-type='image'] {
+  --creative-node-accent: rgb(var(--success-6));
+}
+
+.frame[data-node-type='video'] {
+  --creative-node-accent: rgb(var(--warning-6));
+}
+
+.frame[data-node-type='audio'] {
+  --creative-node-accent: rgb(var(--primary-6));
+}
+
+.frame[data-node-type='panorama'] {
+  --creative-node-accent: rgb(var(--primary-5));
+}
+
+.frame[data-node-type='director'] {
+  --creative-node-accent: color-mix(in srgb, rgb(var(--primary-6)) 66%, rgb(var(--danger-6)));
+}
+
+.frame[data-node-selected='true'] {
+  border-color: var(--creative-node-accent);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--creative-node-accent) 22%, transparent),
+    0 12px 34px rgba(0, 0, 0, 0.17);
+}
+
+.frame[data-node-locked='true'] {
+  background: color-mix(in srgb, var(--color-bg-2) 91%, var(--color-fill-2));
+}
+
+.frame[data-node-status='queued'],
+.frame[data-node-status='running'] {
+  border-color: color-mix(in srgb, var(--creative-node-accent) 66%, var(--color-border-2));
+}
+
+.frame[data-node-status='failed'] {
+  border-color: rgb(var(--danger-6));
+  box-shadow:
+    0 0 0 3px rgba(var(--danger-6), 0.13),
+    0 10px 28px rgba(0, 0, 0, 0.15);
+}
+
+.frame:focus-visible {
+  box-shadow:
+    0 0 0 3px rgba(var(--primary-6), 0.26),
+    0 10px 28px rgba(0, 0, 0, 0.14);
+}
+
+.header {
+  display: flex;
+  min-height: 42px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border-2) 72%, transparent);
+}
+
+.kindIcon {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  place-items: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--creative-node-accent) 12%, var(--color-fill-2));
+  color: var(--creative-node-accent);
+}
+
+.titleBlock {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.title,
+.subtitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.title {
+  font-size: 12px;
+  font-weight: 680;
+  line-height: 1.3;
+}
+
+.subtitle {
+  color: var(--color-text-3);
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.status {
+  display: inline-flex;
+  max-width: 92px;
+  min-height: 22px;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--creative-node-accent) 10%, var(--color-fill-2));
+  color: var(--creative-node-accent);
+  font-size: 10px;
+  font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status[data-status='failed'] {
+  background: rgba(var(--danger-6), 0.12);
+  color: rgb(var(--danger-6));
+}
+
+.status[data-status='canceled'] {
+  color: var(--color-text-3);
+}
+
+.statusIcon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+}
+
+.status[data-status='queued'] .statusIcon,
+.status[data-status='running'] .statusIcon {
+  animation: creative-node-spin 900ms linear infinite;
+}
+
+.actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 3px;
+}
+
+.lockButton,
+.lockedIndicator {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-3);
+}
+
+.lockButton {
+  padding: 0;
+  cursor: pointer;
+}
+
+.lockButton:hover,
+.lockButton:focus-visible {
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
+  outline: none;
+}
+
+.body {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+  border-radius: 0 0 13px 13px;
+}
+
+.progress {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  left: 8px;
+  z-index: 3;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--creative-node-accent) 13%, var(--color-fill-3));
+}
+
+.progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--creative-node-accent);
+  transition: width 180ms ease;
+}
+
+.errorMessage {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  left: 8px;
+  z-index: 4;
+  overflow: hidden;
+  padding: 6px 8px;
+  border: 1px solid rgba(var(--danger-6), 0.25);
+  border-radius: 8px;
+  background: color-mix(in srgb, rgb(var(--danger-6)) 10%, var(--color-bg-2));
+  color: rgb(var(--danger-6));
+  font-size: 10px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.footer {
+  display: flex;
+  min-height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 5px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--color-border-2) 66%, transparent);
+  color: var(--color-text-3);
+  font-size: 10px;
+}
+
+.inputHandle,
+.outputHandle {
+  position: absolute;
+  top: 50%;
+  z-index: 8;
+  transform: translateY(-50%);
+}
+
+.inputHandle {
+  left: 0;
+}
+
+.outputHandle {
+  right: 0;
+}
+
+.groupFrame {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--creative-node-accent) 4%, transparent);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.groupFrame .header {
+  width: fit-content;
+  max-width: calc(100% - 16px);
+  margin: 8px;
+  border: 1px solid color-mix(in srgb, var(--creative-node-accent) 20%, var(--color-border-2));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-bg-2) 92%, transparent);
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.09);
+}
+
+.groupFrame .body {
+  overflow: visible;
+  border-radius: 0;
+}
+
+@keyframes creative-node-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .frame,
+  .progress > span {
+    transition: none;
+  }
+
+  .statusIcon {
+    animation: none !important;
+  }
+}
