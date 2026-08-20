@@ -1,0 +1,75 @@
+.editor {
+  width: 100%;
+  height: 100%;
+}
+
+.nodePlacement {
+  position: absolute;
+  box-sizing: border-box;
+  touch-action: none;
+}
+
+.nodePlacement > * {
+  width: 100%;
+  height: 100%;
+}
+
+.topDockStack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.saveState {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-bg-2) 94%, transparent);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--color-black) 10%, transparent);
+  color: var(--color-text-2);
+  font-size: 12px;
+  line-height: 1.4;
+  backdrop-filter: blur(14px);
+}
+
+.saveState[data-canvas-save-status='conflict'],
+.saveState[data-canvas-save-status='error'] {
+  border-color: color-mix(in srgb, var(--color-danger-light-4) 70%, var(--color-border-2));
+  color: var(--color-danger-6);
+}
+
+.saveState button,
+.centerState button {
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  padding: 5px 9px;
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
+  cursor: pointer;
+}
+
+.centerState {
+  display: flex;
+  width: 100%;
+  min-height: 320px;
+  box-sizing: border-box;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px;
+  background: var(--color-bg-1);
+  color: var(--color-text-2);
+  text-align: center;
+}
+
+.centerState strong {
+  color: var(--color-text-1);
+  font-size: 16px;
+}
