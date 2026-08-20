@@ -53,9 +53,15 @@ export interface CreativeWorkflowWorkspacePageProps {
   autoLoad?: boolean;
   onCreateWithAgent?: () => void;
   onOpenModelSettings?: () => void;
-  onPickAssets?: (variable: WorkflowVariable) => Promise<string[]>;
-  onPickReferenceAssets?: () => Promise<string[]>;
-  onUploadReferenceImages?: (files: readonly File[]) => Promise<string[]>;
+  onPickAssets?: (
+    variable: WorkflowVariable,
+    selectedAssetIds: readonly string[]
+  ) => Promise<string[] | null>;
+  onPickReferenceAssets?: (selectedAssetIds: readonly string[]) => Promise<string[] | null>;
+  onUploadReferenceImages?: (
+    files: readonly File[],
+    selectedAssetIds: readonly string[]
+  ) => Promise<string[]>;
 }
 
 const newestFirst = (workflows: readonly WorkflowDefinitionV1[]) =>

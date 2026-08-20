@@ -8,6 +8,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import {
+  CreativeAssetPickerModal,
   creativeAssetClient,
   useCreativeAssets,
   type CreativeAsset,
@@ -34,7 +35,6 @@ import {
   findStandaloneWorkbenchNode,
 } from './ownership';
 import {
-  ReferenceAssetPicker,
   StandaloneWorkbenchPage,
   useStandaloneWorkbenchScope,
 } from './shared';
@@ -275,20 +275,37 @@ const OwnedImageWorkbench: React.FC<{
         <div className={styles.runtimeNotice} role='alert'>{persistence.resumeError?.message ?? error}</div>
       ) : null}
       <ImageWorkbench {...props} />
-      <ReferenceAssetPicker
+      <CreativeAssetPickerModal
         open={pickerOpen}
         assets={assets.assets}
         acceptedKinds={['image']}
         selectedIds={referenceIds}
         loading={assets.loading}
+        loadingMore={assets.loadingMore}
         hasMore={assets.hasMore}
+        error={assets.error ?? assets.mutationError}
+        uploading={assets.mutating}
         onToggle={(asset: CreativeAsset) =>
           setReferenceIds((ids) =>
             ids.includes(asset.id) ? ids.filter((id) => id !== asset.id) : [...ids, asset.id]
           )
         }
         onLoadMore={() => void assets.loadMore()}
-        onClose={() => setPickerOpen(false)}
+        onRetry={() => void assets.reload()}
+        onUploadFiles={(files) => {
+          void Promise.all(
+            files.map((file) => assets.upload(file, {
+              title: file.name,
+              tags: ['workbench-reference'],
+              inLibrary: true,
+            }))
+          )
+            .then((uploaded) => setReferenceIds((ids) => [
+              ...new Set([...ids, ...uploaded.map((asset) => asset.id)]),
+            ]))
+            .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+        }}
+        onCancel={() => setPickerOpen(false)}
       />
     </>
   );
