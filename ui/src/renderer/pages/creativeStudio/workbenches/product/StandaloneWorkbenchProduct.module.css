@@ -1,0 +1,152 @@
+.page {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
+  background: var(--color-bg-1);
+}
+
+.scopeBar {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 20px;
+  border-bottom: 1px solid var(--color-border-2);
+  background: var(--color-bg-2);
+  color: var(--color-text-2);
+}
+
+.scopeBar[data-tone='warning'] {
+  border-bottom-color: rgb(var(--orange-3));
+  background: rgb(var(--orange-1));
+}
+
+.scopeBar[data-tone='danger'] {
+  border-bottom-color: rgb(var(--red-3));
+  background: rgb(var(--red-1));
+}
+
+.scopeCopy {
+  min-width: 180px;
+  flex: 1;
+}
+
+.scopeCopy strong,
+.scopeCopy span {
+  display: block;
+}
+
+.scopeCopy span {
+  margin-top: 2px;
+  color: var(--color-text-3);
+  font-size: 12px;
+}
+
+.scopeSelect {
+  width: min(360px, 34vw);
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border-3);
+  border-radius: 6px;
+  background: var(--color-bg-1);
+  color: var(--color-text-1);
+}
+
+.scopeAction {
+  border: 0;
+  border-radius: 6px;
+  padding: 8px 12px;
+  background: rgb(var(--primary-6));
+  color: #fff;
+  cursor: pointer;
+}
+
+.scopeAction:disabled,
+.scopeSelect:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.runtimeNotice {
+  margin: 8px 20px 0;
+  padding: 8px 12px;
+  border: 1px solid rgb(var(--red-3));
+  border-radius: 6px;
+  background: rgb(var(--red-1));
+  color: rgb(var(--red-7));
+  font-size: 13px;
+}
+
+.workbench {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.pickerList {
+  display: grid;
+  max-height: 420px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+  overflow: auto;
+}
+
+.pickerItem {
+  display: flex;
+  min-height: 92px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  text-align: left;
+  cursor: pointer;
+}
+
+.pickerItem[data-selected='true'] {
+  border-color: rgb(var(--primary-6));
+  box-shadow: 0 0 0 1px rgb(var(--primary-6));
+}
+
+.pickerItem img,
+.pickerMediaPlaceholder {
+  width: 100%;
+  height: 82px;
+  border-radius: 5px;
+  background: var(--color-fill-2);
+  object-fit: cover;
+}
+
+.pickerMediaPlaceholder {
+  display: grid;
+  place-items: center;
+  color: var(--color-text-3);
+}
+
+.pickerEmpty {
+  padding: 50px 16px;
+  color: var(--color-text-3);
+  text-align: center;
+}
+
+.pickerFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+@media (max-width: 760px) {
+  .scopeBar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .scopeSelect {
+    width: 100%;
+  }
+}
