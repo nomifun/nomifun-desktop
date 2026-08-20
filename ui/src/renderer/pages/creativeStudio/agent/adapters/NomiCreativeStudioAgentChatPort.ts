@@ -286,8 +286,6 @@ export function createNomiCreativeStudioAgentChatPort(
           projectId: request.projectId,
           sessionId: request.sessionId,
           model: request.model,
-          history: request.history,
-          historyKey: requestHistoryKey,
           pendingTurnIdempotencyKey: request.idempotencyKey,
           signal: request.signal,
         });
@@ -297,6 +295,16 @@ export function createNomiCreativeStudioAgentChatPort(
           resolution.binding,
           serializeCreativeStudioAgentHistory(resolution.history)
         );
+        if (
+          resolution.history.length < request.history.length ||
+          serializeCreativeStudioAgentHistory(
+            resolution.history.slice(0, request.history.length)
+          ) !== requestHistoryKey
+        ) {
+          throw new NomiCreativeStudioAgentBindingError(
+            'Nomi conversation no longer preserves the loaded project history prefix'
+          );
+        }
         const recoveredCount = resolution.history.length - request.history.length;
         if (recoveredCount !== 0 && recoveredCount !== 2) {
           throw new NomiCreativeStudioAgentBindingError(

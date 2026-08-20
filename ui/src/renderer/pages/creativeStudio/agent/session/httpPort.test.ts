@@ -36,8 +36,6 @@ const request: CreativeStudioAgentSessionPersistenceRequest = {
   projectId,
   sessionId,
   model: { providerId, model: "nomi-chat" },
-  history,
-  historyKey: serializeCreativeStudioAgentHistory(history),
   pendingTurnIdempotencyKey: null,
 };
 
@@ -54,7 +52,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
             session_id: sessionId,
             conversation_id: conversationId,
             model: { provider_id: providerId, model: "nomi-chat" },
-            history_key: request.historyKey,
+            history_key: serializeCreativeStudioAgentHistory(history),
           },
           history,
           created: false,
@@ -71,8 +69,6 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
       project_id: projectId,
       session_id: sessionId,
       model: { provider_id: providerId, model: "nomi-chat" },
-      history,
-      history_key: request.historyKey,
       pending_turn_idempotency_key: null,
     });
     expect(binding.binding.conversationId).toBe(conversationId);
@@ -88,7 +84,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
             session_id: sessionId,
             conversation_id: "not-a-conversation",
             model: { provider_id: providerId, model: "nomi-chat" },
-            history_key: request.historyKey,
+            history_key: serializeCreativeStudioAgentHistory(history),
           },
           history,
           created: false,
@@ -103,7 +99,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
     expect(failure instanceof Error).toBe(true);
   });
 
-  test("accepts exactly one recovered pair when the project has a pending turn fence", async () => {
+  test("returns complete server-authoritative history while a pending turn is fenced", async () => {
     const recoveredHistory: readonly CreativeStudioAgentMessage[] = [
       ...history,
       {
@@ -169,7 +165,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
     expect(calls).toBe(0);
   });
 
-  test("rejects unknown response fields and non-durable input before use", async () => {
+  test("rejects unknown response fields and an invalid pending fence before use", async () => {
     let calls = 0;
     const transport: CreativeStudioAgentSessionHttpTransport = {
       async resolve() {
@@ -181,7 +177,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
             session_id: sessionId,
             conversation_id: conversationId,
             model: { provider_id: providerId, model: "nomi-chat" },
-            history_key: request.historyKey,
+            history_key: serializeCreativeStudioAgentHistory(history),
           },
           history,
           created: false,
@@ -204,15 +200,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
     )
       .resolveOrCreateExclusive({
         ...request,
-        history: [
-          {
-            id: userMessageId,
-            role: "assistant",
-            status: "running",
-            text: "",
-            activityLabel: "生成中",
-          },
-        ],
+        pendingTurnIdempotencyKey: "not-a-pending-key",
       })
       .catch((failure: unknown) => failure);
     expect(

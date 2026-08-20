@@ -19,14 +19,12 @@ export interface NomiCreativeStudioAgentSessionResolutionInput {
   projectId: string;
   sessionId: string;
   model: CreativeModelSelectionRef;
-  history: readonly CreativeStudioAgentMessage[];
-  historyKey: string;
   pendingTurnIdempotencyKey: string | null;
   signal: AbortSignal;
 }
 /**
- * A resolver must return a dedicated Nomi conversation whose persisted history
- * maps exactly to `historyKey`. Shared main-chat conversations are rejected so
+ * A resolver must return a dedicated Nomi conversation plus the server-owned
+ * persisted history and its exact `historyKey` proof. Shared conversations are rejected so
  * stopping a Creative Studio turn can never cancel an unrelated user turn.
  */
 export interface NomiCreativeStudioAgentSessionBinding {

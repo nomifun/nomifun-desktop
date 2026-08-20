@@ -213,7 +213,7 @@ const matchingResolver = (overrides: ResolverOverrides = {}): NomiCreativeStudio
     const authoritativeHistory =
       typeof historyOverride === 'function'
         ? historyOverride(calls, input)
-        : (historyOverride ?? input.history);
+        : (historyOverride ?? history);
     calls += 1;
     return {
       binding: {
@@ -280,7 +280,7 @@ describe('NomiCreativeStudioAgentChatPort', () => {
     };
     const port = createNomiCreativeStudioAgentChatPort({
       resolveSession: matchingResolver({
-        history: (call, input) => (call === 0 ? input.history : recoveredHistory),
+        history: (call) => (call === 0 ? history : recoveredHistory),
       }),
       transport,
       turnStartTimeoutMs: 100,
@@ -337,7 +337,7 @@ describe('NomiCreativeStudioAgentChatPort', () => {
     ];
     const port = createNomiCreativeStudioAgentChatPort({
       resolveSession: matchingResolver({
-        history: (call, input) => (call === 0 ? input.history : recoveredHistory),
+        history: (call) => (call === 0 ? history : recoveredHistory),
       }),
       transport,
       recoveryPollMs: 25,
@@ -365,7 +365,7 @@ describe('NomiCreativeStudioAgentChatPort', () => {
     });
     const port = createNomiCreativeStudioAgentChatPort({
       resolveSession: matchingResolver({
-        history: (call, input) => (call === 0 ? input.history : recoveredHistory),
+        history: (call) => (call === 0 ? history : recoveredHistory),
       }),
       transport,
       recoveryPollMs: 25,
@@ -407,7 +407,7 @@ describe('NomiCreativeStudioAgentChatPort', () => {
     ];
     const port = createNomiCreativeStudioAgentChatPort({
       resolveSession: matchingResolver({
-        history: (call, input) => (call === 0 ? input.history : recoveredHistory),
+        history: (call) => (call === 0 ? history : recoveredHistory),
       }),
       transport,
       recoveryPollMs: 25,

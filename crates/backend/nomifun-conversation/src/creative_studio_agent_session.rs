@@ -54,8 +54,6 @@ pub struct ResolveCreativeStudioAgentSessionRequest {
     pub project_id: String,
     pub session_id: String,
     pub model: CreativeStudioAgentModelRef,
-    pub history: Vec<CreativeStudioAgentHistoryMessage>,
-    pub history_key: String,
     pub pending_turn_idempotency_key: Option<String>,
 }
 
@@ -109,35 +107,6 @@ fn validate_request(request: &ResolveCreativeStudioAgentSessionRequest) -> Resul
         })?;
     }
 
-    let mut ids = HashSet::with_capacity(request.history.len());
-    for message in &request.history {
-        validate_uuidv7(&message.id).map_err(|error| {
-            AppError::BadRequest(format!(
-                "invalid Creative Studio history message id '{}': {error}",
-                message.id
-            ))
-        })?;
-        if !ids.insert(message.id.as_str()) {
-            return Err(AppError::BadRequest(
-                "Creative Studio history contains a duplicate message id".to_owned(),
-            ));
-        }
-        if message.status != CreativeStudioAgentHistoryStatus::Complete
-            || message.activity_label.is_some()
-            || message.error_message.is_some()
-        {
-            return Err(AppError::Conflict(
-                "Creative Studio session recovery accepts only durable completed history"
-                    .to_owned(),
-            ));
-        }
-    }
-    if serialize_history(&request.history)? != request.history_key {
-        return Err(AppError::Conflict(
-            "Creative Studio Agent history_key does not match its canonical history"
-                .to_owned(),
-        ));
-    }
     Ok(())
 }
 
@@ -290,34 +259,27 @@ fn project_completed_history(
 }
 
 fn validate_history_reconciliation(
-    request_history: &[CreativeStudioAgentHistoryMessage],
     project_message_ids: &[String],
     projected_history: &[CreativeStudioAgentHistoryMessage],
     has_pending_turn: bool,
 ) -> Result<(), AppError> {
-    let requested_ids = request_history
-        .iter()
-        .map(|message| message.id.as_str())
-        .collect::<Vec<_>>();
     let project_ids = project_message_ids
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    if requested_ids != project_ids {
-        return Err(AppError::Conflict(
-            "Creative Studio request history does not match the project message references"
-                .to_owned(),
-        ));
-    }
-    if projected_history.len() < request_history.len()
-        || projected_history[..request_history.len()] != request_history[..]
+    let projected_ids = projected_history
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<Vec<_>>();
+    if projected_ids.len() < project_ids.len()
+        || projected_ids[..project_ids.len()] != project_ids[..]
     {
         return Err(AppError::Conflict(
-            "Creative Studio project history is not a prefix of the dedicated Conversation transcript"
+            "Creative Studio project message references are not a prefix of the dedicated Conversation transcript"
                 .to_owned(),
         ));
     }
-    let recovered = &projected_history[request_history.len()..];
+    let recovered = &projected_history[project_ids.len()..];
     if !recovered.is_empty() && (!has_pending_turn || recovered.len() != 2) {
         return Err(AppError::Conflict(
             "Creative Studio session recovery must reconcile exactly one completed Agent turn"
@@ -444,8 +406,7 @@ impl ConversationService {
                     expected_pending_turn_idempotency_key: request
                         .pending_turn_idempotency_key
                         .clone(),
-                    create_if_missing: request.history.is_empty()
-                        && request.pending_turn_idempotency_key.is_some(),
+                    create_if_missing: request.pending_turn_idempotency_key.is_some(),
                 }),
             )
             .await?;
@@ -480,7 +441,6 @@ impl ConversationService {
         let persisted_model = validate_persisted_binding(owner_id, &request, &resolved.conversation)?;
         let history = project_completed_history(&resolved.messages)?;
         validate_history_reconciliation(
-            &request.history,
             &resolved.project_message_ids,
             &history,
             request.pending_turn_idempotency_key.is_some(),
@@ -590,15 +550,14 @@ mod tests {
                 "已经完成",
             ),
         ];
-        validate_history_reconciliation(&[], &[], &recovered_pair, true).unwrap();
-        assert!(validate_history_reconciliation(&[], &[], &recovered_pair, false).is_err());
+        validate_history_reconciliation(&[], &recovered_pair, true).unwrap();
+        assert!(validate_history_reconciliation(&[], &recovered_pair, false).is_err());
 
         let mut two_pairs = recovered_pair.clone();
         two_pairs.extend(recovered_pair.clone());
-        assert!(validate_history_reconciliation(&[], &[], &two_pairs, true).is_err());
+        assert!(validate_history_reconciliation(&[], &two_pairs, true).is_err());
 
         validate_history_reconciliation(
-            &recovered_pair,
             &[USER_ID.to_owned(), ASSISTANT_B.to_owned()],
             &recovered_pair,
             false,
@@ -606,7 +565,6 @@ mod tests {
         .unwrap();
         assert!(
             validate_history_reconciliation(
-                &recovered_pair,
                 &[USER_ID.to_owned()],
                 &recovered_pair,
                 false,

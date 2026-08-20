@@ -23,8 +23,6 @@ interface WireRequest {
   project_id: string;
   session_id: string;
   model: { provider_id: string; model: string };
-  history: readonly CreativeStudioAgentMessage[];
-  history_key: string;
   pending_turn_idempotency_key: string | null;
 }
 
@@ -142,33 +140,6 @@ export function createNomiCreativeStudioAgentSessionHttpPort(
           "model must be trimmed and non-empty",
         );
       }
-      const requestIds = new Set<string>();
-      for (const message of request.history) {
-        validateBoundaryId(message.id, "history message id");
-        if (
-          requestIds.has(message.id) ||
-          message.status !== "complete" ||
-          (message.role !== "user" && message.role !== "assistant") ||
-          ("activityLabel" in message && message.activityLabel !== undefined) ||
-          ("errorMessage" in message && message.errorMessage !== undefined)
-        ) {
-          throw new CreativeStudioAgentSessionResolutionError(
-            "INVALID_INPUT",
-            "history must contain unique durable completed messages only",
-          );
-        }
-        requestIds.add(message.id);
-      }
-      if (
-        serializeCreativeStudioAgentHistory(request.history) !==
-        request.historyKey
-      ) {
-        throw new CreativeStudioAgentSessionResolutionError(
-          "INVALID_INPUT",
-          "history_key does not match the canonical history",
-        );
-      }
-
       const response = record(
         await transport.resolve({
           project_id: request.projectId,
@@ -177,8 +148,6 @@ export function createNomiCreativeStudioAgentSessionHttpPort(
             provider_id: request.model.providerId,
             model: request.model.model,
           },
-          history: request.history,
-          history_key: request.historyKey,
           pending_turn_idempotency_key: request.pendingTurnIdempotencyKey,
         }),
         "Creative Studio session response",
@@ -242,28 +211,6 @@ export function createNomiCreativeStudioAgentSessionHttpPort(
         throw new CreativeStudioAgentSessionResolutionError(
           "PORT_CONTRACT_VIOLATION",
           "The backend returned a Creative Studio binding outside the requested authority",
-        );
-      }
-
-      if (
-        history.length < request.history.length ||
-        serializeCreativeStudioAgentHistory(
-          history.slice(0, request.history.length),
-        ) !== request.historyKey
-      ) {
-        throw new CreativeStudioAgentSessionResolutionError(
-          "PORT_CONTRACT_VIOLATION",
-          "The backend did not preserve the requested Creative Studio history prefix",
-        );
-      }
-      const recoveredCount = history.length - request.history.length;
-      if (
-        recoveredCount !== 0 &&
-        (request.pendingTurnIdempotencyKey === null || recoveredCount !== 2)
-      ) {
-        throw new CreativeStudioAgentSessionResolutionError(
-          "PORT_CONTRACT_VIOLATION",
-          "The backend recovered more than one pending completed Agent turn",
         );
       }
 
