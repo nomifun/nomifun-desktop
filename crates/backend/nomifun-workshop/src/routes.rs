@@ -39,6 +39,10 @@ use crate::dto::{WorkshopAsset, WorkshopCanvasMeta};
 use crate::service::{AssetPatch, AssetQuery, NewAssetUpload, NewTextAsset};
 use crate::state::WorkshopRouterState;
 use crate::workflow::{CreativeWorkflowDefinitionV1, MAX_WORKFLOW_DEFINITION_BYTES};
+use crate::workflow_run::{
+    CreativeWorkflowRunAggregateV1, CreativeWorkflowRunCreateRequest,
+    MAX_WORKFLOW_RUN_AGGREGATE_BYTES,
+};
 
 pub fn workshop_routes(state: WorkshopRouterState) -> Router {
     // The asset upload route carries its own (larger) body limit. Disable the
@@ -75,6 +79,21 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         ))
         .with_state(state.clone());
 
+    let workflow_run_write_router = Router::new()
+        .route(
+            "/api/creative-studio/workflow-runs",
+            post(create_creative_workflow_run),
+        )
+        .route(
+            "/api/creative-studio/workflow-runs/{workflow_run_id}",
+            axum::routing::put(save_creative_workflow_run),
+        )
+        .layer(DefaultBodyLimit::disable())
+        .layer(RequestBodyLimitLayer::new(
+            MAX_WORKFLOW_RUN_AGGREGATE_BYTES + 64 * 1024,
+        ))
+        .with_state(state.clone());
+
     Router::new()
         .route(
             "/api/creative-studio/projects",
@@ -101,6 +120,14 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         .route(
             "/api/creative-studio/workflows/{workflow_id}",
             get(get_creative_workflow).delete(delete_creative_workflow),
+        )
+        .route(
+            "/api/creative-studio/workflow-runs",
+            get(list_creative_workflow_runs),
+        )
+        .route(
+            "/api/creative-studio/workflow-runs/{workflow_run_id}",
+            get(get_creative_workflow_run),
         )
         .route("/api/workshop/canvases", get(list_canvases).post(create_canvas))
         .route(
@@ -130,6 +157,7 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         )
         .with_state(state)
         .merge(workflow_write_router)
+        .merge(workflow_run_write_router)
         .merge(archive_import_router)
         .merge(upload_router)
 }
@@ -358,6 +386,99 @@ async fn delete_creative_workflow(
 ) -> Result<StatusCode, AppError> {
     state.service.delete_creative_workflow(&workflow_id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── durable Creative Studio workflow runs ─────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreativeWorkflowRunQuery {
+    workflow_id: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreativeWorkflowRunListResponse {
+    runs: Vec<CreativeWorkflowRunAggregateV1>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreativeWorkflowRunResponse {
+    run: CreativeWorkflowRunAggregateV1,
+}
+
+async fn list_creative_workflow_runs(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Query(query): Query<CreativeWorkflowRunQuery>,
+) -> Result<Json<ApiResponse<CreativeWorkflowRunListResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(CreativeWorkflowRunListResponse {
+        runs: state
+            .service
+            .list_creative_workflow_runs(query.workflow_id.as_deref())
+            .await?,
+    })))
+}
+
+async fn get_creative_workflow_run(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(workflow_run_id): Path<String>,
+) -> Result<Json<ApiResponse<CreativeWorkflowRunResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(CreativeWorkflowRunResponse {
+        run: state
+            .service
+            .get_creative_workflow_run(&workflow_run_id)
+            .await?,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateCreativeWorkflowRunRequest {
+    request: CreativeWorkflowRunCreateRequest,
+}
+
+async fn create_creative_workflow_run(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    body: Result<Json<CreateCreativeWorkflowRunRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, AppError> {
+    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let run = state
+        .service
+        .create_creative_workflow_run(request.request)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::ok(CreativeWorkflowRunResponse { run })),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SaveCreativeWorkflowRunRequest {
+    expected_revision: String,
+    run: CreativeWorkflowRunAggregateV1,
+}
+
+async fn save_creative_workflow_run(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(workflow_run_id): Path<String>,
+    body: Result<Json<SaveCreativeWorkflowRunRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CreativeWorkflowRunResponse>>, AppError> {
+    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let run = state
+        .service
+        .save_creative_workflow_run(
+            &workflow_run_id,
+            &request.expected_revision,
+            request.run,
+        )
+        .await?;
+    Ok(Json(ApiResponse::ok(CreativeWorkflowRunResponse { run })))
 }
 
 async fn export_creative_project_archive(
@@ -882,7 +1003,17 @@ mod tests {
     };
 
     async fn test_state() -> (WorkshopRouterState, CurrentUser, tempfile::TempDir) {
-        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (state, user, data_dir, _database) = test_state_with_database().await;
+        (state, user, data_dir)
+    }
+
+    async fn test_state_with_database() -> (
+        WorkshopRouterState,
+        CurrentUser,
+        tempfile::TempDir,
+        Arc<nomifun_db::Database>,
+    ) {
+        let database = Arc::new(nomifun_db::init_database_memory().await.unwrap());
         let repo: Arc<dyn IWorkshopRepository> =
             Arc::new(SqliteWorkshopRepository::new(database.pool().clone()));
         let data_dir = tempfile::tempdir().unwrap();
@@ -891,7 +1022,7 @@ mod tests {
             id: UserId::new(),
             username: "owner".into(),
         };
-        (WorkshopRouterState::new(service), user, data_dir)
+        (WorkshopRouterState::new(service), user, data_dir, database)
     }
 
     fn workflow_definition() -> CreativeWorkflowDefinitionV1 {
@@ -1137,6 +1268,165 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn creative_workflow_run_routes_cover_idempotent_create_list_get_and_cas() {
+        let (state, user, _data_dir, database) = test_state_with_database().await;
+        let provider_id = nomifun_common::ProviderId::new().into_string();
+        let credentials = nomifun_common::encrypt_string(
+            r#"{"api_keys":["test-only"]}"#,
+            &[0x24; 32],
+        )
+        .unwrap();
+        nomifun_db::sqlx::query(
+            "INSERT INTO providers \
+                (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, \
+                 enabled, created_at, updated_at) \
+             VALUES (?, 'openai', 'run-test', 'https://example.invalid', 'bearer', ?, 1, 1, 1)",
+        )
+        .bind(&provider_id)
+        .bind(credentials)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        nomifun_db::sqlx::query(
+            "INSERT INTO provider_models \
+                (provider_id, model, enabled, sort_order, description, created_at, updated_at) \
+             VALUES (?, 'image-model', 1, 0, NULL, 1, 1)",
+        )
+        .bind(&provider_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        nomifun_db::sqlx::query(
+            "INSERT INTO provider_model_capabilities \
+                (provider_id, model, task, traits, protocol, connection_role, \
+                 allow_cross_origin_credentials, provider_params, created_at, updated_at) \
+             VALUES (?, 'image-model', 'image_generation', '[]', 'openai.images', \
+                     'default', 0, '{}', 1, 1)",
+        )
+        .bind(&provider_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        let mut definition = workflow_definition();
+        let variable_id = match &definition.variables[0] {
+            CreativeWorkflowVariable::Text { id, .. } => id.clone(),
+            _ => panic!("workflow fixture must contain a text variable"),
+        };
+        if let CreativeWorkflowStep::GenerateImages { generation, .. } = &mut definition.steps[1]
+        {
+            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+                provider_id,
+                model: "image-model".into(),
+                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+            });
+        }
+        let definition = state
+            .service
+            .create_creative_workflow(definition)
+            .await
+            .unwrap();
+        let workflow_id = definition.id.clone();
+        let run_id = nomifun_common::CreativeStudioWorkflowRunId::new().into_string();
+        let app = workshop_routes(state).layer(Extension(user));
+        let create_json = serde_json::json!({
+            "request": {
+                "runId": run_id,
+                "workflowId": workflow_id,
+                "workflowRevision": 1,
+                "inputs": [{
+                    "type": "text",
+                    "variableId": variable_id,
+                    "value": "NomiFun"
+                }],
+                "referenceAssetIds": []
+            }
+        });
+        let created = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/creative-studio/workflow-runs")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_json).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created_body = axum::body::to_bytes(created.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created_json: Value = serde_json::from_slice(&created_body).unwrap();
+        let mut run: CreativeWorkflowRunAggregateV1 =
+            serde_json::from_value(created_json["data"]["run"].clone()).unwrap();
+
+        let replay = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/creative-studio/workflow-runs")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_json).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::CREATED);
+
+        let listed = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!(
+                        "/api/creative-studio/workflow-runs?workflowId={workflow_id}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let detail = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/creative-studio/workflow-runs/{run_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail.status(), StatusCode::OK);
+
+        run.revision = 2;
+        run.record.status = crate::workflow_run::CreativeWorkflowRunStatus::Queued;
+        run.record.task_ids = vec![nomifun_common::generate_id()];
+        run.record.queued_at = Some(run.request.requested_at + 1);
+        let saved = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/creative-studio/workflow-runs/{run_id}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "expectedRevision": "1",
+                            "run": run
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
     }
 
     #[tokio::test]

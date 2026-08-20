@@ -8,12 +8,12 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use nomifun_common::{
-    AppError, CreativeStudioProjectId, CreativeStudioWorkflowId, ProviderId,
-    SharedProviderLifecycleBarrier, WorkshopAssetId, WorkshopCanvasId, now_ms,
+    AppError, CreativeStudioProjectId, CreativeStudioWorkflowId, CreativeStudioWorkflowRunId,
+    ProviderId, SharedProviderLifecycleBarrier, WorkshopAssetId, WorkshopCanvasId, now_ms,
 };
 use nomifun_db::{
-    AssetSort, CreativeStudioProjectRow, IWorkshopRepository, ListAssetsParams,
-    UpdateAssetParams, WorkshopAssetRow,
+    AssetSort, CreativeStudioProjectRow, CreativeStudioWorkflowRunRow, IWorkshopRepository,
+    ListAssetsParams, UpdateAssetParams, WorkshopAssetRow,
 };
 use serde_json::Value;
 
@@ -31,6 +31,9 @@ use crate::creative_studio::{
 use crate::creative_studio::CREATIVE_STUDIO_SCHEMA;
 use crate::dto::{WorkshopAsset, WorkshopCanvasMeta};
 use crate::workflow::{CreativeWorkflowDefinitionV1, parse_workflow_row};
+use crate::workflow_run::{
+    CreativeWorkflowRunAggregateV1, CreativeWorkflowRunCreateRequest, parse_workflow_run_row,
+};
 use crate::{
     DEFAULT_DOC, MAX_ASSET_BYTES, MAX_DOC_BYTES, WORKSHOP_REL_DIR, docscan, fsio, imagemeta,
     thumbnail,
@@ -572,6 +575,218 @@ impl WorkshopService {
     pub async fn delete_creative_workflow(&self, workflow_id: &str) -> Result<(), AppError> {
         validate_creative_workflow_id(workflow_id)?;
         self.repo.delete_creative_workflow(workflow_id).await?;
+        Ok(())
+    }
+
+    // ---- durable Creative Studio workflow runs ----
+
+    pub async fn list_creative_workflow_runs(
+        &self,
+        workflow_id: Option<&str>,
+    ) -> Result<Vec<CreativeWorkflowRunAggregateV1>, AppError> {
+        if let Some(workflow_id) = workflow_id {
+            validate_creative_workflow_id(workflow_id)?;
+        }
+        self.repo
+            .list_creative_workflow_runs(workflow_id)
+            .await?
+            .into_iter()
+            .map(|row| parse_stored_workflow_run(&row))
+            .collect()
+    }
+
+    pub async fn get_creative_workflow_run(
+        &self,
+        workflow_run_id: &str,
+    ) -> Result<CreativeWorkflowRunAggregateV1, AppError> {
+        validate_creative_workflow_run_id(workflow_run_id)?;
+        let row = self
+            .repo
+            .get_creative_workflow_run(workflow_run_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "creative studio workflow run {workflow_run_id} not found"
+                ))
+            })?;
+        parse_stored_workflow_run(&row)
+    }
+
+    pub async fn create_creative_workflow_run(
+        &self,
+        request: CreativeWorkflowRunCreateRequest,
+    ) -> Result<CreativeWorkflowRunAggregateV1, AppError> {
+        validate_creative_workflow_run_id(&request.run_id)?;
+        validate_creative_workflow_id(&request.workflow_id)?;
+        if request.workflow_revision < 1 {
+            return Err(AppError::BadRequest(
+                "workflowRevision must be a positive integer".into(),
+            ));
+        }
+
+        if let Some(existing) = self
+            .repo
+            .get_creative_workflow_run(&request.run_id)
+            .await?
+        {
+            let existing = parse_stored_workflow_run(&existing)?;
+            if existing.matches_create_request(&request) {
+                return Ok(existing);
+            }
+            return Err(AppError::Conflict(format!(
+                "workflow run {} idempotency key is already bound to another request",
+                request.run_id
+            )));
+        }
+
+        let definition_row = self
+            .repo
+            .get_creative_workflow(&request.workflow_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "creative studio workflow {} not found",
+                    request.workflow_id
+                ))
+            })?;
+        let definition = parse_workflow_row(&definition_row).map_err(|error| {
+            AppError::Internal(format!(
+                "stored creative studio workflow {} is corrupt: {error}",
+                request.workflow_id
+            ))
+        })?;
+        if definition.revision != request.workflow_revision {
+            return Err(AppError::Conflict(format!(
+                "creative studio workflow {} revision changed from {} to {}",
+                request.workflow_id, request.workflow_revision, definition.revision
+            )));
+        }
+
+        let now = now_ms();
+        let aggregate = CreativeWorkflowRunAggregateV1::requested(
+            definition,
+            request.run_id.clone(),
+            request.inputs.clone(),
+            request.reference_asset_ids.clone(),
+            now,
+        )
+        .map_err(|error| AppError::BadRequest(format!("invalid workflow run request: {error}")))?;
+        self.validate_creative_workflow_assets(&aggregate.workflow_snapshot)
+            .await?;
+        self.validate_workflow_run_input_assets(&aggregate).await?;
+        let _provider_guard = self.provider_read_guard().await;
+        self.validate_creative_workflow_models_under_guard(&aggregate.workflow_snapshot)
+            .await?;
+
+        let row = aggregate
+            .to_row(now, now)
+            .map_err(|error| AppError::BadRequest(format!("invalid workflow run request: {error}")))?;
+        let referenced_asset_ids = aggregate
+            .referenced_input_asset_ids()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let persisted = self
+            .repo
+            .create_creative_workflow_run(&row, &referenced_asset_ids)
+            .await?;
+        let persisted = parse_stored_workflow_run(&persisted)?;
+        if !persisted.matches_create_request(&request) {
+            return Err(AppError::Conflict(format!(
+                "workflow run {} idempotency key is already bound to another request",
+                request.run_id
+            )));
+        }
+        Ok(persisted)
+    }
+
+    pub async fn save_creative_workflow_run(
+        &self,
+        workflow_run_id: &str,
+        expected_revision: &str,
+        replacement: CreativeWorkflowRunAggregateV1,
+    ) -> Result<CreativeWorkflowRunAggregateV1, AppError> {
+        validate_creative_workflow_run_id(workflow_run_id)?;
+        let expected_revision = parse_creative_workflow_revision(expected_revision)?;
+        if replacement.request.id != workflow_run_id {
+            return Err(AppError::BadRequest(
+                "workflow run aggregate id must match its route id".into(),
+            ));
+        }
+        let current_row = self
+            .repo
+            .get_creative_workflow_run(workflow_run_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "creative studio workflow run {workflow_run_id} not found"
+                ))
+            })?;
+        let current = parse_stored_workflow_run(&current_row)?;
+        if current.revision != expected_revision {
+            return Err(AppError::Conflict(format!(
+                "creative studio workflow run {workflow_run_id} revision conflict"
+            )));
+        }
+        current.validate_transition(&replacement).map_err(|error| {
+            AppError::BadRequest(format!("invalid workflow run transition: {error}"))
+        })?;
+        self.validate_workflow_run_results(&replacement).await?;
+        let now = now_ms().max(current.request.requested_at);
+        let replacement_row = replacement
+            .to_row(current.request.requested_at, now)
+            .map_err(|error| AppError::BadRequest(format!("invalid workflow run: {error}")))?;
+        let saved = self
+            .repo
+            .save_creative_workflow_run(workflow_run_id, expected_revision, &replacement_row)
+            .await?;
+        parse_stored_workflow_run(&saved)
+    }
+
+    async fn validate_workflow_run_input_assets(
+        &self,
+        aggregate: &CreativeWorkflowRunAggregateV1,
+    ) -> Result<(), AppError> {
+        for asset_id in aggregate.referenced_input_asset_ids() {
+            let asset = self.repo.get_asset(asset_id).await?.ok_or_else(|| {
+                AppError::Conflict(format!("workflow run references missing asset {asset_id}"))
+            })?;
+            if asset.kind != "image" {
+                return Err(AppError::Conflict(format!(
+                    "workflow run reference {asset_id} must identify an image asset"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    async fn validate_workflow_run_results(
+        &self,
+        aggregate: &CreativeWorkflowRunAggregateV1,
+    ) -> Result<(), AppError> {
+        let executable_steps = aggregate
+            .executable_task_step_ids()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let task_ids = aggregate
+            .record
+            .task_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for asset_id in &aggregate.record.result_asset_ids {
+            let asset = self.repo.get_asset(asset_id).await?.ok_or_else(|| {
+                AppError::Conflict(format!(
+                    "workflow run result references missing asset {asset_id}"
+                ))
+            })?;
+            if asset.kind != "image" {
+                return Err(AppError::Conflict(format!(
+                    "workflow run result {asset_id} must identify an image asset"
+                )));
+            }
+            validate_workflow_result_origin(&asset, aggregate, &executable_steps, &task_ids)?;
+        }
         Ok(())
     }
 
@@ -1683,6 +1898,17 @@ impl WorkshopService {
                 )));
             }
         }
+        for run_row in self.repo.list_creative_workflow_runs(None).await? {
+            let run = parse_stored_workflow_run(&run_row)?;
+            if run.referenced_input_asset_ids().contains(&id)
+                || run.record.result_asset_ids.iter().any(|asset_id| asset_id == id)
+            {
+                return Err(AppError::Conflict(format!(
+                    "asset {id} is referenced by workflow run {}",
+                    run.request.id
+                )));
+            }
+        }
         self.repo.delete_asset(id).await?;
         for rel in [row.rel_path.as_deref(), row.thumb_rel_path.as_deref()].into_iter().flatten() {
             let abs = self.data_dir.join(rel);
@@ -1746,6 +1972,66 @@ fn validate_creative_workflow_id(workflow_id: &str) -> Result<(), AppError> {
     CreativeStudioWorkflowId::parse(workflow_id)
         .map(|_| ())
         .map_err(|error| AppError::BadRequest(format!("invalid workflow id: {error}")))
+}
+
+fn validate_creative_workflow_run_id(workflow_run_id: &str) -> Result<(), AppError> {
+    CreativeStudioWorkflowRunId::parse(workflow_run_id)
+        .map(|_| ())
+        .map_err(|error| AppError::BadRequest(format!("invalid workflow run id: {error}")))
+}
+
+fn parse_stored_workflow_run(
+    row: &CreativeStudioWorkflowRunRow,
+) -> Result<CreativeWorkflowRunAggregateV1, AppError> {
+    parse_workflow_run_row(row).map_err(|error| {
+        AppError::Internal(format!(
+            "stored creative studio workflow run {} is corrupt: {error}",
+            row.workflow_run_id
+        ))
+    })
+}
+
+fn validate_workflow_result_origin(
+    asset: &WorkshopAssetRow,
+    aggregate: &CreativeWorkflowRunAggregateV1,
+    executable_steps: &BTreeSet<String>,
+    task_ids: &BTreeSet<String>,
+) -> Result<(), AppError> {
+    let origin = asset.origin.as_deref().ok_or_else(|| {
+        AppError::Conflict(format!(
+            "workflow run result {} has no durable provenance",
+            asset.asset_id
+        ))
+    })?;
+    let origin = serde_json::from_str::<Value>(origin).map_err(|error| {
+        AppError::Conflict(format!(
+            "workflow run result {} has invalid provenance: {error}",
+            asset.asset_id
+        ))
+    })?;
+    let origin = origin.as_object().ok_or_else(|| {
+        AppError::Conflict(format!(
+            "workflow run result {} provenance must be an object",
+            asset.asset_id
+        ))
+    })?;
+    let string = |key: &str| origin.get(key).and_then(Value::as_str);
+    let workflow_step_id = string("workflow_step_id");
+    let creation_task_id = string("creation_task_id");
+    if string("workflow_id") != Some(aggregate.request.workflow_id.as_str())
+        || string("workflow_run_id") != Some(aggregate.request.id.as_str())
+        || workflow_step_id.is_none_or(|id| !executable_steps.contains(id))
+        || creation_task_id.is_none_or(|id| !task_ids.contains(id))
+        || origin.contains_key("project_id")
+        || origin.contains_key("canvas_id")
+        || origin.contains_key("node_id")
+    {
+        return Err(AppError::Conflict(format!(
+            "workflow run result {} provenance does not match run {}",
+            asset.asset_id, aggregate.request.id
+        )));
+    }
+    Ok(())
 }
 
 fn normalize_creative_project_title(
@@ -1930,6 +2216,10 @@ mod tests {
         CreativeWorkflowMetadata, CreativeWorkflowOutputPlan, CreativeWorkflowPromptSource,
         CreativeWorkflowStep, CreativeWorkflowTemplate, CreativeWorkflowTemplateSegment,
         CreativeWorkflowVariable, CreativeWorkflowVisibility,
+    };
+    use crate::workflow_run::{
+        CreativeWorkflowInputValue, CreativeWorkflowRunCreateRequest,
+        CreativeWorkflowRunStatus,
     };
     use nomifun_common::{
         ProviderLifecycleBarrier, WorkshopCanvasId, WorkshopEdgeId, WorkshopNodeId,
@@ -2202,6 +2492,161 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(created.text_model_bindings().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn creative_workflow_run_is_idempotent_cas_backed_and_checks_result_provenance() {
+        let (service, _dir, database) = service_with_database_and_lifecycle(None).await;
+        let provider_id = ProviderId::new().into_string();
+        insert_provider(&database, &provider_id).await;
+        insert_provider_model(&database, &provider_id, "image-model").await;
+        insert_provider_model_capability(
+            &database,
+            &provider_id,
+            "image-model",
+            "image_generation",
+        )
+        .await;
+
+        let mut definition = workflow_definition();
+        let CreativeWorkflowVariable::Text { id: variable_id, .. } = &definition.variables[0]
+        else {
+            panic!("workflow fixture must start with a text variable")
+        };
+        let variable_id = variable_id.clone();
+        if let CreativeWorkflowStep::GenerateImages { generation, .. } = &mut definition.steps[1]
+        {
+            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+                provider_id: provider_id.clone(),
+                model: "image-model".into(),
+                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+            });
+        }
+        let definition = service
+            .create_creative_workflow(definition)
+            .await
+            .unwrap();
+        let reference_asset = service
+            .ingest_asset_bytes(
+                png_1x1(),
+                "image/png",
+                "reference",
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        let run_id = CreativeStudioWorkflowRunId::new().into_string();
+        let request = CreativeWorkflowRunCreateRequest {
+            run_id: run_id.clone(),
+            workflow_id: definition.id.clone(),
+            workflow_revision: definition.revision,
+            inputs: vec![CreativeWorkflowInputValue::Text {
+                variable_id,
+                value: "NomiFun".into(),
+            }],
+            reference_asset_ids: vec![reference_asset.asset_id.clone()],
+        };
+        let created = service
+            .create_creative_workflow_run(request.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .create_creative_workflow_run(request.clone())
+                .await
+                .unwrap(),
+            created
+        );
+        let mut mismatched = request;
+        if let CreativeWorkflowInputValue::Text { value, .. } = &mut mismatched.inputs[0] {
+            *value = "another request".into();
+        }
+        assert!(matches!(
+            service.create_creative_workflow_run(mismatched).await,
+            Err(AppError::Conflict(_))
+        ));
+
+        let task_id = nomifun_common::generate_id();
+        let step_id = created.executable_task_step_ids()[0].clone();
+        let mut queued = created.clone();
+        queued.revision = 2;
+        queued.record.status = CreativeWorkflowRunStatus::Queued;
+        queued.record.task_ids = vec![task_id.clone()];
+        queued.record.queued_at = Some(created.request.requested_at + 1);
+        let queued = service
+            .save_creative_workflow_run(&run_id, "1", queued)
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .save_creative_workflow_run(&run_id, "1", queued.clone())
+                .await,
+            Err(AppError::Conflict(_))
+        ));
+
+        let mut running = queued.clone();
+        running.revision = 3;
+        running.record.status = CreativeWorkflowRunStatus::Running;
+        running.record.started_at = Some(created.request.requested_at + 2);
+        let running = service
+            .save_creative_workflow_run(&run_id, "2", running)
+            .await
+            .unwrap();
+        nomifun_db::sqlx::query(
+            "INSERT INTO creation_tasks \
+                (creation_task_id, workflow_id, workflow_run_id, workflow_step_id, \
+                 provider_id, model, capability, params, status, error, result_asset_ids, \
+                 remote_task_id, attempt, submitted_at, started_at, finished_at, request_fingerprint) \
+             VALUES (?, ?, ?, ?, ?, 'image-model', 'image_generation', '{}', 'running', \
+                     NULL, '[]', NULL, 1, ?, ?, NULL, '{}')",
+        )
+        .bind(&task_id)
+        .bind(&definition.id)
+        .bind(&run_id)
+        .bind(&step_id)
+        .bind(&provider_id)
+        .bind(created.request.requested_at + 1)
+        .bind(created.request.requested_at + 2)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let asset = service
+            .ingest_asset_bytes(
+                png_1x1(),
+                "image/png",
+                "result",
+                false,
+                Some(serde_json::json!({
+                    "workflow_id": definition.id,
+                    "workflow_run_id": run_id,
+                    "workflow_step_id": step_id,
+                    "creation_task_id": task_id
+                })),
+            )
+            .await
+            .unwrap();
+        let mut succeeded = running;
+        succeeded.revision = 4;
+        succeeded.record.status = CreativeWorkflowRunStatus::Succeeded;
+        succeeded.record.result_asset_ids = vec![asset.asset_id];
+        succeeded.record.completed_at = Some(created.request.requested_at + 3);
+        let succeeded = service
+            .save_creative_workflow_run(&run_id, "3", succeeded)
+            .await
+            .unwrap();
+        assert_eq!(succeeded.record.status, CreativeWorkflowRunStatus::Succeeded);
+        assert_eq!(
+            service
+                .list_creative_workflow_runs(Some(&succeeded.request.workflow_id))
+                .await
+                .unwrap(),
+            vec![succeeded]
+        );
+        assert!(matches!(
+            service.delete_asset(&reference_asset.asset_id).await,
+            Err(AppError::Conflict(message)) if message.contains("workflow run")
+        ));
     }
 
     async fn insert_provider_model(
