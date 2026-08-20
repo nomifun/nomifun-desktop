@@ -21,6 +21,7 @@ import {
   creativeStudioPanelStateEqual,
   fitCanvasViewport,
   projectDocumentFromCanvasState,
+  projectDocumentWithAgentSessions,
   projectDocumentWithCanvasPanels,
   projectDocumentWithPendingTaskIds,
 } from './editorModel';
@@ -183,6 +184,47 @@ describe('creative canvas editor model', () => {
       invalidTaskIdError = error;
     }
     expect(invalidTaskIdError instanceof TypeError).toBe(true);
+  });
+
+  test('persists validated Agent references with the latest canvas state', () => {
+    const base = createEmptyCreativeProjectDocument(PROJECT_ID);
+    const sessionId = testUuid(211);
+    const node = testNode('text', 212);
+    const state = createInitialCanvasState({
+      document: { nodes: [node], connections: [] },
+      viewport: { x: 9, y: 11, zoom: 1.2 },
+    });
+    const sessions = [
+      {
+        id: sessionId,
+        title: '海报创作',
+        messageIds: [],
+        model: { providerId: testUuid(213), model: 'nomi-chat' },
+        pendingTurn: {
+          idempotencyKey: testUuid(214),
+          prompt: '继续制作海报',
+          createdAt: 10,
+        },
+        createdAt: 1,
+        updatedAt: 10,
+      },
+    ];
+
+    const saved = projectDocumentWithAgentSessions(base, state, sessions, sessionId);
+
+    expect(saved.chatSessions).toEqual(sessions);
+    expect(saved.activeChatId).toBe(sessionId);
+    expect(saved.nodes).toEqual([node]);
+    expect(saved.viewport).toEqual({ x: 9, y: 11, zoom: 1.2 });
+    expect(base.chatSessions).toEqual([]);
+
+    let invalidActiveSession: unknown;
+    try {
+      projectDocumentWithAgentSessions(base, state, sessions, testUuid(215));
+    } catch (error) {
+      invalidActiveSession = error;
+    }
+    expect(invalidActiveSession instanceof Error).toBe(true);
   });
 
   test('fits graph bounds with padding and centers an empty canvas', () => {
