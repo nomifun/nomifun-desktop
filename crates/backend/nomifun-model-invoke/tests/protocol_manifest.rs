@@ -9,8 +9,8 @@ use nomifun_model_invoke::{
     ALL_MODEL_TASKS, AdapterRegistry, InvokeError, ProtocolAdapter, ProtocolManifestRegistry,
     RealtimeAdapterRegistry, RealtimeProtocolAdapter, RealtimeSession, RealtimeSessionConfig,
     ResolvedCall, ResolvedRealtimeCall, TaskOutcome, default_protocol_registry, platform_presets,
-    protocol_manifest_for, protocol_manifest_for_connection, protocol_task_descriptor,
-    try_default_protocol_registry,
+    preset_protocol_recommendation, protocol_manifest_for, protocol_manifest_for_connection,
+    protocol_manifest_for_model_connection, protocol_task_descriptor, try_default_protocol_registry,
 };
 
 struct FakeRequestAdapter;
@@ -127,7 +127,7 @@ fn execution_registries_reject_duplicate_ids_and_enumerate_stably() {
 }
 
 #[test]
-fn manifest_prioritizes_preset_protocols_while_custom_choices_stay_explicit() {
+fn manifest_prioritizes_preset_protocols_while_custom_without_a_model_stays_explicit() {
     let stepfun = protocol_manifest_for("StepFun", ModelTask::RealtimeConversation);
     assert_eq!(stepfun.tasks, ALL_MODEL_TASKS);
     assert_eq!(stepfun.protocols.len(), 1);
@@ -154,6 +154,104 @@ fn manifest_prioritizes_preset_protocols_while_custom_choices_stay_explicit() {
             "openai.chat_text"
         ]
     );
+}
+
+#[test]
+fn custom_model_hint_recommends_the_unique_registry_declared_compat_protocol_per_task() {
+    let registry = default_protocol_registry();
+    for (task, expected_protocol) in [
+        (ModelTask::Chat, "openai.chat_text"),
+        (ModelTask::ImageGeneration, "openai.images"),
+        (ModelTask::ImageEdit, "openai.images"),
+        (ModelTask::VideoGeneration, "openai.videos"),
+        (ModelTask::SpeechSynthesis, "openai.audio_speech"),
+        (ModelTask::SpeechRecognition, "openai.audio_transcriptions"),
+        (ModelTask::Embedding, "openai.embeddings"),
+        (ModelTask::Rerank, "generic.rerank"),
+    ] {
+        let candidates = registry
+            .descriptors()
+            .filter(|descriptor| {
+                descriptor.supported_tasks.contains(&task)
+                    && descriptor.scopes.contains(&ProtocolScope::OfficialCompat)
+                    && descriptor.scopes.contains(&ProtocolScope::Custom)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(candidates.len(), 1, "{task:?} generic compatibility candidates");
+        assert_eq!(candidates[0].protocol_id, expected_protocol);
+
+        let view = protocol_manifest_for_model_connection(
+            "custom",
+            Some("https://gateway.example/v1"),
+            Some("user-entered-model"),
+            task,
+        );
+        let recommendation = view.recommendation.expect("custom model recommendation");
+        assert_eq!(recommendation.protocol_id, expected_protocol);
+        assert_eq!(recommendation.connection_role, None);
+        assert_eq!(recommendation.default_base_url, None);
+        assert_eq!(recommendation.default_auth_scheme.as_deref(), Some("bearer"));
+        assert!(!recommendation.base_url_override_required);
+
+        let descriptor = registry
+            .get(&recommendation.protocol_id)
+            .expect("recommended protocol is registered");
+        assert!(descriptor.supported_tasks.contains(&task));
+        assert!(descriptor.scopes.contains(&ProtocolScope::OfficialCompat));
+        assert!(descriptor.scopes.contains(&ProtocolScope::Custom));
+        assert!(
+            view.protocols
+                .iter()
+                .find(|candidate| candidate.protocol_id == recommendation.protocol_id)
+                .is_some_and(|candidate| candidate.default_connections.is_empty()),
+            "custom recommendation must not expose a provider connection for {task:?}"
+        );
+    }
+}
+
+#[test]
+fn custom_recommendation_requires_a_non_blank_model_and_has_no_realtime_default() {
+    for model in [None, Some(""), Some("  \n") ] {
+        let view = protocol_manifest_for_model_connection("custom", None, model, ModelTask::Chat);
+        assert!(view.recommendation.is_none(), "blank model hint {model:?}");
+    }
+
+    let realtime = protocol_manifest_for_model_connection(
+        "custom",
+        None,
+        Some("realtime-model"),
+        ModelTask::RealtimeConversation,
+    );
+    assert!(realtime.recommendation.is_none());
+    assert!(preset_protocol_recommendation("custom", ModelTask::Chat).is_none());
+}
+
+#[test]
+fn model_hint_does_not_change_new_api_or_built_in_platform_recommendations() {
+    let new_api = protocol_manifest_for_model_connection(
+        "new-api",
+        Some("https://gateway.example/v1"),
+        Some("gpt-compatible-model"),
+        ModelTask::Chat,
+    );
+    assert!(new_api.recommendation.is_none());
+
+    for preset in platform_presets()
+        .into_iter()
+        .filter(|preset| preset.platform != "custom")
+    {
+        for task in ALL_MODEL_TASKS {
+            let without_model =
+                protocol_manifest_for_connection(&preset.preset, None, task);
+            let with_model = protocol_manifest_for_model_connection(
+                &preset.preset,
+                None,
+                Some("arbitrary-model-hint"),
+                task,
+            );
+            assert_eq!(with_model, without_model, "{} {task:?}", preset.preset);
+        }
+    }
 }
 
 #[test]

@@ -72,10 +72,12 @@
 后端 `nomifun-model-invoke` 的协议 registry 是协议、鉴权和 endpoint 描述的唯一来源。前端通过：
 
 ```text
-GET /api/model-protocols?preset=<preset>&task=<task>&base_url=<optional>
+GET /api/model-protocols?preset=<preset>&task=<task>&base_url=<optional>&model=<optional>
 ```
 
 读取生成的 `ModelProtocolManifestResponse`；编辑已有供应商时也可用 `platform` 查询参数。响应包含该任务已注册的协议、executor/transport、允许的鉴权方案、推荐连接与 Base URL，以及 `endpoint`、`poll_endpoint`、`content_endpoint`、`realtime_endpoint` 的默认值和可编辑性。任务卡必须展示 manifest 返回的全部供应商推荐、已核验和通用高级协议，只高亮推荐项，不能把推荐项当白名单；前端也不得维护另一份协议清单。
+
+`model` 只是配置期“用户已经选择或填写了具体模型”的可选提示，不得解析模型名称来识别厂商或协议。仅当解析后的 `platform` **严格等于** `custom` 且 `model` 非空时，manifest 才可从 protocol registry 推荐当前任务的通用兼容协议：候选 descriptor 必须同时声明该 `task`、`official_compat` 和 `custom` scope，并且候选必须恰好一个；零个或多个都不推荐。`new-api` 不适用此默认策略，Realtime 在没有唯一通用兼容协议时同样保持无默认值。该推荐不得携带原厂 Base URL、命名连接或原厂鉴权；`connection_role` 不指定命名连接、`default_base_url` 为空，鉴权最多沿用 `custom` 预置且必须在协议允许列表内。
 
 每个 capability 的 transport 字段语义固定为：
 
@@ -89,7 +91,7 @@ GET /api/model-protocols?preset=<preset>&task=<task>&base_url=<optional>
 | `allow_cross_origin_credentials` | 当任一绝对覆盖 URL 与凭据所属连接异源时，必须由用户显式确认。 |
 | `provider_params` | 协议专属 JSON 参数；保存校验与运行时使用同一编码契约。JSON 协议递归合并后由 typed 请求字段最终覆盖；multipart/query 只接受能无损编码的值及协议明确声明的数组形式；不能发送的值在保存时直接报错，不能“保存成功、调用时静默丢弃”，也不能携带 transport 或凭据字段。 |
 
-协议切换是一次原子编辑：必须清除旧协议的 endpoint 覆盖、跨域确认和供应商参数，再应用新 manifest 的推荐值，防止参数泄漏到错误 serializer。manifest 和供应商 adapter 状态只能描述一个已选任务能否路由，不得据此为模型新增任务或宣称模型具备该能力。manifest 没有已注册协议时，UI 仍展示该任务和“官网已知/暂无适配器”状态，但不能把它标成可运行。
+协议切换是一次原子编辑：必须清除旧协议的 endpoint 覆盖、跨域确认和供应商参数，再应用新 manifest 的推荐值，防止参数泄漏到错误 serializer。包括 `custom` 自动推荐在内，推荐结果只有在保存 capability 时被**显式持久化**后才成为调用配置；运行时和健康探针只读取精确 capability 行，绝不再次调用配置期推荐、解析模型名或猜测协议。manifest 和供应商 adapter 状态只能描述一个已选任务能否路由，不得据此为模型新增任务或宣称模型具备该能力。manifest 没有已注册协议时，UI 仍展示该任务和“官网已知/暂无适配器”状态，但不能把它标成可运行。
 
 ### 2.4 配置与写入流程
 
@@ -99,7 +101,7 @@ GET /api/model-protocols?preset=<preset>&task=<task>&base_url=<optional>
 2. 先单选模型的主要类型/任务，并只展示目录中明确包含该任务的候选；taskless 目录项不视为支持全部类型。
 3. 在同一个模型输入源里搜索并选择目录模型，或自由填写模型 ID；目录加载失败或没有匹配项不得阻止手工输入和保存。明确选择目录项时，只应用主任务对应的已核验 traits；仅输入相同 ID、后台目录刷新或供应商 adapter 状态都不得静默改变任务集合。
 4. 需要多任务时，用户再通过“添加其他任务”逐项加入，已添加任务不再出现在添加器选项中。正常新建流程不得把全部九种任务呈现为无差别多选，也不得因目录模型声明多任务而自动多选。
-5. 在每个任务卡中选择 manifest 注册协议，并分别编辑实际 Base URL、typed endpoint、连接角色、鉴权兼容性、上下文限制和协议专属参数。
+5. 在每个任务卡中选择 manifest 注册协议，并分别编辑实际 Base URL、typed endpoint、连接角色、鉴权兼容性、上下文限制和协议专属参数。`custom` 在模型 ID 非空且 registry 存在唯一通用兼容候选时可预选该协议，用户无需展开高级配置手工填写；保存时仍将协议 ID 与 transport 配置显式写入该 capability。
 6. 新建供应商通过 `POST /api/providers` 一次提交供应商、`initial_model` 和所需命名连接，数据库原子创建完整能力图；已有供应商使用 `PUT /api/provider-models` 的 `SaveProviderModelRequest` 全量保存一个模型并原子替换其 capability 集合。模型配置在响应中只以嵌套的 `models[].capabilities[]` 形状返回。
 
 主类型单选和额外任务添加器只是新建交互约束，不改变底层多 task 契约。编辑已有多任务模型时必须完整加载并保留其 capability 集合；运行时每次请求仍只选择一个 task，并只按精确的 `(provider_id, model, task)` 行取得协议和 transport 配置。
@@ -110,7 +112,7 @@ GET /api/model-protocols?preset=<preset>&task=<task>&base_url=<optional>
 
 | `platform` / 预置项 | 官方根地址与鉴权边界 | 当前目录策略 | 生命周期与仓库策略 |
 |---|---|---|---|
-| `custom` | 用户给定；鉴权、协议和完整 endpoint 都是用户数据 | 不猜测；可手工模型，或显式配置目录 URL/解析器 | 仅作为高级逃生舱。用户必须逐模型选择协议与任务，不能因名称像某供应商而自动改协议。 |
+| `custom` | 用户给定；鉴权、协议和完整 endpoint 都是用户数据 | 不猜测；可手工模型，或显式配置目录 URL/解析器 | 配置期可按已选任务预选 registry 中唯一的通用兼容协议，并在保存时显式持久化；不解析模型名称、不注入原厂连接/URL，运行时不猜协议。无唯一安全候选时仍由用户选择。 |
 | `new-api` | 用户网关根；每个部署启用的上游不同 | `GET {base}/v1/models`，但仅能证明网关公开了 ID | 每模型显式 `openai` / `anthropic` / `gemini`；非 Chat 模态只有网关声明且仓库有对应协议适配器时才展示。 |
 | `openai` | `https://api.openai.com/v1`，Bearer | 动态 `GET /models`，再按官方模型页/endpoint 能力分组 | 不保存“永久可用”静态列表；下架与弃用以 [Models](https://developers.openai.com/api/docs/models/all) 和官方弃用信息为准。 |
 | `anthropic` | `https://api.anthropic.com`；`x-api-key` + `anthropic-version` | 动态 `GET /v1/models` | 仓库旧 fallback 中 `claude-3-opus-20240229`、`claude-3-sonnet-20240229`、`claude-3-haiku-20240307` 已不可继续作为当前默认；按 [Models](https://docs.anthropic.com/en/docs/about-claude/models/overview) 与 [deprecations](https://docs.anthropic.com/en/docs/resources/model-deprecations) 更新。仅 Chat ✅。 |

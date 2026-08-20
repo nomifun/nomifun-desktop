@@ -34,7 +34,12 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
       () => definition.capabilities.map((capability) => capability.task),
       [definition.capabilities]
     );
-    const manifests = useModelProtocolManifests(data?.platform, tasks, undefined, data?.base_url);
+    const manifests = useModelProtocolManifests({
+      preset: data?.platform,
+      tasks,
+      baseUrlHint: data?.base_url,
+      modelHint: definition.model,
+    });
     const connectionState = useProviderConnections(data?.id, modalProps.visible && Boolean(data));
     const modelListState = useModeModeList({
       platform: data?.platform ?? '',
@@ -82,7 +87,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
         setDefinition(EMPTY_DEFINITION);
         setSaving(false);
       }
-    }, [modalProps.visible]);
+    }, [data?.id, modalProps.visible]);
 
     const handleConfirm = useCallback(async () => {
       if (!data || !validation.valid) {

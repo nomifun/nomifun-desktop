@@ -43,6 +43,12 @@ export type ModelProtocolManifestMap = Partial<Record<ModelTask, ModelProtocolMa
 export interface ModelCapabilityDraft {
   task: ModelTask;
   traits: ModelTrait[];
+  /**
+   * UI-only ownership for protocol-dependent fields. Runtime never sees this
+   * value: it exists so an async recommendation may update its own previous
+   * value without overwriting a user edit or an already-persisted capability.
+   */
+  transportSource: 'blank' | 'recommendation' | 'user' | 'persisted';
   protocol: string;
   connectionRole: string;
   baseUrlOverride: string;
@@ -54,6 +60,10 @@ export interface ModelCapabilityDraft {
   providerParamsJson: string;
   contextLimit?: number;
 }
+
+export type ModelCapabilityDraftPatch = Partial<
+  Omit<ModelCapabilityDraft, 'task' | 'transportSource'>
+>;
 
 export interface ModelDefinitionDraft {
   model: string;
@@ -110,6 +120,7 @@ export const isDuplicateModelId = (value: string, existing: readonly string[]): 
 export const emptyCapabilityDraft = (task: ModelTask): ModelCapabilityDraft => ({
   task,
   traits: [],
+  transportSource: 'blank',
   protocol: '',
   connectionRole: 'default',
   baseUrlOverride: '',
@@ -138,6 +149,7 @@ export const capabilityDraftFromResponse = (capability: {
 }): ModelCapabilityDraft => ({
   task: capability.task,
   traits: capability.traits ?? [],
+  transportSource: 'persisted',
   protocol: capability.protocol,
   connectionRole: capability.connection_role,
   baseUrlOverride: capability.base_url_override ?? '',
@@ -230,32 +242,100 @@ export const changePrimaryModelTask = (
   capabilities: [emptyCapabilityDraft(task)],
 });
 
-/** Fill only blank fields from the backend's provider × task recommendation. */
+/**
+ * Apply backend recommendations only to blank or recommendation-owned
+ * transport. User-edited and persisted transport remain authoritative.
+ */
 export const reconcileCapabilityRecommendations = (
   capabilities: readonly ModelCapabilityDraft[],
   manifests: ModelProtocolManifestMap
 ): ModelCapabilityDraft[] =>
   capabilities.map((capability) => {
-    const recommendation = manifests[capability.task]?.recommendation;
-    if (!recommendation) return capability;
-    const untouchedProtocol = !capability.protocol;
-    const protocol = capability.protocol || recommendation.protocol_id;
-    const connectionRole = untouchedProtocol
-      ? recommendation.connection_role || 'default'
-      : capability.connectionRole || recommendation.connection_role || 'default';
+    const manifest = manifests[capability.task];
+    // Missing data means the request is loading or failed. Only a resolved
+    // manifest with an explicit null recommendation may withdraw an automatic
+    // value; transient transport state must not mutate the user's draft.
+    if (!manifest) return capability;
+    const recommendation = manifest.recommendation;
+    if (capability.transportSource === 'user' || capability.transportSource === 'persisted') {
+      return capability;
+    }
+
+    if (!recommendation) {
+      return capability.transportSource === 'recommendation'
+        ? resetCapabilityTransport(capability, 'blank')
+        : capability;
+    }
+
+    const protocol = recommendation.protocol_id.trim();
+    const connectionRole = recommendation.connection_role || 'default';
     const baseUrlOverride =
-      !capability.baseUrlOverride &&
       connectionRole === 'default' &&
       recommendation.base_url_override_required &&
       recommendation.default_base_url
         ? recommendation.default_base_url
-        : capability.baseUrlOverride;
-    return protocol === capability.protocol &&
-      connectionRole === capability.connectionRole &&
-      baseUrlOverride === capability.baseUrlOverride
-      ? capability
-      : { ...capability, protocol, connectionRole, baseUrlOverride };
+        : '';
+    const protocolChanged = capability.protocol.trim() !== protocol;
+    const base = protocolChanged
+      ? resetCapabilityTransport(capability, 'recommendation')
+      : capability;
+    return base.protocol === protocol &&
+      base.connectionRole === connectionRole &&
+      base.baseUrlOverride === baseUrlOverride &&
+      base.transportSource === 'recommendation'
+      ? base
+      : {
+          ...base,
+          protocol,
+          connectionRole,
+          baseUrlOverride,
+          transportSource: 'recommendation',
+        };
   });
+
+const resetCapabilityTransport = (
+  capability: ModelCapabilityDraft,
+  transportSource: ModelCapabilityDraft['transportSource']
+): ModelCapabilityDraft => ({
+  ...capability,
+  transportSource,
+  protocol: '',
+  connectionRole: 'default',
+  baseUrlOverride: '',
+  endpoint: '',
+  pollEndpoint: '',
+  contentEndpoint: '',
+  realtimeEndpoint: '',
+  allowCrossOriginCredentials: false,
+  providerParamsJson: '',
+});
+
+const TRANSPORT_DRAFT_FIELDS = new Set<keyof ModelCapabilityDraft>([
+  'protocol',
+  'connectionRole',
+  'baseUrlOverride',
+  'endpoint',
+  'pollEndpoint',
+  'contentEndpoint',
+  'realtimeEndpoint',
+  'allowCrossOriginCredentials',
+  'providerParamsJson',
+]);
+
+/** Apply an editor patch and transfer recommendation-owned transport to the user. */
+export const patchCapabilityDraft = (
+  capability: ModelCapabilityDraft,
+  patch: ModelCapabilityDraftPatch
+): ModelCapabilityDraft => ({
+  ...capability,
+  ...patch,
+  task: capability.task,
+  ...(Object.keys(patch).some((key) =>
+    TRANSPORT_DRAFT_FIELDS.has(key as keyof ModelCapabilityDraft)
+  )
+    ? { transportSource: 'user' as const }
+    : {}),
+});
 
 /**
  * Switch protocols as one atomic edit. Transport-owned fields from the old
@@ -267,7 +347,11 @@ export const changeCapabilityProtocol = (
   manifest?: ModelProtocolManifest
 ): ModelCapabilityDraft => {
   const normalizedProtocol = protocol.trim();
-  if (normalizedProtocol === capability.protocol.trim()) return capability;
+  if (normalizedProtocol === capability.protocol.trim()) {
+    return capability.transportSource === 'recommendation' || capability.transportSource === 'blank'
+      ? { ...capability, transportSource: 'user' }
+      : capability;
+  }
   const recommendation = manifest?.recommendation;
   const isRecommendation = recommendation?.protocol_id === normalizedProtocol;
   const connectionRole = isRecommendation ? recommendation.connection_role || 'default' : 'default';
@@ -280,16 +364,10 @@ export const changeCapabilityProtocol = (
       : '';
 
   return {
-    ...capability,
+    ...resetCapabilityTransport(capability, 'user'),
     protocol: normalizedProtocol,
     connectionRole,
     baseUrlOverride,
-    endpoint: '',
-    pollEndpoint: '',
-    contentEndpoint: '',
-    realtimeEndpoint: '',
-    allowCrossOriginCredentials: false,
-    providerParamsJson: '',
   };
 };
 

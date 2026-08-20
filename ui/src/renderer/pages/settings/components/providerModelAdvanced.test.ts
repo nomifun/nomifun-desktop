@@ -19,6 +19,7 @@ import {
   isProtocolAuthSchemeAllowed,
   isDuplicateModelId,
   normalizeModelId,
+  patchCapabilityDraft,
   providerParamVoice,
   reconcileCapabilityRecommendations,
   removeCapabilityTask,
@@ -210,9 +211,11 @@ describe('model definition capability selection', () => {
     expect(removeCapabilityTask(withSpeech, 'embedding')).toEqual(withSpeech);
   });
 
-  test('applies StepFun task recommendations only to blank structured fields', () => {
+  test('applies recommendations only to blank transport and preserves user-owned transport', () => {
     const tts = emptyCapabilityDraft('speech_synthesis');
-    const realtime = { ...emptyCapabilityDraft('realtime_conversation'), protocol: 'manual.realtime' };
+    const realtime = patchCapabilityDraft(emptyCapabilityDraft('realtime_conversation'), {
+      protocol: 'manual.realtime',
+    });
     const manifests = {
       speech_synthesis: manifest('speech_synthesis', 'stepfun.audio_speech'),
       realtime_conversation: manifest('realtime_conversation', 'stepfun.realtime_s2s'),
@@ -222,6 +225,79 @@ describe('model definition capability selection', () => {
       { task: 'speech_synthesis', protocol: 'stepfun.audio_speech', connectionRole: 'default' },
       { task: 'realtime_conversation', protocol: 'manual.realtime', connectionRole: 'default' },
     ]);
+  });
+
+  test('replaces a previous automatic recommendation when the selected model recommendation changes', () => {
+    const firstManifest = manifest('chat', 'openai.chat_text');
+    firstManifest.recommendation!.base_url_override_required = true;
+    firstManifest.recommendation!.default_base_url = 'https://first.example/v1';
+    const [first] = reconcileCapabilityRecommendations([emptyCapabilityDraft('chat')], {
+      chat: firstManifest,
+    });
+    expect(first).toMatchObject({
+      protocol: 'openai.chat_text',
+      baseUrlOverride: 'https://first.example/v1',
+      transportSource: 'recommendation',
+    });
+
+    const secondManifest = manifest('chat', 'anthropic.messages', 'https://second.example');
+    secondManifest.recommendation!.base_url_override_required = false;
+    const [second] = reconcileCapabilityRecommendations([first], { chat: secondManifest });
+    expect(second).toMatchObject({
+      protocol: 'anthropic.messages',
+      connectionRole: 'default',
+      baseUrlOverride: '',
+      endpoint: '',
+      providerParamsJson: '',
+      transportSource: 'recommendation',
+    });
+  });
+
+  test('never replaces user-edited or persisted transport when recommendations refresh', () => {
+    const user = patchCapabilityDraft(emptyCapabilityDraft('chat'), {
+      protocol: 'manual.chat',
+      connectionRole: 'custom_api',
+      endpoint: '/manual',
+    });
+    const persisted = capabilityDraftFromResponse({
+      task: 'chat',
+      protocol: 'stored.chat',
+      connection_role: 'default',
+      endpoint: '/stored',
+    });
+    const recommendation = { chat: manifest('chat', 'openai.chat_text') };
+
+    const reconciled = reconcileCapabilityRecommendations([user, persisted], recommendation);
+    expect(reconciled[0]).toBe(user);
+    expect(reconciled[1]).toBe(persisted);
+  });
+
+  test('clears only recommendation-owned transport when a model no longer has a safe default', () => {
+    const [recommended] = reconcileCapabilityRecommendations([emptyCapabilityDraft('chat')], {
+      chat: manifest('chat', 'openai.chat_text'),
+    });
+    expect(reconcileCapabilityRecommendations([recommended], {})[0]).toBe(recommended);
+
+    const withoutRecommendation = manifest('chat', 'openai.chat_text');
+    withoutRecommendation.recommendation = null;
+
+    expect(
+      reconcileCapabilityRecommendations([recommended], { chat: withoutRecommendation })[0]
+    ).toEqual(emptyCapabilityDraft('chat'));
+  });
+
+  test('keeps an automatic protocol after the user explicitly confirms the same option', () => {
+    const taskManifest = manifest('chat', 'openai.chat_text');
+    const [recommended] = reconcileCapabilityRecommendations([emptyCapabilityDraft('chat')], {
+      chat: taskManifest,
+    });
+    const confirmed = changeCapabilityProtocol(recommended, recommended.protocol, taskManifest);
+    expect(confirmed.transportSource).toBe('user');
+
+    taskManifest.recommendation = null;
+    expect(reconcileCapabilityRecommendations([confirmed], { chat: taskManifest })[0]).toBe(
+      confirmed
+    );
   });
 
   test('persists required task base overrides and keeps named-role base URLs out of capabilities', () => {
@@ -290,10 +366,14 @@ describe('model definition capability selection', () => {
       contextLimit: 32_000,
     };
 
-    expect(changeCapabilityProtocol(current, current.protocol, taskManifest)).toBe(current);
+    expect(changeCapabilityProtocol(current, current.protocol, taskManifest)).toEqual({
+      ...current,
+      transportSource: 'user',
+    });
     const changed = changeCapabilityProtocol(current, 'openai.audio_speech', taskManifest);
     expect(changed).toEqual({
       ...current,
+      transportSource: 'user',
       protocol: 'openai.audio_speech',
       connectionRole: 'default',
       baseUrlOverride: '',
@@ -496,6 +576,7 @@ describe('capability validation and serialization', () => {
     ).toEqual({
       task: 'speech_synthesis',
       traits: ['audio_output'],
+      transportSource: 'persisted',
       protocol: 'stepfun.audio_speech',
       connectionRole: 'voice',
       baseUrlOverride: 'https://voice.example/v1',

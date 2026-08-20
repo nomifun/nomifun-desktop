@@ -1036,6 +1036,23 @@ pub fn protocol_manifest_for_connection(
     base_url_hint: Option<&str>,
     task: ModelTask,
 ) -> ModelProtocolManifestResponse {
+    protocol_manifest_for_model_connection(preset, base_url_hint, None, task)
+}
+
+/// Build configuration-time protocol metadata with an optional model-id hint.
+///
+/// The model id is deliberately only a signal that the user has entered or
+/// selected a concrete model. It is never parsed to infer a vendor or protocol.
+/// For the `custom` preset, that signal allows the manifest to preselect the
+/// sole registry-declared generic compatibility protocol for the requested
+/// task. Callers still have to persist the selected protocol explicitly; this
+/// function is not consulted by runtime resolution or probing.
+pub fn protocol_manifest_for_model_connection(
+    preset: &str,
+    base_url_hint: Option<&str>,
+    model_hint: Option<&str>,
+    task: ModelTask,
+) -> ModelProtocolManifestResponse {
     let selected = resolve_preset(preset, base_url_hint);
     let custom_scope = matches!(selected.platform.as_str(), "custom" | "new-api");
     let registry = default_protocol_registry();
@@ -1073,7 +1090,11 @@ pub fn protocol_manifest_for_connection(
             .then_with(|| left.protocol_id.cmp(&right.protocol_id))
     });
 
-    let recommendation = if custom_scope {
+    let recommendation = if selected.platform == "custom"
+        && model_hint.is_some_and(|model| !model.trim().is_empty())
+    {
+        generic_custom_protocol_recommendation(&registry, &selected, task)
+    } else if custom_scope {
         None
     } else {
         preset_protocol_recommendation(&selected.platform, task).and_then(|route| {
@@ -1125,6 +1146,41 @@ pub fn protocol_manifest_for_connection(
     }
 }
 
+/// Recommend only an unambiguous, registry-declared generic compatibility
+/// protocol. Requiring both scopes keeps provider-native escape hatches out of
+/// the default path, and requiring exactly one match makes registry expansion
+/// fail closed instead of silently changing a user's new-model configuration.
+fn generic_custom_protocol_recommendation(
+    registry: &ProtocolManifestRegistry,
+    selected: &PlatformPresetDescriptor,
+    task: ModelTask,
+) -> Option<ProtocolRecommendation> {
+    let mut candidates = registry.descriptors().filter(|descriptor| {
+        descriptor.supported_tasks.contains(&task)
+            && descriptor.scopes.contains(&ProtocolScope::OfficialCompat)
+            && descriptor.scopes.contains(&ProtocolScope::Custom)
+    });
+    let descriptor = candidates.next()?;
+    if candidates.next().is_some() {
+        return None;
+    }
+
+    let default_auth_scheme = selected.default_auth_scheme.as_ref().and_then(|scheme| {
+        descriptor
+            .allowed_auth_schemes
+            .iter()
+            .any(|allowed| allowed == scheme)
+            .then(|| scheme.clone())
+    });
+    Some(ProtocolRecommendation {
+        protocol_id: descriptor.protocol_id.clone(),
+        connection_role: None,
+        default_base_url: None,
+        default_auth_scheme,
+        base_url_override_required: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1152,6 +1208,30 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.message.contains("duplicate protocol descriptor"));
+    }
+
+    #[test]
+    fn generic_custom_recommendation_requires_exactly_one_dual_scope_candidate() {
+        let selected = resolve_preset("custom", None);
+        let mut generic = fake_descriptor("generic.chat");
+        generic.scopes = vec![ProtocolScope::OfficialCompat, ProtocolScope::Custom];
+        let registry = ProtocolManifestRegistry::try_new(vec![generic]).unwrap();
+        let recommendation = generic_custom_protocol_recommendation(&registry, &selected, Chat)
+            .expect("one generic compatibility protocol");
+        assert_eq!(recommendation.protocol_id, "generic.chat");
+        assert_eq!(recommendation.default_auth_scheme.as_deref(), Some("bearer"));
+
+        let mut first = fake_descriptor("generic.chat.first");
+        first.scopes = vec![ProtocolScope::OfficialCompat, ProtocolScope::Custom];
+        let mut second = fake_descriptor("generic.chat.second");
+        second.scopes = vec![ProtocolScope::OfficialCompat, ProtocolScope::Custom];
+        let registry = ProtocolManifestRegistry::try_new(vec![
+            fake_descriptor("native.escape-hatch"),
+            first,
+            second,
+        ])
+        .unwrap();
+        assert!(generic_custom_protocol_recommendation(&registry, &selected, Chat).is_none());
     }
 
     #[test]

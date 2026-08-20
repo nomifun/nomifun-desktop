@@ -40,6 +40,7 @@ import {
   isDuplicateModelId,
   isProtocolAuthSchemeAllowed,
   parseProviderParams,
+  patchCapabilityDraft,
   protocolDescriptorForDraft,
   providerParamVoice,
   reconcileCapabilityRecommendations,
@@ -53,6 +54,7 @@ import {
   type CapabilityEndpointField,
   type CapabilityValidationResult,
   type ModelCapabilityDraft,
+  type ModelCapabilityDraftPatch,
   type ModelDefinitionDraft,
   type ModelProtocolManifestMap,
   type ProviderConnectionDescriptor,
@@ -68,7 +70,7 @@ export interface ModelCatalogSuggestion {
 
 export interface ModelDefinitionEditorProps {
   value: ModelDefinitionDraft;
-  onChange: (value: ModelDefinitionDraft) => void;
+  onChange: React.Dispatch<React.SetStateAction<ModelDefinitionDraft>>;
   providerBaseUrl: string;
   providerAuthScheme: string;
   manifests: ModelProtocolManifestMap;
@@ -291,6 +293,7 @@ const sameCapabilities = (
     const candidate = right[index];
     return (
       candidate?.task === capability.task &&
+      candidate.transportSource === capability.transportSource &&
       candidate.protocol === capability.protocol &&
       candidate.connectionRole === capability.connectionRole &&
       candidate.baseUrlOverride === capability.baseUrlOverride
@@ -378,9 +381,20 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
 
   useEffect(() => {
     if (recommendationPending) {
-      onChange({ ...value, capabilities: reconciledCapabilities });
+      // Reconcile against the latest parent state. A manifest response can land
+      // in the same frame as model typing or an advanced-field edit; replaying
+      // the render-time `value` snapshot would otherwise overwrite that input.
+      onChange((current) => {
+        const capabilities = reconcileCapabilityRecommendations(
+          current.capabilities,
+          recommendationManifests
+        );
+        return sameCapabilities(current.capabilities, capabilities)
+          ? current
+          : { ...current, capabilities };
+      });
     }
-  }, [onChange, recommendationPending, reconciledCapabilities, value]);
+  }, [onChange, recommendationManifests, recommendationPending]);
 
   useEffect(() => {
     setDisclosureState((current) =>
@@ -390,43 +404,48 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
 
   const duplicateModel = isDuplicateModelId(value.model, existingModelIds);
 
-  const updateCapability = (task: ModelTask, patch: Partial<ModelCapabilityDraft>) => {
-    onChange({
-      ...value,
-      capabilities: value.capabilities.map((capability) =>
-        capability.task === task ? { ...capability, ...patch, task } : capability
+  const updateCapability = (task: ModelTask, patch: ModelCapabilityDraftPatch) => {
+    onChange((current) => ({
+      ...current,
+      capabilities: current.capabilities.map((capability) =>
+        capability.task === task ? patchCapabilityDraft(capability, patch) : capability
       ),
-    });
+    }));
   };
 
   const selectPrimaryTask = (task: ModelTask) => {
     if (task === primaryTask) return;
-    onChange(changePrimaryModelTask(value, task));
+    onChange((current) =>
+      current.capabilities[0]?.task === task ? current : changePrimaryModelTask(current, task)
+    );
   };
 
   const selectCatalogSuggestion = (profile: ModelCatalogSuggestion) => {
     if (!primaryTask) return;
-    onChange(
-      applyCatalogSuggestionForTask(
-        value,
-        { model: profile.value, tasks: profile.tasks, traits: profile.traits },
-        primaryTask
-      )
-    );
+    onChange((current) => {
+      const currentPrimaryTask = current.capabilities[0]?.task;
+      return currentPrimaryTask
+        ? applyCatalogSuggestionForTask(
+            current,
+            { model: profile.value, tasks: profile.tasks, traits: profile.traits },
+            currentPrimaryTask
+          )
+        : current;
+    });
   };
 
   const addTask = (task: ModelTask) => {
-    onChange({
-      ...value,
-      capabilities: addCapabilityTask(value.capabilities, task),
-    });
+    onChange((current) => ({
+      ...current,
+      capabilities: addCapabilityTask(current.capabilities, task),
+    }));
   };
 
   const removeTask = (task: ModelTask) => {
-    onChange({
-      ...value,
-      capabilities: removeCapabilityTask(value.capabilities, task),
-    });
+    onChange((current) => ({
+      ...current,
+      capabilities: removeCapabilityTask(current.capabilities, task),
+    }));
   };
 
   return (
@@ -500,7 +519,11 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
               defaultActiveFirstOption={false}
               onChange={(model, option) => {
                 const manualModel = resolveModelInputChange(model, option);
-                if (manualModel !== undefined) onChange({ ...value, model: manualModel });
+                if (manualModel !== undefined) {
+                  onChange((current) =>
+                    current.model === manualModel ? current : { ...current, model: manualModel }
+                  );
+                }
               }}
               onSelect={(model) => {
                 const suggestion = filteredCatalogSuggestions.find((item) => item.value === model);
@@ -631,7 +654,10 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
         const selectedRole = capability.connectionRole || 'default';
         const selectedRoleExists = availableRoles.includes(selectedRole);
         const genericAdvancedProtocol = Boolean(
-          descriptor && manifest && !descriptor.platforms.includes(manifest.platform)
+          descriptor &&
+            manifest &&
+            descriptor.protocol_id !== recommended &&
+            !descriptor.platforms.includes(manifest.platform)
         );
         const selectedAuthScheme =
           selectedRole === 'default'
@@ -802,16 +828,25 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
                     : t('settings.compatibleProtocolPlaceholder', { defaultValue: '选择已注册适配器' })
                 }
                 onChange={(protocol) => {
-                  const nextCapability = changeCapabilityProtocol(
-                    capability,
-                    typeof protocol === 'string' ? protocol : '',
-                    manifest
-                  );
-                  onChange({
-                    ...value,
-                    capabilities: value.capabilities.map((candidate) =>
-                      candidate.task === capability.task ? nextCapability : candidate
-                    ),
+                  const nextProtocol = typeof protocol === 'string' ? protocol : '';
+                  onChange((current) => {
+                    const selected = current.capabilities.find(
+                      (candidate) => candidate.task === capability.task
+                    );
+                    if (!selected) return current;
+                    const nextCapability = changeCapabilityProtocol(
+                      selected,
+                      nextProtocol,
+                      manifest
+                    );
+                    return nextCapability === selected
+                      ? current
+                      : {
+                          ...current,
+                          capabilities: current.capabilities.map((candidate) =>
+                            candidate.task === capability.task ? nextCapability : candidate
+                          ),
+                        };
                   });
                 }}
                 triggerProps={{ getPopupContainer: () => document.body }}
