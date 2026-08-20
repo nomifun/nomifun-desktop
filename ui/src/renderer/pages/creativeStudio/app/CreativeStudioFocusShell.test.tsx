@@ -11,6 +11,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
+import { ThemeProvider } from '@renderer/hooks/context/ThemeContext';
 import zhCreativeStudio from '@renderer/services/i18n/locales/zh-CN/creativeStudio.json';
 import CreativeStudioFocusShell from './CreativeStudioFocusShell';
 import CreativeStudioHomePage from './CreativeStudioHomePage';
@@ -27,14 +28,16 @@ await testI18n.use(initReactI18next).init({
 const renderFocusShell = (path = CREATIVE_STUDIO_ROOT_PATH) =>
   renderToStaticMarkup(
     <I18nextProvider i18n={testI18n}>
-      <MemoryRouter initialEntries={[path]}>
-        <Routes>
-          <Route path={CREATIVE_STUDIO_ROOT_PATH} element={<CreativeStudioFocusShell />}>
-            <Route index element={<CreativeStudioHomePage />} />
-            <Route path='video' element={<div data-test-route='video'>video route</div>} />
-          </Route>
-        </Routes>
-      </MemoryRouter>
+      <ThemeProvider>
+        <MemoryRouter initialEntries={[path]}>
+          <Routes>
+            <Route path={CREATIVE_STUDIO_ROOT_PATH} element={<CreativeStudioFocusShell />}>
+              <Route index element={<CreativeStudioHomePage />} />
+              <Route path='video' element={<div data-test-route='video'>video route</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </ThemeProvider>
     </I18nextProvider>
   );
 
@@ -47,6 +50,7 @@ describe('Creative Studio focus shell', () => {
     expect(html.includes('data-creative-studio-section="projects"')).toBe(true);
     expect(html.includes('id="creative-studio-portal-root"')).toBe(true);
     expect(html.includes('返回工作台')).toBe(true);
+    expect(html.includes('aria-label="深色"')).toBe(true);
     expect(html.includes('我的画布')).toBe(true);
     expect(html.includes('生图工作台')).toBe(true);
     expect(html.includes('视频创作台')).toBe(true);
