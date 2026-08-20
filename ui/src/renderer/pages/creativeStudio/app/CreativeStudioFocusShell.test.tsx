@@ -14,7 +14,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import zhCreativeStudio from '@renderer/services/i18n/locales/zh-CN/creativeStudio.json';
 import CreativeStudioFocusShell from './CreativeStudioFocusShell';
 import CreativeStudioHomePage from './CreativeStudioHomePage';
-import { CREATIVE_STUDIO_ROOT_PATH } from './routes';
+import { CREATIVE_STUDIO_ROOT_PATH, CREATIVE_STUDIO_VIDEO_PATH } from './routes';
 
 const testI18n = createInstance();
 await testI18n.use(initReactI18next).init({
@@ -24,13 +24,14 @@ await testI18n.use(initReactI18next).init({
   interpolation: { escapeValue: false },
 });
 
-const renderFocusShell = () =>
+const renderFocusShell = (path = CREATIVE_STUDIO_ROOT_PATH) =>
   renderToStaticMarkup(
     <I18nextProvider i18n={testI18n}>
-      <MemoryRouter initialEntries={[CREATIVE_STUDIO_ROOT_PATH]}>
+      <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path={CREATIVE_STUDIO_ROOT_PATH} element={<CreativeStudioFocusShell />}>
             <Route index element={<CreativeStudioHomePage />} />
+            <Route path='video' element={<div data-test-route='video'>video route</div>} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -38,15 +39,38 @@ const renderFocusShell = () =>
   );
 
 describe('Creative Studio focus shell', () => {
-  test('renders product chrome, routed content, and the isolated portal root', () => {
+  test('renders source product navigation and the isolated route boundary', () => {
     const html = renderFocusShell();
 
     expect(html.includes('data-creative-studio-focus-shell="true"')).toBe(true);
     expect(html.includes('data-creative-studio-top-bar="true"')).toBe(true);
-    expect(html.includes('data-creative-studio-home="true"')).toBe(true);
+    expect(html.includes('data-creative-studio-section="projects"')).toBe(true);
     expect(html.includes('id="creative-studio-portal-root"')).toBe(true);
     expect(html.includes('返回工作台')).toBe(true);
-    expect(html.includes('把灵感铺展成一张无限画布')).toBe(true);
+    expect(html.includes('我的画布')).toBe(true);
+    expect(html.includes('生图工作台')).toBe(true);
+    expect(html.includes('视频创作台')).toBe(true);
+    expect(html.includes('提示词库')).toBe(true);
+    expect(html.includes('我的素材')).toBe(true);
+    expect(html.includes('data-creative-studio-navigation="audio"')).toBe(false);
+  });
+
+  test('keeps the index empty until the project list is wired', () => {
+    const html = renderFocusShell();
+
+    expect(html.includes('data-creative-studio-home')).toBe(false);
+    expect(html.includes('把灵感铺展成一张无限画布')).toBe(false);
+    expect(html.includes('creativeStudio.home')).toBe(false);
+  });
+
+  test('marks a deep-linked workbench destination active', () => {
+    const html = renderFocusShell(CREATIVE_STUDIO_VIDEO_PATH);
+
+    expect(html.includes('data-creative-studio-section="video"')).toBe(true);
+    expect(html.includes('data-test-route="video"')).toBe(true);
+    expect(
+      /data-active="true" data-creative-studio-navigation="video" aria-current="page"/.test(html)
+    ).toBe(true);
   });
 
   test('does not render ordinary workbench chrome inside the product boundary', () => {

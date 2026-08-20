@@ -4,57 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { LinkOne, MagicWand, Platte } from '@icon-park/react';
 import React from 'react';
-import { useTranslation } from 'react-i18next';
+import { Navigate } from 'react-router-dom';
 
-import styles from './CreativeStudioHomePage.module.css';
+export interface CreativeStudioRouteRedirectProps {
+  to: string;
+}
 
-const CreativeStudioHomePage: React.FC = () => {
-  const { t } = useTranslation();
-  const pillars = [
-    {
-      key: 'canvas',
-      icon: <Platte theme='outline' size={21} fill='currentColor' />,
-      title: t('creativeStudio.home.canvas.title'),
-      description: t('creativeStudio.home.canvas.description'),
-    },
-    {
-      key: 'nodes',
-      icon: <LinkOne theme='outline' size={21} fill='currentColor' />,
-      title: t('creativeStudio.home.nodes.title'),
-      description: t('creativeStudio.home.nodes.description'),
-    },
-    {
-      key: 'models',
-      icon: <MagicWand theme='outline' size={21} fill='currentColor' />,
-      title: t('creativeStudio.home.models.title'),
-      description: t('creativeStudio.home.models.description'),
-    },
-  ];
+/** Explicit redirect boundary for leaf routes that are intentionally canonicalized by the Router. */
+export const CreativeStudioRouteRedirect: React.FC<CreativeStudioRouteRedirectProps> = ({ to }) => (
+  <Navigate to={to} replace />
+);
 
-  return (
-    <section className={styles.page} data-creative-studio-home>
-      <div className={styles.glow} aria-hidden='true' />
-      <div className={styles.grid} aria-hidden='true' />
-      <div className={styles.hero}>
-        <div className={styles.eyebrow}>{t('creativeStudio.home.eyebrow')}</div>
-        <h1 className={styles.title}>{t('creativeStudio.home.headline')}</h1>
-        <p className={styles.description}>{t('creativeStudio.home.description')}</p>
-        <div className={styles.pillars}>
-          {pillars.map((pillar) => (
-            <article key={pillar.key} className={styles.pillar}>
-              <div className={styles.icon}>{pillar.icon}</div>
-              <div>
-                <h2 className={styles.pillarTitle}>{pillar.title}</h2>
-                <p className={styles.pillarDescription}>{pillar.description}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-};
+/**
+ * Transitional zero-content index boundary.
+ *
+ * The project-list slice replaces this component at `/workshop`; keeping this
+ * boundary empty prevents a fabricated landing experience from flashing while
+ * independently developed route slices are connected.
+ */
+const CreativeStudioHomePage: React.FC = () => null;
 
 export default CreativeStudioHomePage;
