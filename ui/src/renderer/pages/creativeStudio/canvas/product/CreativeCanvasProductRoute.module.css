@@ -108,6 +108,19 @@
   animation: creative-canvas-product-spin 0.9s linear infinite;
 }
 
+.panoramaDescription {
+  margin: 0;
+  color: var(--color-text-2);
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.panoramaActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 @keyframes creative-canvas-product-spin {
   to {
     transform: rotate(360deg);

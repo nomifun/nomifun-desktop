@@ -197,6 +197,37 @@ describe('Creative Studio clipboard reducer', () => {
 });
 
 describe('Creative Studio history reducer', () => {
+  test('coalesces compound node creation and connection into one undo step', () => {
+    const source = testNode('image', 1);
+    const target = testNode('config', 2);
+    let state = createInitialCanvasState({ document: testDocument([source]) });
+    const mergeKey = `create-connected:${target.id}`;
+
+    state = canvasReducer(
+      state,
+      canvasCommands.addNode(target, { at: 10, mergeKey })
+    );
+    state = canvasReducer(
+      state,
+      canvasCommands.connect(source.id, target.id, {
+        at: 10,
+        mergeKey,
+        idFactory: sequentialTestIdFactory(20),
+      })
+    );
+
+    expect(state.document.nodes).toHaveLength(2);
+    expect(state.document.connections).toHaveLength(1);
+    expect(state.history.past).toHaveLength(1);
+
+    state = canvasReducer(state, canvasCommands.undo());
+    expect(state.document.nodes).toEqual([source]);
+    expect(state.document.connections).toEqual([]);
+    state = canvasReducer(state, canvasCommands.redo());
+    expect(state.document.nodes).toHaveLength(2);
+    expect(state.document.connections).toHaveLength(1);
+  });
+
   test('coalesces the same merge key through a 180ms quiet window', () => {
     const node = testNode('text', 1);
     let state = createInitialCanvasState({ document: testDocument([node]) });

@@ -11,6 +11,10 @@ const editorSource = readFileSync(
   new URL('./CreativeCanvasEditor.tsx', import.meta.url),
   'utf8'
 );
+const editorStyles = readFileSync(
+  new URL('./CreativeCanvasEditor.module.css', import.meta.url),
+  'utf8'
+);
 const saveSource = readFileSync(new URL('./casSaveController.ts', import.meta.url), 'utf8');
 
 describe('CreativeCanvasEditor composition contract', () => {
@@ -61,13 +65,28 @@ describe('CreativeCanvasEditor composition contract', () => {
       'onWheel',
       'clientToCanvas',
       "if (tool === 'pan') return",
-      "key === 'c'",
-      "key === 'v'",
-      "key === 'z'",
-      "event.key === 'Delete' || event.key === 'Backspace'",
+      'resolveCanvasKeyboardInput',
+      'startCanvasResize',
+      'updateCanvasResize',
+      'startCanvasConnectionDrag',
+      'finishCanvasConnectionDrag',
+      'validateCanvasDropImport',
+      'openCanvasContextMenu',
+      'resolveCanvasDoubleClick',
+      'onIntegrationIntent',
+      'data-canvas-connection-handle',
+      'data-connection-dragging',
+      'data-resize-corner',
+      'onContextMenu',
+      'onDoubleClick',
+      'onDrop',
     ]) {
       expect(editorSource.includes(token)).toBe(true);
     }
+    expect(
+      editorStyles.includes(".editor[data-connection-dragging='true'] .connectionHandle")
+    ).toBe(true);
+    expect(editorStyles.includes('pointer-events: auto')).toBe(true);
   });
 
   test('does not manufacture assets or invoke generation/model APIs', () => {

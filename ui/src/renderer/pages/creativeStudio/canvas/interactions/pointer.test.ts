@@ -54,6 +54,13 @@ describe('canvas pointer controllers', () => {
       type: 'edge/connect',
       edge: { sourceNodeId: text.id, targetNodeId: image.id, sourceHandle: 'out', targetHandle: 'in' },
     });
+    expect(connected.intents).toEqual([
+      {
+        type: 'connection/created',
+        sourceNodeId: text.id,
+        targetNodeId: image.id,
+      },
+    ]);
     expect(finishCanvasConnectionDrag(document, moved, 5, { nodeId: null }).intents[0]).toMatchObject({
       type: 'connection/create-node-menu/open',
       worldPosition: { x: 60, y: 40 },

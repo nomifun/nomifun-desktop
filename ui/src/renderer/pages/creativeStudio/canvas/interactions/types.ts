@@ -5,6 +5,7 @@
  */
 
 import type { CanvasCommand, CanvasConnectionErrorCode, CanvasPoint } from '../core';
+import type { CreativeAssetUploadRejection } from '../../assets/page/model';
 
 export type CanvasContextTarget =
   | { kind: 'canvas' }
@@ -57,6 +58,11 @@ export type CanvasIntegrationIntent =
       code: CanvasConnectionErrorCode | 'no_valid_drop_target';
     }
   | {
+      type: 'connection/created';
+      sourceNodeId: string;
+      targetNodeId: string;
+    }
+  | {
       type: 'asset/import-file';
       /** This is the real browser File; the controller never invents an asset. */
       file: File;
@@ -64,6 +70,11 @@ export type CanvasIntegrationIntent =
       worldPosition: CanvasPoint;
       /** Source parity: a real 2:1 image asks after upload metadata is known. */
       panoramaChoice: 'after-upload-if-2-to-1' | 'not-applicable';
+    }
+  | {
+      type: 'asset/import-feedback';
+      rejected: Array<{ fileName: string; reason: CreativeAssetUploadRejection }>;
+      ignoredAcceptedFileNames: string[];
     };
 
 export interface CanvasInteractionResolution {

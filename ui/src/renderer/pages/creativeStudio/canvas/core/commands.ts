@@ -75,9 +75,13 @@ function history(at: number | undefined, mergeKey?: string): CanvasHistoryMeta {
 export const canvasCommands = {
   addNode(
     node: CanvasGraphNode,
-    options: { at?: number } = {}
+    options: { at?: number; mergeKey?: string } = {}
   ): CanvasCommand {
-    return { type: 'node/add', node, history: history(options.at) };
+    return {
+      type: 'node/add',
+      node,
+      history: history(options.at, options.mergeKey),
+    };
   },
 
   /**
@@ -145,6 +149,7 @@ export const canvasCommands = {
       sourceHandle?: string | null;
       targetHandle?: string | null;
       at?: number;
+      mergeKey?: string;
       idFactory?: CanvasIdFactory;
     } = {}
   ): CanvasCommand {
@@ -157,7 +162,7 @@ export const canvasCommands = {
         sourceHandle: options.sourceHandle ?? null,
         targetHandle: options.targetHandle ?? null,
       },
-      history: history(options.at),
+      history: history(options.at, options.mergeKey),
     };
   },
 
