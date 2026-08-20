@@ -259,6 +259,57 @@ pub struct CreativeWorkflowImageGenerationSettings {
     pub images_per_prompt: usize,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CreativeWorkflowTextTask {
+    Chat,
+}
+
+impl CreativeWorkflowTextTask {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreativeWorkflowTextModelBinding {
+    pub provider_id: String,
+    pub model: String,
+    pub task: CreativeWorkflowTextTask,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreativeWorkflowPromptPlanningSettings {
+    pub model: Option<CreativeWorkflowTextModelBinding>,
+    pub instruction: String,
+    pub max_tokens: u32,
+}
+
+impl CreativeWorkflowPromptPlanningSettings {
+    fn validate(&self, path: &str) -> Result<(), String> {
+        if let Some(model) = self.model.as_ref() {
+            validate_id(&format!("{path}.model.providerId"), &model.provider_id)?;
+            validate_text(&format!("{path}.model.model"), &model.model, 512, false)?;
+        }
+        validate_text(
+            &format!("{path}.instruction"),
+            &self.instruction,
+            2_000,
+            true,
+        )?;
+        if !(128..=32_768).contains(&self.max_tokens) {
+            return Err(format!(
+                "{path}.maxTokens must be between 128 and 32768"
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl CreativeWorkflowImageGenerationSettings {
     fn validate(&self, path: &str) -> Result<(), String> {
         if let Some(model) = self.model.as_ref() {
@@ -300,6 +351,7 @@ pub enum CreativeWorkflowStep {
         depends_on: Vec<String>,
         enabled: bool,
         template_id: String,
+        planning: CreativeWorkflowPromptPlanningSettings,
     },
     GenerateImages {
         id: String,
@@ -469,6 +521,15 @@ impl CreativeWorkflowDefinitionV1 {
         })
     }
 
+    pub fn text_model_bindings(
+        &self,
+    ) -> impl Iterator<Item = &CreativeWorkflowTextModelBinding> {
+        self.steps.iter().filter_map(|step| match step {
+            CreativeWorkflowStep::DraftPrompts { planning, .. } => planning.model.as_ref(),
+            _ => None,
+        })
+    }
+
     pub fn to_row(&self) -> Result<CreativeStudioWorkflowRow, String> {
         self.validate()?;
         let definition_json = serde_json::to_string(self)
@@ -607,13 +668,18 @@ fn validate_step_references<'a>(
                 return Err(format!("steps[{index}] references a missing template"));
             }
         }
-        CreativeWorkflowStep::DraftPrompts { template_id, .. } => {
+        CreativeWorkflowStep::DraftPrompts {
+            template_id,
+            planning,
+            ..
+        } => {
             if !templates.contains_key(template_id.as_str()) {
                 return Err(format!("steps[{index}] references a missing template"));
             }
             if !matches!(definition.output, CreativeWorkflowOutputPlan::MultiImageSeries { .. }) {
                 return Err("draft-prompts is only valid for a multi-image workflow".into());
             }
+            planning.validate(&format!("steps[{index}].planning"))?;
         }
         CreativeWorkflowStep::GenerateImages {
             depends_on,
@@ -800,6 +866,7 @@ mod tests {
     const TEMPLATE: &str = "0190f5fe-7c00-7a00-8abc-000000000203";
     const RENDER: &str = "0190f5fe-7c00-7a00-8abc-000000000204";
     const GENERATE: &str = "0190f5fe-7c00-7a00-8abc-000000000205";
+    const PLANNER_PROVIDER: &str = "0190f5fe-7c00-7a00-8abc-000000000206";
 
     fn definition() -> CreativeWorkflowDefinitionV1 {
         CreativeWorkflowDefinitionV1 {
@@ -904,5 +971,60 @@ mod tests {
                 .unwrap_err()
                 .contains("must use image_generation")
         );
+    }
+
+    #[test]
+    fn prompt_planning_uses_one_explicit_chat_binding() {
+        let mut definition = definition();
+        definition.output = CreativeWorkflowOutputPlan::MultiImageSeries {
+            target_count: 2,
+            concurrency: 2,
+            review_required: true,
+        };
+        definition.steps = vec![
+            CreativeWorkflowStep::DraftPrompts {
+                id: RENDER.into(),
+                name: "规划提示词".into(),
+                depends_on: Vec::new(),
+                enabled: true,
+                template_id: TEMPLATE.into(),
+                planning: CreativeWorkflowPromptPlanningSettings {
+                    model: Some(CreativeWorkflowTextModelBinding {
+                        provider_id: PLANNER_PROVIDER.into(),
+                        model: "chat-model".into(),
+                        task: CreativeWorkflowTextTask::Chat,
+                    }),
+                    instruction: "保持系列连贯".into(),
+                    max_tokens: 4096,
+                },
+            },
+            CreativeWorkflowStep::GenerateImages {
+                id: GENERATE.into(),
+                name: "生成图片".into(),
+                depends_on: vec![RENDER.into()],
+                enabled: true,
+                prompt_source: CreativeWorkflowPromptSource::PromptDrafts {
+                    step_id: RENDER.into(),
+                },
+                reference_variable_ids: Vec::new(),
+                generation: CreativeWorkflowImageGenerationSettings {
+                    model: None,
+                    quality: CreativeWorkflowImageQuality::Auto,
+                    width: 1024,
+                    height: 1024,
+                    images_per_prompt: 1,
+                },
+            },
+        ];
+
+        definition.validate().unwrap();
+        assert_eq!(
+            definition.text_model_bindings().next().unwrap().task.as_str(),
+            "chat"
+        );
+        if let CreativeWorkflowStep::DraftPrompts { planning, .. } = &mut definition.steps[0] {
+            planning.max_tokens = 0;
+        }
+        assert!(definition.validate().unwrap_err().contains("maxTokens"));
     }
 }

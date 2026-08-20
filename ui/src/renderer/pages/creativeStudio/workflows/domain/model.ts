@@ -57,6 +57,16 @@ export function cloneWorkflowDefinition(workflow: WorkflowDefinitionV1): Workflo
       if (step.kind === 'record-history') {
         return { ...step, dependsOn: [...step.dependsOn], sourceStepIds: [...step.sourceStepIds] };
       }
+      if (step.kind === 'draft-prompts') {
+        return {
+          ...step,
+          dependsOn: [...step.dependsOn],
+          planning: {
+            ...step.planning,
+            model: step.planning.model ? { ...step.planning.model } : null,
+          },
+        };
+      }
       return { ...step, dependsOn: [...step.dependsOn] };
     }),
   };

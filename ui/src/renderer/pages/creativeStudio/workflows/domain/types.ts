@@ -116,6 +116,20 @@ export interface WorkflowRenderTemplateStep extends WorkflowStepBase {
 export interface WorkflowDraftPromptsStep extends WorkflowStepBase {
   kind: 'draft-prompts';
   templateId: WorkflowTemplateId;
+  planning: WorkflowPromptPlanningSettings;
+}
+
+export interface WorkflowTextModelBinding {
+  providerId: string;
+  model: string;
+  task: 'chat';
+}
+
+/** Exact NomiFun Chat model used to turn one rendered brief into reviewed prompts. */
+export interface WorkflowPromptPlanningSettings {
+  model: WorkflowTextModelBinding | null;
+  instruction: string;
+  maxTokens: number;
 }
 
 export type WorkflowImagePromptSource =

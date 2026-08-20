@@ -304,8 +304,10 @@ function validateStep(value: unknown, path: string) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return issue('invalid-value', path, 'expected a workflow step');
   const kind = (value as UnknownRecord).kind;
   const base = ['id', 'name', 'dependsOn', 'enabled', 'kind'];
-  const keys = kind === 'render-template' || kind === 'draft-prompts'
+  const keys = kind === 'render-template'
     ? [...base, 'templateId']
+    : kind === 'draft-prompts'
+      ? [...base, 'templateId', 'planning']
     : kind === 'generate-images'
       ? [...base, 'promptSource', 'referenceVariableIds', 'generation']
       : kind === 'record-history'
@@ -317,7 +319,50 @@ function validateStep(value: unknown, path: string) {
   const common = id(record.id, `${path}.id`) ?? text(record.name, `${path}.name`, 120) ?? stringList(record.dependsOn, `${path}.dependsOn`, WORKFLOW_LIMITS.steps, true);
   if (common) return common;
   if (typeof record.enabled !== 'boolean') return issue('invalid-value', `${path}.enabled`, 'expected a boolean');
-  if (kind === 'render-template' || kind === 'draft-prompts') return id(record.templateId, `${path}.templateId`);
+  if (kind === 'render-template') return id(record.templateId, `${path}.templateId`);
+  if (kind === 'draft-prompts') {
+    const templateError = id(record.templateId, `${path}.templateId`);
+    if (templateError) return templateError;
+    const planning = asRecord(record.planning, `${path}.planning`, [
+      'model',
+      'instruction',
+      'maxTokens',
+    ]);
+    if (isIssue(planning)) return planning;
+    if (planning.model !== null) {
+      const model = asRecord(planning.model, `${path}.planning.model`, [
+        'providerId',
+        'model',
+        'task',
+      ]);
+      if (isIssue(model)) return model;
+      const modelError = id(model.providerId, `${path}.planning.model.providerId`)
+        ?? text(model.model, `${path}.planning.model.model`, 512);
+      if (modelError) return modelError;
+      if (model.task !== 'chat') {
+        return issue('invalid-value', `${path}.planning.model.task`, 'prompt planning requires a chat model');
+      }
+    }
+    const instructionError = text(
+      planning.instruction,
+      `${path}.planning.instruction`,
+      2_000,
+      true
+    );
+    if (instructionError) return instructionError;
+    if (
+      !Number.isSafeInteger(planning.maxTokens) ||
+      (planning.maxTokens as number) < 128 ||
+      (planning.maxTokens as number) > 32_768
+    ) {
+      return issue(
+        'invalid-value',
+        `${path}.planning.maxTokens`,
+        'prompt planning maxTokens must be between 128 and 32768'
+      );
+    }
+    return null;
+  }
   if (kind === 'record-history') return stringList(record.sourceStepIds, `${path}.sourceStepIds`, WORKFLOW_LIMITS.steps, true);
   const refs = stringList(record.referenceVariableIds, `${path}.referenceVariableIds`, WORKFLOW_LIMITS.variables, true);
   if (refs) return refs;

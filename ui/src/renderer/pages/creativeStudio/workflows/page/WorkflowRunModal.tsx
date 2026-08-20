@@ -16,7 +16,7 @@ import {
   type WorkflowVariable,
 } from '../domain';
 import styles from './CreativeWorkflowWorkspacePage.module.css';
-import { generationStep } from './workflowViewModel';
+import { draftPromptsStep, generationStep } from './workflowViewModel';
 
 export interface CreativeWorkflowRunRequest {
   workflow: WorkflowDefinitionV1;
@@ -243,7 +243,13 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
   if (!workflow) return null;
   const generate = generationStep(workflow);
   const model = generate.generation.model;
-  const canSubmit = validation.ok && prompt.ok && model !== null && runner !== undefined;
+  const planningModel = draftPromptsStep(workflow)?.planning.model ?? null;
+  const requiresPlanningModel = workflow.output.kind === 'multi-image-series';
+  const canSubmit = validation.ok
+    && prompt.ok
+    && model !== null
+    && (!requiresPlanningModel || planningModel !== null)
+    && runner !== undefined;
 
   const submit = async () => {
     if (!canSubmit || !runner) return;
@@ -358,6 +364,10 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
           ) : !model ? (
             <div className={styles.runnerUnavailable} role='status'>
               请先编辑工作流并选择支持当前任务的已启用模型。
+            </div>
+          ) : requiresPlanningModel && !planningModel ? (
+            <div className={styles.runnerUnavailable} role='status'>
+              请先为多图提示词规划选择一个已启用的对话模型。
             </div>
           ) : !validation.ok ? (
             <div className={styles.runnerUnavailable} role='status'>

@@ -88,6 +88,25 @@ describe('workflow v1 validation and parser', () => {
     if (!dimensions.ok) expect(dimensions.error.path.includes('generation.width')).toBe(true);
   });
 
+  test('requires an exact chat binding for prompt planning settings', () => {
+    const workflow = createWorkflowFixture(true);
+    const planner = workflow.steps.find((step) => step.kind === 'draft-prompts');
+    if (!planner || planner.kind !== 'draft-prompts') throw new Error('missing prompt planner');
+    planner.planning.model = {
+      providerId: IDS.history,
+      model: 'chat-test',
+      task: 'chat',
+    };
+    expect(validateWorkflowDefinition(workflow).ok).toBe(true);
+
+    planner.planning.maxTokens = 0;
+    const invalidTokens = validateWorkflowDefinition(workflow);
+    expect(invalidTokens.ok).toBe(false);
+    if (!invalidTokens.ok) {
+      expect(invalidTokens.error.path.includes('planning.maxTokens')).toBe(true);
+    }
+  });
+
   test('validates typed inputs and renders structured templates without string substitution', () => {
     const workflow = createWorkflowFixture();
     const missing = validateWorkflowInputsForDefinition(workflow, []);
