@@ -634,6 +634,30 @@ impl WorkshopService {
                 )));
             }
         }
+        for binding in definition.text_model_bindings() {
+            ProviderId::parse(&binding.provider_id).map_err(|error| {
+                AppError::BadRequest(format!(
+                    "workflow references invalid provider id {:?}: {error}",
+                    binding.provider_id
+                ))
+            })?;
+            if !self
+                .repo
+                .provider_model_supports_task(
+                    &binding.provider_id,
+                    &binding.model,
+                    binding.task.as_str(),
+                )
+                .await?
+            {
+                return Err(AppError::Conflict(format!(
+                    "workflow model binding {}/{} does not provide enabled task {}",
+                    binding.provider_id,
+                    binding.model,
+                    binding.task.as_str()
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1362,20 +1386,30 @@ impl WorkshopService {
             })?;
             let mut changed = false;
             for step in &mut workflow.steps {
-                let crate::workflow::CreativeWorkflowStep::GenerateImages {
-                    generation,
-                    ..
-                } = step
-                else {
-                    continue;
-                };
-                if generation
-                    .model
-                    .as_ref()
-                    .is_some_and(|binding| binding.provider_id == provider_id)
-                {
-                    generation.model = None;
-                    changed = true;
+                match step {
+                    crate::workflow::CreativeWorkflowStep::GenerateImages {
+                        generation,
+                        ..
+                    } if generation
+                        .model
+                        .as_ref()
+                        .is_some_and(|binding| binding.provider_id == provider_id) =>
+                    {
+                        generation.model = None;
+                        changed = true;
+                    }
+                    crate::workflow::CreativeWorkflowStep::DraftPrompts {
+                        planning,
+                        ..
+                    } if planning
+                        .model
+                        .as_ref()
+                        .is_some_and(|binding| binding.provider_id == provider_id) =>
+                    {
+                        planning.model = None;
+                        changed = true;
+                    }
+                    _ => {}
                 }
             }
             if !changed {
@@ -2019,6 +2053,57 @@ mod tests {
         }
     }
 
+    fn series_workflow_definition(
+        provider_id: &str,
+        model: &str,
+    ) -> CreativeWorkflowDefinitionV1 {
+        let mut definition = workflow_definition();
+        let template_id = definition.templates[0].id.clone();
+        let draft_id = nomifun_common::generate_id();
+        let generate_id = nomifun_common::generate_id();
+        definition.output = CreativeWorkflowOutputPlan::MultiImageSeries {
+            target_count: 2,
+            concurrency: 2,
+            review_required: true,
+        };
+        definition.steps = vec![
+            CreativeWorkflowStep::DraftPrompts {
+                id: draft_id.clone(),
+                name: "规划提示词".into(),
+                depends_on: Vec::new(),
+                enabled: true,
+                template_id,
+                planning: crate::workflow::CreativeWorkflowPromptPlanningSettings {
+                    model: Some(crate::workflow::CreativeWorkflowTextModelBinding {
+                        provider_id: provider_id.into(),
+                        model: model.into(),
+                        task: crate::workflow::CreativeWorkflowTextTask::Chat,
+                    }),
+                    instruction: "保持系列连贯".into(),
+                    max_tokens: 4096,
+                },
+            },
+            CreativeWorkflowStep::GenerateImages {
+                id: generate_id,
+                name: "生成图片".into(),
+                depends_on: vec![draft_id.clone()],
+                enabled: true,
+                prompt_source: CreativeWorkflowPromptSource::PromptDrafts {
+                    step_id: draft_id,
+                },
+                reference_variable_ids: Vec::new(),
+                generation: crate::workflow::CreativeWorkflowImageGenerationSettings {
+                    model: None,
+                    quality: crate::workflow::CreativeWorkflowImageQuality::Auto,
+                    width: 1024,
+                    height: 1024,
+                    images_per_prompt: 1,
+                },
+            },
+        ];
+        definition
+    }
+
     #[tokio::test]
     async fn creative_workflow_service_persists_closed_definitions_with_cas() {
         let (service, _dir) = service().await;
@@ -2094,6 +2179,29 @@ mod tests {
         .unwrap();
         let created = service.create_creative_workflow(definition).await.unwrap();
         assert_eq!(created.image_model_bindings().count(), 1);
+
+        let text_provider_id = ProviderId::new().into_string();
+        insert_provider(&database, &text_provider_id).await;
+        insert_provider_model(&database, &text_provider_id, "chat-model").await;
+        let text_definition = series_workflow_definition(&text_provider_id, "chat-model");
+        assert!(matches!(
+            service
+                .create_creative_workflow(text_definition.clone())
+                .await,
+            Err(AppError::Conflict(_))
+        ));
+        insert_provider_model_capability(
+            &database,
+            &text_provider_id,
+            "chat-model",
+            "chat",
+        )
+        .await;
+        let created = service
+            .create_creative_workflow(text_definition)
+            .await
+            .unwrap();
+        assert_eq!(created.text_model_bindings().count(), 1);
     }
 
     async fn insert_provider_model(
@@ -2803,6 +2911,8 @@ mod tests {
             "image_generation",
         )
         .await;
+        insert_provider_model_capability(&db, target_provider_id, "delete-me", "chat").await;
+        insert_provider_model_capability(&db, other_provider_id, "keep-me", "chat").await;
         let project = svc.create_creative_project(Some("provider cleanup".into())).await.unwrap();
         let mut document = CreativeProjectDocument::empty(project.project_id.clone());
         document.nodes.push(creative_config_node(
@@ -2847,6 +2957,20 @@ mod tests {
             .create_creative_workflow(surviving_workflow)
             .await
             .unwrap();
+        let target_planning_workflow = svc
+            .create_creative_workflow(series_workflow_definition(
+                target_provider_id,
+                "delete-me",
+            ))
+            .await
+            .unwrap();
+        let surviving_planning_workflow = svc
+            .create_creative_workflow(series_workflow_definition(
+                other_provider_id,
+                "keep-me",
+            ))
+            .await
+            .unwrap();
 
         let _write_guard = barrier.write().await;
         svc.clear_provider_references_under_lifecycle_write_guard(target_provider_id)
@@ -2858,6 +2982,12 @@ mod tests {
             .unwrap();
         assert_eq!(cleaned_once.revision, 2);
         assert_eq!(cleaned_once.image_model_bindings().count(), 0);
+        let cleaned_planning = svc
+            .get_creative_workflow(&target_planning_workflow.id)
+            .await
+            .unwrap();
+        assert_eq!(cleaned_planning.revision, 2);
+        assert_eq!(cleaned_planning.text_model_bindings().count(), 0);
         svc.clear_provider_references_under_lifecycle_write_guard(target_provider_id)
             .await
             .unwrap();
@@ -2892,6 +3022,17 @@ mod tests {
             .expect("unrelated workflow binding must survive provider cleanup");
         assert_eq!(surviving_binding.provider_id, other_provider_id);
         assert_eq!(surviving_binding.model, "keep-me");
+        let surviving_planning_workflow = svc
+            .get_creative_workflow(&surviving_planning_workflow.id)
+            .await
+            .unwrap();
+        assert_eq!(surviving_planning_workflow.revision, 1);
+        let surviving_planning_binding = surviving_planning_workflow
+            .text_model_bindings()
+            .next()
+            .expect("unrelated workflow planning binding must survive provider cleanup");
+        assert_eq!(surviving_planning_binding.provider_id, other_provider_id);
+        assert_eq!(surviving_planning_binding.model, "keep-me");
     }
 
     #[tokio::test]

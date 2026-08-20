@@ -22,12 +22,14 @@ import {
   cloneWorkflowDefinition,
   type WorkflowDefinitionV1,
   type WorkflowImageGenerationSettings,
+  type WorkflowPromptPlanningSettings,
   type WorkflowVariable,
 } from '../domain';
 import styles from './CreativeWorkflowWorkspacePage.module.css';
 import {
   convertWorkflowVariable,
   createWorkflowVariable,
+  draftPromptsStep,
   generationStep,
   removeWorkflowVariable,
   replaceWorkflowTemplateText,
@@ -79,6 +81,26 @@ function patchGeneration(
     model:
       patch.model === undefined
         ? step.generation.model
+        : patch.model
+          ? { ...patch.model }
+          : null,
+  };
+  return next;
+}
+
+function patchPromptPlanning(
+  workflow: WorkflowDefinitionV1,
+  patch: Partial<WorkflowPromptPlanningSettings>
+): WorkflowDefinitionV1 {
+  const next = cloneWorkflowDefinition(workflow);
+  const step = draftPromptsStep(next);
+  if (!step) return next;
+  step.planning = {
+    ...step.planning,
+    ...patch,
+    model:
+      patch.model === undefined
+        ? step.planning.model
         : patch.model
           ? { ...patch.model }
           : null,
@@ -231,6 +253,7 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
   const expectedTask = generate.referenceVariableIds.length > 0 ? 'image_edit' : 'image_generation';
   const mode = workflowMode(workflow);
   const output = workflow.output;
+  const promptPlanning = draftPromptsStep(workflow)?.planning ?? null;
 
   const patchMetadata = (patch: Partial<WorkflowDefinitionV1['metadata']>) =>
     onChange({ ...workflow, metadata: { ...workflow.metadata, ...patch } });
@@ -470,6 +493,57 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
           {output.kind === 'multi-image-series' ? (
             <div className={styles.seriesSettings}>
               <h4>多图提示词规划</h4>
+              <label className={styles.fieldLabel}>
+                <span>提示词规划模型</span>
+                <NomiCreativeModelSelect
+                  filter={{ capability: 'task', task: 'chat' }}
+                  value={
+                    promptPlanning?.model
+                      ? {
+                          providerId: parseProviderId(promptPlanning.model.providerId),
+                          model: promptPlanning.model.model,
+                        }
+                      : null
+                  }
+                  onChange={(selection) =>
+                    onChange(
+                      patchPromptPlanning(workflow, {
+                        model: {
+                          providerId: selection.providerId,
+                          model: selection.model,
+                          task: 'chat',
+                        },
+                      })
+                    )
+                  }
+                  onOpenModelSettings={onOpenModelSettings}
+                />
+              </label>
+              <label className={styles.fieldLabel}>
+                <span>系列拆分要求</span>
+                <Input.TextArea
+                  value={promptPlanning?.instruction ?? ''}
+                  maxLength={2_000}
+                  autoSize={{ minRows: 3, maxRows: 6 }}
+                  placeholder='说明每张图之间如何分工并保持连贯'
+                  onChange={(instruction) =>
+                    onChange(patchPromptPlanning(workflow, { instruction }))
+                  }
+                />
+              </label>
+              <label className={styles.fieldLabel}>
+                <span>规划最大输出 Token</span>
+                <InputNumber
+                  min={128}
+                  max={32_768}
+                  step={128}
+                  value={promptPlanning?.maxTokens ?? 4096}
+                  onChange={(maxTokens) =>
+                    typeof maxTokens === 'number' &&
+                    onChange(patchPromptPlanning(workflow, { maxTokens }))
+                  }
+                />
+              </label>
               <div className={styles.twoColumns}>
                 <label className={styles.fieldLabel}>
                   <span>张数</span>

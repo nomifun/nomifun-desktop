@@ -114,6 +114,11 @@ export function createWorkflowFixture(series = false): WorkflowDefinitionV1 {
         dependsOn: [],
         enabled: true,
         templateId: IDS.template,
+        planning: {
+          model: null,
+          instruction: 'Keep the series coherent.',
+          maxTokens: 4096,
+        },
       },
       {
         id: IDS.generateStep,

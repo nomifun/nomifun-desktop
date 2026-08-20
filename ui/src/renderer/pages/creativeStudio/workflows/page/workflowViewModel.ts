@@ -8,6 +8,7 @@ import { uuidv7 } from '@/common/utils/uuidv7';
 import {
   cloneWorkflowDefinition,
   type WorkflowDefinitionV1,
+  type WorkflowDraftPromptsStep,
   type WorkflowGenerateImagesStep,
   type WorkflowImageGenerationSettings,
   type WorkflowOutputPlan,
@@ -25,6 +26,12 @@ const DEFAULT_GENERATION: WorkflowImageGenerationSettings = {
   height: 1024,
   imagesPerPrompt: 1,
 };
+
+const DEFAULT_PROMPT_PLANNING = {
+  model: null,
+  instruction: '让每张图片承担不同的叙事作用，同时保持统一的主体、视觉风格与发布语境。',
+  maxTokens: 4096,
+} as const;
 
 const textVariable = (
   key: string,
@@ -132,6 +139,7 @@ function buildSteps(
       dependsOn: [],
       enabled: true,
       templateId,
+      planning: { ...DEFAULT_PROMPT_PLANNING },
     },
     {
       id: generateId,
@@ -234,6 +242,14 @@ export function generationStep(
   );
   if (!step) throw new Error('workflow is missing its image-generation step');
   return step;
+}
+
+export function draftPromptsStep(
+  workflow: WorkflowDefinitionV1
+): WorkflowDraftPromptsStep | null {
+  return workflow.steps.find(
+    (candidate): candidate is WorkflowDraftPromptsStep => candidate.kind === 'draft-prompts'
+  ) ?? null;
 }
 
 export function workflowTemplateText(workflow: WorkflowDefinitionV1): string {
@@ -424,7 +440,16 @@ export function duplicateWorkflow(workflow: WorkflowDefinitionV1): WorkflowDefin
       dependsOn: step.dependsOn.map((id) => stepIds.get(id)!),
     };
     if (step.kind === 'render-template' || step.kind === 'draft-prompts') {
-      return { ...common, templateId: templateIds.get(step.templateId)! };
+      return step.kind === 'draft-prompts'
+        ? {
+            ...common,
+            templateId: templateIds.get(step.templateId)!,
+            planning: {
+              ...step.planning,
+              model: step.planning.model ? { ...step.planning.model } : null,
+            },
+          }
+        : { ...common, templateId: templateIds.get(step.templateId)! };
     }
     if (step.kind === 'generate-images') {
       return {
