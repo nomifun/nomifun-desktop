@@ -1,6 +1,25 @@
 use nomifun_common::TimestampMs;
 use serde::{Deserialize, Serialize};
 
+/// Row mapping for the canonical Creative Studio project index + document.
+///
+/// This table is deliberately separate from `workshop_canvases`: the new
+/// product accepts only the `nomifun.creative-studio/v1` document contract and
+/// has no runtime compatibility path for the retired canvas schema.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CreativeStudioProjectRow {
+    pub id: i64,
+    pub project_id: String,
+    pub title: String,
+    /// Monotonic document revision. Metadata-only renames do not change it.
+    pub revision: i64,
+    pub node_count: i64,
+    pub connection_count: i64,
+    pub document_json: String,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
 /// Row mapping for the `workshop_canvases` table (创意工坊 画布轻索引).
 ///
 /// The canvas *body* (nodes/edges/viewport/settings) lives in a file

@@ -59,7 +59,7 @@ pub use id::{
     AgentId, AttachmentId, ChannelPendingPromptId, ChannelPluginId, ChannelSessionId, ChannelUserId,
     CompanionEventId, CompanionEvolutionFeedbackId, CompanionId,
     CompanionMemoryId, CompanionSessionWindowId, CompanionSkillId, CompanionSkillPatternId,
-    ConversationArtifactId, ConversationId, CreationTaskId, CronJobId, CronJobRunId,
+    ConversationArtifactId, ConversationId, CreationTaskId, CreativeStudioProjectId, CronJobId, CronJobRunId,
     CsAgentId, CsNoteId,
     EntityId, FigureId,
     IdmmInterventionId, KnowledgeBaseId, KnowledgeBindingId, McpServerId, MessageId,

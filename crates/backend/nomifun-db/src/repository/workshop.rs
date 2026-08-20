@@ -1,17 +1,64 @@
 use crate::error::DbError;
-use crate::models::{WorkshopAssetRow, WorkshopCanvasRow};
+use crate::models::{CreativeStudioProjectRow, WorkshopAssetRow, WorkshopCanvasRow};
 
-/// Data access for the 创意工坊 (Creative Workshop) domain: the canvas index
-/// (`workshop_canvases`) and the asset library (`workshop_assets`).
+/// Data access for the 创意工坊 (Creative Workshop) domain: canonical Creative
+/// Studio projects plus the legacy canvas index and shared asset library.
 ///
-/// The canvas *body* is a file the `nomifun-workshop` service owns; this repo
-/// only touches the two index tables. Asset binaries likewise live on disk —
-/// the repo stores/serves metadata only.
+/// Canonical project bodies live atomically in `creative_studio_projects`.
+/// Legacy canvas bodies and all asset binaries remain service-owned files; the
+/// repository stores only their `workshop_canvases` / `workshop_assets` index
+/// metadata.
 #[async_trait::async_trait]
 pub trait IWorkshopRepository: Send + Sync {
     /// Check that a Provider business ID exists. Workshop JSON references are
     /// logical links; callers must perform this check before persisting them.
     async fn provider_exists(&self, provider_id: &str) -> Result<bool, DbError>;
+
+    // ---- canonical Creative Studio projects ----
+
+    /// Every canonical Creative Studio project, newest-updated first. Legacy
+    /// `workshop_canvases` rows are intentionally outside this result set.
+    async fn list_creative_projects(&self) -> Result<Vec<CreativeStudioProjectRow>, DbError>;
+
+    /// One canonical Creative Studio project by business ID, or `None`.
+    async fn get_creative_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<CreativeStudioProjectRow>, DbError>;
+
+    /// Insert the initial revision and canonical v1 document atomically.
+    async fn create_creative_project(
+        &self,
+        project_id: &str,
+        title: &str,
+        document_json: &str,
+        now: i64,
+    ) -> Result<CreativeStudioProjectRow, DbError>;
+
+    /// Rename project metadata. The document revision is deliberately kept so
+    /// an in-flight autosave does not conflict with a title-only edit.
+    async fn rename_creative_project(
+        &self,
+        project_id: &str,
+        title: &str,
+        now: i64,
+    ) -> Result<CreativeStudioProjectRow, DbError>;
+
+    /// Compare-and-swap the canonical document. A stale expected revision is a
+    /// conflict; a successful write increments the revision exactly once.
+    async fn save_creative_project(
+        &self,
+        project_id: &str,
+        expected_revision: i64,
+        document_json: &str,
+        node_count: i64,
+        connection_count: i64,
+        now: i64,
+    ) -> Result<CreativeStudioProjectRow, DbError>;
+
+    /// Hard-delete one canonical project row. Managed assets are not deleted:
+    /// they have their own library lifecycle and may be shared by projects.
+    async fn delete_creative_project(&self, project_id: &str) -> Result<(), DbError>;
 
     // ---- canvases ----
 

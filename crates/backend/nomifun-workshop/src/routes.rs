@@ -1,6 +1,7 @@
-//! `/api/workshop/*` route handlers (contract §3.1/§3.2). The management surface
-//! (list/create/patch/delete, doc read/write, upload, agent-ops) is
-//! owner-only — mounted behind the app's authenticated router
+//! Authenticated `/api/creative-studio/*` project routes plus the legacy
+//! `/api/workshop/*` asset/canvas handlers (contract §3.1/§3.2). Their
+//! management surfaces (list/create/patch/delete, doc read/write, upload,
+//! agent-ops) are owner-only — mounted behind the app's authenticated router
 //! (same auth extractor as the knowledge routes). The multipart upload route
 //! raises the body limit to [`MAX_ASSET_BYTES`]; every other route rides the
 //! app's default limit.
@@ -32,6 +33,7 @@ use nomifun_common::{AppError, WorkshopAssetId, WorkshopCanvasId};
 
 use crate::MAX_ASSET_BYTES;
 use crate::agent_ops::PendingOp;
+use crate::creative_studio::{CreativeProjectDocument, CreativeProjectSummary};
 use crate::dto::{WorkshopAsset, WorkshopCanvasMeta};
 use crate::service::{AssetPatch, AssetQuery, NewAssetUpload, NewTextAsset};
 use crate::state::WorkshopRouterState;
@@ -46,6 +48,20 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         .with_state(state.clone());
 
     Router::new()
+        .route(
+            "/api/creative-studio/projects",
+            get(list_creative_projects).post(create_creative_project),
+        )
+        .route(
+            "/api/creative-studio/projects/{project_id}",
+            get(get_creative_project)
+                .patch(rename_creative_project)
+                .delete(delete_creative_project),
+        )
+        .route(
+            "/api/creative-studio/projects/{project_id}/document",
+            axum::routing::put(save_creative_project),
+        )
         .route("/api/workshop/canvases", get(list_canvases).post(create_canvas))
         .route(
             "/api/workshop/canvases/{canvas_id}",
@@ -91,6 +107,119 @@ pub fn workshop_public_routes(state: WorkshopRouterState) -> Router {
 /// content-immutable capability URLs, but `private` keeps shared proxies from
 /// caching a user's media.
 const SERVE_CACHE_CONTROL: &str = "private, max-age=3600";
+
+// ── canonical Creative Studio projects ─────────────────────────────────────
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreativeProjectListResponse {
+    projects: Vec<CreativeProjectSummary>,
+}
+
+async fn list_creative_projects(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<CreativeProjectListResponse>>, AppError> {
+    let projects = state.service.list_creative_projects().await?;
+    Ok(Json(ApiResponse::ok(CreativeProjectListResponse {
+        projects,
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateCreativeProjectRequest {
+    #[serde(default)]
+    title: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreativeProjectResponse {
+    project: CreativeProjectSummary,
+}
+
+async fn create_creative_project(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    body: Result<Json<CreateCreativeProjectRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, AppError> {
+    let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let project = state.service.create_creative_project(req.title).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::ok(CreativeProjectResponse { project })),
+    ))
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreativeProjectDetailResponse {
+    project: CreativeProjectSummary,
+    document: CreativeProjectDocument,
+}
+
+async fn get_creative_project(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(project_id): Path<String>,
+) -> Result<Json<ApiResponse<CreativeProjectDetailResponse>>, AppError> {
+    let detail = state.service.get_creative_project(&project_id).await?;
+    Ok(Json(ApiResponse::ok(CreativeProjectDetailResponse {
+        project: detail.project,
+        document: detail.document,
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RenameCreativeProjectRequest {
+    title: String,
+}
+
+async fn rename_creative_project(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(project_id): Path<String>,
+    body: Result<Json<RenameCreativeProjectRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CreativeProjectResponse>>, AppError> {
+    let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let project = state
+        .service
+        .rename_creative_project(&project_id, &req.title)
+        .await?;
+    Ok(Json(ApiResponse::ok(CreativeProjectResponse { project })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SaveCreativeProjectRequest {
+    expected_revision: String,
+    document: CreativeProjectDocument,
+}
+
+async fn save_creative_project(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(project_id): Path<String>,
+    body: Result<Json<SaveCreativeProjectRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CreativeProjectResponse>>, AppError> {
+    let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let project = state
+        .service
+        .save_creative_project(&project_id, &req.expected_revision, &req.document)
+        .await?;
+    Ok(Json(ApiResponse::ok(CreativeProjectResponse { project })))
+}
+
+async fn delete_creative_project(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(project_id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    state.service.delete_creative_project(&project_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
 
 // ── canvases ────────────────────────────────────────────────────────────────
 
@@ -557,4 +686,118 @@ async fn serve_file(
         Body::from(served.bytes),
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use nomifun_common::UserId;
+    use nomifun_db::{IWorkshopRepository, SqliteWorkshopRepository};
+
+    use super::*;
+    use crate::WorkshopService;
+
+    async fn test_state() -> (WorkshopRouterState, CurrentUser, tempfile::TempDir) {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let repo: Arc<dyn IWorkshopRepository> =
+            Arc::new(SqliteWorkshopRepository::new(database.pool().clone()));
+        let data_dir = tempfile::tempdir().unwrap();
+        let service = WorkshopService::start(data_dir.path(), repo);
+        let user = CurrentUser {
+            id: UserId::new(),
+            username: "owner".into(),
+        };
+        (WorkshopRouterState::new(service), user, data_dir)
+    }
+
+    #[tokio::test]
+    async fn creative_project_handlers_cover_crud_and_revision_conflict() {
+        let (state, user, _data_dir) = test_state().await;
+
+        let created = create_creative_project(
+            State(state.clone()),
+            Extension(user.clone()),
+            Ok::<_, JsonRejection>(Json(CreateCreativeProjectRequest {
+                title: Some("路由项目".into()),
+            })),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let project = state
+            .service
+            .list_creative_projects()
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(project.revision, "1");
+
+        let detail = get_creative_project(
+            State(state.clone()),
+            Extension(user.clone()),
+            Path(project.project_id.clone()),
+        )
+        .await
+        .unwrap();
+        let document = detail.0.data.unwrap().document;
+        assert_eq!(document.schema, "nomifun.creative-studio/v1");
+
+        let saved = save_creative_project(
+            State(state.clone()),
+            Extension(user.clone()),
+            Path(project.project_id.clone()),
+            Ok::<_, JsonRejection>(Json(SaveCreativeProjectRequest {
+                expected_revision: "1".into(),
+                document: document.clone(),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.0.data.unwrap().project.revision, "2");
+
+        let stale = save_creative_project(
+            State(state.clone()),
+            Extension(user.clone()),
+            Path(project.project_id.clone()),
+            Ok::<_, JsonRejection>(Json(SaveCreativeProjectRequest {
+                expected_revision: "1".into(),
+                document,
+            })),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(stale, AppError::Conflict(_)));
+        assert_eq!(stale.into_response().status(), StatusCode::CONFLICT);
+
+        let missing_id = "0190f5fe-7c00-7a00-8abc-000000000199".to_owned();
+        let missing = get_creative_project(
+            State(state.clone()),
+            Extension(user.clone()),
+            Path(missing_id),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(missing, AppError::NotFound(_)));
+        assert_eq!(missing.into_response().status(), StatusCode::NOT_FOUND);
+
+        let deleted = delete_creative_project(
+            State(state.clone()),
+            Extension(user.clone()),
+            Path(project.project_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(deleted, StatusCode::NO_CONTENT);
+
+        let gone = get_creative_project(
+            State(state),
+            Extension(user),
+            Path(project.project_id),
+        )
+            .await
+            .unwrap_err();
+        assert!(matches!(gone, AppError::NotFound(_)));
+    }
 }
