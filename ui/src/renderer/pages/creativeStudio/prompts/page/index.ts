@@ -12,5 +12,13 @@ export type {
   PromptLibraryDetailsContentProps,
   PromptLibraryDetailsProps,
 } from './PromptLibraryDetails';
+export {
+  StandalonePromptLibraryAppearance,
+  StandalonePromptLibraryPage,
+} from './StandalonePromptLibraryPage';
+export type {
+  StandalonePromptLibraryAppearanceProps,
+  StandalonePromptLibraryPageProps,
+} from './StandalonePromptLibraryPage';
 export { copyStandalonePrompt } from './standaloneSelection';
 export type { PromptClipboardWriter } from './standaloneSelection';
