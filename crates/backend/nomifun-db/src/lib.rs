@@ -22,7 +22,8 @@ pub use models::{
     AgentMetadataRow,
     ConversationArtifactRow, IdmmActionReservationRow,
     CreateKnowledgeTagParams, CreationTaskRow, CreativeStudioProjectRow,
-    CreativeStudioWorkflowRow, CronJobRunRow, CronRunReservationRow,
+    CreativeStudioWorkflowRow, CreativeStudioWorkflowRunRow, CronJobRunRow,
+    CronRunReservationRow,
     KnowledgeBaseRow, KnowledgeBindingRow,
     KnowledgeTagRow, SkillTagRow, TagSettingRow, TerminalSessionRow, TerminalTurnAdmissionRow,
     UpdateAgentHandshakeParams,
@@ -130,7 +131,7 @@ pub use repository::{
 };
 // 创意工坊 (Creative Workshop) + 生成引擎 (creation) repository traits + sqlite impls + params.
 pub use repository::{
-    AssetSort, CreateCreationTaskParams, CreateCreativeProjectTaskParams,
+    AssetSort, CreateCreationTaskParams, CreateCreativeTaskParams, CreativeTaskOwnerRef,
     ICreationTaskRepository, IWorkshopRepository, IdempotentCreationTask, ListAssetsParams,
     ListCreationTasksParams, SqliteCreationTaskRepository, SqliteWorkshopRepository,
     UpdateAssetParams, UpdateCreationTaskParams,

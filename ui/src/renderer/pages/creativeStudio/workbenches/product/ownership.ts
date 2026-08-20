@@ -20,7 +20,11 @@ import {
   isCreativeProjectRepositoryError,
   type CreativeProjectRepository,
 } from '../../services';
-import type { CreativeTask, CreativeTaskReference } from '../../tasks';
+import {
+  isCanvasNodeTaskOwner,
+  type CreativeTask,
+  type CreativeTaskReference,
+} from '../../tasks';
 import {
   workbenchResumeRequestsFromDocument,
   type CreativeWorkbenchResumeRequest,
@@ -218,7 +222,7 @@ async function mutateProject<T>(
 function assertReferenceOwner(
   node: ConfigNode | null,
   kind: StandaloneWorkbenchKind,
-  reference: Pick<CreativeTaskReference, 'nodeId' | 'task' | 'capability'>
+  reference: Pick<CreativeTaskReference, 'owner' | 'task' | 'capability'>
 ): ConfigNode {
   if (!node) {
     throw new StandaloneWorkbenchOwnershipError(
@@ -228,7 +232,8 @@ function assertReferenceOwner(
   }
   assertKindContract(kind, reference.task, reference.capability);
   if (
-    node.id !== reference.nodeId
+    !isCanvasNodeTaskOwner(reference.owner) ||
+    node.id !== reference.owner.nodeId
   ) {
     throw new StandaloneWorkbenchOwnershipError(
       'owner-mismatch',
@@ -297,7 +302,7 @@ export async function persistStandalonePendingTask(
   repository: CreativeProjectRepository = creativeProjectRepository,
   signal?: AbortSignal
 ): Promise<void> {
-  if (reference.projectId !== projectId) {
+  if (!isCanvasNodeTaskOwner(reference.owner) || reference.owner.projectId !== projectId) {
     throw new StandaloneWorkbenchOwnershipError('owner-mismatch', '任务不属于当前项目。');
   }
   await mutateProject(
@@ -350,7 +355,7 @@ export async function persistStandaloneSettledTask(
   repository: CreativeProjectRepository = creativeProjectRepository,
   signal?: AbortSignal
 ): Promise<void> {
-  if (task.projectId !== projectId) {
+  if (!isCanvasNodeTaskOwner(task.owner) || task.owner.projectId !== projectId) {
     throw new StandaloneWorkbenchOwnershipError('owner-mismatch', '终态任务不属于当前项目。');
   }
   await mutateProject(
@@ -446,6 +451,8 @@ export function standaloneResumeRequests(
   const node = findStandaloneWorkbenchNode(document, kind);
   if (!node) return [];
   return workbenchResumeRequestsFromDocument(document).filter(
-    (request) => request.reference.nodeId === node.id
+    (request) =>
+      isCanvasNodeTaskOwner(request.reference.owner) &&
+      request.reference.owner.nodeId === node.id
   );
 }

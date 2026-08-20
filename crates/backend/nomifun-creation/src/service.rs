@@ -16,14 +16,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use nomifun_common::{
-    AppError, CreationTaskId, CreativeStudioProjectId, ProviderId, WorkshopAssetId,
-    WorkshopCanvasId, WorkshopNodeId, now_ms, validate_uuidv7,
+    AppError, CreationTaskId, CreativeStudioProjectId, CreativeStudioWorkflowId,
+    CreativeStudioWorkflowRunId, CreativeStudioWorkflowStepId, ProviderId,
+    WorkshopAssetId, WorkshopCanvasId, WorkshopNodeId, now_ms, validate_uuidv7,
 };
 #[cfg(test)]
 use nomifun_common::generate_id;
 use nomifun_db::{
-    CreateCreationTaskParams, CreateCreativeProjectTaskParams, CreationTaskRow,
-    ICreationTaskRepository, ListCreationTasksParams, UpdateCreationTaskParams,
+    CreateCreationTaskParams, CreateCreativeTaskParams, CreationTaskRow,
+    CreativeTaskOwnerRef, ICreationTaskRepository, ListCreationTasksParams,
+    UpdateCreationTaskParams,
 };
 use nomifun_model_invoke::{
     ImageEditRequest, ImageGenRequest, InputAsset, InvokeErrorKind, JobHandle,
@@ -299,6 +301,80 @@ pub struct NewCreationTask {
     pub inputs: Vec<CreationInput>,
 }
 
+/// Canonical Creative Studio task owner. The API accepts this tagged union;
+/// legacy Workshop canvas fields never enter the canonical path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CreativeTaskOwner {
+    CanvasNode {
+        project_id: String,
+        node_id: String,
+    },
+    WorkflowStep {
+        workflow_id: String,
+        workflow_run_id: String,
+        workflow_step_id: String,
+    },
+}
+
+impl CreativeTaskOwner {
+    fn normalize(self) -> Result<Self, AppError> {
+        match self {
+            Self::CanvasNode {
+                project_id,
+                node_id,
+            } => Ok(Self::CanvasNode {
+                project_id: CreativeStudioProjectId::parse(project_id)
+                    .map_err(|error| AppError::BadRequest(format!("invalid project_id: {error}")))?
+                    .into_string(),
+                node_id: WorkshopNodeId::parse(node_id)
+                    .map_err(|error| AppError::BadRequest(format!("invalid node_id: {error}")))?
+                    .into_string(),
+            }),
+            Self::WorkflowStep {
+                workflow_id,
+                workflow_run_id,
+                workflow_step_id,
+            } => Ok(Self::WorkflowStep {
+                workflow_id: CreativeStudioWorkflowId::parse(workflow_id)
+                    .map_err(|error| AppError::BadRequest(format!("invalid workflow_id: {error}")))?
+                    .into_string(),
+                workflow_run_id: CreativeStudioWorkflowRunId::parse(workflow_run_id)
+                    .map_err(|error| {
+                        AppError::BadRequest(format!("invalid workflow_run_id: {error}"))
+                    })?
+                    .into_string(),
+                workflow_step_id: CreativeStudioWorkflowStepId::parse(workflow_step_id)
+                    .map_err(|error| {
+                        AppError::BadRequest(format!("invalid workflow_step_id: {error}"))
+                    })?
+                    .into_string(),
+            }),
+        }
+    }
+
+    fn as_repository_owner(&self) -> CreativeTaskOwnerRef<'_> {
+        match self {
+            Self::CanvasNode {
+                project_id,
+                node_id,
+            } => CreativeTaskOwnerRef::CanvasNode {
+                project_id,
+                node_id,
+            },
+            Self::WorkflowStep {
+                workflow_id,
+                workflow_run_id,
+                workflow_step_id,
+            } => CreativeTaskOwnerRef::WorkflowStep {
+                workflow_id,
+                workflow_run_id,
+                workflow_step_id,
+            },
+        }
+    }
+}
+
 struct PreparedCreationTask {
     canvas_id: Option<String>,
     node_id: Option<String>,
@@ -313,8 +389,7 @@ struct PreparedCreationTask {
 
 #[derive(Serialize)]
 struct CanonicalCreativeTaskRequest<'a> {
-    project_id: &'a str,
-    node_id: &'a str,
+    owner: &'a CreativeTaskOwner,
     provider_id: &'a str,
     model: &'a str,
     capability: &'a str,
@@ -326,14 +401,36 @@ impl PreparedCreationTask {
     fn into_worker_job(
         self,
         creation_task_id: String,
-        project_id: Option<String>,
+        owner: Option<CreativeTaskOwner>,
         submitted_at: i64,
     ) -> WorkerJob {
+        let (project_id, workflow_id, workflow_run_id, workflow_step_id, node_id) =
+            match owner {
+                Some(CreativeTaskOwner::CanvasNode {
+                    project_id,
+                    node_id,
+                }) => (Some(project_id), None, None, None, Some(node_id)),
+                Some(CreativeTaskOwner::WorkflowStep {
+                    workflow_id,
+                    workflow_run_id,
+                    workflow_step_id,
+                }) => (
+                    None,
+                    Some(workflow_id),
+                    Some(workflow_run_id),
+                    Some(workflow_step_id),
+                    None,
+                ),
+                None => (None, None, None, None, self.node_id),
+            };
         WorkerJob {
             creation_task_id,
             project_id,
+            workflow_id,
+            workflow_run_id,
+            workflow_step_id,
             canvas_id: self.canvas_id,
-            node_id: self.node_id,
+            node_id,
             provider_id: self.provider_id,
             model: self.model,
             capability: self.capability,
@@ -354,7 +451,8 @@ pub struct PersistAsset {
     /// Whether the produced asset appears in the asset library. Generated
     /// products default to `true` (see [`CreationService::persist_assets`]).
     pub in_library: bool,
-    /// `{prompt,model,provider_id,params,canvas_id,node_id,creation_task_id}`.
+    /// Canonical provenance, including exactly one legacy/canvas/workflow owner
+    /// branch plus provider/model/task metadata.
     pub origin: Value,
 }
 
@@ -442,6 +540,9 @@ pub trait AssetSource: Send + Sync {
 struct WorkerJob {
     creation_task_id: String,
     project_id: Option<String>,
+    workflow_id: Option<String>,
+    workflow_run_id: Option<String>,
+    workflow_step_id: Option<String>,
     canvas_id: Option<String>,
     node_id: Option<String>,
     provider_id: String,
@@ -688,21 +789,19 @@ impl CreationService {
     /// task business id, making response-loss retries durable across reloads
     /// and process restarts. Only the transaction's `inserted` result may spawn
     /// a worker.
-    pub async fn create_creative_project_task(
+    pub async fn create_creative_task(
         self: &Arc<Self>,
-        project_id: String,
+        owner: CreativeTaskOwner,
         idempotency_key: String,
         req: NewCreationTask,
     ) -> Result<CreationTask, AppError> {
         let creation_task_id = CreationTaskId::parse(idempotency_key)
             .map_err(|error| AppError::BadRequest(format!("invalid Idempotency-Key: {error}")))?
             .into_string();
-        let project_id = CreativeStudioProjectId::parse(project_id)
-            .map_err(|error| AppError::BadRequest(format!("invalid project_id: {error}")))?
-            .into_string();
-        if req.canvas_id.is_some() {
+        let owner = owner.normalize()?;
+        if req.canvas_id.is_some() || req.node_id.is_some() {
             return Err(AppError::BadRequest(
-                "Creative Studio tasks use project_id and must not send canvas_id".into(),
+                "Canonical Creative Studio tasks carry ownership only in owner".into(),
             ));
         }
         if !req.params.is_object() {
@@ -714,9 +813,6 @@ impl CreationService {
         // state only for a brand-new key. Skipping the eager provider lookup
         // here keeps an exact historical replay readable after retirement.
         let prepared = self.prepare_task(req, false).await?;
-        let node_id = prepared.node_id.as_deref().ok_or_else(|| {
-            AppError::BadRequest("Creative Studio tasks require node_id".into())
-        })?;
         if prepared.model.trim() != prepared.model {
             return Err(AppError::BadRequest(
                 "Creative Studio model must be already normalized".into(),
@@ -734,8 +830,7 @@ impl CreationService {
             )));
         }
         let request_fingerprint = serde_json::to_string(&CanonicalCreativeTaskRequest {
-            project_id: &project_id,
-            node_id,
+            owner: &owner,
             provider_id: &prepared.provider_id,
             model: &prepared.model,
             capability: prepared.capability.as_str(),
@@ -746,10 +841,9 @@ impl CreationService {
         let now = now_ms();
         let outcome = self
             .repo
-            .get_or_create_creative_project_task(CreateCreativeProjectTaskParams {
+            .get_or_create_creative_task(CreateCreativeTaskParams {
                 creation_task_id: &creation_task_id,
-                project_id: &project_id,
-                node_id,
+                owner: owner.as_repository_owner(),
                 provider_id: &prepared.provider_id,
                 model: &prepared.model,
                 capability: prepared.capability.as_str(),
@@ -760,11 +854,7 @@ impl CreationService {
             })
             .await?;
         if outcome.inserted {
-            self.spawn(prepared.into_worker_job(
-                creation_task_id,
-                Some(project_id),
-                now,
-            ));
+            self.spawn(prepared.into_worker_job(creation_task_id, Some(owner), now));
             return outcome.row.try_into();
         }
         let mut rows = self.audit_rows_for_output(vec![outcome.row]).await?;
@@ -1064,6 +1154,9 @@ impl CreationService {
                         self.spawn(WorkerJob {
                             creation_task_id: row.creation_task_id.clone(),
                             project_id: row.project_id,
+                            workflow_id: row.workflow_id,
+                            workflow_run_id: row.workflow_run_id,
+                            workflow_step_id: row.workflow_step_id,
                             canvas_id: row.canvas_id,
                             node_id: row.node_id,
                             provider_id: row.provider_id,
@@ -1719,6 +1812,21 @@ fn build_origin(job: &WorkerJob) -> Value {
     if let Some(project_id) = &job.project_id {
         origin.insert("project_id".into(), Value::String(project_id.clone()));
     }
+    if let Some(workflow_id) = &job.workflow_id {
+        origin.insert("workflow_id".into(), Value::String(workflow_id.clone()));
+    }
+    if let Some(workflow_run_id) = &job.workflow_run_id {
+        origin.insert(
+            "workflow_run_id".into(),
+            Value::String(workflow_run_id.clone()),
+        );
+    }
+    if let Some(workflow_step_id) = &job.workflow_step_id {
+        origin.insert(
+            "workflow_step_id".into(),
+            Value::String(workflow_step_id.clone()),
+        );
+    }
     if let Some(canvas_id) = &job.canvas_id {
         origin.insert("canvas_id".into(), Value::String(canvas_id.clone()));
     }
@@ -1914,6 +2022,7 @@ mod tests {
 
     struct RecordingSink {
         count: AtomicUsize,
+        origins: Mutex<Vec<Value>>,
     }
 
     struct RecordingTextExecutor {
@@ -2220,8 +2329,9 @@ mod tests {
     }
     #[async_trait]
     impl AssetSink for RecordingSink {
-        async fn persist(&self, _asset: PersistAsset) -> Result<String, CreationError> {
+        async fn persist(&self, asset: PersistAsset) -> Result<String, CreationError> {
             self.count.fetch_add(1, Ordering::SeqCst);
+            self.origins.lock().unwrap().push(asset.origin);
             Ok(WorkshopAssetId::new().into_string())
         }
 
@@ -2334,7 +2444,10 @@ mod tests {
         let pool = db.pool().clone();
         let provider_id = seed_provider(&pool, platform, adapter.id).await;
         let repo: Arc<dyn ICreationTaskRepository> = Arc::new(SqliteCreationTaskRepository::new(pool.clone()));
-        let sink = Arc::new(RecordingSink { count: AtomicUsize::new(0) });
+        let sink = Arc::new(RecordingSink {
+            count: AtomicUsize::new(0),
+            origins: Mutex::new(Vec::new()),
+        });
         let text_executor = RecordingTextExecutor::new("generated text");
         let svc = CreationService::builder(repo)
             .with_invoke(invoke_over(&pool, vec![adapter as Arc<dyn ProtocolAdapter>]))
@@ -2461,10 +2574,59 @@ mod tests {
         project_id
     }
 
-    fn creative_task(provider_id: &str, node_id: &str, prompt: &str) -> NewCreationTask {
+    async fn seed_creative_workflow_run(
+        pool: &nomifun_db::SqlitePool,
+    ) -> (String, String, String) {
+        let workflow_id = CreativeStudioWorkflowId::new().into_string();
+        let workflow_run_id = CreativeStudioWorkflowRunId::new().into_string();
+        let workflow_step_id = CreativeStudioWorkflowStepId::new().into_string();
+        sqlx::query(
+            "INSERT INTO creative_studio_workflows \
+                (workflow_id, revision, name, description, category, visibility, definition_json, \
+                 created_at, updated_at) \
+             VALUES (?, 1, 'Creation Workflow Test', '', '', 'private', ?, 0, 0)",
+        )
+        .bind(&workflow_id)
+        .bind(json!({"id": workflow_id, "revision": 1}).to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+        let aggregate = json!({
+            "kind": "nomifun.creative-studio.workflow-run",
+            "version": 1,
+            "revision": 1,
+            "workflowSnapshot": {"id": workflow_id, "revision": 1},
+            "request": {
+                "id": workflow_run_id,
+                "workflowId": workflow_id,
+                "workflowRevision": 1
+            },
+            "record": {
+                "requestId": workflow_run_id,
+                "workflowId": workflow_id,
+                "status": "running"
+            }
+        });
+        sqlx::query(
+            "INSERT INTO creative_studio_workflow_runs \
+                (workflow_run_id, workflow_id, workflow_revision, revision, status, step_ids_json, \
+                 aggregate_json, created_at, updated_at) \
+             VALUES (?, ?, 1, 1, 'running', ?, ?, 0, 0)",
+        )
+        .bind(&workflow_run_id)
+        .bind(&workflow_id)
+        .bind(serde_json::to_string(&[&workflow_step_id]).unwrap())
+        .bind(aggregate.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+        (workflow_id, workflow_run_id, workflow_step_id)
+    }
+
+    fn creative_task(provider_id: &str, prompt: &str) -> NewCreationTask {
         NewCreationTask {
             canvas_id: None,
-            node_id: Some(node_id.to_owned()),
+            node_id: None,
             provider_id: provider_id.to_owned(),
             model: "test-model".into(),
             capability: "t2i".into(),
@@ -2483,15 +2645,19 @@ mod tests {
 
         let first_service = h.svc.clone();
         let retry_service = h.svc.clone();
-        let first = first_service.create_creative_project_task(
-            project_id.clone(),
+        let owner = CreativeTaskOwner::CanvasNode {
+            project_id: project_id.clone(),
+            node_id: node_id.clone(),
+        };
+        let first = first_service.create_creative_task(
+            owner.clone(),
             idempotency_key.clone(),
-            creative_task(&h.provider_id, &node_id, "Aurora"),
+            creative_task(&h.provider_id, "Aurora"),
         );
-        let retry = retry_service.create_creative_project_task(
-            project_id.clone(),
+        let retry = retry_service.create_creative_task(
+            owner.clone(),
             idempotency_key.clone(),
-            creative_task(&h.provider_id, &node_id, "Aurora"),
+            creative_task(&h.provider_id, "Aurora"),
         );
         let (first, retry) = tokio::join!(first, retry);
         let first = first.unwrap();
@@ -2508,10 +2674,10 @@ mod tests {
 
         let response_loss_retry = h
             .svc
-            .create_creative_project_task(
-                project_id.clone(),
+            .create_creative_task(
+                owner,
                 idempotency_key.clone(),
-                creative_task(&h.provider_id, &node_id, "Aurora"),
+                creative_task(&h.provider_id, "Aurora"),
             )
             .await
             .unwrap();
@@ -2520,16 +2686,67 @@ mod tests {
 
         let conflict = h
             .svc
-            .create_creative_project_task(
-                project_id,
+            .create_creative_task(
+                CreativeTaskOwner::CanvasNode {
+                    project_id,
+                    node_id,
+                },
                 idempotency_key,
-                creative_task(&h.provider_id, &node_id, "Different request"),
+                creative_task(&h.provider_id, "Different request"),
             )
             .await
             .unwrap_err();
         assert!(matches!(&conflict, AppError::Conflict(_)));
         assert_eq!(conflict.status_code(), axum::http::StatusCode::CONFLICT);
         assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn creative_workflow_task_runs_with_exact_owner_and_provenance() {
+        let adapter = MockAdapter::sync("openai.images");
+        let h = harness(adapter.clone(), "openai").await;
+        let (workflow_id, workflow_run_id, workflow_step_id) =
+            seed_creative_workflow_run(h._db.pool()).await;
+        let creation_task_id = CreationTaskId::new().into_string();
+
+        let created = h
+            .svc
+            .create_creative_task(
+                CreativeTaskOwner::WorkflowStep {
+                    workflow_id: workflow_id.clone(),
+                    workflow_run_id: workflow_run_id.clone(),
+                    workflow_step_id: workflow_step_id.clone(),
+                },
+                creation_task_id.clone(),
+                creative_task(&h.provider_id, "Workflow Aurora"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.workflow_id.as_deref(), Some(workflow_id.as_str()));
+        assert_eq!(
+            created.workflow_run_id.as_deref(),
+            Some(workflow_run_id.as_str())
+        );
+        assert_eq!(
+            created.workflow_step_id.as_deref(),
+            Some(workflow_step_id.as_str())
+        );
+        assert!(created.project_id.is_none());
+        assert!(created.canvas_id.is_none());
+        assert!(created.node_id.is_none());
+
+        let done = wait_terminal(&h.svc, &creation_task_id).await;
+        assert_eq!(done.status, "succeeded");
+        assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 1);
+        let origins = h.sink.origins.lock().unwrap();
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins[0]["workflow_id"], workflow_id);
+        assert_eq!(origins[0]["workflow_run_id"], workflow_run_id);
+        assert_eq!(origins[0]["workflow_step_id"], workflow_step_id);
+        assert_eq!(origins[0]["creation_task_id"], creation_task_id);
+        assert!(origins[0].get("project_id").is_none());
+        assert!(origins[0].get("canvas_id").is_none());
+        assert!(origins[0].get("node_id").is_none());
     }
 
     #[tokio::test]
@@ -2798,7 +3015,10 @@ mod tests {
             vec![ModelTask::VideoGeneration],
             MockBehavior::AsyncNever,
         );
-        let sink = Arc::new(RecordingSink { count: AtomicUsize::new(0) });
+        let sink = Arc::new(RecordingSink {
+            count: AtomicUsize::new(0),
+            origins: Mutex::new(Vec::new()),
+        });
         let svc = CreationService::builder(gated.clone())
             .with_invoke(invoke_over(&pool, vec![adapter as Arc<dyn ProtocolAdapter>]))
             .with_asset_source(Arc::new(StaticSource))
@@ -3379,6 +3599,9 @@ mod tests {
         let job = WorkerJob {
             creation_task_id: creation_task_id.clone(),
             project_id: None,
+            workflow_id: None,
+            workflow_run_id: None,
+            workflow_step_id: None,
             canvas_id: Some(canvas_id.clone()),
             node_id: Some(node_id.clone()),
             provider_id: provider_id.clone(),
@@ -3410,6 +3633,9 @@ mod tests {
         let job = WorkerJob {
             creation_task_id: CreationTaskId::new().into_string(),
             project_id: None,
+            workflow_id: None,
+            workflow_run_id: None,
+            workflow_step_id: None,
             canvas_id: None,
             node_id: None,
             provider_id: ProviderId::new().into_string(),

@@ -320,8 +320,7 @@ export function useCreativeTaskRuntime(
   }, [setSnapshot]);
 
   const identityKey = [
-    options.identity.projectId,
-    options.identity.nodeId,
+    JSON.stringify(options.identity.owner),
     options.identity.providerId,
     options.identity.model,
     options.identity.task,

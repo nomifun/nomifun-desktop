@@ -35,9 +35,13 @@ const TASK_ID = '0190f5fe-7c00-7a00-8000-000000000014';
 const SECOND_TASK_ID = '0190f5fe-7c00-7a00-8000-000000000015';
 const ASSET_ID = '0190f5fe-7c00-7a00-8000-000000000016';
 
-const identity: CreativeTaskIdentity = {
+const CANVAS_OWNER = {
+  kind: 'canvas_node',
   projectId: PROJECT_ID,
   nodeId: NODE_ID,
+} as const;
+const identity: CreativeTaskIdentity = {
+  owner: CANVAS_OWNER,
   providerId: PROVIDER_ID,
   model: 'image-model-v1',
   task: 'image_generation',
@@ -103,8 +107,7 @@ describe('creative task polling', () => {
     expect(waits).toBe(2);
     expect(projectCreativeTaskOutput(terminal)).toEqual({
       taskId: TASK_ID,
-      projectId: PROJECT_ID,
-      nodeId: NODE_ID,
+      owner: CANVAS_OWNER,
       assetIds: [ASSET_ID],
     });
   });
@@ -156,7 +159,14 @@ describe('creative task polling', () => {
   test('rejects an out-of-scope response even when a custom port fails to validate it', async () => {
     const error = await caught(
       pollCreativeTask(
-        portWithGet(async () => task('running', { nodeId: '0190f5fe-7c00-7a00-8000-000000000099' })),
+        portWithGet(async () =>
+          task('running', {
+            owner: {
+              ...CANVAS_OWNER,
+              nodeId: '0190f5fe-7c00-7a00-8000-000000000099',
+            },
+          })
+        ),
         reference
       )
     );
@@ -262,21 +272,24 @@ describe('pending task recovery', () => {
     const secondReference: CreativeTaskReference = {
       ...reference,
       taskId: SECOND_TASK_ID,
-      nodeId: '0190f5fe-7c00-7a00-8000-000000000017',
+      owner: {
+        ...CANVAS_OWNER,
+        nodeId: '0190f5fe-7c00-7a00-8000-000000000017',
+      },
     };
     const port = portWithGet(async (requested) =>
       requested.taskId === TASK_ID
         ? task('succeeded')
         : task('failed', {
             taskId: SECOND_TASK_ID,
-            nodeId: secondReference.nodeId,
+            owner: secondReference.owner,
           })
     );
     const recovery = await recoverPendingCreativeTasks(port, [reference, secondReference]);
 
     expect(recovery.tasks.map((entry) => entry.status)).toEqual(['succeeded', 'failed']);
     expect(recovery.outputs).toEqual([
-      { taskId: TASK_ID, projectId: PROJECT_ID, nodeId: NODE_ID, assetIds: [ASSET_ID] },
+      { taskId: TASK_ID, owner: CANVAS_OWNER, assetIds: [ASSET_ID] },
     ]);
     expect(recovery.issues).toEqual([]);
   });
@@ -285,20 +298,23 @@ describe('pending task recovery', () => {
     const secondReference: CreativeTaskReference = {
       ...reference,
       taskId: SECOND_TASK_ID,
-      nodeId: '0190f5fe-7c00-7a00-8000-000000000017',
+      owner: {
+        ...CANVAS_OWNER,
+        nodeId: '0190f5fe-7c00-7a00-8000-000000000017',
+      },
     };
     const port = portWithGet(async (requested) => {
       if (requested.taskId === TASK_ID) {
         throw new BackendHttpError({
           method: 'GET',
-          path: `/api/creation/tasks/${TASK_ID}`,
+          path: `/api/creative-studio/tasks/${TASK_ID}`,
           status: 404,
           body: { error: 'missing' },
         });
       }
       return task('succeeded', {
         taskId: SECOND_TASK_ID,
-        nodeId: secondReference.nodeId,
+        owner: secondReference.owner,
       });
     });
     const recovery = await recoverPendingCreativeTasks(port, [reference, secondReference]);

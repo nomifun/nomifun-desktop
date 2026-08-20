@@ -298,8 +298,7 @@ export function prepareImageWorkbenchRun(
     references: assets,
     input: {
       idempotencyKey: createCreativeTaskIdempotencyKey(),
-      projectId: input.projectId,
-      nodeId: input.nodeId,
+      owner: { kind: "canvas_node", projectId: input.projectId, nodeId: input.nodeId },
       providerId: model.providerId,
       model: model.model,
       task: input.operation.task,
@@ -372,8 +371,7 @@ export function prepareVideoWorkbenchRun(
     references: assets,
     input: {
       idempotencyKey: createCreativeTaskIdempotencyKey(),
-      projectId: input.projectId,
-      nodeId: input.nodeId,
+      owner: { kind: "canvas_node", projectId: input.projectId, nodeId: input.nodeId },
       providerId: model.providerId,
       model: model.model,
       task: "video_generation",
@@ -462,8 +460,7 @@ export function prepareAudioWorkbenchRun(
     references: [],
     input: {
       idempotencyKey: createCreativeTaskIdempotencyKey(),
-      projectId: input.projectId,
-      nodeId: input.nodeId,
+      owner: { kind: "canvas_node", projectId: input.projectId, nodeId: input.nodeId },
       providerId: model.providerId,
       model: model.model,
       task,

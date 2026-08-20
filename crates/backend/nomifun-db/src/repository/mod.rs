@@ -79,8 +79,9 @@ pub use conversation::{
     ResolvedCreativeStudioAgentSession,
 };
 pub use creation_task::{
-    CreateCreationTaskParams, CreateCreativeProjectTaskParams, ICreationTaskRepository,
-    IdempotentCreationTask, ListCreationTasksParams, UpdateCreationTaskParams,
+    CreateCreationTaskParams, CreateCreativeTaskParams, CreativeTaskOwnerRef,
+    ICreationTaskRepository, IdempotentCreationTask, ListCreationTasksParams,
+    UpdateCreationTaskParams,
 };
 pub use cron::ICronRepository;
 pub use idmm_intervention::{

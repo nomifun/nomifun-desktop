@@ -25,10 +25,16 @@ const PROVIDER_ID = '0190f5fe-7c00-7a00-8000-000000000003';
 const TASK_ID = '0190f5fe-7c00-7a00-8000-000000000004';
 const ASSET_ID = '0190f5fe-7c00-7a00-8000-000000000005';
 const IDEMPOTENCY_KEY = '0190f5fe-7c00-7a00-8000-000000000006';
+const WORKFLOW_ID = '0190f5fe-7c00-7a00-8000-000000000007';
+const WORKFLOW_RUN_ID = '0190f5fe-7c00-7a00-8000-000000000008';
+const WORKFLOW_STEP_ID = '0190f5fe-7c00-7a00-8000-000000000009';
 
 const identity: CreativeTaskIdentity = {
-  projectId: PROJECT_ID,
-  nodeId: NODE_ID,
+  owner: {
+    kind: 'canvas_node',
+    projectId: PROJECT_ID,
+    nodeId: NODE_ID,
+  },
   providerId: PROVIDER_ID,
   model: 'image-model-v1',
   task: 'image_generation',
@@ -42,9 +48,11 @@ function wireTask(
   const terminal = status === 'succeeded' || status === 'failed' || status === 'canceled';
   return {
     creation_task_id: TASK_ID,
-    project_id: PROJECT_ID,
-    canvas_id: null,
-    node_id: NODE_ID,
+    owner: {
+      kind: 'canvas_node',
+      project_id: PROJECT_ID,
+      node_id: NODE_ID,
+    },
     provider_id: PROVIDER_ID,
     model: 'image-model-v1',
     capability: 't2i',
@@ -98,8 +106,11 @@ describe('CreativeTaskClient', () => {
         signal,
         idempotencyKey: IDEMPOTENCY_KEY,
         body: {
-          project_id: PROJECT_ID,
-          node_id: NODE_ID,
+          owner: {
+            kind: 'canvas_node',
+            project_id: PROJECT_ID,
+            node_id: NODE_ID,
+          },
           provider_id: PROVIDER_ID,
           model: 'image-model-v1',
           capability: 't2i',
@@ -120,6 +131,49 @@ describe('CreativeTaskClient', () => {
       startedAt: null,
       finishedAt: null,
     });
+  });
+
+  test('round-trips the exact workflow-step owner without canvas aliases', async () => {
+    const owner = {
+      kind: 'workflow_step' as const,
+      workflowId: WORKFLOW_ID,
+      workflowRunId: WORKFLOW_RUN_ID,
+      workflowStepId: WORKFLOW_STEP_ID,
+    };
+    let body: unknown;
+    const client = new CreativeTaskClient({
+      create: async (value, key) => {
+        body = value;
+        return wireTask('queued', {
+          creation_task_id: key,
+          owner: {
+            kind: 'workflow_step',
+            workflow_id: WORKFLOW_ID,
+            workflow_run_id: WORKFLOW_RUN_ID,
+            workflow_step_id: WORKFLOW_STEP_ID,
+          },
+        });
+      },
+      get: async () => wireTask(),
+      cancel: async () => wireTask('canceled'),
+    });
+
+    const task = await client.create(createInput({ owner }));
+
+    expect(body).toEqual({
+      owner: {
+        kind: 'workflow_step',
+        workflow_id: WORKFLOW_ID,
+        workflow_run_id: WORKFLOW_RUN_ID,
+        workflow_step_id: WORKFLOW_STEP_ID,
+      },
+      provider_id: PROVIDER_ID,
+      model: 'image-model-v1',
+      capability: 't2i',
+      params: { prompt: 'Aurora', count: 1 },
+      inputs: [{ asset_id: ASSET_ID, role: 'reference' }],
+    });
+    expect(task.owner).toEqual(owner);
   });
 
   test('rejects a mismatched ModelTask/capability pair before calling the backend', async () => {
@@ -146,7 +200,14 @@ describe('CreativeTaskClient', () => {
   test('rejects project/node ownership and provider/model identity mismatches', async () => {
     const client = new CreativeTaskClient({
       create: async () => wireTask(),
-      get: async () => wireTask('running', { canvas_id: '0190f5fe-7c00-7a00-8000-000000000099' }),
+      get: async () =>
+        wireTask('running', {
+          owner: {
+            kind: 'canvas_node',
+            project_id: '0190f5fe-7c00-7a00-8000-000000000099',
+            node_id: NODE_ID,
+          },
+        }),
       cancel: async () => wireTask('canceled', { model: 'other-model' }),
     });
     const reference = { taskId: TASK_ID, ...identity };
@@ -248,9 +309,9 @@ describe('HttpCreationTaskApi', () => {
     await api.cancel(TASK_ID, signal);
 
     expect(calls.map((call) => call.url)).toEqual([
-      'http://backend.test/api/creation/tasks',
-      `http://backend.test/api/creation/tasks/${TASK_ID}`,
-      `http://backend.test/api/creation/tasks/${TASK_ID}/cancel`,
+      'http://backend.test/api/creative-studio/tasks',
+      `http://backend.test/api/creative-studio/tasks/${TASK_ID}`,
+      `http://backend.test/api/creative-studio/tasks/${TASK_ID}/cancel`,
     ]);
     expect(calls.map((call) => call.init?.method)).toEqual(['POST', 'GET', 'POST']);
     expect(calls.every((call) => call.init?.signal === signal)).toBe(true);

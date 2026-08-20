@@ -16,7 +16,7 @@ export type CreativeCreationModelTask = Extract<
   'chat' | 'image_generation' | 'image_edit' | 'video_generation' | 'speech_synthesis'
 >;
 
-/** Exact `/api/creation/tasks` capability codes. */
+/** Exact `/api/creative-studio/tasks` capability codes. */
 export type CreativeTaskCapability =
   | 't2i'
   | 'i2i'
@@ -37,9 +37,17 @@ export type CreativeTaskInputRole =
   | 'video'
   | 'audio';
 
+export type CreativeTaskOwner =
+  | { kind: 'canvas_node'; projectId: string; nodeId: string }
+  | {
+      kind: 'workflow_step';
+      workflowId: string;
+      workflowRunId: string;
+      workflowStepId: string;
+    };
+
 export interface CreativeTaskIdentity {
-  projectId: string;
-  nodeId: string;
+  owner: CreativeTaskOwner;
   providerId: string;
   model: string;
   task: CreativeCreationModelTask;
@@ -91,8 +99,7 @@ export interface CreativeTaskReference extends CreativeTaskIdentity {
 
 export interface CreativeTaskOutput {
   taskId: string;
-  projectId: string;
-  nodeId: string;
+  owner: CreativeTaskOwner;
   assetIds: string[];
 }
 
@@ -163,11 +170,33 @@ export function isTerminalCreativeTaskStatus(status: CreativeTaskStatus): boolea
 export function creativeTaskReference(task: CreativeTask): CreativeTaskReference {
   return {
     taskId: task.taskId,
-    projectId: task.projectId,
-    nodeId: task.nodeId,
+    owner: { ...task.owner },
     providerId: task.providerId,
     model: task.model,
     task: task.task,
     capability: task.capability,
   };
+}
+
+export function isCanvasNodeTaskOwner(
+  owner: CreativeTaskOwner
+): owner is Extract<CreativeTaskOwner, { kind: 'canvas_node' }> {
+  return owner.kind === 'canvas_node';
+}
+
+export function sameCreativeTaskOwner(
+  left: CreativeTaskOwner,
+  right: CreativeTaskOwner
+): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === 'canvas_node' && right.kind === 'canvas_node') {
+    return left.projectId === right.projectId && left.nodeId === right.nodeId;
+  }
+  return (
+    left.kind === 'workflow_step' &&
+    right.kind === 'workflow_step' &&
+    left.workflowId === right.workflowId &&
+    left.workflowRunId === right.workflowRunId &&
+    left.workflowStepId === right.workflowStepId
+  );
 }

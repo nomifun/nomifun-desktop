@@ -39,6 +39,25 @@ pub struct CreativeStudioWorkflowRow {
     pub updated_at: TimestampMs,
 }
 
+/// Row mapping for one durable canonical Creative Studio workflow run.
+///
+/// `aggregate_json` is a closed v1 contract validated by `nomifun-workshop`;
+/// the duplicated workflow/status fields provide indexed ownership and
+/// recovery queries without creating a second source of truth.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CreativeStudioWorkflowRunRow {
+    pub id: i64,
+    pub workflow_run_id: String,
+    pub workflow_id: String,
+    pub workflow_revision: i64,
+    pub revision: i64,
+    pub status: String,
+    pub step_ids_json: String,
+    pub aggregate_json: String,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
 /// Row mapping for the `workshop_canvases` table (创意工坊 画布轻索引).
 ///
 /// The canvas *body* (nodes/edges/viewport/settings) lives in a file
@@ -95,8 +114,12 @@ pub struct WorkshopAssetRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreationTaskRow {
     pub creation_task_id: String,
-    /// Canonical Creative Studio owner. Mutually exclusive with `canvas_id`.
+    /// Canonical canvas-node owner. Mutually exclusive with workflow/legacy ownership.
     pub project_id: Option<String>,
+    /// Canonical workflow-step owner. All three workflow columns are present together.
+    pub workflow_id: Option<String>,
+    pub workflow_run_id: Option<String>,
+    pub workflow_step_id: Option<String>,
     /// Retired Workshop owner. Canonical Creative Studio tasks never set it.
     pub canvas_id: Option<String>,
     pub node_id: Option<String>,
