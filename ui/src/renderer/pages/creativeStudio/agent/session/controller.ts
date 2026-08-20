@@ -7,7 +7,7 @@
 import type { CreativeStudioAgentMessage } from '../types';
 import {
   serializeCreativeStudioAgentHistory,
-  type NomiCreativeStudioAgentSessionBinding,
+  type NomiCreativeStudioAgentSessionResolution,
   type NomiCreativeStudioAgentSessionResolutionInput,
   type NomiCreativeStudioAgentSessionResolver,
 } from '../adapters';
@@ -40,7 +40,9 @@ const assertInput = (input: NomiCreativeStudioAgentSessionResolutionInput): void
     !nonBlank(input.projectId) ||
     !nonBlank(input.sessionId) ||
     !nonBlank(input.model.providerId) ||
-    !nonBlank(input.model.model)
+    !nonBlank(input.model.model) ||
+    (input.pendingTurnIdempotencyKey !== null &&
+      !nonBlank(input.pendingTurnIdempotencyKey))
   ) {
     throw new CreativeStudioAgentSessionResolutionError(
       'INVALID_INPUT',
@@ -49,10 +51,11 @@ const assertInput = (input: NomiCreativeStudioAgentSessionResolutionInput): void
   }
 };
 
-const assertBinding = (
+const assertResolution = (
   input: CreativeStudioAgentSessionPersistenceRequest,
-  binding: NomiCreativeStudioAgentSessionBinding
+  resolution: NomiCreativeStudioAgentSessionResolution
 ): void => {
+  const { binding, history } = resolution;
   if (binding.ownership !== 'creative-studio-exclusive') {
     throw new CreativeStudioAgentSessionResolutionError(
       'PORT_CONTRACT_VIOLATION',
@@ -77,10 +80,49 @@ const assertBinding = (
       'Session persistence returned a conversation with a different selected model'
     );
   }
-  if (binding.historyKey !== input.historyKey) {
+  if (typeof resolution.created !== 'boolean') {
     throw new CreativeStudioAgentSessionResolutionError(
       'PORT_CONTRACT_VIOLATION',
-      'Session persistence could not prove the requested Creative Studio history projection'
+      'Session persistence returned an invalid created marker'
+    );
+  }
+  if (
+    history.some(
+      (message) =>
+        message.status !== 'complete' ||
+        (message.role !== 'user' && message.role !== 'assistant')
+    )
+  ) {
+    throw new CreativeStudioAgentSessionResolutionError(
+      'PORT_CONTRACT_VIOLATION',
+      'Session persistence returned non-durable Agent history'
+    );
+  }
+  const canonicalHistoryKey = serializeCreativeStudioAgentHistory(history);
+  if (binding.historyKey !== canonicalHistoryKey) {
+    throw new CreativeStudioAgentSessionResolutionError(
+      'PORT_CONTRACT_VIOLATION',
+      'Session persistence history does not match its binding proof'
+    );
+  }
+  if (
+    history.length < input.history.length ||
+    serializeCreativeStudioAgentHistory(history.slice(0, input.history.length)) !==
+      input.historyKey
+  ) {
+    throw new CreativeStudioAgentSessionResolutionError(
+      'PORT_CONTRACT_VIOLATION',
+      'Session persistence did not preserve the project history prefix'
+    );
+  }
+  const recoveredCount = history.length - input.history.length;
+  if (
+    recoveredCount !== 0 &&
+    (input.pendingTurnIdempotencyKey === null || recoveredCount !== 2)
+  ) {
+    throw new CreativeStudioAgentSessionResolutionError(
+      'PORT_CONTRACT_VIOLATION',
+      'Session persistence recovered more than one pending completed Agent turn'
     );
   }
 };
@@ -105,8 +147,15 @@ const waitForCaller = <T>(operation: Promise<T>, signal: AbortSignal): Promise<T
   });
 };
 
-const operationKey = (projectId: string, sessionId: string): string =>
-  JSON.stringify([projectId, sessionId]);
+const operationKey = (request: CreativeStudioAgentSessionPersistenceRequest): string =>
+  JSON.stringify([
+    request.projectId,
+    request.sessionId,
+    request.model.providerId,
+    request.model.model,
+    request.historyKey,
+    request.pendingTurnIdempotencyKey,
+  ]);
 
 /**
  * Coordinates durable resolution without becoming a second persistence store.
@@ -116,14 +165,14 @@ const operationKey = (projectId: string, sessionId: string): string =>
 export class CreativeStudioAgentSessionController {
   private readonly inFlight = new Map<
     string,
-    Promise<NomiCreativeStudioAgentSessionBinding>
+    Promise<NomiCreativeStudioAgentSessionResolution>
   >();
 
   constructor(private readonly port: CreativeStudioAgentSessionPersistencePort) {}
 
   async resolve(
     input: NomiCreativeStudioAgentSessionResolutionInput
-  ): Promise<NomiCreativeStudioAgentSessionBinding> {
+  ): Promise<NomiCreativeStudioAgentSessionResolution> {
     assertInput(input);
     if (input.signal.aborted) throw abortError();
 
@@ -142,12 +191,13 @@ export class CreativeStudioAgentSessionController {
       model: { ...input.model },
       history,
       historyKey: computedHistoryKey,
+      pendingTurnIdempotencyKey: input.pendingTurnIdempotencyKey,
     };
-    const key = operationKey(request.projectId, request.sessionId);
+    const key = operationKey(request);
 
     let operation = this.inFlight.get(key);
     if (!operation) {
-      let tracked: Promise<NomiCreativeStudioAgentSessionBinding>;
+      let tracked: Promise<NomiCreativeStudioAgentSessionResolution>;
       tracked = Promise.resolve()
         .then(() => this.port.resolveOrCreateExclusive(request))
         .finally(() => {
@@ -157,11 +207,11 @@ export class CreativeStudioAgentSessionController {
       this.inFlight.set(key, tracked);
     }
 
-    const binding = await waitForCaller(operation, input.signal);
+    const resolution = await waitForCaller(operation, input.signal);
     // Validate for every waiter. A request with different model/history cannot
     // inherit the first caller's proof merely because both target one session.
-    assertBinding(request, binding);
-    return binding;
+    assertResolution(request, resolution);
+    return resolution;
   }
 }
 

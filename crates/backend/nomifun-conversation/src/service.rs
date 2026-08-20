@@ -115,6 +115,9 @@ const TURN_WRITEBACK_CANCEL_GRACE: Duration = Duration::from_secs(10);
 pub(super) struct CreativeStudioAgentCreationTarget {
     pub project_id: String,
     pub session_id: String,
+    pub expected_provider_id: String,
+    pub expected_model: String,
+    pub expected_pending_turn_idempotency_key: Option<String>,
     pub create_if_missing: bool,
 }
 
@@ -4473,6 +4476,11 @@ impl ConversationService {
                             owner_id: user_id.to_owned(),
                             project_id: target.project_id.clone(),
                             session_id: target.session_id.clone(),
+                            expected_provider_id: target.expected_provider_id.clone(),
+                            expected_model: target.expected_model.clone(),
+                            expected_pending_turn_idempotency_key: target
+                                .expected_pending_turn_idempotency_key
+                                .clone(),
                             conversation: row.clone(),
                             create_if_missing: target.create_if_missing,
                         },

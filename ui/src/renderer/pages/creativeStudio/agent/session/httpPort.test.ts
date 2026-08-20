@@ -21,8 +21,16 @@ const sessionId = "0190f5fe-7c00-7a00-8000-000000000702";
 const providerId = parseProviderId("0190f5fe-7c00-7a00-8000-000000000703");
 const conversationId = "0190f5fe-7c00-7a00-8000-000000000704";
 const userMessageId = "0190f5fe-7c00-7a00-8000-000000000705";
+const priorAssistantMessageId = "0190f5fe-7c00-7a00-8000-000000000706";
+const pendingKey = "0190f5fe-7c00-7a00-8000-000000000707";
 const history: readonly CreativeStudioAgentMessage[] = [
   { id: userMessageId, role: "user", status: "complete", text: "制作海报" },
+  {
+    id: priorAssistantMessageId,
+    role: "assistant",
+    status: "complete",
+    text: "开始制作",
+  },
 ];
 const request: CreativeStudioAgentSessionPersistenceRequest = {
   projectId,
@@ -30,6 +38,7 @@ const request: CreativeStudioAgentSessionPersistenceRequest = {
   model: { providerId, model: "nomi-chat" },
   history,
   historyKey: serializeCreativeStudioAgentHistory(history),
+  pendingTurnIdempotencyKey: null,
 };
 
 describe("Nomi Creative Studio Agent session HTTP port", () => {
@@ -64,8 +73,9 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
       model: { provider_id: providerId, model: "nomi-chat" },
       history,
       history_key: request.historyKey,
+      pending_turn_idempotency_key: null,
     });
-    expect(binding.conversationId).toBe(conversationId);
+    expect(binding.binding.conversationId).toBe(conversationId);
   });
 
   test("rejects a malformed backend conversation identity", async () => {
@@ -91,6 +101,52 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
       .resolveOrCreateExclusive(request)
       .catch((error: unknown) => error);
     expect(failure instanceof Error).toBe(true);
+  });
+
+  test("accepts exactly one recovered pair when the project has a pending turn fence", async () => {
+    const recoveredHistory: readonly CreativeStudioAgentMessage[] = [
+      ...history,
+      {
+        id: "0190f5fe-7c00-7a00-8000-000000000708",
+        role: "user",
+        status: "complete",
+        text: "继续完善",
+      },
+      {
+        id: "0190f5fe-7c00-7a00-8000-000000000709",
+        role: "assistant",
+        status: "complete",
+        text: "已经完成",
+      },
+    ];
+    const pendingRequest = {
+      ...request,
+      pendingTurnIdempotencyKey: pendingKey,
+    };
+    const transport: CreativeStudioAgentSessionHttpTransport = {
+      async resolve(input) {
+        expect(input.pending_turn_idempotency_key).toBe(pendingKey);
+        return {
+          binding: {
+            ownership: "creative-studio-exclusive",
+            project_id: projectId,
+            session_id: sessionId,
+            conversation_id: conversationId,
+            model: { provider_id: providerId, model: "nomi-chat" },
+            history_key: serializeCreativeStudioAgentHistory(recoveredHistory),
+          },
+          history: recoveredHistory,
+          created: false,
+        };
+      },
+    };
+
+    const resolution =
+      await createNomiCreativeStudioAgentSessionHttpPort(
+        transport,
+      ).resolveOrCreateExclusive(pendingRequest);
+
+    expect(resolution.history).toEqual(recoveredHistory);
   });
 
   test("rejects non-UUID project/session input before transport", async () => {

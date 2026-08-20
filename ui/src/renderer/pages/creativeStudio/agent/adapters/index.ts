@@ -15,6 +15,7 @@ export type {
   NomiConversationRuntimeAuthority,
   NomiCreativeStudioAgentPortOptions,
   NomiCreativeStudioAgentSessionBinding,
+  NomiCreativeStudioAgentSessionResolution,
   NomiCreativeStudioAgentSessionResolutionInput,
   NomiCreativeStudioAgentSessionResolver,
   NomiCreativeStudioAgentTransport,

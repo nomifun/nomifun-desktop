@@ -149,6 +149,7 @@ describe('Creative Studio Agent model and chat boundaries', () => {
       {
         projectId: 'project-1',
         sessionId: 'session-1',
+        idempotencyKey: '0190f5fe-7c00-7a00-8000-000000000301',
         prompt: '创建节点',
         model,
         history: [],
@@ -180,6 +181,7 @@ describe('Creative Studio Agent model and chat boundaries', () => {
     const outcome = await controller.runTurn({
       projectId: 'project-1',
       sessionId: 'session-1',
+      idempotencyKey: '0190f5fe-7c00-7a00-8000-000000000302',
       prompt: '创建节点',
       model,
       history: [],
@@ -211,6 +213,7 @@ describe('Creative Studio Agent model and chat boundaries', () => {
     const turn = controller.runTurn({
       projectId: 'project-1',
       sessionId: 'session-1',
+      idempotencyKey: '0190f5fe-7c00-7a00-8000-000000000303',
       prompt: '创建节点',
       model,
       history: [],

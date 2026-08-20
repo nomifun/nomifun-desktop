@@ -21,6 +21,7 @@ export interface NomiCreativeStudioAgentSessionResolutionInput {
   model: CreativeModelSelectionRef;
   history: readonly CreativeStudioAgentMessage[];
   historyKey: string;
+  pendingTurnIdempotencyKey: string | null;
   signal: AbortSignal;
 }
 /**
@@ -37,9 +38,15 @@ export interface NomiCreativeStudioAgentSessionBinding {
   historyKey: string;
 }
 
+export interface NomiCreativeStudioAgentSessionResolution {
+  binding: NomiCreativeStudioAgentSessionBinding;
+  history: readonly CreativeStudioAgentMessage[];
+  created: boolean;
+}
+
 export type NomiCreativeStudioAgentSessionResolver = (
   input: NomiCreativeStudioAgentSessionResolutionInput
-) => Promise<NomiCreativeStudioAgentSessionBinding>;
+) => Promise<NomiCreativeStudioAgentSessionResolution>;
 
 export type NomiConversationRuntimeAuthority = 'idle' | 'processing' | 'unknown';
 
@@ -58,7 +65,6 @@ export interface NomiCreativeStudioAgentTransport {
     idempotencyKey: string;
   }): Promise<ISendMessageResult>;
   stopAndConfirm(conversationId: ConversationId): Promise<void>;
-  createIdempotencyKey(): string;
   onResponse(listener: (event: IResponseMessage) => void): () => void;
   onTurnStarted(listener: (event: IConversationTurnStartedEvent) => void): () => void;
   onTurnCompleted(listener: (event: IConversationTurnCompletedEvent) => void): () => void;
@@ -69,4 +75,5 @@ export interface NomiCreativeStudioAgentPortOptions {
   resolveSession: NomiCreativeStudioAgentSessionResolver;
   transport?: NomiCreativeStudioAgentTransport;
   turnStartTimeoutMs?: number;
+  recoveryPollMs?: number;
 }
