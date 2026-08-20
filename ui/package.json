@@ -59,11 +59,13 @@
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
-    "swr": "^2.3.6"
+    "swr": "^2.3.6",
+    "three": "^0.185.1"
   },
   "devDependencies": {
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.1.6",
+    "@types/three": "^0.185.4",
     "@vitejs/plugin-react": "^4.3.4",
     "typescript": "^5.8.3",
     "unocss": "^66.3.3",
