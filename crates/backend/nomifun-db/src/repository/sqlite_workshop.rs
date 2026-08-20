@@ -130,6 +130,23 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         .await?)
     }
 
+    async fn provider_model_exists(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<bool, DbError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(\
+                SELECT 1 FROM provider_models \
+                WHERE provider_id = ? AND model = ?\
+            )",
+        )
+        .bind(provider_id)
+        .bind(model)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     // ---- canonical Creative Studio projects ----
 
     async fn list_creative_projects(&self) -> Result<Vec<CreativeStudioProjectRow>, DbError> {

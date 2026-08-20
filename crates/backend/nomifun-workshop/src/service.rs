@@ -3,7 +3,7 @@
 //! project documents live in SQLite; legacy canvas bodies and asset binaries
 //! remain under the service data directory.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -24,7 +24,8 @@ use crate::archive::{
     sanitized_archive_origin,
 };
 use crate::creative_studio::{
-    CreativeProjectDocument, CreativeProjectSummary, MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
+    CreativeNodeData, CreativeProjectDocument, CreativeProjectSummary,
+    MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
 };
 #[cfg(test)]
 use crate::creative_studio::CREATIVE_STUDIO_SCHEMA;
@@ -273,6 +274,59 @@ impl WorkshopService {
         Ok(())
     }
 
+    /// Validate every durable Creative Studio config-node selection against
+    /// the exact managed Provider/model pair. The lifecycle read guard is held
+    /// by callers across this check and the subsequent project CAS write.
+    async fn validate_creative_provider_models(
+        &self,
+        document: &CreativeProjectDocument,
+    ) -> Result<(), AppError> {
+        let mut references = BTreeMap::new();
+        for node in &document.nodes {
+            let CreativeNodeData::Config(config) = &node.data else {
+                continue;
+            };
+            match (config.provider_id.as_deref(), config.model.as_deref()) {
+                (None, None) => {}
+                (Some(provider_id), Some(model)) => {
+                    ProviderId::parse(provider_id).map_err(|error| {
+                        AppError::BadRequest(format!(
+                            "creative config node {} providerId must be a canonical Provider UUIDv7: {error}",
+                            node.id
+                        ))
+                    })?;
+                    references
+                        .entry((provider_id.to_owned(), model.to_owned()))
+                        .or_insert_with(|| node.id.clone());
+                }
+                (Some(_), None) => {
+                    return Err(AppError::BadRequest(format!(
+                        "creative config node {} providerId and model must be set together",
+                        node.id
+                    )));
+                }
+                (None, Some(_)) => {
+                    return Err(AppError::BadRequest(format!(
+                        "creative config node {} providerId and model must be set together",
+                        node.id
+                    )));
+                }
+            }
+        }
+        for ((provider_id, model), node_id) in references {
+            if !self
+                .repo
+                .provider_model_exists(&provider_id, &model)
+                .await?
+            {
+                return Err(AppError::Conflict(format!(
+                    "creative config node {node_id} references missing provider-model '{provider_id}/{model}'"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     // ---- canvases ----
 
     // Canonical Creative Studio project methods intentionally live beside,
@@ -362,6 +416,8 @@ impl WorkshopService {
         let connection_count = i64::try_from(document.connections.len()).map_err(|_| {
             AppError::BadRequest("creative project has too many connections".into())
         })?;
+        let _provider_guard = self.provider_read_guard().await;
+        self.validate_creative_provider_models(document).await?;
         Ok(self
             .repo
             .save_creative_project(
@@ -535,18 +591,16 @@ impl WorkshopService {
         Ok(self.repo.list_canvases().await?.into_iter().map(WorkshopCanvasMeta::from).collect())
     }
 
-    /// Read-only startup audit for the Workshop database index and every
-    /// managed canvas/asset file. Any failure makes the current dataset
-    /// incompatible; callers must retire/reset it as a whole.
+    /// Read-only startup audit for canonical Creative Studio projects and the
+    /// shared asset store. Retired legacy canvas rows/files are intentionally
+    /// inert: corrupt or missing `canvas.json` data must never prevent the new
+    /// product from starting, and this audit never rewrites or deletes it.
     pub async fn audit_managed_data_on_boot(&self) -> Result<(), AppError> {
-        for project in self.repo.list_creative_projects().await? {
-            parse_stored_creative_project_row(&project)?;
-        }
-        let canvases = self.repo.list_canvases().await?;
         let mut referenced_assets = BTreeSet::new();
-        for canvas in &canvases {
-            let doc = self.read_doc(&canvas.canvas_id).await?;
-            referenced_assets.extend(docscan::collect_asset_refs(&doc));
+        for project in self.repo.list_creative_projects().await? {
+            let document = parse_stored_creative_project_row(&project)?;
+            self.validate_creative_provider_models(&document).await?;
+            referenced_assets.extend(collect_document_asset_ids(&document)?);
         }
 
         let assets = self.repo.list_all_assets().await?;
@@ -559,7 +613,7 @@ impl WorkshopService {
             .find(|asset_id| !indexed_assets.contains(asset_id.as_str()))
         {
             return Err(AppError::Internal(format!(
-                "managed workshop canvas references missing asset {asset_id}"
+                "managed creative studio project references missing asset {asset_id}"
             )));
         }
 
@@ -1037,11 +1091,14 @@ impl WorkshopService {
         .await
     }
 
-    /// Remove Provider selections from all generator nodes in all persisted
-    /// canvas documents. This is a SET_NULL logical-reference cleanup invoked
-    /// by the Provider deletion coordinator while holding the lifecycle write
-    /// guard. The operation is idempotent and validates every rewritten doc
-    /// before replacing it atomically.
+    /// Remove one Provider/model selection from every canonical Creative
+    /// Studio config node. The Provider deletion coordinator invokes this while
+    /// holding the process-wide lifecycle write guard, so compliant project
+    /// saves cannot race the scan. Each changed project is replaced with its
+    /// repository CAS: a conflict fails closed instead of overwriting a newer
+    /// document, and the revision bump forces stale editors to reload the
+    /// cleared selection. The overall scan is idempotent; retired legacy canvas
+    /// files remain inert and are neither read nor rewritten.
     pub async fn clear_provider_references_under_lifecycle_write_guard(
         &self,
         provider_id: &str,
@@ -1049,40 +1106,53 @@ impl WorkshopService {
         let provider_id = ProviderId::parse(provider_id)
             .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?
             .into_string();
-        for canvas in self.repo.list_canvases().await? {
-            let path = self.canvas_dir(&canvas.canvas_id).join("canvas.json");
-            let bytes = fsio::read_bytes_opt(&path)
-                .await
-                .map_err(|error| {
-                    AppError::Internal(format!(
-                        "read workshop canvas {}: {error}",
-                        canvas.canvas_id
-                    ))
-                })?
-                .ok_or_else(|| {
-                    AppError::Conflict(format!(
-                        "workshop canvas {} is missing canvas.json",
-                        canvas.canvas_id
-                    ))
-                })?;
-            let mut doc: Value = serde_json::from_slice(&bytes).map_err(|error| {
-                AppError::Conflict(format!(
-                    "workshop canvas {} has invalid JSON: {error}",
-                    canvas.canvas_id
-                ))
-            })?;
-            docscan::validate_canvas_doc_ids(&doc).map_err(|error| {
-                AppError::Conflict(format!(
-                    "workshop canvas {} has invalid durable IDs: {error}",
-                    canvas.canvas_id
-                ))
-            })?;
-            if !docscan::clear_generator_provider_reference(&mut doc, &provider_id)
-                .map_err(|error| AppError::Conflict(format!("invalid workshop canvas: {error}")))?
-            {
+        for project in self.repo.list_creative_projects().await? {
+            let mut document = parse_stored_creative_project_row(&project)?;
+            let mut changed = false;
+            for node in &mut document.nodes {
+                let CreativeNodeData::Config(config) = &mut node.data else {
+                    continue;
+                };
+                if config.provider_id.as_deref() == Some(provider_id.as_str()) {
+                    config.provider_id = None;
+                    config.model = None;
+                    changed = true;
+                }
+            }
+            if !changed {
                 continue;
             }
-            self.save_doc_inner(&canvas.canvas_id, &doc, false).await?;
+
+            document.validate_for_project(&project.project_id).map_err(|error| {
+                AppError::Conflict(format!(
+                    "creative studio project {} is invalid after provider cleanup: {error}",
+                    project.project_id
+                ))
+            })?;
+            self.validate_creative_provider_models(&document).await?;
+            let document_json = serialize_creative_project_document(&document)?;
+            let node_count = i64::try_from(document.nodes.len()).map_err(|_| {
+                AppError::Conflict(format!(
+                    "creative studio project {} has too many nodes",
+                    project.project_id
+                ))
+            })?;
+            let connection_count = i64::try_from(document.connections.len()).map_err(|_| {
+                AppError::Conflict(format!(
+                    "creative studio project {} has too many connections",
+                    project.project_id
+                ))
+            })?;
+            self.repo
+                .save_creative_project(
+                    &project.project_id,
+                    project.revision,
+                    &document_json,
+                    node_count,
+                    connection_count,
+                    now_ms(),
+                )
+                .await?;
         }
         Ok(())
     }
@@ -1546,7 +1616,7 @@ mod tests {
     use nomifun_common::{
         ProviderLifecycleBarrier, WorkshopCanvasId, WorkshopEdgeId, WorkshopNodeId,
     };
-    use nomifun_db::SqliteWorkshopRepository;
+    use nomifun_db::{IProviderRepository, SqliteProviderRepository, SqliteWorkshopRepository};
 
     async fn service() -> (Arc<WorkshopService>, tempfile::TempDir) {
         // Default test harness reclaims immediately (grace 0) so GC/delete tests
@@ -1597,6 +1667,54 @@ mod tests {
         .execute(db.pool())
         .await
         .unwrap();
+    }
+
+    async fn insert_provider_model(
+        db: &nomifun_db::Database,
+        provider_id: &str,
+        model: &str,
+    ) {
+        nomifun_db::sqlx::query(
+            "INSERT INTO provider_models \
+                (provider_id, model, enabled, sort_order, description, created_at, updated_at) \
+             VALUES (?, ?, 1, 0, NULL, 1, 1)",
+        )
+        .bind(provider_id)
+        .bind(model)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    fn creative_config_node(
+        id: &str,
+        provider_id: Option<&str>,
+        model: Option<&str>,
+    ) -> crate::creative_studio::CreativeNode {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "type": "config",
+            "position": { "x": 0, "y": 0 },
+            "size": { "width": 320, "height": 240 },
+            "groupId": null,
+            "zIndex": 1,
+            "locked": false,
+            "data": {
+                "task": "image_generation",
+                "capability": "t2i",
+                "providerId": provider_id,
+                "model": model,
+                "prompt": "",
+                "negativePrompt": "",
+                "parameters": {},
+                "inputAssetIds": [],
+                "taskId": null,
+                "resultAssetIds": [],
+                "status": "idle",
+                "errorMessage": null
+            }
+        }))
+        .unwrap()
     }
 
     // A 1x1 PNG.
@@ -2009,20 +2127,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_data_audit_rejects_invalid_canvas_ids_without_rewriting_the_file() {
+    async fn managed_data_audit_ignores_corrupt_and_missing_retired_canvas_files() {
         let (svc, dir) = service().await;
-        let canvas = svc.create_canvas(None).await.unwrap();
-        let path = dir
+        let corrupt_canvas = svc.create_canvas(Some("corrupt retired canvas".into())).await.unwrap();
+        let corrupt_path = dir
             .path()
             .join("workshop/canvases")
-            .join(&canvas.canvas_id)
+            .join(&corrupt_canvas.canvas_id)
             .join("canvas.json");
         let corrupt = br#"{"schema":1,"nodes":[{"id":"node_legacy"}],"edges":[]}"#;
-        tokio::fs::write(&path, corrupt).await.unwrap();
+        tokio::fs::write(&corrupt_path, corrupt).await.unwrap();
+
+        let missing_canvas = svc.create_canvas(Some("missing retired canvas".into())).await.unwrap();
+        let missing_path = dir
+            .path()
+            .join("workshop/canvases")
+            .join(&missing_canvas.canvas_id)
+            .join("canvas.json");
+        tokio::fs::remove_file(&missing_path).await.unwrap();
+
+        svc.audit_managed_data_on_boot().await.unwrap();
+        assert_eq!(tokio::fs::read(&corrupt_path).await.unwrap(), corrupt);
+        assert!(!missing_path.exists());
+        assert_eq!(svc.list_canvases().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn managed_data_audit_still_rejects_missing_canonical_project_assets() {
+        let (svc, _dir) = service().await;
+        let project = svc.create_creative_project(None).await.unwrap();
+        let missing_asset_id = WorkshopAssetId::new().into_string();
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "missing-image",
+                "type": "image",
+                "position": { "x": 0, "y": 0 },
+                "size": { "width": 320, "height": 240 },
+                "groupId": null,
+                "zIndex": 1,
+                "locked": false,
+                "data": {
+                    "assetId": missing_asset_id,
+                    "caption": "",
+                    "alt": "",
+                    "fit": "contain",
+                    "naturalSize": null
+                }
+            }))
+            .unwrap(),
+        );
+        svc.save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
 
         let error = svc.audit_managed_data_on_boot().await.unwrap_err();
-        assert!(error.to_string().contains("invalid durable IDs"));
-        assert_eq!(tokio::fs::read(&path).await.unwrap(), corrupt);
+        assert!(matches!(
+            error,
+            AppError::Internal(ref message)
+                if message.contains("creative studio project references missing asset")
+                    && message.contains(&missing_asset_id)
+        ));
     }
 
     #[tokio::test]
@@ -2036,6 +2201,73 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn canonical_save_requires_one_existing_provider_model_pair() {
+        let barrier = Arc::new(ProviderLifecycleBarrier::new());
+        let (svc, _dir, db) =
+            service_with_database_and_lifecycle(Some(barrier)).await;
+        let project = svc.create_creative_project(None).await.unwrap();
+        let missing_provider_id = "0190f5fe-7c00-7a00-8000-000000000081";
+        let existing_provider_id = "0190f5fe-7c00-7a00-8000-000000000082";
+        insert_provider(&db, existing_provider_id).await;
+
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(creative_config_node(
+            "missing-provider",
+            Some(missing_provider_id),
+            Some("image-model"),
+        ));
+        let missing_provider = svc
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            missing_provider,
+            AppError::Conflict(ref message)
+                if message.contains("missing provider-model")
+                    && message.contains(missing_provider_id)
+        ));
+
+        document.nodes[0] = creative_config_node(
+            "missing-model",
+            Some(existing_provider_id),
+            Some("unknown-model"),
+        );
+        let missing_model = svc
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            missing_model,
+            AppError::Conflict(ref message)
+                if message.contains("missing provider-model")
+                    && message.contains("unknown-model")
+        ));
+
+        document.nodes[0] = creative_config_node(
+            "partial-pair",
+            Some(existing_provider_id),
+            None,
+        );
+        assert!(matches!(
+            svc.save_creative_project(&project.project_id, "1", &document)
+                .await,
+            Err(AppError::BadRequest(message)) if message.contains("must be set together")
+        ));
+
+        insert_provider_model(&db, existing_provider_id, "image-model").await;
+        document.nodes[0] = creative_config_node(
+            "valid-pair",
+            Some(existing_provider_id),
+            Some("image-model"),
+        );
+        let saved = svc
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, "2");
     }
 
     #[tokio::test]
@@ -2100,7 +2332,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_cleanup_clears_only_the_target_generator_pair_and_is_idempotent() {
+    async fn provider_cleanup_cas_clears_only_target_canonical_pairs_and_is_idempotent() {
         let barrier = Arc::new(ProviderLifecycleBarrier::new());
         let (svc, _dir, db) =
             service_with_database_and_lifecycle(Some(barrier.clone())).await;
@@ -2108,31 +2340,23 @@ mod tests {
         let other_provider_id = "0190f5fe-7c00-7a00-8000-000000000087";
         insert_provider(&db, target_provider_id).await;
         insert_provider(&db, other_provider_id).await;
-        let canvas = svc.create_canvas(Some("provider cleanup".into())).await.unwrap();
-        let doc = serde_json::json!({
-            "schema": 1,
-            "nodes": [
-                {
-                    "id": WorkshopNodeId::new().into_string(),
-                    "kind": "generator",
-                    "data": {
-                        "providerId": target_provider_id,
-                        "model": "delete-me",
-                        "prompt": "keep prompt"
-                    }
-                },
-                {
-                    "id": WorkshopNodeId::new().into_string(),
-                    "kind": "generator",
-                    "data": {
-                        "providerId": other_provider_id,
-                        "model": "keep-me"
-                    }
-                }
-            ],
-            "edges": []
-        });
-        svc.save_doc(&canvas.canvas_id, &doc).await.unwrap();
+        insert_provider_model(&db, target_provider_id, "delete-me").await;
+        insert_provider_model(&db, other_provider_id, "keep-me").await;
+        let project = svc.create_creative_project(Some("provider cleanup".into())).await.unwrap();
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(creative_config_node(
+            "target-config",
+            Some(target_provider_id),
+            Some("delete-me"),
+        ));
+        document.nodes.push(creative_config_node(
+            "surviving-config",
+            Some(other_provider_id),
+            Some("keep-me"),
+        ));
+        svc.save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
 
         let _write_guard = barrier.write().await;
         svc.clear_provider_references_under_lifecycle_write_guard(target_provider_id)
@@ -2142,15 +2366,18 @@ mod tests {
             .await
             .unwrap();
 
-        let cleaned = svc.get_canvas(&canvas.canvas_id).await.unwrap().doc;
-        assert!(cleaned["nodes"][0]["data"].get("providerId").is_none());
-        assert!(cleaned["nodes"][0]["data"].get("model").is_none());
-        assert_eq!(cleaned["nodes"][0]["data"]["prompt"], "keep prompt");
-        assert_eq!(
-            cleaned["nodes"][1]["data"]["providerId"],
-            serde_json::json!(other_provider_id)
-        );
-        assert_eq!(cleaned["nodes"][1]["data"]["model"], "keep-me");
+        let cleaned = svc.get_creative_project(&project.project_id).await.unwrap();
+        assert_eq!(cleaned.project.revision, "3");
+        let CreativeNodeData::Config(target) = &cleaned.document.nodes[0].data else {
+            panic!("expected target config node")
+        };
+        assert_eq!(target.provider_id, None);
+        assert_eq!(target.model, None);
+        let CreativeNodeData::Config(surviving) = &cleaned.document.nodes[1].data else {
+            panic!("expected surviving config node")
+        };
+        assert_eq!(surviving.provider_id.as_deref(), Some(other_provider_id));
+        assert_eq!(surviving.model.as_deref(), Some("keep-me"));
     }
 
     #[tokio::test]
@@ -2183,6 +2410,67 @@ mod tests {
         );
         drop(write_guard);
         save.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn canonical_save_cannot_resurrect_provider_during_deletion() {
+        let barrier = Arc::new(ProviderLifecycleBarrier::new());
+        let (svc, _dir, db) =
+            service_with_database_and_lifecycle(Some(barrier.clone())).await;
+        let provider_id = "0190f5fe-7c00-7a00-8000-000000000089";
+        insert_provider(&db, provider_id).await;
+        insert_provider_model(&db, provider_id, "image-model").await;
+        let project = svc.create_creative_project(Some("delete race".into())).await.unwrap();
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(creative_config_node(
+            "config-node",
+            Some(provider_id),
+            Some("image-model"),
+        ));
+        svc.save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+
+        let write_guard = barrier.write().await;
+        let service = svc.clone();
+        let project_id = project.project_id.clone();
+        let blocked_document = document.clone();
+        let mut save = tokio::spawn(async move {
+            service
+                .save_creative_project(&project_id, "2", &blocked_document)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut save)
+                .await
+                .is_err(),
+            "canonical save must wait while Provider deletion owns the lifecycle write guard"
+        );
+
+        svc.clear_provider_references_under_lifecycle_write_guard(provider_id)
+            .await
+            .unwrap();
+        SqliteProviderRepository::new(db.pool().clone())
+            .delete(provider_id)
+            .await
+            .unwrap();
+        drop(write_guard);
+
+        let error = save.await.unwrap().unwrap_err();
+        assert!(
+            matches!(
+                error,
+                AppError::Conflict(ref message) if message.contains("missing provider-model")
+            ),
+            "save resumed with an unexpected error after Provider deletion: {error:?}"
+        );
+        let cleaned = svc.get_creative_project(&project.project_id).await.unwrap();
+        assert_eq!(cleaned.project.revision, "3");
+        let CreativeNodeData::Config(config) = &cleaned.document.nodes[0].data else {
+            panic!("expected config node")
+        };
+        assert_eq!(config.provider_id, None);
+        assert_eq!(config.model, None);
     }
 
     #[tokio::test]

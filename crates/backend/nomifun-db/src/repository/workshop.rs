@@ -14,6 +14,16 @@ pub trait IWorkshopRepository: Send + Sync {
     /// logical links; callers must perform this check before persisting them.
     async fn provider_exists(&self, provider_id: &str) -> Result<bool, DbError>;
 
+    /// Check one exact Provider/model logical parent. Creative Studio config
+    /// nodes bind the pair, not merely the Provider, so accepting a Provider
+    /// with an unknown model would persist an invocation target that can never
+    /// be resolved by the managed model catalog.
+    async fn provider_model_exists(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<bool, DbError>;
+
     // ---- canonical Creative Studio projects ----
 
     /// Every canonical Creative Studio project, newest-updated first. Legacy
