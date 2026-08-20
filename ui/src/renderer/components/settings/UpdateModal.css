@@ -292,15 +292,15 @@ body[arco-theme='dark'] .update-compact-card,
 }
 
 .update-modal__header h3 {
-  font-size: 18px !important;
-  font-weight: 650 !important;
-  line-height: 26px;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  line-height: 20px;
 }
 
 .update-modal__header button {
-  width: 30px !important;
-  height: 30px !important;
-  border-radius: 8px !important;
+  width: 24px !important;
+  height: 24px !important;
+  border-radius: 6px !important;
 }
 
 .update-modal__available {

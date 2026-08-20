@@ -48,6 +48,7 @@ import EditModeModal from '@/renderer/pages/settings/components/EditModeModal';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
+import ModelHubPageHeader from '@/renderer/pages/modelHub/ModelHubPageHeader';
 import { consumePendingDeepLink } from '@/renderer/hooks/system/useDeepLink';
 import { isManagedModelProvider } from '@/common/types/provider/managedModelService';
 import { reorderById, reorderStrings } from './modelProviderOrdering';
@@ -805,10 +806,7 @@ const ModelModalContent: React.FC = () => {
   });
 
   return (
-    <div
-      ref={paneRef}
-      className={`flex flex-col bg-2 rd-16px py-16px ${isWide ? 'px-24px' : 'px-16px'}`}
-    >
+    <div ref={paneRef} className='flex flex-col'>
       {messageContext}
       {addPlatformModalContext}
       {editModalContext}
@@ -816,16 +814,10 @@ const ModelModalContent: React.FC = () => {
 
       {/* Header with Add Button */}
       <div className='flex-shrink-0 border-b border-b-solid border-[var(--color-border-2)] pb-12px mb-14px flex flex-col gap-10px'>
-        <div className='flex items-center justify-between gap-8px flex-wrap'>
-          <div className='min-w-0'>
-            <div className='text-20px font-600 text-t-primary leading-28px'>
-              {t('settings.modelHub.provider.title')}
-            </div>
-            <div className='mt-2px text-13px leading-18px text-t-secondary'>
-              {t('settings.modelHub.provider.subtitle')}
-            </div>
-          </div>
-          <div className='flex items-center gap-8px flex-wrap'>
+        <ModelHubPageHeader
+          title={t('settings.modelHub.provider.title')}
+          description={t('settings.modelHub.provider.subtitle')}
+          actions={
             <Button
               type='outline'
               shape='round'
@@ -835,8 +827,8 @@ const ModelModalContent: React.FC = () => {
             >
               {t('settings.addModel')}
             </Button>
-          </div>
-        </div>
+          }
+        />
         <div
           className='rd-10px px-12px py-10px border border-solid flex items-start gap-9px'
           style={{

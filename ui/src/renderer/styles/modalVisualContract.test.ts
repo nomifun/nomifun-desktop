@@ -20,6 +20,10 @@ const createTaskSource = readFileSync(
   new URL('../pages/cron/ScheduledTasksPage/CreateTaskDialog.tsx', import.meta.url),
   'utf8'
 );
+const pasteConfirmSource = readFileSync(
+  new URL('../pages/conversation/Workspace/components/PasteConfirmModal.tsx', import.meta.url),
+  'utf8'
+);
 
 describe('Global modal visual contract', () => {
   test('loads after theme styles so modal geometry stays consistent across themes', () => {
@@ -43,7 +47,10 @@ describe('Global modal visual contract', () => {
   test('uses compact modal chrome and compact form rhythm', () => {
     expect(contractCss.includes('--nomi-modal-inline-padding: 14px')).toBe(true);
     expect(contractCss.includes('--nomi-modal-block-padding: 8px')).toBe(true);
-    expect(contractCss.includes('height: 40px')).toBe(true);
+    expect(contractCss.includes('height: 36px')).toBe(true);
+    expect(contractCss.includes('font-size: 14px !important')).toBe(true);
+    expect(contractCss.includes('width: 24px')).toBe(true);
+    expect(contractCss.includes('height: 24px')).toBe(true);
     expect(contractCss.includes('padding: var(--nomi-modal-block-padding) var(--nomi-modal-inline-padding)')).toBe(true);
     expect(contractCss.includes('.arco-modal .arco-form-item')).toBe(true);
     expect(contractCss.includes('margin-bottom: 12px')).toBe(true);
@@ -84,8 +91,11 @@ describe('Global modal visual contract', () => {
   });
 
   test('also tightens custom NomiModal and the text-asset form shown in the reference', () => {
-    expect(nomiModalSource.includes('pb-8px')).toBe(true);
-    expect(nomiModalSource.includes('text-16px')).toBe(true);
+    expect(nomiModalSource.includes('pb-6px')).toBe(true);
+    expect(nomiModalSource.includes('text-14px font-600 leading-20px')).toBe(true);
+    expect(nomiModalSource.includes('h-24px w-24px')).toBe(true);
+    expect(nomiModalSource.includes("<Close size={16} fill='currentColor' />")).toBe(true);
+    expect(pasteConfirmSource.includes('text-14px font-600 leading-20px')).toBe(true);
     expect(createTextSource.includes("className='flex flex-col gap-10px'")).toBe(true);
     expect(createTextSource.includes('autoSize={{ minRows: 4, maxRows: 14 }}')).toBe(true);
   });

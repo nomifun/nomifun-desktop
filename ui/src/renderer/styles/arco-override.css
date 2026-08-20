@@ -623,19 +623,20 @@ body[arco-theme='dark'] .sider-soft-popover .arco-popover-arrow {
 }
 
 .nomifun-modal-title {
-  font-size: 18px;
-  font-weight: 500;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
   color: var(--text-primary);
   margin: 0;
 }
 
 .nomifun-modal-close-btn {
-  width: 32px;
-  height: 32px;
+  width: 24px;
+  height: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
+  border-radius: 6px;
   transition: background-color 0.2s;
   cursor: pointer;
   border: none;

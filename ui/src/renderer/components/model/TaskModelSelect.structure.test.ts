@@ -40,6 +40,12 @@ describe('TaskModelSelect', () => {
     expect(src.includes("t('settings.taskModel.unavailableOption'")).toBe(true);
   });
 
+  test('can hand its resolved warning to a packaged setting-row description', () => {
+    expect(src.includes('onHintChange?: (hint: string) => void')).toBe(true);
+    expect(src.includes('onHintChange?.(hint)')).toBe(true);
+    expect(src.includes('!hideHint && hint')).toBe(true);
+  });
+
   test('the voice select is free text with a candidate list, and only for the TTS variant', () => {
     expect(src.includes('withVoice')).toBe(true);
     expect(src.includes('showSearch')).toBe(true);

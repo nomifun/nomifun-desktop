@@ -13,7 +13,6 @@ import {
   CloudStorage,
   Heartbeat,
   Info,
-  Lightning,
   Refresh,
   RobotOne,
 } from '@icon-park/react';
@@ -25,6 +24,7 @@ import type {
   ManagedModelServiceStatus,
 } from '@/common/types/provider/managedModelService';
 import { useFreeModels } from './useFreeModels';
+import ModelHubPageHeader from './ModelHubPageHeader';
 
 const availabilityColor = (availability: ManagedModelServiceAvailability): string => {
   if (availability === 'ready') return 'green';
@@ -191,68 +191,60 @@ const FreeModelsContent: React.FC = () => {
   };
 
   return (
-    <div className='flex flex-col bg-2 rd-16px px-24px py-16px'>
+    <div className='flex flex-col'>
       {messageContext}
 
       <div className='flex-shrink-0 border-b border-b-solid border-[var(--color-border-2)] pb-12px mb-14px flex flex-col gap-10px'>
-        <div className='flex items-center justify-between gap-12px flex-wrap'>
-          <div className='flex items-center gap-8px min-w-0'>
-            <span className='size-28px flex items-center justify-center rd-8px bg-primary-1 text-primary-6 shrink-0'>
-              <Lightning theme='outline' size='18' strokeWidth={3} />
-            </span>
-            <div className='min-w-0'>
-              <div className='flex items-center gap-8px flex-wrap'>
-                <div className='text-20px font-600 text-t-primary leading-28px'>
-                  {t('settings.modelHub.free.title')}
-                </div>
-                {status && (
-                  <Tag size='small' color={availabilityColor(serviceAvailability)}>
-                    {serviceLabel}
-                  </Tag>
-                )}
+        <ModelHubPageHeader
+          title={t('settings.modelHub.free.title')}
+          description={t('settings.modelHub.free.providerId', {
+            id: status?.providerId ?? 'nomifun-free-model',
+          })}
+          badge={
+            status ? (
+              <Tag size='small' color={availabilityColor(serviceAvailability)}>
+                {serviceLabel}
+              </Tag>
+            ) : undefined
+          }
+          actions={
+            <div className='flex items-center gap-12px flex-wrap'>
+              <div className='flex items-center gap-8px'>
+                <span className='text-13px text-t-secondary'>{t('settings.modelHub.free.serviceEnabled')}</span>
+                <Switch
+                  size='small'
+                  className='compact-dark-switch'
+                  aria-label={t('settings.modelHub.free.serviceEnabled')}
+                  checked={status?.enabled ?? false}
+                  loading={pendingAction === 'service'}
+                  disabled={!status || serviceBusy || healthBusy}
+                  onChange={(enabled) =>
+                    void run(
+                      () => setServiceEnabled(enabled),
+                      enabled
+                        ? 'settings.modelHub.free.serviceEnabledSuccess'
+                        : 'settings.modelHub.free.serviceDisabledSuccess'
+                    )
+                  }
+                />
               </div>
-              <div className='mt-2px text-13px leading-18px text-t-secondary'>
-                {t('settings.modelHub.free.providerId', { id: status?.providerId ?? 'nomifun-free-model' })}
-              </div>
+              <Tooltip content={t('settings.modelHub.free.refreshHint')}>
+                <Button
+                  type='outline'
+                  shape='round'
+                  size='small'
+                  icon={<Refresh theme='outline' size='15' />}
+                  loading={pendingAction === 'refresh'}
+                  disabled={!status || serviceBusy || healthBusy}
+                  onClick={() => void run(refresh, 'settings.modelHub.free.refreshSuccess', true)}
+                  className='rd-100px border-1px border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
+                >
+                  {t('settings.modelHub.free.refresh')}
+                </Button>
+              </Tooltip>
             </div>
-          </div>
-
-          <div className='flex items-center gap-12px flex-wrap'>
-            <div className='flex items-center gap-8px'>
-              <span className='text-13px text-t-secondary'>{t('settings.modelHub.free.serviceEnabled')}</span>
-              <Switch
-                size='small'
-                className='compact-dark-switch'
-                aria-label={t('settings.modelHub.free.serviceEnabled')}
-                checked={status?.enabled ?? false}
-                loading={pendingAction === 'service'}
-                disabled={!status || serviceBusy || healthBusy}
-                onChange={(enabled) =>
-                  void run(
-                    () => setServiceEnabled(enabled),
-                    enabled
-                      ? 'settings.modelHub.free.serviceEnabledSuccess'
-                      : 'settings.modelHub.free.serviceDisabledSuccess'
-                  )
-                }
-              />
-            </div>
-            <Tooltip content={t('settings.modelHub.free.refreshHint')}>
-              <Button
-                type='outline'
-                shape='round'
-                size='small'
-                icon={<Refresh theme='outline' size='15' />}
-                loading={pendingAction === 'refresh'}
-                disabled={!status || serviceBusy || healthBusy}
-                onClick={() => void run(refresh, 'settings.modelHub.free.refreshSuccess', true)}
-                className='rd-100px border-1px border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
-              >
-                {t('settings.modelHub.free.refresh')}
-              </Button>
-            </Tooltip>
-          </div>
-        </div>
+          }
+        />
 
         <div
           className='flex items-start gap-9px rd-10px px-12px py-10px border border-solid'
