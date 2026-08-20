@@ -1,0 +1,64 @@
+.miniMap {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--color-bg-2);
+  color: var(--color-text-3);
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+
+.miniMap[data-minimap-dragging='true'] {
+  cursor: grabbing;
+}
+
+.background {
+  fill: color-mix(in srgb, var(--color-bg-2) 92%, transparent);
+}
+
+.node {
+  fill: color-mix(in srgb, rgb(var(--primary-6)) 52%, var(--color-text-3));
+  stroke: color-mix(in srgb, rgb(var(--primary-6)) 68%, var(--color-border-3));
+  stroke-width: 0.75px;
+  opacity: 0.78;
+  pointer-events: none;
+}
+
+.node[data-minimap-node-type='image'] {
+  fill: rgb(var(--success-6));
+}
+
+.node[data-minimap-node-type='video'] {
+  fill: rgb(var(--warning-6));
+}
+
+.node[data-minimap-node-type='audio'] {
+  fill: rgb(var(--primary-5));
+}
+
+.node[data-minimap-node-type='director'] {
+  fill: color-mix(in srgb, rgb(var(--primary-6)) 60%, rgb(var(--danger-6)));
+}
+
+.node[data-minimap-node-type='group'] {
+  fill: rgba(var(--primary-6), 0.06);
+  stroke: color-mix(in srgb, rgb(var(--primary-6)) 54%, var(--color-border-3));
+  stroke-dasharray: 3 2;
+}
+
+.node[data-minimap-node-selected='true'] {
+  stroke: rgb(var(--primary-6));
+  stroke-width: 1.5px;
+  opacity: 1;
+}
+
+.viewport {
+  fill: rgba(var(--primary-6), 0.1);
+  stroke: rgb(var(--primary-6));
+  stroke-width: 1.5px;
+  pointer-events: none;
+}
