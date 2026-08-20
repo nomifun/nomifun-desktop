@@ -24,6 +24,13 @@ const editorRef = useRef<CreativeCanvasEditorHandle>(null);
 />
 ```
 
+Product chrome sends every canvas mutation through the same reducer and CAS
+boundary with `editorRef.current?.dispatch(command)`. Background changes use
+`editorRef.current?.setBackground('dots' | 'lines' | 'blank')`; the editor
+updates the canonical base document and queues the complete document through
+the same save controller. Product routes must not synthesize keyboard events or
+maintain a second canvas store.
+
 `renderNode` receives the canonical node, its selected state, `onActivate`, and
 pointer props for the product's chosen drag handle. `renderEdge` receives the
 canonical connection plus its resolved source and target nodes. Top, left,

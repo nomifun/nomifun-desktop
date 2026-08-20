@@ -14,6 +14,7 @@ import React, {
 } from 'react';
 
 import type {
+  CreativeCanvasBackground,
   CreativeCanvasConnection,
   CreativeCanvasNode,
   CreativeProjectDetail,
@@ -85,6 +86,10 @@ export type CreativeCanvasEditorSlot =
   | ((context: CreativeCanvasEditorContext) => React.ReactNode);
 
 export interface CreativeCanvasEditorHandle {
+  /** Apply one canonical reducer command and queue persisted document changes. */
+  dispatch(command: CanvasCommand): CanvasState;
+  /** Update the canonical document background and queue it through the same CAS controller. */
+  setBackground(background: CreativeCanvasBackground): void;
   /** Route guards must await this before leaving the editor. */
   flush(): Promise<CanvasCasFlushResult>;
   /** Explicitly discard local state and reload the authoritative remote revision. */
@@ -181,6 +186,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       projectId
     );
     const [state, setState] = useState<CanvasState>(() => createInitialCanvasState());
+    const [background, setBackgroundState] = useState<CreativeCanvasBackground>('lines');
     const stateRef = useRef(state);
     const baseDocumentRef = useRef<CreativeProjectDetail['document'] | null>(null);
     const loadedProjectIdRef = useRef<string | null>(null);
@@ -207,6 +213,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         hydratedSaveControllerRef.current = saveController;
         stateRef.current = next;
         setState(next);
+        setBackgroundState(detail.document.background);
         saveController.reset(detail.project.revision, detail.document);
         pasteSequenceRef.current = 0;
         setInteraction({ type: 'gesture/end' });
@@ -259,6 +266,22 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       [saveController]
     );
 
+    const setBackground = useCallback(
+      (nextBackground: CreativeCanvasBackground) => {
+        const currentBase = baseDocumentRef.current;
+        if (!currentBase || currentBase.background === nextBackground) return;
+
+        const nextBase = {
+          ...structuredClone(currentBase),
+          background: nextBackground,
+        };
+        baseDocumentRef.current = nextBase;
+        setBackgroundState(nextBackground);
+        saveController.queue(projectDocumentFromCanvasState(nextBase, stateRef.current));
+      },
+      [saveController]
+    );
+
     useEffect(() => onStateChange?.(state), [onStateChange, state]);
     useEffect(() => onSaveStateChange?.(saveSnapshot), [onSaveStateChange, saveSnapshot]);
 
@@ -273,12 +296,14 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
     useImperativeHandle(
       ref,
       () => ({
+        dispatch: applyCommand,
+        setBackground,
         flush: () => saveController.flush(),
         reloadRemote,
         getState: () => stateRef.current,
         getSaveState: () => saveController.getSnapshot(),
       }),
-      [reloadRemote, saveController]
+      [applyCommand, reloadRemote, saveController, setBackground]
     );
 
     const localClientPoint = useCallback((clientX: number, clientY: number) => {
@@ -600,7 +625,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         ref={surfaceRef}
         className={`${styles.editor} ${className ?? ''}`.trim()}
         viewport={state.viewport}
-        backgroundMode={canvasSurfaceBackground(baseDocument.background)}
+        backgroundMode={canvasSurfaceBackground(background)}
         tool={tool}
         isPanning={interaction.isPanning}
         ariaLabel={ariaLabel}
