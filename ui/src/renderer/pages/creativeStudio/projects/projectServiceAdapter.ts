@@ -13,6 +13,7 @@ import type {
   CreativeStudioProjectSummary,
   CreativeStudioProjectsService,
 } from './types';
+import { creativeStudioHttpArchivePort } from './archive';
 
 /**
  * Archive IO is intentionally separate from canonical project persistence.
@@ -98,5 +99,8 @@ export const createCreativeStudioProjectsService = (
   },
 });
 
-/** Production project persistence. Archive capabilities stay disabled until injected. */
-export const creativeStudioProjectsService = createCreativeStudioProjectsService();
+/** Production project persistence and authenticated v1 archive transport. */
+export const creativeStudioProjectsService = createCreativeStudioProjectsService(
+  creativeProjectRepository,
+  creativeStudioHttpArchivePort
+);
