@@ -20,6 +20,7 @@ mod imagemeta;
 mod thumbnail;
 
 pub mod agent_ops;
+mod archive;
 pub mod creative_studio;
 pub mod routes;
 pub mod service;

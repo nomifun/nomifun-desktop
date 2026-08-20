@@ -56,6 +56,16 @@ pub trait IWorkshopRepository: Send + Sync {
         now: i64,
     ) -> Result<CreativeStudioProjectRow, DbError>;
 
+    /// Insert a freshly remapped canonical project and all of its imported
+    /// assets in one SQLite transaction. Callers stage binary files before
+    /// entering this method and remove them if the transaction fails; the DB
+    /// therefore never exposes a project without every referenced asset row.
+    async fn import_creative_project_with_assets(
+        &self,
+        project: &CreativeStudioProjectRow,
+        assets: &[WorkshopAssetRow],
+    ) -> Result<CreativeStudioProjectRow, DbError>;
+
     /// Hard-delete one canonical project row. Managed assets are not deleted:
     /// they have their own library lifecycle and may be shared by projects.
     async fn delete_creative_project(&self, project_id: &str) -> Result<(), DbError>;
