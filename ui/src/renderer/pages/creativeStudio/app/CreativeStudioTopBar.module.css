@@ -1,104 +1,189 @@
 .topBar {
   position: relative;
   z-index: 20;
-  display: grid;
-  height: 42px;
-  min-height: 42px;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: stretch;
-  border-bottom: 1px solid var(--border-base);
-  background: var(--bg-2);
-  color: var(--text-primary);
+  width: 100%;
+  height: 64px;
+  min-height: 64px;
+  border-bottom: 1px solid var(--color-border-1);
+  background: color-mix(in srgb, var(--color-bg-1) 90%, transparent);
+  color: var(--color-text-1);
+  backdrop-filter: blur(24px);
   user-select: none;
   -webkit-app-region: drag;
 }
 
-.desktop {
-  padding-left: 8px;
+.inner {
+  display: flex;
+  width: 100%;
+  max-width: 1280px;
+  height: 64px;
+  margin: 0 auto;
+  align-items: center;
+  padding: 0 24px;
+  box-sizing: border-box;
 }
 
-.mac {
-  height: 45px;
-  min-height: 45px;
-  padding-left: 76px;
-  padding-right: 12px;
+.desktop .inner {
+  max-width: none;
+  padding-right: 0;
+  padding-left: max(24px, calc((100vw - 1280px) / 2 + 24px));
 }
 
-.leading,
-.trailing {
+.mac .inner {
+  padding-right: 24px;
+  padding-left: max(88px, calc((100vw - 1280px) / 2 + 24px));
+}
+
+.brand {
+  display: inline-flex;
+  height: 64px;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-1);
+  font-size: 16px;
+  font-weight: 650;
+  line-height: 24px;
+  text-decoration: none;
+  white-space: nowrap;
+  -webkit-app-region: no-drag;
+}
+
+.navigation {
   display: flex;
   min-width: 0;
+  height: 64px;
+  margin-left: 32px;
   align-items: stretch;
+  gap: 28px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-app-region: no-drag;
 }
 
-.leading {
-  justify-content: flex-start;
+.navigation::-webkit-scrollbar {
+  display: none;
+}
+
+.navigationItem {
+  position: relative;
+  display: inline-flex;
+  height: 64px;
+  flex: none;
   align-items: center;
+  gap: 7px;
+  color: var(--color-text-3);
+  font-size: 14px;
+  font-weight: 450;
+  line-height: 24px;
+  text-decoration: none;
+  transition: color 140ms ease;
+}
+
+.navigationItem:hover {
+  color: var(--color-text-1);
+}
+
+.navigationItem[data-active='true'] {
+  color: var(--color-text-1);
+  font-weight: 550;
+}
+
+.navigationItem[data-active='true']::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 1px;
+  background: currentColor;
+  content: '';
 }
 
 .trailing {
-  justify-content: flex-end;
-}
-
-.title {
   display: flex;
-  max-width: min(42vw, 460px);
+  height: 64px;
+  min-width: 0;
+  flex: 1 0 auto;
   align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  color: var(--text-primary);
-  font-size: 13px;
-  font-weight: 650;
-  letter-spacing: 0.01em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-left: 24px;
+  -webkit-app-region: no-drag;
 }
 
 .backButton {
   display: inline-flex;
-  height: 30px;
-  max-width: min(34vw, 220px);
+  height: 34px;
+  flex: none;
   align-items: center;
+  justify-content: center;
   gap: 7px;
-  padding: 0 10px;
-  border: 0;
+  padding: 0 12px;
+  border: 1px solid var(--color-border-2);
   border-radius: 8px;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 12px;
+  background: var(--color-bg-2);
+  color: var(--color-text-2);
+  font-size: 13px;
   font-weight: 550;
+  line-height: 20px;
   cursor: pointer;
-  -webkit-app-region: no-drag;
 }
 
 .backButton:hover {
-  background: var(--fill-2);
-  color: var(--text-primary);
+  border-color: var(--color-border-3);
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
 }
 
 .backButton:active {
-  background: var(--fill-3);
+  background: var(--color-fill-3);
 }
 
-@media (max-width: 560px) {
-  .topBar {
-    height: 48px;
-    min-height: 48px;
-    padding: 0 8px;
+@media (max-width: 960px) {
+  .navigation {
+    margin-left: 24px;
+    gap: 20px;
   }
 
-  .backButton {
-    width: 32px;
-    padding: 0;
-    justify-content: center;
+  .trailing {
+    gap: 8px;
+    padding-left: 16px;
   }
+}
 
+@media (max-width: 820px) {
+  .brand span,
   .backButton span {
     display: none;
   }
 
-  .title {
-    max-width: 52vw;
-    font-size: 14px;
+  .backButton {
+    width: 34px;
+    padding: 0;
+  }
+}
+
+@media (max-width: 620px) {
+  .inner,
+  .desktop .inner,
+  .mac .inner {
+    padding-left: 16px;
+  }
+
+  .navigation {
+    margin-left: 16px;
+    gap: 18px;
+  }
+
+  .navigationItem {
+    gap: 0;
+  }
+
+  .navigationItem span {
+    display: none;
+  }
+
+  .trailing {
+    padding-left: 12px;
   }
 }
