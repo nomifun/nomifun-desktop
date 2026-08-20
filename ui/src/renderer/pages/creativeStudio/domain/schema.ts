@@ -266,7 +266,7 @@ export function createEmptyCreativeProjectDocument(projectId: string): CreativeP
     schema: CREATIVE_STUDIO_DOCUMENT_SCHEMA,
     projectId,
     viewport: { x: 0, y: 0, zoom: 1 },
-    background: 'dots',
+    background: 'lines',
     nodes: [],
     connections: [],
     chatSessions: [],

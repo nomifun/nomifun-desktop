@@ -53,6 +53,7 @@ describe('Creative Studio v1 document contract', () => {
     expect(document.nodes).toEqual([]);
     expect(document.connections).toEqual([]);
     expect(document.viewport.zoom).toBe(1);
+    expect(document.background).toBe('lines');
   });
 
   test('rejects legacy or future schema markers without fallback conversion', () => {
