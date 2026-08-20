@@ -38,6 +38,8 @@ interface TaskModelSelectProps {
   disabled?: boolean;
   /** Suppress the inline warning line (the caller renders its own copy). */
   hideHint?: boolean;
+  /** Receive the resolved warning copy when the caller positions it elsewhere. */
+  onHintChange?: (hint: string) => void;
   /** Copy shown when the catalog has no model for this task at all. */
   emptyHint?: string;
   /** Optional copy for the model field; provider keeps its task-aware default. */
@@ -66,6 +68,7 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
   size = 'mini',
   disabled = false,
   hideHint = false,
+  onHintChange,
   emptyHint,
   placeholder,
 }) => {
@@ -111,6 +114,10 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
         : state.modelStale && selectedModel
           ? t('settings.taskModel.staleHint', { model: selectedModel })
           : '';
+
+  useEffect(() => {
+    onHintChange?.(hint);
+  }, [hint, onHintChange]);
 
   return (
     <div className='flex min-w-0 flex-col items-end gap-4px'>

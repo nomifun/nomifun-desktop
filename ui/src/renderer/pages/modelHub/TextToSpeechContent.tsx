@@ -6,9 +6,9 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Form } from '@arco-design/web-react';
-import { Voice } from '@icon-park/react';
+import { Button } from '@arco-design/web-react';
 import type { TextToSpeechConfig } from '@/common/types/provider/speech';
+import { NomiSettingList, NomiSettingRow } from '@/renderer/components/base/NomiSettingLayout';
 import TaskModelSelect from '@/renderer/components/model/TaskModelSelect';
 import {
   getTextToSpeechConfig,
@@ -17,6 +17,7 @@ import {
 } from '@/renderer/services/textToSpeechConfig';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import ModalityModelsPanel from './ModalityModelsPanel';
+import ModelHubPageHeader from './ModelHubPageHeader';
 
 /**
  * TTS 首次获得配置面：全局默认的「语音合成模型 + 音色」。
@@ -57,52 +58,42 @@ const TextToSpeechContent: React.FC = () => {
     <div className='flex flex-col gap-14px'>
       <ModalityModelsPanel
         modality='tts'
-        icon={<Voice theme='outline' size='18' strokeWidth={3} />}
         titleKey='settings.modelHub.modality.ttsTitle'
         subtitleKey='settings.modelHub.modality.ttsSubtitle'
       />
-      <div className='flex min-h-0 flex-col rd-16px bg-2 px-24px py-16px'>
+      <section className='flex min-h-0 flex-col border-t border-t-solid border-[var(--color-border-2)] pt-16px'>
         {messageContext}
-      <header className='flex items-center gap-9px border-b border-b-solid border-[var(--color-border-2)] pb-14px'>
-        <span className='size-30px shrink-0 flex items-center justify-center rd-9px bg-primary-1 text-primary-6'>
-          <Voice theme='outline' size='18' strokeWidth={3} />
-        </span>
-        <div className='min-w-0'>
-          <h2 className='m-0 text-20px font-650 leading-28px text-t-primary'>
-            {t('settings.modelHub.speech.ttsTitle')}
-          </h2>
-          <p className='m-0 mt-2px text-12px leading-18px text-t-secondary'>
-            {t('settings.modelHub.speech.ttsSubtitle')}
-          </p>
-        </div>
-      </header>
+        <ModelHubPageHeader
+          title={t('settings.modelHub.speech.ttsTitle')}
+          description={t('settings.modelHub.speech.ttsSubtitle')}
+        />
 
-      <Form layout='vertical' className='mt-18px'>
-        <Form.Item
-          label={t('settings.modelHub.speech.ttsSource')}
-          extra={t('settings.taskModel.voiceFreeTextHint')}
-        >
-          <TaskModelSelect
-            task='speech_synthesis'
-            size='default'
-            withVoice
-            value={config}
-            emptyHint={t('settings.modelHub.speech.ttsNoSources')}
-            onChange={({ provider_id, model, voice }) =>
-              persist({ provider_id, model, voice: voice ?? null })
+        <NomiSettingList className='mt-16px'>
+          <NomiSettingRow
+            title={t('settings.modelHub.speech.ttsSource')}
+            description={t('settings.taskModel.voiceFreeTextHint')}
+            controls={
+              <>
+                <TaskModelSelect
+                  task='speech_synthesis'
+                  size='mini'
+                  withVoice
+                  value={config}
+                  emptyHint={t('settings.modelHub.speech.ttsNoSources')}
+                  onChange={({ provider_id, model, voice }) =>
+                    persist({ provider_id, model, voice: voice ?? null })
+                  }
+                />
+                {config && (
+                  <Button size='mini' onClick={() => persist(null)}>
+                    {t('settings.modelHub.speech.ttsClear')}
+                  </Button>
+                )}
+              </>
             }
           />
-        </Form.Item>
-      </Form>
-
-        {config && (
-          <div className='flex items-center gap-8px'>
-            <Button size='small' onClick={() => persist(null)}>
-              {t('settings.modelHub.speech.ttsClear')}
-            </Button>
-          </div>
-        )}
-      </div>
+        </NomiSettingList>
+      </section>
     </div>
   );
 };

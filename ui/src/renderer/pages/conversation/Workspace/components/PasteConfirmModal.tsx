@@ -51,7 +51,9 @@ const PasteConfirmModal: React.FC<PasteConfirmModalProps> = ({
             <FileText theme='outline' size='24' fill='rgb(var(--primary-6))' />
           </div>
           <div>
-            <div className='text-16px font-semibold mb-4px'>{t('conversation.workspace.pasteConfirm_title')}</div>
+            <div className='mb-4px text-14px font-600 leading-20px'>
+              {t('conversation.workspace.pasteConfirm_title')}
+            </div>
             <div className='text-13px' style={{ color: 'var(--color-text-3)' }}>
               {pasteConfirm.filesToPaste.length > 1
                 ? t('conversation.workspace.pasteConfirm_multipleFiles', {

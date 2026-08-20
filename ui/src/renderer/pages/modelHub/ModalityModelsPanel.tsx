@@ -40,6 +40,7 @@ import {
   type ModalityProviderGroup,
 } from './modalityModels';
 import { SerializedLatestWriteQueue } from './serializedLatestWriteQueue';
+import ModelHubPageHeader from './ModelHubPageHeader';
 
 type ImageGenerationDefaultModel = NonNullable<
   ConfigKeyMap['models.default.imageGeneration']
@@ -163,7 +164,6 @@ const ImageGenerationDefaultControl: React.FC<
 
 export interface ModalityModelsPanelProps {
   modality: ModalityKey;
-  icon: React.ReactNode;
   titleKey: I18nKey;
   subtitleKey: I18nKey;
   /** Chat alone owns the install-wide default conversation model. */
@@ -179,7 +179,6 @@ export interface ModalityModelsPanelProps {
  */
 const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
   modality,
-  icon,
   titleKey,
   subtitleKey,
   showDefaultModel = false,
@@ -271,7 +270,7 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
   const renderGroup = (group: ModalityProviderGroup) => (
     <div key={group.providerId} className='flex flex-col gap-6px'>
       <div className='flex min-w-0 items-center gap-8px flex-wrap'>
-        <span className='text-14px font-600 text-t-primary truncate'>
+        <span className='text-13px font-500 leading-18px text-t-primary truncate'>
           {group.providerName}
         </span>
         <span className='text-11px text-t-tertiary shrink-0'>
@@ -295,7 +294,7 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
             key={row.model}
             title={
               <div className='flex min-w-0 items-center gap-6px flex-wrap'>
-                <span className='truncate'>{row.model}</span>
+                <span className='truncate text-13px font-400 leading-18px'>{row.model}</span>
                 <Tag size='small' color='arcoblue'>
                   {t(`settings.modelTask.${row.capability.task}` as I18nKey)}
                 </Tag>
@@ -364,21 +363,9 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
   );
 
   return (
-    <div className='flex min-h-0 flex-col rd-16px bg-2 px-24px py-16px'>
+    <div className='flex min-h-0 flex-col'>
       {messageContext}
-      <header className='flex items-center gap-9px border-b border-b-solid border-[var(--color-border-2)] pb-14px'>
-        <span className='size-30px shrink-0 flex items-center justify-center rd-9px bg-primary-1 text-primary-6'>
-          {icon}
-        </span>
-        <div className='min-w-0'>
-          <h2 className='m-0 text-20px font-650 leading-28px text-t-primary'>
-            {t(titleKey)}
-          </h2>
-          <p className='m-0 mt-2px text-12px leading-18px text-t-secondary'>
-            {t(subtitleKey)}
-          </p>
-        </div>
-      </header>
+      <ModelHubPageHeader title={t(titleKey)} description={t(subtitleKey)} />
 
       {showDefaultModel && (
         <div className='mt-14px'>
