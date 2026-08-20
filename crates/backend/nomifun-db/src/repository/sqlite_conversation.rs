@@ -5846,6 +5846,8 @@ mod tests {
                 "id": session_id,
                 "title": "Agent",
                 "messageIds": [],
+                "model": { "providerId": FIXTURE_PROVIDER_ID, "model": "nomi-chat" },
+                "pendingTurn": null,
                 "createdAt": 1,
                 "updatedAt": 1
             }],
@@ -8529,6 +8531,8 @@ mod tests {
                 "id": second_session_id,
                 "title": "Second",
                 "messageIds": [],
+                "model": { "providerId": FIXTURE_PROVIDER_ID, "model": "nomi-chat" },
+                "pendingTurn": null,
                 "createdAt": 2,
                 "updatedAt": 2
             }));

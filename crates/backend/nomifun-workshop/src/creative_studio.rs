@@ -195,8 +195,9 @@ impl CreativeProjectDocument {
         }
 
         let mut chat_ids = BTreeSet::new();
+        let mut pending_chat_id: Option<&str> = None;
         for (index, chat) in self.chat_sessions.iter().enumerate() {
-            require_id(&format!("chatSessions[{index}].id"), &chat.id)?;
+            require_uuidv7(&format!("chatSessions[{index}].id"), &chat.id)?;
             require_string(
                 &format!("chatSessions[{index}].title"),
                 &chat.title,
@@ -215,14 +216,67 @@ impl CreativeProjectDocument {
                 &format!("chatSessions[{index}].messageIds"),
                 &chat.message_ids,
             )?;
+            if chat.message_ids.len() % 2 != 0 {
+                return Err(format!(
+                    "chatSessions[{index}].messageIds must contain completed user/assistant pairs"
+                ));
+            }
+            for (message_index, message_id) in chat.message_ids.iter().enumerate() {
+                require_uuidv7(
+                    &format!("chatSessions[{index}].messageIds[{message_index}]"),
+                    message_id,
+                )?;
+            }
+            if let Some(model) = chat.model.as_ref() {
+                nomifun_common::ProviderId::parse(&model.provider_id).map_err(|error| {
+                    format!("chatSessions[{index}].model.providerId is invalid: {error}")
+                })?;
+                require_trimmed_string(
+                    &format!("chatSessions[{index}].model.model"),
+                    &model.model,
+                    512,
+                )?;
+            }
+            if let Some(pending) = chat.pending_turn.as_ref() {
+                if pending_chat_id.replace(chat.id.as_str()).is_some() {
+                    return Err("chatSessions must contain at most one pending Agent turn".to_owned());
+                }
+                if chat.model.is_none() {
+                    return Err(format!(
+                        "chatSessions[{index}].model is required for a pending Agent turn"
+                    ));
+                }
+                require_uuidv7(
+                    &format!("chatSessions[{index}].pendingTurn.idempotencyKey"),
+                    &pending.idempotency_key,
+                )?;
+                require_trimmed_string(
+                    &format!("chatSessions[{index}].pendingTurn.prompt"),
+                    &pending.prompt,
+                    65_536,
+                )?;
+                if pending.created_at < chat.created_at || pending.created_at > chat.updated_at {
+                    return Err(format!(
+                        "chatSessions[{index}].pendingTurn.createdAt must be within the chat session lifetime"
+                    ));
+                }
+            }
+            if !chat.message_ids.is_empty() && chat.model.is_none() {
+                return Err(format!(
+                    "chatSessions[{index}].model is required for persisted Agent messages"
+                ));
+            }
         }
         if let Some(active_chat_id) = self.active_chat_id.as_deref() {
-            require_id("activeChatId", active_chat_id)?;
+            require_uuidv7("activeChatId", active_chat_id)?;
             if !chat_ids.contains(active_chat_id) {
                 return Err(format!(
                     "activeChatId {active_chat_id:?} references a missing chat session"
                 ));
             }
+        }
+        if pending_chat_id.is_some() && pending_chat_id != self.active_chat_id.as_deref() {
+            return Err("activeChatId must identify the session owning the pending Agent turn".to_owned());
         }
 
         validate_id_array("pendingTaskIds", &self.pending_task_ids)?;
@@ -679,8 +733,25 @@ pub struct CreativeChatSession {
     pub id: String,
     pub title: String,
     pub message_ids: Vec<String>,
+    pub model: Option<CreativeChatModel>,
+    pub pending_turn: Option<CreativeChatPendingTurn>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreativeChatModel {
+    pub provider_id: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreativeChatPendingTurn {
+    pub idempotency_key: String,
+    pub prompt: String,
+    pub created_at: TimestampMs,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -813,6 +884,20 @@ fn require_string(
 
 fn require_id(path: &str, value: &str) -> Result<(), String> {
     require_string(path, value, false, 256)
+}
+
+fn require_uuidv7(path: &str, value: &str) -> Result<(), String> {
+    nomifun_common::validate_uuidv7(value)
+        .map(|_| ())
+        .map_err(|error| format!("{path} must be a canonical lowercase UUIDv7: {error}"))
+}
+
+fn require_trimmed_string(path: &str, value: &str, max_utf16_units: usize) -> Result<(), String> {
+    require_string(path, value, false, max_utf16_units)?;
+    if value.trim() != value {
+        return Err(format!("{path} must be trimmed"));
+    }
+    Ok(())
 }
 
 fn require_optional_id(path: &str, value: Option<&str>) -> Result<(), String> {
@@ -1210,9 +1295,11 @@ mod tests {
 
         let mut reversed_chat = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
         reversed_chat.chat_sessions.push(CreativeChatSession {
-            id: "chat-a".into(),
+            id: "0190f5fe-7c00-7a00-8abc-000000000183".into(),
             title: "Chat".into(),
             message_ids: Vec::new(),
+            model: None,
+            pending_turn: None,
             created_at: 200,
             updated_at: 199,
         });
@@ -1221,6 +1308,56 @@ mod tests {
                 .validate_for_project(PROJECT_ID)
                 .unwrap_err()
                 .contains("updatedAt")
+        );
+    }
+
+    #[test]
+    fn agent_chat_sessions_pin_model_recovery_and_completed_pairs() {
+        let chat_id = "0190f5fe-7c00-7a00-8abc-000000000184";
+        let mut pending = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        pending.chat_sessions.push(CreativeChatSession {
+            id: chat_id.into(),
+            title: "Poster".into(),
+            message_ids: Vec::new(),
+            model: Some(CreativeChatModel {
+                provider_id: "0190f5fe-7c00-7a00-8abc-000000000188".into(),
+                model: "gpt-5".into(),
+            }),
+            pending_turn: Some(CreativeChatPendingTurn {
+                idempotency_key: "0190f5fe-7c00-7a00-8abc-000000000185".into(),
+                prompt: "Create a poster".into(),
+                created_at: 20,
+            }),
+            created_at: 10,
+            updated_at: 20,
+        });
+        pending.active_chat_id = Some(chat_id.into());
+        pending.validate_for_project(PROJECT_ID).unwrap();
+
+        let mut completed = pending.clone();
+        completed.chat_sessions[0].message_ids = vec![
+            "0190f5fe-7c00-7a00-8abc-000000000186".into(),
+            "0190f5fe-7c00-7a00-8abc-000000000187".into(),
+        ];
+        completed.chat_sessions[0].pending_turn = None;
+        completed.validate_for_project(PROJECT_ID).unwrap();
+
+        let mut half_pair = completed.clone();
+        half_pair.chat_sessions[0].message_ids.pop();
+        assert!(
+            half_pair
+                .validate_for_project(PROJECT_ID)
+                .unwrap_err()
+                .contains("user/assistant pairs")
+        );
+
+        let mut inactive_pending = pending;
+        inactive_pending.active_chat_id = None;
+        assert!(
+            inactive_pending
+                .validate_for_project(PROJECT_ID)
+                .unwrap_err()
+                .contains("owning the pending Agent turn")
         );
     }
 }

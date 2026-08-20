@@ -456,6 +456,10 @@ pub(crate) fn remap_creative_archive_for_import(
         // Conversation messages live outside the archive and therefore cannot
         // be imported as valid references.
         chat.message_ids.clear();
+        // An idempotency key can only resume the exporting installation's
+        // dedicated Conversation. Imported sessions retain their selected
+        // model but always begin without an in-flight turn.
+        chat.pending_turn = None;
     }
     if let Some(active_chat_id) = archive.document.active_chat_id.as_mut() {
         *active_chat_id = chat_ids.get(active_chat_id).cloned().ok_or_else(|| {

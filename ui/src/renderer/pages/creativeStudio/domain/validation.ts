@@ -13,6 +13,8 @@ import {
   type CreativeCanvasConnection,
   type CreativeCanvasNode,
   type CreativeCanvasNodeKind,
+  type CreativeChatModelReference,
+  type CreativeChatPendingTurn,
   type CreativeChatSessionReference,
   type CreativeConfigNodeData,
   type CreativeDirectorNodeData,
@@ -125,6 +127,18 @@ const asId = (value: unknown, path: string, code: CreativeStudioContractErrorCod
   asString(value, path, code, { maxLength: 256 });
 
 const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const asUuidV7Id = (
+  value: unknown,
+  path: string,
+  code: CreativeStudioContractErrorCode
+): string => {
+  const id = asId(value, path, code);
+  if (!UUID_V7_PATTERN.test(id) || id !== id.toLowerCase()) {
+    return fail(code, path, 'canonical lowercase UUIDv7');
+  }
+  return id;
+};
 
 const asProjectId = (
   value: unknown,
@@ -494,13 +508,67 @@ const parseConnection = (value: unknown, path: string): CreativeCanvasConnection
 const parseChatSession = (value: unknown, path: string): CreativeChatSessionReference => {
   const code = 'INVALID_DOCUMENT';
   const record = asRecord(value, path, code);
-  exactKeys(record, ['id', 'title', 'messageIds', 'createdAt', 'updatedAt'], [], path, code);
-  const messageIds = asIdArray(record.messageIds, `${path}.messageIds`, code);
+  exactKeys(
+    record,
+    ['id', 'title', 'messageIds', 'model', 'pendingTurn', 'createdAt', 'updatedAt'],
+    [],
+    path,
+    code
+  );
+  const messageIds = asArray(record.messageIds, `${path}.messageIds`, code, (item, itemPath) =>
+    asUuidV7Id(item, itemPath, code)
+  );
   assertUnique(messageIds, `${path}.messageIds`, code);
+  if (messageIds.length % 2 !== 0) {
+    fail(code, `${path}.messageIds`, 'completed user/assistant id pairs');
+  }
+  let model: CreativeChatModelReference | null = null;
+  if (record.model !== null) {
+    const modelRecord = asRecord(record.model, `${path}.model`, code);
+    exactKeys(modelRecord, ['providerId', 'model'], [], `${path}.model`, code);
+    const providerId = asUuidV7Id(modelRecord.providerId, `${path}.model.providerId`, code);
+    const modelId = asString(modelRecord.model, `${path}.model.model`, code, { maxLength: 512 });
+    if (modelId !== modelId.trim()) fail(code, `${path}.model.model`, 'trimmed model id');
+    model = { providerId, model: modelId };
+  }
+  let pendingTurn: CreativeChatPendingTurn | null = null;
+  if (record.pendingTurn !== null) {
+    const pendingRecord = asRecord(record.pendingTurn, `${path}.pendingTurn`, code);
+    exactKeys(
+      pendingRecord,
+      ['idempotencyKey', 'prompt', 'createdAt'],
+      [],
+      `${path}.pendingTurn`,
+      code
+    );
+    const prompt = asString(pendingRecord.prompt, `${path}.pendingTurn.prompt`, code, {
+      maxLength: 65_536,
+    });
+    if (prompt !== prompt.trim()) {
+      fail(code, `${path}.pendingTurn.prompt`, 'trimmed non-empty prompt');
+    }
+    pendingTurn = {
+      idempotencyKey: asUuidV7Id(
+        pendingRecord.idempotencyKey,
+        `${path}.pendingTurn.idempotencyKey`,
+        code
+      ),
+      prompt,
+      createdAt: asNumber(pendingRecord.createdAt, `${path}.pendingTurn.createdAt`, code, {
+        min: 0,
+        integer: true,
+      }),
+    };
+  }
+  if ((messageIds.length > 0 || pendingTurn !== null) && model === null) {
+    fail(code, `${path}.model`, 'selected model for persisted or pending Agent turns');
+  }
   return {
-    id: asId(record.id, `${path}.id`, code),
+    id: asUuidV7Id(record.id, `${path}.id`, code),
     title: asString(record.title, `${path}.title`, code, { maxLength: 1_000 }),
     messageIds,
+    model,
+    pendingTurn,
     createdAt: asNumber(record.createdAt, `${path}.createdAt`, code, { min: 0, integer: true }),
     updatedAt: asNumber(record.updatedAt, `${path}.updatedAt`, code, { min: 0, integer: true }),
   };
@@ -671,14 +739,34 @@ export function parseCreativeProjectDocument(
       fail(code, `$.connections[${index}].sourceNodeId`, 'image or panorama source for director');
     }
   }
+  const pendingChatSessions: CreativeChatSessionReference[] = [];
   for (const [index, chat] of chatSessions.entries()) {
     if (chat.updatedAt < chat.createdAt) {
       fail(code, `$.chatSessions[${index}].updatedAt`, 'timestamp not earlier than createdAt');
     }
+    if (chat.pendingTurn) {
+      if (chat.pendingTurn.createdAt < chat.createdAt || chat.pendingTurn.createdAt > chat.updatedAt) {
+        fail(
+          code,
+          `$.chatSessions[${index}].pendingTurn.createdAt`,
+          'timestamp within the owning chat session lifetime'
+        );
+      }
+      pendingChatSessions.push(chat);
+    }
   }
-  const activeChatId = asNullableId(record.activeChatId, '$.activeChatId', code);
+  const activeChatId =
+    record.activeChatId === null
+      ? null
+      : asUuidV7Id(record.activeChatId, '$.activeChatId', code);
   if (activeChatId !== null && !chatIds.includes(activeChatId)) {
     fail(code, '$.activeChatId', 'existing chat session id or null');
+  }
+  if (pendingChatSessions.length > 1) {
+    fail(code, '$.chatSessions', 'at most one pending Agent turn');
+  }
+  if (pendingChatSessions.length === 1 && pendingChatSessions[0]?.id !== activeChatId) {
+    fail(code, '$.activeChatId', 'the session owning the pending Agent turn');
   }
   return {
     schema: CREATIVE_STUDIO_DOCUMENT_SCHEMA,
