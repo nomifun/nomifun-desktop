@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { FileText, LoadingTwo, Refresh, Search } from '@icon-park/react';
+import { FileText, Inbox, LoadingTwo, Refresh, Search } from '@icon-park/react';
 import classNames from 'classnames';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
@@ -165,10 +165,6 @@ export const StandalonePromptLibraryAppearance: React.FC<
               </button>
             ) : null}
           </div>
-        ) : items.length === 0 ? (
-          <div className={styles.centerState} data-prompt-page-state='empty' role='status'>
-            <p>暂无提示词</p>
-          </div>
         ) : (
           <div className={styles.libraryBody}>
             <div className={styles.toolbar} data-prompt-page-toolbar='flat'>
@@ -218,41 +214,39 @@ export const StandalonePromptLibraryAppearance: React.FC<
                 </div>
               </div>
 
-              {facets.tags.length > 0 ? (
-                <div className={styles.facetRow}>
-                  <span className={styles.facetLabel}>标签</span>
-                  <div className={styles.chips}>
-                    <button
-                      type='button'
-                      className={classNames(styles.chip, selectedTags.length === 0 && styles.chipActive)}
-                      aria-pressed={selectedTags.length === 0}
-                      onClick={() => setSelectedTags([])}
-                    >
-                      全部
-                    </button>
-                    {facets.tags.map((tag) => {
-                      const active = selectedTags.includes(tag);
-                      return (
-                        <button
-                          key={tag}
-                          type='button'
-                          className={classNames(styles.chip, active && styles.chipActive)}
-                          aria-pressed={active}
-                          onClick={() =>
-                            setSelectedTags((current) =>
-                              current.includes(tag)
-                                ? current.filter((item) => item !== tag)
-                                : [...current, tag]
-                            )
-                          }
-                        >
-                          {tag}
-                        </button>
-                      );
-                    })}
-                  </div>
+              <div className={styles.facetRow}>
+                <span className={styles.facetLabel}>标签</span>
+                <div className={styles.chips}>
+                  <button
+                    type='button'
+                    className={classNames(styles.chip, selectedTags.length === 0 && styles.chipActive)}
+                    aria-pressed={selectedTags.length === 0}
+                    onClick={() => setSelectedTags([])}
+                  >
+                    全部
+                  </button>
+                  {facets.tags.map((tag) => {
+                    const active = selectedTags.includes(tag);
+                    return (
+                      <button
+                        key={tag}
+                        type='button'
+                        className={classNames(styles.chip, active && styles.chipActive)}
+                        aria-pressed={active}
+                        onClick={() =>
+                          setSelectedTags((current) =>
+                            current.includes(tag)
+                              ? current.filter((item) => item !== tag)
+                              : [...current, tag]
+                          )
+                        }
+                      >
+                        {tag}
+                      </button>
+                    );
+                  })}
                 </div>
-              ) : null}
+              </div>
             </div>
 
             {invalidCount > 0 ? (
@@ -266,30 +260,48 @@ export const StandalonePromptLibraryAppearance: React.FC<
               </p>
             ) : null}
 
-            <div className={styles.resultMeta} aria-live='polite'>
-              <span>{hasFilters ? `${filteredItems.length} / ${items.length}` : items.length} 条提示词</span>
-              {refreshing ? <span>正在刷新…</span> : null}
-            </div>
-
-            {filteredItems.length === 0 ? (
-              <div className={styles.filteredState} data-prompt-page-state='filtered' role='status'>
-                <p>没有匹配的提示词</p>
-                <button type='button' className={styles.stateAction} onClick={clearFilters}>
-                  清除筛选
-                </button>
+            {items.length === 0 ? (
+              <div className={styles.loadedEmptyState} data-prompt-page-state='empty' role='status'>
+                <Inbox
+                  theme='outline'
+                  size={48}
+                  fill='currentColor'
+                  strokeWidth={2}
+                  aria-hidden='true'
+                />
+                <p>没有找到匹配的提示词</p>
               </div>
             ) : (
-              <div className={styles.grid} role='list'>
-                {filteredItems.map((item) => (
-                  <div key={item.id} role='listitem'>
-                    <PromptCard
-                      item={item}
-                      selected={selectedId === item.id}
-                      onSelect={onSelect}
-                    />
+              <>
+                <div className={styles.resultMeta} aria-live='polite'>
+                  <span>{hasFilters ? `${filteredItems.length} / ${items.length}` : items.length} 条提示词</span>
+                  {refreshing ? <span>正在刷新…</span> : null}
+                </div>
+                {filteredItems.length === 0 ? (
+                  <div
+                    className={styles.filteredState}
+                    data-prompt-page-state='filtered'
+                    role='status'
+                  >
+                    <p>没有匹配的提示词</p>
+                    <button type='button' className={styles.stateAction} onClick={clearFilters}>
+                      清除筛选
+                    </button>
                   </div>
-                ))}
-              </div>
+                ) : (
+                  <div className={styles.grid} role='list'>
+                    {filteredItems.map((item) => (
+                      <div key={item.id} role='listitem'>
+                        <PromptCard
+                          item={item}
+                          selected={selectedId === item.id}
+                          onSelect={onSelect}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}

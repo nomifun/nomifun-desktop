@@ -42,12 +42,14 @@ describe('standalone prompt-library source-parity appearance', () => {
     expect(html.includes('还没有可用的提示词')).toBe(false);
   });
 
-  test('renders a simple centered empty state without the old descriptive card', () => {
+  test('renders the loaded-empty toolbar and source-aligned inbox state without fake facets', () => {
     const html = render();
     expect(html.includes('data-prompt-page-state="empty"')).toBe(true);
-    expect(html.includes('暂无提示词')).toBe(true);
+    expect(html.includes('没有找到匹配的提示词')).toBe(true);
     expect(html.includes('可用的 NomiFun 预设和文本素材会显示在这里')).toBe(false);
-    expect(html.includes('data-prompt-page-toolbar')).toBe(false);
+    expect(html.includes('data-prompt-page-toolbar="flat"')).toBe(true);
+    expect(html.split('>全部<').length - 1).toBe(2);
+    expect(html.includes('视频创作')).toBe(false);
   });
 
   test('reveals the flat search and real facets only when legal items exist', () => {
@@ -80,6 +82,9 @@ describe('standalone prompt-library source-parity appearance', () => {
     expect(css.includes('text-align: center')).toBe(true);
     expect(css.includes('min-height: 263px')).toBe(true);
     expect(css.includes('background-size: 18px 18px')).toBe(true);
+    expect(css.includes('width: min(672px, 100%)')).toBe(true);
+    expect(css.includes('width: min(1152px, calc(100vw - 48px))')).toBe(true);
+    expect(css.includes('padding-top: 126px')).toBe(true);
 
     const toolbarRule = css.slice(css.indexOf('.toolbar {'), css.indexOf('.searchField {'));
     expect(toolbarRule.includes('background:')).toBe(false);
