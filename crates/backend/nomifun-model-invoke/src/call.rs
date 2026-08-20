@@ -259,6 +259,7 @@ pub struct ResolvedTaskConfig {
     /// rejected before this object is constructed.
     pub provider_params: serde_json::Value,
     pub context_limit: Option<i64>,
+    pub output_limit: Option<i64>,
     /// Non-secret Bedrock SDK metadata (auth method, region and optional
     /// profile). Access-key material lives only in `connection.auth`.
     pub bedrock_config: Option<String>,
@@ -473,6 +474,7 @@ mod tests {
             },
             provider_params: json!({"temperature": 0.2}),
             context_limit: Some(32_000),
+            output_limit: Some(8_192),
             bedrock_config: None,
         };
         let params = config.execution_params();
@@ -502,6 +504,7 @@ mod tests {
             },
             provider_params: json!({}),
             context_limit: None,
+            output_limit: None,
             bedrock_config: None,
         };
         let error = config.http_endpoint().unwrap_err();

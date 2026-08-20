@@ -65,6 +65,7 @@ export const toProviderModelCapabilityInput = (
   allow_cross_origin_credentials: capability.allow_cross_origin_credentials,
   provider_params: capability.provider_params,
   context_limit: capability.context_limit,
+  output_limit: capability.output_limit,
 });
 
 /** Convert a response row into the full-replacement save input. */

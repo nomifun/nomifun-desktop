@@ -25,6 +25,7 @@ static CHAT_CAPABILITIES: [NewProviderModelCapability<'static>; 1] = [NewProvide
     allow_cross_origin_credentials: false,
     provider_params: "{}",
     context_limit: Some(128_000),
+    output_limit: None,
 }];
 
 static IMAGE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
@@ -41,6 +42,7 @@ static IMAGE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
         allow_cross_origin_credentials: false,
         provider_params: "{\"seed\":7}",
         context_limit: None,
+        output_limit: None,
     }];
 
 static VIDEO_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
@@ -57,6 +59,7 @@ static VIDEO_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
         allow_cross_origin_credentials: false,
         provider_params: "{}",
         context_limit: None,
+        output_limit: None,
     }];
 
 static VOICE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
@@ -73,6 +76,7 @@ static VOICE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
         allow_cross_origin_credentials: false,
         provider_params: "{}",
         context_limit: None,
+        output_limit: None,
     }];
 
 fn provider_params(provider_id: Option<&str>) -> CreateProviderParams<'_> {
@@ -284,6 +288,7 @@ async fn model_save_preserves_health_only_when_invocation_config_is_unchanged() 
             allow_cross_origin_credentials: false,
             provider_params: "{}",
             context_limit: None,
+            output_limit: None,
         },
         NewProviderModelCapability {
             task: "image_generation",
@@ -937,6 +942,7 @@ async fn bedrock_provider_allows_the_manifest_defined_empty_base_url() {
         allow_cross_origin_credentials: false,
         provider_params: "{}",
         context_limit: None,
+        output_limit: Some(8192),
     }];
     let db = init_database_memory().await.unwrap();
     let repository = SqliteProviderRepository::new(db.pool().clone());
@@ -960,6 +966,12 @@ async fn bedrock_provider_allows_the_manifest_defined_empty_base_url() {
         .unwrap();
     assert_eq!(provider.base_url, "");
     assert_eq!(provider.auth_scheme, "bedrock");
+    let capability = SqliteProviderModelCapabilityRepository::new(db.pool().clone())
+        .get(PROVIDER_ID, "anthropic.claude", "chat")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(capability.output_limit, Some(8192));
 }
 
 #[tokio::test]

@@ -63,7 +63,8 @@ struct Cli {
     #[arg(short, long, env = "MODEL")]
     model: Option<String>,
 
-    /// Max output tokens per response
+    /// Max output tokens per response. Required by anthropic/bedrock/vertex;
+    /// may also be set as [default].max_tokens in the config file.
     #[arg(long)]
     max_tokens: Option<u32>,
 

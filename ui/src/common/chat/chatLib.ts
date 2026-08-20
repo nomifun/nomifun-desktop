@@ -14,6 +14,7 @@ import {
   parseConversationId,
   parseCronJobId,
   parseKnowledgeBaseId,
+  parseMessageId,
   parsePersistedArtifactId,
   type ConversationId,
   type CronJobId,
@@ -196,12 +197,21 @@ export type AgentStreamErrorInfo = {
   resolution?: AgentErrorResolution;
 };
 
+export type TruncatedTurnFailureCode = 'output_truncated' | 'turn_requests_exhausted';
+
+export type TruncatedTurnRecovery = {
+  kind: 'continue_truncated';
+  source_message_id: MessageId;
+  failure_code: TruncatedTurnFailureCode;
+};
+
 export type IMessageTips = IMessage<
   'tips',
   {
     content: string;
     type: 'error' | 'success' | 'warning';
     error?: AgentStreamErrorInfo;
+    recovery?: TruncatedTurnRecovery;
   }
 >;
 
@@ -767,6 +777,22 @@ export const normalizeAgentStreamError = (value: unknown): AgentStreamErrorInfo 
   };
 };
 
+export const normalizeTruncatedTurnRecovery = (value: unknown): TruncatedTurnRecovery | undefined => {
+  if (!isObject(value) || value.kind !== 'continue_truncated') return undefined;
+  if (value.failure_code !== 'output_truncated' && value.failure_code !== 'turn_requests_exhausted') {
+    return undefined;
+  }
+  try {
+    return {
+      kind: 'continue_truncated',
+      source_message_id: parseMessageId(value.source_message_id),
+      failure_code: value.failure_code,
+    };
+  } catch {
+    return undefined;
+  }
+};
+
 const normalizeTipType = (value: unknown): IMessageTips['content']['type'] =>
   value === 'success' || value === 'warning' || value === 'error' ? value : 'warning';
 
@@ -1066,6 +1092,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
     case 'error': {
       const errorData = message.data;
       const structuredError = normalizeAgentStreamError(errorData);
+      const recovery = isObject(errorData) ? normalizeTruncatedTurnRecovery(errorData.recovery) : undefined;
       const errorText =
         (isObject(errorData) ? optionalDisplayText(errorData.message) : undefined) ?? toDisplayText(errorData);
       return {
@@ -1080,6 +1107,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
           content: errorText,
           type: 'error',
           ...(structuredError ? { error: structuredError } : {}),
+          ...(recovery ? { recovery } : {}),
         },
       };
     }
@@ -1091,6 +1119,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         tipType === 'error'
           ? (normalizeAgentStreamError(data.error) ?? normalizeAgentStreamError({ ...data, message: content }))
           : undefined;
+      const recovery = normalizeTruncatedTurnRecovery(data.recovery);
       return {
         id: uuid(),
         type: 'tips',
@@ -1103,6 +1132,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
           content,
           type: tipType,
           ...(structuredError ? { error: structuredError } : {}),
+          ...(recovery ? { recovery } : {}),
         },
       };
     }
@@ -1220,6 +1250,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
     case 'available_commands':
       return undefined;
     case 'start':
+    case 'output_discarded':
     case 'finish':
     case 'thought':
     case 'skill_suggest':

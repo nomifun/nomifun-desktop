@@ -394,7 +394,6 @@ pub struct AgentInvocationInput {
     pub name: String,
     pub prompt: String,
     pub max_turns: usize,
-    pub max_tokens: u32,
     pub system_prompt: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,

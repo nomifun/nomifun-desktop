@@ -666,7 +666,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn quick_exit_is_observed_after_delayed_activation() {
-        let (program, args) = shell_command("printf quick");
+        #[cfg(windows)]
+        let script = "<nul set /p \"=quick\" & exit /b 0";
+        #[cfg(not(windows))]
+        let script = "printf quick";
+        let (program, args) = shell_command(script);
         let exited = Arc::new(tokio::sync::Notify::new());
         let exited_callback = Arc::clone(&exited);
         let handle = PtyHandle::spawn(
@@ -703,7 +707,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dirty_scrollback_and_live_output_preserve_raw_bytes() {
-        let (program, args) = shell_command("printf hello");
+        #[cfg(windows)]
+        let script = "<nul set /p \"=hello\" & exit /b 0";
+        #[cfg(not(windows))]
+        let script = "printf hello";
+        let (program, args) = shell_command(script);
         let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
         let captured_callback = Arc::clone(&captured);
         let exited = Arc::new(tokio::sync::Notify::new());

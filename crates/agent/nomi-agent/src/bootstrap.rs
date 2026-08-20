@@ -25,14 +25,72 @@ use crate::session::Session;
 struct SessionExtractModel {
     provider: Arc<dyn LlmProvider>,
     model: String,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
+}
+
+/// Drain a provider response for a tool-less, visible-text-only helper call.
+/// `Done` is a commit candidate rather than an early return: the channel must
+/// close cleanly before the candidate can be trusted, and any trailing event
+/// invalidates it.
+#[cfg(any(test, feature = "browser-use"))]
+async fn collect_toolless_text_response(
+    mut rx: tokio::sync::mpsc::Receiver<nomi_types::llm::LlmEvent>,
+    context: &str,
+) -> Result<String, String> {
+    use nomi_types::llm::LlmEvent;
+    use nomi_types::message::StopReason;
+
+    let mut output = String::new();
+    let mut terminal: Option<StopReason> = None;
+    while let Some(event) = rx.recv().await {
+        if terminal.is_some() {
+            return Err(format!(
+                "{context} provider emitted an event after terminal Done"
+            ));
+        }
+        match event {
+            LlmEvent::TextDelta(delta) => output.push_str(&delta),
+            LlmEvent::Done { stop_reason, .. } => terminal = Some(stop_reason),
+            LlmEvent::Error(error) => {
+                return Err(format!("{context} provider stream failed: {error}"));
+            }
+            LlmEvent::ToolUse { .. }
+            | LlmEvent::ToolUseDelta { .. }
+            | LlmEvent::ToolUseTruncated { .. } => {
+                return Err(format!(
+                    "{context} provider emitted a tool call for a tool-less request"
+                ));
+            }
+            LlmEvent::ProviderRoundId(_) => {
+                return Err(format!(
+                    "{context} provider emitted a retained round id for a non-retainable request"
+                ));
+            }
+            LlmEvent::ThinkingDelta(_) | LlmEvent::ThinkingSignature(_) => {}
+        }
+    }
+
+    let Some(stop_reason) = terminal else {
+        return Err(format!(
+            "{context} provider stream ended without terminal Done"
+        ));
+    };
+    if stop_reason != StopReason::EndTurn {
+        return Err(format!(
+            "{context} provider stopped with {stop_reason:?}"
+        ));
+    }
+    if output.trim().is_empty() {
+        return Err(format!("{context} provider returned an empty response"));
+    }
+    Ok(output)
 }
 
 #[cfg(feature = "browser-use")]
 #[async_trait::async_trait]
 impl nomi_browser::extract::ExtractModel for SessionExtractModel {
     async fn complete(&self, prompt: &str) -> Result<String, String> {
-        use nomi_types::llm::{LlmEvent, LlmRequest};
+        use nomi_types::llm::LlmRequest;
         use nomi_types::message::{ContentBlock, Message, Role};
 
         let request = LlmRequest {
@@ -46,23 +104,14 @@ impl nomi_browser::extract::ExtractModel for SessionExtractModel {
             max_tokens: self.max_tokens,
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         };
-        let mut rx = self
+        let rx = self
             .provider
             .stream(&request)
             .await
             .map_err(|e| format!("extract model stream failed: {e}"))?;
-        let mut out = String::new();
-        while let Some(event) = rx.recv().await {
-            match event {
-                LlmEvent::TextDelta(t) => out.push_str(&t),
-                LlmEvent::Done { .. } => break,
-                LlmEvent::Error(e) => return Err(format!("extract model error: {e}")),
-                // No tools / no thinking requested → other events aren't expected; ignore.
-                _ => {}
-            }
-        }
-        Ok(out)
+        collect_toolless_text_response(rx, "extract model").await
     }
 }
 
@@ -81,7 +130,7 @@ impl nomi_browser::extract::ExtractModel for SessionExtractModel {
 struct SessionVisualLocator {
     provider: Arc<dyn LlmProvider>,
     model: String,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
 }
 
 #[cfg(feature = "browser-use")]
@@ -92,7 +141,7 @@ impl SessionVisualLocator {
     /// share this; only the prompt + reply parser differ.
     async fn run_vision(&self, prompt: String, png: &[u8]) -> Result<String, String> {
         use base64::Engine as _;
-        use nomi_types::llm::{LlmEvent, LlmRequest};
+        use nomi_types::llm::LlmRequest;
         use nomi_types::message::{ContentBlock, Message, Role};
 
         let data = base64::engine::general_purpose::STANDARD.encode(png);
@@ -110,24 +159,69 @@ impl SessionVisualLocator {
             max_tokens: self.max_tokens,
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         };
 
-        let mut rx = self
+        let rx = self
             .provider
             .stream(&request)
             .await
             .map_err(|e| format!("visual locator stream failed: {e}"))?;
-        let mut out = String::new();
-        while let Some(event) = rx.recv().await {
-            match event {
-                LlmEvent::TextDelta(t) => out.push_str(&t),
-                LlmEvent::Done { .. } => break,
-                LlmEvent::Error(e) => return Err(format!("visual locator error: {e}")),
-                // No tools / no thinking requested → other events aren't expected; ignore.
-                _ => {}
-            }
+        collect_toolless_text_response(rx, "visual locator").await
+    }
+}
+
+#[cfg(test)]
+mod toolless_response_tests {
+    use super::collect_toolless_text_response;
+    use nomi_types::llm::LlmEvent;
+    use nomi_types::message::{StopReason, TokenUsage};
+
+    async fn drain(events: Vec<LlmEvent>) -> Result<String, String> {
+        let (tx, rx) = tokio::sync::mpsc::channel(events.len().max(1));
+        for event in events {
+            tx.send(event).await.unwrap();
         }
-        Ok(out)
+        drop(tx);
+        collect_toolless_text_response(rx, "test helper").await
+    }
+
+    fn done(stop_reason: StopReason) -> LlmEvent {
+        LlmEvent::Done {
+            stop_reason,
+            usage: TokenUsage::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn toolless_helper_commits_only_a_clean_nonempty_end_turn() {
+        let output = drain(vec![
+            LlmEvent::TextDelta("complete".to_owned()),
+            done(StopReason::EndTurn),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(output, "complete");
+
+        for events in [
+            vec![
+                LlmEvent::TextDelta("partial".to_owned()),
+                done(StopReason::MaxTokens),
+            ],
+            vec![LlmEvent::TextDelta("partial".to_owned())],
+            vec![
+                LlmEvent::TextDelta("committed?".to_owned()),
+                done(StopReason::EndTurn),
+                LlmEvent::TextDelta("poison".to_owned()),
+            ],
+            vec![
+                LlmEvent::TextDelta("payload".to_owned()),
+                LlmEvent::ProviderRoundId("unexpected".to_owned()),
+                done(StopReason::EndTurn),
+            ],
+        ] {
+            assert!(drain(events).await.is_err());
+        }
     }
 }
 
@@ -813,7 +907,7 @@ impl AgentBootstrap {
             let extract_model = Arc::new(SessionExtractModel {
                 provider: provider.clone(),
                 model: self.config.model.clone(),
-                max_tokens: self.config.max_tokens,
+                max_tokens: self.config.output_max_tokens,
             });
             browser_tool = browser_tool.with_extract_model(extract_model);
             // P7B: visual fallback opt-in (LIVE pref `agent.browserUse.visualFallback`, default
@@ -826,7 +920,7 @@ impl AgentBootstrap {
                 let locator = Arc::new(SessionVisualLocator {
                     provider: provider.clone(),
                     model: self.config.model.clone(),
-                    max_tokens: self.config.max_tokens,
+                    max_tokens: self.config.output_max_tokens,
                 });
                 browser_tool = browser_tool
                     .with_visual_locator(locator)

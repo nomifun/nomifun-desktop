@@ -276,7 +276,9 @@ impl OpenAIProvider {
         if include_stream_usage {
             body["stream_options"] = json!({ "include_usage": true });
         }
-        body[max_tokens_field] = json!(request.max_tokens);
+        if let Some(limit) = request.max_tokens {
+            body[max_tokens_field] = json!(limit);
+        }
 
         if !request.tools.is_empty() {
             body["tools"] = json!(Self::build_tools(
@@ -289,7 +291,13 @@ impl OpenAIProvider {
             body["reasoning_effort"] = json!(effort);
         }
 
-        let mut body = crate::request_body_with_extra(&self.compat, body);
+        let mut body = crate::request_body_with_extra(
+            &self.compat,
+            crate::OutputCeilingLocation::Top {
+                dynamic: Some(max_tokens_field),
+            },
+            body,
+        );
         let object = body
             .as_object_mut()
             .expect("typed OpenAI request body is an object");
@@ -643,6 +651,7 @@ struct StreamState {
     tool_calls: Vec<ToolCallAccumulator>,
     input_tokens: u64,
     output_tokens: u64,
+    reasoning_tokens: u64,
     /// Cache-read (prompt-cache hit) tokens reported by the provider, if any.
     /// Informational: surfaced into the Done event's usage so the cache-hit rate
     /// is observable for domestic OpenAI-compatible providers (DeepSeek/GLM/Qwen/…)
@@ -672,6 +681,7 @@ impl StreamState {
             tool_calls: Vec::new(),
             input_tokens: 0,
             output_tokens: 0,
+            reasoning_tokens: 0,
             cache_read_tokens: 0,
             pending_done: None,
             finish_reason: None,
@@ -717,6 +727,16 @@ impl StreamState {
 
         let mut events = Vec::new();
         if matches!(stop_reason, StopReason::MaxTokens) {
+            // The ceiling cut the response mid-composition. The accumulators are
+            // never executable (see `drain_truncated_tool_calls`), but their
+            // identity is a fact the next round needs, so drain them into
+            // non-executable `ToolUseTruncated` events here — the single true
+            // terminal — rather than discarding them in the `length` arm. They
+            // must precede the `Done` push below: the engine rejects any event
+            // that arrives after a terminal Done as a protocol violation.
+            events = drain_truncated_tool_calls(self);
+        } else if matches!(stop_reason, StopReason::Refusal) {
+            // A refusal's partial arguments are not truncated work to resume.
             self.tool_calls.clear();
         } else if !self.tool_calls.is_empty() || matches!(stop_reason, StopReason::ToolUse) {
             if self.tool_calls.is_empty() {
@@ -740,6 +760,7 @@ impl StreamState {
             usage: TokenUsage {
                 input_tokens: self.input_tokens,
                 output_tokens: self.output_tokens,
+                reasoning_tokens: self.reasoning_tokens,
                 cache_creation_tokens: 0,
                 cache_read_tokens: self.cache_read_tokens,
             },
@@ -1229,6 +1250,32 @@ fn finalize_structured_tool_calls(
     Ok(events)
 }
 
+/// Drain the accumulators of a response the provider truncated at its output
+/// ceiling into non-executable `ToolUseTruncated` facts.
+///
+/// This is the one place a truncated call's identity survives. It is reached
+/// only from the MaxTokens branch of [`StreamState::drain_terminal_events`], so
+/// none of these can ever become an executable `LlmEvent::ToolUse`: the sole
+/// caller of `finalize_structured_tool_calls` lives in a sibling branch that a
+/// MaxTokens terminal never takes.
+///
+/// Filtered on the name only, never the id: gateways that run with
+/// `auto_tool_id` do not send ids at all, and dropping their truncated calls
+/// would blind the resumable round on exactly the provider family that needs
+/// it. A nameless accumulator is unidentifiable and carries no usable fact.
+fn drain_truncated_tool_calls(state: &mut StreamState) -> Vec<LlmEvent> {
+    state
+        .tool_calls
+        .drain(..)
+        .filter(|acc| !acc.name.trim().is_empty())
+        .map(|acc| LlmEvent::ToolUseTruncated {
+            id: acc.id,
+            name: acc.name,
+            argument_bytes: acc.arguments.len(),
+        })
+        .collect()
+}
+
 fn skip_json_whitespace(input: &str, mut index: usize) -> usize {
     while let Some(ch) = input[index..].chars().next() {
         if !ch.is_whitespace() {
@@ -1330,6 +1377,8 @@ fn update_stream_usage(json: &Value, state: &mut StreamState) -> Result<(), Stri
             optional_usage_u64(usage, "inputTokens")?.unwrap_or(state.input_tokens);
         state.output_tokens = optional_usage_u64(usage, "outputTokens")?
             .unwrap_or(state.output_tokens);
+        state.reasoning_tokens = optional_usage_u64(usage, "reasoningTokens")?
+            .unwrap_or(state.reasoning_tokens);
         let cache_read = optional_usage_u64(usage, "cacheReadTokens")?
             .unwrap_or(state.cache_read_tokens);
         state.input_tokens = input.checked_add(cache_read).ok_or_else(|| {
@@ -1356,6 +1405,18 @@ fn update_stream_usage(json: &Value, state: &mut StreamState) -> Result<(), Stri
     })?;
     state.output_tokens =
         optional_usage_u64(usage, "completion_tokens")?.unwrap_or(state.output_tokens);
+
+    state.reasoning_tokens = match usage.get("completion_tokens_details") {
+        None | Some(Value::Null) => state.reasoning_tokens,
+        Some(Value::Object(details)) => optional_usage_u64(details, "reasoning_tokens")?
+            .unwrap_or(state.reasoning_tokens),
+        Some(_) => {
+            return Err(
+                "OpenAI-compatible provider returned non-object completion_tokens_details"
+                    .to_string(),
+            );
+        }
+    };
 
     let detail_cached = match usage.get("prompt_tokens_details") {
         None | Some(Value::Null) => 0,
@@ -1399,9 +1460,12 @@ fn provider_error_detail(error: &Value) -> String {
 fn normalize_finish_reason(reason: &str) -> Result<&'static str, String> {
     if reason.eq_ignore_ascii_case("stop")
         || reason.eq_ignore_ascii_case("end_turn")
-        || reason.eq_ignore_ascii_case("content_filter")
     {
         Ok("stop")
+    } else if reason.eq_ignore_ascii_case("content_filter")
+        || reason.eq_ignore_ascii_case("refusal")
+    {
+        Ok("refusal")
     } else if reason.eq_ignore_ascii_case("tool_calls")
         || reason.eq_ignore_ascii_case("function_call")
     {
@@ -1578,16 +1642,16 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
                 "OpenAI-compatible provider emitted content after finish_reason",
             );
         }
-        if state.finish_reason.as_deref() == Some("length")
-            && delta
-                .get("tool_calls")
-                .and_then(Value::as_array)
-                .is_some_and(|calls| !calls.is_empty())
-        {
-            return state.poison(
-                "OpenAI-compatible provider emitted tool data after a length finish_reason",
-            );
-        }
+        // A late tool fragment after a `length` finish is NOT poisoned. Gateways
+        // that defer their final tool fragment past their first finish_reason
+        // (see the deferral note below) would otherwise turn every truncated
+        // tool call into a hard stream error instead of a resumable MaxTokens
+        // terminal. The fragment appends into the same index-keyed accumulator
+        // the earlier chunks built, so `argument_bytes` reports the real final
+        // count; and the accumulators remain structurally non-executable,
+        // because the only path from `tool_calls` to `LlmEvent::ToolUse` is
+        // `finalize_structured_tool_calls`, which a MaxTokens terminal never
+        // reaches (`drain_terminal_events` takes the truncation branch first).
     }
 
     // Reasoning content (OpenAI reasoning models)
@@ -1717,6 +1781,8 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
                 }
             }
 
+            // Captured before the mutable accumulator borrow below.
+            let truncated_terminal = state.finish_reason.as_deref() == Some("length");
             let acc = state.get_or_create_tool(index);
 
             if let Some(id) = id {
@@ -1726,10 +1792,20 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
                 acc.name = name;
             }
             if let Some(arguments) = arguments {
+                // A gateway that repeats its terminal frame re-sends the same
+                // argument string. Suppressing that echo keeps the accumulator
+                // (and therefore a truncation's reported byte count) equal to
+                // what was actually streamed once.
+                //
+                // The `is_ok` parse check identifies a COMPLETE argument string,
+                // which is why a truncated one needs its own clause: a
+                // `length`-truncated string never parses, so without this the
+                // echo would append and report exactly double the real count.
                 let duplicate_terminal_echo = post_finish
                     && finish_reason.is_some()
                     && acc.arguments == arguments
-                    && serde_json::from_str::<Value>(&acc.arguments).is_ok();
+                    && (truncated_terminal
+                        || serde_json::from_str::<Value>(&acc.arguments).is_ok());
                 if !duplicate_terminal_echo {
                     acc.arguments.push_str(&arguments);
                 }
@@ -1768,11 +1844,28 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
             "length" => {
                 // A length-truncated argument stream is never safe to execute,
                 // even if the accumulated JSON happens to parse. Report the
-                // actual terminal condition and discard all incomplete call
-                // accumulators; the caller can retry with a larger token budget.
-                state.tool_calls.clear();
+                // actual terminal condition, but KEEP the accumulators: their
+                // identity is drained into non-executable `ToolUseTruncated`
+                // events at the single terminal point
+                // (`drain_terminal_events`), so a resumable round can tell the
+                // next attempt which call was cut off and how far it got.
+                //
+                // Retention cannot leak an executable call. The only function
+                // that turns an accumulator into `LlmEvent::ToolUse` is
+                // `finalize_structured_tool_calls`, whose sole caller sits in
+                // the `else if` branch that a MaxTokens terminal never reaches;
+                // `infer_terminal_from_done` returns early because
+                // `finish_seen` is set immediately below; and `poison` clears
+                // the accumulators outright.
                 state.pending_done = Some(LlmEvent::Done {
                     stop_reason: StopReason::MaxTokens,
+                    usage: TokenUsage::default(),
+                });
+            }
+            "refusal" => {
+                state.tool_calls.clear();
+                state.pending_done = Some(LlmEvent::Done {
+                    stop_reason: StopReason::Refusal,
                     usage: TokenUsage::default(),
                 });
             }
@@ -2113,9 +2206,10 @@ mod tests {
     }
 
     #[test]
-    fn length_finish_never_executes_partial_structured_tool_call() {
+    fn length_finish_reports_a_truncated_tool_call_and_never_executes_it() {
         let mut state = StreamState::new();
 
+        let partial = r#"{"file_path":"/tmp/index.html","content":"<html><body>hello"#;
         let chunk = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_write","type":"function","function":{"name":"Write","arguments":"{\"file_path\":\"/tmp/index.html\",\"content\":\"<html><body>hello"}}]},"finish_reason":"length","index":0}]}"#;
         let events = parse_sse_chunk(chunk, &mut state, true);
 
@@ -2125,7 +2219,15 @@ mod tests {
                 .all(|event| !matches!(event, LlmEvent::ToolUse { .. })),
             "length-truncated arguments must never execute"
         );
-        assert!(state.tool_calls.is_empty());
+        // The accumulator is RETAINED, not discarded: its identity is the fact a
+        // resumable round needs. Retention is safe because the only path from
+        // `tool_calls` to an executable `ToolUse` is
+        // `finalize_structured_tool_calls`, which a MaxTokens terminal never
+        // reaches.
+        assert_eq!(state.tool_calls.len(), 1);
+        assert_eq!(state.tool_calls[0].name, "Write");
+        assert_eq!(state.tool_calls[0].arguments, partial);
+        let streamed_bytes = partial.len();
         assert!(matches!(
             state.pending_done,
             Some(LlmEvent::Done {
@@ -2133,6 +2235,120 @@ mod tests {
                 ..
             })
         ));
+
+        // The single terminal converts it to a non-executable fact, ahead of the
+        // Done — the engine rejects any event that arrives after a Done.
+        let terminal = state.drain_terminal_events();
+        assert!(matches!(
+            terminal.as_slice(),
+            [
+                LlmEvent::ToolUseTruncated {
+                    id,
+                    name,
+                    argument_bytes,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::MaxTokens,
+                    ..
+                }
+            ] if id == "call_write" && name == "Write" && *argument_bytes == streamed_bytes
+        ));
+        assert!(state.tool_calls.is_empty(), "the drain must not leave a survivor");
+    }
+
+    /// The deferral invariant this file documents: a gateway may deliver its
+    /// final tool fragment after its first `finish_reason`. That must append into
+    /// the same accumulator (so `argument_bytes` is the real final count) rather
+    /// than poison the stream, which would turn every truncated tool call on
+    /// those gateways into a hard error instead of a resumable MaxTokens.
+    #[test]
+    fn a_post_finish_argument_fragment_is_counted_once_and_never_executed() {
+        let mut state = StreamState::new();
+
+        let first = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_write","type":"function","function":{"name":"Write","arguments":"{\"file_path\":\"/tmp/a.html\",\"conte"}}]},"finish_reason":"length","index":0}]}"#;
+        parse_sse_chunk(first, &mut state, true);
+        let after_finish = state.tool_calls[0].arguments.len();
+
+        let late = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"nt\":\"<html>"}}]},"index":0}]}"#;
+        let late_events = parse_sse_chunk(late, &mut state, true);
+        assert!(
+            late_events
+                .iter()
+                .all(|event| !matches!(event, LlmEvent::Error(_))),
+            "a deferred tool fragment after `length` must not poison the stream"
+        );
+        let after_late = state.tool_calls[0].arguments.len();
+        assert!(
+            after_late > after_finish,
+            "the late fragment must append into the SAME accumulator"
+        );
+
+        let terminal = state.drain_terminal_events();
+        let [LlmEvent::ToolUseTruncated { argument_bytes, .. }, LlmEvent::Done { .. }] =
+            terminal.as_slice()
+        else {
+            panic!("expected exactly one truncation fact then Done, got {terminal:?}");
+        };
+        assert_eq!(
+            *argument_bytes, after_late,
+            "the late fragment must be counted exactly once"
+        );
+        assert!(
+            terminal
+                .iter()
+                .all(|event| !matches!(event, LlmEvent::ToolUse { .. })),
+            "a deferred fragment must never make the call executable"
+        );
+    }
+
+    /// A gateway that repeats its terminal frame must not make the truncated
+    /// call look twice as long as it was. The complete-JSON parse check cannot
+    /// recognise a truncated echo, since a cut-off argument string never parses.
+    #[test]
+    fn a_repeated_length_terminal_frame_does_not_double_count_the_cutoff() {
+        let mut state = StreamState::new();
+        let frame = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_write","type":"function","function":{"name":"Write","arguments":"{\"file_path\":\"/tmp/a.html\",\"content\":\"<htm"}}]},"finish_reason":"length","index":0}]}"#;
+        parse_sse_chunk(frame, &mut state, true);
+        let streamed = state.tool_calls[0].arguments.len();
+
+        // The same terminal frame again, as duplicate-terminal gateways send it.
+        parse_sse_chunk(frame, &mut state, true);
+        assert_eq!(
+            state.tool_calls[0].arguments.len(),
+            streamed,
+            "the echoed argument string must not append a second time"
+        );
+
+        let terminal = state.drain_terminal_events();
+        assert!(matches!(
+            terminal.as_slice(),
+            [
+                LlmEvent::ToolUseTruncated { argument_bytes, .. },
+                LlmEvent::Done {
+                    stop_reason: StopReason::MaxTokens,
+                    ..
+                }
+            ] if *argument_bytes == streamed
+        ));
+    }
+
+    /// A refusal's partial arguments are not truncated work to resume, so they
+    /// stay discarded silently rather than becoming a truncation fact.
+    #[test]
+    fn refusal_discards_partial_tool_arguments_without_reporting_a_cutoff() {
+        let mut state = StreamState::new();
+        let chunk = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_write","type":"function","function":{"name":"Write","arguments":"{\"file_path\":\"/tmp/a"}}]},"finish_reason":"content_filter","index":0}]}"#;
+        parse_sse_chunk(chunk, &mut state, true);
+
+        let terminal = state.drain_terminal_events();
+        assert!(matches!(
+            terminal.as_slice(),
+            [LlmEvent::Done {
+                stop_reason: StopReason::Refusal,
+                ..
+            }]
+        ));
+        assert!(state.tool_calls.is_empty());
     }
 
     #[test]
@@ -3188,9 +3404,10 @@ mod tests {
                 }],
             )],
             tools: vec![],
-            max_tokens: 16,
+            max_tokens: Some(16),
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         }
     }
 
@@ -3361,9 +3578,10 @@ mod tests {
             system: String::new(),
             messages: vec![],
             tools: vec![],
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         };
         let body = provider.build_request_body(&req, provider.should_sanitize_tool_schemas(), true);
         assert_eq!(body["max_tokens"], 1024);
@@ -3382,13 +3600,89 @@ mod tests {
             system: String::new(),
             messages: vec![],
             tools: vec![],
-            max_tokens: 2048,
+            max_tokens: Some(2048),
             thinking: None,
             reasoning_effort: None,
+            retain_provider_round: false,
         };
         let body = provider.build_request_body(&req, provider.should_sanitize_tool_schemas(), true);
         assert_eq!(body["max_completion_tokens"], 2048);
         assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn omitted_output_ceiling_cannot_be_restored_by_compat_extra_body() {
+        let mut compat = ProviderCompat {
+            max_tokens_field: Some("tokenBudget".into()),
+            ..Default::default()
+        };
+        compat.extra_body = Some(
+            json!({
+                "max_tokens": 1,
+                "max_completion_tokens": 2,
+                "maxOutputTokens": 3,
+                "max_output_tokens": 4,
+                "tokenBudget": 5,
+                "temperature": 0.2
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let provider = OpenAIProvider::new("key", "http://localhost", compat);
+        let mut request = simple_request();
+        request.max_tokens = None;
+
+        let body = provider.build_request_body(
+            &request,
+            provider.should_sanitize_tool_schemas(),
+            true,
+        );
+
+        for key in [
+            "max_tokens",
+            "max_completion_tokens",
+            "maxOutputTokens",
+            "max_output_tokens",
+            "tokenBudget",
+        ] {
+            assert!(body.get(key).is_none(), "{key} must stay absent");
+        }
+        assert_eq!(body["temperature"], 0.2);
+    }
+
+    #[test]
+    fn content_filter_finish_reason_maps_to_refusal() {
+        let mut state = StreamState::new();
+        let events = parse_sse_chunk(
+            r#"{"choices":[{"delta":{},"finish_reason":"content_filter"}]}"#,
+            &mut state,
+            true,
+        );
+        assert!(events.is_empty());
+        assert!(matches!(
+            state.flush_done(),
+            Some(LlmEvent::Done {
+                stop_reason: StopReason::Refusal,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn usage_records_reasoning_as_an_output_subset() {
+        let mut state = StreamState::new();
+        let events = parse_sse_chunk(
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":13,"completion_tokens_details":{"reasoning_tokens":11}}}"#,
+            &mut state,
+            true,
+        );
+        assert!(events.is_empty());
+        let Some(LlmEvent::Done { usage, .. }) = state.flush_done() else {
+            panic!("expected Done");
+        };
+        assert_eq!(usage.output_tokens, 13);
+        assert_eq!(usage.reasoning_tokens, 11);
     }
 
     #[test]

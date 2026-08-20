@@ -480,6 +480,7 @@ async fn bedrock_requires_explicit_sdk_auth_and_sdk_capability() {
                 "task": "chat",
                 "protocol": "bedrock.anthropic_messages",
                 "connection_role": "default",
+                "output_limit": 8192,
                 "provider_params": {}
             }]
         },

@@ -37,6 +37,7 @@ impl OutputSink for RecordingOutput {
         ));
     }
     fn emit_stream_start(&self, _: &str) {}
+    fn emit_output_discarded(&self, _: &str, _: u32) {}
     fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
     fn emit_error(&self, _: &str) {}
     fn emit_info(&self, _: &str) {}
@@ -104,7 +105,7 @@ fn make_compact_engine_with_output(
         messages,
         system_prompt: String::new(),
         model: "test-model".to_string(),
-        max_tokens: 4096,
+        output_max_tokens: Some(4096),
         max_turns: Some(10),
         total_usage: Default::default(),
         thinking: None,
@@ -220,9 +221,14 @@ fn prune_old_tool_images_keeps_most_recent() {
         CompactState::new(),
         (0..5).map(|i| tool_result_msg_with_image(&format!("call_{i}"))).collect(),
     );
+    engine.messages[0].provider_round_id = Some("resp_before_prune".to_owned());
     engine.max_recent_images = 3;
     engine.prune_old_tool_images();
     assert_eq!(count_images(&engine.messages), 3);
+    assert!(
+        engine.messages.iter().all(|message| message.provider_round_id.is_none()),
+        "rewriting any provider-visible history invalidates every retained round id"
+    );
     // The two oldest lost their images; text content survives.
     for (i, msg) in engine.messages.iter().enumerate() {
         if let ContentBlock::ToolResult { images, content, .. } = &msg.content[0] {
@@ -240,9 +246,15 @@ fn prune_old_tool_images_noop_under_limit() {
         CompactState::new(),
         vec![tool_result_msg_with_image("call_0")],
     );
+    engine.messages[0].provider_round_id = Some("resp_preserved".to_owned());
     engine.max_recent_images = 3;
     engine.prune_old_tool_images();
     assert_eq!(count_images(&engine.messages), 1);
+    assert_eq!(
+        engine.messages[0].provider_round_id.as_deref(),
+        Some("resp_preserved"),
+        "a byte-identical no-op must not break the response chain"
+    );
 }
 
 #[test]
@@ -492,6 +504,7 @@ async fn microcompact_clears_old_results() {
     let state = CompactState::new();
 
     let mut engine = make_compact_engine(config, state, messages);
+    engine.messages[0].provider_round_id = Some("resp_before_microcompact".to_owned());
     engine.run_compaction().await.unwrap();
 
     // Last 3 tool results should be preserved
@@ -505,6 +518,10 @@ async fn microcompact_clears_old_results() {
         .count();
 
     assert_eq!(cleared_count, 9);
+    assert!(
+        engine.messages.iter().all(|message| message.provider_round_id.is_none()),
+        "microcompact rewrites the full provider snapshot"
+    );
 }
 
 // -- Disabled config skips micro and auto but not emergency --

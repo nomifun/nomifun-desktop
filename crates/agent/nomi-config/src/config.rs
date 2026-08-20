@@ -185,8 +185,10 @@ pub struct DefaultConfig {
     #[serde(default = "default_provider")]
     pub provider: String,
     pub model: Option<String>,
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
+    /// Explicit CLI/TOML output ceiling. `None` lets protocols that support
+    /// omission use their provider default; required protocols reject it.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
     #[serde(default)]
     pub max_turns: Option<usize>,
     pub system_prompt: Option<String>,
@@ -197,7 +199,7 @@ impl Default for DefaultConfig {
         Self {
             provider: default_provider(),
             model: None,
-            max_tokens: default_max_tokens(),
+            max_tokens: None,
             max_turns: None,
             system_prompt: None,
         }
@@ -444,9 +446,6 @@ impl Default for SessionConfig {
 fn default_provider() -> String {
     "anthropic".to_string()
 }
-fn default_max_tokens() -> u32 {
-    8192
-}
 fn default_allow_list() -> Vec<String> {
     vec!["Read".into(), "Grep".into(), "Glob".into()]
 }
@@ -479,7 +478,8 @@ pub struct Config {
     pub api_key: String,
     pub base_url: String,
     pub model: String,
-    pub max_tokens: u32,
+    /// Effective output ceiling for requests. `None` means omit the field.
+    pub output_max_tokens: Option<u32>,
     pub max_turns: Option<usize>,
     pub system_prompt: Option<String>,
     pub project_instructions: ProjectInstructionsConfig,
@@ -502,16 +502,26 @@ pub struct Config {
 pub enum ProviderType {
     Anthropic,
     OpenAI,
+    OpenAIResponses,
     Gemini,
     Bedrock,
     Vertex,
 }
 
 impl ProviderType {
+    /// Whether this protocol requires an explicit output ceiling on the wire.
+    /// Exhaustive so every future provider adapter must make the choice.
+    pub fn requires_output_ceiling(self) -> bool {
+        match self {
+            ProviderType::Anthropic | ProviderType::Bedrock | ProviderType::Vertex => true,
+            ProviderType::OpenAI | ProviderType::OpenAIResponses | ProviderType::Gemini => false,
+        }
+    }
+
     fn default_base_url(self) -> &'static str {
         match self {
             ProviderType::Anthropic => "https://api.anthropic.com",
-            ProviderType::OpenAI => "https://api.openai.com",
+            ProviderType::OpenAI | ProviderType::OpenAIResponses => "https://api.openai.com",
             ProviderType::Gemini => "https://generativelanguage.googleapis.com/v1beta",
             // Bedrock/Vertex URLs are constructed from region/project.
             ProviderType::Bedrock | ProviderType::Vertex => "",
@@ -521,7 +531,7 @@ impl ProviderType {
     fn default_model(self) -> &'static str {
         match self {
             ProviderType::Anthropic => "claude-sonnet-4-20250514",
-            ProviderType::OpenAI => "gpt-4o",
+            ProviderType::OpenAI | ProviderType::OpenAIResponses => "gpt-4o",
             ProviderType::Gemini => "gemini-3.6-flash",
             ProviderType::Bedrock => "anthropic.claude-sonnet-4-20250514-v1:0",
             ProviderType::Vertex => "claude-sonnet-4@20250514",
@@ -532,6 +542,7 @@ impl ProviderType {
         match self {
             ProviderType::Anthropic => ProviderCompat::anthropic_defaults(),
             ProviderType::OpenAI => ProviderCompat::openai_defaults(),
+            ProviderType::OpenAIResponses => ProviderCompat::openai_responses_defaults(),
             ProviderType::Gemini => ProviderCompat::gemini_defaults(),
             ProviderType::Bedrock => ProviderCompat::bedrock_defaults(),
             ProviderType::Vertex => ProviderCompat::anthropic_defaults(),
@@ -603,7 +614,7 @@ impl Config {
             .or(merged.default.model.clone())
             .unwrap_or_else(|| provider.default_model().into());
 
-        let max_tokens = cli.max_tokens.unwrap_or(merged.default.max_tokens);
+        let output_max_tokens = cli.max_tokens.or(merged.default.max_tokens);
         let max_turns = cli.max_turns.or(merged.default.max_turns);
 
         let system_prompt = cli
@@ -643,7 +654,7 @@ impl Config {
             api_key,
             base_url,
             model,
-            max_tokens,
+            output_max_tokens,
             max_turns,
             system_prompt,
             project_instructions,
@@ -668,6 +679,7 @@ fn parse_builtin_provider(s: &str) -> Option<ProviderType> {
     match s {
         "anthropic" => Some(ProviderType::Anthropic),
         "openai" => Some(ProviderType::OpenAI),
+        "openai-responses" => Some(ProviderType::OpenAIResponses),
         "gemini" => Some(ProviderType::Gemini),
         "bedrock" => Some(ProviderType::Bedrock),
         "vertex" => Some(ProviderType::Vertex),
@@ -705,7 +717,7 @@ fn resolve_provider_alias(
 
     let alias_config = providers.get(requested).cloned().ok_or_else(|| {
         anyhow::anyhow!(
-            "Unknown provider: '{}'. Expected a built-in provider (anthropic, openai, gemini, bedrock, vertex) \
+            "Unknown provider: '{}'. Expected a built-in provider (anthropic, openai, openai-responses, gemini, bedrock, vertex) \
              or a custom alias defined in [providers.{}].",
             requested,
             requested
@@ -715,7 +727,7 @@ fn resolve_provider_alias(
     let underlying = alias_config.provider.clone().ok_or_else(|| {
         anyhow::anyhow!(
             "Provider alias '{}' requires a 'provider' field in [providers.{}] \
-             that maps to a built-in type (anthropic, openai, gemini, bedrock, vertex).",
+             that maps to a built-in type (anthropic, openai, openai-responses, gemini, bedrock, vertex).",
             requested,
             requested
         )
@@ -724,7 +736,7 @@ fn resolve_provider_alias(
     let provider_type = parse_builtin_provider(&underlying).ok_or_else(|| {
         anyhow::anyhow!(
             "Provider alias '{}' maps to '{}', which is not a built-in provider. \
-             Use one of: anthropic, openai, gemini, bedrock, vertex.",
+             Use one of: anthropic, openai, openai-responses, gemini, bedrock, vertex.",
             requested,
             underlying
         )
@@ -766,7 +778,7 @@ fn resolve_api_key(
                 return Ok(key);
             }
         }
-        ProviderType::OpenAI => {
+        ProviderType::OpenAI | ProviderType::OpenAIResponses => {
             if let Ok(key) = std::env::var("OPENAI_API_KEY") {
                 return Ok(key);
             }
@@ -1046,11 +1058,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
             global.default.provider
         },
         model: project.default.model.or(global.default.model),
-        max_tokens: if project.default.max_tokens != default_max_tokens() {
-            project.default.max_tokens
-        } else {
-            global.default.max_tokens
-        },
+        max_tokens: project.default.max_tokens.or(global.default.max_tokens),
         max_turns: project.default.max_turns.or(global.default.max_turns),
         system_prompt: project
             .default
@@ -1307,7 +1315,7 @@ fn apply_profile(mut config: ConfigFile, profile_name: &str) -> anyhow::Result<C
         config.default.model = Some(model);
     }
     if let Some(max_tokens) = profile.max_tokens {
-        config.default.max_tokens = max_tokens;
+        config.default.max_tokens = Some(max_tokens);
     }
     if let Some(max_turns) = profile.max_turns {
         config.default.max_turns = Some(max_turns);
@@ -1362,7 +1370,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = r#"# nomi configuration
 [default]
 provider = "anthropic"            # built-in provider or custom alias from [providers.<name>]
 # model = "claude-sonnet-4-20250514"
-max_tokens = 8192
+# max_tokens = 8192               # required by anthropic/bedrock/vertex; optional otherwise
 # max_turns = 30                  # optional: omit for unlimited turns
 # system_prompt = "..."          # optional custom system prompt
 
@@ -1535,6 +1543,22 @@ mod tests {
     }
 
     #[test]
+    fn test_openai_responses_provider_contract() {
+        assert_eq!(
+            parse_builtin_provider("openai-responses"),
+            Some(ProviderType::OpenAIResponses)
+        );
+        assert_eq!(
+            ProviderType::OpenAIResponses.default_base_url(),
+            "https://api.openai.com"
+        );
+        let compat = ProviderType::OpenAIResponses.compat_defaults();
+        assert_eq!(compat.api_path(), "/v1/responses");
+        assert_eq!(compat.max_tokens_field.as_deref(), Some("max_output_tokens"));
+        assert!(!compat.chain_rounds());
+    }
+
+    #[test]
     fn test_provider_type_from_str_gemini() {
         let result = parse_builtin_provider("gemini");
         assert_eq!(result, Some(ProviderType::Gemini));
@@ -1570,6 +1594,24 @@ mod tests {
     fn test_provider_type_from_str_invalid() {
         let result = parse_builtin_provider("invalid");
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn output_ceiling_requirement_follows_protocol_contract() {
+        for provider in [
+            ProviderType::Anthropic,
+            ProviderType::Bedrock,
+            ProviderType::Vertex,
+        ] {
+            assert!(provider.requires_output_ceiling(), "{provider:?}");
+        }
+        for provider in [
+            ProviderType::OpenAI,
+            ProviderType::OpenAIResponses,
+            ProviderType::Gemini,
+        ] {
+            assert!(!provider.requires_output_ceiling(), "{provider:?}");
+        }
     }
 
     #[test]
@@ -1660,7 +1702,7 @@ mod tests {
             default: DefaultConfig {
                 provider: "anthropic".to_string(),
                 model: Some("global-model".to_string()),
-                max_tokens: 4096,
+                max_tokens: Some(4096),
                 max_turns: Some(10),
                 system_prompt: Some("global prompt".to_string()),
             },
@@ -1670,7 +1712,7 @@ mod tests {
             default: DefaultConfig {
                 provider: "openai".to_string(), // non-default -> overrides global
                 model: Some("project-model".to_string()),
-                max_tokens: 2048,   // non-default -> overrides global
+                max_tokens: Some(2048), // explicit -> overrides global
                 max_turns: Some(5), // non-default -> overrides global
                 system_prompt: Some("project prompt".to_string()),
             },
@@ -1681,7 +1723,7 @@ mod tests {
 
         assert_eq!(merged.default.provider, "openai");
         assert_eq!(merged.default.model, Some("project-model".to_string()));
-        assert_eq!(merged.default.max_tokens, 2048);
+        assert_eq!(merged.default.max_tokens, Some(2048));
         assert_eq!(merged.default.max_turns, Some(5));
         assert_eq!(
             merged.default.system_prompt,
@@ -1696,13 +1738,13 @@ mod tests {
             default: DefaultConfig {
                 provider: "openai".to_string(),
                 model: Some("global-model".to_string()),
-                max_tokens: 1024,
+                max_tokens: Some(1024),
                 max_turns: Some(5),
                 system_prompt: Some("global prompt".to_string()),
             },
             ..Default::default()
         };
-        // Project stays at built-in defaults (provider = "anthropic", max_tokens = 8192, max_turns = None)
+        // Project stays at built-in defaults (provider = "anthropic", max_tokens = None).
         let project = ConfigFile::default();
 
         let merged = merge_config_files(global, project);
@@ -1710,7 +1752,7 @@ mod tests {
         // provider: project default "anthropic" == default_provider() -> use global "openai"
         assert_eq!(merged.default.provider, "openai");
         assert_eq!(merged.default.model, Some("global-model".to_string()));
-        assert_eq!(merged.default.max_tokens, 1024);
+        assert_eq!(merged.default.max_tokens, Some(1024));
         assert_eq!(merged.default.max_turns, Some(5));
         assert_eq!(
             merged.default.system_prompt,
@@ -1724,7 +1766,7 @@ mod tests {
         let merged = merge_config_files(ConfigFile::default(), ConfigFile::default());
 
         assert_eq!(merged.default.provider, default_provider());
-        assert_eq!(merged.default.max_tokens, default_max_tokens());
+        assert_eq!(merged.default.max_tokens, None);
         assert_eq!(merged.default.max_turns, None);
         assert!(merged.default.model.is_none());
         assert!(merged.providers.is_empty());
@@ -2022,7 +2064,7 @@ allow = ["commit", "review-pr", "db:*"]
         let config: ConfigFile = toml::from_str("").unwrap();
 
         assert_eq!(config.default.provider, "anthropic");
-        assert_eq!(config.default.max_tokens, 8192);
+        assert_eq!(config.default.max_tokens, None);
         assert_eq!(config.default.max_turns, None);
         assert!(config.default.model.is_none());
         assert!(config.providers.is_empty());
@@ -2049,7 +2091,7 @@ prompt_caching = false
 
         assert_eq!(config.default.provider, "openai");
         assert_eq!(config.default.model, Some("gpt-4o".to_string()));
-        assert_eq!(config.default.max_tokens, 4096);
+        assert_eq!(config.default.max_tokens, Some(4096));
 
         let openai = config.providers.get("openai").unwrap();
         assert_eq!(openai.api_key.as_deref(), Some("sk-test-key"));
@@ -2276,6 +2318,7 @@ base_url = "https://my-service.example.com/api/openai"
         for (name, expected_type) in [
             ("anthropic", ProviderType::Anthropic),
             ("openai", ProviderType::OpenAI),
+            ("openai-responses", ProviderType::OpenAIResponses),
             ("gemini", ProviderType::Gemini),
             ("bedrock", ProviderType::Bedrock),
             ("vertex", ProviderType::Vertex),
@@ -2542,7 +2585,7 @@ max_tokens = 1234
         };
 
         let config = Config::resolve(&cli_args).unwrap();
-        assert_eq!(config.max_tokens, 1234);
+        assert_eq!(config.output_max_tokens, Some(1234));
         assert_eq!(
             config.project_instructions.project_doc_fallback_filenames,
             vec!["TEAM_GUIDE.md", ".agents.md"]

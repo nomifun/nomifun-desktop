@@ -28,7 +28,7 @@ fn make_engine() -> super::AgentEngine {
         messages: vec![],
         system_prompt: String::new(),
         model: "test-model".to_string(),
-        max_tokens: 4096,
+        output_max_tokens: Some(4096),
         max_turns: Some(10),
         total_usage: Default::default(),
         thinking: None,

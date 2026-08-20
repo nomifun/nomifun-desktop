@@ -236,7 +236,7 @@ async fn nomi_factory_resolves_provider_from_db() {
         delegation_policy: Default::default(),
         conversation_created_at: Some(1),
         workspace_binding_lease: None,
-        extra: serde_json::json!({ "max_tokens": 2048 }),
+        extra: serde_json::json!({}),
     };
 
     let result = factory(options).await;
