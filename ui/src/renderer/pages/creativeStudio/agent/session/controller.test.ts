@@ -37,29 +37,27 @@ const history: readonly CreativeStudioAgentMessage[] = [
 const input = (
   overrides: Partial<NomiCreativeStudioAgentSessionResolutionInput> = {}
 ): NomiCreativeStudioAgentSessionResolutionInput => {
-  const selectedHistory = overrides.history ?? history;
   return {
     projectId: 'project-a',
     sessionId: 'session-a',
     model,
     signal: new AbortController().signal,
     ...overrides,
-    history: selectedHistory,
-    historyKey: overrides.historyKey ?? serializeCreativeStudioAgentHistory(selectedHistory),
     pendingTurnIdempotencyKey: overrides.pendingTurnIdempotencyKey ?? null,
   };
 };
 
 const binding = (
   request: CreativeStudioAgentSessionPersistenceRequest,
-  conversationId = conversationA
+  conversationId = conversationA,
+  authoritativeHistory: readonly CreativeStudioAgentMessage[] = history
 ): NomiCreativeStudioAgentSessionBinding => ({
   ownership: 'creative-studio-exclusive',
   projectId: request.projectId,
   sessionId: request.sessionId,
   conversationId,
   model: request.model,
-  historyKey: request.historyKey,
+  historyKey: serializeCreativeStudioAgentHistory(authoritativeHistory),
 });
 
 const resolution = (
@@ -67,10 +65,10 @@ const resolution = (
   conversationId = conversationA,
   overrides: Partial<NomiCreativeStudioAgentSessionResolution> = {}
 ): NomiCreativeStudioAgentSessionResolution => {
-  const authoritativeHistory = overrides.history ?? request.history;
+  const authoritativeHistory = overrides.history ?? history;
   return {
     binding: {
-      ...binding(request, conversationId),
+      ...binding(request, conversationId, authoritativeHistory),
       historyKey: serializeCreativeStudioAgentHistory(authoritativeHistory),
       ...overrides.binding,
     },
@@ -235,7 +233,7 @@ describe('CreativeStudioAgentSessionController', () => {
     expect(attempts).toBe(2);
   });
 
-  test('accepts exactly one authoritative completed pair behind a durable pending fence', async () => {
+  test('loads the complete server-authoritative history behind a durable pending fence', async () => {
     const recoveredHistory: readonly CreativeStudioAgentMessage[] = [
       ...history,
       { id: 'message-3', role: 'user', status: 'complete', text: '继续制作' },
@@ -251,30 +249,24 @@ describe('CreativeStudioAgentSessionController', () => {
       input({ pendingTurnIdempotencyKey: pendingKey })
     );
     expect(recovered.history).toEqual(recoveredHistory);
-
-    const rejected = await new CreativeStudioAgentSessionController(port)
-      .resolve(input())
-      .catch((error: unknown) => error);
-    expect(rejected instanceof CreativeStudioAgentSessionResolutionError).toBe(true);
   });
 
-  test('fails when the caller history key is stale before persistence is contacted', async () => {
-    let called = false;
+  test('fails when persistence returns history that does not match its binding proof', async () => {
     const port: CreativeStudioAgentSessionPersistencePort = {
       async resolveOrCreateExclusive(request) {
-        called = true;
-        return resolution(request);
+        return resolution(request, conversationA, {
+          binding: { ...binding(request), historyKey: 'stale' },
+        });
       },
     };
 
     const failure = await new CreativeStudioAgentSessionController(port)
-      .resolve(input({ historyKey: 'stale' }))
+      .resolve(input())
       .catch((error: unknown) => error);
     expect(failure instanceof CreativeStudioAgentSessionResolutionError).toBe(true);
     expect((failure as CreativeStudioAgentSessionResolutionError).code).toBe(
-      'HISTORY_PROJECTION_MISMATCH'
+      'PORT_CONTRACT_VIOLATION'
     );
-    expect(called).toBe(false);
   });
 
   test('the current production boundary fails closed with an actionable backend contract', async () => {

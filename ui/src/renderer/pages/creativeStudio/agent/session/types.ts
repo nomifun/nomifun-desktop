@@ -36,7 +36,6 @@ export interface CreativeStudioAgentSessionPersistencePort {
 
 export type CreativeStudioAgentSessionResolutionErrorCode =
   | 'INVALID_INPUT'
-  | 'HISTORY_PROJECTION_MISMATCH'
   | 'PORT_CONTRACT_VIOLATION';
 
 export class CreativeStudioAgentSessionResolutionError extends Error {

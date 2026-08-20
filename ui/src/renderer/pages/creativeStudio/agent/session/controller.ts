@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CreativeStudioAgentMessage } from '../types';
 import {
   serializeCreativeStudioAgentHistory,
   type NomiCreativeStudioAgentSessionResolution,
@@ -30,10 +29,6 @@ const abortError = (): Error => {
   error.name = 'AbortError';
   return error;
 };
-
-const copyHistory = (
-  history: readonly CreativeStudioAgentMessage[]
-): readonly CreativeStudioAgentMessage[] => history.map((message) => ({ ...message }));
 
 const assertInput = (input: NomiCreativeStudioAgentSessionResolutionInput): void => {
   if (
@@ -105,26 +100,6 @@ const assertResolution = (
       'Session persistence history does not match its binding proof'
     );
   }
-  if (
-    history.length < input.history.length ||
-    serializeCreativeStudioAgentHistory(history.slice(0, input.history.length)) !==
-      input.historyKey
-  ) {
-    throw new CreativeStudioAgentSessionResolutionError(
-      'PORT_CONTRACT_VIOLATION',
-      'Session persistence did not preserve the project history prefix'
-    );
-  }
-  const recoveredCount = history.length - input.history.length;
-  if (
-    recoveredCount !== 0 &&
-    (input.pendingTurnIdempotencyKey === null || recoveredCount !== 2)
-  ) {
-    throw new CreativeStudioAgentSessionResolutionError(
-      'PORT_CONTRACT_VIOLATION',
-      'Session persistence recovered more than one pending completed Agent turn'
-    );
-  }
 };
 
 const waitForCaller = <T>(operation: Promise<T>, signal: AbortSignal): Promise<T> => {
@@ -153,7 +128,6 @@ const operationKey = (request: CreativeStudioAgentSessionPersistenceRequest): st
     request.sessionId,
     request.model.providerId,
     request.model.model,
-    request.historyKey,
     request.pendingTurnIdempotencyKey,
   ]);
 
@@ -176,21 +150,10 @@ export class CreativeStudioAgentSessionController {
     assertInput(input);
     if (input.signal.aborted) throw abortError();
 
-    const history = copyHistory(input.history);
-    const computedHistoryKey = serializeCreativeStudioAgentHistory(history);
-    if (computedHistoryKey !== input.historyKey) {
-      throw new CreativeStudioAgentSessionResolutionError(
-        'HISTORY_PROJECTION_MISMATCH',
-        'Creative Studio Agent history changed before durable session resolution'
-      );
-    }
-
     const request: CreativeStudioAgentSessionPersistenceRequest = {
       projectId: input.projectId,
       sessionId: input.sessionId,
       model: { ...input.model },
-      history,
-      historyKey: computedHistoryKey,
       pendingTurnIdempotencyKey: input.pendingTurnIdempotencyKey,
     };
     const key = operationKey(request);
