@@ -690,7 +690,7 @@ export function parseCreativeProjectDocument(
     },
     background: asLiteral<CreativeCanvasBackground>(
       record.background,
-      ['dots', 'lines', 'grid', 'blank'],
+      ['dots', 'lines', 'blank'],
       '$.background',
       code
     ),

@@ -12,7 +12,7 @@ export const CREATIVE_STUDIO_DOCUMENT_SCHEMA = 'nomifun.creative-studio/v1' as c
 /** New documents never share a schema or a fallback reader with the retired workshop. */
 export type CreativeStudioDocumentSchema = typeof CREATIVE_STUDIO_DOCUMENT_SCHEMA;
 
-export type CreativeCanvasBackground = 'dots' | 'lines' | 'grid' | 'blank';
+export type CreativeCanvasBackground = 'dots' | 'lines' | 'blank';
 
 export type CreativeCanvasNodeKind =
   | 'image'

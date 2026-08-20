@@ -82,7 +82,7 @@ describe('Creative Studio v1 document contract', () => {
     );
   });
 
-  test('requires UUIDv7 project identity and a bounded viewport', () => {
+  test('requires UUIDv7 project identity, a bounded viewport, and a source background mode', () => {
     const invalidId = {
       ...createEmptyCreativeProjectDocument(PROJECT_ID),
       projectId: 'creative-studio-project-123',
@@ -91,9 +91,18 @@ describe('Creative Studio v1 document contract', () => {
       ...createEmptyCreativeProjectDocument(PROJECT_ID),
       viewport: { x: 0, y: 0, zoom: 5.01 },
     };
+    const inventedBackground = {
+      ...createEmptyCreativeProjectDocument(PROJECT_ID),
+      background: 'grid',
+    };
 
     expectContractError(() => parseCreativeProjectDocument(invalidId), 'INVALID_DOCUMENT', '$.projectId');
     expectContractError(() => parseCreativeProjectDocument(invalidZoom), 'INVALID_DOCUMENT', '$.viewport.zoom');
+    expectContractError(
+      () => parseCreativeProjectDocument(inventedBackground),
+      'INVALID_DOCUMENT',
+      '$.background'
+    );
   });
 
   test('parses typed nodes and validates graph references', () => {
