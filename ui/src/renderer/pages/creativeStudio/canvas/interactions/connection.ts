@@ -169,5 +169,6 @@ export function finishCanvasConnectionDrag(
             : (target.handleId ?? null),
       }),
     ],
+    intents: [{ type: 'connection/created', sourceNodeId, targetNodeId }],
   });
 }

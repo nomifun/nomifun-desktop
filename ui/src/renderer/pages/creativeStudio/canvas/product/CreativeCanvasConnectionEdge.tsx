@@ -18,7 +18,10 @@ export interface CreativeCanvasConnectionEdgeProps {
   source: CreativeCanvasNode;
   target: CreativeCanvasNode;
   selected: boolean;
+  highlighted?: boolean;
+  dimmed?: boolean;
   onActivate(): void;
+  onContextMenu?: React.MouseEventHandler<SVGElement>;
   ariaLabel?: string;
 }
 
@@ -32,7 +35,10 @@ const CreativeCanvasConnectionEdge: React.FC<CreativeCanvasConnectionEdgeProps> 
   source,
   target,
   selected,
+  highlighted = false,
+  dimmed = false,
   onActivate,
+  onContextMenu,
   ariaLabel = `连接 ${source.id} 至 ${target.id}`,
 }) => {
   const geometry = buildCanvasConnectionBezier(connection, source, target);
@@ -52,6 +58,9 @@ const CreativeCanvasConnectionEdge: React.FC<CreativeCanvasConnectionEdgeProps> 
       data-canvas-product-edge
       data-connection-id={connection.id}
       data-edge-selected={selected || undefined}
+      data-edge-highlighted={highlighted || undefined}
+      data-edge-dimmed={dimmed || undefined}
+      onContextMenu={onContextMenu}
     >
       <path
         className={styles.visiblePath}

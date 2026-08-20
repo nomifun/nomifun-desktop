@@ -42,6 +42,26 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('<CreativeCanvasTimelineUnwiredPanel')).toBe(true);
   });
 
+  test('resolves typed interaction intents through real product boundaries', () => {
+    for (const token of [
+      'onIntegrationIntent',
+      '<CreativeCanvasInteractionOverlays',
+      'resolveCanvasContextAction',
+      'validateCanvasConnection',
+      'creativeAssetClient.upload',
+      'navigator.clipboard.read()',
+      'manualUploadRejectionMessage',
+      'pendingPanoramaChoice',
+      'creativeStudioDirectorProjectPath(projectId)',
+      'onOpen={onOpen}',
+      'onToggleLock={onToggleLock}',
+    ]) {
+      expect(source.includes(token)).toBe(true);
+    }
+    expect(source.includes('URL.createObjectURL')).toBe(false);
+    expect(source.includes('data:image/')).toBe(false);
+  });
+
   test('uses CAS recovery and never invents local persistence or generation', () => {
     expect(source.includes('await editor.flush()')).toBe(true);
     expect(source.includes('canLeaveCreativeCanvasAfterFlush(await editor.flush())')).toBe(true);

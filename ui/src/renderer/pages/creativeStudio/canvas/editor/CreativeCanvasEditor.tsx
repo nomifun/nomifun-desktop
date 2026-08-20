@@ -30,12 +30,32 @@ import {
   clientToCanvas,
   createInitialCanvasState,
   type CanvasCommand,
+  type CanvasPoint,
   type CanvasState,
 } from '../core';
 import {
   CanvasSurface,
   type CanvasInteractionTool,
 } from '../components';
+import {
+  deriveCanvasGraphHighlight,
+  finishCanvasConnectionDrag,
+  finishCanvasResize,
+  openCanvasContextMenu,
+  resolveCanvasContextAction,
+  resolveCanvasDoubleClick,
+  resolveCanvasKeyboardInput,
+  startCanvasConnectionDrag,
+  startCanvasResize,
+  updateCanvasConnectionDrag,
+  updateCanvasResize,
+  validateCanvasDropImport,
+  type CanvasConnectionDragGesture,
+  type CanvasConnectionHandleKind,
+  type CanvasIntegrationIntent,
+  type CanvasInteractionResolution,
+  type CanvasResizeCorner,
+} from '../interactions';
 import {
   type CanvasCasFlushResult,
   type CanvasCasSaveSnapshot,
@@ -64,7 +84,11 @@ import styles from './CreativeCanvasEditor.module.css';
 export interface CreativeCanvasNodeRenderContext {
   node: CreativeCanvasNode;
   selected: boolean;
+  highlighted: boolean;
+  dimmed: boolean;
   onActivate(): void;
+  onOpen(): void;
+  onToggleLock(): void;
   dragHandleProps: {
     onPointerDown: React.PointerEventHandler<HTMLElement>;
   };
@@ -75,7 +99,10 @@ export interface CreativeCanvasEdgeRenderContext {
   source: CreativeCanvasNode;
   target: CreativeCanvasNode;
   selected: boolean;
+  highlighted: boolean;
+  dimmed: boolean;
   onActivate(): void;
+  onContextMenu: React.MouseEventHandler<SVGElement>;
 }
 
 export interface CreativeCanvasEditorContext {
@@ -125,6 +152,7 @@ export interface CreativeCanvasEditorProps {
   leftPanel?: CreativeCanvasEditorSlot;
   rightPanel?: CreativeCanvasEditorSlot;
   bottomPanel?: CreativeCanvasEditorSlot;
+  worldOverlay?: CreativeCanvasEditorSlot;
   screenOverlay?: CreativeCanvasEditorSlot;
   miniMap?: CreativeCanvasEditorSlot;
   isMiniMapOpen?: boolean;
@@ -135,6 +163,7 @@ export interface CreativeCanvasEditorProps {
   renderError?: (error: Error, retry: () => Promise<CreativeProjectDetail | undefined>) => React.ReactNode;
   onStateChange?: (state: CanvasState) => void;
   onSaveStateChange?: (save: CanvasCasSaveSnapshot) => void;
+  onIntegrationIntent?: (intent: CanvasIntegrationIntent) => void | Promise<void>;
   /** Fires after hydration and after each canonical task-feed mutation. */
   onPendingTaskIdsChange?: (taskIds: readonly string[]) => void;
 }
@@ -167,6 +196,37 @@ const defaultError = (error: Error, retry: () => Promise<CreativeProjectDetail |
   </div>
 );
 
+const connectionAnchor = (
+  node: CreativeCanvasNode,
+  handle: CanvasConnectionHandleKind
+): CanvasPoint => ({
+  x: handle === 'source' ? node.position.x + node.size.width : node.position.x,
+  y: node.position.y + node.size.height / 2,
+});
+
+const connectionPreviewPath = (
+  state: CanvasState,
+  gesture: CanvasConnectionDragGesture
+): string | null => {
+  const fixed = state.document.nodes.find((node) => node.id === gesture.fixedNodeId);
+  if (!fixed) return null;
+  const fixedPoint = connectionAnchor(fixed, gesture.fixedHandle);
+  const source = gesture.fixedHandle === 'source' ? fixedPoint : gesture.worldPosition;
+  const target = gesture.fixedHandle === 'target' ? fixedPoint : gesture.worldPosition;
+  const control = Math.max(40, Math.abs(target.x - source.x) * 0.45);
+  return `M ${source.x} ${source.y} C ${source.x + control} ${source.y}, ${target.x - control} ${target.y}, ${target.x} ${target.y}`;
+};
+
+const hasDraggedFiles = (dataTransfer: DataTransfer): boolean =>
+  Array.from(dataTransfer.types).includes('Files');
+
+const RESIZE_CORNERS: readonly CanvasResizeCorner[] = [
+  'top-left',
+  'top-right',
+  'bottom-left',
+  'bottom-right',
+];
+
 const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, CreativeCanvasEditorProps>(
   (
     {
@@ -182,6 +242,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       leftPanel,
       rightPanel,
       bottomPanel,
+      worldOverlay,
       screenOverlay,
       miniMap,
       isMiniMapOpen = false,
@@ -192,6 +253,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       renderError = defaultError,
       onStateChange,
       onSaveStateChange,
+      onIntegrationIntent,
       onPendingTaskIdsChange,
     },
     ref
@@ -287,6 +349,21 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         return next;
       },
       [saveController]
+    );
+
+    const applyInteractionResolution = useCallback(
+      (resolution: CanvasInteractionResolution) => {
+        if (!resolution.handled) return;
+        for (const command of resolution.commands) applyCommand(command);
+        if (onIntegrationIntent && resolution.intents.length > 0) {
+          void (async () => {
+            for (const intent of resolution.intents) {
+              await onIntegrationIntent(intent);
+            }
+          })();
+        }
+      },
+      [applyCommand, onIntegrationIntent]
     );
 
     const setBackground = useCallback(
@@ -422,7 +499,12 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
 
     const capturePointer = useCallback((pointerId: number) => {
       const surface = surfaceRef.current;
-      if (surface && !surface.hasPointerCapture(pointerId)) surface.setPointerCapture(pointerId);
+      if (!surface || surface.hasPointerCapture(pointerId)) return;
+      try {
+        surface.setPointerCapture(pointerId);
+      } catch {
+        // The pointer may have been canceled between the child handler and capture.
+      }
     }, []);
 
     const releasePointer = useCallback((pointerId: number) => {
@@ -458,6 +540,65 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         capturePointer(event.pointerId);
       },
       [applyCommand, capturePointer, projectId, setInteraction, tool]
+    );
+
+    const beginNodeResize = useCallback(
+      (
+        node: CreativeCanvasNode,
+        corner: CanvasResizeCorner,
+        event: React.PointerEvent<HTMLButtonElement>
+      ) => {
+        if (tool !== 'select' || event.button !== 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const started = startCanvasResize(
+          node,
+          event.pointerId,
+          { x: event.clientX, y: event.clientY },
+          corner,
+          stateRef.current.viewport,
+          {
+            keepAspectRatio: event.shiftKey,
+          }
+        );
+        if (!started.ok) return;
+        gestureSequenceRef.current += 1;
+        applyCommand(canvasCommands.setSelection([node.id]));
+        setInteraction({
+          type: 'gesture/start',
+          gesture: {
+            ...started.gesture,
+            mergeKey: `resize:${projectId}:${node.id}:${gestureSequenceRef.current}`,
+          },
+        });
+        capturePointer(event.pointerId);
+      },
+      [applyCommand, capturePointer, projectId, setInteraction, tool]
+    );
+
+    const beginConnectionDrag = useCallback(
+      (
+        node: CreativeCanvasNode,
+        handle: CanvasConnectionHandleKind,
+        event: React.PointerEvent<HTMLButtonElement>
+      ) => {
+        if (tool !== 'select' || event.button !== 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const started = startCanvasConnectionDrag(stateRef.current.document, {
+          nodeId: node.id,
+          handle,
+          handleId: handle,
+          pointerId: event.pointerId,
+          clientPosition: localClientPoint(event.clientX, event.clientY),
+          viewport: stateRef.current.viewport,
+        });
+        if (!started.ok) return;
+        applyCommand(canvasCommands.setSelection([node.id]));
+        setInteraction({ type: 'gesture/start', gesture: started.gesture });
+        capturePointer(event.pointerId);
+      },
+      [applyCommand, capturePointer, localClientPoint, setInteraction, tool]
     );
 
     const handleSurfacePointerDown = useCallback(
@@ -499,6 +640,25 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         const gesture = interactionRef.current.gesture;
         if (!gesture || gesture.pointerId !== event.pointerId) return;
         const client = { x: event.clientX, y: event.clientY };
+
+        if (gesture.kind === 'resize') {
+          const update = updateCanvasResize(gesture, event.pointerId, client, event.timeStamp);
+          if (update.command) applyCommand(update.command);
+          return;
+        }
+        if (gesture.kind === 'connection') {
+          const next = updateCanvasConnectionDrag(
+            gesture,
+            event.pointerId,
+            localClientPoint(event.clientX, event.clientY),
+            stateRef.current.viewport
+          );
+          if (next !== gesture) {
+            setInteraction({ type: 'gesture/replace', gesture: next });
+          }
+          return;
+        }
+
         const dx = client.x - gesture.lastClient.x;
         const dy = client.y - gesture.lastClient.y;
 
@@ -524,15 +684,65 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       [applyCommand, localClientPoint, setInteraction]
     );
 
+    const connectionDropTarget = useCallback(
+      (gesture: CanvasConnectionDragGesture, clientX: number, clientY: number) => {
+        const element = document.elementFromPoint(clientX, clientY);
+        const handleElement = element?.closest<HTMLElement>('[data-canvas-connection-handle]');
+        const nodeElement = element?.closest<HTMLElement>('[data-canvas-node-id]');
+        const nodeId = handleElement?.dataset.canvasNodeId?.trim() ?? null;
+        const handle = handleElement?.dataset.canvasConnectionHandle;
+        const opposite = gesture.fixedHandle === 'source' ? 'target' : 'source';
+        if (nodeId && handle === opposite) {
+          return {
+            nodeId,
+            handleId: handleElement?.dataset.canvasHandleId ?? handle,
+            isNearNode: true,
+          };
+        }
+        return { nodeId: null, isNearNode: Boolean(nodeElement) };
+      },
+      []
+    );
+
     const finishPointer = useCallback(
-      (pointerId: number) => {
+      (event: React.PointerEvent<HTMLDivElement>, canceled = false) => {
+        const pointerId = event.pointerId;
         const gesture = interactionRef.current.gesture;
         if (!gesture || gesture.pointerId !== pointerId) return;
-        if (gesture.kind === 'select') applyCommand(canvasCommands.endBoxSelection());
-        releasePointer(pointerId);
+
+        if (gesture.kind === 'select') {
+          applyCommand(canvasCommands.endBoxSelection());
+        } else if (gesture.kind === 'resize') {
+          finishCanvasResize(gesture, pointerId);
+        } else if (gesture.kind === 'connection' && !canceled) {
+          const latest = updateCanvasConnectionDrag(
+            gesture,
+            pointerId,
+            localClientPoint(event.clientX, event.clientY),
+            stateRef.current.viewport
+          );
+          applyInteractionResolution(
+            finishCanvasConnectionDrag(
+              stateRef.current.document,
+              latest,
+              pointerId,
+              connectionDropTarget(latest, event.clientX, event.clientY),
+              { at: event.timeStamp }
+            )
+          );
+        }
+
         setInteraction({ type: 'gesture/end', pointerId });
+        releasePointer(pointerId);
       },
-      [applyCommand, releasePointer, setInteraction]
+      [
+        applyCommand,
+        applyInteractionResolution,
+        connectionDropTarget,
+        localClientPoint,
+        releasePointer,
+        setInteraction,
+      ]
     );
 
     const handleWheel = useCallback(
@@ -587,45 +797,107 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
 
     const handleKeyDown = useCallback(
       (event: React.KeyboardEvent<HTMLDivElement>) => {
-        if (isCanvasKeyboardTarget(event.target)) return;
         const modifier = event.ctrlKey || event.metaKey;
         const key = event.key.toLowerCase();
-
-        if (modifier && key === 'c') {
-          event.preventDefault();
-          pasteSequenceRef.current = 0;
-          applyCommand(canvasCommands.copySelection());
-          return;
-        }
-        if (modifier && key === 'v') {
-          const pasteIndex = pasteSequenceRef.current + 1;
-          const paste = canvasCommands.pasteClipboard(stateRef.current, {
-            offset: { x: 32 * pasteIndex, y: 32 * pasteIndex },
-          });
-          if (paste) {
-            event.preventDefault();
-            pasteSequenceRef.current = pasteIndex;
-            applyCommand(paste);
+        const pasteSequence = pasteSequenceRef.current + 1;
+        const rect = surfaceRef.current?.getBoundingClientRect();
+        const resolution = resolveCanvasKeyboardInput(
+          stateRef.current,
+          {
+            key: event.key,
+            ctrlKey: event.ctrlKey,
+            metaKey: event.metaKey,
+            shiftKey: event.shiftKey,
+            altKey: event.altKey,
+            editable: isCanvasKeyboardTarget(event.target),
+          },
+          {
+            pasteSequence,
+            at: event.timeStamp,
+            clipboardWorldPosition: clientToCanvas(
+              { x: (rect?.width ?? 0) / 2, y: (rect?.height ?? 0) / 2 },
+              stateRef.current.viewport
+            ),
           }
-          return;
+        );
+        if (!resolution.handled) return;
+        if (resolution.preventDefault) event.preventDefault();
+        if (modifier && key === 'c') pasteSequenceRef.current = 0;
+        if (
+          modifier &&
+          key === 'v' &&
+          resolution.commands.some((command) => command.type === 'clipboard/paste')
+        ) {
+          pasteSequenceRef.current = pasteSequence;
         }
-        if (modifier && (key === 'z' || key === 'y')) {
-          event.preventDefault();
-          applyCommand(
-            key === 'y' || event.shiftKey ? canvasCommands.redo() : canvasCommands.undo()
-          );
-          return;
-        }
-        if (event.key === 'Delete' || event.key === 'Backspace') {
-          event.preventDefault();
-          applyCommand(canvasCommands.deleteSelection());
-          return;
-        }
-        if (event.key === 'Escape') {
-          applyCommand(canvasCommands.clearSelection());
-        }
+        applyInteractionResolution(resolution);
       },
-      [applyCommand]
+      [applyInteractionResolution]
+    );
+
+    const handleCanvasContextMenu = useCallback(
+      (event: React.MouseEvent<HTMLDivElement>) => {
+        event.preventDefault();
+        applyInteractionResolution(
+          openCanvasContextMenu(
+            { kind: 'canvas' },
+            localClientPoint(event.clientX, event.clientY)
+          )
+        );
+      },
+      [applyInteractionResolution, localClientPoint]
+    );
+
+    const handleCanvasDoubleClick = useCallback(
+      (event: React.MouseEvent<HTMLDivElement>) => {
+        event.preventDefault();
+        applyInteractionResolution(
+          resolveCanvasDoubleClick(
+            stateRef.current,
+            { kind: 'canvas' },
+            localClientPoint(event.clientX, event.clientY),
+            stateRef.current.viewport
+          )
+        );
+      },
+      [applyInteractionResolution, localClientPoint]
+    );
+
+    const handleDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+      if (!hasDraggedFiles(event.dataTransfer)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+    }, []);
+
+    const handleDrop = useCallback(
+      (event: React.DragEvent<HTMLDivElement>) => {
+        if (!hasDraggedFiles(event.dataTransfer)) return;
+        event.preventDefault();
+        const validation = validateCanvasDropImport(
+          Array.from(event.dataTransfer.files),
+          localClientPoint(event.clientX, event.clientY),
+          stateRef.current.viewport
+        );
+        const intents: CanvasIntegrationIntent[] = [];
+        if (validation.intent) intents.push(validation.intent);
+        if (validation.rejected.length > 0 || validation.ignoredAcceptedFiles.length > 0) {
+          intents.push({
+            type: 'asset/import-feedback',
+            rejected: validation.rejected.map(({ file, reason }) => ({
+              fileName: file.name,
+              reason,
+            })),
+            ignoredAcceptedFileNames: validation.ignoredAcceptedFiles.map((file) => file.name),
+          });
+        }
+        applyInteractionResolution({
+          handled: intents.length > 0,
+          preventDefault: true,
+          commands: [],
+          intents,
+        });
+      },
+      [applyInteractionResolution, localClientPoint]
     );
 
     const loadState = classifyCreativeCanvasLoadState({
@@ -655,9 +927,15 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
     const nodeById = new Map(state.document.nodes.map((node) => [node.id, node]));
     const selectedNodeIds = new Set(state.selection.nodeIds);
     const selectedEdgeIds = new Set(state.selection.edgeIds);
+    const graphHighlight = deriveCanvasGraphHighlight(
+      state.document,
+      state.selection.nodeIds
+    );
+    const hasGraphHighlight = graphHighlight.rootNodeIds.size > 0;
     const nodeLayer = state.document.nodes.map((node) => {
       const onPointerDown: React.PointerEventHandler<HTMLElement> = (event) =>
         beginNodePointer(node, event);
+      const highlighted = graphHighlight.nodeIds.has(node.id);
       return (
         <div
           key={node.id}
@@ -672,14 +950,91 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
           data-canvas-node-id={node.id}
           data-canvas-node-kind={node.type}
           data-selected={selectedNodeIds.has(node.id) || undefined}
+          data-highlighted={highlighted || undefined}
+          data-dimmed={hasGraphHighlight && !highlighted ? true : undefined}
           onPointerDown={onPointerDown}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            applyInteractionResolution(
+              openCanvasContextMenu(
+                { kind: 'node', nodeId: node.id },
+                localClientPoint(event.clientX, event.clientY)
+              )
+            );
+          }}
+          onDoubleClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            applyInteractionResolution(
+              resolveCanvasDoubleClick(
+                stateRef.current,
+                { kind: 'node', nodeId: node.id },
+                localClientPoint(event.clientX, event.clientY),
+                stateRef.current.viewport
+              )
+            );
+          }}
         >
           {renderNode({
             node,
             selected: selectedNodeIds.has(node.id),
+            highlighted,
+            dimmed: hasGraphHighlight && !highlighted,
             onActivate: () => applyCommand(canvasCommands.setSelection([node.id])),
+            onOpen: () =>
+              applyInteractionResolution(
+                resolveCanvasDoubleClick(
+                  stateRef.current,
+                  { kind: 'node', nodeId: node.id },
+                  { x: 0, y: 0 },
+                  stateRef.current.viewport
+                )
+              ),
+            onToggleLock: () =>
+              applyInteractionResolution(
+                resolveCanvasContextAction(
+                  stateRef.current,
+                  { kind: 'node', nodeId: node.id },
+                  'toggle-lock'
+                )
+              ),
             dragHandleProps: { onPointerDown },
           })}
+          {node.type !== 'group' ? (
+            <button
+              type='button'
+              className={`${styles.connectionHandle} ${styles.connectionHandleInput}`}
+              aria-label='连接输入'
+              data-canvas-connection-handle='target'
+              data-canvas-handle-id='target'
+              data-canvas-node-id={node.id}
+              onPointerDown={(event) => beginConnectionDrag(node, 'target', event)}
+            />
+          ) : null}
+          {node.type !== 'group' && node.type !== 'director' ? (
+            <button
+              type='button'
+              className={`${styles.connectionHandle} ${styles.connectionHandleOutput}`}
+              aria-label='连接输出'
+              data-canvas-connection-handle='source'
+              data-canvas-handle-id='source'
+              data-canvas-node-id={node.id}
+              onPointerDown={(event) => beginConnectionDrag(node, 'source', event)}
+            />
+          ) : null}
+          {selectedNodeIds.has(node.id) && !node.locked
+            ? RESIZE_CORNERS.map((corner) => (
+                <button
+                  key={corner}
+                  type='button'
+                  className={styles.resizeHandle}
+                  data-resize-corner={corner}
+                  aria-label={`调整节点大小：${corner}`}
+                  onPointerDown={(event) => beginNodeResize(node, corner, event)}
+                />
+              ))
+            : null}
         </div>
       );
     });
@@ -694,7 +1049,19 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
             source,
             target,
             selected: selectedEdgeIds.has(connection.id),
+            highlighted: graphHighlight.edgeIds.has(connection.id),
+            dimmed: hasGraphHighlight && !graphHighlight.edgeIds.has(connection.id),
             onActivate: () => applyCommand(canvasCommands.setSelection([], [connection.id])),
+            onContextMenu: (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              applyInteractionResolution(
+                openCanvasContextMenu(
+                  { kind: 'edge', edgeId: connection.id },
+                  localClientPoint(event.clientX, event.clientY)
+                )
+              );
+            },
           })}
         </React.Fragment>,
       ];
@@ -729,6 +1096,11 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       </div>
     );
     const resolvedTopDock = resolveSlot(topDock, context);
+    const previewPath =
+      interaction.gesture?.kind === 'connection'
+        ? connectionPreviewPath(state, interaction.gesture)
+        : null;
+    const resolvedWorldOverlay = resolveSlot(worldOverlay, context);
 
     return (
       <CanvasSurface
@@ -742,8 +1114,21 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         tabIndex={0}
         data-creative-canvas-editor
         data-editor-save-state={saveSnapshot.status}
+        data-connection-dragging={interaction.gesture?.kind === 'connection' || undefined}
         nodeLayer={nodeLayer}
         edgeLayer={edgeLayer}
+        worldOverlay={
+          resolvedWorldOverlay || previewPath ? (
+            <>
+              {resolvedWorldOverlay}
+              {previewPath ? (
+                <svg className={styles.connectionPreview} aria-hidden='true'>
+                  <path d={previewPath} vectorEffect='non-scaling-stroke' />
+                </svg>
+              ) : null}
+            </>
+          ) : undefined
+        }
         selectionRect={state.selection.marquee}
         topDock={
           saveChrome || resolvedTopDock ? (
@@ -773,11 +1158,15 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         }
         onPointerDown={handleSurfacePointerDown}
         onPointerMove={handleSurfacePointerMove}
-        onPointerUp={(event) => finishPointer(event.pointerId)}
-        onPointerCancel={(event) => finishPointer(event.pointerId)}
-        onLostPointerCapture={(event) => finishPointer(event.pointerId)}
+        onPointerUp={(event) => finishPointer(event)}
+        onPointerCancel={(event) => finishPointer(event, true)}
+        onLostPointerCapture={(event) => finishPointer(event, true)}
         onWheel={handleWheel}
         onKeyDown={handleKeyDown}
+        onContextMenu={handleCanvasContextMenu}
+        onDoubleClick={handleCanvasDoubleClick}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
       />
     );
   }

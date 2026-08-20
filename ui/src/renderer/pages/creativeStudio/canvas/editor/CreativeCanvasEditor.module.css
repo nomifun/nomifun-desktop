@@ -7,11 +7,103 @@
   position: absolute;
   box-sizing: border-box;
   touch-action: none;
+  transition: opacity 120ms ease;
 }
 
 .nodePlacement > * {
   width: 100%;
   height: 100%;
+}
+
+.nodePlacement[data-dimmed='true'] {
+  opacity: 0.32;
+}
+
+.connectionHandle,
+.resizeHandle {
+  position: absolute;
+  z-index: 12;
+  box-sizing: border-box;
+  padding: 0;
+  border: calc(1.5px * var(--creative-canvas-inverse-zoom)) solid var(--color-bg-2);
+  border-radius: 50%;
+  background: rgb(var(--primary-6));
+  box-shadow: 0 0 0 calc(1px * var(--creative-canvas-inverse-zoom)) rgba(var(--primary-6), 0.28);
+  outline: none;
+}
+
+.connectionHandle {
+  top: 50%;
+  width: calc(12px * var(--creative-canvas-inverse-zoom));
+  height: calc(12px * var(--creative-canvas-inverse-zoom));
+  cursor: crosshair;
+  opacity: 0;
+  pointer-events: auto;
+  transform: translateY(-50%);
+  transition: opacity 120ms ease;
+}
+
+.nodePlacement:hover .connectionHandle,
+.nodePlacement[data-selected='true'] .connectionHandle,
+.editor[data-connection-dragging='true'] .connectionHandle,
+.connectionHandle:focus-visible {
+  opacity: 1;
+}
+
+.connectionHandleInput {
+  left: calc(-6px * var(--creative-canvas-inverse-zoom));
+}
+
+.connectionHandleOutput {
+  right: calc(-6px * var(--creative-canvas-inverse-zoom));
+}
+
+.resizeHandle {
+  width: calc(10px * var(--creative-canvas-inverse-zoom));
+  height: calc(10px * var(--creative-canvas-inverse-zoom));
+  background: var(--color-bg-2);
+}
+
+.resizeHandle[data-resize-corner='top-left'] {
+  top: calc(-5px * var(--creative-canvas-inverse-zoom));
+  left: calc(-5px * var(--creative-canvas-inverse-zoom));
+  cursor: nwse-resize;
+}
+
+.resizeHandle[data-resize-corner='top-right'] {
+  top: calc(-5px * var(--creative-canvas-inverse-zoom));
+  right: calc(-5px * var(--creative-canvas-inverse-zoom));
+  cursor: nesw-resize;
+}
+
+.resizeHandle[data-resize-corner='bottom-left'] {
+  bottom: calc(-5px * var(--creative-canvas-inverse-zoom));
+  left: calc(-5px * var(--creative-canvas-inverse-zoom));
+  cursor: nesw-resize;
+}
+
+.resizeHandle[data-resize-corner='bottom-right'] {
+  right: calc(-5px * var(--creative-canvas-inverse-zoom));
+  bottom: calc(-5px * var(--creative-canvas-inverse-zoom));
+  cursor: nwse-resize;
+}
+
+.connectionPreview {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.connectionPreview path {
+  fill: none;
+  stroke: rgb(var(--primary-6));
+  stroke-dasharray: 7 5;
+  stroke-linecap: round;
+  stroke-width: 2px;
 }
 
 .topDockStack {
@@ -72,4 +164,11 @@
 .centerState strong {
   color: var(--color-text-1);
   font-size: 16px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nodePlacement,
+  .connectionHandle {
+    transition: none;
+  }
 }

@@ -5,6 +5,10 @@
  */
 
 import type { CanvasPoint } from '../core';
+import type {
+  CanvasConnectionDragGesture,
+  CanvasResizeGesture,
+} from '../interactions';
 
 export type CanvasPointerGesture =
   | {
@@ -22,7 +26,9 @@ export type CanvasPointerGesture =
       pointerId: number;
       lastClient: CanvasPoint;
       mergeKey: string;
-    };
+    }
+  | CanvasResizeGesture
+  | CanvasConnectionDragGesture;
 
 export interface CanvasEditorInteractionState {
   gesture: CanvasPointerGesture | null;
@@ -31,6 +37,7 @@ export interface CanvasEditorInteractionState {
 
 export type CanvasEditorInteractionAction =
   | { type: 'gesture/start'; gesture: CanvasPointerGesture }
+  | { type: 'gesture/replace'; gesture: CanvasPointerGesture }
   | { type: 'gesture/update'; pointerId: number; client: CanvasPoint }
   | { type: 'gesture/end'; pointerId?: number };
 
@@ -45,12 +52,14 @@ export function canvasEditorInteractionReducer(
 ): CanvasEditorInteractionState {
   switch (action.type) {
     case 'gesture/start':
+    case 'gesture/replace':
       return {
         gesture: action.gesture,
         isPanning: action.gesture.kind === 'pan',
       };
     case 'gesture/update':
       if (!state.gesture || state.gesture.pointerId !== action.pointerId) return state;
+      if (!('lastClient' in state.gesture)) return state;
       return {
         ...state,
         gesture: { ...state.gesture, lastClient: { ...action.client } },
