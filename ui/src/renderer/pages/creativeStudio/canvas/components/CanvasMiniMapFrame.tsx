@@ -1,0 +1,40 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import classNames from 'classnames';
+import React from 'react';
+
+import styles from './CanvasMiniMapFrame.module.css';
+
+export interface CanvasMiniMapFrameProps extends React.HTMLAttributes<HTMLDivElement> {
+  children: React.ReactNode;
+  label?: string;
+}
+
+/**
+ * Screen-space chrome for a controlled minimap renderer. The child owns its
+ * drawing and navigation semantics; this component only supplies product
+ * chrome and a stable responsive boundary.
+ */
+const CanvasMiniMapFrame: React.FC<CanvasMiniMapFrameProps> = ({
+  children,
+  className,
+  label = '画布小地图',
+  ...rest
+}) => (
+  <div
+    {...rest}
+    className={classNames(styles.frame, className)}
+    role='group'
+    aria-label={label}
+    data-canvas-no-zoom
+    data-canvas-minimap
+  >
+    {children}
+  </div>
+);
+
+export default CanvasMiniMapFrame;
