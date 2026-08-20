@@ -1,0 +1,176 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+
+import type { CreativeAsset } from '../types';
+import CreativeAssetLibrary from './CreativeAssetLibrary';
+import CreativeAssetUploadQueue from './CreativeAssetUploadQueue';
+import { DEFAULT_CREATIVE_ASSET_LIBRARY_LABELS } from './types';
+import type { CreativeAssetLibraryState } from './types';
+
+const asset = (id: string, kind: CreativeAsset['kind']): CreativeAsset => ({
+  id,
+  kind,
+  title: `${kind} asset`,
+  collection: 'Campaign',
+  tags: ['hero', kind],
+  mimeType: kind === 'text' ? null : `${kind}/example`,
+  width: kind === 'image' || kind === 'video' ? 1280 : null,
+  height: kind === 'image' || kind === 'video' ? 720 : null,
+  bytes: kind === 'text' ? null : 2048,
+  inLibrary: true,
+  textContent: kind === 'text' ? 'A reusable creative prompt' : null,
+  origin: null,
+  originalUrl: `/api/workshop/files/${id}`,
+  thumbnailUrl: kind === 'image' ? `/api/workshop/files/${id}?thumb=1` : null,
+  createdAt: 1_777_000_000_000,
+  updatedAt: 1_777_000_000_000,
+});
+
+const assets = (['image', 'video', 'audio', 'text'] as const).map((kind, index) => asset(`asset-${index}`, kind));
+
+const state = (overrides: Partial<CreativeAssetLibraryState> = {}): CreativeAssetLibraryState => ({
+  assets,
+  total: assets.length,
+  loading: false,
+  loadingMore: false,
+  mutating: false,
+  error: null,
+  mutationError: null,
+  hasMore: false,
+  reload: async () => undefined,
+  loadMore: async () => undefined,
+  ...overrides,
+});
+
+const renderLibrary = (overrides: Partial<React.ComponentProps<typeof CreativeAssetLibrary>> = {}) =>
+  renderToStaticMarkup(
+    <CreativeAssetLibrary
+      state={state()}
+      search=''
+      kind='all'
+      scope='library'
+      view='grid'
+      selectedIds={new Set(['asset-0', 'asset-1'])}
+      onSearchChange={() => undefined}
+      onKindChange={() => undefined}
+      onScopeChange={() => undefined}
+      onViewChange={() => undefined}
+      onSelectionChange={() => undefined}
+      onUploadFiles={() => undefined}
+      onCreateText={() => undefined}
+      onOpenAsset={() => undefined}
+      onEditAsset={() => undefined}
+      onDownloadAsset={() => undefined}
+      onRemoveAsset={() => undefined}
+      onSetSelectedLibrary={() => undefined}
+      onInsertSelected={() => undefined}
+      onDownloadSelected={() => undefined}
+      onRemoveSelected={() => undefined}
+      {...overrides}
+    />
+  );
+
+describe('CreativeAssetLibrary', () => {
+  test('renders the controlled source-aligned library surface and every media kind', () => {
+    const html = renderLibrary();
+
+    expect(html.includes('data-creative-asset-library="true"')).toBe(true);
+    expect(html.includes('data-asset-scope="library"')).toBe(true);
+    expect(html.includes('data-asset-view="grid"')).toBe(true);
+    for (const kind of ['image', 'video', 'audio', 'text']) {
+      expect(html.includes(`data-asset-kind="${kind}"`)).toBe(true);
+    }
+    expect(html.includes('/api/workshop/files/asset-0?thumb=1')).toBe(true);
+    expect(html.includes('data-asset-media-state="audio"')).toBe(true);
+    expect(html.includes('audio/example')).toBe(true);
+    expect(html.includes('A reusable creative prompt')).toBe(true);
+  });
+
+  test('exposes selection and multi-action intent without owning selected state', () => {
+    const html = renderLibrary();
+
+    expect(html.includes('data-asset-selection-bar="true"')).toBe(true);
+    expect(html.includes('已选择 2 项')).toBe(true);
+    for (const label of ['移出素材库', '插入画布', '下载', '删除']) {
+      expect(html.includes(label)).toBe(true);
+    }
+    expect(html.match(/type="checkbox"/g)?.length).toBe(4);
+  });
+
+  test('switches to the controlled list presentation without changing asset identity', () => {
+    const html = renderLibrary({ view: 'list', selectedIds: new Set() });
+    expect(html.includes('data-asset-view="list"')).toBe(true);
+    expect(html.match(/data-asset-id=/g)?.length).toBe(4);
+    expect(html.match(/<time /g)?.length).toBe(4);
+    expect(html.includes('aria-label="素材类型"')).toBe(true);
+    expect(html.includes('aria-label="素材范围"')).toBe(true);
+    expect(html.includes('aria-label="显示方式"')).toBe(true);
+  });
+
+  test('distinguishes loading, error, plain empty and filtered empty states', () => {
+    const loading = renderLibrary({ state: state({ assets: [], total: 0, loading: true }), selectedIds: new Set() });
+    expect(loading.includes('data-asset-state="loading"')).toBe(true);
+    expect(loading.includes('aria-busy="true"')).toBe(true);
+
+    const error = renderLibrary({
+      state: state({ assets: [], total: 0, error: new Error('backend unavailable') }),
+      selectedIds: new Set(),
+    });
+    expect(error.includes('data-asset-state="error"')).toBe(true);
+    expect(error.includes('backend unavailable')).toBe(true);
+
+    const empty = renderLibrary({ state: state({ assets: [], total: 0 }), selectedIds: new Set() });
+    expect(empty.includes(DEFAULT_CREATIVE_ASSET_LIBRARY_LABELS.emptyTitle)).toBe(true);
+
+    const canvasEmpty = renderLibrary({
+      state: state({ assets: [], total: 0 }),
+      scope: 'canvas',
+      selectedIds: new Set(),
+    });
+    expect(canvasEmpty.includes(DEFAULT_CREATIVE_ASSET_LIBRARY_LABELS.canvasEmptyTitle)).toBe(true);
+
+    const filtered = renderLibrary({
+      state: state({ assets: [], total: 0 }),
+      search: 'missing',
+      selectedIds: new Set(),
+    });
+    expect(filtered.includes(DEFAULT_CREATIVE_ASSET_LIBRARY_LABELS.filteredEmptyTitle)).toBe(true);
+  });
+
+  test('renders typed upload progress, completion and failure records', () => {
+    const html = renderToStaticMarkup(
+      <CreativeAssetUploadQueue
+        labels={DEFAULT_CREATIVE_ASSET_LIBRARY_LABELS}
+        items={[
+          { id: 'a', fileName: 'upload.png', percent: 42, status: 'uploading' },
+          { id: 'b', fileName: 'complete.mp4', percent: 100, status: 'completed' },
+          { id: 'c', fileName: 'failed.png', percent: 17, status: 'error', error: 'too large' },
+        ]}
+        onCancel={() => undefined}
+        onRetry={() => undefined}
+        onDismiss={() => undefined}
+      />
+    );
+
+    expect(html.includes('data-asset-upload-queue="true"')).toBe(true);
+    expect(html.includes('aria-valuenow="42"')).toBe(true);
+    expect(html.includes('data-upload-status="completed"')).toBe(true);
+    expect(html.includes('too large')).toBe(true);
+  });
+
+  test('keeps compact and reduced-motion layouts explicit', () => {
+    const css = readFileSync(new URL('./CreativeAssetLibrary.module.css', import.meta.url), 'utf8');
+    expect(css.includes('@media (max-width: 820px)')).toBe(true);
+    expect(css.includes('@media (max-width: 560px)')).toBe(true);
+    expect(css.includes('@media (hover: none)')).toBe(true);
+    expect(css.includes('@media (prefers-reduced-motion: reduce)')).toBe(true);
+  });
+});
