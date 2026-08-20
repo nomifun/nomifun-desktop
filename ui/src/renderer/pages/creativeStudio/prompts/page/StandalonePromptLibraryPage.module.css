@@ -95,20 +95,23 @@
 }
 
 .libraryBody {
-  padding-top: 34px;
+  padding-top: 37px;
 }
 
 .toolbar {
   display: grid;
-  gap: 12px;
+  gap: 0;
 }
 
 .searchField {
   display: flex;
+  box-sizing: border-box;
+  width: min(672px, 100%);
   height: 44px;
   align-items: center;
   gap: 9px;
   padding: 0 13px;
+  margin: 0 auto;
   border: 1px solid var(--color-border-2);
   border-radius: 9px;
   color: var(--color-text-3);
@@ -132,9 +135,19 @@
 
 .facetRow {
   display: grid;
+  width: min(1152px, calc(100vw - 48px));
+  min-height: 48px;
   grid-template-columns: 52px minmax(0, 1fr);
   align-items: start;
-  gap: 10px;
+  gap: 12px;
+  margin-top: 24px;
+  margin-left: 50%;
+  transform: translateX(-50%);
+}
+
+.facetRow + .facetRow {
+  min-height: 27px;
+  margin-top: 10px;
 }
 
 .facetLabel {
@@ -152,8 +165,8 @@
 }
 
 .chip {
-  min-height: 27px;
-  padding: 3px 10px;
+  min-height: 24px;
+  padding: 2px 9px;
   border: 1px solid transparent;
   border-radius: 999px;
   color: var(--color-text-2);
@@ -168,9 +181,9 @@
 }
 
 .chipActive {
-  border-color: color-mix(in srgb, rgb(var(--primary-6)) 20%, transparent);
-  color: rgb(var(--primary-6));
-  background: color-mix(in srgb, rgb(var(--primary-6)) 9%, transparent);
+  border-color: var(--color-text-1);
+  color: var(--color-bg-1);
+  background: var(--color-text-1);
 }
 
 .notice {
@@ -189,6 +202,21 @@
   padding: 12px 0 6px;
   color: var(--color-text-3);
   font-size: 12px;
+}
+
+.loadedEmptyState {
+  display: grid;
+  padding-top: 126px;
+  place-content: start center;
+  justify-items: center;
+  color: var(--color-text-4, var(--color-text-3));
+  font-size: 14px;
+  text-align: center;
+}
+
+.loadedEmptyState p {
+  margin: 8px 0 0;
+  color: var(--color-text-3);
 }
 
 .grid {
@@ -369,6 +397,18 @@
   }
 
   .facetRow {
+    width: 100%;
+    min-height: auto;
+    margin-top: 18px;
+    margin-left: 0;
+    transform: none;
+  }
+
+  .facetRow + .facetRow {
+    margin-top: 10px;
+  }
+
+  .facetRow {
     grid-template-columns: 1fr;
     gap: 5px;
   }
@@ -379,6 +419,10 @@
 
   .grid {
     grid-template-columns: 1fr;
+  }
+
+  .loadedEmptyState {
+    padding-top: 84px;
   }
 }
 
