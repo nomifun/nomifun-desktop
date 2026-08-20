@@ -5,7 +5,7 @@
  */
 
 import type {
-  NomiCreativeStudioAgentSessionBinding,
+  NomiCreativeStudioAgentSessionResolution,
   NomiCreativeStudioAgentSessionResolutionInput,
 } from '../adapters';
 
@@ -31,7 +31,7 @@ export type CreativeStudioAgentSessionPersistenceRequest = Readonly<
 export interface CreativeStudioAgentSessionPersistencePort {
   resolveOrCreateExclusive(
     input: CreativeStudioAgentSessionPersistenceRequest
-  ): Promise<NomiCreativeStudioAgentSessionBinding>;
+  ): Promise<NomiCreativeStudioAgentSessionResolution>;
 }
 
 export type CreativeStudioAgentSessionResolutionErrorCode =

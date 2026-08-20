@@ -1079,6 +1079,31 @@ impl IConversationRepository for SqliteConversationRepository {
                 "creative studio agent session_id is not a canonical UUIDv7: {error}"
             ))
         })?;
+        ProviderId::parse(&params.expected_provider_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio agent expected_provider_id is invalid: {error}"
+            ))
+        })?;
+        if params.expected_model.trim().is_empty()
+            || params.expected_model.trim() != params.expected_model
+        {
+            return Err(DbError::Conflict(
+                "creative studio agent expected_model must be trimmed and non-empty".to_owned(),
+            ));
+        }
+        if let Some(key) = params.expected_pending_turn_idempotency_key.as_deref() {
+            validate_uuidv7(key).map_err(|error| {
+                DbError::Conflict(format!(
+                    "creative studio agent pending turn idempotency key is invalid: {error}"
+                ))
+            })?;
+        }
+        if params.create_if_missing && params.expected_pending_turn_idempotency_key.is_none() {
+            return Err(DbError::Conflict(
+                "creative studio agent binding creation requires a durable pending turn fence"
+                    .to_owned(),
+            ));
+        }
         ConversationId::parse(&params.conversation.conversation_id).map_err(|error| {
             DbError::Conflict(format!(
                 "creative studio agent candidate conversation_id is not a canonical UUIDv7: {error}"
@@ -1108,10 +1133,13 @@ impl IConversationRepository for SqliteConversationRepository {
                  ) AND EXISTS ( \
                      SELECT 1 FROM creative_studio_projects project, \
                                   json_each(project.document_json, '$.chatSessions') session \
-                     WHERE project.project_id = ? \
-                       AND json_extract(session.value, '$.id') = ? \
-                       AND json_array_length(session.value, '$.messageIds') = 0 \
-                 ) \
+                      WHERE project.project_id = ? \
+                        AND json_extract(session.value, '$.id') = ? \
+                        AND json_array_length(session.value, '$.messageIds') = 0 \
+                        AND json_extract(session.value, '$.model.providerId') = ? \
+                        AND json_extract(session.value, '$.model.model') = ? \
+                        AND json_extract(session.value, '$.pendingTurn.idempotencyKey') = ? \
+                  ) \
                  ON CONFLICT(owner_id, project_id, session_id) DO NOTHING",
             )
             .bind(&params.owner_id)
@@ -1123,6 +1151,9 @@ impl IConversationRepository for SqliteConversationRepository {
             .bind(&params.owner_id)
             .bind(&params.project_id)
             .bind(&params.session_id)
+            .bind(&params.expected_provider_id)
+            .bind(&params.expected_model)
+            .bind(&params.expected_pending_turn_idempotency_key)
             .execute(&mut *tx)
             .await?
             .rows_affected()
@@ -1131,25 +1162,41 @@ impl IConversationRepository for SqliteConversationRepository {
             false
         };
 
-        let authorized_project: bool = sqlx::query_scalar(
-            "SELECT EXISTS( \
-                SELECT 1 FROM creative_studio_projects project \
-                JOIN installation_identity identity \
-                  ON identity.singleton_key = 'installation' \
-                 AND identity.owner_user_id = ? \
-                JOIN json_each(project.document_json, '$.chatSessions') session \
-                WHERE project.project_id = ? \
-                  AND json_extract(session.value, '$.id') = ? \
-            )",
+        let project_session = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
+            "SELECT \
+                 CAST(json_extract(session.value, '$.model.providerId') AS TEXT), \
+                 CAST(json_extract(session.value, '$.model.model') AS TEXT), \
+                 CAST(json_extract(session.value, '$.pendingTurn.idempotencyKey') AS TEXT) \
+             FROM creative_studio_projects project \
+             JOIN installation_identity identity \
+               ON identity.singleton_key = 'installation' \
+              AND identity.owner_user_id = ? \
+             JOIN json_each(project.document_json, '$.chatSessions') session \
+             WHERE project.project_id = ? \
+               AND json_extract(session.value, '$.id') = ?",
         )
         .bind(&params.owner_id)
         .bind(&params.project_id)
         .bind(&params.session_id)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
-        if !authorized_project {
+        let Some((project_provider_id, project_model, project_pending_key)) = project_session else {
             return Err(DbError::NotFound(
                 "creative studio project/session is not owned by the installation user or does not exist"
+                    .to_owned(),
+            ));
+        };
+        if project_provider_id.as_deref() != Some(params.expected_provider_id.as_str())
+            || project_model.as_deref() != Some(params.expected_model.as_str())
+        {
+            return Err(DbError::Conflict(
+                "creative studio project session model does not match the requested binding"
+                    .to_owned(),
+            ));
+        }
+        if project_pending_key != params.expected_pending_turn_idempotency_key {
+            return Err(DbError::Conflict(
+                "creative studio project pending turn fence changed during session resolution"
                     .to_owned(),
             ));
         }
@@ -5748,6 +5795,7 @@ mod tests {
 
     const TEST_INSTALLATION_OWNER: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const FIXTURE_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
+    const CREATIVE_PENDING_KEY: &str = "0190f5fe-7c00-7a00-8abc-012345678902";
 
     async fn init_database_memory() -> Result<crate::Database, crate::DbError> {
         crate::init_database_memory_with_owner(
@@ -5847,7 +5895,11 @@ mod tests {
                 "title": "Agent",
                 "messageIds": [],
                 "model": { "providerId": FIXTURE_PROVIDER_ID, "model": "nomi-chat" },
-                "pendingTurn": null,
+                "pendingTurn": {
+                    "idempotencyKey": CREATIVE_PENDING_KEY,
+                    "prompt": "Create a poster",
+                    "createdAt": 1
+                },
                 "createdAt": 1,
                 "updatedAt": 1
             }],
@@ -5902,6 +5954,9 @@ mod tests {
             owner_id: owner_id.to_owned(),
             project_id: project_id.to_owned(),
             session_id: session_id.to_owned(),
+            expected_provider_id: FIXTURE_PROVIDER_ID.to_owned(),
+            expected_model: "nomi-chat".to_owned(),
+            expected_pending_turn_idempotency_key: Some(CREATIVE_PENDING_KEY.to_owned()),
             conversation,
             create_if_missing: true,
         }
@@ -8497,6 +8552,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn creative_studio_agent_binding_requires_exact_model_and_pending_turn_fences() {
+        let (repo, db) = setup().await;
+        let project_id = nomifun_common::CreativeStudioProjectId::new().into_string();
+        let session_id = ConversationId::new().into_string();
+        insert_creative_project_session(db.pool(), &project_id, &session_id).await;
+
+        let mut wrong_model = creative_session_params(
+            TEST_INSTALLATION_OWNER,
+            &project_id,
+            &session_id,
+            ConversationId::new().into_string(),
+        );
+        wrong_model.expected_model = "different-model".to_owned();
+        assert!(
+            repo.resolve_or_create_creative_studio_agent_session(&wrong_model)
+                .await
+                .is_err()
+        );
+
+        let mut wrong_pending = creative_session_params(
+            TEST_INSTALLATION_OWNER,
+            &project_id,
+            &session_id,
+            ConversationId::new().into_string(),
+        );
+        wrong_pending.expected_pending_turn_idempotency_key =
+            Some("0190f5fe-7c00-7a00-8abc-012345678903".to_owned());
+        assert!(
+            repo.resolve_or_create_creative_studio_agent_session(&wrong_pending)
+                .await
+                .is_err()
+        );
+
+        let mut missing_pending = creative_session_params(
+            TEST_INSTALLATION_OWNER,
+            &project_id,
+            &session_id,
+            ConversationId::new().into_string(),
+        );
+        missing_pending.expected_pending_turn_idempotency_key = None;
+        assert!(
+            repo.resolve_or_create_creative_studio_agent_session(&missing_pending)
+                .await
+                .is_err()
+        );
+
+        let binding_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM creative_studio_agent_sessions")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        let conversation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM conversations WHERE name = 'Creative Studio Agent'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(binding_count, 0);
+        assert_eq!(conversation_count, 0);
+    }
+
+    #[tokio::test]
     async fn creative_studio_agent_binding_rejects_reused_conversation_identity() {
         let (repo, db) = setup().await;
         let project_id = nomifun_common::CreativeStudioProjectId::new().into_string();
@@ -8532,7 +8649,11 @@ mod tests {
                 "title": "Second",
                 "messageIds": [],
                 "model": { "providerId": FIXTURE_PROVIDER_ID, "model": "nomi-chat" },
-                "pendingTurn": null,
+                "pendingTurn": {
+                    "idempotencyKey": CREATIVE_PENDING_KEY,
+                    "prompt": "Create a poster",
+                    "createdAt": 2
+                },
                 "createdAt": 2,
                 "updatedAt": 2
             }));

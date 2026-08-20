@@ -5,7 +5,6 @@
  */
 
 import { conversation } from '@/common/adapter/ipcBridge';
-import { uuidv7 } from '@/common/utils/uuidv7';
 import { getConversationRuntimeAuthority } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import {
   stopConversationAndConfirmRelease,
@@ -57,7 +56,6 @@ export function createNomiCreativeStudioAgentTransport(): NomiCreativeStudioAgen
       }
     },
 
-    createIdempotencyKey: uuidv7,
     onResponse: (listener) => conversation.responseStream.on(listener),
     onTurnStarted: (listener) => conversation.turnStarted.on(listener),
     onTurnCompleted: (listener) => conversation.turnCompleted.on(listener),

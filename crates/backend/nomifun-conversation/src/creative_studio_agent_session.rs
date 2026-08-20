@@ -56,6 +56,7 @@ pub struct ResolveCreativeStudioAgentSessionRequest {
     pub model: CreativeStudioAgentModelRef,
     pub history: Vec<CreativeStudioAgentHistoryMessage>,
     pub history_key: String,
+    pub pending_turn_idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +100,13 @@ fn validate_request(request: &ResolveCreativeStudioAgentSessionRequest) -> Resul
         return Err(AppError::BadRequest(
             "Creative Studio Agent model must be trimmed and non-empty".to_owned(),
         ));
+    }
+    if let Some(key) = request.pending_turn_idempotency_key.as_deref() {
+        validate_uuidv7(key).map_err(|error| {
+            AppError::BadRequest(format!(
+                "invalid Creative Studio pending_turn_idempotency_key: {error}"
+            ))
+        })?;
     }
 
     let mut ids = HashSet::with_capacity(request.history.len());
@@ -281,6 +289,44 @@ fn project_completed_history(
     Ok(history)
 }
 
+fn validate_history_reconciliation(
+    request_history: &[CreativeStudioAgentHistoryMessage],
+    project_message_ids: &[String],
+    projected_history: &[CreativeStudioAgentHistoryMessage],
+    has_pending_turn: bool,
+) -> Result<(), AppError> {
+    let requested_ids = request_history
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<Vec<_>>();
+    let project_ids = project_message_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if requested_ids != project_ids {
+        return Err(AppError::Conflict(
+            "Creative Studio request history does not match the project message references"
+                .to_owned(),
+        ));
+    }
+    if projected_history.len() < request_history.len()
+        || projected_history[..request_history.len()] != request_history[..]
+    {
+        return Err(AppError::Conflict(
+            "Creative Studio project history is not a prefix of the dedicated Conversation transcript"
+                .to_owned(),
+        ));
+    }
+    let recovered = &projected_history[request_history.len()..];
+    if !recovered.is_empty() && (!has_pending_turn || recovered.len() != 2) {
+        return Err(AppError::Conflict(
+            "Creative Studio session recovery must reconcile exactly one completed Agent turn"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_persisted_binding(
     owner_id: &str,
     request: &ResolveCreativeStudioAgentSessionRequest,
@@ -393,7 +439,13 @@ impl ConversationService {
                 Some(CreativeStudioAgentCreationTarget {
                     project_id: request.project_id.clone(),
                     session_id: request.session_id.clone(),
-                    create_if_missing: request.history.is_empty(),
+                    expected_provider_id: request.model.provider_id.clone(),
+                    expected_model: request.model.model.clone(),
+                    expected_pending_turn_idempotency_key: request
+                        .pending_turn_idempotency_key
+                        .clone(),
+                    create_if_missing: request.history.is_empty()
+                        && request.pending_turn_idempotency_key.is_some(),
                 }),
             )
             .await?;
@@ -415,6 +467,11 @@ impl ConversationService {
                     owner_id: owner_id.to_owned(),
                     project_id: request.project_id.clone(),
                     session_id: request.session_id.clone(),
+                    expected_provider_id: request.model.provider_id.clone(),
+                    expected_model: request.model.model.clone(),
+                    expected_pending_turn_idempotency_key: request
+                        .pending_turn_idempotency_key
+                        .clone(),
                     conversation: row,
                     create_if_missing: false,
                 },
@@ -422,27 +479,13 @@ impl ConversationService {
             .await?;
         let persisted_model = validate_persisted_binding(owner_id, &request, &resolved.conversation)?;
         let history = project_completed_history(&resolved.messages)?;
-        let projected_ids = history
-            .iter()
-            .map(|message| message.id.as_str())
-            .collect::<Vec<_>>();
-        let project_ids = resolved
-            .project_message_ids
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        if projected_ids != project_ids || history != request.history {
-            return Err(AppError::Conflict(
-                "Creative Studio project history does not match the dedicated Conversation transcript"
-                    .to_owned(),
-            ));
-        }
+        validate_history_reconciliation(
+            &request.history,
+            &resolved.project_message_ids,
+            &history,
+            request.pending_turn_idempotency_key.is_some(),
+        )?;
         let history_key = serialize_history(&history)?;
-        if history_key != request.history_key {
-            return Err(AppError::Conflict(
-                "Creative Studio Agent history projection changed during resolution".to_owned(),
-            ));
-        }
 
         Ok(ResolveCreativeStudioAgentSessionResponse {
             binding: CreativeStudioAgentSessionBindingResponse {
@@ -483,6 +526,21 @@ mod tests {
         }
     }
 
+    fn history_message(
+        id: &str,
+        role: CreativeStudioAgentHistoryRole,
+        text: &str,
+    ) -> CreativeStudioAgentHistoryMessage {
+        CreativeStudioAgentHistoryMessage {
+            id: id.to_owned(),
+            role,
+            status: CreativeStudioAgentHistoryStatus::Complete,
+            text: text.to_owned(),
+            activity_label: None,
+            error_message: None,
+        }
+    }
+
     #[test]
     fn canonical_history_matches_renderer_field_order() {
         let history = vec![CreativeStudioAgentHistoryMessage {
@@ -520,5 +578,40 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[1].id, ASSISTANT_B);
         assert_eq!(history[1].text, "已经完成");
+    }
+
+    #[test]
+    fn recovery_accepts_only_one_pending_completed_pair_after_project_history() {
+        let recovered_pair = vec![
+            history_message(USER_ID, CreativeStudioAgentHistoryRole::User, "制作海报"),
+            history_message(
+                ASSISTANT_B,
+                CreativeStudioAgentHistoryRole::Assistant,
+                "已经完成",
+            ),
+        ];
+        validate_history_reconciliation(&[], &[], &recovered_pair, true).unwrap();
+        assert!(validate_history_reconciliation(&[], &[], &recovered_pair, false).is_err());
+
+        let mut two_pairs = recovered_pair.clone();
+        two_pairs.extend(recovered_pair.clone());
+        assert!(validate_history_reconciliation(&[], &[], &two_pairs, true).is_err());
+
+        validate_history_reconciliation(
+            &recovered_pair,
+            &[USER_ID.to_owned(), ASSISTANT_B.to_owned()],
+            &recovered_pair,
+            false,
+        )
+        .unwrap();
+        assert!(
+            validate_history_reconciliation(
+                &recovered_pair,
+                &[USER_ID.to_owned()],
+                &recovered_pair,
+                false,
+            )
+            .is_err()
+        );
     }
 }

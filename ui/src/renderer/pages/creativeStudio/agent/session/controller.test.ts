@@ -10,6 +10,7 @@ import { parseConversationId, parseProviderId } from '@/common/types/ids';
 import { serializeCreativeStudioAgentHistory } from '../adapters';
 import type {
   NomiCreativeStudioAgentSessionBinding,
+  NomiCreativeStudioAgentSessionResolution,
   NomiCreativeStudioAgentSessionResolutionInput,
 } from '../adapters';
 import type { CreativeStudioAgentMessage } from '../types';
@@ -25,6 +26,8 @@ import {
 const providerId = parseProviderId('0190f5fe-7c00-7a00-8000-000000000401');
 const conversationA = parseConversationId('0190f5fe-7c00-7a00-8000-000000000501');
 const conversationB = parseConversationId('0190f5fe-7c00-7a00-8000-000000000502');
+const pendingKey = '0190f5fe-7c00-7a00-8000-000000000503';
+const replacementPendingKey = '0190f5fe-7c00-7a00-8000-000000000504';
 const model = { providerId, model: 'nomi-chat' } as const;
 const history: readonly CreativeStudioAgentMessage[] = [
   { id: 'message-1', role: 'user', status: 'complete', text: '制作一张海报' },
@@ -39,10 +42,11 @@ const input = (
     projectId: 'project-a',
     sessionId: 'session-a',
     model,
-    history: selectedHistory,
-    historyKey: serializeCreativeStudioAgentHistory(selectedHistory),
     signal: new AbortController().signal,
     ...overrides,
+    history: selectedHistory,
+    historyKey: overrides.historyKey ?? serializeCreativeStudioAgentHistory(selectedHistory),
+    pendingTurnIdempotencyKey: overrides.pendingTurnIdempotencyKey ?? null,
   };
 };
 
@@ -58,13 +62,30 @@ const binding = (
   historyKey: request.historyKey,
 });
 
+const resolution = (
+  request: CreativeStudioAgentSessionPersistenceRequest,
+  conversationId = conversationA,
+  overrides: Partial<NomiCreativeStudioAgentSessionResolution> = {}
+): NomiCreativeStudioAgentSessionResolution => {
+  const authoritativeHistory = overrides.history ?? request.history;
+  return {
+    binding: {
+      ...binding(request, conversationId),
+      historyKey: serializeCreativeStudioAgentHistory(authoritativeHistory),
+      ...overrides.binding,
+    },
+    history: authoritativeHistory,
+    created: overrides.created ?? false,
+  };
+};
+
 class DeferredPort implements CreativeStudioAgentSessionPersistencePort {
   readonly calls: CreativeStudioAgentSessionPersistenceRequest[] = [];
-  private resolvePending?: (value: NomiCreativeStudioAgentSessionBinding) => void;
+  private resolvePending?: (value: NomiCreativeStudioAgentSessionResolution) => void;
 
   resolveOrCreateExclusive(
     request: CreativeStudioAgentSessionPersistenceRequest
-  ): Promise<NomiCreativeStudioAgentSessionBinding> {
+  ): Promise<NomiCreativeStudioAgentSessionResolution> {
     this.calls.push(request);
     return new Promise((resolve) => {
       this.resolvePending = resolve;
@@ -74,7 +95,7 @@ class DeferredPort implements CreativeStudioAgentSessionPersistencePort {
   release(): void {
     const request = this.calls.at(-1);
     if (!request || !this.resolvePending) throw new Error('no pending resolution');
-    this.resolvePending(binding(request));
+    this.resolvePending(resolution(request));
   }
 }
 
@@ -90,7 +111,7 @@ describe('CreativeStudioAgentSessionController', () => {
     expect(port.calls).toHaveLength(1);
     port.release();
     const resolved = await Promise.all([first, second]);
-    expect(resolved.map((item) => item.conversationId)).toEqual([
+    expect(resolved.map((item) => item.binding.conversationId)).toEqual([
       conversationA,
       conversationA,
     ]);
@@ -111,7 +132,7 @@ describe('CreativeStudioAgentSessionController', () => {
     expect((firstFailure as Error).name).toBe('AbortError');
     expect(port.calls).toHaveLength(1);
     port.release();
-    expect((await replacement).conversationId).toBe(conversationA);
+    expect((await replacement).binding.conversationId).toBe(conversationA);
   });
 
   test('restores through the durable port after controller recreation', async () => {
@@ -123,7 +144,7 @@ describe('CreativeStudioAgentSessionController', () => {
         const key = `${request.projectId}/${request.sessionId}`;
         const restored = persisted.get(key) ?? binding(request);
         persisted.set(key, restored);
-        return restored;
+        return resolution(request, restored.conversationId, { binding: restored });
       },
     };
 
@@ -139,7 +160,10 @@ describe('CreativeStudioAgentSessionController', () => {
     const port: CreativeStudioAgentSessionPersistencePort = {
       async resolveOrCreateExclusive(request) {
         calls.push(request);
-        return binding(request, request.projectId === 'project-a' ? conversationA : conversationB);
+        return resolution(
+          request,
+          request.projectId === 'project-a' ? conversationA : conversationB
+        );
       },
     };
     const controller = new CreativeStudioAgentSessionController(port);
@@ -150,14 +174,37 @@ describe('CreativeStudioAgentSessionController', () => {
     ]);
 
     expect(calls.map((request) => request.projectId).sort()).toEqual(['project-a', 'project-b']);
-    expect(first.conversationId).toBe(conversationA);
-    expect(second.conversationId).toBe(conversationB);
+    expect(first.binding.conversationId).toBe(conversationA);
+    expect(second.binding.conversationId).toBe(conversationB);
+  });
+
+  test('does not coalesce different durable pending-turn proofs for one session', async () => {
+    const calls: CreativeStudioAgentSessionPersistenceRequest[] = [];
+    const port: CreativeStudioAgentSessionPersistencePort = {
+      async resolveOrCreateExclusive(request) {
+        calls.push(request);
+        return resolution(request);
+      },
+    };
+    const controller = new CreativeStudioAgentSessionController(port);
+
+    await Promise.all([
+      controller.resolve(input({ pendingTurnIdempotencyKey: pendingKey })),
+      controller.resolve(input({ pendingTurnIdempotencyKey: replacementPendingKey })),
+    ]);
+
+    expect(calls.map((request) => request.pendingTurnIdempotencyKey).sort()).toEqual([
+      pendingKey,
+      replacementPendingKey,
+    ]);
   });
 
   test('rejects a cross-project binding returned by the persistence port', async () => {
     const port: CreativeStudioAgentSessionPersistencePort = {
       async resolveOrCreateExclusive(request) {
-        return { ...binding(request), projectId: 'project-b' };
+        return resolution(request, conversationA, {
+          binding: { ...binding(request), projectId: 'project-b' },
+        });
       },
     };
 
@@ -176,7 +223,7 @@ describe('CreativeStudioAgentSessionController', () => {
       async resolveOrCreateExclusive(request) {
         attempts += 1;
         if (attempts === 1) throw new Error('temporary backend failure');
-        return binding(request);
+        return resolution(request);
       },
     };
     const controller = new CreativeStudioAgentSessionController(port);
@@ -184,8 +231,31 @@ describe('CreativeStudioAgentSessionController', () => {
     const firstFailure = await controller.resolve(input()).catch((error: unknown) => error);
     expect(firstFailure instanceof Error).toBe(true);
     expect((firstFailure as Error).message).toBe('temporary backend failure');
-    expect((await controller.resolve(input())).conversationId).toBe(conversationA);
+    expect((await controller.resolve(input())).binding.conversationId).toBe(conversationA);
     expect(attempts).toBe(2);
+  });
+
+  test('accepts exactly one authoritative completed pair behind a durable pending fence', async () => {
+    const recoveredHistory: readonly CreativeStudioAgentMessage[] = [
+      ...history,
+      { id: 'message-3', role: 'user', status: 'complete', text: '继续制作' },
+      { id: 'message-4', role: 'assistant', status: 'complete', text: '已完成' },
+    ];
+    const port: CreativeStudioAgentSessionPersistencePort = {
+      async resolveOrCreateExclusive(request) {
+        return resolution(request, conversationA, { history: recoveredHistory });
+      },
+    };
+
+    const recovered = await new CreativeStudioAgentSessionController(port).resolve(
+      input({ pendingTurnIdempotencyKey: pendingKey })
+    );
+    expect(recovered.history).toEqual(recoveredHistory);
+
+    const rejected = await new CreativeStudioAgentSessionController(port)
+      .resolve(input())
+      .catch((error: unknown) => error);
+    expect(rejected instanceof CreativeStudioAgentSessionResolutionError).toBe(true);
   });
 
   test('fails when the caller history key is stale before persistence is contacted', async () => {
@@ -193,7 +263,7 @@ describe('CreativeStudioAgentSessionController', () => {
     const port: CreativeStudioAgentSessionPersistencePort = {
       async resolveOrCreateExclusive(request) {
         called = true;
-        return binding(request);
+        return resolution(request);
       },
     };
 

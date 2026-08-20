@@ -10,6 +10,8 @@ import type { CreativeStudioAgentMessage } from './types';
 export interface CreativeStudioAgentTurnRequest {
   projectId: string;
   sessionId: string;
+  /** Durable UUIDv7 persisted in the project before this turn is submitted. */
+  idempotencyKey: string;
   prompt: string;
   model: CreativeModelSelectionRef;
   history: readonly CreativeStudioAgentMessage[];
@@ -18,6 +20,7 @@ export interface CreativeStudioAgentTurnRequest {
 export type CreativeStudioAgentTurnEvent =
   | { type: 'activity'; label: string }
   | { type: 'assistant-delta'; delta: string }
+  | { type: 'history-reconciled'; history: readonly CreativeStudioAgentMessage[] }
   | { type: 'completed'; assistantMessageId?: string }
   | { type: 'failed'; message: string; code?: string; retryable?: boolean };
 

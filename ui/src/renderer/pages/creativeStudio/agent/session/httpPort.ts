@@ -25,6 +25,7 @@ interface WireRequest {
   model: { provider_id: string; model: string };
   history: readonly CreativeStudioAgentMessage[];
   history_key: string;
+  pending_turn_idempotency_key: string | null;
 }
 
 interface CreativeStudioAgentSessionHttpTransport {
@@ -125,6 +126,12 @@ export function createNomiCreativeStudioAgentSessionHttpPort(
     ) {
       validateBoundaryId(request.projectId, "projectId");
       validateBoundaryId(request.sessionId, "sessionId");
+      if (request.pendingTurnIdempotencyKey !== null) {
+        validateBoundaryId(
+          request.pendingTurnIdempotencyKey,
+          "pendingTurnIdempotencyKey",
+        );
+      }
       parseProviderId(request.model.providerId);
       if (
         !request.model.model ||
@@ -172,6 +179,7 @@ export function createNomiCreativeStudioAgentSessionHttpPort(
           },
           history: request.history,
           history_key: request.historyKey,
+          pending_turn_idempotency_key: request.pendingTurnIdempotencyKey,
         }),
         "Creative Studio session response",
       );
@@ -229,8 +237,7 @@ export function createNomiCreativeStudioAgentSessionHttpPort(
         boundProjectId !== request.projectId ||
         boundSessionId !== request.sessionId ||
         boundProviderId !== request.model.providerId ||
-        boundModel !== request.model.model ||
-        historyKey !== request.historyKey
+        boundModel !== request.model.model
       ) {
         throw new CreativeStudioAgentSessionResolutionError(
           "PORT_CONTRACT_VIOLATION",
@@ -238,16 +245,42 @@ export function createNomiCreativeStudioAgentSessionHttpPort(
         );
       }
 
+      if (
+        history.length < request.history.length ||
+        serializeCreativeStudioAgentHistory(
+          history.slice(0, request.history.length),
+        ) !== request.historyKey
+      ) {
+        throw new CreativeStudioAgentSessionResolutionError(
+          "PORT_CONTRACT_VIOLATION",
+          "The backend did not preserve the requested Creative Studio history prefix",
+        );
+      }
+      const recoveredCount = history.length - request.history.length;
+      if (
+        recoveredCount !== 0 &&
+        (request.pendingTurnIdempotencyKey === null || recoveredCount !== 2)
+      ) {
+        throw new CreativeStudioAgentSessionResolutionError(
+          "PORT_CONTRACT_VIOLATION",
+          "The backend recovered more than one pending completed Agent turn",
+        );
+      }
+
       return {
-        ownership: "creative-studio-exclusive",
-        projectId: boundProjectId,
-        sessionId: boundSessionId,
-        conversationId: parseConversationId(binding.conversation_id),
-        model: {
-          providerId: boundProviderId,
-          model: boundModel,
+        binding: {
+          ownership: "creative-studio-exclusive",
+          projectId: boundProjectId,
+          sessionId: boundSessionId,
+          conversationId: parseConversationId(binding.conversation_id),
+          model: {
+            providerId: boundProviderId,
+            model: boundModel,
+          },
+          historyKey,
         },
-        historyKey,
+        history,
+        created: response.created,
       };
     },
   };

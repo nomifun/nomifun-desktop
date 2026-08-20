@@ -21,10 +21,12 @@ import { createNomiCreativeStudioAgentTransport } from './nomiTransport';
 import type {
   NomiCreativeStudioAgentPortOptions,
   NomiCreativeStudioAgentSessionBinding,
+  NomiCreativeStudioAgentSessionResolution,
   NomiCreativeStudioAgentTransport,
 } from './types';
 
 const DEFAULT_TURN_START_TIMEOUT_MS = 30_000;
+const DEFAULT_RECOVERY_POLL_MS = 250;
 
 type RuntimeEvent =
   | { kind: 'response'; value: IResponseMessage }
@@ -99,7 +101,7 @@ const sameModel = (
 const validateBinding = (
   request: CreativeStudioAgentTurnRequest,
   binding: NomiCreativeStudioAgentSessionBinding,
-  historyKey: string
+  authoritativeHistoryKey: string
 ): void => {
   if (binding.ownership !== 'creative-studio-exclusive') {
     throw new NomiCreativeStudioAgentBindingError('Nomi conversation is not Creative Studio exclusive');
@@ -110,9 +112,25 @@ const validateBinding = (
   if (!sameModel(binding.model, request.model)) {
     throw new NomiCreativeStudioAgentBindingError('Nomi conversation model binding mismatch');
   }
-  if (binding.historyKey !== historyKey) {
+  if (binding.historyKey !== authoritativeHistoryKey) {
     throw new NomiCreativeStudioAgentBindingError('Nomi conversation history projection mismatch');
   }
+};
+
+const completedEvents = (
+  resolution: NomiCreativeStudioAgentSessionResolution
+): readonly CreativeStudioAgentTurnEvent[] => {
+  const last = resolution.history.at(-1);
+  if (!last || last.role !== 'assistant' || last.status !== 'complete') {
+    throw new NomiCreativeStudioAgentRuntimeError(
+      'AUTHORITATIVE_HISTORY_INCOMPLETE',
+      'NomiFun did not return a completed assistant message for the recovered turn'
+    );
+  }
+  return [
+    { type: 'history-reconciled', history: resolution.history },
+    { type: 'completed', assistantMessageId: last.id },
+  ];
 };
 
 const activityFromResponse = (event: IResponseMessage): string | null => {
@@ -169,6 +187,24 @@ const abortError = (): Error => {
   error.name = 'AbortError';
   return error;
 };
+
+const waitForRecoveryPoll = (signal: AbortSignal, delayMs: number): Promise<void> =>
+  new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(abortError());
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      reject(abortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 
 const waitForReceiptOrAbort = <T>(
   operation: Promise<T>,
@@ -240,32 +276,78 @@ export function createNomiCreativeStudioAgentChatPort(
 ): CreativeStudioAgentChatPort {
   const transport = options.transport ?? createNomiCreativeStudioAgentTransport();
   const turnStartTimeoutMs = options.turnStartTimeoutMs ?? DEFAULT_TURN_START_TIMEOUT_MS;
+  const recoveryPollMs = Math.max(25, options.recoveryPollMs ?? DEFAULT_RECOVERY_POLL_MS);
 
   return {
     async *runTurn(request): AsyncIterable<CreativeStudioAgentTurnEvent> {
-      const historyKey = serializeCreativeStudioAgentHistory(request.history);
-      const binding = await options.resolveSession({
-        projectId: request.projectId,
-        sessionId: request.sessionId,
-        model: request.model,
-        history: request.history,
-        historyKey,
-        signal: request.signal,
-      });
-      if (request.signal.aborted) throw abortError();
-      validateBinding(request, binding, historyKey);
+      const requestHistoryKey = serializeCreativeStudioAgentHistory(request.history);
+      const resolveAuthoritative = async (): Promise<NomiCreativeStudioAgentSessionResolution> => {
+        const resolution = await options.resolveSession({
+          projectId: request.projectId,
+          sessionId: request.sessionId,
+          model: request.model,
+          history: request.history,
+          historyKey: requestHistoryKey,
+          pendingTurnIdempotencyKey: request.idempotencyKey,
+          signal: request.signal,
+        });
+        if (request.signal.aborted) throw abortError();
+        validateBinding(
+          request,
+          resolution.binding,
+          serializeCreativeStudioAgentHistory(resolution.history)
+        );
+        const recoveredCount = resolution.history.length - request.history.length;
+        if (recoveredCount !== 0 && recoveredCount !== 2) {
+          throw new NomiCreativeStudioAgentBindingError(
+            'Nomi conversation returned an invalid pending-turn history projection'
+          );
+        }
+        return resolution;
+      };
+      const reconcileCompleted = async (): Promise<NomiCreativeStudioAgentSessionResolution> => {
+        const deadline = Date.now() + turnStartTimeoutMs;
+        for (;;) {
+          const resolution = await resolveAuthoritative();
+          if (resolution.history.length === request.history.length + 2) return resolution;
+          if (resolution.history.length !== request.history.length) {
+            throw new NomiCreativeStudioAgentRuntimeError(
+              'AUTHORITATIVE_HISTORY_INVALID',
+              'NomiFun returned an invalid completed-turn history projection'
+            );
+          }
+          if (Date.now() >= deadline) {
+            throw new NomiCreativeStudioAgentRuntimeError(
+              'HISTORY_RECONCILIATION_TIMEOUT',
+              'NomiFun reached a terminal state before its completed message pair became durable'
+            );
+          }
+          await waitForRecoveryPoll(request.signal, recoveryPollMs);
+        }
+      };
+
+      const initialResolution = await resolveAuthoritative();
+      if (initialResolution.history.length === request.history.length + 2) {
+        for (const event of completedEvents(initialResolution)) yield event;
+        return;
+      }
+      const binding = initialResolution.binding;
 
       const beforeSend = await transport.inspect(binding.conversationId);
       if (beforeSend.conversationId !== binding.conversationId) {
-        throw new NomiCreativeStudioAgentBindingError('Nomi conversation identity changed during resolution');
+        throw new NomiCreativeStudioAgentBindingError(
+          'Nomi conversation identity changed during resolution'
+        );
       }
       if (!sameModel(beforeSend.model, request.model)) {
-        throw new NomiCreativeStudioAgentBindingError('Nomi conversation selected model changed before send');
+        throw new NomiCreativeStudioAgentBindingError(
+          'Nomi conversation selected model changed before send'
+        );
       }
-      if (beforeSend.authority !== 'idle') {
+      if (beforeSend.authority === 'unknown') {
         throw new NomiCreativeStudioAgentRuntimeError(
-          'CONVERSATION_NOT_IDLE',
-          'Bound Nomi conversation is not authoritatively idle'
+          'CONVERSATION_AUTHORITY_UNKNOWN',
+          'Bound Nomi conversation has no authoritative runtime state'
         );
       }
       if (request.signal.aborted) throw abortError();
@@ -287,7 +369,7 @@ export function createNomiCreativeStudioAgentChatPort(
         const receiptPromise = transport.sendMessage({
           conversationId: binding.conversationId,
           prompt: request.prompt,
-          idempotencyKey: transport.createIdempotencyKey(),
+          idempotencyKey: request.idempotencyKey,
         });
         const receipt = await waitForReceiptOrAbort(receiptPromise, request.signal);
 
@@ -308,15 +390,18 @@ export function createNomiCreativeStudioAgentChatPort(
             };
             return;
           }
-          if (receipt.value.result_text) {
-            yield { type: 'assistant-delta', delta: receipt.value.result_text };
-          }
-          // `msg_id` is the persisted user message, not an assistant message.
-          // Complete without inventing an assistant identity.
-          yield { type: 'completed' };
+          const resolution = await reconcileCompleted();
+          for (const event of completedEvents(resolution)) yield event;
           return;
         }
         admittedNonTerminalTurn = true;
+
+        if (!receipt.value.replayed && beforeSend.authority !== 'idle') {
+          throw new NomiCreativeStudioAgentRuntimeError(
+            'CONVERSATION_NOT_IDLE',
+            'A fresh Agent turn was admitted while its exclusive conversation was already running'
+          );
+        }
 
         if (receipt.value.replayed) {
           const afterSend = await transport.inspect(binding.conversationId);
@@ -331,6 +416,10 @@ export function createNomiCreativeStudioAgentChatPort(
             // fresh authoritative GET. A fresh admission still has to observe
             // and verify its own turn.started event below.
             activeTurnId = afterSend.activeTurnId;
+          } else if (afterSend.authority === 'idle') {
+            const resolution = await reconcileCompleted();
+            for (const event of completedEvents(resolution)) yield event;
+            return;
           } else {
             throw new NomiCreativeStudioAgentRuntimeError(
               'REPLAY_RUNTIME_UNRESOLVED',
@@ -342,12 +431,35 @@ export function createNomiCreativeStudioAgentChatPort(
         for (;;) {
           const queued = await queue.next(
             request.signal,
-            activeTurnId ? undefined : turnStartTimeoutMs
+            activeTurnId ? recoveryPollMs : turnStartTimeoutMs
           );
           if (queued.kind === 'aborted') {
             return await stopAfterAbort(transport, binding.conversationId);
           }
           if (queued.kind === 'timeout') {
+            if (activeTurnId) {
+              const snapshot = await transport.inspect(binding.conversationId);
+              if (!sameModel(snapshot.model, request.model)) {
+                throw new NomiCreativeStudioAgentBindingError(
+                  'Nomi conversation selected model changed during recovery'
+                );
+              }
+              if (
+                snapshot.authority === 'processing' &&
+                snapshot.activeTurnId === activeTurnId
+              ) {
+                continue;
+              }
+              if (snapshot.authority === 'idle') {
+                const resolution = await reconcileCompleted();
+                for (const event of completedEvents(resolution)) yield event;
+                return;
+              }
+              throw new NomiCreativeStudioAgentRuntimeError(
+                'REPLAY_RUNTIME_UNRESOLVED',
+                'NomiFun replay lost its authoritative active turn before durable completion'
+              );
+            }
             throw new NomiCreativeStudioAgentRuntimeError(
               'TURN_START_TIMEOUT',
               'NomiFun accepted the message but no authoritative turn start was observed'
@@ -365,6 +477,11 @@ export function createNomiCreativeStudioAgentChatPort(
               activeTurnId = snapshot.activeTurnId;
               yield { type: 'activity', label: '连接已恢复，Agent 仍在运行' };
               continue;
+            }
+            if (snapshot.authority === 'idle' && activeTurnId) {
+              const resolution = await reconcileCompleted();
+              for (const event of completedEvents(resolution)) yield event;
+              return;
             }
             throw new NomiCreativeStudioAgentRuntimeError(
               'RECONNECTED_TERMINAL_UNKNOWN',
@@ -457,7 +574,6 @@ export function createNomiCreativeStudioAgentChatPort(
             return;
           }
 
-          const finalMessageId = event.last_message.message_id;
           const finalText = extractResponseTextChunk(event.last_message.content);
           if (finalText) {
             // The terminal row may have a different durable message id from a
@@ -469,10 +585,8 @@ export function createNomiCreativeStudioAgentChatPort(
               yield { type: 'assistant-delta', delta: appended.delta };
             }
           }
-          yield {
-            type: 'completed',
-            ...(finalMessageId ? { assistantMessageId: finalMessageId } : {}),
-          };
+          const resolution = await reconcileCompleted();
+          for (const completedEvent of completedEvents(resolution)) yield completedEvent;
           return;
         }
       } catch (error) {

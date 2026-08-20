@@ -15,6 +15,9 @@ pub struct ResolveCreativeStudioAgentSessionParams {
     pub owner_id: String,
     pub project_id: String,
     pub session_id: String,
+    pub expected_provider_id: String,
+    pub expected_model: String,
+    pub expected_pending_turn_idempotency_key: Option<String>,
     pub conversation: ConversationRow,
     pub create_if_missing: bool,
 }

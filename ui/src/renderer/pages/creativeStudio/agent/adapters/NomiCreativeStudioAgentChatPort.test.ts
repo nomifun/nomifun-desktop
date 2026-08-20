@@ -28,6 +28,9 @@ import {
 } from './NomiCreativeStudioAgentChatPort';
 import { serializeCreativeStudioAgentHistory } from './history';
 import type {
+  NomiCreativeStudioAgentSessionBinding,
+  NomiCreativeStudioAgentSessionResolution,
+  NomiCreativeStudioAgentSessionResolutionInput,
   NomiCreativeStudioAgentSessionResolver,
   NomiCreativeStudioAgentTransport,
   NomiCreativeStudioConversationSnapshot,
@@ -37,13 +40,29 @@ const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000101
 const turnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000102');
 const userMessageId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000103');
 const assistantMessageId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000104');
+const idempotencyKey = '0190f5fe-7c00-7a00-8000-000000000106';
 const model = {
   providerId: parseProviderId('0190f5fe-7c00-7a00-8000-000000000105'),
   model: 'nomi-chat-model',
 };
 const history: CreativeStudioAgentMessage[] = [
-  { id: 'user-history-1', role: 'user', status: 'complete', text: '上一轮问题' },
-  { id: 'assistant-history-1', role: 'assistant', status: 'complete', text: '上一轮回复' },
+  {
+    id: '0190f5fe-7c00-7a00-8000-000000000109',
+    role: 'user',
+    status: 'complete',
+    text: '上一轮问题',
+  },
+  {
+    id: '0190f5fe-7c00-7a00-8000-000000000110',
+    role: 'assistant',
+    status: 'complete',
+    text: '上一轮回复',
+  },
+];
+const recoveredHistory: CreativeStudioAgentMessage[] = [
+  ...history,
+  { id: userMessageId, role: 'user', status: 'complete', text: '基于当前画布继续创作' },
+  { id: assistantMessageId, role: 'assistant', status: 'complete', text: '真实回复' },
 ];
 
 const idleSnapshot = (
@@ -146,10 +165,6 @@ class FakeTransport implements NomiCreativeStudioAgentTransport {
     this.stopCalls.push(id);
   }
 
-  createIdempotencyKey(): string {
-    return '0190f5fe-7c00-7a00-8000-000000000106';
-  }
-
   onResponse(listener: (event: IResponseMessage) => void): () => void {
     this.responseListeners.add(listener);
     return () => this.responseListeners.delete(listener);
@@ -183,22 +198,43 @@ class FakeTransport implements NomiCreativeStudioAgentTransport {
   }
 }
 
-const matchingResolver = (
-  overrides: Partial<Awaited<ReturnType<NomiCreativeStudioAgentSessionResolver>>> = {}
-): NomiCreativeStudioAgentSessionResolver =>
-  async (input) => ({
-    ownership: 'creative-studio-exclusive',
-    projectId: input.projectId,
-    sessionId: input.sessionId,
-    conversationId,
-    model: input.model,
-    historyKey: input.historyKey,
-    ...overrides,
-  });
+interface ResolverOverrides {
+  binding?: Partial<NomiCreativeStudioAgentSessionBinding>;
+  history?:
+    | readonly CreativeStudioAgentMessage[]
+    | ((call: number, input: NomiCreativeStudioAgentSessionResolutionInput) => readonly CreativeStudioAgentMessage[]);
+  created?: boolean;
+}
+
+const matchingResolver = (overrides: ResolverOverrides = {}): NomiCreativeStudioAgentSessionResolver => {
+  let calls = 0;
+  return async (input): Promise<NomiCreativeStudioAgentSessionResolution> => {
+    const historyOverride = overrides.history;
+    const authoritativeHistory =
+      typeof historyOverride === 'function'
+        ? historyOverride(calls, input)
+        : (historyOverride ?? input.history);
+    calls += 1;
+    return {
+      binding: {
+        ownership: 'creative-studio-exclusive',
+        projectId: input.projectId,
+        sessionId: input.sessionId,
+        conversationId,
+        model: input.model,
+        historyKey: serializeCreativeStudioAgentHistory(authoritativeHistory),
+        ...overrides.binding,
+      },
+      history: authoritativeHistory,
+      created: overrides.created ?? false,
+    };
+  };
+};
 
 const request = (signal: AbortSignal) => ({
   projectId: '0190f5fe-7c00-7a00-8000-000000000107',
-  sessionId: 'session-1',
+  sessionId: '0190f5fe-7c00-7a00-8000-000000000108',
+  idempotencyKey,
   prompt: '基于当前画布继续创作',
   model,
   history,
@@ -243,7 +279,9 @@ describe('NomiCreativeStudioAgentChatPort', () => {
       });
     };
     const port = createNomiCreativeStudioAgentChatPort({
-      resolveSession: matchingResolver(),
+      resolveSession: matchingResolver({
+        history: (call, input) => (call === 0 ? input.history : recoveredHistory),
+      }),
       transport,
       turnStartTimeoutMs: 100,
     });
@@ -254,13 +292,14 @@ describe('NomiCreativeStudioAgentChatPort', () => {
       { type: 'activity', label: '正在理解画布' },
       { type: 'assistant-delta', delta: '真实' },
       { type: 'assistant-delta', delta: '回复' },
+      { type: 'history-reconciled', history: recoveredHistory },
       { type: 'completed', assistantMessageId },
     ]);
     expect(transport.sendCalls).toEqual([
       {
         conversationId,
         prompt: '基于当前画布继续创作',
-        idempotencyKey: '0190f5fe-7c00-7a00-8000-000000000106',
+        idempotencyKey,
       },
     ]);
     expect(transport.responseListeners.size).toBe(0);
@@ -270,7 +309,7 @@ describe('NomiCreativeStudioAgentChatPort', () => {
   test('fails before send when project/session/model/history binding is not exact', async () => {
     const transport = new FakeTransport();
     const port = createNomiCreativeStudioAgentChatPort({
-      resolveSession: matchingResolver({ historyKey: 'different-history' }),
+      resolveSession: matchingResolver({ binding: { historyKey: 'different-history' } }),
       transport,
     });
     let error: unknown;
@@ -297,8 +336,12 @@ describe('NomiCreativeStudioAgentChatPort', () => {
       }),
     ];
     const port = createNomiCreativeStudioAgentChatPort({
-      resolveSession: matchingResolver(),
+      resolveSession: matchingResolver({
+        history: (call, input) => (call === 0 ? input.history : recoveredHistory),
+      }),
       transport,
+      recoveryPollMs: 25,
+      turnStartTimeoutMs: 100,
     });
     let error: unknown;
 
@@ -321,16 +364,88 @@ describe('NomiCreativeStudioAgentChatPort', () => {
       result_text: '后端持久化回复',
     });
     const port = createNomiCreativeStudioAgentChatPort({
-      resolveSession: matchingResolver(),
+      resolveSession: matchingResolver({
+        history: (call, input) => (call === 0 ? input.history : recoveredHistory),
+      }),
+      transport,
+      recoveryPollMs: 25,
+      turnStartTimeoutMs: 100,
+    });
+
+    const events = await collect(port.runTurn(request(new AbortController().signal)));
+
+    expect(events).toEqual([
+      { type: 'history-reconciled', history: recoveredHistory },
+      { type: 'completed', assistantMessageId },
+    ]);
+  });
+
+  test('reconciles a response-loss completion before transport without submitting twice', async () => {
+    const transport = new FakeTransport();
+    const port = createNomiCreativeStudioAgentChatPort({
+      resolveSession: matchingResolver({ history: recoveredHistory }),
       transport,
     });
 
     const events = await collect(port.runTurn(request(new AbortController().signal)));
 
     expect(events).toEqual([
-      { type: 'assistant-delta', delta: '后端持久化回复' },
-      { type: 'completed' },
+      { type: 'history-reconciled', history: recoveredHistory },
+      { type: 'completed', assistantMessageId },
     ]);
+    expect(transport.inspectCalls).toEqual([]);
+    expect(transport.sendCalls).toEqual([]);
+  });
+
+  test('recovers an active durable replay after missed WebSocket terminal events', async () => {
+    const transport = new FakeTransport();
+    transport.receipt = acceptedReceipt({ replayed: true });
+    transport.snapshots = [
+      idleSnapshot({ authority: 'processing', activeTurnId: turnId }),
+      idleSnapshot({ authority: 'processing', activeTurnId: turnId }),
+      idleSnapshot(),
+    ];
+    const port = createNomiCreativeStudioAgentChatPort({
+      resolveSession: matchingResolver({
+        history: (call, input) => (call === 0 ? input.history : recoveredHistory),
+      }),
+      transport,
+      recoveryPollMs: 25,
+      turnStartTimeoutMs: 100,
+    });
+
+    const events = await collect(port.runTurn(request(new AbortController().signal)));
+
+    expect(events).toEqual([
+      { type: 'history-reconciled', history: recoveredHistory },
+      { type: 'completed', assistantMessageId },
+    ]);
+    expect(transport.sendCalls[0]?.idempotencyKey).toBe(idempotencyKey);
+  });
+
+  test('never reports success when a terminal receipt has no durable message pair', async () => {
+    const transport = new FakeTransport();
+    transport.receipt = acceptedReceipt({
+      replayed: true,
+      completed: true,
+      result_ok: true,
+      result_text: 'only a transient receipt result',
+    });
+    const port = createNomiCreativeStudioAgentChatPort({
+      resolveSession: matchingResolver(),
+      transport,
+      recoveryPollMs: 25,
+      turnStartTimeoutMs: 50,
+    });
+
+    const error = await collect(port.runTurn(request(new AbortController().signal))).catch(
+      (caught: unknown) => caught
+    );
+
+    expect(error instanceof NomiCreativeStudioAgentRuntimeError).toBe(true);
+    expect(error instanceof NomiCreativeStudioAgentRuntimeError ? error.code : '').toBe(
+      'HISTORY_RECONCILIATION_TIMEOUT'
+    );
   });
 
   test('AbortSignal requests backend stop and waits for its confirmation boundary', async () => {
