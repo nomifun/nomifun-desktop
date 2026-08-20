@@ -27,6 +27,7 @@ use crate::tool_execution::{
 use crate::output::{OutputSink, ToolCallExecutionContext, ToolCallRetryContext};
 use crate::plan::prompt as plan_prompt;
 use crate::plan::state::PlanState;
+use crate::round;
 use crate::session::{EditableTurnCheckpoint, Session, SessionManager};
 
 /// Decide how a prompt-cache-break diagnostic should surface to the user.
@@ -1290,6 +1291,11 @@ impl AgentEngine {
                         stop_reason: StopReason::EndTurn,
                         usage: TokenUsage::default(),
                         turns: 0,
+                        // A slash command runs no provider pass at all.
+                        rounds: 1,
+                        effects_ok: 0,
+                        cutoff_state_changing: 0,
+                        state_changing_tools_advertised: false,
                     })
                 }
                 Err(e) => {
@@ -1315,12 +1321,23 @@ impl AgentEngine {
                 prior_host_context: self.host_context.clone(),
             });
         }
+        // The accepted requirement, captured BEFORE the push below moves
+        // `user_content` into the transcript. This owned clone is the only thing
+        // a restart can re-push, and holding it as a stack local — rather than
+        // an index into `self.messages` — is what makes the anchor survive
+        // autocompaction, which replaces the whole message vector (and can
+        // reduce the root user message to a summary) from inside this very loop.
+        let round_requirement = user_content.clone();
         self.messages.push(Message::now(Role::User, user_content));
         *turn_started = true;
         // Persist before the first provider await. A stop or process exit must
         // not discard rewind authority for the accepted user message.
         self.save_session();
 
+        let mut round = round::RoundState::new(round_requirement);
+        // Accumulated across every pass of this turn, so a later tool-less pass
+        // cannot erase the fact that state-changing work was on the table.
+        let mut state_changing_tools_advertised = false;
         let mut turn: usize = 0;
         let mut tool_retry_tracker = ToolRetryTracker::default();
         let mut routed_tool_calls_seen = 0usize;
@@ -1340,6 +1357,10 @@ impl AgentEngine {
                     stop_reason: StopReason::MaxTurns,
                     usage: self.total_usage.clone(),
                     turns: turn,
+                    rounds: round.attempt,
+                    effects_ok: round.ledger.effects_ok_total,
+                    cutoff_state_changing: round.ledger.cutoff_state_changing_total,
+                    state_changing_tools_advertised,
                 });
             }
             // Enforce the per-request provider ceiling on preloaded/resumed
@@ -1396,6 +1417,26 @@ impl AgentEngine {
             // deliberately hides mutating tools), so dispatch must never use
             // the live registry as an implicit allow-list.
             let tool_authority = ProviderToolAuthority::from_request_tools(&tools);
+            // What this exact request made possible, captured before `tools`
+            // moves into the LlmRequest below.
+            //
+            // `tools_advertised` is per-pass and gates the resumable restart: a
+            // request with no tools (a provider health check, a model-only
+            // answer) has no tool work to resume, so restarting it would only
+            // re-run the same generation against the same ceiling.
+            //
+            // `state_changing_tools_advertised` accumulates across every pass of
+            // the turn and gates the no-progress verdict. It must be recovered
+            // from the registry because `ToolDef` carries no category, and it
+            // stays false for plan mode (Info-only) and for model-only runtimes
+            // (`update_plan` alone, also Info) so a turn that COULD NOT have
+            // produced a state-changing effect is never judged for failing to.
+            let tools_advertised = !tools.is_empty();
+            state_changing_tools_advertised |= tools.iter().any(|def| {
+                self.tools
+                    .get(&def.name)
+                    .is_some_and(|tool| round::is_state_changing(tool.category()))
+            });
 
             // Build system prompt: append plan mode instructions when active
             let system = if self.plan_state.is_active {
@@ -1447,6 +1488,14 @@ impl AgentEngine {
                 system,
                 self.drain_system_resource_notices(),
             );
+            // Round facts last, so a restart's carried-forward ledger is the
+            // closest thing to the request in the system channel. Reuses the
+            // contributor merge: this is the same "append trimmed non-empty
+            // blocks to the system prompt" contract, on the same channel.
+            let system = crate::context_contributor::merge_pre_turn_context(
+                system,
+                round.take_section().into_iter().collect(),
+            );
 
             // Record prompt state for cache diagnostics
             self.cache_detector.record_request(&system, &tools);
@@ -1470,6 +1519,11 @@ impl AgentEngine {
             let mut tool_calls: Vec<ContentBlock> = Vec::new();
             let mut previewed_tool_calls: BTreeMap<String, String> = BTreeMap::new();
             let mut stop_reason = StopReason::EndTurn;
+            // Calls this pass's ceiling cut off. Declared beside `stop_reason`
+            // so it resets on every provider pass: a cutoff belongs to the pass
+            // that produced it, and carrying a stale one forward would render a
+            // wrong fact into the next attempt's prompt.
+            let mut truncated_calls: Vec<round::LedgerCutoff> = Vec::new();
             let mut turn_usage = TokenUsage::default();
             let mut done_count = 0_u8;
 
@@ -1707,6 +1761,38 @@ impl AgentEngine {
                         self.output.emit_thinking(&text, &self.current_msg_id);
                         thinking_text.push_str(&text);
                     }
+                    LlmEvent::ToolUseTruncated {
+                        id,
+                        name,
+                        argument_bytes,
+                    } => {
+                        // NOT a tool call. It is never dispatched, never enters
+                        // `tool_calls`, and is never schema-validated — the
+                        // provider is reporting that its output ceiling cut this
+                        // call off mid-stream. Recorded as a fact so the next
+                        // round can tell the model what it was reaching for.
+                        //
+                        // Filtered against this request's authority: a truncated
+                        // call naming a tool this request never advertised is
+                        // provider noise, and rendering that name into the next
+                        // attempt's prompt would state a falsehood.
+                        if tool_authority.advertises(&name) {
+                            let state_changing = self
+                                .tools
+                                .get(&name)
+                                .is_some_and(|tool| round::is_state_changing(tool.category()));
+                            truncated_calls.push(round::LedgerCutoff {
+                                tool: name,
+                                argument_bytes,
+                                state_changing,
+                            });
+                        }
+                        // The provider has declared this call will never
+                        // complete, so an unreconciled preview for it is an
+                        // expected outcome rather than the protocol anomaly the
+                        // Done-time reconciliation exists to catch.
+                        previewed_tool_calls.remove(&id);
+                    }
                     LlmEvent::ThinkingSignature(signature) => {
                         thinking_signature = Some(signature);
                     }
@@ -1909,7 +1995,135 @@ impl AgentEngine {
             self.messages
                 .push(Message::now(Role::Assistant, assistant_content));
 
+            // Adopt this pass's cutoffs unconditionally, before any restart
+            // decision. Recording them only on the restart path would drop the
+            // final pass's cutoff (so the attempt-cap case under-reported what it
+            // was reaching for), and recording them only when non-empty would let
+            // a previous pass's cutoff persist into a later round's prompt as a
+            // stale claim. Replacing every pass keeps "WHAT WAS CUT OFF" a
+            // statement about the pass that just ended.
+            round.ledger.set_cutoff(std::mem::take(&mut truncated_calls));
+
             if tool_calls.is_empty() {
+                // Resumable round: the provider hit its output ceiling
+                // mid-composition. Continuing a truncated draft is not
+                // recoverable — it can end mid-token or mid-JSON, and asking a
+                // model to continue such a string reliably produces a fresh
+                // restatement instead of a completion. Restart the round against
+                // the ORIGINAL requirement, carrying forward a ledger of what
+                // machine-observably already happened.
+                //
+                // This runs FIRST inside the block, before `stagnation_guard`
+                // is reset and before `safe_messages` is refreshed, because a
+                // truncated pass is not a completed assistant response and the
+                // three continuation hooks below all assume one. The placement
+                // window is exact: after the steering drain further down, the
+                // tail message would be a steering user message and `pop()`
+                // would delete the wrong one; after the `safe_messages`
+                // refresh, the rollback floor would still contain the truncated
+                // draft.
+                //
+                // Reached only with `tool_calls` empty: a MaxTokens terminal
+                // carrying complete tool calls is already a hard protocol error
+                // above, before the assistant message was pushed.
+                // The evidence must be about THE PASS THAT WAS TRUNCATED, not
+                // about the turn. `cutoff` is exactly that: this pass streamed a
+                // tool call and the ceiling cut it off mid-arguments, so its
+                // arguments are unparseable and continuing the draft is provably
+                // impossible while re-attempting is provably useful.
+                //
+                // Turn-lifetime evidence was deliberately rejected here. Gating
+                // on "this turn already produced an effect" or "the model has an
+                // unfinished plan" would restart a prose-only truncation that had
+                // NOTHING in flight — burning two more full ceilings to
+                // regenerate the same prose against the same wall, which is the
+                // exact waste the deleted host loop caused. Worse, it would hand
+                // that model a system section ordering it to open with a tool
+                // call, inviting a completed Exec or Irreversible action to run
+                // twice. A prose-only truncation is honestly reported as
+                // retryable `MaxTokens` instead, which is a decision for the user
+                // to spend budget on, not the engine.
+                let restart = stop_reason == StopReason::MaxTokens
+                    && round.attempt < round::MAX_ROUND_ATTEMPTS
+                    && tools_advertised
+                    && !round.ledger.cutoff.is_empty();
+                if restart {
+                    // The assistant message pushed just above is the tail, and
+                    // nothing between that push and here mutates `self.messages`
+                    // — so this removes exactly this pass's draft, independent of
+                    // history length, of autocompaction, and of prior rounds.
+                    // Only ever an assistant message, so every already-drained
+                    // steering interjection stays in the transcript.
+                    let dropped = self.messages.pop().expect(
+                        "the assistant message pushed immediately above is still the tail",
+                    );
+                    debug_assert_eq!(dropped.role, Role::Assistant);
+                    let dropped_draft_bytes = assistant_text.len();
+                    round.begin_attempt();
+                    // Keep exactly one live copy of each image on the wire: the
+                    // re-pushed requirement below. Same call and same rationale
+                    // as the abort path.
+                    self.redact_user_images_since(0);
+                    // Re-push the requirement only when it is not already the
+                    // tail, so a first-pass truncation does not send the same
+                    // request twice in a row.
+                    //
+                    // Compared AFTER redaction, which is what makes this correct
+                    // for all three shapes. Text-only and still at the tail: the
+                    // values match and nothing is appended. Multimodal: the
+                    // history copy now holds placeholders while the requirement
+                    // holds real images, so they differ and the live payload is
+                    // restored at the tail. Tail is a tool result or a steering
+                    // interjection: they differ, and the requirement is
+                    // re-stated where the model will actually act on it.
+                    //
+                    // Compared through `serde_json::Value` because `ContentBlock`
+                    // does not implement `PartialEq`. Only ever reached on a
+                    // restart, so the cost is irrelevant.
+                    let requirement_is_tail = self.messages.last().is_some_and(|tail| {
+                        tail.role == Role::User
+                            && serde_json::to_value(&tail.content).ok()
+                                == serde_json::to_value(&round.requirement).ok()
+                    });
+                    if !requirement_is_tail {
+                        self.messages
+                            .push(Message::now(Role::User, round.requirement.clone()));
+                    }
+                    // A steer that arrived during the truncated pass is
+                    // delivered on the very next pass. Draining is
+                    // unconditionally safe here, unlike the gated drain below: a
+                    // restart does not increment `turn`, so a provider pass is
+                    // guaranteed to follow.
+                    for text in self.drain_steering() {
+                        self.messages
+                            .push(Message::now(Role::User, vec![ContentBlock::Text { text }]));
+                    }
+                    // Fail-closed settlement of any tool card the truncated pass
+                    // published but never completed, plus a reset of the per-turn
+                    // citation buffer. A repeat Start under the same msg_id is
+                    // documented as benign for the UI.
+                    self.output.emit_stream_start(&self.current_msg_id);
+                    // Round N's rollback floor: the requirement, not the draft.
+                    *safe_messages = self.messages.clone();
+                    self.save_session();
+                    tracing::warn!(
+                        target: "nomi_agent",
+                        attempt = round.attempt,
+                        max_attempts = round::MAX_ROUND_ATTEMPTS,
+                        dropped_draft_bytes,
+                        plan_steps = round.ledger.steps.len(),
+                        effects_total = round.ledger.effects_total,
+                        effects_ok = round.ledger.effects_ok_total,
+                        cutoff = round.ledger.cutoff.len(),
+                        "output ceiling reached; restarting the round against the original requirement"
+                    );
+                    // Deliberately does NOT increment `turn`: a round is a retry
+                    // of this turn, not another tool-loop iteration, and
+                    // model-only runtimes are pinned at max_turns = 1, where any
+                    // `turn` increment would end the turn instead of retrying it.
+                    continue;
+                }
+
                 self.stagnation_guard.reset();
                 // The provider completed this assistant response. It is a safe
                 // rollback point; any steering/goal continuation appended below
@@ -1983,6 +2197,10 @@ impl AgentEngine {
                     stop_reason,
                     usage: self.total_usage.clone(),
                     turns: turn + 1,
+                    rounds: round.attempt,
+                    effects_ok: round.ledger.effects_ok_total,
+                    cutoff_state_changing: round.ledger.cutoff_state_changing_total,
+                    state_changing_tools_advertised,
                 });
             }
 
@@ -2151,6 +2369,84 @@ impl AgentEngine {
             }
 
             efficiency.observe_results(&outcome.results);
+            // Round ledger (machine truth only). Runs AFTER the result loop
+            // above, not inside it: that loop holds an immutable borrow of
+            // `self.tools` through `artifact_identity` for its whole body, and
+            // its own `find_map` binds only `id`/`name`, never `input`. Pairing
+            // `&outcome.results` with `&tool_calls` here recovers the input and
+            // also reads the `is_error` flag AFTER any undeliverable-media
+            // downgrade, which is the more correct value.
+            //
+            // No third producer exists by design: nothing is scraped from
+            // transcript prose (which is how a phantom tool call reached the
+            // observed production trace), no summarization pass is run, and the
+            // filesystem is never probed.
+            for result in &outcome.results {
+                let ContentBlock::ToolResult {
+                    tool_use_id,
+                    is_error,
+                    ..
+                } = result
+                else {
+                    continue;
+                };
+                let Some((name, input)) = tool_calls.iter().find_map(|call| match call {
+                    ContentBlock::ToolUse {
+                        id, name, input, ..
+                    } if id == tool_use_id => Some((name, input)),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                let Some(tool) = self.tools.get(name) else {
+                    continue;
+                };
+                // Producer A: the model's own plan snapshot. Gated on success
+                // because `update_plan` errors on invalid arguments and on an
+                // empty plan, and neither may clobber a good ledger. Replaced
+                // wholesale, never merged: the tool is stateless, so a merge
+                // would resurrect steps the model deliberately dropped.
+                if name == "update_plan" {
+                    if !*is_error
+                        && let Ok(args) = serde_json::from_value::<
+                            nomi_tools::update_plan::UpdatePlanArgs,
+                        >(input.clone())
+                    {
+                        round.ledger.replace_plan(
+                            args.plan
+                                .into_iter()
+                                .map(|item| round::LedgerStep {
+                                    step: item.step,
+                                    status: item.status,
+                                })
+                                .collect(),
+                        );
+                    }
+                    continue;
+                }
+                // Producer B: state-changing effects. A successful `Read` is not
+                // progress; a `Write` or `Bash` is.
+                //
+                // Counted when EITHER the base category or this invocation's
+                // category is state-changing, deliberately erring toward
+                // "something happened". A multi-action tool (browser, computer)
+                // reports Exec as its base category — so it is counted in
+                // `state_changing_tools_advertised`, which has no input to judge
+                // — while `category_for` can report Info for one read-only
+                // invocation. Judging effects on `category_for` alone would let
+                // such a tool arm the no-progress verdict without ever being
+                // able to satisfy it. The rendered label still describes exactly
+                // what ran, so the ledger stays honest either way.
+                if round::is_state_changing(tool.category())
+                    || round::is_state_changing(tool.category_for(input))
+                {
+                    round.ledger.push_effect(
+                        name.clone(),
+                        round::effect_label(&tool.describe(input)),
+                        !*is_error,
+                    );
+                }
+            }
             tool_retry_tracker.observe_invalid_arguments(
                 &tool_calls,
                 &tool_call_contexts,
@@ -2295,6 +2591,10 @@ impl AgentEngine {
                     stop_reason: StopReason::EndTurn,
                     usage: self.total_usage.clone(),
                     turns: turn + 1,
+                    rounds: round.attempt,
+                    effects_ok: round.ledger.effects_ok_total,
+                    cutoff_state_changing: round.ledger.cutoff_state_changing_total,
+                    state_changing_tools_advertised,
                 });
             }
             if tool_allowlist.is_some() && artifact_delivery_succeeded && !had_steering {
@@ -2310,6 +2610,10 @@ impl AgentEngine {
                     stop_reason: StopReason::EndTurn,
                     usage: self.total_usage.clone(),
                     turns: turn + 1,
+                    rounds: round.attempt,
+                    effects_ok: round.ledger.effects_ok_total,
+                    cutoff_state_changing: round.ledger.cutoff_state_changing_total,
+                    state_changing_tools_advertised,
                 });
             }
             if stagnation_action == crate::loop_guard::StagnationAction::Abort {
@@ -3091,6 +3395,19 @@ pub struct AgentResult {
     pub stop_reason: StopReason,
     pub usage: TokenUsage,
     pub turns: usize,
+    /// Attempts at the accepted requirement, including the first. 1 = the
+    /// provider never hit its output ceiling with recoverable work in flight.
+    pub rounds: usize,
+    /// Successful state-changing tool effects across every round of this turn.
+    /// Carried from a monotonic counter, never from a bounded render window.
+    pub effects_ok: usize,
+    /// State-changing tool calls the output ceiling cut off across every round.
+    /// Non-zero is machine evidence that the turn was reaching for an effect.
+    pub cutoff_state_changing: usize,
+    /// Whether this turn's requests advertised any state-changing tool. False
+    /// for plan mode and model-only runtimes, whose turns must never be judged
+    /// for producing no state-changing effect.
+    pub state_changing_tools_advertised: bool,
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -573,6 +573,24 @@ fn map_agent_invocation_outcome(
                     Some("exhausted its per-turn provider-request budget before finishing")
                 }
                 StopReason::Refusal => Some("was refused by the provider before finishing"),
+                // A delegate whose round restarted after the output ceiling, was
+                // cut off mid state-changing call, had such tools available, and
+                // still completed no state-changing effect has not done the work
+                // its text claims. The parent must not build on it. Gated on all
+                // four machine facts so a plan-mode or Info-only delegate — which
+                // structurally cannot produce a state-changing effect — is never
+                // judged for producing none.
+                StopReason::EndTurn
+                    if result.rounds > 1
+                        && result.state_changing_tools_advertised
+                        && result.cutoff_state_changing > 0
+                        && result.effects_ok == 0 =>
+                {
+                    Some(
+                        "restarted after its output token ceiling and never completed the \
+                         state-changing tool call it was cut off from",
+                    )
+                }
                 StopReason::EndTurn | StopReason::ToolUse => None,
             };
             AgentInvocationOutput {
@@ -1345,11 +1363,76 @@ mod phase7_tests {
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
                 turns: 3,
+                rounds: 1,
+                effects_ok: 0,
+                cutoff_state_changing: 0,
+                state_changing_tools_advertised: true,
             }));
         let r = map_agent_invocation_outcome("a".to_string(), ok, 300);
         assert!(!r.is_error);
         assert_eq!(r.text, "done");
         assert_eq!(r.turns, 3);
+    }
+
+    fn restarted(
+        rounds: usize,
+        effects_ok: usize,
+        cutoff_state_changing: usize,
+        state_changing_tools_advertised: bool,
+    ) -> Result<Result<AgentResult, AgentError>, tokio::time::error::Elapsed> {
+        Ok(Ok(AgentResult {
+            text: "Created miniapp.html.".to_string(),
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+            turns: 1,
+            rounds,
+            effects_ok,
+            cutoff_state_changing,
+            state_changing_tools_advertised,
+        }))
+    }
+
+    /// The short false completion claim A1 provably cannot see: `EndTurn` with
+    /// non-empty text. Only the four-fact conjunction catches it.
+    #[test]
+    fn a_restarted_delegate_that_completed_no_state_changing_call_is_incomplete() {
+        let r = map_agent_invocation_outcome("a".to_string(), restarted(2, 0, 1, true), 300);
+        assert!(r.is_error);
+        assert!(
+            r.text.contains("never completed the state-changing tool call"),
+            "text: {}",
+            r.text
+        );
+        assert!(r.text.contains("Created miniapp.html."), "partial text is evidence and is kept");
+    }
+
+    #[test]
+    fn a_delegate_that_never_restarted_is_not_judged() {
+        let r = map_agent_invocation_outcome("a".to_string(), restarted(1, 0, 1, true), 300);
+        assert!(!r.is_error, "text: {}", r.text);
+    }
+
+    /// Plan mode and model-only runtimes advertise only Info tools, so they can
+    /// never produce a state-changing effect. Judging them for producing none
+    /// would convert every completed plan-mode turn into a hard failure.
+    #[test]
+    fn a_delegate_with_no_state_changing_tools_advertised_is_not_judged() {
+        let r = map_agent_invocation_outcome("a".to_string(), restarted(2, 0, 1, false), 300);
+        assert!(!r.is_error, "text: {}", r.text);
+    }
+
+    /// A restart driven by an open plan or a prior effect — rather than by a
+    /// truncated state-changing call — is not evidence of an abandoned write.
+    #[test]
+    fn a_delegate_with_no_truncated_state_changing_call_is_not_judged() {
+        let r = map_agent_invocation_outcome("a".to_string(), restarted(2, 0, 0, true), 300);
+        assert!(!r.is_error, "text: {}", r.text);
+    }
+
+    #[test]
+    fn a_restarted_delegate_that_did_change_state_is_not_judged() {
+        let r = map_agent_invocation_outcome("a".to_string(), restarted(2, 1, 1, true), 300);
+        assert!(!r.is_error, "text: {}", r.text);
     }
 
     #[test]
