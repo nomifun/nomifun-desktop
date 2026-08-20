@@ -65,10 +65,11 @@ describe('workflow reducer', () => {
       {
         type: 'run/request',
         id: IDS.request,
-        idempotencyKey: IDS.idempotency,
+        idempotencyKey: IDS.request,
         workflowId: IDS.workflow,
         requestedAt: 2_000,
         inputs: input,
+        referenceAssetIds: [],
       },
     ]);
     expect(state.runs[0].status).toBe('awaiting-review');
@@ -162,10 +163,11 @@ describe('workflow reducer', () => {
       {
         type: 'run/request',
         id: IDS.request,
-        idempotencyKey: IDS.idempotency,
+        idempotencyKey: IDS.request,
         workflowId: IDS.workflow,
         requestedAt: 2_000,
         inputs: input,
+        referenceAssetIds: [],
       },
       { type: 'run/queue', requestId: IDS.request, queuedAt: 2_100 },
       { type: 'run/start', requestId: IDS.request, taskIds: [IDS.task], startedAt: 2_200 },
@@ -189,10 +191,11 @@ describe('workflow reducer', () => {
       {
         type: 'run/request',
         id: IDS.request,
-        idempotencyKey: IDS.idempotency,
+        idempotencyKey: IDS.request,
         workflowId: IDS.workflow,
         requestedAt: 2_000,
         inputs: input,
+        referenceAssetIds: [],
       },
     ]);
     expect(workflowReducer(state, { type: 'workflow/delete', workflowId: IDS.workflow })).toBe(

@@ -180,8 +180,12 @@ export function workflowReducer(
         !workflow ||
         !isWorkflowBusinessId(command.id) ||
         !isWorkflowBusinessId(command.idempotencyKey) ||
+        command.idempotencyKey !== command.id ||
         !validTime(command.requestedAt) ||
-        !validateWorkflowInputsForDefinition(workflow, command.inputs).ok
+        !validateWorkflowInputsForDefinition(workflow, command.inputs).ok ||
+        command.referenceAssetIds.some((assetId) => !isWorkflowBusinessId(assetId)) ||
+        new Set(command.referenceAssetIds).size !== command.referenceAssetIds.length ||
+        command.referenceAssetIds.length > 100
       ) return state;
       const request = {
         id: command.id,
@@ -193,6 +197,7 @@ export function workflowReducer(
         inputs: command.inputs.map((input) =>
           input.type === 'image-series' ? { ...input, assetIds: [...input.assetIds] } : { ...input }
         ),
+        referenceAssetIds: [...command.referenceAssetIds],
       };
       const existing = state.runRequests.find(
         (item) => item.id === request.id || item.idempotencyKey === request.idempotencyKey

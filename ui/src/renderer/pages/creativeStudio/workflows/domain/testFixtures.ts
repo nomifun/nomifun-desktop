@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { WorkflowDefinitionV1 } from './types';
+import type { WorkflowDefinitionV1, WorkflowRunAggregateV1 } from './types';
 
 export const IDS = {
   workflow: '018f0000-0000-7000-8000-000000000001',
@@ -22,6 +22,10 @@ export const IDS = {
   task: '018f0000-0000-7000-8000-00000000000d',
   asset: '018f0000-0000-7000-8000-00000000000e',
   history: '018f0000-0000-7000-8000-00000000000f',
+  provider: '018f0000-0000-7000-8000-000000000010',
+  task2: '018f0000-0000-7000-8000-000000000011',
+  task3: '018f0000-0000-7000-8000-000000000012',
+  result2: '018f0000-0000-7000-8000-000000000013',
 } as const;
 
 export function createWorkflowFixture(series = false): WorkflowDefinitionV1 {
@@ -145,5 +149,61 @@ export function createWorkflowFixture(series = false): WorkflowDefinitionV1 {
         sourceStepIds: [IDS.generateStep],
       },
     ],
+  };
+}
+
+export function createExecutableWorkflowFixture(series = false): WorkflowDefinitionV1 {
+  const workflow = createWorkflowFixture(series);
+  for (const step of workflow.steps) {
+    if (step.kind === 'draft-prompts') {
+      step.planning.model = {
+        providerId: IDS.provider,
+        model: 'nomifun-chat-test',
+        task: 'chat',
+      };
+    } else if (step.kind === 'generate-images') {
+      step.generation.model = {
+        providerId: IDS.provider,
+        model: 'nomifun-image-test',
+        task: 'image_edit',
+      };
+    }
+  }
+  return workflow;
+}
+
+export function createWorkflowRunFixture(series = false): WorkflowRunAggregateV1 {
+  const workflow = createExecutableWorkflowFixture(series);
+  return {
+    kind: 'nomifun.creative-studio.workflow-run',
+    version: 1,
+    revision: 1,
+    workflowSnapshot: workflow,
+    request: {
+      id: IDS.request,
+      idempotencyKey: IDS.request,
+      workflowId: workflow.id,
+      workflowRevision: workflow.revision,
+      requestedAt: 2_000,
+      output: workflow.output.kind === 'single-image'
+        ? { kind: 'single-image' }
+        : { ...workflow.output },
+      inputs: [{ variableId: IDS.variable, type: 'text', value: 'NomiFun' }],
+      referenceAssetIds: [],
+    },
+    promptDrafts: [],
+    record: {
+      requestId: IDS.request,
+      workflowId: workflow.id,
+      status: 'requested',
+      promptDraftIds: [],
+      taskIds: [],
+      resultAssetIds: [],
+      historyReferenceIds: [],
+      queuedAt: null,
+      startedAt: null,
+      completedAt: null,
+      failure: null,
+    },
   };
 }

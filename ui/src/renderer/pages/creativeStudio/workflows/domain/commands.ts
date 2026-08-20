@@ -34,6 +34,7 @@ export type WorkflowCommand =
       workflowId: string;
       requestedAt: number;
       inputs: WorkflowInputValue[];
+      referenceAssetIds: string[];
     }
   | {
       type: 'prompt-draft/add';

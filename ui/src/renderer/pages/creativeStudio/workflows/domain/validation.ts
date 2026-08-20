@@ -474,14 +474,33 @@ function validateInput(value: unknown, path: string): WorkflowValidationError | 
   return stringList(record.assetIds, `${path}.assetIds`, WORKFLOW_LIMITS.seriesItems, true);
 }
 
-export function validateWorkflowInputsForDefinition(workflow: WorkflowDefinitionV1, inputs: unknown, path = '$.inputs'): WorkflowValidationResult {
-  if (!Array.isArray(inputs) || inputs.length > workflow.variables.length) return { ok: false, error: issue('limit-exceeded', path, 'input count exceeds variable count') };
+export function validateWorkflowInputValues(
+  inputs: unknown,
+  path = '$.inputs',
+  maximum: number = WORKFLOW_LIMITS.variables
+): WorkflowValidationResult {
+  if (!Array.isArray(inputs)) {
+    return { ok: false, error: issue('invalid-value', path, 'expected an input array') };
+  }
+  if (inputs.length > maximum) {
+    return { ok: false, error: issue('limit-exceeded', path, 'input count exceeds its limit') };
+  }
   const ids: string[] = [];
   for (const [index, input] of inputs.entries()) {
     const shape = validateInput(input, `${path}[${index}]`);
     if (shape) return { ok: false, error: shape };
+    ids.push((input as WorkflowInputValue).variableId);
+  }
+  const duplicate = uniqueIds(ids, path);
+  return duplicate ? { ok: false, error: duplicate } : { ok: true };
+}
+
+export function validateWorkflowInputsForDefinition(workflow: WorkflowDefinitionV1, inputs: unknown, path = '$.inputs'): WorkflowValidationResult {
+  if (!Array.isArray(inputs) || inputs.length > workflow.variables.length) return { ok: false, error: issue('limit-exceeded', path, 'input count exceeds variable count') };
+  const shape = validateWorkflowInputValues(inputs, path, workflow.variables.length);
+  if (!shape.ok) return shape;
+  for (const [index, input] of inputs.entries()) {
     const typed = input as WorkflowInputValue;
-    ids.push(typed.variableId);
     const variable = workflow.variables.find((item) => item.id === typed.variableId);
     if (!variable || variable.type !== typed.type) return { ok: false, error: issue('broken-reference', `${path}[${index}].variableId`, 'input does not match a workflow variable') };
     if (
@@ -493,8 +512,6 @@ export function validateWorkflowInputsForDefinition(workflow: WorkflowDefinition
     if (typed.type === 'number' && variable.type === 'number' && ((variable.minimum !== null && typed.value < variable.minimum) || (variable.maximum !== null && typed.value > variable.maximum))) return { ok: false, error: issue('invalid-value', `${path}[${index}].value`, 'number input is outside its bounds') };
     if (typed.type === 'image-series' && variable.type === 'image-series' && (typed.assetIds.length < variable.minItems || typed.assetIds.length > variable.maxItems)) return { ok: false, error: issue('invalid-value', `${path}[${index}].assetIds`, 'image-series input is outside its bounds') };
   }
-  const duplicate = uniqueIds(ids, path);
-  if (duplicate) return { ok: false, error: duplicate };
   for (const variable of workflow.variables) {
     if (!variable.required) continue;
     const input = (inputs as WorkflowInputValue[]).find((item) => item.variableId === variable.id);
@@ -505,7 +522,7 @@ export function validateWorkflowInputsForDefinition(workflow: WorkflowDefinition
 }
 
 function validateRunRequest(value: unknown, path: string) {
-  const record = asRecord(value, path, ['id', 'idempotencyKey', 'workflowId', 'workflowRevision', 'requestedAt', 'output', 'inputs']);
+  const record = asRecord(value, path, ['id', 'idempotencyKey', 'workflowId', 'workflowRevision', 'requestedAt', 'output', 'inputs', 'referenceAssetIds']);
   if (isIssue(record)) return record;
   const common = id(record.id, `${path}.id`) ?? id(record.idempotencyKey, `${path}.idempotencyKey`) ?? id(record.workflowId, `${path}.workflowId`) ?? (!Number.isSafeInteger(record.workflowRevision) || (record.workflowRevision as number) < 1 ? issue('invalid-value', `${path}.workflowRevision`, 'expected a positive revision') : null) ?? timestamp(record.requestedAt, `${path}.requestedAt`) ?? validateWorkflowOutput(record.output, `${path}.output`);
   if (common) return common;
@@ -516,7 +533,11 @@ function validateRunRequest(value: unknown, path: string) {
     if (error) return error;
     ids.push((input as WorkflowInputValue).variableId);
   }
-  return uniqueIds(ids, `${path}.inputs`);
+  return uniqueIds(ids, `${path}.inputs`)
+    ?? stringList(record.referenceAssetIds, `${path}.referenceAssetIds`, 100, true)
+    ?? (record.idempotencyKey === record.id
+      ? null
+      : issue('invalid-value', `${path}.idempotencyKey`, 'idempotencyKey must equal the durable run id'));
 }
 
 function validateDraft(value: unknown, path: string) {
