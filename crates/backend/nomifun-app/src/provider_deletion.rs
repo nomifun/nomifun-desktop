@@ -105,7 +105,7 @@ mod tests {
     use super::*;
     use nomifun_common::{
         AdaptationPolicy, AgentExecutionEventKind, AgentExecutionStatus, DecisionPolicy,
-        DelegationPolicy, PlanGate, ProviderUsageFeature, WorkshopNodeId,
+        DelegationPolicy, PlanGate, ProviderUsageFeature,
     };
     use nomifun_db::{
         IAgentExecutionRepository, IAgentExecutionTemplateRepository,
@@ -525,39 +525,62 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (coord, db) = coordinator(dir.path()).await;
         let workshop = coord.workshop.clone();
-        let canvas = workshop
-            .create_canvas(Some("provider cleanup integration".into()))
-            .await
-            .unwrap();
         let deleted_provider_id = "0190f5fe-7c00-7a00-8000-000000000026";
         let surviving_provider_id = "0190f5fe-7c00-7a00-8000-000000000023";
-        workshop
-            .save_doc(
-                &canvas.canvas_id,
-                &serde_json::json!({
-                    "schema": 1,
-                    "nodes": [
-                        {
-                            "id": WorkshopNodeId::new().into_string(),
-                            "kind": "generator",
-                            "data": {
-                                "providerId": deleted_provider_id,
-                                "model": "delete-me",
-                                "prompt": "preserve"
-                            }
-                        },
-                        {
-                            "id": WorkshopNodeId::new().into_string(),
-                            "kind": "generator",
-                            "data": {
-                                "providerId": surviving_provider_id,
-                                "model": "keep-me"
-                            }
-                        }
-                    ],
-                    "edges": []
-                }),
+        for (provider_id, model) in [
+            (deleted_provider_id, "delete-me"),
+            (surviving_provider_id, "keep-me"),
+        ] {
+            nomifun_db::sqlx::query(
+                "INSERT INTO provider_models \
+                    (provider_id, model, enabled, sort_order, description, created_at, updated_at) \
+                 VALUES (?, ?, 1, 0, NULL, 1, 1)",
             )
+            .bind(provider_id)
+            .bind(model)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+
+        let project = workshop
+            .create_creative_project(Some("provider cleanup integration".into()))
+            .await
+            .unwrap();
+        let mut document = nomifun_workshop::CreativeProjectDocument::empty(project.project_id.clone());
+        for (id, provider_id, model, prompt) in [
+            ("delete-config", deleted_provider_id, "delete-me", "preserve"),
+            ("keep-config", surviving_provider_id, "keep-me", ""),
+        ] {
+            document.nodes.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": id,
+                    "type": "config",
+                    "position": { "x": 0, "y": 0 },
+                    "size": { "width": 320, "height": 240 },
+                    "groupId": null,
+                    "zIndex": 1,
+                    "locked": false,
+                    "data": {
+                        "task": "image_generation",
+                        "capability": "t2i",
+                        "providerId": provider_id,
+                        "model": model,
+                        "prompt": prompt,
+                        "negativePrompt": "",
+                        "parameters": {},
+                        "inputAssetIds": [],
+                        "taskId": null,
+                        "resultAssetIds": [],
+                        "status": "idle",
+                        "errorMessage": null
+                    }
+                }))
+                .unwrap(),
+            );
+        }
+        workshop
+            .save_creative_project(&project.project_id, "1", &document)
             .await
             .unwrap();
 
@@ -577,14 +600,22 @@ mod tests {
         provider_service.delete(deleted_provider_id).await.unwrap();
 
         assert!(provider_repo.find_by_id(deleted_provider_id).await.unwrap().is_none());
-        let cleaned = workshop.get_canvas(&canvas.canvas_id).await.unwrap().doc;
-        assert!(cleaned["nodes"][0]["data"].get("providerId").is_none());
-        assert!(cleaned["nodes"][0]["data"].get("model").is_none());
-        assert_eq!(cleaned["nodes"][0]["data"]["prompt"], "preserve");
-        assert_eq!(
-            cleaned["nodes"][1]["data"]["providerId"],
-            serde_json::json!(surviving_provider_id)
-        );
-        assert_eq!(cleaned["nodes"][1]["data"]["model"], "keep-me");
+        let cleaned = workshop.get_creative_project(&project.project_id).await.unwrap();
+        assert_eq!(cleaned.project.revision, "3");
+        let nomifun_workshop::creative_studio::CreativeNodeData::Config(deleted) =
+            &cleaned.document.nodes[0].data
+        else {
+            panic!("expected deleted config node")
+        };
+        assert_eq!(deleted.provider_id, None);
+        assert_eq!(deleted.model, None);
+        assert_eq!(deleted.prompt, "preserve");
+        let nomifun_workshop::creative_studio::CreativeNodeData::Config(surviving) =
+            &cleaned.document.nodes[1].data
+        else {
+            panic!("expected surviving config node")
+        };
+        assert_eq!(surviving.provider_id.as_deref(), Some(surviving_provider_id));
+        assert_eq!(surviving.model.as_deref(), Some("keep-me"));
     }
 }
