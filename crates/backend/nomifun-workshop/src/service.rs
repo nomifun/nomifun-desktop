@@ -2575,7 +2575,10 @@ mod tests {
         assert_eq!(asset.width, Some(1));
         assert_eq!(asset.height, Some(1));
         assert!(asset.in_library);
-        assert_eq!(asset.url, format!("/api/workshop/files/{}", asset.asset_id));
+        assert_eq!(
+            asset.url,
+            format!("/api/creative-studio/files/{}", asset.asset_id)
+        );
 
         // serve returns the bytes + mime
         let served = svc.serve_file(&asset.asset_id, false).await.unwrap();

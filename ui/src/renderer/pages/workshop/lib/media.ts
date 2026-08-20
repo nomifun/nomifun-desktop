@@ -7,10 +7,9 @@
 /**
  * Workshop media loader.
  *
- * `GET /api/workshop/files/{id}` sits behind the auth gateway, so a bare
- * `<img src>` cannot reach it on every host (WebUI needs the CSRF/trust
- * headers). All workshop surfaces therefore load binaries through this
- * module: authenticated fetch → Blob → object URL, memoised per
+ * `GET /api/creative-studio/files/{id}` is a public capability URL. Workshop
+ * surfaces still load binaries through this module: authenticated fetch → Blob
+ * → object URL, memoised per
  * `assetId(+thumb)` for the lifetime of the session.
  *
  * Frozen at M0 (append-only): downstream modules may add helpers but must not

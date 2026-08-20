@@ -1,19 +1,19 @@
 //! Pure helpers that extract workshop asset UUIDv7 ids from the two
 //! machine-readable signals a channel turn carries: a completed
 //! `nomi_workshop_*` tool call's `output` JSON (`result_asset_ids`), and any
-//! `/api/workshop/files/{id}` URL the assistant wrote into its visible text
+//! `/api/creative-studio/files/{id}` URL the assistant wrote into its visible text
 //! (the same link the desktop renders). Both are deduped by the caller.
 
 use regex::Regex;
 use std::sync::OnceLock;
 
 /// Matches a workshop capability URL and captures the asset id, e.g.
-/// `/api/workshop/files/{uuidv7}` (host optional, `?thumb=1` tolerated).
+/// `/api/creative-studio/files/{uuidv7}` (host optional, `?thumb=1` tolerated).
 fn files_url_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"/api/workshop/files/([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})",
+            r"/api/creative-studio/files/([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})",
         )
         .unwrap()
     })
@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn text_extracts_capability_urls() {
-        let text = "图来咯～ ![cat](/api/workshop/files/0190f5fe-7c00-7a00-8000-000000000081) and http://127.0.0.1:8080/api/workshop/files/0190f5fe-7c00-7a00-8000-000000000082?thumb=1";
+        let text = "图来咯～ ![cat](/api/creative-studio/files/0190f5fe-7c00-7a00-8000-000000000081) and http://127.0.0.1:8080/api/creative-studio/files/0190f5fe-7c00-7a00-8000-000000000082?thumb=1";
         assert_eq!(
             asset_ids_from_text(text),
             vec![

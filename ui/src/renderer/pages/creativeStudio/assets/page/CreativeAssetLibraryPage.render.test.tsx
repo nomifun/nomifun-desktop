@@ -18,7 +18,8 @@ const inertClient: CreativeAssetLibraryPort = {
   update: async () => { throw new Error('not invoked during SSR'); },
   remove: async () => undefined,
   renameCollection: async () => 0,
-  url: (assetId, variant = 'original') => `/api/workshop/files/${assetId}${variant === 'thumbnail' ? '?thumb=1' : ''}`,
+  url: (assetId, variant = 'original') =>
+    `/api/creative-studio/files/${assetId}${variant === 'thumbnail' ? '?thumb=1' : ''}`,
 };
 
 describe('CreativeAssetLibraryPage', () => {

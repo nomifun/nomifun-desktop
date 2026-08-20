@@ -16,8 +16,11 @@ import {
 describe('Director trusted asset URLs', () => {
   test('accepts backend-relative, HTTPS, and blob URLs', () => {
     expect(
-      resolveTrustedDirectorAssetUrl('/api/workshop/files/asset-1', 'https://nomifun.test/workshop/')
-    ).toBe('https://nomifun.test/api/workshop/files/asset-1');
+      resolveTrustedDirectorAssetUrl(
+        '/api/creative-studio/files/asset-1',
+        'https://nomifun.test/workshop/'
+      )
+    ).toBe('https://nomifun.test/api/creative-studio/files/asset-1');
     expect(resolveTrustedDirectorAssetUrl('https://assets.nomifun.test/model.glb')).toBe(
       'https://assets.nomifun.test/model.glb'
     );

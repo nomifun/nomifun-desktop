@@ -1,5 +1,5 @@
-//! Authenticated `/api/creative-studio/*` project routes plus the legacy
-//! `/api/workshop/*` asset/canvas handlers (contract §3.1/§3.2). Their
+//! Authenticated `/api/creative-studio/*` project/asset routes plus the legacy
+//! `/api/workshop/*` canvas handlers (contract §3.1/§3.2). Their
 //! management surfaces (list/create/patch/delete, doc read/write, upload,
 //! agent-ops) are owner-only — mounted behind the app's authenticated router
 //! (same auth extractor as the knowledge routes). The multipart upload route
@@ -43,7 +43,7 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
     // The asset upload route carries its own (larger) body limit. Disable the
     // app's global `DefaultBodyLimit` on it, then cap at MAX_ASSET_BYTES.
     let upload_router = Router::new()
-        .route("/api/workshop/assets/upload", post(upload_asset))
+        .route("/api/creative-studio/assets/upload", post(upload_asset))
         .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(MAX_ASSET_BYTES))
         .with_state(state.clone());
@@ -92,12 +92,18 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
             "/api/workshop/canvases/{canvas_id}/pending-ops/ack",
             post(ack_pending_ops),
         )
-        .route("/api/workshop/assets", get(list_assets).post(create_text_asset))
         .route(
-            "/api/workshop/assets/{asset_id}",
+            "/api/creative-studio/assets",
+            get(list_assets).post(create_text_asset),
+        )
+        .route(
+            "/api/creative-studio/assets/{asset_id}",
             axum::routing::patch(patch_asset).delete(delete_asset),
         )
-        .route("/api/workshop/collections/rename", post(rename_collection))
+        .route(
+            "/api/creative-studio/collections/rename",
+            post(rename_collection),
+        )
         .with_state(state)
         .merge(archive_import_router)
         .merge(upload_router)
@@ -115,7 +121,7 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
 /// exists to serve.
 pub fn workshop_public_routes(state: WorkshopRouterState) -> Router {
     Router::new()
-        .route("/api/workshop/files/{asset_id}", get(serve_file))
+        .route("/api/creative-studio/files/{asset_id}", get(serve_file))
         .route("/api/workshop/canvas-thumbs/{canvas_id}", get(serve_canvas_thumb))
         .with_state(state)
 }
@@ -522,7 +528,7 @@ async fn list_assets(
     Ok(Json(ApiResponse::ok(AssetListResponse { items: page.items, total: page.total })))
 }
 
-/// Fields extracted from a `/api/workshop/assets/upload` multipart request.
+/// Fields extracted from a `/api/creative-studio/assets/upload` multipart request.
 struct UploadFields {
     bytes: Vec<u8>,
     file_name: Option<String>,
@@ -633,7 +639,7 @@ async fn create_text_asset(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     if req.kind != "text" {
         return Err(AppError::BadRequest(
-            "this endpoint only registers text assets; upload binaries via /api/workshop/assets/upload".into(),
+            "this endpoint only registers text assets; upload binaries via /api/creative-studio/assets/upload".into(),
         ));
     }
     let asset = state
@@ -749,6 +755,7 @@ mod tests {
 
     use nomifun_common::UserId;
     use nomifun_db::{IWorkshopRepository, SqliteWorkshopRepository};
+    use tower::ServiceExt;
 
     use super::*;
     use crate::WorkshopService;
@@ -905,5 +912,136 @@ mod tests {
         let projects = state.service.list_creative_projects().await.unwrap();
         assert_eq!(projects.len(), 2);
         assert_ne!(projects[0].project_id, projects[1].project_id);
+    }
+
+    #[tokio::test]
+    async fn canonical_asset_management_routes_replace_legacy_namespace() {
+        let (state, user, _data_dir) = test_state().await;
+        let existing = state
+            .service
+            .create_text_asset(NewTextAsset {
+                title: "existing".into(),
+                text_content: "editable".into(),
+                collection: None,
+                tags: None,
+                in_library: Some(true),
+            })
+            .await
+            .unwrap();
+        let app = workshop_routes(state).layer(Extension(user));
+
+        let list = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/creative-studio/assets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+
+        let create = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/creative-studio/assets")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"text","title":"created","text_content":"body"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::CREATED);
+
+        let patch = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PATCH")
+                    .uri(format!(
+                        "/api/creative-studio/assets/{}",
+                        existing.asset_id
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"title":"renamed"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(patch.status(), StatusCode::OK);
+
+        let rename = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/creative-studio/collections/rename")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"from":"missing","to":"renamed"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rename.status(), StatusCode::OK);
+
+        let upload = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/creative-studio/assets/upload")
+                    .header(header::CONTENT_TYPE, "multipart/form-data; boundary=asset-contract")
+                    .body(Body::from("--asset-contract--\r\n"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upload.status(), StatusCode::BAD_REQUEST);
+
+        let delete = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/creative-studio/assets/{}",
+                        existing.asset_id
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn canonical_asset_file_route_replaces_legacy_namespace() {
+        let (state, _user, _data_dir) = test_state().await;
+        let asset = state
+            .service
+            .create_text_asset(NewTextAsset {
+                title: "route contract".into(),
+                text_content: "canonical bytes".into(),
+                collection: None,
+                tags: None,
+                in_library: Some(true),
+            })
+            .await
+            .unwrap();
+        let canonical = workshop_public_routes(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/creative-studio/files/{}", asset.asset_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(canonical.status(), StatusCode::OK);
     }
 }

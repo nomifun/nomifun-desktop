@@ -79,7 +79,7 @@ const TEXT_ASSET: CreativeAsset = {
   inLibrary: true,
   textContent: '描述主体位置、景别与光线关系。',
   origin: null,
-  originalUrl: '/api/workshop/assets/file',
+  originalUrl: '/api/creative-studio/files/asset',
   thumbnailUrl: null,
   createdAt: 10,
   updatedAt: 20,
