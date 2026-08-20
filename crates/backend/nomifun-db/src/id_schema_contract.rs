@@ -693,6 +693,9 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     // cleanup is the only pruning authority.
     text_ref!("cs_audit_events", "cs_agent_id" => "cs_agents", "cs_agent_id", false, "idx_cs_audit_agent_time", KeepHistory),
     text_ref!("creation_tasks", "canvas_id" => "workshop_canvases", "canvas_id", true, "idx_creation_tasks_canvas_id", SetNull),
+    // Canonical Creative Studio task history survives project deletion, while
+    // creation itself still locks and validates a live project row.
+    text_ref!("creation_tasks", "project_id" => "creative_studio_projects", "project_id", true, "idx_creation_tasks_project_id", KeepHistory),
     text_ref!("creation_tasks", "provider_id" => "providers", "provider_id", false, "idx_creation_tasks_provider_id", Restrict),
     text_ref!("idmm_action_reservations", "user_id" => "users", "user_id", false, "idx_idmm_action_reservations_user_id", Cascade),
     text_ref!("idmm_action_reservations", "conversation_id" => "conversations", "conversation_id", false, "idx_idmm_action_reservations_conversation_id", Cascade)

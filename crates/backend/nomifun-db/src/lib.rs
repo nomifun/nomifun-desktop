@@ -128,7 +128,8 @@ pub use repository::{
 };
 // 创意工坊 (Creative Workshop) + 生成引擎 (creation) repository traits + sqlite impls + params.
 pub use repository::{
-    AssetSort, CreateCreationTaskParams, ICreationTaskRepository, IWorkshopRepository, ListAssetsParams,
+    AssetSort, CreateCreationTaskParams, CreateCreativeProjectTaskParams,
+    ICreationTaskRepository, IWorkshopRepository, IdempotentCreationTask, ListAssetsParams,
     ListCreationTasksParams, SqliteCreationTaskRepository, SqliteWorkshopRepository,
     UpdateAssetParams, UpdateCreationTaskParams,
 };

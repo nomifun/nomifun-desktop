@@ -8,12 +8,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { CreativeTaskPort } from './port';
 import {
+  CreativeTaskProgressGuard,
   CreativeTaskRequestFence,
   pollCreativeTask,
   projectCreativeTaskOutput,
 } from './runtime';
 import type { CreativeTaskPollOptions } from './runtime';
 import {
+  CreativeTaskContractError,
   creativeTaskReference,
   isTerminalCreativeTaskStatus,
 } from './types';
@@ -47,11 +49,15 @@ export interface UseCreativeTaskRuntimeOptions {
   pendingTaskId?: string | null;
   autoResume?: boolean;
   poll?: Omit<CreativeTaskPollOptions, 'signal' | 'onTask'>;
+  /** Persist this pending reference before the POST can create backend work. */
+  onSubmission?: (reference: CreativeTaskReference) => void | Promise<void>;
   onTask?: (task: CreativeTask) => void;
   onOutput?: (output: CreativeTaskOutput) => void;
 }
 
 export interface CreativeTaskRunPayload {
+  /** Stable for every retry of this one logical submission. */
+  idempotencyKey: string;
   parameters: CreateCreativeTaskInput['parameters'];
   inputs?: readonly CreativeTaskInput[];
 }
@@ -99,8 +105,8 @@ export function useCreativeTaskRuntime(
   const snapshotRef = useRef(snapshot);
   const optionsRef = useRef(options);
   optionsRef.current = options;
-  const mountedRef = useRef(true);
   const fenceRef = useRef(new CreativeTaskRequestFence());
+  const progressRef = useRef(new CreativeTaskProgressGuard());
   const abortRef = useRef<AbortController | null>(null);
   const activeReferenceRef = useRef<CreativeTaskReference | null>(null);
   const activePromiseRef = useRef<Promise<CreativeTask | null> | null>(null);
@@ -120,6 +126,7 @@ export function useCreativeTaskRuntime(
 
   const publishTask = useCallback((revision: number, task: CreativeTask): boolean => {
     return fenceRef.current.commit(revision, () => {
+      progressRef.current.observe(task);
       const output = projectCreativeTaskOutput(task);
       const next: CreativeTaskRuntimeSnapshot = {
         status: task.status,
@@ -167,16 +174,38 @@ export function useCreativeTaskRuntime(
       if (isBusy(snapshotRef.current.status)) {
         return activePromiseRef.current ?? Promise.resolve(null);
       }
+      const unresolvedReference = snapshotRef.current.status === 'request_error'
+        ? activeReferenceRef.current
+        : null;
+      if (
+        unresolvedReference &&
+        payload.idempotencyKey !== unresolvedReference.taskId
+      ) {
+        return Promise.reject(
+          new CreativeTaskContractError(
+            'invalid_request',
+            `Submission outcome for ${unresolvedReference.taskId} is unresolved; retry with its exact Idempotency-Key or reset explicitly`,
+            'idempotencyKey'
+          )
+        );
+      }
       const { revision, controller } = begin();
-      activeReferenceRef.current = null;
+      progressRef.current.reset();
+      activeReferenceRef.current = {
+        taskId: payload.idempotencyKey,
+        ...optionsRef.current.identity,
+      };
       cancelAfterSubmitRef.current = false;
       setSnapshot({ status: 'submitting', task: null, output: null, requestError: null });
 
       const operation = (async (): Promise<CreativeTask | null> => {
         try {
+          await optionsRef.current.onSubmission?.(activeReferenceRef.current!);
+          if (!fenceRef.current.isCurrent(revision) || controller.signal.aborted) return null;
           const created = await optionsRef.current.port.create(
             {
               ...optionsRef.current.identity,
+              idempotencyKey: payload.idempotencyKey,
               parameters: payload.parameters,
               inputs: payload.inputs ?? [],
             },
@@ -197,6 +226,25 @@ export function useCreativeTaskRuntime(
           if (isTerminalCreativeTaskStatus(created.status)) return created;
           return await pollReference(revision, controller, activeReferenceRef.current);
         } catch (reason) {
+          if (
+            cancelAfterSubmitRef.current &&
+            activeReferenceRef.current &&
+            fenceRef.current.isCurrent(revision) &&
+            !controller.signal.aborted
+          ) {
+            cancelAfterSubmitRef.current = false;
+            try {
+              const canceled = await optionsRef.current.port.cancel(
+                activeReferenceRef.current,
+                controller.signal
+              );
+              publishTask(revision, canceled);
+              return canceled;
+            } catch (cancelReason) {
+              publishRequestError(revision, cancelReason);
+              return null;
+            }
+          }
           publishRequestError(revision, reason);
           return null;
         }
@@ -217,6 +265,7 @@ export function useCreativeTaskRuntime(
         return activePromiseRef.current ?? Promise.resolve(null);
       }
       const { revision, controller } = begin();
+      progressRef.current.reset();
       const reference: CreativeTaskReference = {
         taskId,
         ...optionsRef.current.identity,
@@ -242,7 +291,7 @@ export function useCreativeTaskRuntime(
   );
 
   const cancel = useCallback(async (): Promise<CreativeTask | null> => {
-    if (snapshotRef.current.status === 'submitting' && !activeReferenceRef.current) {
+    if (snapshotRef.current.status === 'submitting') {
       cancelAfterSubmitRef.current = true;
       return activePromiseRef.current ?? null;
     }
@@ -263,6 +312,7 @@ export function useCreativeTaskRuntime(
     abortRef.current?.abort();
     abortRef.current = null;
     fenceRef.current.invalidate();
+    progressRef.current.reset();
     activeReferenceRef.current = null;
     activePromiseRef.current = null;
     cancelAfterSubmitRef.current = false;
@@ -279,12 +329,11 @@ export function useCreativeTaskRuntime(
   ].join('\u0000');
 
   useEffect(() => {
-    mountedRef.current = true;
+    progressRef.current.reset();
     if (options.autoResume !== false && options.pendingTaskId) {
       void resume(options.pendingTaskId);
     }
     return () => {
-      mountedRef.current = false;
       abortRef.current?.abort();
       abortRef.current = null;
       fenceRef.current.invalidate();
@@ -302,6 +351,7 @@ export function useCreativeTaskRuntime(
       snapshot.status === 'submitting' ||
       snapshot.status === 'recovering' ||
       snapshot.status === 'queued' ||
-      snapshot.status === 'running',
+      snapshot.status === 'running' ||
+      (snapshot.status === 'request_error' && activeReferenceRef.current !== null),
   };
 }

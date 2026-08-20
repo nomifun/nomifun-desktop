@@ -3,8 +3,8 @@
 //! this module's ownership).
 
 use nomifun_common::{
-    AppError, CreationTaskId, ProviderId, TimestampMs, WorkshopAssetId, WorkshopCanvasId,
-    WorkshopNodeId,
+    AppError, CreationTaskId, CreativeStudioProjectId, ProviderId, TimestampMs,
+    WorkshopAssetId, WorkshopCanvasId, WorkshopNodeId,
 };
 use nomifun_db::CreationTaskRow;
 use serde::Serialize;
@@ -17,6 +17,7 @@ use nomifun_common::generate_id;
 #[derive(Debug, Clone, Serialize)]
 pub struct CreationTask {
     pub creation_task_id: String,
+    pub project_id: Option<String>,
     pub canvas_id: Option<String>,
     pub node_id: Option<String>,
     pub provider_id: String,
@@ -38,6 +39,10 @@ impl TryFrom<CreationTaskRow> for CreationTask {
     fn try_from(row: CreationTaskRow) -> Result<Self, Self::Error> {
         CreationTaskId::parse(&row.creation_task_id)
             .map_err(|error| corrupt_id("creation_tasks.creation_task_id", error))?;
+        if let Some(id) = row.project_id.as_deref() {
+            CreativeStudioProjectId::parse(id)
+                .map_err(|error| corrupt_id("creation_tasks.project_id", error))?;
+        }
         if let Some(id) = row.canvas_id.as_deref() {
             WorkshopCanvasId::parse(id).map_err(|error| corrupt_id("creation_tasks.canvas_id", error))?;
         }
@@ -69,6 +74,7 @@ impl TryFrom<CreationTaskRow> for CreationTask {
 
         Ok(Self {
             creation_task_id: row.creation_task_id,
+            project_id: row.project_id,
             canvas_id: row.canvas_id,
             node_id: row.node_id,
             provider_id: row.provider_id,
@@ -102,6 +108,7 @@ mod tests {
         let asset_id = WorkshopAssetId::new().into_string();
         let row = CreationTaskRow {
             creation_task_id: creation_task_id.clone(),
+            project_id: None,
             canvas_id: Some(canvas_id),
             node_id: None,
             provider_id,
@@ -133,6 +140,7 @@ mod tests {
     fn succeeded_without_artifacts_fails_closed() {
         let row = CreationTaskRow {
             creation_task_id: generate_id(),
+            project_id: None,
             canvas_id: None,
             node_id: None,
             provider_id: ProviderId::new().into_string(),
@@ -166,6 +174,7 @@ mod tests {
         ] {
             let row = CreationTaskRow {
                 creation_task_id: creation_task_id.into(),
+                project_id: None,
                 canvas_id: None,
                 node_id: None,
                 provider_id: ProviderId::new().into_string(),

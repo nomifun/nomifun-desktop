@@ -76,6 +76,9 @@ pub struct WorkshopAssetRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreationTaskRow {
     pub creation_task_id: String,
+    /// Canonical Creative Studio owner. Mutually exclusive with `canvas_id`.
+    pub project_id: Option<String>,
+    /// Retired Workshop owner. Canonical Creative Studio tasks never set it.
     pub canvas_id: Option<String>,
     pub node_id: Option<String>,
     pub provider_id: String,

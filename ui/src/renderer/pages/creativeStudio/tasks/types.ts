@@ -5,6 +5,8 @@
  */
 
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
+import { parseCreationTaskId } from '@/common/types/ids';
+import { uuidv7 } from '@/common/utils/uuidv7';
 
 import type { CreativeJsonObject } from '../domain/schema';
 
@@ -49,8 +51,18 @@ export interface CreativeTaskInput {
 }
 
 export interface CreateCreativeTaskInput extends CreativeTaskIdentity {
+  /** One logical user submission. Retries must reuse this canonical UUIDv7. */
+  idempotencyKey: string;
   parameters: CreativeJsonObject;
   inputs: readonly CreativeTaskInput[];
+}
+
+export function createCreativeTaskIdempotencyKey(): string {
+  return uuidv7();
+}
+
+export function parseCreativeTaskIdempotencyKey(value: unknown): string {
+  return String(parseCreationTaskId(value));
 }
 
 export interface CreativeTaskError {

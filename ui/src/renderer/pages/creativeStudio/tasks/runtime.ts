@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { BackendHttpError } from '@/common/adapter/httpBridge';
+
 import type { CreativeProjectDocument } from '../domain/schema';
 import type { CreativeTaskPort } from './port';
 import {
@@ -38,6 +40,86 @@ export class CreativeTaskPollTimeoutError extends Error {
     this.name = 'CreativeTaskPollTimeoutError';
     this.taskId = taskId;
     this.maxWaitMs = maxWaitMs;
+  }
+}
+
+/** Enforces the backend state machine at every observed response boundary. */
+export class CreativeTaskProgressGuard {
+  private previous: CreativeTask | null = null;
+
+  reset(): void {
+    this.previous = null;
+  }
+
+  observe(task: CreativeTask): void {
+    const previous = this.previous;
+    if (!previous) {
+      this.previous = task;
+      return;
+    }
+    assertCreativeTaskReference(task, previous);
+    if (previous.submittedAt !== task.submittedAt) {
+      throw new CreativeTaskContractError(
+        'invalid_response',
+        `Creative task ${task.taskId} changed submittedAt`,
+        'submittedAt'
+      );
+    }
+    if (JSON.stringify(previous.parameters) !== JSON.stringify(task.parameters)) {
+      throw new CreativeTaskContractError(
+        'invalid_response',
+        `Creative task ${task.taskId} changed immutable parameters`,
+        'parameters'
+      );
+    }
+    if (previous.status === 'running' && task.status === 'queued') {
+      throw new CreativeTaskContractError(
+        'invalid_response',
+        `Creative task ${task.taskId} moved from running back to queued`,
+        'status'
+      );
+    }
+    if (isTerminalCreativeTaskStatus(previous.status) && task.status !== previous.status) {
+      throw new CreativeTaskContractError(
+        'invalid_response',
+        `Creative task ${task.taskId} changed terminal status from ${previous.status} to ${task.status}`,
+        'status'
+      );
+    }
+    if (task.attempt < previous.attempt) {
+      throw new CreativeTaskContractError(
+        'invalid_response',
+        `Creative task ${task.taskId} attempt moved backwards`,
+        'attempt'
+      );
+    }
+    if (previous.startedAt !== null && task.startedAt !== previous.startedAt) {
+      throw new CreativeTaskContractError(
+        'invalid_response',
+        `Creative task ${task.taskId} changed its start authority`,
+        'startedAt'
+      );
+    }
+    if (previous.finishedAt !== null && task.finishedAt !== previous.finishedAt) {
+      throw new CreativeTaskContractError(
+        'invalid_response',
+        `Creative task ${task.taskId} changed its terminal timestamp`,
+        'finishedAt'
+      );
+    }
+    if (
+      isTerminalCreativeTaskStatus(previous.status) &&
+      (task.attempt !== previous.attempt ||
+        JSON.stringify(task.error) !== JSON.stringify(previous.error) ||
+        JSON.stringify(task.resultAssetIds) !== JSON.stringify(previous.resultAssetIds))
+    ) {
+      throw new CreativeTaskContractError(
+        'invalid_response',
+        `Creative task ${task.taskId} mutated after reaching ${previous.status}`,
+        'status'
+      );
+    }
+    this.previous = task;
   }
 }
 
@@ -122,12 +204,14 @@ export async function pollCreativeTask(
   const wait = options.wait ?? defaultWait;
   const now = options.now ?? Date.now;
   const startedAt = now();
+  const progress = new CreativeTaskProgressGuard();
 
   for (;;) {
     throwIfAborted(options.signal);
     const task = await port.get(reference, options.signal);
     throwIfAborted(options.signal);
     assertCreativeTaskReference(task, reference);
+    progress.observe(task);
     options.onTask?.(task);
     if (isTerminalCreativeTaskStatus(task.status)) return task;
     if (maxWaitMs !== undefined && now() - startedAt >= maxWaitMs) {
@@ -214,6 +298,13 @@ export function pendingCreativeTaskReferences(
 export interface CreativeTaskRecovery {
   tasks: CreativeTask[];
   outputs: CreativeTaskOutput[];
+  issues: CreativeTaskRecoveryIssue[];
+}
+
+export interface CreativeTaskRecoveryIssue {
+  reference: CreativeTaskReference;
+  kind: 'orphaned' | 'contract' | 'request';
+  error: Error;
 }
 
 /** Recover all persisted pending references; caller ownership is checked on every response. */
@@ -231,31 +322,41 @@ export async function recoverPendingCreativeTasks(
     );
   }
 
-  const controller = new AbortController();
-  const abort = (): void => controller.abort();
-  if (options.signal?.aborted) controller.abort();
-  else options.signal?.addEventListener('abort', abort, { once: true });
-  try {
-    const tasks = await Promise.all(
-      references.map((reference) =>
-        pollCreativeTask(port, reference, {
-          ...options,
-          signal: controller.signal,
-        })
-      )
-    );
-    return {
-      tasks,
-      outputs: tasks
-        .map(projectCreativeTaskOutput)
-        .filter((output): output is CreativeTaskOutput => output !== null),
-    };
-  } catch (error) {
-    controller.abort();
-    throw error;
-  } finally {
-    options.signal?.removeEventListener('abort', abort);
-  }
+  throwIfAborted(options.signal);
+  const settled = await Promise.all(
+    references.map(async (reference) => {
+      try {
+        const task = await pollCreativeTask(port, reference, options);
+        return { reference, task, error: null };
+      } catch (reason) {
+        return {
+          reference,
+          task: null,
+          error: reason instanceof Error ? reason : new Error(String(reason)),
+        };
+      }
+    })
+  );
+  throwIfAborted(options.signal);
+  const tasks = settled
+    .map((result) => result.task)
+    .filter((task): task is CreativeTask => task !== null);
+  const issues = settled.flatMap((result): CreativeTaskRecoveryIssue[] => {
+    if (!result.error) return [];
+    const kind = result.error instanceof BackendHttpError && result.error.status === 404
+      ? 'orphaned'
+      : result.error instanceof CreativeTaskContractError
+        ? 'contract'
+        : 'request';
+    return [{ reference: result.reference, kind, error: result.error }];
+  });
+  return {
+    tasks,
+    outputs: tasks
+      .map(projectCreativeTaskOutput)
+      .filter((output): output is CreativeTaskOutput => output !== null),
+    issues,
+  };
 }
 
 /** Monotonic response fence used by hooks to ignore late responses even when a port ignores abort. */

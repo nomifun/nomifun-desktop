@@ -11,6 +11,22 @@ pub trait ICreationTaskRepository: Send + Sync {
     /// Insert a task (typically `status = "queued"`).
     async fn create_task(&self, params: CreateCreationTaskParams<'_>) -> Result<CreationTaskRow, DbError>;
 
+    /// Atomically insert or recover one canonical Creative Studio task.
+    ///
+    /// `creation_task_id` is the caller's UUIDv7 Idempotency-Key. An existing
+    /// row is returned only when its persisted canonical request fingerprint
+    /// is byte-for-byte identical; reusing a key for another request is a
+    /// conflict. `inserted` is the sole authority for spawning a worker.
+    async fn get_or_create_creative_project_task(
+        &self,
+        params: CreateCreativeProjectTaskParams<'_>,
+    ) -> Result<IdempotentCreationTask, DbError> {
+        let _ = params;
+        Err(DbError::Init(
+            "canonical creative task idempotency is unavailable in this repository".into(),
+        ))
+    }
+
     /// One task by stable business id, or `None`.
     async fn get_task(
         &self,
@@ -57,6 +73,29 @@ pub trait ICreationTaskRepository: Send + Sync {
     /// Every task currently in a live (`queued`/`running`) state — the boot
     /// reconciliation input.
     async fn list_live_tasks(&self) -> Result<Vec<CreationTaskRow>, DbError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct IdempotentCreationTask {
+    pub row: CreationTaskRow,
+    pub inserted: bool,
+}
+
+/// Canonical Creative Studio create parameters. Unlike the legacy insert,
+/// ownership is a `creative_studio_projects.project_id`, and the exact
+/// canonical request is persisted for durable idempotency comparison.
+#[derive(Debug)]
+pub struct CreateCreativeProjectTaskParams<'a> {
+    pub creation_task_id: &'a str,
+    pub project_id: &'a str,
+    pub node_id: &'a str,
+    pub provider_id: &'a str,
+    pub model: &'a str,
+    pub capability: &'a str,
+    pub params: &'a str,
+    pub request_fingerprint: &'a str,
+    pub status: &'a str,
+    pub submitted_at: i64,
 }
 
 /// Params for [`ICreationTaskRepository::create_task`]. SQLite allocates the

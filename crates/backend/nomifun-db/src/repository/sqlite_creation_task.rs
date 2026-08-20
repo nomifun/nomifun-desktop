@@ -1,5 +1,6 @@
 use nomifun_common::{
-    CreationTaskId, ProviderId, WorkshopAssetId, WorkshopCanvasId, WorkshopNodeId,
+    CreationTaskId, CreativeStudioProjectId, ProviderId, WorkshopAssetId,
+    WorkshopCanvasId, WorkshopNodeId,
 };
 #[cfg(test)]
 use nomifun_common::validate_uuidv7;
@@ -10,7 +11,8 @@ use crate::error::DbError;
 use crate::models::CreationTaskRow;
 use crate::repository::ICreationTaskRepository;
 use crate::repository::creation_task::{
-    CreateCreationTaskParams, ListCreationTasksParams, UpdateCreationTaskParams,
+    CreateCreationTaskParams, CreateCreativeProjectTaskParams,
+    IdempotentCreationTask, ListCreationTasksParams, UpdateCreationTaskParams,
 };
 
 /// SQLite-backed implementation of [`ICreationTaskRepository`].
@@ -28,6 +30,7 @@ impl SqliteCreationTaskRepository {
 #[derive(sqlx::FromRow)]
 struct CreationTaskDbRow {
     creation_task_id: String,
+    project_id: Option<String>,
     canvas_id: Option<String>,
     node_id: Option<String>,
     provider_id: String,
@@ -42,6 +45,7 @@ struct CreationTaskDbRow {
     submitted_at: i64,
     started_at: Option<i64>,
     finished_at: Option<i64>,
+    request_fingerprint: Option<String>,
 }
 
 impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
@@ -50,6 +54,7 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
     fn try_from(row: CreationTaskDbRow) -> Result<Self, Self::Error> {
         let CreationTaskDbRow {
             creation_task_id,
+            project_id,
             canvas_id,
             node_id,
             provider_id,
@@ -64,8 +69,16 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
             submitted_at,
             started_at,
             finished_at,
+            request_fingerprint,
         } = row;
         validate_creation_task_id(&creation_task_id)?;
+        if let Some(id) = project_id.as_deref() {
+            CreativeStudioProjectId::parse(id).map_err(|error| {
+                DbError::Conflict(format!(
+                    "creation task {creation_task_id} has invalid project_id {id:?}: {error}"
+                ))
+            })?;
+        }
         if let Some(canvas_id) = &canvas_id {
             WorkshopCanvasId::parse(canvas_id).map_err(|error| {
                 DbError::Conflict(format!(
@@ -85,6 +98,16 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
                 "creation task {creation_task_id} has invalid provider_id {provider_id:?}: {error}"
             ))
         })?;
+        if project_id.is_some() && canvas_id.is_some() {
+            return Err(DbError::Conflict(format!(
+                "creation task {creation_task_id} cannot have both canonical project and legacy canvas ownership"
+            )));
+        }
+        if project_id.is_some() != request_fingerprint.is_some() {
+            return Err(DbError::Conflict(format!(
+                "creation task {creation_task_id} has inconsistent canonical request fingerprint ownership"
+            )));
+        }
         let canonical_result_asset_ids = canonicalize_result_asset_ids(&result_asset_ids)?;
         if canonical_result_asset_ids != result_asset_ids {
             return Err(DbError::Conflict(format!(
@@ -93,6 +116,7 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
         }
         Ok(Self {
             creation_task_id,
+            project_id,
             canvas_id,
             node_id,
             provider_id,
@@ -117,6 +141,35 @@ fn validate_creation_task_id(creation_task_id: &str) -> Result<(), DbError> {
             "Creation task creation_task_id '{creation_task_id}' is not a canonical UUIDv7: {error}"
         ))
     })?;
+    Ok(())
+}
+
+fn validate_idempotent_creative_task(
+    stored: &CreationTaskDbRow,
+    params: &CreateCreativeProjectTaskParams<'_>,
+    project_id: &str,
+    node_id: &str,
+    provider_id: &str,
+) -> Result<(), DbError> {
+    if stored.request_fingerprint.as_deref() != Some(params.request_fingerprint) {
+        return Err(DbError::Conflict(format!(
+            "Idempotency-Key '{}' was already used for a different creation request",
+            params.creation_task_id
+        )));
+    }
+    if stored.project_id.as_deref() != Some(project_id)
+        || stored.canvas_id.is_some()
+        || stored.node_id.as_deref() != Some(node_id)
+        || stored.provider_id != provider_id
+        || stored.model != params.model
+        || stored.capability != params.capability
+        || stored.params != params.params
+    {
+        return Err(DbError::Conflict(format!(
+            "Idempotency-Key '{}' resolved to an inconsistent creation task",
+            params.creation_task_id
+        )));
+    }
     Ok(())
 }
 
@@ -182,6 +235,30 @@ async fn lock_canvas(
         )));
     }
     Ok(Some(canvas_id.into_string()))
+}
+
+async fn lock_creative_project(
+    tx: &mut Transaction<'_, Sqlite>,
+    project_id: &str,
+) -> Result<String, DbError> {
+    let project_id = CreativeStudioProjectId::parse(project_id).map_err(|error| {
+        DbError::Conflict(format!(
+            "Creative task project_id '{project_id}' is not a canonical UUIDv7: {error}"
+        ))
+    })?;
+    let parent = sqlx::query(
+        "UPDATE creative_studio_projects SET updated_at = updated_at WHERE project_id = ?",
+    )
+    .bind(project_id.as_str())
+    .execute(&mut **tx)
+    .await?;
+    if parent.rows_affected() == 0 {
+        return Err(DbError::Conflict(format!(
+            "Creative task project '{}' does not exist",
+            project_id
+        )));
+    }
+    Ok(project_id.into_string())
 }
 
 /// Canonicalize the task's JSON result asset references.
@@ -279,6 +356,7 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
 
         Ok(CreationTaskRow {
             creation_task_id: params.creation_task_id.to_string(),
+            project_id: None,
             canvas_id,
             node_id: node_id.map(WorkshopNodeId::into_string),
             provider_id: provider_id.into_string(),
@@ -294,6 +372,123 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
             started_at: None,
             finished_at: None,
         })
+    }
+
+    async fn get_or_create_creative_project_task(
+        &self,
+        params: CreateCreativeProjectTaskParams<'_>,
+    ) -> Result<IdempotentCreationTask, DbError> {
+        validate_creation_task_id(params.creation_task_id)?;
+        let project_id = CreativeStudioProjectId::parse(params.project_id)
+            .map_err(|error| {
+                DbError::Conflict(format!(
+                    "Creative task project_id '{}' is not a canonical UUIDv7: {error}",
+                    params.project_id
+                ))
+            })?
+            .into_string();
+        let node_id = WorkshopNodeId::parse(params.node_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "Creative task node_id '{}' is not a canonical UUIDv7: {error}",
+                params.node_id
+            ))
+        })?;
+        let provider_id = ProviderId::parse(params.provider_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "Creation task provider_id '{}' is not a canonical UUIDv7: {error}",
+                params.provider_id
+            ))
+        })?;
+
+        let mut tx = self.pool.begin().await?;
+
+        // Take SQLite's writer authority on the idempotency key before looking
+        // at mutable parent state. Exact replays are historical reads and must
+        // remain recoverable after their project/provider is retired. A key
+        // that has never existed continues below and must validate live parents.
+        let existing = sqlx::query(
+            "UPDATE creation_tasks SET submitted_at = submitted_at WHERE creation_task_id = ?",
+        )
+        .bind(params.creation_task_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+        if existing {
+            let stored = sqlx::query_as::<_, CreationTaskDbRow>(
+                "SELECT * FROM creation_tasks WHERE creation_task_id = ?",
+            )
+            .bind(params.creation_task_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            validate_idempotent_creative_task(
+                &stored,
+                &params,
+                &project_id,
+                node_id.as_str(),
+                provider_id.as_str(),
+            )?;
+            let row = stored.try_into()?;
+            tx.commit().await?;
+            return Ok(IdempotentCreationTask {
+                row,
+                inserted: false,
+            });
+        }
+
+        lock_creative_project(&mut tx, &project_id).await?;
+        let provider = sqlx::query("UPDATE providers SET updated_at = updated_at WHERE provider_id = ?")
+            .bind(provider_id.as_str())
+            .execute(&mut *tx)
+            .await?;
+        if provider.rows_affected() == 0 {
+            return Err(DbError::Conflict(format!(
+                "Creation task provider '{}' does not exist",
+                provider_id
+            )));
+        }
+
+        let inserted = sqlx::query(
+            "INSERT INTO creation_tasks \
+                (creation_task_id, project_id, canvas_id, node_id, provider_id, model, capability, \
+                 params, status, error, result_asset_ids, remote_task_id, attempt, submitted_at, \
+                 started_at, finished_at, request_fingerprint) \
+             VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, '[]', NULL, 0, ?, NULL, NULL, ?) \
+             ON CONFLICT(creation_task_id) DO NOTHING",
+        )
+        .bind(params.creation_task_id)
+        .bind(&project_id)
+        .bind(node_id.as_str())
+        .bind(provider_id.as_str())
+        .bind(params.model)
+        .bind(params.capability)
+        .bind(params.params)
+        .bind(params.status)
+        .bind(params.submitted_at)
+        .bind(params.request_fingerprint)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+
+        let stored = sqlx::query_as::<_, CreationTaskDbRow>(
+            "SELECT * FROM creation_tasks WHERE creation_task_id = ?",
+        )
+        .bind(params.creation_task_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        validate_idempotent_creative_task(
+            &stored,
+            &params,
+            &project_id,
+            node_id.as_str(),
+            provider_id.as_str(),
+        )?;
+
+        let row = stored.try_into()?;
+        tx.commit().await?;
+        Ok(IdempotentCreationTask { row, inserted })
     }
 
     async fn get_task(
@@ -501,6 +696,310 @@ mod tests {
             status: "queued",
             submitted_at: 100,
         }
+    }
+
+    async fn seed_creative_project(db: &crate::Database) -> String {
+        let project_id = CreativeStudioProjectId::new().into_string();
+        let document = serde_json::json!({
+            "schema": "nomifun.creative-studio/v1",
+            "projectId": project_id,
+            "nodes": []
+        });
+        sqlx::query(
+            "INSERT INTO creative_studio_projects \
+                (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+             VALUES (?, 'Idempotency Test', 1, 0, 0, ?, 0, 0)",
+        )
+        .bind(&project_id)
+        .bind(document.to_string())
+        .execute(db.pool())
+        .await
+        .unwrap();
+        project_id
+    }
+
+    fn creative_params<'a>(
+        creation_task_id: &'a str,
+        project_id: &'a str,
+        node_id: &'a str,
+        provider_id: &'a str,
+        fingerprint: &'a str,
+    ) -> CreateCreativeProjectTaskParams<'a> {
+        CreateCreativeProjectTaskParams {
+            creation_task_id,
+            project_id,
+            node_id,
+            provider_id,
+            model: "image-model-v1",
+            capability: "t2i",
+            params: r#"{"prompt":"Aurora"}"#,
+            request_fingerprint: fingerprint,
+            status: "queued",
+            submitted_at: 100,
+        }
+    }
+
+    async fn raw_insert_task_ownership(
+        db: &crate::Database,
+        creation_task_id: &str,
+        project_id: Option<&str>,
+        canvas_id: Option<&str>,
+        node_id: Option<&str>,
+        provider_id: &str,
+        request_fingerprint: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO creation_tasks \
+                (creation_task_id, project_id, canvas_id, node_id, provider_id, model, capability, \
+                 params, status, submitted_at, request_fingerprint) \
+             VALUES (?, ?, ?, ?, ?, 'image-model-v1', 't2i', '{}', 'queued', 100, ?)",
+        )
+        .bind(creation_task_id)
+        .bind(project_id)
+        .bind(canvas_id)
+        .bind(node_id)
+        .bind(provider_id)
+        .bind(request_fingerprint)
+        .execute(db.pool())
+        .await
+        .map(|_| ())
+    }
+
+    #[tokio::test]
+    async fn schema_rejects_mixed_or_incomplete_canonical_task_ownership() {
+        let (_repo, db, provider_id) = repo().await;
+        let project_id = seed_creative_project(&db).await;
+        let node_id = WorkshopNodeId::new().into_string();
+        let canvas_id = WorkshopCanvasId::new().into_string();
+
+        let mixed = raw_insert_task_ownership(
+            &db,
+            &CreationTaskId::new().into_string(),
+            Some(&project_id),
+            Some(&canvas_id),
+            Some(&node_id),
+            &provider_id,
+            Some(r#"{"project_id":"mixed"}"#),
+        )
+        .await;
+        assert!(mixed.is_err(), "project_id and canvas_id must be exclusive");
+
+        let missing_fingerprint = raw_insert_task_ownership(
+            &db,
+            &CreationTaskId::new().into_string(),
+            Some(&project_id),
+            None,
+            Some(&node_id),
+            &provider_id,
+            None,
+        )
+        .await;
+        assert!(
+            missing_fingerprint.is_err(),
+            "canonical project ownership requires a durable request fingerprint"
+        );
+
+        let orphan_fingerprint = raw_insert_task_ownership(
+            &db,
+            &CreationTaskId::new().into_string(),
+            None,
+            None,
+            None,
+            &provider_id,
+            Some(r#"{"project_id":"missing"}"#),
+        )
+        .await;
+        assert!(
+            orphan_fingerprint.is_err(),
+            "legacy/global task ownership cannot carry a canonical fingerprint"
+        );
+    }
+
+    #[tokio::test]
+    async fn creative_project_idempotency_reuses_exact_request_without_reopening_terminal_state() {
+        let (repo, db, provider_id) = repo().await;
+        let project_id = seed_creative_project(&db).await;
+        let node_id = WorkshopNodeId::new().into_string();
+        let task_id = CreationTaskId::new().into_string();
+        let fingerprint = r#"{"project_id":"p","inputs":[]}"#;
+
+        let first = repo
+            .get_or_create_creative_project_task(creative_params(
+                &task_id,
+                &project_id,
+                &node_id,
+                &provider_id,
+                fingerprint,
+            ))
+            .await
+            .unwrap();
+        assert!(first.inserted);
+        assert_eq!(first.row.project_id.as_deref(), Some(project_id.as_str()));
+        assert!(first.row.canvas_id.is_none());
+
+        repo.update_task(
+            &task_id,
+            UpdateCreationTaskParams {
+                status: Some("canceled"),
+                finished_at: Some(Some(200)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let retry = repo
+            .get_or_create_creative_project_task(creative_params(
+                &task_id,
+                &project_id,
+                &node_id,
+                &provider_id,
+                fingerprint,
+            ))
+            .await
+            .unwrap();
+        assert!(!retry.inserted);
+        assert_eq!(retry.row.status, "canceled");
+        assert_eq!(retry.row.finished_at, Some(200));
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM creation_tasks WHERE creation_task_id = ?",
+        )
+        .bind(&task_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn exact_retry_survives_parent_removal_but_a_new_key_still_requires_a_live_project() {
+        let (repo, db, provider_id) = repo().await;
+        let project_id = seed_creative_project(&db).await;
+        let node_id = WorkshopNodeId::new().into_string();
+        let task_id = CreationTaskId::new().into_string();
+        let fingerprint = r#"{"project_id":"historical"}"#;
+
+        let first = repo
+            .get_or_create_creative_project_task(creative_params(
+                &task_id,
+                &project_id,
+                &node_id,
+                &provider_id,
+                fingerprint,
+            ))
+            .await
+            .unwrap();
+        assert!(first.inserted);
+        sqlx::query("DELETE FROM creative_studio_projects WHERE project_id = ?")
+            .bind(&project_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let historical_retry = repo
+            .get_or_create_creative_project_task(creative_params(
+                &task_id,
+                &project_id,
+                &node_id,
+                &provider_id,
+                fingerprint,
+            ))
+            .await
+            .unwrap();
+        assert!(!historical_retry.inserted);
+        assert_eq!(historical_retry.row.creation_task_id, task_id);
+
+        let new_key = CreationTaskId::new().into_string();
+        let new_submission = repo
+            .get_or_create_creative_project_task(creative_params(
+                &new_key,
+                &project_id,
+                &node_id,
+                &provider_id,
+                r#"{"project_id":"new"}"#,
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            new_submission,
+            DbError::Conflict(message) if message.contains("does not exist")
+        ));
+    }
+
+    #[tokio::test]
+    async fn creative_project_idempotency_rejects_key_reuse_for_another_request() {
+        let (repo, db, provider_id) = repo().await;
+        let project_id = seed_creative_project(&db).await;
+        let node_id = WorkshopNodeId::new().into_string();
+        let task_id = CreationTaskId::new().into_string();
+        repo.get_or_create_creative_project_task(creative_params(
+            &task_id,
+            &project_id,
+            &node_id,
+            &provider_id,
+            r#"{"prompt":"first"}"#,
+        ))
+        .await
+        .unwrap();
+
+        let error = repo
+            .get_or_create_creative_project_task(creative_params(
+                &task_id,
+                &project_id,
+                &node_id,
+                &provider_id,
+                r#"{"prompt":"different"}"#,
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            DbError::Conflict(message) if message.contains("different creation request")
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_creative_project_retries_have_one_insert_authority() {
+        let (repo, db, provider_id) = repo().await;
+        let project_id = seed_creative_project(&db).await;
+        let node_id = WorkshopNodeId::new().into_string();
+        let task_id = CreationTaskId::new().into_string();
+        let repo = Arc::new(repo);
+        let mut retries = Vec::new();
+        for _ in 0..8 {
+            let repo = repo.clone();
+            let task_id = task_id.clone();
+            let project_id = project_id.clone();
+            let node_id = node_id.clone();
+            let provider_id = provider_id.clone();
+            retries.push(tokio::spawn(async move {
+                repo.get_or_create_creative_project_task(creative_params(
+                    &task_id,
+                    &project_id,
+                    &node_id,
+                    &provider_id,
+                    r#"{"same":true}"#,
+                ))
+                .await
+                .unwrap()
+                .inserted
+            }));
+        }
+        let mut insert_authorities = 0;
+        for retry in retries {
+            insert_authorities += usize::from(retry.await.unwrap());
+        }
+        assert_eq!(insert_authorities, 1);
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM creation_tasks WHERE creation_task_id = ?",
+        )
+        .bind(&task_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[tokio::test]

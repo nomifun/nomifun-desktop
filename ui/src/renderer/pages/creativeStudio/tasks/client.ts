@@ -11,8 +11,8 @@ import {
   getBaseUrl,
 } from '@/common/adapter/httpBridge';
 import {
+  CANONICAL_UUID_V7,
   parseAssetId,
-  parseCanvasId,
   parseCreationTaskId,
   parseProviderId,
   parseWorkshopNodeId,
@@ -24,6 +24,7 @@ import {
   CreativeTaskContractError,
   assertTaskCapabilityPair,
   isCreativeTaskCapability,
+  isTerminalCreativeTaskStatus,
   modelTaskForCapability,
 } from './types';
 import type {
@@ -62,9 +63,24 @@ const CREATION_MODEL_TASKS = new Set<CreativeCreationModelTask>([
 ]);
 
 export interface CreationTaskWireApi {
-  create(body: unknown, signal?: AbortSignal): Promise<unknown>;
+  create(body: unknown, idempotencyKey: string, signal?: AbortSignal): Promise<unknown>;
   get(taskId: string, signal?: AbortSignal): Promise<unknown>;
   cancel(taskId: string, signal?: AbortSignal): Promise<unknown>;
+}
+
+function parseCreativeProjectId(
+  value: unknown,
+  field: string,
+  code: 'invalid_request' | 'invalid_response' = 'invalid_response'
+): string {
+  if (typeof value !== 'string' || !CANONICAL_UUID_V7.test(value)) {
+    throw new CreativeTaskContractError(
+      code,
+      `Invalid Creative Studio ${field}`,
+      field
+    );
+  }
+  return value;
 }
 
 export interface HttpCreationTaskApiOptions {
@@ -344,13 +360,22 @@ export function mapCreationTaskWire(
 ): CreativeTask {
   const wire = requireRecord(value, 'response');
   const capability = parseCapability(wire.capability);
-  const projectId = wire.canvas_id === null ? null : String(parseCanvasId(wire.canvas_id));
+  const projectId = wire.project_id === null
+    ? null
+    : parseCreativeProjectId(wire.project_id, 'project_id');
   const nodeId = wire.node_id === null ? null : String(parseWorkshopNodeId(wire.node_id));
   if (projectId === null || nodeId === null) {
     throw new CreativeTaskContractError(
       'ownership_mismatch',
-      'Creative Studio tasks require both canvas_id and node_id ownership',
-      projectId === null ? 'canvas_id' : 'node_id'
+      'Creative Studio tasks require both project_id and node_id ownership',
+      projectId === null ? 'project_id' : 'node_id'
+    );
+  }
+  if (wire.canvas_id !== null) {
+    throw new CreativeTaskContractError(
+      'ownership_mismatch',
+      'Creative Studio tasks must not carry legacy canvas_id ownership',
+      'canvas_id'
     );
   }
   const task: CreativeTask = {
@@ -386,7 +411,7 @@ function normalizeIdentity(identity: CreativeTaskIdentity): CreativeTaskIdentity
   }
   assertTaskCapabilityPair(identity.task, capability);
   return {
-    projectId: String(parseCanvasId(identity.projectId)),
+    projectId: parseCreativeProjectId(identity.projectId, 'projectId', 'invalid_request'),
     nodeId: String(parseWorkshopNodeId(identity.nodeId)),
     providerId: String(parseProviderId(identity.providerId)),
     model: requireNonBlankString(identity.model, 'model'),
@@ -404,6 +429,7 @@ function normalizeReference(reference: CreativeTaskReference): CreativeTaskRefer
 
 function toCreateTaskBody(input: CreateCreativeTaskInput): {
   identity: CreativeTaskIdentity;
+  idempotencyKey: string;
   body: Record<string, unknown>;
 } {
   const identity = normalizeIdentity(input);
@@ -423,8 +449,9 @@ function toCreateTaskBody(input: CreateCreativeTaskInput): {
   });
   return {
     identity,
+    idempotencyKey: String(parseCreationTaskId(input.idempotencyKey)),
     body: {
-      canvas_id: identity.projectId,
+      project_id: identity.projectId,
       node_id: identity.nodeId,
       provider_id: identity.providerId,
       model: identity.model,
@@ -465,7 +492,13 @@ export class HttpCreationTaskApi implements CreationTaskWireApi {
     this.authHeaders = options.authHeaders ?? buildBackendAuthHeaders;
   }
 
-  private async request(method: string, path: string, body: unknown, signal?: AbortSignal): Promise<unknown> {
+  private async request(
+    method: string,
+    path: string,
+    body: unknown,
+    signal?: AbortSignal,
+    requestHeaders: Record<string, string> = {}
+  ): Promise<unknown> {
     throwIfAborted(signal);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       let response: Response;
@@ -475,6 +508,7 @@ export class HttpCreationTaskApi implements CreationTaskWireApi {
           headers: {
             ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
             ...this.authHeaders(method),
+            ...requestHeaders,
           },
           body: body === undefined ? undefined : JSON.stringify(body),
           signal,
@@ -508,8 +542,10 @@ export class HttpCreationTaskApi implements CreationTaskWireApi {
     );
   }
 
-  create(body: unknown, signal?: AbortSignal): Promise<unknown> {
-    return this.request('POST', '/api/creation/tasks', body, signal);
+  create(body: unknown, idempotencyKey: string, signal?: AbortSignal): Promise<unknown> {
+    return this.request('POST', '/api/creation/tasks', body, signal, {
+      'Idempotency-Key': idempotencyKey,
+    });
   }
 
   get(taskId: string, signal?: AbortSignal): Promise<unknown> {
@@ -536,8 +572,11 @@ export class CreativeTaskClient implements CreativeTaskPort {
 
   async create(input: CreateCreativeTaskInput, signal?: AbortSignal): Promise<CreativeTask> {
     throwIfAborted(signal);
-    const { identity, body } = toCreateTaskBody(input);
-    return mapCreationTaskWire(await this.api.create(body, signal), identity);
+    const { identity, idempotencyKey, body } = toCreateTaskBody(input);
+    return mapCreationTaskWire(
+      await this.api.create(body, idempotencyKey, signal),
+      { taskId: idempotencyKey, ...identity }
+    );
   }
 
   async get(reference: CreativeTaskReference, signal?: AbortSignal): Promise<CreativeTask> {
@@ -549,7 +588,15 @@ export class CreativeTaskClient implements CreativeTaskPort {
   async cancel(reference: CreativeTaskReference, signal?: AbortSignal): Promise<CreativeTask> {
     throwIfAborted(signal);
     const normalized = normalizeReference(reference);
-    return mapCreationTaskWire(await this.api.cancel(normalized.taskId, signal), normalized);
+    const task = mapCreationTaskWire(await this.api.cancel(normalized.taskId, signal), normalized);
+    if (!isTerminalCreativeTaskStatus(task.status)) {
+      throw new CreativeTaskContractError(
+        'invalid_response',
+        `Cancel did not return an authoritative terminal task: ${task.status}`,
+        'status'
+      );
+    }
+    return task;
   }
 }
 
