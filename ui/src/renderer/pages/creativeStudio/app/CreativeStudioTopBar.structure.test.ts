@@ -38,6 +38,15 @@ describe('Creative Studio application navigation structure', () => {
     expect(topBarStyles.includes('gap: 28px;')).toBe(true);
   });
 
+  test('keeps source light-dark switching inside the focused product shell', () => {
+    expect(topBarSource.includes('onToggleTheme')).toBe(true);
+    expect(topBarSource.includes("t('settings.darkMode', { defaultValue: '深色' })")).toBe(true);
+    expect(topBarSource.includes("t('settings.lightMode', { defaultValue: '浅色' })")).toBe(true);
+    expect(topBarSource.includes("aria-pressed={theme === 'dark'}")).toBe(true);
+    expect(topBarSource.includes("<Moon theme='outline' size={17}")).toBe(true);
+    expect(topBarSource.includes("<SunOne theme='outline' size={17}")).toBe(true);
+  });
+
   test('uses a zero-content index instead of a fabricated landing page', () => {
     expect(homeSource.includes('const CreativeStudioHomePage: React.FC = () => null')).toBe(true);
     expect(homeSource.includes('CreativeStudioRouteRedirect')).toBe(true);

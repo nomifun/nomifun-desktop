@@ -15,6 +15,8 @@ import {
   FolderOpen,
   FullScreen,
   ImageFiles,
+  Moon,
+  SunOne,
   VideoTwo,
 } from '@icon-park/react';
 import classNames from 'classnames';
@@ -36,6 +38,8 @@ import {
 export interface CreativeStudioTopBarProps {
   title: string;
   backLabel: string;
+  theme: 'light' | 'dark';
+  onToggleTheme: () => void;
   onBack: () => void;
 }
 
@@ -47,7 +51,13 @@ interface NavigationItem {
 }
 
 /** Source product navigation; audio remains a route, but is not a source top-level destination. */
-const CreativeStudioTopBar: React.FC<CreativeStudioTopBarProps> = ({ title, backLabel, onBack }) => {
+const CreativeStudioTopBar: React.FC<CreativeStudioTopBarProps> = ({
+  title,
+  backLabel,
+  theme,
+  onToggleTheme,
+  onBack,
+}) => {
   const { t } = useTranslation();
   const location = useLocation();
   const desktopRuntime = isDesktopShell();
@@ -55,6 +65,9 @@ const CreativeStudioTopBar: React.FC<CreativeStudioTopBarProps> = ({ title, back
   const showWindowControls = desktopRuntime && !macRuntime;
   const section = creativeStudioSectionForPath(location.pathname);
   const activeSection = section === 'canvas' ? 'projects' : section;
+  const themeToggleLabel = theme === 'light'
+    ? t('settings.darkMode', { defaultValue: '深色' })
+    : t('settings.lightMode', { defaultValue: '浅色' });
   const navigation: NavigationItem[] = [
     {
       section: 'projects',
@@ -139,6 +152,21 @@ const CreativeStudioTopBar: React.FC<CreativeStudioTopBarProps> = ({ title, back
         </nav>
 
         <div className={styles.trailing}>
+          <InstantHoverTooltip content={themeToggleLabel} position='bottom'>
+            <button
+              type='button'
+              className={styles.iconButton}
+              onClick={onToggleTheme}
+              aria-label={themeToggleLabel}
+              aria-pressed={theme === 'dark'}
+            >
+              {theme === 'light' ? (
+                <Moon theme='outline' size={17} fill='currentColor' strokeWidth={3} />
+              ) : (
+                <SunOne theme='outline' size={17} fill='currentColor' strokeWidth={3} />
+              )}
+            </button>
+          </InstantHoverTooltip>
           <InstantHoverTooltip content={backLabel} position='bottom'>
             <button
               type='button'

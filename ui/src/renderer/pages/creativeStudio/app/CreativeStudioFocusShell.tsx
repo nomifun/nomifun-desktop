@@ -9,6 +9,8 @@ import React, { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 
+import { useThemeContext } from '@renderer/hooks/context/ThemeContext';
+
 import styles from './CreativeStudioFocusShell.module.css';
 import CreativeStudioTopBar from './CreativeStudioTopBar';
 import { creativeStudioSectionForPath, WORKBENCH_HOME_PATH } from './routes';
@@ -18,11 +20,15 @@ const CreativeStudioFocusShell: React.FC = () => {
   const { t } = useTranslation();
   const location = useLocation();
   const navigate = useNavigate();
+  const { theme, setTheme } = useThemeContext();
   const section = creativeStudioSectionForPath(location.pathname);
 
   const returnToWorkbench = useCallback(() => {
     void navigate(WORKBENCH_HOME_PATH, { replace: true });
   }, [navigate]);
+  const toggleTheme = useCallback(() => {
+    void setTheme(theme === 'light' ? 'dark' : 'light');
+  }, [setTheme, theme]);
 
   return (
     <div
@@ -33,6 +39,8 @@ const CreativeStudioFocusShell: React.FC = () => {
       <CreativeStudioTopBar
         title={t('creativeStudio.title')}
         backLabel={t('creativeStudio.focus.backToWorkbench')}
+        theme={theme}
+        onToggleTheme={toggleTheme}
         onBack={returnToWorkbench}
       />
       <main className={styles.content} data-creative-studio-route-outlet>
