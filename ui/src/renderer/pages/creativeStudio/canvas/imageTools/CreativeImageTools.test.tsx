@@ -1,0 +1,69 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, test } from "bun:test";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+
+import type { CreativeAsset } from "../../assets";
+import CreativeCanvasImageToolbar from "./CreativeCanvasImageToolbar";
+import { CreativeImageCropDialogContent } from "./CreativeImageCropDialog";
+
+const ASSET: CreativeAsset = {
+  id: "018f7a3c-1234-7abc-8abc-1234567890ab",
+  kind: "image",
+  title: "导演截图",
+  collection: null,
+  tags: [],
+  mimeType: "image/png",
+  width: 1_920,
+  height: 1_080,
+  bytes: 1,
+  inLibrary: true,
+  textContent: null,
+  origin: null,
+  originalUrl: "/api/creative-studio/files/asset",
+  thumbnailUrl: null,
+  createdAt: 1,
+  updatedAt: 1,
+};
+
+describe("creative image tool surfaces", () => {
+  test("shows only real implemented node actions when selected", () => {
+    const html = renderToStaticMarkup(
+      <CreativeCanvasImageToolbar
+        visible
+        onCrop={() => undefined}
+        onDownload={() => undefined}
+      >
+        <article>image</article>
+      </CreativeCanvasImageToolbar>,
+    );
+    expect(html.includes('aria-label="图片工具"')).toBe(true);
+    expect(html.includes("裁剪并生成新节点")).toBe(true);
+    expect(html.includes("下载图片")).toBe(true);
+    expect(html.includes("局部编辑")).toBe(false);
+    expect(html.includes("AI 超分")).toBe(false);
+  });
+
+  test("renders the source crop controls, exact dimensions, and all handles", () => {
+    const html = renderToStaticMarkup(
+      <CreativeImageCropDialogContent
+        visible
+        asset={ASSET}
+        onClose={() => undefined}
+        onConfirm={() => undefined}
+      />,
+    );
+    expect(html.includes("data-creative-image-crop-dialog")).toBe(true);
+    expect(html.includes("裁剪尺寸 1459 × 821")).toBe(true);
+    expect(html.includes("原图 1920 × 1080")).toBe(true);
+    expect(html.includes("确认裁剪")).toBe(true);
+    expect(html.split("调整裁剪框：").length - 1).toBe(8);
+    expect(html.includes("自由比例")).toBe(true);
+    expect(html.includes("16:9")).toBe(true);
+  });
+});

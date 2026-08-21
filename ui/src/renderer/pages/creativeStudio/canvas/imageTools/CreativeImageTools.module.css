@@ -1,0 +1,310 @@
+.nodeHost {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.nodeHost > :first-child {
+  width: 100%;
+  height: 100%;
+}
+
+.nodeToolbar {
+  position: absolute;
+  bottom: calc(100% + 10px * var(--creative-canvas-inverse-zoom));
+  left: 50%;
+  z-index: 30;
+  display: flex;
+  gap: 2px;
+  width: max-content;
+  padding: 5px;
+  border: 1px solid color-mix(in srgb, var(--color-text-1) 68%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-text-1) 92%, black);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.24);
+  color: var(--color-bg-1);
+  pointer-events: auto;
+  transform: translateX(-50%) scale(var(--creative-canvas-inverse-zoom));
+  transform-origin: center bottom;
+}
+
+.nodeToolbar button {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.nodeToolbar button:hover,
+.nodeToolbar button:focus-visible {
+  background: color-mix(in srgb, var(--color-bg-1) 18%, transparent);
+  outline: none;
+}
+
+.nodeToolbar button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.cropModal :global(.arco-modal-content) {
+  padding: 18px 24px 20px;
+}
+
+.cropDialog {
+  display: grid;
+  gap: 14px;
+}
+
+.cropStage {
+  position: relative;
+  width: 100%;
+  max-height: min(52vh, 430px);
+  overflow: hidden;
+  border-radius: 10px;
+  background: #080808;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  touch-action: none;
+}
+
+.cropStage > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  user-select: none;
+}
+
+.cropImageError {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-height: 280px;
+  place-items: center;
+  padding: 24px;
+  color: rgba(255, 255, 255, 0.76);
+  font-size: 13px;
+}
+
+.cropBox {
+  position: absolute;
+  z-index: 2;
+  box-sizing: border-box;
+  border: 2px solid rgba(255, 255, 255, 0.96);
+  outline: none;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.48);
+  cursor: move;
+}
+
+.cropBox:focus-visible {
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.48);
+}
+
+.cropBox::before {
+  position: absolute;
+  inset: 0;
+  background-image: inherit;
+  content: "";
+  pointer-events: none;
+}
+
+.cropGridVerticalOne,
+.cropGridVerticalTwo,
+.cropGridHorizontalOne,
+.cropGridHorizontalTwo {
+  position: absolute;
+  z-index: 1;
+  display: block;
+  background: rgba(255, 255, 255, 0.42);
+  pointer-events: none;
+}
+
+.cropGridVerticalOne,
+.cropGridVerticalTwo {
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.cropGridVerticalOne {
+  left: 33.333%;
+}
+
+.cropGridVerticalTwo {
+  left: 66.666%;
+}
+
+.cropGridHorizontalOne,
+.cropGridHorizontalTwo {
+  right: 0;
+  left: 0;
+  height: 1px;
+}
+
+.cropGridHorizontalOne {
+  top: 33.333%;
+}
+
+.cropGridHorizontalTwo {
+  top: 66.666%;
+}
+
+.cropHandle {
+  position: absolute;
+  z-index: 3;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.28);
+  transform: translate(-50%, -50%);
+}
+
+.cropHandle[data-crop-handle="north-west"] {
+  top: 0;
+  left: 0;
+  cursor: nwse-resize;
+}
+
+.cropHandle[data-crop-handle="north"] {
+  top: 0;
+  left: 50%;
+  cursor: ns-resize;
+}
+
+.cropHandle[data-crop-handle="north-east"] {
+  top: 0;
+  left: 100%;
+  cursor: nesw-resize;
+}
+
+.cropHandle[data-crop-handle="east"] {
+  top: 50%;
+  left: 100%;
+  cursor: ew-resize;
+}
+
+.cropHandle[data-crop-handle="south-east"] {
+  top: 100%;
+  left: 100%;
+  cursor: nwse-resize;
+}
+
+.cropHandle[data-crop-handle="south"] {
+  top: 100%;
+  left: 50%;
+  cursor: ns-resize;
+}
+
+.cropHandle[data-crop-handle="south-west"] {
+  top: 100%;
+  left: 0;
+  cursor: nesw-resize;
+}
+
+.cropHandle[data-crop-handle="west"] {
+  top: 50%;
+  left: 0;
+  cursor: ew-resize;
+}
+
+.cropHandle:focus-visible {
+  outline: 2px solid rgb(var(--primary-6));
+  outline-offset: 2px;
+}
+
+.cropMetaBar {
+  display: flex;
+  box-sizing: border-box;
+  min-height: 50px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 9px;
+  background: var(--color-fill-1);
+}
+
+.cropMetrics {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  color: var(--color-text-2);
+  font-size: 12px;
+}
+
+.aspectSelect {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.aspectSelect select {
+  min-width: 110px;
+  height: 32px;
+  padding: 0 28px 0 10px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  font: inherit;
+  font-size: 12px;
+}
+
+.cropError {
+  padding: 9px 11px;
+  border: 1px solid rgba(var(--danger-6), 0.26);
+  border-radius: 8px;
+  background: rgba(var(--danger-6), 0.08);
+  color: rgb(var(--danger-6));
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.cropFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .nodeToolbar span {
+    display: none;
+  }
+
+  .cropModal :global(.arco-modal-content) {
+    padding: 14px;
+  }
+
+  .cropMetaBar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .aspectSelect {
+    justify-content: space-between;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nodeToolbar button {
+    transition: none;
+  }
+}

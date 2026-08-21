@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { uuidv7 } from '@/common/utils/uuidv7';
 import { Delete, Group, Loading, Refresh, Ungroup } from '@icon-park/react';
 import { Button, Modal, Tooltip } from '@arco-design/web-react';
 import React, {
@@ -24,7 +25,10 @@ import {
   useCreativeAssetPickerDialog,
   useCreativeAssets,
 } from '../../assets';
-import { manualUploadRejectionMessage } from '../../assets/page/model';
+import {
+  creativeAssetDownloadName,
+  manualUploadRejectionMessage,
+} from '../../assets/page/model';
 import {
   CREATIVE_STUDIO_PROJECTS_PATH,
   CREATIVE_STUDIO_WORKFLOWS_PATH,
@@ -73,6 +77,14 @@ import {
   type CanvasContextTarget,
   type CanvasIntegrationIntent,
 } from '../interactions';
+import {
+  CreativeCanvasImageToolbar,
+  CreativeImageCropDialog,
+  cropCreativeImageAsset,
+  nextDerivedImagePosition,
+  uploadCreativeImageCrop,
+  type CreativeImageCropRect,
+} from '../imageTools';
 import { CreativeNodeView } from '../nodes';
 import CreativeCanvasAgentPanel, {
   type CreativeCanvasAgentPanelHandle,
@@ -135,6 +147,11 @@ interface ProductCreateNodeMenuState {
 interface PendingPanoramaChoice {
   asset: CreativeAsset;
   worldPosition: CanvasPoint;
+}
+
+interface PendingImageCrop {
+  nodeId: string;
+  asset: CreativeAsset;
 }
 
 interface AgentDocumentState {
@@ -294,6 +311,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const hydratedBackgroundRef = useRef<{ projectId: string; revision: string } | null>(null);
   const knownAssetsRef = useRef<ReadonlyMap<string, CreativeAsset>>(new Map());
   const assetImportBusyRef = useRef(false);
+  const imageToolBusyRef = useRef(false);
+  const imageToolAbortRef = useRef<AbortController | null>(null);
+  const activeProjectIdRef = useRef(projectId);
   const workflowRequestRef = useRef(0);
 
   const [canvasState, setCanvasState] = useState<CanvasState | null>(null);
@@ -318,6 +338,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [createNodeMenu, setCreateNodeMenu] = useState<ProductCreateNodeMenuState | null>(null);
   const [pendingPanoramaChoice, setPendingPanoramaChoice] = useState<PendingPanoramaChoice | null>(null);
   const [assetImportBusy, setAssetImportBusy] = useState(false);
+  const [pendingImageCrop, setPendingImageCrop] = useState<PendingImageCrop | null>(null);
+  const [imageCropBusy, setImageCropBusy] = useState(false);
+  const [imageCropProgress, setImageCropProgress] = useState<number | null>(null);
+  const [imageCropError, setImageCropError] = useState<string | null>(null);
   const [agentDocumentState, setAgentDocumentState] = useState<AgentDocumentState | null>(null);
   const [workflows, setWorkflows] = useState<WorkflowDefinitionV1[]>([]);
   const [workflowLoading, setWorkflowLoading] = useState(false);
@@ -379,6 +403,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, []);
 
   useLayoutEffect(() => {
+    activeProjectIdRef.current = projectId;
+    imageToolAbortRef.current?.abort();
+    imageToolAbortRef.current = null;
     const defaultPanels = structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS);
     panelsRef.current = defaultPanels;
     setPanels(defaultPanels);
@@ -391,9 +418,17 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setCreateNodeMenu(null);
     setPendingPanoramaChoice(null);
     setAssetImportBusy(false);
+    setPendingImageCrop(null);
+    setImageCropBusy(false);
+    setImageCropProgress(null);
+    setImageCropError(null);
     setAgentDocumentState(null);
     assetImportBusyRef.current = false;
+    imageToolBusyRef.current = false;
     knownAssetsRef.current = new Map();
+    return () => {
+      imageToolAbortRef.current?.abort();
+    };
   }, [projectId]);
 
   useEffect(() => {
@@ -515,6 +550,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, []);
 
   const flushBeforeLeave = useCallback(async (): Promise<boolean> => {
+    if (imageToolBusyRef.current) {
+      setNotice('图片工具仍在处理，请等待完成后再离开。');
+      return false;
+    }
     if (!(await agentPanelRef.current?.prepareToLeave() ?? true)) return false;
     const editor = editorRef.current;
     if (!editor) return true;
@@ -653,6 +692,200 @@ const CreativeCanvasProductRoute: React.FC = () => {
       }
     },
     [insertAssetAtWorld]
+  );
+
+  const resolveCanvasImageAsset = useCallback(
+    async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
+      const assetId = node.data.assetId?.trim();
+      if (!assetId) throw new Error('该图片节点尚未关联真实素材。');
+      const cached = knownAssetsRef.current.get(assetId);
+      const asset = cached ?? (await creativeAssetClient.get(assetId));
+      if (asset.kind !== 'image') {
+        throw new Error('该节点关联的素材不是图片，已停止图片操作。');
+      }
+      knownAssetsRef.current = new Map(knownAssetsRef.current).set(asset.id, asset);
+      return asset;
+    },
+    []
+  );
+
+  const handleOpenImageCrop = useCallback(
+    async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
+      if (imageToolBusyRef.current || assetImportBusyRef.current) {
+        setNotice('已有图片或素材操作正在进行，请等待完成。');
+        return;
+      }
+      setImageCropError(null);
+      try {
+        const asset = await resolveCanvasImageAsset(node);
+        if (activeProjectIdRef.current !== projectId) return;
+        setImageCropProgress(null);
+        setPendingImageCrop({ nodeId: node.id, asset });
+      } catch (error) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setNotice(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [projectId, resolveCanvasImageAsset]
+  );
+
+  const handleDownloadImage = useCallback(
+    async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
+      try {
+        const asset = await resolveCanvasImageAsset(node);
+        if (activeProjectIdRef.current !== projectId) return;
+        const anchor = document.createElement('a');
+        anchor.href = asset.originalUrl;
+        anchor.download = creativeAssetDownloadName(asset);
+        anchor.rel = 'noopener noreferrer';
+        anchor.click();
+      } catch (error) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setNotice(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [projectId, resolveCanvasImageAsset]
+  );
+
+  const closeImageCrop = useCallback(() => {
+    if (imageToolBusyRef.current) return;
+    setPendingImageCrop(null);
+    setImageCropProgress(null);
+    setImageCropError(null);
+  }, []);
+
+  const handleConfirmImageCrop = useCallback(
+    async (crop: CreativeImageCropRect) => {
+      const request = pendingImageCrop;
+      const editor = editorRef.current;
+      if (!request || !editor || imageToolBusyRef.current) return;
+      if (assetImportBusyRef.current) {
+        setImageCropError('另一个素材上传仍在进行，请等待完成后重试。');
+        return;
+      }
+
+      const controller = new AbortController();
+      imageToolAbortRef.current = controller;
+      imageToolBusyRef.current = true;
+      setImageCropBusy(true);
+      setImageCropProgress(0);
+      setImageCropError(null);
+      let uploadedAsset: CreativeAsset | null = null;
+
+      try {
+        const cropped = await cropCreativeImageAsset({
+          asset: request.asset,
+          crop,
+          signal: controller.signal,
+        });
+        const uploaded = await uploadCreativeImageCrop({
+          port: creativeAssetClient,
+          source: request.asset,
+          file: cropped.file,
+          operationId: uuidv7(),
+          signal: controller.signal,
+          onProgress: setImageCropProgress,
+        });
+        uploadedAsset = uploaded.asset;
+        controller.signal.throwIfAborted();
+        if (activeProjectIdRef.current !== projectId) {
+          throw new DOMException('Project changed', 'AbortError');
+        }
+
+        const current = editor.getState();
+        const source = current.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
+            node.id === request.nodeId && node.type === 'image'
+        );
+        if (!source || source.data.assetId !== request.asset.id) {
+          throw new Error('原图片节点已被删除或替换；裁剪素材已保存在素材库中。');
+        }
+
+        const position = nextDerivedImagePosition(
+          current.document,
+          source,
+          CREATIVE_CANVAS_PRODUCT_NODE_SIZES.image
+        );
+        const derived = creativeNodeFromAsset(
+          uploaded.asset,
+          current,
+          measuredSize(canvasHostRef.current),
+          { position }
+        );
+        if (derived.type !== 'image') {
+          throw new Error('裁剪结果未能构造成图片节点。');
+        }
+        const connection = {
+          sourceNodeId: source.id,
+          targetNodeId: derived.id,
+        };
+        const validation = validateCanvasConnection(
+          {
+            ...current.document,
+            nodes: [...current.document.nodes, derived],
+          },
+          connection
+        );
+        if (!validation.ok) {
+          throw new Error(
+            `无法连接裁剪结果：${connectionErrorMessage(validation.code)}。`
+          );
+        }
+
+        knownAssetsRef.current = new Map(knownAssetsRef.current).set(
+          uploaded.asset.id,
+          uploaded.asset
+        );
+        const at = Date.now();
+        const mergeKey = `image-crop:${source.id}:${uploaded.asset.id}`;
+        editor.dispatch(canvasCommands.addNode(derived, { at, mergeKey }));
+        editor.dispatch(
+          canvasCommands.connect(source.id, derived.id, {
+            sourceHandle: 'source',
+            targetHandle: 'target',
+            at,
+            mergeKey,
+          })
+        );
+        editor.dispatch(canvasCommands.setSelection([derived.id]));
+        setPendingImageCrop(null);
+        setImageCropProgress(null);
+        void assets.reload();
+
+        const flush = await editor.flush();
+        if (flush.status === 'saved' || flush.status === 'noop') {
+          setNotice(
+            uploaded.recoveredAfterResponseLoss
+              ? '上传响应中断后已找回真实裁剪素材，并将派生节点保存到画布。'
+              : '已裁剪真实原图，创建派生图片节点并保存连线。'
+          );
+        } else {
+          setNotice(`裁剪素材已上传，但画布保存失败：${flush.error.message}`);
+        }
+      } catch (error) {
+        const aborted =
+          controller.signal.aborted ||
+          (error instanceof Error && error.name === 'AbortError');
+        if (!aborted && activeProjectIdRef.current === projectId) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (uploadedAsset) {
+            setPendingImageCrop(null);
+            setImageCropProgress(null);
+            void assets.reload();
+            setNotice(message);
+          } else {
+            setImageCropError(message);
+          }
+        }
+      } finally {
+        if (imageToolAbortRef.current === controller) {
+          imageToolAbortRef.current = null;
+          imageToolBusyRef.current = false;
+          setImageCropBusy(false);
+        }
+      }
+    },
+    [assets, pendingImageCrop, projectId]
   );
 
   const insertClipboardText = useCallback((text: string, worldPosition: CanvasPoint) => {
@@ -1130,7 +1363,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   );
   const productDisabled = save.revision === null;
   const projectTitle = project.detail?.project.title ?? (project.isLoading ? '正在载入项目…' : '画布项目');
-  const saveMessage = save.error?.message ?? notice ?? undefined;
+  const saveMessage = save.error?.message ?? undefined;
   const compact = viewportSize.width < 760;
   const panelViews = creativeCanvasProductPanelViews(panels);
   const canvasLayoutStyle = {
@@ -1254,18 +1487,31 @@ const CreativeCanvasProductRoute: React.FC = () => {
                   onOpen,
                   onToggleLock,
                   dragHandleProps,
-                }) => (
-                  <CreativeNodeView
-                    node={node}
-                    selected={selected}
-                    placement='contained'
-                    asset={resolveCreativeNodeAssetPresentation(node, knownAssetsById) ?? undefined}
-                    onActivate={onActivate}
-                    onOpen={onOpen}
-                    onToggleLock={onToggleLock}
-                    onPointerDown={dragHandleProps.onPointerDown}
-                  />
-                )}
+                }) => {
+                  const nodeView = (
+                    <CreativeNodeView
+                      node={node}
+                      selected={selected}
+                      placement='contained'
+                      asset={resolveCreativeNodeAssetPresentation(node, knownAssetsById) ?? undefined}
+                      onActivate={onActivate}
+                      onOpen={onOpen}
+                      onToggleLock={onToggleLock}
+                      onPointerDown={dragHandleProps.onPointerDown}
+                    />
+                  );
+                  if (node.type !== 'image') return nodeView;
+                  return (
+                    <CreativeCanvasImageToolbar
+                      visible={selected && Boolean(node.data.assetId)}
+                      disabled={productDisabled || assetImportBusy || imageCropBusy}
+                      onCrop={() => void handleOpenImageCrop(node)}
+                      onDownload={() => void handleDownloadImage(node)}
+                    >
+                      {nodeView}
+                    </CreativeCanvasImageToolbar>
+                  );
+                }}
                 renderEdge={(context) => <CreativeCanvasConnectionEdge {...context} />}
                 screenOverlay={
                   <CreativeCanvasInteractionOverlays
@@ -1432,6 +1678,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
         }}
       />
       {workflowAssetPicker.dialog}
+      <CreativeImageCropDialog
+        visible={pendingImageCrop !== null}
+        asset={pendingImageCrop?.asset ?? null}
+        busy={imageCropBusy}
+        progress={imageCropProgress}
+        error={imageCropError}
+        onClose={closeImageCrop}
+        onConfirm={(crop) => void handleConfirmImageCrop(crop)}
+      />
       <Modal
         title='选择 2:1 图片的节点类型'
         visible={pendingPanoramaChoice !== null}
