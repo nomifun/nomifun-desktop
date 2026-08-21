@@ -2,7 +2,7 @@
 
 > 用途：在长任务发生上下文压缩或人员切换时，从可验证提交继续，而不是重新审计整仓。
 > 分支：`codex/infinite-canvas-rebuild`
-> 最后功能锚点：`7e45f8ad`（`feat(creative-studio): add attributed prompt catalog`）
+> 最后功能锚点：`03b8d591`（`fix(creative-studio): align project center with source`）
 > 参考产品锚点：`ef7303d`
 
 ## 1. 续接协议
@@ -40,6 +40,8 @@
 - 素材中心：1440×900 浅色源/目标对照完成；真实分页、搜索提交、上传限制、编辑、删除与合集重命名已有定向测试。
 - 提示词中心：1440×900 浅色源/目标并排对照完成；7 个固定上游共同步 1592 条。搜索 Enter、分类、详情、复制、加入素材、刷新恢复及 30→60 渐进加载均真实通过；干净重载 Console 无错误。
 - 提示词对照图：`C:\Users\MINISFORUM\.codex\visualizations\2026\08\19\01a01aa7-ea42-76e3-aa34-9158a1382c97\32-prompts-accepted-source-target-comparison.png`。
+- 项目中心：新建/打开/返回、重命名与重载持久化、选择态、真实 ZIP 导出/导入、删除确认与取消均已验证；隔离导入副本通过精确 ID 清理。1440×900 浅色/深色与 1024×768 深色源/目标同状态对照完成，干净重载 Console 无错误。
+- 项目中心对照图：`C:\Users\MINISFORUM\.codex\visualizations\2026\08\19\01a01aa7-ea42-76e3-aa34-9158a1382c97\38-projects-accepted-source-target-comparison-light-1440x900.png`、`41-projects-source-target-comparison-dark-1440x900.png`、`44-projects-source-target-comparison-dark-1024x768.png`。
 
 `7e45f8ad` 的提交前检查：
 
@@ -47,6 +49,12 @@
 - `cargo check -p nomifun-app --lib`：通过；输出仅有其他 crate 的既存未使用代码警告。
 - 提示词 + 资产 client + canvas node factory：40 passed。
 - `bun run typecheck`、`bun run check:icons`、`bun run check:theme`、`cargo fmt --check`、`git diff --check`：通过。
+
+`03b8d591` 的提交前检查：
+
+- 项目中心定向测试：16 passed / 113 assertions。
+- `bun run typecheck`、`bun run check:icons`、`bun run check:theme`、`bun run check:dead-css`、`git diff --check`：通过。
+- UI production build：通过；仅保留仓库既存的动态/静态重复导入与大 chunk 提示。
 
 ## 4. 仍需明确保留的限制
 
@@ -59,10 +67,9 @@
 
 ## 5. 下一步单线程优先级
 
-1. 项目中心：新建/打开/重命名/删除/导入/导出，完成 1440×900 双主题与 1024×768 状态验收。
-2. 画布主链：新项目上逐项验证节点、拖拽/框选/缩放/连线、撤销重做、面板持久化、冲突和重开恢复。
-3. 生图、视频与工作流：先验证无模型/失败/取消/恢复，再在得到成本授权后执行一个真实 provider 冒烟。
-4. Director：验证场景、时间轴、截图回填、归档重开，并确认所有不可用入口描述准确。
-5. P11：1280×720、1024×768、390×844、双主题、Tauri 慢环、UI build/桌面打包和最终能力文档。
+1. 画布主链：新项目上逐项验证节点、拖拽/框选/缩放/连线、撤销重做、面板持久化、冲突和重开恢复。
+2. 生图、视频与工作流：先验证无模型/失败/取消/恢复，再在得到成本授权后执行一个真实 provider 冒烟。
+3. Director：验证场景、时间轴、截图回填、归档重开，并确认所有不可用入口描述准确。
+4. P11：1280×720、1024×768、390×844、双主题、Tauri 慢环、UI build/桌面打包和最终能力文档。
 
-不要因为主体代码已存在就跳过这些门禁；下一提交应从第 1 项项目中心验收开始，发现问题只修该页及其直接契约。
+不要因为主体代码已存在就跳过这些门禁；下一提交应从第 1 项画布主链验收开始，发现问题只修画布页及其直接契约。
