@@ -53,7 +53,6 @@ const UNCONDITIONAL_UUIDV7_BUSINESS_IDS: &[(&str, &str)] = &[
     ("knowledge_bases", "knowledge_base_id"),
     ("knowledge_bindings", "knowledge_binding_id"),
     ("attachments", "attachment_id"),
-    ("workshop_canvases", "canvas_id"),
     ("workshop_assets", "asset_id"),
     ("channel_plugins", "channel_plugin_id"),
     ("channel_sessions", "channel_session_id"),
@@ -229,7 +228,6 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "users",
     "webhooks",
     "workshop_assets",
-    "workshop_canvases",
 ];
 
 /// True for the FTS5 virtual table and its shadow tables, whose physical shape
@@ -1154,24 +1152,24 @@ async fn remaining_uuid_logical_links_and_json_registry_enforce_text_values() {
 
     let project_id = nomifun_common::generate_id();
     let node_id = nomifun_common::generate_id();
-    let canvas_owner_asset_id = nomifun_common::generate_id();
+    let project_owner_asset_id = nomifun_common::generate_id();
     sqlx::query(
         "INSERT INTO workshop_assets \
          (asset_id, kind, title, origin, created_at, updated_at) \
-         VALUES (?, 'image', 'canvas owner origin', ?, 1, 1)",
+         VALUES (?, 'image', 'project owner origin', ?, 1, 1)",
     )
-    .bind(&canvas_owner_asset_id)
+    .bind(&project_owner_asset_id)
     .bind(serde_json::json!({
         "project_id": project_id,
         "node_id": node_id
     }).to_string())
     .execute(pool)
     .await
-    .expect("canonical canvas-node asset owner");
+    .expect("canonical project-node asset owner");
     assert!(
         sqlx::query("UPDATE workshop_assets SET origin = ? WHERE asset_id = ?")
             .bind(serde_json::json!({"project_id": project_id}).to_string())
-            .bind(&canvas_owner_asset_id)
+            .bind(&project_owner_asset_id)
             .execute(pool)
             .await
             .is_err(),

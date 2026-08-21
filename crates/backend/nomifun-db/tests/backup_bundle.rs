@@ -1014,9 +1014,11 @@ async fn workshop_asset_origin_rejects_legacy_and_noncanonical_creation_task_ref
         .execute(database.pool())
         .await
         .expect_err("retired or noncanonical CreationTask origin references must fail");
+        let message = error.to_string();
         assert!(
-            error.to_string().contains("CHECK constraint failed"),
-            "{label}: unexpected database error: {error}"
+            message.contains("CHECK constraint failed")
+                || message.contains("unsupported creative asset origin id key"),
+            "{label}: unexpected database error: {message}"
         );
         database.close().await;
     }

@@ -4,7 +4,7 @@ use serde_json::Value;
 use crate::error::DbError;
 use crate::models::{
     CreativeStudioProjectRow, CreativeStudioWorkflowRow, CreativeStudioWorkflowRunRow,
-    WorkshopAssetRow, WorkshopCanvasRow,
+    WorkshopAssetRow,
 };
 use crate::repository::IWorkshopRepository;
 use crate::repository::workshop::{AssetSort, ListAssetsParams, UpdateAssetParams};
@@ -35,7 +35,11 @@ impl SqliteWorkshopRepository {
 
 struct OriginReferences {
     provider_id: Option<String>,
-    canvas_id: Option<String>,
+    project_id: Option<String>,
+    node_id: Option<String>,
+    workflow_id: Option<String>,
+    workflow_run_id: Option<String>,
+    workflow_step_id: Option<String>,
     creation_task_id: Option<String>,
 }
 
@@ -66,7 +70,11 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
     let Some(origin) = origin else {
         return Ok(OriginReferences {
             provider_id: None,
-            canvas_id: None,
+            project_id: None,
+            node_id: None,
+            workflow_id: None,
+            workflow_run_id: None,
+            workflow_step_id: None,
             creation_task_id: None,
         });
     };
@@ -78,9 +86,14 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
     for retired_key in [
         "task_id",
         "providerId",
+        "canvas_id",
         "canvasId",
         "nodeId",
         "creationTaskId",
+        "projectId",
+        "workflowId",
+        "workflowRunId",
+        "workflowStepId",
     ] {
         if object.contains_key(retired_key) {
             return Err(DbError::Conflict(format!(
@@ -89,12 +102,44 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
         }
     }
     let provider_id = optional_origin_id(object, "provider_id")?;
-    let canvas_id = optional_origin_id(object, "canvas_id")?;
-    let _node_id = optional_origin_id(object, "node_id")?;
+    let project_id = optional_origin_id(object, "project_id")?;
+    let node_id = optional_origin_id(object, "node_id")?;
+    let workflow_id = optional_origin_id(object, "workflow_id")?;
+    let workflow_run_id = optional_origin_id(object, "workflow_run_id")?;
+    let workflow_step_id = optional_origin_id(object, "workflow_step_id")?;
     let creation_task_id = optional_origin_id(object, "creation_task_id")?;
+    let has_project_owner = project_id.is_some() || node_id.is_some();
+    if project_id.is_some() != node_id.is_some() {
+        return Err(DbError::Conflict(
+            "workshop asset project origin requires both project_id and node_id".into(),
+        ));
+    }
+    let workflow_owner_count = [
+        workflow_id.is_some(),
+        workflow_run_id.is_some(),
+        workflow_step_id.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    if workflow_owner_count != 0 && workflow_owner_count != 3 {
+        return Err(DbError::Conflict(
+            "workshop asset workflow origin requires workflow_id, workflow_run_id, and workflow_step_id"
+                .into(),
+        ));
+    }
+    if has_project_owner && workflow_owner_count != 0 {
+        return Err(DbError::Conflict(
+            "workshop asset origin cannot combine project and workflow ownership".into(),
+        ));
+    }
     Ok(OriginReferences {
         provider_id,
-        canvas_id,
+        project_id,
+        node_id,
+        workflow_id,
+        workflow_run_id,
+        workflow_step_id,
         creation_task_id,
     })
 }
@@ -367,7 +412,8 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         for asset in assets {
             let references = origin_references(asset.origin.as_deref())?;
             if references.provider_id.is_some()
-                || references.canvas_id.is_some()
+                || references.project_id.is_some()
+                || references.workflow_id.is_some()
                 || references.creation_task_id.is_some()
             {
                 return Err(DbError::Conflict(format!(
@@ -730,127 +776,6 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         )))
     }
 
-    // ---- canvases ----
-
-    async fn list_canvases(&self) -> Result<Vec<WorkshopCanvasRow>, DbError> {
-        let rows = sqlx::query_as::<_, WorkshopCanvasRow>(
-            "SELECT * FROM workshop_canvases ORDER BY updated_at DESC, id DESC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows)
-    }
-
-    async fn get_canvas(&self, id: &str) -> Result<Option<WorkshopCanvasRow>, DbError> {
-        let row = sqlx::query_as::<_, WorkshopCanvasRow>(
-            "SELECT * FROM workshop_canvases WHERE canvas_id = ?",
-        )
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row)
-    }
-
-    async fn create_canvas(&self, id: &str, title: &str, now: i64) -> Result<WorkshopCanvasRow, DbError> {
-        let row_id: i64 = sqlx::query_scalar(
-            "INSERT INTO workshop_canvases \
-                (canvas_id, title, thumbnail_rel_path, node_count, created_at, updated_at) \
-             VALUES (?, ?, NULL, 0, ?, ?) RETURNING id",
-        )
-        .bind(id)
-        .bind(title)
-        .bind(now)
-        .bind(now)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(WorkshopCanvasRow {
-            id: row_id,
-            canvas_id: id.to_string(),
-            title: title.to_string(),
-            thumbnail_rel_path: None,
-            node_count: 0,
-            created_at: now,
-            updated_at: now,
-        })
-    }
-
-    async fn rename_canvas(&self, id: &str, title: &str, now: i64) -> Result<WorkshopCanvasRow, DbError> {
-        let result = sqlx::query(
-            "UPDATE workshop_canvases SET title = ?, updated_at = ? WHERE canvas_id = ?",
-        )
-            .bind(title)
-            .bind(now)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::NotFound(format!("workshop canvas '{id}' not found")));
-        }
-        self.get_canvas(id)
-            .await?
-            .ok_or_else(|| DbError::NotFound(format!("workshop canvas '{id}' not found")))
-    }
-
-    async fn touch_canvas(&self, id: &str, node_count: i64, now: i64) -> Result<WorkshopCanvasRow, DbError> {
-        let result = sqlx::query(
-            "UPDATE workshop_canvases SET node_count = ?, updated_at = ? WHERE canvas_id = ?",
-        )
-            .bind(node_count)
-            .bind(now)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::NotFound(format!("workshop canvas '{id}' not found")));
-        }
-        self.get_canvas(id)
-            .await?
-            .ok_or_else(|| DbError::NotFound(format!("workshop canvas '{id}' not found")))
-    }
-
-    async fn delete_canvas(&self, id: &str) -> Result<(), DbError> {
-        let mut tx = self.pool.begin().await?;
-        let locked = sqlx::query(
-            "UPDATE workshop_canvases SET updated_at = updated_at WHERE canvas_id = ?",
-        )
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        if locked.rows_affected() == 0 {
-            return Err(DbError::NotFound(format!("workshop canvas '{id}' not found")));
-        }
-        // Retired canvas IDs can remain only as immutable historical asset
-        // provenance; canonical creation tasks no longer carry canvas_id.
-        sqlx::query("DELETE FROM workshop_canvases WHERE canvas_id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    async fn set_canvas_thumbnail(
-        &self,
-        id: &str,
-        thumbnail_rel_path: &str,
-        now: i64,
-    ) -> Result<WorkshopCanvasRow, DbError> {
-        let result = sqlx::query(
-            "UPDATE workshop_canvases SET thumbnail_rel_path = ?, updated_at = ? WHERE canvas_id = ?",
-        )
-            .bind(thumbnail_rel_path)
-            .bind(now)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::NotFound(format!("workshop canvas '{id}' not found")));
-        }
-        self.get_canvas(id)
-            .await?
-            .ok_or_else(|| DbError::NotFound(format!("workshop canvas '{id}' not found")))
-    }
-
     // ---- assets ----
 
     async fn create_asset(&self, row: &WorkshopAssetRow) -> Result<WorkshopAssetRow, DbError> {
@@ -870,29 +795,86 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                 )));
             }
         }
-        if let Some(canvas_id) = references.canvas_id {
+        if let Some(project_id) = &references.project_id {
             let locked = sqlx::query(
-                "UPDATE workshop_canvases SET updated_at = updated_at WHERE canvas_id = ?",
+                "UPDATE creative_studio_projects SET updated_at = updated_at WHERE project_id = ?",
             )
-            .bind(&canvas_id)
+            .bind(project_id)
             .execute(&mut *tx)
             .await?;
             if locked.rows_affected() == 0 {
                 return Err(DbError::Conflict(format!(
-                    "workshop asset origin references missing canvas '{canvas_id}'"
+                    "workshop asset origin references missing creative studio project '{project_id}'"
+                )));
+            }
+        }
+        if let (Some(workflow_id), Some(workflow_run_id)) =
+            (&references.workflow_id, &references.workflow_run_id)
+        {
+            let workflow = sqlx::query(
+                "UPDATE creative_studio_workflows SET updated_at = updated_at WHERE workflow_id = ?",
+            )
+            .bind(workflow_id)
+            .execute(&mut *tx)
+            .await?;
+            if workflow.rows_affected() == 0 {
+                return Err(DbError::Conflict(format!(
+                    "workshop asset origin references missing creative studio workflow '{workflow_id}'"
+                )));
+            }
+            let run = sqlx::query(
+                "UPDATE creative_studio_workflow_runs SET updated_at = updated_at \
+                 WHERE workflow_run_id = ? AND workflow_id = ?",
+            )
+            .bind(workflow_run_id)
+            .bind(workflow_id)
+            .execute(&mut *tx)
+            .await?;
+            if run.rows_affected() == 0 {
+                return Err(DbError::Conflict(format!(
+                    "workshop asset origin references missing workflow run '{workflow_run_id}' for workflow '{workflow_id}'"
                 )));
             }
         }
         if let Some(creation_task_id) = references.creation_task_id {
-            let task = sqlx::query(
-                "UPDATE creation_tasks SET status = status WHERE creation_task_id = ?",
+            let task = sqlx::query_as::<
+                _,
+                (
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                ),
+            >(
+                "UPDATE creation_tasks SET status = status WHERE creation_task_id = ? \
+                 RETURNING project_id, node_id, workflow_id, workflow_run_id, workflow_step_id",
             )
             .bind(&creation_task_id)
-            .execute(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await?;
-            if task.rows_affected() == 0 {
-                return Err(DbError::Conflict(format!(
+            let task = task.ok_or_else(|| {
+                DbError::Conflict(format!(
                     "workshop asset origin references missing creation task '{creation_task_id}'"
+                ))
+            })?;
+            let expected = (
+                references.project_id.as_deref(),
+                references.node_id.as_deref(),
+                references.workflow_id.as_deref(),
+                references.workflow_run_id.as_deref(),
+                references.workflow_step_id.as_deref(),
+            );
+            let actual = (
+                task.0.as_deref(),
+                task.1.as_deref(),
+                task.2.as_deref(),
+                task.3.as_deref(),
+                task.4.as_deref(),
+            );
+            if expected != actual {
+                return Err(DbError::Conflict(format!(
+                    "workshop asset origin owner does not match creation task '{creation_task_id}'"
                 )));
             }
         }
@@ -1137,10 +1119,6 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
 mod tests {
     use super::*;
     use crate::init_database_memory;
-
-    const CANVAS_A: &str = "0190f5fe-7c00-7a00-8abc-000000000001";
-    const CANVAS_1: &str = "0190f5fe-7c00-7a00-8abc-000000000002";
-    const CANVAS_2: &str = "0190f5fe-7c00-7a00-8abc-000000000003";
 
     const ASSET_1: &str = "0190f5fe-7c00-7a00-8abc-000000000101";
     const ASSET_2: &str = "0190f5fe-7c00-7a00-8abc-000000000102";
@@ -1444,42 +1422,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn canvas_crud_flow() {
-        let (repo, _db) = repo().await;
-        let c = repo.create_canvas(CANVAS_A, "画布", 1).await.unwrap();
-        assert!(c.id > 0);
-        assert_eq!(c.canvas_id, CANVAS_A);
-        assert_eq!(c.node_count, 0);
-        assert_eq!(c.title, "画布");
-
-        let renamed = repo.rename_canvas(CANVAS_A, "新名", 2).await.unwrap();
-        assert_eq!(renamed.title, "新名");
-        assert_eq!(renamed.updated_at, 2);
-
-        let touched = repo.touch_canvas(CANVAS_A, 7, 3).await.unwrap();
-        assert_eq!(touched.node_count, 7);
-        assert_eq!(touched.updated_at, 3);
-
-        assert_eq!(repo.list_canvases().await.unwrap().len(), 1);
-        repo.delete_canvas(CANVAS_A).await.unwrap();
-        assert!(repo.get_canvas(CANVAS_A).await.unwrap().is_none());
-        assert!(matches!(repo.delete_canvas(CANVAS_A).await.unwrap_err(), DbError::NotFound(_)));
-        assert!(matches!(repo.rename_canvas("nope", "x", 1).await.unwrap_err(), DbError::NotFound(_)));
-    }
-
-    #[tokio::test]
-    async fn list_canvases_orders_by_updated_desc() {
-        let (repo, _db) = repo().await;
-        repo.create_canvas(CANVAS_1, "a", 100).await.unwrap();
-        repo.create_canvas(CANVAS_2, "b", 200).await.unwrap();
-        let all = repo.list_canvases().await.unwrap();
-        assert_eq!(all[0].id, 2);
-        assert_eq!(all[0].canvas_id, CANVAS_2);
-        assert_eq!(all[1].id, 1);
-        assert_eq!(all[1].canvas_id, CANVAS_1);
-    }
-
-    #[tokio::test]
     async fn asset_crud_and_filters() {
         let (repo, _db) = repo().await;
         repo.create_asset(&sample_asset(1, ASSET_1, "image", "红色卖点图")).await.unwrap();
@@ -1530,7 +1472,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn asset_origin_uses_creation_task_business_id_only() {
+    async fn asset_origin_requires_exact_canonical_task_owner() {
         let (repo, db) = repo().await;
         let provider_id = nomifun_common::generate_id();
         sqlx::query(
@@ -1576,13 +1518,32 @@ mod tests {
         .unwrap();
 
         let mut valid = sample_asset(1, ASSET_1, "image", "business origin");
-        valid.origin =
-            Some(serde_json::json!({ "creation_task_id": creation_task_id.clone() }).to_string());
+        valid.origin = Some(
+            serde_json::json!({
+                "project_id": project_id,
+                "node_id": node_id,
+                "creation_task_id": creation_task_id.clone()
+            })
+            .to_string(),
+        );
         let created = repo.create_asset(&valid).await.unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(created.origin.as_deref().unwrap())
                 .unwrap()["creation_task_id"],
             creation_task_id
+        );
+
+        let mut wrong_owner = sample_asset(2, ASSET_2, "image", "wrong task owner");
+        wrong_owner.origin = Some(
+            serde_json::json!({ "creation_task_id": creation_task_id.clone() }).to_string(),
+        );
+        assert!(
+            matches!(
+                repo.create_asset(&wrong_owner).await,
+                Err(DbError::Conflict(message))
+                    if message.contains("owner does not match creation task")
+            ),
+            "origin ownership must exactly match the referenced task"
         );
 
         let mut missing_parent = sample_asset(2, ASSET_2, "image", "missing task");
@@ -1735,18 +1696,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_canvas_thumbnail_and_asset_thumb() {
+    async fn set_asset_thumb() {
         let (repo, _db) = repo().await;
-        repo.create_canvas(CANVAS_A, "画布", 1).await.unwrap();
-        let thumbnail = format!("workshop/canvases/{CANVAS_A}/thumb.jpg");
-        let c = repo.set_canvas_thumbnail(CANVAS_A, &thumbnail, 5).await.unwrap();
-        assert_eq!(c.thumbnail_rel_path.as_deref(), Some(thumbnail.as_str()));
-        assert_eq!(c.updated_at, 5);
-        assert!(matches!(
-            repo.set_canvas_thumbnail("nope", "x", 1).await.unwrap_err(),
-            DbError::NotFound(_)
-        ));
-
         repo.create_asset(&sample_asset(1, ASSET_T, "image", "img")).await.unwrap();
         let thumb = format!("workshop/assets/thumbs/{ASSET_T}.jpg");
         repo.set_asset_thumb(ASSET_T, &thumb, 6).await.unwrap();

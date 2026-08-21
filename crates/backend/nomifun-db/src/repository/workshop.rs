@@ -1,16 +1,15 @@
 use crate::error::DbError;
 use crate::models::{
     CreativeStudioProjectRow, CreativeStudioWorkflowRow, CreativeStudioWorkflowRunRow,
-    WorkshopAssetRow, WorkshopCanvasRow,
+    WorkshopAssetRow,
 };
 
-/// Data access for the 创意工坊 (Creative Workshop) domain: canonical Creative
-/// Studio projects plus the legacy canvas index and shared asset library.
+/// Data access for canonical Creative Studio projects, workflows, runs, and
+/// the shared asset library.
 ///
-/// Canonical project bodies live atomically in `creative_studio_projects`.
-/// Legacy canvas bodies and all asset binaries remain service-owned files; the
-/// repository stores only their `workshop_canvases` / `workshop_assets` index
-/// metadata.
+/// Project bodies live atomically in `creative_studio_projects`. Asset binaries
+/// remain service-owned files while this repository stores their indexed
+/// `workshop_assets` metadata.
 #[async_trait::async_trait]
 pub trait IWorkshopRepository: Send + Sync {
     /// Check that a Provider business ID exists. Workshop JSON references are
@@ -44,8 +43,7 @@ pub trait IWorkshopRepository: Send + Sync {
 
     // ---- canonical Creative Studio projects ----
 
-    /// Every canonical Creative Studio project, newest-updated first. Legacy
-    /// `workshop_canvases` rows are intentionally outside this result set.
+    /// Every canonical Creative Studio project, newest-updated first.
     async fn list_creative_projects(&self) -> Result<Vec<CreativeStudioProjectRow>, DbError>;
 
     /// One canonical Creative Studio project by business ID, or `None`.
@@ -201,31 +199,6 @@ pub trait IWorkshopRepository: Send + Sync {
             "creative studio workflow run persistence is unavailable in this repository".into(),
         ))
     }
-
-    // ---- canvases ----
-
-    /// Every canvas, newest-updated first.
-    async fn list_canvases(&self) -> Result<Vec<WorkshopCanvasRow>, DbError>;
-
-    /// One canvas by id, or `None`.
-    async fn get_canvas(&self, id: &str) -> Result<Option<WorkshopCanvasRow>, DbError>;
-
-    /// Insert a canvas index row (the service creates its dir + empty doc).
-    async fn create_canvas(&self, id: &str, title: &str, now: i64) -> Result<WorkshopCanvasRow, DbError>;
-
-    /// Rename a canvas. `DbError::NotFound` when the id is unknown.
-    async fn rename_canvas(&self, id: &str, title: &str, now: i64) -> Result<WorkshopCanvasRow, DbError>;
-
-    /// Refresh `node_count` + `updated_at` after a doc save. `DbError::NotFound`
-    /// when the id is unknown.
-    async fn touch_canvas(&self, id: &str, node_count: i64, now: i64) -> Result<WorkshopCanvasRow, DbError>;
-
-    /// Delete a canvas index row. `DbError::NotFound` when the id is unknown.
-    async fn delete_canvas(&self, id: &str) -> Result<(), DbError>;
-
-    /// Set (or replace) a canvas's gallery-thumbnail `rel_path`. The service
-    /// writes the thumbnail file first. `DbError::NotFound` when unknown.
-    async fn set_canvas_thumbnail(&self, id: &str, thumbnail_rel_path: &str, now: i64) -> Result<WorkshopCanvasRow, DbError>;
 
     // ---- assets ----
 

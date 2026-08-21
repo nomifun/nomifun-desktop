@@ -350,10 +350,6 @@ define_entity_id!(
     CompanionEvolutionFeedbackId
 );
 define_entity_id!(
-    /// Globally unique workshop-canvas identifier.
-    WorkshopCanvasId
-);
-define_entity_id!(
     /// Globally unique canonical Creative Studio project identifier.
     CreativeStudioProjectId
 );
@@ -392,14 +388,6 @@ define_entity_id!(
 define_entity_id!(
     /// Globally unique creation-task identifier.
     CreationTaskId
-);
-define_entity_id!(
-    /// Globally unique node identifier within a durable workshop canvas doc.
-    WorkshopNodeId
-);
-define_entity_id!(
-    /// Globally unique edge identifier within a durable workshop canvas doc.
-    WorkshopEdgeId
 );
 define_entity_id!(
     /// Globally unique MCP-server configuration identifier.

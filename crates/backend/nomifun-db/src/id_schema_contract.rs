@@ -126,7 +126,6 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "users",
     "webhooks",
     "workshop_assets",
-    "workshop_canvases",
 ];
 
 /// Business columns that carry a bare canonical UUIDv7 for every populated row.
@@ -178,7 +177,6 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("users", "user_id"),
     ("webhooks", "webhook_id"),
     ("workshop_assets", "asset_id"),
-    ("workshop_canvases", "canvas_id"),
 ];
 
 /// Canonical UUIDv7 values owned by a managed side store rather than a
@@ -260,7 +258,6 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("users", "user_id"),
     ("webhooks", "webhook_id"),
     ("workshop_assets", "asset_id"),
-    ("workshop_canvases", "canvas_id"),
 ];
 
 const PARTIAL_UNIQUE_INDEXES: &[PartialUniqueIndexContract] = &[
@@ -859,11 +856,6 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
         "workshop_assets", "origin", "$.provider_id",
         "SELECT json_extract(origin, '$.provider_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
         "providers", "provider_id", "idx_workshop_assets_origin_provider_id", KeepHistory, AllowMissingHistoricalParent
-    ),
-    json_text_ref!(
-        "workshop_assets", "origin", "$.canvas_id",
-        "SELECT json_extract(origin, '$.canvas_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
-        "workshop_canvases", "canvas_id", "idx_workshop_assets_origin_canvas_id", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.project_id",
@@ -2029,6 +2021,7 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
         for retired_key in [
             "task_id",
             "providerId",
+            "canvas_id",
             "canvasId",
             "nodeId",
             "creationTaskId",
@@ -2045,7 +2038,6 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
         }
         for key in [
             "provider_id",
-            "canvas_id",
             "node_id",
             "creation_task_id",
             "project_id",
@@ -2068,16 +2060,13 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
             })?;
         }
         let has_project = object.contains_key("project_id");
+        let has_node = object.contains_key("node_id");
         let has_workflow = ["workflow_id", "workflow_run_id", "workflow_step_id"]
             .iter()
             .any(|key| object.contains_key(*key));
-        if has_project
-            && (!object.contains_key("node_id")
-                || object.contains_key("canvas_id")
-                || has_workflow)
-        {
+        if has_project != has_node || (has_project && has_workflow) {
             return Err(DbError::Init(format!(
-                "v3 workshop asset {asset_id} origin has an invalid canvas-node owner branch"
+                "v3 workshop asset {asset_id} origin has an invalid project-node owner branch"
             )));
         }
         if has_workflow
@@ -2085,7 +2074,6 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
                 .iter()
                 .all(|key| object.contains_key(*key))
                 || object.contains_key("project_id")
-                || object.contains_key("canvas_id")
                 || object.contains_key("node_id"))
         {
             return Err(DbError::Init(format!(
