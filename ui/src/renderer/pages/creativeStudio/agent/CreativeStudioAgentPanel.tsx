@@ -155,8 +155,13 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
           modelLocked={props.modelLocked === true}
           isRunning={props.isRunning}
           disabled={panelDisabled}
+          contextItems={props.contextItems}
+          skillOptions={props.skillOptions}
+          selectedSkillIds={props.selectedSkillIds}
           onDraftChange={props.onDraftChange}
           onModelChange={props.onModelChange}
+          onRemoveContextItem={props.onRemoveContextItem}
+          onToggleSkill={props.onToggleSkill}
           onSend={props.onSend}
           onStop={props.onStop}
           onOpenModelSettings={props.onOpenModelSettings}

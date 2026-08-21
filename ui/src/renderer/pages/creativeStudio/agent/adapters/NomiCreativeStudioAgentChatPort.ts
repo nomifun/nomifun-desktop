@@ -27,6 +27,10 @@ import type {
 
 const DEFAULT_TURN_START_TIMEOUT_MS = 30_000;
 const DEFAULT_RECOVERY_POLL_MS = 250;
+const MAX_MODEL_INPUT_LENGTH = 262_144;
+const MAX_SKILL_IDS = 8;
+const MAX_SKILL_ID_LENGTH = 128;
+const SKILL_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 type RuntimeEvent =
   | { kind: 'response'; value: IResponseMessage }
@@ -97,6 +101,42 @@ const sameModel = (
   left: NomiCreativeStudioAgentSessionBinding['model'],
   right: NomiCreativeStudioAgentSessionBinding['model']
 ): boolean => left.providerId === right.providerId && left.model === right.model;
+
+const validatePlanningEnvelope = (
+  request: CreativeStudioAgentTurnRequest
+): { modelInput: string; skillIds: readonly string[] } => {
+  if (
+    typeof request.modelInput !== 'string' ||
+    request.modelInput.length === 0 ||
+    request.modelInput.length > MAX_MODEL_INPUT_LENGTH ||
+    request.modelInput !== request.modelInput.trim()
+  ) {
+    throw new TypeError(
+      'Creative Studio Agent model input must be trimmed, non-empty, and at most 262144 characters'
+    );
+  }
+  if (!Array.isArray(request.skillIds) || request.skillIds.length > MAX_SKILL_IDS) {
+    throw new TypeError('Creative Studio Agent skill ids must be an array of at most 8 items');
+  }
+  const skillIds = request.skillIds.map((skillId, index) => {
+    if (
+      typeof skillId !== 'string' ||
+      skillId.length === 0 ||
+      skillId.length > MAX_SKILL_ID_LENGTH ||
+      skillId !== skillId.trim() ||
+      !SKILL_ID_PATTERN.test(skillId)
+    ) {
+      throw new TypeError(
+        `Creative Studio Agent skill id ${index} must be a trimmed 1-128 character ASCII id`
+      );
+    }
+    return skillId;
+  });
+  if (new Set(skillIds).size !== skillIds.length) {
+    throw new TypeError('Creative Studio Agent skill ids must be unique');
+  }
+  return { modelInput: request.modelInput, skillIds };
+};
 
 const validateBinding = (
   request: CreativeStudioAgentTurnRequest,
@@ -280,6 +320,9 @@ export function createNomiCreativeStudioAgentChatPort(
 
   return {
     async *runTurn(request): AsyncIterable<CreativeStudioAgentTurnEvent> {
+      // Snapshot and validate the durable planning envelope before resolving or
+      // inspecting any transport state. Never rebuild it from the display prompt.
+      const planningEnvelope = validatePlanningEnvelope(request);
       const requestHistoryKey = serializeCreativeStudioAgentHistory(request.history);
       const resolveAuthoritative = async (): Promise<NomiCreativeStudioAgentSessionResolution> => {
         const resolution = await options.resolveSession({
@@ -376,7 +419,8 @@ export function createNomiCreativeStudioAgentChatPort(
       try {
         const receiptPromise = transport.sendMessage({
           conversationId: binding.conversationId,
-          prompt: request.prompt,
+          modelInput: planningEnvelope.modelInput,
+          skillIds: planningEnvelope.skillIds,
           idempotencyKey: request.idempotencyKey,
         });
         const receipt = await waitForReceiptOrAbort(receiptPromise, request.signal);

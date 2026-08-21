@@ -20,6 +20,7 @@ import {
   type ConversationId,
 } from '@/common/types/ids';
 
+import type { CreativeStudioAgentTurnRequest } from '../chatPort';
 import type { CreativeStudioAgentMessage } from '../types';
 import {
   createNomiCreativeStudioAgentChatPort,
@@ -41,6 +42,10 @@ const turnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000102');
 const userMessageId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000103');
 const assistantMessageId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000104');
 const idempotencyKey = '0190f5fe-7c00-7a00-8000-000000000106';
+const displayPrompt = '基于当前画布继续创作';
+const planningModelInput =
+  '<creative-studio-planning>{"request":"基于当前画布继续创作","canvasRevision":7}</creative-studio-planning>';
+const planningSkillIds = ['creative-studio-canvas', 'asset.inspect'] as const;
 const model = {
   providerId: parseProviderId('0190f5fe-7c00-7a00-8000-000000000105'),
   model: 'nomi-chat-model',
@@ -61,7 +66,7 @@ const history: CreativeStudioAgentMessage[] = [
 ];
 const recoveredHistory: CreativeStudioAgentMessage[] = [
   ...history,
-  { id: userMessageId, role: 'user', status: 'complete', text: '基于当前画布继续创作' },
+  { id: userMessageId, role: 'user', status: 'complete', text: displayPrompt },
   { id: assistantMessageId, role: 'assistant', status: 'complete', text: '真实回复' },
 ];
 
@@ -140,7 +145,12 @@ class FakeTransport implements NomiCreativeStudioAgentTransport {
   readonly completedListeners = new Set<(event: IConversationTurnCompletedEvent) => void>();
   readonly reconnectListeners = new Set<() => void>();
   readonly inspectCalls: ConversationId[] = [];
-  readonly sendCalls: Array<{ conversationId: ConversationId; prompt: string; idempotencyKey: string }> = [];
+  readonly sendCalls: Array<{
+    conversationId: ConversationId;
+    modelInput: string;
+    skillIds: readonly string[];
+    idempotencyKey: string;
+  }> = [];
   readonly stopCalls: ConversationId[] = [];
   snapshots: NomiCreativeStudioConversationSnapshot[] = [idleSnapshot()];
   receipt = acceptedReceipt();
@@ -153,7 +163,8 @@ class FakeTransport implements NomiCreativeStudioAgentTransport {
 
   async sendMessage(input: {
     conversationId: ConversationId;
-    prompt: string;
+    modelInput: string;
+    skillIds: readonly string[];
     idempotencyKey: string;
   }): Promise<ISendMessageResult> {
     this.sendCalls.push(input);
@@ -231,13 +242,19 @@ const matchingResolver = (overrides: ResolverOverrides = {}): NomiCreativeStudio
   };
 };
 
-const request = (signal: AbortSignal) => ({
+const request = (
+  signal: AbortSignal,
+  overrides: Partial<Omit<CreativeStudioAgentTurnRequest, 'signal'>> = {}
+): CreativeStudioAgentTurnRequest => ({
   projectId: '0190f5fe-7c00-7a00-8000-000000000107',
   sessionId: '0190f5fe-7c00-7a00-8000-000000000108',
   idempotencyKey,
-  prompt: '基于当前画布继续创作',
+  prompt: displayPrompt,
+  modelInput: planningModelInput,
+  skillIds: planningSkillIds,
   model,
   history,
+  ...overrides,
   signal,
 });
 
@@ -253,6 +270,7 @@ const collect = async <T>(
 describe('NomiCreativeStudioAgentChatPort', () => {
   test('maps real REST admission plus exact WS turn lifecycle into port events', async () => {
     const transport = new FakeTransport();
+    const mutableSkillIds = [...planningSkillIds];
     transport.snapshots = [
       idleSnapshot(),
       idleSnapshot({ authority: 'processing', activeTurnId: turnId }),
@@ -286,7 +304,9 @@ describe('NomiCreativeStudioAgentChatPort', () => {
       turnStartTimeoutMs: 100,
     });
 
-    const events = await collect(port.runTurn(request(new AbortController().signal)));
+    const turnRequest = request(new AbortController().signal, { skillIds: mutableSkillIds });
+    const events = await collect(port.runTurn(turnRequest));
+    mutableSkillIds.reverse();
 
     expect(events).toEqual([
       { type: 'activity', label: '正在理解画布' },
@@ -298,12 +318,61 @@ describe('NomiCreativeStudioAgentChatPort', () => {
     expect(transport.sendCalls).toEqual([
       {
         conversationId,
-        prompt: '基于当前画布继续创作',
+        modelInput: planningModelInput,
+        skillIds: planningSkillIds,
         idempotencyKey,
       },
     ]);
+    expect(transport.sendCalls[0]?.skillIds).not.toBe(turnRequest.skillIds);
     expect(transport.responseListeners.size).toBe(0);
     expect(transport.completedListeners.size).toBe(0);
+  });
+
+  test('rejects invalid durable planning envelopes before touching the transport', async () => {
+    const cases: Array<{
+      label: string;
+      overrides: Partial<Omit<CreativeStudioAgentTurnRequest, 'signal'>>;
+    }> = [
+      { label: 'blank model input', overrides: { modelInput: '' } },
+      { label: 'padded model input', overrides: { modelInput: ' padded' } },
+      {
+        label: 'oversized model input',
+        overrides: { modelInput: 'x'.repeat(262_145) },
+      },
+      {
+        label: 'too many skills',
+        overrides: {
+          skillIds: Array.from({ length: 9 }, (_, index) => `skill-${index}`),
+        },
+      },
+      { label: 'non-ascii skill', overrides: { skillIds: ['canvas.检查'] } },
+      { label: 'duplicate skills', overrides: { skillIds: ['canvas.read', 'canvas.read'] } },
+    ];
+
+    for (const invalid of cases) {
+      const transport = new FakeTransport();
+      let resolverCalls = 0;
+      const resolveSession = matchingResolver();
+      const port = createNomiCreativeStudioAgentChatPort({
+        resolveSession: async (input) => {
+          resolverCalls += 1;
+          return resolveSession(input);
+        },
+        transport,
+      });
+
+      const error = await collect(
+        port.runTurn(request(new AbortController().signal, invalid.overrides))
+      ).catch((caught: unknown) => caught);
+
+      expect({ label: invalid.label, isTypeError: error instanceof TypeError }).toEqual({
+        label: invalid.label,
+        isTypeError: true,
+      });
+      expect(resolverCalls).toBe(0);
+      expect(transport.inspectCalls).toEqual([]);
+      expect(transport.sendCalls).toEqual([]);
+    }
   });
 
   test('fails before send when project/session/model/history binding is not exact', async () => {
@@ -378,6 +447,14 @@ describe('NomiCreativeStudioAgentChatPort', () => {
       { type: 'history-reconciled', history: recoveredHistory },
       { type: 'completed', assistantMessageId },
     ]);
+    expect(transport.sendCalls).toEqual([
+      {
+        conversationId,
+        modelInput: planningModelInput,
+        skillIds: planningSkillIds,
+        idempotencyKey,
+      },
+    ]);
   });
 
   test('reconciles a response-loss completion before transport without submitting twice', async () => {
@@ -420,7 +497,14 @@ describe('NomiCreativeStudioAgentChatPort', () => {
       { type: 'history-reconciled', history: recoveredHistory },
       { type: 'completed', assistantMessageId },
     ]);
-    expect(transport.sendCalls[0]?.idempotencyKey).toBe(idempotencyKey);
+    expect(transport.sendCalls).toEqual([
+      {
+        conversationId,
+        modelInput: planningModelInput,
+        skillIds: planningSkillIds,
+        idempotencyKey,
+      },
+    ]);
   });
 
   test('never reports success when a terminal receipt has no durable message pair', async () => {
@@ -589,6 +673,9 @@ describe('Nomi adapter boundaries', () => {
     expect(transport.includes('conversation.turnStarted.on')).toBe(true);
     expect(transport.includes('conversation.turnCompleted.on')).toBe(true);
     expect(transport.includes('stopConversationAndConfirmRelease')).toBe(true);
+    expect(transport.includes('input: modelInput')).toBe(true);
+    expect(transport.includes('inject_skills: [...skillIds]')).toBe(true);
+    expect(transport.includes('input: prompt')).toBe(false);
     expect(adapter.includes('useNavigate')).toBe(false);
     expect(adapter.includes('ChatConversation')).toBe(false);
     expect(adapter.includes('NomiSendBox')).toBe(false);

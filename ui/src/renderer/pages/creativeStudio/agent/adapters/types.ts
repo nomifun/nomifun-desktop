@@ -59,7 +59,8 @@ export interface NomiCreativeStudioAgentTransport {
   inspect(conversationId: ConversationId): Promise<NomiCreativeStudioConversationSnapshot>;
   sendMessage(input: {
     conversationId: ConversationId;
-    prompt: string;
+    modelInput: string;
+    skillIds: readonly string[];
     idempotencyKey: string;
   }): Promise<ISendMessageResult>;
   stopAndConfirm(conversationId: ConversationId): Promise<void>;

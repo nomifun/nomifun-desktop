@@ -320,3 +320,22 @@ export function serializeCreativeCanvasAgentModelInput(input: {
   }
   return serialized;
 }
+
+/** Apply the user's composer exclusions without rebuilding or widening the snapshot. */
+export function selectCreativeCanvasAgentContextNodes(
+  context: CreativeCanvasAgentContextSnapshot,
+  includedNodeIds: readonly string[]
+): CreativeCanvasAgentContextSnapshot {
+  const requested = new Set(includedNodeIds);
+  const nodes = context.nodes.filter((node) => requested.has(node.id));
+  const included = new Set(nodes.map((node) => node.id));
+  return {
+    ...context,
+    selectedNodeIds: context.selectedNodeIds.filter((id) => included.has(id)),
+    nodes,
+    connections: context.connections.filter(
+      (connection) =>
+        included.has(connection.sourceNodeId) && included.has(connection.targetNodeId)
+    ),
+  };
+}

@@ -130,6 +130,7 @@ import { CreativeNodeView } from '../nodes';
 import CreativeCanvasAgentPanel, {
   type CreativeCanvasAgentPanelHandle,
 } from './agent/CreativeCanvasAgentPanel';
+import { buildCreativeCanvasAgentContext } from './agent/context';
 import CreativeCanvasConnectionEdge from './CreativeCanvasConnectionEdge';
 import CreativeCanvasAudioComposer from './CreativeCanvasAudioComposer';
 import CreativeCanvasImageComposer from './CreativeCanvasImageComposer';
@@ -3500,6 +3501,18 @@ const CreativeCanvasProductRoute: React.FC = () => {
     () => creativeCanvasProductSelectionCapabilities(canvasState),
     [canvasState]
   );
+  const agentPlanningContext = useMemo(() => {
+    if (!project.detail || !canvasState || save.revision === null) return null;
+    return buildCreativeCanvasAgentContext({
+      document: {
+        ...project.detail.document,
+        nodes: canvasState.document.nodes,
+        connections: canvasState.document.connections,
+      },
+      projectRevision: save.revision,
+      selectedNodeIds: canvasState.selection.nodeIds,
+    });
+  }, [canvasState, project.detail, save.revision]);
   const productDisabled = save.revision === null;
   const imageTaskRuntimeBlocksNew =
     imageTaskRuntime.submittingCount > 0 ||
@@ -4283,6 +4296,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 hydrated={agentDocumentState !== null}
                 sessions={agentDocumentState?.sessions ?? []}
                 activeSessionId={agentDocumentState?.activeSessionId ?? null}
+                planningContext={agentPlanningContext}
                 disabled={productDisabled}
                 onPersist={handlePersistAgentSessions}
                 onCollapse={() => handleRightViewChange(null)}

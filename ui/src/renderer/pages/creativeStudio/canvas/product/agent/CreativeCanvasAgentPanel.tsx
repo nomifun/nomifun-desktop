@@ -44,6 +44,16 @@ import {
   creativeCanvasAgentSessionWithoutPendingTurn,
   replaceCreativeCanvasAgentSession,
 } from './model';
+import {
+  selectCreativeCanvasAgentContextNodes,
+  serializeCreativeCanvasAgentModelInput,
+  type CreativeCanvasAgentContextSnapshot,
+} from './context';
+import {
+  CREATIVE_STUDIO_PLANNING_SKILLS,
+  DEFAULT_CREATIVE_STUDIO_PLANNING_SKILL_IDS,
+  isCreativeStudioPlanningSkillId,
+} from './planningSkills';
 
 export interface CreativeCanvasAgentPanelHandle {
   /** Stop an active exclusive turn and wait for its durable settlement before route exit. */
@@ -55,6 +65,7 @@ export interface CreativeCanvasAgentPanelProps {
   hydrated: boolean;
   sessions: readonly CreativeChatSessionReference[];
   activeSessionId: string | null;
+  planningContext: CreativeCanvasAgentContextSnapshot | null;
   disabled?: boolean;
   onPersist(
     sessions: readonly CreativeChatSessionReference[],
@@ -141,6 +152,10 @@ const CreativeCanvasAgentPanel = React.forwardRef<
   const [isRunning, setIsRunning] = useState(false);
   const [panelError, setPanelError] = useState<string | undefined>();
   const [loadRequest, setLoadRequest] = useState(0);
+  const [excludedContextNodeIds, setExcludedContextNodeIds] = useState<readonly string[]>([]);
+  const [selectedSkillIds, setSelectedSkillIds] = useState<readonly string[]>([
+    ...DEFAULT_CREATIVE_STUDIO_PLANNING_SKILL_IDS,
+  ]);
 
   const resolver = useMemo(
     () =>
@@ -177,6 +192,32 @@ const CreativeCanvasAgentPanel = React.forwardRef<
     [documentState]
   );
   const activeSignature = sessionSignature(activeSession);
+  const selectedContextSignature = JSON.stringify(
+    props.planningContext?.selectedNodeIds ?? []
+  );
+  const contextItems = useMemo(
+    () =>
+      (props.planningContext?.nodes ?? [])
+        .filter((node) => !excludedContextNodeIds.includes(node.id))
+        .map((node) => ({
+          id: node.id,
+          label: node.label,
+          type: node.type,
+          selected: node.selected,
+        })),
+    [excludedContextNodeIds, props.planningContext?.nodes]
+  );
+
+  useEffect(() => {
+    setExcludedContextNodeIds([]);
+  }, [selectedContextSignature]);
+
+  useEffect(() => {
+    if (!activeSession?.pendingTurn) return;
+    setSelectedSkillIds(
+      activeSession.pendingTurn.skillIds.filter(isCreativeStudioPlanningSkillId)
+    );
+  }, [activeSession?.pendingTurn?.idempotencyKey]);
 
   const persistDocument = useCallback(
     async (
@@ -318,6 +359,8 @@ const CreativeCanvasAgentPanel = React.forwardRef<
               sessionId: session.id,
               idempotencyKey: pending.idempotencyKey,
               prompt: pending.prompt,
+              modelInput: pending.modelInput,
+              skillIds: pending.skillIds,
               model,
               history,
             },
@@ -493,6 +536,16 @@ const CreativeCanvasAgentPanel = React.forwardRef<
   const handleSend = useCallback(
     (input: CreativeStudioAgentSendInput) => {
       if (isRunning || sendOperationRef.current) return;
+      const planningContext = props.planningContext;
+      if (
+        !planningContext ||
+        input.skillIds.length === 0 ||
+        input.skillIds.length > 3 ||
+        input.skillIds.some((skillId) => !isCreativeStudioPlanningSkillId(skillId))
+      ) {
+        setPanelError('请明确选择 1–3 个 Creative Studio 创作技能。');
+        return;
+      }
       const leaveEpoch = leaveEpochRef.current;
       setIsRunning(true);
       setPanelError(undefined);
@@ -507,6 +560,15 @@ const CreativeCanvasAgentPanel = React.forwardRef<
             model: input.model,
             idempotencyKey: createId(),
             prompt: input.prompt,
+            modelInput: serializeCreativeCanvasAgentModelInput({
+              prompt: input.prompt,
+              context: selectCreativeCanvasAgentContextNodes(
+                planningContext,
+                input.contextNodeIds
+              ),
+              skillIds: input.skillIds,
+            }),
+            skillIds: input.skillIds,
             now: now(),
           });
           await persistSession(pending);
@@ -531,7 +593,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
         if (sendOperationRef.current === operation) sendOperationRef.current = null;
       });
     },
-    [createId, isRunning, now, persistSession, runPersistedTurn]
+    [createId, isRunning, now, persistSession, props.planningContext, runPersistedTurn]
   );
 
   const handleRetryLoad = useCallback(() => {
@@ -597,6 +659,9 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       messages={messages}
       draft={draft}
       model={model}
+      contextItems={contextItems}
+      skillOptions={CREATIVE_STUDIO_PLANNING_SKILLS}
+      selectedSkillIds={selectedSkillIds}
       modelLocked={lockedModel !== null}
       isRunning={isRunning}
       errorMessage={panelError}
@@ -607,6 +672,22 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       onDraftChange={setDraft}
       onModelChange={(nextModel) => {
         if (!lockedModel) setSelectedModel(nextModel);
+      }}
+      onRemoveContextItem={(itemId) =>
+        setExcludedContextNodeIds((current) =>
+          current.includes(itemId) ? current : [...current, itemId]
+        )
+      }
+      onToggleSkill={(skillId) => {
+        if (!isCreativeStudioPlanningSkillId(skillId)) return;
+        setSelectedSkillIds((current) => {
+          if (current.includes(skillId)) {
+            return current.length === 1
+              ? current
+              : current.filter((currentId) => currentId !== skillId);
+          }
+          return current.length >= 3 ? current : [...current, skillId];
+        });
       }}
       onSend={handleSend}
       onStop={handleStop}
