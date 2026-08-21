@@ -13,6 +13,11 @@ It keeps the route split with
 The product's own “返回项目” action awaits the editor CAS `flush()` and only
 navigates to `CREATIVE_STUDIO_PROJECTS_PATH` after `noop` or `saved`. A
 `conflict` or `error` stays on the canvas and exposes explicit reload/retry.
+The product chrome is the single visible save/recovery surface and therefore
+sets the generic Editor save banner off. It shows a stable Chinese conflict
+message without leaking project IDs or backend diagnostics; only the backend
+code `REVISION_CONFLICT` enables “重新载入远端”. A generic business 409 remains
+an ordinary save error and does not invite the user to discard local work.
 
 The surrounding `CreativeStudioFocusShell` awaits the exported
 `requestCreativeCanvasProductBeforeLeave()` before product navigation. The

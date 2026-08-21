@@ -12,7 +12,7 @@ import type {
   CreativeRightPanelView,
   CreativeStudioPanelState,
 } from '../../domain';
-import type { CanvasCasFlushResult } from '../editor';
+import type { CanvasCasFlushResult, CanvasCasSaveSnapshot } from '../editor';
 import type { CreativeNodeAssetPresentation } from '../nodes';
 import type { CanvasState } from '../core';
 
@@ -114,6 +114,27 @@ export function canLeaveCreativeCanvasAfterFlush(
   result: CanvasCasFlushResult
 ): boolean {
   return result.status === 'noop' || result.status === 'saved';
+}
+
+export const CREATIVE_CANVAS_REVISION_CONFLICT_MESSAGE =
+  '远端画布已更新，本地更改未覆盖。';
+
+export function creativeCanvasSaveDisplayMessage(
+  save: CanvasCasSaveSnapshot
+): string | undefined {
+  if (save.status === 'conflict') return CREATIVE_CANVAS_REVISION_CONFLICT_MESSAGE;
+  if (save.status === 'error') return save.error?.message ?? '画布保存失败。';
+  return undefined;
+}
+
+export function creativeCanvasBlockedLeaveMessage(
+  result: CanvasCasFlushResult
+): string | undefined {
+  if (result.status === 'conflict') {
+    return `${CREATIVE_CANVAS_REVISION_CONFLICT_MESSAGE}请先重新载入远端版本。`;
+  }
+  if (result.status === 'error') return result.error.message;
+  return undefined;
 }
 
 function referencedAssetId(node: CreativeCanvasNode): string | null {

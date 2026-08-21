@@ -172,6 +172,8 @@ export interface CreativeCanvasEditorProps {
   isMiniMapOpen?: boolean;
   onToggleMiniMap?: () => void;
   showZoomControls?: boolean;
+  /** Keep the generic in-canvas save banner when no product chrome owns it. */
+  showSaveState?: boolean;
   renderLoading?: () => React.ReactNode;
   renderNotFound?: (projectId: string) => React.ReactNode;
   renderError?: (error: Error, retry: () => Promise<CreativeProjectDetail | undefined>) => React.ReactNode;
@@ -269,6 +271,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       isMiniMapOpen = false,
       onToggleMiniMap,
       showZoomControls = true,
+      showSaveState = true,
       renderLoading = defaultLoading,
       renderNotFound = defaultNotFound,
       renderError = defaultError,
@@ -1157,7 +1160,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       ];
     });
 
-    const saveChrome = saveSnapshot.status === 'idle' ? null : (
+    const saveChrome = !showSaveState || saveSnapshot.status === 'idle' ? null : (
       <div
         className={styles.saveState}
         data-canvas-save-status={saveSnapshot.status}

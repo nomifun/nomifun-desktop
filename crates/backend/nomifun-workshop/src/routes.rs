@@ -1011,8 +1011,14 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(stale, AppError::Conflict(_)));
-        assert_eq!(stale.into_response().status(), StatusCode::CONFLICT);
+        assert!(matches!(stale, AppError::RevisionConflict(_)));
+        let stale_response = stale.into_response();
+        assert_eq!(stale_response.status(), StatusCode::CONFLICT);
+        let stale_body = axum::body::to_bytes(stale_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let stale_json: Value = serde_json::from_slice(&stale_body).unwrap();
+        assert_eq!(stale_json["code"], "REVISION_CONFLICT");
 
         let missing_id = "0190f5fe-7c00-7a00-8abc-000000000199".to_owned();
         let missing = get_creative_project(

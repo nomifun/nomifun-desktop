@@ -14,8 +14,10 @@ import {
   CREATIVE_CANVAS_SOURCE_AGENT_PANEL_WIDTH,
   CREATIVE_CANVAS_SOURCE_LEFT_PANEL_WIDTH,
   canLeaveCreativeCanvasAfterFlush,
+  creativeCanvasBlockedLeaveMessage,
   creativeCanvasProductPanelViews,
   creativeCanvasProductSelectionCapabilities,
+  creativeCanvasSaveDisplayMessage,
   resolveCreativeNodeAssetPresentation,
   withCreativeCanvasBottomView,
   withCreativeCanvasLeftView,
@@ -114,20 +116,38 @@ describe('Creative Canvas product controller helpers', () => {
   test('allows route leave only after a non-lossy flush result', () => {
     expect(canLeaveCreativeCanvasAfterFlush({ status: 'noop', revision: '7' })).toBe(true);
     expect(canLeaveCreativeCanvasAfterFlush({ status: 'saved', revision: '8' })).toBe(true);
+    const conflict = {
+      status: 'conflict' as const,
+      revision: '7',
+      error: new Error('internal revision conflict for project-id'),
+    };
+    const error = {
+      status: 'error' as const,
+      revision: '7',
+      error: new Error('offline'),
+    };
+    expect(canLeaveCreativeCanvasAfterFlush(conflict)).toBe(false);
+    expect(canLeaveCreativeCanvasAfterFlush(error)).toBe(false);
+    expect(creativeCanvasBlockedLeaveMessage(conflict)).toBe(
+      '远端画布已更新，本地更改未覆盖。请先重新载入远端版本。'
+    );
+    expect(creativeCanvasBlockedLeaveMessage(error)).toBe('offline');
     expect(
-      canLeaveCreativeCanvasAfterFlush({
+      creativeCanvasSaveDisplayMessage({
         status: 'conflict',
         revision: '7',
-        error: new Error('conflict'),
+        hasPendingChanges: true,
+        error: conflict.error,
       })
-    ).toBe(false);
+    ).toBe('远端画布已更新，本地更改未覆盖。');
     expect(
-      canLeaveCreativeCanvasAfterFlush({
-        status: 'error',
-        revision: '7',
-        error: new Error('offline'),
+      creativeCanvasSaveDisplayMessage({
+        status: 'saved',
+        revision: '8',
+        hasPendingChanges: false,
+        error: null,
       })
-    ).toBe(false);
+    ).toBeUndefined();
   });
 
   test('resolves only real, type-compatible asset URLs', () => {

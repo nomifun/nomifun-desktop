@@ -57,6 +57,13 @@ changes and hydrates the authoritative server revision. A product-specific
 merge flow can be added above this boundary later; it must still end in an
 explicit user choice.
 
+Only HTTP 409 responses carrying the stable backend code
+`REVISION_CONFLICT` enter that terminal state. Other business conflicts retain
+their own error path and must never be presented as a reason to discard local
+work. Returning the local document to its pre-edit signature also does not
+clear a conflict; only `reset(remoteRevision, remoteDocument)` may unlock the
+controller.
+
 ## Product integrations left above this boundary
 
 Node creation palettes, handles for creating connections, media preview and
@@ -106,5 +113,6 @@ onRecoveryFailure: async (reference) => {
 },
 ```
 
-The canvas product does not currently mount a workbench runtime, so this seam
-does not claim automatic recovery is active here.
+The Editor layer does not mount a workbench runtime. The canvas product uses
+this seam for its one project-scoped image runtime; other products must wire
+their own runtime explicitly rather than assuming recovery is automatic.

@@ -54,6 +54,7 @@ describe('CreativeCanvasEditor composition contract', () => {
       'saveController.queue(projectDocumentFromCanvasState(nextBase, stateRef.current))',
       'flush: () => saveController.flush()',
       'reloadRemote',
+      'showSaveState',
       "saveSnapshot.status === 'conflict'",
       '放弃本地更改并重新载入',
     ]) {

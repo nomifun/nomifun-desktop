@@ -23,6 +23,7 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('projectId={projectId}')).toBe(true);
     expect(source.includes('<CreativeCanvasChrome')).toBe(true);
     expect(source.includes('<CreativeCanvasEditor')).toBe(true);
+    expect(source.includes('showSaveState={false}')).toBe(true);
     expect(source.includes('editorRef.current?.dispatch')).toBe(true);
     expect(source.includes('editorRef.current?.setPanels')).toBe(true);
     expect(source.includes('creativeCanvasProductPanelViews(panels)')).toBe(
@@ -118,16 +119,14 @@ describe('Creative Canvas product route composition', () => {
 
   test('uses CAS recovery and delegates generation to the typed runtime gateway', () => {
     expect(source.includes('await editor.flush()')).toBe(true);
-    expect(
-      source.includes('canLeaveCreativeCanvasAfterFlush(await editor.flush())')
-    ).toBe(true);
+    expect(source.includes('creativeCanvasBlockedLeaveMessage(result)')).toBe(
+      true
+    );
     expect(source.includes('await editorRef.current.reloadRemote()')).toBe(
       true
     );
     expect(source.includes('setBackground(next)')).toBe(true);
-    expect(
-      source.includes('const saveMessage = save.error?.message ?? undefined')
-    ).toBe(true);
+    expect(source.includes('creativeCanvasSaveDisplayMessage(save)')).toBe(true);
     expect(source.includes('save.error?.message ?? notice')).toBe(false);
     expect(source.includes('localStorage')).toBe(false);
     expect(source.includes('sessionStorage')).toBe(false);

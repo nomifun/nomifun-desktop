@@ -110,6 +110,11 @@ export class CanvasCasSaveController {
     this.pendingDocument = cloneDocument(document);
     const hasPendingChanges = documentSignature(document) !== this.savedSignature;
 
+    if (this.snapshot.status === 'conflict') {
+      this.updateSnapshot({ ...this.snapshot, hasPendingChanges: true });
+      return;
+    }
+
     if (!hasPendingChanges) {
       this.cancelTimer();
       this.updateSnapshot({
@@ -118,11 +123,6 @@ export class CanvasCasSaveController {
         hasPendingChanges: false,
         error: null,
       });
-      return;
-    }
-
-    if (this.snapshot.status === 'conflict') {
-      this.updateSnapshot({ ...this.snapshot, hasPendingChanges: true });
       return;
     }
 
@@ -138,11 +138,19 @@ export class CanvasCasSaveController {
   async flush(): Promise<CanvasCasFlushResult> {
     this.cancelTimer();
     const revision = this.snapshot.revision;
+    if (
+      this.snapshot.status === 'conflict' &&
+      this.snapshot.error &&
+      revision !== null
+    ) {
+      return {
+        status: 'conflict',
+        revision,
+        error: this.snapshot.error,
+      };
+    }
     if (revision === null || !this.pendingDocument || !this.snapshot.hasPendingChanges) {
       return { status: 'noop', revision };
-    }
-    if (this.snapshot.status === 'conflict' && this.snapshot.error) {
-      return { status: 'conflict', revision, error: this.snapshot.error };
     }
     if (this.inFlight) {
       await this.inFlight;

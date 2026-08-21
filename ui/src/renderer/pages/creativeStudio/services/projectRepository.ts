@@ -85,9 +85,9 @@ export function toCreativeProjectRepositoryError(
     const kind: CreativeProjectRepositoryErrorKind =
       error.status === 404
         ? 'not-found'
-        : error.status === 409
+        : error.status === 409 && error.code === 'REVISION_CONFLICT'
           ? 'revision-conflict'
-          : error.status === 400 || error.status === 422
+          : error.status === 400 || error.status === 409 || error.status === 422
             ? 'invalid-request'
             : error.status === 401 || error.status === 403
               ? 'permission-denied'
