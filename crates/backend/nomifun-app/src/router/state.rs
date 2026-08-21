@@ -86,7 +86,7 @@ pub struct ModuleStates {
     pub companion: CompanionRouterState,
     /// 客服独立域 (customer-service domain).
     pub customer_service: nomifun_customer_service::CustomerServiceRouterState,
-    /// 创意工坊 (Creative Workshop) canvas/asset domain.
+    /// Creative Studio project, asset, workflow, and archive domain.
     pub workshop: WorkshopRouterState,
     /// 小程序 (mini-app) library: metadata CRUD + the document serve channel.
     pub miniapp: nomifun_miniapp::MiniAppRouterState,
@@ -1362,8 +1362,8 @@ pub fn build_webhook_state(services: &AppServices) -> WebhookRouterState {
     WebhookRouterState { service }
 }
 
-/// Build the 创意工坊 (Creative Workshop) router state, reusing the singleton
-/// `workshop_service` (canvas/asset CRUD + on-disk docs/binaries).
+/// Build the Creative Studio router state, reusing the singleton project/asset
+/// service and its on-disk asset binaries.
 pub fn build_workshop_state(services: &AppServices) -> WorkshopRouterState {
     WorkshopRouterState::new(services.workshop_service.clone())
 }

@@ -1,7 +1,7 @@
-//! E2E tests for the 创意工坊 (Creative Workshop) public read-only file channel
-//! (M10a). The binary serve routes must be reachable WITHOUT credentials (so
-//! `<img>`/`<video>` subresource loads work under the desktop's local-trust
-//! policy), while every management route stays authenticated.
+//! E2E tests for the Creative Studio public read-only file channel. Asset files
+//! must be reachable WITHOUT credentials (so `<img>`/`<video>` subresource
+//! loads work under the desktop's local-trust policy), while every management
+//! route stays authenticated and retired Workshop routes stay absent.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
@@ -64,10 +64,7 @@ async fn workshop_file_channel_serves_without_auth() {
 async fn workshop_public_serve_missing_is_404_not_auth_rejected() {
     let (app, _services) = build_app().await;
 
-    for uri in [
-        "/api/creative-studio/files/0190f5fe-7c00-7a00-8000-000000009991",
-        "/api/workshop/canvas-thumbs/0190f5fe-7c00-7a00-8000-000000009992",
-    ] {
+    for uri in ["/api/creative-studio/files/0190f5fe-7c00-7a00-8000-000000009991"] {
         let resp = app.clone().oneshot(get_request(uri)).await.unwrap();
         assert_eq!(
             resp.status(),
@@ -78,16 +75,13 @@ async fn workshop_public_serve_missing_is_404_not_auth_rejected() {
     }
 }
 
-/// Every OTHER workshop route stays authenticated: unauthenticated GETs are
-/// rejected (401/403), never served.
+/// Every Creative Studio management route stays authenticated: unauthenticated
+/// GETs and writes are rejected (401/403), never served.
 #[tokio::test]
 async fn workshop_management_routes_still_require_auth() {
     let (app, _services) = build_app().await;
 
-    for uri in [
-        "/api/workshop/canvases",
-        "/api/creative-studio/assets",
-    ] {
+    for uri in ["/api/creative-studio/assets"] {
         let resp = app.clone().oneshot(get_request(uri)).await.unwrap();
         assert!(
             resp.status() == StatusCode::UNAUTHORIZED || resp.status() == StatusCode::FORBIDDEN,
@@ -102,7 +96,7 @@ async fn workshop_management_routes_still_require_auth() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/workshop/canvases")
+                .uri("/api/creative-studio/assets")
                 .header("content-type", "application/json")
                 .body(Body::from("{}"))
                 .unwrap(),
@@ -111,7 +105,27 @@ async fn workshop_management_routes_still_require_auth() {
         .unwrap();
     assert!(
         resp.status() == StatusCode::UNAUTHORIZED || resp.status() == StatusCode::FORBIDDEN,
-        "POST create canvas must stay auth-gated, got {}",
+        "POST create asset must stay auth-gated, got {}",
         resp.status()
     );
+}
+
+#[tokio::test]
+async fn retired_workshop_and_unowned_creation_routes_are_not_mounted() {
+    let (app, _services) = build_app().await;
+
+    for uri in [
+        "/api/workshop/canvases",
+        "/api/workshop/canvases/0190f5fe-7c00-7a00-8000-000000009991",
+        "/api/workshop/canvas-thumbs/0190f5fe-7c00-7a00-8000-000000009992",
+        "/api/creation/tasks",
+        "/api/creation/tasks/0190f5fe-7c00-7a00-8000-000000009993",
+    ] {
+        let response = app.clone().oneshot(get_request(uri)).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "retired route {uri} must not be mounted"
+        );
+    }
 }
