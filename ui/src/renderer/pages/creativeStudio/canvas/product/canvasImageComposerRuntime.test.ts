@@ -36,8 +36,25 @@ const sourceNode = (): Extract<CreativeCanvasNode, { type: 'image' }> => {
   return { ...base, data: { ...base.data, assetId: SOURCE_ASSET_ID } };
 };
 
-const emptySourceNode = (): Extract<CreativeCanvasNode, { type: 'image' }> =>
-  testNode('image', 1, { width: 340, height: 240 });
+const emptySourceNode = (): Extract<CreativeCanvasNode, { type: 'image' }> => {
+  const base = testNode('image', 1, { width: 340, height: 240 });
+  return {
+    ...base,
+    data: {
+      ...base.data,
+      composer: {
+        prompt: '生成后继续编辑',
+        model: { providerId: PROVIDER_ID, model: 'generate-v1' },
+        interfaceMode: 'images',
+        quality: 'auto',
+        width: 1024,
+        height: 1024,
+        aspectRatio: '1:1',
+        count: 2,
+      },
+    },
+  };
+};
 
 const configNode = (): Extract<CreativeCanvasNode, { type: 'config' }> => {
   const base = testNode('config', 2, {
@@ -325,7 +342,14 @@ describe('canvas image composer runtime integration', () => {
     expect(state.document.nodes.find((node) => node.id === source.id)).toMatchObject({
       id: source.id,
       type: 'image',
-      data: { assetId: RESULT_ASSET_ID },
+      data: {
+        assetId: RESULT_ASSET_ID,
+        composer: {
+          prompt: '生成后继续编辑',
+          model: null,
+          count: 2,
+        },
+      },
     });
     const extraNodes = state.document.nodes.filter(
       (node) => node.type === 'image' && node.data.assetId === SECOND_RESULT_ASSET_ID

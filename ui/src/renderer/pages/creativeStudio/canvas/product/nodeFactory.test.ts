@@ -33,6 +33,7 @@ const expectedData: CreativeCanvasNodeDataByKind = {
     alt: '',
     fit: 'contain',
     naturalSize: null,
+    composer: null,
   },
   panorama: {
     assetId: null,
@@ -261,6 +262,7 @@ describe('real library insertion helpers', () => {
         alt: '真实素材',
         fit: 'contain',
         naturalSize: { width: 1_920, height: 1_080 },
+        composer: null,
       });
     }
     expect(video.type === 'video' && video.data.posterAssetId).toBeNull();

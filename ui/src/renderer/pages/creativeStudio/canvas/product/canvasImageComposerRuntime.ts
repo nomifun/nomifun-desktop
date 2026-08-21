@@ -18,6 +18,7 @@ import {
   canvasImageComposeConfigFromTask,
   canvasImageComposeResultPosition,
   canvasImageComposeSourceNodeId,
+  clearCanvasImageComposeDraftModel,
   reconcileCanvasImageComposeConfig,
 } from './canvasImageComposerCanvas';
 import { creativeNodeFromAsset } from './nodeFactory';
@@ -143,7 +144,7 @@ export async function settleCanvasImageComposeTask(input: {
         }
         resultNode = source.data.assetId === asset.id
           ? source
-          : {
+          : clearCanvasImageComposeDraftModel({
               ...source,
               data: {
                 ...source.data,
@@ -155,7 +156,7 @@ export async function settleCanvasImageComposeTask(input: {
                     ? { width: asset.width, height: asset.height }
                     : null,
               },
-            };
+            });
         if (source.data.assetId !== asset.id) {
           input.editor.dispatch(canvasCommands.reconcileRuntimeNode(resultNode));
           state = input.editor.getState();

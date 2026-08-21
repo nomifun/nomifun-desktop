@@ -11,6 +11,7 @@ import type {
 } from '../../assets';
 import { CREATIVE_ASSET_MANUAL_UPLOAD_LIMIT_BYTES } from '../../assets/page/model';
 import type { CreativeCanvasNode, CreativeSize } from '../../domain';
+import { clearCanvasImageComposeDraftModel } from './canvasImageComposerCanvas';
 
 type ImageNode = Extract<CreativeCanvasNode, { type: 'image' }>;
 
@@ -126,7 +127,7 @@ export function fillEmptyCanvasImageNodeFromAsset(
     positive(asset.width) && positive(asset.height)
       ? { width: asset.width, height: asset.height }
       : null;
-  return {
+  return clearCanvasImageComposeDraftModel({
     ...node,
     size: uploadedCanvasImageNodeSize(asset, node.size),
     data: {
@@ -137,5 +138,5 @@ export function fillEmptyCanvasImageNodeFromAsset(
       fit: 'contain',
       naturalSize,
     },
-  };
+  });
 }

@@ -194,7 +194,26 @@ describe('Creative Studio v1 document contract', () => {
       groupId: group.id,
       zIndex: 2,
       locked: false,
-      data: { assetId: null, caption: '', alt: '', fit: 'contain', naturalSize: null },
+      data: {
+        assetId: null,
+        caption: '',
+        alt: '',
+        fit: 'contain',
+        naturalSize: null,
+        composer: {
+          prompt: '雾中灯塔',
+          model: {
+            providerId: '0198f8bb-8424-7b3d-8f17-bc6a1676f118',
+            model: 'image-v1',
+          },
+          interfaceMode: 'images',
+          quality: 'high',
+          width: 1536,
+          height: 1024,
+          aspectRatio: '3:2',
+          count: 2,
+        },
+      },
     };
     const document = {
       ...createEmptyCreativeProjectDocument(PROJECT_ID),
@@ -211,6 +230,7 @@ describe('Creative Studio v1 document contract', () => {
     };
 
     expect(parseCreativeProjectDocument(document).nodes[1]).toEqual(text);
+    expect(parseCreativeProjectDocument(document).nodes[2]).toEqual(image);
 
     const missingTarget = structuredClone(document);
     missingTarget.connections[0].targetNodeId = 'missing';
@@ -218,6 +238,85 @@ describe('Creative Studio v1 document contract', () => {
       () => parseCreativeProjectDocument(missingTarget),
       'INVALID_DOCUMENT',
       '$.connections[0].targetNodeId'
+    );
+  });
+
+  test('defaults old v1 image composer data and rejects malformed durable drafts', () => {
+    const image: CreativeCanvasNode = {
+      id: 'image-legacy',
+      type: 'image',
+      position: { x: 0, y: 0 },
+      size: { width: 320, height: 240 },
+      groupId: null,
+      zIndex: 0,
+      locked: false,
+      data: { assetId: null, caption: '', alt: '', fit: 'contain', naturalSize: null, composer: null },
+    };
+    const oldV1 = structuredClone(image) as unknown as {
+      data: Record<string, unknown>;
+    };
+    delete oldV1.data.composer;
+    const parsed = parseCreativeProjectDocument({
+      ...createEmptyCreativeProjectDocument(PROJECT_ID),
+      nodes: [oldV1],
+    });
+    expect(parsed.nodes[0].type === 'image' && parsed.nodes[0].data.composer).toBeNull();
+
+    const malformed = structuredClone(image);
+    if (malformed.type !== 'image') throw new Error('fixture must be an image');
+    malformed.data.composer = {
+      prompt: 'draft',
+      model: {
+        providerId: 'not-a-provider-id',
+        model: 'image-v1',
+      },
+      interfaceMode: 'images',
+      quality: 'auto',
+      width: 1024,
+      height: 1024,
+      aspectRatio: '1:1',
+      count: 1,
+    };
+    expectContractError(
+      () =>
+        parseCreativeProjectDocument({
+          ...createEmptyCreativeProjectDocument(PROJECT_ID),
+          nodes: [malformed],
+        }),
+      'INVALID_DOCUMENT',
+      '$.nodes[0].data.composer.model.providerId'
+    );
+
+    const partialDimensions = structuredClone(malformed);
+    if (partialDimensions.type !== 'image' || !partialDimensions.data.composer) {
+      throw new Error('fixture must contain an image composer');
+    }
+    partialDimensions.data.composer.model = null;
+    partialDimensions.data.composer.width = null;
+    expectContractError(
+      () =>
+        parseCreativeProjectDocument({
+          ...createEmptyCreativeProjectDocument(PROJECT_ID),
+          nodes: [partialDimensions],
+        }),
+      'INVALID_DOCUMENT',
+      '$.nodes[0].data.composer'
+    );
+
+    const paddedAspect = structuredClone(partialDimensions);
+    if (paddedAspect.type !== 'image' || !paddedAspect.data.composer) {
+      throw new Error('fixture must contain an image composer');
+    }
+    paddedAspect.data.composer.width = 1024;
+    paddedAspect.data.composer.aspectRatio = ' 1:1 ';
+    expectContractError(
+      () =>
+        parseCreativeProjectDocument({
+          ...createEmptyCreativeProjectDocument(PROJECT_ID),
+          nodes: [paddedAspect],
+        }),
+      'INVALID_DOCUMENT',
+      '$.nodes[0].data.composer.aspectRatio'
     );
   });
 
@@ -230,7 +329,7 @@ describe('Creative Studio v1 document contract', () => {
       groupId: null,
       zIndex: 0,
       locked: false,
-      data: { assetId: null, caption: '', alt: '', fit: 'contain', naturalSize: null },
+      data: { assetId: null, caption: '', alt: '', fit: 'contain', naturalSize: null, composer: null },
     };
     const director: CreativeCanvasNode = {
       id: 'director-1',

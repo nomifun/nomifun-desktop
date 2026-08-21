@@ -132,6 +132,7 @@ describe("Director capture to canvas transfer", () => {
       alt: "真实导演截图",
       fit: "contain",
       naturalSize: { width: 1_920, height: 1_080 },
+      composer: null,
     });
     expect(
       plan.document.nodes.find((node) => node.id === DIRECTOR_NODE_ID)?.type,

@@ -53,8 +53,8 @@ impl CreativeProjectDocument {
     }
 
     /// Validate invariants that must remain stable across every client. The v1
-    /// node payload union is closed: kind-specific evolution requires a new
-    /// schema version instead of accepting uncoordinated fields.
+    /// node payload union remains closed to unknown fields; coordinated,
+    /// backward-readable optional fields are normalized by both wire parsers.
     pub fn validate_for_project(&self, expected_project_id: &str) -> Result<(), String> {
         nomifun_common::validate_uuidv7(expected_project_id)
             .map_err(|error| format!("project id must be a canonical UUIDv7: {error}"))?;
@@ -441,6 +441,8 @@ pub struct CreativeImageNodeData {
     pub alt: String,
     pub fit: CreativeImageFit,
     pub natural_size: Option<CreativeSize>,
+    #[serde(default)]
+    pub composer: Option<CreativeImageComposerDraft>,
 }
 
 impl CreativeImageNodeData {
@@ -451,8 +453,82 @@ impl CreativeImageNodeData {
         if let Some(size) = self.natural_size {
             size.validate(&format!("{path}.naturalSize"))?;
         }
+        if let Some(composer) = &self.composer {
+            composer.validate(&format!("{path}.composer"))?;
+        }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreativeImageComposerDraft {
+    pub prompt: String,
+    pub model: Option<CreativeImageComposerModel>,
+    pub interface_mode: CreativeImageComposerInterfaceMode,
+    pub quality: CreativeImageComposerQuality,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub aspect_ratio: String,
+    pub count: u8,
+}
+
+impl CreativeImageComposerDraft {
+    fn validate(&self, path: &str) -> Result<(), String> {
+        require_string(&format!("{path}.prompt"), &self.prompt, true, 1_000_000)?;
+        if let Some(model) = &self.model {
+            model.validate(&format!("{path}.model"))?;
+        }
+        for (field, value) in [("width", self.width), ("height", self.height)] {
+            if value.is_some_and(|value| !(1..=8192).contains(&value)) {
+                return Err(format!("{path}.{field} must be between 1 and 8192"));
+            }
+        }
+        if self.width.is_none() != self.height.is_none() {
+            return Err(format!(
+                "{path}.width and {path}.height must both be null or both be set"
+            ));
+        }
+        require_trimmed_string(
+            &format!("{path}.aspectRatio"),
+            &self.aspect_ratio,
+            128,
+        )?;
+        if !(1..=10).contains(&self.count) {
+            return Err(format!("{path}.count must be between 1 and 10"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreativeImageComposerModel {
+    pub provider_id: String,
+    pub model: String,
+}
+
+impl CreativeImageComposerModel {
+    fn validate(&self, path: &str) -> Result<(), String> {
+        require_uuidv7(&format!("{path}.providerId"), &self.provider_id)?;
+        require_trimmed_string(&format!("{path}.model"), &self.model, 512)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CreativeImageComposerInterfaceMode {
+    Images,
+    Responses,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CreativeImageComposerQuality {
+    Auto,
+    High,
+    Medium,
+    Low,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -983,7 +1059,20 @@ mod tests {
                 "caption": "image caption",
                 "alt": "image alt",
                 "fit": "contain",
-                "naturalSize": { "width": 1920, "height": 1080 }
+                "naturalSize": { "width": 1920, "height": 1080 },
+                "composer": {
+                    "prompt": "draw a fox",
+                    "model": {
+                        "providerId": "0190f5fe-7c00-7a00-8abc-000000000188",
+                        "model": "image-model-v1"
+                    },
+                    "interfaceMode": "images",
+                    "quality": "high",
+                    "width": 1536,
+                    "height": 1024,
+                    "aspectRatio": "3:2",
+                    "count": 2
+                }
             }),
             "panorama" => serde_json::json!({
                 "assetId": "asset-panorama",
@@ -1163,6 +1252,72 @@ mod tests {
             doc.validate_for_project(PROJECT_ID)
                 .unwrap_or_else(|error| panic!("{kind} payload must validate: {error}"));
         }
+    }
+
+    #[test]
+    fn image_composer_draft_is_strict_but_old_v1_images_default_to_none() {
+        let mut old_image = node_value("old-image", "image");
+        old_image["data"].as_object_mut().unwrap().remove("composer");
+        let old_image: CreativeNode = serde_json::from_value(old_image).unwrap();
+        let CreativeNodeData::Image(old_data) = &old_image.data else {
+            unreachable!()
+        };
+        assert_eq!(old_data.composer, None);
+        assert_eq!(serde_json::to_value(old_image).unwrap()["data"]["composer"], Value::Null);
+
+        let mut invalid_count = node("invalid-composer", "image");
+        let CreativeNodeData::Image(data) = &mut invalid_count.data else {
+            unreachable!()
+        };
+        data.composer.as_mut().unwrap().count = 11;
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(invalid_count);
+        assert!(document
+            .validate_for_project(PROJECT_ID)
+            .unwrap_err()
+            .contains("composer.count"));
+
+        let mut partial_model = node_value("partial-model", "image");
+        partial_model["data"]["composer"]["model"]
+            .as_object_mut()
+            .unwrap()
+            .remove("providerId");
+        assert!(serde_json::from_value::<CreativeNode>(partial_model).is_err());
+
+        let mut partial_dimensions = node("partial-dimensions", "image");
+        let CreativeNodeData::Image(data) = &mut partial_dimensions.data else {
+            unreachable!()
+        };
+        let composer = data.composer.as_mut().unwrap();
+        composer.width = None;
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(partial_dimensions);
+        assert!(document
+            .validate_for_project(PROJECT_ID)
+            .unwrap_err()
+            .contains("must both be null or both be set"));
+
+        let mut padded_model = node("padded-model", "image");
+        let CreativeNodeData::Image(data) = &mut padded_model.data else {
+            unreachable!()
+        };
+        data.composer
+            .as_mut()
+            .unwrap()
+            .model
+            .as_mut()
+            .unwrap()
+            .model = " image-model-v1 ".into();
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(padded_model);
+        assert!(document
+            .validate_for_project(PROJECT_ID)
+            .unwrap_err()
+            .contains("must be trimmed"));
+
+        let mut unknown_nested = node_value("unknown-nested", "image");
+        unknown_nested["data"]["composer"]["legacySetting"] = Value::Bool(true);
+        assert!(serde_json::from_value::<CreativeNode>(unknown_nested).is_err());
     }
 
     #[test]
