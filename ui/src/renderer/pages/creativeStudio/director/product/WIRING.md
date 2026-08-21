@@ -1,25 +1,9 @@
 # Creative Director product route wiring
 
-The default export is a no-props route component. It reads the canonical
-`projectId` with `useParams`, loads the root Creative Studio project through
-`creativeProjectRepository`, and saves its Director scene through revision CAS.
-
-Add the lazy route import beside the other Creative Studio products:
-
-```tsx
-const CreativeDirectorProductRoute = React.lazy(
-  () => import("@renderer/pages/creativeStudio/director/product"),
-);
-```
-
-Mount it inside `CreativeStudioFocusShell`:
-
-```tsx
-<Route
-  path="director/:projectId"
-  element={withRouteFallback(CreativeDirectorProductRoute)}
-/>
-```
+The default no-props route is mounted at `/workshop/director/:projectId`. It
+reads the canonical `projectId` with `useParams`, loads the root Creative
+Studio project through `creativeProjectRepository`, and saves its Director
+scene through revision CAS.
 
 The root canvas document remains authoritative. Its single `director` node
 stores a `sceneId` pointer to an immutable, non-library NomiFun text asset whose
@@ -27,9 +11,9 @@ content is the validated `nomifun.director.project` v1 document. Every pointer
 advance uses the root project's compare-and-swap revision; conflicts never
 force-write.
 
-The product registers an asynchronous leave gate. Focus-shell navigation must
-also await `requestCreativeDirectorProductBeforeLeave()` and continue only when
-it returns `true`, just as it already does for the canvas product.
+The product registers an asynchronous leave gate. Focus-shell navigation
+already awaits `requestCreativeDirectorProductBeforeLeave()` and continues only
+when it returns `true`, just as it does for the canvas product.
 The Director close action awaits the same gate and returns to
 `creativeStudioCanvasProjectPath(projectId)`, preserving the current project's
 canvas context instead of dropping the user at the project index.
@@ -46,7 +30,6 @@ reused, and an uncertain response is reconciled against the authoritative
 project before retry, so the action cannot create duplicates. Multi-angle
 capture and video export remain visibly unavailable.
 
-The current backend archive collector also ignores `director.sceneId`; route
-wiring alone therefore does not make Director sidecars portable. Project ZIP
-export/import must not be declared complete for Director scenes until the
-backend archive collector and remapper explicitly include this pointer.
+Project ZIP export/import includes the Director `sceneId` text sidecar and
+remaps the pointer on import. Archive tests cover collection, checksum,
+identity remapping and round-trip recovery of that scene document.

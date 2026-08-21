@@ -1,14 +1,15 @@
 # Standalone workbench wiring
 
-This directory supplies two prop-free route components:
+This directory supplies two prop-free route components mounted by the
+production router at `/workshop/image` and `/workshop/video`:
 
 - `ImageWorkbenchProductRoute`
 - `VideoWorkbenchProductRoute`
 
-The router is intentionally not changed in this slice. Each route accepts an
-explicit `?projectId=<canonical UUIDv7>` scope. With no scope it renders the
-source workbench in a fail-closed state and asks the user to choose a real
-project; it never borrows or creates a recent project implicitly.
+Each route accepts an explicit `?projectId=<canonical UUIDv7>` scope. With no
+scope it renders the source workbench in a fail-closed state and asks the user
+to choose a real project; it never borrows or creates a recent project
+implicitly.
 
 Before POSTing a task the route creates or updates a visible canonical config
 node through project CAS. `onPendingTask` durably records the task id before
