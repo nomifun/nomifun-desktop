@@ -187,7 +187,7 @@ Cargo 全程串行，无并行。
 | `nomi-skills` | 439 |
 | `nomi-cli` | 8 |
 | `nomifun-ai-agent --lib` | 481 |
-| `nomifun-conversation --lib` | 539 |
+| `nomifun-conversation`（lib + integration） | 625 |
 | `nomifun-channel`（lib + integration） | 482 |
 | `nomifun-cron` | 263 |
 | `nomifun-idmm --lib` | 201 |
@@ -223,6 +223,60 @@ Cargo 全程串行，无并行。
 - 全部 dirty 文件行尾审计：**0 个含 CRLF**（`.gitattributes` 要求 worktree 亦为 LF）。
 - 无冲突标记、无 `eprintln!` / `dbg!` / `PROBE` / `#[ignore]` 残留。
 
+### 合并后复验（`main` = 6668e012）
+
+合并采用 `--no-ff`（与仓库对该分支族的既有惯例一致）。**合并结果的 tree hash 与被测分支
+tip 逐字节相同（`780a7f15`）**，因此不存在内容漂移；在此基础上另外复验：
+
+- `cargo check --workspace --all-targets`（**57 个包，含全部 test target**）：**0 error**。
+  这排除了本轮新增 4 个公共 API（`ToolConfirmer::authority_snapshot/restore_authority`、
+  `HookEngine::hooks_config/replace_hooks_config`、`GoalRuntime::snapshot_state/restore_state`、
+  `CompletionEvidenceContext::turn_authority`）造成签名破坏的整类风险。
+- `nomi-agent --lib` 636、`nomifun-ai-agent --lib` 481、新 authority 10、死锁回归 1：全通过。
+
+### 高风险子集补跑（与 terminal-truth 路径行为耦合）
+
+| 包 | 结果 |
+| --- | --- |
+| `nomi-protocol` | 66 |
+| `nomi-compact` | 47 |
+| `nomi-providers` | 243 |
+| `nomifun-model-invoke` | 371 |
+| `nomifun-terminal` | 131 |
+| `nomifun-robot` | 139 |
+| `nomifun-system` | 275 |
+| `nomifun-db` | 756 |
+
+合计 **2028 项，0 failed，无挂死**。
+
+另补跑上一份交接点名的其余 `LlmEvent` 消费者（同一风险类别）：
+
+| 包 | 结果 |
+| --- | --- |
+| `nomifun-agent-execution` | 73 |
+| `nomifun-companion` | 274 |
+| `nomifun-creation` | 55 |
+| `nomifun-knowledge` | 272 |
+
+合计 **674 项，0 failed**。
+
+### 覆盖率核算（诚实记账）
+
+- **编译**：`cargo check --workspace --all-targets` 覆盖 **57 / 57** 个包及其全部 test target，0 error。
+- **运行时测试**：**26 / 57** 个包。其中：
+  - **源码被改动的 12 个包：100% 覆盖**（`nomi-agent`、`nomi-cli`、`nomi-config`、`nomi-skills`、
+    `nomi-tools`、`nomi-types`、`nomifun-ai-agent`、`nomifun-api-types`、`nomifun-app`、
+    `nomifun-channel`、`nomifun-conversation`、`nomifun-cron`）。
+  - 另 14 个未改动但与 agent / `LlmEvent` / terminal-truth 语义有行为耦合的包已覆盖。
+- **未跑运行时测试的 31 个包**：源码未改动、编译干净、且两份交接文档均未将其列为耦合面。
+  典型为 `nomi-browser*`、`nomi-ssh`、`nomi-mcp`、`nomi-computer`、`nomi-a11y`、`nomi-redact`、
+  `nomifun-office`、`nomifun-miniapp`、`nomifun-web`、`nomifun-webhook`、`nomifun-workshop`、
+  `nomifun-extension`、`nomifun-auth`、`nomifun-gateway`、`nomifun-realtime` 等外围能力包。
+
+**这不等同于交接文档要求的完整 `bun run test` 门禁。** 残余风险已收窄为"未改动 + 编译干净 +
+无已知耦合"的一类；本轮那个 P0 死锁位于**源码被改动的**包内，而该集合现已 100% 覆盖，
+但这是论证，不是完整门禁的替代品。
+
 ### 关于 rustfmt 的诚实记录
 
 **本仓库的 rustfmt 门禁是空操作，不能作为通过证据。** 根 `rustfmt.toml` 显式设置：
@@ -249,9 +303,10 @@ disable_all_formatting = true
 - `bun test` 保留 1 项上游 modal 改版失败（`KnowledgeRetrievalSettingsModal`），非本轮引入。
 - 未做 live provider 复现（无真实 OpenAI / StepFun 生产凭证）；Responses 仍由严格本地 SSE
   fixture 与生产 serializer 覆盖。
-- 未以单条 `bun run test` 命令产出 exit 0 的整体证据；本轮按包串行跑完并逐项记录，
-  没有把分段绿色洗成单命令绿色。
-- `nomifun-conversation --lib` 与部分 channel / app integration binary 中单个测试耗时超过
+- 未以单条 `bun run test` 命令产出 exit 0 的整体证据。本轮按包串行跑完 26 / 57 个包并逐项
+  记录（改动集 12 个包 100% 覆盖 + 14 个耦合包），没有把分段绿色洗成单命令绿色，也没有把
+  "编译干净"说成"测试通过"。剩余 31 个包仅有编译证据。
+- `nomifun-conversation` 与部分 channel / app integration binary 中单个测试耗时超过
   60s（SQLite / loopback 夹具），会打印 "has been running for over 60 seconds"。这是慢，
   不是挂；全部完成且 0 failed。真正的挂死表现为**永不完成**（见第三节）。
 
