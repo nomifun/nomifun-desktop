@@ -2,7 +2,7 @@
 
 > 用途：在长任务发生上下文压缩或人员切换时，从可验证提交继续，而不是重新审计整仓。
 > 分支：`codex/infinite-canvas-rebuild`
-> 最后功能锚点：`a394b1e6`（`feat(creative-studio): coordinate exact model deletion`）
+> 最后功能锚点：`bc879581`（`feat(creative-studio): expose safe agent canvas ops`）
 > 参考产品锚点：`ef7303d`
 
 ## 1. 续接协议
@@ -28,7 +28,7 @@
 | P5 | Canonical 资产 API/库、文本/图像/视频/音频节点、素材选择与结果回填 | `57128727`、`e05b18a8`、`04f805a3`、`444db764` |
 | P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化；画布视频/音频 owner、提交响应不明状态确认与 authoritative 404 orphan 清理；真实 `standalone_workbench` owner、完整有序输入快照、owner-scoped keyset/active 历史与安全退役合同；单模型删除的 Creative Studio exact-pair 原子清理与硬绑定门禁 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44`、`60982e38`、`9fffd526`、`8e5f83cf`、`1dd4b9e9`、`9990921c`、`53093740`、`a394b1e6` |
 | P7 | 生图/视频工作台、owner-scoped 持久终态历史、live 恢复/取消/载入/精确重试、terminal-only 安全移除、工作流定义/运行中心、提示词与素材中心 | `2283ee74`、`1414846e`、`ebd17f3a`…`aad21d9d`、`7e45f8ad`、`9990921c`、`3b8a1b03` |
-| P8 | 持久化画布 Agent、原子操作、裁剪/切分/遮罩编辑与真实任务回填 | `e5368474`…`00f407c6`、`cac4bca8`…`bc01849e` |
+| P8 | 持久化画布 Agent、原子操作、裁剪/切分/遮罩编辑与真实任务回填；owner-only Agent canvas-op HTTP 网关、服务端审计来源、CAS/UUIDv7/删除确认门禁 | `e5368474`…`00f407c6`、`cac4bca8`…`bc01849e`、`bc879581` |
 | P9 | Director v1 domain、Three.js runtime、CAS sidecar、时间轴、截图回填、sidecar 全资产闭包与归档重映射 | `1ccbd013`、`d3a609f6`、`7b7712c0`、`dfa3c0b3`、`f25825f1`、`c12b8db` |
 | P10 | 旧 Workshop UI、翻译、后端路由、旧画布存储与旧任务归属退出运行链 | `63c99d4f`…`7867fe3f` |
 
@@ -78,6 +78,8 @@
 - 单独删除一个 Provider model 现在必须经过 app 层协调器：Workshop 只生成精确 `{ providerId, model }` 的项目/工作流清理计划，`SqliteProviderModelRepository` 在一个 writer transaction 内复核 active creation task 与 nonterminal Workflow snapshot、对全部 project/workflow 做 revision CAS、删除 exact capability/model 并只递增一次 Provider `config_revision`。任一 stale/missing/hard binding 都整笔回滚；旧 repository delete 旁路已移除，System 构造器也必须显式注入协调器。
 - 只清除 config、图片/视频/音频 composer、Workflow generator/planner 和无消息空 Agent session 的当前选择；同 Provider 其他模型、completed Agent session、terminal task、asset origin 与 terminal Workflow snapshot 保留为历史。live config、pending Agent turn、queued/running task 或 nonterminal Workflow run 返回冲突。新 creation task 在同一写事务内证明 Provider/model 均 enabled 且具有 exact task capability；既有幂等历史回放仍在 live-parent 门禁前返回。
 - 图片/视频独立工作台在目录刷新后会清空已消失的 exact 选择，不自动替换成同 Provider 的其他模型。真实 API 创建临时 Provider、两个模型与双 config 项目后删除目标模型，项目 revision 2→3、目标选择清空且 prompt 保留、sibling 模型/选择保留；临时项目与 Provider 最终精确清理为 0。稳定后端下图片/视频完整 reload 均 Console 0 error / 0 warning，固定 stone token 为 `#f4f2ed / #292524 / 87,83,78`；未调用付费 Provider。
+- `POST /api/creative-studio/projects/{projectId}/agent-ops` 已把既有 `CreativeAgentOp` 原子批处理暴露为 owner-only HTTP 网关。Wrapper 只接受 `{ expectedRevision, ops }`，审计 source 固定由服务端写入 `creative-studio-agent`；nested op 继续复用 canonical snake_case domain wire，不复制 DTO。响应只包含 CAS 后 project summary 与有序 op results；stale、unknown field、空/非法批次、config runtime 字段篡改均零写入，节点/连线 ID 由服务端签发 UUIDv7。
+- Agent route 首批显式拒绝 `delete_node`，删除仍只能走画布人工确认入口；domain/service 的受控内部删除能力不受影响。真实 API 已验证 add 200/revision 2、stale 409/`REVISION_CONFLICT`、delete 400 且零写入、move 200/revision 3，并精确清理临时项目为 0。现有画布刷新仍为 3 节点/0 连接、返回项目可用、Console 0 error / 0 warning。前端严格 artifact 预览/“应用到画布”按钮尚未接线，不能把网关存在描述成 Agent 已会自动改画布。
 
 `dd18dc6f` 的提交前检查：
 
@@ -193,6 +195,12 @@
 - `nomifun-workshop` exact cleanup 与整 Provider 回归：3 passed；`nomifun-system` provider-model route：6 passed；`nomifun-app` 真实协调器：2 passed；`cargo check -p nomifun-app --lib`、Rust fmt、`bun run typecheck`、Product route 8 tests / 42 assertions、`git diff --check` 通过。输出仅有未改模块既存 warning。
 - 隔离后端真实 HTTP 冒烟通过并清理 QA Provider/项目为 0。图片/视频页面完整 reload、返回入口、空历史与 fixed palette 通过；稳定 reload Console 0 error / 0 warning。没有发起模型调用或产生 Provider 成本。
 
+`bc879581` 的提交前检查：
+
+- `cargo test -p nomifun-workshop creative_agent_ops --lib`：6 passed，覆盖 domain、service 与 route；Rust fmt、`git diff --check` 通过。
+- 真实 HTTP add/stale/delete/move 状态分别为 200/409/400/200，revision 1→2→3；server-minted node UUIDv7、rejected-op 零写入和 QA 项目清理为 0 均通过。
+- 真实画布刷新保持 3 节点/0 连接，返回项目与固定创作表面可见，Console 0 error / 0 warning。没有模型调用或媒体任务。
+
 `7e45f8ad` 的提交前检查：
 
 - `cargo test -p nomifun-workshop`：70 passed。
@@ -226,8 +234,8 @@
 
 ## 5. 下一步单线程优先级
 
-1. 规划型 Agent：补首页 Agent 启动画布、画布选择上下文、正规 NomiFun 创作 Skill 注入、安全文本/结构 ops 与 Workflow AI draft→预览→编辑器→人工保存；首批不触发高级媒体生成。
+1. 规划型 Agent：在已完成的安全 ops 网关上接画布选择上下文、正规 NomiFun 创作 Skill 注入、严格 artifact 预览/人工应用；随后补首页 Agent 启动画布与 Workflow AI draft→预览→编辑器→人工保存。首批不触发高级媒体生成。
 2. 高级媒体：视频多任务/首尾帧/高级引用、音频上传/时长/VoiceClone、Director/全景与完整视频输出均须先补 typed 后端能力。
 3. P11：1280×720、1024×768、390×844、Tauri 慢环、真实 provider 冒烟、UI build/桌面打包和最终能力文档。
 
-不要因为主体代码已存在就跳过这些门禁；standalone owner/history/recovery/安全移除与 Creative Studio exact-model 删除闭环已完成，下一功能提交从首页/画布规划 Agent 与 Workflow AI 产品能力开始。
+不要因为主体代码已存在就跳过这些门禁；standalone owner/history/recovery/安全移除、Creative Studio exact-model 删除和 Agent ops 网关已完成，下一功能提交从画布 context/Skill/artifact 产品接线开始。
