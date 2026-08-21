@@ -42,6 +42,7 @@ type ComposerProps = Pick<
   | 'generating'
   | 'submitDisabled'
   | 'references'
+  | 'addReferenceLabel'
   | 'onAddReferences'
   | 'onRemoveReference'
   | 'onMoveReference'
@@ -120,9 +121,13 @@ const ReferenceItem: React.FC<{
 const ReferenceStrip: React.FC<
   Pick<
     ComposerProps,
-    'references' | 'onAddReferences' | 'onRemoveReference' | 'onMoveReference'
+    | 'references'
+    | 'addReferenceLabel'
+    | 'onAddReferences'
+    | 'onRemoveReference'
+    | 'onMoveReference'
   >
-> = ({ references, onAddReferences, onRemoveReference, onMoveReference }) => (
+> = ({ references, addReferenceLabel, onAddReferences, onRemoveReference, onMoveReference }) => (
   <div className={styles.referenceSection}>
     <div className={styles.sectionHeading}>
       <span>参考素材</span>
@@ -145,7 +150,7 @@ const ReferenceStrip: React.FC<
       ))}
       <button type='button' className={styles.addReference} onClick={onAddReferences}>
         <Plus size={15} />
-        <span>{references.length ? '继续添加' : '添加图片、视频或音频'}</span>
+        <span>{references.length ? '继续添加' : addReferenceLabel ?? '添加图片、视频或音频'}</span>
       </button>
     </div>
   </div>
@@ -267,6 +272,7 @@ const VideoWorkbenchComposer: React.FC<ComposerProps> = ({
   generating = false,
   submitDisabled = false,
   references,
+  addReferenceLabel,
   onAddReferences,
   onRemoveReference,
   onMoveReference,
@@ -306,6 +312,7 @@ const VideoWorkbenchComposer: React.FC<ComposerProps> = ({
   };
   const referenceProps = {
     references,
+    addReferenceLabel,
     onAddReferences,
     onRemoveReference,
     onMoveReference,

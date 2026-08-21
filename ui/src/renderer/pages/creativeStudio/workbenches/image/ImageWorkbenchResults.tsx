@@ -30,9 +30,16 @@ interface ImageWorkbenchResultsProps {
   selectedResultIds: readonly string[];
   task: ImageWorkbenchTaskSummary;
   onSelectionChange(resultIds: string[]): void;
-  onDeleteResult(resultId: string): void;
-  onDeleteSelected(resultIds: string[]): void;
+  onDeleteResult?(resultId: string): void;
+  onDeleteSelected?(resultIds: string[]): void;
   onRetryResult?(resultId: string): void;
+  onLoadResult?(taskId: string): void;
+  onCancelTask?(taskId: string): void;
+  historyLoading?: boolean;
+  historyError?: string;
+  historyLoadingMore?: boolean;
+  historyHasMore?: boolean;
+  onLoadMoreResults?(): void;
 }
 
 const taskStateLabel = (task: ImageWorkbenchTaskSummary): string | null => {
@@ -52,13 +59,21 @@ const taskStateLabel = (task: ImageWorkbenchTaskSummary): string | null => {
   }
 };
 
-const TaskMeta: React.FC<{ result: ImageWorkbenchResult }> = ({ result }) => (
+const TaskMeta: React.FC<{
+  result: ImageWorkbenchResult;
+  onLoadResult?(taskId: string): void;
+}> = ({ result, onLoadResult }) => (
   <div className={styles.resultMeta}>
     <p title={result.prompt}>{result.prompt}</p>
     <div>
       <Tag title={`${result.model.providerId}/${result.model.model}`}>{result.modelLabel}</Tag>
       {result.createdAtLabel ? <Tag>{result.createdAtLabel}</Tag> : null}
       {result.durationLabel ? <Tag>{result.durationLabel}</Tag> : null}
+      {onLoadResult ? (
+        <Button size='mini' onClick={() => onLoadResult(result.taskId)}>
+          载入
+        </Button>
+      ) : null}
     </div>
   </div>
 );
@@ -66,18 +81,24 @@ const TaskMeta: React.FC<{ result: ImageWorkbenchResult }> = ({ result }) => (
 const ResultVisual: React.FC<{
   result: ImageWorkbenchResult;
   onRetryResult?(resultId: string): void;
-}> = ({ result, onRetryResult }) => {
+  onCancelTask?(taskId: string): void;
+}> = ({ result, onRetryResult, onCancelTask }) => {
   if (result.status === 'succeeded') {
+    const first = result.outputs[0];
     return (
       <div className={styles.successVisual}>
-        <img src={result.imageUrl} alt={result.alt} />
+        <div className={styles.successGallery} data-image-output-count={result.outputs.length}>
+          {result.outputs.map((output) => (
+            <img key={output.assetId} src={output.imageUrl} alt={output.alt} />
+          ))}
+        </div>
         <span className={styles.resultBadge} data-tone='success'>
-          <Check /> 成功
+          <Check /> 成功 · {result.outputs.length} 张
         </span>
-        {result.width && result.height ? (
+        {first?.width && first.height ? (
           <span className={styles.imageDimensions}>
-            {result.width} × {result.height}
-            {result.sizeLabel ? ` · ${result.sizeLabel}` : ''}
+            {first.width} × {first.height}
+            {first.sizeLabel ? ` · ${first.sizeLabel}` : ''}
           </span>
         ) : null}
       </div>
@@ -90,7 +111,7 @@ const ResultVisual: React.FC<{
         <Error size={30} />
         <strong>生成失败</strong>
         <span>{result.errorMessage}</span>
-        {onRetryResult ? (
+        {onRetryResult && result.retryable !== false ? (
           <Button size='small' status='danger' icon={<Refresh />} onClick={() => onRetryResult(result.id)}>
             重试
           </Button>
@@ -105,7 +126,7 @@ const ResultVisual: React.FC<{
         <CloseOne size={30} />
         <strong>已取消</strong>
         <span>{result.message || '任务已取消，没有生成图片'}</span>
-        {onRetryResult ? (
+        {onRetryResult && result.retryable !== false ? (
           <Button size='small' icon={<Refresh />} onClick={() => onRetryResult(result.id)}>
             重新生成
           </Button>
@@ -121,6 +142,11 @@ const ResultVisual: React.FC<{
         <Time size={26} />
         <strong>{result.statusLabel || '排队中'}</strong>
         <span>等待模型开始处理</span>
+        {onCancelTask ? (
+          <Button size='small' status='danger' onClick={() => onCancelTask(result.taskId)}>
+            取消任务
+          </Button>
+        ) : null}
       </div>
     );
   }
@@ -135,6 +161,11 @@ const ResultVisual: React.FC<{
       ) : (
         <span>正在等待模型返回结果</span>
       )}
+      {onCancelTask ? (
+        <Button size='small' status='danger' onClick={() => onCancelTask(result.taskId)}>
+          取消任务
+        </Button>
+      ) : null}
     </div>
   );
 };
@@ -147,7 +178,15 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
   onDeleteResult,
   onDeleteSelected,
   onRetryResult,
+  onLoadResult,
+  onCancelTask,
+  historyLoading,
+  historyError,
+  historyLoadingMore,
+  historyHasMore,
+  onLoadMoreResults,
 }) => {
+  const deletionEnabled = Boolean(onDeleteResult && onDeleteSelected);
   const allSelected = results.length > 0 && results.every((result) => selectedResultIds.includes(result.id));
   const stateLabel = taskStateLabel(task);
   const stateTone =
@@ -159,10 +198,10 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
         <div className={styles.resultsTitle}>
           <History />
           <h2>全部结果</h2>
-          <Tag>{results.length}</Tag>
+          <Tag>已加载 {results.length}</Tag>
           {stateLabel ? <Tag color={stateTone}>{stateLabel}</Tag> : null}
         </div>
-        <div className={styles.resultsActions}>
+        {deletionEnabled ? <div className={styles.resultsActions}>
           <Button
             size='small'
             icon={allSelected ? <CloseSmall /> : <Check />}
@@ -176,20 +215,18 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
             status='danger'
             icon={<Delete />}
             disabled={selectedResultIds.length === 0}
-            onClick={() => onDeleteSelected([...selectedResultIds])}
+            onClick={() => onDeleteSelected?.([...selectedResultIds])}
           >
             删除{selectedResultIds.length > 0 ? ` ${selectedResultIds.length}` : ''}
           </Button>
-        </div>
+        </div> : null}
       </header>
 
       {results.length === 0 ? (
         <div className={styles.emptyResults} data-image-result-state='empty'>
-          <span className={styles.emptyIcon}>
-            <Pic size={38} />
-          </span>
-          <strong>还没有生成图片</strong>
-          <p>在创作台输入提示词并选择模型，生成结果会出现在这里。</p>
+          <span className={styles.emptyIcon}>{historyLoading ? <Loading size={38} className={styles.spin} /> : historyError ? <Error size={38} /> : <Pic size={38} />}</span>
+          <strong>{historyLoading ? '正在恢复生成历史' : historyError ? '生成历史加载失败' : '还没有生成图片'}</strong>
+          <p>{historyLoading ? '正在读取当前项目的真实任务与结果。' : historyError ?? '在创作台输入提示词并选择模型，生成结果会出现在这里。'}</p>
         </div>
       ) : (
         <div className={styles.resultGrid}>
@@ -204,7 +241,7 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
                 data-model={result.model.model}
                 data-selected={selected || undefined}
               >
-                <div className={styles.resultSelection}>
+                {deletionEnabled ? <div className={styles.resultSelection}>
                   <Checkbox
                     checked={selected}
                     aria-label={`选择结果 ${result.id}`}
@@ -220,16 +257,27 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
                     status='danger'
                     icon={<Delete />}
                     aria-label={`删除结果 ${result.id}`}
-                    onClick={() => onDeleteResult(result.id)}
+                    onClick={() => onDeleteResult?.(result.id)}
                   />
-                </div>
-                <ResultVisual result={result} onRetryResult={onRetryResult} />
-                <TaskMeta result={result} />
+                </div> : null}
+                <ResultVisual
+                  result={result}
+                  onRetryResult={onRetryResult}
+                  onCancelTask={onCancelTask}
+                />
+                <TaskMeta result={result} onLoadResult={onLoadResult} />
               </article>
             );
           })}
         </div>
       )}
+      {historyHasMore && onLoadMoreResults ? (
+        <div className={styles.historyFooter}>
+          <Button loading={historyLoadingMore} onClick={onLoadMoreResults}>
+            {historyLoadingMore ? '正在加载…' : '加载更多历史'}
+          </Button>
+        </div>
+      ) : null}
     </section>
   );
 };

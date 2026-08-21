@@ -97,6 +97,7 @@ pub struct CreationTaskPageCursorRef<'a> {
 pub struct ListStandaloneWorkbenchTasksParams<'a> {
     pub project_id: &'a str,
     pub workbench_kind: &'a str,
+    pub active_only: bool,
     pub before: Option<CreationTaskPageCursorRef<'a>>,
     /// Requested visible page size. The repository reads one additional row.
     pub limit: usize,

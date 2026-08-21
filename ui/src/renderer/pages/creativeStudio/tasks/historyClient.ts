@@ -109,10 +109,19 @@ const normalizeQuery = (
       'limit'
     );
   }
+  const activeOnly = input.activeOnly ?? false;
+  if (typeof activeOnly !== 'boolean') {
+    throw new CreativeTaskContractError(
+      'invalid_request',
+      'Standalone task history activeOnly must be boolean',
+      'activeOnly'
+    );
+  }
   return {
     projectId: input.projectId,
     workbenchKind: input.workbenchKind,
     limit,
+    activeOnly,
     cursor:
       input.cursor == null
         ? null
@@ -172,6 +181,7 @@ export class CreativeTaskHistoryClient {
       workbench_kind: query.workbenchKind,
       limit: String(query.limit),
     });
+    if (query.activeOnly) params.set('active_only', 'true');
     if (query.cursor) params.set('cursor', query.cursor.raw);
     const wire = record(
       await this.api.listStandalone(params.toString(), signal),
@@ -196,6 +206,17 @@ export class CreativeTaskHistoryClient {
     const seen = new Set<string>();
     for (const task of items) {
       assertOwned(task, query);
+      if (
+        query.activeOnly &&
+        task.status !== 'queued' &&
+        task.status !== 'running'
+      ) {
+        throw new CreativeTaskContractError(
+          'invalid_response',
+          `Active standalone history returned terminal task ${task.taskId}`,
+          'response.items'
+        );
+      }
       if (seen.has(task.taskId)) {
         throw new CreativeTaskContractError(
           'invalid_response',

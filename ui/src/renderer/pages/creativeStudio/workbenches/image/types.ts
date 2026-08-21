@@ -61,6 +61,8 @@ interface ImageWorkbenchResultBase {
   modelLabel: string;
   createdAtLabel?: string;
   durationLabel?: string;
+  /** False when legacy inputs or the exact model are no longer available. */
+  retryable?: boolean;
 }
 
 export interface ImageWorkbenchQueuedResult extends ImageWorkbenchResultBase {
@@ -76,13 +78,15 @@ export interface ImageWorkbenchRunningResult extends ImageWorkbenchResultBase {
 
 export interface ImageWorkbenchSucceededResult extends ImageWorkbenchResultBase {
   status: 'succeeded';
-  /** Stable generated asset identity; the URL is a caller-resolved presentation detail. */
-  assetId: string;
-  imageUrl: string;
-  alt: string;
-  width?: number;
-  height?: number;
-  sizeLabel?: string;
+  /** One task card retains every output in authoritative result order. */
+  outputs: readonly {
+    assetId: string;
+    imageUrl: string;
+    alt: string;
+    width?: number;
+    height?: number;
+    sizeLabel?: string;
+  }[];
 }
 
 export interface ImageWorkbenchFailedResult extends ImageWorkbenchResultBase {
@@ -137,9 +141,16 @@ export interface ImageWorkbenchProps {
   onCountChange(count: number): void;
   onGenerate(): void;
   onResultSelectionChange(resultIds: string[]): void;
-  onDeleteResult(resultId: string): void;
-  onDeleteSelected(resultIds: string[]): void;
+  onDeleteResult?(resultId: string): void;
+  onDeleteSelected?(resultIds: string[]): void;
   onRetryResult?(resultId: string): void;
+  onLoadResult?(taskId: string): void;
+  onCancelTask?(taskId: string): void;
+  historyLoading?: boolean;
+  historyError?: string;
+  historyLoadingMore?: boolean;
+  historyHasMore?: boolean;
+  onLoadMoreResults?(): void;
 }
 
 export const DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS: readonly ImageWorkbenchAspectRatioOption[] = [

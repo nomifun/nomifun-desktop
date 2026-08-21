@@ -306,7 +306,7 @@ export function mapImageWorkbenchRuntimeResults(
   options: MapImageWorkbenchRuntimeOptions = {},
 ): ImageWorkbenchResult[] {
   const formatters = options.formatters ?? defaultFormatters;
-  return snapshot.entries.flatMap((entry): ImageWorkbenchResult[] => {
+  return snapshot.entries.map((entry): ImageWorkbenchResult => {
     const task = entry.task;
     const base = {
       taskId: task.taskId,
@@ -315,14 +315,18 @@ export function mapImageWorkbenchRuntimeResults(
       modelLabel: exactModelLabel(options.catalog, task, formatters),
       createdAtLabel: formatters.createdAtLabel(task),
       durationLabel: formatters.durationLabel(task),
+      retryable:
+        task.inputs !== null &&
+        (!options.catalog ||
+          exactWorkbenchModelOptions(options.catalog, task.task).some(
+            (option) =>
+              option.providerId === task.providerId && option.model === task.model,
+          )),
     };
     if (task.status === "succeeded") {
-      return requireSucceededOutputs(entry).map((output) => {
+      const outputs = requireSucceededOutputs(entry).map((output) => {
         const presentation = options.outputPresentation?.(output, task) ?? {};
         return {
-          ...base,
-          id: output.assetId,
-          status: "succeeded",
           assetId: output.assetId,
           imageUrl: requireMediaUrl(output),
           alt: presentation.alt ?? promptOf(task),
@@ -331,38 +335,45 @@ export function mapImageWorkbenchRuntimeResults(
           sizeLabel: presentation.sizeLabel,
         };
       });
+      return {
+        ...base,
+        id: task.taskId,
+        status: "succeeded",
+        outputs,
+      };
     }
     if (task.status === "failed") {
-      return [
-        {
-          ...base,
-          id: task.taskId,
-          status: "failed",
-          errorMessage: requireFailedMessage(entry),
-          errorDetail: entry.requestError?.message,
-        },
-      ];
+      return {
+        ...base,
+        id: task.taskId,
+        status: "failed",
+        errorMessage: requireFailedMessage(entry),
+        errorDetail: entry.requestError?.message,
+      };
     }
     if (task.status === "canceled") {
-      return [{ ...base, id: task.taskId, status: "canceled" }];
+      return { ...base, id: task.taskId, status: "canceled" };
     }
-    return [{ ...base, id: task.taskId, status: task.status }];
+    return { ...base, id: task.taskId, status: task.status };
   });
 }
 
 export function imageWorkbenchTaskSummary(
   snapshot: CreativeWorkbenchRuntimeSnapshot,
 ): ImageWorkbenchTaskSummary {
-  const entry = singleEntry(snapshot, "image");
+  const entry = snapshot.entries.find(
+    (candidate) =>
+      candidate.task.status === "queued" || candidate.task.status === "running",
+  );
+  const activeCount = snapshot.entries.filter(
+    (candidate) =>
+      candidate.task.status === "queued" || candidate.task.status === "running",
+  ).length;
   return {
     state: entry?.task.status ?? "idle",
     pendingCount:
       snapshot.submittingCount +
-      snapshot.recoveringCount +
-      (entry &&
-      (entry.task.status === "queued" || entry.task.status === "running")
-        ? 1
-        : 0),
+      Math.max(snapshot.recoveringCount, activeCount),
     message: taskMessage(snapshot, entry),
   };
 }
@@ -466,10 +477,6 @@ export function mapVideoWorkbenchRuntimeTasks(
   options: MapVideoWorkbenchRuntimeOptions = {},
 ): VideoWorkbenchTask[] {
   const formatters = options.formatters ?? defaultFormatters;
-  const realTaskCount =
-    snapshot.entries.length +
-    snapshot.submittingCount +
-    snapshot.recoveringCount;
   return snapshot.entries.map((entry): VideoWorkbenchTask => {
     const task = entry.task;
     const labels = videoLabels(task);
@@ -481,7 +488,14 @@ export function mapVideoWorkbenchRuntimeTasks(
       model: { providerId: task.providerId, model: task.model },
       modelLabel: exactModelLabel(options.catalog, task, formatters),
       ...labels,
-      taskCount: realTaskCount,
+      taskCount: 1,
+      retryable:
+        task.inputs !== null &&
+        (!options.catalog ||
+          exactWorkbenchModelOptions(options.catalog, task.task).some(
+            (option) =>
+              option.providerId === task.providerId && option.model === task.model,
+          )),
     };
     if (task.status === "succeeded") {
       const outputs = requireSucceededOutputs(entry);

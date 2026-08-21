@@ -150,12 +150,16 @@ describe('ImageWorkbench visual states', () => {
         {
           ...resultBase,
           status: 'succeeded',
-          assetId: 'asset-result-1',
-          imageUrl: 'https://media.invalid/result.png',
-          alt: '生成的未来城市',
-          width: 1536,
-          height: 1024,
-          sizeLabel: '2.4 MB',
+          outputs: [
+            {
+              assetId: 'asset-result-1',
+              imageUrl: 'https://media.invalid/result.png',
+              alt: '生成的未来城市',
+              width: 1536,
+              height: 1024,
+              sizeLabel: '2.4 MB',
+            },
+          ],
         },
       ],
       task: { state: 'succeeded', pendingCount: 0 },

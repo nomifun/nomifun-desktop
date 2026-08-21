@@ -534,6 +534,13 @@
   border-color: var(--color-border-3);
 }
 
+.historyFooter {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: center;
+  padding: 0 14px 14px;
+}
+
 .cardOverlayActions {
   position: absolute;
   top: 7px;

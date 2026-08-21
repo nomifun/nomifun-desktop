@@ -40,6 +40,8 @@ interface VideoWorkbenchTaskBase {
   sizeLabel: string;
   durationLabel: string;
   taskCount: number;
+  /** False when legacy inputs or the exact model are no longer available. */
+  retryable?: boolean;
 }
 
 export interface QueuedVideoWorkbenchTask extends VideoWorkbenchTaskBase {
@@ -92,6 +94,7 @@ export interface VideoWorkbenchProps {
   submitDisabled?: boolean;
 
   references: readonly VideoWorkbenchReference[];
+  addReferenceLabel?: string;
   onAddReferences: () => void;
   onRemoveReference: (referenceId: string) => void;
   onMoveReference?: (referenceId: string, direction: -1 | 1) => void;
@@ -116,13 +119,19 @@ export interface VideoWorkbenchProps {
   tasks: readonly VideoWorkbenchTask[];
   selectedTaskIds: readonly string[];
   onSelectedTaskIdsChange: (ids: readonly string[]) => void;
-  onDeleteTasks: (ids: readonly string[]) => void;
+  onDeleteTasks?: (ids: readonly string[]) => void;
   onNewSession?: () => void;
   onLoadTask?: (taskId: string) => void;
   onRetryTask?: (taskId: string) => void;
+  onCancelTask?: (taskId: string) => void;
   onInspectTask?: (taskId: string) => void;
   onCopyPrompt?: (prompt: string) => void;
   onDownloadTask?: (taskId: string) => void;
+  historyLoading?: boolean;
+  historyError?: string;
+  historyLoadingMore?: boolean;
+  historyHasMore?: boolean;
+  onLoadMoreTasks?: () => void;
 
   className?: string;
 }

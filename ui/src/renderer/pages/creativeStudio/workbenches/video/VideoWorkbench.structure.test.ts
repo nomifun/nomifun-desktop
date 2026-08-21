@@ -39,7 +39,7 @@ describe('VideoWorkbench controlled boundary', () => {
     expect(results.includes('placehold')).toBe(false);
   });
 
-  test('exposes the requested result states and task selection/deletion', () => {
+  test('exposes result states while gating deletion behind a real capability', () => {
     for (const status of ['queued', 'running', 'succeeded', 'failed', 'canceled']) {
       expect(types.includes(`status: '${status}'`)).toBe(true);
     }
@@ -47,8 +47,11 @@ describe('VideoWorkbench controlled boundary', () => {
     expect(results.includes('data-video-result-state={task.status}')).toBe(true);
     expect(results.includes('toggleVideoTaskSelection')).toBe(true);
     expect(results.includes('toggleAllVideoTasks')).toBe(true);
-    expect(results.includes('onDeleteTasks(visibleSelectedIds)')).toBe(true);
-    expect(results.includes('onDeleteTasks([task.id])')).toBe(true);
+    expect(results.includes('onDeleteTasks?.(visibleSelectedIds)')).toBe(true);
+    expect(results.includes('onDeleteTasks?.([task.id])')).toBe(true);
+    expect(results.includes('deletionEnabled')).toBe(true);
+    expect(results.includes('加载更多历史')).toBe(true);
+    expect(results.includes('onCancelTask(task.id)')).toBe(true);
     expect(results.includes("if (task.status === 'queued') return '排队中'")).toBe(true);
     expect(results.includes("if (task.status === 'canceled') return <CanceledVisual task={task} />")).toBe(true);
   });

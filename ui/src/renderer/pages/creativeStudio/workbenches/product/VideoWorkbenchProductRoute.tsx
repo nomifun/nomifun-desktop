@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useMemo, useState } from 'react';
+import { isBackendHttpError } from '@/common/adapter/httpBridge';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import {
@@ -19,26 +20,35 @@ import {
   useNomiCreativeModelCatalog,
   type CreativeModelSelectionRef,
 } from '../../models';
-import { creativeTaskClient } from '../../tasks';
 import {
-  VideoWorkbench,
-  type VideoWorkbenchLayout,
-} from '../video';
+  creativeTaskClient,
+  creativeTaskReference,
+  type CreativeTask,
+} from '../../tasks';
+import {
+  combineStandaloneHistoryTasks,
+  hydrateStandaloneTaskReferences,
+  standaloneHistoryResumeRequests,
+  standaloneHistoryRuntimeSnapshot,
+  useStandaloneWorkbenchHistory,
+  type StandaloneWorkbenchHistoryState,
+} from '../history';
 import {
   createVideoWorkbenchRuntimeProps,
+  prepareStandaloneHistoryRetry,
   videoWorkbenchReferencesFromAssets,
   useVideoWorkbenchRuntime,
 } from '../runtime';
+import { VideoWorkbench, type VideoWorkbenchLayout } from '../video';
 import {
-  ensureStandaloneWorkbenchNode,
-  findStandaloneWorkbenchNode,
+  standaloneWorkbenchOwner,
   STANDALONE_VIDEO_MAX_CONCURRENT_TASKS,
 } from './ownership';
 import {
   StandaloneWorkbenchPage,
+  StandaloneHistoryGate,
   useStandaloneWorkbenchScope,
 } from './shared';
-import { useStandalonePersistence } from './useStandalonePersistence';
 import styles from './StandaloneWorkbenchProduct.module.css';
 
 const RESOLUTIONS = [
@@ -55,6 +65,8 @@ const DURATIONS = [
   { value: '10', label: '10 秒' },
 ];
 
+const ownerScopedPendingNoop = async (): Promise<void> => undefined;
+
 const videoDimensions = (
   resolution: string,
   aspect: string
@@ -67,7 +79,37 @@ const videoDimensions = (
   throw new Error(`不支持的视频画幅：${aspect}`);
 };
 
-const UnownedVideoWorkbench: React.FC = () => {
+const videoControlsFromTask = (
+  task: CreativeTask
+): { prompt: string; resolution: string; aspect: string; duration: string } => {
+  if (task.task !== 'video_generation') throw new Error(`任务 ${task.taskId} 不是视频任务。`);
+  const prompt = task.parameters.prompt;
+  const width = task.parameters.width;
+  const height = task.parameters.height;
+  const seconds = task.parameters.seconds;
+  if (
+    typeof prompt !== 'string' ||
+    !Number.isSafeInteger(width) ||
+    !Number.isSafeInteger(height) ||
+    (seconds !== 5 && seconds !== 10)
+  ) {
+    throw new Error(`任务 ${task.taskId} 的视频参数快照不完整，无法载入。`);
+  }
+  const match = RESOLUTIONS.flatMap((resolution) =>
+    ASPECTS.map((aspect) => ({
+      resolution: resolution.value,
+      aspect: aspect.value,
+      dimensions: videoDimensions(resolution.value, aspect.value),
+    }))
+  ).find((candidate) => candidate.dimensions.width === width && candidate.dimensions.height === height);
+  if (!match) throw new Error(`任务 ${task.taskId} 的视频尺寸不属于当前精确选项。`);
+  return { prompt, resolution: match.resolution, aspect: match.aspect, duration: String(seconds) };
+};
+
+const UnownedVideoWorkbench: React.FC<{
+  historyLoading?: boolean;
+  historyError?: string;
+}> = ({ historyLoading, historyError }) => {
   const catalog = useNomiCreativeModelCatalog();
   const [layout, setLayout] = useState<VideoWorkbenchLayout>('side');
   const [prompt, setPrompt] = useState('');
@@ -81,6 +123,7 @@ const UnownedVideoWorkbench: React.FC = () => {
       onGenerate={() => undefined}
       submitDisabled
       references={[]}
+      addReferenceLabel='添加图片参考'
       onAddReferences={() => undefined}
       onRemoveReference={() => undefined}
       modelSlot={
@@ -107,84 +150,124 @@ const UnownedVideoWorkbench: React.FC = () => {
       tasks={[]}
       selectedTaskIds={[]}
       onSelectedTaskIdsChange={() => undefined}
-      onDeleteTasks={() => undefined}
+      historyLoading={historyLoading}
+      historyError={historyError}
     />
   );
 };
 
-const OwnedVideoWorkbench: React.FC<{
+const OwnedVideoWorkbenchReady: React.FC<{
   detail: CreativeProjectDetail;
-  refresh(): Promise<CreativeProjectDetail | undefined>;
-}> = ({ detail, refresh }) => {
+  history: StandaloneWorkbenchHistoryState;
+}> = ({ detail, history }) => {
   const navigate = useNavigate();
   const catalog = useNomiCreativeModelCatalog();
   const assets = useCreativeAssets({ pageSize: 200, query: { sort: 'updated_desc' } });
-  const initialNode = useMemo(() => findStandaloneWorkbenchNode(detail.document, 'video'), []);
   const [layout, setLayout] = useState<VideoWorkbenchLayout>('side');
-  const [prompt, setPrompt] = useState(initialNode?.data.prompt ?? '');
-  const [model, setModel] = useState<CreativeModelSelectionRef | null>(
-    initialNode?.data.providerId && initialNode.data.model
-      ? { providerId: initialNode.data.providerId as CreativeModelSelectionRef['providerId'], model: initialNode.data.model }
-      : null
-  );
+  const [prompt, setPrompt] = useState('');
+  const [model, setModel] = useState<CreativeModelSelectionRef | null>(null);
   const [resolution, setResolution] = useState('1080p');
   const [aspect, setAspect] = useState('16:9');
   const [duration, setDuration] = useState('5');
-  const [referenceIds, setReferenceIds] = useState<string[]>(initialNode?.data.inputAssetIds ?? []);
-  const [selectedTaskIds, setSelectedTaskIds] = useState<readonly string[]>([]);
-  const [hiddenTaskIds, setHiddenTaskIds] = useState<readonly string[]>([]);
+  const [taskCount, setTaskCount] = useState(1);
+  const [referenceIds, setReferenceIds] = useState<string[]>([]);
+  const [hydratedReferences, setHydratedReferences] = useState<CreativeAsset[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const references = useMemo(
-    () => referenceIds.flatMap((id) => assets.assets.find((asset) => asset.id === id) ?? []),
-    [assets.assets, referenceIds]
+  const loadGenerationRef = useRef(0);
+  const projectId = detail.project.projectId;
+  const historyScope = useMemo(
+    () => ({ projectId, workbenchKind: 'video' as const }),
+    [projectId]
   );
-  const persistence = useStandalonePersistence({ kind: 'video', detail, refresh });
+  const durableTasks = useMemo(
+    () => combineStandaloneHistoryTasks(history.tasks, history.activeTasks),
+    [history.activeTasks, history.tasks]
+  );
+  const initialResumeRequests = useMemo(
+    () => standaloneHistoryResumeRequests(historyScope, history.activeTasks),
+    [history.activeTasks, historyScope]
+  );
+  const onSettledTask = useCallback(async () => {
+    await history.reload();
+  }, [history.reload]);
+  const onRecoveryFailure = useCallback(
+    async (_reference: unknown, reason: unknown): Promise<boolean> => {
+      if (!isBackendHttpError(reason) || reason.status !== 404) return false;
+      await history.reload();
+      return true;
+    },
+    [history.reload]
+  );
   const runtime = useVideoWorkbenchRuntime({
-    scopeKey: `${detail.project.projectId}:standalone-video`,
+    scopeKey: `${projectId}:standalone-video`,
     tasks: creativeTaskClient,
     assets: creativeAssetClient,
-    initialResumeRequests: persistence.initialResumeRequests,
-    onPendingTask: persistence.onPendingTask,
-    onSettledTask: persistence.onSettledTask,
-    onRecoveryFailure: persistence.onRecoveryFailure,
+    initialResumeRequests,
+    onPendingTask: ownerScopedPendingNoop,
+    onSettledTask,
+    onRecoveryFailure,
     onRuntimeError: (reason) => setError(reason instanceof Error ? reason.message : String(reason)),
   });
+  const presentationRuntime = useMemo(
+    () => standaloneHistoryRuntimeSnapshot(historyScope, durableTasks, runtime, creativeAssetClient),
+    [durableTasks, historyScope, runtime]
+  );
+  const referenceById = useMemo(
+    () => new Map([...assets.assets, ...hydratedReferences].map((asset) => [asset.id, asset])),
+    [assets.assets, hydratedReferences]
+  );
+  const references = useMemo(
+    () => referenceIds.flatMap((id) => referenceById.get(id) ?? []),
+    [referenceById, referenceIds]
+  );
+  const busy = presentationRuntime.entries.some(
+    (entry) => entry.task.status === 'queued' || entry.task.status === 'running'
+  ) || presentationRuntime.submittingCount > 0 || presentationRuntime.recoveringCount > 0;
+
+  useEffect(
+    () => () => {
+      loadGenerationRef.current += 1;
+    },
+    []
+  );
+
+  const taskById = useCallback(
+    (taskId: string): CreativeTask => {
+      const task = presentationRuntime.entries.find((entry) => entry.task.taskId === taskId)?.task;
+      if (!task) throw new Error(`找不到任务 ${taskId}。`);
+      return task;
+    },
+    [presentationRuntime.entries]
+  );
 
   const generate = async (): Promise<void> => {
     setError(null);
-    setHiddenTaskIds([]);
     if (!model || catalog.status !== 'ready') {
       setError('没有可用且明确选择的真实视频模型，未发起生成。');
       return;
     }
-    if (references.length > 1 || references.some((asset) => asset.kind !== 'image')) {
-      setError('当前视频生成只支持一张真实图片参考；V2V 与多图引用尚未开放。');
+    if (
+      references.length !== referenceIds.length ||
+      references.length > 1 ||
+      references.some((asset) => asset.kind !== 'image')
+    ) {
+      setError('当前视频生成只支持一张可读取的真实图片参考；V2V 与多图引用尚未开放。');
       return;
     }
     try {
       const capability = references.length === 1 ? 'i2v' : 't2v';
       const dimensions = videoDimensions(resolution, aspect);
-      const node = await ensureStandaloneWorkbenchNode(detail.project.projectId, 'video', {
-        task: 'video_generation',
-        capability,
-        prompt,
-        providerId: model.providerId,
-        model: model.model,
-        parameters: { ...dimensions, seconds: Number(duration) },
-        inputAssetIds: references.map((asset) => asset.id),
-      });
-      await refresh();
       await runtime.generate({
         catalog,
-        projectId: detail.project.projectId,
-        nodeId: node.id,
+        projectId,
+        owner: standaloneWorkbenchOwner(projectId, 'video'),
         model,
         references: {
           assets: references,
           bindings: references.map((asset) => ({
             assetId: asset.id,
-            kind: asset.kind,
+            kind: 'image' as const,
             role: 'reference' as const,
           })),
         },
@@ -193,9 +276,63 @@ const OwnedVideoWorkbench: React.FC<{
         seconds: Number(duration),
         width: dimensions.width,
         height: dimensions.height,
-        taskCount: STANDALONE_VIDEO_MAX_CONCURRENT_TASKS,
+        taskCount,
       });
     } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const retryTask = async (taskId: string): Promise<void> => {
+    setError(null);
+    try {
+      const task = taskById(taskId);
+      const retryReferences = await hydrateStandaloneTaskReferences(task, creativeAssetClient);
+      await runtime.run(
+        prepareStandaloneHistoryRetry({ catalog, task, references: retryReferences })
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const cancelTask = async (taskId: string): Promise<void> => {
+    setError(null);
+    try {
+      await runtime.cancel(taskId);
+    } catch {
+      try {
+        const task = taskById(taskId);
+        await creativeTaskClient.cancel(creativeTaskReference(task));
+        await history.reload();
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      }
+    }
+  };
+
+  const loadTask = async (taskId: string): Promise<void> => {
+    const generation = loadGenerationRef.current + 1;
+    loadGenerationRef.current = generation;
+    setError(null);
+    try {
+      const task = taskById(taskId);
+      const controls = videoControlsFromTask(task);
+      const nextReferences = await hydrateStandaloneTaskReferences(task, creativeAssetClient);
+      if (nextReferences.assets.length > 1 || nextReferences.assets.some((asset) => asset.kind !== 'image')) {
+        throw new Error('该历史任务使用当前视频工作台未开放的参考类型。');
+      }
+      if (loadGenerationRef.current !== generation) return;
+      setPrompt(controls.prompt);
+      setModel({ providerId: task.providerId as CreativeModelSelectionRef['providerId'], model: task.model });
+      setResolution(controls.resolution);
+      setAspect(controls.aspect);
+      setDuration(controls.duration);
+      setTaskCount(1);
+      setHydratedReferences([...nextReferences.assets]);
+      setReferenceIds(nextReferences.bindings.map((binding) => binding.assetId));
+    } catch (reason) {
+      if (loadGenerationRef.current !== generation) return;
       setError(reason instanceof Error ? reason.message : String(reason));
     }
   };
@@ -206,7 +343,7 @@ const OwnedVideoWorkbench: React.FC<{
       filter={{ capability: 'task', task: 'video_generation' }}
       value={model}
       onChange={setModel}
-      disabled={runtime.submittingCount > 0 || runtime.recoveringCount > 0}
+      disabled={busy}
     />
   );
   const baseProps = {
@@ -214,9 +351,9 @@ const OwnedVideoWorkbench: React.FC<{
     onLayoutChange: setLayout,
     prompt,
     onPromptChange: setPrompt,
-    submitDisabled:
-      persistence.resumeError !== null || catalog.status !== 'ready' || model === null,
+    submitDisabled: catalog.status !== 'ready' || model === null || history.refreshing,
     references: videoWorkbenchReferencesFromAssets(references),
+    addReferenceLabel: '添加图片参考',
     onAddReferences: () => setPickerOpen(true),
     onRemoveReference: (referenceId: string) =>
       setReferenceIds((ids) => ids.filter((id) => id !== referenceId)),
@@ -239,64 +376,107 @@ const OwnedVideoWorkbench: React.FC<{
     duration,
     durationOptions: DURATIONS,
     onDurationChange: setDuration,
-    taskCount: STANDALONE_VIDEO_MAX_CONCURRENT_TASKS,
+    taskCount,
     onTaskCountChange: (count: number) => {
-      if (count !== STANDALONE_VIDEO_MAX_CONCURRENT_TASKS) {
-        setError('当前 canonical config node 只能拥有一个 pending task；多视频并发需 standalone owner-union 后再开放。');
+      if (!Number.isSafeInteger(count) || count < 1 || count > STANDALONE_VIDEO_MAX_CONCURRENT_TASKS) {
+        setError(`视频并发任务数必须在 1-${STANDALONE_VIDEO_MAX_CONCURRENT_TASKS} 之间。`);
+        return;
       }
+      setTaskCount(count);
     },
     onOpenParameters: () =>
       setError('高级参数只会在具有明确 NomiFun 协议契约后开放，当前未发送隐藏参数。'),
     onOpenPromptLibrary: () => navigate('/workshop/prompts'),
-    selectedTaskIds,
-    onSelectedTaskIdsChange: setSelectedTaskIds,
-    onDeleteTasks: (ids: readonly string[]) => {
-      const selected = runtime.entries.filter((entry) => ids.includes(entry.task.taskId));
-      if (selected.some((entry) => entry.task.status !== 'succeeded')) {
-        setError('后端没有删除任务历史的能力；未伪装删除失败或运行中的任务。');
-        return;
-      }
-      void Promise.all(
-        selected.flatMap((entry) => entry.outputs.map((output) => creativeAssetClient.remove(output.assetId)))
-      )
-        .then(async () => {
-          setHiddenTaskIds((current) => [...new Set([...current, ...ids])]);
-          setSelectedTaskIds([]);
-          await assets.reload();
-        })
-        .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-    },
+    selectedTaskIds: [] as string[],
+    onSelectedTaskIdsChange: () => undefined,
     onNewSession: () => {
-      runtime.reset();
-      setHiddenTaskIds([]);
+      loadGenerationRef.current += 1;
+      setPrompt('');
+      setReferenceIds([]);
+      setHydratedReferences([]);
+      setTaskCount(1);
+      setError(null);
     },
-    onCopyPrompt: (value: string) => void navigator.clipboard.writeText(value),
+    onLoadTask: (taskId: string) => void loadTask(taskId),
+    onCancelTask: (taskId: string) => void cancelTask(taskId),
+    onInspectTask: (taskId: string) => {
+      try {
+        const task = taskById(taskId);
+        setError(task.error ? `${task.error.kind}: ${task.error.message}` : '任务没有错误详情。');
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      }
+    },
+    onCopyPrompt: (value: string) => {
+      void navigator.clipboard.writeText(value).catch((reason) =>
+        setError(reason instanceof Error ? reason.message : String(reason))
+      );
+    },
     onDownloadTask: (taskId: string) => {
-      const output = runtime.entries.find((entry) => entry.task.taskId === taskId)?.outputs[0];
-      if (!output?.url) return;
-      const link = document.createElement('a');
-      link.href = output.url;
-      link.download = `${output.assetId}.mp4`;
-      link.click();
+      try {
+        const task = taskById(taskId);
+        const assetId = task.resultAssetIds[0];
+        if (!assetId || task.resultAssetIds.length !== 1) {
+          setError('视频任务没有唯一可下载结果。');
+          return;
+        }
+        const link = document.createElement('a');
+        link.href = creativeAssetClient.url(assetId, 'original');
+        link.download = `${assetId}.mp4`;
+        link.click();
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      }
     },
+    historyLoadingMore: history.loadingMore,
+    historyHasMore: history.nextCursor !== null,
+    onLoadMoreTasks: () => void history.loadMore(),
   };
-  const wiredProps = createVideoWorkbenchRuntimeProps({
+  const props = createVideoWorkbenchRuntimeProps({
     base: baseProps,
-    runtime,
+    runtime: presentationRuntime,
     catalog,
     onGenerate: generate,
-    onRetryTask: runtime.retry,
+    onRetryTask: retryTask,
     onActionError: (reason) => setError(reason instanceof Error ? reason.message : String(reason)),
   });
-  const props = {
-    ...wiredProps,
-    tasks: wiredProps.tasks.filter((task) => !hiddenTaskIds.includes(task.id)),
-  };
 
   return (
     <>
-      {persistence.resumeError || error ? (
-        <div className={styles.runtimeNotice} role='alert'>{persistence.resumeError?.message ?? error}</div>
+      {history.error || error ? (
+        <div className={styles.runtimeNotice} role='alert'>
+          {history.error?.message ?? error}
+        </div>
+      ) : null}
+      {presentationRuntime.submissionFailures.map((failure) => (
+        <div className={styles.runtimeNotice} role='status' key={failure.order}>
+          <span>任务提交结果尚未确认，可使用原幂等请求安全重试。</span>
+          <button
+            type='button'
+            onClick={() => {
+              void runtime.retrySubmission(failure.order).catch((reason) =>
+                setError(reason instanceof Error ? reason.message : String(reason))
+              );
+            }}
+          >
+            确认任务状态
+          </button>
+        </div>
+      ))}
+      {presentationRuntime.requestError && history.activeTasks.length > 0 ? (
+        <div className={styles.runtimeNotice} role='status'>
+          <span>{presentationRuntime.requestError.message}</span>
+          <button
+            type='button'
+            onClick={() => {
+              void runtime.resume(initialResumeRequests).catch((reason) =>
+                setError(reason instanceof Error ? reason.message : String(reason))
+              );
+            }}
+          >
+            重试任务同步
+          </button>
+        </div>
       ) : null}
       <VideoWorkbench {...props} />
       <CreativeAssetPickerModal
@@ -310,29 +490,28 @@ const OwnedVideoWorkbench: React.FC<{
         error={assets.error ?? assets.mutationError}
         uploading={assets.mutating}
         onToggle={(asset: CreativeAsset) =>
-          setReferenceIds((ids) => {
-            if (ids.includes(asset.id)) return ids.filter((id) => id !== asset.id);
-            return [asset.id];
-          })
+          setReferenceIds((ids) => (ids.includes(asset.id) ? [] : [asset.id]))
         }
         onLoadMore={() => void assets.loadMore()}
         onRetry={() => void assets.reload()}
         onUploadFiles={(files) => {
           void Promise.all(
-            files.map((file) => assets.upload(file, {
-              title: file.name,
-              tags: ['workbench-reference'],
-              inLibrary: true,
-            }))
+            files.map((file) =>
+              assets.upload(file, {
+                title: file.name,
+                tags: ['workbench-reference'],
+                inLibrary: true,
+              })
+            )
           )
             .then((uploaded) => {
-              const firstKind = uploaded[0]?.kind;
-              if (!firstKind) return;
-              if (firstKind !== 'image') {
+              const first = uploaded[0];
+              if (!first) return;
+              if (first.kind !== 'image') {
                 setError('当前视频生成只支持图片参考。');
                 return;
               }
-              setReferenceIds(uploaded[0] ? [uploaded[0].id] : []);
+              setReferenceIds([first.id]);
             })
             .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
         }}
@@ -342,17 +521,31 @@ const OwnedVideoWorkbench: React.FC<{
   );
 };
 
+const OwnedVideoWorkbench: React.FC<{ detail: CreativeProjectDetail }> = ({ detail }) => {
+  const historyScope = useMemo(
+    () => ({ projectId: detail.project.projectId, workbenchKind: 'video' as const }),
+    [detail.project.projectId]
+  );
+  const history = useStandaloneWorkbenchHistory(historyScope);
+  if (history.status !== 'ready') {
+    return (
+      <StandaloneHistoryGate
+        label='视频'
+        error={history.error}
+        onRetry={() => void history.reload()}
+      />
+    );
+  }
+  return <OwnedVideoWorkbenchReady detail={detail} history={history} />;
+};
+
 /** Router-ready, prop-free standalone video product. */
 const VideoWorkbenchProductRoute: React.FC = () => {
   const scope = useStandaloneWorkbenchScope();
   return (
     <StandaloneWorkbenchPage scope={scope} error={null}>
       {scope.state === 'ready' && scope.detail ? (
-        <OwnedVideoWorkbench
-          key={scope.detail.project.projectId}
-          detail={scope.detail}
-          refresh={scope.refreshProject}
-        />
+        <OwnedVideoWorkbench key={scope.detail.project.projectId} detail={scope.detail} />
       ) : (
         <UnownedVideoWorkbench />
       )}

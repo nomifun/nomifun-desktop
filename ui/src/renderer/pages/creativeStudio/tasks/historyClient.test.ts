@@ -39,6 +39,14 @@ const task = (taskId: string, submittedAt: number) => ({
   finished_at: submittedAt + 2,
 });
 
+const activeTask = (taskId: string, submittedAt: number) => ({
+  ...task(taskId, submittedAt),
+  status: 'queued',
+  error: null,
+  started_at: null,
+  finished_at: null,
+});
+
 describe('CreativeTaskHistoryClient', () => {
   test('maps an exact owner-scoped page and preserves the opaque cursor', async () => {
     let requested = '';
@@ -170,5 +178,39 @@ describe('CreativeTaskHistoryClient', () => {
         signal,
       },
     ]);
+  });
+
+  test('requests and enforces an active-only recovery inventory', async () => {
+    let requested = '';
+    const client = new CreativeTaskHistoryClient({
+      listStandalone: async (query) => {
+        requested = query;
+        return { items: [activeTask(TASK_A, 10)], next_cursor: null };
+      },
+    });
+    const page = await client.listStandalone({
+      projectId: PROJECT_ID,
+      workbenchKind: 'image',
+      limit: 100,
+      activeOnly: true,
+    });
+    expect(requested).toBe(
+      `project_id=${PROJECT_ID}&workbench_kind=image&limit=100&active_only=true`
+    );
+    expect(page.items[0]?.status).toBe('queued');
+
+    let error: unknown = null;
+    try {
+      await new CreativeTaskHistoryClient({
+        listStandalone: async () => ({ items: [task(TASK_A, 10)], next_cursor: null }),
+      }).listStandalone({
+        projectId: PROJECT_ID,
+        workbenchKind: 'image',
+        activeOnly: true,
+      });
+    } catch (reason) {
+      error = reason;
+    }
+    expect(error instanceof CreativeTaskContractError).toBe(true);
   });
 });

@@ -1005,6 +1005,7 @@ impl CreationService {
         &self,
         project_id: &str,
         workbench_kind: StandaloneWorkbenchKind,
+        active_only: bool,
         limit: Option<usize>,
         cursor: Option<&str>,
     ) -> Result<StandaloneWorkbenchTaskPage, AppError> {
@@ -1023,6 +1024,7 @@ impl CreationService {
             .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
                 project_id: &project_id,
                 workbench_kind: workbench_kind.as_str(),
+                active_only,
                 before: cursor.as_ref().map(|cursor| CreationTaskPageCursorRef {
                     submitted_at: cursor.submitted_at,
                     creation_task_id: &cursor.creation_task_id,
@@ -2952,6 +2954,7 @@ mod tests {
             .list_standalone_workbench_tasks(
                 &project_id,
                 StandaloneWorkbenchKind::Video,
+                false,
                 Some(1),
                 None,
             )
@@ -2965,6 +2968,7 @@ mod tests {
             .list_standalone_workbench_tasks(
                 &project_id,
                 StandaloneWorkbenchKind::Video,
+                false,
                 Some(1),
                 Some(&cursor),
             )
@@ -2978,6 +2982,7 @@ mod tests {
                 .list_standalone_workbench_tasks(
                     &project_id,
                     StandaloneWorkbenchKind::Image,
+                    false,
                     None,
                     None,
                 )
@@ -2992,6 +2997,7 @@ mod tests {
                     .list_standalone_workbench_tasks(
                         &project_id,
                         StandaloneWorkbenchKind::Video,
+                        false,
                         None,
                         Some(invalid),
                     )
@@ -2999,6 +3005,73 @@ mod tests {
                 Err(AppError::BadRequest(_))
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn standalone_active_page_excludes_every_terminal_status() {
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let provider_id = seed_provider(db.pool(), "openai", "openai.images").await;
+        let project_id = seed_service_test_project(db.pool()).await;
+        let repo = SqliteCreationTaskRepository::new(db.pool().clone());
+        let queued_id = CreationTaskId::new().into_string();
+        let failed_id = CreationTaskId::new().into_string();
+        for (task_id, submitted_at) in [(&queued_id, 20), (&failed_id, 10)] {
+            let fingerprint = json!({"task": task_id}).to_string();
+            repo.get_or_create_creative_task(CreateCreativeTaskParams {
+                creation_task_id: task_id,
+                owner: CreativeTaskOwnerRef::StandaloneWorkbench {
+                    project_id: &project_id,
+                    workbench_kind: "image",
+                },
+                provider_id: &provider_id,
+                model: "image-model",
+                capability: "t2i",
+                params: r#"{"prompt":"Aurora"}"#,
+                input_bindings: "[]",
+                request_fingerprint: &fingerprint,
+                status: "queued",
+                submitted_at,
+            })
+            .await
+            .unwrap();
+        }
+        repo.update_task(
+            &failed_id,
+            UpdateCreationTaskParams {
+                status: Some("failed"),
+                error: Some(Some(r#"{"kind":"provider_error","message":"fixture"}"#)),
+                finished_at: Some(Some(11)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let service = CreationService::new(Arc::new(repo));
+
+        let active = service
+            .list_standalone_workbench_tasks(
+                &project_id,
+                StandaloneWorkbenchKind::Image,
+                true,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(active.items.len(), 1);
+        assert_eq!(active.items[0].creation_task_id, queued_id);
+
+        let all = service
+            .list_standalone_workbench_tasks(
+                &project_id,
+                StandaloneWorkbenchKind::Image,
+                false,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(all.items.len(), 2);
     }
 
     #[tokio::test]
