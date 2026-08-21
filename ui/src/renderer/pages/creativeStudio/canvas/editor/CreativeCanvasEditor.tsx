@@ -73,6 +73,7 @@ import {
   projectDocumentWithAgentSessions,
   projectDocumentWithCanvasPanels,
   projectDocumentWithPendingTaskIds,
+  shouldHydrateCreativeCanvasDetail,
 } from './editorModel';
 import {
   canvasEditorInteractionReducer,
@@ -295,6 +296,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
     const activeAgentSessionIdRef = useRef<string | null>(null);
     const baseDocumentRef = useRef<CreativeProjectDetail['document'] | null>(null);
     const loadedProjectIdRef = useRef<string | null>(null);
+    const loadedRevisionRef = useRef<string | null>(null);
     const hydratedSaveControllerRef = useRef<typeof saveController | null>(null);
     const surfaceRef = useRef<HTMLDivElement>(null);
     const pasteSequenceRef = useRef(0);
@@ -315,6 +317,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         const next = canvasStateFromProjectDocument(detail.document);
         baseDocumentRef.current = structuredClone(detail.document);
         loadedProjectIdRef.current = detail.project.projectId;
+        loadedRevisionRef.current = detail.project.revision;
         hydratedSaveControllerRef.current = saveController;
         stateRef.current = next;
         setState(next);
@@ -334,6 +337,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
 
     useEffect(() => {
       loadedProjectIdRef.current = null;
+      loadedRevisionRef.current = null;
       baseDocumentRef.current = null;
       hydratedSaveControllerRef.current = null;
       pendingTaskIdsRef.current = [];
@@ -346,16 +350,22 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
 
     useEffect(() => {
       const detail = project.detail;
+      if (hydratedSaveControllerRef.current !== saveController) {
+        loadedProjectIdRef.current = null;
+        loadedRevisionRef.current = null;
+      }
       if (
         !detail ||
-        detail.project.projectId !== projectId ||
-        (loadedProjectIdRef.current === projectId &&
-          hydratedSaveControllerRef.current === saveController)
-      ) {
-        return;
-      }
+        !shouldHydrateCreativeCanvasDetail({
+          projectId,
+          loadedProjectId: loadedProjectIdRef.current,
+          loadedRevision: loadedRevisionRef.current,
+          detail,
+          save: saveSnapshot,
+        })
+      ) return;
       hydrate(detail);
-    }, [hydrate, project.detail, projectId]);
+    }, [hydrate, project.detail, projectId, saveController, saveSnapshot]);
 
     const reloadRemote = useCallback(async (): Promise<boolean> => {
       const detail = await project.refresh();

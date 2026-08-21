@@ -226,6 +226,7 @@ describe('DirectorWorkbenchShell presentation', () => {
       captures: [
         {
           id: 'capture-01',
+          assetId: 'asset-capture-01',
           name: '机位01截图01',
           thumbnailUrl: 'nomifun-asset://capture-01/thumbnail',
           imageUrl: 'nomifun-asset://capture-01/original',
