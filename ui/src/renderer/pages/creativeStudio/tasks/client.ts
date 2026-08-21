@@ -13,9 +13,9 @@ import {
 import {
   CANONICAL_UUID_V7,
   parseAssetId,
+  parseCreativeStudioNodeId,
   parseCreationTaskId,
   parseProviderId,
-  parseWorkshopNodeId,
 } from '@/common/types/ids';
 
 import type { CreativeJsonObject, CreativeJsonValue } from '../domain/schema';
@@ -196,7 +196,7 @@ function parseOwner(value: unknown): CreativeTaskOwner {
     return {
       kind: 'canvas_node',
       projectId: parseCreativeOwnerId(owner.project_id, 'owner.project_id'),
-      nodeId: String(parseWorkshopNodeId(owner.node_id)),
+      nodeId: String(parseCreativeStudioNodeId(owner.node_id)),
     };
   }
   if (owner.kind === 'workflow_step') {
@@ -447,7 +447,7 @@ function normalizeOwner(owner: CreativeTaskOwner): CreativeTaskOwner {
     return {
       kind: 'canvas_node',
       projectId: parseCreativeOwnerId(owner.projectId, 'owner.projectId', 'invalid_request'),
-      nodeId: String(parseWorkshopNodeId(owner.nodeId)),
+      nodeId: String(parseCreativeStudioNodeId(owner.nodeId)),
     };
   }
   return {

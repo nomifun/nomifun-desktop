@@ -1,7 +1,7 @@
 use nomifun_common::{
-    CreationTaskId, CreativeStudioProjectId, CreativeStudioWorkflowId,
-    CreativeStudioWorkflowRunId, CreativeStudioWorkflowStepId, ProviderId,
-    WorkshopAssetId, WorkshopCanvasId, WorkshopNodeId,
+    CreationTaskId, CreativeStudioNodeId, CreativeStudioProjectId,
+    CreativeStudioWorkflowId, CreativeStudioWorkflowRunId, CreativeStudioWorkflowStepId,
+    ProviderId, WorkshopAssetId, WorkshopCanvasId, WorkshopNodeId,
 };
 #[cfg(test)]
 use nomifun_common::validate_uuidv7;
@@ -115,7 +115,12 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
             })?;
         }
         if let Some(node_id) = &node_id {
-            WorkshopNodeId::parse(node_id).map_err(|error| {
+            let parsed = if project_id.is_some() {
+                CreativeStudioNodeId::parse(node_id).map(|_| ())
+            } else {
+                WorkshopNodeId::parse(node_id).map(|_| ())
+            };
+            parsed.map_err(|error| {
                 DbError::Conflict(format!(
                     "creation task {creation_task_id} has invalid node_id {node_id:?}: {error}"
                 ))
@@ -216,7 +221,7 @@ fn normalize_canonical_owner(owner: CreativeTaskOwnerRef<'_>) -> Result<Canonica
                     ))
                 })?
                 .into_string(),
-            node_id: WorkshopNodeId::parse(node_id)
+            node_id: CreativeStudioNodeId::parse(node_id)
                 .map_err(|error| {
                     DbError::Conflict(format!(
                         "Creative task node_id '{node_id}' is not a canonical UUIDv7: {error}"
@@ -1061,7 +1066,7 @@ mod tests {
     async fn schema_rejects_mixed_or_incomplete_canonical_task_ownership() {
         let (_repo, db, provider_id) = repo().await;
         let project_id = seed_creative_project(&db).await;
-        let node_id = WorkshopNodeId::new().into_string();
+        let node_id = CreativeStudioNodeId::new().into_string();
         let canvas_id = WorkshopCanvasId::new().into_string();
 
         let mixed = raw_insert_task_ownership(
@@ -1111,7 +1116,7 @@ mod tests {
     async fn creative_project_idempotency_reuses_exact_request_without_reopening_terminal_state() {
         let (repo, db, provider_id) = repo().await;
         let project_id = seed_creative_project(&db).await;
-        let node_id = WorkshopNodeId::new().into_string();
+        let node_id = CreativeStudioNodeId::new().into_string();
         let task_id = CreationTaskId::new().into_string();
         let fingerprint = r#"{"project_id":"p","inputs":[]}"#;
 
@@ -1168,7 +1173,7 @@ mod tests {
     async fn exact_retry_survives_parent_removal_but_a_new_key_still_requires_a_live_project() {
         let (repo, db, provider_id) = repo().await;
         let project_id = seed_creative_project(&db).await;
-        let node_id = WorkshopNodeId::new().into_string();
+        let node_id = CreativeStudioNodeId::new().into_string();
         let task_id = CreationTaskId::new().into_string();
         let fingerprint = r#"{"project_id":"historical"}"#;
 
@@ -1223,7 +1228,7 @@ mod tests {
     async fn creative_project_idempotency_rejects_key_reuse_for_another_request() {
         let (repo, db, provider_id) = repo().await;
         let project_id = seed_creative_project(&db).await;
-        let node_id = WorkshopNodeId::new().into_string();
+        let node_id = CreativeStudioNodeId::new().into_string();
         let task_id = CreationTaskId::new().into_string();
         repo.get_or_create_creative_task(creative_params(
             &task_id,
@@ -1255,7 +1260,7 @@ mod tests {
     async fn concurrent_creative_project_retries_have_one_insert_authority() {
         let (repo, db, provider_id) = repo().await;
         let project_id = seed_creative_project(&db).await;
-        let node_id = WorkshopNodeId::new().into_string();
+        let node_id = CreativeStudioNodeId::new().into_string();
         let task_id = CreationTaskId::new().into_string();
         let repo = Arc::new(repo);
         let mut retries = Vec::new();
@@ -1518,7 +1523,7 @@ mod tests {
             .unwrap();
         let project_id = seed_creative_project(&db).await;
         let canonical_task_id = CreationTaskId::new().into_string();
-        let canonical_node_id = WorkshopNodeId::new().into_string();
+        let canonical_node_id = CreativeStudioNodeId::new().into_string();
         repo.get_or_create_creative_task(creative_params(
             &canonical_task_id,
             &project_id,

@@ -61,11 +61,11 @@ export type EntityKind =
   | 'requirement'
   | 'persisted-artifact'
   | 'user'
-  | 'canvas'
   | 'asset'
   | 'creation-task'
-  | 'workshop-node'
-  | 'workshop-edge'
+  | 'creative-studio-project'
+  | 'creative-studio-node'
+  | 'creative-studio-connection'
   | 'miniapp';
 
 export type ConversationId = EntityId<'conversation'>;
@@ -111,11 +111,11 @@ export type PreviewSnapshotId = EntityId<'preview-snapshot'>;
 export type PersistedArtifactId = EntityId<'persisted-artifact'>;
 export type IdmmInterventionId = EntityId<'idmm-intervention'>;
 export type UserId = EntityId<'user'>;
-export type CanvasId = EntityId<'canvas'>;
 export type AssetId = EntityId<'asset'>;
 export type CreationTaskId = EntityId<'creation-task'>;
-export type WorkshopNodeId = EntityId<'workshop-node'>;
-export type WorkshopEdgeId = EntityId<'workshop-edge'>;
+export type CreativeStudioProjectId = EntityId<'creative-studio-project'>;
+export type CreativeStudioNodeId = EntityId<'creative-studio-node'>;
+export type CreativeStudioConnectionId = EntityId<'creative-studio-connection'>;
 export type MiniAppId = EntityId<'miniapp'>;
 
 export class InvalidEntityIdError extends TypeError {
@@ -240,14 +240,15 @@ export const parsePersistedArtifactId = (value: unknown): PersistedArtifactId =>
 export const parseIdmmInterventionId = (value: unknown): IdmmInterventionId =>
   parseEntityId('idmm-intervention', value);
 export const parseUserId = (value: unknown): UserId => parseEntityId('user', value);
-export const parseCanvasId = (value: unknown): CanvasId => parseEntityId('canvas', value);
 export const parseAssetId = (value: unknown): AssetId => parseEntityId('asset', value);
 export const parseCreationTaskId = (value: unknown): CreationTaskId =>
   parseEntityId('creation-task', value);
-export const parseWorkshopNodeId = (value: unknown): WorkshopNodeId =>
-  parseEntityId('workshop-node', value);
-export const parseWorkshopEdgeId = (value: unknown): WorkshopEdgeId =>
-  parseEntityId('workshop-edge', value);
+export const parseCreativeStudioProjectId = (value: unknown): CreativeStudioProjectId =>
+  parseEntityId('creative-studio-project', value);
+export const parseCreativeStudioNodeId = (value: unknown): CreativeStudioNodeId =>
+  parseEntityId('creative-studio-node', value);
+export const parseCreativeStudioConnectionId = (value: unknown): CreativeStudioConnectionId =>
+  parseEntityId('creative-studio-connection', value);
 export const parseMiniAppId = (value: unknown): MiniAppId => parseEntityId('miniapp', value);
 
 export type SessionTarget =
