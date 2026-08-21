@@ -16,7 +16,6 @@ import {
   Redo,
   Robot,
   SettingConfig,
-  Timeline,
   Undo,
   VideoTwo,
   Voice,
@@ -849,7 +848,7 @@ export const CreativeCanvasHistoryPanel: React.FC<CreativeCanvasHistoryPanelProp
   </section>
 );
 
-export type CreativeCanvasUnavailableKind = 'assistant' | 'workflows' | 'timeline' | 'generic';
+export type CreativeCanvasUnavailableKind = 'assistant' | 'workflows' | 'generic';
 
 export interface CreativeCanvasUnavailablePanelProps {
   kind?: CreativeCanvasUnavailableKind;
@@ -862,7 +861,6 @@ export interface CreativeCanvasUnavailablePanelProps {
 function unavailableIcon(kind: CreativeCanvasUnavailableKind): React.ReactNode {
   if (kind === 'assistant') return <Robot {...iconProps} />;
   if (kind === 'workflows') return <Workbench {...iconProps} />;
-  if (kind === 'timeline') return <Timeline {...iconProps} />;
   return <Info {...iconProps} />;
 }
 
@@ -909,17 +907,6 @@ export const CreativeCanvasWorkflowUnwiredPanel: React.FC<{ className?: string }
     className={className}
     title='工作流尚未连接'
     description='当前项目文档没有工作流数据源，本面板不会显示示例流程或虚构运行状态。'
-  />
-);
-
-export const CreativeCanvasTimelineUnwiredPanel: React.FC<{ className?: string }> = ({
-  className,
-}) => (
-  <CreativeCanvasUnavailablePanel
-    kind='timeline'
-    className={className}
-    title='时间线尚未连接'
-    description='画布核心没有全局轨道与关键帧数据，本面板不会用导演节点的局部时间值伪造时间线。'
   />
 );
 

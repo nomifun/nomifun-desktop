@@ -24,6 +24,10 @@ describe("CreativeDirectorProductRoute structure", () => {
     expect(source.includes("registerCreativeDirectorProductBeforeLeave")).toBe(
       true,
     );
+    expect(source.includes("creativeStudioCanvasProjectPath(projectId)")).toBe(
+      true,
+    );
+    expect(source.includes("返回画布")).toBe(true);
   });
 
   test("does not substitute bundled media or pretend unsupported exports exist", () => {

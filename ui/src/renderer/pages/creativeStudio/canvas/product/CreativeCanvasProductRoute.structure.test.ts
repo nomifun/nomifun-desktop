@@ -47,7 +47,10 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('<WorkflowRunModal')).toBe(true);
     expect(source.includes('workflowAssetPicker.pick')).toBe(true);
     expect(source.includes('creativeAssetClient.get(assetId)')).toBe(true);
-    expect(source.includes('<CreativeCanvasTimelineUnwiredPanel')).toBe(true);
+    expect(source.includes('<CreativeCanvasTimelinePanel')).toBe(true);
+    expect(source.includes('<CreativeCanvasTimelineUnwiredPanel')).toBe(false);
+    expect(source.includes("onAddDirector={() => addNode('director')}")).toBe(true);
+    expect(source.includes('handleOpenDirector(nodeId)')).toBe(true);
   });
 
   test('resolves typed interaction intents through real product boundaries', () => {
@@ -61,6 +64,8 @@ describe('Creative Canvas product route composition', () => {
       'manualUploadRejectionMessage',
       'pendingPanoramaChoice',
       'creativeStudioDirectorProjectPath(projectId)',
+      "state.document.nodes.filter((node) => node.type === 'director')",
+      "handleBottomViewChange('timeline')",
       'onOpen={onOpen}',
       'onToggleLock={onToggleLock}',
     ]) {

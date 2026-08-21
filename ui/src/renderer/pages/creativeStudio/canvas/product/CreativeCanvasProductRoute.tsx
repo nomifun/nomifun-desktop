@@ -85,9 +85,9 @@ import {
   CreativeCanvasHistoryPanel,
   CreativeCanvasOutlinePanel,
   CreativeCanvasPropertiesPanel,
-  CreativeCanvasTimelineUnwiredPanel,
   CreativeCanvasUnavailablePanel,
 } from './CreativeCanvasPanels';
+import CreativeCanvasTimelinePanel from './CreativeCanvasTimelinePanel';
 import CreativeCanvasWorkflowPanel from './CreativeCanvasWorkflowPanel';
 import {
   CreativeCanvasProductAssetLibrary,
@@ -465,15 +465,33 @@ const CreativeCanvasProductRoute: React.FC = () => {
       const editor = editorRef.current;
       if (!editor || save.revision === null) return;
       const state = editor.getState();
+      if (kind === 'director') {
+        const directors = state.document.nodes.filter((node) => node.type === 'director');
+        if (directors.length > 0) {
+          editor.dispatch(canvasCommands.setSelection(directors.map((node) => node.id)));
+          handleBottomViewChange('timeline');
+          setNotice(
+            directors.length === 1
+              ? '项目已有唯一导演节点，已为你选中。'
+              : '项目存在多个导演节点，请在时间线面板中处理冲突。'
+          );
+          return;
+        }
+      }
       const node = createCreativeCanvasProductNode(
         kind,
         state,
         measuredSize(canvasHostRef.current)
       );
       editor.dispatch(canvasCommands.addNode(node));
-      setNotice(null);
+      if (kind === 'director') {
+        handleBottomViewChange('timeline');
+        setNotice('已创建项目唯一的导演节点。');
+      } else {
+        setNotice(null);
+      }
     },
-    [save.revision]
+    [handleBottomViewChange, save.revision]
   );
 
   const handleBackgroundChange = useCallback((next: CreativeCanvasBackground) => {
@@ -705,6 +723,36 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [importCanvasFile, insertClipboardText]
   );
 
+  const handleOpenDirector = useCallback(
+    async (requestedNodeId?: string) => {
+      const editor = editorRef.current;
+      if (!editor || save.revision === null) return;
+      const directors = editor
+        .getState()
+        .document.nodes.filter((node) => node.type === 'director');
+      handleBottomViewChange('timeline');
+      if (directors.length === 0) {
+        setNotice('请先添加导演节点，再进入 3D 导演台。');
+        return;
+      }
+      if (directors.length > 1) {
+        editor.dispatch(canvasCommands.setSelection(directors.map((node) => node.id)));
+        setNotice('项目存在多个导演节点。请只保留一个，再进入 3D 导演台。');
+        return;
+      }
+      const director = directors[0];
+      if (requestedNodeId && requestedNodeId !== director.id) {
+        setNotice('请求的导演节点已不存在，请从时间线面板重新打开。');
+        return;
+      }
+      editor.dispatch(canvasCommands.setSelection([director.id]));
+      if (await flushBeforeLeave()) {
+        navigate(creativeStudioDirectorProjectPath(projectId));
+      }
+    },
+    [flushBeforeLeave, handleBottomViewChange, navigate, projectId, save.revision]
+  );
+
   const handleIntegrationIntent = useCallback(
     async (intent: CanvasIntegrationIntent) => {
       switch (intent.type) {
@@ -743,9 +791,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           dispatch(canvasCommands.setSelection([intent.nodeId]));
           dismissInteractionOverlays();
           if (intent.mode === 'open-director') {
-            if (await flushBeforeLeave()) {
-              navigate(creativeStudioDirectorProjectPath(projectId));
-            }
+            await handleOpenDirector(intent.nodeId);
             return;
           }
           persistPanels(withCreativeCanvasRightView(panelsRef.current, 'properties'));
@@ -782,12 +828,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [
       dismissInteractionOverlays,
       dispatch,
-      flushBeforeLeave,
+      handleOpenDirector,
       importCanvasFile,
-      navigate,
       openCreateNodeMenu,
       persistPanels,
-      projectId,
       readSystemClipboard,
       viewportSize.height,
       viewportSize.width,
@@ -832,12 +876,26 @@ const CreativeCanvasProductRoute: React.FC = () => {
       const menu = createNodeMenu;
       if (!editor || !menu || save.revision === null) return;
       const state = editor.getState();
-      const node = createCreativeCanvasProductNode(
-        kind,
-        state,
-        measuredSize(canvasHostRef.current),
-        { position: centeredNodePosition(kind, menu.worldPosition) }
-      );
+      const directors =
+        kind === 'director'
+          ? state.document.nodes.filter((node) => node.type === 'director')
+          : [];
+      if (directors.length > 1) {
+        editor.dispatch(canvasCommands.setSelection(directors.map((node) => node.id)));
+        handleBottomViewChange('timeline');
+        setNotice('项目存在多个导演节点，请先处理冲突，未创建新的导演节点。');
+        dismissInteractionOverlays();
+        return;
+      }
+      const reusedDirector = directors[0] ?? null;
+      const node =
+        reusedDirector ??
+        createCreativeCanvasProductNode(
+          kind,
+          state,
+          measuredSize(canvasHostRef.current),
+          { position: centeredNodePosition(kind, menu.worldPosition) }
+        );
 
       if (menu.connection) {
         const sourceNodeId =
@@ -850,7 +908,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
             : menu.connection.fixedNodeId;
         const candidateDocument = {
           ...state.document,
-          nodes: [...state.document.nodes, node],
+          nodes: reusedDirector
+            ? state.document.nodes
+            : [...state.document.nodes, node],
         };
         const validation = validateCanvasConnection(candidateDocument, {
           sourceNodeId,
@@ -863,7 +923,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
 
         const at = Date.now();
         const mergeKey = `create-connected:${node.id}`;
-        editor.dispatch(canvasCommands.addNode(node, { at, mergeKey }));
+        if (!reusedDirector) {
+          editor.dispatch(canvasCommands.addNode(node, { at, mergeKey }));
+        }
         editor.dispatch(
           canvasCommands.connect(sourceNodeId, targetNodeId, {
             at,
@@ -878,14 +940,32 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 : 'target',
           })
         );
-        setNotice('已创建节点并完成连接。');
+        editor.dispatch(canvasCommands.setSelection([node.id]));
+        setNotice(
+          reusedDirector
+            ? '已复用项目唯一的导演节点并完成连接。'
+            : '已创建节点并完成连接。'
+        );
       } else {
-        editor.dispatch(canvasCommands.addNode(node));
-        setNotice('已在指定位置创建节点。');
+        if (reusedDirector) {
+          editor.dispatch(canvasCommands.setSelection([node.id]));
+          setNotice('项目已有唯一导演节点，已为你选中。');
+        } else {
+          editor.dispatch(canvasCommands.addNode(node));
+          setNotice('已在指定位置创建节点。');
+        }
+      }
+      if (kind === 'director') {
+        handleBottomViewChange('timeline');
       }
       dismissInteractionOverlays();
     },
-    [createNodeMenu, dismissInteractionOverlays, save.revision]
+    [
+      createNodeMenu,
+      dismissInteractionOverlays,
+      handleBottomViewChange,
+      save.revision,
+    ]
   );
 
   const resolvePendingPanoramaChoice = useCallback(
@@ -1102,6 +1182,22 @@ const CreativeCanvasProductRoute: React.FC = () => {
     />
   );
 
+  const timeline = renderCanvasState ? (
+    <CreativeCanvasTimelinePanel
+      state={renderCanvasState}
+      disabled={productDisabled}
+      onSelectNode={(nodeId) => dispatch(canvasCommands.setSelection([nodeId]))}
+      onAddDirector={() => addNode('director')}
+      onOpenDirector={(nodeId) => void handleOpenDirector(nodeId)}
+    />
+  ) : (
+    <CreativeCanvasUnavailablePanel
+      kind='generic'
+      title='正在载入导演时间线'
+      description='等待项目文档通过 canonical v1 校验。'
+    />
+  );
+
   return (
     <main
       className={styles.root}
@@ -1304,7 +1400,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           },
           bottom: {
             history,
-            timeline: <CreativeCanvasTimelineUnwiredPanel />,
+            timeline,
           },
         }}
       />
