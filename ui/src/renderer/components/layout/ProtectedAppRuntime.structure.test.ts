@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 const readSource = (url: URL) => readFileSync(url, 'utf8');
@@ -19,6 +19,7 @@ const focusShellSource = readSource(
 const focusTopBarSource = readSource(
   new URL('../../pages/creativeStudio/app/CreativeStudioTopBar.tsx', import.meta.url)
 );
+const legacyWorkshopPageUrl = new URL('../../pages/workshop/index.tsx', import.meta.url);
 
 describe('protected application runtime boundary', () => {
   test('owns authentication and application-wide desktop effects without a visible layout', () => {
@@ -81,6 +82,7 @@ describe('protected application runtime boundary', () => {
     expect(workbenchAt).toBeGreaterThan(focusRouteAt);
     expect(routerSource.includes("import('@renderer/pages/workshop')")).toBe(false);
     expect(routerSource.includes("import('@renderer/pages/workshop/CanvasPage')")).toBe(false);
+    expect(existsSync(legacyWorkshopPageUrl)).toBe(false);
   });
 
   test('keeps the focus shell free of workbench-only chrome and exposes a stable return path', () => {
