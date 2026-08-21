@@ -16,9 +16,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use nomifun_common::{
-    AppError, CreationTaskId, CreativeStudioProjectId, CreativeStudioWorkflowId,
-    CreativeStudioWorkflowRunId, CreativeStudioWorkflowStepId, ProviderId,
-    WorkshopAssetId, WorkshopCanvasId, WorkshopNodeId, now_ms, validate_uuidv7,
+    AppError, CreationTaskId, CreativeStudioNodeId, CreativeStudioProjectId,
+    CreativeStudioWorkflowId, CreativeStudioWorkflowRunId, CreativeStudioWorkflowStepId,
+    ProviderId, WorkshopAssetId, WorkshopCanvasId, WorkshopNodeId, now_ms,
+    validate_uuidv7,
 };
 #[cfg(test)]
 use nomifun_common::generate_id;
@@ -327,7 +328,7 @@ impl CreativeTaskOwner {
                 project_id: CreativeStudioProjectId::parse(project_id)
                     .map_err(|error| AppError::BadRequest(format!("invalid project_id: {error}")))?
                     .into_string(),
-                node_id: WorkshopNodeId::parse(node_id)
+                node_id: CreativeStudioNodeId::parse(node_id)
                     .map_err(|error| AppError::BadRequest(format!("invalid node_id: {error}")))?
                     .into_string(),
             }),
@@ -2640,7 +2641,7 @@ mod tests {
         let adapter = MockAdapter::sync("openai.images");
         let h = harness(adapter.clone(), "openai").await;
         let project_id = seed_creative_project(h._db.pool()).await;
-        let node_id = WorkshopNodeId::new().into_string();
+        let node_id = CreativeStudioNodeId::new().into_string();
         let idempotency_key = CreationTaskId::new().into_string();
 
         let first_service = h.svc.clone();
