@@ -18,7 +18,7 @@ describe('Creative Studio project center product contract', () => {
     expect(css.includes('grid-template-columns: repeat(3, minmax(0, 1fr))')).toBe(true);
     expect(css.includes('gap: 20px')).toBe(true);
     expect(css.includes('min-height: 176px')).toBe(true);
-    expect(css.includes('border-radius: 16px')).toBe(true);
+    expect(css.includes('border-radius: 18px')).toBe(true);
     expect(css.includes('@media (max-width: 1279px)')).toBe(true);
     expect(css.includes('grid-template-columns: repeat(2, minmax(0, 1fr))')).toBe(true);
     expect(css.includes('@media (max-width: 639px)')).toBe(true);
