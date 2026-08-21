@@ -10,6 +10,7 @@ import { createEmptyCreativeProjectDocument } from '../../domain';
 import { CreativeProjectRepositoryError } from '../../services';
 import {
   CanvasCasSaveController,
+  canvasSaveRequiresUnloadGuard,
   type CanvasSaveScheduler,
 } from './casSaveController';
 
@@ -56,6 +57,33 @@ const documentWithTitle = (title: string) => ({
 });
 
 describe('CanvasCasSaveController', () => {
+  test('guards unload only while a hydrated revision has pending work', () => {
+    expect(
+      canvasSaveRequiresUnloadGuard({
+        status: 'dirty',
+        revision: '8',
+        hasPendingChanges: true,
+        error: null,
+      })
+    ).toBe(true);
+    expect(
+      canvasSaveRequiresUnloadGuard({
+        status: 'saved',
+        revision: '9',
+        hasPendingChanges: false,
+        error: null,
+      })
+    ).toBe(false);
+    expect(
+      canvasSaveRequiresUnloadGuard({
+        status: 'idle',
+        revision: null,
+        hasPendingChanges: true,
+        error: null,
+      })
+    ).toBe(false);
+  });
+
   test('debounces edits and saves only the latest canonical document', async () => {
     const scheduler = new FakeScheduler();
     const calls: Array<{ revision: string; title: string }> = [];
