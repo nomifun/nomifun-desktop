@@ -18,6 +18,12 @@ const item: PromptLibraryItem = {
   category: '商业摄影',
   tags: ['静物', '产品'],
   knowledgeBaseIds: ['knowledge-1'],
+  coverUrl: null,
+  preview: null,
+  sourceUrl: null,
+  license: null,
+  licenseUrl: null,
+  createdAt: 1_760_000_000,
   updatedAt: 1_770_000_000,
 };
 
@@ -37,6 +43,10 @@ describe('standalone prompt selection', () => {
       category: '商业摄影',
       tags: ['静物', '产品'],
       knowledgeBaseIds: ['knowledge-1'],
+      coverUrl: null,
+      sourceUrl: null,
+      license: null,
+      licenseUrl: null,
     });
   });
 

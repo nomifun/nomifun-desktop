@@ -68,6 +68,10 @@ function mapOrigin(value: unknown): CreativeAssetOrigin | null {
     projectId: optionalString(origin.project_id),
     nodeId: optionalString(origin.node_id),
     generationTaskId: optionalString(origin.creation_task_id),
+    promptCatalogId: optionalString(origin.prompt_catalog_id),
+    sourceUrl: optionalString(origin.source_url),
+    license: optionalString(origin.license),
+    licenseUrl: optionalString(origin.license_url),
   };
 }
 
@@ -203,6 +207,14 @@ export class CreativeAssetClient implements CreativeAssetLibraryPort {
         collection: input.collection,
         tags: input.tags,
         in_library: input.inLibrary,
+        origin: input.origin
+          ? {
+                prompt_catalog_id: input.origin.promptCatalogId,
+                source_url: input.origin.sourceUrl,
+                license: input.origin.license,
+                license_url: input.origin.licenseUrl,
+              }
+            : undefined,
       })
     );
   }

@@ -13,7 +13,7 @@ import type {
   PromptLibrarySource,
 } from './types';
 
-const SOURCES = new Set<PromptLibrarySource>(['preset', 'asset']);
+const SOURCES = new Set<PromptLibrarySource>(['catalog', 'preset', 'asset']);
 const UNSAFE_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 
 function record(value: unknown): Record<string, unknown> {
@@ -69,6 +69,19 @@ function timestamp(value: unknown): number | null {
   return value;
 }
 
+function nullableHttpsUrl(value: unknown, field: string): string | null {
+  const normalized = nullableText(value, field, 4_096);
+  if (normalized === null) return null;
+  let url: URL;
+  try {
+    url = new URL(normalized);
+  } catch {
+    throw new TypeError(`${field} must be an absolute URL`);
+  }
+  if (url.protocol !== 'https:') throw new TypeError(`${field} must use HTTPS`);
+  return url.toString();
+}
+
 export function parsePromptLibraryItem(value: unknown): PromptLibraryItem {
   const item = record(value);
   return {
@@ -80,6 +93,12 @@ export function parsePromptLibraryItem(value: unknown): PromptLibraryItem {
     category: nullableText(item.category, 'category', 120),
     tags: stringList(item.tags, 'tags', 48),
     knowledgeBaseIds: stringList(item.knowledgeBaseIds, 'knowledgeBaseIds', 128),
+    coverUrl: nullableHttpsUrl(item.coverUrl, 'coverUrl'),
+    preview: nullableText(item.preview, 'preview', 100_000),
+    sourceUrl: nullableHttpsUrl(item.sourceUrl, 'sourceUrl'),
+    license: nullableText(item.license, 'license', 120),
+    licenseUrl: nullableHttpsUrl(item.licenseUrl, 'licenseUrl'),
+    createdAt: timestamp(item.createdAt),
     updatedAt: timestamp(item.updatedAt),
   };
 }
@@ -117,10 +136,12 @@ export function promptLibraryFacets(items: readonly PromptLibraryItem[]): Prompt
     else hasUncategorized = true;
     item.tags.forEach((tag) => tags.add(tag));
   }
-  const sort = (left: string, right: string) => left.localeCompare(right, 'zh-CN');
   return {
-    categories: [...categories].sort(sort),
-    tags: [...tags].sort(sort),
+    // Preserve the catalog's stable source order. This keeps the most useful
+    // upstream facets first and matches the order users see in the source
+    // library instead of moving @handles ahead of common creative tags.
+    categories: [...categories],
+    tags: [...tags],
     hasUncategorized,
   };
 }
@@ -144,6 +165,20 @@ export function filterPromptLibraryItems(
   });
 }
 
+/** Match the source library's newest-first card order while keeping null dates stable. */
+export function sortPromptLibraryItemsByUpdatedAt(
+  items: readonly PromptLibraryItem[]
+): PromptLibraryItem[] {
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => {
+      const leftTime = left.item.updatedAt ?? left.item.createdAt ?? Number.NEGATIVE_INFINITY;
+      const rightTime = right.item.updatedAt ?? right.item.createdAt ?? Number.NEGATIVE_INFINITY;
+      return rightTime - leftTime || left.index - right.index;
+    })
+    .map(({ item }) => item);
+}
+
 export function toPromptLibrarySelection(item: PromptLibraryItem): PromptLibrarySelection {
   return {
     id: item.id,
@@ -153,5 +188,9 @@ export function toPromptLibrarySelection(item: PromptLibraryItem): PromptLibrary
     category: item.category,
     tags: [...item.tags],
     knowledgeBaseIds: [...item.knowledgeBaseIds],
+    coverUrl: item.coverUrl,
+    sourceUrl: item.sourceUrl,
+    license: item.license,
+    licenseUrl: item.licenseUrl,
   };
 }

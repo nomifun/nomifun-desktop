@@ -114,6 +114,12 @@ describe('Nomi prompt library port', () => {
       category: '分镜',
       tags: ['分镜'],
       knowledgeBaseIds: [KNOWLEDGE_ID],
+      coverUrl: null,
+      preview: null,
+      sourceUrl: null,
+      license: null,
+      licenseUrl: null,
+      createdAt: null,
       updatedAt: null,
     });
     expect(mapNomiPresetToPromptLibraryItem(preset({ enabled: false }), [TAG], 'zh-CN')).toBeNull();
@@ -129,6 +135,21 @@ describe('Nomi prompt library port', () => {
     expect(mapNomiTextAssetToPromptLibraryItem({ ...TEXT_ASSET, kind: 'image' })).toBeNull();
     expect(mapNomiTextAssetToPromptLibraryItem({ ...TEXT_ASSET, inLibrary: false })).toBeNull();
     expect(mapNomiTextAssetToPromptLibraryItem({ ...TEXT_ASSET, textContent: ' ' })).toBeNull();
+    expect(
+      mapNomiTextAssetToPromptLibraryItem({
+        ...TEXT_ASSET,
+        origin: {
+          promptCatalogId: 'catalog-prompt-1',
+          sourceUrl: 'https://example.test/source',
+          license: 'CC0-1.0',
+          licenseUrl: 'https://example.test/license',
+        },
+      })
+    ).toMatchObject({
+      sourceUrl: 'https://example.test/source',
+      license: 'CC0-1.0',
+      licenseUrl: 'https://example.test/license',
+    });
   });
 
   test('combines injected Nomi preset and asset services without inventing data', async () => {

@@ -25,6 +25,12 @@ describe('prompt-library standalone details', () => {
       category: '品牌设计',
       tags: ['海报', '品牌'],
       knowledgeBaseIds: ['kb-1', 'kb-2'],
+      coverUrl: null,
+      preview: null,
+      sourceUrl: null,
+      license: null,
+      licenseUrl: null,
+      createdAt: null,
       updatedAt: null,
     });
 
@@ -47,11 +53,44 @@ describe('prompt-library standalone details', () => {
       category: null,
       tags: [],
       knowledgeBaseIds: [],
+      coverUrl: null,
+      preview: null,
+      sourceUrl: null,
+      license: null,
+      licenseUrl: null,
+      createdAt: 1_760_000_000,
       updatedAt: 1_770_000_000,
     });
 
     expect(html.includes('我的文本素材')).toBe(true);
     expect(html.includes('未分类')).toBe(true);
     expect(html.includes('保留真实材质与自然阴影。')).toBe(true);
+  });
+
+  test('renders catalog media and auditable source attribution', () => {
+    const html = renderDetails({
+      id: 'catalog-1',
+      source: 'catalog',
+      title: '纸雕海报',
+      description: null,
+      prompt: 'Create a paper poster.',
+      category: 'awesome-gpt-image',
+      tags: ['poster'],
+      knowledgeBaseIds: [],
+      coverUrl: 'https://raw.githubusercontent.com/example/paper.jpg',
+      preview: '![](https://raw.githubusercontent.com/example/paper.jpg)\n\n来源说明',
+      sourceUrl: 'https://github.com/ZeroLu/awesome-gpt-image',
+      license: 'MIT',
+      licenseUrl: 'https://github.com/ZeroLu/awesome-gpt-image/blob/main/LICENSE',
+      createdAt: null,
+      updatedAt: null,
+    });
+
+    expect(html.includes('data-prompt-source="catalog"')).toBe(true);
+    expect(html.includes('公共提示词目录')).toBe(true);
+    expect(html.includes('<img')).toBe(true);
+    expect(html.includes('查看来源')).toBe(true);
+    expect(html.includes('MIT')).toBe(true);
+    expect(html.includes('来源说明')).toBe(true);
   });
 });

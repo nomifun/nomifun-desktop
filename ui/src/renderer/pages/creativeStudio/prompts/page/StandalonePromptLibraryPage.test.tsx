@@ -21,6 +21,12 @@ const ITEM: PromptLibraryItem = {
   category: '视频创作',
   tags: ['分镜', '节奏'],
   knowledgeBaseIds: [],
+  coverUrl: null,
+  preview: null,
+  sourceUrl: null,
+  license: null,
+  licenseUrl: null,
+  createdAt: null,
   updatedAt: null,
 };
 
@@ -61,6 +67,19 @@ describe('standalone prompt-library source-parity appearance', () => {
     expect(html.includes('视频创作')).toBe(true);
     expect(html.includes('分镜')).toBe(true);
     expect(html.includes('aria-pressed="true"')).toBe(true);
+    expect(html.includes('按标题查询，按 Enter 搜索')).toBe(true);
+    expect(html.includes('已经到底了')).toBe(true);
+  });
+
+  test('renders a bounded first page instead of mounting the full catalog at once', () => {
+    const items = Array.from({ length: 31 }, (_, index) => ({
+      ...ITEM,
+      id: `prompt-${index + 1}`,
+      title: `提示词 ${index + 1}`,
+    }));
+    const html = render({ items });
+    expect(html.split('data-prompt-library-item=').length - 1).toBe(30);
+    expect(html.includes('继续向下滚动加载更多')).toBe(true);
   });
 
   test('keeps initial errors centered and retryable', () => {
@@ -76,7 +95,7 @@ describe('standalone prompt-library source-parity appearance', () => {
       new URL('./StandalonePromptLibraryPage.module.css', import.meta.url),
       'utf8'
     );
-    expect(css.includes('width: min(1120px, calc(100% - 48px))')).toBe(true);
+    expect(css.includes('width: min(1280px, calc(100% - 48px))')).toBe(true);
     expect(css.includes('padding: 31px 0 64px')).toBe(true);
     expect(css.includes('font-size: 36px')).toBe(true);
     expect(css.includes('text-align: center')).toBe(true);
@@ -85,6 +104,8 @@ describe('standalone prompt-library source-parity appearance', () => {
     expect(css.includes('width: min(672px, 100%)')).toBe(true);
     expect(css.includes('width: min(1152px, calc(100vw - 48px))')).toBe(true);
     expect(css.includes('padding-top: 126px')).toBe(true);
+    expect(css.includes('aspect-ratio: 4 / 3')).toBe(true);
+    expect(css.includes('gap: 20px')).toBe(true);
 
     const toolbarRule = css.slice(css.indexOf('.toolbar {'), css.indexOf('.searchField {'));
     expect(toolbarRule.includes('background:')).toBe(false);

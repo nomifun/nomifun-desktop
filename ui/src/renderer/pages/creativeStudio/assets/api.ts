@@ -59,6 +59,12 @@ export interface WorkshopTextAssetInput {
   collection?: string;
   tags?: string[];
   in_library?: boolean;
+  origin?: {
+    prompt_catalog_id: string;
+    source_url: string;
+    license: string;
+    license_url: string;
+  };
 }
 
 export interface WorkshopAssetPatch {

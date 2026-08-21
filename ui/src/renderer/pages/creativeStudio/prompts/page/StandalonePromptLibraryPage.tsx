@@ -11,11 +11,14 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   filterPromptLibraryItems,
   promptLibraryFacets,
+  sortPromptLibraryItemsByUpdatedAt,
   type PromptLibraryItem,
   type PromptLibraryPort,
   usePromptLibrary,
 } from '..';
 import styles from './StandalonePromptLibraryPage.module.css';
+
+const PROMPT_PAGE_SIZE = 30;
 
 export interface StandalonePromptLibraryAppearanceProps {
   items: readonly PromptLibraryItem[];
@@ -54,22 +57,44 @@ const PromptCard: React.FC<{
       aria-label={`查看提示词：${item.title}`}
       onClick={() => onSelect?.(item)}
     >
-      <div className={styles.cardHeader}>
-        <span className={styles.cardIcon} aria-hidden='true'>
-          <FileText theme='outline' size={15} fill='currentColor' />
-        </span>
-        <h2 className={styles.cardTitle}>{item.title}</h2>
-        {item.category ? <span className={styles.category}>{item.category}</span> : null}
-      </div>
-      {item.description ? <p className={styles.cardDescription}>{item.description}</p> : null}
-      <p className={styles.promptPreview}>{item.prompt}</p>
-      {item.tags.length > 0 ? (
-        <div className={styles.cardTags} aria-label='标签'>
-          {item.tags.slice(0, 5).map((tag) => (
-            <span key={tag}>{tag}</span>
-          ))}
+      {item.coverUrl ? (
+        <div className={styles.cardMedia}>
+          <img
+            src={item.coverUrl}
+            alt={item.title}
+            loading='lazy'
+            decoding='async'
+            referrerPolicy='no-referrer'
+          />
         </div>
-      ) : null}
+      ) : (
+        <div className={styles.cardMediaFallback} aria-hidden='true'>
+          <FileText theme='outline' size={30} fill='currentColor' />
+        </div>
+      )}
+      <div className={styles.cardBody}>
+        <div className={styles.cardHeader}>
+          <h2 className={styles.cardTitle}>{item.title}</h2>
+          {item.updatedAt ? (
+            <time className={styles.cardDate} dateTime={new Date(item.updatedAt).toISOString()}>
+              {new Intl.DateTimeFormat('zh-CN', {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+              }).format(item.updatedAt)}
+            </time>
+          ) : null}
+        </div>
+        {item.description ? <p className={styles.cardDescription}>{item.description}</p> : null}
+        <p className={styles.promptPreview}>{item.prompt}</p>
+        {item.tags.length > 0 ? (
+          <div className={styles.cardTags} aria-label='标签'>
+            {item.tags.slice(0, 5).map((tag) => (
+              <span key={tag}>{tag}</span>
+            ))}
+          </div>
+        ) : null}
+      </div>
     </button>
   </article>
 );
@@ -87,15 +112,21 @@ export const StandalonePromptLibraryAppearance: React.FC<
   onRetry,
   onSelect,
 }) => {
+  const [queryInput, setQueryInput] = useState('');
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<string | null | undefined>(undefined);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [visibleCount, setVisibleCount] = useState(PROMPT_PAGE_SIZE);
   const facets = useMemo(() => promptLibraryFacets(items), [items]);
   const filteredItems = useMemo(
-    () => filterPromptLibraryItems(items, { query, category, tags: selectedTags }),
+    () =>
+      sortPromptLibraryItemsByUpdatedAt(
+        filterPromptLibraryItems(items, { query, category, tags: selectedTags })
+      ),
     [category, items, query, selectedTags]
   );
   const hasFilters = Boolean(query.trim() || category !== undefined || selectedTags.length > 0);
+  const visibleItems = filteredItems.slice(0, visibleCount);
 
   useEffect(() => {
     setCategory((current) => {
@@ -109,19 +140,44 @@ export const StandalonePromptLibraryAppearance: React.FC<
     });
   }, [facets]);
 
+  useEffect(() => {
+    setVisibleCount(PROMPT_PAGE_SIZE);
+  }, [category, items, query, selectedTags]);
+
   const clearFilters = useCallback(() => {
+    setQueryInput('');
     setQuery('');
     setCategory(undefined);
     setSelectedTags([]);
   }, []);
 
+  const handlePageScroll = useCallback(
+    (event: React.UIEvent<HTMLElement>) => {
+      const target = event.currentTarget;
+      if (
+        visibleCount < filteredItems.length &&
+        target.scrollTop + target.clientHeight >= target.scrollHeight - 160
+      ) {
+        setVisibleCount((current) =>
+          Math.min(filteredItems.length, current + PROMPT_PAGE_SIZE)
+        );
+      }
+    },
+    [filteredItems.length, visibleCount]
+  );
+
   return (
-    <section className={styles.page} data-standalone-prompt-library='true'>
+    <section
+      className={styles.page}
+      data-standalone-prompt-library='true'
+      onScroll={handlePageScroll}
+    >
       <div className={styles.content}>
         <header className={styles.hero}>
           <h1 className={styles.heroTitle}>{title}</h1>
           <p className={styles.heroSubtitle}>
-            共 {items.length} 条提示词，按标题、标签与分类快速查找灵感。
+            共 {hasFilters ? filteredItems.length : items.length}{' '}
+            条提示词，按标题、标签与分类快速查找灵感。
           </p>
           {onRetry ? (
             <button
@@ -172,10 +228,13 @@ export const StandalonePromptLibraryAppearance: React.FC<
                 <Search theme='outline' size={15} fill='currentColor' aria-hidden='true' />
                 <input
                   type='search'
-                  value={query}
+                  value={queryInput}
                   aria-label='搜索提示词'
-                  placeholder='搜索标题、内容或标签'
-                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder='按标题查询，按 Enter 搜索'
+                  onChange={(event) => setQueryInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') setQuery(queryInput);
+                  }}
                 />
               </label>
 
@@ -273,10 +332,6 @@ export const StandalonePromptLibraryAppearance: React.FC<
               </div>
             ) : (
               <>
-                <div className={styles.resultMeta} aria-live='polite'>
-                  <span>{hasFilters ? `${filteredItems.length} / ${items.length}` : items.length} 条提示词</span>
-                  {refreshing ? <span>正在刷新…</span> : null}
-                </div>
                 {filteredItems.length === 0 ? (
                   <div
                     className={styles.filteredState}
@@ -290,7 +345,7 @@ export const StandalonePromptLibraryAppearance: React.FC<
                   </div>
                 ) : (
                   <div className={styles.grid} role='list'>
-                    {filteredItems.map((item) => (
+                    {visibleItems.map((item) => (
                       <div key={item.id} role='listitem'>
                         <PromptCard
                           item={item}
@@ -301,6 +356,15 @@ export const StandalonePromptLibraryAppearance: React.FC<
                     ))}
                   </div>
                 )}
+                {filteredItems.length > 0 ? (
+                  <p className={styles.loadStatus} aria-live='polite'>
+                    {refreshing
+                      ? '正在刷新…'
+                      : visibleItems.length < filteredItems.length
+                        ? '继续向下滚动加载更多'
+                        : '已经到底了'}
+                  </p>
+                ) : null}
               </>
             )}
           </div>

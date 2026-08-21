@@ -5,6 +5,7 @@
 mod dto;
 mod fsio;
 mod imagemeta;
+mod prompt_catalog;
 mod thumbnail;
 
 mod archive;
@@ -25,6 +26,7 @@ pub use creative_studio::{
     MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
 };
 pub use dto::WorkshopAsset;
+pub use prompt_catalog::{CreativePromptCatalogItem, CreativePromptCatalogPage};
 pub use workflow::{CreativeWorkflowDefinitionV1, MAX_WORKFLOW_DEFINITION_BYTES};
 pub use workflow_run::{
     CreativeWorkflowRunAggregateV1, CreativeWorkflowRunCreateRequest, CreativeWorkflowRunStatus,

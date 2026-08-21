@@ -20,6 +20,12 @@ const ITEM: PromptLibraryItem = {
   category: '视觉创作',
   tags: ['构图', '场景'],
   knowledgeBaseIds: ['knowledge-one'],
+  coverUrl: null,
+  preview: null,
+  sourceUrl: null,
+  license: null,
+  licenseUrl: null,
+  createdAt: null,
   updatedAt: null,
 };
 

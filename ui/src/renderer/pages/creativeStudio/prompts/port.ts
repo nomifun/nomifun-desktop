@@ -15,6 +15,7 @@ export interface NomiPromptLibraryPortOptions {
   locale?: string;
   includePresets?: boolean;
   assets?: CreativeAssetLibraryPort | null;
+  catalog?: PromptLibraryPort | null;
   assetPageSize?: number;
   loadPresets?: () => Promise<Preset[]>;
   loadPresetTags?: () => Promise<PresetTag[]>;
@@ -85,12 +86,19 @@ export function mapNomiPresetToPromptLibraryItem(
     category: scenarioTags[0] ?? null,
     tags: [...new Set([...scenarioTags, ...audienceTags])],
     knowledgeBaseIds: preset.knowledge_bases.map((binding) => binding.knowledge_base_id),
+    coverUrl: null,
+    preview: null,
+    sourceUrl: null,
+    license: null,
+    licenseUrl: null,
+    createdAt: null,
     updatedAt: null,
   };
 }
 
 export function mapNomiTextAssetToPromptLibraryItem(asset: CreativeAsset): PromptLibraryItem | null {
   if (asset.kind !== 'text' || !asset.inLibrary || !asset.textContent?.trim()) return null;
+  const promptOrigin = asset.origin;
   return {
     id: asset.id,
     source: 'asset',
@@ -100,6 +108,12 @@ export function mapNomiTextAssetToPromptLibraryItem(asset: CreativeAsset): Promp
     category: asset.collection,
     tags: [...asset.tags],
     knowledgeBaseIds: [],
+    coverUrl: null,
+    preview: null,
+    sourceUrl: promptOrigin?.sourceUrl ?? null,
+    license: promptOrigin?.license ?? null,
+    licenseUrl: promptOrigin?.licenseUrl ?? null,
+    createdAt: asset.createdAt,
     updatedAt: asset.updatedAt,
   };
 }
@@ -138,15 +152,20 @@ export function createNomiPromptLibraryPort(
   return {
     async list(signal) {
       throwIfAborted(signal);
-      const [presetData, assetData] = await Promise.all([
+      const [catalogData, presetData, assetData] = await Promise.all([
+        options.catalog ? options.catalog.list(signal) : Promise.resolve([]),
         includePresets
           ? Promise.all([loadPresets(), loadPresetTags()])
           : Promise.resolve<[Preset[], PresetTag[]]>([[], []]),
         options.assets ? loadTextAssets(options.assets, pageSize, signal) : Promise.resolve([]),
       ]);
       throwIfAborted(signal);
+      if (!Array.isArray(catalogData)) {
+        throw new TypeError('Prompt catalog adapter must return an array');
+      }
       const [presets, tags] = presetData;
       return [
+        ...catalogData,
         ...presets
           .map((preset) => mapNomiPresetToPromptLibraryItem(preset, tags, locale))
           .filter((item): item is PromptLibraryItem => item !== null),

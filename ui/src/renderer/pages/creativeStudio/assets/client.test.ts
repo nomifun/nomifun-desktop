@@ -70,6 +70,10 @@ describe('CreativeAssetClient', () => {
       projectId: '0190f5fe-7c00-7a00-8000-000000000003',
       nodeId: '0190f5fe-7c00-7a00-8000-000000000004',
       generationTaskId: '0190f5fe-7c00-7a00-8000-000000000005',
+      promptCatalogId: undefined,
+      sourceUrl: undefined,
+      license: undefined,
+      licenseUrl: undefined,
     });
   });
 
@@ -148,7 +152,20 @@ describe('CreativeAssetClient', () => {
         )
       ).id
     ).toBe(ASSET_ID);
-    expect((await client.createText({ title: 'Prompt', textContent: 'Hello' })).kind).toBe('text');
+    expect(
+      (
+        await client.createText({
+          title: 'Prompt',
+          textContent: 'Hello',
+          origin: {
+            promptCatalogId: 'prompt-1',
+            sourceUrl: 'https://example.test/source',
+            license: 'MIT',
+            licenseUrl: 'https://example.test/license',
+          },
+        })
+      ).kind
+    ).toBe('text');
     expect((await client.update(ASSET_ID, { collection: null, inLibrary: false })).title).toBe('Updated');
     await client.remove(ASSET_ID);
     expect(await client.renameCollection('Old', 'New')).toBe(3);
@@ -169,6 +186,20 @@ describe('CreativeAssetClient', () => {
       collection: '',
       tags: undefined,
       in_library: false,
+    });
+    expect(calls.find(([name]) => name === 'createText')?.[1]).toEqual({
+      kind: 'text',
+      title: 'Prompt',
+      text_content: 'Hello',
+      collection: undefined,
+      tags: undefined,
+      in_library: undefined,
+      origin: {
+        prompt_catalog_id: 'prompt-1',
+        source_url: 'https://example.test/source',
+        license: 'MIT',
+        license_url: 'https://example.test/license',
+      },
     });
   });
 

@@ -10,6 +10,7 @@ import {
   filterPromptLibraryItems,
   normalizePromptLibrary,
   promptLibraryFacets,
+  sortPromptLibraryItemsByUpdatedAt,
   toPromptLibrarySelection,
 } from './library';
 import type { PromptLibraryItem } from './types';
@@ -23,6 +24,12 @@ const FIRST: PromptLibraryItem = {
   category: '视频创作',
   tags: ['分镜', '叙事'],
   knowledgeBaseIds: ['knowledge-one'],
+  coverUrl: null,
+  preview: null,
+  sourceUrl: null,
+  license: null,
+  licenseUrl: null,
+  createdAt: null,
   updatedAt: null,
 };
 
@@ -35,6 +42,12 @@ const SECOND: PromptLibraryItem = {
   category: null,
   tags: ['构图'],
   knowledgeBaseIds: [],
+  coverUrl: null,
+  preview: null,
+  sourceUrl: null,
+  license: null,
+  licenseUrl: null,
+  createdAt: 10,
   updatedAt: 20,
 };
 
@@ -63,7 +76,7 @@ describe('prompt library validation and filtering', () => {
   test('derives legal facets and produces a detached insertion snapshot', () => {
     expect(promptLibraryFacets([FIRST, SECOND])).toEqual({
       categories: ['视频创作'],
-      tags: ['分镜', '构图', '叙事'],
+      tags: ['分镜', '叙事', '构图'],
       hasUncategorized: true,
     });
     const selection = toPromptLibrarySelection(FIRST);
@@ -71,6 +84,18 @@ describe('prompt library validation and filtering', () => {
     selection.knowledgeBaseIds.push('knowledge-two');
     expect(FIRST.tags).toEqual(['分镜', '叙事']);
     expect(FIRST.knowledgeBaseIds).toEqual(['knowledge-one']);
+  });
+
+  test('sorts cards newest-first and preserves null-date source order', () => {
+    const older = { ...FIRST, id: 'older', updatedAt: 100 };
+    const newer = { ...FIRST, id: 'newer', updatedAt: 200 };
+    const undatedOne = { ...FIRST, id: 'undated-one', createdAt: null, updatedAt: null };
+    const undatedTwo = { ...FIRST, id: 'undated-two', createdAt: null, updatedAt: null };
+    expect(
+      sortPromptLibraryItemsByUpdatedAt([undatedOne, older, undatedTwo, newer]).map(
+        (item) => item.id
+      )
+    ).toEqual(['newer', 'older', 'undated-one', 'undated-two']);
   });
 
   test('rejects a non-array response instead of guessing a wire shape', () => {

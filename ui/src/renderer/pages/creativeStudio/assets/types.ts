@@ -21,6 +21,17 @@ export interface CreativeAssetOrigin {
   projectId?: string;
   nodeId?: string;
   generationTaskId?: string;
+  promptCatalogId?: string;
+  sourceUrl?: string;
+  license?: string;
+  licenseUrl?: string;
+}
+
+export interface CreativePromptAssetOrigin {
+  promptCatalogId: string;
+  sourceUrl: string;
+  license: string;
+  licenseUrl: string;
 }
 
 /** Product-facing asset shape. Backend snake_case is contained in api.ts/client.ts. */
@@ -73,6 +84,7 @@ export interface CreateCreativeTextAsset {
   collection?: string;
   tags?: string[];
   inLibrary?: boolean;
+  origin?: CreativePromptAssetOrigin;
 }
 
 export interface CreativeAssetPatch {
