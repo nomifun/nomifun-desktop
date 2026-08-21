@@ -109,7 +109,7 @@ const ModelHealthCheckAction: React.FC<{
           onClick={(event) => event.stopPropagation()}
         >
           <div className='px-8px pb-2px text-12px text-t-secondary'>
-            {label} · {t('settings.modelModality', { defaultValue: '模态能力' })}
+            {label} · {t('settings.modelSupportedTasks', { defaultValue: '支持的任务' })}
           </div>
           {tasks.map((task) => (
             <Button
@@ -1038,7 +1038,10 @@ const ModelModalContent: React.FC = () => {
                                         </div>
                                         {checkedCapability && (
                                           <div className='text-12px mt-4px'>
-                                            {t('settings.modelModality', { defaultValue: '模态能力' })}:{' '}
+                                            {t('settings.modelSupportedTasks', {
+                                              defaultValue: '支持的任务',
+                                            })}
+                                            :{' '}
                                             {t(`settings.modelTask.${checkedCapability.task}`, {
                                               defaultValue: checkedCapability.task,
                                             })}
