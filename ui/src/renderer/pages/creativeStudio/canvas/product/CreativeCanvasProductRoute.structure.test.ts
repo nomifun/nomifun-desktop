@@ -42,7 +42,11 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('persistAgentSessions(sessions, activeSessionId)')).toBe(true);
     expect(source.includes('agentPanelRef.current?.prepareToLeave()')).toBe(true);
     expect(source.includes('<CreativeCanvasAssistantUnwiredPanel')).toBe(false);
-    expect(source.includes('<CreativeCanvasWorkflowUnwiredPanel')).toBe(true);
+    expect(source.includes('<CreativeCanvasWorkflowPanel')).toBe(true);
+    expect(source.includes('<CreativeCanvasWorkflowUnwiredPanel')).toBe(false);
+    expect(source.includes('<WorkflowRunModal')).toBe(true);
+    expect(source.includes('workflowAssetPicker.pick')).toBe(true);
+    expect(source.includes('creativeAssetClient.get(assetId)')).toBe(true);
     expect(source.includes('<CreativeCanvasTimelineUnwiredPanel')).toBe(true);
   });
 

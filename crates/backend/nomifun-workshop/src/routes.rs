@@ -149,7 +149,7 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         )
         .route(
             "/api/creative-studio/assets/{asset_id}",
-            axum::routing::patch(patch_asset).delete(delete_asset),
+            get(get_asset).patch(patch_asset).delete(delete_asset),
         )
         .route(
             "/api/creative-studio/collections/rename",
@@ -763,6 +763,16 @@ async fn list_assets(
         })
         .await?;
     Ok(Json(ApiResponse::ok(AssetListResponse { items: page.items, total: page.total })))
+}
+
+async fn get_asset(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(asset_id): Path<WorkshopAssetId>,
+) -> Result<Json<ApiResponse<WorkshopAsset>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state.service.get_asset(asset_id.as_str()).await?,
+    )))
 }
 
 /// Fields extracted from a `/api/creative-studio/assets/upload` multipart request.
@@ -1540,6 +1550,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(patch.status(), StatusCode::OK);
+
+        let get = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!(
+                        "/api/creative-studio/assets/{}",
+                        existing.asset_id
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK);
 
         let rename = app
             .clone()

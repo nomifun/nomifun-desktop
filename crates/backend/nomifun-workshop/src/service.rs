@@ -1849,6 +1849,16 @@ impl WorkshopService {
         Ok(AssetListPage { items, total })
     }
 
+    /// Resolve one canonical asset record for authenticated product clients.
+    pub async fn get_asset(&self, id: &str) -> Result<WorkshopAsset, AppError> {
+        let row = self
+            .repo
+            .get_asset(id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("workshop asset {id} not found")))?;
+        WorkshopAsset::try_from(row)
+    }
+
     pub async fn patch_asset(&self, id: &str, patch: AssetPatch) -> Result<WorkshopAsset, AppError> {
         // Own the JSON string so the borrowed params can reference it.
         let tags_owned = patch.tags.map(|t| serde_json::to_string(&t).unwrap_or_else(|_| "[]".to_string()));

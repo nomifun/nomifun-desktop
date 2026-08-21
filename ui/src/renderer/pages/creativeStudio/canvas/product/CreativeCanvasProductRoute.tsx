@@ -21,11 +21,13 @@ import {
   creativeAssetClient,
   type CreativeAsset,
   type CreativeAssetKind,
+  useCreativeAssetPickerDialog,
   useCreativeAssets,
 } from '../../assets';
 import { manualUploadRejectionMessage } from '../../assets/page/model';
 import {
   CREATIVE_STUDIO_PROJECTS_PATH,
+  CREATIVE_STUDIO_WORKFLOWS_PATH,
   creativeStudioDirectorProjectPath,
 } from '../../app/routes';
 import {
@@ -39,6 +41,10 @@ import {
 } from '../../domain';
 import type { PromptLibrarySelection } from '../../prompts';
 import { useCreativeProject } from '../../services';
+import type { WorkflowDefinitionV1, WorkflowRunAggregateV1 } from '../../workflows/domain';
+import { WorkflowRunModal, type CreativeWorkflowRunnerPort } from '../../workflows/page';
+import { useCreativeWorkflowRuntime } from '../../workflows/runtime';
+import { creativeWorkflowRepository } from '../../workflows/services';
 import { CreativeCanvasChrome } from '../chrome';
 import type { CanvasInteractionTool } from '../components';
 import {
@@ -81,8 +87,8 @@ import {
   CreativeCanvasPropertiesPanel,
   CreativeCanvasTimelineUnwiredPanel,
   CreativeCanvasUnavailablePanel,
-  CreativeCanvasWorkflowUnwiredPanel,
 } from './CreativeCanvasPanels';
+import CreativeCanvasWorkflowPanel from './CreativeCanvasWorkflowPanel';
 import {
   CreativeCanvasProductAssetLibrary,
   CreativeCanvasProductPromptLibrary,
@@ -275,6 +281,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const { i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language ?? 'zh-CN';
   const project = useCreativeProject(projectId || null);
+  const workflowRuntime = useCreativeWorkflowRuntime();
+  const workflowAssetPicker = useCreativeAssetPickerDialog();
 
   const editorRef = useRef<CreativeCanvasEditorHandle>(null);
   const agentPanelRef = useRef<CreativeCanvasAgentPanelHandle>(null);
@@ -286,6 +294,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const hydratedBackgroundRef = useRef<{ projectId: string; revision: string } | null>(null);
   const knownAssetsRef = useRef<ReadonlyMap<string, CreativeAsset>>(new Map());
   const assetImportBusyRef = useRef(false);
+  const workflowRequestRef = useRef(0);
 
   const [canvasState, setCanvasState] = useState<CanvasState | null>(null);
   const [save, setSave] = useState<CanvasCasSaveSnapshot>(INITIAL_SAVE);
@@ -310,6 +319,36 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [pendingPanoramaChoice, setPendingPanoramaChoice] = useState<PendingPanoramaChoice | null>(null);
   const [assetImportBusy, setAssetImportBusy] = useState(false);
   const [agentDocumentState, setAgentDocumentState] = useState<AgentDocumentState | null>(null);
+  const [workflows, setWorkflows] = useState<WorkflowDefinitionV1[]>([]);
+  const [workflowLoading, setWorkflowLoading] = useState(false);
+  const [workflowError, setWorkflowError] = useState<string | null>(null);
+  const [workflowToRun, setWorkflowToRun] = useState<WorkflowDefinitionV1 | null>(null);
+  const [workflowInsertingRunId, setWorkflowInsertingRunId] = useState<string | null>(null);
+
+  const loadWorkflows = useCallback(async () => {
+    const request = ++workflowRequestRef.current;
+    setWorkflowLoading(true);
+    setWorkflowError(null);
+    try {
+      const loaded = await creativeWorkflowRepository.list();
+      if (request !== workflowRequestRef.current) return;
+      setWorkflows(
+        [...loaded].sort((left, right) => right.metadata.updatedAt - left.metadata.updatedAt)
+      );
+    } catch (error) {
+      if (request !== workflowRequestRef.current) return;
+      setWorkflowError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (request === workflowRequestRef.current) setWorkflowLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadWorkflows();
+    return () => {
+      workflowRequestRef.current += 1;
+    };
+  }, [loadWorkflows]);
 
   const assetQuery = useMemo(
     () => ({
@@ -492,6 +531,19 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const handleOpenModelSettings = useCallback(async () => {
     if (await flushBeforeLeave()) navigate('/models?section=models');
   }, [flushBeforeLeave, navigate]);
+
+  const handleOpenWorkflowCenter = useCallback(async () => {
+    if (await flushBeforeLeave()) navigate(CREATIVE_STUDIO_WORKFLOWS_PATH);
+  }, [flushBeforeLeave, navigate]);
+
+  const workflowRunner = useMemo<CreativeWorkflowRunnerPort>(
+    () => ({
+      async start(input) {
+        await workflowRuntime.controller.start(input);
+      },
+    }),
+    [workflowRuntime.controller]
+  );
 
   const dismissInteractionOverlays = useCallback(() => {
     setContextMenu(null);
@@ -952,6 +1004,29 @@ const CreativeCanvasProductRoute: React.FC = () => {
     );
   }, []);
 
+  const handleInsertWorkflowResults = useCallback(
+    async (run: WorkflowRunAggregateV1) => {
+      if (workflowInsertingRunId || run.record.resultAssetIds.length === 0) return;
+      setWorkflowInsertingRunId(run.request.id);
+      setNotice('正在解析工作流的真实结果素材…');
+      try {
+        const resolved = await Promise.all(
+          run.record.resultAssetIds.map((assetId) => creativeAssetClient.get(assetId))
+        );
+        const known = new Map(knownAssetsRef.current);
+        for (const asset of resolved) known.set(asset.id, asset);
+        knownAssetsRef.current = known;
+        handleInsertAssets(resolved);
+        void assets.reload();
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        setWorkflowInsertingRunId(null);
+      }
+    },
+    [assets, handleInsertAssets, workflowInsertingRunId]
+  );
+
   const handleInsertPrompt = useCallback((selection: PromptLibrarySelection) => {
     const editor = editorRef.current;
     if (!editor) return;
@@ -1193,7 +1268,23 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 onInsert={handleInsertPrompt}
               />
             ),
-            workflows: <CreativeCanvasWorkflowUnwiredPanel />,
+            workflows: (
+              <CreativeCanvasWorkflowPanel
+                workflows={workflows}
+                runtime={workflowRuntime.snapshot}
+                loading={workflowLoading}
+                error={workflowError}
+                disabled={productDisabled}
+                insertingRunId={workflowInsertingRunId}
+                onRetry={() => {
+                  void loadWorkflows();
+                  void workflowRuntime.controller.load().catch(() => undefined);
+                }}
+                onRun={setWorkflowToRun}
+                onInsertResults={(run) => void handleInsertWorkflowResults(run)}
+                onOpenCenter={() => void handleOpenWorkflowCenter()}
+              />
+            ),
           },
           right: {
             assistant: (
@@ -1217,6 +1308,34 @@ const CreativeCanvasProductRoute: React.FC = () => {
           },
         }}
       />
+      <WorkflowRunModal
+        workflow={workflowToRun}
+        runner={workflowRunner}
+        onClose={() => setWorkflowToRun(null)}
+        onPickAssets={(variable, selectedAssetIds) => workflowAssetPicker.pick({
+          acceptedKinds: ['image'],
+          initialSelectedIds: selectedAssetIds,
+          selectionLimit: variable.type === 'image-series' ? variable.maxItems : 1,
+          title: variable.type === 'image-series' ? '选择变量图片' : '选择变量参考图',
+        })}
+        onPickReferenceAssets={(selectedAssetIds) => workflowAssetPicker.pick({
+          acceptedKinds: ['image'],
+          initialSelectedIds: selectedAssetIds,
+          selectionLimit: 100,
+          title: '选择工作流参考图',
+        })}
+        onUploadReferenceImages={async (files, selectedAssetIds) => {
+          const uploaded = await Promise.all(
+            files.map((file) => creativeAssetClient.upload(file, {
+              title: file.name,
+              tags: ['workflow-reference'],
+              inLibrary: true,
+            }))
+          );
+          return [...new Set([...selectedAssetIds, ...uploaded.map((asset) => asset.id)])];
+        }}
+      />
+      {workflowAssetPicker.dialog}
       <Modal
         title='选择 2:1 图片的节点类型'
         visible={pendingPanoramaChoice !== null}

@@ -151,9 +151,13 @@ const WorkflowInputControl: React.FC<{
           disabled={disabled || !onPickAssets}
           title={onPickAssets ? undefined : '素材选择器尚未连接'}
           onClick={() =>
-            void onPickAssets?.(variable, input.assetId ? [input.assetId] : []).then((assetIds) => {
-              if (assetIds) onChange({ ...input, assetId: assetIds[0] ?? null });
-            })
+            void onPickAssets?.(variable, input.assetId ? [input.assetId] : [])
+              .then((assetIds) => {
+                if (assetIds) onChange({ ...input, assetId: assetIds[0] ?? null });
+              })
+              .catch((error) => Message.error(
+                error instanceof Error ? error.message : '素材选择器打开失败'
+              ))
           }
         >
           从我的素材选择
@@ -170,9 +174,13 @@ const WorkflowInputControl: React.FC<{
           disabled={disabled || !onPickAssets}
           title={onPickAssets ? undefined : '素材选择器尚未连接'}
           onClick={() =>
-            void onPickAssets?.(variable, input.assetIds).then((assetIds) => {
-              if (assetIds) onChange({ ...input, assetIds });
-            })
+            void onPickAssets?.(variable, input.assetIds)
+              .then((assetIds) => {
+                if (assetIds) onChange({ ...input, assetIds });
+              })
+              .catch((error) => Message.error(
+                error instanceof Error ? error.message : '素材选择器打开失败'
+              ))
           }
         >
           从我的素材选择
@@ -329,9 +337,13 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
                   disabled={submitting || !onPickReferenceAssets}
                   title={onPickReferenceAssets ? undefined : '素材选择器尚未连接'}
                   onClick={() =>
-                    void onPickReferenceAssets?.(referenceAssetIds).then((assetIds) => {
-                      if (assetIds) setReferenceAssetIds(assetIds);
-                    })
+                    void onPickReferenceAssets?.(referenceAssetIds)
+                      .then((assetIds) => {
+                        if (assetIds) setReferenceAssetIds(assetIds);
+                      })
+                      .catch((error) => Message.error(
+                        error instanceof Error ? error.message : '素材选择器打开失败'
+                      ))
                   }
                 >
                   我的素材
@@ -356,7 +368,11 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
                 const files = [...(event.currentTarget.files ?? [])];
                 event.currentTarget.value = '';
                 if (files.length === 0 || !onUploadReferenceImages) return;
-                void onUploadReferenceImages(files, referenceAssetIds).then(setReferenceAssetIds);
+                void onUploadReferenceImages(files, referenceAssetIds)
+                  .then(setReferenceAssetIds)
+                  .catch((error) => Message.error(
+                    error instanceof Error ? error.message : '参考图上传失败'
+                  ));
               }}
             />
             <div className={styles.referencePlaceholder}>
