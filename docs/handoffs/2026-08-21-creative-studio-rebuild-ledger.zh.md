@@ -2,7 +2,7 @@
 
 > 用途：在长任务发生上下文压缩或人员切换时，从可验证提交继续，而不是重新审计整仓。
 > 分支：`codex/infinite-canvas-rebuild`
-> 最后功能锚点：`af300a40`（`feat(creative-studio): persist planning turn inputs`）
+> 最后功能锚点：`4afae7af`（`feat(creative-studio): connect canvas planning context`）
 > 参考产品锚点：`ef7303d`
 
 ## 1. 续接协议
@@ -28,7 +28,7 @@
 | P5 | Canonical 资产 API/库、文本/图像/视频/音频节点、素材选择与结果回填 | `57128727`、`e05b18a8`、`04f805a3`、`444db764` |
 | P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化；画布视频/音频 owner、提交响应不明状态确认与 authoritative 404 orphan 清理；真实 `standalone_workbench` owner、完整有序输入快照、owner-scoped keyset/active 历史与安全退役合同；单模型删除的 Creative Studio exact-pair 原子清理与硬绑定门禁 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44`、`60982e38`、`9fffd526`、`8e5f83cf`、`1dd4b9e9`、`9990921c`、`53093740`、`a394b1e6` |
 | P7 | 生图/视频工作台、owner-scoped 持久终态历史、live 恢复/取消/载入/精确重试、terminal-only 安全移除、工作流定义/运行中心、提示词与素材中心 | `2283ee74`、`1414846e`、`ebd17f3a`…`aad21d9d`、`7e45f8ad`、`9990921c`、`3b8a1b03` |
-| P8 | 持久化画布 Agent、原子操作、裁剪/切分/遮罩编辑与真实任务回填；owner-only Agent canvas-op HTTP 网关、服务端审计来源、CAS/UUIDv7/删除确认门禁；durable exact `modelInput`/`skillIds` 与有界 selection context/planning envelope | `e5368474`…`00f407c6`、`cac4bca8`…`bc01849e`、`bc879581`、`af300a40` |
+| P8 | 持久化画布 Agent、原子操作、裁剪/切分/遮罩编辑与真实任务回填；owner-only Agent canvas-op HTTP 网关、服务端审计来源、CAS/UUIDv7/删除确认门禁；durable exact `modelInput`/`skillIds`、有界 selection context/planning envelope、正规 NomiFun Skill chip 与 Conversation `inject_skills` | `e5368474`…`00f407c6`、`cac4bca8`…`bc01849e`、`bc879581`、`af300a40`、`4afae7af` |
 | P9 | Director v1 domain、Three.js runtime、CAS sidecar、时间轴、截图回填、sidecar 全资产闭包与归档重映射 | `1ccbd013`、`d3a609f6`、`7b7712c0`、`dfa3c0b3`、`f25825f1`、`c12b8db` |
 | P10 | 旧 Workshop UI、翻译、后端路由、旧画布存储与旧任务归属退出运行链 | `63c99d4f`…`7867fe3f` |
 
@@ -81,7 +81,9 @@
 - `POST /api/creative-studio/projects/{projectId}/agent-ops` 已把既有 `CreativeAgentOp` 原子批处理暴露为 owner-only HTTP 网关。Wrapper 只接受 `{ expectedRevision, ops }`，审计 source 固定由服务端写入 `creative-studio-agent`；nested op 继续复用 canonical snake_case domain wire，不复制 DTO。响应只包含 CAS 后 project summary 与有序 op results；stale、unknown field、空/非法批次、config runtime 字段篡改均零写入，节点/连线 ID 由服务端签发 UUIDv7。
 - Agent route 首批显式拒绝 `delete_node`，删除仍只能走画布人工确认入口；domain/service 的受控内部删除能力不受影响。真实 API 已验证 add 200/revision 2、stale 409/`REVISION_CONFLICT`、delete 400 且零写入、move 200/revision 3，并精确清理临时项目为 0。现有画布刷新仍为 3 节点/0 连接、返回项目可用、Console 0 error / 0 warning。前端严格 artifact 预览/“应用到画布”按钮尚未接线，不能把网关存在描述成 Agent 已会自动改画布。
 - Agent pending turn 新增 durable `modelInput` 与有序 `skillIds`：旧文档缺字段时前端规范化为 `modelInput=prompt` / `skillIds=[]`，新写入始终带完整字段；刷新/响应丢失恢复必须重放同一模型输入与技能快照。模型输入上限 262144 UTF-16 units；Skill 最多 8 个，1-128 ASCII `[A-Za-z0-9._-]`、唯一且保持顺序。标题仍只来自用户 prompt，不会泄漏 planning envelope。
-- 纯 context builder 以 document 顺序稳定输出 selected 节点→一跳连线/分组/operation 引用，最多 32 节点与 64 连接；文本/提示词最多 2000 Unicode characters，data/blob 媒体载荷被剥离，不包含 resolved URL 或 opaque Provider parameters。v1 planning envelope 固定声明只允许 canvas-ops artifact、必须人工批准并禁止 delete/media-generation。该提交尚未把 context/skills 接入 Composer/transport，产品接线仍是下一门禁。
+- 纯 context builder 以 document 顺序稳定输出 selected 节点→一跳连线/分组/operation 引用，最多 32 节点与 64 连接；文本/提示词最多 2000 Unicode characters，data/blob 媒体载荷被剥离，不包含 resolved URL 或 opaque Provider parameters。v1 planning envelope 固定声明只允许 canvas-ops artifact、必须人工批准并禁止 delete/media-generation。
+- Canvas Agent Composer 现在显示可移除 context chips，并由用户明确选择 1-3 个正规 NomiFun Skill：画布规划、整理布局、工作流设计；不会再按 prompt 正则伪推断能力。发送前把当前 chip ID、bounded envelope 与 skill 顺序一起持久化；Nomi transport 只发送 `modelInput`，把 skills 复制到 `inject_skills`，展示 prompt 只用于标题/聊天。replay/recovery 继续使用同一 envelope、skill list 与 idempotency key。
+- 三个 Skill 已进入 packaged builtin corpus 与本地化 metadata，并由安全合同限制为人工审阅提案：canvas 禁止 `delete_node`/媒体生成，organize 只整理现有结构，workflow 在 strict draft parser 接入前只给规划文本。隔离后端启动真实刷新 Skill fingerprint，`GET /api/skills` 3/3 返回 builtin。严格 artifact preview/“应用到画布”仍未接线，不能宣称 Agent 已能自动改图。
 
 `dd18dc6f` 的提交前检查：
 
@@ -209,6 +211,13 @@
 - Frontend domain/model/context/editor：33 passed / 225 assertions；`bun run typecheck` 与 `git diff --check` 通过。
 - Context fixtures 覆盖 selection/一跳顺序、32/64/2000 边界、config parameters/operation 脱敏、data/blob 剥离和 deterministic approval-only envelope；未改变可见 UI、未调用模型。
 
+`4afae7af` 的提交前检查：
+
+- Agent Panel/transport/context/ProductRoute：35 passed / 294 assertions；Nomi adapter 13/13 覆盖 exact `modelInput`、ordered copied skills、invalid envelope 前置拒绝、replay/recovery 与停止边界。
+- Builtin corpus metadata 与 Creative Studio Skill 安全合同定向测试通过；`GET /api/skills` 真实返回 3 个新 builtin Skill。`bun run typecheck`、图标/主题/dead-css、`git diff --check` 全部通过。
+- 真实 1280×720 画布选择节点并打开 Agent：context chip、3 个 Skill、移除/toggle、390px 右栏均通过且无横向 overflow，Console 0 error / 0 warning；最终通过 UI 收起并核对项目仍为 3 节点/0 连接、`right.open=false`、pending Agent turn=0。浏览器 viewport override 本轮未生效到 390px，未伪报移动端实测。
+- 完整 `bun run build` 通过 Vite 7685 modules、Rust release、Tauri 与 NSIS，生成 `nomifun-desktop.exe` 和 `NomiFun_0.6.4_x64-setup.exe`；只保留仓库既存 chunk/unused warning。未调用模型或产生 Provider 成本。
+
 `7e45f8ad` 的提交前检查：
 
 - `cargo test -p nomifun-workshop`：70 passed。
@@ -242,8 +251,8 @@
 
 ## 5. 下一步单线程优先级
 
-1. 规划型 Agent：在已完成的安全 ops 网关上接画布选择上下文、正规 NomiFun 创作 Skill 注入、严格 artifact 预览/人工应用；随后补首页 Agent 启动画布与 Workflow AI draft→预览→编辑器→人工保存。首批不触发高级媒体生成。
+1. 规划型 Agent：在已完成的 context/Skill transport 与安全 ops 网关上接严格 canvas-ops artifact 解析、预览和人工“应用到画布”；随后补首页 Agent 启动画布与 Workflow AI draft→预览→编辑器→人工保存。首批不触发高级媒体生成。
 2. 高级媒体：视频多任务/首尾帧/高级引用、音频上传/时长/VoiceClone、Director/全景与完整视频输出均须先补 typed 后端能力。
 3. P11：1280×720、1024×768、390×844、Tauri 慢环、真实 provider 冒烟、UI build/桌面打包和最终能力文档。
 
-不要因为主体代码已存在就跳过这些门禁；standalone owner/history/recovery/安全移除、Creative Studio exact-model 删除、Agent ops 网关和 durable planning input/context 合同已完成，下一功能提交从 Composer/transport 的 context/Skill/artifact 产品接线开始。
+不要因为主体代码已存在就跳过这些门禁；standalone owner/history/recovery/安全移除、Creative Studio exact-model 删除、Agent ops 网关、durable planning input/context 与 Canvas context/Skill transport 已完成，下一功能提交从 strict artifact 预览/人工应用开始。
