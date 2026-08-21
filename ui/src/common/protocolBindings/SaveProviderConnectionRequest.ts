@@ -7,7 +7,7 @@
  * existing encrypted payload. The service rejects an omitted payload when
  * the `(provider_id, role)` row does not yet exist.
  */
-export type SaveProviderConnectionRequest = { role: string, label?: string | null, base_url: string, auth_scheme: string, 
+export type SaveProviderConnectionRequest = { role: string, label?: string | null, base_url: string, auth_scheme: string,
 /**
  * Omitted keeps an existing connection's encrypted credential payload.
  */
