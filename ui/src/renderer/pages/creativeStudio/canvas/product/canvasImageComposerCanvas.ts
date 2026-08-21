@@ -45,6 +45,11 @@ export const CREATIVE_IMAGE_COMPOSE_OPERATION = 'image-node-compose';
 type ImageNode = Extract<CreativeCanvasNode, { type: 'image' }>;
 type ConfigNode = Extract<CreativeCanvasNode, { type: 'config' }>;
 
+export interface CanvasImageComposeDraft {
+  prompt: string;
+  settings: ImageWorkbenchSettings;
+}
+
 export interface PreparedCanvasImageCompose {
   configNode: ConfigNode;
   connection: Omit<CreativeCanvasConnection, 'id'>;
@@ -93,6 +98,78 @@ export function canvasImageComposeSettings(
     height: dimension(config.data.parameters.height),
     aspectRatio: typeof aspect === 'string' && aspect.trim() ? aspect : 'auto',
     count: count(config.data.parameters.count),
+  };
+}
+
+/** Restore the node-owned draft, falling back to the latest submitted config. */
+export function canvasImageComposeDraftFromState(
+  state: CanvasState,
+  nodeId: string
+): CanvasImageComposeDraft {
+  const source = state.document.nodes.find(
+    (node): node is ImageNode => node.id === nodeId && node.type === 'image'
+  );
+  const persisted = source?.data.composer;
+  if (persisted) {
+    return {
+      prompt: persisted.prompt,
+      settings: {
+        model: persisted.model ? { ...persisted.model } : null,
+        interfaceMode: persisted.interfaceMode,
+        quality: persisted.quality,
+        width: persisted.width,
+        height: persisted.height,
+        aspectRatio: persisted.aspectRatio,
+        count: persisted.count,
+      },
+    };
+  }
+  const config = latestCanvasImageComposeConfig(state.document, nodeId);
+  return {
+    prompt: config?.data.prompt ?? '',
+    settings: config
+      ? canvasImageComposeSettings(config)
+      : structuredClone(DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS),
+  };
+}
+
+/** Replace the complete durable composer draft without changing node identity. */
+export function withCanvasImageComposeDraft(
+  node: ImageNode,
+  draft: CanvasImageComposeDraft
+): ImageNode {
+  return {
+    ...node,
+    data: {
+      ...node.data,
+      composer: {
+        prompt: draft.prompt,
+        model: draft.settings.model ? { ...draft.settings.model } : null,
+        interfaceMode: draft.settings.interfaceMode,
+        quality: draft.settings.quality,
+        width: draft.settings.width,
+        height: draft.settings.height,
+        aspectRatio: draft.settings.aspectRatio,
+        count: draft.settings.count,
+      },
+    },
+  };
+}
+
+/** An empty image uses T2I while a filled image uses I2I, so never carry a
+ * task-specific model selection across that boundary. The submitted config
+ * node keeps the historical model identity. */
+export function clearCanvasImageComposeDraftModel(node: ImageNode): ImageNode {
+  if (!node.data.composer?.model) return node;
+  return {
+    ...node,
+    data: {
+      ...node.data,
+      composer: {
+        ...node.data.composer,
+        model: null,
+      },
+    },
   };
 }
 

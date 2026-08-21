@@ -27,6 +27,7 @@ const SOURCE: Extract<CreativeCanvasNode, { type: "image" }> = {
     alt: "source",
     fit: "contain",
     naturalSize: { width: 1_920, height: 1_080 },
+    composer: null,
   },
 };
 

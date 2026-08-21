@@ -227,6 +227,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
         <textarea
           className={styles.prompt}
           value={prompt}
+          maxLength={1_000_000}
           placeholder={
             hasImageContent
               ? '请输入你想要把这张图修改成什么'

@@ -20,6 +20,7 @@ import {
   type CreativeDirectorNodeData,
   type CreativeGenerationStatus,
   type CreativeGroupNodeData,
+  type CreativeImageComposerDraft,
   type CreativeImageNodeData,
   type CreativeJsonObject,
   type CreativeJsonValue,
@@ -270,13 +271,117 @@ const parseJsonObject = (
 const parseImageData = (value: unknown, path: string): CreativeImageNodeData => {
   const code = 'INVALID_DOCUMENT';
   const record = asRecord(value, path, code);
-  exactKeys(record, ['assetId', 'caption', 'alt', 'fit', 'naturalSize'], [], path, code);
+  exactKeys(
+    record,
+    ['assetId', 'caption', 'alt', 'fit', 'naturalSize'],
+    ['composer'],
+    path,
+    code
+  );
   return {
     assetId: asNullableId(record.assetId, `${path}.assetId`, code),
     caption: asString(record.caption, `${path}.caption`, code, { allowEmpty: true, maxLength: 20_000 }),
     alt: asString(record.alt, `${path}.alt`, code, { allowEmpty: true, maxLength: 2_000 }),
     fit: asLiteral(record.fit, ['contain', 'cover'], `${path}.fit`, code),
     naturalSize: parseNullableNaturalSize(record.naturalSize, `${path}.naturalSize`, code),
+    composer:
+      record.composer === undefined || record.composer === null
+        ? null
+        : parseImageComposerDraft(record.composer, `${path}.composer`),
+  };
+};
+
+const parseImageComposerDraft = (
+  value: unknown,
+  path: string
+): CreativeImageComposerDraft => {
+  const code = 'INVALID_DOCUMENT';
+  const record = asRecord(value, path, code);
+  exactKeys(
+    record,
+    [
+      'prompt',
+      'model',
+      'interfaceMode',
+      'quality',
+      'width',
+      'height',
+      'aspectRatio',
+      'count',
+    ],
+    [],
+    path,
+    code
+  );
+  const model =
+    record.model === null
+      ? null
+      : (() => {
+          const modelRecord = asRecord(record.model, `${path}.model`, code);
+          exactKeys(modelRecord, ['providerId', 'model'], [], `${path}.model`, code);
+          const modelId = asString(modelRecord.model, `${path}.model.model`, code, {
+            maxLength: 512,
+          });
+          if (modelId !== modelId.trim()) {
+            fail(code, `${path}.model.model`, 'trimmed non-empty model id');
+          }
+          return {
+            providerId: asUuidV7Id(
+              modelRecord.providerId,
+              `${path}.model.providerId`,
+              code
+            ),
+            model: modelId,
+          };
+        })();
+  const nullableDimension = (entry: unknown, entryPath: string): number | null =>
+    entry === null
+      ? null
+      : asNumber(entry, entryPath, code, {
+          min: 1,
+          max: 8192,
+          integer: true,
+        });
+  const width = nullableDimension(record.width, `${path}.width`);
+  const height = nullableDimension(record.height, `${path}.height`);
+  if ((width === null) !== (height === null)) {
+    fail(code, path, 'width and height both null or both positive integers');
+  }
+  const aspectRatio = asString(
+    record.aspectRatio,
+    `${path}.aspectRatio`,
+    code,
+    { maxLength: 128 }
+  );
+  if (aspectRatio !== aspectRatio.trim()) {
+    fail(code, `${path}.aspectRatio`, 'trimmed non-empty aspect ratio');
+  }
+  return {
+    prompt: asString(record.prompt, `${path}.prompt`, code, {
+      allowEmpty: true,
+      maxLength: 1_000_000,
+    }),
+    model,
+    interfaceMode: asLiteral(
+      record.interfaceMode,
+      ['images', 'responses'],
+      `${path}.interfaceMode`,
+      code
+    ),
+    quality: asLiteral(
+      record.quality,
+      ['auto', 'high', 'medium', 'low'],
+      `${path}.quality`,
+      code
+    ),
+    width,
+    height,
+    aspectRatio,
+    count: asNumber(record.count, `${path}.count`, code, {
+      min: 1,
+      max: 10,
+      integer: true,
+    }),
   };
 };
 

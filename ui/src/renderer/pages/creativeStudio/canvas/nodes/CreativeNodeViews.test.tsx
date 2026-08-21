@@ -26,7 +26,7 @@ const nodes: CreativeCanvasNode[] = [
     id: 'image-1',
     type: 'image',
     locked: true,
-    data: { assetId: 'asset-image', caption: '城市夜景', alt: '城市夜景', fit: 'cover', naturalSize: { width: 1920, height: 1080 } },
+    data: { assetId: 'asset-image', caption: '城市夜景', alt: '城市夜景', fit: 'cover', naturalSize: { width: 1920, height: 1080 }, composer: null },
   },
   {
     ...base,

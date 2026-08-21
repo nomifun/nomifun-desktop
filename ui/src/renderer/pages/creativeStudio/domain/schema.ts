@@ -58,12 +58,35 @@ export type CreativeJsonValue =
   | { [key: string]: CreativeJsonValue };
 export type CreativeJsonObject = { [key: string]: CreativeJsonValue };
 
+export interface CreativeImageComposerModel {
+  providerId: string;
+  model: string;
+}
+
+/**
+ * The durable, node-owned draft shown by the inline image composer.
+ *
+ * It intentionally contains no task or asset identity. Submitted work is
+ * owned by a config node; this value only restores the user's next edit.
+ */
+export interface CreativeImageComposerDraft {
+  prompt: string;
+  model: CreativeImageComposerModel | null;
+  interfaceMode: 'images' | 'responses';
+  quality: 'auto' | 'high' | 'medium' | 'low';
+  width: number | null;
+  height: number | null;
+  aspectRatio: string;
+  count: number;
+}
+
 export interface CreativeImageNodeData {
   assetId: string | null;
   caption: string;
   alt: string;
   fit: 'contain' | 'cover';
   naturalSize: CreativeSize | null;
+  composer: CreativeImageComposerDraft | null;
 }
 
 export interface CreativePanoramaNodeData {

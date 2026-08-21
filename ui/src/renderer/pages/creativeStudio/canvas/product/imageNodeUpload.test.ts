@@ -127,7 +127,7 @@ describe('canvas image node upload projection', () => {
   });
 
   test('fills the exact empty node and preserves its graph identity', () => {
-    const node = testNode('image', 1, {
+    const base = testNode('image', 1, {
       x: 120,
       y: 80,
       width: 340,
@@ -135,6 +135,22 @@ describe('canvas image node upload projection', () => {
       locked: true,
       groupId: testUuid(702),
     });
+    const node = {
+      ...base,
+      data: {
+        ...base.data,
+        composer: {
+          prompt: '保留这个草稿',
+          model: { providerId: testUuid(710), model: 't2i-model' },
+          interfaceMode: 'images' as const,
+          quality: 'high' as const,
+          width: 1024,
+          height: 1024,
+          aspectRatio: '1:1',
+          count: 2,
+        },
+      },
+    };
     const filled = fillEmptyCanvasImageNodeFromAsset(node, imageAsset());
 
     expect(filled).toMatchObject({
@@ -150,6 +166,16 @@ describe('canvas image node upload projection', () => {
         alt: '上传的图片.png',
         fit: 'contain',
         naturalSize: { width: 1920, height: 1080 },
+        composer: {
+          prompt: '保留这个草稿',
+          model: null,
+          interfaceMode: 'images',
+          quality: 'high',
+          width: 1024,
+          height: 1024,
+          aspectRatio: '1:1',
+          count: 2,
+        },
       },
     });
   });

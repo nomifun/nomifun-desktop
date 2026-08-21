@@ -14,11 +14,14 @@ import { createEmptyCreativeProjectDocument } from '../../domain';
 import { createInitialCanvasState } from '../core';
 import { testNode, testUuid } from '../core/testFixtures';
 import {
+  canvasImageComposeDraftFromState,
   canvasImageComposeResumeRequests,
   canvasImageComposeSettings,
   canvasImageComposeTaskSummary,
+  clearCanvasImageComposeDraftModel,
   latestCanvasImageComposeConfig,
   prepareCanvasImageCompose,
+  withCanvasImageComposeDraft,
 } from './canvasImageComposerCanvas';
 
 const PROVIDER_ID = testUuid(300) as ProviderId;
@@ -268,5 +271,47 @@ describe('canvas image composer product model', () => {
       pendingCount: 1,
       message: undefined,
     });
+  });
+
+  test('restores the node-owned draft before submitted config and clears task-specific models', () => {
+    const { document, prepared, source } = preparedFixture();
+    document.nodes.push(prepared.configNode);
+    const persisted = withCanvasImageComposeDraft(source, {
+      prompt: '尚未提交的新草稿',
+      settings: {
+        model: { providerId: PROVIDER_ID, model: 'edit-v1' },
+        interfaceMode: 'responses',
+        quality: 'medium',
+        width: 1280,
+        height: 720,
+        aspectRatio: '16:9',
+        count: 3,
+      },
+    });
+    document.nodes[0] = persisted;
+    const restored = canvasImageComposeDraftFromState(
+      createInitialCanvasState({ document }),
+      source.id
+    );
+    expect(restored).toEqual({
+      prompt: '尚未提交的新草稿',
+      settings: {
+        model: { providerId: PROVIDER_ID, model: 'edit-v1' },
+        interfaceMode: 'responses',
+        quality: 'medium',
+        width: 1280,
+        height: 720,
+        aspectRatio: '16:9',
+        count: 3,
+      },
+    });
+
+    const cleared = clearCanvasImageComposeDraftModel(persisted);
+    expect(cleared.id).toBe(source.id);
+    expect(cleared.data.composer).toEqual({
+      ...persisted.data.composer,
+      model: null,
+    });
+    expect(clearCanvasImageComposeDraftModel(cleared)).toBe(cleared);
   });
 });

@@ -30,6 +30,7 @@ const TEST_DATA: CreativeCanvasNodeDataByKind = {
     alt: '',
     fit: 'contain',
     naturalSize: null,
+    composer: null,
   },
   panorama: {
     assetId: null,

@@ -16,6 +16,10 @@ const style = readFileSync(
   new URL('./CreativeCanvasProductRoute.module.css', import.meta.url),
   'utf8'
 );
+const editorStyle = readFileSync(
+  new URL('../editor/CreativeCanvasEditor.module.css', import.meta.url),
+  'utf8'
+);
 
 describe('Creative Canvas product route composition', () => {
   test('is a no-props nested route over the canonical Editor store', () => {
@@ -141,6 +145,14 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('runtime.retrySubmission(')).toBe(true);
     expect(source.includes('runtime.taskExists(')).toBe(true);
     expect(source.includes('imageWorkbenchModelOptions(modelCatalog, \'image_edit\')')).toBe(true);
+    expect(source.includes('withCanvasImageComposeDraft(node, update(current))')).toBe(true);
+    expect(source.includes('mergeKey: `image-composer:${nodeId}`')).toBe(true);
+    expect(source.includes('imageComposeDrafts')).toBe(false);
+    expect(source.includes("if (state && target?.type === 'image')")).toBe(true);
+    expect(source.includes('target.data.assetId)')).toBe(false);
+    expect(
+      editorStyle.includes('.nodePlacement:has([data-canvas-image-composer])')
+    ).toBe(true);
   });
 
   test('documents the exact lazy Router handoff without modifying Router here', () => {

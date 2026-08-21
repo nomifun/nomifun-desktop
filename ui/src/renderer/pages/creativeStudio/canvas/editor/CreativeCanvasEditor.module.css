@@ -16,6 +16,13 @@
   height: 100%;
 }
 
+/* The inline composer may extend across later nodes. Raise the owning image
+ * stacking context only while that real overlay exists, so its controls never
+ * click through to a higher-z canvas node underneath. */
+.nodePlacement:has([data-canvas-image-composer]) {
+  z-index: 1000000 !important;
+}
+
 .nodePlacement[data-dimmed='true'] {
   opacity: 0.32;
 }

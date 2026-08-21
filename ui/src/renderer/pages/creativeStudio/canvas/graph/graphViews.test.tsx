@@ -29,7 +29,7 @@ const sourceNode: CreativeCanvasNode = {
   groupId: null,
   zIndex: 2,
   locked: false,
-  data: { assetId: null, caption: '', alt: '', fit: 'contain', naturalSize: null },
+  data: { assetId: null, caption: '', alt: '', fit: 'contain', naturalSize: null, composer: null },
 };
 
 const targetNode: CreativeCanvasNode = {

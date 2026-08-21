@@ -149,12 +149,14 @@ import {
   type CreativeCanvasAssetKindFilter,
 } from './CreativeCanvasProductLibraries';
 import {
-  canvasImageComposeSettings,
+  canvasImageComposeDraftFromState,
   canvasImageComposeTaskSummary,
   CREATIVE_IMAGE_COMPOSE_OPERATION,
   DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS,
   latestCanvasImageComposeConfig,
   prepareCanvasImageCompose,
+  withCanvasImageComposeDraft,
+  type CanvasImageComposeDraft,
 } from './canvasImageComposerCanvas';
 import CanvasImageTaskRuntimeBridge, {
   canvasImageTaskReferenceFromPlan,
@@ -246,11 +248,6 @@ interface PendingImageMaskEdit {
   submission: PendingImageMaskSubmission | null;
 }
 
-interface CanvasImageComposeDraft {
-  prompt: string;
-  settings: ImageWorkbenchSettings;
-}
-
 interface PendingCanvasImageComposeSubmission {
   nodeId: string;
   plan: PreparedCreativeWorkbenchRun;
@@ -261,19 +258,6 @@ interface CanvasImageComposeIssue {
   nodeId: string;
   message: string;
 }
-
-const canvasImageComposeDraftFromState = (
-  state: CanvasState,
-  nodeId: string
-): CanvasImageComposeDraft => {
-  const config = latestCanvasImageComposeConfig(state.document, nodeId);
-  return {
-    prompt: config?.data.prompt ?? '',
-    settings: config
-      ? canvasImageComposeSettings(config)
-      : structuredClone(DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS),
-  };
-};
 
 interface AgentDocumentState {
   sessions: readonly CreativeChatSessionReference[];
@@ -592,9 +576,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [imageTaskRuntimeEpoch, setImageTaskRuntimeEpoch] = useState(0);
   const [imageTaskRuntimeActionBusy, setImageTaskRuntimeActionBusy] =
     useState(false);
-  const [imageComposeDrafts, setImageComposeDrafts] = useState<
-    Readonly<Record<string, CanvasImageComposeDraft>>
-  >({});
   const [imageComposeBusy, setImageComposeBusy] = useState(false);
   const [imageComposeIssue, setImageComposeIssue] =
     useState<CanvasImageComposeIssue | null>(null);
@@ -722,7 +703,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setImageTaskRuntimeReady(false);
     setImageTaskRuntimeEpoch(0);
     setImageTaskRuntimeActionBusy(false);
-    setImageComposeDrafts({});
     setImageComposeBusy(false);
     setImageComposeIssue(null);
     setImageComposeSubmission(null);
@@ -829,13 +809,23 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const updateImageComposeDraft = useCallback(
     (
       nodeId: string,
-      fallback: CanvasImageComposeDraft,
       update: (current: CanvasImageComposeDraft) => CanvasImageComposeDraft
     ) => {
-      setImageComposeDrafts((current) => ({
-        ...current,
-        [nodeId]: update(current[nodeId] ?? fallback),
-      }));
+      const editor = editorRef.current;
+      if (!editor) return;
+      const state = editor.getState();
+      const node = state.document.nodes.find(
+        (candidate): candidate is Extract<CreativeCanvasNode, { type: 'image' }> =>
+          candidate.id === nodeId && candidate.type === 'image'
+      );
+      if (!node) return;
+      const current = canvasImageComposeDraftFromState(state, nodeId);
+      const nextState = editor.dispatch(
+        canvasCommands.updateNode(withCanvasImageComposeDraft(node, update(current)), {
+          mergeKey: `image-composer:${nodeId}`,
+        })
+      );
+      setCanvasState(nextState);
     },
     []
   );
@@ -1993,12 +1983,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
       let canvasOwned = false;
       try {
         const state = editor.getState();
-        const source = state.document.nodes.find(
+        const sourceNode = state.document.nodes.find(
           (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
             node.id === nodeId && node.type === 'image'
         );
-        if (!source) throw new Error('图片节点已被删除，未创建图片创作任务。');
-        const selectedModelOptions = source.data.assetId
+        if (!sourceNode) throw new Error('图片节点已被删除，未创建图片创作任务。');
+        const selectedModelOptions = sourceNode.data.assetId
           ? imageMaskModelOptions
           : imageGenerationExactOptions;
         const selectedModel = selectedModelOptions.find(
@@ -2008,11 +1998,26 @@ const CreativeCanvasProductRoute: React.FC = () => {
         );
         if (!selectedModel) {
           throw new Error(
-            source.data.assetId
+            sourceNode.data.assetId
               ? '所选图片编辑模型已不可用，未发起生成。'
               : '所选图片生成模型已不可用，未发起生成。'
           );
         }
+        const source = withCanvasImageComposeDraft(sourceNode, {
+          prompt,
+          settings: {
+            ...settings,
+            model: {
+              providerId: selectedModel.providerId,
+              model: selectedModel.model,
+            },
+          },
+        });
+        editor.dispatch(
+          canvasCommands.updateNode(source, {
+            mergeKey: `image-composer:${nodeId}`,
+          })
+        );
         const sourceAsset = source.data.assetId
           ? await resolveCanvasImageAsset(source)
           : null;
@@ -2628,9 +2633,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
         const target = state?.document.nodes.find(
           (node) => node.id === promptInsertTargetNodeId && node.type === 'image'
         );
-        if (state && target?.type === 'image' && target.data.assetId) {
-          const fallback = canvasImageComposeDraftFromState(state, target.id);
-          updateImageComposeDraft(target.id, fallback, (current) => ({
+        if (state && target?.type === 'image') {
+          updateImageComposeDraft(target.id, (current) => ({
             ...current,
             prompt: selection.prompt,
           }));
@@ -2834,7 +2838,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                         prompt: '',
                         settings: structuredClone(DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS),
                       };
-                  const composeDraft = imageComposeDrafts[node.id] ?? composeFallback;
+                  const composeDraft = composeFallback;
                   const composeModelOptions = node.data.assetId
                     ? imageComposeModelOptions
                     : imageGenerationModelOptions;
@@ -2919,7 +2923,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           onPromptChange={(prompt) =>
                             updateImageComposeDraft(
                               node.id,
-                              composeFallback,
                               (current) => ({ ...current, prompt })
                             )
                           }
@@ -2929,7 +2932,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           onModelChange={(model: ImageWorkbenchModelIdentity | null) =>
                             updateImageComposeDraft(
                               node.id,
-                              composeFallback,
                               (current) => ({
                                 ...current,
                                 settings: { ...current.settings, model },
@@ -2939,7 +2941,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           onInterfaceModeChange={(interfaceMode) =>
                             updateImageComposeDraft(
                               node.id,
-                              composeFallback,
                               (current) => ({
                                 ...current,
                                 settings: { ...current.settings, interfaceMode },
@@ -2949,7 +2950,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           onQualityChange={(quality) =>
                             updateImageComposeDraft(
                               node.id,
-                              composeFallback,
                               (current) => ({
                                 ...current,
                                 settings: { ...current.settings, quality },
@@ -2959,7 +2959,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           onDimensionsChange={(dimensions) =>
                             updateImageComposeDraft(
                               node.id,
-                              composeFallback,
                               (current) => ({
                                 ...current,
                                 settings: { ...current.settings, ...dimensions },
@@ -2969,7 +2968,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           onAspectRatioChange={(option: ImageWorkbenchAspectRatioOption) =>
                             updateImageComposeDraft(
                               node.id,
-                              composeFallback,
                               (current) => ({
                                 ...current,
                                 settings: {
@@ -2984,7 +2982,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           onCountChange={(count) =>
                             updateImageComposeDraft(
                               node.id,
-                              composeFallback,
                               (current) => ({
                                 ...current,
                                 settings: { ...current.settings, count },

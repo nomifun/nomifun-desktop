@@ -43,6 +43,7 @@ const DEFAULT_NODE_DATA: CreativeCanvasNodeDataByKind = {
     alt: '',
     fit: 'contain',
     naturalSize: null,
+    composer: null,
   },
   panorama: {
     assetId: null,
@@ -296,6 +297,7 @@ export function creativeNodeFromAsset(
           alt: asset.title,
           fit: 'contain',
           naturalSize: naturalImageSize(asset),
+          composer: null,
         },
         state,
         viewportSize,
