@@ -51,6 +51,7 @@ const nodes: CreativeCanvasNode[] = [
       model: 'model-1',
       prompt: '电影感雨夜街道',
       negativePrompt: '',
+      operation: null,
       parameters: { width: 1024, height: 1024 },
       inputAssetIds: [],
       taskId: 'task-1',
@@ -63,7 +64,7 @@ const nodes: CreativeCanvasNode[] = [
     ...base,
     id: 'video-1',
     type: 'video',
-    data: { assetId: null, posterAssetId: null, autoplay: false, loop: false, muted: true, trimStartMs: 0, trimEndMs: null },
+    data: { assetId: null, posterAssetId: null, autoplay: false, loop: false, muted: true, trimStartMs: 0, trimEndMs: null, composer: null },
   },
   {
     ...base,

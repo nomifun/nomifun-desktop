@@ -19,7 +19,7 @@
 /* The inline composer may extend across later nodes. Raise the owning image
  * stacking context only while that real overlay exists, so its controls never
  * click through to a higher-z canvas node underneath. */
-.nodePlacement:has([data-canvas-image-composer]) {
+.nodePlacement:has([data-canvas-image-composer], [data-canvas-video-composer]) {
   z-index: 1000000 !important;
 }
 

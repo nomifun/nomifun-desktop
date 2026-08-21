@@ -151,6 +151,7 @@ function createStandaloneWorkbenchNode(
       model: draft.model,
       prompt: draft.prompt,
       negativePrompt: '',
+      operation: null,
       parameters: {
         ...structuredClone(draft.parameters),
         [STANDALONE_WORKBENCH_MARKER]: kind,

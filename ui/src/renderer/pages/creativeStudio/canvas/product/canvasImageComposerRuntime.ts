@@ -107,7 +107,7 @@ export async function settleCanvasImageComposeTask(input: {
       throw new Error('图片创作结果错误地复用了输入素材，已停止写入画布。');
     }
     const sourceNodeId = canvasImageComposeSourceNodeId(initialConfig);
-    const sourceAssetParameter = initialConfig.data.parameters.sourceAssetId;
+    const sourceAssetParameter = initialConfig.data.operation?.sourceAssetId;
     if (
       sourceAssetParameter !== null &&
       (typeof sourceAssetParameter !== 'string' || !sourceAssetParameter.trim())

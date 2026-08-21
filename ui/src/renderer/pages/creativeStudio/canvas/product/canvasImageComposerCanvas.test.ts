@@ -140,9 +140,6 @@ describe('canvas image composer product model', () => {
       capability: 'i2i',
       inputs: [{ assetId: SOURCE_ASSET_ID, role: 'reference' }],
       parameters: {
-        canvasOperation: 'image-node-compose',
-        sourceNodeId: source.id,
-        sourceAssetId: SOURCE_ASSET_ID,
         prompt: '把画面改成清晨',
         quality: 'high',
         aspect: '3:2',
@@ -154,6 +151,11 @@ describe('canvas image composer product model', () => {
       position: { x: 420, y: 0 },
       locked: true,
       data: {
+        operation: {
+          kind: 'image-node-compose',
+          sourceNodeId: source.id,
+          sourceAssetId: SOURCE_ASSET_ID,
+        },
         inputAssetIds: [SOURCE_ASSET_ID],
         taskId: prepared.plan.input.idempotencyKey,
         status: 'queued',
@@ -193,9 +195,6 @@ describe('canvas image composer product model', () => {
       capability: 't2i',
       inputs: [],
       parameters: {
-        canvasOperation: 'image-node-compose',
-        sourceNodeId: source.id,
-        sourceAssetId: null,
         prompt: '清晨湖面上的薄雾',
         count: 2,
       },
@@ -203,6 +202,11 @@ describe('canvas image composer product model', () => {
     expect(prepared.configNode.data).toMatchObject({
       task: 'image_generation',
       capability: 't2i',
+      operation: {
+        kind: 'image-node-compose',
+        sourceNodeId: source.id,
+        sourceAssetId: null,
+      },
       inputAssetIds: [],
       status: 'queued',
     });

@@ -433,11 +433,21 @@ function videoLabels(task: CreativeTask): {
   const resolution = parameterString(task, "resolution");
   const aspect = parameterString(task, "aspect");
   const seconds = parameterNumber(task, "seconds");
+  const divisor = (left: number, right: number): number => {
+    let a = Math.abs(Math.round(left));
+    let b = Math.abs(Math.round(right));
+    while (b > 0) [a, b] = [b, a % b];
+    return a || 1;
+  };
+  const derivedAspect =
+    width !== undefined && height !== undefined
+      ? `${width / divisor(width, height)}:${height / divisor(width, height)}`
+      : "";
   return {
     resolutionLabel:
       resolution ??
       (width !== undefined && height !== undefined ? `${width}×${height}` : ""),
-    sizeLabel: aspect ?? "",
+    sizeLabel: aspect ?? derivedAspect,
     durationLabel: seconds === undefined ? "" : `${seconds}s`,
   };
 }

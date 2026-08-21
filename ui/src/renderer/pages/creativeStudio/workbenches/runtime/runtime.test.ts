@@ -136,8 +136,6 @@ function videoPlan(taskCount = 2) {
     references: { bindings: [], assets: [] },
     operation: { task: "video_generation", capability: "t2v" },
     prompt: "A real video prompt",
-    resolution: "1080p",
-    aspectRatio: "16:9",
     seconds: 6,
     width: 1920,
     height: 1080,

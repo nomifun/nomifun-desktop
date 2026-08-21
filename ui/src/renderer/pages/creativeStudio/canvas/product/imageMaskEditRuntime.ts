@@ -51,15 +51,14 @@ const taskDocument = (
   projectId: string
 ) => ({ projectId, nodes: editor.getState().document.nodes });
 
-const requiredParameter = (
-  node: Extract<CreativeCanvasNode, { type: 'config' }>,
-  key: string
-): string => {
-  const value = node.data.parameters[key];
-  if (typeof value !== 'string' || !value.trim()) {
-    throw new Error(`局部编辑配置缺少 ${key}。`);
+const requiredImageMaskOperation = (
+  node: Extract<CreativeCanvasNode, { type: 'config' }>
+) => {
+  const operation = node.data.operation;
+  if (operation?.kind !== 'image-mask-edit') {
+    throw new Error('局部编辑配置缺少 canonical operation。');
   }
-  return value;
+  return operation;
 };
 
 export function creativeTaskReferenceFromInput(
@@ -142,11 +141,8 @@ export async function settleCanvasImageMaskEditTask(input: {
     if (resultIds.length !== input.task.resultAssetIds.length) {
       throw new Error('局部编辑任务返回了重复的结果素材。');
     }
-    const sourceAssetId = requiredParameter(initialConfig, 'sourceAssetId');
-    const markedReferenceAssetId = requiredParameter(
-      initialConfig,
-      'markedReferenceAssetId'
-    );
+    const { sourceAssetId, markedReferenceAssetId } =
+      requiredImageMaskOperation(initialConfig);
     if (
       resultIds.some(
         (assetId) =>

@@ -122,5 +122,7 @@ describe('CreativeCanvasImageComposer', () => {
     expect(css.includes(".positioner[data-placement='above']")).toBe(true);
     expect(css.includes('--creative-canvas-image-composer-offset-x')).toBe(true);
     expect(css.includes(".positioner[data-overlay='true']")).toBe(true);
+    expect(css.includes('.settingsSummary')).toBe(true);
+    expect(css.includes('.settingsButton span')).toBe(false);
   });
 });

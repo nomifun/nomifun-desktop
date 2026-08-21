@@ -132,6 +132,7 @@ import CreativeCanvasAgentPanel, {
 } from './agent/CreativeCanvasAgentPanel';
 import CreativeCanvasConnectionEdge from './CreativeCanvasConnectionEdge';
 import CreativeCanvasImageComposer from './CreativeCanvasImageComposer';
+import CreativeCanvasVideoComposer from './CreativeCanvasVideoComposer';
 import CreativeCanvasInteractionOverlays, {
   type CreativeCanvasContextMenuState,
 } from './CreativeCanvasInteractionOverlays';
@@ -151,7 +152,6 @@ import {
 import {
   canvasImageComposeDraftFromState,
   canvasImageComposeTaskSummary,
-  CREATIVE_IMAGE_COMPOSE_OPERATION,
   DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS,
   latestCanvasImageComposeConfig,
   prepareCanvasImageCompose,
@@ -162,6 +162,23 @@ import CanvasImageTaskRuntimeBridge, {
   canvasImageTaskReferenceFromPlan,
   type CanvasImageTaskRuntimeBridgeHandle,
 } from './CanvasImageTaskRuntimeBridge';
+import CanvasVideoTaskRuntimeBridge, {
+  canvasVideoTaskReferenceFromPlan,
+  type CanvasVideoTaskRuntimeBridgeHandle,
+} from './CanvasVideoTaskRuntimeBridge';
+import {
+  canvasVideoComposeDraftFromState,
+  canvasVideoComposeMode,
+  canvasVideoComposeTaskSummary,
+  DEFAULT_CANVAS_VIDEO_COMPOSE_DRAFT,
+  latestCanvasVideoComposeConfig,
+  prepareCanvasVideoCompose,
+  withCanvasVideoComposeDraft,
+  type CanvasVideoComposeDraft,
+  type CanvasVideoComposeMode,
+  type CanvasVideoComposeSettings,
+} from './canvasVideoComposerCanvas';
+import { orphanCanvasVideoComposeTask } from './canvasVideoComposerRuntime';
 import {
   createCreativeCanvasProductNode,
   CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
@@ -199,7 +216,7 @@ const INITIAL_SAVE: CanvasCasSaveSnapshot = {
   error: null,
 };
 
-const INITIAL_IMAGE_TASK_RUNTIME: CreativeWorkbenchRuntimeSnapshot = {
+const INITIAL_CANVAS_TASK_RUNTIME: CreativeWorkbenchRuntimeSnapshot = {
   state: 'idle',
   entries: [],
   submissionFailures: [],
@@ -255,6 +272,17 @@ interface PendingCanvasImageComposeSubmission {
 }
 
 interface CanvasImageComposeIssue {
+  nodeId: string;
+  message: string;
+}
+
+interface PendingCanvasVideoComposeSubmission {
+  nodeId: string;
+  plan: PreparedCreativeWorkbenchRun;
+  failureOrder: number;
+}
+
+interface CanvasVideoComposeIssue {
   nodeId: string;
   message: string;
 }
@@ -402,16 +430,16 @@ const SaveRecoveryAction: React.FC<{
   </>
 );
 
-const ImageTaskRuntimeAction: React.FC<{
+const CanvasTaskRuntimeAction: React.FC<{
+  label: string;
   snapshot: CreativeWorkbenchRuntimeSnapshot;
   busy: boolean;
   onCancel(taskId: string): void;
   onRetry(taskId: string): void;
-}> = ({ snapshot, busy, onCancel, onRetry }) => {
-  const taskLabel = (task: CreativeWorkbenchRuntimeSnapshot['entries'][number]['task']) =>
-    task.parameters?.canvasOperation === CREATIVE_IMAGE_COMPOSE_OPERATION
-      ? '图片创作'
-      : '局部编辑';
+}> = ({ label, snapshot, busy, onCancel, onRetry }) => {
+  const taskLabel = (
+    _task: CreativeWorkbenchRuntimeSnapshot['entries'][number]['task']
+  ) => label;
   const requestError = snapshot.entries.find(
     (entry) => entry.requestError !== null
   );
@@ -471,7 +499,7 @@ const ImageTaskRuntimeAction: React.FC<{
   if (snapshot.recoveringCount > 0) {
     return (
       <span className={styles.notice} role="status">
-        正在恢复图片任务…
+        正在恢复{label}…
       </span>
     );
   }
@@ -495,6 +523,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
 
   const editorRef = useRef<CreativeCanvasEditorHandle>(null);
   const imageTaskRuntimeRef = useRef<CanvasImageTaskRuntimeBridgeHandle>(null);
+  const videoTaskRuntimeRef = useRef<CanvasVideoTaskRuntimeBridgeHandle>(null);
   const agentPanelRef = useRef<CreativeCanvasAgentPanelHandle>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const imageNodeUploadInputRef = useRef<HTMLInputElement>(null);
@@ -571,7 +600,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   );
   const [imageMaskError, setImageMaskError] = useState<string | null>(null);
   const [imageTaskRuntime, setImageTaskRuntime] =
-    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_IMAGE_TASK_RUNTIME);
+    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
   const [imageTaskRuntimeReady, setImageTaskRuntimeReady] = useState(false);
   const [imageTaskRuntimeEpoch, setImageTaskRuntimeEpoch] = useState(0);
   const [imageTaskRuntimeActionBusy, setImageTaskRuntimeActionBusy] =
@@ -581,6 +610,17 @@ const CreativeCanvasProductRoute: React.FC = () => {
     useState<CanvasImageComposeIssue | null>(null);
   const [imageComposeSubmission, setImageComposeSubmission] =
     useState<PendingCanvasImageComposeSubmission | null>(null);
+  const [videoTaskRuntime, setVideoTaskRuntime] =
+    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
+  const [videoTaskRuntimeReady, setVideoTaskRuntimeReady] = useState(false);
+  const [videoTaskRuntimeEpoch, setVideoTaskRuntimeEpoch] = useState(0);
+  const [videoTaskRuntimeActionBusy, setVideoTaskRuntimeActionBusy] =
+    useState(false);
+  const [videoComposeBusy, setVideoComposeBusy] = useState(false);
+  const [videoComposeIssue, setVideoComposeIssue] =
+    useState<CanvasVideoComposeIssue | null>(null);
+  const [videoComposeSubmission, setVideoComposeSubmission] =
+    useState<PendingCanvasVideoComposeSubmission | null>(null);
   const [promptInsertTargetNodeId, setPromptInsertTargetNodeId] =
     useState<string | null>(null);
   const [agentDocumentState, setAgentDocumentState] =
@@ -649,6 +689,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
     () => exactWorkbenchModelOptions(modelCatalog, 'image_generation'),
     [modelCatalog]
   );
+  const videoModelOptions = useMemo(
+    () => exactWorkbenchModelOptions(modelCatalog, 'video_generation'),
+    [modelCatalog]
+  );
 
   const knownAssetsById = useMemo(() => {
     const merged = new Map(knownAssetsRef.current);
@@ -699,13 +743,19 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setImageMaskBusy(false);
     setImageMaskProgress(null);
     setImageMaskError(null);
-    setImageTaskRuntime(INITIAL_IMAGE_TASK_RUNTIME);
+    setImageTaskRuntime(INITIAL_CANVAS_TASK_RUNTIME);
     setImageTaskRuntimeReady(false);
     setImageTaskRuntimeEpoch(0);
     setImageTaskRuntimeActionBusy(false);
     setImageComposeBusy(false);
     setImageComposeIssue(null);
     setImageComposeSubmission(null);
+    setVideoTaskRuntime(INITIAL_CANVAS_TASK_RUNTIME);
+    setVideoTaskRuntimeReady(false);
+    setVideoTaskRuntimeActionBusy(false);
+    setVideoComposeBusy(false);
+    setVideoComposeIssue(null);
+    setVideoComposeSubmission(null);
     setPromptInsertTargetNodeId(null);
     setAgentDocumentState(null);
     assetImportBusyRef.current = false;
@@ -717,7 +767,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, [projectId]);
 
   useEffect(() => {
-    if (imageTaskRuntimeReady) return;
+    if (imageTaskRuntimeReady && videoTaskRuntimeReady) return;
     const detail = project.detail;
     if (!detail || detail.project.projectId !== projectId || !canvasState)
       return;
@@ -725,9 +775,16 @@ const CreativeCanvasProductRoute: React.FC = () => {
       canvasState.document.nodes.map((node) => node.id)
     );
     if (detail.document.nodes.every((node) => currentNodeIds.has(node.id))) {
-      setImageTaskRuntimeReady(true);
+      if (!imageTaskRuntimeReady) setImageTaskRuntimeReady(true);
+      if (!videoTaskRuntimeReady) setVideoTaskRuntimeReady(true);
     }
-  }, [canvasState, imageTaskRuntimeReady, project.detail, projectId]);
+  }, [
+    canvasState,
+    imageTaskRuntimeReady,
+    project.detail,
+    projectId,
+    videoTaskRuntimeReady,
+  ]);
 
   useEffect(() => {
     if (!imageMaskModel || pendingImageMaskEdit?.submission) return;
@@ -830,7 +887,31 @@ const CreativeCanvasProductRoute: React.FC = () => {
     []
   );
 
-  const openImageComposePromptLibrary = useCallback(
+  const updateVideoComposeDraft = useCallback(
+    (
+      nodeId: string,
+      update: (current: CanvasVideoComposeDraft) => CanvasVideoComposeDraft
+    ) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      const state = editor.getState();
+      const node = state.document.nodes.find(
+        (candidate): candidate is Extract<CreativeCanvasNode, { type: 'video' }> =>
+          candidate.id === nodeId && candidate.type === 'video'
+      );
+      if (!node) return;
+      const current = canvasVideoComposeDraftFromState(state, nodeId);
+      const nextState = editor.dispatch(
+        canvasCommands.updateNode(withCanvasVideoComposeDraft(node, update(current)), {
+          mergeKey: `video-composer:${nodeId}`,
+        })
+      );
+      setCanvasState(nextState);
+    },
+    []
+  );
+
+  const openComposePromptLibrary = useCallback(
     (nodeId: string) => {
       setPromptInsertTargetNodeId(nodeId);
       handleLeftViewChange('prompts');
@@ -1881,7 +1962,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         reference: request.submission.reference,
       });
       setImageTaskRuntimeEpoch((value) => value + 1);
-      setImageTaskRuntime(INITIAL_IMAGE_TASK_RUNTIME);
+      setImageTaskRuntime(INITIAL_CANVAS_TASK_RUNTIME);
       setPendingImageMaskEdit(null);
       setImageMaskProgress(null);
       setNotice('已确认服务器不存在该任务；配置节点记录为失败并清理恢复标记。');
@@ -2139,6 +2220,338 @@ const CreativeCanvasProductRoute: React.FC = () => {
       }
     },
     [applyImageComposeAdmission, imageComposeSubmission]
+  );
+
+  const applyVideoComposeAdmission = useCallback(
+    (
+      nodeId: string,
+      plan: PreparedCreativeWorkbenchRun,
+      result: Awaited<ReturnType<CanvasVideoTaskRuntimeBridgeHandle['submit']>>
+    ) => {
+      if (result.kind === 'admitted') {
+        setVideoComposeSubmission(null);
+        setVideoComposeIssue(null);
+        setNotice('视频创作任务已安全提交；配置节点会持续显示真实后端状态。');
+        return;
+      }
+      setVideoComposeSubmission({ nodeId, plan, failureOrder: result.order });
+      setVideoComposeIssue({
+        nodeId,
+        message: `任务提交结果尚未确认：${result.error.message}。请重试同一任务。`,
+      });
+    },
+    []
+  );
+
+  const generateFromCanvasVideo = useCallback(
+    async (
+      nodeId: string,
+      prompt: string,
+      settings: CanvasVideoComposeSettings
+    ) => {
+      const editor = editorRef.current;
+      const runtime = videoTaskRuntimeRef.current;
+      if (
+        !editor ||
+        !runtime ||
+        videoComposeBusy ||
+        videoComposeSubmission
+      ) {
+        return;
+      }
+      if (!settings.model || modelCatalog.status !== 'ready') {
+        setVideoComposeIssue({
+          nodeId,
+          message: '没有可用且明确选择的真实视频模型，未发起生成。',
+        });
+        return;
+      }
+      const snapshot = runtime.snapshot();
+      if (
+        snapshot.submittingCount > 0 ||
+        snapshot.recoveringCount > 0 ||
+        snapshot.submissionFailures.length > 0 ||
+        snapshot.requestError !== null ||
+        snapshot.entries.some(
+          (entry) => entry.task.status === 'queued' || entry.task.status === 'running'
+        )
+      ) {
+        setVideoComposeIssue({ nodeId, message: '已有视频任务正在处理，请等待完成。' });
+        return;
+      }
+
+      setVideoComposeBusy(true);
+      setVideoComposeIssue(null);
+      let prepared: ReturnType<typeof prepareCanvasVideoCompose> | null = null;
+      let canvasOwned = false;
+      try {
+        const state = editor.getState();
+        const source = state.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'video' }> =>
+            node.id === nodeId && node.type === 'video'
+        );
+        if (!source) throw new Error('视频节点已被删除，未创建视频创作任务。');
+        const mode = canvasVideoComposeMode(state.document, nodeId);
+        if (mode.kind === 'unsupported') throw new Error(mode.message);
+        const selectedModel = videoModelOptions.find(
+          (option) =>
+            option.providerId === settings.model?.providerId &&
+            option.model === settings.model.model
+        );
+        if (!selectedModel) {
+          throw new Error('所选视频模型已不可用，未发起生成。');
+        }
+        const reference =
+          mode.kind === 'i2v'
+            ? (knownAssetsRef.current.get(mode.assetId) ??
+              (await creativeAssetClient.get(mode.assetId)))
+            : null;
+        if (reference && reference.kind !== 'image') {
+          throw new Error('I2V 引用没有解析为真实图片素材。');
+        }
+        if (reference) {
+          knownAssetsRef.current = new Map(knownAssetsRef.current).set(
+            reference.id,
+            reference
+          );
+        }
+        if (activeProjectIdRef.current !== projectId) {
+          throw new DOMException('Project changed', 'AbortError');
+        }
+        const currentState = editor.getState();
+        const currentSource = currentState.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'video' }> =>
+            node.id === nodeId && node.type === 'video'
+        );
+        const currentMode = canvasVideoComposeMode(currentState.document, nodeId);
+        if (
+          !currentSource ||
+          currentSource.data.assetId !== null ||
+          currentMode.kind !== mode.kind ||
+          (mode.kind === 'i2v' &&
+            (currentMode.kind !== 'i2v' || currentMode.assetId !== mode.assetId))
+        ) {
+          throw new Error('视频节点或其直接引用已变化，未创建视频创作任务。');
+        }
+        const durableSource = withCanvasVideoComposeDraft(currentSource, {
+          prompt,
+          settings: {
+            ...settings,
+            model: {
+              providerId: selectedModel.providerId,
+              model: selectedModel.model,
+            },
+          },
+        });
+        editor.dispatch(
+          canvasCommands.updateNode(durableSource, {
+            mergeKey: `video-composer:${nodeId}`,
+          })
+        );
+        prepared = prepareCanvasVideoCompose({
+          projectId,
+          state: editor.getState(),
+          viewportSize: measuredSize(canvasHostRef.current),
+          sourceNode: durableSource,
+          sourceAsset: null,
+          catalog: modelCatalog,
+          model: selectedModel,
+          operation: {
+            task: 'video_generation',
+            capability: mode.kind === 'i2v' ? 'i2v' : 't2v',
+          },
+          references: reference
+            ? {
+                assets: [reference],
+                bindings: [
+                  {
+                    assetId: reference.id,
+                    kind: 'image',
+                    role: 'reference',
+                  },
+                ],
+              }
+            : { assets: [], bindings: [] },
+          prompt,
+          settings: {
+            resolution: settings.resolution,
+            aspectRatio: settings.aspectRatio,
+            seconds: settings.seconds,
+          },
+        });
+        const at = Date.now();
+        const mergeKey = `video-compose:${nodeId}:${prepared.plan.input.idempotencyKey}`;
+        editor.dispatch(canvasCommands.addNode(prepared.configNode, { at, mergeKey }));
+        editor.dispatch(
+          canvasCommands.connect(nodeId, prepared.configNode.id, {
+            sourceHandle: prepared.connection.sourceHandle,
+            targetHandle: prepared.connection.targetHandle,
+            at,
+            mergeKey,
+          })
+        );
+        canvasOwned = true;
+        const result = await runtime.submit(prepared.plan);
+        applyVideoComposeAdmission(nodeId, prepared.plan, result);
+      } catch (error) {
+        let message = error instanceof Error ? error.message : String(error);
+        if (canvasOwned && prepared) {
+          try {
+            await editor.addPendingTask(prepared.plan.input.idempotencyKey);
+            void runtime
+              .recoverTask(canvasVideoTaskReferenceFromPlan(prepared.plan))
+              .catch((recoveryError) =>
+                setNotice(
+                  recoveryError instanceof Error
+                    ? recoveryError.message
+                    : String(recoveryError)
+                )
+              );
+            message = `任务接收状态未确认，已保留同一任务恢复标记：${message}`;
+          } catch (saveError) {
+            message = `${message}；${
+              saveError instanceof Error ? saveError.message : String(saveError)
+            }`;
+          }
+        }
+        if (activeProjectIdRef.current === projectId) {
+          setVideoComposeIssue({ nodeId, message });
+        }
+      } finally {
+        setVideoComposeBusy(false);
+      }
+    },
+    [
+      applyVideoComposeAdmission,
+      modelCatalog,
+      projectId,
+      videoComposeBusy,
+      videoComposeSubmission,
+      videoModelOptions,
+    ]
+  );
+
+  const retryCanvasVideoComposeSubmission = useCallback(
+    async (nodeId: string) => {
+      const request = videoComposeSubmission;
+      const runtime = videoTaskRuntimeRef.current;
+      if (!request || request.nodeId !== nodeId || !runtime || videoComposeBusy) {
+        return;
+      }
+      setVideoComposeBusy(true);
+      setVideoComposeIssue(null);
+      try {
+        const result = await runtime.retrySubmission(
+          request.failureOrder,
+          request.plan.input.idempotencyKey
+        );
+        applyVideoComposeAdmission(nodeId, request.plan, result);
+      } catch (error) {
+        setVideoComposeIssue({
+          nodeId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        setVideoComposeBusy(false);
+      }
+    },
+    [applyVideoComposeAdmission, videoComposeBusy, videoComposeSubmission]
+  );
+
+  const confirmCanvasVideoComposeSubmission = useCallback(
+    async (nodeId: string) => {
+      const request = videoComposeSubmission;
+      const runtime = videoTaskRuntimeRef.current;
+      const editor = editorRef.current;
+      if (
+        !request ||
+        request.nodeId !== nodeId ||
+        !runtime ||
+        !editor ||
+        videoComposeBusy
+      ) {
+        return;
+      }
+      setVideoComposeBusy(true);
+      setVideoComposeIssue(null);
+      const reference = canvasVideoTaskReferenceFromPlan(request.plan);
+      try {
+        const exists = await runtime.taskExists(reference);
+        if (activeProjectIdRef.current !== projectId) return;
+        if (exists) {
+          const result = await runtime.retrySubmission(
+            request.failureOrder,
+            request.plan.input.idempotencyKey
+          );
+          applyVideoComposeAdmission(nodeId, request.plan, result);
+          if (result.kind === 'admitted') {
+            setNotice('服务器已存在该视频任务，已安全恢复而未重复创建。');
+          }
+          return;
+        }
+        await orphanCanvasVideoComposeTask({
+          editor,
+          projectId,
+          reference,
+        });
+        if (activeProjectIdRef.current !== projectId) return;
+        setVideoComposeSubmission(null);
+        setVideoTaskRuntimeEpoch((value) => value + 1);
+        setVideoComposeIssue({
+          nodeId,
+          message: '服务器确认未创建该视频任务，已清理恢复标记，可以重新生成。',
+        });
+      } catch (error) {
+        if (activeProjectIdRef.current === projectId) {
+          setVideoComposeIssue({
+            nodeId,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setVideoComposeBusy(false);
+        }
+      }
+    },
+    [
+      applyVideoComposeAdmission,
+      projectId,
+      videoComposeBusy,
+      videoComposeSubmission,
+    ]
+  );
+
+  const retryVideoRuntimeTask = useCallback(
+    async (taskId: string) => {
+      const runtime = videoTaskRuntimeRef.current;
+      if (!runtime || videoTaskRuntimeActionBusy) return;
+      setVideoTaskRuntimeActionBusy(true);
+      try {
+        await runtime.retryTask(taskId);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        setVideoTaskRuntimeActionBusy(false);
+      }
+    },
+    [videoTaskRuntimeActionBusy]
+  );
+
+  const cancelVideoRuntimeTask = useCallback(
+    async (taskId: string) => {
+      const runtime = videoTaskRuntimeRef.current;
+      if (!runtime || videoTaskRuntimeActionBusy) return;
+      setVideoTaskRuntimeActionBusy(true);
+      try {
+        await runtime.cancelTask(taskId);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        setVideoTaskRuntimeActionBusy(false);
+      }
+    },
+    [videoTaskRuntimeActionBusy]
   );
 
   const insertClipboardText = useCallback(
@@ -2631,7 +3044,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
       if (promptInsertTargetNodeId) {
         const state = editorRef.current?.getState();
         const target = state?.document.nodes.find(
-          (node) => node.id === promptInsertTargetNodeId && node.type === 'image'
+          (node) =>
+            node.id === promptInsertTargetNodeId &&
+            (node.type === 'image' || node.type === 'video')
         );
         if (state && target?.type === 'image') {
           updateImageComposeDraft(target.id, (current) => ({
@@ -2641,6 +3056,16 @@ const CreativeCanvasProductRoute: React.FC = () => {
           setPromptInsertTargetNodeId(null);
           setSelectedPromptId(selection.id);
           setNotice(`已将“${selection.title}”填入图片创作提示词。`);
+          return;
+        }
+        if (state && target?.type === 'video') {
+          updateVideoComposeDraft(target.id, (current) => ({
+            ...current,
+            prompt: selection.prompt,
+          }));
+          setPromptInsertTargetNodeId(null);
+          setSelectedPromptId(selection.id);
+          setNotice(`已将“${selection.title}”填入视频创作提示词。`);
           return;
         }
         setPromptInsertTargetNodeId(null);
@@ -2660,7 +3085,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
       setSelectedPromptId(selection.id);
       setNotice(`已将“${selection.title}”插入为文本节点。`);
     },
-    [prepareCenteredInsertion, promptInsertTargetNodeId, updateImageComposeDraft]
+    [
+      prepareCenteredInsertion,
+      promptInsertTargetNodeId,
+      updateImageComposeDraft,
+      updateVideoComposeDraft,
+    ]
   );
 
   const selection = useMemo(
@@ -2674,6 +3104,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
     imageTaskRuntime.submissionFailures.length > 0 ||
     imageTaskRuntime.requestError !== null ||
     imageTaskRuntime.entries.some(
+      (entry) =>
+        entry.task.status === 'queued' || entry.task.status === 'running'
+    );
+  const videoTaskRuntimeBlocksNew =
+    videoTaskRuntime.submittingCount > 0 ||
+    videoTaskRuntime.recoveringCount > 0 ||
+    videoTaskRuntime.submissionFailures.length > 0 ||
+    videoTaskRuntime.requestError !== null ||
+    videoTaskRuntime.entries.some(
       (entry) =>
         entry.task.status === 'queued' || entry.task.status === 'running'
     );
@@ -2828,6 +3267,142 @@ const CreativeCanvasProductRoute: React.FC = () => {
                       onPointerDown={dragHandleProps.onPointerDown}
                     />
                   );
+                  if (node.type === 'video') {
+                    const composeConfig = canvasState
+                      ? latestCanvasVideoComposeConfig(canvasState.document, node.id)
+                      : null;
+                    const composeDraft = canvasState
+                      ? canvasVideoComposeDraftFromState(canvasState, node.id)
+                      : structuredClone(DEFAULT_CANVAS_VIDEO_COMPOSE_DRAFT);
+                    const mode: CanvasVideoComposeMode = canvasState
+                      ? canvasVideoComposeMode(canvasState.document, node.id)
+                      : {
+                          kind: 'unsupported',
+                          message: '画布尚未完成载入。',
+                        };
+                    const selectedModel = composeDraft.settings.model;
+                    const exactModel = selectedModel
+                      ? videoModelOptions.find(
+                          (option) =>
+                            option.providerId === selectedModel.providerId &&
+                            option.model === selectedModel.model
+                        )
+                      : null;
+                    const onlyModel =
+                      videoModelOptions.length === 1 ? videoModelOptions[0] : null;
+                    const composeSettings: CanvasVideoComposeSettings = {
+                      ...composeDraft.settings,
+                      model: exactModel
+                        ? {
+                            providerId: exactModel.providerId,
+                            model: exactModel.model,
+                          }
+                        : onlyModel
+                          ? {
+                              providerId: onlyModel.providerId,
+                              model: onlyModel.model,
+                            }
+                          : null,
+                    };
+                    const referenceAsset =
+                      mode.kind === 'i2v'
+                        ? knownAssetsById.get(mode.assetId) ?? null
+                        : null;
+                    const singleSelected =
+                      selected && canvasState?.selection.nodeIds.length === 1;
+                    const retrySubmission =
+                      videoComposeSubmission?.nodeId === node.id;
+                    return (
+                      <div className={styles.nodeComposerHost} data-video-composer-host>
+                        {nodeView}
+                        {singleSelected ? (
+                          <CreativeCanvasVideoComposer
+                            nodeId={node.id}
+                            mode={mode.kind}
+                            reference={
+                              mode.kind === 'i2v'
+                                ? {
+                                    name: referenceAsset?.title ?? '已连接图片',
+                                    previewUrl:
+                                      referenceAsset?.thumbnailUrl ??
+                                      referenceAsset?.originalUrl ??
+                                      creativeAssetClient.url(mode.assetId),
+                                  }
+                                : null
+                            }
+                            initialPrompt={composeDraft.prompt}
+                            settings={composeSettings}
+                            modelOptions={videoModelOptions}
+                            task={canvasVideoComposeTaskSummary(composeConfig)}
+                            disabled={
+                              productDisabled ||
+                              assetImportBusy ||
+                              videoComposeBusy ||
+                              !videoTaskRuntimeReady ||
+                              (!retrySubmission &&
+                                videoTaskRuntimeBlocksNew &&
+                                composeConfig?.data.status !== 'queued' &&
+                                composeConfig?.data.status !== 'running')
+                            }
+                            error={
+                              videoComposeIssue?.nodeId === node.id
+                                ? videoComposeIssue.message
+                                : mode.kind === 'unsupported'
+                                  ? mode.message
+                                  : null
+                            }
+                            retrySubmission={retrySubmission}
+                            onPromptChange={(prompt) =>
+                              updateVideoComposeDraft(node.id, (current) => ({
+                                ...current,
+                                prompt,
+                              }))
+                            }
+                            onOpenPromptLibrary={() =>
+                              openComposePromptLibrary(node.id)
+                            }
+                            onModelChange={(model) =>
+                              updateVideoComposeDraft(node.id, (current) => ({
+                                ...current,
+                                settings: { ...current.settings, model },
+                              }))
+                            }
+                            onResolutionChange={(resolution) =>
+                              updateVideoComposeDraft(node.id, (current) => ({
+                                ...current,
+                                settings: { ...current.settings, resolution },
+                              }))
+                            }
+                            onAspectRatioChange={(aspectRatio) =>
+                              updateVideoComposeDraft(node.id, (current) => ({
+                                ...current,
+                                settings: { ...current.settings, aspectRatio },
+                              }))
+                            }
+                            onSecondsChange={(seconds) =>
+                              updateVideoComposeDraft(node.id, (current) => ({
+                                ...current,
+                                settings: { ...current.settings, seconds },
+                              }))
+                            }
+                            onGenerate={(prompt) =>
+                              void generateFromCanvasVideo(
+                                node.id,
+                                prompt,
+                                composeSettings
+                              )
+                            }
+                            onRetrySubmission={() =>
+                              void retryCanvasVideoComposeSubmission(node.id)
+                            }
+                            onConfirmSubmission={() =>
+                              void confirmCanvasVideoComposeSubmission(node.id)
+                            }
+                          />
+                        ) : null}
+                      </div>
+                    );
+                  }
                   if (node.type !== 'image') return nodeView;
                   const composeConfig = canvasState
                     ? latestCanvasImageComposeConfig(canvasState.document, node.id)
@@ -2927,7 +3502,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                             )
                           }
                           onOpenPromptLibrary={() =>
-                            openImageComposePromptLibrary(node.id)
+                            openComposePromptLibrary(node.id)
                           }
                           onModelChange={(model: ImageWorkbenchModelIdentity | null) =>
                             updateImageComposeDraft(
@@ -3038,11 +3613,19 @@ const CreativeCanvasProductRoute: React.FC = () => {
           ),
           topActions: (
             <>
-              <ImageTaskRuntimeAction
+              <CanvasTaskRuntimeAction
+                label="图片任务"
                 snapshot={imageTaskRuntime}
                 busy={imageTaskRuntimeActionBusy}
                 onCancel={(taskId) => void cancelImageRuntimeTask(taskId)}
                 onRetry={(taskId) => void retryImageRuntimeTask(taskId)}
+              />
+              <CanvasTaskRuntimeAction
+                label="视频任务"
+                snapshot={videoTaskRuntime}
+                busy={videoTaskRuntimeActionBusy}
+                onCancel={(taskId) => void cancelVideoRuntimeTask(taskId)}
+                onRetry={(taskId) => void retryVideoRuntimeTask(taskId)}
               />
               <SaveRecoveryAction
                 save={save}
@@ -3167,6 +3750,25 @@ const CreativeCanvasProductRoute: React.FC = () => {
             void assets.reload();
           }}
           onSnapshot={setImageTaskRuntime}
+          onNotice={setNotice}
+        />
+      ) : null}
+      {videoTaskRuntimeReady && project.detail ? (
+        <CanvasVideoTaskRuntimeBridge
+          key={`${projectId}:video:${videoTaskRuntimeEpoch}`}
+          ref={videoTaskRuntimeRef}
+          projectId={projectId}
+          initialDocument={project.detail.document}
+          editorRef={editorRef}
+          viewportSize={viewportSize}
+          onAsset={(asset) => {
+            knownAssetsRef.current = new Map(knownAssetsRef.current).set(
+              asset.id,
+              asset
+            );
+            void assets.reload();
+          }}
+          onSnapshot={setVideoTaskRuntime}
           onNotice={setNotice}
         />
       ) : null}

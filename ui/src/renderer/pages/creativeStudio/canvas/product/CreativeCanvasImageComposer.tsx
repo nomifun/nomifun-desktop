@@ -404,7 +404,9 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                 disabled={disabled}
               >
                 <SettingTwo theme='outline' size={15} fill='currentColor' />
-                <span>{qualityLabel} · {settings.aspectRatio} · {settings.count} 张</span>
+                <span className={styles.settingsSummary}>
+                  {qualityLabel} · {settings.aspectRatio} · {settings.count} 张
+                </span>
               </button>
             </Popover>
           </div>

@@ -192,12 +192,12 @@ export function isCanvasImageComposeConfig(
     node?.type === 'config' &&
     ((node.data.task === 'image_edit' && node.data.capability === 'i2i') ||
       (node.data.task === 'image_generation' && node.data.capability === 't2i')) &&
-    node.data.parameters.canvasOperation === CREATIVE_IMAGE_COMPOSE_OPERATION
+    node.data.operation?.kind === CREATIVE_IMAGE_COMPOSE_OPERATION
   );
 }
 
 export function canvasImageComposeSourceNodeId(node: ConfigNode): string {
-  const value = node.data.parameters.sourceNodeId;
+  const value = node.data.operation?.sourceNodeId;
   if (typeof value !== 'string' || !value.trim()) {
     throw new Error('图片创作配置缺少 sourceNodeId。');
   }
@@ -211,7 +211,7 @@ export function latestCanvasImageComposeConfig(
   const matches = document.nodes.filter(
     (node): node is ConfigNode =>
       isCanvasImageComposeConfig(node) &&
-      node.data.parameters.sourceNodeId === sourceNodeId
+      node.data.operation?.sourceNodeId === sourceNodeId
   );
   return matches.at(-1) ?? null;
 }
@@ -302,11 +302,6 @@ export function prepareCanvasImageCompose(input: {
     height: input.settings.height,
     aspectRatio: input.settings.aspectRatio,
     count: input.settings.count,
-    extraParameters: {
-      canvasOperation: CREATIVE_IMAGE_COMPOSE_OPERATION,
-      sourceNodeId: input.sourceNode.id,
-      sourceAssetId: input.sourceAsset?.id ?? null,
-    },
   });
   const configNode: ConfigNode = {
     ...base,
@@ -317,6 +312,11 @@ export function prepareCanvasImageCompose(input: {
       providerId: plan.model.providerId,
       model: plan.model.model,
       prompt: input.prompt.trim(),
+      operation: {
+        kind: CREATIVE_IMAGE_COMPOSE_OPERATION,
+        sourceNodeId: input.sourceNode.id,
+        sourceAssetId: input.sourceAsset?.id ?? null,
+      },
       parameters: structuredClone(plan.input.parameters),
       inputAssetIds: input.sourceAsset ? [input.sourceAsset.id] : [],
       taskId: plan.input.idempotencyKey,

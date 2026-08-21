@@ -16,7 +16,9 @@ import {
   type CreativeChatModelReference,
   type CreativeChatPendingTurn,
   type CreativeChatSessionReference,
+  type CreativeComposerModel,
   type CreativeConfigNodeData,
+  type CreativeConfigOperation,
   type CreativeDirectorNodeData,
   type CreativeGenerationStatus,
   type CreativeGroupNodeData,
@@ -36,6 +38,7 @@ import {
   type CreativeStudioPanelState,
   type CreativeTextNodeData,
   type CreativeVideoNodeData,
+  type CreativeVideoComposerDraft,
   type RenameCreativeProjectRequest,
   type SaveCreativeProjectRequest,
 } from './schema';
@@ -268,6 +271,24 @@ const parseJsonObject = (
   return parseJsonValue(record, path, code, new Set(), 0) as CreativeJsonObject;
 };
 
+const parseComposerModel = (
+  value: unknown,
+  path: string
+): CreativeComposerModel | null => {
+  const code = 'INVALID_DOCUMENT';
+  if (value === null) return null;
+  const record = asRecord(value, path, code);
+  exactKeys(record, ['providerId', 'model'], [], path, code);
+  const model = asString(record.model, `${path}.model`, code, { maxLength: 512 });
+  if (model !== model.trim()) {
+    fail(code, `${path}.model`, 'trimmed non-empty model id');
+  }
+  return {
+    providerId: asUuidV7Id(record.providerId, `${path}.providerId`, code),
+    model,
+  };
+};
+
 const parseImageData = (value: unknown, path: string): CreativeImageNodeData => {
   const code = 'INVALID_DOCUMENT';
   const record = asRecord(value, path, code);
@@ -313,27 +334,7 @@ const parseImageComposerDraft = (
     path,
     code
   );
-  const model =
-    record.model === null
-      ? null
-      : (() => {
-          const modelRecord = asRecord(record.model, `${path}.model`, code);
-          exactKeys(modelRecord, ['providerId', 'model'], [], `${path}.model`, code);
-          const modelId = asString(modelRecord.model, `${path}.model.model`, code, {
-            maxLength: 512,
-          });
-          if (modelId !== modelId.trim()) {
-            fail(code, `${path}.model.model`, 'trimmed non-empty model id');
-          }
-          return {
-            providerId: asUuidV7Id(
-              modelRecord.providerId,
-              `${path}.model.providerId`,
-              code
-            ),
-            model: modelId,
-          };
-        })();
+  const model = parseComposerModel(record.model, `${path}.model`);
   const nullableDimension = (entry: unknown, entryPath: string): number | null =>
     entry === null
       ? null
@@ -426,6 +427,120 @@ const GENERATION_STATUSES: readonly CreativeGenerationStatus[] = [
   'canceled',
 ];
 
+const parseConfigOperation = (
+  value: unknown,
+  path: string
+): CreativeConfigOperation | null => {
+  const code = 'INVALID_DOCUMENT';
+  if (value === undefined || value === null) return null;
+  const record = asRecord(value, path, code);
+  const kind = asLiteral(
+    record.kind,
+    ['image-node-compose', 'image-mask-edit', 'video-node-compose'],
+    `${path}.kind`,
+    code
+  );
+  if (kind === 'image-mask-edit') {
+    exactKeys(
+      record,
+      ['kind', 'sourceNodeId', 'sourceAssetId', 'markedReferenceAssetId'],
+      [],
+      path,
+      code
+    );
+    return {
+      kind,
+      sourceNodeId: asId(record.sourceNodeId, `${path}.sourceNodeId`, code),
+      sourceAssetId: asId(record.sourceAssetId, `${path}.sourceAssetId`, code),
+      markedReferenceAssetId: asId(
+        record.markedReferenceAssetId,
+        `${path}.markedReferenceAssetId`,
+        code
+      ),
+    };
+  }
+  exactKeys(
+    record,
+    ['kind', 'sourceNodeId', 'sourceAssetId'],
+    [],
+    path,
+    code
+  );
+  return {
+    kind,
+    sourceNodeId: asId(record.sourceNodeId, `${path}.sourceNodeId`, code),
+    sourceAssetId: asNullableId(
+      record.sourceAssetId,
+      `${path}.sourceAssetId`,
+      code
+    ),
+  };
+};
+
+const LEGACY_CONFIG_OPERATION_KEYS = [
+  'canvasOperation',
+  'sourceNodeId',
+  'sourceAssetId',
+  'markedReferenceAssetId',
+  'userPrompt',
+  'referenceWidth',
+  'referenceHeight',
+] as const;
+
+const normalizeConfigOperation = (
+  explicit: CreativeConfigOperation | null,
+  parameters: CreativeJsonObject,
+  path: string
+): CreativeConfigOperation | null => {
+  const code = 'INVALID_DOCUMENT';
+  const legacyKind = parameters.canvasOperation;
+  if (legacyKind === undefined) return explicit;
+  if (explicit) {
+    fail(code, `${path}.parameters.canvasOperation`, 'absent when operation is present');
+  }
+  if (
+    legacyKind !== 'image-node-compose' &&
+    legacyKind !== 'image-mask-edit' &&
+    legacyKind !== 'video-node-compose'
+  ) {
+    fail(code, `${path}.parameters.canvasOperation`, 'known canvas operation');
+  }
+  const kind = legacyKind as CreativeConfigOperation['kind'];
+  const sourceNodeId = asId(
+    parameters.sourceNodeId,
+    `${path}.parameters.sourceNodeId`,
+    code
+  );
+  const sourceAssetId =
+    parameters.sourceAssetId === null
+      ? null
+      : asId(
+          parameters.sourceAssetId,
+          `${path}.parameters.sourceAssetId`,
+          code
+        );
+  let operation: CreativeConfigOperation;
+  if (kind === 'image-mask-edit') {
+    if (sourceAssetId === null) {
+      fail(code, `${path}.parameters.sourceAssetId`, 'non-null asset id');
+    }
+    operation = {
+      kind,
+      sourceNodeId,
+      sourceAssetId: sourceAssetId as string,
+      markedReferenceAssetId: asId(
+        parameters.markedReferenceAssetId,
+        `${path}.parameters.markedReferenceAssetId`,
+        code
+      ),
+    };
+  } else {
+    operation = { kind, sourceNodeId, sourceAssetId };
+  }
+  for (const key of LEGACY_CONFIG_OPERATION_KEYS) delete parameters[key];
+  return operation;
+};
+
 const parseConfigData = (value: unknown, path: string): CreativeConfigNodeData => {
   const code = 'INVALID_DOCUMENT';
   const record = asRecord(value, path, code);
@@ -445,12 +560,18 @@ const parseConfigData = (value: unknown, path: string): CreativeConfigNodeData =
       'status',
       'errorMessage',
     ],
-    [],
+    ['operation'],
     path,
     code
   );
   const inputAssetIds = asIdArray(record.inputAssetIds, `${path}.inputAssetIds`, code);
   const resultAssetIds = asIdArray(record.resultAssetIds, `${path}.resultAssetIds`, code);
+  const parameters = parseJsonObject(record.parameters, `${path}.parameters`, code);
+  const operation = normalizeConfigOperation(
+    parseConfigOperation(record.operation, `${path}.operation`),
+    parameters,
+    path
+  );
   assertUnique(inputAssetIds, `${path}.inputAssetIds`, code);
   assertUnique(resultAssetIds, `${path}.resultAssetIds`, code);
   return {
@@ -463,7 +584,8 @@ const parseConfigData = (value: unknown, path: string): CreativeConfigNodeData =
       allowEmpty: true,
       maxLength: 1_000_000,
     }),
-    parameters: parseJsonObject(record.parameters, `${path}.parameters`, code),
+    operation,
+    parameters,
     inputAssetIds,
     taskId: asNullableId(record.taskId, `${path}.taskId`, code),
     resultAssetIds,
@@ -475,13 +597,49 @@ const parseConfigData = (value: unknown, path: string): CreativeConfigNodeData =
   };
 };
 
+const parseVideoComposerDraft = (
+  value: unknown,
+  path: string
+): CreativeVideoComposerDraft => {
+  const code = 'INVALID_DOCUMENT';
+  const record = asRecord(value, path, code);
+  exactKeys(
+    record,
+    ['prompt', 'model', 'resolution', 'aspectRatio', 'seconds'],
+    [],
+    path,
+    code
+  );
+  const trimmed = (entry: unknown, entryPath: string): string => {
+    const parsed = asString(entry, entryPath, code, { maxLength: 128 });
+    if (parsed !== parsed.trim()) {
+      fail(code, entryPath, 'trimmed non-empty string');
+    }
+    return parsed;
+  };
+  return {
+    prompt: asString(record.prompt, `${path}.prompt`, code, {
+      allowEmpty: true,
+      maxLength: 1_000_000,
+    }),
+    model: parseComposerModel(record.model, `${path}.model`),
+    resolution: trimmed(record.resolution, `${path}.resolution`),
+    aspectRatio: trimmed(record.aspectRatio, `${path}.aspectRatio`),
+    seconds: asNumber(record.seconds, `${path}.seconds`, code, {
+      min: 1,
+      max: 3_600,
+      integer: true,
+    }),
+  };
+};
+
 const parseVideoData = (value: unknown, path: string): CreativeVideoNodeData => {
   const code = 'INVALID_DOCUMENT';
   const record = asRecord(value, path, code);
   exactKeys(
     record,
     ['assetId', 'posterAssetId', 'autoplay', 'loop', 'muted', 'trimStartMs', 'trimEndMs'],
-    [],
+    ['composer'],
     path,
     code
   );
@@ -498,6 +656,10 @@ const parseVideoData = (value: unknown, path: string): CreativeVideoNodeData => 
     muted: asBoolean(record.muted, `${path}.muted`, code),
     trimStartMs,
     trimEndMs,
+    composer:
+      record.composer === undefined || record.composer === null
+        ? null
+        : parseVideoComposerDraft(record.composer, `${path}.composer`),
   };
 };
 

@@ -320,6 +320,149 @@ describe('Creative Studio v1 document contract', () => {
     );
   });
 
+  test('round-trips video composer drafts and defaults old v1 video nodes', () => {
+    const video: CreativeCanvasNode = {
+      id: 'video-1',
+      type: 'video',
+      position: { x: 0, y: 0 },
+      size: { width: 420, height: 236 },
+      groupId: null,
+      zIndex: 0,
+      locked: false,
+      data: {
+        assetId: null,
+        posterAssetId: null,
+        autoplay: false,
+        loop: false,
+        muted: true,
+        trimStartMs: 0,
+        trimEndMs: null,
+        composer: {
+          prompt: '缓慢推进到城市天际线',
+          model: {
+            providerId: '0198f8bb-8424-7b3d-8f17-bc6a1676f118',
+            model: 'video-v1',
+          },
+          resolution: '1080p',
+          aspectRatio: '16:9',
+          seconds: 5,
+        },
+      },
+    };
+    const parsed = parseCreativeProjectDocument({
+      ...createEmptyCreativeProjectDocument(PROJECT_ID),
+      nodes: [video],
+    });
+    expect(parsed.nodes[0]).toEqual(video);
+
+    const oldV1 = structuredClone(video) as unknown as { data: Record<string, unknown> };
+    delete oldV1.data.composer;
+    const oldParsed = parseCreativeProjectDocument({
+      ...createEmptyCreativeProjectDocument(PROJECT_ID),
+      nodes: [oldV1],
+    });
+    expect(oldParsed.nodes[0].type === 'video' && oldParsed.nodes[0].data.composer).toBeNull();
+
+    const invalid = structuredClone(video);
+    if (invalid.type !== 'video' || !invalid.data.composer) {
+      throw new Error('fixture must contain a video composer');
+    }
+    invalid.data.composer.seconds = 0;
+    expectContractError(
+      () =>
+        parseCreativeProjectDocument({
+          ...createEmptyCreativeProjectDocument(PROJECT_ID),
+          nodes: [invalid],
+        }),
+      'INVALID_DOCUMENT',
+      '$.nodes[0].data.composer.seconds'
+    );
+    invalid.data.composer.seconds = 5;
+    invalid.data.composer.resolution = ' 1080p ';
+    expectContractError(
+      () =>
+        parseCreativeProjectDocument({
+          ...createEmptyCreativeProjectDocument(PROJECT_ID),
+          nodes: [invalid],
+        }),
+      'INVALID_DOCUMENT',
+      '$.nodes[0].data.composer.resolution'
+    );
+  });
+
+  test('normalizes legacy canvas operation metadata out of provider parameters', () => {
+    const legacyConfig = {
+      id: 'config-legacy',
+      type: 'config',
+      position: { x: 0, y: 0 },
+      size: { width: 440, height: 240 },
+      groupId: null,
+      zIndex: 0,
+      locked: false,
+      data: {
+        task: 'image_edit',
+        capability: 'i2i',
+        providerId: null,
+        model: null,
+        prompt: 'edit',
+        negativePrompt: '',
+        parameters: {
+          prompt: 'provider prompt',
+          width: 1024,
+          canvasOperation: 'image-mask-edit',
+          sourceNodeId: 'image-source',
+          sourceAssetId: 'asset-source',
+          markedReferenceAssetId: 'asset-mask',
+          userPrompt: 'local prompt',
+          referenceWidth: 1024,
+          referenceHeight: 1024,
+        },
+        inputAssetIds: ['asset-mask'],
+        taskId: null,
+        resultAssetIds: [],
+        status: 'idle',
+        errorMessage: null,
+      },
+    };
+    const parsed = parseCreativeProjectDocument({
+      ...createEmptyCreativeProjectDocument(PROJECT_ID),
+      nodes: [legacyConfig],
+    });
+    if (parsed.nodes[0]?.type !== 'config') throw new Error('expected config');
+    expect(parsed.nodes[0].data.operation).toEqual({
+      kind: 'image-mask-edit',
+      sourceNodeId: 'image-source',
+      sourceAssetId: 'asset-source',
+      markedReferenceAssetId: 'asset-mask',
+    });
+    expect(parsed.nodes[0].data.parameters).toEqual({
+      prompt: 'provider prompt',
+      width: 1024,
+    });
+
+    const duplicate = {
+      ...structuredClone(legacyConfig),
+      data: {
+        ...structuredClone(legacyConfig.data),
+        operation: {
+          kind: 'image-mask-edit',
+          sourceNodeId: 'image-source',
+          sourceAssetId: 'asset-source',
+          markedReferenceAssetId: 'asset-mask',
+        },
+      },
+    };
+    expectContractError(
+      () =>
+        parseCreativeProjectDocument({
+          ...createEmptyCreativeProjectDocument(PROJECT_ID),
+          nodes: [duplicate],
+        }),
+      'INVALID_DOCUMENT',
+      '$.nodes[0].data.parameters.canvasOperation'
+    );
+  });
+
   test('rejects graph states the editor cannot create', () => {
     const image: CreativeCanvasNode = {
       id: 'image-1',

@@ -55,6 +55,18 @@ const DURATIONS = [
   { value: '10', label: '10 秒' },
 ];
 
+const videoDimensions = (
+  resolution: string,
+  aspect: string
+): { width: number; height: number } => {
+  const shortEdge = resolution === '720p' ? 720 : resolution === '1080p' ? 1080 : null;
+  if (shortEdge === null) throw new Error(`不支持的视频分辨率：${resolution}`);
+  if (aspect === '16:9') return { width: Math.round((shortEdge * 16) / 9), height: shortEdge };
+  if (aspect === '9:16') return { width: shortEdge, height: Math.round((shortEdge * 16) / 9) };
+  if (aspect === '1:1') return { width: shortEdge, height: shortEdge };
+  throw new Error(`不支持的视频画幅：${aspect}`);
+};
+
 const UnownedVideoWorkbench: React.FC = () => {
   const catalog = useNomiCreativeModelCatalog();
   const [layout, setLayout] = useState<VideoWorkbenchLayout>('side');
@@ -146,20 +158,20 @@ const OwnedVideoWorkbench: React.FC<{
       setError('没有可用且明确选择的真实视频模型，未发起生成。');
       return;
     }
-    const kinds = new Set(references.map((asset) => asset.kind));
-    if (kinds.size > 1 || [...kinds].some((kind) => kind !== 'image' && kind !== 'video')) {
-      setError('一次视频任务只能使用同一种兼容参考素材。');
+    if (references.length > 1 || references.some((asset) => asset.kind !== 'image')) {
+      setError('当前视频生成只支持一张真实图片参考；V2V 与多图引用尚未开放。');
       return;
     }
     try {
-      const capability = references[0]?.kind === 'image' ? 'i2v' : references[0]?.kind === 'video' ? 'v2v' : 't2v';
+      const capability = references.length === 1 ? 'i2v' : 't2v';
+      const dimensions = videoDimensions(resolution, aspect);
       const node = await ensureStandaloneWorkbenchNode(detail.project.projectId, 'video', {
         task: 'video_generation',
         capability,
         prompt,
         providerId: model.providerId,
         model: model.model,
-        parameters: { resolution, aspect, seconds: Number(duration) },
+        parameters: { ...dimensions, seconds: Number(duration) },
         inputAssetIds: references.map((asset) => asset.id),
       });
       await refresh();
@@ -173,16 +185,14 @@ const OwnedVideoWorkbench: React.FC<{
           bindings: references.map((asset) => ({
             assetId: asset.id,
             kind: asset.kind,
-            role: asset.kind === 'video' ? ('video' as const) : ('reference' as const),
+            role: 'reference' as const,
           })),
         },
         operation: { task: 'video_generation', capability },
         prompt,
-        resolution,
-        aspectRatio: aspect,
         seconds: Number(duration),
-        width: null,
-        height: null,
+        width: dimensions.width,
+        height: dimensions.height,
         taskCount: STANDALONE_VIDEO_MAX_CONCURRENT_TASKS,
       });
     } catch (reason) {
@@ -292,7 +302,7 @@ const OwnedVideoWorkbench: React.FC<{
       <CreativeAssetPickerModal
         open={pickerOpen}
         assets={assets.assets}
-        acceptedKinds={['image', 'video']}
+        acceptedKinds={['image']}
         selectedIds={referenceIds}
         loading={assets.loading}
         loadingMore={assets.loadingMore}
@@ -302,8 +312,7 @@ const OwnedVideoWorkbench: React.FC<{
         onToggle={(asset: CreativeAsset) =>
           setReferenceIds((ids) => {
             if (ids.includes(asset.id)) return ids.filter((id) => id !== asset.id);
-            const existing = ids.flatMap((id) => assets.assets.find((item) => item.id === id) ?? []);
-            return existing.some((item) => item.kind !== asset.kind) ? [asset.id] : [...ids, asset.id];
+            return [asset.id];
           })
         }
         onLoadMore={() => void assets.loadMore()}
@@ -319,18 +328,11 @@ const OwnedVideoWorkbench: React.FC<{
             .then((uploaded) => {
               const firstKind = uploaded[0]?.kind;
               if (!firstKind) return;
-              if (uploaded.some((asset) => asset.kind !== firstKind)) {
-                setError('一次视频任务只能使用同一种兼容参考素材。');
+              if (firstKind !== 'image') {
+                setError('当前视频生成只支持图片参考。');
+                return;
               }
-              const compatible = uploaded.filter((asset) => asset.kind === firstKind);
-              setReferenceIds((ids) => {
-                const existing = ids.flatMap(
-                  (id) => assets.assets.find((asset) => asset.id === id) ?? []
-                );
-                return existing.some((asset) => asset.kind !== firstKind)
-                  ? compatible.map((asset) => asset.id)
-                  : [...new Set([...ids, ...compatible.map((asset) => asset.id)])];
-              });
+              setReferenceIds(uploaded[0] ? [uploaded[0].id] : []);
             })
             .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
         }}
