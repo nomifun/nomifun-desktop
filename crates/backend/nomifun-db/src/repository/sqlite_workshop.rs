@@ -819,13 +819,8 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         if locked.rows_affected() == 0 {
             return Err(DbError::NotFound(format!("workshop canvas '{id}' not found")));
         }
-        sqlx::query("UPDATE creation_tasks SET canvas_id = NULL WHERE canvas_id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        // workshop_assets.origin.canvas_id is immutable provenance with the
-        // registry's KEEP_HISTORY policy. It intentionally retains the former
-        // business ID after the Canvas row is deleted.
+        // Retired canvas IDs can remain only as immutable historical asset
+        // provenance; canonical creation tasks no longer carry canvas_id.
         sqlx::query("DELETE FROM workshop_canvases WHERE canvas_id = ?")
             .bind(id)
             .execute(&mut *tx)
@@ -1548,12 +1543,33 @@ mod tests {
         .await
         .unwrap();
         let creation_task_id = nomifun_common::generate_id();
+        let project_id = nomifun_common::generate_id();
+        let node_id = nomifun_common::generate_id();
+        let document = serde_json::json!({
+            "schema": "nomifun.creative-studio/v1",
+            "projectId": project_id,
+            "nodes": []
+        });
+        sqlx::query(
+            "INSERT INTO creative_studio_projects \
+             (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+             VALUES (?, 'Asset Origin Project', 1, 0, 0, ?, 1, 1)",
+        )
+        .bind(&project_id)
+        .bind(document.to_string())
+        .execute(db.pool())
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO creation_tasks \
-             (creation_task_id, provider_id, model, capability, params, status, submitted_at) \
-             VALUES (?, ?, 'model', 'image', '{}', 'succeeded', 1)",
+             (creation_task_id, project_id, node_id, provider_id, model, capability, params, status, \
+              submitted_at, request_fingerprint) \
+             VALUES (?, ?, ?, ?, 'model', 'image', '{}', 'succeeded', 1, \
+              '{\"asset_origin_fixture\":true}')",
         )
         .bind(&creation_task_id)
+        .bind(&project_id)
+        .bind(&node_id)
         .bind(&provider_id)
         .execute(db.pool())
         .await

@@ -490,8 +490,6 @@ async fn generate(
             },
             operation_id,
             NewCreationTask {
-                canvas_id: None,
-                node_id: None,
                 provider_id,
                 model,
                 capability,

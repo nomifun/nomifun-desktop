@@ -1,10 +1,9 @@
-//! Wire DTOs for the legacy `/api/creation/tasks` and canonical
-//! `/api/creative-studio/tasks` surfaces. Both remain snake_case on the wire.
+//! Canonical Creative Studio creation-task DTOs. Wire fields remain snake_case.
 
 use nomifun_common::{
-    AppError, CreationTaskId, CreativeStudioProjectId, CreativeStudioWorkflowId,
-    CreativeStudioWorkflowRunId, CreativeStudioWorkflowStepId, ProviderId,
-    TimestampMs, WorkshopAssetId, WorkshopCanvasId, WorkshopNodeId,
+    AppError, CreationTaskId, CreativeStudioNodeId, CreativeStudioProjectId,
+    CreativeStudioWorkflowId, CreativeStudioWorkflowRunId, CreativeStudioWorkflowStepId,
+    ProviderId, TimestampMs, WorkshopAssetId,
 };
 use nomifun_db::CreationTaskRow;
 use serde::Serialize;
@@ -13,7 +12,7 @@ use serde_json::Value;
 #[cfg(test)]
 use nomifun_common::generate_id;
 
-/// A generation task as seen over the wire.
+/// Canonical persisted task state used by the service and tagged wire adapter.
 #[derive(Debug, Clone, Serialize)]
 pub struct CreationTask {
     pub creation_task_id: String,
@@ -21,7 +20,6 @@ pub struct CreationTask {
     pub workflow_id: Option<String>,
     pub workflow_run_id: Option<String>,
     pub workflow_step_id: Option<String>,
-    pub canvas_id: Option<String>,
     pub node_id: Option<String>,
     pub provider_id: String,
     pub model: String,
@@ -58,11 +56,9 @@ impl TryFrom<CreationTaskRow> for CreationTask {
             CreativeStudioWorkflowStepId::parse(id)
                 .map_err(|error| corrupt_id("creation_tasks.workflow_step_id", error))?;
         }
-        if let Some(id) = row.canvas_id.as_deref() {
-            WorkshopCanvasId::parse(id).map_err(|error| corrupt_id("creation_tasks.canvas_id", error))?;
-        }
         if let Some(id) = row.node_id.as_deref() {
-            WorkshopNodeId::parse(id).map_err(|error| corrupt_id("creation_tasks.node_id", error))?;
+            CreativeStudioNodeId::parse(id)
+                .map_err(|error| corrupt_id("creation_tasks.node_id", error))?;
         }
         ProviderId::parse(&row.provider_id).map_err(|error| corrupt_id("creation_tasks.provider_id", error))?;
 
@@ -86,6 +82,22 @@ impl TryFrom<CreationTaskRow> for CreationTask {
                 row.creation_task_id
             )));
         }
+        match (
+            row.project_id.as_ref(),
+            row.workflow_id.as_ref(),
+            row.workflow_run_id.as_ref(),
+            row.workflow_step_id.as_ref(),
+            row.node_id.as_ref(),
+        ) {
+            (Some(_), None, None, None, Some(_))
+            | (None, Some(_), Some(_), Some(_), None) => {}
+            _ => {
+                return Err(AppError::Internal(format!(
+                    "creation task {} does not have one canonical Creative Studio owner",
+                    row.creation_task_id
+                )));
+            }
+        }
 
         Ok(Self {
             creation_task_id: row.creation_task_id,
@@ -93,7 +105,6 @@ impl TryFrom<CreationTaskRow> for CreationTask {
             workflow_id: row.workflow_id,
             workflow_run_id: row.workflow_run_id,
             workflow_step_id: row.workflow_step_id,
-            canvas_id: row.canvas_id,
             node_id: row.node_id,
             provider_id: row.provider_id,
             model: row.model,
@@ -125,8 +136,8 @@ pub enum CreativeCreationTaskOwner {
     },
 }
 
-/// Canonical Creative Studio wire task. Legacy canvas/global columns are not
-/// nullable fields here: a response has exactly one tagged owner or fails.
+/// Canonical Creative Studio wire task. A response has exactly one tagged
+/// owner or fails closed.
 #[derive(Debug, Clone, Serialize)]
 pub struct CreativeCreationTask {
     pub creation_task_id: String,
@@ -153,16 +164,15 @@ impl TryFrom<CreationTask> for CreativeCreationTask {
             task.workflow_id,
             task.workflow_run_id,
             task.workflow_step_id,
-            task.canvas_id,
             task.node_id,
         ) {
-            (Some(project_id), None, None, None, None, Some(node_id)) => {
+            (Some(project_id), None, None, None, Some(node_id)) => {
                 CreativeCreationTaskOwner::CanvasNode {
                     project_id,
                     node_id,
                 }
             }
-            (None, Some(workflow_id), Some(workflow_run_id), Some(workflow_step_id), None, None) => {
+            (None, Some(workflow_id), Some(workflow_run_id), Some(workflow_step_id), None) => {
                 CreativeCreationTaskOwner::WorkflowStep {
                     workflow_id,
                     workflow_run_id,
@@ -205,17 +215,17 @@ mod tests {
     #[test]
     fn task_dto_parses_json_columns() {
         let creation_task_id = generate_id();
-        let canvas_id = WorkshopCanvasId::new().into_string();
+        let project_id = CreativeStudioProjectId::new().into_string();
+        let node_id = CreativeStudioNodeId::new().into_string();
         let provider_id = ProviderId::new().into_string();
         let asset_id = WorkshopAssetId::new().into_string();
         let row = CreationTaskRow {
             creation_task_id: creation_task_id.clone(),
-            project_id: None,
+            project_id: Some(project_id),
             workflow_id: None,
             workflow_run_id: None,
             workflow_step_id: None,
-            canvas_id: Some(canvas_id),
-            node_id: None,
+            node_id: Some(node_id),
             provider_id,
             model: "m".into(),
             capability: "t2i".into(),
@@ -245,12 +255,11 @@ mod tests {
     fn succeeded_without_artifacts_fails_closed() {
         let row = CreationTaskRow {
             creation_task_id: generate_id(),
-            project_id: None,
+            project_id: Some(CreativeStudioProjectId::new().into_string()),
             workflow_id: None,
             workflow_run_id: None,
             workflow_step_id: None,
-            canvas_id: None,
-            node_id: None,
+            node_id: Some(CreativeStudioNodeId::new().into_string()),
             provider_id: ProviderId::new().into_string(),
             model: "m".into(),
             capability: "t2i".into(),
@@ -282,12 +291,11 @@ mod tests {
         ] {
             let row = CreationTaskRow {
                 creation_task_id: creation_task_id.into(),
-                project_id: None,
+                project_id: Some(CreativeStudioProjectId::new().into_string()),
                 workflow_id: None,
                 workflow_run_id: None,
                 workflow_step_id: None,
-                canvas_id: None,
-                node_id: None,
+                node_id: Some(CreativeStudioNodeId::new().into_string()),
                 provider_id: ProviderId::new().into_string(),
                 model: "m".into(),
                 capability: "t2i".into(),

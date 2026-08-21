@@ -2,6 +2,27 @@ use nomifun_common::{ConversationId, TerminalId, validate_uuidv7};
 use nomifun_db::{init_database_memory, validate_id_schema_contract};
 use sqlx::Row;
 
+async fn seed_creation_task_project(pool: &nomifun_db::SqlitePool) -> (String, String) {
+    let project_id = nomifun_common::generate_id();
+    let node_id = nomifun_common::generate_id();
+    let document = serde_json::json!({
+        "schema": "nomifun.creative-studio/v1",
+        "projectId": project_id,
+        "nodes": []
+    });
+    sqlx::query(
+        "INSERT INTO creative_studio_projects \
+         (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+         VALUES (?, 'ID Contract Task', 1, 0, 0, ?, 1, 1)",
+    )
+    .bind(&project_id)
+    .bind(document.to_string())
+    .execute(pool)
+    .await
+    .expect("creative task project");
+    (project_id, node_id)
+}
+
 const BASELINE: &str = include_str!("../migrations/001_v3_baseline.sql");
 
 fn executable_baseline_sql() -> String {
@@ -719,12 +740,16 @@ async fn remaining_product_business_ids_reject_duplicates_and_non_uuid_values() 
     }
 
     let creation_task_id = nomifun_common::generate_id();
+    let (task_project_id, task_node_id) = seed_creation_task_project(pool).await;
     sqlx::query(
         "INSERT INTO creation_tasks \
-         (creation_task_id, provider_id, model, capability, params, status, submitted_at) \
-         VALUES (?, ?, 'model', 'text', '{}', 'queued', 1)",
+         (creation_task_id, project_id, node_id, provider_id, model, capability, params, status, \
+          submitted_at, request_fingerprint) \
+         VALUES (?, ?, ?, ?, 'model', 'text', '{}', 'queued', 1, '{\"contract\":\"business-id\"}')",
     )
     .bind(&creation_task_id)
+    .bind(&task_project_id)
+    .bind(&task_node_id)
     .bind(&provider_id)
     .execute(pool)
     .await
@@ -732,10 +757,13 @@ async fn remaining_product_business_ids_reject_duplicates_and_non_uuid_values() 
     assert!(
         sqlx::query(
             "INSERT INTO creation_tasks \
-             (creation_task_id, provider_id, model, capability, params, status, submitted_at) \
-             VALUES (?, ?, 'duplicate', 'text', '{}', 'queued', 1)",
+             (creation_task_id, project_id, node_id, provider_id, model, capability, params, status, \
+              submitted_at, request_fingerprint) \
+             VALUES (?, ?, ?, ?, 'duplicate', 'text', '{}', 'queued', 1, '{\"contract\":\"business-id\"}')",
         )
         .bind(&creation_task_id)
+        .bind(&task_project_id)
+        .bind(&task_node_id)
         .bind(&provider_id)
         .execute(pool)
         .await
@@ -744,9 +772,12 @@ async fn remaining_product_business_ids_reject_duplicates_and_non_uuid_values() 
     assert!(
         sqlx::query(
             "INSERT INTO creation_tasks \
-             (creation_task_id, provider_id, model, capability, params, status, submitted_at) \
-             VALUES ('not-a-uuid', ?, 'model', 'text', '{}', 'queued', 1)",
+             (creation_task_id, project_id, node_id, provider_id, model, capability, params, status, \
+              submitted_at, request_fingerprint) \
+             VALUES ('not-a-uuid', ?, ?, ?, 'model', 'text', '{}', 'queued', 1, '{\"contract\":\"business-id\"}')",
         )
+        .bind(&task_project_id)
+        .bind(&task_node_id)
         .bind(&provider_id)
         .execute(pool)
         .await
@@ -1025,12 +1056,16 @@ async fn remaining_uuid_logical_links_and_json_registry_enforce_text_values() {
     .await
     .expect("provider");
     let creation_task_id = nomifun_common::generate_id();
+    let (task_project_id, task_node_id) = seed_creation_task_project(pool).await;
     sqlx::query(
         "INSERT INTO creation_tasks \
-         (creation_task_id, provider_id, model, capability, params, status, submitted_at) \
-         VALUES (?, ?, 'model', 'text', '{}', 'queued', 1)",
+         (creation_task_id, project_id, node_id, provider_id, model, capability, params, status, \
+          submitted_at, request_fingerprint) \
+         VALUES (?, ?, ?, ?, 'model', 'text', '{}', 'queued', 1, '{\"contract\":\"asset-origin\"}')",
     )
     .bind(&creation_task_id)
+    .bind(&task_project_id)
+    .bind(&task_node_id)
     .bind(&provider_id)
     .execute(pool)
     .await
