@@ -68,6 +68,8 @@ export interface ModelCatalogSuggestion {
   label: string;
   tasks: ModelTask[];
   traits: ModelTrait[];
+  /** Window the provider's own catalog declares, when it declares one. */
+  contextLimit?: number;
 }
 
 export interface ModelDefinitionEditorProps {
@@ -426,7 +428,12 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
       return task
         ? applyCatalogSuggestionForTask(
             current,
-            { model: profile.value, tasks: profile.tasks, traits: profile.traits },
+            {
+              model: profile.value,
+              tasks: profile.tasks,
+              traits: profile.traits,
+              ...(profile.contextLimit === undefined ? {} : { contextLimit: profile.contextLimit }),
+            },
             task
           )
         : current;

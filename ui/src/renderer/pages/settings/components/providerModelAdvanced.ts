@@ -75,6 +75,8 @@ export interface CatalogCapabilitySuggestion {
   model: string;
   tasks: ModelTask[];
   traits: ModelTrait[];
+  /** Context window the provider's catalog declares, when it declares one. */
+  contextLimit?: number;
 }
 
 export type ProviderModelCapabilityInput = CanonicalProviderModelCapabilityInput;
@@ -223,9 +225,11 @@ export const catalogSuggestionsForTask = <T extends { tasks: readonly ModelTask[
  * which silently discarded every other declared task, plus that task's own
  * protocol/endpoint work, the moment a user clicked a suggestion. The catalog is
  * advisory, so it may never overwrite configuration the user already entered.
- * Traits are the one field it owns, and only when the entry actually declares
- * this task: an entry that says nothing about the task says nothing about its
- * traits either.
+ *
+ * Traits and the context window are the fields it owns, and only when the entry
+ * actually declares this task: an entry that says nothing about the task says
+ * nothing about its capabilities either. A window the user already chose wins —
+ * they may be correcting the provider, which is the whole point of the field.
  */
 export const applyCatalogSuggestionForTask = (
   definition: ModelDefinitionDraft,
@@ -238,14 +242,27 @@ export const applyCatalogSuggestionForTask = (
         (trait) => suggestion.traits.includes(trait) && CATALOG_TRAITS_BY_TASK[task].includes(trait)
       )
     : [];
+  const declaredWindow =
+    declaresTask && suggestion.contextLimit && suggestion.contextLimit > 0
+      ? suggestion.contextLimit
+      : undefined;
   const known = definition.capabilities.some((capability) => capability.task === task);
   return {
     model: suggestion.model,
     capabilities: known
       ? definition.capabilities.map((capability) =>
-          capability.task === task && declaresTask ? { ...capability, traits } : capability
+          capability.task === task && declaresTask
+            ? {
+                ...capability,
+                traits,
+                contextLimit: capability.contextLimit ?? declaredWindow,
+              }
+            : capability
         )
-      : [...definition.capabilities, { ...emptyCapabilityDraft(task), traits }],
+      : [
+          ...definition.capabilities,
+          { ...emptyCapabilityDraft(task), traits, contextLimit: declaredWindow },
+        ],
   };
 };
 

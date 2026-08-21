@@ -125,12 +125,20 @@ export function toUpdateProviderRequest(input: UpdateProviderRequest): UpdatePro
   };
 }
 
-/** One fixed fetch-model shape. There is no string or profile-map fallback. */
+/**
+ * One fixed fetch-model shape. There is no string or profile-map fallback.
+ *
+ * Mirrors the ts-rs generated `ModelInfo`. `context_limit` is present only when
+ * the provider's own catalog declares a window (Gemini's `inputTokenLimit`, an
+ * OpenAI-compatible gateway's `context_length`); it is absent, never null, when
+ * the provider says nothing.
+ */
 export interface FetchedModelInfo {
   id: string;
   name?: string | null;
   tasks?: ModelTask[];
   traits?: ModelTrait[];
+  context_limit?: number;
 }
 
 export interface FetchModelsResponse {

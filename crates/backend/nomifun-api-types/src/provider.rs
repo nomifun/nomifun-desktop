@@ -339,22 +339,38 @@ pub struct ProbeProviderConnectionResponse {
 }
 
 /// A fetched model entry with one fixed wire shape.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(deny_unknown_fields)]
-pub struct ModelInfo {    pub id: String,
+pub struct ModelInfo {
+    pub id: String,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<ModelTask>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub traits: Vec<ModelTrait>,
+    /// Input context window the provider's own catalog declared for this model,
+    /// in tokens. This is the only automatic source for the value a user would
+    /// otherwise have to type into the chat capability's `context_limit`, so it
+    /// deliberately reuses that name.
+    ///
+    /// Absent — never `null` — when the catalog said nothing, so a client can
+    /// distinguish "the provider did not declare a window" from a declared
+    /// value. Only positive values are carried; nothing is inferred from a
+    /// model id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub context_limit: Option<i64>,
 }
 
 /// Response for `POST /api/providers/:id/models`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 pub struct FetchModelsResponse {
     pub models: Vec<ModelInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub fixed_base_url: Option<String>,
 }
 
@@ -435,6 +451,7 @@ mod tests {
                 name: None,
                 tasks: vec![ModelTask::Chat],
                 traits: vec![ModelTrait::VisionInput],
+                context_limit: None,
             }],
             fixed_base_url: None,
         };
@@ -449,6 +466,46 @@ mod tests {
                     "traits": ["vision_input"]
                 }]
             })
+        );
+    }
+
+    #[test]
+    fn catalog_context_limit_is_optional_in_both_directions() {
+        // A payload produced before the field existed must still deserialize
+        // under `deny_unknown_fields`, and an undeclared window must be absent
+        // rather than an explicit null the UI would have to special-case.
+        let older: ModelInfo = serde_json::from_value(json!({
+            "id": "gemini-3.1-pro",
+            "tasks": ["chat"]
+        }))
+        .unwrap();
+        assert_eq!(older.context_limit, None);
+        let value = serde_json::to_value(&older).unwrap();
+        assert!(
+            !value.as_object().unwrap().contains_key("context_limit"),
+            "an unknown window must be omitted, not serialized as null: {value}"
+        );
+
+        let declared: ModelInfo = serde_json::from_value(json!({
+            "id": "gemini-3.1-pro",
+            "context_limit": 1_048_576_i64
+        }))
+        .unwrap();
+        assert_eq!(declared.context_limit, Some(1_048_576));
+        assert_eq!(
+            serde_json::to_value(&declared).unwrap()["context_limit"],
+            json!(1_048_576_i64)
+        );
+
+        // The name matches `ProviderModelCapabilityInput::context_limit`, which
+        // is where the UI ultimately persists it. A near-miss alias must not
+        // silently deserialize into a different field.
+        assert!(
+            serde_json::from_value::<ModelInfo>(json!({
+                "id": "gemini-3.1-pro",
+                "context_length": 1_048_576_i64
+            }))
+            .is_err()
         );
     }
 

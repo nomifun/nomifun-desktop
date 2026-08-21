@@ -157,6 +157,7 @@ const AddPlatformModal = ModalHOC<{
         label: model.label,
         tasks: model.tasks,
         traits: model.traits,
+        ...(model.contextLimit === undefined ? {} : { contextLimit: model.contextLimit }),
       })),
     [modelListState.data?.models]
   );
