@@ -33,6 +33,7 @@ import {
   createCreativeCanvasProductNode,
   CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
 } from './nodeFactory';
+import { nextCanvasImageTaskPosition } from './imageTaskCanvasLayout';
 
 export const CREATIVE_IMAGE_MASK_EDIT_OPERATION = 'image-mask-edit';
 
@@ -43,38 +44,6 @@ export interface PreparedCanvasImageMaskEdit {
   configNode: ConfigNode;
   connection: Omit<CreativeCanvasConnection, 'id'>;
   plan: PreparedCreativeWorkbenchRun;
-}
-
-const overlaps = (
-  node: CreativeCanvasNode,
-  position: { x: number; y: number },
-  size: CreativeSize
-): boolean =>
-  position.x < node.position.x + node.size.width &&
-  position.x + size.width > node.position.x &&
-  position.y < node.position.y + node.size.height &&
-  position.y + size.height > node.position.y;
-
-function nextRightSidePosition(
-  nodes: readonly CreativeCanvasNode[],
-  source: CreativeCanvasNode,
-  size: CreativeSize
-): { x: number; y: number } {
-  const origin = {
-    x: source.position.x + source.size.width + 80,
-    y: source.position.y,
-  };
-  const stride = size.height + 40;
-  const lowest = nodes.reduce(
-    (edge, node) => Math.max(edge, node.position.y + node.size.height),
-    origin.y
-  );
-  const rows = Math.max(0, Math.ceil((lowest - origin.y) / stride));
-  for (let row = 0; row <= rows; row += 1) {
-    const position = { x: origin.x, y: origin.y + row * stride };
-    if (!nodes.some((node) => overlaps(node, position, size))) return position;
-  }
-  throw new Error('无法为局部编辑节点找到安全的画布位置。');
 }
 
 export function isCanvasImageMaskEditConfig(
@@ -145,7 +114,7 @@ export function prepareCanvasImageMaskEdit(input: {
     throw new Error('局部编辑缺少已验证的隐藏标记参考图。');
   }
 
-  const configPosition = nextRightSidePosition(
+  const configPosition = nextCanvasImageTaskPosition(
     input.state.document.nodes,
     input.sourceNode,
     CREATIVE_CANVAS_PRODUCT_NODE_SIZES.config
@@ -321,7 +290,7 @@ export function canvasImageMaskEditResultPosition(
   nodes: readonly CreativeCanvasNode[],
   config: ConfigNode
 ): { x: number; y: number } {
-  return nextRightSidePosition(
+  return nextCanvasImageTaskPosition(
     nodes,
     config,
     CREATIVE_CANVAS_PRODUCT_NODE_SIZES.image

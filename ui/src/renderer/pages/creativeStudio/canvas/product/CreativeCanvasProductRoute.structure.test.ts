@@ -82,10 +82,13 @@ describe('Creative Canvas product route composition', () => {
       'manualUploadRejectionMessage',
       'pendingPanoramaChoice',
       '<CreativeCanvasImageToolbar',
+      '<CreativeCanvasImageComposer',
       '<CreativeImageCropDialog',
       '<CreativeImageMaskEditDialog',
       '<CreativeImageSplitDialog',
-      '<CanvasImageMaskEditRuntimeBridge',
+      '<CanvasImageTaskRuntimeBridge',
+      'prepareCanvasImageCompose',
+      'CREATIVE_IMAGE_COMPOSE_OPERATION',
       'buildCreativeImageMaskReference',
       'uploadCreativeImageMaskReference',
       'prepareCanvasImageMaskEdit',
@@ -133,6 +136,7 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('runtime.submit(prepared.plan)')).toBe(true);
     expect(source.includes('runtime.retrySubmission(')).toBe(true);
     expect(source.includes('runtime.taskExists(')).toBe(true);
+    expect(source.includes('imageWorkbenchModelOptions(modelCatalog, \'image_edit\')')).toBe(true);
   });
 
   test('documents the exact lazy Router handoff without modifying Router here', () => {
