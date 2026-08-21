@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { CuttingOne, Download } from "@icon-park/react";
+import { CuttingOne, Download, GridNine } from "@icon-park/react";
 import React from "react";
 
 import styles from "./CreativeImageTools.module.css";
@@ -15,6 +15,7 @@ export interface CreativeCanvasImageToolbarProps {
   disabled?: boolean;
   onCrop(): void;
   onDownload(): void;
+  onSplit(): void;
 }
 
 const iconProps = {
@@ -31,6 +32,7 @@ const CreativeCanvasImageToolbar: React.FC<CreativeCanvasImageToolbarProps> = ({
   disabled = false,
   onCrop,
   onDownload,
+  onSplit,
 }) => (
   <div className={styles.nodeHost} data-canvas-image-tools-host>
     {children}
@@ -65,6 +67,18 @@ const CreativeCanvasImageToolbar: React.FC<CreativeCanvasImageToolbarProps> = ({
         >
           <CuttingOne {...iconProps} />
           <span>裁剪</span>
+        </button>
+        <button
+          type="button"
+          aria-label="切分并生成图片子节点"
+          disabled={disabled}
+          onClick={(event) => {
+            event.stopPropagation();
+            onSplit();
+          }}
+        >
+          <GridNine {...iconProps} />
+          <span>切图</span>
         </button>
       </div>
     ) : null}
