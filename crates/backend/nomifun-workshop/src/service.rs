@@ -30,6 +30,7 @@ use crate::creative_studio::{
 use crate::creative_studio::CREATIVE_STUDIO_SCHEMA;
 use crate::creative_agent_ops::{CreativeAgentOp, CreativeAgentOpResult};
 use crate::dto::WorkshopAsset;
+use crate::prompt_catalog::{CreativePromptCatalogPage, PromptCatalogService};
 use crate::workflow::{CreativeWorkflowDefinitionV1, parse_workflow_row};
 use crate::workflow_run::{
     CreativeWorkflowRunAggregateV1, CreativeWorkflowRunCreateRequest, parse_workflow_run_row,
@@ -134,6 +135,16 @@ pub struct NewAssetUpload {
     pub in_library: Option<bool>,
 }
 
+/// Auditable provenance stored with a prompt-catalog text asset.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptCatalogAssetOrigin {
+    pub prompt_catalog_id: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
+}
+
 /// A `text`-kind asset (no binary; body lives in `text_content`).
 pub struct NewTextAsset {
     pub title: String,
@@ -141,6 +152,10 @@ pub struct NewTextAsset {
     pub collection: Option<String>,
     pub tags: Option<Vec<String>>,
     pub in_library: Option<bool>,
+    /// Optional bounded provenance for a prompt-catalog item. The text itself
+    /// remains authoritative in `text_content`; this metadata preserves source
+    /// attribution when the user adds a catalog prompt to My Assets.
+    pub origin: Option<PromptCatalogAssetOrigin>,
 }
 
 /// Filters + pagination for [`WorkshopService::list_assets`].
@@ -180,6 +195,7 @@ pub struct WorkshopService {
     /// Backend data dir root. Asset `rel_path`s are relative to this.
     data_dir: PathBuf,
     provider_lifecycle: Option<SharedProviderLifecycleBarrier>,
+    prompt_catalog: PromptCatalogService,
 }
 
 impl WorkshopService {
@@ -206,7 +222,25 @@ impl WorkshopService {
             repo,
             data_dir: data_dir.to_path_buf(),
             provider_lifecycle,
+            prompt_catalog: PromptCatalogService::start(data_dir),
         })
+    }
+
+    /// Read the last valid prompt-catalog snapshot without touching the
+    /// network. A fresh installation returns an empty, stale page so the
+    /// client can explicitly request the owner-only synchronization route.
+    pub async fn list_prompt_catalog(&self) -> Result<CreativePromptCatalogPage, AppError> {
+        self.prompt_catalog.list().await
+    }
+
+    /// Refresh the fixed, attributed upstream prompt sources. Per-source
+    /// failures retain the last valid cached entries; a completely empty first
+    /// sync fails instead of publishing an empty catalog as success.
+    pub async fn sync_prompt_catalog(
+        &self,
+        force: bool,
+    ) -> Result<CreativePromptCatalogPage, AppError> {
+        self.prompt_catalog.sync(force).await
     }
 
     // ---- path helpers ----
@@ -1453,7 +1487,7 @@ impl WorkshopService {
             bytes: None,
             text_content: Some(input.text_content),
             in_library: input.in_library.unwrap_or(true),
-            origin: None,
+            origin: serialize_text_asset_origin(input.origin)?,
             created_at: now,
             updated_at: now,
         };
@@ -1618,6 +1652,42 @@ fn validate_creative_project_id(project_id: &str) -> Result<(), AppError> {
                 "creative studio project id must be a canonical UUIDv7: {error}"
             ))
         })
+}
+
+fn serialize_text_asset_origin(
+    origin: Option<PromptCatalogAssetOrigin>,
+) -> Result<Option<String>, AppError> {
+    let Some(origin) = origin else {
+        return Ok(None);
+    };
+    let required = |key: &str, value: &str, max: usize| -> Result<(), AppError> {
+        let value = Some(value)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| AppError::BadRequest(format!("text asset origin.{key} is required")))?;
+        if value.len() > max || value.chars().any(char::is_control) {
+            return Err(AppError::BadRequest(format!(
+                "text asset origin.{key} is invalid"
+            )));
+        }
+        Ok(())
+    };
+    required("prompt_catalog_id", &origin.prompt_catalog_id, 255)?;
+    required("source_url", &origin.source_url, 4_096)?;
+    required("license", &origin.license, 120)?;
+    required("license_url", &origin.license_url, 4_096)?;
+    let valid_https_url = |value: &str| {
+        reqwest::Url::parse(value)
+            .is_ok_and(|url| url.scheme() == "https" && url.host().is_some())
+    };
+    if !valid_https_url(&origin.source_url) || !valid_https_url(&origin.license_url) {
+        return Err(AppError::BadRequest(
+            "text asset origin URLs must use HTTPS".into(),
+        ));
+    }
+    serde_json::to_string(&origin)
+        .map(Some)
+        .map_err(|error| AppError::BadRequest(format!("serialize text asset origin: {error}")))
 }
 
 fn validate_creative_workflow_id(workflow_id: &str) -> Result<(), AppError> {
@@ -2638,6 +2708,7 @@ mod tests {
                 collection: Some("归档".into()),
                 tags: Some(vec!["prompt".into()]),
                 in_library: Some(false),
+                origin: None,
             })
             .await
             .unwrap();
@@ -3210,6 +3281,7 @@ mod tests {
                 collection: None,
                 tags: None,
                 in_library: Some(false),
+                origin: None,
             })
             .await
             .unwrap();
@@ -3245,6 +3317,50 @@ mod tests {
         assert_eq!(String::from_utf8(served.bytes).unwrap(), a.text_content.clone().unwrap());
         svc.delete_asset(&a.asset_id).await.unwrap();
         assert!(svc.serve_file(&a.asset_id, false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn text_asset_prompt_catalog_origin_is_bounded_and_roundtrips() {
+        let (svc, _dir) = service().await;
+        let asset = svc
+            .create_text_asset(NewTextAsset {
+                title: "有来源的提示词".into(),
+                text_content: "Create a paper poster".into(),
+                collection: Some("提示词".into()),
+                tags: Some(vec!["poster".into()]),
+                in_library: Some(true),
+                origin: Some(PromptCatalogAssetOrigin {
+                    prompt_catalog_id: "awesome-gpt-image-001".into(),
+                    source_url: "https://github.com/ZeroLu/awesome-gpt-image".into(),
+                    license: "MIT".into(),
+                    license_url:
+                        "https://github.com/ZeroLu/awesome-gpt-image/blob/main/LICENSE".into(),
+                }),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            asset.origin.as_ref().unwrap()["prompt_catalog_id"],
+            "awesome-gpt-image-001"
+        );
+
+        let error = svc
+            .create_text_asset(NewTextAsset {
+                title: "不安全来源".into(),
+                text_content: "prompt".into(),
+                collection: None,
+                tags: None,
+                in_library: Some(true),
+                origin: Some(PromptCatalogAssetOrigin {
+                    prompt_catalog_id: "prompt-1".into(),
+                    source_url: "http://example.test/source".into(),
+                    license: "MIT".into(),
+                    license_url: "https://example.test/license".into(),
+                }),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::BadRequest(_)));
     }
 
     /// A real, decodable PNG (unlike the header-only `png_1x1`).
@@ -3321,6 +3437,7 @@ mod tests {
             collection: None,
             tags: None,
             in_library: Some(true),
+            origin: None,
         })
         .await
         .unwrap();
@@ -3331,6 +3448,7 @@ mod tests {
             collection: Some("   ".into()),
             tags: None,
             in_library: Some(true),
+            origin: None,
         })
         .await
         .unwrap();
@@ -3340,6 +3458,7 @@ mod tests {
             collection: Some("角色".into()),
             tags: None,
             in_library: Some(true),
+            origin: None,
         })
         .await
         .unwrap();

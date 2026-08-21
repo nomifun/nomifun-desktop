@@ -12,6 +12,8 @@ nomifun-auth.workspace = true
 nomifun-db.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+reqwest.workspace = true
+regex.workspace = true
 # JSON Schema for the canonical Creative Studio Agent operation vocabulary: the
 # same `CreativeAgentOp` type exposed by `nomi_creative_studio_apply_ops`, so
 # schema and validation cannot drift. Same major as gateway's `schemars = "1"`.

@@ -11,10 +11,15 @@ export type { PromptLibrarySidebarProps } from './PromptLibrarySidebar';
 export { PromptLibrarySurface } from './PromptLibrarySurface';
 export type { PromptLibrarySurfaceProps } from './PromptLibrarySurface';
 export {
+  createCreativePromptCatalogPort,
+  creativePromptCatalogPort,
+} from './catalogPort';
+export {
   filterPromptLibraryItems,
   normalizePromptLibrary,
   parsePromptLibraryItem,
   promptLibraryFacets,
+  sortPromptLibraryItemsByUpdatedAt,
   toPromptLibrarySelection,
 } from './library';
 export {

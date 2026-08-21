@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type PromptLibrarySource = 'preset' | 'asset';
+export type PromptLibrarySource = 'catalog' | 'preset' | 'asset';
 
-/** Validated, product-facing prompt data. No remote markup or image URL enters this shape. */
+/** Validated product data. Remote media is restricted to absolute HTTPS URLs and rendered as data. */
 export interface PromptLibraryItem {
   id: string;
   source: PromptLibrarySource;
@@ -16,6 +16,12 @@ export interface PromptLibraryItem {
   category: string | null;
   tags: string[];
   knowledgeBaseIds: string[];
+  coverUrl: string | null;
+  preview: string | null;
+  sourceUrl: string | null;
+  license: string | null;
+  licenseUrl: string | null;
+  createdAt: number | null;
   updatedAt: number | null;
 }
 /** Immutable payload handed to a canvas/editor integration. */
@@ -27,6 +33,10 @@ export interface PromptLibrarySelection {
   category: string | null;
   tags: string[];
   knowledgeBaseIds: string[];
+  coverUrl: string | null;
+  sourceUrl: string | null;
+  license: string | null;
+  licenseUrl: string | null;
 }
 
 /**

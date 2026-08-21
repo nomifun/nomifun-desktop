@@ -19,7 +19,9 @@ const selectionSource = readFileSync(
 describe('Creative Studio prompt-library route wiring', () => {
   test('composes the existing library with real NomiFun presets and text assets', () => {
     expect(routeSource.includes('<StandalonePromptLibraryPage')).toBe(true);
-    expect(routeSource.includes('createNomiPromptLibraryPort({ locale, assets: assetPort })')).toBe(true);
+    expect(routeSource.includes('createNomiPromptLibraryPort({')).toBe(true);
+    expect(routeSource.includes('assets: assetPort')).toBe(true);
+    expect(routeSource.includes('catalog: creativePromptCatalogPort')).toBe(true);
     expect(routeSource.includes('assetPort = creativeAssetClient')).toBe(true);
     expect(routeSource.includes('onSelect={selectPrompt}')).toBe(true);
   });

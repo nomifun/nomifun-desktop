@@ -32,7 +32,10 @@ use crate::MAX_ASSET_BYTES;
 use crate::archive::MAX_CREATIVE_ARCHIVE_COMPRESSED_BYTES;
 use crate::creative_studio::{CreativeProjectDocument, CreativeProjectSummary};
 use crate::dto::WorkshopAsset;
-use crate::service::{AssetPatch, AssetQuery, NewAssetUpload, NewTextAsset};
+use crate::prompt_catalog::CreativePromptCatalogPage;
+use crate::service::{
+    AssetPatch, AssetQuery, NewAssetUpload, NewTextAsset, PromptCatalogAssetOrigin,
+};
 use crate::state::WorkshopRouterState;
 use crate::workflow::{CreativeWorkflowDefinitionV1, MAX_WORKFLOW_DEFINITION_BYTES};
 use crate::workflow_run::{
@@ -108,6 +111,14 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         .route(
             "/api/creative-studio/projects/{project_id}/archive",
             get(export_creative_project_archive),
+        )
+        .route(
+            "/api/creative-studio/prompts",
+            get(list_prompt_catalog),
+        )
+        .route(
+            "/api/creative-studio/prompts/sync",
+            post(sync_prompt_catalog),
         )
         .route(
             "/api/creative-studio/workflows",
@@ -276,6 +287,33 @@ async fn delete_creative_project(
 ) -> Result<StatusCode, AppError> {
     state.service.delete_creative_project(&project_id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── attributed prompt catalog ─────────────────────────────────────────────
+
+async fn list_prompt_catalog(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<CreativePromptCatalogPage>>, AppError> {
+    let catalog = state.service.list_prompt_catalog().await?;
+    Ok(Json(ApiResponse::ok(catalog)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SyncPromptCatalogRequest {
+    #[serde(default)]
+    force: bool,
+}
+
+async fn sync_prompt_catalog(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    body: Result<Json<SyncPromptCatalogRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CreativePromptCatalogPage>>, AppError> {
+    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let catalog = state.service.sync_prompt_catalog(request.force).await?;
+    Ok(Json(ApiResponse::ok(catalog)))
 }
 
 // ── canonical Creative Studio workflows ────────────────────────────────────
@@ -676,6 +714,7 @@ async fn upload_asset(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateTextAssetRequest {
     kind: String,
     title: String,
@@ -687,6 +726,8 @@ struct CreateTextAssetRequest {
     tags: Option<Vec<String>>,
     #[serde(default)]
     in_library: Option<bool>,
+    #[serde(default)]
+    origin: Option<PromptCatalogAssetOrigin>,
 }
 
 async fn create_text_asset(
@@ -708,6 +749,7 @@ async fn create_text_asset(
             collection: req.collection,
             tags: req.tags,
             in_library: req.in_library,
+            origin: req.origin,
         })
         .await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(asset))))
@@ -1000,6 +1042,46 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(gone, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn prompt_catalog_routes_are_owner_scoped_and_fail_closed() {
+        let (state, user, _data_dir) = test_state().await;
+        let app = workshop_routes(state).layer(Extension(user));
+
+        let listed = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/creative-studio/prompts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed_json: Value = serde_json::from_slice(
+            &axum::body::to_bytes(listed.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(listed_json["data"]["total"], 0);
+        assert_eq!(listed_json["data"]["stale"], true);
+        assert_eq!(listed_json["data"]["sources"].as_array().unwrap().len(), 7);
+
+        let rejected = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/creative-studio/prompts/sync")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"force":false,"unexpected":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -1313,6 +1395,7 @@ mod tests {
                 collection: None,
                 tags: None,
                 in_library: Some(true),
+                origin: None,
             })
             .await
             .unwrap();
@@ -1433,6 +1516,7 @@ mod tests {
                 collection: None,
                 tags: None,
                 in_library: Some(true),
+                origin: None,
             })
             .await
             .unwrap();

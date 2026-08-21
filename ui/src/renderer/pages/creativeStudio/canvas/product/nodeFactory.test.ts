@@ -277,6 +277,10 @@ describe('real library insertion helpers', () => {
       category: '摄影',
       tags: ['cinematic'],
       knowledgeBaseIds: ['kb-1'],
+      coverUrl: null,
+      sourceUrl: null,
+      license: null,
+      licenseUrl: null,
     };
     const original = structuredClone(prompt);
     const node = creativeTextNodeFromPrompt(
