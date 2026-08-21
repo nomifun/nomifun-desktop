@@ -2,7 +2,7 @@
 
 > 用途：在长任务发生上下文压缩或人员切换时，从可验证提交继续，而不是重新审计整仓。
 > 分支：`codex/infinite-canvas-rebuild`
-> 最后功能锚点：`9fffd526`（`feat(creative-studio): add canvas audio generation`）
+> 最后功能锚点：`8e5f83cf`（`feat(creative-studio): add standalone task ownership`）
 > 参考产品锚点：`ef7303d`
 
 ## 1. 续接协议
@@ -26,7 +26,7 @@
 | P3 | `nomifun.creative-studio/v1`、UUIDv7、项目 CRUD/CAS、项目中心、自包含 ZIP 导入导出与完整引用重映射 | `d03a6a64`、`b4361084`、`44933dd3`…`2ad53b01`、`c12b8db` |
 | P4 | 画布 reducer/history、视口、节点、连线、小地图、选择/分组/快捷键、Editor CAS、离开/reload 门禁；首节点居中、参考节点几何、固定创作配色、直接节点工具、图片节点生成/上传面板、图片/视频/音频持久 composer 草稿与双客户端冲突恢复；空视频节点 T2V/单图 I2V、空音频节点 TTS 与真实任务终态回填 | `b2e19806`…`dc6c3c34`、`dd18dc6f`、`451dc013`、`5352954c`、`b2e103c8`、`46c1ba1e`、`777caba7`、`ef26f4cb`、`60982e38`、`9fffd526` |
 | P5 | Canonical 资产 API/库、文本/图像/视频/音频节点、素材选择与结果回填 | `57128727`、`e05b18a8`、`04f805a3`、`444db764` |
-| P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化；画布视频/音频 owner、提交响应不明状态确认与 authoritative 404 orphan 清理 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44`、`60982e38`、`9fffd526` |
+| P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化；画布视频/音频 owner、提交响应不明状态确认与 authoritative 404 orphan 清理；真实 `standalone_workbench` owner 与完整有序输入快照 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44`、`60982e38`、`9fffd526`、`8e5f83cf` |
 | P7 | 生图/视频工作台、工作流定义/运行中心、提示词与素材中心 | `2283ee74`、`1414846e`、`ebd17f3a`…`aad21d9d`、`7e45f8ad` |
 | P8 | 持久化画布 Agent、原子操作、裁剪/切分/遮罩编辑与真实任务回填 | `e5368474`…`00f407c6`、`cac4bca8`…`bc01849e` |
 | P9 | Director v1 domain、Three.js runtime、CAS sidecar、时间轴、截图回填、sidecar 全资产闭包与归档重映射 | `1ccbd013`、`d3a609f6`、`7b7712c0`、`dfa3c0b3`、`f25825f1`、`c12b8db` |
@@ -63,6 +63,10 @@
 - 单选空音频节点现在展开固定浅 stone 朗读 Composer，只走精确 `speech_synthesis` / `tts`、零输入和单任务。朗读正文、精确 Provider/model、Voice ID 与 MP3/WAV 草稿由 audio node canonical `data.composer` 持有；本地 source 身份只存在强类型 `audio-node-compose` operation，Provider 参数没有 canvas/node/asset 元数据。成功任务必须恰好返回一个真实 audio asset，并原位填充同一个节点 ID；失败、取消、响应丢失重试、恢复、authoritative 404 与 pending-last 均复用统一任务合同。
 - 音频可选字段按八个现有 adapter 的 exact protocol profile 显示：未知协议降级为 prompt-only，Deepgram 正文上限 2000，要求 Voice ID 的协议会在本地阻止空音色提交；format 只允许 artifact gate 已支持的 MP3/WAV。Voice ID 只在同一 Provider 且同一协议内保留，跨 Provider/协议、失效模型或单模型自动接管都会清空并要求重新确认。首批明确不发送 speed、instructions、参考音频、VoiceClone、AAC 或 PCM。
 - 真实浏览器完成音频唯一 marker、Undo、Redo、完整 reload 和提示词库入口；1440×900、1024×768、390×844 的 Composer 均完整可操作。空节点不再显示无意义的 `0:00 – ∞`；浅/深主题切换前后面板背景与文字计算色完全一致。最终用 UI 删除 QA 音频节点、恢复画布面板并重载回原 3 节点；最后新页面会话 Console 0 error / 0 warning。参考项目仍在 3000 打开并复核音频入口；没有调用付费 Provider、没有上传本地文件。
+- migration 043 新增第三种 canonical task owner：`standalone_workbench { projectId, workbenchKind }`，其中 kind 仅允许 image/video/audio，并与 canvas node、workflow step 三分支严格互斥。Creation 会校验 workbench kind 与 capability 媒体族匹配；owner、Provider、模型、capability、params 和有序 inputs 全部参与同一幂等一致性比较，旧 key 不能换 owner、换输入或换顺序。
+- 每个新任务显式持久并返回有序 `{ assetId, kind, role }` 输入快照；`kind` 只允许 image/video/audio/text，worker 会用真实 MIME 再校验声明。迁移旧任务只有在 fingerprint 含完整有序 inputs、每个 asset 仍存在且 kind 可证明时才恢复；否则响应为 `inputs:null`，前端将其视为“不可原参数重试”，绝不伪装成 `[]`。新零输入任务始终返回 `inputs:[]`，create 响应若不精确回显输入快照会失败关闭。
+- 输入与结果资产进入 DB logical-reference registry；新 standalone 产物 origin 使用 `project_id + workbench_kind + creation_task_id`，并在写入时与真实任务 owner 逐字段比对。043 的旧输入解析、insert/update input trigger 与 asset-origin owner trigger 均使用 NULL-safe SQLite 判断，缺字段、显式 null、重复键、未知字段或混合 owner 都不能通过三值逻辑绕过。
+- 当前独立图片/视频产品路由仍有意保留 config-node owner，直到下一切片提供 owner-scoped list/recovery；现在提前切换 POST 会导致刷新后无法找回正在运行的任务。底层合同和前端 strict wire 已就绪，但不把尚未接线的持久历史描述成可用产品功能。
 
 `dd18dc6f` 的提交前检查：
 
@@ -137,6 +141,14 @@
 - UI production build：通过；仅保留仓库既存的动态/静态重复导入与大 chunk 提示。
 - 真实浏览器：参考项目运行在 3000，目标运行在隔离 5174/8788；草稿保存/撤销/重做/reload、提示词库、无模型禁用、1440/1024/390、固定主题和 QA 清理通过，最终干净会话 Console 0 error / 0 warning；未触发付费生成。
 
+`8e5f83cf` 的提交前检查：
+
+- `cargo test -p nomifun-db --lib`：387 passed；`id_schema_contract`：22 passed；043 owner/input migration：5 passed。覆盖三 owner 分支、旧输入可证明恢复/不可证明 NULL、input trigger 缺失/null/重复键、asset origin insert/update 与幂等输入顺序。
+- `cargo test -p nomifun-creation --lib`：65 passed；`cargo test -p nomifun-gateway --lib`：142 passed；standalone DTO、kind/capability、input kind/MIME、origin 与 Gateway kind 证明通过。
+- `cargo check -p nomifun-app --lib`、Rust 定向 fmt、`bun run typecheck`、图标/主题/dead-css、UI production build、`git diff --cached --check`：通过；仅有仓库既存未使用代码与 Vite chunk 提示。
+- Creative Studio 广域 UI 测试运行得到 604 passed / 3 failed；本切片的 WIRING 断言已修正并定向复跑通过，剩余 2 项是未改动的 Director capture 几何旧期望（期望 x=900/y=2160，当前 canonical 结果 x=920/y=2320），不作为本数据合同提交的伪阻断，也未篡改测试掩盖。
+- 隔离 8788 在原 QA 数据根真实应用 043 后正常启动；提交 `image` owner + `t2v` 的错误媒体族请求返回 400，随后同 task ID GET 为 404，证明门禁发生在 Provider/任务落库前。现有画布重载仍为原 3 节点，Console 0 error / 0 warning；未调用付费 Provider。
+
 `7e45f8ad` 的提交前检查：
 
 - `cargo test -p nomifun-workshop`：70 passed。
@@ -153,7 +165,9 @@
 ## 4. 仍需明确保留的限制
 
 - Standalone 工作台必须显式选择真实项目；不会借用或偷偷创建最近项目。
-- v1 config node 只拥有一个 `taskId`，因此 standalone 视频批量数固定为 1。要支持 1-6 并行任务，必须先升级 canonical owner/schema/archive 契约。
+- `standalone_workbench` owner 与完整 inputs 快照已经落地，但图片/视频产品尚未切换到 owner-scoped 历史读取；在 list/recovery API 完成前仍使用旧 config-node 持久化。不得仅改 POST owner 制造刷新后失联任务。
+- 迁移旧任务的 `inputs:null` 表示输入快照无法证明，只允许审计展示，必须禁用精确重试；不能把它归一为空数组或猜测素材 kind/role。
+- 当前 standalone 路由仍由只拥有一个 `taskId` 的 v1 config node 持久化，因此视频批量数固定为 1。要支持 1-6 并行任务，必须先切换到已落地的 standalone owner，并让 owner-scoped list/recovery 与多任务 UI 同步接通。
 - 画布视频当前只开放空节点 T2V 与一张直接连接真实图片的 I2V。Creation engine 对 V2V 返回 `unsupported_capability`；首尾帧、多图、视频/音频混合参考和 Provider 特有高级参数必须等协议能力矩阵完成后再开放。
 - 视频任务“取消”是 NomiFun 本地权威取消：会阻止晚到结果覆盖和入库，但现有 adapter 没有远端 cancel 契约，不能承诺 Provider 作业或计费必然停止。
 - 画布音频当前只开放空节点 TTS，零输入且每次一个真实音频结果。参考音频、VoiceClone、声音设计、speed/instructions、AAC/PCM 与音频到音频必须先扩展 typed TTS 输入、协议 profile 和 artifact gate，不能只添加 UI 控件。
