@@ -63,7 +63,6 @@ const CreativeStudioWorkflowRoute = React.lazy(
 );
 const MiniAppsListPage = React.lazy(() => import('@renderer/pages/miniApps'));
 const MiniAppRunnerPage = React.lazy(() => import('@renderer/pages/miniApps/RunnerPage'));
-const AssetLibraryPage = React.lazy(() => import('@renderer/pages/assets'));
 const CompanionPage = React.lazy(() => import('@renderer/pages/companion'));
 const ConversationShell = React.lazy(() => import('@renderer/pages/conversation/components/ConversationShell'));
 
@@ -228,8 +227,6 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/customer-service/:cs_agent_id' element={withRouteFallback(CustomerServiceDetailPage)} />
             <Route path='/knowledge' element={withRouteFallback(KnowledgeListPage)} />
             <Route path='/knowledge/:id' element={withRouteFallback(KnowledgeDetailPage)} />
-            {/* 资产库 (Asset Library) — platform-level management of workshop assets. */}
-            <Route path='/assets' element={withRouteFallback(AssetLibraryPage)} />
             {/* 小程序 (Mini-apps) — the solidified library and its full-page runner. */}
             <Route path='/mini-apps' element={withRouteFallback(MiniAppsListPage)} />
             <Route path='/mini-apps/:id' element={withRouteFallback(MiniAppRunnerPage)} />

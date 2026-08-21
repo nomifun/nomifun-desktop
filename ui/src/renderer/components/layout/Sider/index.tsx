@@ -14,7 +14,10 @@ import { blurActiveElement } from '@renderer/utils/ui/focus';
 import { isDesktopShell } from '@renderer/utils/platform';
 import { useBrowserOverview } from '@renderer/pages/browser/useBrowserInventory';
 import { parseSessionRoute } from '@renderer/utils/routes/sessionRoute';
-import { CREATIVE_STUDIO_ROOT_PATH } from '@renderer/pages/creativeStudio/app/routes';
+import {
+  CREATIVE_STUDIO_ASSETS_PATH,
+  CREATIVE_STUDIO_ROOT_PATH,
+} from '@renderer/pages/creativeStudio/app/routes';
 import {
   SiderAssetLibraryEntry,
   SiderBrowserEntry,
@@ -111,7 +114,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleScheduledClick = () => navTo('/scheduled');
   const handleRequirementsClick = () => navTo('/requirements');
   const handleKnowledgeClick = () => navTo('/knowledge');
-  const handleAssetLibraryClick = () => navTo('/assets');
+  const handleAssetLibraryClick = () => navTo(CREATIVE_STUDIO_ASSETS_PATH);
   const handleNomiClick = () => navTo('/nomi');
   const handleCreativeStudioClick = () => navTo(CREATIVE_STUDIO_ROOT_PATH);
   const handleMiniAppsClick = () => navTo('/mini-apps');
@@ -234,10 +237,10 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleKnowledgeClick}
             />
-            {/* Asset library — unified management of creative-workshop assets */}
+            {/* Asset library — enter the canonical full-screen Creative Studio surface. */}
             <SiderAssetLibraryEntry
               isMobile={isMobile}
-              isActive={pathname.startsWith('/assets')}
+              isActive={pathname === CREATIVE_STUDIO_ASSETS_PATH}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleAssetLibraryClick}
