@@ -885,6 +885,10 @@ fn collect_config_operation_asset_ids(
         | CreativeConfigOperation::VideoNodeCompose {
             source_node_id,
             source_asset_id,
+        }
+        | CreativeConfigOperation::AudioNodeCompose {
+            source_node_id,
+            source_asset_id,
         } => {
             validate_config_source_node(source_node_id, operation, node_ids)?;
             if let Some(asset_id) = source_asset_id {
@@ -945,6 +949,10 @@ fn remap_config_operation(
             source_asset_id,
         }
         | CreativeConfigOperation::VideoNodeCompose {
+            source_node_id,
+            source_asset_id,
+        }
+        | CreativeConfigOperation::AudioNodeCompose {
             source_node_id,
             source_asset_id,
         } => {
@@ -1323,6 +1331,7 @@ mod tests {
     const DIRECTOR_CAPTURE_ASSET_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000710";
     const MASK_REFERENCE_ASSET_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000711";
     const CONFIG_RESULT_ASSET_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000712";
+    const AUDIO_SOURCE_ASSET_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000714";
 
     fn image_document() -> CreativeProjectDocument {
         let mut document = CreativeProjectDocument::empty(PROJECT_ID.into());
@@ -1528,7 +1537,68 @@ mod tests {
             }
         }))
         .unwrap();
-        document.nodes = vec![source, compose, mask, t2i, video_source, video_config];
+        let audio_source: CreativeNode = serde_json::from_value(serde_json::json!({
+            "id": "audio-source-node",
+            "type": "audio",
+            "position": { "x": 0, "y": 600 },
+            "size": { "width": 340, "height": 160 },
+            "groupId": null,
+            "zIndex": 7,
+            "locked": false,
+            "data": {
+                "assetId": AUDIO_SOURCE_ASSET_ID,
+                "title": "Voice reference",
+                "loop": false,
+                "volume": 1,
+                "trimStartMs": 0,
+                "trimEndMs": null,
+                "composer": null
+            }
+        }))
+        .unwrap();
+        let audio_config: CreativeNode = serde_json::from_value(serde_json::json!({
+            "id": "audio-config",
+            "type": "config",
+            "position": { "x": 500, "y": 600 },
+            "size": { "width": 440, "height": 240 },
+            "groupId": null,
+            "zIndex": 8,
+            "locked": false,
+            "data": {
+                "task": "speech_synthesis",
+                "capability": "tts",
+                "providerId": null,
+                "model": null,
+                "prompt": "literal narration",
+                "negativePrompt": "",
+                "operation": {
+                    "kind": "audio-node-compose",
+                    "sourceNodeId": "audio-source-node",
+                    "sourceAssetId": AUDIO_SOURCE_ASSET_ID
+                },
+                "parameters": {
+                    "prompt": "literal narration",
+                    "voice": "alloy",
+                    "format": "mp3"
+                },
+                "inputAssetIds": [],
+                "taskId": null,
+                "resultAssetIds": [],
+                "status": "idle",
+                "errorMessage": null
+            }
+        }))
+        .unwrap();
+        document.nodes = vec![
+            source,
+            compose,
+            mask,
+            t2i,
+            video_source,
+            video_config,
+            audio_source,
+            audio_config,
+        ];
         document
     }
 
@@ -1575,6 +1645,36 @@ mod tests {
                 rel_path: Some(format!("workshop/assets/{asset_id}.png")),
                 thumb_rel_path: None,
                 mime: Some("image/png".into()),
+                width: None,
+                height: None,
+                bytes: Some(bytes.len() as i64),
+                text_content: None,
+                in_library,
+                origin: None,
+                created_at: 10,
+                updated_at: 20,
+            },
+            bytes,
+        }
+    }
+
+    fn opaque_audio_asset_snapshot(
+        asset_id: &str,
+        title: &str,
+        in_library: bool,
+    ) -> CreativeArchiveAssetSnapshot {
+        let bytes = format!("opaque-audio-{asset_id}").into_bytes();
+        CreativeArchiveAssetSnapshot {
+            row: WorkshopAssetRow {
+                id: 0,
+                asset_id: asset_id.into(),
+                kind: "audio".into(),
+                title: title.into(),
+                collection: None,
+                tags: "[]".into(),
+                rel_path: Some(format!("workshop/assets/{asset_id}.mp3")),
+                thumb_rel_path: None,
+                mime: Some("audio/mpeg".into()),
                 width: None,
                 height: None,
                 bytes: Some(bytes.len() as i64),
@@ -1789,12 +1889,13 @@ mod tests {
                 opaque_image_asset_snapshot(ASSET_ID, "源图片", false),
                 opaque_image_asset_snapshot(MASK_REFERENCE_ASSET_ID, "遮罩参考", false),
                 opaque_image_asset_snapshot(CONFIG_RESULT_ASSET_ID, "生成结果", false),
+                opaque_audio_asset_snapshot(AUDIO_SOURCE_ASSET_ID, "音频来源", false),
             ],
             30,
         )
         .unwrap();
         let parsed = parse_creative_project_archive(&bytes).unwrap();
-        assert_eq!(parsed.assets.len(), 3);
+        assert_eq!(parsed.assets.len(), 4);
 
         let imported_project = "0190f5fe-7c00-7a00-8abc-000000000713";
         let remapped = remap_creative_archive_for_import(parsed, imported_project).unwrap();
@@ -1858,17 +1959,82 @@ mod tests {
         };
         assert_eq!(source_node_id, &video_source.id);
         assert_eq!(source_asset_id, &None);
+        let audio_source = &remapped.document.nodes[6];
+        let CreativeNodeData::Audio(audio_source_data) = &audio_source.data else {
+            panic!("expected audio source node")
+        };
+        assert_eq!(
+            audio_source_data.asset_id.as_deref(),
+            Some(asset_by_title["音频来源"])
+        );
+        let CreativeNodeData::Config(audio_config) = &remapped.document.nodes[7].data else {
+            panic!("expected audio config")
+        };
+        let Some(CreativeConfigOperation::AudioNodeCompose {
+            source_node_id,
+            source_asset_id,
+        }) = &audio_config.operation
+        else {
+            panic!("expected audio compose operation")
+        };
+        assert_eq!(source_node_id, &audio_source.id);
+        assert_eq!(
+            source_asset_id.as_deref(),
+            Some(asset_by_title["音频来源"])
+        );
         let remapped_json = serde_json::to_string(&remapped.document).unwrap();
         for old_id in [
             "config-source-node",
             "video-source-node",
+            "audio-source-node",
             ASSET_ID,
             MASK_REFERENCE_ASSET_ID,
             CONFIG_RESULT_ASSET_ID,
+            AUDIO_SOURCE_ASSET_ID,
         ] {
             assert!(!remapped_json.contains(old_id));
         }
 
+    }
+
+    #[test]
+    fn audio_config_operation_rejects_missing_source_node_and_invalid_asset_identity() {
+        let mut missing_source = config_reference_document();
+        let CreativeNodeData::Config(config) = &mut missing_source.nodes[7].data else {
+            panic!("expected audio config")
+        };
+        let Some(CreativeConfigOperation::AudioNodeCompose { source_node_id, .. }) =
+            &mut config.operation
+        else {
+            panic!("expected audio compose operation")
+        };
+        *source_node_id = "missing-audio-source".into();
+        let error = collect_document_asset_ids(&missing_source).unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::BadRequest(ref message)
+                if message.contains("missing source node")
+                    && message.contains("missing-audio-source")
+        ));
+
+        let mut invalid_asset = config_reference_document();
+        let CreativeNodeData::Config(config) = &mut invalid_asset.nodes[7].data else {
+            panic!("expected audio config")
+        };
+        let Some(CreativeConfigOperation::AudioNodeCompose {
+            source_asset_id, ..
+        }) = &mut config.operation
+        else {
+            panic!("expected audio compose operation")
+        };
+        *source_asset_id = Some("not-an-asset-id".into());
+        let error = collect_document_asset_ids(&invalid_asset).unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::BadRequest(ref message)
+                if message.contains("invalid assetId")
+                    && message.contains("not-an-asset-id")
+        ));
     }
 
     #[test]

@@ -55,7 +55,12 @@ export function pendingTaskCommandGuard(
       if (!sameOperation(operation, nextOwner.data.operation)) return true;
       if (!operation) return false;
       const sourceNodeId = operation.sourceNodeId;
-      const sourceType = operation.kind === 'video-node-compose' ? 'video' : 'image';
+      const sourceType =
+        operation.kind === 'video-node-compose'
+          ? 'video'
+          : operation.kind === 'audio-node-compose'
+            ? 'audio'
+            : 'image';
       const currentSource = state.document.nodes.find(
         (node) => node.id === sourceNodeId && node.type === sourceType
       );

@@ -3808,6 +3808,36 @@ mod tests {
     }
 
     #[test]
+    fn canonical_tts_fields_and_audio_canvas_metadata_never_reach_provider_extra() {
+        let params = json!({
+            "prompt": "literal narration",
+            "text": "legacy duplicate that must not be forwarded",
+            "voice": "alloy",
+            "format": "mp3",
+            "speed": 1.25,
+            "instructions": "warm and calm",
+            "canvasOperation": "audio-node-compose",
+            "sourceNodeId": "audio-node",
+            "sourceAssetId": null
+        });
+        let TaskRequest::SpeechSynthesis(request) =
+            cap_to_task_request(MediaCapability::Tts, &params, vec![]).unwrap()
+        else {
+            panic!("tts must map to SpeechSynthesis");
+        };
+        assert_eq!(request.text, "literal narration");
+        assert_eq!(request.voice.as_deref(), Some("alloy"));
+        assert_eq!(request.format.as_deref(), Some("mp3"));
+        assert_eq!(
+            request.extra,
+            json!({
+                "speed": 1.25,
+                "instructions": "warm and calm"
+            })
+        );
+    }
+
+    #[test]
     fn text_max_tokens_is_strict_and_bounded() {
         assert_eq!(param_text_max_tokens(&json!({})).unwrap(), DEFAULT_TEXT_MAX_TOKENS);
         assert_eq!(param_text_max_tokens(&json!({"max_tokens": 8192})).unwrap(), 8192);

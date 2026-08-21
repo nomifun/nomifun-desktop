@@ -80,6 +80,7 @@ const expectedData: CreativeCanvasNodeDataByKind = {
     volume: 1,
     trimStartMs: 0,
     trimEndMs: null,
+    composer: null,
   },
   director: {
     sceneId: null,
@@ -269,6 +270,7 @@ describe('real library insertion helpers', () => {
     }
     expect(video.type === 'video' && video.data.posterAssetId).toBeNull();
     expect(audio.type === 'audio' && audio.data.title).toBe('环境声');
+    expect(audio.type === 'audio' && audio.data.composer).toBeNull();
     expect(text.type === 'text' && text.data.text).toBe('第一幕\n雨夜。');
 
     for (const node of [image, video, audio, text]) {

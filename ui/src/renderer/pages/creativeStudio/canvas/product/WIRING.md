@@ -53,9 +53,10 @@ The Agent supplies its own single header; the generic right-panel tab header is
 shown only for properties so the product never renders stacked title bars.
 
 The Editor also exposes the canonical pending-task recovery feed described in
-`../editor/WIRING.md`. One project-scoped image-task runtime is mounted only
-after the project and Editor graph are both hydrated. It routes two strict
-persisted operations without creating a second controller:
+`../editor/WIRING.md`. Project-scoped image, video, and audio task runtimes are
+mounted only after the project and Editor graph are both hydrated. The image
+runtime routes two strict persisted operations without creating a second
+document controller:
 
 - `image-mask-edit` uploads the blue-marked reference as a hidden real asset.
 - `image-node-compose` submits empty image nodes as exact
@@ -70,6 +71,29 @@ as config-to-image nodes before pending removal performs the final CAS flush.
 Mount recovery accepts only either exact operation marker. A
 transport-ambiguous create keeps the same config and idempotency key for safe
 retry; only an authoritative 404 may clear an orphaned pending reference.
+
+The video runtime owns only `video-node-compose`. It accepts an empty video
+node as exact `video_generation` / `t2v`, or the same empty node with exactly
+one directly connected real image as `i2v`. It maps 720p/1080p and the supported
+aspect ratios to concrete width/height, fixes repeat to one, keeps canvas owner
+identity in `config.data.operation`, and never forwards local metadata through
+provider parameters. V2V, multiple/first-last-frame references, audio/video
+references, and provider-specific camera controls stay explicitly unavailable.
+
+The audio runtime owns only `audio-node-compose`. Its first deliverable accepts
+an empty audio node, no input assets, exact `speech_synthesis` / `tts`, and one
+real audio result. Exact adapter protocol profiles decide whether Voice ID and
+MP3/WAV format controls are exposed, whether voice is required, and the text
+limit; unknown protocols receive prompt only. Speed, instructions, reference
+audio, VoiceClone, AAC, and PCM are never sent by this slice. Successful
+settlement fills the same audio node ID, clears only the now-inapplicable draft
+model, and removes pending last. Failed/canceled configs remain auditable, and
+ambiguous submission offers same-key retry plus an explicit status check that
+cleans only an authoritative 404 orphan.
+
+All three inline media composers own node-persisted drafts, use fixed light
+stone creation palettes independent from the application theme, and switch to
+a viewport portal when the canvas column cannot contain them.
 
 The inline composer opens only for one selected image. A successful empty-node
 `t2i` task idempotently fills that source node with the first real result; any

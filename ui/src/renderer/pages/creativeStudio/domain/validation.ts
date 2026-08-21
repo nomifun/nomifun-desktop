@@ -7,6 +7,7 @@
 import {
   CREATIVE_STUDIO_DOCUMENT_SCHEMA,
   type CreateCreativeProjectRequest,
+  type CreativeAudioComposerDraft,
   type CreativeAudioNodeData,
   type CreativeBottomPanelView,
   type CreativeCanvasBackground,
@@ -436,7 +437,12 @@ const parseConfigOperation = (
   const record = asRecord(value, path, code);
   const kind = asLiteral(
     record.kind,
-    ['image-node-compose', 'image-mask-edit', 'video-node-compose'],
+    [
+      'image-node-compose',
+      'image-mask-edit',
+      'video-node-compose',
+      'audio-node-compose',
+    ],
     `${path}.kind`,
     code
   );
@@ -501,7 +507,8 @@ const normalizeConfigOperation = (
   if (
     legacyKind !== 'image-node-compose' &&
     legacyKind !== 'image-mask-edit' &&
-    legacyKind !== 'video-node-compose'
+    legacyKind !== 'video-node-compose' &&
+    legacyKind !== 'audio-node-compose'
   ) {
     fail(code, `${path}.parameters.canvasOperation`, 'known canvas operation');
   }
@@ -663,10 +670,41 @@ const parseVideoData = (value: unknown, path: string): CreativeVideoNodeData => 
   };
 };
 
+const parseAudioComposerDraft = (
+  value: unknown,
+  path: string
+): CreativeAudioComposerDraft => {
+  const code = 'INVALID_DOCUMENT';
+  const record = asRecord(value, path, code);
+  exactKeys(record, ['prompt', 'model', 'voice', 'format'], [], path, code);
+  const voice = asString(record.voice, `${path}.voice`, code, {
+    allowEmpty: true,
+    maxLength: 256,
+  });
+  if (voice !== voice.trim()) {
+    fail(code, `${path}.voice`, 'trimmed string');
+  }
+  return {
+    prompt: asString(record.prompt, `${path}.prompt`, code, {
+      allowEmpty: true,
+      maxLength: 1_000_000,
+    }),
+    model: parseComposerModel(record.model, `${path}.model`),
+    voice,
+    format: asLiteral(record.format, ['mp3', 'wav'], `${path}.format`, code),
+  };
+};
+
 const parseAudioData = (value: unknown, path: string): CreativeAudioNodeData => {
   const code = 'INVALID_DOCUMENT';
   const record = asRecord(value, path, code);
-  exactKeys(record, ['assetId', 'title', 'loop', 'volume', 'trimStartMs', 'trimEndMs'], [], path, code);
+  exactKeys(
+    record,
+    ['assetId', 'title', 'loop', 'volume', 'trimStartMs', 'trimEndMs'],
+    ['composer'],
+    path,
+    code
+  );
   const trimStartMs = asNumber(record.trimStartMs, `${path}.trimStartMs`, code, { min: 0 });
   const trimEndMs =
     record.trimEndMs === null
@@ -679,6 +717,10 @@ const parseAudioData = (value: unknown, path: string): CreativeAudioNodeData => 
     volume: asNumber(record.volume, `${path}.volume`, code, { min: 0, max: 1 }),
     trimStartMs,
     trimEndMs,
+    composer:
+      record.composer === undefined || record.composer === null
+        ? null
+        : parseAudioComposerDraft(record.composer, `${path}.composer`),
   };
 };
 

@@ -77,6 +77,7 @@ const TEST_DATA: CreativeCanvasNodeDataByKind = {
     volume: 1,
     trimStartMs: 0,
     trimEndMs: null,
+    composer: null,
   },
   director: {
     sceneId: null,

@@ -729,6 +729,10 @@ pub enum CreativeConfigOperation {
         source_node_id: String,
         source_asset_id: Option<String>,
     },
+    AudioNodeCompose {
+        source_node_id: String,
+        source_asset_id: Option<String>,
+    },
 }
 
 impl CreativeConfigOperation {
@@ -739,6 +743,10 @@ impl CreativeConfigOperation {
                 source_asset_id,
             }
             | Self::VideoNodeCompose {
+                source_node_id,
+                source_asset_id,
+            }
+            | Self::AudioNodeCompose {
                 source_node_id,
                 source_asset_id,
             } => {
@@ -806,6 +814,10 @@ fn normalize_legacy_config_operation(
             source_asset_id,
         },
         "video-node-compose" => CreativeConfigOperation::VideoNodeCompose {
+            source_node_id,
+            source_asset_id,
+        },
+        "audio-node-compose" => CreativeConfigOperation::AudioNodeCompose {
             source_node_id,
             source_asset_id,
         },
@@ -918,6 +930,8 @@ pub struct CreativeAudioNodeData {
     pub volume: f64,
     pub trim_start_ms: f64,
     pub trim_end_ms: Option<f64>,
+    #[serde(default)]
+    pub composer: Option<CreativeAudioComposerDraft>,
 }
 
 impl CreativeAudioNodeData {
@@ -932,6 +946,35 @@ impl CreativeAudioNodeData {
                 trim_end_ms,
                 self.trim_start_ms,
             )?;
+        }
+        if let Some(composer) = &self.composer {
+            composer.validate(&format!("{path}.composer"))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreativeAudioComposerDraft {
+    pub prompt: String,
+    pub model: Option<CreativeComposerModel>,
+    pub voice: String,
+    pub format: String,
+}
+
+impl CreativeAudioComposerDraft {
+    fn validate(&self, path: &str) -> Result<(), String> {
+        require_string(&format!("{path}.prompt"), &self.prompt, true, 1_000_000)?;
+        if let Some(model) = &self.model {
+            model.validate(&format!("{path}.model"))?;
+        }
+        require_string(&format!("{path}.voice"), &self.voice, true, 256)?;
+        if self.voice.trim() != self.voice {
+            return Err(format!("{path}.voice must be trimmed"));
+        }
+        if !matches!(self.format.as_str(), "mp3" | "wav") {
+            return Err(format!("{path}.format must be mp3 or wav"));
         }
         Ok(())
     }
@@ -1332,7 +1375,16 @@ mod tests {
                 "loop": false,
                 "volume": 0.75,
                 "trimStartMs": 0,
-                "trimEndMs": null
+                "trimEndMs": null,
+                "composer": {
+                    "prompt": "Welcome to NomiFun",
+                    "model": {
+                        "providerId": "0190f5fe-7c00-7a00-8abc-000000000190",
+                        "model": "speech-model-v1"
+                    },
+                    "voice": "alloy",
+                    "format": "mp3"
+                }
             }),
             "director" => serde_json::json!({
                 "sceneId": "scene-a",
@@ -1568,6 +1620,74 @@ mod tests {
     }
 
     #[test]
+    fn audio_composer_draft_is_strict_but_old_v1_audio_defaults_to_none() {
+        let mut old_audio = node_value("old-audio", "audio");
+        old_audio["data"].as_object_mut().unwrap().remove("composer");
+        let old_audio: CreativeNode = serde_json::from_value(old_audio).unwrap();
+        let CreativeNodeData::Audio(old_data) = &old_audio.data else {
+            unreachable!()
+        };
+        assert_eq!(old_data.composer, None);
+        assert_eq!(
+            serde_json::to_value(old_audio).unwrap()["data"]["composer"],
+            Value::Null
+        );
+
+        let mut invalid_format = node("invalid-audio-format", "audio");
+        let CreativeNodeData::Audio(data) = &mut invalid_format.data else {
+            unreachable!()
+        };
+        data.composer.as_mut().unwrap().format = "aac".into();
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(invalid_format);
+        assert!(
+            document
+                .validate_for_project(PROJECT_ID)
+                .unwrap_err()
+                .contains("composer.format must be mp3 or wav")
+        );
+
+        let mut oversized_voice = node("oversized-audio-voice", "audio");
+        let CreativeNodeData::Audio(data) = &mut oversized_voice.data else {
+            unreachable!()
+        };
+        data.composer.as_mut().unwrap().voice = "v".repeat(257);
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(oversized_voice);
+        assert!(
+            document
+                .validate_for_project(PROJECT_ID)
+                .unwrap_err()
+                .contains("composer.voice")
+        );
+
+        let mut untrimmed_voice = node("untrimmed-audio-voice", "audio");
+        let CreativeNodeData::Audio(data) = &mut untrimmed_voice.data else {
+            unreachable!()
+        };
+        data.composer.as_mut().unwrap().voice = " alloy ".into();
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(untrimmed_voice);
+        assert!(
+            document
+                .validate_for_project(PROJECT_ID)
+                .unwrap_err()
+                .contains("composer.voice must be trimmed")
+        );
+
+        let mut partial_model = node_value("partial-audio-model", "audio");
+        partial_model["data"]["composer"]["model"]
+            .as_object_mut()
+            .unwrap()
+            .remove("providerId");
+        assert!(serde_json::from_value::<CreativeNode>(partial_model).is_err());
+
+        let mut unknown_nested = node_value("unknown-audio-composer", "audio");
+        unknown_nested["data"]["composer"]["legacySetting"] = Value::Bool(true);
+        assert!(serde_json::from_value::<CreativeNode>(unknown_nested).is_err());
+    }
+
+    #[test]
     fn legacy_canvas_operation_is_normalized_out_of_provider_parameters() {
         let mut legacy = node_value("legacy-mask", "config");
         legacy["data"]["parameters"] = serde_json::json!({
@@ -1608,6 +1728,38 @@ mod tests {
             "markedReferenceAssetId": "asset-mask"
         });
         assert!(serde_json::from_value::<CreativeNode>(legacy).is_err());
+
+        let mut legacy_audio = node_value("legacy-audio", "config");
+        legacy_audio["data"]["parameters"] = serde_json::json!({
+            "prompt": "literal narration",
+            "voice": "alloy",
+            "format": "mp3",
+            "canvasOperation": "audio-node-compose",
+            "sourceNodeId": "audio-source",
+            "sourceAssetId": null
+        });
+        let parsed: CreativeNode = serde_json::from_value(legacy_audio).unwrap();
+        let CreativeNodeData::Config(data) = &parsed.data else {
+            unreachable!()
+        };
+        assert_eq!(
+            data.operation,
+            Some(CreativeConfigOperation::AudioNodeCompose {
+                source_node_id: "audio-source".into(),
+                source_asset_id: None,
+            })
+        );
+        assert_eq!(
+            data.parameters,
+            serde_json::json!({
+                "prompt": "literal narration",
+                "voice": "alloy",
+                "format": "mp3"
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        );
     }
 
     #[test]

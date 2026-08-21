@@ -228,4 +228,54 @@ describe('canvas pending task owner guard', () => {
       )
     ).toBe(true);
   });
+
+  test('protects a pending audio compose source and allows authoritative settlement', () => {
+    const source = testNode('audio', 4);
+    const config = pendingConfig();
+    const owner = {
+      ...config,
+      data: {
+        ...config.data,
+        task: 'speech_synthesis' as const,
+        capability: 'tts',
+        operation: {
+          kind: 'audio-node-compose' as const,
+          sourceNodeId: source.id,
+          sourceAssetId: null,
+        },
+      },
+    };
+    const state = createInitialCanvasState({
+      document: testDocument([owner, source]),
+    });
+    const taskIds = [owner.data.taskId as string];
+
+    expect(
+      canvasCommandPreservesPendingTaskOwners(
+        state,
+        taskIds,
+        canvasCommands.deleteSelection({ nodeIds: [source.id] })
+      )
+    ).toBe(false);
+    expect(
+      canvasCommandPreservesPendingTaskOwners(
+        state,
+        taskIds,
+        canvasCommands.updateNode({
+          ...source,
+          data: { ...source.data, assetId: testUuid(42) },
+        })
+      )
+    ).toBe(false);
+    expect(
+      canvasCommandPreservesPendingTaskOwners(
+        state,
+        taskIds,
+        canvasCommands.reconcileRuntimeNode({
+          ...source,
+          data: { ...source.data, assetId: testUuid(42) },
+        })
+      )
+    ).toBe(true);
+  });
 });

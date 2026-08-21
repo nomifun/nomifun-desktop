@@ -35,8 +35,8 @@ every stable asset referenced inside its v1 document: panorama, character,
 object, and capture records, including captures that were never sent back to
 the canvas. Import rewrites the sidecar's root Creative Studio `projectId` and
 all nested asset IDs before persisting it, while retaining internal
-camera/entity/timeline identities. The outer Director pointer, known image and
-video composer/mask `config.operation` node/asset references, graph identities, manifest checksums,
+camera/entity/timeline identities. The outer Director pointer, known image,
+video, and audio composer/mask `config.operation` node/asset references, graph identities, manifest checksums,
 and content paths are remapped from the same complete identity maps.
 
 The archive parser rejects missing dependencies, unknown reference-bearing
