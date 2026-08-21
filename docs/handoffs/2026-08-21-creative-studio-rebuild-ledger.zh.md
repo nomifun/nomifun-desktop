@@ -2,7 +2,7 @@
 
 > 用途：在长任务发生上下文压缩或人员切换时，从可验证提交继续，而不是重新审计整仓。
 > 分支：`codex/infinite-canvas-rebuild`
-> 最后功能锚点：`451dc013`（`feat(creative-studio): expose direct canvas node tools`）
+> 最后功能锚点：`5352954c`（`feat(creative-studio): add image node composer`）
 > 参考产品锚点：`ef7303d`
 
 ## 1. 续接协议
@@ -24,7 +24,7 @@
 | --- | --- | --- |
 | P1-P2 | 受保护运行时拆分、根主题、全屏 Focus Shell、侧栏入口与返回工作台 | `ed9c66df`…`954d6dcb` |
 | P3 | `nomifun.creative-studio/v1`、UUIDv7、项目 CRUD/CAS、项目中心、ZIP 导入导出 | `d03a6a64`、`b4361084`、`44933dd3`…`2ad53b01` |
-| P4 | 画布 reducer/history、视口、节点、连线、小地图、选择/分组/快捷键、Editor CAS 与离开 flush；首节点居中、参考节点几何、固定创作配色与直接节点工具 | `b2e19806`…`dc6c3c34`、`dd18dc6f`、`451dc013` |
+| P4 | 画布 reducer/history、视口、节点、连线、小地图、选择/分组/快捷键、Editor CAS 与离开 flush；首节点居中、参考节点几何、固定创作配色、直接节点工具与图片节点生成面板 | `b2e19806`…`dc6c3c34`、`dd18dc6f`、`451dc013`、`5352954c` |
 | P5 | Canonical 资产 API/库、文本/图像/视频/音频节点、素材选择与结果回填 | `57128727`、`e05b18a8`、`04f805a3`、`444db764` |
 | P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44` |
 | P7 | 生图/视频工作台、工作流定义/运行中心、提示词与素材中心 | `2283ee74`、`1414846e`、`ebd17f3a`…`aad21d9d`、`7e45f8ad` |
@@ -45,6 +45,8 @@
 - 画布主链：隔离新项目真实完成文本/图片节点创建、拖拽、连线、框选、分组/取消分组、缩放、撤销/重做、背景、小地图、属性编辑与重载持久化。首节点现在以参考产品世界原点居中，重置视图不再把节点推向右下；8 类节点默认尺寸、节点外壳、连线和占位态已按参考实现收敛。
 - 画布采用参考产品浅色 stone 中性配色作为固定创作表面，不跟随用户主题。1440×900 像素比较确认切换用户浅色/深色后仅顶部 65px 外层 NomiFun 导航变化，画布及创作控件区域逐像素一致。参考/目标对照图：`C:\Users\MINISFORUM\.codex\visualizations\2026\08\19\01a01aa7-ea42-76e3-aa34-9158a1382c97\68-canvas-reference-target-focused-comparison-light-1440x900.png`；主题隔离对照图：`65-target-canvas-fixed-palette-stable-theme-comparison.png`。
 - 底部工具栏已按参考产品顺序直接暴露文本、图片、视频、音频、全景、导演台和生成配置；分组继续是选择动作，不伪装为新节点类型。真实点击“视频”后节点数从 2 变 3，撤销后回到 2，重载确认没有残留；1440×900 对照图：`71-canvas-direct-toolbar-source-target-comparison-light-1440x900.png`。
+- 单选图片节点现在展开参考式 580px 生成面板：空图片使用精确 `image_generation` / `t2i`，已有真实素材使用 `image_edit` / `i2i`；提示词库、精确 NomiFun 模型、接口模式、质量、比例、尺寸、张数、幂等提交、取消、恢复和真实素材回填均走现有 canonical runtime。空图片首个结果原位填充，额外结果成为 config-linked 图片；已有图片永不被覆盖。无模型时保持明确禁用，没有伪造 provider、积分或 Camera Control。
+- 图片生成面板沿用参考项目的固定浅 stone 配色，主面板、设置弹层和嵌套下拉均不受用户主题影响。面板会按剩余空间在节点上下翻转，1024×768 自动横向钳制，390×844 在画布列无法容纳时切为 16px 视口边距浮层；新浏览器会话完成 1440→1024→390→1440 动态门禁，Console 0 error / 0 warning。参考与目标截图：`C:\Users\MINISFORUM\.codex\visualizations\2026\08\19\01a01aa7-ea42-76e3-aa34-9158a1382c97\creative-studio-image-composer-qa\reference-image-composer-light-1440x900.png`、`target-image-composer-clean-final-light-1440x900.png`。
 
 `dd18dc6f` 的提交前检查：
 
@@ -57,6 +59,14 @@
 - 画布目录完整测试：194 passed / 1066 assertions。
 - `bun run typecheck`、`bun run check:icons`、`bun run check:theme`、`bun run check:dead-css`、`git diff --cached --check`：通过。
 - UI production build：通过；仅保留仓库既存的动态/静态重复导入与大 chunk 提示。
+
+`5352954c` 的提交前检查：
+
+- Canvas product + imageTools：113 passed / 624 assertions。
+- T2I/I2I composer 精确契约：空图片无伪输入素材、首结果原位填充、多结果幂等与 confirmed-404 单项清理均有测试。
+- `bun run typecheck`、`bun run check:icons`、`bun run check:theme`、`bun run check:dead-css`、`git diff --cached --check`：通过。
+- UI production build：通过；仅保留仓库既存的动态/静态重复导入与大 chunk 提示。
+- 真实浏览器：1440×900、1024×768、390×844，浅色/深色外层主题、设置弹层、下拉、Enter/Shift+Enter、无模型禁用与提示词库入口通过；未触发付费生成。
 
 `7e45f8ad` 的提交前检查：
 
@@ -82,7 +92,7 @@
 
 ## 5. 下一步单线程优先级
 
-1. 画布交互补齐：接入选中图片后的真实生成 composer；随后做保存冲突的真实双客户端门禁。
+1. 画布交互补齐：做保存冲突的真实双客户端门禁，并继续逐项核对参考项目的节点级动态操作。
 2. 生图、视频与工作流：先验证无模型/失败/取消/恢复，再在得到成本授权后执行一个真实 provider 冒烟。
 3. Director：验证场景、时间轴、截图回填、归档重开，并确认所有不可用入口描述准确。
 4. P11：1280×720、1024×768、390×844、固定创作配色、Tauri 慢环、UI build/桌面打包和最终能力文档。
