@@ -81,7 +81,7 @@ pub use conversation::{
 pub use creation_task::{
     CreateCreativeTaskParams, CreationTaskPageCursorRef, CreativeTaskOwnerRef,
     ICreationTaskRepository, IdempotentCreationTask, ListStandaloneWorkbenchTasksParams,
-    UpdateCreationTaskParams,
+    RetireStandaloneWorkbenchTasksParams, UpdateCreationTaskParams,
 };
 pub use cron::ICronRepository;
 pub use idmm_intervention::{

@@ -63,6 +63,8 @@ interface ImageWorkbenchResultBase {
   durationLabel?: string;
   /** False when legacy inputs or the exact model are no longer available. */
   retryable?: boolean;
+  /** Only terminal tasks may be retired from durable history. */
+  deletable?: boolean;
 }
 
 export interface ImageWorkbenchQueuedResult extends ImageWorkbenchResultBase {

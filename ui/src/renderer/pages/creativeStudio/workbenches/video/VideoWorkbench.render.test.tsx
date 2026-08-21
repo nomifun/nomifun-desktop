@@ -23,8 +23,8 @@ const base = {
 };
 
 const tasks: VideoWorkbenchTask[] = [
-  { ...base, id: 'queued', taskId: 'task-queued', status: 'queued' },
-  { ...base, id: 'running', taskId: 'task-running', status: 'running' },
+  { ...base, id: 'queued', taskId: 'task-queued', status: 'queued', deletable: false },
+  { ...base, id: 'running', taskId: 'task-running', status: 'running', deletable: false },
   {
     ...base,
     id: 'succeeded',
@@ -32,6 +32,7 @@ const tasks: VideoWorkbenchTask[] = [
     status: 'succeeded',
     assetId: 'asset-succeeded',
     videoUrl: 'https://media.invalid/video.mp4',
+    deletable: true,
   },
   {
     ...base,
@@ -39,6 +40,7 @@ const tasks: VideoWorkbenchTask[] = [
     taskId: 'task-failed',
     status: 'failed',
     error: '模型暂时不可用',
+    deletable: true,
   },
   {
     ...base,
@@ -46,6 +48,7 @@ const tasks: VideoWorkbenchTask[] = [
     taskId: 'task-canceled',
     status: 'canceled',
     message: '用户已取消任务',
+    deletable: true,
   },
 ];
 
@@ -73,5 +76,9 @@ describe('VideoWorkbench result rendering', () => {
     expect(html.includes('https://media.invalid/video.mp4')).toBe(true);
     expect(html.includes('data:video')).toBe(false);
     expect(html.includes('当前创作进度')).toBe(false);
+    expect(html.includes('选择任务 queued')).toBe(false);
+    expect(html.includes('选择任务 running')).toBe(false);
+    expect(html.includes('选择任务 succeeded')).toBe(true);
+    expect(html.includes('从历史移除 failed')).toBe(true);
   });
 });

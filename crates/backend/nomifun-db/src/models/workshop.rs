@@ -125,4 +125,7 @@ pub struct CreationTaskRow {
     pub submitted_at: TimestampMs,
     pub started_at: Option<TimestampMs>,
     pub finished_at: Option<TimestampMs>,
+    /// History retirement tombstone. The task and all manifests remain live
+    /// canonical records; only owner-scoped list surfaces hide this row.
+    pub deleted_at: Option<TimestampMs>,
 }

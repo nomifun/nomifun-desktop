@@ -133,8 +133,9 @@ pub use repository::{
 pub use repository::{
     AssetSort, CreateCreativeTaskParams, CreationTaskPageCursorRef, CreativeTaskOwnerRef,
     ICreationTaskRepository, IWorkshopRepository, IdempotentCreationTask, ListAssetsParams,
-    ListStandaloneWorkbenchTasksParams, SqliteCreationTaskRepository, SqliteWorkshopRepository,
-    UpdateAssetParams, UpdateCreationTaskParams,
+    ListStandaloneWorkbenchTasksParams, RetireStandaloneWorkbenchTasksParams,
+    SqliteCreationTaskRepository, SqliteWorkshopRepository, UpdateAssetParams,
+    UpdateCreationTaskParams,
 };
 
 // Re-export sqlx (and its pool type) for downstream crates that run ad-hoc

@@ -895,7 +895,7 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
     json_text_ref!(
         "creation_tasks", "result_asset_ids", "$[]",
         "SELECT item.value AS value FROM creation_tasks, json_each(creation_tasks.result_asset_ids) item" =>
-        "workshop_assets", "asset_id", "idx_creation_tasks_result_asset_ids_json", SetNull, RequireParent
+        "workshop_assets", "asset_id", "idx_creation_tasks_result_asset_ids_json", Restrict, RequireParent
     ),
     json_text_ref!(
         "client_preferences", "value", "$.queue[].provider_id",
@@ -1382,6 +1382,13 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             &[
                 "BEFORE UPDATE OF CHANNEL_PLUGIN_ID, CHANNEL_USER_ID, CHAT_ID, CHANNEL_SESSION_ID, CREATED_AT ON CHANNEL_SESSION_BINDINGS",
                 "RAISE(ABORT, 'CHANNEL SESSION BINDING IDENTITY IS IMMUTABLE')",
+            ],
+        ),
+        (
+            "restrict_workshop_asset_delete_creation_task_refs",
+            &[
+                "BEFORE DELETE ON WORKSHOP_ASSETS",
+                "RAISE(ABORT, 'WORKSHOP ASSET IS REFERENCED BY CREATION TASK INPUT OR RESULT')",
             ],
         ),
         (

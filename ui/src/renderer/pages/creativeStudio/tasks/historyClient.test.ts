@@ -37,6 +37,7 @@ const task = (taskId: string, submittedAt: number) => ({
   submitted_at: submittedAt,
   started_at: submittedAt + 1,
   finished_at: submittedAt + 2,
+  deleted_at: null,
 });
 
 const activeTask = (taskId: string, submittedAt: number) => ({
@@ -89,6 +90,7 @@ describe('CreativeTaskHistoryClient', () => {
       { items: [task(TASK_A, 10), task(TASK_A, 10)], next_cursor: null },
       { items: [task(TASK_A, 10), task(TASK_B, 20)], next_cursor: null },
       { items: [], next_cursor: `10:${TASK_A}` },
+      { items: [{ ...task(TASK_A, 10), deleted_at: 20 }], next_cursor: null },
     ];
     for (const value of cases) {
       let error: unknown = null;
@@ -212,5 +214,109 @@ describe('CreativeTaskHistoryClient', () => {
       error = reason;
     }
     expect(error instanceof CreativeTaskContractError).toBe(true);
+  });
+
+  test('retires an exact owner-scoped batch and requires an ordered full echo', async () => {
+    let body: unknown = null;
+    const result = await new CreativeTaskHistoryClient({
+      listStandalone: async () => ({ items: [], next_cursor: null }),
+      retireStandalone: async (value) => {
+        body = value;
+        return { retired_task_ids: [TASK_B, TASK_A] };
+      },
+    }).retireStandalone({
+      projectId: PROJECT_ID,
+      workbenchKind: 'image',
+      taskIds: [TASK_B, TASK_A],
+    });
+    expect(body).toEqual({
+      project_id: PROJECT_ID,
+      workbench_kind: 'image',
+      task_ids: [TASK_B, TASK_A],
+    });
+    expect(result.retiredTaskIds).toEqual([TASK_B, TASK_A]);
+
+    for (const value of [
+      { retired_task_ids: [TASK_A] },
+      { retired_task_ids: [TASK_A, TASK_B] },
+      { retired_task_ids: [TASK_B, TASK_A], unknown: true },
+    ]) {
+      let error: unknown = null;
+      try {
+        await new CreativeTaskHistoryClient({
+          listStandalone: async () => ({ items: [], next_cursor: null }),
+          retireStandalone: async () => value,
+        }).retireStandalone({
+          projectId: PROJECT_ID,
+          workbenchKind: 'image',
+          taskIds: [TASK_B, TASK_A],
+        });
+      } catch (reason) {
+        error = reason;
+      }
+      expect(error instanceof CreativeTaskContractError).toBe(true);
+    }
+  });
+
+  test('uses the canonical retirement route and forwards AbortSignal', async () => {
+    const calls: Array<{ url: string; method?: string; body?: string; signal?: AbortSignal }> = [];
+    const signal = new AbortController().signal;
+    const http = new HttpCreationTaskApi({
+      baseUrl: () => 'http://127.0.0.1:8788',
+      authHeaders: () => ({}),
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({
+          url: String(url),
+          method: init?.method,
+          body: typeof init?.body === 'string' ? init.body : undefined,
+          signal: init?.signal ?? undefined,
+        });
+        return new Response(JSON.stringify({ data: { retired_task_ids: [TASK_A] } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }) as typeof fetch,
+    });
+    await new CreativeTaskHistoryClient(http).retireStandalone(
+      { projectId: PROJECT_ID, workbenchKind: 'image', taskIds: [TASK_A] },
+      signal
+    );
+    expect(calls).toEqual([
+      {
+        url: 'http://127.0.0.1:8788/api/creative-studio/tasks/retire',
+        method: 'POST',
+        body: JSON.stringify({
+          project_id: PROJECT_ID,
+          workbench_kind: 'image',
+          task_ids: [TASK_A],
+        }),
+        signal,
+      },
+    ]);
+  });
+
+  test('rejects empty, duplicate, or oversized retirement batches before the API', async () => {
+    let calls = 0;
+    const client = new CreativeTaskHistoryClient({
+      listStandalone: async () => ({ items: [], next_cursor: null }),
+      retireStandalone: async () => {
+        calls += 1;
+        return { retired_task_ids: [] };
+      },
+    });
+    for (const taskIds of [[], [TASK_A, TASK_A], Array.from({ length: 101 }, () => TASK_A)]) {
+      let error: unknown = null;
+      try {
+        await client.retireStandalone({
+          projectId: PROJECT_ID,
+          workbenchKind: 'image',
+          taskIds,
+        });
+      } catch (reason) {
+        error = reason;
+      }
+      expect(error instanceof CreativeTaskContractError).toBe(true);
+    }
+    expect(calls).toBe(0);
   });
 });

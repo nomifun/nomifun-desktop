@@ -91,6 +91,7 @@ const task = (
   submittedAt: 1,
   startedAt: 2,
   finishedAt: status === 'queued' || status === 'running' ? null : 3,
+  deletedAt: null,
 });
 
 const resultAsset: CreativeAsset = {

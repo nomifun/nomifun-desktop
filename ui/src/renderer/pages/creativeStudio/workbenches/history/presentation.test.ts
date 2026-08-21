@@ -35,6 +35,7 @@ const task = (status: CreativeTask['status']): CreativeTask => ({
   submittedAt: 10,
   startedAt: status === 'queued' ? null : 11,
   finishedAt: status === 'succeeded' ? 12 : null,
+  deletedAt: null,
 });
 const runtime: CreativeWorkbenchRuntimeSnapshot = {
   state: 'idle',

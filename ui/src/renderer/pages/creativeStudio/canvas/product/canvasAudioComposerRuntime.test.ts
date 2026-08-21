@@ -127,6 +127,7 @@ const task = (
     status === 'succeeded' || status === 'failed' || status === 'canceled'
       ? 3
       : null,
+  deletedAt: null,
 });
 
 const audioAsset = (id: string, title: string): CreativeAsset => ({

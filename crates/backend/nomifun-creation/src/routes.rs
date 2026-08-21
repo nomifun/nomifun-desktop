@@ -14,7 +14,9 @@ use nomifun_api_types::ApiResponse;
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
 
-use crate::dto::{CreativeCreationTask, CreativeCreationTaskPage};
+use crate::dto::{
+    CreativeCreationTask, CreativeCreationTaskPage, CreativeCreationTaskRetireResult,
+};
 #[cfg(test)]
 use crate::dto::CreationTask;
 use crate::service::{CreativeTaskOwner, NewCreationTask};
@@ -30,6 +32,10 @@ pub fn creation_routes(state: CreationRouterState) -> Router {
         .route(
             "/api/creative-studio/tasks/{creation_task_id}",
             get(get_creative_task),
+        )
+        .route(
+            "/api/creative-studio/tasks/retire",
+            post(retire_standalone_workbench_tasks),
         )
         .route(
             "/api/creative-studio/tasks/{creation_task_id}/cancel",
@@ -122,6 +128,14 @@ struct ListStandaloneWorkbenchTasksQuery {
     active_only: Option<bool>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetireStandaloneWorkbenchTasksRequest {
+    project_id: String,
+    workbench_kind: StandaloneWorkbenchKind,
+    task_ids: Vec<String>,
+}
+
 fn required_idempotency_key(headers: &HeaderMap) -> Result<String, AppError> {
     let mut values = headers.get_all("idempotency-key").iter();
     let value = values.next().ok_or_else(|| {
@@ -194,6 +208,25 @@ async fn list_standalone_workbench_tasks(
         page.items,
         page.next_cursor,
     )?)))
+}
+
+async fn retire_standalone_workbench_tasks(
+    State(state): State<CreationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    body: Result<Json<RetireStandaloneWorkbenchTasksRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CreativeCreationTaskRetireResult>>, AppError> {
+    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let retired_task_ids = state
+        .service
+        .retire_standalone_workbench_tasks(
+            &request.project_id,
+            request.workbench_kind,
+            &request.task_ids,
+        )
+        .await?;
+    Ok(Json(ApiResponse::ok(CreativeCreationTaskRetireResult {
+        retired_task_ids,
+    })))
 }
 
 async fn get_creative_task(
@@ -353,6 +386,33 @@ mod tests {
     }
 
     #[test]
+    fn standalone_retire_body_is_flat_exact_and_typed() {
+        let request = serde_json::from_value::<RetireStandaloneWorkbenchTasksRequest>(json!({
+            "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
+            "workbench_kind": "image",
+            "task_ids": ["0190f5fe-7c00-7a00-8000-000000000002"]
+        }))
+        .unwrap();
+        assert_eq!(request.workbench_kind, StandaloneWorkbenchKind::Image);
+        assert_eq!(request.task_ids.len(), 1);
+        for invalid in [
+            json!({
+                "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                "workbench_kind": "image",
+                "task_ids": [],
+                "owner": {"kind": "standalone_workbench"}
+            }),
+            json!({
+                "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                "workbench_kind": "canvas",
+                "task_ids": []
+            }),
+        ] {
+            assert!(serde_json::from_value::<RetireStandaloneWorkbenchTasksRequest>(invalid).is_err());
+        }
+    }
+
+    #[test]
     fn creative_task_surface_rejects_invalid_owner_rows() {
         let invalid = CreationTask {
             creation_task_id: "0190f5fe-7c00-7a00-8000-000000000001".into(),
@@ -374,6 +434,7 @@ mod tests {
             submitted_at: 1,
             started_at: None,
             finished_at: None,
+            deleted_at: None,
         };
         assert!(CreativeCreationTask::try_from(invalid).is_err());
     }

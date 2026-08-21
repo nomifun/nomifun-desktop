@@ -500,6 +500,7 @@ export function mapCreationTaskWire(
       'submitted_at',
       'started_at',
       'finished_at',
+      'deleted_at',
     ],
     'response'
   );
@@ -520,8 +521,22 @@ export function mapCreationTaskWire(
     submittedAt: requireInteger(wire.submitted_at, 'submitted_at'),
     startedAt: nullableInteger(wire.started_at, 'started_at'),
     finishedAt: nullableInteger(wire.finished_at, 'finished_at'),
+    deletedAt: nullableInteger(wire.deleted_at, 'deleted_at'),
   };
   assertStatusContract(task);
+  if (
+    task.deletedAt !== null &&
+    (task.owner.kind !== 'standalone_workbench' ||
+      task.status === 'queued' ||
+      task.status === 'running' ||
+      task.deletedAt < task.submittedAt)
+  ) {
+    throw new CreativeTaskContractError(
+      'invalid_response',
+      `Creative task ${task.taskId} has an invalid history tombstone`,
+      'deleted_at'
+    );
+  }
   if (expected) assertExpectedTask(task, expected);
   return task;
 }
@@ -773,6 +788,15 @@ export class HttpCreationTaskApi implements CreationTaskWireApi {
     );
   }
 
+  retireStandalone(body: unknown, signal?: AbortSignal): Promise<unknown> {
+    return this.request(
+      'POST',
+      '/api/creative-studio/tasks/retire',
+      body,
+      signal
+    );
+  }
+
   get(taskId: string, signal?: AbortSignal): Promise<unknown> {
     return this.request(
       'GET',
@@ -803,6 +827,13 @@ export class CreativeTaskClient implements CreativeTaskPort {
       { taskId: idempotencyKey, ...identity }
     );
     assertCreatedTaskInputs(task, input.inputs);
+    if (task.deletedAt !== null) {
+      throw new CreativeTaskContractError(
+        'invalid_response',
+        'A retired creative task cannot satisfy a create request',
+        'deleted_at'
+      );
+    }
     return task;
   }
 

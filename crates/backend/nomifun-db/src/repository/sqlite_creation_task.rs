@@ -7,14 +7,15 @@ use nomifun_common::{
 use nomifun_common::validate_uuidv7;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{Sqlite, SqlitePool, Transaction};
+use sqlx::{QueryBuilder, Sqlite, SqlitePool, Transaction};
 
 use crate::error::DbError;
 use crate::models::CreationTaskRow;
 use crate::repository::ICreationTaskRepository;
 use crate::repository::creation_task::{
     CreateCreativeTaskParams, CreativeTaskOwnerRef, IdempotentCreationTask,
-    ListStandaloneWorkbenchTasksParams, UpdateCreationTaskParams,
+    ListStandaloneWorkbenchTasksParams, RetireStandaloneWorkbenchTasksParams,
+    UpdateCreationTaskParams,
 };
 
 /// SQLite-backed implementation of [`ICreationTaskRepository`].
@@ -51,6 +52,7 @@ struct CreationTaskDbRow {
     submitted_at: i64,
     started_at: Option<i64>,
     finished_at: Option<i64>,
+    deleted_at: Option<i64>,
     request_fingerprint: Option<String>,
 }
 
@@ -79,6 +81,7 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
             submitted_at,
             started_at,
             finished_at,
+            deleted_at,
             request_fingerprint,
         } = row;
         validate_creation_task_id(&creation_task_id)?;
@@ -168,6 +171,19 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
                 "creation task {creation_task_id} input_bindings is not canonically encoded"
             )));
         }
+        if deleted_at.is_some_and(|deleted_at| {
+            deleted_at < submitted_at
+                || workbench_kind.is_none()
+                || node_id.is_some()
+                || workflow_id.is_some()
+                || workflow_run_id.is_some()
+                || workflow_step_id.is_some()
+                || !matches!(status.as_str(), "failed" | "canceled" | "succeeded")
+        }) {
+            return Err(DbError::Conflict(format!(
+                "creation task {creation_task_id} has an invalid retirement tombstone"
+            )));
+        }
         Ok(Self {
             creation_task_id,
             project_id,
@@ -189,6 +205,7 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
             submitted_at,
             started_at,
             finished_at,
+            deleted_at,
         })
     }
 }
@@ -767,6 +784,7 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
             sqlx::query_as::<_, CreationTaskDbRow>(
                 "SELECT * FROM creation_tasks \
                  WHERE project_id = ?1 AND workbench_kind = ?2 \
+                   AND deleted_at IS NULL \
                    AND node_id IS NULL AND workflow_id IS NULL \
                    AND workflow_run_id IS NULL AND workflow_step_id IS NULL \
                    AND (?3 = 0 OR status IN ('queued', 'running')) \
@@ -785,6 +803,7 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
             sqlx::query_as::<_, CreationTaskDbRow>(
                 "SELECT * FROM creation_tasks \
                  WHERE project_id = ?1 AND workbench_kind = ?2 \
+                   AND deleted_at IS NULL \
                    AND node_id IS NULL AND workflow_id IS NULL \
                    AND workflow_run_id IS NULL AND workflow_step_id IS NULL \
                    AND (?3 = 0 OR status IN ('queued', 'running')) \
@@ -798,6 +817,157 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
             .await?
         };
         rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    async fn retire_standalone_workbench_tasks(
+        &self,
+        params: RetireStandaloneWorkbenchTasksParams<'_>,
+    ) -> Result<Vec<CreationTaskRow>, DbError> {
+        let project_id = CreativeStudioProjectId::parse(params.project_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "Creative task project_id {:?} is not a canonical UUIDv7: {error}",
+                params.project_id
+            ))
+        })?;
+        if !matches!(params.workbench_kind, "image" | "video" | "audio") {
+            return Err(DbError::Conflict(format!(
+                "Creative task workbench_kind {:?} is invalid",
+                params.workbench_kind
+            )));
+        }
+        if params.task_ids.is_empty() || params.task_ids.len() > 100 {
+            return Err(DbError::Conflict(
+                "standalone workbench retirement requires 1 to 100 task ids".into(),
+            ));
+        }
+        if params.deleted_at < 0 {
+            return Err(DbError::Conflict(
+                "standalone workbench retirement deleted_at must be non-negative".into(),
+            ));
+        }
+        let mut seen = std::collections::HashSet::with_capacity(params.task_ids.len());
+        for task_id in params.task_ids {
+            validate_creation_task_id(task_id)?;
+            if !seen.insert(task_id.as_str()) {
+                return Err(DbError::Conflict(format!(
+                    "standalone workbench retirement contains duplicate task id {task_id}"
+                )));
+            }
+        }
+
+        let mut tx = self.pool.begin().await?;
+        // Acquire SQLite writer authority before validating the batch, so a
+        // worker cannot cross the live/terminal boundary between validation
+        // and the tombstone write.
+        let mut lock = QueryBuilder::<Sqlite>::new(
+            "UPDATE creation_tasks SET status = status WHERE creation_task_id IN (",
+        );
+        {
+            let mut ids = lock.separated(", ");
+            for task_id in params.task_ids {
+                ids.push_bind(task_id);
+            }
+        }
+        lock.push(")");
+        lock.build().execute(&mut *tx).await?;
+
+        let mut select =
+            QueryBuilder::<Sqlite>::new("SELECT * FROM creation_tasks WHERE creation_task_id IN (");
+        {
+            let mut ids = select.separated(", ");
+            for task_id in params.task_ids {
+                ids.push_bind(task_id);
+            }
+        }
+        select.push(")");
+        let rows = select
+            .build_query_as::<CreationTaskDbRow>()
+            .fetch_all(&mut *tx)
+            .await?;
+        if rows.len() != params.task_ids.len() {
+            return Err(DbError::NotFound(
+                "one or more standalone workbench tasks do not exist".into(),
+            ));
+        }
+        for row in &rows {
+            let exact_owner = row.project_id.as_deref() == Some(project_id.as_str())
+                && row.workbench_kind.as_deref() == Some(params.workbench_kind)
+                && row.node_id.is_none()
+                && row.workflow_id.is_none()
+                && row.workflow_run_id.is_none()
+                && row.workflow_step_id.is_none();
+            if !exact_owner {
+                return Err(DbError::Conflict(format!(
+                    "creation task {} does not belong to the requested standalone workbench owner",
+                    row.creation_task_id
+                )));
+            }
+            if matches!(row.status.as_str(), "queued" | "running") {
+                return Err(DbError::Conflict(format!(
+                    "live creation task {} cannot be retired",
+                    row.creation_task_id
+                )));
+            }
+            if !matches!(row.status.as_str(), "failed" | "canceled" | "succeeded") {
+                return Err(DbError::Conflict(format!(
+                    "creation task {} has unsupported terminal status {:?}",
+                    row.creation_task_id, row.status
+                )));
+            }
+            if params.deleted_at < row.submitted_at {
+                return Err(DbError::Conflict(format!(
+                    "retirement timestamp predates creation task {}",
+                    row.creation_task_id
+                )));
+            }
+        }
+        if rows.iter().any(|row| row.deleted_at.is_none()) {
+            let mut update = QueryBuilder::<Sqlite>::new(
+                "UPDATE creation_tasks SET deleted_at = COALESCE(deleted_at, ",
+            );
+            update.push_bind(params.deleted_at);
+            update.push(") WHERE creation_task_id IN (");
+            {
+                let mut ids = update.separated(", ");
+                for task_id in params.task_ids {
+                    ids.push_bind(task_id);
+                }
+            }
+            update.push(")");
+            update.build().execute(&mut *tx).await?;
+        }
+
+        let mut refreshed = QueryBuilder::<Sqlite>::new(
+            "SELECT * FROM creation_tasks WHERE creation_task_id IN (",
+        );
+        {
+            let mut ids = refreshed.separated(", ");
+            for task_id in params.task_ids {
+                ids.push_bind(task_id);
+            }
+        }
+        refreshed.push(")");
+        let rows = refreshed
+            .build_query_as::<CreationTaskDbRow>()
+            .fetch_all(&mut *tx)
+            .await?;
+        let mut by_id = rows
+            .into_iter()
+            .map(|row| Ok((row.creation_task_id.clone(), CreationTaskRow::try_from(row)?)))
+            .collect::<Result<std::collections::HashMap<_, _>, DbError>>()?;
+        let ordered = params
+            .task_ids
+            .iter()
+            .map(|task_id| {
+                by_id.remove(task_id).ok_or_else(|| {
+                    DbError::Init(format!(
+                        "retired creation task {task_id} vanished before commit"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        tx.commit().await?;
+        Ok(ordered)
     }
 
     async fn list_all_tasks(&self) -> Result<Vec<CreationTaskRow>, DbError> {
@@ -927,7 +1097,9 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
 
     async fn list_live_tasks(&self) -> Result<Vec<CreationTaskRow>, DbError> {
         let rows = sqlx::query_as::<_, CreationTaskDbRow>(
-            "SELECT * FROM creation_tasks WHERE status IN ('queued', 'running') ORDER BY submitted_at ASC",
+            "SELECT * FROM creation_tasks \
+             WHERE status IN ('queued', 'running') AND deleted_at IS NULL \
+             ORDER BY submitted_at ASC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1451,6 +1623,165 @@ mod tests {
                 .collect::<Vec<_>>(),
             matching[1..]
         );
+    }
+
+    #[tokio::test]
+    async fn standalone_retirement_is_terminal_owner_scoped_atomic_and_idempotent() {
+        let (repo, db, provider_id) = repo().await;
+        let project_id = seed_creative_project(&db).await;
+        let mut ids = Vec::new();
+        for (index, status) in ["failed", "canceled", "queued"].into_iter().enumerate() {
+            let task_id = CreationTaskId::new().into_string();
+            let fingerprint = serde_json::json!({"task": task_id}).to_string();
+            let mut create = standalone_creative_params(
+                &task_id,
+                &project_id,
+                "video",
+                &provider_id,
+                "[]",
+                &fingerprint,
+            );
+            create.submitted_at = 100 + index as i64;
+            repo.get_or_create_creative_task(create).await.unwrap();
+            if status != "queued" {
+                repo.update_task(
+                    &task_id,
+                    UpdateCreationTaskParams {
+                        status: Some(status),
+                        finished_at: Some(Some(200 + index as i64)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            ids.push(task_id);
+        }
+        let retired = repo
+            .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
+                project_id: &project_id,
+                workbench_kind: "video",
+                task_ids: &ids[..2],
+                deleted_at: 500,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            retired
+                .iter()
+                .map(|row| row.creation_task_id.as_str())
+                .collect::<Vec<_>>(),
+            ids[..2].iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert!(retired.iter().all(|row| row.deleted_at == Some(500)));
+        let replay_fingerprint = serde_json::json!({"task": &ids[0]}).to_string();
+        let replay = repo
+            .get_or_create_creative_task(standalone_creative_params(
+                &ids[0],
+                &project_id,
+                "video",
+                &provider_id,
+                "[]",
+                &replay_fingerprint,
+            ))
+            .await
+            .unwrap();
+        assert!(!replay.inserted);
+        assert_eq!(replay.row.deleted_at, Some(500));
+        let visible = repo
+            .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
+                project_id: &project_id,
+                workbench_kind: "video",
+                active_only: false,
+                before: None,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].creation_task_id, ids[2]);
+
+        let repeated = repo
+            .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
+                project_id: &project_id,
+                workbench_kind: "video",
+                task_ids: &ids[..2],
+                deleted_at: 600,
+            })
+            .await
+            .unwrap();
+        assert!(repeated.iter().all(|row| row.deleted_at == Some(500)));
+
+        let new_terminal_id = CreationTaskId::new().into_string();
+        let fingerprint = serde_json::json!({"task": new_terminal_id}).to_string();
+        let mut create = standalone_creative_params(
+            &new_terminal_id,
+            &project_id,
+            "video",
+            &provider_id,
+            "[]",
+            &fingerprint,
+        );
+        create.submitted_at = 150;
+        repo.get_or_create_creative_task(create).await.unwrap();
+        repo.update_task(
+            &new_terminal_id,
+            UpdateCreationTaskParams {
+                status: Some("failed"),
+                finished_at: Some(Some(151)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mixed_terminal_ids = vec![ids[0].clone(), new_terminal_id.clone()];
+        let mixed_terminal = repo
+            .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
+                project_id: &project_id,
+                workbench_kind: "video",
+                task_ids: &mixed_terminal_ids,
+                deleted_at: 700,
+            })
+            .await
+            .unwrap();
+        assert_eq!(mixed_terminal[0].deleted_at, Some(500));
+        assert_eq!(mixed_terminal[1].deleted_at, Some(700));
+
+        let mixed_live = repo
+            .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
+                project_id: &project_id,
+                workbench_kind: "video",
+                task_ids: &[ids[0].clone(), ids[2].clone()],
+                deleted_at: 700,
+            })
+            .await;
+        assert!(matches!(mixed_live, Err(DbError::Conflict(message)) if message.contains("live")));
+        assert_eq!(
+            repo.get_task(&ids[0]).await.unwrap().unwrap().deleted_at,
+            Some(500),
+            "failed mixed batch must not rewrite an existing tombstone"
+        );
+        assert!(repo.get_task(&ids[2]).await.unwrap().unwrap().deleted_at.is_none());
+
+        let wrong_owner = repo
+            .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
+                project_id: &project_id,
+                workbench_kind: "image",
+                task_ids: &[ids[0].clone()],
+                deleted_at: 800,
+            })
+            .await;
+        assert!(matches!(wrong_owner, Err(DbError::Conflict(message)) if message.contains("does not belong")));
+        let missing_id = CreationTaskId::new().into_string();
+        let missing = repo
+            .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
+                project_id: &project_id,
+                workbench_kind: "video",
+                task_ids: &[missing_id],
+                deleted_at: 800,
+            })
+            .await;
+        assert!(matches!(missing, Err(DbError::NotFound(_))));
     }
 
     #[tokio::test]

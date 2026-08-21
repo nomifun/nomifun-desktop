@@ -90,6 +90,7 @@ export function isExactStandaloneWorkbenchHistoryTask(
     isStandaloneWorkbenchTaskOwner(task.owner) &&
     task.owner.projectId === scope.projectId &&
     task.owner.workbenchKind === scope.workbenchKind &&
+    task.deletedAt === null &&
     taskMatchesWorkbenchKind(task, scope.workbenchKind)
   );
 }

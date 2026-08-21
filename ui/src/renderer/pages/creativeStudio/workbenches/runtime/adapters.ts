@@ -322,6 +322,10 @@ export function mapImageWorkbenchRuntimeResults(
             (option) =>
               option.providerId === task.providerId && option.model === task.model,
           )),
+      deletable:
+        task.status === "succeeded" ||
+        task.status === "failed" ||
+        task.status === "canceled",
     };
     if (task.status === "succeeded") {
       const outputs = requireSucceededOutputs(entry).map((output) => {
@@ -496,6 +500,10 @@ export function mapVideoWorkbenchRuntimeTasks(
             (option) =>
               option.providerId === task.providerId && option.model === task.model,
           )),
+      deletable:
+        task.status === "succeeded" ||
+        task.status === "failed" ||
+        task.status === "canceled",
     };
     if (task.status === "succeeded") {
       const outputs = requireSucceededOutputs(entry);

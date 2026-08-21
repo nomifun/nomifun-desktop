@@ -50,6 +50,7 @@ export interface UseCreativeWorkbenchRuntimeResult extends CreativeWorkbenchRunt
   cancel(taskId?: string): Promise<CreativeWorkbenchRuntimeSnapshot>;
   retry(taskId: string): Promise<CreativeWorkbenchRuntimeSnapshot>;
   retrySubmission(order: number): Promise<CreativeWorkbenchRuntimeSnapshot>;
+  dismiss(taskIds: readonly string[]): CreativeWorkbenchRuntimeSnapshot;
   reset(): void;
 }
 
@@ -127,6 +128,10 @@ export function useCreativeWorkbenchRuntime(
     (order: number) => controller.retrySubmission(order),
     [controller],
   );
+  const dismiss = useCallback(
+    (taskIds: readonly string[]) => controller.dismiss(taskIds),
+    [controller],
+  );
   const reset = useCallback(() => controller.reset(), [controller]);
 
   return {
@@ -137,6 +142,7 @@ export function useCreativeWorkbenchRuntime(
     cancel,
     retry,
     retrySubmission,
+    dismiss,
     reset,
   };
 }

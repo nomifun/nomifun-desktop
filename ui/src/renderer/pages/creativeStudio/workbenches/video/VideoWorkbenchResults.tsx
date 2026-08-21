@@ -248,9 +248,9 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
   onLoadMoreTasks,
 }) => {
   const deletionEnabled = Boolean(onDeleteTasks);
-  const taskIds = tasks.map((task) => task.id);
+  const taskIds = tasks.filter((task) => task.deletable).map((task) => task.id);
   const visibleSelectedIds = selectedTaskIds.filter((id) => taskIds.includes(id));
-  const allSelected = tasks.length > 0 && tasks.every((task) => selectedTaskIds.includes(task.id));
+  const allSelected = taskIds.length > 0 && taskIds.every((id) => selectedTaskIds.includes(id));
   const pendingCount = tasks.filter(
     (task) => task.status === 'queued' || task.status === 'running'
   ).length;
@@ -278,7 +278,7 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
           {deletionEnabled ? <Button
             size='small'
             icon={allSelected ? <CloseSmall /> : <Check />}
-            disabled={tasks.length === 0}
+            disabled={taskIds.length === 0}
             onClick={() =>
               onSelectedTaskIdsChange(toggleAllVideoTasks(taskIds, selectedTaskIds))
             }
@@ -292,7 +292,7 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
             disabled={visibleSelectedIds.length === 0}
             onClick={() => onDeleteTasks?.(visibleSelectedIds)}
           >
-            删除{visibleSelectedIds.length ? ` ${visibleSelectedIds.length}` : ''}
+            移除{visibleSelectedIds.length ? ` ${visibleSelectedIds.length}` : ''}
           </Button> : null}
         </div>
       </header>
@@ -306,7 +306,7 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
       ) : (
         <div className={styles.resultGrid}>
           {tasks.map((task) => {
-            const selected = selectedTaskIds.includes(task.id);
+            const selected = Boolean(task.deletable && selectedTaskIds.includes(task.id));
             return (
               <article
                 key={task.id}
@@ -316,7 +316,7 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
                 data-model={task.model.model}
                 data-selected={selected || undefined}
               >
-                {deletionEnabled ? <div className={styles.cardOverlayActions}>
+                {deletionEnabled && task.deletable ? <div className={styles.cardOverlayActions}>
                   <Checkbox
                     checked={selected}
                     aria-label={`选择任务 ${task.id}`}
@@ -331,7 +331,7 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
                     type='text'
                     status='danger'
                     icon={<Delete />}
-                    aria-label={`删除任务 ${task.id}`}
+                    aria-label={`从历史移除 ${task.id}`}
                     onClick={() => onDeleteTasks?.([task.id])}
                   />
                 </div> : null}

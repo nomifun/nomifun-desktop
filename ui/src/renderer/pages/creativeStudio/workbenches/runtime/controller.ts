@@ -1070,6 +1070,38 @@ export class CreativeWorkbenchRuntimeController {
     return this.snapshot();
   }
 
+  /** Remove terminal presentation entries after the backend owner index retires them. */
+  dismiss(taskIds: readonly string[]): CreativeWorkbenchRuntimeSnapshot {
+    this.assertUsable();
+    if (new Set(taskIds).size !== taskIds.length) {
+      throw new CreativeWorkbenchRuntimeError(
+        "invalid_parameters",
+        "Dismiss task ids must be unique",
+        "taskIds",
+      );
+    }
+    const selected = new Set(taskIds);
+    const live = this.current.entries.find(
+      (entry) =>
+        selected.has(entry.task.taskId) &&
+        !isTerminalCreativeTaskStatus(entry.task.status),
+    );
+    if (live) {
+      throw new CreativeWorkbenchRuntimeError(
+        "busy",
+        `Cannot dismiss live task ${live.task.taskId}`,
+        "taskIds",
+      );
+    }
+    if (taskIds.length === 0) return this.snapshot();
+    this.update({
+      entries: this.current.entries.filter(
+        (entry) => !selected.has(entry.task.taskId),
+      ),
+    });
+    return this.snapshot();
+  }
+
   reset(): void {
     this.assertUsable();
     this.assertNotBusy();

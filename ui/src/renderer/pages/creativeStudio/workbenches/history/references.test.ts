@@ -33,6 +33,7 @@ const baseTask: CreativeTask = {
   submittedAt: 1,
   startedAt: 2,
   finishedAt: 3,
+  deletedAt: null,
 };
 
 const asset = (id: string, kind: CreativeAsset['kind'] = 'image'): CreativeAsset => ({

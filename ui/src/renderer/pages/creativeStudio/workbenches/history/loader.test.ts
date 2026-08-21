@@ -36,6 +36,7 @@ const task = (
   submittedAt,
   startedAt: status === 'queued' ? null : submittedAt + 1,
   finishedAt: status === 'failed' ? submittedAt + 2 : null,
+  deletedAt: null,
 });
 
 describe('standalone history loader', () => {
