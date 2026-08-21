@@ -45,8 +45,12 @@ CAS save, conflict, and reload behavior. Background changes use the same CAS
 port. The right-side Agent uses the owner-only Creative Studio session resolver,
 the real NomiFun Conversation REST/WebSocket transport, and Editor-owned CAS for
 session references and response-loss fences. Route exit first stops and settles
-an active exclusive Agent turn, then flushes the Editor. Workflows and the global
-timeline remain explicit unavailable states until their production adapters exist.
+an active exclusive Agent turn, then flushes the Editor. The left workflow panel
+uses the canonical workflow repository and durable run controller, opens the
+same typed runner and real asset picker as the standalone center, and resolves
+successful result IDs through the authenticated asset-detail endpoint before
+inserting canonical nodes. The global timeline remains an explicit unavailable
+state until its production projection is connected.
 
 The source geometry is canonical for views that currently have no resize handle:
 the left library is 280px and opening Agent normalizes the right panel to 390px.

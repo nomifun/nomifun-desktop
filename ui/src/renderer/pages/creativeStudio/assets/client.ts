@@ -179,6 +179,10 @@ export class CreativeAssetClient implements CreativeAssetLibraryPort {
     };
   }
 
+  async get(assetId: string): Promise<CreativeAsset> {
+    return this.map(await this.api.get(parseAssetId(assetId)));
+  }
+
   async upload(
     file: File,
     metadata: CreativeAssetMetadata = {},

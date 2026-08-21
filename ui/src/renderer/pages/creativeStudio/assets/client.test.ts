@@ -43,6 +43,7 @@ function assetDto(overrides: Partial<WorkshopAssetDto> = {}): WorkshopAssetDto {
 function apiStub(overrides: Partial<WorkshopAssetApi> = {}): WorkshopAssetApi {
   return {
     list: async () => ({ items: [assetDto()], total: 1 }),
+    get: async () => assetDto(),
     upload: async () => assetDto(),
     createText: async () => assetDto({ kind: 'text', mime: null, width: null, height: null, bytes: null }),
     update: async () => assetDto(),
@@ -96,12 +97,16 @@ describe('CreativeAssetClient', () => {
     });
   });
 
-  test('adapts list, update, upload, text creation, deletion, rename and URLs', async () => {
+  test('adapts detail, list, update, upload, text creation, deletion, rename and URLs', async () => {
     const calls: Array<[string, unknown]> = [];
     const api = apiStub({
       list: async (query) => {
         calls.push(['list', query]);
         return { items: [assetDto()], total: 1 };
+      },
+      get: async (id) => {
+        calls.push(['get', id]);
+        return assetDto();
       },
       upload: async (_file, metadata, signal, onProgress) => {
         calls.push(['upload', { metadata, signal }]);
@@ -132,6 +137,7 @@ describe('CreativeAssetClient', () => {
     expect(page.total).toBe(1);
     expect(page.items[0]?.originalUrl).toBe('/original');
     expect(page.items[0]?.thumbnailUrl).toBe('/thumbnail');
+    expect((await client.get(ASSET_ID)).originalUrl).toBe('/original');
     expect(
       (
         await client.upload(
@@ -149,7 +155,15 @@ describe('CreativeAssetClient', () => {
     expect(client.url(ASSET_ID)).toBe('/original');
     expect(client.url(ASSET_ID, 'thumbnail')).toBe('/thumbnail');
     expect(progress).toEqual([42]);
-    expect(calls.map(([name]) => name)).toEqual(['list', 'upload', 'createText', 'update', 'remove', 'rename']);
+    expect(calls.map(([name]) => name)).toEqual([
+      'list',
+      'get',
+      'upload',
+      'createText',
+      'update',
+      'remove',
+      'rename',
+    ]);
     expect(calls.find(([name]) => name === 'update')?.[1]).toEqual({
       title: undefined,
       collection: '',

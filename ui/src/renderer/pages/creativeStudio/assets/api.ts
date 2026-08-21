@@ -71,6 +71,7 @@ export interface WorkshopAssetPatch {
 
 export interface WorkshopAssetApi {
   list(query?: WorkshopAssetListQuery): Promise<WorkshopAssetListDto>;
+  get(assetId: AssetId): Promise<WorkshopAssetDto>;
   upload(
     file: File,
     metadata?: WorkshopAssetUploadMetadata,
@@ -230,6 +231,13 @@ export const workshopAssetApi: WorkshopAssetApi = {
       `/api/creative-studio/assets${queryString(query)}`
     );
     return { items: response?.items ?? [], total: response?.total ?? 0 };
+  },
+
+  get(assetId) {
+    return httpRequest<WorkshopAssetDto>(
+      'GET',
+      `/api/creative-studio/assets/${encodeURIComponent(assetId)}`
+    );
   },
 
   upload: uploadWorkshopAsset,
