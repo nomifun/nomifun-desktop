@@ -11,8 +11,8 @@ use nomifun_common::{
     ProviderId, SharedProviderLifecycleBarrier, WorkshopAssetId, now_ms,
 };
 use nomifun_db::{
-    AssetSort, CreativeStudioProjectRow, CreativeStudioWorkflowRunRow, IWorkshopRepository,
-    ListAssetsParams, UpdateAssetParams, WorkshopAssetRow,
+    AssetSort, CreativeStudioProjectRow, CreativeStudioWorkflowRunRow, DbError,
+    IWorkshopRepository, ListAssetsParams, UpdateAssetParams, WorkshopAssetRow,
 };
 use serde_json::Value;
 
@@ -401,7 +401,7 @@ impl WorkshopService {
         })?;
         let _provider_guard = self.provider_read_guard().await;
         self.validate_creative_provider_models(document).await?;
-        Ok(self
+        let saved = self
             .repo
             .save_creative_project(
                 project_id,
@@ -411,8 +411,12 @@ impl WorkshopService {
                 connection_count,
                 now_ms(),
             )
-            .await?
-            .into())
+            .await
+            .map_err(|error| match error {
+                DbError::Conflict(message) => AppError::RevisionConflict(message),
+                other => other.into(),
+            })?;
+        Ok(saved.into())
     }
 
     /// Apply Agent graph operations through the canonical project revision CAS.
@@ -428,7 +432,7 @@ impl WorkshopService {
         let expected_revision = parse_creative_project_revision(expected_revision)?;
         let current = self.get_creative_project(project_id).await?;
         if current.project.revision != expected_revision.to_string() {
-            return Err(AppError::Conflict(format!(
+            return Err(AppError::RevisionConflict(format!(
                 "creative studio project {project_id} revision is {}, expected {expected_revision}",
                 current.project.revision
             )));
@@ -2568,7 +2572,7 @@ mod tests {
             .save_creative_project(&created.project_id, "1", &document)
             .await
             .unwrap_err();
-        assert!(matches!(stale, AppError::Conflict(_)));
+        assert!(matches!(stale, AppError::RevisionConflict(_)));
 
         svc.delete_creative_project(&created.project_id)
             .await
@@ -2625,7 +2629,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(stale, AppError::Conflict(_)));
+        assert!(matches!(stale, AppError::RevisionConflict(_)));
         let current = svc.get_creative_project(&created.project_id).await.unwrap();
         assert_eq!(current.project.revision, "2");
         assert_eq!(current.document.nodes.len(), 1);
@@ -2891,7 +2895,7 @@ mod tests {
         assert_eq!(
             results
                 .iter()
-                .filter(|result| matches!(result, Err(AppError::Conflict(_))))
+                .filter(|result| matches!(result, Err(AppError::RevisionConflict(_))))
                 .count(),
             1
         );

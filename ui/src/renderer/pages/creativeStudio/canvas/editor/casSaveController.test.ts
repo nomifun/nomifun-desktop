@@ -138,6 +138,29 @@ describe('CanvasCasSaveController', () => {
     expect(calls).toBe(1);
   });
 
+  test('keeps conflict terminal when undo returns to the stale local baseline', async () => {
+    const baseline = documentWithTitle('baseline');
+    const controller = new CanvasCasSaveController(async () => {
+      throw new CreativeProjectRepositoryError({
+        kind: 'revision-conflict',
+        message: 'remote revision changed',
+        status: 409,
+        backendCode: 'REVISION_CONFLICT',
+      });
+    });
+    controller.reset('8', baseline);
+    controller.queue(documentWithTitle('local edit'));
+    expect((await controller.flush()).status).toBe('conflict');
+
+    controller.queue(baseline);
+    expect(controller.getSnapshot()).toMatchObject({
+      status: 'conflict',
+      revision: '8',
+      hasPendingChanges: true,
+    });
+    expect((await controller.flush()).status).toBe('conflict');
+  });
+
   test('requires an explicit remote reset before saving after conflict', async () => {
     let conflict = true;
     const revisions: string[] = [];

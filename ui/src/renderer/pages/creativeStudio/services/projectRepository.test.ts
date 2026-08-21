@@ -78,6 +78,34 @@ describe('Creative Project repository', () => {
       expect((error as CreativeProjectRepositoryError).backendCode).toBe('REVISION_CONFLICT');
     }
 
+    const businessConflict = createCreativeProjectRepository(
+      apiStub({
+        saveProject: async () =>
+          Promise.reject(
+            new BackendHttpError({
+              method: 'PUT',
+              path: `/api/creative-studio/projects/${PROJECT_ID}/document`,
+              status: 409,
+              body: { code: 'CONFLICT', error: 'Provider model no longer exists' },
+            })
+          ),
+      })
+    );
+    try {
+      await businessConflict.save(
+        PROJECT_ID,
+        '1',
+        createEmptyCreativeProjectDocument(PROJECT_ID)
+      );
+      throw new Error('Expected business conflict');
+    } catch (error) {
+      expect(error).toMatchObject({
+        kind: 'invalid-request',
+        status: 409,
+        backendCode: 'CONFLICT',
+      });
+    }
+
     const missing = createCreativeProjectRepository(
       apiStub({
         getProject: async () =>

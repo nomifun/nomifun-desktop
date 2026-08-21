@@ -169,8 +169,10 @@ import {
 } from './nodeFactory';
 import {
   canLeaveCreativeCanvasAfterFlush,
+  creativeCanvasBlockedLeaveMessage,
   creativeCanvasProductPanelViews,
   creativeCanvasProductSelectionCapabilities,
+  creativeCanvasSaveDisplayMessage,
   resolveCreativeNodeAssetPresentation,
   withCreativeCanvasBottomView,
   withCreativeCanvasLeftView,
@@ -931,7 +933,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
       return false;
     const editor = editorRef.current;
     if (!editor) return true;
-    return canLeaveCreativeCanvasAfterFlush(await editor.flush());
+    const result = await editor.flush();
+    const canLeave = canLeaveCreativeCanvasAfterFlush(result);
+    if (!canLeave) {
+      setNotice(creativeCanvasBlockedLeaveMessage(result) ?? '画布尚未安全保存。');
+    }
+    return canLeave;
   }, []);
 
   const handlePersistAgentSessions = useCallback(
@@ -2564,7 +2571,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const projectTitle =
     project.detail?.project.title ??
     (project.isLoading ? '正在载入项目…' : '画布项目');
-  const saveMessage = save.error?.message ?? undefined;
+  const saveMessage = creativeCanvasSaveDisplayMessage(save);
   const compact = viewportSize.width < 760;
   const panelViews = creativeCanvasProductPanelViews(panels);
   const canvasLayoutStyle = {
@@ -2673,6 +2680,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 ref={editorRef}
                 projectId={projectId}
                 tool={tool}
+                showSaveState={false}
                 isMiniMapOpen={miniMapOpen}
                 onToggleMiniMap={() => setMiniMapOpen((open) => !open)}
                 onStateChange={setCanvasState}
