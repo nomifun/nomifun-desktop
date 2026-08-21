@@ -121,6 +121,11 @@ export type CreativeConfigOperation =
       kind: 'video-node-compose';
       sourceNodeId: string;
       sourceAssetId: string | null;
+    }
+  | {
+      kind: 'audio-node-compose';
+      sourceNodeId: string;
+      sourceAssetId: string | null;
     };
 
 /**
@@ -169,6 +174,14 @@ export interface CreativeAudioNodeData {
   volume: number;
   trimStartMs: number;
   trimEndMs: number | null;
+  composer: CreativeAudioComposerDraft | null;
+}
+
+export interface CreativeAudioComposerDraft {
+  prompt: string;
+  model: CreativeComposerModel | null;
+  voice: string;
+  format: 'mp3' | 'wav';
 }
 
 export interface CreativeDirectorNodeData {

@@ -90,6 +90,7 @@ const DEFAULT_NODE_DATA: CreativeCanvasNodeDataByKind = {
     volume: 1,
     trimStartMs: 0,
     trimEndMs: null,
+    composer: null,
   },
   director: {
     sceneId: null,
@@ -333,6 +334,7 @@ export function creativeNodeFromAsset(
           volume: 1,
           trimStartMs: 0,
           trimEndMs: null,
+          composer: null,
         },
         state,
         viewportSize,

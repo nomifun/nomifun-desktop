@@ -390,6 +390,82 @@ describe('Creative Studio v1 document contract', () => {
     );
   });
 
+  test('round-trips audio composer drafts and defaults old v1 audio nodes', () => {
+    const audio: CreativeCanvasNode = {
+      id: 'audio-1',
+      type: 'audio',
+      position: { x: 0, y: 0 },
+      size: { width: 340, height: 160 },
+      groupId: null,
+      zIndex: 0,
+      locked: false,
+      data: {
+        assetId: null,
+        title: '',
+        loop: false,
+        volume: 1,
+        trimStartMs: 0,
+        trimEndMs: null,
+        composer: {
+          prompt: '欢迎来到 NomiFun 创作空间',
+          model: {
+            providerId: '0198f8bb-8424-7b3d-8f17-bc6a1676f119',
+            model: 'tts-v1',
+          },
+          voice: 'alloy',
+          format: 'mp3',
+        },
+      },
+    };
+    const parsed = parseCreativeProjectDocument({
+      ...createEmptyCreativeProjectDocument(PROJECT_ID),
+      nodes: [audio],
+    });
+    expect(parsed.nodes[0]).toEqual(audio);
+
+    const oldV1 = structuredClone(audio) as unknown as {
+      data: Record<string, unknown>;
+    };
+    delete oldV1.data.composer;
+    const oldParsed = parseCreativeProjectDocument({
+      ...createEmptyCreativeProjectDocument(PROJECT_ID),
+      nodes: [oldV1],
+    });
+    expect(
+      oldParsed.nodes[0].type === 'audio' && oldParsed.nodes[0].data.composer
+    ).toBeNull();
+
+    const invalidFormat = structuredClone(audio);
+    if (invalidFormat.type !== 'audio' || !invalidFormat.data.composer) {
+      throw new Error('fixture must contain an audio composer');
+    }
+    invalidFormat.data.composer.format = 'aac' as 'mp3';
+    expectContractError(
+      () =>
+        parseCreativeProjectDocument({
+          ...createEmptyCreativeProjectDocument(PROJECT_ID),
+          nodes: [invalidFormat],
+        }),
+      'INVALID_DOCUMENT',
+      '$.nodes[0].data.composer.format'
+    );
+
+    const invalidVoice = structuredClone(audio);
+    if (invalidVoice.type !== 'audio' || !invalidVoice.data.composer) {
+      throw new Error('fixture must contain an audio composer');
+    }
+    invalidVoice.data.composer.voice = ' alloy ';
+    expectContractError(
+      () =>
+        parseCreativeProjectDocument({
+          ...createEmptyCreativeProjectDocument(PROJECT_ID),
+          nodes: [invalidVoice],
+        }),
+      'INVALID_DOCUMENT',
+      '$.nodes[0].data.composer.voice'
+    );
+  });
+
   test('normalizes legacy canvas operation metadata out of provider parameters', () => {
     const legacyConfig = {
       id: 'config-legacy',

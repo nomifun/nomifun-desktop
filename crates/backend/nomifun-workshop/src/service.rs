@@ -331,6 +331,24 @@ impl WorkshopService {
                         .entry((model.provider_id.clone(), model.model.clone()))
                         .or_insert_with(|| format!("video node {} composer", node.id));
                 }
+                CreativeNodeData::Audio(audio) => {
+                    let Some(model) = audio
+                        .composer
+                        .as_ref()
+                        .and_then(|composer| composer.model.as_ref())
+                    else {
+                        continue;
+                    };
+                    ProviderId::parse(&model.provider_id).map_err(|error| {
+                        AppError::BadRequest(format!(
+                            "creative audio node {} composer providerId must be a canonical Provider UUIDv7: {error}",
+                            node.id
+                        ))
+                    })?;
+                    references
+                        .entry((model.provider_id.clone(), model.model.clone()))
+                        .or_insert_with(|| format!("audio node {} composer", node.id));
+                }
                 _ => {}
             }
         }
@@ -1343,6 +1361,19 @@ impl WorkshopService {
                             .is_some_and(|model| model.provider_id == provider_id);
                         if clears_target {
                             if let Some(composer) = video.composer.as_mut() {
+                                composer.model = None;
+                            }
+                            changed = true;
+                        }
+                    }
+                    CreativeNodeData::Audio(audio) => {
+                        let clears_target = audio
+                            .composer
+                            .as_ref()
+                            .and_then(|composer| composer.model.as_ref())
+                            .is_some_and(|model| model.provider_id == provider_id);
+                        if clears_target {
+                            if let Some(composer) = audio.composer.as_mut() {
                                 composer.model = None;
                             }
                             changed = true;
@@ -2636,6 +2667,38 @@ mod tests {
         .unwrap()
     }
 
+    fn creative_audio_node(
+        id: &str,
+        provider_id: Option<&str>,
+        model: Option<&str>,
+    ) -> crate::creative_studio::CreativeNode {
+        let composer_model = composer_model_value(provider_id, model);
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "type": "audio",
+            "position": { "x": 0, "y": 0 },
+            "size": { "width": 340, "height": 160 },
+            "groupId": null,
+            "zIndex": 1,
+            "locked": false,
+            "data": {
+                "assetId": null,
+                "title": "",
+                "loop": false,
+                "volume": 1,
+                "trimStartMs": 0,
+                "trimEndMs": null,
+                "composer": {
+                    "prompt": "literal narration",
+                    "model": composer_model,
+                    "voice": "alloy",
+                    "format": "mp3"
+                }
+            }
+        }))
+        .unwrap()
+    }
+
     fn director_sidecar_text(
         project_id: &str,
         panorama_asset_id: &str,
@@ -3526,6 +3589,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn canonical_save_validates_audio_composer_provider_model_pair() {
+        let barrier = Arc::new(ProviderLifecycleBarrier::new());
+        let (svc, _dir, db) = service_with_database_and_lifecycle(Some(barrier)).await;
+        let project = svc.create_creative_project(None).await.unwrap();
+        let provider_id = "0190f5fe-7c00-7a00-8000-000000000085";
+        insert_provider(&db, provider_id).await;
+
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(creative_audio_node(
+            "audio-composer",
+            Some(provider_id),
+            Some("missing-audio-model"),
+        ));
+        let missing_model = svc
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            missing_model,
+            AppError::Conflict(ref message)
+                if message.contains("audio node audio-composer composer")
+                    && message.contains("missing-audio-model")
+        ));
+
+        insert_provider_model(&db, provider_id, "audio-model").await;
+        document.nodes[0] = creative_audio_node(
+            "audio-composer",
+            Some(provider_id),
+            Some("audio-model"),
+        );
+        let saved = svc
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, "2");
+    }
+
+    #[tokio::test]
     async fn provider_cleanup_cas_clears_only_target_canonical_pairs_and_is_idempotent() {
         let barrier = Arc::new(ProviderLifecycleBarrier::new());
         let (svc, _dir, db) =
@@ -3581,6 +3682,16 @@ mod tests {
         ));
         document.nodes.push(creative_video_node(
             "surviving-video",
+            Some(other_provider_id),
+            Some("keep-me"),
+        ));
+        document.nodes.push(creative_audio_node(
+            "target-audio",
+            Some(target_provider_id),
+            Some("delete-me"),
+        ));
+        document.nodes.push(creative_audio_node(
+            "surviving-audio",
             Some(other_provider_id),
             Some("keep-me"),
         ));
@@ -3695,6 +3806,24 @@ mod tests {
             .expect("unrelated video composer model must survive provider cleanup");
         assert_eq!(surviving_video_model.provider_id, other_provider_id);
         assert_eq!(surviving_video_model.model, "keep-me");
+        let CreativeNodeData::Audio(target_audio) = &cleaned.document.nodes[6].data else {
+            panic!("expected target audio node")
+        };
+        let target_audio_composer = target_audio.composer.as_ref().unwrap();
+        assert_eq!(target_audio_composer.model, None);
+        assert_eq!(target_audio_composer.prompt, "literal narration");
+        assert_eq!(target_audio_composer.voice, "alloy");
+        assert_eq!(target_audio_composer.format, "mp3");
+        let CreativeNodeData::Audio(surviving_audio) = &cleaned.document.nodes[7].data else {
+            panic!("expected surviving audio node")
+        };
+        let surviving_audio_model = surviving_audio
+            .composer
+            .as_ref()
+            .and_then(|composer| composer.model.as_ref())
+            .expect("unrelated audio composer model must survive provider cleanup");
+        assert_eq!(surviving_audio_model.provider_id, other_provider_id);
+        assert_eq!(surviving_audio_model.model, "keep-me");
 
         let cleaned_twice = svc
             .get_creative_workflow(&target_workflow.id)

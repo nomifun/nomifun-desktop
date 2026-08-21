@@ -131,6 +131,7 @@ import CreativeCanvasAgentPanel, {
   type CreativeCanvasAgentPanelHandle,
 } from './agent/CreativeCanvasAgentPanel';
 import CreativeCanvasConnectionEdge from './CreativeCanvasConnectionEdge';
+import CreativeCanvasAudioComposer from './CreativeCanvasAudioComposer';
 import CreativeCanvasImageComposer from './CreativeCanvasImageComposer';
 import CreativeCanvasVideoComposer from './CreativeCanvasVideoComposer';
 import CreativeCanvasInteractionOverlays, {
@@ -166,6 +167,24 @@ import CanvasVideoTaskRuntimeBridge, {
   canvasVideoTaskReferenceFromPlan,
   type CanvasVideoTaskRuntimeBridgeHandle,
 } from './CanvasVideoTaskRuntimeBridge';
+import CanvasAudioTaskRuntimeBridge, {
+  canvasAudioTaskReferenceFromPlan,
+  type CanvasAudioTaskRuntimeBridgeHandle,
+} from './CanvasAudioTaskRuntimeBridge';
+import {
+  canvasAudioComposeDraftFromState,
+  canvasAudioComposeEligibility,
+  canvasAudioComposeProtocolProfile,
+  canvasAudioComposeTaskSummary,
+  canvasAudioComposeVoiceAfterModelChange,
+  DEFAULT_CANVAS_AUDIO_COMPOSE_DRAFT,
+  latestCanvasAudioComposeConfig,
+  prepareCanvasAudioCompose,
+  withCanvasAudioComposeDraft,
+  type CanvasAudioComposeDraft,
+  type CanvasAudioComposeSettings,
+} from './canvasAudioComposerCanvas';
+import { orphanCanvasAudioComposeTask } from './canvasAudioComposerRuntime';
 import {
   canvasVideoComposeDraftFromState,
   canvasVideoComposeMode,
@@ -283,6 +302,17 @@ interface PendingCanvasVideoComposeSubmission {
 }
 
 interface CanvasVideoComposeIssue {
+  nodeId: string;
+  message: string;
+}
+
+interface PendingCanvasAudioComposeSubmission {
+  nodeId: string;
+  plan: PreparedCreativeWorkbenchRun;
+  failureOrder: number;
+}
+
+interface CanvasAudioComposeIssue {
   nodeId: string;
   message: string;
 }
@@ -524,6 +554,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const editorRef = useRef<CreativeCanvasEditorHandle>(null);
   const imageTaskRuntimeRef = useRef<CanvasImageTaskRuntimeBridgeHandle>(null);
   const videoTaskRuntimeRef = useRef<CanvasVideoTaskRuntimeBridgeHandle>(null);
+  const audioTaskRuntimeRef = useRef<CanvasAudioTaskRuntimeBridgeHandle>(null);
   const agentPanelRef = useRef<CreativeCanvasAgentPanelHandle>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const imageNodeUploadInputRef = useRef<HTMLInputElement>(null);
@@ -621,6 +652,17 @@ const CreativeCanvasProductRoute: React.FC = () => {
     useState<CanvasVideoComposeIssue | null>(null);
   const [videoComposeSubmission, setVideoComposeSubmission] =
     useState<PendingCanvasVideoComposeSubmission | null>(null);
+  const [audioTaskRuntime, setAudioTaskRuntime] =
+    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
+  const [audioTaskRuntimeReady, setAudioTaskRuntimeReady] = useState(false);
+  const [audioTaskRuntimeEpoch, setAudioTaskRuntimeEpoch] = useState(0);
+  const [audioTaskRuntimeActionBusy, setAudioTaskRuntimeActionBusy] =
+    useState(false);
+  const [audioComposeBusy, setAudioComposeBusy] = useState(false);
+  const [audioComposeIssue, setAudioComposeIssue] =
+    useState<CanvasAudioComposeIssue | null>(null);
+  const [audioComposeSubmission, setAudioComposeSubmission] =
+    useState<PendingCanvasAudioComposeSubmission | null>(null);
   const [promptInsertTargetNodeId, setPromptInsertTargetNodeId] =
     useState<string | null>(null);
   const [agentDocumentState, setAgentDocumentState] =
@@ -693,6 +735,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
     () => exactWorkbenchModelOptions(modelCatalog, 'video_generation'),
     [modelCatalog]
   );
+  const audioModelOptions = useMemo(
+    () => exactWorkbenchModelOptions(modelCatalog, 'speech_synthesis'),
+    [modelCatalog]
+  );
 
   const knownAssetsById = useMemo(() => {
     const merged = new Map(knownAssetsRef.current);
@@ -752,10 +798,18 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setImageComposeSubmission(null);
     setVideoTaskRuntime(INITIAL_CANVAS_TASK_RUNTIME);
     setVideoTaskRuntimeReady(false);
+    setVideoTaskRuntimeEpoch(0);
     setVideoTaskRuntimeActionBusy(false);
     setVideoComposeBusy(false);
     setVideoComposeIssue(null);
     setVideoComposeSubmission(null);
+    setAudioTaskRuntime(INITIAL_CANVAS_TASK_RUNTIME);
+    setAudioTaskRuntimeReady(false);
+    setAudioTaskRuntimeEpoch(0);
+    setAudioTaskRuntimeActionBusy(false);
+    setAudioComposeBusy(false);
+    setAudioComposeIssue(null);
+    setAudioComposeSubmission(null);
     setPromptInsertTargetNodeId(null);
     setAgentDocumentState(null);
     assetImportBusyRef.current = false;
@@ -767,7 +821,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, [projectId]);
 
   useEffect(() => {
-    if (imageTaskRuntimeReady && videoTaskRuntimeReady) return;
+    if (
+      imageTaskRuntimeReady &&
+      videoTaskRuntimeReady &&
+      audioTaskRuntimeReady
+    ) {
+      return;
+    }
     const detail = project.detail;
     if (!detail || detail.project.projectId !== projectId || !canvasState)
       return;
@@ -777,8 +837,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
     if (detail.document.nodes.every((node) => currentNodeIds.has(node.id))) {
       if (!imageTaskRuntimeReady) setImageTaskRuntimeReady(true);
       if (!videoTaskRuntimeReady) setVideoTaskRuntimeReady(true);
+      if (!audioTaskRuntimeReady) setAudioTaskRuntimeReady(true);
     }
   }, [
+    audioTaskRuntimeReady,
     canvasState,
     imageTaskRuntimeReady,
     project.detail,
@@ -907,6 +969,31 @@ const CreativeCanvasProductRoute: React.FC = () => {
         })
       );
       setCanvasState(nextState);
+    },
+    []
+  );
+
+  const updateAudioComposeDraft = useCallback(
+    (
+      nodeId: string,
+      update: (current: CanvasAudioComposeDraft) => CanvasAudioComposeDraft
+    ) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      const state = editor.getState();
+      const node = state.document.nodes.find(
+        (candidate): candidate is Extract<CreativeCanvasNode, { type: 'audio' }> =>
+          candidate.id === nodeId && candidate.type === 'audio'
+      );
+      if (!node) return;
+      const current = canvasAudioComposeDraftFromState(state, nodeId);
+      editor.dispatch(
+        canvasCommands.updateNode(
+          withCanvasAudioComposeDraft(node, update(current)),
+          { mergeKey: `audio-composer:${nodeId}` }
+        )
+      );
+      setCanvasState(editor.getState());
     },
     []
   );
@@ -2554,6 +2641,309 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [videoTaskRuntimeActionBusy]
   );
 
+  const applyAudioComposeAdmission = useCallback(
+    (
+      nodeId: string,
+      plan: PreparedCreativeWorkbenchRun,
+      result: Awaited<ReturnType<CanvasAudioTaskRuntimeBridgeHandle['submit']>>
+    ) => {
+      if (result.kind === 'admitted') {
+        setAudioComposeSubmission(null);
+        setAudioComposeIssue(null);
+        setNotice('音频创作任务已安全提交；配置节点会持续显示真实后端状态。');
+        return;
+      }
+      setAudioComposeSubmission({ nodeId, plan, failureOrder: result.order });
+      setAudioComposeIssue({
+        nodeId,
+        message: `任务提交结果尚未确认：${result.error.message}。请重试同一任务。`,
+      });
+    },
+    []
+  );
+
+  const generateFromCanvasAudio = useCallback(
+    async (
+      nodeId: string,
+      prompt: string,
+      settings: CanvasAudioComposeSettings
+    ) => {
+      const editor = editorRef.current;
+      const runtime = audioTaskRuntimeRef.current;
+      if (!editor || !runtime || audioComposeBusy || audioComposeSubmission) {
+        return;
+      }
+      if (!settings.model || modelCatalog.status !== 'ready') {
+        setAudioComposeIssue({
+          nodeId,
+          message: '没有可用且明确选择的真实语音合成模型，未发起生成。',
+        });
+        return;
+      }
+      const snapshot = runtime.snapshot();
+      if (
+        snapshot.submittingCount > 0 ||
+        snapshot.recoveringCount > 0 ||
+        snapshot.submissionFailures.length > 0 ||
+        snapshot.requestError !== null ||
+        snapshot.entries.some(
+          (entry) =>
+            entry.task.status === 'queued' || entry.task.status === 'running'
+        )
+      ) {
+        setAudioComposeIssue({
+          nodeId,
+          message: '已有音频任务正在处理，请等待完成。',
+        });
+        return;
+      }
+
+      setAudioComposeBusy(true);
+      setAudioComposeIssue(null);
+      let prepared: ReturnType<typeof prepareCanvasAudioCompose> | null = null;
+      let canvasOwned = false;
+      try {
+        const state = editor.getState();
+        const source = state.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'audio' }> =>
+            node.id === nodeId && node.type === 'audio'
+        );
+        if (!source) throw new Error('音频节点已被删除，未创建音频创作任务。');
+        const eligibility = canvasAudioComposeEligibility(
+          state.document,
+          nodeId
+        );
+        if (eligibility.kind === 'unsupported') {
+          throw new Error(eligibility.message);
+        }
+        const selectedModel = audioModelOptions.find(
+          (option) =>
+            option.providerId === settings.model?.providerId &&
+            option.model === settings.model.model
+        );
+        if (!selectedModel) {
+          throw new Error('所选语音合成模型已不可用，未发起生成。');
+        }
+        if (activeProjectIdRef.current !== projectId) {
+          throw new DOMException('Project changed', 'AbortError');
+        }
+        const currentState = editor.getState();
+        const currentSource = currentState.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'audio' }> =>
+            node.id === nodeId && node.type === 'audio'
+        );
+        const currentEligibility = canvasAudioComposeEligibility(
+          currentState.document,
+          nodeId
+        );
+        if (!currentSource || currentEligibility.kind !== 'tts') {
+          throw new Error('音频节点或其直接引用已变化，未创建音频创作任务。');
+        }
+        const durableSource = withCanvasAudioComposeDraft(currentSource, {
+          prompt,
+          settings: {
+            ...settings,
+            model: {
+              providerId: selectedModel.providerId,
+              model: selectedModel.model,
+            },
+          },
+        });
+        editor.dispatch(
+          canvasCommands.updateNode(durableSource, {
+            mergeKey: `audio-composer:${nodeId}`,
+          })
+        );
+        prepared = prepareCanvasAudioCompose({
+          projectId,
+          state: editor.getState(),
+          viewportSize: measuredSize(canvasHostRef.current),
+          sourceNode: durableSource,
+          sourceAsset: null,
+          catalog: modelCatalog,
+          model: selectedModel,
+          references: { assets: [], bindings: [] },
+          prompt,
+          settings: {
+            voice: settings.voice,
+            format: settings.format,
+          },
+        });
+        const at = Date.now();
+        const mergeKey = `audio-compose:${nodeId}:${prepared.plan.input.idempotencyKey}`;
+        editor.dispatch(
+          canvasCommands.addNode(prepared.configNode, { at, mergeKey })
+        );
+        editor.dispatch(
+          canvasCommands.connect(nodeId, prepared.configNode.id, {
+            sourceHandle: prepared.connection.sourceHandle,
+            targetHandle: prepared.connection.targetHandle,
+            at,
+            mergeKey,
+          })
+        );
+        canvasOwned = true;
+        const result = await runtime.submit(prepared.plan);
+        applyAudioComposeAdmission(nodeId, prepared.plan, result);
+      } catch (error) {
+        let message = error instanceof Error ? error.message : String(error);
+        if (canvasOwned && prepared) {
+          try {
+            await editor.addPendingTask(prepared.plan.input.idempotencyKey);
+            void runtime
+              .recoverTask(canvasAudioTaskReferenceFromPlan(prepared.plan))
+              .catch((recoveryError) =>
+                setNotice(
+                  recoveryError instanceof Error
+                    ? recoveryError.message
+                    : String(recoveryError)
+                )
+              );
+            message = `任务接收状态未确认，已保留同一任务恢复标记：${message}`;
+          } catch (saveError) {
+            message = `${message}；${
+              saveError instanceof Error ? saveError.message : String(saveError)
+            }`;
+          }
+        }
+        if (activeProjectIdRef.current === projectId) {
+          setAudioComposeIssue({ nodeId, message });
+        }
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setAudioComposeBusy(false);
+        }
+      }
+    },
+    [
+      applyAudioComposeAdmission,
+      audioComposeBusy,
+      audioComposeSubmission,
+      audioModelOptions,
+      modelCatalog,
+      projectId,
+    ]
+  );
+
+  const retryCanvasAudioComposeSubmission = useCallback(
+    async (nodeId: string) => {
+      const request = audioComposeSubmission;
+      const runtime = audioTaskRuntimeRef.current;
+      if (!request || request.nodeId !== nodeId || !runtime || audioComposeBusy) {
+        return;
+      }
+      setAudioComposeBusy(true);
+      setAudioComposeIssue(null);
+      try {
+        const result = await runtime.retrySubmission(
+          request.failureOrder,
+          request.plan.input.idempotencyKey
+        );
+        applyAudioComposeAdmission(nodeId, request.plan, result);
+      } catch (error) {
+        setAudioComposeIssue({
+          nodeId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        setAudioComposeBusy(false);
+      }
+    },
+    [applyAudioComposeAdmission, audioComposeBusy, audioComposeSubmission]
+  );
+
+  const confirmCanvasAudioComposeSubmission = useCallback(
+    async (nodeId: string) => {
+      const request = audioComposeSubmission;
+      const runtime = audioTaskRuntimeRef.current;
+      const editor = editorRef.current;
+      if (
+        !request ||
+        request.nodeId !== nodeId ||
+        !runtime ||
+        !editor ||
+        audioComposeBusy
+      ) {
+        return;
+      }
+      setAudioComposeBusy(true);
+      setAudioComposeIssue(null);
+      const reference = canvasAudioTaskReferenceFromPlan(request.plan);
+      try {
+        const exists = await runtime.taskExists(reference);
+        if (activeProjectIdRef.current !== projectId) return;
+        if (exists) {
+          const result = await runtime.retrySubmission(
+            request.failureOrder,
+            request.plan.input.idempotencyKey
+          );
+          applyAudioComposeAdmission(nodeId, request.plan, result);
+          if (result.kind === 'admitted') {
+            setNotice('服务器已存在该音频任务，已安全恢复而未重复创建。');
+          }
+          return;
+        }
+        await orphanCanvasAudioComposeTask({ editor, projectId, reference });
+        if (activeProjectIdRef.current !== projectId) return;
+        setAudioComposeSubmission(null);
+        setAudioTaskRuntimeEpoch((value) => value + 1);
+        setAudioComposeIssue({
+          nodeId,
+          message: '服务器确认未创建该音频任务，已清理恢复标记，可以重新生成。',
+        });
+      } catch (error) {
+        if (activeProjectIdRef.current === projectId) {
+          setAudioComposeIssue({
+            nodeId,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setAudioComposeBusy(false);
+        }
+      }
+    },
+    [
+      applyAudioComposeAdmission,
+      audioComposeBusy,
+      audioComposeSubmission,
+      projectId,
+    ]
+  );
+
+  const retryAudioRuntimeTask = useCallback(
+    async (taskId: string) => {
+      const runtime = audioTaskRuntimeRef.current;
+      if (!runtime || audioTaskRuntimeActionBusy) return;
+      setAudioTaskRuntimeActionBusy(true);
+      try {
+        await runtime.retryTask(taskId);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        setAudioTaskRuntimeActionBusy(false);
+      }
+    },
+    [audioTaskRuntimeActionBusy]
+  );
+
+  const cancelAudioRuntimeTask = useCallback(
+    async (taskId: string) => {
+      const runtime = audioTaskRuntimeRef.current;
+      if (!runtime || audioTaskRuntimeActionBusy) return;
+      setAudioTaskRuntimeActionBusy(true);
+      try {
+        await runtime.cancelTask(taskId);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        setAudioTaskRuntimeActionBusy(false);
+      }
+    },
+    [audioTaskRuntimeActionBusy]
+  );
+
   const insertClipboardText = useCallback(
     (text: string, worldPosition: CanvasPoint) => {
       const editor = editorRef.current;
@@ -3046,7 +3436,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
         const target = state?.document.nodes.find(
           (node) =>
             node.id === promptInsertTargetNodeId &&
-            (node.type === 'image' || node.type === 'video')
+            (node.type === 'image' ||
+              node.type === 'video' ||
+              node.type === 'audio')
         );
         if (state && target?.type === 'image') {
           updateImageComposeDraft(target.id, (current) => ({
@@ -3066,6 +3458,16 @@ const CreativeCanvasProductRoute: React.FC = () => {
           setPromptInsertTargetNodeId(null);
           setSelectedPromptId(selection.id);
           setNotice(`已将“${selection.title}”填入视频创作提示词。`);
+          return;
+        }
+        if (state && target?.type === 'audio') {
+          updateAudioComposeDraft(target.id, (current) => ({
+            ...current,
+            prompt: selection.prompt,
+          }));
+          setPromptInsertTargetNodeId(null);
+          setSelectedPromptId(selection.id);
+          setNotice(`已将“${selection.title}”填入音频朗读文本。`);
           return;
         }
         setPromptInsertTargetNodeId(null);
@@ -3088,6 +3490,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [
       prepareCenteredInsertion,
       promptInsertTargetNodeId,
+      updateAudioComposeDraft,
       updateImageComposeDraft,
       updateVideoComposeDraft,
     ]
@@ -3113,6 +3516,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
     videoTaskRuntime.submissionFailures.length > 0 ||
     videoTaskRuntime.requestError !== null ||
     videoTaskRuntime.entries.some(
+      (entry) =>
+        entry.task.status === 'queued' || entry.task.status === 'running'
+    );
+  const audioTaskRuntimeBlocksNew =
+    audioTaskRuntime.submittingCount > 0 ||
+    audioTaskRuntime.recoveringCount > 0 ||
+    audioTaskRuntime.submissionFailures.length > 0 ||
+    audioTaskRuntime.requestError !== null ||
+    audioTaskRuntime.entries.some(
       (entry) =>
         entry.task.status === 'queued' || entry.task.status === 'running'
     );
@@ -3403,6 +3815,150 @@ const CreativeCanvasProductRoute: React.FC = () => {
                       </div>
                     );
                   }
+                  if (node.type === 'audio') {
+                    const composeConfig = canvasState
+                      ? latestCanvasAudioComposeConfig(canvasState.document, node.id)
+                      : null;
+                    const composeDraft = canvasState
+                      ? canvasAudioComposeDraftFromState(canvasState, node.id)
+                      : structuredClone(DEFAULT_CANVAS_AUDIO_COMPOSE_DRAFT);
+                    const eligibility = canvasState
+                      ? canvasAudioComposeEligibility(canvasState.document, node.id)
+                      : {
+                          kind: 'unsupported' as const,
+                          message: '画布尚未完成载入。',
+                        };
+                    const selectedModel = composeDraft.settings.model;
+                    const exactModel = selectedModel
+                      ? audioModelOptions.find(
+                          (option) =>
+                            option.providerId === selectedModel.providerId &&
+                            option.model === selectedModel.model
+                        )
+                      : null;
+                    const onlyModel =
+                      audioModelOptions.length === 1 ? audioModelOptions[0] : null;
+                    const resolvedModel = exactModel ?? onlyModel;
+                    const composeSettings: CanvasAudioComposeSettings = {
+                      ...composeDraft.settings,
+                      voice: canvasAudioComposeVoiceAfterModelChange(
+                        exactModel ?? null,
+                        resolvedModel,
+                        composeDraft.settings.voice
+                      ),
+                      model: resolvedModel
+                        ? {
+                            providerId: resolvedModel.providerId,
+                            model: resolvedModel.model,
+                          }
+                        : null,
+                    };
+                    const protocolProfile = canvasAudioComposeProtocolProfile(
+                      resolvedModel?.protocol ?? ''
+                    );
+                    const singleSelected =
+                      selected && canvasState?.selection.nodeIds.length === 1;
+                    const retrySubmission =
+                      audioComposeSubmission?.nodeId === node.id;
+                    return (
+                      <div
+                        className={styles.nodeComposerHost}
+                        data-audio-composer-host
+                      >
+                        {nodeView}
+                        {singleSelected ? (
+                          <CreativeCanvasAudioComposer
+                            nodeId={node.id}
+                            initialPrompt={composeDraft.prompt}
+                            settings={composeSettings}
+                            modelOptions={audioModelOptions}
+                            task={canvasAudioComposeTaskSummary(composeConfig)}
+                            voiceSupported={protocolProfile.fieldSupport.voice}
+                            voiceRequired={protocolProfile.voiceRequired}
+                            formatSupported={protocolProfile.fieldSupport.format}
+                            maxTextLength={protocolProfile.maxTextLength}
+                            disabled={
+                              productDisabled ||
+                              assetImportBusy ||
+                              audioComposeBusy ||
+                              !audioTaskRuntimeReady ||
+                              eligibility.kind === 'unsupported' ||
+                              (!retrySubmission &&
+                                audioTaskRuntimeBlocksNew &&
+                                composeConfig?.data.status !== 'queued' &&
+                                composeConfig?.data.status !== 'running')
+                            }
+                            error={
+                              audioComposeIssue?.nodeId === node.id
+                                ? audioComposeIssue.message
+                                : eligibility.kind === 'unsupported'
+                                  ? eligibility.message
+                                  : null
+                            }
+                            retrySubmission={retrySubmission}
+                            onPromptChange={(prompt) =>
+                              updateAudioComposeDraft(node.id, (current) => ({
+                                ...current,
+                                prompt,
+                              }))
+                            }
+                            onOpenPromptLibrary={() =>
+                              openComposePromptLibrary(node.id)
+                            }
+                            onModelChange={(model) => {
+                              const nextModel = model
+                                ? (audioModelOptions.find(
+                                    (option) =>
+                                      option.providerId === model.providerId &&
+                                      option.model === model.model
+                                  ) ?? null)
+                                : null;
+                              updateAudioComposeDraft(node.id, (current) => ({
+                                ...current,
+                                settings: {
+                                  ...current.settings,
+                                  model,
+                                  voice: canvasAudioComposeVoiceAfterModelChange(
+                                    exactModel ?? null,
+                                    nextModel,
+                                    current.settings.voice
+                                  ),
+                                },
+                              }));
+                            }}
+                            onVoiceChange={(voice) =>
+                              updateAudioComposeDraft(node.id, (current) => ({
+                                ...current,
+                                settings: {
+                                  ...current.settings,
+                                  voice: voice.trim(),
+                                },
+                              }))
+                            }
+                            onFormatChange={(format) =>
+                              updateAudioComposeDraft(node.id, (current) => ({
+                                ...current,
+                                settings: { ...current.settings, format },
+                              }))
+                            }
+                            onGenerate={(prompt) =>
+                              void generateFromCanvasAudio(
+                                node.id,
+                                prompt,
+                                composeSettings
+                              )
+                            }
+                            onRetrySubmission={() =>
+                              void retryCanvasAudioComposeSubmission(node.id)
+                            }
+                            onConfirmSubmission={() =>
+                              void confirmCanvasAudioComposeSubmission(node.id)
+                            }
+                          />
+                        ) : null}
+                      </div>
+                    );
+                  }
                   if (node.type !== 'image') return nodeView;
                   const composeConfig = canvasState
                     ? latestCanvasImageComposeConfig(canvasState.document, node.id)
@@ -3627,6 +4183,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 onCancel={(taskId) => void cancelVideoRuntimeTask(taskId)}
                 onRetry={(taskId) => void retryVideoRuntimeTask(taskId)}
               />
+              <CanvasTaskRuntimeAction
+                label="音频任务"
+                snapshot={audioTaskRuntime}
+                busy={audioTaskRuntimeActionBusy}
+                onCancel={(taskId) => void cancelAudioRuntimeTask(taskId)}
+                onRetry={(taskId) => void retryAudioRuntimeTask(taskId)}
+              />
               <SaveRecoveryAction
                 save={save}
                 busy={recoveryBusy}
@@ -3769,6 +4332,24 @@ const CreativeCanvasProductRoute: React.FC = () => {
             void assets.reload();
           }}
           onSnapshot={setVideoTaskRuntime}
+          onNotice={setNotice}
+        />
+      ) : null}
+      {audioTaskRuntimeReady && project.detail ? (
+        <CanvasAudioTaskRuntimeBridge
+          key={`${projectId}:audio:${audioTaskRuntimeEpoch}`}
+          ref={audioTaskRuntimeRef}
+          projectId={projectId}
+          initialDocument={project.detail.document}
+          editorRef={editorRef}
+          onAsset={(asset) => {
+            knownAssetsRef.current = new Map(knownAssetsRef.current).set(
+              asset.id,
+              asset
+            );
+            void assets.reload();
+          }}
+          onSnapshot={setAudioTaskRuntime}
           onNotice={setNotice}
         />
       ) : null}

@@ -94,14 +94,22 @@ describe('Creative Canvas product route composition', () => {
       '<CreativeCanvasImageToolbar',
       '<CreativeCanvasImageComposer',
       '<CreativeCanvasVideoComposer',
+      '<CreativeCanvasAudioComposer',
       '<CreativeImageCropDialog',
       '<CreativeImageMaskEditDialog',
       '<CreativeImageSplitDialog',
       '<CanvasImageTaskRuntimeBridge',
       '<CanvasVideoTaskRuntimeBridge',
+      '<CanvasAudioTaskRuntimeBridge',
       'prepareCanvasImageCompose',
       'prepareCanvasVideoCompose',
       'canvasVideoComposeMode',
+      'prepareCanvasAudioCompose',
+      'canvasAudioComposeEligibility',
+      'canvasAudioComposeProtocolProfile',
+      'confirmCanvasAudioComposeSubmission',
+      'orphanCanvasAudioComposeTask',
+      'key={`${projectId}:audio:${audioTaskRuntimeEpoch}`}',
       'confirmCanvasVideoComposeSubmission',
       'orphanCanvasVideoComposeTask',
       'videoTaskRuntimeEpoch',
@@ -161,6 +169,9 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('target.data.assetId)')).toBe(false);
     expect(
       editorStyle.includes('[data-canvas-video-composer]')
+    ).toBe(true);
+    expect(
+      editorStyle.includes('[data-canvas-audio-composer]')
     ).toBe(true);
   });
 

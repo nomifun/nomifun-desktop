@@ -218,7 +218,7 @@ export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
       icon={<Voice theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
       title={node.data.title || title}
       subtitle={asset?.label}
-      footer={trimLabel}
+      footer={resolved ? trimLabel : undefined}
       {...sharedFrameProps(props)}
     >
       {resolved ? (

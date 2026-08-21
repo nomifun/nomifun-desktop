@@ -70,7 +70,7 @@ const nodes: CreativeCanvasNode[] = [
     ...base,
     id: 'audio-1',
     type: 'audio',
-    data: { assetId: null, title: '环境声', loop: false, volume: 0.8, trimStartMs: 0, trimEndMs: 12_000 },
+    data: { assetId: null, title: '环境声', loop: false, volume: 0.8, trimStartMs: 0, trimEndMs: 12_000, composer: null },
   },
   {
     ...base,
@@ -108,6 +108,7 @@ describe('Creative Studio canonical node views', () => {
     expect(html.includes('data-node-empty-media="true"')).toBe(true);
     expect(html.includes('空视频节点')).toBe(true);
     expect(html.includes('空音频节点')).toBe(true);
+    expect(html.includes('0:00 – ∞ · 80%')).toBe(false);
     expect(html.includes('data-node-status="failed"')).toBe(true);
     expect(html.includes('role="alert"')).toBe(true);
     expect(html.includes('服务暂时不可用')).toBe(true);
