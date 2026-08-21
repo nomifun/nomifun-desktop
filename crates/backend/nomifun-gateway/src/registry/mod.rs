@@ -180,7 +180,7 @@ impl Registry {
         register_instance_owner_domain(&mut caps, crate::caps_files::register);
         register_instance_owner_domain(&mut caps, crate::caps_mcp::register);
         register_instance_owner_domain(&mut caps, crate::caps_agent::register);
-        register_instance_owner_domain(&mut caps, crate::caps_workshop::register);
+        register_instance_owner_domain(&mut caps, crate::caps_creative_studio::register);
         #[cfg(feature = "browser-use")]
         register_instance_owner_domain(&mut caps, crate::caps_browser::register);
         #[cfg(feature = "computer-use")]

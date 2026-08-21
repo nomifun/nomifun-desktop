@@ -21,6 +21,7 @@ mod thumbnail;
 
 pub mod agent_ops;
 mod archive;
+pub mod creative_agent_ops;
 pub mod creative_studio;
 pub mod routes;
 pub mod service;
@@ -29,6 +30,10 @@ pub mod workflow;
 pub mod workflow_run;
 
 pub use agent_ops::{AddNodeSpec, AgentOp, AppliedOp, OpDisposition, PendingOp};
+pub use creative_agent_ops::{
+    CreativeAgentOp, CreativeAgentOpResult, MAX_CREATIVE_AGENT_OPS_PER_CALL,
+    apply_creative_agent_ops,
+};
 pub use creative_studio::{
     CREATIVE_STUDIO_SCHEMA, CreativeProjectDocument, CreativeProjectSummary,
     MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,

@@ -1,13 +1,13 @@
-//! Pure helpers that extract workshop asset UUIDv7 ids from the two
+//! Pure helpers that extract Creative Studio asset UUIDv7 ids from the two
 //! machine-readable signals a channel turn carries: a completed
-//! `nomi_workshop_*` tool call's `output` JSON (`result_asset_ids`), and any
+//! `nomi_creative_studio_*` tool call's `output` JSON (`result_asset_ids`), and any
 //! `/api/creative-studio/files/{id}` URL the assistant wrote into its visible text
 //! (the same link the desktop renders). Both are deduped by the caller.
 
 use regex::Regex;
 use std::sync::OnceLock;
 
-/// Matches a workshop capability URL and captures the asset id, e.g.
+/// Matches a Creative Studio file URL and captures the asset id, e.g.
 /// `/api/creative-studio/files/{uuidv7}` (host optional, `?thumb=1` tolerated).
 fn files_url_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -58,7 +58,7 @@ fn collect_result_asset_ids(value: &serde_json::Value, out: &mut Vec<String>) {
     }
 }
 
-/// Extract asset ids from assistant text by matching workshop capability URLs.
+/// Extract asset ids from assistant text by matching Creative Studio file URLs.
 pub fn asset_ids_from_text(text: &str) -> Vec<String> {
     files_url_re()
         .captures_iter(text)
