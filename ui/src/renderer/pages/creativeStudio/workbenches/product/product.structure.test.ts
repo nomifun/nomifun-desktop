@@ -12,6 +12,7 @@ const video = readFileSync(new URL('./VideoWorkbenchProductRoute.tsx', import.me
 const ownership = readFileSync(new URL('./ownership.ts', import.meta.url), 'utf8');
 const shared = readFileSync(new URL('./shared.tsx', import.meta.url), 'utf8');
 const wiring = readFileSync(new URL('./WIRING.md', import.meta.url), 'utf8');
+const css = readFileSync(new URL('./StandaloneWorkbenchProduct.module.css', import.meta.url), 'utf8');
 
 describe('standalone workbench product wiring', () => {
   test('exports prop-free product routes composed from the source-parity views', () => {
@@ -21,12 +22,14 @@ describe('standalone workbench product wiring', () => {
     expect(video.includes('<VideoWorkbench {...props} />')).toBe(true);
   });
 
-  test('fails closed without scope and wires durable lifecycle callbacks', () => {
+  test('fails closed without scope and wires owner-scoped history recovery', () => {
     expect(ownership.includes("if (values.length === 0) return { state: 'missing'")).toBe(true);
-    expect(image.includes('initialResumeRequests: persistence.initialResumeRequests')).toBe(true);
-    expect(image.includes('onPendingTask: persistence.onPendingTask')).toBe(true);
-    expect(video.includes('onSettledTask: persistence.onSettledTask')).toBe(true);
-    expect(video.includes('onRecoveryFailure: persistence.onRecoveryFailure')).toBe(true);
+    expect(image.includes("owner: standaloneWorkbenchOwner(projectId, 'image')")).toBe(true);
+    expect(video.includes("owner: standaloneWorkbenchOwner(projectId, 'video')")).toBe(true);
+    expect(image.includes('useStandaloneWorkbenchHistory')).toBe(true);
+    expect(video.includes('standaloneHistoryResumeRequests')).toBe(true);
+    expect(image.includes('useStandalonePersistence')).toBe(false);
+    expect(video.includes('ensureStandaloneWorkbenchNode')).toBe(false);
     expect(shared.includes('navigate(CREATIVE_STUDIO_PROJECTS_PATH)')).toBe(true);
     expect(shared.includes("navigate('/workshop/projects')")).toBe(false);
     expect(wiring.includes('never borrows or creates a recent project implicitly')).toBe(true);
@@ -40,5 +43,28 @@ describe('standalone workbench product wiring', () => {
     expect(wiring.includes('{ assetId, kind, role }')).toBe(true);
     expect(wiring.includes('inputs: null')).toBe(true);
     expect(wiring.includes('owner-scoped list/recovery')).toBe(true);
+  });
+
+  test('does not disguise asset deletion or hidden React ids as task-history deletion', () => {
+    expect(image.includes('creativeAssetClient.remove')).toBe(false);
+    expect(video.includes('creativeAssetClient.remove')).toBe(false);
+    expect(image.includes('hiddenResultIds')).toBe(false);
+    expect(video.includes('hiddenTaskIds')).toBe(false);
+  });
+
+  test('keeps the focused creation palette independent from the app theme', () => {
+    expect(css.includes('--color-bg-1: #f4f2ed')).toBe(true);
+    expect(css.includes('--color-text-1: #292524')).toBe(true);
+    expect(css.includes('--primary-6: 87, 83, 78')).toBe(true);
+    expect(css.includes("[data-theme='dark']")).toBe(false);
+  });
+
+  test('keeps recovery retryable and fences stale task-load hydration', () => {
+    expect(image.includes('重试任务同步')).toBe(true);
+    expect(video.includes('重试任务同步')).toBe(true);
+    expect(image.includes('loadGenerationRef.current !== generation')).toBe(true);
+    expect(video.includes('loadGenerationRef.current !== generation')).toBe(true);
+    expect(image.includes('creativeTaskClient.cancel(creativeTaskReference(task))')).toBe(true);
+    expect(video.includes('creativeTaskClient.cancel(creativeTaskReference(task))')).toBe(true);
   });
 });

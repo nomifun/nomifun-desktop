@@ -769,11 +769,13 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
                  WHERE project_id = ?1 AND workbench_kind = ?2 \
                    AND node_id IS NULL AND workflow_id IS NULL \
                    AND workflow_run_id IS NULL AND workflow_step_id IS NULL \
-                   AND (submitted_at < ?3 OR (submitted_at = ?3 AND creation_task_id < ?4)) \
-                 ORDER BY submitted_at DESC, creation_task_id DESC LIMIT ?5",
+                   AND (?3 = 0 OR status IN ('queued', 'running')) \
+                   AND (submitted_at < ?4 OR (submitted_at = ?4 AND creation_task_id < ?5)) \
+                 ORDER BY submitted_at DESC, creation_task_id DESC LIMIT ?6",
             )
             .bind(project_id.as_str())
             .bind(params.workbench_kind)
+            .bind(i64::from(params.active_only))
             .bind(before.submitted_at)
             .bind(before.creation_task_id)
             .bind(fetch_limit)
@@ -785,10 +787,12 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
                  WHERE project_id = ?1 AND workbench_kind = ?2 \
                    AND node_id IS NULL AND workflow_id IS NULL \
                    AND workflow_run_id IS NULL AND workflow_step_id IS NULL \
-                 ORDER BY submitted_at DESC, creation_task_id DESC LIMIT ?3",
+                   AND (?3 = 0 OR status IN ('queued', 'running')) \
+                 ORDER BY submitted_at DESC, creation_task_id DESC LIMIT ?4",
             )
             .bind(project_id.as_str())
             .bind(params.workbench_kind)
+            .bind(i64::from(params.active_only))
             .bind(fetch_limit)
             .fetch_all(&self.pool)
             .await?
@@ -1382,6 +1386,7 @@ mod tests {
             .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
                 project_id: &project_id,
                 workbench_kind: "video",
+                active_only: false,
                 before: None,
                 limit: 2,
             })
@@ -1401,6 +1406,7 @@ mod tests {
             .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
                 project_id: &project_id,
                 workbench_kind: "video",
+                active_only: false,
                 before: Some(crate::repository::CreationTaskPageCursorRef {
                     submitted_at: visible_last.submitted_at,
                     creation_task_id: &visible_last.creation_task_id,
@@ -1415,6 +1421,35 @@ mod tests {
                 .map(|row| (row.submitted_at, row.creation_task_id.clone()))
                 .collect::<Vec<_>>(),
             matching[2..]
+        );
+
+        repo.update_task(
+            &matching[0].1,
+            UpdateCreationTaskParams {
+                status: Some("failed"),
+                error: Some(Some(r#"{"kind":"provider","message":"fixture"}"#)),
+                finished_at: Some(Some(301)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let active = repo
+            .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
+                project_id: &project_id,
+                workbench_kind: "video",
+                active_only: true,
+                before: None,
+                limit: 100,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            active
+                .iter()
+                .map(|row| (row.submitted_at, row.creation_task_id.clone()))
+                .collect::<Vec<_>>(),
+            matching[1..]
         );
     }
 

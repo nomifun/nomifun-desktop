@@ -40,9 +40,15 @@ type ResultsProps = Pick<
   | 'onNewSession'
   | 'onLoadTask'
   | 'onRetryTask'
+  | 'onCancelTask'
   | 'onInspectTask'
   | 'onCopyPrompt'
   | 'onDownloadTask'
+  | 'historyLoading'
+  | 'historyError'
+  | 'historyLoadingMore'
+  | 'historyHasMore'
+  | 'onLoadMoreTasks'
 >;
 
 const taskStatusLabel = (task: VideoWorkbenchTask): string => {
@@ -170,10 +176,11 @@ const TaskActions: React.FC<{
   task: VideoWorkbenchTask;
   onLoadTask?: (taskId: string) => void;
   onRetryTask?: (taskId: string) => void;
+  onCancelTask?: (taskId: string) => void;
   onInspectTask?: (taskId: string) => void;
   onDownloadTask?: (taskId: string) => void;
-}> = ({ task, onLoadTask, onRetryTask, onInspectTask, onDownloadTask }) => {
-  if (!onLoadTask && !onRetryTask && !onInspectTask && !onDownloadTask) return null;
+}> = ({ task, onLoadTask, onRetryTask, onCancelTask, onInspectTask, onDownloadTask }) => {
+  if (!onLoadTask && !onRetryTask && !onCancelTask && !onInspectTask && !onDownloadTask) return null;
   return (
     <div className={styles.taskActions}>
       <div>
@@ -189,7 +196,7 @@ const TaskActions: React.FC<{
         ) : null}
       </div>
       <div>
-        {(task.status === 'failed' || task.status === 'canceled') && onRetryTask ? (
+        {(task.status === 'failed' || task.status === 'canceled') && onRetryTask && task.retryable !== false ? (
           <Button
             size='mini'
             status='danger'
@@ -197,6 +204,15 @@ const TaskActions: React.FC<{
             onClick={() => onRetryTask(task.id)}
           >
             重试
+          </Button>
+        ) : null}
+        {(task.status === 'queued' || task.status === 'running') && onCancelTask ? (
+          <Button
+            size='mini'
+            status='danger'
+            onClick={() => onCancelTask(task.id)}
+          >
+            取消
           </Button>
         ) : null}
         {task.status === 'succeeded' && onDownloadTask ? (
@@ -221,10 +237,17 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
   onNewSession,
   onLoadTask,
   onRetryTask,
+  onCancelTask,
   onInspectTask,
   onCopyPrompt,
   onDownloadTask,
+  historyLoading,
+  historyError,
+  historyLoadingMore,
+  historyHasMore,
+  onLoadMoreTasks,
 }) => {
+  const deletionEnabled = Boolean(onDeleteTasks);
   const taskIds = tasks.map((task) => task.id);
   const visibleSelectedIds = selectedTaskIds.filter((id) => taskIds.includes(id));
   const allSelected = tasks.length > 0 && tasks.every((task) => selectedTaskIds.includes(task.id));
@@ -243,7 +266,7 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
         <div className={styles.resultsTitle}>
           <History size={17} />
           <h2>全部成果</h2>
-          <Tag>{tasks.length}</Tag>
+          <Tag>已加载 {tasks.length}</Tag>
           {pendingCount ? <Tag color='arcoblue'>{pendingCount} 个处理中</Tag> : null}
         </div>
         <div className={styles.resultsActions}>
@@ -252,7 +275,7 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
               新建
             </Button>
           ) : null}
-          <Button
+          {deletionEnabled ? <Button
             size='small'
             icon={allSelected ? <CloseSmall /> : <Check />}
             disabled={tasks.length === 0}
@@ -261,26 +284,24 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
             }
           >
             {allSelected ? '取消全选' : '全选'}
-          </Button>
-          <Button
+          </Button> : null}
+          {deletionEnabled ? <Button
             size='small'
             status='danger'
             icon={<Delete />}
             disabled={visibleSelectedIds.length === 0}
-            onClick={() => onDeleteTasks(visibleSelectedIds)}
+            onClick={() => onDeleteTasks?.(visibleSelectedIds)}
           >
             删除{visibleSelectedIds.length ? ` ${visibleSelectedIds.length}` : ''}
-          </Button>
+          </Button> : null}
         </div>
       </header>
 
       {tasks.length === 0 ? (
         <div className={styles.emptyResults} data-video-result-state='empty'>
-          <span className={styles.emptyIcon}>
-            <VideoTwo size={40} />
-          </span>
-          <strong>还没有生成视频</strong>
-          <p>输入提示词并选择视频模型，生成成果会出现在这里。</p>
+          <span className={styles.emptyIcon}>{historyLoading ? <Loading size={40} className={styles.spin} /> : historyError ? <Error size={40} /> : <VideoTwo size={40} />}</span>
+          <strong>{historyLoading ? '正在恢复生成历史' : historyError ? '生成历史加载失败' : '还没有生成视频'}</strong>
+          <p>{historyLoading ? '正在读取当前项目的真实任务与结果。' : historyError ?? '输入提示词并选择视频模型，生成成果会出现在这里。'}</p>
         </div>
       ) : (
         <div className={styles.resultGrid}>
@@ -295,7 +316,7 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
                 data-model={task.model.model}
                 data-selected={selected || undefined}
               >
-                <div className={styles.cardOverlayActions}>
+                {deletionEnabled ? <div className={styles.cardOverlayActions}>
                   <Checkbox
                     checked={selected}
                     aria-label={`选择任务 ${task.id}`}
@@ -311,9 +332,9 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
                     status='danger'
                     icon={<Delete />}
                     aria-label={`删除任务 ${task.id}`}
-                    onClick={() => onDeleteTasks([task.id])}
+                    onClick={() => onDeleteTasks?.([task.id])}
                   />
-                </div>
+                </div> : null}
                 <span className={styles.cardStatus} data-status={task.status}>
                   {taskStatusLabel(task)}
                 </span>
@@ -323,6 +344,7 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
                   task={task}
                   onLoadTask={onLoadTask}
                   onRetryTask={onRetryTask}
+                  onCancelTask={onCancelTask}
                   onInspectTask={onInspectTask}
                   onDownloadTask={onDownloadTask}
                 />
@@ -331,6 +353,13 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
           })}
         </div>
       )}
+      {historyHasMore && onLoadMoreTasks ? (
+        <div className={styles.historyFooter}>
+          <Button loading={historyLoadingMore} onClick={onLoadMoreTasks}>
+            {historyLoadingMore ? '正在加载…' : '加载更多历史'}
+          </Button>
+        </div>
+      ) : null}
     </section>
   );
 };

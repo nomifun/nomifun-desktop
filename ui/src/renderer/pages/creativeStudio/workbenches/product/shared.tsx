@@ -65,7 +65,7 @@ export function useStandaloneWorkbenchScope(): StandaloneWorkbenchScope {
     message = state === 'not-found' ? '指定项目不存在或已被删除。' : project.error.message;
   } else if (project.detail?.project.projectId === projectId) {
     state = 'ready';
-    message = `任务将写入项目「${project.detail.project.title}」的可见配置节点。`;
+    message = `任务与结果将写入项目「${project.detail.project.title}」的独立工作台历史。`;
   } else {
     state = 'loading';
     message = '正在验证项目归属…';
@@ -140,4 +140,20 @@ export const StandaloneWorkbenchPage: React.FC<{
     ) : null}
     <div className={styles.workbench}>{children}</div>
   </div>
+);
+
+export const StandaloneHistoryGate: React.FC<{
+  label: string;
+  error: Error | null;
+  onRetry(): void;
+}> = ({ label, error, onRetry }) => (
+  <section className={styles.historyGate} role={error ? 'alert' : 'status'}>
+    <strong>{error ? `${label}历史加载失败` : `正在恢复${label}历史`}</strong>
+    <p>{error?.message ?? '正在读取当前项目的真实任务与结果，请稍候。'}</p>
+    {error ? (
+      <button type='button' onClick={onRetry}>
+        重试
+      </button>
+    ) : null}
+  </section>
 );

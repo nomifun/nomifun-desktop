@@ -26,6 +26,7 @@ import {
   mapImageWorkbenchRuntimeResults,
   prepareAudioWorkbenchRun,
   prepareImageWorkbenchRun,
+  prepareStandaloneHistoryRetry,
   prepareVideoWorkbenchRun,
   resolveExactWorkbenchModel,
   workbenchRuntimeRequestPresentation,
@@ -299,6 +300,46 @@ describe("Creative workbench controller", () => {
     expect(gets).toBe(2);
   });
 
+  test("retries an initial owner-history recovery after a transient GET failure", async () => {
+    const plan = imagePlan();
+    const reference: CreativeTaskReference = {
+      taskId: plan.input.idempotencyKey,
+      owner: { ...plan.input.owner },
+      providerId: plan.input.providerId,
+      model: plan.input.model,
+      task: plan.input.task,
+      capability: plan.input.capability,
+    };
+    let gets = 0;
+    const port: CreativeTaskPort = {
+      create: async () => {
+        throw new Error("not used");
+      },
+      get: async () => {
+        gets += 1;
+        if (gets === 1) throw new Error("temporary recovery transport failure");
+        return task(plan.input, "succeeded", {
+          taskId: reference.taskId,
+          assetId: ASSET_A,
+        });
+      },
+      cancel: async () => {
+        throw new Error("not used");
+      },
+    };
+    const controller = new CreativeWorkbenchRuntimeController(port, assets);
+    const request = { reference, outputKind: "image" as const, retryInput: null };
+
+    const failed = await controller.resume([request]);
+    expect(failed.state).toBe("request_error");
+    expect(failed.entries).toHaveLength(0);
+
+    const recovered = await controller.resume([request]);
+    expect(recovered.state).toBe("succeeded");
+    expect(recovered.entries[0]?.task.taskId).toBe(reference.taskId);
+    expect(gets).toBe(2);
+  });
+
   test("retries one failed video task without clearing successful siblings", async () => {
     const inputs: CreateCreativeTaskInput[] = [];
     const port: CreativeTaskPort = {
@@ -530,11 +571,15 @@ describe("Creative workbench planning and presentation boundaries", () => {
     };
 
     expect(mapImageWorkbenchRuntimeResults(snapshot)[0]).toMatchObject({
-      id: ASSET_A,
+      id: succeeded.taskId,
       taskId: succeeded.taskId,
-      assetId: ASSET_A,
-      imageUrl: `nomifun://asset/${ASSET_A}`,
       status: "succeeded",
+      outputs: [
+        {
+          assetId: ASSET_A,
+          imageUrl: `nomifun://asset/${ASSET_A}`,
+        },
+      ],
     });
   });
 
@@ -617,6 +662,17 @@ describe("Creative workbench planning and presentation boundaries", () => {
         true,
       );
     }
+
+    const failed = task(plan.input, "failed");
+    const retry = prepareStandaloneHistoryRetry({
+      catalog: base.catalog,
+      task: failed,
+      references: base.references,
+    });
+    expect(retry.input.owner).toEqual(plan.input.owner);
+    expect(retry.input.parameters).toEqual(plan.input.parameters);
+    expect(retry.input.inputs).toEqual(plan.input.inputs);
+    expect(retry.input.idempotencyKey).not.toBe(plan.input.idempotencyKey);
   });
 
   test("keeps audio cancellation enabled for an authoritative queued task", async () => {

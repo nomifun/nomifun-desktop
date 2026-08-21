@@ -31,6 +31,13 @@ const ImageWorkbench: React.FC<ImageWorkbenchProps> = (props) => (
         onDeleteResult={props.onDeleteResult}
         onDeleteSelected={props.onDeleteSelected}
         onRetryResult={props.onRetryResult}
+        onLoadResult={props.onLoadResult}
+        onCancelTask={props.onCancelTask}
+        historyLoading={props.historyLoading}
+        historyError={props.historyError}
+        historyLoadingMore={props.historyLoadingMore}
+        historyHasMore={props.historyHasMore}
+        onLoadMoreResults={props.onLoadMoreResults}
       />
       {props.layout === 'bottom' ? <ImageWorkbenchComposer {...props} /> : null}
     </main>

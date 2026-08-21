@@ -119,6 +119,7 @@ struct ListStandaloneWorkbenchTasksQuery {
     workbench_kind: StandaloneWorkbenchKind,
     limit: Option<usize>,
     cursor: Option<String>,
+    active_only: Option<bool>,
 }
 
 fn required_idempotency_key(headers: &HeaderMap) -> Result<String, AppError> {
@@ -184,6 +185,7 @@ async fn list_standalone_workbench_tasks(
         .list_standalone_workbench_tasks(
             &query.project_id,
             query.workbench_kind,
+            query.active_only.unwrap_or(false),
             query.limit,
             query.cursor.as_deref(),
         )
@@ -325,19 +327,22 @@ mod tests {
 
     #[test]
     fn standalone_list_query_is_exact_and_rejects_unknown_or_duplicate_fields() {
-        let uri = "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=video&limit=30&cursor=1%3A0190f5fe-7c00-7a00-8000-000000000002"
+        let uri = "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=video&limit=30&cursor=1%3A0190f5fe-7c00-7a00-8000-000000000002&active_only=true"
             .parse()
             .unwrap();
         let Query(query) = Query::<ListStandaloneWorkbenchTasksQuery>::try_from_uri(&uri).unwrap();
         assert_eq!(query.project_id, "0190f5fe-7c00-7a00-8000-000000000001");
         assert_eq!(query.workbench_kind, StandaloneWorkbenchKind::Video);
         assert_eq!(query.limit, Some(30));
+        assert_eq!(query.active_only, Some(true));
         assert!(query.cursor.as_deref().unwrap().starts_with("1:"));
 
         for invalid in [
             "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=video&unknown=1",
             "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&project_id=0190f5fe-7c00-7a00-8000-000000000002&workbench_kind=video",
             "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=canvas",
+            "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=video&active_only=yes",
+            "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=video&active_only=true&active_only=false",
         ] {
             let uri = invalid.parse().unwrap();
             assert!(

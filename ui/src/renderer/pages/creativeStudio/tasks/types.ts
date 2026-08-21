@@ -120,6 +120,8 @@ export interface CreativeStandaloneTaskHistoryQuery {
   workbenchKind: CreativeStandaloneWorkbenchKind;
   limit?: number;
   cursor?: string | null;
+  /** Recovery inventory only; the normal history page includes every status. */
+  activeOnly?: boolean;
 }
 
 export interface CreativeStandaloneTaskHistoryPage {

@@ -16,6 +16,7 @@ import type {
   CreativeTaskInput,
   CreativeTaskInputRole,
   CreativeTaskOwner,
+  CreativeTask,
 } from "../../tasks";
 import type { AudioWorkbenchFieldSupport, AudioWorkbenchValue } from "../audio";
 import type {
@@ -130,6 +131,12 @@ export interface PrepareAudioWorkbenchRunInput extends WorkbenchPlanBase {
   value: AudioWorkbenchValue;
   fieldSupport: AudioWorkbenchFieldSupport;
   maxTextLength?: number;
+}
+
+export interface PrepareStandaloneHistoryRetryInput {
+  catalog: CreativeModelCatalogSnapshot;
+  task: CreativeTask;
+  references: CreativeWorkbenchReferences;
 }
 
 function requirePrompt(
@@ -265,6 +272,83 @@ function assertNoReferences(
       "references",
     );
   }
+}
+
+/** Replays only an exact, proven standalone request under a fresh idempotency key. */
+export function prepareStandaloneHistoryRetry(
+  input: PrepareStandaloneHistoryRetryInput,
+): PreparedCreativeWorkbenchRun {
+  const task = input.task;
+  if (task.status !== "failed" && task.status !== "canceled") {
+    throw new CreativeWorkbenchRuntimeError(
+      "invalid_parameters",
+      `Task ${task.taskId} is not in a retryable terminal state`,
+      "task.status",
+    );
+  }
+  if (task.inputs === null) {
+    throw new CreativeWorkbenchRuntimeError(
+      "reference_contract_mismatch",
+      `Task ${task.taskId} has no proven input snapshot`,
+      "task.inputs",
+    );
+  }
+  const expectedKind: CreativeStandaloneWorkbenchKind =
+    task.task === "image_generation" || task.task === "image_edit"
+      ? "image"
+      : task.task === "video_generation"
+        ? "video"
+        : task.task === "speech_synthesis"
+          ? "audio"
+          : (() => {
+              throw new CreativeWorkbenchRuntimeError(
+                "task_capability_mismatch",
+                `Standalone workbench cannot retry ${task.task}`,
+                "task.task",
+              );
+            })();
+  if (
+    task.owner.kind !== "standalone_workbench" ||
+    task.owner.workbenchKind !== expectedKind
+  ) {
+    throw new CreativeWorkbenchRuntimeError(
+      "task_capability_mismatch",
+      `Task ${task.taskId} does not belong to its ${expectedKind} standalone workbench`,
+      "task.owner",
+    );
+  }
+  assertTaskCapabilityPair(task.task, task.capability);
+  const model = resolveExactWorkbenchModel(
+    input.catalog,
+    { providerId: task.providerId, model: task.model },
+    task.task,
+  );
+  const assets = validateWorkbenchReferences(input.references);
+  const suppliedInputs = taskInputs(input.references);
+  if (JSON.stringify(suppliedInputs) !== JSON.stringify(task.inputs)) {
+    throw new CreativeWorkbenchRuntimeError(
+      "reference_contract_mismatch",
+      `Retry references do not exactly reproduce task ${task.taskId}`,
+      "references",
+    );
+  }
+  return markPreparedRun({
+    kind: expectedKind,
+    repeat: 1,
+    outputKind: expectedKind,
+    model,
+    references: assets,
+    input: {
+      idempotencyKey: createCreativeTaskIdempotencyKey(),
+      owner: { ...task.owner },
+      providerId: task.providerId,
+      model: task.model,
+      task: task.task,
+      capability: task.capability,
+      parameters: structuredClone(task.parameters),
+      inputs: task.inputs.map((binding) => ({ ...binding })),
+    },
+  });
 }
 
 export function prepareImageWorkbenchRun(

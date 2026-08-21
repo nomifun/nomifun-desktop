@@ -581,11 +581,31 @@
   background: var(--color-fill-1);
 }
 
-.successVisual img {
+.successGallery {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 2px;
+  background: var(--color-border-2);
+}
+
+.successGallery[data-image-output-count='1'] {
+  grid-template-columns: 1fr;
+}
+
+.successGallery img {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.historyFooter {
+  display: flex;
+  justify-content: center;
+  padding: 14px 0 2px;
 }
 
 .resultBadge {
