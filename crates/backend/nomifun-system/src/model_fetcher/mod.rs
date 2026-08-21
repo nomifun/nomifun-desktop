@@ -627,16 +627,34 @@ mod tests {
                 name: Some("Nova Pro".into()),
                 tasks: Vec::new(),
                 traits: Vec::new(),
+                context_limit: None,
             },
             ModelInfo {
                 id: "us.anthropic.claude-sonnet-4-v1:0".into(),
                 name: Some("Claude Sonnet".into()),
                 tasks: vec![nomifun_api_types::ModelTask::Chat],
                 traits: Vec::new(),
+                context_limit: None,
             },
         ];
         enrich_model_suggestions("bedrock", &mut models);
         assert!(models[0].tasks.is_empty());
         assert_eq!(models[1].tasks, vec![nomifun_api_types::ModelTask::Chat]);
+    }
+
+    #[test]
+    fn task_trait_enrichment_preserves_a_provider_declared_context_window() {
+        // Inline suggestions must not overwrite the only automatic source for
+        // the capability's context limit.
+        let mut models = vec![ModelInfo {
+            id: "gemini-3.1-pro".into(),
+            name: None,
+            tasks: Vec::new(),
+            traits: Vec::new(),
+            context_limit: Some(1_048_576),
+        }];
+        enrich_model_suggestions("gemini", &mut models);
+        assert_eq!(models[0].context_limit, Some(1_048_576));
+        assert!(!models[0].tasks.is_empty());
     }
 }

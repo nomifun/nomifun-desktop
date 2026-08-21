@@ -181,6 +181,39 @@ describe('model definition capability selection', () => {
     });
   });
 
+  test('prefills a provider-declared context window without overriding the user', () => {
+    // The provider catalog is the only automatic source for this number — the
+    // fallback is a silent 200k assumption that miscalibrates compaction.
+    expect(
+      applyCatalogSuggestionForTask(
+        { model: '', capabilities: [] },
+        { model: 'catalog/chat', tasks: ['chat'], traits: [], contextLimit: 32_000 },
+        'chat'
+      ).capabilities[0]?.contextLimit
+    ).toBe(32_000);
+
+    // An explicit user value wins: correcting the provider is the point.
+    expect(
+      applyCatalogSuggestionForTask(
+        {
+          model: '',
+          capabilities: [{ ...emptyCapabilityDraft('chat'), contextLimit: 8_000 }],
+        },
+        { model: 'catalog/chat', tasks: ['chat'], traits: [], contextLimit: 32_000 },
+        'chat'
+      ).capabilities[0]?.contextLimit
+    ).toBe(8_000);
+
+    // A provider that declares nothing must not manufacture a window.
+    expect(
+      applyCatalogSuggestionForTask(
+        { model: '', capabilities: [] },
+        { model: 'catalog/chat', tasks: ['chat'], traits: [] },
+        'chat'
+      ).capabilities[0]?.contextLimit
+    ).toBeUndefined();
+  });
+
   test('does not touch traits when the selected task is absent from the entry', () => {
     const oldSpeech: ModelCapabilityDraft = {
       ...emptyCapabilityDraft('speech_synthesis'),
