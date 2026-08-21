@@ -51,6 +51,8 @@ describe('CreativeCanvasEditor composition contract', () => {
       'projectDocumentWithAgentSessions',
       'canonicalCreativePendingTaskIds',
       'await saveController.flush()',
+      'canvasSaveRequiresUnloadGuard',
+      "event.returnValue = ''",
       'saveController.queue(projectDocumentFromCanvasState(nextBase, stateRef.current))',
       'flush: () => saveController.flush()',
       'reloadRemote',

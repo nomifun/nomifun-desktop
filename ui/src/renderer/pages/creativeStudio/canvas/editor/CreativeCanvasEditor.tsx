@@ -58,6 +58,7 @@ import {
   type CanvasResizeCorner,
 } from '../interactions';
 import {
+  canvasSaveRequiresUnloadGuard,
   type CanvasCasFlushResult,
   type CanvasCasSaveSnapshot,
 } from './casSaveController';
@@ -546,8 +547,11 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
     }, [activeAgentSessionId, agentSessions, onAgentSessionsChange]);
 
     useEffect(() => {
-      const beforeUnload = () => {
-        if (saveController.getSnapshot().hasPendingChanges) void saveController.flush();
+      const beforeUnload = (event: BeforeUnloadEvent) => {
+        if (!canvasSaveRequiresUnloadGuard(saveController.getSnapshot())) return;
+        void saveController.flush();
+        event.preventDefault();
+        event.returnValue = '';
       };
       window.addEventListener('beforeunload', beforeUnload);
       return () => window.removeEventListener('beforeunload', beforeUnload);

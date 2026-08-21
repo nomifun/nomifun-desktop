@@ -46,9 +46,13 @@ of the current editor context.
 
 Before route navigation, await `editorRef.current?.flush()`. Continue for
 `status: 'noop'` or `status: 'saved'`; keep the editor mounted for `conflict` or
-`error` so the user can resolve it. The browser `beforeunload` listener is only
-a best-effort flush because browsers cannot await asynchronous persistence while
-closing.
+`error` so the user can resolve it. While a hydrated revision still has pending
+changes, the browser `beforeunload` listener starts the same flush and requests
+the native leave confirmation instead of silently allowing Ctrl+R/close during
+the debounce window. Browsers still cannot await asynchronous persistence
+during unload, so accepting that warning is an explicit choice to leave before
+the save is known durable. Tauri's normal close gesture only hides the main
+window, leaving the renderer and save controller alive.
 
 A revision conflict is terminal for the current save controller. It never
 retries with a newer revision and never overwrites remote state. The built-in

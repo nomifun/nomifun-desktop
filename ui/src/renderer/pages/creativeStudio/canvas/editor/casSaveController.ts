@@ -40,6 +40,12 @@ export interface CanvasSaveScheduler {
   clearTimeout(timer: ReturnType<typeof setTimeout>): void;
 }
 
+export function canvasSaveRequiresUnloadGuard(
+  snapshot: CanvasCasSaveSnapshot
+): boolean {
+  return snapshot.revision !== null && snapshot.hasPendingChanges;
+}
+
 const defaultScheduler: CanvasSaveScheduler = {
   setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
   clearTimeout: (timer) => clearTimeout(timer),
