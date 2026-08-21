@@ -5,6 +5,7 @@
  */
 
 export * from './client';
+export * from './historyClient';
 export * from './port';
 export * from './runtime';
 export * from './types';

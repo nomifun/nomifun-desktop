@@ -27,11 +27,27 @@ its ordered `{ assetId, kind, role }` input snapshot. A migrated legacy task
 whose input kinds cannot be proven returns `inputs: null`; callers must disable
 exact retry rather than interpret that value as an empty input list.
 
-The current image/video routes intentionally keep their config-node persistence
-until the next history slice adds owner-scoped list/recovery. Switching POST
-ownership before that read path exists would make an in-flight task impossible
-to recover after reload. No product code should create another owner adapter in
-the meantime.
+The backend now exposes the exact owner-scoped read path at
+`GET /api/creative-studio/tasks?project_id=...&workbench_kind=...`. It uses a
+strict newest-first keyset cursor (`submitted_at:creation_task_uuidv7`), audits
+every result artifact before returning a page, and rejects unknown query fields,
+foreign owners, capability drift, malformed cursors, and limits outside 1-100.
+The UI task layer parses that page strictly, bounds every response to the
+requested limit/keyset window, and requires a continuation cursor to equal the
+last visible task key. The standalone history model merges durable and live
+rows without splitting a multi-output task. A live row may replace only the
+mutable state of the same immutable task identity, never downgrade a more
+advanced durable state, and never attach outputs outside the task's exact
+ordered result IDs. Conflicting terminal states fail closed. Retry is allowed
+only for failed/canceled tasks whose ordered input snapshot is proven; legacy
+`inputs: null` rows remain visible but cannot be retried exactly.
+
+The current image/video routes still intentionally keep their config-node
+persistence until the coordinated route-integration slice consumes this read
+path and switches POST ownership at the same time. Switching POST ownership
+without mounting list/recovery in the product route would still make an
+in-flight task impossible to recover after reload. No product code should
+create another owner adapter in the meantime.
 
 ## Deliberate blocker
 

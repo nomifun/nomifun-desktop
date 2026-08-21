@@ -764,6 +764,15 @@ export class HttpCreationTaskApi implements CreationTaskWireApi {
     });
   }
 
+  listStandalone(query: string, signal?: AbortSignal): Promise<unknown> {
+    return this.request(
+      'GET',
+      `/api/creative-studio/tasks${query ? `?${query}` : ''}`,
+      undefined,
+      signal
+    );
+  }
+
   get(taskId: string, signal?: AbortSignal): Promise<unknown> {
     return this.request(
       'GET',

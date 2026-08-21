@@ -30,6 +30,19 @@ pub trait ICreationTaskRepository: Send + Sync {
         creation_task_id: &str,
     ) -> Result<Option<CreationTaskRow>, DbError>;
 
+    /// Newest-first keyset page for one exact standalone-workbench aggregate.
+    /// Implementations fetch `limit + 1` rows so the service can derive an
+    /// opaque continuation cursor without a count query.
+    async fn list_standalone_workbench_tasks_page(
+        &self,
+        params: ListStandaloneWorkbenchTasksParams<'_>,
+    ) -> Result<Vec<CreationTaskRow>, DbError> {
+        let _ = params;
+        Err(DbError::Init(
+            "standalone workbench task paging is unavailable in this repository".into(),
+        ))
+    }
+
     /// Complete task inventory for boot-time artifact reconciliation. Unlike
     /// the paginated API listing, this intentionally has no 500-row cap.
     async fn list_all_tasks(&self) -> Result<Vec<CreationTaskRow>, DbError>;
@@ -72,6 +85,21 @@ pub trait ICreationTaskRepository: Send + Sync {
 pub struct IdempotentCreationTask {
     pub row: CreationTaskRow,
     pub inserted: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CreationTaskPageCursorRef<'a> {
+    pub submitted_at: i64,
+    pub creation_task_id: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ListStandaloneWorkbenchTasksParams<'a> {
+    pub project_id: &'a str,
+    pub workbench_kind: &'a str,
+    pub before: Option<CreationTaskPageCursorRef<'a>>,
+    /// Requested visible page size. The repository reads one additional row.
+    pub limit: usize,
 }
 
 /// Strict canonical Creative Studio task owner. No field is shared between

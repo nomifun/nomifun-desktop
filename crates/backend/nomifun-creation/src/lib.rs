@@ -20,7 +20,9 @@ pub mod service;
 pub mod state;
 
 pub use artifact::validate_artifact_payload;
-pub use dto::{CreationTask, CreativeCreationTask, CreativeCreationTaskOwner};
+pub use dto::{
+    CreationTask, CreativeCreationTask, CreativeCreationTaskOwner, CreativeCreationTaskPage,
+};
 pub use routes::creation_routes;
 pub use service::{
     AssetSink, AssetSource, CreationService, CreationServiceBuilder, CreativeTaskOwner,

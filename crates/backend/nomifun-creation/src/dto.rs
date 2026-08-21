@@ -180,6 +180,27 @@ pub struct CreativeCreationTask {
     pub finished_at: Option<TimestampMs>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CreativeCreationTaskPage {
+    pub items: Vec<CreativeCreationTask>,
+    pub next_cursor: Option<String>,
+}
+
+impl CreativeCreationTaskPage {
+    pub fn try_new(
+        tasks: Vec<CreationTask>,
+        next_cursor: Option<String>,
+    ) -> Result<Self, AppError> {
+        Ok(Self {
+            items: tasks
+                .into_iter()
+                .map(CreativeCreationTask::try_from)
+                .collect::<Result<_, _>>()?,
+            next_cursor,
+        })
+    }
+}
+
 impl TryFrom<CreationTask> for CreativeCreationTask {
     type Error = AppError;
 
@@ -321,13 +342,19 @@ mod tests {
         };
         let task = CreationTask::try_from(row).unwrap();
         assert_eq!(task.inputs.as_ref().unwrap()[0].asset_id, input_asset_id);
-        let wire = serde_json::to_value(CreativeCreationTask::try_from(task).unwrap()).unwrap();
-        assert_eq!(wire["owner"]["kind"], "standalone_workbench");
-        assert_eq!(wire["owner"]["project_id"], project_id);
-        assert_eq!(wire["owner"]["workbench_kind"], "video");
-        assert_eq!(wire["inputs"][0]["asset_id"], input_asset_id);
-        assert_eq!(wire["inputs"][0]["kind"], "image");
-        assert_eq!(wire["inputs"][0]["role"], "first_frame");
+        let page = CreativeCreationTaskPage::try_new(
+            vec![task],
+            Some("3:0190f5fe-7c00-7a00-8000-000000000001".into()),
+        )
+        .unwrap();
+        let wire = serde_json::to_value(page).unwrap();
+        assert_eq!(wire["items"][0]["owner"]["kind"], "standalone_workbench");
+        assert_eq!(wire["items"][0]["owner"]["project_id"], project_id);
+        assert_eq!(wire["items"][0]["owner"]["workbench_kind"], "video");
+        assert_eq!(wire["items"][0]["inputs"][0]["asset_id"], input_asset_id);
+        assert_eq!(wire["items"][0]["inputs"][0]["kind"], "image");
+        assert_eq!(wire["items"][0]["inputs"][0]["role"], "first_frame");
+        assert!(wire["next_cursor"].as_str().is_some());
     }
 
     #[test]
