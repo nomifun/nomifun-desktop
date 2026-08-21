@@ -2,7 +2,7 @@
 
 > 用途：在长任务发生上下文压缩或人员切换时，从可验证提交继续，而不是重新审计整仓。
 > 分支：`codex/infinite-canvas-rebuild`
-> 最后功能锚点：`9990921c`（`feat(creative-studio): connect standalone workbench history`）
+> 最后功能锚点：`53093740`（`feat(creative-studio): add safe task history retirement`）
 > 参考产品锚点：`ef7303d`
 
 ## 1. 续接协议
@@ -26,7 +26,7 @@
 | P3 | `nomifun.creative-studio/v1`、UUIDv7、项目 CRUD/CAS、项目中心、自包含 ZIP 导入导出与完整引用重映射 | `d03a6a64`、`b4361084`、`44933dd3`…`2ad53b01`、`c12b8db` |
 | P4 | 画布 reducer/history、视口、节点、连线、小地图、选择/分组/快捷键、Editor CAS、离开/reload 门禁；首节点居中、参考节点几何、固定创作配色、直接节点工具、图片节点生成/上传面板、图片/视频/音频持久 composer 草稿与双客户端冲突恢复；空视频节点 T2V/单图 I2V、空音频节点 TTS 与真实任务终态回填 | `b2e19806`…`dc6c3c34`、`dd18dc6f`、`451dc013`、`5352954c`、`b2e103c8`、`46c1ba1e`、`777caba7`、`ef26f4cb`、`60982e38`、`9fffd526` |
 | P5 | Canonical 资产 API/库、文本/图像/视频/音频节点、素材选择与结果回填 | `57128727`、`e05b18a8`、`04f805a3`、`444db764` |
-| P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化；画布视频/音频 owner、提交响应不明状态确认与 authoritative 404 orphan 清理；真实 `standalone_workbench` owner、完整有序输入快照与 owner-scoped keyset/active 历史读取合同 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44`、`60982e38`、`9fffd526`、`8e5f83cf`、`1dd4b9e9`、`9990921c` |
+| P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化；画布视频/音频 owner、提交响应不明状态确认与 authoritative 404 orphan 清理；真实 `standalone_workbench` owner、完整有序输入快照、owner-scoped keyset/active 历史与安全退役合同 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44`、`60982e38`、`9fffd526`、`8e5f83cf`、`1dd4b9e9`、`9990921c`、`53093740` |
 | P7 | 生图/视频工作台、owner-scoped 持久终态历史、live 恢复/取消/载入/精确重试、工作流定义/运行中心、提示词与素材中心 | `2283ee74`、`1414846e`、`ebd17f3a`…`aad21d9d`、`7e45f8ad`、`9990921c` |
 | P8 | 持久化画布 Agent、原子操作、裁剪/切分/遮罩编辑与真实任务回填 | `e5368474`…`00f407c6`、`cac4bca8`…`bc01849e` |
 | P9 | Director v1 domain、Three.js runtime、CAS sidecar、时间轴、截图回填、sidecar 全资产闭包与归档重映射 | `1ccbd013`、`d3a609f6`、`7b7712c0`、`dfa3c0b3`、`f25825f1`、`c12b8db` |
@@ -72,6 +72,8 @@
 - 生图多输出保持一任务一卡片和有序图片集合；“载入”只回填 composer，“重试”从原 owner/provider/model/task/capability/params/有序 inputs 生成新幂等键并保留旧记录。素材按每个 ID 精确读取，快速载入 A/B 使用 generation fence，旧请求不能覆盖新表单。`inputs:null` 或模型已删除的冷历史不显示重试。
 - 没有原子任务退役合同前，独立历史不显示选择/删除，也不再删结果资产后用 React `hiddenIds` 假装删除。旧 `canvas_node` 任务仍是画布任务，不猜测迁入 standalone scope。视频批量继续固定为 1；页面只声称当前真实支持的一张图片参考。
 - 独立工作台使用与画布一致的固定浅 stone token，不跟随应用主题。SafeResizeObserver 在 `disconnect()` 时会取消被延后一帧的回调，避免 reload 期间 Arco Select 卸载后访问空 popup ref。
+- migration 044 新增独立历史 `deleted_at` tombstone 和严格批量 `POST /api/creative-studio/tasks/retire`：只允许同一精确 standalone owner 的 1-100 个 terminal task，live/missing/错 owner/重复或损坏产物会整批失败；`COALESCE` 保留首次时间戳。普通/active list 隐藏 tombstone，direct GET、幂等回放、boot audit 继续保留并返回 `deleted_at`。
+- 任务 input/result 资产均改为 Restrict，repository 与 DB DELETE trigger 双层阻止绕过；不再剪短 succeeded `result_asset_ids`。项目存在 queued/running task 时删除返回 conflict，terminal/tombstone history 与生成资产继续 KeepHistory。该提交只建立后端与严格前端 adapter/presentation 能力，产品路由尚未恢复移除按钮。
 
 `dd18dc6f` 的提交前检查：
 
@@ -169,6 +171,12 @@
 - 隔离 QA 库精确写入 31 条专用失败记录：首次/reload 显示 30 条，点击 cursor 后显示 31 条且按钮消失；“载入”只回填提示词，删除控件不存在。另写一条 queued 视频任务，刷新后恢复为 live 卡，UI 取消后持久为 canceled，二次 reload 不再 processing。31+1 条均按 project/kind/model 精确删除并确认剩余 0；没有调用 Provider、没有生成/删除资产。
 - 真实浏览器完成 1440×900、1024×768、390×844；浅/深主题下页面/工作台背景、文字和 primary 计算值逐项一致。SafeResizeObserver 生命周期修复后，全新标签页首次进入与完整 reload 都恢复为空历史，Console 0 error / 0 warning；参考项目仍运行在 3000。
 
+`53093740` 的提交前检查：
+
+- `cargo test -p nomifun-creation --lib`：69 passed；retire service/route、direct tombstone wire、list/active 隐藏、产物审计和重复请求均通过。
+- DB retire 原子性/混合 tombstone/错 owner/live/缺失、044 migration CHECK/旧行 NULL/禁止状态复活、input/result asset Restrict/DELETE trigger、project live-task 删除门禁与 terminal KeepHistory 定向门禁通过；Workshop service 与 `cargo check -p nomifun-app --lib` 通过。
+- 严格前端 task/history client、tombstone parser、retire ordered echo、runtime terminal dismiss 和 terminal-only presentation 已通过定向测试；产品路由仍保持删除控件隐藏，不提前调用新命令。
+
 `7e45f8ad` 的提交前检查：
 
 - `cargo test -p nomifun-workshop`：70 passed。
@@ -185,7 +193,7 @@
 ## 4. 仍需明确保留的限制
 
 - Standalone 工作台必须显式选择真实项目；不会借用或偷偷创建最近项目。
-- `standalone_workbench` owner、完整 inputs、owner-scoped list/active recovery 和图片/视频产品历史已经接通；当前缺口是引用安全的原子软删除/退役合同。完成前必须继续隐藏历史删除，不能映射为 asset DELETE 或本地隐藏。
+- `standalone_workbench` 安全退役 API、tombstone 和资产/项目生命周期门禁已经落地，但图片/视频产品路由尚未消费 retire 命令；完成确认 UI 前继续隐藏移除控件，不能映射为 asset DELETE 或本地隐藏。
 - 迁移旧任务的 `inputs:null` 表示输入快照无法证明，只允许审计展示，必须禁用精确重试；不能把它归一为空数组或猜测素材 kind/role。
 - standalone 视频虽然已具备多任务 owner/history 基础，批量数仍有意固定为 1。1-6 并发会改变取消、选择、重试和 Provider 成本 UX，必须作为独立门禁，不得顺手放开。
 - 画布视频当前只开放空节点 T2V 与一张直接连接真实图片的 I2V。Creation engine 对 V2V 返回 `unsupported_capability`；首尾帧、多图、视频/音频混合参考和 Provider 特有高级参数必须等协议能力矩阵完成后再开放。
@@ -202,9 +210,9 @@
 
 ## 5. 下一步单线程优先级
 
-1. Standalone：owner、完整快照、分页/active recovery、live/durable 历史 UI 已完成；下一提交实现引用安全软删除/任务退役和 artifact 生命周期合同，再恢复带确认的单删/批删控件。
+1. Standalone：安全退役与 artifact 生命周期后端合同已完成；下一提交把图片/视频 terminal-only 单删/批删、固定配色确认和成功后第一页 reload 接到产品路由。
 2. 模型与 Agent：消除单模型删除的 Creative Studio 引用缺口，再补首页 Agent 启动画布、选择上下文/创作技能和 Workflow AI 创建。
 3. 高级媒体：视频多任务/首尾帧/高级引用、音频上传/时长/VoiceClone、Director/全景与完整视频输出均须先补 typed 后端能力。
 4. P11：1280×720、1024×768、390×844、Tauri 慢环、真实 provider 冒烟、UI build/桌面打包和最终能力文档。
 
-不要因为主体代码已存在就跳过这些门禁；画布 image/video/audio 基础生成闭环和 standalone owner/history/recovery 已完成，下一功能提交从第 1 项引用安全软删除与任务/资产生命周期合同开始。
+不要因为主体代码已存在就跳过这些门禁；standalone 安全退役后端合同已完成，下一功能提交从第 1 项产品确认 UI 与真实单删/批删接线开始。
