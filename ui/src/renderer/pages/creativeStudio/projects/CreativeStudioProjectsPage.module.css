@@ -13,7 +13,7 @@
   max-width: 1152px;
   min-height: 100%;
   margin: 0 auto;
-  padding: 40px 24px;
+  padding: 39px 24px 40px;
   flex-direction: column;
   gap: 32px;
 }
@@ -49,15 +49,16 @@
   color: var(--color-text-3, var(--text-secondary));
   font-size: 12px;
   font-weight: 400;
-  line-height: 18px;
+  line-height: 16px;
 }
 
 .title {
+  margin-bottom: 15px;
   color: var(--color-text-1, var(--text-primary));
   font-size: 30px;
-  font-weight: 600;
+  font-weight: 500;
   line-height: 36px;
-  letter-spacing: -0.02em;
+  letter-spacing: normal;
 }
 
 .headerActions {
@@ -66,6 +67,28 @@
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.headerActions :global(.arco-btn),
+.emptyPanel :global(.arco-btn-primary) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 6px;
+}
+
+.headerActions :global(.arco-btn:not(.arco-btn-primary)) {
+  border-color: #d9d9d9;
+  color: rgb(0 0 0 / 88%);
+  background: #fff;
+}
+
+.headerActions :global(.arco-btn-primary),
+.emptyPanel :global(.arco-btn-primary) {
+  border-color: transparent;
+  color: #fff;
+  background: #171717;
 }
 
 .grid {
@@ -84,7 +107,7 @@
   justify-content: space-between;
   overflow: hidden;
   border: 0;
-  border-radius: 16px;
+  border-radius: 18px;
   background: #f1eee8;
   cursor: pointer;
   transition: background-color 160ms ease;
@@ -110,13 +133,23 @@
 .cardTop {
   display: grid;
   min-width: 0;
-  grid-template-columns: 18px minmax(0, 1fr);
+  grid-template-columns: 16px minmax(0, 1fr);
   align-items: flex-start;
   gap: 12px;
 }
 
 .cardCheckbox {
-  margin-top: 4px;
+  width: 16px;
+  height: 16px;
+  padding-left: 0 !important;
+  margin-top: 0;
+  line-height: 16px;
+}
+
+.cardCheckbox :global(.arco-checkbox-mask-wrapper),
+.cardCheckbox :global(.arco-checkbox-mask) {
+  width: 16px;
+  height: 16px;
 }
 
 .cardIdentity {
@@ -127,14 +160,14 @@
   overflow: hidden;
   color: var(--color-text-1, var(--text-primary));
   font-size: 20px;
-  font-weight: 600;
+  font-weight: 500;
   line-height: 28px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .cardStats {
-  margin-top: 12px;
+  margin-top: 10px;
   color: var(--color-text-3, var(--text-secondary));
   font-size: 14px;
   line-height: 24px;
@@ -154,7 +187,8 @@
   overflow: hidden;
   color: var(--color-text-3, var(--text-secondary));
   font-size: 12px;
-  line-height: 18px;
+  margin-bottom: 12px;
+  line-height: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -164,6 +198,30 @@
   flex: none;
   align-items: center;
   gap: 4px;
+}
+
+.cardActions :global(.arco-btn) {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0;
+  color: rgb(0 0 0 / 88%);
+}
+
+:global([data-theme='dark']) .headerActions :global(.arco-btn:not(.arco-btn-primary)) {
+  border-color: #424242;
+  color: rgb(255 255 255 / 85%);
+  background: #141414;
+}
+
+:global([data-theme='dark']) .headerActions :global(button.arco-btn.arco-btn-primary),
+:global([data-theme='dark']) .emptyPanel :global(button.arco-btn.arco-btn-primary) {
+  --button-primary-text: #171717;
+  background: #d8d8d8;
+}
+
+:global([data-theme='dark']) .cardActions :global(.arco-btn) {
+  color: var(--color-text-1, #fff);
 }
 
 .statePanel,
@@ -223,7 +281,7 @@
 
 @media (max-width: 639px) {
   .container {
-    padding: 32px 24px;
+    padding: 31px 24px 32px;
   }
 
   .header {

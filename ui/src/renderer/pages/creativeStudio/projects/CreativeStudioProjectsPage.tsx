@@ -209,7 +209,7 @@ const CreativeStudioProjectsPage: React.FC<CreativeStudioProjectsPageProps> = ({
             {selectionActive && loadState === 'ready' ? (
               <>
                 <Button
-                  icon={<Download theme='outline' size={15} fill='currentColor' />}
+                  icon={<Download theme='outline' size={16} fill='currentColor' />}
                   loading={busyAction === 'export'}
                   disabled={controlsDisabled || !service.archiveCapabilities.canExport}
                   title={service.archiveCapabilities.canExport ? undefined : copy.archiveUnavailable}
@@ -234,7 +234,7 @@ const CreativeStudioProjectsPage: React.FC<CreativeStudioProjectsPageProps> = ({
               </Button>
             ) : null}
             <Button
-              icon={<Upload theme='outline' size={15} fill='currentColor' />}
+              icon={<Upload theme='outline' size={16} fill='currentColor' />}
               loading={busyAction === 'import'}
               disabled={controlsDisabled || !service.archiveCapabilities.canImport}
               title={service.archiveCapabilities.canImport ? undefined : copy.archiveUnavailable}
@@ -244,7 +244,7 @@ const CreativeStudioProjectsPage: React.FC<CreativeStudioProjectsPageProps> = ({
             </Button>
             <Button
               type='primary'
-              icon={<Plus theme='outline' size={15} fill='currentColor' />}
+              icon={<Plus theme='outline' size={16} fill='currentColor' />}
               loading={busyAction === 'create'}
               disabled={controlsDisabled}
               onClick={() => void createProject()}
@@ -284,7 +284,7 @@ const CreativeStudioProjectsPage: React.FC<CreativeStudioProjectsPageProps> = ({
             </div>
             <Button
               type='primary'
-              icon={<Plus theme='outline' size={15} fill='currentColor' />}
+              icon={<Plus theme='outline' size={16} fill='currentColor' />}
               loading={busyAction === 'create'}
               disabled={busyAction !== null}
               onClick={() => void createProject()}

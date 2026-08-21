@@ -120,7 +120,7 @@ const CreativeStudioProjectCard: React.FC<CreativeStudioProjectCardProps> = ({
                 type='text'
                 size='small'
                 shape='circle'
-                icon={<Check theme='outline' size={15} fill='currentColor' />}
+                icon={<Check theme='outline' size={16} fill='currentColor' />}
                 aria-label={copy.saveRename}
                 title={copy.saveRename}
                 disabled={saveDisabled}
@@ -130,7 +130,7 @@ const CreativeStudioProjectCard: React.FC<CreativeStudioProjectCardProps> = ({
                 type='text'
                 size='small'
                 shape='circle'
-                icon={<Close theme='outline' size={15} fill='currentColor' />}
+                icon={<Close theme='outline' size={16} fill='currentColor' />}
                 aria-label={copy.cancelRename}
                 title={copy.cancelRename}
                 disabled={disabled}
@@ -143,7 +143,7 @@ const CreativeStudioProjectCard: React.FC<CreativeStudioProjectCardProps> = ({
                 type='text'
                 size='small'
                 shape='circle'
-                icon={<Download theme='outline' size={15} fill='currentColor' />}
+                icon={<Download theme='outline' size={16} fill='currentColor' />}
                 aria-label={`${copy.exportProject}: ${project.title}`}
                 title={exportDisabled ? archiveUnavailableMessage : copy.exportProject}
                 disabled={disabled || exportDisabled}
@@ -153,7 +153,7 @@ const CreativeStudioProjectCard: React.FC<CreativeStudioProjectCardProps> = ({
                 type='text'
                 size='small'
                 shape='circle'
-                icon={<EditTwo theme='outline' size={15} fill='currentColor' />}
+                icon={<EditTwo theme='outline' size={16} fill='currentColor' />}
                 aria-label={`${copy.renameProject}: ${project.title}`}
                 title={copy.renameProject}
                 disabled={disabled}
@@ -163,7 +163,7 @@ const CreativeStudioProjectCard: React.FC<CreativeStudioProjectCardProps> = ({
                 type='text'
                 size='small'
                 shape='circle'
-                icon={<Delete theme='outline' size={15} fill='currentColor' />}
+                icon={<Delete theme='outline' size={16} fill='currentColor' />}
                 aria-label={`${copy.deleteProject}: ${project.title}`}
                 title={copy.deleteProject}
                 disabled={disabled}
