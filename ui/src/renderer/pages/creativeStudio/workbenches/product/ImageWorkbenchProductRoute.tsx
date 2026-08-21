@@ -21,6 +21,7 @@ import {
   creativeTaskReference,
   type CreativeTask,
 } from '../../tasks';
+import { creativeTaskHistoryClient } from '../../tasks/historyClient';
 import {
   ImageWorkbench,
   type ImageWorkbenchAspectRatioOption,
@@ -48,6 +49,7 @@ import { standaloneWorkbenchOwner } from './ownership';
 import {
   StandaloneWorkbenchPage,
   StandaloneHistoryGate,
+  StandaloneHistoryRetireDialog,
   useStandaloneWorkbenchScope,
 } from './shared';
 import styles from './StandaloneWorkbenchProduct.module.css';
@@ -158,6 +160,11 @@ const OwnedImageWorkbenchReady: React.FC<{
   const [settings, setSettings] = useState<ImageWorkbenchSettings>(EMPTY_SETTINGS);
   const [referenceIds, setReferenceIds] = useState<string[]>([]);
   const [hydratedReferences, setHydratedReferences] = useState<CreativeAsset[]>([]);
+  const [selectedResultIds, setSelectedResultIds] = useState<string[]>([]);
+  const [retireTaskIds, setRetireTaskIds] = useState<string[]>([]);
+  const [retiredTaskIds, setRetiredTaskIds] = useState<string[]>([]);
+  const [retiring, setRetiring] = useState(false);
+  const [retireError, setRetireError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const loadGenerationRef = useRef(0);
@@ -167,8 +174,11 @@ const OwnedImageWorkbenchReady: React.FC<{
     [projectId]
   );
   const durableTasks = useMemo(
-    () => combineStandaloneHistoryTasks(history.tasks, history.activeTasks),
-    [history.activeTasks, history.tasks]
+    () =>
+      combineStandaloneHistoryTasks(history.tasks, history.activeTasks).filter(
+        (task) => !retiredTaskIds.includes(task.taskId)
+      ),
+    [history.activeTasks, history.tasks, retiredTaskIds]
   );
   const initialResumeRequests = useMemo(
     () => standaloneHistoryResumeRequests(historyScope, history.activeTasks),
@@ -321,12 +331,55 @@ const OwnedImageWorkbenchReady: React.FC<{
     }
   };
 
+  const requestRetirement = (taskIds: readonly string[]): void => {
+    setError(null);
+    setRetireError(null);
+    const unique = [...new Set(taskIds)];
+    try {
+      if (unique.length === 0 || unique.length > 100) {
+        throw new Error('每次必须选择 1-100 条终态历史。');
+      }
+      for (const taskId of unique) {
+        const task = taskById(taskId);
+        if (task.status === 'queued' || task.status === 'running') {
+          throw new Error('运行中的任务必须先取消，不能直接从历史移除。');
+        }
+      }
+      setRetireTaskIds(unique);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const confirmRetirement = async (): Promise<void> => {
+    if (retireTaskIds.length === 0 || retiring) return;
+    setRetiring(true);
+    setError(null);
+    setRetireError(null);
+    try {
+      const result = await creativeTaskHistoryClient.retireStandalone({
+        projectId,
+        workbenchKind: 'image',
+        taskIds: retireTaskIds,
+      });
+      runtime.dismiss(result.retiredTaskIds);
+      setRetiredTaskIds((current) => [...new Set([...current, ...result.retiredTaskIds])]);
+      setSelectedResultIds([]);
+      setRetireTaskIds([]);
+      await history.reload();
+    } catch (reason) {
+      setRetireError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setRetiring(false);
+    }
+  };
+
   const baseProps = {
     layout,
     prompt,
     references: imageWorkbenchReferencesFromAssets(references),
     settings,
-    selectedResultIds: [] as string[],
+    selectedResultIds,
     onLayoutChange: setLayout,
     onPromptChange: setPrompt,
     onClearPrompt: () => setPrompt(''),
@@ -350,7 +403,9 @@ const OwnedImageWorkbenchReady: React.FC<{
         height: option.height,
       })),
     onCountChange: (count: number) => setSettings((value) => ({ ...value, count })),
-    onResultSelectionChange: () => undefined,
+    onResultSelectionChange: setSelectedResultIds,
+    onDeleteResult: (taskId: string) => requestRetirement([taskId]),
+    onDeleteSelected: requestRetirement,
     onLoadResult: (taskId: string) => void loadTask(taskId),
     onCancelTask: (taskId: string) => void cancelTask(taskId),
     historyLoadingMore: history.loadingMore,
@@ -441,6 +496,17 @@ const OwnedImageWorkbenchReady: React.FC<{
             .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
         }}
         onCancel={() => setPickerOpen(false)}
+      />
+      <StandaloneHistoryRetireDialog
+        open={retireTaskIds.length > 0}
+        count={retireTaskIds.length}
+        busy={retiring}
+        error={retireError}
+        onCancel={() => {
+          setRetireTaskIds([]);
+          setRetireError(null);
+        }}
+        onConfirm={() => void confirmRetirement()}
       />
     </>
   );

@@ -25,6 +25,7 @@ import {
   creativeTaskReference,
   type CreativeTask,
 } from '../../tasks';
+import { creativeTaskHistoryClient } from '../../tasks/historyClient';
 import {
   combineStandaloneHistoryTasks,
   hydrateStandaloneTaskReferences,
@@ -47,6 +48,7 @@ import {
 import {
   StandaloneWorkbenchPage,
   StandaloneHistoryGate,
+  StandaloneHistoryRetireDialog,
   useStandaloneWorkbenchScope,
 } from './shared';
 import styles from './StandaloneWorkbenchProduct.module.css';
@@ -172,6 +174,11 @@ const OwnedVideoWorkbenchReady: React.FC<{
   const [taskCount, setTaskCount] = useState(1);
   const [referenceIds, setReferenceIds] = useState<string[]>([]);
   const [hydratedReferences, setHydratedReferences] = useState<CreativeAsset[]>([]);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+  const [retireTaskIds, setRetireTaskIds] = useState<string[]>([]);
+  const [retiredTaskIds, setRetiredTaskIds] = useState<string[]>([]);
+  const [retiring, setRetiring] = useState(false);
+  const [retireError, setRetireError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const loadGenerationRef = useRef(0);
@@ -181,8 +188,11 @@ const OwnedVideoWorkbenchReady: React.FC<{
     [projectId]
   );
   const durableTasks = useMemo(
-    () => combineStandaloneHistoryTasks(history.tasks, history.activeTasks),
-    [history.activeTasks, history.tasks]
+    () =>
+      combineStandaloneHistoryTasks(history.tasks, history.activeTasks).filter(
+        (task) => !retiredTaskIds.includes(task.taskId)
+      ),
+    [history.activeTasks, history.tasks, retiredTaskIds]
   );
   const initialResumeRequests = useMemo(
     () => standaloneHistoryResumeRequests(historyScope, history.activeTasks),
@@ -337,6 +347,49 @@ const OwnedVideoWorkbenchReady: React.FC<{
     }
   };
 
+  const requestRetirement = (taskIds: readonly string[]): void => {
+    setError(null);
+    setRetireError(null);
+    const unique = [...new Set(taskIds)];
+    try {
+      if (unique.length === 0 || unique.length > 100) {
+        throw new Error('每次必须选择 1-100 条终态历史。');
+      }
+      for (const taskId of unique) {
+        const task = taskById(taskId);
+        if (task.status === 'queued' || task.status === 'running') {
+          throw new Error('运行中的任务必须先取消，不能直接从历史移除。');
+        }
+      }
+      setRetireTaskIds(unique);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const confirmRetirement = async (): Promise<void> => {
+    if (retireTaskIds.length === 0 || retiring) return;
+    setRetiring(true);
+    setError(null);
+    setRetireError(null);
+    try {
+      const result = await creativeTaskHistoryClient.retireStandalone({
+        projectId,
+        workbenchKind: 'video',
+        taskIds: retireTaskIds,
+      });
+      runtime.dismiss(result.retiredTaskIds);
+      setRetiredTaskIds((current) => [...new Set([...current, ...result.retiredTaskIds])]);
+      setSelectedTaskIds([]);
+      setRetireTaskIds([]);
+      await history.reload();
+    } catch (reason) {
+      setRetireError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setRetiring(false);
+    }
+  };
+
   const modelSlot = (
     <CreativeModelSelect
       catalog={catalog}
@@ -387,14 +440,16 @@ const OwnedVideoWorkbenchReady: React.FC<{
     onOpenParameters: () =>
       setError('高级参数只会在具有明确 NomiFun 协议契约后开放，当前未发送隐藏参数。'),
     onOpenPromptLibrary: () => navigate('/workshop/prompts'),
-    selectedTaskIds: [] as string[],
-    onSelectedTaskIdsChange: () => undefined,
+    selectedTaskIds,
+    onSelectedTaskIdsChange: (ids: readonly string[]) => setSelectedTaskIds([...ids]),
+    onDeleteTasks: requestRetirement,
     onNewSession: () => {
       loadGenerationRef.current += 1;
       setPrompt('');
       setReferenceIds([]);
       setHydratedReferences([]);
       setTaskCount(1);
+      setSelectedTaskIds([]);
       setError(null);
     },
     onLoadTask: (taskId: string) => void loadTask(taskId),
@@ -516,6 +571,17 @@ const OwnedVideoWorkbenchReady: React.FC<{
             .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
         }}
         onCancel={() => setPickerOpen(false)}
+      />
+      <StandaloneHistoryRetireDialog
+        open={retireTaskIds.length > 0}
+        count={retireTaskIds.length}
+        busy={retiring}
+        error={retireError}
+        onCancel={() => {
+          setRetireTaskIds([]);
+          setRetireError(null);
+        }}
+        onConfirm={() => void confirmRetirement()}
       />
     </>
   );

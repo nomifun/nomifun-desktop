@@ -173,6 +173,71 @@
   cursor: pointer;
 }
 
+.retireBackdrop {
+  position: fixed;
+  z-index: 1200;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(28, 25, 23, 0.36);
+  backdrop-filter: blur(4px);
+}
+
+.retireDialog {
+  width: min(440px, 100%);
+  border: 1px solid var(--color-border-2);
+  border-radius: 14px;
+  padding: 22px;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  box-shadow: 0 24px 70px rgba(28, 25, 23, 0.22);
+  outline: none;
+}
+
+.retireDialog h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.retireDialog p {
+  margin: 10px 0 0;
+  color: var(--color-text-2);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.retireDialog .retireError {
+  color: rgb(var(--danger-7));
+}
+
+.retireActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.retireActions button {
+  border: 1px solid var(--color-border-3);
+  border-radius: 7px;
+  padding: 7px 12px;
+  background: var(--color-bg-1);
+  color: var(--color-text-1);
+  cursor: pointer;
+}
+
+.retireActions button[data-danger] {
+  border-color: rgb(var(--danger-6));
+  background: rgb(var(--danger-6));
+  color: #fff;
+}
+
+.retireActions button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
 .workbench {
   min-height: 0;
   flex: 1;
