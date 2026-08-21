@@ -3,7 +3,7 @@ use sqlx::SqlitePool;
 
 use crate::error::DbError;
 use crate::models::{NewProviderModel, ProviderModelRow};
-use crate::repository::provider_model::IProviderModelRepository;
+use crate::repository::provider_model::{CoordinatedProviderModelDelete, IProviderModelRepository};
 use crate::repository::sqlite_provider_model_capability::{
     bump_provider_config_revision_tx, replace_for_model_tx,
 };
@@ -165,44 +165,155 @@ impl IProviderModelRepository for SqliteProviderModelRepository {
         Ok(stored)
     }
 
-    async fn delete(&self, provider_id: &str, model: &str) -> Result<bool, DbError> {
+    async fn delete_coordinated(
+        &self,
+        plan: &CoordinatedProviderModelDelete,
+    ) -> Result<bool, DbError> {
         let mut transaction = self.pool.begin().await?;
-        let provider_id = ProviderId::parse(provider_id).map_err(|error| {
-            DbError::Conflict(format!(
-                "Provider model provider_id '{provider_id}' is not a canonical UUIDv7: {error}"
-            ))
-        })?;
-        let parent = sqlx::query(
-            "UPDATE providers SET config_revision = config_revision WHERE provider_id = ?",
+        let provider_id = lock_parent_provider(
+            &mut transaction,
+            &plan.provider_id,
+            plan.expected_config_revision,
+        )
+        .await?;
+
+        let model_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM provider_models WHERE provider_id = ? AND model = ?)",
         )
         .bind(provider_id.as_str())
-        .execute(&mut *transaction)
+        .bind(&plan.model)
+        .fetch_one(&mut *transaction)
         .await?;
-        if parent.rows_affected() == 0 {
+        if !model_exists {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+
+        let live_creation_task: Option<String> = sqlx::query_scalar(
+            "SELECT creation_task_id FROM creation_tasks \
+             WHERE provider_id = ? AND model = ? AND status IN ('queued', 'running') \
+             ORDER BY submitted_at ASC, creation_task_id ASC LIMIT 1",
+        )
+        .bind(provider_id.as_str())
+        .bind(&plan.model)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(task_id) = live_creation_task {
             return Err(DbError::Conflict(format!(
-                "Provider model provider '{provider_id}' does not exist"
+                "provider model '{}/{}' has live creation task '{task_id}'",
+                provider_id, plan.model
             )));
         }
-        let deleted_capabilities = sqlx::query(
+
+        let live_workflow_run: Option<String> = sqlx::query_scalar(
+            "SELECT workflow_run_id FROM creative_studio_workflow_runs AS run \
+             WHERE run.status IN ('requested', 'awaiting-review', 'queued', 'running') \
+               AND EXISTS (\
+                   SELECT 1 FROM json_each(run.aggregate_json, '$.workflowSnapshot.steps') AS step \
+                   WHERE (\
+                       json_extract(step.value, '$.kind') = 'generate-images' \
+                       AND json_extract(step.value, '$.generation.model.providerId') = ?1 \
+                       AND json_extract(step.value, '$.generation.model.model') = ?2\
+                   ) OR (\
+                       json_extract(step.value, '$.kind') = 'draft-prompts' \
+                       AND json_extract(step.value, '$.planning.model.providerId') = ?1 \
+                       AND json_extract(step.value, '$.planning.model.model') = ?2\
+                   )\
+               ) \
+             ORDER BY run.updated_at ASC, run.workflow_run_id ASC LIMIT 1",
+        )
+        .bind(provider_id.as_str())
+        .bind(&plan.model)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(workflow_run_id) = live_workflow_run {
+            return Err(DbError::Conflict(format!(
+                "provider model '{}/{}' is pinned by nonterminal workflow run '{workflow_run_id}'",
+                provider_id, plan.model
+            )));
+        }
+
+        for cleanup in &plan.cleanup.projects {
+            let updated = sqlx::query(
+                "UPDATE creative_studio_projects \
+                 SET document_json = ?, node_count = ?, connection_count = ?, \
+                     revision = revision + 1, updated_at = ? \
+                 WHERE project_id = ? AND revision = ?",
+            )
+            .bind(&cleanup.document_json)
+            .bind(cleanup.node_count)
+            .bind(cleanup.connection_count)
+            .bind(cleanup.updated_at)
+            .bind(&cleanup.project_id)
+            .bind(cleanup.expected_revision)
+            .execute(&mut *transaction)
+            .await?;
+            if updated.rows_affected() != 1 {
+                return Err(DbError::Conflict(format!(
+                    "creative studio project '{}' changed during provider model cleanup; expected revision {}",
+                    cleanup.project_id, cleanup.expected_revision
+                )));
+            }
+        }
+
+        for cleanup in &plan.cleanup.workflows {
+            let replacement = &cleanup.replacement;
+            if replacement.workflow_id != cleanup.workflow_id
+                || replacement.revision != cleanup.expected_revision + 1
+            {
+                return Err(DbError::Conflict(format!(
+                    "creative studio workflow '{}' cleanup replacement must preserve its ID and increment revision once",
+                    cleanup.workflow_id
+                )));
+            }
+            let updated = sqlx::query(
+                "UPDATE creative_studio_workflows \
+                 SET revision = ?, name = ?, description = ?, category = ?, visibility = ?, \
+                     definition_json = ?, updated_at = ? \
+                 WHERE workflow_id = ? AND revision = ?",
+            )
+            .bind(replacement.revision)
+            .bind(&replacement.name)
+            .bind(&replacement.description)
+            .bind(&replacement.category)
+            .bind(&replacement.visibility)
+            .bind(&replacement.definition_json)
+            .bind(replacement.updated_at)
+            .bind(&cleanup.workflow_id)
+            .bind(cleanup.expected_revision)
+            .execute(&mut *transaction)
+            .await?;
+            if updated.rows_affected() != 1 {
+                return Err(DbError::Conflict(format!(
+                    "creative studio workflow '{}' changed during provider model cleanup; expected revision {}",
+                    cleanup.workflow_id, cleanup.expected_revision
+                )));
+            }
+        }
+
+        sqlx::query(
             "DELETE FROM provider_model_capabilities WHERE provider_id = ? AND model = ?",
         )
         .bind(provider_id.as_str())
-        .bind(model)
+        .bind(&plan.model)
+        .execute(&mut *transaction)
+        .await?;
+        let deleted = sqlx::query(
+            "DELETE FROM provider_models WHERE provider_id = ? AND model = ?",
+        )
+        .bind(provider_id.as_str())
+        .bind(&plan.model)
         .execute(&mut *transaction)
         .await?
         .rows_affected();
-        let deleted =
-            sqlx::query("DELETE FROM provider_models WHERE provider_id = ? AND model = ?")
-                .bind(provider_id.as_str())
-                .bind(model)
-                .execute(&mut *transaction)
-                .await?
-                .rows_affected()
-                > 0;
-        if deleted || deleted_capabilities > 0 {
-            bump_provider_config_revision_tx(&mut transaction, provider_id.as_str()).await?;
+        if deleted != 1 {
+            return Err(DbError::Conflict(format!(
+                "provider model '{}/{}' changed during coordinated deletion",
+                provider_id, plan.model
+            )));
         }
+        bump_provider_config_revision_tx(&mut transaction, provider_id.as_str()).await?;
         transaction.commit().await?;
-        Ok(deleted)
+        Ok(true)
     }
 }

@@ -84,6 +84,31 @@ Earlier `canvas_node` tasks remain auditable canvas tasks and are never guessed
 into the standalone owner scope; the new routes contain no compatibility reader
 or dual-write path for the retired config-node ledger.
 
+## Exact model retirement
+
+Deleting one catalog model is coordinated with Creative Studio instead of
+leaving stale invocation targets behind. Workshop first parses and validates an
+exact `{ providerId, model }` cleanup plan. The model repository then applies
+every project/workflow replacement with revision CAS, removes the exact model
+capabilities and model row, and increments the Provider configuration revision
+inside one SQLite writer transaction. A stale project/workflow revision rolls
+back the complete operation; there is no partial cleanup followed by a failed
+delete and no legacy repository delete bypass.
+
+Only mutable selections are cleared: config nodes, image/video/audio composer
+drafts, Workflow generator/planner bindings, and empty Agent sessions. The same
+Provider's other models survive. Completed Agent sessions, terminal creation
+tasks, generated-asset origin, and terminal Workflow snapshots remain immutable
+history. Queued/running tasks, live config owners, pending Agent turns, or
+nonterminal Workflow snapshots reject deletion before any write.
+
+A brand-new creation task now proves the Provider and exact model are enabled
+and that the model exposes the precise task capability in the same transaction
+that inserts the task. Exact idempotent history replay still returns before
+those live-parent checks, so deleting a model cannot erase or corrupt audit
+history. Image and video workbench selectors clear a vanished exact model after
+the canonical catalog refresh; they never substitute another model silently.
+
 ## Deliberate blocker
 
 Standalone video still fixes `taskCount` to one. The owner/history foundation

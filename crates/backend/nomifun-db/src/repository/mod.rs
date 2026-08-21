@@ -96,7 +96,10 @@ pub use mcp_server::IMcpServerRepository;
 pub use oauth_token::IOAuthTokenRepository;
 pub use provider::IProviderRepository;
 pub use provider_connection::IProviderConnectionRepository;
-pub use provider_model::IProviderModelRepository;
+pub use provider_model::{
+    CoordinatedProviderModelDelete, IProviderModelRepository, ProviderModelCleanupPlan,
+    ProviderModelProjectCleanup, ProviderModelWorkflowCleanup,
+};
 pub use provider_model_capability::IProviderModelCapabilityRepository;
 pub use preset::{IPresetRepository, IPresetStateRepository, IPresetTagRepository};
 pub use requirement::{

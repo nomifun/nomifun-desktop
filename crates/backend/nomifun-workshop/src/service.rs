@@ -12,7 +12,9 @@ use nomifun_common::{
 };
 use nomifun_db::{
     AssetSort, CreativeStudioProjectRow, CreativeStudioWorkflowRunRow, DbError,
-    IWorkshopRepository, ListAssetsParams, UpdateAssetParams, WorkshopAssetRow,
+    IWorkshopRepository, ListAssetsParams, ProviderModelCleanupPlan,
+    ProviderModelProjectCleanup, ProviderModelWorkflowCleanup, UpdateAssetParams,
+    WorkshopAssetRow,
 };
 use serde_json::Value;
 
@@ -24,7 +26,7 @@ use crate::archive::{
     sanitized_archive_origin,
 };
 use crate::creative_studio::{
-    CreativeNodeData, CreativeProjectDocument, CreativeProjectSummary,
+    CreativeGenerationStatus, CreativeNodeData, CreativeProjectDocument, CreativeProjectSummary,
     MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
 };
 #[cfg(test)]
@@ -648,7 +650,9 @@ impl WorkshopService {
             .validate()
             .map_err(|error| AppError::BadRequest(format!("invalid workflow definition: {error}")))?;
         self.validate_creative_workflow_assets(&definition).await?;
-        self.validate_creative_workflow_models(&definition).await?;
+        let _provider_guard = self.provider_read_guard().await;
+        self.validate_creative_workflow_models_under_guard(&definition)
+            .await?;
         let row = definition
             .to_row()
             .map_err(|error| AppError::BadRequest(format!("invalid workflow definition: {error}")))?;
@@ -699,7 +703,9 @@ impl WorkshopService {
             .validate()
             .map_err(|error| AppError::BadRequest(format!("invalid workflow definition: {error}")))?;
         self.validate_creative_workflow_assets(&definition).await?;
-        self.validate_creative_workflow_models(&definition).await?;
+        let _provider_guard = self.provider_read_guard().await;
+        self.validate_creative_workflow_models_under_guard(&definition)
+            .await?;
         let replacement = definition
             .to_row()
             .map_err(|error| AppError::BadRequest(format!("invalid workflow definition: {error}")))?;
@@ -952,15 +958,6 @@ impl WorkshopService {
             }
         }
         Ok(())
-    }
-
-    async fn validate_creative_workflow_models(
-        &self,
-        definition: &CreativeWorkflowDefinitionV1,
-    ) -> Result<(), AppError> {
-        let _provider_guard = self.provider_read_guard().await;
-        self.validate_creative_workflow_models_under_guard(definition)
-            .await
     }
 
     async fn validate_creative_workflow_models_under_guard(
@@ -1315,27 +1312,107 @@ impl WorkshopService {
         .await
     }
 
-    /// Remove one Provider/model selection from every canonical Creative
-    /// Studio config node and workflow generation step. The Provider deletion
-    /// coordinator invokes this while holding the process-wide lifecycle write
-    /// guard, so compliant saves cannot race the scan. Each changed project or
-    /// workflow is replaced with its repository CAS: a conflict fails closed
-    /// instead of overwriting a newer revision. The overall scan is idempotent.
+    /// Remove one Provider selection from every canonical Creative Studio
+    /// config node and workflow generation step. Full Provider deletion keeps
+    /// its existing coordinator contract; exact model deletion uses the atomic
+    /// plan below instead.
     pub async fn clear_provider_references_under_lifecycle_write_guard(
         &self,
         provider_id: &str,
     ) -> Result<(), AppError> {
+        let cleanup = self
+            .build_provider_model_cleanup_plan(provider_id, None)
+            .await?;
+        for project in cleanup.projects {
+            self.repo
+                .save_creative_project(
+                    &project.project_id,
+                    project.expected_revision,
+                    &project.document_json,
+                    project.node_count,
+                    project.connection_count,
+                    project.updated_at,
+                )
+                .await?;
+        }
+        for workflow in cleanup.workflows {
+            self.repo
+                .save_creative_workflow(
+                    &workflow.workflow_id,
+                    workflow.expected_revision,
+                    &workflow.replacement,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Build, validate, and serialize every soft-reference replacement for one
+    /// exact Provider/model pair. No row is written here: the model repository
+    /// applies the complete plan and deletes the catalog model in one SQLite
+    /// transaction. Historical tasks, completed Agent sessions, assets, and
+    /// terminal workflow snapshots remain immutable audit records.
+    pub async fn plan_provider_model_cleanup_under_lifecycle_write_guard(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<ProviderModelCleanupPlan, AppError> {
+        let model = model.trim();
+        if model.is_empty() || model.chars().count() > 512 {
+            return Err(AppError::BadRequest(
+                "provider model must contain 1 to 512 characters".into(),
+            ));
+        }
+        self.build_provider_model_cleanup_plan(provider_id, Some(model))
+            .await
+    }
+
+    async fn build_provider_model_cleanup_plan(
+        &self,
+        provider_id: &str,
+        target_model: Option<&str>,
+    ) -> Result<ProviderModelCleanupPlan, AppError> {
         let provider_id = ProviderId::parse(provider_id)
             .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?
             .into_string();
+        let matches = |candidate_provider: &str, candidate_model: Option<&str>| {
+            candidate_provider == provider_id.as_str()
+                && target_model.is_none_or(|model| candidate_model == Some(model))
+        };
+        let mut project_cleanups = Vec::new();
         for project in self.repo.list_creative_projects().await? {
             let mut document = parse_stored_creative_project_row(&project)?;
+            let pending_task_ids = document
+                .pending_task_ids
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
             let mut changed = false;
             for node in &mut document.nodes {
                 match &mut node.data {
                     CreativeNodeData::Config(config)
-                        if config.provider_id.as_deref() == Some(provider_id.as_str()) =>
+                        if config.provider_id.as_deref().is_some_and(|candidate| {
+                            matches(candidate, config.model.as_deref())
+                        }) =>
                     {
+                        if target_model.is_some()
+                            && (matches!(
+                                config.status,
+                                CreativeGenerationStatus::Queued
+                                    | CreativeGenerationStatus::Running
+                            ) || config
+                                .task_id
+                                .as_ref()
+                                .is_some_and(|task_id| pending_task_ids.contains(task_id)))
+                        {
+                            return Err(AppError::Conflict(format!(
+                                "creative studio project {} config node {} is still using provider-model '{}/{}'",
+                                project.project_id,
+                                node.id,
+                                provider_id,
+                                target_model.expect("exact cleanup has a model")
+                            )));
+                        }
                         config.provider_id = None;
                         config.model = None;
                         changed = true;
@@ -1345,7 +1422,9 @@ impl WorkshopService {
                             .composer
                             .as_ref()
                             .and_then(|composer| composer.model.as_ref())
-                            .is_some_and(|model| model.provider_id == provider_id);
+                            .is_some_and(|model| {
+                                matches(&model.provider_id, Some(&model.model))
+                            });
                         if clears_target {
                             if let Some(composer) = image.composer.as_mut() {
                                 composer.model = None;
@@ -1358,7 +1437,9 @@ impl WorkshopService {
                             .composer
                             .as_ref()
                             .and_then(|composer| composer.model.as_ref())
-                            .is_some_and(|model| model.provider_id == provider_id);
+                            .is_some_and(|model| {
+                                matches(&model.provider_id, Some(&model.model))
+                            });
                         if clears_target {
                             if let Some(composer) = video.composer.as_mut() {
                                 composer.model = None;
@@ -1371,7 +1452,9 @@ impl WorkshopService {
                             .composer
                             .as_ref()
                             .and_then(|composer| composer.model.as_ref())
-                            .is_some_and(|model| model.provider_id == provider_id);
+                            .is_some_and(|model| {
+                                matches(&model.provider_id, Some(&model.model))
+                            });
                         if clears_target {
                             if let Some(composer) = audio.composer.as_mut() {
                                 composer.model = None;
@@ -1380,6 +1463,29 @@ impl WorkshopService {
                         }
                     }
                     _ => {}
+                }
+            }
+            if target_model.is_some() {
+                for chat in &mut document.chat_sessions {
+                    let clears_target = chat.model.as_ref().is_some_and(|model| {
+                        matches(&model.provider_id, Some(&model.model))
+                    });
+                    if !clears_target {
+                        continue;
+                    }
+                    if chat.pending_turn.is_some() {
+                        return Err(AppError::Conflict(format!(
+                            "creative studio project {} Agent session {} has a pending turn using provider-model '{}/{}'",
+                            project.project_id,
+                            chat.id,
+                            provider_id,
+                            target_model.expect("exact cleanup has a model")
+                        )));
+                    }
+                    if chat.message_ids.is_empty() {
+                        chat.model = None;
+                        changed = true;
+                    }
                 }
             }
             if !changed {
@@ -1406,17 +1512,16 @@ impl WorkshopService {
                     project.project_id
                 ))
             })?;
-            self.repo
-                .save_creative_project(
-                    &project.project_id,
-                    project.revision,
-                    &document_json,
-                    node_count,
-                    connection_count,
-                    now_ms(),
-                )
-                .await?;
+            project_cleanups.push(ProviderModelProjectCleanup {
+                project_id: project.project_id,
+                expected_revision: project.revision,
+                document_json,
+                node_count,
+                connection_count,
+                updated_at: now_ms().max(project.updated_at),
+            });
         }
+        let mut workflow_cleanups = Vec::new();
         for workflow_row in self.repo.list_creative_workflows().await? {
             let mut workflow = parse_workflow_row(&workflow_row).map_err(|error| {
                 AppError::Conflict(format!(
@@ -1433,7 +1538,9 @@ impl WorkshopService {
                     } if generation
                         .model
                         .as_ref()
-                        .is_some_and(|binding| binding.provider_id == provider_id) =>
+                        .is_some_and(|binding| {
+                            matches(&binding.provider_id, Some(&binding.model))
+                        }) =>
                     {
                         generation.model = None;
                         changed = true;
@@ -1444,7 +1551,9 @@ impl WorkshopService {
                     } if planning
                         .model
                         .as_ref()
-                        .is_some_and(|binding| binding.provider_id == provider_id) =>
+                        .is_some_and(|binding| {
+                            matches(&binding.provider_id, Some(&binding.model))
+                        }) =>
                     {
                         planning.model = None;
                         changed = true;
@@ -1456,7 +1565,7 @@ impl WorkshopService {
                 continue;
             }
             workflow.revision = workflow_row.revision + 1;
-            workflow.metadata.updated_at = now_ms();
+            workflow.metadata.updated_at = now_ms().max(workflow_row.updated_at);
             workflow.validate().map_err(|error| {
                 AppError::Conflict(format!(
                     "creative studio workflow {} is invalid after provider cleanup: {error}",
@@ -1471,11 +1580,16 @@ impl WorkshopService {
                     workflow.id
                 ))
             })?;
-            self.repo
-                .save_creative_workflow(&workflow.id, workflow_row.revision, &replacement)
-                .await?;
+            workflow_cleanups.push(ProviderModelWorkflowCleanup {
+                workflow_id: workflow.id,
+                expected_revision: workflow_row.revision,
+                replacement,
+            });
         }
-        Ok(())
+        Ok(ProviderModelCleanupPlan {
+            projects: project_cleanups,
+            workflows: workflow_cleanups,
+        })
     }
 
     /// Read an asset's original binary + its resolved mime. Errors when the
@@ -3902,6 +4016,316 @@ mod tests {
             .expect("unrelated workflow planning binding must survive provider cleanup");
         assert_eq!(surviving_planning_binding.provider_id, other_provider_id);
         assert_eq!(surviving_planning_binding.model, "keep-me");
+    }
+
+    #[tokio::test]
+    async fn exact_model_cleanup_builds_one_validated_plan_and_preserves_history_and_siblings() {
+        let barrier = Arc::new(ProviderLifecycleBarrier::new());
+        let (svc, _dir, db) =
+            service_with_database_and_lifecycle(Some(barrier.clone())).await;
+        let provider_id = "0190f5fe-7c00-7a00-8000-00000000008a";
+        insert_provider(&db, provider_id).await;
+        for model in ["delete-me", "keep-same-provider"] {
+            insert_provider_model(&db, provider_id, model).await;
+            insert_provider_model_capability(&db, provider_id, model, "image_generation")
+                .await;
+            insert_provider_model_capability(&db, provider_id, model, "chat").await;
+        }
+
+        let project = svc
+            .create_creative_project(Some("exact model cleanup".into()))
+            .await
+            .unwrap();
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(creative_config_node(
+            "target-config",
+            Some(provider_id),
+            Some("delete-me"),
+        ));
+        document.nodes.push(creative_config_node(
+            "sibling-config",
+            Some(provider_id),
+            Some("keep-same-provider"),
+        ));
+        document.nodes.push(creative_image_node(
+            "target-image",
+            Some(provider_id),
+            Some("delete-me"),
+        ));
+        document.nodes.push(creative_video_node(
+            "target-video",
+            Some(provider_id),
+            Some("delete-me"),
+        ));
+        document.nodes.push(creative_audio_node(
+            "target-audio",
+            Some(provider_id),
+            Some("delete-me"),
+        ));
+        let empty_chat_id = nomifun_common::generate_id();
+        let completed_chat_id = nomifun_common::generate_id();
+        document.chat_sessions.push(crate::creative_studio::CreativeChatSession {
+            id: empty_chat_id.clone(),
+            title: "empty draft".into(),
+            message_ids: Vec::new(),
+            model: Some(crate::creative_studio::CreativeChatModel {
+                provider_id: provider_id.into(),
+                model: "delete-me".into(),
+            }),
+            pending_turn: None,
+            created_at: 1,
+            updated_at: 1,
+        });
+        document.chat_sessions.push(crate::creative_studio::CreativeChatSession {
+            id: completed_chat_id.clone(),
+            title: "completed history".into(),
+            message_ids: vec![
+                nomifun_common::generate_id(),
+                nomifun_common::generate_id(),
+            ],
+            model: Some(crate::creative_studio::CreativeChatModel {
+                provider_id: provider_id.into(),
+                model: "delete-me".into(),
+            }),
+            pending_turn: None,
+            created_at: 1,
+            updated_at: 1,
+        });
+        svc.save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+
+        let mut target_workflow = workflow_definition();
+        if let CreativeWorkflowStep::GenerateImages { generation, .. } =
+            &mut target_workflow.steps[1]
+        {
+            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+                provider_id: provider_id.into(),
+                model: "delete-me".into(),
+                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+            });
+        }
+        let target_workflow = svc
+            .create_creative_workflow(target_workflow)
+            .await
+            .unwrap();
+        let mut sibling_workflow = workflow_definition();
+        if let CreativeWorkflowStep::GenerateImages { generation, .. } =
+            &mut sibling_workflow.steps[1]
+        {
+            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+                provider_id: provider_id.into(),
+                model: "keep-same-provider".into(),
+                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+            });
+        }
+        let sibling_workflow = svc
+            .create_creative_workflow(sibling_workflow)
+            .await
+            .unwrap();
+        let planning_workflow = svc
+            .create_creative_workflow(series_workflow_definition(provider_id, "delete-me"))
+            .await
+            .unwrap();
+
+        let _write_guard = barrier.write().await;
+        let cleanup = svc
+            .plan_provider_model_cleanup_under_lifecycle_write_guard(provider_id, "delete-me")
+            .await
+            .unwrap();
+
+        assert_eq!(cleanup.projects.len(), 1);
+        let project_patch = &cleanup.projects[0];
+        assert_eq!(project_patch.project_id, project.project_id);
+        assert_eq!(project_patch.expected_revision, 2);
+        let replacement: CreativeProjectDocument =
+            serde_json::from_str(&project_patch.document_json).unwrap();
+        let CreativeNodeData::Config(target_config) = &replacement.nodes[0].data else {
+            panic!("expected target config")
+        };
+        assert_eq!(target_config.provider_id, None);
+        assert_eq!(target_config.model, None);
+        let CreativeNodeData::Config(sibling_config) = &replacement.nodes[1].data else {
+            panic!("expected sibling config")
+        };
+        assert_eq!(sibling_config.provider_id.as_deref(), Some(provider_id));
+        assert_eq!(sibling_config.model.as_deref(), Some("keep-same-provider"));
+        for node in &replacement.nodes[2..=4] {
+            let model = match &node.data {
+                CreativeNodeData::Image(image) => image
+                    .composer
+                    .as_ref()
+                    .and_then(|composer| composer.model.as_ref()),
+                CreativeNodeData::Video(video) => video
+                    .composer
+                    .as_ref()
+                    .and_then(|composer| composer.model.as_ref()),
+                CreativeNodeData::Audio(audio) => audio
+                    .composer
+                    .as_ref()
+                    .and_then(|composer| composer.model.as_ref()),
+                _ => panic!("expected a composer node"),
+            };
+            assert_eq!(model, None, "exact composer selection must be cleared");
+        }
+        let empty_chat = replacement
+            .chat_sessions
+            .iter()
+            .find(|chat| chat.id == empty_chat_id)
+            .unwrap();
+        assert_eq!(empty_chat.model, None);
+        let completed_chat = replacement
+            .chat_sessions
+            .iter()
+            .find(|chat| chat.id == completed_chat_id)
+            .unwrap();
+        assert_eq!(completed_chat.model.as_ref().unwrap().model, "delete-me");
+
+        assert_eq!(cleanup.workflows.len(), 2);
+        let target_patch = cleanup
+            .workflows
+            .iter()
+            .find(|patch| patch.workflow_id == target_workflow.id)
+            .expect("target image workflow must be planned");
+        assert_eq!(target_patch.expected_revision, 1);
+        assert_eq!(target_patch.replacement.revision, 2);
+        assert_eq!(
+            parse_workflow_row(&target_patch.replacement)
+                .unwrap()
+                .image_model_bindings()
+                .count(),
+            0
+        );
+        let planning_patch = cleanup
+            .workflows
+            .iter()
+            .find(|patch| patch.workflow_id == planning_workflow.id)
+            .expect("target planning workflow must be planned");
+        assert_eq!(
+            parse_workflow_row(&planning_patch.replacement)
+                .unwrap()
+                .text_model_bindings()
+                .count(),
+            0
+        );
+        assert!(
+            cleanup
+                .workflows
+                .iter()
+                .all(|patch| patch.workflow_id != sibling_workflow.id)
+        );
+
+        let unchanged_project = svc.get_creative_project(&project.project_id).await.unwrap();
+        assert_eq!(unchanged_project.project.revision, "2");
+        assert_eq!(
+            svc.get_creative_workflow(&target_workflow.id)
+                .await
+                .unwrap()
+                .revision,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_model_cleanup_rejects_pending_canvas_or_agent_usage_without_writes() {
+        let barrier = Arc::new(ProviderLifecycleBarrier::new());
+        let (svc, _dir, db) =
+            service_with_database_and_lifecycle(Some(barrier.clone())).await;
+        let provider_id = "0190f5fe-7c00-7a00-8000-00000000008b";
+        insert_provider(&db, provider_id).await;
+        insert_provider_model(&db, provider_id, "delete-me").await;
+
+        let canvas_project = svc
+            .create_creative_project(Some("live canvas".into()))
+            .await
+            .unwrap();
+        let mut canvas_document =
+            CreativeProjectDocument::empty(canvas_project.project_id.clone());
+        let task_id = nomifun_common::generate_id();
+        let mut config = creative_config_node(
+            "live-config",
+            Some(provider_id),
+            Some("delete-me"),
+        );
+        let CreativeNodeData::Config(config_data) = &mut config.data else {
+            unreachable!()
+        };
+        config_data.status = CreativeGenerationStatus::Queued;
+        config_data.task_id = Some(task_id.clone());
+        canvas_document.nodes.push(config);
+        canvas_document.pending_task_ids.push(task_id);
+        svc.save_creative_project(&canvas_project.project_id, "1", &canvas_document)
+            .await
+            .unwrap();
+
+        let write_guard = barrier.write().await;
+        let canvas_error = svc
+            .plan_provider_model_cleanup_under_lifecycle_write_guard(provider_id, "delete-me")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            canvas_error,
+            AppError::Conflict(ref message) if message.contains("config node live-config")
+        ));
+        drop(write_guard);
+        assert_eq!(
+            svc.get_creative_project(&canvas_project.project_id)
+                .await
+                .unwrap()
+                .project
+                .revision,
+            "2"
+        );
+
+        svc.delete_creative_project(&canvas_project.project_id)
+            .await
+            .unwrap();
+        let agent_project = svc
+            .create_creative_project(Some("pending Agent".into()))
+            .await
+            .unwrap();
+        let mut agent_document =
+            CreativeProjectDocument::empty(agent_project.project_id.clone());
+        let chat_id = nomifun_common::generate_id();
+        agent_document.chat_sessions.push(crate::creative_studio::CreativeChatSession {
+            id: chat_id.clone(),
+            title: "pending".into(),
+            message_ids: Vec::new(),
+            model: Some(crate::creative_studio::CreativeChatModel {
+                provider_id: provider_id.into(),
+                model: "delete-me".into(),
+            }),
+            pending_turn: Some(crate::creative_studio::CreativeChatPendingTurn {
+                idempotency_key: nomifun_common::generate_id(),
+                prompt: "continue".into(),
+                created_at: 1,
+            }),
+            created_at: 1,
+            updated_at: 1,
+        });
+        agent_document.active_chat_id = Some(chat_id.clone());
+        svc.save_creative_project(&agent_project.project_id, "1", &agent_document)
+            .await
+            .unwrap();
+
+        let _write_guard = barrier.write().await;
+        let agent_error = svc
+            .plan_provider_model_cleanup_under_lifecycle_write_guard(provider_id, "delete-me")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            agent_error,
+            AppError::Conflict(ref message)
+                if message.contains("Agent session") && message.contains(&chat_id)
+        ));
+        assert_eq!(
+            svc.get_creative_project(&agent_project.project_id)
+                .await
+                .unwrap()
+                .project
+                .revision,
+            "2"
+        );
     }
 
     #[tokio::test]

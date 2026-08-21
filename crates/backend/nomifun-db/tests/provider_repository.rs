@@ -1,12 +1,14 @@
 use nomifun_db::models::ConversationRow;
 use nomifun_db::{
-    CreateProviderParams, CreateTerminalParams, DbError, IConversationRepository,
-    IProviderConnectionRepository, IProviderModelCapabilityRepository, IProviderModelRepository,
-    IProviderRepository, ITerminalRepository, NewProviderModel, NewProviderModelCapability,
-    SqliteConversationRepository, SqliteProviderConnectionRepository,
-    SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
-    SqliteProviderRepository, SqliteTerminalRepository, UpdateProviderParams,
-    UpsertProviderConnectionParams, init_database_memory,
+    CoordinatedProviderModelDelete, CreateProviderParams, CreateTerminalParams,
+    CreativeStudioWorkflowRow, DbError, IConversationRepository,
+    IProviderConnectionRepository, IProviderModelCapabilityRepository,
+    IProviderModelRepository, IProviderRepository, ITerminalRepository, NewProviderModel,
+    NewProviderModelCapability, ProviderModelCleanupPlan, ProviderModelProjectCleanup,
+    ProviderModelWorkflowCleanup, SqliteConversationRepository,
+    SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
+    SqliteProviderModelRepository, SqliteProviderRepository, SqliteTerminalRepository,
+    UpdateProviderParams, UpsertProviderConnectionParams, init_database_memory,
 };
 
 const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
@@ -361,7 +363,17 @@ async fn model_save_preserves_health_only_when_invocation_config_is_unchanged() 
             .config_revision,
         3
     );
-    assert!(models.delete(PROVIDER_ID, "multi").await.unwrap());
+    assert!(
+        models
+            .delete_coordinated(&CoordinatedProviderModelDelete {
+                provider_id: PROVIDER_ID.to_owned(),
+                model: "multi".to_owned(),
+                expected_config_revision: 3,
+                cleanup: ProviderModelCleanupPlan::default(),
+            })
+            .await
+            .unwrap()
+    );
     assert_eq!(
         providers
             .find_by_id(PROVIDER_ID)
@@ -1150,5 +1162,486 @@ async fn delete_fails_closed_on_malformed_cron_provider_json() {
     assert_eq!(
         cron_count, 1,
         "failed deletion must not mutate the cron row"
+    );
+}
+
+async fn seed_model_delete_provider(
+    db: &nomifun_db::Database,
+    with_surviving_model: bool,
+) -> i64 {
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    providers
+        .create(
+            provider_params(Some(PROVIDER_ID)),
+            &model("delete-me", &IMAGE_CAPABILITIES),
+            &[],
+        )
+        .await
+        .unwrap();
+    if with_surviving_model {
+        SqliteProviderModelRepository::new(db.pool().clone())
+            .save(PROVIDER_ID, 0, &model("keep-me", &CHAT_CAPABILITIES))
+            .await
+            .unwrap();
+        1
+    } else {
+        0
+    }
+}
+
+async fn model_delete_provider_revision(db: &nomifun_db::Database) -> i64 {
+    sqlx::query_scalar("SELECT config_revision FROM providers WHERE provider_id = ?")
+        .bind(PROVIDER_ID)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
+async fn seed_model_cleanup_project(
+    db: &nomifun_db::Database,
+    marker: &str,
+) -> (String, String) {
+    let project_id = nomifun_common::CreativeStudioProjectId::new().into_string();
+    let document_json = serde_json::json!({
+        "schema": "nomifun.creative-studio/v1",
+        "projectId": project_id,
+        "nodes": [{ "marker": marker }],
+        "connections": []
+    })
+    .to_string();
+    sqlx::query(
+        "INSERT INTO creative_studio_projects \
+            (project_id, title, revision, node_count, connection_count, document_json, \
+             created_at, updated_at) \
+         VALUES (?, 'Model cleanup', 1, 1, 0, ?, 100, 100)",
+    )
+    .bind(&project_id)
+    .bind(&document_json)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    (project_id, document_json)
+}
+
+fn model_cleanup_project_patch(
+    project_id: &str,
+    expected_revision: i64,
+    marker: &str,
+) -> ProviderModelProjectCleanup {
+    ProviderModelProjectCleanup {
+        project_id: project_id.to_owned(),
+        expected_revision,
+        document_json: serde_json::json!({
+            "schema": "nomifun.creative-studio/v1",
+            "projectId": project_id,
+            "nodes": [{ "marker": marker }],
+            "connections": []
+        })
+        .to_string(),
+        node_count: 1,
+        connection_count: 0,
+        updated_at: 200,
+    }
+}
+
+async fn seed_model_cleanup_workflow(
+    db: &nomifun_db::Database,
+    marker: &str,
+) -> CreativeStudioWorkflowRow {
+    let workflow_id = nomifun_common::CreativeStudioWorkflowId::new().into_string();
+    let definition_json = serde_json::json!({
+        "id": workflow_id,
+        "revision": 1,
+        "marker": marker
+    })
+    .to_string();
+    sqlx::query_as::<_, CreativeStudioWorkflowRow>(
+        "INSERT INTO creative_studio_workflows \
+            (workflow_id, revision, name, description, category, visibility, definition_json, \
+             created_at, updated_at) \
+         VALUES (?, 1, 'Model cleanup', '', '', 'private', ?, 100, 100) RETURNING *",
+    )
+    .bind(&workflow_id)
+    .bind(&definition_json)
+    .fetch_one(db.pool())
+    .await
+    .unwrap()
+}
+
+fn model_cleanup_workflow_patch(
+    row: &CreativeStudioWorkflowRow,
+    expected_revision: i64,
+    marker: &str,
+) -> ProviderModelWorkflowCleanup {
+    let mut replacement = row.clone();
+    replacement.revision = expected_revision + 1;
+    replacement.updated_at = 200;
+    replacement.definition_json = serde_json::json!({
+        "id": row.workflow_id,
+        "revision": replacement.revision,
+        "marker": marker
+    })
+    .to_string();
+    ProviderModelWorkflowCleanup {
+        workflow_id: row.workflow_id.clone(),
+        expected_revision,
+        replacement,
+    }
+}
+
+async fn seed_live_model_creation_task(
+    db: &nomifun_db::Database,
+    project_id: &str,
+) {
+    let task_id = nomifun_common::CreationTaskId::new().into_string();
+    let node_id = nomifun_common::CreativeStudioNodeId::new().into_string();
+    sqlx::query(
+        "INSERT INTO creation_tasks \
+            (creation_task_id, project_id, node_id, provider_id, model, capability, params, \
+             input_bindings, status, error, result_asset_ids, remote_task_id, attempt, \
+             submitted_at, started_at, finished_at, request_fingerprint) \
+         VALUES (?, ?, ?, ?, 'delete-me', 't2i', '{}', '[]', 'queued', NULL, '[]', \
+                 NULL, 0, 100, NULL, NULL, '{\"fixture\":true}')",
+    )
+    .bind(task_id)
+    .bind(project_id)
+    .bind(node_id)
+    .bind(PROVIDER_ID)
+    .execute(db.pool())
+    .await
+    .unwrap();
+}
+
+async fn seed_model_workflow_run(
+    db: &nomifun_db::Database,
+    workflow: &CreativeStudioWorkflowRow,
+    step_kind: &str,
+    status: &str,
+) {
+    let workflow_run_id = nomifun_common::CreativeStudioWorkflowRunId::new().into_string();
+    let workflow_step_id = nomifun_common::CreativeStudioWorkflowStepId::new().into_string();
+    let step = match step_kind {
+        "generate-images" => serde_json::json!({
+            "kind": "generate-images",
+            "generation": {
+                "model": { "providerId": PROVIDER_ID, "model": "delete-me" }
+            }
+        }),
+        "draft-prompts" => serde_json::json!({
+            "kind": "draft-prompts",
+            "planning": {
+                "model": { "providerId": PROVIDER_ID, "model": "delete-me" }
+            }
+        }),
+        other => panic!("unsupported workflow fixture step {other}"),
+    };
+    let aggregate_json = serde_json::json!({
+        "kind": "nomifun.creative-studio.workflow-run",
+        "version": 1,
+        "revision": 1,
+        "workflowSnapshot": {
+            "id": workflow.workflow_id,
+            "revision": workflow.revision,
+            "steps": [step]
+        },
+        "request": {
+            "id": workflow_run_id,
+            "workflowId": workflow.workflow_id,
+            "workflowRevision": workflow.revision
+        },
+        "record": {
+            "requestId": workflow_run_id,
+            "workflowId": workflow.workflow_id,
+            "status": status
+        }
+    })
+    .to_string();
+    sqlx::query(
+        "INSERT INTO creative_studio_workflow_runs \
+            (workflow_run_id, workflow_id, workflow_revision, revision, status, step_ids_json, \
+             aggregate_json, created_at, updated_at) \
+         VALUES (?, ?, ?, 1, ?, ?, ?, 100, 100)",
+    )
+    .bind(&workflow_run_id)
+    .bind(&workflow.workflow_id)
+    .bind(workflow.revision)
+    .bind(status)
+    .bind(serde_json::to_string(&[workflow_step_id]).unwrap())
+    .bind(aggregate_json)
+    .execute(db.pool())
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn coordinated_model_delete_applies_all_cleanup_and_preserves_sibling_model() {
+    let db = init_database_memory().await.unwrap();
+    let expected_config_revision = seed_model_delete_provider(&db, true).await;
+    let (project_id, _) = seed_model_cleanup_project(&db, "delete-me").await;
+    let workflow = seed_model_cleanup_workflow(&db, "delete-me").await;
+    seed_model_workflow_run(&db, &workflow, "generate-images", "succeeded").await;
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+
+    let deleted = models
+        .delete_coordinated(&CoordinatedProviderModelDelete {
+            provider_id: PROVIDER_ID.to_owned(),
+            model: "delete-me".to_owned(),
+            expected_config_revision,
+            cleanup: ProviderModelCleanupPlan {
+                projects: vec![model_cleanup_project_patch(&project_id, 1, "cleared")],
+                workflows: vec![model_cleanup_workflow_patch(&workflow, 1, "cleared")],
+            },
+        })
+        .await
+        .unwrap();
+
+    assert!(deleted);
+    assert!(models.get(PROVIDER_ID, "delete-me").await.unwrap().is_none());
+    assert!(models.get(PROVIDER_ID, "keep-me").await.unwrap().is_some());
+    assert!(
+        SqliteProviderModelCapabilityRepository::new(db.pool().clone())
+            .get(PROVIDER_ID, "delete-me", "image_generation")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        SqliteProviderModelCapabilityRepository::new(db.pool().clone())
+            .get(PROVIDER_ID, "keep-me", "chat")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let project: (i64, String) = sqlx::query_as(
+        "SELECT revision, document_json FROM creative_studio_projects WHERE project_id = ?",
+    )
+    .bind(&project_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(project.0, 2);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&project.1).unwrap()["nodes"][0]["marker"], "cleared");
+    let workflow_after: (i64, String) = sqlx::query_as(
+        "SELECT revision, definition_json FROM creative_studio_workflows WHERE workflow_id = ?",
+    )
+    .bind(&workflow.workflow_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(workflow_after.0, 2);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&workflow_after.1).unwrap()["marker"], "cleared");
+    assert_eq!(
+        SqliteProviderRepository::new(db.pool().clone())
+            .find_by_id(PROVIDER_ID)
+            .await
+            .unwrap()
+            .unwrap()
+            .config_revision,
+        expected_config_revision + 1
+    );
+}
+
+#[tokio::test]
+async fn coordinated_model_delete_rejects_live_creation_task_without_writes() {
+    let db = init_database_memory().await.unwrap();
+    seed_model_delete_provider(&db, false).await;
+    let (project_id, original_document) = seed_model_cleanup_project(&db, "original").await;
+    seed_live_model_creation_task(&db, &project_id).await;
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+    let error = models
+        .delete_coordinated(&CoordinatedProviderModelDelete {
+            provider_id: PROVIDER_ID.to_owned(),
+            model: "delete-me".to_owned(),
+            expected_config_revision: 0,
+            cleanup: ProviderModelCleanupPlan {
+                projects: vec![model_cleanup_project_patch(&project_id, 1, "must-not-write")],
+                workflows: vec![],
+            },
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::Conflict(message) if message.contains("live creation task")));
+    assert!(models.get(PROVIDER_ID, "delete-me").await.unwrap().is_some());
+    let project: (i64, String) = sqlx::query_as(
+        "SELECT revision, document_json FROM creative_studio_projects WHERE project_id = ?",
+    )
+    .bind(project_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(project, (1, original_document));
+    assert_eq!(model_delete_provider_revision(&db).await, 0);
+}
+
+#[tokio::test]
+async fn coordinated_model_delete_rejects_each_live_workflow_snapshot_binding() {
+    for step_kind in ["generate-images", "draft-prompts"] {
+        let db = init_database_memory().await.unwrap();
+        seed_model_delete_provider(&db, false).await;
+        let workflow = seed_model_cleanup_workflow(&db, "original").await;
+        seed_model_workflow_run(&db, &workflow, step_kind, "queued").await;
+        let models = SqliteProviderModelRepository::new(db.pool().clone());
+        let error = models
+            .delete_coordinated(&CoordinatedProviderModelDelete {
+                provider_id: PROVIDER_ID.to_owned(),
+                model: "delete-me".to_owned(),
+                expected_config_revision: 0,
+                cleanup: ProviderModelCleanupPlan {
+                    projects: vec![],
+                    workflows: vec![model_cleanup_workflow_patch(
+                        &workflow,
+                        1,
+                        "must-not-write",
+                    )],
+                },
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, DbError::Conflict(message) if message.contains("nonterminal workflow run")));
+        assert!(models.get(PROVIDER_ID, "delete-me").await.unwrap().is_some());
+        let revision: i64 = sqlx::query_scalar(
+            "SELECT revision FROM creative_studio_workflows WHERE workflow_id = ?",
+        )
+        .bind(&workflow.workflow_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(revision, 1, "{step_kind}");
+        assert_eq!(model_delete_provider_revision(&db).await, 0, "{step_kind}");
+    }
+}
+
+#[tokio::test]
+async fn stale_project_cleanup_rolls_back_earlier_project_patch_and_model_delete() {
+    let db = init_database_memory().await.unwrap();
+    seed_model_delete_provider(&db, false).await;
+    let (first_id, first_original) = seed_model_cleanup_project(&db, "first-original").await;
+    let (stale_id, _) = seed_model_cleanup_project(&db, "stale-original").await;
+    let stale_document = model_cleanup_project_patch(&stale_id, 1, "newer-writer").document_json;
+    sqlx::query(
+        "UPDATE creative_studio_projects SET revision = 2, document_json = ? WHERE project_id = ?",
+    )
+    .bind(&stale_document)
+    .bind(&stale_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+    let error = models
+        .delete_coordinated(&CoordinatedProviderModelDelete {
+            provider_id: PROVIDER_ID.to_owned(),
+            model: "delete-me".to_owned(),
+            expected_config_revision: 0,
+            cleanup: ProviderModelCleanupPlan {
+                projects: vec![
+                    model_cleanup_project_patch(&first_id, 1, "first-cleaned"),
+                    model_cleanup_project_patch(&stale_id, 1, "stale-cleaned"),
+                ],
+                workflows: vec![],
+            },
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::Conflict(message) if message.contains("project")));
+    let first_after: (i64, String) = sqlx::query_as(
+        "SELECT revision, document_json FROM creative_studio_projects WHERE project_id = ?",
+    )
+    .bind(&first_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(first_after, (1, first_original));
+    assert!(models.get(PROVIDER_ID, "delete-me").await.unwrap().is_some());
+    assert_eq!(model_delete_provider_revision(&db).await, 0);
+}
+
+#[tokio::test]
+async fn stale_workflow_cleanup_rolls_back_project_patch_and_model_delete() {
+    let db = init_database_memory().await.unwrap();
+    seed_model_delete_provider(&db, false).await;
+    let (project_id, project_original) = seed_model_cleanup_project(&db, "original").await;
+    let workflow = seed_model_cleanup_workflow(&db, "original").await;
+    let stale_definition = serde_json::json!({
+        "id": workflow.workflow_id,
+        "revision": 2,
+        "marker": "newer-writer"
+    })
+    .to_string();
+    sqlx::query(
+        "UPDATE creative_studio_workflows SET revision = 2, definition_json = ?, updated_at = 150 \
+         WHERE workflow_id = ?",
+    )
+    .bind(stale_definition)
+    .bind(&workflow.workflow_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+    let error = models
+        .delete_coordinated(&CoordinatedProviderModelDelete {
+            provider_id: PROVIDER_ID.to_owned(),
+            model: "delete-me".to_owned(),
+            expected_config_revision: 0,
+            cleanup: ProviderModelCleanupPlan {
+                projects: vec![model_cleanup_project_patch(&project_id, 1, "cleaned")],
+                workflows: vec![model_cleanup_workflow_patch(&workflow, 1, "cleaned")],
+            },
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::Conflict(message) if message.contains("workflow")));
+    let project_after: (i64, String) = sqlx::query_as(
+        "SELECT revision, document_json FROM creative_studio_projects WHERE project_id = ?",
+    )
+    .bind(project_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(project_after, (1, project_original));
+    assert!(models.get(PROVIDER_ID, "delete-me").await.unwrap().is_some());
+    assert_eq!(model_delete_provider_revision(&db).await, 0);
+}
+
+#[tokio::test]
+async fn missing_model_returns_false_without_applying_cleanup() {
+    let db = init_database_memory().await.unwrap();
+    seed_model_delete_provider(&db, false).await;
+    let (project_id, original_document) = seed_model_cleanup_project(&db, "original").await;
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+    assert!(
+        !models
+            .delete_coordinated(&CoordinatedProviderModelDelete {
+                provider_id: PROVIDER_ID.to_owned(),
+                model: "missing".to_owned(),
+                expected_config_revision: 0,
+                cleanup: ProviderModelCleanupPlan {
+                    projects: vec![model_cleanup_project_patch(
+                        &project_id,
+                        1,
+                        "must-not-write",
+                    )],
+                    workflows: vec![],
+                },
+            })
+            .await
+            .unwrap()
+    );
+    let project: (i64, String) = sqlx::query_as(
+        "SELECT revision, document_json FROM creative_studio_projects WHERE project_id = ?",
+    )
+    .bind(project_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(project, (1, original_document));
+    assert!(models.get(PROVIDER_ID, "delete-me").await.unwrap().is_some());
+    assert_eq!(
+        SqliteProviderRepository::new(db.pool().clone())
+            .find_by_id(PROVIDER_ID)
+            .await
+            .unwrap()
+            .unwrap()
+            .config_revision,
+        0
     );
 }

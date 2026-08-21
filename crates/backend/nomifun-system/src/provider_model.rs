@@ -7,9 +7,9 @@ use nomifun_api_types::{
 };
 use nomifun_common::{AppError, ProviderId};
 use nomifun_db::{
-    IProviderConnectionRepository, IProviderModelCapabilityRepository,
-    IProviderModelRepository, IProviderRepository, NewProviderModel,
-    NewProviderModelCapability, ProviderModelCapabilityRow, ProviderModelRow,
+    CoordinatedProviderModelDelete, IProviderConnectionRepository,
+    IProviderModelCapabilityRepository, IProviderModelRepository, IProviderRepository,
+    NewProviderModel, NewProviderModelCapability, ProviderModelCapabilityRow, ProviderModelRow,
 };
 use nomifun_model_invoke::{
     ProtocolScope, ProtocolTransportKind, protocol_descriptor,
@@ -19,6 +19,7 @@ use reqwest::Url;
 
 use crate::managed_model::is_managed_provider_platform;
 use crate::provider_connection::{normalize_auth_scheme, validate_role};
+use crate::provider_deletion::SharedProviderDeletionCoordinator;
 
 #[derive(Clone)]
 pub struct ProviderModelService {
@@ -26,6 +27,7 @@ pub struct ProviderModelService {
     capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
     provider_repo: Arc<dyn IProviderRepository>,
     connection_repo: Arc<dyn IProviderConnectionRepository>,
+    deletion_coordinator: SharedProviderDeletionCoordinator,
 }
 
 impl ProviderModelService {
@@ -34,12 +36,14 @@ impl ProviderModelService {
         capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
         provider_repo: Arc<dyn IProviderRepository>,
         connection_repo: Arc<dyn IProviderConnectionRepository>,
+        deletion_coordinator: SharedProviderDeletionCoordinator,
     ) -> Self {
         Self {
             model_repo,
             capability_repo,
             provider_repo,
             connection_repo,
+            deletion_coordinator,
         }
     }
 
@@ -147,6 +151,12 @@ impl ProviderModelService {
 
     pub async fn delete(&self, provider_id: &str, model: &str) -> Result<bool, AppError> {
         validate_provider_id(provider_id)?;
+        let model = model.trim();
+        if model.is_empty() || model.chars().count() > 512 {
+            return Err(AppError::BadRequest(
+                "provider model must contain 1 to 512 characters".into(),
+            ));
+        }
         let provider = self
             .provider_repo
             .find_by_id(provider_id)
@@ -158,7 +168,28 @@ impl ProviderModelService {
                     .into(),
             ));
         }
-        Ok(self.model_repo.delete(provider_id, model).await?)
+        let lifecycle_barrier = self.deletion_coordinator.provider_lifecycle_barrier();
+        let _lifecycle_guard = if let Some(barrier) = lifecycle_barrier.as_ref() {
+            Some(barrier.write().await)
+        } else {
+            None
+        };
+        if self.model_repo.get(provider_id, model).await?.is_none() {
+            return Ok(false);
+        }
+        let cleanup = self
+            .deletion_coordinator
+            .prepare_soft_model_cleanup(provider_id, model)
+            .await?;
+        Ok(self
+            .model_repo
+            .delete_coordinated(&CoordinatedProviderModelDelete {
+                provider_id: provider_id.to_owned(),
+                model: model.to_owned(),
+                expected_config_revision: provider.config_revision,
+                cleanup,
+            })
+            .await?)
     }
 
     async fn validate_capabilities(

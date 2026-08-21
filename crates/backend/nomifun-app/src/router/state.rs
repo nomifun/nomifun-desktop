@@ -669,7 +669,7 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
             connection_repo.clone(),
             encryption_key,
         )
-        .with_deletion_coordinator(deletion_coordinator),
+        .with_deletion_coordinator(deletion_coordinator.clone()),
         provider_connection_service: nomifun_system::ProviderConnectionService::new(
             connection_repo.clone(),
             provider_repo.clone(),
@@ -682,6 +682,7 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
             capability_repo,
             provider_repo,
             connection_repo,
+            deletion_coordinator,
         ),
         managed_model_service: Some(services.managed_model_service.clone()),
         version_check_service: VersionCheckService::new_dynamic(env!("CARGO_PKG_VERSION").to_owned()),
