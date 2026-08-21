@@ -2,7 +2,7 @@
 
 > 用途：在长任务发生上下文压缩或人员切换时，从可验证提交继续，而不是重新审计整仓。
 > 分支：`codex/infinite-canvas-rebuild`
-> 最后功能锚点：`46c1ba1e`（`feat(creative-studio): add image node upload tools`）
+> 最后功能锚点：`777caba7`（`fix(creative-studio): harden canvas reload recovery`）
 > 参考产品锚点：`ef7303d`
 
 ## 1. 续接协议
@@ -24,7 +24,7 @@
 | --- | --- | --- |
 | P1-P2 | 受保护运行时拆分、根主题、全屏 Focus Shell、侧栏入口与返回工作台 | `ed9c66df`…`954d6dcb` |
 | P3 | `nomifun.creative-studio/v1`、UUIDv7、项目 CRUD/CAS、项目中心、ZIP 导入导出 | `d03a6a64`、`b4361084`、`44933dd3`…`2ad53b01` |
-| P4 | 画布 reducer/history、视口、节点、连线、小地图、选择/分组/快捷键、Editor CAS 与离开 flush；首节点居中、参考节点几何、固定创作配色、直接节点工具、图片节点生成/上传面板与双客户端冲突恢复 | `b2e19806`…`dc6c3c34`、`dd18dc6f`、`451dc013`、`5352954c`、`b2e103c8`、`46c1ba1e` |
+| P4 | 画布 reducer/history、视口、节点、连线、小地图、选择/分组/快捷键、Editor CAS、离开/reload 门禁；首节点居中、参考节点几何、固定创作配色、直接节点工具、图片节点生成/上传面板与双客户端冲突恢复 | `b2e19806`…`dc6c3c34`、`dd18dc6f`、`451dc013`、`5352954c`、`b2e103c8`、`46c1ba1e`、`777caba7` |
 | P5 | Canonical 资产 API/库、文本/图像/视频/音频节点、素材选择与结果回填 | `57128727`、`e05b18a8`、`04f805a3`、`444db764` |
 | P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44` |
 | P7 | 生图/视频工作台、工作流定义/运行中心、提示词与素材中心 | `2283ee74`、`1414846e`、`ebd17f3a`…`aad21d9d`、`7e45f8ad` |
@@ -49,6 +49,7 @@
 - 图片生成面板沿用参考项目的固定浅 stone 配色，主面板、设置弹层和嵌套下拉均不受用户主题影响。面板会按剩余空间在节点上下翻转，1024×768 自动横向钳制，390×844 在画布列无法容纳时切为 16px 视口边距浮层；新浏览器会话完成 1440→1024→390→1440 动态门禁，Console 0 error / 0 warning。参考与目标截图：`C:\Users\MINISFORUM\.codex\visualizations\2026\08\19\01a01aa7-ea42-76e3-aa34-9158a1382c97\creative-studio-image-composer-qa\reference-image-composer-light-1440x900.png`、`target-image-composer-clean-final-light-1440x900.png`。
 - 画布 CAS 已用两个真实浏览器客户端验证：A 保存新 panel revision，B 从旧 revision 写入时后端返回稳定 `REVISION_CONFLICT`；B 回到旧本地基线后仍保持冲突，返回项目被阻止，显式载入会取得 A 的权威状态，之后可按新 revision 继续保存。通用业务 `CONFLICT` 不会再被误判为 revision 冲突。产品只显示一份中文恢复条，不泄漏项目 ID 或后端诊断；隔离项目最终恢复为“画布”面板。冲突截图：`C:\Users\MINISFORUM\.codex\visualizations\2026\08\19\01a01aa7-ea42-76e3-aa34-9158a1382c97\creative-studio-image-composer-qa\target-canvas-cas-conflict-final-1440x900.png`。
 - 单选空图片现在按参考产品显示固定深色“信息 / 删除 / 上传图片”工具条；信息打开真实属性面板，删除只删除节点/边，上传打开单文件图片选择器。上传使用 64 MB/类型前置校验、唯一 operation tag 与 response-loss 找回，重新读取最新 Editor 后原位更新同一 nodeId，并立即 CAS flush；Undo/Redo 保持同一节点，素材始终保留在素材库。pending T2I 同时保护 config owner 与 source image，用户删除/上传不能破坏终态回填。多选时工具条与 composer 均隐藏。1440×900 与 390×844 均完整可见且主题不影响工具条配色；文件选择器已真实打开，但未把本地文件写入测试后端。截图：`C:\Users\MINISFORUM\.codex\visualizations\2026\08\19\01a01aa7-ea42-76e3-aa34-9158a1382c97\creative-studio-image-composer-qa\target-image-node-toolbar-final-light-1440x900.png`、`target-image-node-toolbar-mobile-390x844.png`。
+- 画布 reload 门禁已补强：动态 import/chunk 失败不再用必然复用 rejected `React.lazy` Promise 的原地重试，而显示“重新加载页面”；完整 reload 已真实恢复曾失败的 Canvas route。已 hydration 且仍有 pending document 时，`beforeunload` 会启动同一 CAS flush 并请求浏览器原生离开确认，不再静默穿过 600ms debounce。隔离项目的即时 panel 变更在 reload 后恢复，随后已还原“画布”基线。
 
 `dd18dc6f` 的提交前检查：
 
@@ -85,6 +86,13 @@
 - UI production build：通过；仅保留仓库既存的动态/静态重复导入与大 chunk 提示。
 - 真实浏览器：单选/多选、属性面板、文件选择器、浅/深主题、1440×900 与 390×844 自适应通过；干净桌面/手机页面 Console 0 error / 0 warning。
 
+`777caba7` 的提交前检查：
+
+- Route boundary + Canvas editor：33 passed / 176 assertions。
+- `bun run typecheck`、`bun run check:icons`、`bun run check:theme`、`bun run check:dead-css`、`git diff --cached --check`：通过。
+- UI production build：通过；仅保留仓库既存的动态/静态重复导入与大 chunk 提示。
+- 真实浏览器复现 Canvas 动态模块加载失败；原地“重试”确认无效，完整页面 reload 恢复。新 matcher 覆盖 Chromium/Safari/Vite/Webpack 常见 chunk 文案。
+
 `7e45f8ad` 的提交前检查：
 
 - `cargo test -p nomifun-workshop`：70 passed。
@@ -105,7 +113,7 @@
 - 手工素材上传当前只支持图片与视频；音频可由生成任务入库，但不伪装成已支持的拖放上传。
 - Director 的 GLB/glTF 模型导入仍不可用；四/十二方位批量捕获和视频导出保持显式不可用。当前不使用参考项目的压缩 Director bundle 或来源不清模型。
 - 390px 只承诺关键入口和状态不白屏；尚未宣称完整移动触控生产体验。
-- 浏览器刷新/关闭的 `beforeunload` 保存仍只能 best-effort；产品内受控导航会等待 CAS，但浏览器不能等待异步持久化。
+- 浏览器刷新/关闭时会在 pending revision 上启动 flush 并请求原生确认；浏览器仍不能等待异步持久化，用户若明确接受离开，最后一段编辑仍可能尚未得到服务端确认。Tauri 普通关闭只隐藏窗口，renderer 会继续保存。
 - 真实付费 provider 端到端冒烟尚未执行，需要可用凭证和单独的成本授权。
 
 ## 5. 下一步单线程优先级
