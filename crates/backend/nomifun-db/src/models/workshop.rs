@@ -89,13 +89,16 @@ pub struct WorkshopAssetRow {
 
 /// Row mapping for the `creation_tasks` table (生成引擎 任务队列).
 ///
-/// `params` / `error` / `result_asset_ids` are JSON TEXT parsed by the service
-/// layer. `provider_id` is a provider business-ID logical reference.
+/// `params` / `input_bindings` / `error` / `result_asset_ids` are JSON TEXT
+/// parsed by the service layer. `provider_id` is a provider business-ID logical
+/// reference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreationTaskRow {
     pub creation_task_id: String,
-    /// Canonical project-node owner. Mutually exclusive with workflow ownership.
+    /// Canonical project owner. A node or standalone workbench discriminator
+    /// completes the branch; both are mutually exclusive with workflow ownership.
     pub project_id: Option<String>,
+    pub workbench_kind: Option<String>,
     /// Canonical workflow-step owner. All three workflow columns are present together.
     pub workflow_id: Option<String>,
     pub workflow_run_id: Option<String>,
@@ -107,6 +110,9 @@ pub struct CreationTaskRow {
     pub capability: String,
     /// JSON parameter snapshot.
     pub params: String,
+    /// Canonical ordered `{asset_id,kind,role}` array. `None` is reserved for a
+    /// pre-043 row whose complete bindings could not be proven during migration.
+    pub input_bindings: Option<String>,
     /// `queued|running|succeeded|failed|canceled`.
     pub status: String,
     /// JSON `{kind,message,http_status?}`; `None`.

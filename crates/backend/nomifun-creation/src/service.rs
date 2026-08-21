@@ -41,7 +41,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::artifact::{reconcile_mime, validate_for_capability};
 use crate::dto::CreationTask;
-use crate::types::{CreationError, CreationInput, MediaCapability, TaskStatus};
+use crate::types::{
+    CreationError, CreationInput, CreationInputKind, MediaCapability, StandaloneWorkbenchKind,
+    TaskStatus,
+};
 
 /// Default per-provider in-flight cap (信号量).
 const DEFAULT_PER_PROVIDER_LIMIT: usize = 3;
@@ -343,6 +346,10 @@ pub enum CreativeTaskOwner {
         project_id: String,
         node_id: String,
     },
+    StandaloneWorkbench {
+        project_id: String,
+        workbench_kind: StandaloneWorkbenchKind,
+    },
     WorkflowStep {
         workflow_id: String,
         workflow_run_id: String,
@@ -363,6 +370,15 @@ impl CreativeTaskOwner {
                 node_id: CreativeStudioNodeId::parse(node_id)
                     .map_err(|error| AppError::BadRequest(format!("invalid node_id: {error}")))?
                     .into_string(),
+            }),
+            Self::StandaloneWorkbench {
+                project_id,
+                workbench_kind,
+            } => Ok(Self::StandaloneWorkbench {
+                project_id: CreativeStudioProjectId::parse(project_id)
+                    .map_err(|error| AppError::BadRequest(format!("invalid project_id: {error}")))?
+                    .into_string(),
+                workbench_kind,
             }),
             Self::WorkflowStep {
                 workflow_id,
@@ -394,6 +410,13 @@ impl CreativeTaskOwner {
             } => CreativeTaskOwnerRef::CanvasNode {
                 project_id,
                 node_id,
+            },
+            Self::StandaloneWorkbench {
+                project_id,
+                workbench_kind,
+            } => CreativeTaskOwnerRef::StandaloneWorkbench {
+                project_id,
+                workbench_kind: workbench_kind.as_str(),
             },
             Self::WorkflowStep {
                 workflow_id,
@@ -435,27 +458,46 @@ impl PreparedCreationTask {
         owner: CreativeTaskOwner,
         submitted_at: i64,
     ) -> WorkerJob {
-        let (project_id, workflow_id, workflow_run_id, workflow_step_id, node_id) =
-            match owner {
-                CreativeTaskOwner::CanvasNode {
-                    project_id,
-                    node_id,
-                } => (Some(project_id), None, None, None, Some(node_id)),
-                CreativeTaskOwner::WorkflowStep {
-                    workflow_id,
-                    workflow_run_id,
-                    workflow_step_id,
-                } => (
-                    None,
-                    Some(workflow_id),
-                    Some(workflow_run_id),
-                    Some(workflow_step_id),
-                    None,
-                ),
-            };
+        let (
+            project_id,
+            workbench_kind,
+            workflow_id,
+            workflow_run_id,
+            workflow_step_id,
+            node_id,
+        ) = match owner {
+            CreativeTaskOwner::CanvasNode {
+                project_id,
+                node_id,
+            } => (Some(project_id), None, None, None, None, Some(node_id)),
+            CreativeTaskOwner::StandaloneWorkbench {
+                project_id,
+                workbench_kind,
+            } => (
+                Some(project_id),
+                Some(workbench_kind),
+                None,
+                None,
+                None,
+                None,
+            ),
+            CreativeTaskOwner::WorkflowStep {
+                workflow_id,
+                workflow_run_id,
+                workflow_step_id,
+            } => (
+                None,
+                None,
+                Some(workflow_id),
+                Some(workflow_run_id),
+                Some(workflow_step_id),
+                None,
+            ),
+        };
         WorkerJob {
             creation_task_id,
             project_id,
+            workbench_kind,
             workflow_id,
             workflow_run_id,
             workflow_step_id,
@@ -569,6 +611,7 @@ pub trait AssetSource: Send + Sync {
 struct WorkerJob {
     creation_task_id: String,
     project_id: Option<String>,
+    workbench_kind: Option<StandaloneWorkbenchKind>,
     workflow_id: Option<String>,
     workflow_run_id: Option<String>,
     workflow_step_id: Option<String>,
@@ -759,7 +802,11 @@ impl CreationService {
                 let asset_id = WorkshopAssetId::parse(input.asset_id)
                     .map_err(|error| AppError::BadRequest(format!("invalid input asset_id: {error}")))?
                     .into_string();
-                Ok(CreationInput { asset_id, role: input.role })
+                Ok(CreationInput {
+                    asset_id,
+                    kind: input.kind,
+                    role: input.role,
+                })
             })
             .collect::<Result<Vec<_>, AppError>>()?;
         let params = canonical_json(req.params);
@@ -800,6 +847,15 @@ impl CreationService {
         // state only for a brand-new key. Skipping the eager provider lookup
         // here keeps an exact historical replay readable after retirement.
         let prepared = self.prepare_task(req).await?;
+        if let CreativeTaskOwner::StandaloneWorkbench { workbench_kind, .. } = &owner
+            && !workbench_kind.accepts_capability(prepared.capability)
+        {
+            return Err(AppError::BadRequest(format!(
+                "standalone {} workbench cannot own capability {}",
+                workbench_kind.as_str(),
+                prepared.capability.as_str()
+            )));
+        }
         if prepared.model.trim() != prepared.model {
             return Err(AppError::BadRequest(
                 "Creative Studio model must be already normalized".into(),
@@ -816,6 +872,21 @@ impl CreationService {
                 input.role
             )));
         }
+        if let Some(input) = prepared.inputs.iter().find(|input| match input.role.as_str() {
+            "mask" | "first_frame" | "last_frame" => input.kind != CreationInputKind::Image,
+            "video" => input.kind != CreationInputKind::Video,
+            "audio" => input.kind != CreationInputKind::Audio,
+            "reference" => false,
+            _ => false,
+        }) {
+            return Err(AppError::BadRequest(format!(
+                "Creative Studio input role '{}' is incompatible with kind '{}'",
+                input.role,
+                input.kind.as_str()
+            )));
+        }
+        let input_bindings = serde_json::to_string(&prepared.inputs)
+            .map_err(|error| AppError::BadRequest(format!("invalid input bindings: {error}")))?;
         let request_fingerprint = serde_json::to_string(&CanonicalCreativeTaskRequest {
             owner: &owner,
             provider_id: &prepared.provider_id,
@@ -835,6 +906,7 @@ impl CreationService {
                 model: &prepared.model,
                 capability: prepared.capability.as_str(),
                 params: &prepared.params_json,
+                input_bindings: &input_bindings,
                 request_fingerprint: &request_fingerprint,
                 status: TaskStatus::Queued.as_str(),
                 submitted_at: now,
@@ -1132,6 +1204,10 @@ impl CreationService {
                         self.spawn(WorkerJob {
                             creation_task_id: row.creation_task_id.clone(),
                             project_id: row.project_id,
+                            workbench_kind: row
+                                .workbench_kind
+                                .as_deref()
+                                .and_then(StandaloneWorkbenchKind::parse),
                             workflow_id: row.workflow_id,
                             workflow_run_id: row.workflow_run_id,
                             workflow_step_id: row.workflow_step_id,
@@ -1481,6 +1557,17 @@ impl CreationService {
         let mut out = Vec::with_capacity(inputs.len());
         for i in inputs {
             let loaded = source.load(&i.asset_id).await?;
+            if !i.kind.matches_mime(&loaded.mime) {
+                return Err(CreationError::new(
+                    "input_kind_mismatch",
+                    format!(
+                        "input asset {} was bound as {}, but its MIME is {}",
+                        i.asset_id,
+                        i.kind.as_str(),
+                        loaded.mime
+                    ),
+                ));
+            }
             out.push(InputAsset {
                 id: Some(i.asset_id.clone()),
                 role: i.role.clone(),
@@ -1788,6 +1875,12 @@ fn build_origin(job: &WorkerJob) -> Value {
     ]);
     if let Some(project_id) = &job.project_id {
         origin.insert("project_id".into(), Value::String(project_id.clone()));
+    }
+    if let Some(workbench_kind) = job.workbench_kind {
+        origin.insert(
+            "workbench_kind".into(),
+            Value::String(workbench_kind.as_str().to_owned()),
+        );
     }
     if let Some(workflow_id) = &job.workflow_id {
         origin.insert("workflow_id".into(), Value::String(workflow_id.clone()));
@@ -2517,6 +2610,7 @@ mod tests {
                 model: "test-model",
                 capability,
                 params,
+                input_bindings: "[]",
                 request_fingerprint: &fingerprint,
                 status: TaskStatus::Queued.as_str(),
                 submitted_at: now_ms(),
@@ -3066,7 +3160,11 @@ mod tests {
         bad = new_task("  ", "t2i");
         assert!(matches!(h.svc.create_test_task(bad).await.unwrap_err(), AppError::BadRequest(_)));
         bad = new_task(&h.provider_id, "t2i");
-        bad.inputs = vec![CreationInput { asset_id: String::new(), role: "reference".into() }];
+        bad.inputs = vec![CreationInput {
+            asset_id: String::new(),
+            kind: CreationInputKind::Image,
+            role: "reference".into(),
+        }];
         assert!(matches!(h.svc.create_test_task(bad).await.unwrap_err(), AppError::BadRequest(_)));
         for owner in [
             CreativeTaskOwner::CanvasNode {
@@ -3559,6 +3657,7 @@ mod tests {
                 model: "test-model",
                 capability: "t2v",
                 params: "{}",
+                input_bindings: "[]",
                 request_fingerprint: &fingerprint,
                 status: "queued",
                 submitted_at: old,
@@ -3618,6 +3717,7 @@ mod tests {
         let job = WorkerJob {
             creation_task_id: creation_task_id.clone(),
             project_id: Some(project_id.clone()),
+            workbench_kind: None,
             workflow_id: None,
             workflow_run_id: None,
             workflow_step_id: None,
@@ -3651,6 +3751,7 @@ mod tests {
         let job = WorkerJob {
             creation_task_id: CreationTaskId::new().into_string(),
             project_id: None,
+            workbench_kind: None,
             workflow_id: Some(CreativeStudioWorkflowId::new().into_string()),
             workflow_run_id: Some(CreativeStudioWorkflowRunId::new().into_string()),
             workflow_step_id: Some(CreativeStudioWorkflowStepId::new().into_string()),
@@ -3668,6 +3769,34 @@ mod tests {
         let origin = build_origin(&job);
         assert!(!origin.as_object().unwrap().contains_key("project_id"));
         assert!(!origin.as_object().unwrap().contains_key("node_id"));
+    }
+
+    #[test]
+    fn build_origin_carries_exact_standalone_workbench_branch() {
+        let project_id = CreativeStudioProjectId::new().into_string();
+        let job = WorkerJob {
+            creation_task_id: CreationTaskId::new().into_string(),
+            project_id: Some(project_id.clone()),
+            workbench_kind: Some(StandaloneWorkbenchKind::Video),
+            workflow_id: None,
+            workflow_run_id: None,
+            workflow_step_id: None,
+            node_id: None,
+            provider_id: ProviderId::new().into_string(),
+            model: "video-model".into(),
+            capability: MediaCapability::I2v,
+            params: json!({"prompt": "Aurora", "seconds": 5}),
+            required_artifact_count: 1,
+            inputs: vec![],
+            submitted_at: 1,
+            remote_task_id: None,
+        };
+
+        let origin = build_origin(&job);
+        assert_eq!(origin["project_id"], project_id);
+        assert_eq!(origin["workbench_kind"], "video");
+        assert!(origin.get("node_id").is_none());
+        assert!(origin.get("workflow_id").is_none());
     }
 
     // ---- param helpers (ported verbatim from the retired adapters/mod.rs) ----

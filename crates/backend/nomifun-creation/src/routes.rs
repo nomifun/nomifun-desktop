@@ -19,7 +19,7 @@ use crate::dto::CreativeCreationTask;
 use crate::dto::CreationTask;
 use crate::service::{CreativeTaskOwner, NewCreationTask};
 use crate::state::CreationRouterState;
-use crate::types::CreationInput;
+use crate::types::{CreationInput, CreationInputKind, StandaloneWorkbenchKind};
 
 pub fn creation_routes(state: CreationRouterState) -> Router {
     Router::new()
@@ -39,6 +39,7 @@ pub fn creation_routes(state: CreationRouterState) -> Router {
 #[serde(deny_unknown_fields)]
 struct InputRef {
     asset_id: String,
+    kind: CreationInputKind,
     #[serde(default = "default_role")]
     role: String,
 }
@@ -53,6 +54,10 @@ enum CreativeTaskOwnerRequest {
     CanvasNode {
         project_id: String,
         node_id: String,
+    },
+    StandaloneWorkbench {
+        project_id: String,
+        workbench_kind: StandaloneWorkbenchKind,
     },
     WorkflowStep {
         workflow_id: String,
@@ -70,6 +75,13 @@ impl From<CreativeTaskOwnerRequest> for CreativeTaskOwner {
             } => Self::CanvasNode {
                 project_id,
                 node_id,
+            },
+            CreativeTaskOwnerRequest::StandaloneWorkbench {
+                project_id,
+                workbench_kind,
+            } => Self::StandaloneWorkbench {
+                project_id,
+                workbench_kind,
             },
             CreativeTaskOwnerRequest::WorkflowStep {
                 workflow_id,
@@ -136,6 +148,7 @@ async fn create_creative_task(
                     .into_iter()
                     .map(|input| CreationInput {
                         asset_id: input.asset_id,
+                        kind: input.kind,
                         role: input.role,
                     })
                     .collect(),
@@ -193,6 +206,31 @@ mod tests {
             CreativeTaskOwnerRequest::WorkflowStep { .. }
         ));
 
+        let standalone = serde_json::from_value::<CreateCreativeTaskRequest>(json!({
+            "owner": {
+                "kind": "standalone_workbench",
+                "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                "workbench_kind": "video"
+            },
+            "provider_id": "0190f5fe-7c00-7a00-8000-000000000004",
+            "model": "video-model-v1",
+            "capability": "i2v",
+            "params": {"prompt": "Aurora"},
+            "inputs": [{
+                "asset_id": "0190f5fe-7c00-7a00-8000-000000000006",
+                "kind": "image",
+                "role": "first_frame"
+            }]
+        }))
+        .unwrap();
+        assert!(matches!(
+            standalone.owner,
+            CreativeTaskOwnerRequest::StandaloneWorkbench {
+                workbench_kind: StandaloneWorkbenchKind::Video,
+                ..
+            }
+        ));
+
         for invalid in [
             json!({
                 "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
@@ -211,6 +249,20 @@ mod tests {
                 "provider_id": "0190f5fe-7c00-7a00-8000-000000000004",
                 "model": "image-model-v1",
                 "capability": "t2i"
+            }),
+            json!({
+                "owner": {
+                    "kind": "standalone_workbench",
+                    "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                    "workbench_kind": "video"
+                },
+                "provider_id": "0190f5fe-7c00-7a00-8000-000000000004",
+                "model": "video-model-v1",
+                "capability": "i2v",
+                "inputs": [{
+                    "asset_id": "0190f5fe-7c00-7a00-8000-000000000006",
+                    "role": "first_frame"
+                }]
             }),
         ] {
             assert!(serde_json::from_value::<CreateCreativeTaskRequest>(invalid).is_err());
@@ -243,6 +295,7 @@ mod tests {
         let invalid = CreationTask {
             creation_task_id: "0190f5fe-7c00-7a00-8000-000000000001".into(),
             project_id: None,
+            workbench_kind: None,
             workflow_id: None,
             workflow_run_id: None,
             workflow_step_id: None,
@@ -251,6 +304,7 @@ mod tests {
             model: "image-model-v1".into(),
             capability: "t2i".into(),
             params: json!({}),
+            inputs: Some(Vec::new()),
             status: "queued".into(),
             error: None,
             result_asset_ids: Vec::new(),

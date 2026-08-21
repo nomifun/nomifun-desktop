@@ -122,6 +122,7 @@ const task = (
     aspect: '16:9',
     seconds: 5,
   },
+  inputs: [{ assetId: INPUT_IMAGE_ASSET_ID, kind: 'image', role: 'reference' }],
   status,
   error:
     status === 'failed' ? { kind: 'provider', message: 'provider failed', httpStatus: 500 } : null,

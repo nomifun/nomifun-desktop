@@ -888,6 +888,11 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
         "idx_workshop_assets_origin_node_id", KeepHistory
     ),
     json_text_ref!(
+        "creation_tasks", "input_bindings", "$[].asset_id",
+        "SELECT json_extract(item.value, '$.asset_id') AS value FROM creation_tasks, json_each(creation_tasks.input_bindings) item WHERE creation_tasks.input_bindings IS NOT NULL" =>
+        "workshop_assets", "asset_id", "idx_creation_tasks_input_bindings_json", Restrict, RequireParent
+    ),
+    json_text_ref!(
         "creation_tasks", "result_asset_ids", "$[]",
         "SELECT item.value AS value FROM creation_tasks, json_each(creation_tasks.result_asset_ids) item" =>
         "workshop_assets", "asset_id", "idx_creation_tasks_result_asset_ids_json", SetNull, RequireParent
@@ -1705,11 +1710,26 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             ],
         ),
         (
+            "validate_creation_task_input_bindings_insert",
+            &[
+                "BEFORE INSERT ON CREATION_TASKS",
+                "RAISE(ABORT, 'INVALID CREATION TASK INPUT BINDING')",
+            ],
+        ),
+        (
+            "validate_creation_task_input_bindings_update",
+            &[
+                "BEFORE UPDATE OF INPUT_BINDINGS ON CREATION_TASKS",
+                "RAISE(ABORT, 'INVALID CREATION TASK INPUT BINDING')",
+            ],
+        ),
+        (
             "validate_creative_asset_origin_insert",
             &[
                 "BEFORE INSERT ON WORKSHOP_ASSETS",
                 "RAISE(ABORT, 'UNSUPPORTED CREATIVE ASSET ORIGIN ID KEY')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN PROJECT_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKBENCH_KIND')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_RUN_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_STEP_ID')",
@@ -1722,6 +1742,7 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
                 "BEFORE UPDATE OF ORIGIN ON WORKSHOP_ASSETS",
                 "RAISE(ABORT, 'UNSUPPORTED CREATIVE ASSET ORIGIN ID KEY')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN PROJECT_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKBENCH_KIND')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_RUN_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_STEP_ID')",
@@ -1940,7 +1961,13 @@ async fn require_workshop_asset_origin_id_contract(
             )));
         }
     }
-    for retired_key in ["PROJECTID", "WORKFLOWID", "WORKFLOWRUNID", "WORKFLOWSTEPID"] {
+    for retired_key in [
+        "PROJECTID",
+        "WORKBENCHKIND",
+        "WORKFLOWID",
+        "WORKFLOWRUNID",
+        "WORKFLOWSTEPID",
+    ] {
         let fragment = format!("JSON_TYPE(NEW.ORIGIN, '$.{retired_key}') IS NOT NULL");
         if !normalized.contains(&fragment) {
             return Err(DbError::Init(format!(
@@ -1981,7 +2008,7 @@ async fn require_workshop_asset_origin_id_contract(
     ] {
         let fragments = [
             format!("JSON_TYPE(NEW.ORIGIN, '$.{key}') IS NOT NULL"),
-            format!("JSON_TYPE(NEW.ORIGIN, '$.{key}') = 'TEXT'"),
+            format!("JSON_TYPE(NEW.ORIGIN, '$.{key}') IS 'TEXT'"),
             format!("LENGTH(JSON_EXTRACT(NEW.ORIGIN, '$.{key}')) = 36"),
             format!(
                 "JSON_EXTRACT(NEW.ORIGIN, '$.{key}') GLOB '????????-????-7???-[89AB]???-????????????'"
@@ -2026,6 +2053,7 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
             "nodeId",
             "creationTaskId",
             "projectId",
+            "workbenchKind",
             "workflowId",
             "workflowRunId",
             "workflowStepId",
@@ -2061,12 +2089,27 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
         }
         let has_project = object.contains_key("project_id");
         let has_node = object.contains_key("node_id");
+        let has_workbench = object.contains_key("workbench_kind");
+        if let Some(kind) = object.get("workbench_kind") {
+            let valid = kind
+                .as_str()
+                .is_some_and(|kind| matches!(kind, "image" | "video" | "audio"));
+            if !valid {
+                return Err(DbError::Init(format!(
+                    "v3 workshop asset {asset_id} origin.workbench_kind is invalid"
+                )));
+            }
+        }
         let has_workflow = ["workflow_id", "workflow_run_id", "workflow_step_id"]
             .iter()
             .any(|key| object.contains_key(*key));
-        if has_project != has_node || (has_project && has_workflow) {
+        let canvas_owner = has_project && has_node && !has_workbench;
+        let standalone_owner = has_project && !has_node && has_workbench;
+        if (has_project || has_node || has_workbench)
+            && (!canvas_owner && !standalone_owner || has_workflow)
+        {
             return Err(DbError::Init(format!(
-                "v3 workshop asset {asset_id} origin has an invalid project-node owner branch"
+                "v3 workshop asset {asset_id} origin has an invalid project owner branch"
             )));
         }
         if has_workflow
@@ -2074,7 +2117,8 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
                 .iter()
                 .all(|key| object.contains_key(*key))
                 || object.contains_key("project_id")
-                || object.contains_key("node_id"))
+                || object.contains_key("node_id")
+                || object.contains_key("workbench_kind"))
         {
             return Err(DbError::Init(format!(
                 "v3 workshop asset {asset_id} origin has an invalid workflow-step owner branch"

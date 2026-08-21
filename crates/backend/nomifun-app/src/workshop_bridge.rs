@@ -1045,6 +1045,7 @@ mod tests {
             model: "fixture",
             capability: "t2i",
             params: "{}",
+            input_bindings: "[]",
             request_fingerprint: &fingerprint,
             status: "queued",
             submitted_at: 1,

@@ -113,6 +113,7 @@ const task = (
     voice: 'nova',
     format: 'wav',
   },
+  inputs: [],
   status,
   error:
     status === 'failed'

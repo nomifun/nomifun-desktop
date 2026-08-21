@@ -35,9 +35,12 @@ import type {
   CreativeTaskCapability,
   CreativeTaskError,
   CreativeTaskIdentity,
+  CreativeTaskInput,
+  CreativeTaskInputKind,
   CreativeTaskOwner,
   CreativeTaskInputRole,
   CreativeTaskReference,
+  CreativeStandaloneWorkbenchKind,
   CreativeTaskStatus,
 } from './types';
 
@@ -56,6 +59,12 @@ const INPUT_ROLES = new Set<CreativeTaskInputRole>([
   'video',
   'audio',
 ]);
+const INPUT_KINDS = new Set<CreativeTaskInputKind>([
+  'image',
+  'video',
+  'audio',
+  'text',
+]);
 const CREATION_MODEL_TASKS = new Set<CreativeCreationModelTask>([
   'chat',
   'image_generation',
@@ -63,6 +72,29 @@ const CREATION_MODEL_TASKS = new Set<CreativeCreationModelTask>([
   'video_generation',
   'speech_synthesis',
 ]);
+const STANDALONE_WORKBENCH_KINDS = new Set<CreativeStandaloneWorkbenchKind>([
+  'image',
+  'video',
+  'audio',
+]);
+
+function parseStandaloneWorkbenchKind(
+  value: unknown,
+  field: string,
+  code: 'invalid_request' | 'invalid_response' = 'invalid_response'
+): CreativeStandaloneWorkbenchKind {
+  if (
+    typeof value !== 'string' ||
+    !STANDALONE_WORKBENCH_KINDS.has(value as CreativeStandaloneWorkbenchKind)
+  ) {
+    throw new CreativeTaskContractError(
+      code,
+      `Invalid standalone workbench kind: ${String(value)}`,
+      field
+    );
+  }
+  return value as CreativeStandaloneWorkbenchKind;
+}
 
 export interface CreationTaskWireApi {
   create(body: unknown, idempotencyKey: string, signal?: AbortSignal): Promise<unknown>;
@@ -199,6 +231,21 @@ function parseOwner(value: unknown): CreativeTaskOwner {
       nodeId: String(parseCreativeStudioNodeId(owner.node_id)),
     };
   }
+  if (owner.kind === 'standalone_workbench') {
+    requireExactKeys(
+      owner,
+      ['kind', 'project_id', 'workbench_kind'],
+      'owner'
+    );
+    return {
+      kind: 'standalone_workbench',
+      projectId: parseCreativeOwnerId(owner.project_id, 'owner.project_id'),
+      workbenchKind: parseStandaloneWorkbenchKind(
+        owner.workbench_kind,
+        'owner.workbench_kind'
+      ),
+    };
+  }
   if (owner.kind === 'workflow_step') {
     requireExactKeys(
       owner,
@@ -240,6 +287,41 @@ function requireNonBlankString(value: unknown, field: string): string {
     );
   }
   return string;
+}
+
+function parseTaskInputs(value: unknown): CreativeTaskInput[] | null {
+  if (value === null) return null;
+  if (!Array.isArray(value)) {
+    throw new CreativeTaskContractError(
+      'invalid_response',
+      'Invalid creative task inputs snapshot',
+      'inputs'
+    );
+  }
+  return value.map((entry, index) => {
+    const field = `inputs[${index}]`;
+    const input = requireRecord(entry, field);
+    requireExactKeys(input, ['asset_id', 'kind', 'role'], field);
+    if (!INPUT_KINDS.has(input.kind as CreativeTaskInputKind)) {
+      throw new CreativeTaskContractError(
+        'invalid_response',
+        `Unsupported creative task input kind: ${String(input.kind)}`,
+        `${field}.kind`
+      );
+    }
+    if (!INPUT_ROLES.has(input.role as CreativeTaskInputRole)) {
+      throw new CreativeTaskContractError(
+        'invalid_response',
+        `Unsupported creative task input role: ${String(input.role)}`,
+        `${field}.role`
+      );
+    }
+    return {
+      assetId: String(parseAssetId(input.asset_id)),
+      kind: input.kind as CreativeTaskInputKind,
+      role: input.role as CreativeTaskInputRole,
+    };
+  });
 }
 
 function requireInteger(value: unknown, field: string, minimum = 0): number {
@@ -410,6 +492,7 @@ export function mapCreationTaskWire(
       'model',
       'capability',
       'params',
+      'inputs',
       'status',
       'error',
       'result_asset_ids',
@@ -429,6 +512,7 @@ export function mapCreationTaskWire(
     task: modelTaskForCapability(capability),
     capability,
     parameters: parseJsonObject(wire.params, 'params'),
+    inputs: parseTaskInputs(wire.inputs),
     status: parseStatus(wire.status),
     error: parseError(wire.error),
     resultAssetIds: parseResultAssetIds(wire.result_asset_ids),
@@ -448,6 +532,21 @@ function normalizeOwner(owner: CreativeTaskOwner): CreativeTaskOwner {
       kind: 'canvas_node',
       projectId: parseCreativeOwnerId(owner.projectId, 'owner.projectId', 'invalid_request'),
       nodeId: String(parseCreativeStudioNodeId(owner.nodeId)),
+    };
+  }
+  if (owner.kind === 'standalone_workbench') {
+    return {
+      kind: 'standalone_workbench',
+      projectId: parseCreativeOwnerId(
+        owner.projectId,
+        'owner.projectId',
+        'invalid_request'
+      ),
+      workbenchKind: parseStandaloneWorkbenchKind(
+        owner.workbenchKind,
+        'owner.workbenchKind',
+        'invalid_request'
+      ),
     };
   }
   return {
@@ -493,6 +592,13 @@ function ownerWire(owner: CreativeTaskOwner): Record<string, string> {
       node_id: owner.nodeId,
     };
   }
+  if (owner.kind === 'standalone_workbench') {
+    return {
+      kind: owner.kind,
+      project_id: owner.projectId,
+      workbench_kind: owner.workbenchKind,
+    };
+  }
   return {
     kind: owner.kind,
     workflow_id: owner.workflowId,
@@ -508,6 +614,28 @@ function normalizeReference(reference: CreativeTaskReference): CreativeTaskRefer
   };
 }
 
+function assertCreatedTaskInputs(
+  task: CreativeTask,
+  expected: readonly CreativeTaskInput[]
+): void {
+  if (
+    task.inputs === null ||
+    task.inputs.length !== expected.length ||
+    task.inputs.some(
+      (input, index) =>
+        input.assetId !== expected[index]?.assetId ||
+        input.kind !== expected[index]?.kind ||
+        input.role !== expected[index]?.role
+    )
+  ) {
+    throw new CreativeTaskContractError(
+      'identity_mismatch',
+      'Creative task did not echo the exact ordered input snapshot',
+      'inputs'
+    );
+  }
+}
+
 function toCreateTaskBody(input: CreateCreativeTaskInput): {
   identity: CreativeTaskIdentity;
   idempotencyKey: string;
@@ -516,6 +644,13 @@ function toCreateTaskBody(input: CreateCreativeTaskInput): {
   const identity = normalizeIdentity(input);
   const parameters = parseJsonObject(input.parameters, 'parameters');
   const inputs = input.inputs.map((entry, index) => {
+    if (!INPUT_KINDS.has(entry.kind)) {
+      throw new CreativeTaskContractError(
+        'invalid_request',
+        `Unsupported creative task input kind: ${String(entry.kind)}`,
+        `inputs[${index}].kind`
+      );
+    }
     if (!INPUT_ROLES.has(entry.role)) {
       throw new CreativeTaskContractError(
         'invalid_request',
@@ -525,6 +660,7 @@ function toCreateTaskBody(input: CreateCreativeTaskInput): {
     }
     return {
       asset_id: String(parseAssetId(entry.assetId)),
+      kind: entry.kind,
       role: entry.role,
     };
   });
@@ -653,10 +789,12 @@ export class CreativeTaskClient implements CreativeTaskPort {
   async create(input: CreateCreativeTaskInput, signal?: AbortSignal): Promise<CreativeTask> {
     throwIfAborted(signal);
     const { identity, idempotencyKey, body } = toCreateTaskBody(input);
-    return mapCreationTaskWire(
+    const task = mapCreationTaskWire(
       await this.api.create(body, idempotencyKey, signal),
       { taskId: idempotencyKey, ...identity }
     );
+    assertCreatedTaskInputs(task, input.inputs);
+    return task;
   }
 
   async get(reference: CreativeTaskReference, signal?: AbortSignal): Promise<CreativeTask> {

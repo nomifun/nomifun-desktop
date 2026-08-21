@@ -80,6 +80,7 @@ const task = (
 ): CreativeTask => ({
   ...reference(node),
   parameters: {},
+  inputs: [{ assetId: MARKED_ASSET_ID, kind: 'image', role: 'reference' }],
   status,
   error:
     status === 'failed'
@@ -301,7 +302,7 @@ describe('canvas image mask edit runtime integration', () => {
       task: 'image_edit' as const,
       capability: 'i2i' as const,
       parameters: {},
-      inputs: [{ assetId: MARKED_ASSET_ID, role: 'reference' as const }],
+      inputs: [{ assetId: MARKED_ASSET_ID, kind: 'image' as const, role: 'reference' as const }],
     };
     const result = waitForCanvasImageMaskEditAdmission({
       controller,

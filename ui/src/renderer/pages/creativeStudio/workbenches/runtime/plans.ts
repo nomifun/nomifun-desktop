@@ -184,6 +184,7 @@ function taskInputs(
 ): CreativeTaskInput[] {
   return references.bindings.map((binding) => ({
     assetId: binding.assetId,
+    kind: binding.kind,
     role: binding.role,
   }));
 }

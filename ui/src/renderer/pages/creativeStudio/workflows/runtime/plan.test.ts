@@ -44,7 +44,7 @@ describe('workflow task planning', () => {
         width: 1024,
         height: 1024,
       },
-      inputs: [{ assetId: IDS.asset, role: 'reference' }],
+      inputs: [{ assetId: IDS.asset, kind: 'image', role: 'reference' }],
     });
   });
 

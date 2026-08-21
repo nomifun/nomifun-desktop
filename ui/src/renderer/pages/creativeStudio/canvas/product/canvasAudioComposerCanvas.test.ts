@@ -172,6 +172,7 @@ const taskFor = (
   task: prepared.plan.input.task,
   capability: prepared.plan.input.capability,
   parameters: structuredClone(prepared.plan.input.parameters),
+  inputs: structuredClone(prepared.plan.input.inputs),
   status: 'running',
   error: null,
   resultAssetIds: [],

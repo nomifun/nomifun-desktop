@@ -99,6 +99,7 @@ const taskFor = (
   task: 'image_edit',
   capability: 'i2i',
   parameters: {},
+  inputs: [{ assetId: MARKED_ASSET_ID, kind: 'image', role: 'reference' }],
   status,
   error:
     status === 'failed'
@@ -152,7 +153,7 @@ describe('canvas image mask edit product model', () => {
       model: 'edit-v1',
       task: 'image_edit',
       capability: 'i2i',
-      inputs: [{ assetId: MARKED_ASSET_ID, role: 'reference' }],
+      inputs: [{ assetId: MARKED_ASSET_ID, kind: 'image', role: 'reference' }],
     });
     expect(prepared.configNode).toMatchObject({
       type: 'config',

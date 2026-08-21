@@ -5,6 +5,7 @@ use nomifun_common::{
 };
 #[cfg(test)]
 use nomifun_common::validate_uuidv7;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{Sqlite, SqlitePool, Transaction};
 
@@ -32,6 +33,7 @@ impl SqliteCreationTaskRepository {
 struct CreationTaskDbRow {
     creation_task_id: String,
     project_id: Option<String>,
+    workbench_kind: Option<String>,
     workflow_id: Option<String>,
     workflow_run_id: Option<String>,
     workflow_step_id: Option<String>,
@@ -40,6 +42,7 @@ struct CreationTaskDbRow {
     model: String,
     capability: String,
     params: String,
+    input_bindings: Option<String>,
     status: String,
     error: Option<String>,
     result_asset_ids: String,
@@ -58,6 +61,7 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
         let CreationTaskDbRow {
             creation_task_id,
             project_id,
+            workbench_kind,
             workflow_id,
             workflow_run_id,
             workflow_step_id,
@@ -66,6 +70,7 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
             model,
             capability,
             params,
+            input_bindings,
             status,
             error,
             result_asset_ids,
@@ -83,6 +88,13 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
                     "creation task {creation_task_id} has invalid project_id {id:?}: {error}"
                 ))
             })?;
+        }
+        if let Some(kind) = workbench_kind.as_deref()
+            && !matches!(kind, "image" | "video" | "audio")
+        {
+            return Err(DbError::Conflict(format!(
+                "creation task {creation_task_id} has invalid workbench_kind {kind:?}"
+            )));
         }
         if let Some(id) = workflow_id.as_deref() {
             CreativeStudioWorkflowId::parse(id).map_err(|error| {
@@ -119,15 +131,26 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
         })?;
         let canvas_owner = project_id.is_some()
             && node_id.is_some()
+            && workbench_kind.is_none()
+            && workflow_id.is_none()
+            && workflow_run_id.is_none()
+            && workflow_step_id.is_none();
+        let standalone_owner = project_id.is_some()
+            && workbench_kind.is_some()
+            && node_id.is_none()
             && workflow_id.is_none()
             && workflow_run_id.is_none()
             && workflow_step_id.is_none();
         let workflow_owner = project_id.is_none()
+            && workbench_kind.is_none()
             && node_id.is_none()
             && workflow_id.is_some()
             && workflow_run_id.is_some()
             && workflow_step_id.is_some();
-        let valid_owner = request_fingerprint.is_some() && (canvas_owner ^ workflow_owner);
+        let owner_branches = usize::from(canvas_owner)
+            + usize::from(standalone_owner)
+            + usize::from(workflow_owner);
+        let valid_owner = request_fingerprint.is_some() && owner_branches == 1;
         if !valid_owner {
             return Err(DbError::Conflict(format!(
                 "creation task {creation_task_id} has an invalid tagged owner"
@@ -139,9 +162,16 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
                 "creation task {creation_task_id} result_asset_ids is not canonically encoded"
             )));
         }
+        let canonical_input_bindings = canonicalize_input_bindings(input_bindings.as_deref())?;
+        if canonical_input_bindings != input_bindings {
+            return Err(DbError::Conflict(format!(
+                "creation task {creation_task_id} input_bindings is not canonically encoded"
+            )));
+        }
         Ok(Self {
             creation_task_id,
             project_id,
+            workbench_kind,
             workflow_id,
             workflow_run_id,
             workflow_step_id,
@@ -150,6 +180,7 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
             model,
             capability,
             params,
+            input_bindings,
             status,
             error,
             result_asset_ids,
@@ -176,6 +207,10 @@ enum CanonicalTaskOwner {
     CanvasNode {
         project_id: String,
         node_id: String,
+    },
+    StandaloneWorkbench {
+        project_id: String,
+        workbench_kind: String,
     },
     WorkflowStep {
         workflow_id: String,
@@ -205,6 +240,29 @@ fn normalize_canonical_owner(owner: CreativeTaskOwnerRef<'_>) -> Result<Canonica
                 })?
                 .into_string(),
         }),
+        CreativeTaskOwnerRef::StandaloneWorkbench {
+            project_id,
+            workbench_kind,
+        } => {
+            let workbench_kind = match workbench_kind {
+                "image" | "video" | "audio" => workbench_kind.to_owned(),
+                other => {
+                    return Err(DbError::Conflict(format!(
+                        "Creative task workbench_kind {other:?} is invalid"
+                    )));
+                }
+            };
+            Ok(CanonicalTaskOwner::StandaloneWorkbench {
+                project_id: CreativeStudioProjectId::parse(project_id)
+                    .map_err(|error| {
+                        DbError::Conflict(format!(
+                            "Creative task project_id '{project_id}' is not a canonical UUIDv7: {error}"
+                        ))
+                    })?
+                    .into_string(),
+                workbench_kind,
+            })
+        }
         CreativeTaskOwnerRef::WorkflowStep {
             workflow_id,
             workflow_run_id,
@@ -243,6 +301,18 @@ fn stored_owner_matches(stored: &CreationTaskDbRow, owner: &CanonicalTaskOwner) 
         } => {
             stored.project_id.as_deref() == Some(project_id)
                 && stored.node_id.as_deref() == Some(node_id)
+                && stored.workbench_kind.is_none()
+                && stored.workflow_id.is_none()
+                && stored.workflow_run_id.is_none()
+                && stored.workflow_step_id.is_none()
+        }
+        CanonicalTaskOwner::StandaloneWorkbench {
+            project_id,
+            workbench_kind,
+        } => {
+            stored.project_id.as_deref() == Some(project_id)
+                && stored.workbench_kind.as_deref() == Some(workbench_kind)
+                && stored.node_id.is_none()
                 && stored.workflow_id.is_none()
                 && stored.workflow_run_id.is_none()
                 && stored.workflow_step_id.is_none()
@@ -253,6 +323,7 @@ fn stored_owner_matches(stored: &CreationTaskDbRow, owner: &CanonicalTaskOwner) 
             workflow_step_id,
         } => {
             stored.project_id.is_none()
+                && stored.workbench_kind.is_none()
                 && stored.node_id.is_none()
                 && stored.workflow_id.as_deref() == Some(workflow_id)
                 && stored.workflow_run_id.as_deref() == Some(workflow_run_id)
@@ -278,6 +349,7 @@ fn validate_idempotent_creative_task(
         || stored.model != params.model
         || stored.capability != params.capability
         || stored.params != params.params
+        || stored.input_bindings.as_deref() != Some(params.input_bindings)
     {
         return Err(DbError::Conflict(format!(
             "Idempotency-Key '{}' resolved to an inconsistent creation task",
@@ -383,7 +455,8 @@ async fn lock_canonical_owner(
     owner: &CanonicalTaskOwner,
 ) -> Result<(), DbError> {
     match owner {
-        CanonicalTaskOwner::CanvasNode { project_id, .. } => {
+        CanonicalTaskOwner::CanvasNode { project_id, .. }
+        | CanonicalTaskOwner::StandaloneWorkbench { project_id, .. } => {
             lock_creative_project(tx, project_id).await?;
         }
         CanonicalTaskOwner::WorkflowStep {
@@ -401,6 +474,53 @@ async fn lock_canonical_owner(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalInputBinding {
+    asset_id: String,
+    kind: String,
+    role: String,
+}
+
+fn canonicalize_input_bindings(raw: Option<&str>) -> Result<Option<String>, DbError> {
+    let Some(raw) = raw else {
+        // Only migration 043 may produce NULL, to identify legacy rows whose
+        // complete input order/kind could not be proven.
+        return Ok(None);
+    };
+    let bindings: Vec<CanonicalInputBinding> = serde_json::from_str(raw).map_err(|error| {
+        DbError::Conflict(format!(
+            "creation task input_bindings must be a JSON array of exact bindings: {error}"
+        ))
+    })?;
+    for (index, binding) in bindings.iter().enumerate() {
+        WorkshopAssetId::parse(&binding.asset_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creation task input_bindings[{index}].asset_id {:?} is not a canonical UUIDv7: {error}",
+                binding.asset_id
+            ))
+        })?;
+        if !matches!(binding.kind.as_str(), "image" | "video" | "audio" | "text") {
+            return Err(DbError::Conflict(format!(
+                "creation task input_bindings[{index}].kind {:?} is invalid",
+                binding.kind
+            )));
+        }
+        if !matches!(
+            binding.role.as_str(),
+            "reference" | "mask" | "first_frame" | "last_frame" | "video" | "audio"
+        ) {
+            return Err(DbError::Conflict(format!(
+                "creation task input_bindings[{index}].role {:?} is invalid",
+                binding.role
+            )));
+        }
+    }
+    serde_json::to_string(&bindings)
+        .map(Some)
+        .map_err(|error| DbError::Init(format!("encode creation task input_bindings: {error}")))
 }
 
 /// Canonicalize the task's JSON result asset references.
@@ -509,6 +629,7 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
 
         let (
             project_id,
+            workbench_kind,
             workflow_id,
             workflow_run_id,
             workflow_step_id,
@@ -522,13 +643,26 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
                 None,
                 None,
                 None,
+                None,
                 Some(node_id.as_str()),
+            ),
+            CanonicalTaskOwner::StandaloneWorkbench {
+                project_id,
+                workbench_kind,
+            } => (
+                Some(project_id.as_str()),
+                Some(workbench_kind.as_str()),
+                None,
+                None,
+                None,
+                None,
             ),
             CanonicalTaskOwner::WorkflowStep {
                 workflow_id,
                 workflow_run_id,
                 workflow_step_id,
             } => (
+                None,
                 None,
                 Some(workflow_id.as_str()),
                 Some(workflow_run_id.as_str()),
@@ -538,15 +672,16 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         };
         let inserted = sqlx::query(
             "INSERT INTO creation_tasks \
-                (creation_task_id, project_id, workflow_id, workflow_run_id, workflow_step_id, \
+                (creation_task_id, project_id, workbench_kind, workflow_id, workflow_run_id, workflow_step_id, \
                  node_id, provider_id, model, capability, \
-                 params, status, error, result_asset_ids, remote_task_id, attempt, submitted_at, \
+                 params, input_bindings, status, error, result_asset_ids, remote_task_id, attempt, submitted_at, \
                  started_at, finished_at, request_fingerprint) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '[]', NULL, 0, ?, NULL, NULL, ?) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '[]', NULL, 0, ?, NULL, NULL, ?) \
              ON CONFLICT(creation_task_id) DO NOTHING",
         )
         .bind(params.creation_task_id)
         .bind(project_id)
+        .bind(workbench_kind)
         .bind(workflow_id)
         .bind(workflow_run_id)
         .bind(workflow_step_id)
@@ -555,6 +690,7 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         .bind(params.model)
         .bind(params.capability)
         .bind(params.params)
+        .bind(params.input_bindings)
         .bind(params.status)
         .bind(params.submitted_at)
         .bind(params.request_fingerprint)
@@ -846,6 +982,7 @@ mod tests {
             model: "image-model-v1",
             capability: "t2i",
             params: r#"{"prompt":"Aurora"}"#,
+            input_bindings: "[]",
             request_fingerprint: fingerprint,
             status: "queued",
             submitted_at: 100,
@@ -892,6 +1029,32 @@ mod tests {
             model: "image-model-v1",
             capability: "t2i",
             params: r#"{"prompt":"Aurora"}"#,
+            input_bindings: "[]",
+            request_fingerprint: fingerprint,
+            status: "queued",
+            submitted_at: 100,
+        }
+    }
+
+    fn standalone_creative_params<'a>(
+        creation_task_id: &'a str,
+        project_id: &'a str,
+        workbench_kind: &'a str,
+        provider_id: &'a str,
+        input_bindings: &'a str,
+        fingerprint: &'a str,
+    ) -> CreateCreativeTaskParams<'a> {
+        CreateCreativeTaskParams {
+            creation_task_id,
+            owner: CreativeTaskOwnerRef::StandaloneWorkbench {
+                project_id,
+                workbench_kind,
+            },
+            provider_id,
+            model: "image-model-v1",
+            capability: "i2v",
+            params: r#"{"prompt":"Aurora"}"#,
+            input_bindings,
             request_fingerprint: fingerprint,
             status: "queued",
             submitted_at: 100,
@@ -1028,6 +1191,90 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn standalone_owner_and_ordered_inputs_are_frozen_by_idempotency() {
+        let (repo, db, provider_id) = repo().await;
+        let project_id = seed_creative_project(&db).await;
+        let task_id = CreationTaskId::new().into_string();
+        let first_asset = WorkshopAssetId::new().into_string();
+        let second_asset = WorkshopAssetId::new().into_string();
+        let bindings = serde_json::json!([
+            {"asset_id": first_asset, "kind": "image", "role": "first_frame"},
+            {"asset_id": second_asset, "kind": "image", "role": "last_frame"}
+        ])
+        .to_string();
+        let fingerprint = serde_json::json!({
+            "owner": {
+                "kind": "standalone_workbench",
+                "project_id": project_id,
+                "workbench_kind": "video"
+            },
+            "inputs": serde_json::from_str::<Value>(&bindings).unwrap()
+        })
+        .to_string();
+
+        let created = repo
+            .get_or_create_creative_task(standalone_creative_params(
+                &task_id,
+                &project_id,
+                "video",
+                &provider_id,
+                &bindings,
+                &fingerprint,
+            ))
+            .await
+            .unwrap();
+        assert!(created.inserted);
+        assert_eq!(created.row.project_id.as_deref(), Some(project_id.as_str()));
+        assert_eq!(created.row.workbench_kind.as_deref(), Some("video"));
+        assert!(created.row.node_id.is_none());
+        assert_eq!(created.row.input_bindings.as_deref(), Some(bindings.as_str()));
+
+        let replay = repo
+            .get_or_create_creative_task(standalone_creative_params(
+                &task_id,
+                &project_id,
+                "video",
+                &provider_id,
+                &bindings,
+                &fingerprint,
+            ))
+            .await
+            .unwrap();
+        assert!(!replay.inserted);
+
+        let wrong_owner = repo
+            .get_or_create_creative_task(standalone_creative_params(
+                &task_id,
+                &project_id,
+                "image",
+                &provider_id,
+                &bindings,
+                &fingerprint,
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(wrong_owner, DbError::Conflict(message) if message.contains("inconsistent")));
+
+        let reversed = serde_json::json!([
+            {"asset_id": second_asset, "kind": "image", "role": "last_frame"},
+            {"asset_id": first_asset, "kind": "image", "role": "first_frame"}
+        ])
+        .to_string();
+        let wrong_inputs = repo
+            .get_or_create_creative_task(standalone_creative_params(
+                &task_id,
+                &project_id,
+                "video",
+                &provider_id,
+                &reversed,
+                &fingerprint,
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(wrong_inputs, DbError::Conflict(message) if message.contains("inconsistent")));
     }
 
     #[tokio::test]

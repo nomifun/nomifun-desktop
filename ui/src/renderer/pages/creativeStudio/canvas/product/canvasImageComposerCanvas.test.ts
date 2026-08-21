@@ -138,7 +138,7 @@ describe('canvas image composer product model', () => {
       model: 'edit-v1',
       task: 'image_edit',
       capability: 'i2i',
-      inputs: [{ assetId: SOURCE_ASSET_ID, role: 'reference' }],
+      inputs: [{ assetId: SOURCE_ASSET_ID, kind: 'image', role: 'reference' }],
       parameters: {
         prompt: '把画面改成清晨',
         quality: 'high',

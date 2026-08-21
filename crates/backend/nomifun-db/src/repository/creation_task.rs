@@ -83,6 +83,10 @@ pub enum CreativeTaskOwnerRef<'a> {
         project_id: &'a str,
         node_id: &'a str,
     },
+    StandaloneWorkbench {
+        project_id: &'a str,
+        workbench_kind: &'a str,
+    },
     WorkflowStep {
         workflow_id: &'a str,
         workflow_run_id: &'a str,
@@ -100,6 +104,9 @@ pub struct CreateCreativeTaskParams<'a> {
     pub model: &'a str,
     pub capability: &'a str,
     pub params: &'a str,
+    /// Canonical ordered JSON array of `{asset_id,kind,role}` objects. New
+    /// writes must always supply it, including `[]` for no inputs.
+    pub input_bindings: &'a str,
     pub request_fingerprint: &'a str,
     pub status: &'a str,
     pub submitted_at: i64,

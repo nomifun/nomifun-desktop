@@ -129,6 +129,7 @@ const task = (
 ): CreativeTask => ({
   ...reference(node),
   parameters: { prompt: '改成清晨' },
+  inputs: [{ assetId: SOURCE_ASSET_ID, kind: 'image', role: 'reference' }],
   status,
   error:
     status === 'failed'
@@ -154,6 +155,7 @@ const generationTask = (
   task: 'image_generation',
   capability: 't2i',
   parameters: { prompt: '清晨湖面上的薄雾' },
+  inputs: [],
   status: 'succeeded',
   error: null,
   resultAssetIds: [RESULT_ASSET_ID, SECOND_RESULT_ASSET_ID],

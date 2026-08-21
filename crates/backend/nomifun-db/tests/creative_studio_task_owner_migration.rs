@@ -11,6 +11,10 @@ const PROJECT_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000002";
 const NODE_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000003";
 const LEGACY_TASK_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000004";
 const CREATIVE_TASK_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000005";
+const INPUT_IMAGE_ID: &str = "0190f5fe-7c00-7a00-8abc-00000000000a";
+const INPUT_VIDEO_ID: &str = "0190f5fe-7c00-7a00-8abc-00000000000b";
+const UNKNOWN_INPUT_TASK_ID: &str = "0190f5fe-7c00-7a00-8abc-00000000000c";
+const INCOMPLETE_INPUT_TASK_ID: &str = "0190f5fe-7c00-7a00-8abc-00000000000f";
 
 async fn migrate_to(pool: &sqlx::SqlitePool, max_version: i64) {
     let mut connection = pool.acquire().await.unwrap();
@@ -215,4 +219,227 @@ async fn migration_041_drops_legacy_rows_and_canvas_ownership_column() {
     .execute(&pool)
     .await;
     assert!(unowned.is_err(), "041 must reject ownerless task writes");
+}
+
+#[tokio::test]
+async fn migration_043_recovers_only_provable_ordered_input_bindings() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    seed_pre_040(&pool).await;
+    migrate_to(&pool, 42).await;
+
+    for (asset_id, kind) in [(INPUT_IMAGE_ID, "image"), (INPUT_VIDEO_ID, "video")] {
+        sqlx::query(
+            "INSERT INTO workshop_assets \
+                (asset_id, kind, title, tags, bytes, in_library, created_at, updated_at) \
+             VALUES (?, ?, 'Migration input', '[]', 0, 1, 1, 1)",
+        )
+        .bind(asset_id)
+        .bind(kind)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let fingerprint = serde_json::json!({
+        "owner": {
+            "kind": "canvas_node",
+            "project_id": PROJECT_ID,
+            "node_id": NODE_ID
+        },
+        "inputs": [
+            {"asset_id": INPUT_VIDEO_ID, "role": "video"},
+            {"asset_id": INPUT_IMAGE_ID, "role": "first_frame"}
+        ]
+    });
+    sqlx::query(
+        "UPDATE creation_tasks SET request_fingerprint = ? WHERE creation_task_id = ?",
+    )
+    .bind(fingerprint.to_string())
+    .bind(CREATIVE_TASK_ID)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO creation_tasks \
+            (creation_task_id, project_id, node_id, provider_id, model, capability, params, \
+             status, submitted_at, request_fingerprint) \
+         VALUES (?, ?, ?, ?, 'legacy-incomplete-inputs', 'i2i', '{}', 'queued', 31, ?)",
+    )
+    .bind(INCOMPLETE_INPUT_TASK_ID)
+    .bind(PROJECT_ID)
+    .bind(NODE_ID)
+    .bind(PROVIDER_ID)
+    .bind(
+        serde_json::json!({
+            "inputs": [{"asset_id": INPUT_IMAGE_ID}]
+        })
+        .to_string(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO creation_tasks \
+            (creation_task_id, project_id, node_id, provider_id, model, capability, params, \
+             status, submitted_at, request_fingerprint) \
+         VALUES (?, ?, ?, ?, 'legacy-unknown-inputs', 't2i', '{}', 'queued', 30, ?)",
+    )
+    .bind(UNKNOWN_INPUT_TASK_ID)
+    .bind(PROJECT_ID)
+    .bind(NODE_ID)
+    .bind(PROVIDER_ID)
+    .bind(serde_json::json!({"owner": {"kind": "canvas_node"}}).to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    migrate_to(&pool, 43).await;
+
+    let recovered: String = sqlx::query_scalar(
+        "SELECT input_bindings FROM creation_tasks WHERE creation_task_id = ?",
+    )
+    .bind(CREATIVE_TASK_ID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&recovered).unwrap(),
+        serde_json::json!([
+            {"asset_id": INPUT_VIDEO_ID, "kind": "video", "role": "video"},
+            {"asset_id": INPUT_IMAGE_ID, "kind": "image", "role": "first_frame"}
+        ])
+    );
+    let unknown: Option<String> = sqlx::query_scalar(
+        "SELECT input_bindings FROM creation_tasks WHERE creation_task_id = ?",
+    )
+    .bind(UNKNOWN_INPUT_TASK_ID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(unknown.is_none(), "missing legacy inputs must remain explicitly unprovable");
+    let incomplete: Option<String> = sqlx::query_scalar(
+        "SELECT input_bindings FROM creation_tasks WHERE creation_task_id = ?",
+    )
+    .bind(INCOMPLETE_INPUT_TASK_ID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        incomplete.is_none(),
+        "legacy inputs missing a required role must remain explicitly unprovable"
+    );
+}
+
+#[tokio::test]
+async fn migration_043_enforces_exact_standalone_owner_and_input_shape() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    seed_pre_040(&pool).await;
+    migrate_to(&pool, 43).await;
+
+    let standalone_id = "0190f5fe-7c00-7a00-8abc-00000000000d";
+    sqlx::query(
+        "INSERT INTO creation_tasks \
+            (creation_task_id, project_id, workbench_kind, provider_id, model, capability, \
+             params, input_bindings, status, submitted_at, request_fingerprint) \
+         VALUES (?, ?, 'image', ?, 'model', 't2i', '{}', '[]', 'queued', 1, '{}')",
+    )
+    .bind(standalone_id)
+    .bind(PROJECT_ID)
+    .bind(PROVIDER_ID)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mixed = sqlx::query(
+        "INSERT INTO creation_tasks \
+            (creation_task_id, project_id, workbench_kind, node_id, provider_id, model, capability, \
+             params, input_bindings, status, submitted_at, request_fingerprint) \
+         VALUES (?, ?, 'video', ?, ?, 'model', 't2v', '{}', '[]', 'queued', 1, '{}')",
+    )
+    .bind("0190f5fe-7c00-7a00-8abc-00000000000e")
+    .bind(PROJECT_ID)
+    .bind(NODE_ID)
+    .bind(PROVIDER_ID)
+    .execute(&pool)
+    .await;
+    assert!(mixed.is_err(), "standalone and canvas-node fields must be exclusive");
+
+    let malformed_inputs = sqlx::query(
+        "UPDATE creation_tasks SET input_bindings = ? WHERE creation_task_id = ?",
+    )
+    .bind(serde_json::json!([{
+        "asset_id": INPUT_IMAGE_ID,
+        "kind": "image",
+        "role": "reference",
+        "guessed": true
+    }]).to_string())
+    .bind(standalone_id)
+    .execute(&pool)
+    .await;
+    assert!(malformed_inputs.is_err(), "input bindings reject unknown fields");
+
+    for (label, payload) in [
+        (
+            "explicit null kind",
+            serde_json::json!([{
+                "asset_id": INPUT_IMAGE_ID,
+                "kind": null,
+                "role": "reference"
+            }])
+            .to_string(),
+        ),
+        (
+            "missing role",
+            serde_json::json!([{
+                "asset_id": INPUT_IMAGE_ID,
+                "kind": "image"
+            }])
+            .to_string(),
+        ),
+        (
+            "duplicate kind",
+            format!(
+                r#"[{{"asset_id":"{INPUT_IMAGE_ID}","kind":"image","kind":"video","role":"reference"}}]"#
+            ),
+        ),
+    ] {
+        let update = sqlx::query(
+            "UPDATE creation_tasks SET input_bindings = ? WHERE creation_task_id = ?",
+        )
+        .bind(&payload)
+        .bind(standalone_id)
+        .execute(&pool)
+        .await;
+        assert!(update.is_err(), "update trigger must reject {label}");
+    }
+
+    let incomplete_insert = sqlx::query(
+        "INSERT INTO creation_tasks \
+            (creation_task_id, project_id, workbench_kind, provider_id, model, capability, \
+             params, input_bindings, status, submitted_at, request_fingerprint) \
+         VALUES (?, ?, 'image', ?, 'model', 'i2i', '{}', ?, 'queued', 1, '{}')",
+    )
+    .bind("0190f5fe-7c00-7a00-8abc-000000000010")
+    .bind(PROJECT_ID)
+    .bind(PROVIDER_ID)
+    .bind(
+        serde_json::json!([{
+            "asset_id": INPUT_IMAGE_ID,
+            "kind": "image"
+        }])
+        .to_string(),
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        incomplete_insert.is_err(),
+        "insert trigger must reject a missing required role"
+    );
 }

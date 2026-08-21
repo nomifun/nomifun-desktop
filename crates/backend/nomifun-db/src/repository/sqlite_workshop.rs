@@ -37,6 +37,7 @@ struct OriginReferences {
     provider_id: Option<String>,
     project_id: Option<String>,
     node_id: Option<String>,
+    workbench_kind: Option<String>,
     workflow_id: Option<String>,
     workflow_run_id: Option<String>,
     workflow_step_id: Option<String>,
@@ -72,6 +73,7 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
             provider_id: None,
             project_id: None,
             node_id: None,
+            workbench_kind: None,
             workflow_id: None,
             workflow_run_id: None,
             workflow_step_id: None,
@@ -91,6 +93,7 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
         "nodeId",
         "creationTaskId",
         "projectId",
+        "workbenchKind",
         "workflowId",
         "workflowRunId",
         "workflowStepId",
@@ -104,16 +107,34 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
     let provider_id = optional_origin_id(object, "provider_id")?;
     let project_id = optional_origin_id(object, "project_id")?;
     let node_id = optional_origin_id(object, "node_id")?;
+    let workbench_kind = match object.get("workbench_kind") {
+        None => None,
+        Some(Value::String(value)) if matches!(value.as_str(), "image" | "video" | "audio") => {
+            Some(value.clone())
+        }
+        Some(Value::String(value)) => {
+            return Err(DbError::Conflict(format!(
+                "workshop asset origin.workbench_kind {value:?} is invalid"
+            )));
+        }
+        Some(Value::Null) => {
+            return Err(DbError::Conflict(
+                "workshop asset origin.workbench_kind must be omitted when absent".into(),
+            ));
+        }
+        Some(_) => {
+            return Err(DbError::Conflict(
+                "workshop asset origin.workbench_kind must be image, video, or audio".into(),
+            ));
+        }
+    };
     let workflow_id = optional_origin_id(object, "workflow_id")?;
     let workflow_run_id = optional_origin_id(object, "workflow_run_id")?;
     let workflow_step_id = optional_origin_id(object, "workflow_step_id")?;
     let creation_task_id = optional_origin_id(object, "creation_task_id")?;
-    let has_project_owner = project_id.is_some() || node_id.is_some();
-    if project_id.is_some() != node_id.is_some() {
-        return Err(DbError::Conflict(
-            "workshop asset project origin requires both project_id and node_id".into(),
-        ));
-    }
+    let canvas_owner = project_id.is_some() && node_id.is_some() && workbench_kind.is_none();
+    let standalone_owner =
+        project_id.is_some() && node_id.is_none() && workbench_kind.is_some();
     let workflow_owner_count = [
         workflow_id.is_some(),
         workflow_run_id.is_some(),
@@ -128,7 +149,14 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
                 .into(),
         ));
     }
-    if has_project_owner && workflow_owner_count != 0 {
+    let any_project_owner = project_id.is_some() || node_id.is_some() || workbench_kind.is_some();
+    if any_project_owner && !canvas_owner && !standalone_owner {
+        return Err(DbError::Conflict(
+            "workshop asset project origin requires exactly one node_id or workbench_kind branch"
+                .into(),
+        ));
+    }
+    if any_project_owner && workflow_owner_count != 0 {
         return Err(DbError::Conflict(
             "workshop asset origin cannot combine project and workflow ownership".into(),
         ));
@@ -137,6 +165,7 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
         provider_id,
         project_id,
         node_id,
+        workbench_kind,
         workflow_id,
         workflow_run_id,
         workflow_step_id,
@@ -845,10 +874,11 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                     Option<String>,
                     Option<String>,
                     Option<String>,
+                    Option<String>,
                 ),
             >(
                 "UPDATE creation_tasks SET status = status WHERE creation_task_id = ? \
-                 RETURNING project_id, node_id, workflow_id, workflow_run_id, workflow_step_id",
+                 RETURNING project_id, node_id, workbench_kind, workflow_id, workflow_run_id, workflow_step_id",
             )
             .bind(&creation_task_id)
             .fetch_optional(&mut *tx)
@@ -861,6 +891,7 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
             let expected = (
                 references.project_id.as_deref(),
                 references.node_id.as_deref(),
+                references.workbench_kind.as_deref(),
                 references.workflow_id.as_deref(),
                 references.workflow_run_id.as_deref(),
                 references.workflow_step_id.as_deref(),
@@ -871,6 +902,7 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                 task.2.as_deref(),
                 task.3.as_deref(),
                 task.4.as_deref(),
+                task.5.as_deref(),
             );
             if expected != actual {
                 return Err(DbError::Conflict(format!(
@@ -1531,6 +1563,42 @@ mod tests {
             serde_json::from_str::<Value>(created.origin.as_deref().unwrap())
                 .unwrap()["creation_task_id"],
             creation_task_id
+        );
+
+        let standalone_task_id = nomifun_common::generate_id();
+        sqlx::query(
+            "INSERT INTO creation_tasks \
+             (creation_task_id, project_id, workbench_kind, provider_id, model, capability, params, \
+              input_bindings, status, submitted_at, request_fingerprint) \
+             VALUES (?, ?, 'video', ?, 'model', 't2v', '{}', '[]', 'running', 1, \
+              '{\"asset_origin_fixture\":\"standalone\"}')",
+        )
+        .bind(&standalone_task_id)
+        .bind(&project_id)
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let standalone_asset_id = nomifun_common::generate_id();
+        let mut standalone = sample_asset(
+            2,
+            &standalone_asset_id,
+            "video",
+            "standalone task owner",
+        );
+        standalone.origin = Some(
+            serde_json::json!({
+                "project_id": project_id,
+                "workbench_kind": "video",
+                "creation_task_id": standalone_task_id
+            })
+            .to_string(),
+        );
+        let standalone_created = repo.create_asset(&standalone).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(standalone_created.origin.as_deref().unwrap())
+                .unwrap()["workbench_kind"],
+            "video"
         );
 
         let mut wrong_owner = sample_asset(2, ASSET_2, "image", "wrong task owner");

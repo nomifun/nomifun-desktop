@@ -110,6 +110,7 @@ function taskFrom(
     task: input.task,
     capability: input.capability,
     parameters: { ...input.parameters },
+    inputs: input.inputs,
     status,
     error: status === 'failed'
       ? { kind: 'provider_failure', message: 'provider rejected task', httpStatus: 400 }
@@ -220,7 +221,7 @@ describe('Creative Workflow run controller', () => {
         workflowStepId: IDS.generateStep,
       },
       capability: 'i2i',
-      inputs: [{ assetId: IDS.asset, role: 'reference' }],
+      inputs: [{ assetId: IDS.asset, kind: 'image', role: 'reference' }],
     });
     expect(controller.getSnapshot().activities[IDS.request]).toBeUndefined();
   });
