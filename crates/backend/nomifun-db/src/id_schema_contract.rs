@@ -705,7 +705,6 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     // Audit events are retained after the agent is deleted; retention-days
     // cleanup is the only pruning authority.
     text_ref!("cs_audit_events", "cs_agent_id" => "cs_agents", "cs_agent_id", false, "idx_cs_audit_agent_time", KeepHistory),
-    text_ref!("creation_tasks", "canvas_id" => "workshop_canvases", "canvas_id", true, "idx_creation_tasks_canvas_id", SetNull),
     // Canonical Creative Studio task history survives project deletion, while
     // creation itself still locks and validates a live project row.
     text_ref!("creation_tasks", "project_id" => "creative_studio_projects", "project_id", true, "idx_creation_tasks_project_id", KeepHistory),
@@ -2898,13 +2897,33 @@ mod tests {
         .await
         .expect("provider");
         let creation_task_id = nomifun_common::CreationTaskId::new();
+        let project_id = nomifun_common::CreativeStudioProjectId::new();
+        let node_id = nomifun_common::CreativeStudioNodeId::new();
+        let document = serde_json::json!({
+            "schema": "nomifun.creative-studio/v1",
+            "projectId": project_id.as_str(),
+            "nodes": []
+        });
+        sqlx::query(
+            "INSERT INTO creative_studio_projects \
+             (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+             VALUES (?, 'Creation Contract', 1, 0, 0, ?, 1, 1)",
+        )
+        .bind(project_id.as_str())
+        .bind(document.to_string())
+        .execute(pool)
+        .await
+        .expect("project");
         sqlx::query(
             "INSERT INTO creation_tasks \
-             (creation_task_id, provider_id, model, capability, params, status, \
-              result_asset_ids, submitted_at, finished_at) \
-             VALUES (?, ?, 'model', 't2i', '{}', 'succeeded', '[]', 1, 2)",
+             (creation_task_id, project_id, node_id, provider_id, model, capability, params, status, \
+              result_asset_ids, submitted_at, finished_at, request_fingerprint) \
+             VALUES (?, ?, ?, ?, 'model', 't2i', '{}', 'succeeded', '[]', 1, 2, \
+              '{\"contract\":\"invalid-success\"}')",
         )
         .bind(creation_task_id.as_str())
+        .bind(project_id.as_str())
+        .bind(node_id.as_str())
         .bind(provider_id.as_str())
         .execute(pool)
         .await

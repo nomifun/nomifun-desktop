@@ -817,13 +817,35 @@ async fn restore_rebuilds_technical_ids_and_preserves_registered_business_id_ref
     .unwrap();
     assert_eq!(source_attachment_parent, source_requirement_lookup);
 
+    let task_project_id = generate_id();
+    let task_node_id = generate_id();
+    let task_document = json!({
+        "schema": "nomifun.creative-studio/v1",
+        "projectId": task_project_id,
+        "nodes": []
+    });
+    sqlx::query(
+        "INSERT INTO creative_studio_projects \
+         (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+         VALUES (?, 'Backup task project', 1, 0, 0, ?, 1, 1)",
+    )
+    .bind(&task_project_id)
+    .bind(task_document.to_string())
+    .execute(database.pool())
+    .await
+    .unwrap();
+
     let discarded_creation_task_id = generate_id();
     let discarded_creation_task_technical_id: i64 = sqlx::query_scalar(
         "INSERT INTO creation_tasks \
-         (creation_task_id, provider_id, model, capability, params, status, submitted_at) \
-         VALUES (?, ?, 'model', 'image', '{}', 'queued', 1) RETURNING id",
+         (creation_task_id, project_id, node_id, provider_id, model, capability, params, status, \
+          submitted_at, request_fingerprint) \
+         VALUES (?, ?, ?, ?, 'model', 'image', '{}', 'queued', 1, \
+          '{\"backup_fixture\":\"discarded\"}') RETURNING id",
     )
     .bind(&discarded_creation_task_id)
+    .bind(&task_project_id)
+    .bind(&task_node_id)
     .bind(&provider_id)
     .fetch_one(database.pool())
     .await
@@ -836,10 +858,14 @@ async fn restore_rebuilds_technical_ids_and_preserves_registered_business_id_ref
     let source_creation_task_id = generate_id();
     let source_creation_task_technical_id: i64 = sqlx::query_scalar(
         "INSERT INTO creation_tasks \
-         (creation_task_id, provider_id, model, capability, params, status, submitted_at) \
-         VALUES (?, ?, 'model', 'image', '{}', 'done', 2) RETURNING id",
+         (creation_task_id, project_id, node_id, provider_id, model, capability, params, status, \
+          submitted_at, request_fingerprint) \
+         VALUES (?, ?, ?, ?, 'model', 'image', '{}', 'done', 2, \
+          '{\"backup_fixture\":\"source\"}') RETURNING id",
     )
     .bind(&source_creation_task_id)
+    .bind(&task_project_id)
+    .bind(&task_node_id)
     .bind(&provider_id)
     .fetch_one(database.pool())
     .await

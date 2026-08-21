@@ -8,9 +8,6 @@ use crate::models::CreationTaskRow;
 /// JSON strings the caller builds.
 #[async_trait::async_trait]
 pub trait ICreationTaskRepository: Send + Sync {
-    /// Insert a task (typically `status = "queued"`).
-    async fn create_task(&self, params: CreateCreationTaskParams<'_>) -> Result<CreationTaskRow, DbError>;
-
     /// Atomically insert or recover one canonical Creative Studio task.
     ///
     /// `creation_task_id` is the caller's UUIDv7 Idempotency-Key. An existing
@@ -32,10 +29,6 @@ pub trait ICreationTaskRepository: Send + Sync {
         &self,
         creation_task_id: &str,
     ) -> Result<Option<CreationTaskRow>, DbError>;
-
-    /// Filtered listing (optional canvas / status), newest-submitted first,
-    /// capped by `limit`.
-    async fn list_tasks(&self, params: ListCreationTasksParams<'_>) -> Result<Vec<CreationTaskRow>, DbError>;
 
     /// Complete task inventory for boot-time artifact reconciliation. Unlike
     /// the paginated API listing, this intentionally has no 500-row cap.
@@ -110,31 +103,6 @@ pub struct CreateCreativeTaskParams<'a> {
     pub request_fingerprint: &'a str,
     pub status: &'a str,
     pub submitted_at: i64,
-}
-
-/// Params for [`ICreationTaskRepository::create_task`]. SQLite allocates the
-/// technical `id`; the caller supplies the stable UUIDv7 business id and clock.
-#[derive(Debug)]
-pub struct CreateCreationTaskParams<'a> {
-    pub creation_task_id: &'a str,
-    pub canvas_id: Option<&'a str>,
-    pub node_id: Option<&'a str>,
-    pub provider_id: &'a str,
-    pub model: &'a str,
-    pub capability: &'a str,
-    /// JSON parameter snapshot.
-    pub params: &'a str,
-    pub status: &'a str,
-    pub submitted_at: i64,
-}
-
-/// Filters for [`ICreationTaskRepository::list_tasks`].
-#[derive(Debug, Default)]
-pub struct ListCreationTasksParams<'a> {
-    pub canvas_id: Option<&'a str>,
-    pub status: Option<&'a str>,
-    /// Max rows (clamped by the caller).
-    pub limit: i64,
 }
 
 /// Partial-update params for [`ICreationTaskRepository::update_task`]. Each

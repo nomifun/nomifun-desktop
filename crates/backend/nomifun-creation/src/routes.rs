@@ -14,7 +14,9 @@ use nomifun_api_types::ApiResponse;
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
 
-use crate::dto::{CreationTask, CreativeCreationTask};
+use crate::dto::CreativeCreationTask;
+#[cfg(test)]
+use crate::dto::CreationTask;
 use crate::service::{CreativeTaskOwner, NewCreationTask};
 use crate::state::CreationRouterState;
 use crate::types::CreationInput;
@@ -125,8 +127,6 @@ async fn create_creative_task(
             req.owner.into(),
             idempotency_key,
             NewCreationTask {
-                canvas_id: None,
-                node_id: None,
                 provider_id: req.provider_id,
                 model: req.model,
                 capability: req.capability,
@@ -148,27 +148,13 @@ async fn create_creative_task(
     ))
 }
 
-fn is_legacy_task(task: &CreationTask) -> bool {
-    task.project_id.is_none()
-        && task.workflow_id.is_none()
-        && task.workflow_run_id.is_none()
-        && task.workflow_step_id.is_none()
-}
-
-fn require_creative_task(task: CreationTask) -> Result<CreativeCreationTask, AppError> {
-    if is_legacy_task(&task) {
-        return Err(AppError::NotFound("creative task not found".into()));
-    }
-    CreativeCreationTask::try_from(task)
-}
-
 async fn get_creative_task(
     State(state): State<CreationRouterState>,
     Extension(_user): Extension<CurrentUser>,
     Path(creation_task_id): Path<String>,
 ) -> Result<Json<ApiResponse<CreativeCreationTask>>, AppError> {
     let task = state.service.get_task(&creation_task_id).await?;
-    Ok(Json(ApiResponse::ok(require_creative_task(task)?)))
+    Ok(Json(ApiResponse::ok(CreativeCreationTask::try_from(task)?)))
 }
 
 async fn cancel_creative_task(
@@ -176,9 +162,8 @@ async fn cancel_creative_task(
     Extension(_user): Extension<CurrentUser>,
     Path(creation_task_id): Path<String>,
 ) -> Result<Json<ApiResponse<CreativeCreationTask>>, AppError> {
-    require_creative_task(state.service.get_task(&creation_task_id).await?)?;
     let task = state.service.cancel_task(&creation_task_id).await?;
-    Ok(Json(ApiResponse::ok(require_creative_task(task)?)))
+    Ok(Json(ApiResponse::ok(CreativeCreationTask::try_from(task)?)))
 }
 
 #[cfg(test)]
@@ -254,15 +239,14 @@ mod tests {
     }
 
     #[test]
-    fn creative_task_surface_rejects_retired_unowned_rows() {
-        let legacy = CreationTask {
+    fn creative_task_surface_rejects_invalid_owner_rows() {
+        let invalid = CreationTask {
             creation_task_id: "0190f5fe-7c00-7a00-8000-000000000001".into(),
             project_id: None,
             workflow_id: None,
             workflow_run_id: None,
             workflow_step_id: None,
-            canvas_id: Some("0190f5fe-7c00-7a00-8000-000000000002".into()),
-            node_id: Some("0190f5fe-7c00-7a00-8000-000000000003".into()),
+            node_id: None,
             provider_id: "0190f5fe-7c00-7a00-8000-000000000004".into(),
             model: "image-model-v1".into(),
             capability: "t2i".into(),
@@ -275,14 +259,6 @@ mod tests {
             started_at: None,
             finished_at: None,
         };
-        let mut creative = legacy.clone();
-        creative.canvas_id = None;
-        creative.project_id = Some("0190f5fe-7c00-7a00-8000-000000000005".into());
-
-        assert!(matches!(
-            require_creative_task(legacy),
-            Err(AppError::NotFound(_))
-        ));
-        assert!(require_creative_task(creative).is_ok());
+        assert!(CreativeCreationTask::try_from(invalid).is_err());
     }
 }

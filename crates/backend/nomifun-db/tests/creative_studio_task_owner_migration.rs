@@ -1,4 +1,5 @@
-//! Migration 040 preserves pre-union tasks while introducing strict workflow owners.
+//! Task-owner migrations: 040 introduces the tagged union; 041 retires the
+//! historical Workshop/global branch without rewriting canonical task history.
 
 use sqlx::migrate::{Migrate, Migrator};
 use sqlx::sqlite::SqlitePoolOptions;
@@ -161,4 +162,57 @@ async fn migration_adds_the_strict_workflow_owner_shape() {
     .execute(&pool)
     .await;
     assert!(invalid.is_err(), "workflow_step_id is mandatory for the branch");
+}
+
+#[tokio::test]
+async fn migration_041_drops_legacy_rows_and_canvas_ownership_column() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    seed_pre_040(&pool).await;
+
+    migrate_to(&pool, 41).await;
+
+    let legacy_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM creation_tasks WHERE creation_task_id = ?",
+    )
+    .bind(LEGACY_TASK_ID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(legacy_count, 0, "retired unowned tasks must not survive 041");
+
+    let canonical: (String, String, String) = sqlx::query_as(
+        "SELECT project_id, node_id, request_fingerprint \
+         FROM creation_tasks WHERE creation_task_id = ?",
+    )
+    .bind(CREATIVE_TASK_ID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(canonical.0, PROJECT_ID);
+    assert_eq!(canonical.1, NODE_ID);
+    assert!(!canonical.2.is_empty());
+
+    let canvas_column_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('creation_tasks') WHERE name = 'canvas_id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(canvas_column_count, 0);
+
+    let unowned = sqlx::query(
+        "INSERT INTO creation_tasks \
+            (creation_task_id, provider_id, model, capability, params, status, submitted_at, \
+             request_fingerprint) \
+         VALUES (?, ?, 'retired', 't2i', '{}', 'queued', 40, '{}')",
+    )
+    .bind("0190f5fe-7c00-7a00-8abc-000000000009")
+    .bind(PROVIDER_ID)
+    .execute(&pool)
+    .await;
+    assert!(unowned.is_err(), "041 must reject ownerless task writes");
 }

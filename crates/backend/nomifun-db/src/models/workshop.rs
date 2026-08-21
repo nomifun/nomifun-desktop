@@ -114,14 +114,12 @@ pub struct WorkshopAssetRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreationTaskRow {
     pub creation_task_id: String,
-    /// Canonical canvas-node owner. Mutually exclusive with workflow/legacy ownership.
+    /// Canonical project-node owner. Mutually exclusive with workflow ownership.
     pub project_id: Option<String>,
     /// Canonical workflow-step owner. All three workflow columns are present together.
     pub workflow_id: Option<String>,
     pub workflow_run_id: Option<String>,
     pub workflow_step_id: Option<String>,
-    /// Retired Workshop owner. Canonical Creative Studio tasks never set it.
-    pub canvas_id: Option<String>,
     pub node_id: Option<String>,
     pub provider_id: String,
     pub model: String,
