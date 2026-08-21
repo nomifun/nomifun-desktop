@@ -17,7 +17,7 @@ Then add the nested route inside the existing
 
 ```tsx
 <Route
-  path='canvas/:projectId'
+  path="canvas/:projectId"
   element={withRouteFallback(CreativeCanvasProductRoute)}
 />
 ```
@@ -63,5 +63,14 @@ The Agent supplies its own single header; the generic right-panel tab header is
 shown only for properties so the product never renders stacked title bars.
 
 The Editor also exposes the canonical pending-task recovery feed described in
-`../editor/WIRING.md`. This product does not currently instantiate a workbench
-runtime, so it intentionally does not fabricate `initialResumeRequests`.
+`../editor/WIRING.md`. Image-node local editing now instantiates one scoped
+workbench runtime only after the project and Editor graph are both hydrated.
+It uploads the blue-marked reference as a hidden real asset, persists the
+locked config owner plus `pendingTaskIds` before POST, and submits the exact
+`image_edit` / `i2i` model identity through the shared NomiFun task client.
+Queued/running state is reconciled without creating undo history; terminal
+results are fetched as real image assets and written as config-to-image nodes
+before pending removal performs the final CAS flush. Mount recovery is derived
+only from matching `image-mask-edit` config nodes. A transport-ambiguous create
+keeps the draft and idempotency key locked for safe retry; abandonment first
+probes the backend and is allowed only after an authoritative 404.
