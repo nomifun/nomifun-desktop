@@ -31,10 +31,9 @@ nomifun-db.workspace = true
 nomifun-terminal.workspace = true
 nomifun-idmm.workspace = true
 nomifun-knowledge.workspace = true
-# 创意工坊 (Creative Workshop): canvas/asset service (read canvas state + apply
-# agent ops) and the 生成引擎 (creation) task queue (trigger/inspect generation).
-# Both back the caps_workshop 画布助手 tools. Dependency direction gateway →
-# workshop / creation only (neither deps gateway — no cycle).
+# Canonical Creative Studio project/asset service and generation task queue.
+# Both back the `nomi_creative_studio_*` tools. Dependency direction remains
+# gateway -> workshop / creation only (neither depends on gateway, so no cycle).
 nomifun-workshop.workspace = true
 nomifun-creation.workspace = true
 # Persistent Agent Execution aggregate and Engine backing collaboration tools.

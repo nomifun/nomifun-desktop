@@ -29,6 +29,7 @@ use crate::creative_studio::{
 };
 #[cfg(test)]
 use crate::creative_studio::CREATIVE_STUDIO_SCHEMA;
+use crate::creative_agent_ops::{CreativeAgentOp, CreativeAgentOpResult};
 use crate::dto::{WorkshopAsset, WorkshopCanvasMeta};
 use crate::workflow::{CreativeWorkflowDefinitionV1, parse_workflow_row};
 use crate::workflow_run::{
@@ -49,6 +50,13 @@ pub struct CanvasWithDoc {
 pub struct CreativeProjectWithDocument {
     pub project: CreativeProjectSummary,
     pub document: CreativeProjectDocument,
+}
+
+/// One CAS-committed Agent graph mutation batch.
+#[derive(Debug)]
+pub struct CreativeAgentApplyResult {
+    pub project: CreativeProjectSummary,
+    pub ops: Vec<CreativeAgentOpResult>,
 }
 
 /// A completed, bounded Creative Studio v1 project archive.
@@ -434,6 +442,45 @@ impl WorkshopService {
             )
             .await?
             .into())
+    }
+
+    /// Apply Agent graph operations through the canonical project revision CAS.
+    /// The product editor and Agent therefore share one conflict model: neither
+    /// can overwrite a newer document snapshot silently.
+    pub async fn apply_creative_agent_ops(
+        &self,
+        project_id: &str,
+        expected_revision: &str,
+        ops: Vec<CreativeAgentOp>,
+        source: &str,
+    ) -> Result<CreativeAgentApplyResult, AppError> {
+        let expected_revision = parse_creative_project_revision(expected_revision)?;
+        let current = self.get_creative_project(project_id).await?;
+        if current.project.revision != expected_revision.to_string() {
+            return Err(AppError::Conflict(format!(
+                "creative studio project {project_id} revision is {}, expected {expected_revision}",
+                current.project.revision
+            )));
+        }
+        let (document, results) = crate::creative_agent_ops::apply_creative_agent_ops(
+            &current.document,
+            ops,
+        )
+        .map_err(|error| AppError::BadRequest(format!("invalid Creative Studio operations: {error}")))?;
+        let project = self
+            .save_creative_project(project_id, &expected_revision.to_string(), &document)
+            .await?;
+        tracing::info!(
+            project_id,
+            source,
+            revision = project.revision,
+            ops = results.len(),
+            "Creative Studio Agent operations committed"
+        );
+        Ok(CreativeAgentApplyResult {
+            project,
+            ops: results,
+        })
     }
 
     pub async fn delete_creative_project(&self, project_id: &str) -> Result<(), AppError> {
@@ -2882,6 +2929,58 @@ mod tests {
             Err(AppError::NotFound(_))
         ));
         assert!(svc.get_canvas(&legacy.canvas_id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn creative_agent_ops_share_project_revision_cas() {
+        let (svc, _dir) = service().await;
+        let created = svc.create_creative_project(Some("Agent CAS".into())).await.unwrap();
+        let applied = svc
+            .apply_creative_agent_ops(
+                &created.project_id,
+                "1",
+                vec![crate::creative_agent_ops::CreativeAgentOp::AddNode {
+                    node_type: crate::creative_studio::CreativeNodeType::Text,
+                    x: 10.0,
+                    y: 20.0,
+                    width: None,
+                    height: None,
+                    group_id: None,
+                    data: serde_json::json!({
+                        "text": "Agent-created",
+                        "format": "plain",
+                        "fontSize": 16,
+                        "textAlign": "left"
+                    }),
+                }],
+                "conversation:test",
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied.project.revision, "2");
+        assert_eq!(applied.project.node_count, 1);
+        assert_eq!(applied.ops.len(), 1);
+
+        let stale = svc
+            .apply_creative_agent_ops(
+                &created.project_id,
+                "1",
+                vec![crate::creative_agent_ops::CreativeAgentOp::DeleteNode {
+                    node_id: match &applied.ops[0] {
+                        crate::creative_agent_ops::CreativeAgentOpResult::NodeAdded { node_id } => {
+                            node_id.clone()
+                        }
+                        other => panic!("unexpected result {other:?}"),
+                    },
+                }],
+                "conversation:test",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, AppError::Conflict(_)));
+        let current = svc.get_creative_project(&created.project_id).await.unwrap();
+        assert_eq!(current.project.revision, "2");
+        assert_eq!(current.document.nodes.len(), 1);
     }
 
     #[tokio::test]

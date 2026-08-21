@@ -278,11 +278,6 @@ pub async fn create_router(services: &AppServices) -> Router {
         ),
         idmm_service: states.idmm.service.clone(),
         knowledge_service: services.knowledge_service.clone(),
-        // Creative Studio project/asset repository over the same pool used by
-        // the canonical product service and Gateway capabilities.
-        workshop_repo: Arc::new(nomifun_db::SqliteWorkshopRepository::new(
-            services.database.pool().clone(),
-        )),
         // Creative Studio project/asset + generation services: the SAME
         // singletons used by `/api/creative-studio/*`, so Gateway operations and
         // product requests observe one project store and one live task queue.

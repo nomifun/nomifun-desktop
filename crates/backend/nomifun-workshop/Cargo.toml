@@ -12,9 +12,9 @@ nomifun-auth.workspace = true
 nomifun-db.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# JSON Schema for the agent-op vocabulary (画布助手): the same `AgentOp` type the
-# gateway's `nomi_workshop_apply_ops` capability exposes to LLMs (single source →
-# no schema/validation drift). Same major as the gateway's `schemars = "1"`.
+# JSON Schema for the canonical Creative Studio Agent operation vocabulary: the
+# same `CreativeAgentOp` type exposed by `nomi_creative_studio_apply_ops`, so
+# schema and validation cannot drift. Same major as gateway's `schemars = "1"`.
 schemars = "1"
 tokio.workspace = true
 axum.workspace = true

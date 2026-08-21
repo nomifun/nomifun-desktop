@@ -358,6 +358,14 @@ define_entity_id!(
     CreativeStudioProjectId
 );
 define_entity_id!(
+    /// Globally unique node identifier inside a canonical Creative Studio project.
+    CreativeStudioNodeId
+);
+define_entity_id!(
+    /// Globally unique connection identifier inside a canonical Creative Studio project.
+    CreativeStudioConnectionId
+);
+define_entity_id!(
     /// Globally unique canonical Creative Studio workflow identifier.
     CreativeStudioWorkflowId
 );

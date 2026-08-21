@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use nomifun_common::TimestampMs;
 use nomifun_db::CreativeStudioProjectRow;
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Map, Value};
 
@@ -374,7 +375,7 @@ impl<'de> Deserialize<'de> for CreativeNode {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CreativeNodeType {
     Image,
