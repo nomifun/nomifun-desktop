@@ -18,6 +18,7 @@ import {
   testDocument,
   testEdge,
   testNode,
+  testUuid,
 } from './testFixtures';
 
 describe('Creative Studio selection and movement reducer', () => {
@@ -197,6 +198,76 @@ describe('Creative Studio clipboard reducer', () => {
 });
 
 describe('Creative Studio history reducer', () => {
+  test('keeps authoritative runtime fields terminal across undo and redo', () => {
+    const config = testNode('config', 1);
+    let state = createInitialCanvasState({ document: testDocument([config]) });
+    state = canvasReducer(
+      state,
+      canvasCommands.updateNode(
+        {
+          ...config,
+          position: { x: 80, y: 40 },
+          data: {
+            ...config.data,
+            taskId: testUuid(20),
+            status: 'running',
+          },
+        },
+        { at: 10 }
+      )
+    );
+
+    state = canvasReducer(
+      state,
+      canvasCommands.reconcileRuntimeNode({
+        ...config,
+        position: { x: 999, y: 999 },
+        locked: true,
+        data: {
+          ...config.data,
+          taskId: testUuid(20),
+          resultAssetIds: [testUuid(30)],
+          status: 'succeeded',
+        },
+      })
+    );
+
+    expect(state.history.past).toHaveLength(1);
+    expect(state.document.nodes[0]).toMatchObject({
+      position: { x: 80, y: 40 },
+      locked: true,
+      data: { status: 'succeeded', resultAssetIds: [testUuid(30)] },
+    });
+
+    state = canvasReducer(state, canvasCommands.undo());
+    expect(state.document.nodes[0]).toMatchObject({
+      position: config.position,
+      locked: true,
+      data: { status: 'succeeded', resultAssetIds: [testUuid(30)] },
+    });
+    state = canvasReducer(state, canvasCommands.redo());
+    expect(state.document.nodes[0]).toMatchObject({
+      position: { x: 80, y: 40 },
+      locked: true,
+      data: { status: 'succeeded', resultAssetIds: [testUuid(30)] },
+    });
+  });
+
+  test('ignores runtime reconciliation for missing or kind-mismatched nodes', () => {
+    const text = testNode('text', 1);
+    const state = createInitialCanvasState({ document: testDocument([text]) });
+
+    expect(
+      canvasReducer(state, canvasCommands.reconcileRuntimeNode(testNode('text', 2)))
+    ).toBe(state);
+    expect(
+      canvasReducer(
+        state,
+        canvasCommands.reconcileRuntimeNode({ ...testNode('image', 2), id: text.id })
+      )
+    ).toBe(state);
+  });
+
   test('coalesces compound node creation and connection into one undo step', () => {
     const source = testNode('image', 1);
     const target = testNode('config', 2);
