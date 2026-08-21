@@ -5,7 +5,10 @@ const mainSource = readFileSync(new URL('../main.tsx', import.meta.url), 'utf8')
 const contractCss = readFileSync(new URL('./modal-contract.css', import.meta.url), 'utf8');
 const nomiModalSource = readFileSync(new URL('../components/base/NomiModal.tsx', import.meta.url), 'utf8');
 const createTextSource = readFileSync(
-  new URL('../pages/workshop/assets/CreateTextAssetModal.tsx', import.meta.url),
+  new URL(
+    '../pages/creativeStudio/assets/components/CreateCreativeTextAssetModal.tsx',
+    import.meta.url
+  ),
   'utf8'
 );
 const createCsStyles = readFileSync(
@@ -86,8 +89,8 @@ describe('Global modal visual contract', () => {
   test('also tightens custom NomiModal and the text-asset form shown in the reference', () => {
     expect(nomiModalSource.includes('pb-8px')).toBe(true);
     expect(nomiModalSource.includes('text-16px')).toBe(true);
-    expect(createTextSource.includes("className='flex flex-col gap-10px'")).toBe(true);
-    expect(createTextSource.includes('autoSize={{ minRows: 4, maxRows: 14 }}')).toBe(true);
+    expect(createTextSource.includes('className={styles.textAssetForm}')).toBe(true);
+    expect(createTextSource.includes('autoSize={{ minRows: 7, maxRows: 14 }}')).toBe(true);
   });
 
   test('keeps local modal shells on the shared compact inset without double-padding scroll content', () => {

@@ -17,8 +17,8 @@ const companionControl = readFileSync(
   new URL('../../pages/nomi/CompanionModelControl.tsx', import.meta.url),
   'utf8'
 );
-const generatorCard = readFileSync(
-  new URL('../../pages/workshop/generation/GeneratorCard.tsx', import.meta.url),
+const modalityModelsPanel = readFileSync(
+  new URL('../../pages/modelHub/ModalityModelsPanel.tsx', import.meta.url),
   'utf8'
 );
 const failoverContent = readFileSync(
@@ -68,9 +68,9 @@ describe('TaskModelSelect', () => {
     expect(companionControl.includes('NomiSelect.Option')).toBe(false);
   });
 
-  test('generation and failover reuse this selector instead of owning parallel pickers', () => {
-    expect(generatorCard.includes("components/model/TaskModelSelect'")).toBe(true);
-    expect(generatorCard.includes('onChange={setTaskModel}')).toBe(true);
+  test('model configuration and failover reuse this selector instead of owning parallel pickers', () => {
+    expect(modalityModelsPanel.includes("components/model/TaskModelSelect'")).toBe(true);
+    expect(modalityModelsPanel.match(/<TaskModelSelect/g)?.length).toBeGreaterThanOrEqual(2);
     expect(failoverContent.includes("components/model/TaskModelSelect'")).toBe(true);
     expect(failoverContent.includes('onChange={setDraft}')).toBe(true);
   });

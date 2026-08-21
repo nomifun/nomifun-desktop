@@ -12,7 +12,9 @@ const siderSource = readSource(new URL('./index.tsx', import.meta.url));
 const navBarrelSource = readSource(new URL('./SiderNav/index.ts', import.meta.url));
 const entrySource = readSource(new URL('./SiderNav/SiderCreativeStudioEntry.tsx', import.meta.url));
 const routesSource = readSource(new URL('../../../pages/creativeStudio/app/routes.ts', import.meta.url));
+const routerSource = readSource(new URL('../Router.tsx', import.meta.url));
 const legacyEntryUrl = new URL('./SiderNav/SiderWorkshopEntry.tsx', import.meta.url);
+const legacyAssetPageUrl = new URL('../../../pages/assets/index.tsx', import.meta.url);
 
 describe('Creative Studio primary navigation', () => {
   test('owns the former workshop slot with one canonical product route', () => {
@@ -33,5 +35,14 @@ describe('Creative Studio primary navigation', () => {
     expect(entrySource.includes('workshop.beta')).toBe(false);
     expect(entrySource.includes('Beta')).toBe(false);
     expect(existsSync(legacyEntryUrl)).toBe(false);
+  });
+
+  test('routes the workbench asset entry into the canonical focused product', () => {
+    expect(routesSource.includes("CREATIVE_STUDIO_ASSETS_PATH = '/workshop/assets'")).toBe(true);
+    expect(siderSource.includes('navTo(CREATIVE_STUDIO_ASSETS_PATH)')).toBe(true);
+    expect(siderSource.includes("navTo('/assets')")).toBe(false);
+    expect(routerSource.includes("import('@renderer/pages/assets')")).toBe(false);
+    expect(routerSource.includes("path='/assets'")).toBe(false);
+    expect(existsSync(legacyAssetPageUrl)).toBe(false);
   });
 });

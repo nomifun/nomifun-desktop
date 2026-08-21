@@ -84,7 +84,11 @@ describe('protected application runtime boundary', () => {
   });
 
   test('keeps the focus shell free of workbench-only chrome and exposes a stable return path', () => {
-    expect(focusShellSource.includes('void navigate(WORKBENCH_HOME_PATH, { replace: true });')).toBe(true);
+    expect(
+      focusShellSource.includes('void navigateAfterProductFlush(WORKBENCH_HOME_PATH, true);')
+    ).toBe(true);
+    expect(focusShellSource.includes('requestCreativeCanvasProductBeforeLeave()')).toBe(true);
+    expect(focusShellSource.includes('requestCreativeDirectorProductBeforeLeave()')).toBe(true);
     expect(focusShellSource.includes('data-creative-studio-focus-shell')).toBe(true);
     expect(focusShellSource.includes("classNames('creative-studio-root', styles.shell)")).toBe(true);
     expect(focusShellSource.includes("id='creative-studio-portal-root'")).toBe(true);
