@@ -55,9 +55,31 @@ idempotency key from the immutable request snapshot. Queued/running cards use
 the canonical cancel route. Cold history is never passed to
 `runtime.retry(taskId)`.
 
-Task-history deletion remains unavailable until the next atomic backend slice.
-The product therefore hides selection/deletion controls; it does not delete
-result assets or keep `hiddenIds` to impersonate a deleted history row.
+## History retirement and asset safety
+
+Migration 044 adds a `deleted_at` tombstone that is separate from task status.
+`POST /api/creative-studio/tasks/retire` accepts one exact
+`{ project_id, workbench_kind, task_ids }` batch (1-100 IDs), audits every row
+and succeeded artifact, and atomically retires only failed/canceled/succeeded
+standalone tasks. A queued/running, missing, duplicate, foreign-owner or corrupt
+row rejects the whole batch. Repeating the same request preserves the first
+tombstone timestamp.
+
+Normal and active history lists exclude tombstones, while direct GET,
+idempotent replay, boot inventory and artifact audit retain them. The UI offers
+single and multi-select retirement only on terminal cards, requires a fixed-
+palette confirmation, then reloads the first page. Runtime entries are dismissed
+only after the backend commits. Live cards retain cancel and never expose delete.
+
+Retirement never deletes media. Task inputs and results both restrict asset
+deletion, including after retirement; succeeded manifests cannot be shortened
+into an invalid empty result. Generated results remain in the asset library.
+Projects with queued/running creation tasks cannot be deleted until those tasks
+are canceled. Restore, retention purge and optional output cleanup are future
+explicit commands, not hidden side effects of this action.
+
+The product does not delete result assets or keep `hiddenIds` to impersonate a
+deleted history row.
 Earlier `canvas_node` tasks remain auditable canvas tasks and are never guessed
 into the standalone owner scope; the new routes contain no compatibility reader
 or dual-write path for the retired config-node ledger.

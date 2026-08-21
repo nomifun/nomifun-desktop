@@ -5,7 +5,7 @@
  */
 
 import { Spin } from '@arco-design/web-react';
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 import { CREATIVE_STUDIO_PROJECTS_PATH } from '../../app/routes';
@@ -157,3 +157,56 @@ export const StandaloneHistoryGate: React.FC<{
     ) : null}
   </section>
 );
+
+export const StandaloneHistoryRetireDialog: React.FC<{
+  open: boolean;
+  count: number;
+  busy: boolean;
+  error?: string | null;
+  onCancel(): void;
+  onConfirm(): void;
+}> = ({ open, count, busy, error, onCancel, onConfirm }) => {
+  const dialogRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (open) dialogRef.current?.focus();
+  }, [open]);
+  if (!open) return null;
+  return (
+    <div
+      className={styles.retireBackdrop}
+      onMouseDown={(event) => {
+        if (!busy && event.target === event.currentTarget) onCancel();
+      }}
+    >
+      <section
+        ref={dialogRef}
+        className={styles.retireDialog}
+        role='dialog'
+        aria-modal='true'
+        aria-labelledby='standalone-retire-title'
+        tabIndex={-1}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape' && !busy) onCancel();
+        }}
+      >
+        <h2 id='standalone-retire-title'>从历史移除{count > 1 ? ` ${count} 条` : '这条记录'}？</h2>
+        <p>
+          任务审计、输入素材和生成结果会继续安全保留；这里只让所选记录不再出现在当前工作台历史中。
+        </p>
+        {error ? (
+          <p className={styles.retireError} role='alert'>
+            {error}
+          </p>
+        ) : null}
+        <div className={styles.retireActions}>
+          <button type='button' disabled={busy} onClick={onCancel}>
+            取消
+          </button>
+          <button type='button' data-danger disabled={busy} onClick={onConfirm}>
+            {busy ? '正在移除…' : '从历史移除'}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+};

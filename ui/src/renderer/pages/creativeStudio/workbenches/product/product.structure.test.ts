@@ -52,6 +52,15 @@ describe('standalone workbench product wiring', () => {
     expect(video.includes('hiddenTaskIds')).toBe(false);
   });
 
+  test('retires only terminal history through the exact backend command', () => {
+    expect(image.includes('creativeTaskHistoryClient.retireStandalone')).toBe(true);
+    expect(video.includes('creativeTaskHistoryClient.retireStandalone')).toBe(true);
+    expect(image.includes('StandaloneHistoryRetireDialog')).toBe(true);
+    expect(video.includes('StandaloneHistoryRetireDialog')).toBe(true);
+    expect(wiring.includes('POST /api/creative-studio/tasks/retire')).toBe(true);
+    expect(wiring.includes('Retirement never deletes media')).toBe(true);
+  });
+
   test('keeps the focused creation palette independent from the app theme', () => {
     expect(css.includes('--color-bg-1: #f4f2ed')).toBe(true);
     expect(css.includes('--color-text-1: #292524')).toBe(true);
