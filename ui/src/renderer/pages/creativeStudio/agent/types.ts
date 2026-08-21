@@ -57,6 +57,23 @@ export type CreativeStudioAgentMessage =
 export interface CreativeStudioAgentSendInput {
   prompt: string;
   model: CreativeModelSelectionRef;
+  /** Exact context chips still included when the user submits this turn. */
+  contextNodeIds: string[];
+  /** Ordered explicit NomiFun Skills; never inferred from prompt text. */
+  skillIds: string[];
+}
+
+export interface CreativeStudioAgentContextItem {
+  id: string;
+  label: string;
+  type: string;
+  selected: boolean;
+}
+
+export interface CreativeStudioAgentSkillOption {
+  id: string;
+  label: string;
+  description: string;
 }
 
 /**
@@ -72,6 +89,9 @@ export interface CreativeStudioAgentPanelProps {
   messages: readonly CreativeStudioAgentMessage[];
   draft: string;
   model: CreativeModelSelectionRef | null;
+  contextItems: readonly CreativeStudioAgentContextItem[];
+  skillOptions: readonly CreativeStudioAgentSkillOption[];
+  selectedSkillIds: readonly string[];
   /** A dedicated NomiFun conversation cannot change model after its first turn. */
   modelLocked?: boolean;
   isRunning: boolean;
@@ -82,6 +102,8 @@ export interface CreativeStudioAgentPanelProps {
   onSelectSession(sessionId: string): void;
   onDraftChange(draft: string): void;
   onModelChange(model: CreativeModelSelectionRef): void;
+  onRemoveContextItem(itemId: string): void;
+  onToggleSkill(skillId: string): void;
   onSend(input: CreativeStudioAgentSendInput): void;
   onStop(): void;
   onCollapse(): void;

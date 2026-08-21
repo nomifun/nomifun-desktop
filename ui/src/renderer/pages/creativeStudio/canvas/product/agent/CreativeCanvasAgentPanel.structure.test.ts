@@ -20,6 +20,11 @@ describe('Creative Canvas Agent product integration', () => {
       'const operation = props.onPersist',
       'documentMutationRef',
       'pending.idempotencyKey',
+      'pending.modelInput',
+      'pending.skillIds',
+      'serializeCreativeCanvasAgentModelInput',
+      'selectCreativeCanvasAgentContextNodes',
+      'CREATIVE_STUDIO_PLANNING_SKILLS',
       "event.type === 'history-reconciled'",
       'creativeCanvasAgentSessionWithAuthoritativeHistory',
       'creativeCanvasAgentSessionWithoutPendingTurn',
@@ -30,6 +35,7 @@ describe('Creative Canvas Agent product integration', () => {
     expect(source.includes('sessionStorage')).toBe(false);
     expect(source.includes('setTimeout')).toBe(false);
     expect(source.includes('Math.random')).toBe(false);
+    expect(source.includes('inject_skills')).toBe(false);
   });
 
   test('fences admission and settles the exclusive turn before route exit', () => {
@@ -38,5 +44,7 @@ describe('Creative Canvas Agent product integration', () => {
     expect(source.includes('admittedSend ?? Promise.resolve(true)')).toBe(true);
     expect(source.includes('controller.stop()')).toBe(true);
     expect(source.includes('await currentRunRef.current')).toBe(true);
+    expect(source.includes('input.skillIds.length > 3')).toBe(true);
+    expect(source.includes('input.contextNodeIds')).toBe(true);
   });
 });

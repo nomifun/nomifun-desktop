@@ -12,6 +12,7 @@ import {
   MAX_CREATIVE_CANVAS_AGENT_CONTEXT_NODES,
   MAX_CREATIVE_CANVAS_AGENT_CONTEXT_TEXT_CHARS,
   buildCreativeCanvasAgentContext,
+  selectCreativeCanvasAgentContextNodes,
   serializeCreativeCanvasAgentModelInput,
 } from './context';
 
@@ -209,5 +210,19 @@ describe('Creative Canvas Agent context', () => {
         forbiddenActions: ['delete-node', 'media-generation'],
       },
     });
+  });
+
+  test('applies composer exclusions without reintroducing nodes or dangling connections', () => {
+    const context = buildCreativeCanvasAgentContext({
+      document: fixture(),
+      projectRevision: '10',
+      selectedNodeIds: [nodeId(1), nodeId(3)],
+    });
+    const selected = selectCreativeCanvasAgentContextNodes(context, [nodeId(3), nodeId(1)]);
+    expect(selected.nodes.map((node) => node.id)).toEqual([nodeId(1), nodeId(3)]);
+    expect(selected.selectedNodeIds).toEqual([nodeId(1), nodeId(3)]);
+    expect(selected.connections).toEqual([]);
+    expect(selected.totalNodeCount).toBe(context.totalNodeCount);
+    expect(selected.totalConnectionCount).toBe(context.totalConnectionCount);
   });
 });

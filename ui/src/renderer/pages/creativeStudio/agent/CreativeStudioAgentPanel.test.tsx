@@ -36,12 +36,23 @@ const baseProps = (
   messages: [],
   draft: '',
   model,
+  contextItems: [],
+  skillOptions: [
+    {
+      id: 'creative-studio-canvas',
+      label: '画布规划',
+      description: '安全规划当前画布',
+    },
+  ],
+  selectedSkillIds: ['creative-studio-canvas'],
   isRunning: false,
   onViewChange: noop,
   onNewSession: noop,
   onSelectSession: noop,
   onDraftChange: noop,
   onModelChange: noop,
+  onRemoveContextItem: noop,
+  onToggleSkill: noop,
   onSend: noop,
   onStop: noop,
   onCollapse: noop,
@@ -127,6 +138,35 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     expect(html.includes('data-agent-model-locked="true"')).toBe(true);
     expect(html.includes('会话模型已锁定：chat-model')).toBe(true);
   });
+
+  test('renders removable context and explicit NomiFun Skill chips', () => {
+    const html = renderPanel({
+      contextItems: [
+        { id: 'node-1', label: '主标题', type: 'text', selected: true },
+        { id: 'node-2', label: '参考图', type: 'image', selected: false },
+      ],
+      skillOptions: [
+        {
+          id: 'creative-studio-canvas',
+          label: '画布规划',
+          description: '安全规划当前画布',
+        },
+        {
+          id: 'creative-studio-organize',
+          label: '整理布局',
+          description: '整理已有节点',
+        },
+      ],
+      selectedSkillIds: ['creative-studio-canvas'],
+    });
+    expect(html.includes('data-agent-context-items="true"')).toBe(true);
+    expect(html.includes('移除上下文：主标题')).toBe(true);
+    expect(html.includes('参考图')).toBe(true);
+    expect(html.includes('data-agent-skill-options="true"')).toBe(true);
+    expect(html.includes('画布规划')).toBe(true);
+    expect(html.includes('aria-pressed="true"')).toBe(true);
+    expect(html.includes('整理布局')).toBe(true);
+  });
 });
 
 describe('Creative Studio Agent model and chat boundaries', () => {
@@ -159,6 +199,8 @@ describe('Creative Studio Agent model and chat boundaries', () => {
         sessionId: 'session-1',
         idempotencyKey: '0190f5fe-7c00-7a00-8000-000000000301',
         prompt: '创建节点',
+        modelInput: '创建节点',
+        skillIds: [],
         model,
         history: [],
       },
@@ -191,6 +233,8 @@ describe('Creative Studio Agent model and chat boundaries', () => {
       sessionId: 'session-1',
       idempotencyKey: '0190f5fe-7c00-7a00-8000-000000000302',
       prompt: '创建节点',
+      modelInput: '创建节点',
+      skillIds: [],
       model,
       history: [],
     });
@@ -223,6 +267,8 @@ describe('Creative Studio Agent model and chat boundaries', () => {
       sessionId: 'session-1',
       idempotencyKey: '0190f5fe-7c00-7a00-8000-000000000303',
       prompt: '创建节点',
+      modelInput: '创建节点',
+      skillIds: [],
       model,
       history: [],
     });

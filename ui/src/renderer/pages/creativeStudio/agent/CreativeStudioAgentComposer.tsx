@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ArrowUp, Robot, Square } from '@icon-park/react';
+import { ArrowUp, CloseSmall, Robot, Square } from '@icon-park/react';
 import { Button, Input, Popover } from '@arco-design/web-react';
 import React from 'react';
 
@@ -14,6 +14,10 @@ import {
   type CreativeModelSelectionRef,
 } from '../models';
 import type { CreativeStudioAgentSendInput } from './types';
+import type {
+  CreativeStudioAgentContextItem,
+  CreativeStudioAgentSkillOption,
+} from './types';
 import styles from './CreativeStudioAgentPanel.module.css';
 
 export const CREATIVE_STUDIO_AGENT_MODEL_FILTER = {
@@ -27,8 +31,13 @@ interface CreativeStudioAgentComposerProps {
   modelLocked: boolean;
   isRunning: boolean;
   disabled: boolean;
+  contextItems: readonly CreativeStudioAgentContextItem[];
+  skillOptions: readonly CreativeStudioAgentSkillOption[];
+  selectedSkillIds: readonly string[];
   onDraftChange(draft: string): void;
   onModelChange(model: CreativeModelSelectionRef): void;
+  onRemoveContextItem(itemId: string): void;
+  onToggleSkill(skillId: string): void;
   onSend(input: CreativeStudioAgentSendInput): void;
   onStop(): void;
   onOpenModelSettings?(): void;
@@ -40,18 +49,33 @@ const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = 
   modelLocked,
   isRunning,
   disabled,
+  contextItems,
+  skillOptions,
+  selectedSkillIds,
   onDraftChange,
   onModelChange,
+  onRemoveContextItem,
+  onToggleSkill,
   onSend,
   onStop,
   onOpenModelSettings,
 }) => {
-  const canSend = !disabled && !isRunning && Boolean(model) && Boolean(draft.trim());
+  const canSend =
+    !disabled &&
+    !isRunning &&
+    Boolean(model) &&
+    Boolean(draft.trim()) &&
+    selectedSkillIds.length > 0;
 
   const submit = () => {
     const prompt = draft.trim();
     if (!prompt || !model || disabled || isRunning) return;
-    onSend({ prompt, model });
+    onSend({
+      prompt,
+      model,
+      contextNodeIds: contextItems.map((item) => item.id),
+      skillIds: [...selectedSkillIds],
+    });
   };
 
   const modelPicker = (
@@ -78,6 +102,53 @@ const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = 
       data-agent-model-locked={modelLocked || undefined}
     >
       <div className={styles.composerCard}>
+        {contextItems.length > 0 ? (
+          <div className={styles.planningField} data-agent-context-items>
+            <span className={styles.planningLabel}>画布上下文</span>
+            <div className={styles.contextChips}>
+              {contextItems.map((item) => (
+                <span
+                  key={item.id}
+                  className={styles.contextChip}
+                  data-selected={item.selected || undefined}
+                  title={`${item.type} · ${item.id}`}
+                >
+                  <span>{item.label}</span>
+                  <button
+                    type='button'
+                    aria-label={`移除上下文：${item.label}`}
+                    disabled={disabled || isRunning}
+                    onClick={() => onRemoveContextItem(item.id)}
+                  >
+                    <CloseSmall theme='outline' size='11' />
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        <div className={styles.planningField} data-agent-skill-options>
+          <span className={styles.planningLabel}>创作技能</span>
+          <div className={styles.skillChips}>
+            {skillOptions.map((skill) => {
+              const active = selectedSkillIds.includes(skill.id);
+              return (
+                <button
+                  key={skill.id}
+                  type='button'
+                  className={styles.skillChip}
+                  data-active={active || undefined}
+                  aria-pressed={active}
+                  disabled={disabled || isRunning}
+                  title={skill.description}
+                  onClick={() => onToggleSkill(skill.id)}
+                >
+                  {skill.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
         <Input.TextArea
           className={styles.composerInput}
           value={draft}

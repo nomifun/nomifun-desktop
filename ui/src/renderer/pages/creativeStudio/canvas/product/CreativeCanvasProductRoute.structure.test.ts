@@ -53,6 +53,9 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('<CreativeCanvasProductAssetLibrary')).toBe(true);
     expect(source.includes('<CreativeCanvasProductPromptLibrary')).toBe(true);
     expect(source.includes('<CreativeCanvasAgentPanel')).toBe(true);
+    expect(source.includes('buildCreativeCanvasAgentContext')).toBe(true);
+    expect(source.includes('selectedNodeIds: canvasState.selection.nodeIds')).toBe(true);
+    expect(source.includes('planningContext={agentPlanningContext}')).toBe(true);
     expect(
       source.includes('onAgentSessionsChange={handleAgentSessionsChange}')
     ).toBe(true);

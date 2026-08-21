@@ -12,7 +12,12 @@ export interface CreativeStudioAgentTurnRequest {
   sessionId: string;
   /** Durable UUIDv7 persisted in the project before this turn is submitted. */
   idempotencyKey: string;
+  /** Human-readable text persisted for the Creative Studio transcript. */
   prompt: string;
+  /** Exact durable planning envelope submitted to the NomiFun model. */
+  modelInput: string;
+  /** Ordered durable skill injection snapshot for this exact turn. */
+  skillIds: readonly string[];
   model: CreativeModelSelectionRef;
   history: readonly CreativeStudioAgentMessage[];
   signal: AbortSignal;

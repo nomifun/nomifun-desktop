@@ -35,11 +35,12 @@ export function createNomiCreativeStudioAgentTransport(): NomiCreativeStudioAgen
       };
     },
 
-    sendMessage({ conversationId, prompt, idempotencyKey }) {
+    sendMessage({ conversationId, modelInput, skillIds, idempotencyKey }) {
       return conversation.sendMessage.invoke({
         conversation_id: conversationId,
-        input: prompt,
+        input: modelInput,
         idempotency_key: idempotencyKey,
+        inject_skills: [...skillIds],
       });
     },
 

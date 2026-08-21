@@ -72,16 +72,26 @@ the complete shape. Model input is trimmed/non-empty and bounded to 262144
 UTF-16 units. Skill IDs are an ordered unique ASCII set of at most eight items,
 each no longer than 128 units.
 
-The pure canvas-context builder is also established for the next product
-connection. It includes selected nodes first, then only their one-hop graph,
-group and operation references, with at most 32 nodes and 64 relevant
-connections. Text/prompt fields are capped at 2000 Unicode characters, data/blob payloads are
-removed, and neither resolved media URLs nor opaque Provider parameters enter
-the envelope. The v1 planning envelope names the allowed canvas-op artifact,
-requires explicit user approval and forbids node deletion or media generation.
-This commit establishes and tests the durable/context contract only; the Agent
-composer and Nomi transport are wired to consume it in the following product
-slice.
+The pure canvas-context builder includes selected nodes first, then only their
+one-hop graph, group and operation references, with at most 32 nodes and 64
+relevant connections. Text/prompt fields are capped at 2000 Unicode characters,
+data/blob payloads are removed, and neither resolved media URLs nor opaque
+Provider parameters enter the envelope. The v1 planning envelope names the
+allowed canvas-op artifact, requires explicit user approval and forbids node
+deletion or media generation.
+
+The Canvas Agent composer now consumes that contract. Current context nodes are
+shown as removable chips; the user explicitly selects one to three packaged
+NomiFun Skills (`creative-studio-canvas`, `creative-studio-organize`, and
+`creative-studio-workflow`) instead of triggering prompt-regex pseudo-skills.
+Submission builds the bounded envelope once, persists it with the ordered Skill
+IDs, then the real Conversation transport sends `modelInput` and copies those
+IDs to `inject_skills`. The visible user message and session title continue to
+use the original prompt. Recovery reads only the durable pending snapshot, so a
+later selection change cannot alter an admitted turn. No direct Provider/API-key
+path or automatic model invocation was added. Strict assistant artifact parsing,
+manual preview and the “应用到画布” call into the Agent ops gateway remain the
+next explicit product gate.
 
 The source geometry is canonical for views that currently have no resize handle:
 the left library is 280px and opening Agent normalizes the right panel to 390px.

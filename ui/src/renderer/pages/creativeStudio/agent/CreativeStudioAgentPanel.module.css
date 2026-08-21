@@ -278,6 +278,96 @@
   background: var(--color-bg-2);
 }
 
+.planningField {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  margin-bottom: 9px;
+}
+
+.planningLabel {
+  color: var(--color-text-3);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.contextChips,
+.skillChips {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.contextChip,
+.skillChip {
+  max-width: 100%;
+  border: 1px solid var(--color-border-2);
+  border-radius: 999px;
+  background: var(--color-fill-1);
+  color: var(--color-text-2);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.contextChip {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 5px 3px 8px;
+}
+
+.contextChip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contextChip > button {
+  appearance: none;
+  display: grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--color-text-3);
+  cursor: pointer;
+}
+
+.contextChip > button:hover,
+.contextChip > button:focus-visible {
+  background: var(--color-fill-3);
+  color: var(--color-text-1);
+}
+
+.contextChip[data-selected='true'] {
+  border-color: color-mix(in srgb, rgb(var(--primary-6)) 35%, var(--color-border-2));
+}
+
+.skillChip {
+  appearance: none;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+
+.skillChip[data-active='true'] {
+  border-color: rgb(var(--primary-6));
+  background: color-mix(in srgb, rgb(var(--primary-6)) 11%, var(--color-bg-2));
+  color: rgb(var(--primary-6));
+}
+
+.contextChip > button:disabled,
+.skillChip:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .composerInput,
 .composerInput textarea {
   padding: 0 !important;

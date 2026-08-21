@@ -88,6 +88,35 @@ fn migrated_workflows_are_self_contained_skills_with_display_metadata() {
 }
 
 #[test]
+fn creative_studio_planning_skills_are_safe_self_contained_proposals() {
+    let root = builtin_skills_root();
+    for name in [
+        "creative-studio-canvas",
+        "creative-studio-organize",
+        "creative-studio-workflow",
+    ] {
+        let skill_path = root.join(name).join("SKILL.md");
+        let skill = read_to_string(&skill_path);
+        assert!(
+            skill.starts_with("---\n") && skill.contains(&format!("name: {name}")),
+            "{} must be a self-contained named Skill",
+            skill_path.display()
+        );
+        assert!(
+            skill.contains("user") || skill.contains("用户"),
+            "{name} must preserve an explicit user-review boundary"
+        );
+    }
+    let canvas = read_to_string(root.join("creative-studio-canvas/SKILL.md"));
+    assert!(canvas.contains("Never emit `delete_node`"));
+    assert!(canvas.contains("Never start image, video, or audio generation"));
+    assert!(canvas.contains("应用到画布"));
+    let workflow = read_to_string(root.join("creative-studio-workflow/SKILL.md"));
+    assert!(workflow.contains("Do not save, run"));
+    assert!(workflow.contains("Do not disguise arbitrary JSON"));
+}
+
+#[test]
 fn builtin_skill_display_metadata_matches_the_packaged_corpus() {
     let metadata: Value =
         serde_json::from_str(&read_to_string(builtin_skills_root().join("skill-tags.json"))).unwrap();
