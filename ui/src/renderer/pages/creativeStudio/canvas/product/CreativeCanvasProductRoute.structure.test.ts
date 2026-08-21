@@ -63,6 +63,14 @@ describe('Creative Canvas product route composition', () => {
       'navigator.clipboard.read()',
       'manualUploadRejectionMessage',
       'pendingPanoramaChoice',
+      '<CreativeCanvasImageToolbar',
+      '<CreativeImageCropDialog',
+      'cropCreativeImageAsset',
+      'uploadCreativeImageCrop',
+      'nextDerivedImagePosition',
+      'canvasCommands.connect(source.id, derived.id',
+      'const flush = await editor.flush()',
+      'imageToolBusyRef.current',
       'creativeStudioDirectorProjectPath(projectId)',
       "state.document.nodes.filter((node) => node.type === 'director')",
       "handleBottomViewChange('timeline')",
@@ -80,6 +88,8 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('canLeaveCreativeCanvasAfterFlush(await editor.flush())')).toBe(true);
     expect(source.includes('await editorRef.current.reloadRemote()')).toBe(true);
     expect(source.includes('setBackground(next)')).toBe(true);
+    expect(source.includes('const saveMessage = save.error?.message ?? undefined')).toBe(true);
+    expect(source.includes('save.error?.message ?? notice')).toBe(false);
     expect(source.includes('localStorage')).toBe(false);
     expect(source.includes('sessionStorage')).toBe(false);
     expect(source.includes('fetch(')).toBe(false);
