@@ -1,18 +1,16 @@
-//! Authenticated `/api/creative-studio/*` project/asset routes plus the legacy
-//! `/api/workshop/*` canvas handlers (contract §3.1/§3.2). Their
-//! management surfaces (list/create/patch/delete, doc read/write, upload,
-//! agent-ops) are owner-only — mounted behind the app's authenticated router
-//! (same auth extractor as the knowledge routes). The multipart upload route
-//! raises the body limit to [`MAX_ASSET_BYTES`]; every other route rides the
-//! app's default limit.
+//! Authenticated `/api/creative-studio/*` project, asset, workflow, and archive
+//! routes. Their management surfaces are owner-only — mounted behind the app's
+//! authenticated router (same auth extractor as the knowledge routes). The
+//! multipart upload route raises the body limit to [`MAX_ASSET_BYTES`]; every
+//! other route rides the app's default limit.
 //!
-//! The two **read-only binary serve** routes ([`serve_file`] +
-//! [`serve_canvas_thumb`]) instead live on the auth-EXEMPT public router
-//! ([`workshop_public_routes`]): `<img>` / `<video>` / `new Image()` loads carry
+//! The **read-only binary serve** route ([`serve_file`]) instead lives on the
+//! auth-EXEMPT public router ([`workshop_public_routes`]): `<img>` / `<video>` /
+//! `new Image()` loads carry
 //! no custom-header API, so under the desktop's `TrustLocalToken` policy they
 //! cannot present the `x-nomi-local-trust` header — the authenticated router
-//! would 403 every asset thumbnail and canvas gallery image. They are GET-only,
-//! serve opaque unguessable UUIDv7 ids (a capability URL, not
+//! would 403 every asset thumbnail. It is GET-only, serves an opaque
+//! unguessable UUIDv7 id (a capability URL, not
 //! an enumeration surface), keep the service's traversal sandbox, and never
 //! extract `CurrentUser` (see the note on the public router).
 
@@ -24,18 +22,16 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
-use serde_json::Value;
 use tower_http::limit::RequestBodyLimitLayer;
 
 use nomifun_api_types::ApiResponse;
 use nomifun_auth::CurrentUser;
-use nomifun_common::{AppError, WorkshopAssetId, WorkshopCanvasId};
+use nomifun_common::{AppError, WorkshopAssetId};
 
 use crate::MAX_ASSET_BYTES;
-use crate::agent_ops::PendingOp;
 use crate::archive::MAX_CREATIVE_ARCHIVE_COMPRESSED_BYTES;
 use crate::creative_studio::{CreativeProjectDocument, CreativeProjectSummary};
-use crate::dto::{WorkshopAsset, WorkshopCanvasMeta};
+use crate::dto::WorkshopAsset;
 use crate::service::{AssetPatch, AssetQuery, NewAssetUpload, NewTextAsset};
 use crate::state::WorkshopRouterState;
 use crate::workflow::{CreativeWorkflowDefinitionV1, MAX_WORKFLOW_DEFINITION_BYTES};
@@ -129,20 +125,6 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
             "/api/creative-studio/workflow-runs/{workflow_run_id}",
             get(get_creative_workflow_run),
         )
-        .route("/api/workshop/canvases", get(list_canvases).post(create_canvas))
-        .route(
-            "/api/workshop/canvases/{canvas_id}",
-            get(get_canvas).patch(patch_canvas).delete(delete_canvas),
-        )
-        .route("/api/workshop/canvases/{canvas_id}/doc", axum::routing::put(put_doc))
-        .route(
-            "/api/workshop/canvases/{canvas_id}/pending-ops",
-            get(get_pending_ops),
-        )
-        .route(
-            "/api/workshop/canvases/{canvas_id}/pending-ops/ack",
-            post(ack_pending_ops),
-        )
         .route(
             "/api/creative-studio/assets",
             get(list_assets).post(create_text_asset),
@@ -175,7 +157,6 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
 pub fn workshop_public_routes(state: WorkshopRouterState) -> Router {
     Router::new()
         .route("/api/creative-studio/files/{asset_id}", get(serve_file))
-        .route("/api/workshop/canvas-thumbs/{canvas_id}", get(serve_canvas_thumb))
         .with_state(state)
 }
 
@@ -519,176 +500,6 @@ async fn import_creative_project_archive(
     ))
 }
 
-// ── canvases ────────────────────────────────────────────────────────────────
-
-#[derive(serde::Serialize)]
-struct CanvasListResponse {
-    canvases: Vec<WorkshopCanvasMeta>,
-}
-
-async fn list_canvases(
-    State(state): State<WorkshopRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-) -> Result<Json<ApiResponse<CanvasListResponse>>, AppError> {
-    let canvases = state.service.list_canvases().await?;
-    Ok(Json(ApiResponse::ok(CanvasListResponse { canvases })))
-}
-
-#[derive(Deserialize)]
-struct CreateCanvasRequest {
-    #[serde(default)]
-    title: Option<String>,
-}
-
-async fn create_canvas(
-    State(state): State<WorkshopRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    body: Result<Json<CreateCanvasRequest>, JsonRejection>,
-) -> Result<impl IntoResponse, AppError> {
-    // Body is optional — an empty POST creates a default-titled canvas.
-    let title = body.ok().and_then(|Json(req)| req.title);
-    let meta = state.service.create_canvas(title).await?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::ok(meta))))
-}
-
-#[derive(serde::Serialize)]
-struct CanvasDetailResponse {
-    meta: WorkshopCanvasMeta,
-    doc: Value,
-}
-
-async fn get_canvas(
-    State(state): State<WorkshopRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(canvas_id): Path<WorkshopCanvasId>,
-) -> Result<Json<ApiResponse<CanvasDetailResponse>>, AppError> {
-    let c = state.service.get_canvas(canvas_id.as_str()).await?;
-    // This REST route is the editor's canvas-doc load path (CanvasPage). Mark
-    // the canvas "open" now so an agent's concurrent apply_ops in the gap before
-    // the first pending-ops poll is queued for this editor rather than written
-    // straight to canvas.json and then clobbered by the editor's first autosave.
-    // The gateway agent reads via `service.get_canvas` directly and never hits
-    // this handler, so it is not falsely marked open.
-    state.service.mark_canvas_open(canvas_id.as_str());
-    Ok(Json(ApiResponse::ok(CanvasDetailResponse { meta: c.meta, doc: c.doc })))
-}
-
-#[derive(Deserialize)]
-struct PutDocRequest {
-    doc: Value,
-}
-
-#[derive(serde::Serialize)]
-struct PutDocResponse {
-    updated_at: i64,
-}
-
-async fn put_doc(
-    State(state): State<WorkshopRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(canvas_id): Path<WorkshopCanvasId>,
-    body: Result<Json<PutDocRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<PutDocResponse>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let updated_at = state.service.save_doc(canvas_id.as_str(), &req.doc).await?;
-    Ok(Json(ApiResponse::ok(PutDocResponse { updated_at })))
-}
-
-// ── 画布助手 (agent-op) pending queue ─────────────────────────────────────────
-
-#[derive(serde::Serialize)]
-struct PendingOpsResponse {
-    ops: Vec<PendingOp>,
-}
-
-/// Drain the pending agent ops for an open canvas (idempotent — ops stay until
-/// acked). Polling this also registers the canvas as "open" so the agent's writes
-/// route to this frontend rather than the backend direct applier.
-async fn get_pending_ops(
-    State(state): State<WorkshopRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(canvas_id): Path<WorkshopCanvasId>,
-) -> Result<Json<ApiResponse<PendingOpsResponse>>, AppError> {
-    let ops = state.service.take_pending_ops(canvas_id.as_str()).await?;
-    Ok(Json(ApiResponse::ok(PendingOpsResponse { ops })))
-}
-
-#[derive(Deserialize)]
-struct AckOpsRequest {
-    #[serde(default)]
-    op_ids: Vec<String>,
-}
-
-#[derive(serde::Serialize)]
-struct AckOpsResponse {
-    acked: usize,
-}
-
-/// Acknowledge (remove) agent ops the frontend has applied.
-async fn ack_pending_ops(
-    State(state): State<WorkshopRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(canvas_id): Path<WorkshopCanvasId>,
-    body: Result<Json<AckOpsRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<AckOpsResponse>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state.service.ack_agent_ops(canvas_id.as_str(), &req.op_ids);
-    Ok(Json(ApiResponse::ok(AckOpsResponse { acked: req.op_ids.len() })))
-}
-
-#[derive(Deserialize)]
-struct PatchCanvasRequest {
-    #[serde(default)]
-    title: Option<String>,
-    /// Set the canvas gallery thumbnail from this asset (append-only over the
-    /// original `{ title }` contract).
-    #[serde(default)]
-    thumbnail_asset_id: Option<String>,
-}
-
-async fn patch_canvas(
-    State(state): State<WorkshopRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(canvas_id): Path<WorkshopCanvasId>,
-    body: Result<Json<PatchCanvasRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<WorkshopCanvasMeta>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let meta = state
-        .service
-        .patch_canvas(canvas_id.as_str(), req.title, req.thumbnail_asset_id)
-        .await?;
-    Ok(Json(ApiResponse::ok(meta)))
-}
-
-async fn delete_canvas(
-    State(state): State<WorkshopRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(canvas_id): Path<WorkshopCanvasId>,
-) -> Result<StatusCode, AppError> {
-    state.service.delete_canvas(canvas_id.as_str()).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// AUTH-EXEMPT (mounted on [`workshop_public_routes`]): no `CurrentUser`
-/// extractor. Serves a canvas gallery thumbnail (JPEG).
-async fn serve_canvas_thumb(
-    State(state): State<WorkshopRouterState>,
-    Path(canvas_id): Path<WorkshopCanvasId>,
-) -> Result<Response, AppError> {
-    let served = state
-        .service
-        .serve_canvas_thumbnail(canvas_id.as_str())
-        .await?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, served.mime),
-            (header::CACHE_CONTROL, SERVE_CACHE_CONTROL.to_string()),
-        ],
-        Body::from(served.bytes),
-    )
-        .into_response())
-}
-
 // ── assets ────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -1002,6 +813,7 @@ mod tests {
 
     use nomifun_common::UserId;
     use nomifun_db::{IWorkshopRepository, SqliteWorkshopRepository};
+    use serde_json::Value;
     use tower::ServiceExt;
 
     use super::*;
