@@ -70,15 +70,16 @@ export const creativeImageSafeFileStem = (title: string): string =>
     .replace(/\s+/gu, " ")
     .slice(0, 80);
 
-const canvasToBlob = (
+export const creativeImageCanvasToBlob = (
   canvas: HTMLCanvasElement,
   mimeType: string,
+  failureMessage = "浏览器未能编码裁剪后的图片。",
 ): Promise<Blob> =>
   new Promise((resolve, reject) => {
     canvas.toBlob(
       (blob) => {
         if (blob) resolve(blob);
-        else reject(new Error("浏览器未能编码裁剪后的图片。"));
+        else reject(new Error(failureMessage));
       },
       mimeType,
       mimeType === "image/png" ? undefined : 0.92,
@@ -127,7 +128,7 @@ export const browserCreativeImageCropCodec: CreativeImageCropCodec = {
       crop.width,
       crop.height,
     );
-    return canvasToBlob(canvas, mimeType);
+    return creativeImageCanvasToBlob(canvas, mimeType);
   },
 };
 
