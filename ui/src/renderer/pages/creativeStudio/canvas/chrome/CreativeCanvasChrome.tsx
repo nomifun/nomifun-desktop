@@ -24,7 +24,6 @@ import {
   PanoramaHorizontal,
   Pic,
   Platte,
-  Plus,
   Redo,
   Robot,
   Setting,
@@ -45,6 +44,7 @@ import styles from './CreativeCanvasChrome.module.css';
 import {
   CREATIVE_CANVAS_CHROME_BACKGROUNDS,
   CREATIVE_CANVAS_CHROME_NODE_KINDS,
+  CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS,
   toggleCreativeCanvasPanel,
   type CreativeCanvasBottomView,
   type CreativeCanvasChromeBackground,
@@ -269,11 +269,6 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
     onWheel: stopChromeEvent,
   };
 
-  const selectNode = (kind: CreativeCanvasChromeNodeKind) => {
-    props.onAddNode(kind);
-    props.onNodeMenuOpenChange(false);
-  };
-
   const selectBackground = (background: CreativeCanvasChromeBackground) => {
     props.onBackgroundChange(background);
     props.onBackgroundMenuOpenChange(false);
@@ -470,32 +465,6 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
 
           <span className={styles.divider} aria-hidden='true' />
 
-          <Popover
-            trigger='click'
-            position='top'
-            popupVisible={props.nodeMenuOpen}
-            onVisibleChange={props.onNodeMenuOpenChange}
-            content={<CreativeCanvasNodeMenu disabled={props.disabled} onSelect={selectNode} />}
-            unmountOnExit
-          >
-            <span className={styles.menuAnchor}>
-              <button
-                type='button'
-                className={styles.addButton}
-                data-active={props.nodeMenuOpen || undefined}
-                aria-haspopup='menu'
-                aria-expanded={props.nodeMenuOpen}
-                disabled={props.disabled}
-                onClick={() => props.onNodeMenuOpenChange(!props.nodeMenuOpen)}
-              >
-                <Plus {...iconProps} />
-                <span className={styles.toolText}>添加节点</span>
-              </button>
-            </span>
-          </Popover>
-
-          <span className={styles.divider} aria-hidden='true' />
-
           <ChromeIconButton
             label='撤销'
             icon={<Undo {...iconProps} />}
@@ -508,6 +477,18 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
             disabled={props.disabled || !props.canRedo}
             onClick={props.onRedo}
           />
+
+          <span className={styles.divider} aria-hidden='true' />
+
+          {CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS.map((kind) => (
+            <ChromeIconButton
+              key={kind}
+              label={NODE_LABELS[kind]}
+              icon={nodeIcon(kind)}
+              disabled={props.disabled}
+              onClick={() => props.onAddNode(kind)}
+            />
+          ))}
 
           <span className={styles.divider} aria-hidden='true' />
 

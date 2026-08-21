@@ -38,7 +38,6 @@
 
 .backButton,
 .iconButton,
-.addButton,
 .leftTabs button,
 .panelTabs button,
 .nodeMenu button,
@@ -50,7 +49,6 @@
 }
 
 .backButton,
-.addButton,
 .leftTabs button,
 .panelTabs button,
 .nodeMenu button,
@@ -340,8 +338,7 @@
   background: var(--color-fill-1);
 }
 
-.iconButton,
-.addButton {
+.iconButton {
   height: 34px;
   padding: 0;
   border-radius: 9px;
@@ -361,22 +358,12 @@
   place-items: center;
 }
 
-.addButton {
-  min-width: 34px;
-  gap: 6px;
-  padding: 0 10px;
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.iconButton:hover:not(:disabled),
-.addButton:hover:not(:disabled) {
+.iconButton:hover:not(:disabled) {
   background: var(--color-fill-2);
   color: var(--color-text-1);
 }
 
-.iconButton[data-active='true'],
-.addButton[data-active='true'] {
+.iconButton[data-active='true'] {
   background: rgba(var(--primary-6), 0.12);
   box-shadow: inset 0 0 0 1px rgba(var(--primary-6), 0.16);
   color: rgb(var(--primary-6));
@@ -388,7 +375,6 @@
 
 .backButton:focus-visible,
 .iconButton:focus-visible,
-.addButton:focus-visible,
 .leftTabs button:focus-visible,
 .panelTabs button:focus-visible,
 .nodeMenu button:focus-visible,
@@ -398,7 +384,6 @@
 
 .backButton:disabled,
 .iconButton:disabled,
-.addButton:disabled,
 .leftTabs button:disabled,
 .panelTabs button:disabled,
 .nodeMenu button:disabled,
@@ -518,8 +503,7 @@
 }
 
 .root[data-compact='true'] .backLabel,
-.root[data-compact='true'] .tabLabel,
-.root[data-compact='true'] .toolText {
+.root[data-compact='true'] .tabLabel {
   display: none;
 }
 
@@ -542,8 +526,7 @@
     grid-template-columns: 232px minmax(0, 1fr) 0;
   }
 
-  .backLabel,
-  .toolText {
+  .backLabel {
     display: none;
   }
 
@@ -665,8 +648,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .iconButton,
-  .addButton {
+  .iconButton {
     transition: none;
   }
 

@@ -61,6 +61,20 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     expect(types.includes("'grid'" )).toBe(false);
   });
 
+  test('keeps source-order node creation directly on the toolbar', () => {
+    expect(
+      types.includes('CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS')
+    ).toBe(true);
+    expect(
+      component.includes('CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS.map')
+    ).toBe(true);
+    expect(
+      component.includes('onClick={() => props.onAddNode(kind)}')
+    ).toBe(true);
+    expect(component.includes('nodeMenuOpen')).toBe(false);
+    expect(types.includes('nodeMenuOpen')).toBe(false);
+  });
+
   test('preserves a squeezed three-column canvas and compact scrolling dock', () => {
     for (const token of [
       'grid-template-columns: 280px minmax(0, 1fr) 360px',

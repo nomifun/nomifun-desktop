@@ -15,6 +15,7 @@ import CreativeCanvasChrome, {
 import {
   CREATIVE_CANVAS_CHROME_BACKGROUNDS,
   CREATIVE_CANVAS_CHROME_NODE_KINDS,
+  CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS,
   toggleCreativeCanvasPanel,
   type CreativeCanvasChromeProps,
 } from './types';
@@ -34,7 +35,6 @@ const baseProps = (
   leftView: 'canvas',
   rightView: 'assistant',
   bottomView: 'history',
-  nodeMenuOpen: false,
   backgroundMenuOpen: false,
   compact: false,
   slots: {
@@ -48,7 +48,6 @@ const baseProps = (
   onBackToProjects: noop,
   onToolChange: noop,
   onAddNode: noop,
-  onNodeMenuOpenChange: noop,
   onBackgroundChange: noop,
   onBackgroundMenuOpenChange: noop,
   onUndo: noop,
@@ -85,6 +84,28 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
     expect(html.includes('aria-label="打开小地图"')).toBe(true);
     expect(html.includes('aria-pressed="true"')).toBe(true);
     expect(html.includes('data-right-panel-header')).toBe(false);
+    expect(html.includes('添加节点')).toBe(false);
+    expect(CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS).toEqual([
+      'text',
+      'image',
+      'video',
+      'audio',
+      'panorama',
+      'director',
+      'config',
+    ]);
+    for (const label of [
+      '文本',
+      '图片',
+      '视频',
+      '音频',
+      '全景图',
+      '导演台',
+      '生成配置',
+    ]) {
+      expect(html.includes(`aria-label="${label}"`)).toBe(true);
+    }
+    expect(html.includes('aria-label="分组"')).toBe(false);
   });
 
   test('keeps a header for properties while the Agent owns its source header', () => {

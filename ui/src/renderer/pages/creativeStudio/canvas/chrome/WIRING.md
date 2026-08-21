@@ -20,7 +20,6 @@ the panel slots:
   leftView={leftView}
   rightView={rightView}
   bottomView={bottomView}
-  nodeMenuOpen={nodeMenuOpen}
   backgroundMenuOpen={backgroundMenuOpen}
   slots={{
     canvas: <CreativeCanvasEditor showZoomControls={false} {...editorProps} />,
@@ -49,5 +48,10 @@ responsible for translating callbacks into canonical core commands and for
 constructing new canonical nodes. This layer never creates IDs, persists a
 document, invokes a model, resolves assets, or fabricates panel content.
 
+The bottom dock exposes text, image, video, audio, panorama, Director, and
+generation-config creation directly in the reference order. Group creation is
+intentionally not a node-creation tool; it remains a selection action.
+
 `rightView` and `bottomView` use `null` for a closed panel. Menu visibility is
-also controlled so route transitions can close transient UI deterministically.
+controlled for the remaining background picker so route transitions can close
+transient UI deterministically.

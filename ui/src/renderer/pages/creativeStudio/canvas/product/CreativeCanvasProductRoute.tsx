@@ -491,7 +491,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [panels, setPanels] = useState<CreativeStudioPanelState>(() =>
     structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS)
   );
-  const [nodeMenuOpen, setNodeMenuOpen] = useState(false);
   const [backgroundMenuOpen, setBackgroundMenuOpen] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -2337,14 +2336,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
         leftView={panelViews.left}
         rightView={panelViews.right}
         bottomView={panelViews.bottom}
-        nodeMenuOpen={nodeMenuOpen}
         backgroundMenuOpen={backgroundMenuOpen}
         compact={compact}
         disabled={productDisabled}
         onBackToProjects={() => void handleBackToProjects()}
         onToolChange={setTool}
         onAddNode={addNode}
-        onNodeMenuOpenChange={setNodeMenuOpen}
         onBackgroundChange={handleBackgroundChange}
         onBackgroundMenuOpenChange={setBackgroundMenuOpen}
         onUndo={() => dispatch(canvasCommands.undo())}
