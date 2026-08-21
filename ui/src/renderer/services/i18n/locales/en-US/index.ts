@@ -33,12 +33,6 @@ import modelFailover from './modelFailover.json';
 import agentExecution from './agentExecution.json';
 import collaboration from './collaboration.json';
 import creativeStudio from './creativeStudio.json';
-import workshop from './workshop.json';
-import workshopCanvas from './workshopCanvas.json';
-import workshopAssets from './workshopAssets.json';
-import workshopEditor from './workshopEditor.json';
-import workshopGeneration from './workshopGeneration.json';
-import workshopAgent from './workshopAgent.json';
 import browser from './browser.json';
 import ssh from './ssh.json';
 import miniApps from './miniApps.json';
@@ -74,12 +68,6 @@ export default {
   agentExecution,
   collaboration,
   creativeStudio,
-  workshop,
-  workshopCanvas,
-  workshopAssets,
-  workshopEditor,
-  workshopGeneration,
-  workshopAgent,
   browser,
   ssh,
   miniApps,
