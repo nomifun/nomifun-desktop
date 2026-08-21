@@ -43,6 +43,7 @@ describe('CreativeCanvasEditor composition contract', () => {
       'removePendingTask',
       'getPendingTaskIds',
       'onPendingTaskIdsChange',
+      'onPendingTaskCommandBlocked',
       'persistAgentSessions',
       'getAgentSessions',
       'getActiveAgentSessionId',

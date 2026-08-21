@@ -81,6 +81,7 @@ import {
   type CanvasEditorInteractionAction,
   type CanvasEditorInteractionState,
 } from './interactionReducer';
+import { pendingTaskCommandGuard } from './pendingTaskGuard';
 import { useCanvasCasSave } from './useCanvasCasSave';
 import styles from './CreativeCanvasEditor.module.css';
 
@@ -179,6 +180,8 @@ export interface CreativeCanvasEditorProps {
   onIntegrationIntent?: (intent: CanvasIntegrationIntent) => void | Promise<void>;
   /** Fires after hydration and after each canonical task-feed mutation. */
   onPendingTaskIdsChange?: (taskIds: readonly string[]) => void;
+  /** Reports a command rejected because it would orphan a durable pending task. */
+  onPendingTaskCommandBlocked?: (taskIds: readonly string[]) => void;
   /** Fires after hydration and each durable Agent reference mutation. */
   onAgentSessionsChange?: (
     sessions: readonly CreativeChatSessionReference[],
@@ -273,6 +276,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       onSaveStateChange,
       onIntegrationIntent,
       onPendingTaskIdsChange,
+      onPendingTaskCommandBlocked,
       onAgentSessionsChange,
     },
     ref
@@ -377,6 +381,11 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
     const applyCommand = useCallback(
       (command: CanvasCommand): CanvasState => {
         const current = stateRef.current;
+        const guard = pendingTaskCommandGuard(current, command, pendingTaskIdsRef.current);
+        if (!guard.allowed) {
+          onPendingTaskCommandBlocked?.(guard.orphanedTaskIds);
+          return current;
+        }
         const next = canvasReducer(current, command);
         if (next === current) return current;
         stateRef.current = next;
@@ -390,7 +399,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         }
         return next;
       },
-      [saveController]
+      [onPendingTaskCommandBlocked, saveController]
     );
 
     const applyInteractionResolution = useCallback(

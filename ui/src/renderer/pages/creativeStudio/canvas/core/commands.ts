@@ -22,6 +22,7 @@ type WithHistory<T> = T & { history: CanvasHistoryMeta };
 export type CanvasCommand =
   | WithHistory<{ type: 'node/add'; node: CanvasGraphNode }>
   | WithHistory<{ type: 'node/update'; node: CanvasGraphNode }>
+  | { type: 'node/reconcile-runtime'; node: CanvasGraphNode }
   | WithHistory<{
       type: 'node/move';
       nodeIds?: string[];
@@ -99,6 +100,15 @@ export const canvasCommands = {
       node,
       history: history(options.at, options.mergeKey),
     };
+  },
+
+  /**
+   * Reconcile backend-authoritative runtime fields without creating a user
+   * undo step. The reducer carries the new data/lock state into existing
+   * history snapshots so undo/redo cannot regress a terminal task.
+   */
+  reconcileRuntimeNode(node: CanvasGraphNode): CanvasCommand {
+    return { type: 'node/reconcile-runtime', node };
   },
 
   moveNodes(

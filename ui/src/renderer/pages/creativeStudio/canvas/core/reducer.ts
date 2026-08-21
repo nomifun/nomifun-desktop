@@ -152,6 +152,25 @@ function sameCanvasNode(
   return JSON.stringify(current) === JSON.stringify(next);
 }
 
+function reconcileRuntimeNode(
+  document: CanvasDocument,
+  requested: Extract<CanvasCommand, { type: 'node/reconcile-runtime' }>['node']
+): CanvasDocument {
+  const index = document.nodes.findIndex((node) => node.id === requested.id);
+  if (index < 0) return document;
+  const current = document.nodes[index];
+  if (!current || current.type !== requested.type) return document;
+  const next = {
+    ...current,
+    locked: requested.locked,
+    data: structuredClone(requested.data),
+  } as typeof current;
+  if (sameCanvasNode(current, next)) return document;
+  const nodes = [...document.nodes];
+  nodes[index] = next;
+  return { ...document, nodes };
+}
+
 function deleteSelection(state: CanvasState, command: Extract<CanvasCommand, { type: 'selection/delete' }>): CanvasState {
   const requestedNodeIds = command.nodeIds ?? state.selection.nodeIds;
   const deletedNodeIds = new Set(requestedNodeIds);
@@ -248,6 +267,26 @@ export function canvasReducer(state: CanvasState, command: CanvasCommand): Canva
       const nodes = [...state.document.nodes];
       nodes[index] = structuredClone(command.node);
       return recordDocument(state, { ...state.document, nodes }, command.history);
+    }
+
+    case 'node/reconcile-runtime': {
+      const document = reconcileRuntimeNode(state.document, command.node);
+      const past = state.history.past.map((snapshot) =>
+        reconcileRuntimeNode(snapshot, command.node)
+      );
+      const future = state.history.future.map((snapshot) =>
+        reconcileRuntimeNode(snapshot, command.node)
+      );
+      const changed =
+        document !== state.document ||
+        past.some((snapshot, index) => snapshot !== state.history.past[index]) ||
+        future.some((snapshot, index) => snapshot !== state.history.future[index]);
+      if (!changed) return state;
+      return {
+        ...state,
+        document,
+        history: { past, future, merge: null },
+      };
     }
 
     case 'node/move': {

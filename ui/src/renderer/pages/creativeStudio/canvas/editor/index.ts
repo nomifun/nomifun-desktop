@@ -16,3 +16,4 @@ export type {
 export * from './casSaveController';
 export * from './editorModel';
 export * from './interactionReducer';
+export * from './pendingTaskGuard';

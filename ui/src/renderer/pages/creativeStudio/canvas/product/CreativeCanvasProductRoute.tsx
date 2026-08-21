@@ -1697,6 +1697,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 onStateChange={setCanvasState}
                 onSaveStateChange={setSave}
                 onAgentSessionsChange={handleAgentSessionsChange}
+                onPendingTaskCommandBlocked={() =>
+                  setNotice('运行中的生成任务必须保留配置节点；请等待任务结束后再删除或撤销。')
+                }
                 onIntegrationIntent={(intent) => void handleIntegrationIntent(intent)}
                 renderNode={({
                   node,
