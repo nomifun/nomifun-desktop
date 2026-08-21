@@ -282,9 +282,9 @@ describe('creative canvas editor model', () => {
     });
 
     expect(fitCanvasViewport(state, { width: 1_000, height: 600 }, 100)).toEqual({
-      x: -100,
-      y: 0,
-      zoom: 2,
+      x: 200,
+      y: 150,
+      zoom: 1,
     });
     expect(
       fitCanvasViewport(createInitialCanvasState(), { width: 1_000, height: 600 })

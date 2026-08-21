@@ -7,7 +7,7 @@
   overflow: hidden;
   contain: layout paint style;
   isolation: isolate;
-  background: var(--color-bg-1);
+  background: var(--creative-canvas-surface-background, var(--color-bg-1));
   color: var(--color-text-1);
   user-select: none;
   touch-action: none;
@@ -48,15 +48,15 @@
 .grid_dots {
   background-image: radial-gradient(
     circle,
-    color-mix(in srgb, var(--color-text-3) 44%, transparent) 1px,
+    var(--creative-canvas-grid-dot, color-mix(in srgb, var(--color-text-3) 44%, transparent)) 1px,
     transparent 1.25px
   );
 }
 
 .grid_lines {
   background-image:
-    linear-gradient(color-mix(in srgb, var(--color-border-2) 62%, transparent) 1px, transparent 1px),
-    linear-gradient(90deg, color-mix(in srgb, var(--color-border-2) 62%, transparent) 1px, transparent 1px);
+    linear-gradient(var(--creative-canvas-grid-line, color-mix(in srgb, var(--color-border-2) 62%, transparent)) 1px, transparent 1px),
+    linear-gradient(90deg, var(--creative-canvas-grid-line, color-mix(in srgb, var(--color-border-2) 62%, transparent)) 1px, transparent 1px);
 }
 
 .grid_blank {
@@ -96,10 +96,10 @@
   position: absolute;
   z-index: 3;
   box-sizing: border-box;
-  border: calc(1.25px * var(--creative-canvas-inverse-zoom)) dashed rgb(var(--primary-6));
+  border: calc(1.25px * var(--creative-canvas-inverse-zoom)) dashed var(--creative-canvas-selection-stroke, rgb(var(--primary-6)));
   border-radius: calc(3px * var(--creative-canvas-inverse-zoom));
-  background: rgba(var(--primary-6), 0.1);
-  box-shadow: 0 0 0 calc(1px * var(--creative-canvas-inverse-zoom)) rgba(var(--primary-6), 0.06);
+  background: var(--creative-canvas-selection-fill, rgba(var(--primary-6), 0.1));
+  box-shadow: 0 0 0 calc(1px * var(--creative-canvas-inverse-zoom)) color-mix(in srgb, var(--creative-canvas-selection-stroke, rgb(var(--primary-6))) 12%, transparent);
   pointer-events: none;
 }
 

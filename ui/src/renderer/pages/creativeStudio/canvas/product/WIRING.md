@@ -6,6 +6,9 @@ the only reducer and CAS persistence owner.
 
 The production router mounts this default export at
 `/workshop/canvas/:projectId` inside `CreativeStudioFocusShell`.
+It keeps the route split with
+`import('@renderer/pages/creativeStudio/canvas/product')` and the nested
+`path="canvas/:projectId"` contract.
 
 The product's own “返回项目” action awaits the editor CAS `flush()` and only
 navigates to `CREATIVE_STUDIO_PROJECTS_PATH` after `noop` or `saved`. A

@@ -84,7 +84,7 @@ export interface CreativeTextNodeProps extends CreativeNodePresentationProps<'te
 
 export const CreativeTextNode: React.FC<CreativeTextNodeProps> = ({
   title = '文本',
-  emptyLabel = '双击编辑文本',
+  emptyLabel = '双击编辑文字',
   ...props
 }) => {
   const { node } = props;
@@ -120,7 +120,7 @@ export type CreativeImageNodeProps = CreativeAssetNodeProps<'image'>;
 export const CreativeImageNode: React.FC<CreativeImageNodeProps> = ({
   asset,
   title = '图片',
-  emptyLabel = '尚未连接图片素材',
+  emptyLabel = '空图片节点',
   ...props
 }) => {
   const { node } = props;
@@ -158,7 +158,7 @@ export type CreativeVideoNodeProps = CreativeAssetNodeProps<'video'>;
 export const CreativeVideoNode: React.FC<CreativeVideoNodeProps> = ({
   asset,
   title = '视频',
-  emptyLabel = '尚未连接视频素材',
+  emptyLabel = '空视频节点',
   ...props
 }) => {
   const { node } = props;
@@ -204,7 +204,7 @@ export type CreativeAudioNodeProps = CreativeAssetNodeProps<'audio'>;
 export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
   asset,
   title = '音频',
-  emptyLabel = '尚未连接音频素材',
+  emptyLabel = '空音频节点',
   ...props
 }) => {
   const { node } = props;
@@ -253,7 +253,7 @@ export const CreativePanoramaNode: React.FC<CreativePanoramaNodeProps> = ({
   asset,
   preview,
   title = '全景图',
-  emptyLabel = '尚未连接全景素材',
+  emptyLabel = '空全景图节点',
   ...props
 }) => {
   const { node } = props;

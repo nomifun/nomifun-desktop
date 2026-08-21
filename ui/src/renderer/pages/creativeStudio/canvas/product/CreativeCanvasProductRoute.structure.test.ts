@@ -12,6 +12,10 @@ const source = readFileSync(
   'utf8'
 );
 const wiring = readFileSync(new URL('./WIRING.md', import.meta.url), 'utf8');
+const style = readFileSync(
+  new URL('./CreativeCanvasProductRoute.module.css', import.meta.url),
+  'utf8'
+);
 
 describe('Creative Canvas product route composition', () => {
   test('is a no-props nested route over the canonical Editor store', () => {
@@ -139,5 +143,16 @@ describe('Creative Canvas product route composition', () => {
     expect(wiring.includes('CREATIVE_STUDIO_PROJECTS_PATH')).toBe(true);
     expect(wiring.includes('image_edit` / `i2i')).toBe(true);
     expect(wiring.includes('authoritative 404')).toBe(true);
+  });
+
+  test('keeps the focused reference palette independent from the app theme', () => {
+    expect(style.includes('--creative-canvas-surface-background: #f4f2ed')).toBe(
+      true
+    );
+    expect(style.includes('--creative-canvas-node-fill: #e7e5df')).toBe(true);
+    expect(style.includes('--color-text-1: #292524')).toBe(true);
+    expect(style.includes('--primary-6: 87, 83, 78')).toBe(true);
+    expect(style.includes('color-scheme: light')).toBe(true);
+    expect(style.includes("[data-theme='dark']")).toBe(false);
   });
 });
