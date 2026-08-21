@@ -33,7 +33,6 @@ import {
   addCapabilityTask,
   applyCatalogSuggestionForTask,
   catalogSuggestionsForTask,
-  changePrimaryModelTask,
   changeCapabilityProtocol,
   effectiveBaseUrl,
   endpointDescriptorValue,
@@ -340,10 +339,15 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
     () => MODEL_TASK_ORDER.filter((task) => !selectedTasks.includes(task)),
     [selectedTasks]
   );
-  const primaryTask = modelReadOnly ? undefined : selectedTasks[0];
+  // The catalog needs exactly ONE task to filter its suggestions by. This is a
+  // search scope, not a model property: it is never rendered as a value and
+  // never persisted. The backend re-sorts a model's capabilities by task on
+  // read (`provider_model.rs` `row_to_model_response`), so a user-picked
+  // "primary task" could not survive a reload even if we stored one.
+  const catalogFilterTask = selectedTasks[0];
   const filteredCatalogSuggestions = useMemo(
-    () => catalogSuggestionsForTask(catalogSuggestions, primaryTask),
-    [catalogSuggestions, primaryTask]
+    () => catalogSuggestionsForTask(catalogSuggestions, catalogFilterTask),
+    [catalogSuggestions, catalogFilterTask]
   );
   const recommendationManifests = useMemo(() => {
     const ready: ModelProtocolManifestMap = {};
@@ -416,22 +420,14 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
     }));
   };
 
-  const selectPrimaryTask = (task: ModelTask) => {
-    if (task === primaryTask) return;
-    onChange((current) =>
-      current.capabilities[0]?.task === task ? current : changePrimaryModelTask(current, task)
-    );
-  };
-
   const selectCatalogSuggestion = (profile: ModelCatalogSuggestion) => {
-    if (!primaryTask) return;
     onChange((current) => {
-      const currentPrimaryTask = current.capabilities[0]?.task;
-      return currentPrimaryTask
+      const task = current.capabilities[0]?.task;
+      return task
         ? applyCatalogSuggestionForTask(
             current,
             { model: profile.value, tasks: profile.tasks, traits: profile.traits },
-            currentPrimaryTask
+            task
           )
         : current;
     });
@@ -453,131 +449,6 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
 
   return (
     <div className='flex flex-col gap-16px' data-model-definition-editor>
-      {!modelReadOnly ? (
-        <>
-          <div className='space-y-8px' data-primary-model-task-section>
-            <label className='text-13px font-500 text-t-secondary'>
-              {t('settings.modelType', { defaultValue: '模型类型' })}
-            </label>
-            <Select
-              value={primaryTask}
-              options={MODEL_TASK_ORDER.map((task) => ({
-                value: task,
-                label: t(`settings.modelTask.${task}`, { defaultValue: task }),
-              }))}
-              placeholder={t('settings.selectModelType', {
-                defaultValue: '先选择模型主要用于什么任务',
-              })}
-              onChange={(task) => {
-                if (typeof task === 'string') selectPrimaryTask(task as ModelTask);
-              }}
-              triggerProps={{ getPopupContainer: () => document.body }}
-              data-primary-model-task-picker
-            />
-            <div className='text-11px leading-4 text-t-secondary'>
-              {t('settings.modelTypeHint', {
-                defaultValue: '模型候选会按类型筛选；每次请求只使用所选任务对应的协议。',
-              })}
-            </div>
-          </div>
-
-          <div className='space-y-8px' data-filtered-catalog-count={filteredCatalogSuggestions.length}>
-            <div className='flex items-center justify-between gap-8px'>
-              <label htmlFor={modelInputId} className='text-13px font-500 text-t-secondary'>
-                {t('settings.modelSelection', { defaultValue: '模型' })}
-              </label>
-              {onRefreshCatalog && (
-                <Tooltip content={t('common.refresh', { defaultValue: '刷新' })}>
-                  <Button
-                    size='mini'
-                    type='text'
-                    className='!h-28px !w-28px !min-w-28px'
-                    icon={<Refresh theme='outline' size='14' />}
-                    loading={catalogLoading}
-                    onClick={onRefreshCatalog}
-                    aria-label={t('common.refresh', { defaultValue: '刷新' })}
-                  />
-                </Tooltip>
-              )}
-            </div>
-            <AutoComplete
-              value={value.model}
-              data={filteredCatalogSuggestions.map((suggestion) => ({
-                value: suggestion.value,
-                name: suggestion.label,
-              }))}
-              disabled={!primaryTask}
-              loading={catalogLoading}
-              allowClear
-              status={primaryTask && (!value.model.trim() || duplicateModel) ? 'error' : undefined}
-              placeholder={
-                primaryTask
-                  ? t('settings.modelSelectionPlaceholder', {
-                      defaultValue: '搜索目录模型，或直接输入官网模型 ID',
-                    })
-                  : t('settings.modelSelectionRequiresType', {
-                      defaultValue: '请先选择模型类型',
-                    })
-              }
-              defaultActiveFirstOption={false}
-              onChange={(model, option) => {
-                const manualModel = resolveModelInputChange(model, option);
-                if (manualModel !== undefined) {
-                  onChange((current) =>
-                    current.model === manualModel ? current : { ...current, model: manualModel }
-                  );
-                }
-              }}
-              onSelect={(model) => {
-                const suggestion = filteredCatalogSuggestions.find((item) => item.value === model);
-                if (suggestion) selectCatalogSuggestion(suggestion);
-              }}
-              triggerProps={{ getPopupContainer: () => document.body }}
-              inputProps={{
-                id: modelInputId,
-                'aria-describedby': `${modelInputId}-hint`,
-              }}
-              data-unified-model-input
-            />
-            <div
-              id={`${modelInputId}-hint`}
-              role={duplicateModel ? 'alert' : 'note'}
-              className={`text-11px leading-4 ${duplicateModel ? 'text-danger-6' : 'text-t-secondary'}`}
-            >
-              {duplicateModel
-                ? t('settings.modelIdDuplicate', {
-                    defaultValue: '该模型 ID 已存在。',
-                  })
-                : t('settings.modelSelectionHint', {
-                    defaultValue: '目录仅提供当前类型的建议；没有匹配项时可直接输入模型 ID。',
-                  })}
-            </div>
-            {primaryTask && !catalogLoading && filteredCatalogSuggestions.length === 0 && !catalogError && (
-              <div className='text-11px text-t-tertiary' role='note' data-empty-filtered-model-catalog>
-                {t('settings.modelCatalogFilteredEmpty', {
-                  defaultValue: '目录中暂无该类型的模型，请直接输入模型 ID。',
-                })}
-              </div>
-            )}
-            {catalogError && (
-              <div className='text-11px text-warning-6' role='note'>
-                {t('settings.modelCatalogUnavailable', {
-                  defaultValue: '目录暂不可用，不影响手填模型 ID。',
-                })}{' '}
-                {catalogError}
-              </div>
-            )}
-          </div>
-        </>
-      ) : (
-        <div className='space-y-8px'>
-          <label htmlFor={modelInputId} className='text-13px font-500 text-t-secondary'>
-            {t('settings.modelId', { defaultValue: '模型 ID' })}
-          </label>
-          <Input id={modelInputId} value={value.model} readOnly data-readonly-model-id />
-        </div>
-      )}
-
       <section className='space-y-10px' aria-labelledby={taskSectionId} data-model-task-section>
         <div className='space-y-4px'>
           <div id={taskSectionId} className='text-13px font-500 text-t-secondary'>
@@ -585,7 +456,8 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
           </div>
           <div className='text-11px leading-4 text-t-secondary'>
             {t('settings.modelSupportedTasksHint', {
-              defaultValue: '只添加该模型实际支持的任务；每次请求只使用当前任务对应的一套协议。',
+              defaultValue:
+                '先选该模型支持的任务，候选模型会按其中第一个任务筛选。同一个模型 ID 支持多个任务时逐项添加，每个任务单独配置协议与地址。',
             })}
           </div>
         </div>
@@ -598,34 +470,137 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
           </div>
         )}
 
-        {(modelReadOnly || value.capabilities.length > 0) && (
-          <Select
-            value={undefined}
-            disabled={!value.model.trim() || availableTasks.length === 0}
-            options={availableTasks.map((task) => ({
-              value: task,
-              label: t(`settings.modelTask.${task}`, { defaultValue: task }),
-            }))}
-            placeholder={
-              availableTasks.length === 0
-                ? t('settings.modelTasksAllAdded', {
-                    defaultValue: '所有任务均已添加',
+        <Select
+          value={undefined}
+          disabled={availableTasks.length === 0}
+          options={availableTasks.map((task) => ({
+            value: task,
+            label: t(`settings.modelTask.${task}`, { defaultValue: task }),
+          }))}
+          placeholder={
+            availableTasks.length === 0
+              ? t('settings.modelTasksAllAdded', {
+                  defaultValue: '所有任务均已添加',
+                })
+              : value.capabilities.length === 0
+                ? t('settings.selectModelTask', {
+                    defaultValue: '选择该模型支持的任务',
                   })
                 : t('settings.addAnotherModelTask', {
                     defaultValue: '添加其他任务',
                   })
+          }
+          onChange={(task) => {
+            if (typeof task === 'string') addTask(task as ModelTask);
+          }}
+          triggerProps={{ getPopupContainer: () => document.body }}
+          aria-label={t('settings.modelSupportedTasks', { defaultValue: '支持的任务' })}
+          data-model-task-picker
+        />
+      </section>
+
+      {!modelReadOnly ? (
+        <div className='space-y-8px' data-filtered-catalog-count={filteredCatalogSuggestions.length}>
+          <div className='flex items-center justify-between gap-8px'>
+            <label htmlFor={modelInputId} className='text-13px font-500 text-t-secondary'>
+              {t('settings.modelSelection', { defaultValue: '模型' })}
+            </label>
+            {onRefreshCatalog && (
+              <Tooltip content={t('common.refresh', { defaultValue: '刷新' })}>
+                <Button
+                  size='mini'
+                  type='text'
+                  className='!h-28px !w-28px !min-w-28px'
+                  icon={<Refresh theme='outline' size='14' />}
+                  loading={catalogLoading}
+                  onClick={onRefreshCatalog}
+                  aria-label={t('common.refresh', { defaultValue: '刷新' })}
+                />
+              </Tooltip>
+            )}
+          </div>
+          <AutoComplete
+            value={value.model}
+            data={filteredCatalogSuggestions.map((suggestion) => ({
+              value: suggestion.value,
+              name: suggestion.label,
+            }))}
+            disabled={value.capabilities.length === 0}
+            loading={catalogLoading}
+            allowClear
+            status={
+              value.capabilities.length > 0 && (!value.model.trim() || duplicateModel)
+                ? 'error'
+                : undefined
             }
-            onChange={(task) => {
-              if (typeof task === 'string') addTask(task as ModelTask);
+            placeholder={
+              value.capabilities.length > 0
+                ? t('settings.modelSelectionPlaceholder', {
+                    defaultValue: '搜索目录模型，或直接输入官网模型 ID',
+                  })
+                : t('settings.modelSelectionRequiresTask', {
+                    defaultValue: '请先在上方选择任务',
+                  })
+            }
+            defaultActiveFirstOption={false}
+            onChange={(model, option) => {
+              const manualModel = resolveModelInputChange(model, option);
+              if (manualModel !== undefined) {
+                onChange((current) =>
+                  current.model === manualModel ? current : { ...current, model: manualModel }
+                );
+              }
+            }}
+            onSelect={(model) => {
+              const suggestion = filteredCatalogSuggestions.find((item) => item.value === model);
+              if (suggestion) selectCatalogSuggestion(suggestion);
             }}
             triggerProps={{ getPopupContainer: () => document.body }}
-            aria-label={t('settings.addAnotherModelTask', {
-              defaultValue: '添加其他任务',
-            })}
-            data-model-task-picker
+            inputProps={{
+              id: modelInputId,
+              'aria-describedby': `${modelInputId}-hint`,
+            }}
+            data-unified-model-input
           />
-        )}
+          <div
+            id={`${modelInputId}-hint`}
+            role={duplicateModel ? 'alert' : 'note'}
+            className={`text-11px leading-4 ${duplicateModel ? 'text-danger-6' : 'text-t-secondary'}`}
+          >
+            {duplicateModel
+              ? t('settings.modelIdDuplicate', {
+                  defaultValue: '该模型 ID 已存在。',
+                })
+              : t('settings.modelSelectionHint', {
+                  defaultValue: '目录仅提供第一个任务的建议；没有匹配项时可直接输入模型 ID。',
+                })}
+          </div>
+          {catalogFilterTask && !catalogLoading && filteredCatalogSuggestions.length === 0 && !catalogError && (
+            <div className='text-11px text-t-tertiary' role='note' data-empty-filtered-model-catalog>
+              {t('settings.modelCatalogFilteredEmpty', {
+                defaultValue: '目录中暂无该类型的模型，请直接输入模型 ID。',
+              })}
+            </div>
+          )}
+          {catalogError && (
+            <div className='text-11px text-warning-6' role='note'>
+              {t('settings.modelCatalogUnavailable', {
+                defaultValue: '目录暂不可用，不影响手填模型 ID。',
+              })}{' '}
+              {catalogError}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className='space-y-8px'>
+          <label htmlFor={modelInputId} className='text-13px font-500 text-t-secondary'>
+            {t('settings.modelId', { defaultValue: '模型 ID' })}
+          </label>
+          <Input id={modelInputId} value={value.model} readOnly data-readonly-model-id />
+        </div>
+      )}
 
+      <div className='space-y-10px' data-capability-card-list>
         {value.capabilities.map((capability) => {
         const loading = manifestLoadingTasks.includes(capability.task);
         const manifest = loading ? undefined : manifests[capability.task];
@@ -774,27 +749,55 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
                   </span>
                 </div>
               </button>
-              {(modelReadOnly || capability.task !== primaryTask) && (
-                <div className='flex shrink-0 items-center pr-10px'>
-                  <Popconfirm
-                    title={t('settings.removeModelTaskConfirm', {
-                      defaultValue: `移除“${t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task })}”及其高级配置？`,
-                      task: t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task }),
-                    })}
-                    onOk={() => removeTask(capability.task)}
-                  >
-                    <Button
-                      size='mini'
-                      type='text'
-                      status='danger'
-                      className='!h-28px !w-28px !min-w-28px'
-                      icon={<DeleteFour theme='outline' size='14' />}
-                      aria-label={t('settings.removeModelTask', { defaultValue: '移除任务' })}
-                      data-remove-model-task={capability.task}
-                    />
-                  </Popconfirm>
-                </div>
-              )}
+              <div className='flex shrink-0 items-center pr-10px'>
+                <Popconfirm
+                  title={t('settings.removeModelTaskConfirm', {
+                    defaultValue: `移除“${t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task })}”及其高级配置？`,
+                    task: t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task }),
+                  })}
+                  onOk={() => removeTask(capability.task)}
+                >
+                  <Button
+                    size='mini'
+                    type='text'
+                    status='danger'
+                    className='!h-28px !w-28px !min-w-28px'
+                    icon={<DeleteFour theme='outline' size='14' />}
+                    aria-label={t('settings.removeModelTask', { defaultValue: '移除任务' })}
+                    data-remove-model-task={capability.task}
+                  />
+                </Popconfirm>
+              </div>
+            </div>
+
+            {/*
+              Traits stay visible without expanding the card: they describe what
+              the model can do, which is the same kind of question as the task
+              itself, and they are cheap to answer. Everything below — protocol,
+              URLs, connection role, token ceilings — is transport detail that
+              already has a working default.
+            */}
+            <div
+              className='space-y-6px border-0 border-t border-solid border-[var(--color-border-2)] px-14px py-12px'
+              data-capability-traits={capability.task}
+            >
+              <div className='text-12px text-t-secondary'>
+                {t('settings.modelTraitsLabel', { defaultValue: '能力细化（traits）' })}
+              </div>
+              <Select
+                mode='multiple'
+                value={capability.traits}
+                options={MODEL_TRAIT_ORDER.map((trait) => ({
+                  value: trait,
+                  label: t(`settings.modelTrait.${trait}`, { defaultValue: trait }),
+                }))}
+                onChange={(traits: ModelTrait[]) =>
+                  updateCapability(capability.task, {
+                    traits: MODEL_TRAIT_ORDER.filter((trait) => (traits ?? []).includes(trait)),
+                  })
+                }
+                triggerProps={{ getPopupContainer: () => document.body }}
+              />
             </div>
 
             <div
@@ -1107,51 +1110,51 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
               );
             })}
 
-            <div className='space-y-6px'>
-              <div className='text-12px text-t-secondary'>
-                {t('settings.modelTraitsLabel', { defaultValue: '能力细化（traits）' })}
+            {/*
+              One heading for both ceilings, because they are NOT two spellings
+              of the same thing and the old flat layout implied they were. The
+              context window feeds the compaction budget (its "default" is the
+              app's 200k assumption); the output ceiling feeds the request's
+              max_tokens (its "default" is whatever the provider picks) and is
+              mandatory for the Anthropic-family protocols.
+            */}
+            <div className='space-y-8px' data-token-limits>
+              <div className='text-12px font-500 text-t-secondary'>
+                {t('settings.modelAdvanced.tokenLimits', { defaultValue: 'Token 上限' })}
               </div>
-              <Select
-                mode='multiple'
-                value={capability.traits}
-                options={MODEL_TRAIT_ORDER.map((trait) => ({
-                  value: trait,
-                  label: t(`settings.modelTrait.${trait}`, { defaultValue: trait }),
-                }))}
-                onChange={(traits: ModelTrait[]) =>
-                  updateCapability(capability.task, {
-                    traits: MODEL_TRAIT_ORDER.filter((trait) => (traits ?? []).includes(trait)),
-                  })
-                }
-                triggerProps={{ getPopupContainer: () => document.body }}
-              />
-            </div>
 
-            <div className='space-y-6px'>
-              <div className='text-12px text-t-secondary'>
-                {t('settings.contextLimit', { defaultValue: '上下文窗口（tokens）' })}
-              </div>
-              <ContextLimitSelect
-                value={capability.contextLimit}
-                onChange={(contextLimit) => updateCapability(capability.task, { contextLimit })}
-              />
-            </div>
-
-            <div className='space-y-6px'>
-              <div className='text-12px text-t-secondary'>
-                {t('settings.outputLimit', { defaultValue: 'Max output tokens' })}
-              </div>
-              <OutputLimitInput
-                value={capability.outputLimit}
-                onChange={(outputLimit) => updateCapability(capability.task, { outputLimit })}
-              />
-              {outputLimitMissing && (
-                <div className='text-11px text-danger-6' role='alert' data-output-limit-required>
-                  {t('settings.outputLimitRequired', {
-                    defaultValue: 'This protocol requires an explicit max output token value.',
+              <div className='space-y-6px'>
+                <div className='text-12px text-t-secondary'>
+                  {t('settings.contextLimit', { defaultValue: '上下文窗口（tokens）' })}
+                </div>
+                <ContextLimitSelect
+                  value={capability.contextLimit}
+                  onChange={(contextLimit) => updateCapability(capability.task, { contextLimit })}
+                />
+                <div className='text-11px leading-4 text-t-tertiary'>
+                  {t('settings.contextLimitHint', {
+                    defaultValue:
+                      '留空按默认 200k 估算。模型真实窗口更小时请填写：否则自动压缩不会及时触发，供应商会直接拒绝该轮请求。',
                   })}
                 </div>
-              )}
+              </div>
+
+              <div className='space-y-6px'>
+                <div className='text-12px text-t-secondary'>
+                  {t('settings.outputLimit', { defaultValue: 'Max output tokens' })}
+                </div>
+                <OutputLimitInput
+                  value={capability.outputLimit}
+                  onChange={(outputLimit) => updateCapability(capability.task, { outputLimit })}
+                />
+                {outputLimitMissing && (
+                  <div className='text-11px text-danger-6' role='alert' data-output-limit-required>
+                    {t('settings.outputLimitRequired', {
+                      defaultValue: 'This protocol requires an explicit max output token value.',
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
 
             {crossOrigin && (
@@ -1285,7 +1288,7 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
           </section>
         );
       })}
-      </section>
+      </div>
     </div>
   );
 };
