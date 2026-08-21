@@ -2,7 +2,7 @@
 
 > 用途：在长任务发生上下文压缩或人员切换时，从可验证提交继续，而不是重新审计整仓。
 > 分支：`codex/infinite-canvas-rebuild`
-> 最后功能锚点：`03b8d591`（`fix(creative-studio): align project center with source`）
+> 最后功能锚点：`dd18dc6f`（`fix(creative-studio): align canvas focus surface`）
 > 参考产品锚点：`ef7303d`
 
 ## 1. 续接协议
@@ -24,7 +24,7 @@
 | --- | --- | --- |
 | P1-P2 | 受保护运行时拆分、根主题、全屏 Focus Shell、侧栏入口与返回工作台 | `ed9c66df`…`954d6dcb` |
 | P3 | `nomifun.creative-studio/v1`、UUIDv7、项目 CRUD/CAS、项目中心、ZIP 导入导出 | `d03a6a64`、`b4361084`、`44933dd3`…`2ad53b01` |
-| P4 | 画布 reducer/history、视口、节点、连线、小地图、选择/分组/快捷键、Editor CAS 与离开 flush | `b2e19806`…`dc6c3c34` |
+| P4 | 画布 reducer/history、视口、节点、连线、小地图、选择/分组/快捷键、Editor CAS 与离开 flush；首节点居中、参考节点几何与固定创作配色 | `b2e19806`…`dc6c3c34`、`dd18dc6f` |
 | P5 | Canonical 资产 API/库、文本/图像/视频/音频节点、素材选择与结果回填 | `57128727`、`e05b18a8`、`04f805a3`、`444db764` |
 | P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44` |
 | P7 | 生图/视频工作台、工作流定义/运行中心、提示词与素材中心 | `2283ee74`、`1414846e`、`ebd17f3a`…`aad21d9d`、`7e45f8ad` |
@@ -42,6 +42,14 @@
 - 提示词对照图：`C:\Users\MINISFORUM\.codex\visualizations\2026\08\19\01a01aa7-ea42-76e3-aa34-9158a1382c97\32-prompts-accepted-source-target-comparison.png`。
 - 项目中心：新建/打开/返回、重命名与重载持久化、选择态、真实 ZIP 导出/导入、删除确认与取消均已验证；隔离导入副本通过精确 ID 清理。1440×900 浅色/深色与 1024×768 深色源/目标同状态对照完成，干净重载 Console 无错误。
 - 项目中心对照图：`C:\Users\MINISFORUM\.codex\visualizations\2026\08\19\01a01aa7-ea42-76e3-aa34-9158a1382c97\38-projects-accepted-source-target-comparison-light-1440x900.png`、`41-projects-source-target-comparison-dark-1440x900.png`、`44-projects-source-target-comparison-dark-1024x768.png`。
+- 画布主链：隔离新项目真实完成文本/图片节点创建、拖拽、连线、框选、分组/取消分组、缩放、撤销/重做、背景、小地图、属性编辑与重载持久化。首节点现在以参考产品世界原点居中，重置视图不再把节点推向右下；8 类节点默认尺寸、节点外壳、连线和占位态已按参考实现收敛。
+- 画布采用参考产品浅色 stone 中性配色作为固定创作表面，不跟随用户主题。1440×900 像素比较确认切换用户浅色/深色后仅顶部 65px 外层 NomiFun 导航变化，画布及创作控件区域逐像素一致。参考/目标对照图：`C:\Users\MINISFORUM\.codex\visualizations\2026\08\19\01a01aa7-ea42-76e3-aa34-9158a1382c97\68-canvas-reference-target-focused-comparison-light-1440x900.png`；主题隔离对照图：`65-target-canvas-fixed-palette-stable-theme-comparison.png`。
+
+`dd18dc6f` 的提交前检查：
+
+- 画布目录完整测试：193 passed / 1051 assertions。
+- `bun run typecheck`、`bun run check:theme`、`bun run check:dead-css`、`git diff --cached --check`：通过。
+- UI production build：通过；仅保留仓库既存的动态/静态重复导入与大 chunk 提示。
 
 `7e45f8ad` 的提交前检查：
 
@@ -67,9 +75,9 @@
 
 ## 5. 下一步单线程优先级
 
-1. 画布主链：新项目上逐项验证节点、拖拽/框选/缩放/连线、撤销重做、面板持久化、冲突和重开恢复。
+1. 画布交互补齐：将底部“添加节点”下拉收敛为参考产品的直接节点工具，并接入选中图片后的真实生成 composer；随后做保存冲突的真实双客户端门禁。
 2. 生图、视频与工作流：先验证无模型/失败/取消/恢复，再在得到成本授权后执行一个真实 provider 冒烟。
 3. Director：验证场景、时间轴、截图回填、归档重开，并确认所有不可用入口描述准确。
-4. P11：1280×720、1024×768、390×844、双主题、Tauri 慢环、UI build/桌面打包和最终能力文档。
+4. P11：1280×720、1024×768、390×844、固定创作配色、Tauri 慢环、UI build/桌面打包和最终能力文档。
 
 不要因为主体代码已存在就跳过这些门禁；下一提交应从第 1 项画布主链验收开始，发现问题只修画布页及其直接契约。
