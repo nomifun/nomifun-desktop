@@ -42,10 +42,13 @@ export interface CreativeImageMaskEditDialogProps {
   catalog: CreativeModelCatalogSnapshot;
   model: CreativeModelSelectionRef | null;
   busy?: boolean;
+  /** Preserve the exact mask, prompt, model, and idempotency key after an uncertain POST. */
+  retryLocked?: boolean;
   progress?: number | null;
   error?: string | null;
   onModelChange(model: CreativeModelSelectionRef): void;
   onOpenModelSettings?: () => void;
+  onAbandon?: () => void;
   onClose(): void;
   onConfirm(input: CreativeImageMaskEditSubmit): void;
 }
@@ -67,7 +70,9 @@ const iconProps = {
   strokeWidth: 3,
 };
 
-const finiteDimensions = (asset: CreativeAsset | null): MaskDimensions | null =>
+const finiteDimensions = (
+  asset: CreativeAsset | null,
+): MaskDimensions | null =>
   asset &&
   asset.kind === "image" &&
   Number.isFinite(asset.width) &&
@@ -177,10 +182,12 @@ export const CreativeImageMaskEditDialogContent: React.FC<
   catalog,
   model,
   busy = false,
+  retryLocked = false,
   progress = null,
   error = null,
   onModelChange,
   onOpenModelSettings,
+  onAbandon,
   onClose,
   onConfirm,
 }) => {
@@ -192,11 +199,10 @@ export const CreativeImageMaskEditDialogContent: React.FC<
   );
   const [imageFailed, setImageFailed] = useState(false);
   const [prompt, setPrompt] = useState("");
-  const [brushSize, setBrushSize] = useState(
-    CREATIVE_IMAGE_MASK_BRUSH_DEFAULT,
-  );
+  const [brushSize, setBrushSize] = useState(CREATIVE_IMAGE_MASK_BRUSH_DEFAULT);
   const [mode, setMode] = useState<CreativeImageMaskDrawMode>("paint");
   const [validationError, setValidationError] = useState<string | null>(null);
+  const draftLocked = busy || retryLocked;
 
   useEffect(() => {
     if (!visible) return;
@@ -217,13 +223,12 @@ export const CreativeImageMaskEditDialogContent: React.FC<
   const draw = (event: React.PointerEvent<HTMLCanvasElement>): void => {
     const maskCanvas = maskCanvasRef.current;
     const context = maskCanvas?.getContext("2d");
-    if (!maskCanvas || !context || busy) return;
+    if (!maskCanvas || !context || draftLocked) return;
     const bounds = event.currentTarget.getBoundingClientRect();
-    const point = creativeImageMaskPoint(
-      bounds,
-      maskCanvas,
-      { x: event.clientX, y: event.clientY },
-    );
+    const point = creativeImageMaskPoint(bounds, maskCanvas, {
+      x: event.clientX,
+      y: event.clientY,
+    });
     context.lineCap = "round";
     context.lineJoin = "round";
     context.lineWidth = brushSize;
@@ -243,7 +248,7 @@ export const CreativeImageMaskEditDialogContent: React.FC<
   };
 
   const startDraw = (event: React.PointerEvent<HTMLCanvasElement>): void => {
-    if (busy || !dimensions) return;
+    if (draftLocked || !dimensions) return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -357,14 +362,18 @@ export const CreativeImageMaskEditDialogContent: React.FC<
       <section className={styles.maskControls}>
         <header>
           <h2>局部遮罩编辑</h2>
-          <p>{dimensions ? `${dimensions.width} × ${dimensions.height}px` : "读取中"}</p>
+          <p>
+            {dimensions
+              ? `${dimensions.width} × ${dimensions.height}px`
+              : "读取中"}
+          </p>
         </header>
 
         <div className={styles.maskModeGrid}>
           <Button
             type={mode === "paint" ? "primary" : "default"}
             icon={<Paint {...iconProps} />}
-            disabled={busy}
+            disabled={draftLocked}
             onClick={() => setMode("paint")}
           >
             画笔
@@ -372,7 +381,7 @@ export const CreativeImageMaskEditDialogContent: React.FC<
           <Button
             type={mode === "erase" ? "primary" : "default"}
             icon={<Erase {...iconProps} />}
-            disabled={busy}
+            disabled={draftLocked}
             onClick={() => setMode("erase")}
           >
             擦除
@@ -389,7 +398,7 @@ export const CreativeImageMaskEditDialogContent: React.FC<
             max={CREATIVE_IMAGE_MASK_BRUSH_MAX}
             step={CREATIVE_IMAGE_MASK_BRUSH_STEP}
             value={brushSize}
-            disabled={busy}
+            disabled={draftLocked}
             onChange={(value) =>
               setBrushSize(
                 normalizeCreativeImageMaskBrush(
@@ -401,14 +410,17 @@ export const CreativeImageMaskEditDialogContent: React.FC<
         </div>
 
         <div className={styles.maskField}>
-          <label className={styles.maskFieldTitle} htmlFor="creative-mask-edit-prompt">
+          <label
+            className={styles.maskFieldTitle}
+            htmlFor="creative-mask-edit-prompt"
+          >
             修改要求
           </label>
           <Input.TextArea
             id="creative-mask-edit-prompt"
             rows={6}
             value={prompt}
-            disabled={busy}
+            disabled={draftLocked}
             status={shownError === "请输入修改要求" ? "error" : undefined}
             placeholder="例如：把选中区域改成金属材质，保持原图光影"
             onChange={(value) => {
@@ -427,7 +439,7 @@ export const CreativeImageMaskEditDialogContent: React.FC<
           catalog={catalog}
           filter={{ capability: "task", task: "image_edit" }}
           value={model}
-          disabled={busy}
+          disabled={draftLocked}
           label="模型"
           onChange={(selection) => {
             setValidationError(null);
@@ -447,7 +459,7 @@ export const CreativeImageMaskEditDialogContent: React.FC<
         <footer className={styles.maskFooter}>
           <Button
             icon={<Refresh {...iconProps} />}
-            disabled={busy}
+            disabled={draftLocked}
             onClick={reset}
           >
             重置
@@ -455,10 +467,10 @@ export const CreativeImageMaskEditDialogContent: React.FC<
           <div>
             <Button
               icon={<CloseOne {...iconProps} />}
-              disabled={busy}
-              onClick={onClose}
+              disabled={busy || (retryLocked && !onAbandon)}
+              onClick={retryLocked ? onAbandon : onClose}
             >
-              取消
+              {retryLocked ? "放弃本次" : "取消"}
             </Button>
             <Button
               type="primary"
@@ -467,7 +479,7 @@ export const CreativeImageMaskEditDialogContent: React.FC<
               disabled={busy || !asset || !dimensions || imageFailed}
               onClick={submit}
             >
-              AI 修改
+              {retryLocked ? "安全重试" : "AI 修改"}
             </Button>
           </div>
         </footer>
@@ -485,9 +497,9 @@ const CreativeImageMaskEditDialog: React.FC<
     className={styles.maskModal}
     style={{ width: 980, maxWidth: "calc(100vw - 32px)" }}
     footer={null}
-    maskClosable={!props.busy}
-    escToExit={!props.busy}
-    closable={!props.busy}
+    maskClosable={!props.busy && !props.retryLocked}
+    escToExit={!props.busy && !props.retryLocked}
+    closable={!props.busy && !props.retryLocked}
     unmountOnExit
     getPopupContainer={() =>
       document.getElementById("creative-studio-portal-root") ?? document.body

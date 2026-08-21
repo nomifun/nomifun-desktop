@@ -5,7 +5,14 @@
  */
 
 import { uuidv7 } from '@/common/utils/uuidv7';
-import { Delete, Group, Loading, Refresh, Ungroup } from '@icon-park/react';
+import {
+  CloseOne,
+  Delete,
+  Group,
+  Loading,
+  Refresh,
+  Ungroup,
+} from '@icon-park/react';
 import { Button, Modal, Tooltip } from '@arco-design/web-react';
 import React, {
   useCallback,
@@ -43,10 +50,26 @@ import {
   type CreativeSize,
   type CreativeStudioPanelState,
 } from '../../domain';
+import {
+  useNomiCreativeModelCatalog,
+  type CreativeModelSelectionRef,
+} from '../../models';
 import type { PromptLibrarySelection } from '../../prompts';
 import { useCreativeProject } from '../../services';
-import type { WorkflowDefinitionV1, WorkflowRunAggregateV1 } from '../../workflows/domain';
-import { WorkflowRunModal, type CreativeWorkflowRunnerPort } from '../../workflows/page';
+import type { CreativeTaskReference } from '../../tasks';
+import {
+  exactWorkbenchModelOptions,
+  type CreativeWorkbenchRuntimeSnapshot,
+  type PreparedCreativeWorkbenchRun,
+} from '../../workbenches/runtime';
+import type {
+  WorkflowDefinitionV1,
+  WorkflowRunAggregateV1,
+} from '../../workflows/domain';
+import {
+  WorkflowRunModal,
+  type CreativeWorkflowRunnerPort,
+} from '../../workflows/page';
 import { useCreativeWorkflowRuntime } from '../../workflows/runtime';
 import { creativeWorkflowRepository } from '../../workflows/services';
 import { CreativeCanvasChrome } from '../chrome';
@@ -67,10 +90,7 @@ import {
   type CanvasCasSaveSnapshot,
   type CreativeCanvasEditorHandle,
 } from '../editor';
-import {
-  CanvasMiniMap,
-  type CanvasMiniMapNavigationRequest,
-} from '../graph';
+import { CanvasMiniMap, type CanvasMiniMapNavigationRequest } from '../graph';
 import {
   resolveCanvasContextAction,
   type CanvasContextAction,
@@ -80,7 +100,9 @@ import {
 import {
   CreativeCanvasImageToolbar,
   CreativeImageCropDialog,
+  CreativeImageMaskEditDialog,
   CreativeImageSplitDialog,
+  buildCreativeImageMaskReference,
   createCreativeImageSplitCanvasLayout,
   creativeImageSplitColumns,
   creativeImageSplitNodePosition,
@@ -88,10 +110,13 @@ import {
   cropCreativeImageAsset,
   nextDerivedImagePosition,
   removeUploadedCreativeImageSplit,
+  removeCreativeImageMaskReference,
   splitCreativeImageAsset,
   uploadCreativeImageCrop,
+  uploadCreativeImageMaskReference,
   uploadCreativeImageSplit,
   type CreativeImageCropRect,
+  type CreativeImageMaskEditSubmit,
   type CreativeImageSplitParams,
   type UploadedCreativeImageSplitPiece,
 } from '../imageTools';
@@ -131,6 +156,15 @@ import {
   withCreativeCanvasLeftView,
   withCreativeCanvasRightView,
 } from './productController';
+import CanvasImageMaskEditRuntimeBridge, {
+  canvasImageMaskEditReferenceFromPlan,
+  type CanvasImageMaskEditRuntimeBridgeHandle,
+} from './CanvasImageMaskEditRuntimeBridge';
+import {
+  preferredCanvasImageMaskEditModel,
+  prepareCanvasImageMaskEdit,
+} from './imageMaskEditCanvas';
+import { orphanCanvasImageMaskEditTask } from './imageMaskEditRuntime';
 import { registerCreativeCanvasProductBeforeLeave } from './beforeLeave';
 import styles from './CreativeCanvasProductRoute.module.css';
 
@@ -139,6 +173,15 @@ const INITIAL_SAVE: CanvasCasSaveSnapshot = {
   revision: null,
   hasPendingChanges: false,
   error: null,
+};
+
+const INITIAL_IMAGE_MASK_RUNTIME: CreativeWorkbenchRuntimeSnapshot = {
+  state: 'idle',
+  entries: [],
+  submissionFailures: [],
+  submittingCount: 0,
+  recoveringCount: 0,
+  requestError: null,
 };
 
 const FALLBACK_VIEWPORT_SIZE: CreativeSize = { width: 1, height: 1 };
@@ -169,6 +212,18 @@ interface PendingImageSplit {
   asset: CreativeAsset;
 }
 
+interface PendingImageMaskSubmission {
+  plan: PreparedCreativeWorkbenchRun;
+  reference: CreativeTaskReference;
+  failureOrder: number;
+}
+
+interface PendingImageMaskEdit {
+  nodeId: string;
+  asset: CreativeAsset;
+  submission: PendingImageMaskSubmission | null;
+}
+
 interface AgentDocumentState {
   sessions: readonly CreativeChatSessionReference[];
   activeSessionId: string | null;
@@ -184,8 +239,10 @@ const iconProps = {
 function measuredSize(element: HTMLElement | null): CreativeSize {
   const rect = element?.getBoundingClientRect();
   return {
-    width: rect && Number.isFinite(rect.width) && rect.width > 0 ? rect.width : 1,
-    height: rect && Number.isFinite(rect.height) && rect.height > 0 ? rect.height : 1,
+    width:
+      rect && Number.isFinite(rect.width) && rect.width > 0 ? rect.width : 1,
+    height:
+      rect && Number.isFinite(rect.height) && rect.height > 0 ? rect.height : 1,
   };
 }
 
@@ -250,9 +307,9 @@ const ProductToolbarButton: React.FC<ProductToolbarButtonProps> = ({
   icon,
   onClick,
 }) => (
-  <Tooltip content={label} position='top' mini>
+  <Tooltip content={label} position="top" mini>
     <button
-      type='button'
+      type="button"
       className={styles.toolbarButton}
       data-danger={danger || undefined}
       aria-label={label}
@@ -273,34 +330,114 @@ const SaveRecoveryAction: React.FC<{
 }> = ({ save, busy, notice, onReload, onRetry }) => (
   <>
     {notice ? (
-      <span className={styles.notice} role='status' title={notice}>
+      <span className={styles.notice} role="status" title={notice}>
         {notice}
       </span>
     ) : null}
     {save.status === 'conflict' ? (
       <button
-        type='button'
+        type="button"
         className={styles.recoveryButton}
         disabled={busy}
         onClick={onReload}
       >
-        {busy ? <Loading className={styles.spin} {...iconProps} /> : <Refresh {...iconProps} />}
+        {busy ? (
+          <Loading className={styles.spin} {...iconProps} />
+        ) : (
+          <Refresh {...iconProps} />
+        )}
         重新载入远端
       </button>
     ) : null}
     {save.status === 'error' ? (
       <button
-        type='button'
+        type="button"
         className={styles.recoveryButton}
         disabled={busy}
         onClick={onRetry}
       >
-        {busy ? <Loading className={styles.spin} {...iconProps} /> : <Refresh {...iconProps} />}
+        {busy ? (
+          <Loading className={styles.spin} {...iconProps} />
+        ) : (
+          <Refresh {...iconProps} />
+        )}
         重试保存
       </button>
     ) : null}
   </>
 );
+
+const ImageMaskRuntimeAction: React.FC<{
+  snapshot: CreativeWorkbenchRuntimeSnapshot;
+  busy: boolean;
+  onCancel(taskId: string): void;
+  onRetry(taskId: string): void;
+}> = ({ snapshot, busy, onCancel, onRetry }) => {
+  const requestError = snapshot.entries.find(
+    (entry) => entry.requestError !== null
+  );
+  const active = snapshot.entries.find(
+    (entry) => entry.task.status === 'queued' || entry.task.status === 'running'
+  );
+  if (requestError) {
+    return (
+      <>
+        <span
+          className={styles.notice}
+          role="alert"
+          title={requestError.requestError?.message}
+        >
+          局部编辑同步中断
+        </span>
+        <button
+          type="button"
+          className={styles.recoveryButton}
+          disabled={busy}
+          onClick={() => onRetry(requestError.task.taskId)}
+        >
+          {busy ? (
+            <Loading className={styles.spin} {...iconProps} />
+          ) : (
+            <Refresh {...iconProps} />
+          )}
+          重试任务同步
+        </button>
+      </>
+    );
+  }
+  if (active) {
+    return (
+      <>
+        <span className={styles.notice} role="status">
+          {active.task.status === 'queued'
+            ? '局部编辑等待执行'
+            : '局部编辑生成中'}
+        </span>
+        <button
+          type="button"
+          className={styles.recoveryButton}
+          disabled={busy}
+          onClick={() => onCancel(active.task.taskId)}
+        >
+          {busy ? (
+            <Loading className={styles.spin} {...iconProps} />
+          ) : (
+            <CloseOne {...iconProps} />
+          )}
+          取消任务
+        </button>
+      </>
+    );
+  }
+  if (snapshot.recoveringCount > 0) {
+    return (
+      <span className={styles.notice} role="status">
+        正在恢复局部编辑任务…
+      </span>
+    );
+  }
+  return null;
+};
 
 /**
  * Route-level product composition. CreativeCanvasEditor remains the only
@@ -313,17 +450,26 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const { i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language ?? 'zh-CN';
   const project = useCreativeProject(projectId || null);
+  const modelCatalog = useNomiCreativeModelCatalog();
   const workflowRuntime = useCreativeWorkflowRuntime();
   const workflowAssetPicker = useCreativeAssetPickerDialog();
 
   const editorRef = useRef<CreativeCanvasEditorHandle>(null);
+  const imageMaskRuntimeRef =
+    useRef<CanvasImageMaskEditRuntimeBridgeHandle>(null);
   const agentPanelRef = useRef<CreativeCanvasAgentPanelHandle>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const panelsRef = useRef<CreativeStudioPanelState>(
     structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS)
   );
-  const hydratedPanelsRef = useRef<{ projectId: string; revision: string } | null>(null);
-  const hydratedBackgroundRef = useRef<{ projectId: string; revision: string } | null>(null);
+  const hydratedPanelsRef = useRef<{
+    projectId: string;
+    revision: string;
+  } | null>(null);
+  const hydratedBackgroundRef = useRef<{
+    projectId: string;
+    revision: string;
+  } | null>(null);
   const knownAssetsRef = useRef<ReadonlyMap<string, CreativeAsset>>(new Map());
   const assetImportBusyRef = useRef(false);
   const imageToolBusyRef = useRef(false);
@@ -334,8 +480,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [canvasState, setCanvasState] = useState<CanvasState | null>(null);
   const [save, setSave] = useState<CanvasCasSaveSnapshot>(INITIAL_SAVE);
   const [tool, setTool] = useState<CanvasInteractionTool>('select');
-  const [background, setBackground] = useState<CreativeCanvasBackground>('lines');
-  const [viewportSize, setViewportSize] = useState<CreativeSize>(FALLBACK_VIEWPORT_SIZE);
+  const [background, setBackground] =
+    useState<CreativeCanvasBackground>('lines');
+  const [viewportSize, setViewportSize] = useState<CreativeSize>(
+    FALLBACK_VIEWPORT_SIZE
+  );
   const [miniMapOpen, setMiniMapOpen] = useState(false);
   const [miniMapDragging, setMiniMapDragging] = useState(false);
   const [panels, setPanels] = useState<CreativeStudioPanelState>(() =>
@@ -346,27 +495,58 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [assetSearch, setAssetSearch] = useState('');
-  const [assetKind, setAssetKind] = useState<CreativeCanvasAssetKindFilter>('all');
-  const [selectedAssetIds, setSelectedAssetIds] = useState<ReadonlySet<string>>(new Set());
+  const [assetKind, setAssetKind] =
+    useState<CreativeCanvasAssetKindFilter>('all');
+  const [selectedAssetIds, setSelectedAssetIds] = useState<ReadonlySet<string>>(
+    new Set()
+  );
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
-  const [contextMenu, setContextMenu] = useState<CreativeCanvasContextMenuState | null>(null);
-  const [createNodeMenu, setCreateNodeMenu] = useState<ProductCreateNodeMenuState | null>(null);
-  const [pendingPanoramaChoice, setPendingPanoramaChoice] = useState<PendingPanoramaChoice | null>(null);
+  const [contextMenu, setContextMenu] =
+    useState<CreativeCanvasContextMenuState | null>(null);
+  const [createNodeMenu, setCreateNodeMenu] =
+    useState<ProductCreateNodeMenuState | null>(null);
+  const [pendingPanoramaChoice, setPendingPanoramaChoice] =
+    useState<PendingPanoramaChoice | null>(null);
   const [assetImportBusy, setAssetImportBusy] = useState(false);
-  const [pendingImageCrop, setPendingImageCrop] = useState<PendingImageCrop | null>(null);
+  const [pendingImageCrop, setPendingImageCrop] =
+    useState<PendingImageCrop | null>(null);
   const [imageCropBusy, setImageCropBusy] = useState(false);
-  const [imageCropProgress, setImageCropProgress] = useState<number | null>(null);
+  const [imageCropProgress, setImageCropProgress] = useState<number | null>(
+    null
+  );
   const [imageCropError, setImageCropError] = useState<string | null>(null);
-  const [pendingImageSplit, setPendingImageSplit] = useState<PendingImageSplit | null>(null);
+  const [pendingImageSplit, setPendingImageSplit] =
+    useState<PendingImageSplit | null>(null);
   const [imageSplitBusy, setImageSplitBusy] = useState(false);
-  const [imageSplitProgress, setImageSplitProgress] = useState<number | null>(null);
+  const [imageSplitProgress, setImageSplitProgress] = useState<number | null>(
+    null
+  );
   const [imageSplitError, setImageSplitError] = useState<string | null>(null);
-  const [agentDocumentState, setAgentDocumentState] = useState<AgentDocumentState | null>(null);
+  const [pendingImageMaskEdit, setPendingImageMaskEdit] =
+    useState<PendingImageMaskEdit | null>(null);
+  const [imageMaskModel, setImageMaskModel] =
+    useState<CreativeModelSelectionRef | null>(null);
+  const [imageMaskBusy, setImageMaskBusy] = useState(false);
+  const [imageMaskProgress, setImageMaskProgress] = useState<number | null>(
+    null
+  );
+  const [imageMaskError, setImageMaskError] = useState<string | null>(null);
+  const [imageMaskRuntime, setImageMaskRuntime] =
+    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_IMAGE_MASK_RUNTIME);
+  const [imageMaskRuntimeReady, setImageMaskRuntimeReady] = useState(false);
+  const [imageMaskRuntimeEpoch, setImageMaskRuntimeEpoch] = useState(0);
+  const [imageMaskRuntimeActionBusy, setImageMaskRuntimeActionBusy] =
+    useState(false);
+  const [agentDocumentState, setAgentDocumentState] =
+    useState<AgentDocumentState | null>(null);
   const [workflows, setWorkflows] = useState<WorkflowDefinitionV1[]>([]);
   const [workflowLoading, setWorkflowLoading] = useState(false);
   const [workflowError, setWorkflowError] = useState<string | null>(null);
-  const [workflowToRun, setWorkflowToRun] = useState<WorkflowDefinitionV1 | null>(null);
-  const [workflowInsertingRunId, setWorkflowInsertingRunId] = useState<string | null>(null);
+  const [workflowToRun, setWorkflowToRun] =
+    useState<WorkflowDefinitionV1 | null>(null);
+  const [workflowInsertingRunId, setWorkflowInsertingRunId] = useState<
+    string | null
+  >(null);
 
   const loadWorkflows = useCallback(async () => {
     const request = ++workflowRequestRef.current;
@@ -376,7 +556,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
       const loaded = await creativeWorkflowRepository.list();
       if (request !== workflowRequestRef.current) return;
       setWorkflows(
-        [...loaded].sort((left, right) => right.metadata.updatedAt - left.metadata.updatedAt)
+        [...loaded].sort(
+          (left, right) => right.metadata.updatedAt - left.metadata.updatedAt
+        )
       );
     } catch (error) {
       if (request !== workflowRequestRef.current) return;
@@ -401,7 +583,14 @@ const CreativeCanvasProductRoute: React.FC = () => {
     }),
     [assetKind, assetSearch]
   );
-  const assets = useCreativeAssets({ enabled: Boolean(projectId), query: assetQuery });
+  const assets = useCreativeAssets({
+    enabled: Boolean(projectId),
+    query: assetQuery,
+  });
+  const imageMaskModelOptions = useMemo(
+    () => exactWorkbenchModelOptions(modelCatalog, 'image_edit'),
+    [modelCatalog]
+  );
 
   const knownAssetsById = useMemo(() => {
     const merged = new Map(knownAssetsRef.current);
@@ -445,6 +634,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setImageSplitBusy(false);
     setImageSplitProgress(null);
     setImageSplitError(null);
+    setPendingImageMaskEdit(null);
+    setImageMaskModel(null);
+    setImageMaskBusy(false);
+    setImageMaskProgress(null);
+    setImageMaskError(null);
+    setImageMaskRuntime(INITIAL_IMAGE_MASK_RUNTIME);
+    setImageMaskRuntimeReady(false);
+    setImageMaskRuntimeEpoch(0);
+    setImageMaskRuntimeActionBusy(false);
     setAgentDocumentState(null);
     assetImportBusyRef.current = false;
     imageToolBusyRef.current = false;
@@ -453,6 +651,29 @@ const CreativeCanvasProductRoute: React.FC = () => {
       imageToolAbortRef.current?.abort();
     };
   }, [projectId]);
+
+  useEffect(() => {
+    if (imageMaskRuntimeReady) return;
+    const detail = project.detail;
+    if (!detail || detail.project.projectId !== projectId || !canvasState)
+      return;
+    const currentNodeIds = new Set(
+      canvasState.document.nodes.map((node) => node.id)
+    );
+    if (detail.document.nodes.every((node) => currentNodeIds.has(node.id))) {
+      setImageMaskRuntimeReady(true);
+    }
+  }, [canvasState, imageMaskRuntimeReady, project.detail, projectId]);
+
+  useEffect(() => {
+    if (!imageMaskModel || pendingImageMaskEdit?.submission) return;
+    const available = imageMaskModelOptions.some(
+      (option) =>
+        option.providerId === imageMaskModel.providerId &&
+        option.model === imageMaskModel.model
+    );
+    if (!available) setImageMaskModel(null);
+  }, [imageMaskModel, imageMaskModelOptions, pendingImageMaskEdit?.submission]);
 
   useEffect(() => {
     const detail = project.detail;
@@ -487,9 +708,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
     };
   }, [project.detail, projectId, save.status]);
 
-  const dispatch = useCallback((command: Parameters<CreativeCanvasEditorHandle['dispatch']>[0]) => {
-    return editorRef.current?.dispatch(command) ?? null;
-  }, []);
+  const dispatch = useCallback(
+    (command: Parameters<CreativeCanvasEditorHandle['dispatch']>[0]) => {
+      return editorRef.current?.dispatch(command) ?? null;
+    },
+    []
+  );
 
   const persistPanels = useCallback((nextPanels: CreativeStudioPanelState) => {
     panelsRef.current = nextPanels;
@@ -524,9 +748,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
       if (!editor || save.revision === null) return;
       const state = editor.getState();
       if (kind === 'director') {
-        const directors = state.document.nodes.filter((node) => node.type === 'director');
+        const directors = state.document.nodes.filter(
+          (node) => node.type === 'director'
+        );
         if (directors.length > 0) {
-          editor.dispatch(canvasCommands.setSelection(directors.map((node) => node.id)));
+          editor.dispatch(
+            canvasCommands.setSelection(directors.map((node) => node.id))
+          );
           handleBottomViewChange('timeline');
           setNotice(
             directors.length === 1
@@ -552,32 +780,42 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [handleBottomViewChange, save.revision]
   );
 
-  const handleBackgroundChange = useCallback((next: CreativeCanvasBackground) => {
-    setBackground(next);
-    editorRef.current?.setBackground(next);
-  }, []);
+  const handleBackgroundChange = useCallback(
+    (next: CreativeCanvasBackground) => {
+      setBackground(next);
+      editorRef.current?.setBackground(next);
+    },
+    []
+  );
 
   const handleFit = useCallback(() => {
     const editor = editorRef.current;
     if (!editor) return;
     editor.dispatch(
       canvasCommands.setViewport(
-        fitCanvasViewport(editor.getState(), measuredSize(canvasHostRef.current))
+        fitCanvasViewport(
+          editor.getState(),
+          measuredSize(canvasHostRef.current)
+        )
       )
     );
   }, []);
 
-  const handleMiniMapNavigate = useCallback((request: CanvasMiniMapNavigationRequest) => {
-    setMiniMapDragging(request.phase !== 'end');
-    editorRef.current?.dispatch(canvasCommands.setViewport(request.viewport));
-  }, []);
+  const handleMiniMapNavigate = useCallback(
+    (request: CanvasMiniMapNavigationRequest) => {
+      setMiniMapDragging(request.phase !== 'end');
+      editorRef.current?.dispatch(canvasCommands.setViewport(request.viewport));
+    },
+    []
+  );
 
   const flushBeforeLeave = useCallback(async (): Promise<boolean> => {
     if (imageToolBusyRef.current) {
       setNotice('图片工具仍在处理，请等待完成后再离开。');
       return false;
     }
-    if (!(await agentPanelRef.current?.prepareToLeave() ?? true)) return false;
+    if (!((await agentPanelRef.current?.prepareToLeave()) ?? true))
+      return false;
     const editor = editorRef.current;
     if (!editor) return true;
     return canLeaveCreativeCanvasAfterFlush(await editor.flush());
@@ -631,13 +869,19 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, []);
 
   const openCreateNodeMenu = useCallback(
-    (worldPosition: CanvasPoint, connection: ConnectionCreateNodeIntent | null = null) => {
+    (
+      worldPosition: CanvasPoint,
+      connection: ConnectionCreateNodeIntent | null = null
+    ) => {
       const editor = editorRef.current;
       if (!editor) return;
       setContextMenu(null);
       setCreateNodeMenu({
         worldPosition: { ...worldPosition },
-        clientPosition: canvasToClient(worldPosition, editor.getState().viewport),
+        clientPosition: canvasToClient(
+          worldPosition,
+          editor.getState().viewport
+        ),
         connection,
       });
     },
@@ -673,9 +917,14 @@ const CreativeCanvasProductRoute: React.FC = () => {
             measuredSize(canvasHostRef.current),
             { position }
           );
-      knownAssetsRef.current = new Map(knownAssetsRef.current).set(asset.id, asset);
+      knownAssetsRef.current = new Map(knownAssetsRef.current).set(
+        asset.id,
+        asset
+      );
       editor.dispatch(canvasCommands.addNode(node));
-      setNotice(`已将“${asset.title}”插入为${asPanorama ? '全景图' : '素材'}节点。`);
+      setNotice(
+        `已将“${asset.title}”插入为${asPanorama ? '全景图' : '素材'}节点。`
+      );
       void assets.reload();
     },
     [assets]
@@ -699,10 +948,17 @@ const CreativeCanvasProductRoute: React.FC = () => {
           file,
           { title: file.name, inLibrary: true, tags: ['canvas-import'] },
           undefined,
-          (progress) => setNotice(`正在上传“${file.name}” ${Math.round(progress)}%`)
+          (progress) =>
+            setNotice(`正在上传“${file.name}” ${Math.round(progress)}%`)
         );
-        if (panoramaChoice === 'after-upload-if-2-to-1' && isTwoToOneImage(asset)) {
-          setPendingPanoramaChoice({ asset, worldPosition: { ...worldPosition } });
+        if (
+          panoramaChoice === 'after-upload-if-2-to-1' &&
+          isTwoToOneImage(asset)
+        ) {
+          setPendingPanoramaChoice({
+            asset,
+            worldPosition: { ...worldPosition },
+          });
           setNotice('检测到真实 2:1 图片，请选择普通图片或全景图节点。');
           return;
         }
@@ -726,7 +982,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
       if (asset.kind !== 'image') {
         throw new Error('该节点关联的素材不是图片，已停止图片操作。');
       }
-      knownAssetsRef.current = new Map(knownAssetsRef.current).set(asset.id, asset);
+      knownAssetsRef.current = new Map(knownAssetsRef.current).set(
+        asset.id,
+        asset
+      );
       return asset;
     },
     []
@@ -841,7 +1100,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
             node.id === request.nodeId && node.type === 'image'
         );
         if (!source || source.data.assetId !== request.asset.id) {
-          throw new Error('原图片节点已被删除或替换；裁剪素材已保存在素材库中。');
+          throw new Error(
+            '原图片节点已被删除或替换；裁剪素材已保存在素材库中。'
+          );
         }
 
         const position = nextDerivedImagePosition(
@@ -910,7 +1171,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
           controller.signal.aborted ||
           (error instanceof Error && error.name === 'AbortError');
         if (!aborted && activeProjectIdRef.current === projectId) {
-          const message = error instanceof Error ? error.message : String(error);
+          const message =
+            error instanceof Error ? error.message : String(error);
           if (uploadedAsset) {
             setPendingImageCrop(null);
             setImageCropProgress(null);
@@ -955,7 +1217,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
       setImageSplitBusy(true);
       setImageSplitProgress(0);
       setImageSplitError(null);
-      let uploadedPieces: readonly UploadedCreativeImageSplitPiece[] | null = null;
+      let uploadedPieces: readonly UploadedCreativeImageSplitPiece[] | null =
+        null;
       let canvasMutated = false;
 
       try {
@@ -995,7 +1258,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
           rows,
           columns
         );
-        const derivedNodes: Extract<CreativeCanvasNode, { type: 'image' }>[] = [];
+        const derivedNodes: Extract<CreativeCanvasNode, { type: 'image' }>[] =
+          [];
         let factoryState = current;
         for (const piece of uploaded) {
           const derived = creativeNodeFromAsset(
@@ -1003,7 +1267,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
             factoryState,
             measuredSize(canvasHostRef.current),
             {
-              position: creativeImageSplitNodePosition(layout, piece.row, piece.column),
+              position: creativeImageSplitNodePosition(
+                layout,
+                piece.row,
+                piece.column
+              ),
               size: layout.cellSize,
             }
           );
@@ -1037,7 +1305,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
         }
 
         const nextAssets = new Map(knownAssetsRef.current);
-        for (const piece of uploaded) nextAssets.set(piece.asset.id, piece.asset);
+        for (const piece of uploaded)
+          nextAssets.set(piece.asset.id, piece.asset);
         knownAssetsRef.current = nextAssets;
 
         const at = Date.now();
@@ -1056,7 +1325,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
             })
           );
         }
-        editor.dispatch(canvasCommands.setSelection(derivedNodes.map((node) => node.id)));
+        editor.dispatch(
+          canvasCommands.setSelection(derivedNodes.map((node) => node.id))
+        );
         setPendingImageSplit(null);
         setImageSplitProgress(null);
         void assets.reload();
@@ -1078,10 +1349,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
         let message = error instanceof Error ? error.message : String(error);
         if (uploadedPieces && !canvasMutated) {
           try {
-            await removeUploadedCreativeImageSplit(creativeAssetClient, uploadedPieces);
+            await removeUploadedCreativeImageSplit(
+              creativeAssetClient,
+              uploadedPieces
+            );
           } catch (cleanupError) {
             const cleanupMessage =
-              cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+              cleanupError instanceof Error
+                ? cleanupError.message
+                : String(cleanupError);
             message = `${message}；${cleanupMessage}`;
           }
           void assets.reload();
@@ -1106,26 +1382,357 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [assets, pendingImageSplit, projectId]
   );
 
-  const insertClipboardText = useCallback((text: string, worldPosition: CanvasPoint) => {
+  const handleOpenImageMaskEdit = useCallback(
+    async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
+      const runtime = imageMaskRuntimeRef.current?.snapshot();
+      const runtimeBlocked =
+        !imageMaskRuntimeReady ||
+        !runtime ||
+        runtime.submittingCount > 0 ||
+        runtime.recoveringCount > 0 ||
+        runtime.submissionFailures.length > 0 ||
+        runtime.requestError !== null ||
+        runtime.entries.some(
+          (entry) =>
+            entry.task.status === 'queued' || entry.task.status === 'running'
+        );
+      if (
+        imageToolBusyRef.current ||
+        assetImportBusyRef.current ||
+        runtimeBlocked
+      ) {
+        setNotice(
+          runtimeBlocked
+            ? '已有局部编辑任务正在运行、恢复或等待确认，请先处理该任务。'
+            : '已有图片或素材操作正在进行，请等待完成。'
+        );
+        return;
+      }
+      setImageMaskError(null);
+      try {
+        const asset = await resolveCanvasImageAsset(node);
+        if (activeProjectIdRef.current !== projectId) return;
+        setImageMaskProgress(null);
+        setImageMaskModel((previous) =>
+          preferredCanvasImageMaskEditModel(
+            imageMaskModelOptions,
+            previous,
+            asset
+          )
+        );
+        setPendingImageMaskEdit({ nodeId: node.id, asset, submission: null });
+      } catch (error) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setNotice(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [
+      imageMaskModelOptions,
+      imageMaskRuntimeReady,
+      projectId,
+      resolveCanvasImageAsset,
+    ]
+  );
+
+  const closeImageMaskEdit = useCallback(() => {
+    if (imageToolBusyRef.current || pendingImageMaskEdit?.submission) return;
+    setPendingImageMaskEdit(null);
+    setImageMaskProgress(null);
+    setImageMaskError(null);
+  }, [pendingImageMaskEdit?.submission]);
+
+  const applyImageMaskAdmission = useCallback(
+    (
+      result: Awaited<
+        ReturnType<CanvasImageMaskEditRuntimeBridgeHandle['submit']>
+      >,
+      plan: PreparedCreativeWorkbenchRun
+    ) => {
+      if (result.kind === 'admitted') {
+        setPendingImageMaskEdit(null);
+        setImageMaskProgress(null);
+        setImageMaskError(null);
+        setNotice('局部编辑任务已安全提交；配置节点会持续显示真实后端状态。');
+        return;
+      }
+      setPendingImageMaskEdit((current) =>
+        current
+          ? {
+              ...current,
+              submission: {
+                plan,
+                reference: canvasImageMaskEditReferenceFromPlan(plan),
+                failureOrder: result.order,
+              },
+            }
+          : current
+      );
+      setImageMaskError(
+        `任务提交结果尚未确认：${result.error.message}。请安全重试同一任务，或确认服务器不存在后放弃。`
+      );
+    },
+    []
+  );
+
+  const handleConfirmImageMaskEdit = useCallback(
+    async (input: CreativeImageMaskEditSubmit) => {
+      const request = pendingImageMaskEdit;
+      const editor = editorRef.current;
+      const runtime = imageMaskRuntimeRef.current;
+      if (!request || !editor || !runtime || imageToolBusyRef.current) return;
+
+      imageToolBusyRef.current = true;
+      setImageMaskBusy(true);
+      setImageMaskError(null);
+
+      if (request.submission) {
+        try {
+          const result = await runtime.retrySubmission(
+            request.submission.failureOrder,
+            request.submission.plan.input.idempotencyKey
+          );
+          applyImageMaskAdmission(result, request.submission.plan);
+        } catch (error) {
+          setImageMaskError(
+            error instanceof Error ? error.message : String(error)
+          );
+        } finally {
+          imageToolBusyRef.current = false;
+          setImageMaskBusy(false);
+        }
+        return;
+      }
+
+      if (assetImportBusyRef.current) {
+        imageToolBusyRef.current = false;
+        setImageMaskBusy(false);
+        setImageMaskError('另一个素材上传仍在进行，请等待完成后重试。');
+        return;
+      }
+
+      const controller = new AbortController();
+      imageToolAbortRef.current = controller;
+      setImageMaskProgress(0);
+      let uploadedReference: CreativeAsset | null = null;
+      let prepared: ReturnType<typeof prepareCanvasImageMaskEdit> | null = null;
+      let canvasOwned = false;
+
+      try {
+        const marked = await buildCreativeImageMaskReference({
+          asset: request.asset,
+          selection: input.selection,
+          signal: controller.signal,
+        });
+        const uploaded = await uploadCreativeImageMaskReference({
+          port: creativeAssetClient,
+          source: request.asset,
+          file: marked.file,
+          operationId: uuidv7(),
+          signal: controller.signal,
+          onProgress: setImageMaskProgress,
+        });
+        uploadedReference = uploaded.asset;
+        controller.signal.throwIfAborted();
+        if (activeProjectIdRef.current !== projectId) {
+          throw new DOMException('Project changed', 'AbortError');
+        }
+
+        const current = editor.getState();
+        const source = current.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
+            node.id === request.nodeId && node.type === 'image'
+        );
+        if (!source || source.data.assetId !== request.asset.id) {
+          throw new Error('原图片节点已被删除或替换，未创建局部编辑任务。');
+        }
+        prepared = prepareCanvasImageMaskEdit({
+          projectId,
+          state: current,
+          viewportSize: measuredSize(canvasHostRef.current),
+          sourceNode: source,
+          sourceAsset: request.asset,
+          markedReference: uploaded.asset,
+          referenceDimensions: { width: marked.width, height: marked.height },
+          catalog: modelCatalog,
+          model: input.model,
+          userPrompt: input.prompt,
+        });
+
+        const at = Date.now();
+        const mergeKey = `image-mask-edit:${source.id}:${prepared.plan.input.idempotencyKey}`;
+        editor.dispatch(
+          canvasCommands.addNode(prepared.configNode, { at, mergeKey })
+        );
+        editor.dispatch(
+          canvasCommands.connect(source.id, prepared.configNode.id, {
+            sourceHandle: prepared.connection.sourceHandle,
+            targetHandle: prepared.connection.targetHandle,
+            at,
+            mergeKey,
+          })
+        );
+        editor.dispatch(canvasCommands.setSelection([prepared.configNode.id]));
+        canvasOwned = true;
+
+        const result = await runtime.submit(prepared.plan);
+        applyImageMaskAdmission(result, prepared.plan);
+        if (uploaded.recoveredAfterResponseLoss && result.kind === 'admitted') {
+          setNotice('上传响应中断后已找回标记参考图，并安全提交局部编辑任务。');
+        }
+      } catch (error) {
+        const aborted =
+          controller.signal.aborted ||
+          (error instanceof Error && error.name === 'AbortError');
+        let message = error instanceof Error ? error.message : String(error);
+        if (uploadedReference && !canvasOwned) {
+          try {
+            await removeCreativeImageMaskReference(
+              creativeAssetClient,
+              uploadedReference
+            );
+          } catch (cleanupError) {
+            const cleanupMessage =
+              cleanupError instanceof Error
+                ? cleanupError.message
+                : String(cleanupError);
+            message = `${message}；${cleanupMessage}`;
+          }
+        }
+        if (canvasOwned && prepared && !aborted) {
+          try {
+            // Once the config exists, an unclassified transport outcome must
+            // remain recoverable. A later mount will resolve the exact key or
+            // clean only an authoritative 404.
+            await editor.addPendingTask(prepared.plan.input.idempotencyKey);
+            void runtime
+              .recoverTask(canvasImageMaskEditReferenceFromPlan(prepared.plan))
+              .catch((recoveryError) =>
+                setNotice(
+                  recoveryError instanceof Error
+                    ? recoveryError.message
+                    : String(recoveryError)
+                )
+              );
+          } catch (saveError) {
+            message = `${message}；${
+              saveError instanceof Error ? saveError.message : String(saveError)
+            }`;
+          }
+        }
+        if (!aborted && activeProjectIdRef.current === projectId) {
+          if (canvasOwned) {
+            setPendingImageMaskEdit(null);
+            setImageMaskProgress(null);
+            setNotice(`任务接收状态未确认，已保留同一任务恢复标记：${message}`);
+          } else {
+            setImageMaskError(message);
+          }
+        }
+      } finally {
+        if (imageToolAbortRef.current === controller)
+          imageToolAbortRef.current = null;
+        imageToolBusyRef.current = false;
+        setImageMaskBusy(false);
+      }
+    },
+    [applyImageMaskAdmission, modelCatalog, pendingImageMaskEdit, projectId]
+  );
+
+  const abandonImageMaskSubmission = useCallback(async () => {
+    const request = pendingImageMaskEdit;
+    const runtime = imageMaskRuntimeRef.current;
     const editor = editorRef.current;
-    const normalized = text.trim();
-    if (!editor || !normalized) return false;
-    const state = editor.getState();
-    const node = createCreativeCanvasProductNode(
-      'text',
-      state,
-      measuredSize(canvasHostRef.current),
-      { position: centeredNodePosition('text', worldPosition) }
-    );
-    editor.dispatch(
-      canvasCommands.addNode({
-        ...node,
-        data: { ...node.data, text: normalized },
-      })
-    );
-    setNotice('已从真实系统剪贴板插入文本。');
-    return true;
-  }, []);
+    if (!request?.submission || !runtime || !editor || imageToolBusyRef.current)
+      return;
+    imageToolBusyRef.current = true;
+    setImageMaskBusy(true);
+    setImageMaskError(null);
+    try {
+      const exists = await runtime.taskExists(request.submission.reference);
+      if (exists) {
+        const result = await runtime.retrySubmission(
+          request.submission.failureOrder,
+          request.submission.plan.input.idempotencyKey
+        );
+        applyImageMaskAdmission(result, request.submission.plan);
+        if (result.kind === 'admitted') {
+          setNotice('服务器已存在该任务，已安全恢复而未重复创建。');
+        }
+        return;
+      }
+      await orphanCanvasImageMaskEditTask({
+        editor,
+        projectId,
+        reference: request.submission.reference,
+      });
+      setImageMaskRuntimeEpoch((value) => value + 1);
+      setImageMaskRuntime(INITIAL_IMAGE_MASK_RUNTIME);
+      setPendingImageMaskEdit(null);
+      setImageMaskProgress(null);
+      setNotice('已确认服务器不存在该任务；配置节点记录为失败并清理恢复标记。');
+    } catch (error) {
+      setImageMaskError(error instanceof Error ? error.message : String(error));
+    } finally {
+      imageToolBusyRef.current = false;
+      setImageMaskBusy(false);
+    }
+  }, [applyImageMaskAdmission, pendingImageMaskEdit, projectId]);
+
+  const retryImageMaskRuntimeTask = useCallback(
+    async (taskId: string) => {
+      const runtime = imageMaskRuntimeRef.current;
+      if (!runtime || imageMaskRuntimeActionBusy) return;
+      setImageMaskRuntimeActionBusy(true);
+      try {
+        await runtime.retryTask(taskId);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        setImageMaskRuntimeActionBusy(false);
+      }
+    },
+    [imageMaskRuntimeActionBusy]
+  );
+
+  const cancelImageMaskRuntimeTask = useCallback(
+    async (taskId: string) => {
+      const runtime = imageMaskRuntimeRef.current;
+      if (!runtime || imageMaskRuntimeActionBusy) return;
+      setImageMaskRuntimeActionBusy(true);
+      try {
+        await runtime.cancelTask(taskId);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        setImageMaskRuntimeActionBusy(false);
+      }
+    },
+    [imageMaskRuntimeActionBusy]
+  );
+
+  const insertClipboardText = useCallback(
+    (text: string, worldPosition: CanvasPoint) => {
+      const editor = editorRef.current;
+      const normalized = text.trim();
+      if (!editor || !normalized) return false;
+      const state = editor.getState();
+      const node = createCreativeCanvasProductNode(
+        'text',
+        state,
+        measuredSize(canvasHostRef.current),
+        { position: centeredNodePosition('text', worldPosition) }
+      );
+      editor.dispatch(
+        canvasCommands.addNode({
+          ...node,
+          data: { ...node.data, text: normalized },
+        })
+      );
+      setNotice('已从真实系统剪贴板插入文本。');
+      return true;
+    },
+    []
+  );
 
   const readSystemClipboard = useCallback(
     async (worldPosition: CanvasPoint) => {
@@ -1187,7 +1794,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
         return;
       }
       if (directors.length > 1) {
-        editor.dispatch(canvasCommands.setSelection(directors.map((node) => node.id)));
+        editor.dispatch(
+          canvasCommands.setSelection(directors.map((node) => node.id))
+        );
         setNotice('项目存在多个导演节点。请只保留一个，再进入 3D 导演台。');
         return;
       }
@@ -1201,7 +1810,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
         navigate(creativeStudioDirectorProjectPath(projectId));
       }
     },
-    [flushBeforeLeave, handleBottomViewChange, navigate, projectId, save.revision]
+    [
+      flushBeforeLeave,
+      handleBottomViewChange,
+      navigate,
+      projectId,
+      save.revision,
+    ]
   );
 
   const handleIntegrationIntent = useCallback(
@@ -1211,13 +1826,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
           dismissInteractionOverlays();
           return;
         case 'context-menu/open': {
-          const nodeId = intent.target.kind === 'node' ? intent.target.nodeId : null;
-          const node =
-            nodeId
-              ? editorRef.current?.getState().document.nodes.find(
-                  (candidate) => candidate.id === nodeId
-                )
-              : null;
+          const nodeId =
+            intent.target.kind === 'node' ? intent.target.nodeId : null;
+          const node = nodeId
+            ? editorRef.current
+                ?.getState()
+                .document.nodes.find((candidate) => candidate.id === nodeId)
+            : null;
           setCreateNodeMenu(null);
           setContextMenu({
             target: intent.target,
@@ -1245,7 +1860,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
             await handleOpenDirector(intent.nodeId);
             return;
           }
-          persistPanels(withCreativeCanvasRightView(panelsRef.current, 'properties'));
+          persistPanels(
+            withCreativeCanvasRightView(panelsRef.current, 'properties')
+          );
           setNotice('已在属性面板打开所选节点。');
           return;
         case 'system-clipboard/read': {
@@ -1261,7 +1878,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
           return;
         }
         case 'asset/import-file':
-          await importCanvasFile(intent.file, intent.worldPosition, intent.panoramaChoice);
+          await importCanvasFile(
+            intent.file,
+            intent.worldPosition,
+            intent.panoramaChoice
+          );
           return;
         case 'asset/import-feedback': {
           const first = intent.rejected[0];
@@ -1294,10 +1915,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
       const editor = editorRef.current;
       const menu = contextMenu;
       if (!editor || !menu) return;
-      const resolution = resolveCanvasContextAction(editor.getState(), menu.target, action);
+      const resolution = resolveCanvasContextAction(
+        editor.getState(),
+        menu.target,
+        action
+      );
       dismissInteractionOverlays();
       for (const command of resolution.commands) editor.dispatch(command);
-      for (const intent of resolution.intents) await handleIntegrationIntent(intent);
+      for (const intent of resolution.intents)
+        await handleIntegrationIntent(intent);
     },
     [contextMenu, dismissInteractionOverlays, handleIntegrationIntent]
   );
@@ -1332,7 +1958,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
           ? state.document.nodes.filter((node) => node.type === 'director')
           : [];
       if (directors.length > 1) {
-        editor.dispatch(canvasCommands.setSelection(directors.map((node) => node.id)));
+        editor.dispatch(
+          canvasCommands.setSelection(directors.map((node) => node.id))
+        );
         handleBottomViewChange('timeline');
         setNotice('项目存在多个导演节点，请先处理冲突，未创建新的导演节点。');
         dismissInteractionOverlays();
@@ -1368,7 +1996,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
           targetNodeId,
         });
         if (!validation.ok) {
-          setNotice(`无法创建连接：${connectionErrorMessage(validation.code)}。`);
+          setNotice(
+            `无法创建连接：${connectionErrorMessage(validation.code)}。`
+          );
           return;
         }
 
@@ -1507,42 +2137,48 @@ const CreativeCanvasProductRoute: React.FC = () => {
     });
   }, []);
 
-  const handleInsertAssets = useCallback((selectedAssets: readonly CreativeAsset[]) => {
-    const editor = editorRef.current;
-    if (!editor) return;
-    let state = editor.getState();
-    let inserted = 0;
-    const errors: string[] = [];
-    for (const asset of selectedAssets) {
-      try {
-        const node = creativeNodeFromAsset(
-          asset,
-          state,
-          measuredSize(canvasHostRef.current),
-          { cascadeIndex: state.document.nodes.length }
-        );
-        state = editor.dispatch(canvasCommands.addNode(node));
-        inserted += 1;
-      } catch (error) {
-        errors.push(error instanceof Error ? error.message : String(error));
+  const handleInsertAssets = useCallback(
+    (selectedAssets: readonly CreativeAsset[]) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      let state = editor.getState();
+      let inserted = 0;
+      const errors: string[] = [];
+      for (const asset of selectedAssets) {
+        try {
+          const node = creativeNodeFromAsset(
+            asset,
+            state,
+            measuredSize(canvasHostRef.current),
+            { cascadeIndex: state.document.nodes.length }
+          );
+          state = editor.dispatch(canvasCommands.addNode(node));
+          inserted += 1;
+        } catch (error) {
+          errors.push(error instanceof Error ? error.message : String(error));
+        }
       }
-    }
-    setSelectedAssetIds(new Set());
-    setNotice(
-      errors.length > 0
-        ? `${inserted} 项已插入；${errors.length} 项未插入：${errors[0]}`
-        : `${inserted} 项素材已插入画布。`
-    );
-  }, []);
+      setSelectedAssetIds(new Set());
+      setNotice(
+        errors.length > 0
+          ? `${inserted} 项已插入；${errors.length} 项未插入：${errors[0]}`
+          : `${inserted} 项素材已插入画布。`
+      );
+    },
+    []
+  );
 
   const handleInsertWorkflowResults = useCallback(
     async (run: WorkflowRunAggregateV1) => {
-      if (workflowInsertingRunId || run.record.resultAssetIds.length === 0) return;
+      if (workflowInsertingRunId || run.record.resultAssetIds.length === 0)
+        return;
       setWorkflowInsertingRunId(run.request.id);
       setNotice('正在解析工作流的真实结果素材…');
       try {
         const resolved = await Promise.all(
-          run.record.resultAssetIds.map((assetId) => creativeAssetClient.get(assetId))
+          run.record.resultAssetIds.map((assetId) =>
+            creativeAssetClient.get(assetId)
+          )
         );
         const known = new Map(knownAssetsRef.current);
         for (const asset of resolved) known.set(asset.id, asset);
@@ -1558,29 +2194,43 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [assets, handleInsertAssets, workflowInsertingRunId]
   );
 
-  const handleInsertPrompt = useCallback((selection: PromptLibrarySelection) => {
-    const editor = editorRef.current;
-    if (!editor) return;
-    const state = editor.getState();
-    editor.dispatch(
-      canvasCommands.addNode(
-        creativeTextNodeFromPrompt(
-          selection,
-          state,
-          measuredSize(canvasHostRef.current)
+  const handleInsertPrompt = useCallback(
+    (selection: PromptLibrarySelection) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      const state = editor.getState();
+      editor.dispatch(
+        canvasCommands.addNode(
+          creativeTextNodeFromPrompt(
+            selection,
+            state,
+            measuredSize(canvasHostRef.current)
+          )
         )
-      )
-    );
-    setSelectedPromptId(selection.id);
-    setNotice(`已将“${selection.title}”插入为文本节点。`);
-  }, []);
+      );
+      setSelectedPromptId(selection.id);
+      setNotice(`已将“${selection.title}”插入为文本节点。`);
+    },
+    []
+  );
 
   const selection = useMemo(
     () => creativeCanvasProductSelectionCapabilities(canvasState),
     [canvasState]
   );
   const productDisabled = save.revision === null;
-  const projectTitle = project.detail?.project.title ?? (project.isLoading ? '正在载入项目…' : '画布项目');
+  const imageMaskRuntimeBlocksNew =
+    imageMaskRuntime.submittingCount > 0 ||
+    imageMaskRuntime.recoveringCount > 0 ||
+    imageMaskRuntime.submissionFailures.length > 0 ||
+    imageMaskRuntime.requestError !== null ||
+    imageMaskRuntime.entries.some(
+      (entry) =>
+        entry.task.status === 'queued' || entry.task.status === 'running'
+    );
+  const projectTitle =
+    project.detail?.project.title ??
+    (project.isLoading ? '正在载入项目…' : '画布项目');
   const saveMessage = save.error?.message ?? undefined;
   const compact = viewportSize.width < 760;
   const panelViews = creativeCanvasProductPanelViews(panels);
@@ -1599,9 +2249,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
     />
   ) : (
     <CreativeCanvasUnavailablePanel
-      kind='generic'
-      title='正在载入画布结构'
-      description='等待项目文档通过 canonical v1 校验。'
+      kind="generic"
+      title="正在载入画布结构"
+      description="等待项目文档通过 canonical v1 校验。"
     />
   );
 
@@ -1613,9 +2263,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
     />
   ) : (
     <CreativeCanvasUnavailablePanel
-      kind='generic'
-      title='正在载入属性'
-      description='选择真实节点后才能查看 canonical 属性。'
+      kind="generic"
+      title="正在载入属性"
+      description="选择真实节点后才能查看 canonical 属性。"
     />
   );
 
@@ -1627,9 +2277,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
     />
   ) : (
     <CreativeCanvasUnavailablePanel
-      kind='generic'
-      title='正在载入撤销状态'
-      description='历史面板仅展示当前编辑会话的真实撤销栈。'
+      kind="generic"
+      title="正在载入撤销状态"
+      description="历史面板仅展示当前编辑会话的真实撤销栈。"
     />
   );
 
@@ -1643,9 +2293,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
     />
   ) : (
     <CreativeCanvasUnavailablePanel
-      kind='generic'
-      title='正在载入导演时间线'
-      description='等待项目文档通过 canonical v1 校验。'
+      kind="generic"
+      title="正在载入导演时间线"
+      description="等待项目文档通过 canonical v1 校验。"
     />
   );
 
@@ -1698,9 +2348,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 onSaveStateChange={setSave}
                 onAgentSessionsChange={handleAgentSessionsChange}
                 onPendingTaskCommandBlocked={() =>
-                  setNotice('运行中的生成任务必须保留配置节点；请等待任务结束后再删除或撤销。')
+                  setNotice(
+                    '运行中的生成任务必须保留配置节点；请等待任务结束后再删除或撤销。'
+                  )
                 }
-                onIntegrationIntent={(intent) => void handleIntegrationIntent(intent)}
+                onIntegrationIntent={(intent) =>
+                  void handleIntegrationIntent(intent)
+                }
                 renderNode={({
                   node,
                   selected,
@@ -1713,8 +2367,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
                     <CreativeNodeView
                       node={node}
                       selected={selected}
-                      placement='contained'
-                      asset={resolveCreativeNodeAssetPresentation(node, knownAssetsById) ?? undefined}
+                      placement="contained"
+                      asset={
+                        resolveCreativeNodeAssetPresentation(
+                          node,
+                          knownAssetsById
+                        ) ?? undefined
+                      }
                       onActivate={onActivate}
                       onOpen={onOpen}
                       onToggleLock={onToggleLock}
@@ -1726,17 +2385,25 @@ const CreativeCanvasProductRoute: React.FC = () => {
                     <CreativeCanvasImageToolbar
                       visible={selected && Boolean(node.data.assetId)}
                       disabled={
-                        productDisabled || assetImportBusy || imageCropBusy || imageSplitBusy
+                        productDisabled ||
+                        assetImportBusy ||
+                        imageCropBusy ||
+                        imageSplitBusy ||
+                        imageMaskBusy ||
+                        imageMaskRuntimeBlocksNew
                       }
                       onCrop={() => void handleOpenImageCrop(node)}
                       onDownload={() => void handleDownloadImage(node)}
+                      onMaskEdit={() => void handleOpenImageMaskEdit(node)}
                       onSplit={() => void handleOpenImageSplit(node)}
                     >
                       {nodeView}
                     </CreativeCanvasImageToolbar>
                   );
                 }}
-                renderEdge={(context) => <CreativeCanvasConnectionEdge {...context} />}
+                renderEdge={(context) => (
+                  <CreativeCanvasConnectionEdge {...context} />
+                )}
                 screenOverlay={
                   <CreativeCanvasInteractionOverlays
                     viewportSize={viewportSize}
@@ -1747,9 +2414,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
                         : null
                     }
                     disabled={productDisabled || assetImportBusy}
-                    onContextAction={(action) => void handleContextAction(action)}
+                    onContextAction={(action) =>
+                      void handleContextAction(action)
+                    }
                     onOpenCreateNodeMenu={handleOpenCreateNodeMenuFromContext}
-                    onPasteFromSystemClipboard={() => void handlePasteFromContext()}
+                    onPasteFromSystemClipboard={() =>
+                      void handlePasteFromContext()
+                    }
                     onSelectNode={handleSelectCreatedNode}
                     onDismiss={dismissInteractionOverlays}
                   />
@@ -1768,18 +2439,26 @@ const CreativeCanvasProductRoute: React.FC = () => {
             </div>
           ),
           topActions: (
-            <SaveRecoveryAction
-              save={save}
-              busy={recoveryBusy}
-              notice={notice}
-              onReload={() => void handleReloadRemote()}
-              onRetry={() => void handleRetrySave()}
-            />
+            <>
+              <ImageMaskRuntimeAction
+                snapshot={imageMaskRuntime}
+                busy={imageMaskRuntimeActionBusy}
+                onCancel={(taskId) => void cancelImageMaskRuntimeTask(taskId)}
+                onRetry={(taskId) => void retryImageMaskRuntimeTask(taskId)}
+              />
+              <SaveRecoveryAction
+                save={save}
+                busy={recoveryBusy}
+                notice={notice}
+                onReload={() => void handleReloadRemote()}
+                onRetry={() => void handleRetrySave()}
+              />
+            </>
           ),
           toolbarTrailing: (
             <>
               <ProductToolbarButton
-                label='将所选节点分组'
+                label="将所选节点分组"
                 icon={<Group {...iconProps} />}
                 disabled={productDisabled || !selection.canGroup}
                 onClick={() =>
@@ -1792,7 +2471,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 }
               />
               <ProductToolbarButton
-                label='取消所选分组'
+                label="取消所选分组"
                 icon={<Ungroup {...iconProps} />}
                 disabled={productDisabled || selection.groupIds.length === 0}
                 onClick={() => {
@@ -1802,7 +2481,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 }}
               />
               <ProductToolbarButton
-                label='删除所选节点或连接'
+                label="删除所选节点或连接"
                 icon={<Delete {...iconProps} />}
                 danger
                 disabled={productDisabled || !selection.hasSelection}
@@ -1874,31 +2553,65 @@ const CreativeCanvasProductRoute: React.FC = () => {
           },
         }}
       />
+      {imageMaskRuntimeReady && project.detail ? (
+        <CanvasImageMaskEditRuntimeBridge
+          key={`${projectId}:${imageMaskRuntimeEpoch}`}
+          ref={imageMaskRuntimeRef}
+          projectId={projectId}
+          initialDocument={project.detail.document}
+          editorRef={editorRef}
+          viewportSize={viewportSize}
+          onAsset={(asset) => {
+            knownAssetsRef.current = new Map(knownAssetsRef.current).set(
+              asset.id,
+              asset
+            );
+            void assets.reload();
+          }}
+          onSnapshot={setImageMaskRuntime}
+          onNotice={setNotice}
+        />
+      ) : null}
       <WorkflowRunModal
         workflow={workflowToRun}
         runner={workflowRunner}
         onClose={() => setWorkflowToRun(null)}
-        onPickAssets={(variable, selectedAssetIds) => workflowAssetPicker.pick({
-          acceptedKinds: ['image'],
-          initialSelectedIds: selectedAssetIds,
-          selectionLimit: variable.type === 'image-series' ? variable.maxItems : 1,
-          title: variable.type === 'image-series' ? '选择变量图片' : '选择变量参考图',
-        })}
-        onPickReferenceAssets={(selectedAssetIds) => workflowAssetPicker.pick({
-          acceptedKinds: ['image'],
-          initialSelectedIds: selectedAssetIds,
-          selectionLimit: 100,
-          title: '选择工作流参考图',
-        })}
+        onPickAssets={(variable, selectedAssetIds) =>
+          workflowAssetPicker.pick({
+            acceptedKinds: ['image'],
+            initialSelectedIds: selectedAssetIds,
+            selectionLimit:
+              variable.type === 'image-series' ? variable.maxItems : 1,
+            title:
+              variable.type === 'image-series'
+                ? '选择变量图片'
+                : '选择变量参考图',
+          })
+        }
+        onPickReferenceAssets={(selectedAssetIds) =>
+          workflowAssetPicker.pick({
+            acceptedKinds: ['image'],
+            initialSelectedIds: selectedAssetIds,
+            selectionLimit: 100,
+            title: '选择工作流参考图',
+          })
+        }
         onUploadReferenceImages={async (files, selectedAssetIds) => {
           const uploaded = await Promise.all(
-            files.map((file) => creativeAssetClient.upload(file, {
-              title: file.name,
-              tags: ['workflow-reference'],
-              inLibrary: true,
-            }))
+            files.map((file) =>
+              creativeAssetClient.upload(file, {
+                title: file.name,
+                tags: ['workflow-reference'],
+                inLibrary: true,
+              })
+            )
           );
-          return [...new Set([...selectedAssetIds, ...uploaded.map((asset) => asset.id)])];
+          return [
+            ...new Set([
+              ...selectedAssetIds,
+              ...uploaded.map((asset) => asset.id),
+            ]),
+          ];
         }}
       />
       {workflowAssetPicker.dialog}
@@ -1920,8 +2633,23 @@ const CreativeCanvasProductRoute: React.FC = () => {
         onClose={closeImageSplit}
         onConfirm={(params) => void handleConfirmImageSplit(params)}
       />
+      <CreativeImageMaskEditDialog
+        visible={pendingImageMaskEdit !== null}
+        asset={pendingImageMaskEdit?.asset ?? null}
+        catalog={modelCatalog}
+        model={imageMaskModel}
+        busy={imageMaskBusy}
+        retryLocked={Boolean(pendingImageMaskEdit?.submission)}
+        progress={imageMaskProgress}
+        error={imageMaskError}
+        onModelChange={setImageMaskModel}
+        onOpenModelSettings={() => void handleOpenModelSettings()}
+        onAbandon={() => void abandonImageMaskSubmission()}
+        onClose={closeImageMaskEdit}
+        onConfirm={(input) => void handleConfirmImageMaskEdit(input)}
+      />
       <Modal
-        title='选择 2:1 图片的节点类型'
+        title="选择 2:1 图片的节点类型"
         visible={pendingPanoramaChoice !== null}
         closable={false}
         maskClosable={false}
@@ -1931,14 +2659,18 @@ const CreativeCanvasProductRoute: React.FC = () => {
             <Button onClick={() => resolvePendingPanoramaChoice(false)}>
               作为普通图片
             </Button>
-            <Button type='primary' onClick={() => resolvePendingPanoramaChoice(true)}>
+            <Button
+              type="primary"
+              onClick={() => resolvePendingPanoramaChoice(true)}
+            >
               作为全景图
             </Button>
           </div>
         }
       >
         <p className={styles.panoramaDescription}>
-          图片已经真实上传并保存在素材库中。检测到宽高比接近 2:1，请确认它应作为普通图片还是等距柱状全景图插入当前画布。
+          图片已经真实上传并保存在素材库中。检测到宽高比接近
+          2:1，请确认它应作为普通图片还是等距柱状全景图插入当前画布。
         </p>
       </Modal>
     </main>

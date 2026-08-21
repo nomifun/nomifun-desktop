@@ -85,6 +85,25 @@ describe("creative image tool surfaces", () => {
     expect(html.includes("image_edit")).toBe(true);
   });
 
+  test("locks the mask draft while preserving explicit safe retry and abandon actions", () => {
+    const html = renderToStaticMarkup(
+      <CreativeImageMaskEditDialogContent
+        visible
+        retryLocked
+        asset={ASSET}
+        catalog={EMPTY_CATALOG}
+        model={null}
+        onModelChange={() => undefined}
+        onAbandon={() => undefined}
+        onClose={() => undefined}
+        onConfirm={() => undefined}
+      />,
+    );
+    expect(html.includes("安全重试")).toBe(true);
+    expect(html.includes("放弃本次")).toBe(true);
+    expect((html.match(/disabled=""/g)?.length ?? 0) >= 5).toBe(true);
+  });
+
   test("renders the source crop controls, exact dimensions, and all handles", () => {
     const html = renderToStaticMarkup(
       <CreativeImageCropDialogContent
