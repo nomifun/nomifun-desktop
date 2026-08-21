@@ -19,7 +19,8 @@ use serde_json::Value;
 use crate::archive::{
     CREATIVE_STUDIO_ARCHIVE_MIME, CreativeArchiveAssetSnapshot,
     build_creative_project_archive, collect_document_asset_ids,
-    parse_creative_project_archive, remap_creative_archive_for_import,
+    director_sidecar_asset_ids, parse_creative_project_archive,
+    remap_creative_archive_for_import,
     sanitized_archive_origin,
 };
 use crate::creative_studio::{
@@ -329,6 +330,55 @@ impl WorkshopService {
         Ok(())
     }
 
+    /// Resolve the complete project-owned asset closure, including the hidden
+    /// Director v1 sidecar and every panorama/model/capture asset referenced by
+    /// that sidecar. All asset lifecycle paths share this authority so export,
+    /// deletion protection, project cleanup, and startup audit cannot drift.
+    async fn collect_creative_project_asset_closure(
+        &self,
+        document: &CreativeProjectDocument,
+    ) -> Result<BTreeSet<String>, AppError> {
+        let mut asset_ids = collect_document_asset_ids(document)?;
+        let scene_ids = document
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.data {
+                CreativeNodeData::Director(data) => data.scene_id.clone(),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for scene_id in scene_ids {
+            let row = self.repo.get_asset(&scene_id).await?.ok_or_else(|| {
+                AppError::Conflict(format!(
+                    "creative project {} references missing Director sidecar {scene_id}",
+                    document.project_id
+                ))
+            })?;
+            if row.kind != "text" {
+                return Err(AppError::Conflict(format!(
+                    "creative project {} Director sidecar {scene_id} is not a text asset",
+                    document.project_id
+                )));
+            }
+            let bytes = self.read_original(&row).await.map_err(|error| {
+                AppError::Conflict(format!(
+                    "creative project {} Director sidecar {scene_id} is unavailable: {error}",
+                    document.project_id
+                ))
+            })?.0;
+            let nested = director_sidecar_asset_ids(&bytes, &document.project_id).map_err(
+                |error| {
+                    AppError::Conflict(format!(
+                        "creative project {} Director sidecar {scene_id} is invalid: {error}",
+                        document.project_id
+                    ))
+                },
+            )?;
+            asset_ids.extend(nested);
+        }
+        Ok(asset_ids)
+    }
+
     // ---- projects ----
 
     pub async fn list_creative_projects(
@@ -475,7 +525,9 @@ impl WorkshopService {
     pub async fn delete_creative_project(&self, project_id: &str) -> Result<(), AppError> {
         validate_creative_project_id(project_id)?;
         let project = self.get_creative_project(project_id).await?;
-        let referenced_asset_ids = collect_document_asset_ids(&project.document)?;
+        let referenced_asset_ids = self
+            .collect_creative_project_asset_closure(&project.document)
+            .await?;
         self.repo.delete_creative_project(project_id).await?;
         for asset_id in referenced_asset_ids {
             let Some(asset) = self.repo.get_asset(&asset_id).await? else {
@@ -935,7 +987,9 @@ impl WorkshopService {
         project_id: &str,
     ) -> Result<CreativeProjectArchive, AppError> {
         let detail = self.get_creative_project(project_id).await?;
-        let asset_ids = collect_document_asset_ids(&detail.document)?;
+        let asset_ids = self
+            .collect_creative_project_asset_closure(&detail.document)
+            .await?;
         let mut assets = Vec::with_capacity(asset_ids.len());
         for asset_id in asset_ids {
             let row = self
@@ -1087,7 +1141,16 @@ impl WorkshopService {
         for project in self.repo.list_creative_projects().await? {
             let document = parse_stored_creative_project_row(&project)?;
             self.validate_creative_provider_models(&document).await?;
-            referenced_assets.extend(collect_document_asset_ids(&document)?);
+            let project_assets = self
+                .collect_creative_project_asset_closure(&document)
+                .await
+                .map_err(|error| {
+                    AppError::Internal(format!(
+                        "managed creative studio project {} has an invalid asset closure: {error}",
+                        project.project_id
+                    ))
+                })?;
+            referenced_assets.extend(project_assets);
         }
 
         let assets = self.repo.list_all_assets().await?;
@@ -1596,7 +1659,11 @@ impl WorkshopService {
             .ok_or_else(|| AppError::NotFound(format!("workshop asset {id} not found")))?;
         for project_row in self.repo.list_creative_projects().await? {
             let document = parse_stored_creative_project_row(&project_row)?;
-            if collect_document_asset_ids(&document)?.contains(id) {
+            if self
+                .collect_creative_project_asset_closure(&document)
+                .await?
+                .contains(id)
+            {
                 return Err(AppError::Conflict(format!(
                     "asset {id} is referenced by Creative Studio project {}",
                     project_row.project_id
@@ -2500,6 +2567,95 @@ mod tests {
         .unwrap()
     }
 
+    fn director_sidecar_text(
+        project_id: &str,
+        panorama_asset_id: &str,
+        capture_asset_id: &str,
+    ) -> String {
+        serde_json::to_string_pretty(&serde_json::json!({
+            "kind": "nomifun.director.project",
+            "version": 1,
+            "project": {
+                "projectId": project_id,
+                "name": "Portable Director",
+                "scene": {
+                    "name": "Scene",
+                    "transform": {
+                        "position": { "x": 0, "y": 0, "z": 0 },
+                        "rotation": { "x": 0, "y": 0, "z": 0 },
+                        "scale": { "x": 1, "y": 1, "z": 1 }
+                    },
+                    "environment": {
+                        "skyColor": "#101820",
+                        "panorama": { "assetId": panorama_asset_id },
+                        "panoramaYawDegrees": 0,
+                        "panoramaRadius": 50,
+                        "groundVisible": true,
+                        "gridVisible": true,
+                        "snapToGrid": false,
+                        "characterLabelsVisible": true
+                    }
+                },
+                "cameras": [{
+                    "kind": "camera",
+                    "id": "camera-1",
+                    "name": "Camera",
+                    "transform": {
+                        "position": { "x": 0, "y": 2, "z": 8 },
+                        "rotation": { "x": 0, "y": 0, "z": 0 },
+                        "scale": { "x": 1, "y": 1, "z": 1 }
+                    },
+                    "visible": true,
+                    "locked": false,
+                    "projection": "perspective",
+                    "focalLengthMm": 50,
+                    "orthographicSize": 10,
+                    "nearClip": 0.1,
+                    "farClip": 1000,
+                    "aspectRatio": { "width": 16, "height": 9 },
+                    "guides": { "frame": true, "center": true, "thirds": true, "safeArea": false }
+                }],
+                "characters": [],
+                "objects": [],
+                "lights": [],
+                "activeCameraId": "camera-1",
+                "selection": null,
+                "viewMode": "director",
+                "panels": {
+                    "leftSidebarOpen": true,
+                    "rightSidebarOpen": true,
+                    "timelineOpen": true
+                },
+                "timeline": {
+                    "durationSeconds": 5,
+                    "currentTimeSeconds": 0,
+                    "framesPerSecond": 24,
+                    "loop": false,
+                    "tracks": []
+                },
+                "capture": {
+                    "settings": {
+                        "width": 1920,
+                        "height": 1080,
+                        "imageFormat": "png",
+                        "videoFramesPerSecond": 24
+                    },
+                    "records": [{
+                        "id": "capture-1",
+                        "kind": "image",
+                        "cameraId": "camera-1",
+                        "assetId": capture_asset_id,
+                        "capturedAt": 123,
+                        "width": 1,
+                        "height": 1,
+                        "format": "png"
+                    }]
+                }
+            }
+        }))
+        .unwrap()
+    }
+
     // A 1x1 PNG.
     fn png_1x1() -> Vec<u8> {
         let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
@@ -2906,6 +3062,145 @@ mod tests {
                 .0,
             b"portable prompt"
         );
+    }
+
+    #[tokio::test]
+    async fn director_archive_is_self_contained_across_fresh_data_roots() {
+        let (source, _source_dir) = service().await;
+        let project = source
+            .create_creative_project(Some("Portable Director".into()))
+            .await
+            .unwrap();
+        let panorama = source
+            .ingest_asset_bytes(png_1x1(), "image/png", "Director panorama", false, None)
+            .await
+            .unwrap();
+        let capture = source
+            .ingest_asset_bytes(png_1x1(), "image/png", "Unsent capture", false, None)
+            .await
+            .unwrap();
+        let sidecar = source
+            .create_text_asset(NewTextAsset {
+                title: "Director scene".into(),
+                text_content: director_sidecar_text(
+                    &project.project_id,
+                    &panorama.asset_id,
+                    &capture.asset_id,
+                ),
+                collection: None,
+                tags: Some(vec!["nomifun-director-v1".into()]),
+                in_library: Some(false),
+                origin: None,
+            })
+            .await
+            .unwrap();
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "director-node",
+                "type": "director",
+                "position": { "x": 0, "y": 0 },
+                "size": { "width": 640, "height": 360 },
+                "groupId": null,
+                "zIndex": 1,
+                "locked": false,
+                "data": {
+                    "sceneId": sidecar.asset_id,
+                    "cameraId": "camera-1",
+                    "timelineMs": 0,
+                    "durationMs": 5000
+                }
+            }))
+            .unwrap(),
+        );
+        source
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            source.delete_asset(&panorama.asset_id).await,
+            Err(AppError::Conflict(message)) if message.contains("Creative Studio project")
+        ));
+        source.audit_managed_data_on_boot().await.unwrap();
+        let first_archive = source
+            .export_creative_project_archive(&project.project_id)
+            .await
+            .unwrap();
+
+        let (target, _target_dir) = service().await;
+        let imported = target
+            .import_creative_project_archive(first_archive.bytes)
+            .await
+            .unwrap();
+        let imported_detail = target
+            .get_creative_project(&imported.project_id)
+            .await
+            .unwrap();
+        let CreativeNodeData::Director(imported_director) =
+            &imported_detail.document.nodes[0].data
+        else {
+            panic!("expected imported Director node")
+        };
+        let imported_sidecar_id = imported_director.scene_id.as_deref().unwrap();
+        assert_ne!(imported_sidecar_id, sidecar.asset_id);
+        let imported_sidecar = target
+            .read_asset_bytes(imported_sidecar_id)
+            .await
+            .unwrap()
+            .0;
+        let imported_nested =
+            director_sidecar_asset_ids(&imported_sidecar, &imported.project_id).unwrap();
+        assert_eq!(imported_nested.len(), 2);
+        assert!(!imported_nested.contains(&panorama.asset_id));
+        assert!(!imported_nested.contains(&capture.asset_id));
+        for asset_id in &imported_nested {
+            assert_eq!(target.read_asset_bytes(asset_id).await.unwrap().0, png_1x1());
+        }
+        target.audit_managed_data_on_boot().await.unwrap();
+        let second_archive = target
+            .export_creative_project_archive(&imported.project_id)
+            .await
+            .unwrap();
+
+        let (third, _third_dir) = service().await;
+        let imported_again = third
+            .import_creative_project_archive(second_archive.bytes)
+            .await
+            .unwrap();
+        let third_detail = third
+            .get_creative_project(&imported_again.project_id)
+            .await
+            .unwrap();
+        let CreativeNodeData::Director(third_director) = &third_detail.document.nodes[0].data
+        else {
+            panic!("expected twice-imported Director node")
+        };
+        let third_sidecar_id = third_director.scene_id.as_deref().unwrap();
+        let third_sidecar = third.read_asset_bytes(third_sidecar_id).await.unwrap().0;
+        let third_nested =
+            director_sidecar_asset_ids(&third_sidecar, &imported_again.project_id).unwrap();
+        assert_eq!(third_nested.len(), 2);
+        for asset_id in &third_nested {
+            third.read_asset_bytes(asset_id).await.unwrap();
+        }
+        third.audit_managed_data_on_boot().await.unwrap();
+
+        let imported_owned_assets = imported_nested
+            .iter()
+            .cloned()
+            .chain(std::iter::once(imported_sidecar_id.to_owned()))
+            .collect::<Vec<_>>();
+        target
+            .delete_creative_project(&imported.project_id)
+            .await
+            .unwrap();
+        for asset_id in imported_owned_assets {
+            assert!(matches!(
+                target.read_asset_bytes(&asset_id).await,
+                Err(AppError::NotFound(_))
+            ));
+        }
     }
 
     #[tokio::test]

@@ -30,6 +30,18 @@ reused, and an uncertain response is reconciled against the authoritative
 project before retry, so the action cannot create duplicates. Multi-angle
 capture and video export remain visibly unavailable.
 
-Project ZIP export/import includes the Director `sceneId` text sidecar and
-remaps the pointer on import. Archive tests cover collection, checksum,
-identity remapping and round-trip recovery of that scene document.
+Project ZIP export/import closes over the Director `sceneId` text sidecar and
+every stable asset referenced inside its v1 document: panorama, character,
+object, and capture records, including captures that were never sent back to
+the canvas. Import rewrites the sidecar's root Creative Studio `projectId` and
+all nested asset IDs before persisting it, while retaining internal
+camera/entity/timeline identities. The outer Director pointer, known image
+composer/mask node and asset parameters, graph identities, manifest checksums,
+and content paths are remapped from the same complete identity maps.
+
+The archive parser rejects missing dependencies, unknown reference-bearing
+canvas operations, invalid Director envelopes, stale project ownership,
+undeclared entries, checksum drift, and ZIP budget violations. Export,
+project/asset deletion protection, and startup managed-data audit share the
+same Director asset-closure resolver, so hidden scene dependencies cannot be
+deleted or omitted independently of their project.
