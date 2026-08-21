@@ -9,7 +9,7 @@
 }
 
 .edge {
-  --creative-edge-color: color-mix(in srgb, rgb(var(--primary-6)) 44%, var(--color-border-3));
+  --creative-edge-color: var(--creative-canvas-edge-default, var(--color-text-3));
   --creative-edge-width: 1.8px;
   --creative-edge-opacity: 0.78;
 }
@@ -40,20 +40,20 @@
 }
 
 .edge[data-edge-highlighted='true'] {
-  --creative-edge-color: rgb(var(--primary-6));
+  --creative-edge-color: var(--creative-canvas-edge-active, var(--color-text-1));
   --creative-edge-width: 2.4px;
   --creative-edge-opacity: 1;
 }
 
 .edge[data-edge-selected='true'] {
-  --creative-edge-color: rgb(var(--primary-6));
+  --creative-edge-color: var(--creative-canvas-edge-active, var(--color-text-1));
   --creative-edge-width: 2.8px;
   --creative-edge-opacity: 1;
 }
 
 .edge[data-edge-selected='true'] .visiblePath,
 .edge:has(.hitPath:focus-visible) .visiblePath {
-  filter: drop-shadow(0 0 5px rgba(var(--primary-6), 0.42));
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--creative-canvas-edge-active, var(--color-text-1)) 42%, transparent));
 }
 
 .edge[data-edge-upstream='true'] {

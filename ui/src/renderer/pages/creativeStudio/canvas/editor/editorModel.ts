@@ -188,7 +188,11 @@ export function fitCanvasViewport(
   const availableWidth = Math.max(1, width - safePadding * 2);
   const availableHeight = Math.max(1, height - safePadding * 2);
   const zoom = clampCanvasZoom(
-    Math.min(availableWidth / Math.max(bounds.width, 1), availableHeight / Math.max(bounds.height, 1))
+    Math.min(
+      1,
+      availableWidth / Math.max(bounds.width, 1),
+      availableHeight / Math.max(bounds.height, 1)
+    )
   );
   return {
     x: (width - bounds.width * zoom) / 2 - bounds.x * zoom,

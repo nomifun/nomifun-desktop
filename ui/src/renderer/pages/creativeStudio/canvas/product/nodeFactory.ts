@@ -16,18 +16,20 @@ import type { PromptLibrarySelection } from '../../prompts';
 import {
   clientToCanvas,
   makeCanvasNode,
+  normalizeCanvasViewport,
   type CanvasState,
+  type CanvasViewport,
 } from '../core';
 
 export const CREATIVE_CANVAS_PRODUCT_NODE_SIZES = {
-  text: { width: 300, height: 180 },
-  image: { width: 320, height: 220 },
-  panorama: { width: 320, height: 220 },
-  video: { width: 320, height: 220 },
-  audio: { width: 320, height: 180 },
-  config: { width: 340, height: 240 },
-  director: { width: 360, height: 220 },
-  group: { width: 360, height: 260 },
+  text: { width: 340, height: 240 },
+  image: { width: 340, height: 240 },
+  panorama: { width: 340, height: 170 },
+  video: { width: 420, height: 236 },
+  audio: { width: 340, height: 160 },
+  config: { width: 440, height: 240 },
+  director: { width: 360, height: 320 },
+  group: { width: 760, height: 480 },
 } as const satisfies Record<CreativeCanvasNodeKind, CreativeSize>;
 
 /** Repeated insertions move by this many client pixels, independent of zoom. */
@@ -135,6 +137,31 @@ const normalizeSize = (value: CreativeSize | undefined, fallback: CreativeSize):
   width: positiveFinite(value?.width ?? fallback.width, fallback.width),
   height: positiveFinite(value?.height ?? fallback.height, fallback.height),
 });
+
+/**
+ * The reference canvas keeps world origin at the visible center. A new
+ * server-side project cannot know its eventual client dimensions, so its
+ * canonical viewport starts at 0/0. Normalize that one pristine state at the
+ * first centered insertion; user panning or zooming an empty canvas is always
+ * preserved.
+ */
+export function creativeCanvasProductInsertionViewport(
+  state: CreativeCanvasProductState,
+  viewportSize: CreativeSize
+): CanvasViewport {
+  const viewport = normalizeCanvasViewport(state.viewport);
+  const isPristine =
+    state.document.nodes.length === 0 &&
+    viewport.x === 0 &&
+    viewport.y === 0 &&
+    viewport.zoom === 1;
+  if (!isPristine) return viewport;
+  return {
+    x: positiveFinite(viewportSize.width, 1) / 2,
+    y: positiveFinite(viewportSize.height, 1) / 2,
+    zoom: 1,
+  };
+}
 
 const nextCanvasZIndex = (state: CreativeCanvasProductState): number =>
   state.document.nodes.reduce(

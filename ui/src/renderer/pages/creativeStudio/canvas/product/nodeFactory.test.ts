@@ -14,9 +14,11 @@ import type {
 import type { PromptLibrarySelection } from '../../prompts';
 import { createInitialCanvasState } from '../core';
 import {
+  CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
   CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
   CreativeCanvasNodeFactoryError,
   createCreativeCanvasProductNode,
+  creativeCanvasProductInsertionViewport,
   creativeNodeFromAsset,
   creativeTextNodeFromPrompt,
 } from './nodeFactory';
@@ -134,6 +136,7 @@ describe('createCreativeCanvasProductNode', () => {
       expect(node.groupId).toBeNull();
       expect(node.locked).toBe(false);
       expect(node.zIndex).toBe(0);
+      expect(node.size).toEqual(CREATIVE_CANVAS_PRODUCT_NODE_SIZES[node.type]);
     }
 
     const firstConfig = nodes.find((node) => node.type === 'config');
@@ -153,10 +156,10 @@ describe('createCreativeCanvasProductNode', () => {
     const oneClientSlot = createCreativeCanvasProductNode('text', empty, VIEWPORT_SIZE, {
       cascadeIndex: 1,
     });
-    expect(centered.position).toEqual({ x: 200, y: 110 });
+    expect(centered.position).toEqual({ x: 180, y: 80 });
     expect(oneClientSlot.position).toEqual({
-      x: 200 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP / 2,
-      y: 110 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP / 2,
+      x: 180 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP / 2,
+      y: 80 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP / 2,
     });
 
     const high = createCreativeCanvasProductNode('image', empty, VIEWPORT_SIZE, {
@@ -174,10 +177,33 @@ describe('createCreativeCanvasProductNode', () => {
     const cascaded = createCreativeCanvasProductNode('text', populated, VIEWPORT_SIZE);
 
     expect(cascaded.position).toEqual({
-      x: 200 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
-      y: 110 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
+      x: 180 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
+      y: 80 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
     });
     expect(cascaded.zIndex).toBe(8);
+  });
+
+  test('centers only the pristine server viewport before the first insertion', () => {
+    const pristine = createInitialCanvasState();
+    const centeredViewport = creativeCanvasProductInsertionViewport(
+      pristine,
+      VIEWPORT_SIZE
+    );
+    expect(centeredViewport).toEqual({ x: 500, y: 300, zoom: 1 });
+
+    const centeredState = createInitialCanvasState({ viewport: centeredViewport });
+    expect(
+      createCreativeCanvasProductNode('text', centeredState, VIEWPORT_SIZE, {
+        cascadeIndex: 0,
+      }).position
+    ).toEqual({ x: -170, y: -120 });
+
+    const userPanned = createInitialCanvasState({
+      viewport: { x: 12, y: -8, zoom: 1 },
+    });
+    expect(
+      creativeCanvasProductInsertionViewport(userPanned, VIEWPORT_SIZE)
+    ).toEqual(userPanned.viewport);
   });
 
   test('accepts explicit safe layout overrides without giving up generated identity', () => {

@@ -144,6 +144,7 @@ import {
 import {
   createCreativeCanvasProductNode,
   CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
+  creativeCanvasProductInsertionViewport,
   creativeNodeFromAsset,
   creativeTextNodeFromPrompt,
 } from './nodeFactory';
@@ -742,11 +743,28 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [persistPanels]
   );
 
+  const prepareCenteredInsertion = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return null;
+    const viewportSize = measuredSize(canvasHostRef.current);
+    let state = editor.getState();
+    const viewport = creativeCanvasProductInsertionViewport(state, viewportSize);
+    if (
+      viewport.x !== state.viewport.x ||
+      viewport.y !== state.viewport.y ||
+      viewport.zoom !== state.viewport.zoom
+    ) {
+      state = editor.dispatch(canvasCommands.setViewport(viewport));
+    }
+    return { editor, state, viewportSize };
+  }, []);
+
   const addNode = useCallback(
     (kind: CreativeCanvasNodeKind) => {
-      const editor = editorRef.current;
-      if (!editor || save.revision === null) return;
-      const state = editor.getState();
+      if (save.revision === null) return;
+      const insertion = prepareCenteredInsertion();
+      if (!insertion) return;
+      const { editor, state, viewportSize } = insertion;
       if (kind === 'director') {
         const directors = state.document.nodes.filter(
           (node) => node.type === 'director'
@@ -767,7 +785,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
       const node = createCreativeCanvasProductNode(
         kind,
         state,
-        measuredSize(canvasHostRef.current)
+        viewportSize
       );
       editor.dispatch(canvasCommands.addNode(node));
       if (kind === 'director') {
@@ -777,7 +795,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setNotice(null);
       }
     },
-    [handleBottomViewChange, save.revision]
+    [handleBottomViewChange, prepareCenteredInsertion, save.revision]
   );
 
   const handleBackgroundChange = useCallback(
@@ -2139,9 +2157,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
 
   const handleInsertAssets = useCallback(
     (selectedAssets: readonly CreativeAsset[]) => {
-      const editor = editorRef.current;
-      if (!editor) return;
-      let state = editor.getState();
+      const insertion = prepareCenteredInsertion();
+      if (!insertion) return;
+      const { editor, viewportSize } = insertion;
+      let { state } = insertion;
       let inserted = 0;
       const errors: string[] = [];
       for (const asset of selectedAssets) {
@@ -2149,7 +2168,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           const node = creativeNodeFromAsset(
             asset,
             state,
-            measuredSize(canvasHostRef.current),
+            viewportSize,
             { cascadeIndex: state.document.nodes.length }
           );
           state = editor.dispatch(canvasCommands.addNode(node));
@@ -2165,7 +2184,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           : `${inserted} 项素材已插入画布。`
       );
     },
-    []
+    [prepareCenteredInsertion]
   );
 
   const handleInsertWorkflowResults = useCallback(
@@ -2196,22 +2215,22 @@ const CreativeCanvasProductRoute: React.FC = () => {
 
   const handleInsertPrompt = useCallback(
     (selection: PromptLibrarySelection) => {
-      const editor = editorRef.current;
-      if (!editor) return;
-      const state = editor.getState();
+      const insertion = prepareCenteredInsertion();
+      if (!insertion) return;
+      const { editor, state, viewportSize } = insertion;
       editor.dispatch(
         canvasCommands.addNode(
           creativeTextNodeFromPrompt(
             selection,
             state,
-            measuredSize(canvasHostRef.current)
+            viewportSize
           )
         )
       );
       setSelectedPromptId(selection.id);
       setNotice(`已将“${selection.title}”插入为文本节点。`);
     },
-    []
+    [prepareCenteredInsertion]
   );
 
   const selection = useMemo(

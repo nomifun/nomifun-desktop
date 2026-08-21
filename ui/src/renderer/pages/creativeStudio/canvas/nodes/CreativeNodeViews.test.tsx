@@ -105,8 +105,8 @@ describe('Creative Studio canonical node views', () => {
     const html = renderToStaticMarkup(<>{nodes.map((node) => <CreativeNodeView key={node.id} node={node} />)}</>);
 
     expect(html.includes('data-node-empty-media="true"')).toBe(true);
-    expect(html.includes('尚未连接视频素材')).toBe(true);
-    expect(html.includes('尚未连接音频素材')).toBe(true);
+    expect(html.includes('空视频节点')).toBe(true);
+    expect(html.includes('空音频节点')).toBe(true);
     expect(html.includes('data-node-status="failed"')).toBe(true);
     expect(html.includes('role="alert"')).toBe(true);
     expect(html.includes('服务暂时不可用')).toBe(true);

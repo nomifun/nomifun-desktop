@@ -289,7 +289,7 @@ describe('canvas image mask edit product model', () => {
       canvasImageMaskEditResultPosition([config, blocker], config)
     ).toEqual({
       x: 820,
-      y: 520,
+      y: 560,
     });
   });
 });
