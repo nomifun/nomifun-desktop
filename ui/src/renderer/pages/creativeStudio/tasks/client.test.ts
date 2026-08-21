@@ -57,6 +57,7 @@ function wireTask(
     model: 'image-model-v1',
     capability: 't2i',
     params: { prompt: 'Aurora', count: 1 },
+    inputs: [{ asset_id: ASSET_ID, kind: 'image', role: 'reference' }],
     status,
     error: status === 'failed' ? { kind: 'provider_error', message: 'upstream failed' } : null,
     result_asset_ids: status === 'succeeded' ? [ASSET_ID] : [],
@@ -73,7 +74,7 @@ function createInput(overrides: Partial<CreateCreativeTaskInput> = {}): CreateCr
     ...identity,
     idempotencyKey: IDEMPOTENCY_KEY,
     parameters: { prompt: 'Aurora', count: 1 },
-    inputs: [{ assetId: ASSET_ID, role: 'reference' }],
+    inputs: [{ assetId: ASSET_ID, kind: 'image', role: 'reference' }],
     ...overrides,
   };
 }
@@ -115,7 +116,7 @@ describe('CreativeTaskClient', () => {
           model: 'image-model-v1',
           capability: 't2i',
           params: { prompt: 'Aurora', count: 1 },
-          inputs: [{ asset_id: ASSET_ID, role: 'reference' }],
+          inputs: [{ asset_id: ASSET_ID, kind: 'image', role: 'reference' }],
         },
       },
     ]);
@@ -123,6 +124,7 @@ describe('CreativeTaskClient', () => {
       taskId: IDEMPOTENCY_KEY,
       ...identity,
       parameters: { prompt: 'Aurora', count: 1 },
+      inputs: [{ assetId: ASSET_ID, kind: 'image', role: 'reference' }],
       status: 'queued',
       error: null,
       resultAssetIds: [],
@@ -171,9 +173,66 @@ describe('CreativeTaskClient', () => {
       model: 'image-model-v1',
       capability: 't2i',
       params: { prompt: 'Aurora', count: 1 },
-      inputs: [{ asset_id: ASSET_ID, role: 'reference' }],
+      inputs: [{ asset_id: ASSET_ID, kind: 'image', role: 'reference' }],
     });
     expect(task.owner).toEqual(owner);
+  });
+
+  test('round-trips the exact standalone workbench owner without a config node', async () => {
+    const owner = {
+      kind: 'standalone_workbench' as const,
+      projectId: PROJECT_ID,
+      workbenchKind: 'image' as const,
+    };
+    let body: unknown;
+    const client = new CreativeTaskClient({
+      create: async (value, key) => {
+        body = value;
+        return wireTask('queued', {
+          creation_task_id: key,
+          owner: {
+            kind: 'standalone_workbench',
+            project_id: PROJECT_ID,
+            workbench_kind: 'image',
+          },
+        });
+      },
+      get: async () => wireTask(),
+      cancel: async () => wireTask('canceled'),
+    });
+
+    const task = await client.create(createInput({ owner }));
+
+    expect(body).toEqual({
+      owner: {
+        kind: 'standalone_workbench',
+        project_id: PROJECT_ID,
+        workbench_kind: 'image',
+      },
+      provider_id: PROVIDER_ID,
+      model: 'image-model-v1',
+      capability: 't2i',
+      params: { prompt: 'Aurora', count: 1 },
+      inputs: [{ asset_id: ASSET_ID, kind: 'image', role: 'reference' }],
+    });
+    expect(task.owner).toEqual(owner);
+  });
+
+  test('keeps unprovable legacy inputs nullable and rejects invented kinds', () => {
+    expect(mapCreationTaskWire(wireTask('queued', { inputs: null })).inputs).toBeNull();
+    let invalid: unknown = null;
+    try {
+      mapCreationTaskWire(
+        wireTask('queued', {
+          inputs: [
+            { asset_id: ASSET_ID, kind: 'panorama', role: 'reference' },
+          ],
+        })
+      );
+    } catch (error) {
+      invalid = error;
+    }
+    expect(invalid instanceof CreativeTaskContractError).toBe(true);
   });
 
   test('rejects a mismatched ModelTask/capability pair before calling the backend', async () => {
@@ -229,6 +288,18 @@ describe('CreativeTaskClient', () => {
     expect(error instanceof CreativeTaskContractError).toBe(true);
     expect((error as CreativeTaskContractError).code).toBe('identity_mismatch');
     expect((error as CreativeTaskContractError).field).toBe('taskId');
+  });
+
+  test('rejects a create response without the exact ordered input snapshot', async () => {
+    const client = new CreativeTaskClient({
+      create: async (_body, key) =>
+        wireTask('queued', { creation_task_id: key, inputs: null }),
+      get: async () => wireTask(),
+      cancel: async () => wireTask('canceled'),
+    });
+    const error = await caught(client.create(createInput()));
+    expect(error instanceof CreativeTaskContractError).toBe(true);
+    expect((error as CreativeTaskContractError).field).toBe('inputs');
   });
 
   test('reuses the exact header key for concurrent StrictMode-style duplicate calls', async () => {

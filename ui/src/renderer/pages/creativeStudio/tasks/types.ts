@@ -37,8 +37,17 @@ export type CreativeTaskInputRole =
   | 'video'
   | 'audio';
 
+export type CreativeTaskInputKind = 'image' | 'video' | 'audio' | 'text';
+
+export type CreativeStandaloneWorkbenchKind = 'image' | 'video' | 'audio';
+
 export type CreativeTaskOwner =
   | { kind: 'canvas_node'; projectId: string; nodeId: string }
+  | {
+      kind: 'standalone_workbench';
+      projectId: string;
+      workbenchKind: CreativeStandaloneWorkbenchKind;
+    }
   | {
       kind: 'workflow_step';
       workflowId: string;
@@ -55,6 +64,7 @@ export interface CreativeTaskIdentity {
 }
 export interface CreativeTaskInput {
   assetId: string;
+  kind: CreativeTaskInputKind;
   role: CreativeTaskInputRole;
 }
 
@@ -83,6 +93,8 @@ export interface CreativeTaskError {
 export interface CreativeTask extends CreativeTaskIdentity {
   taskId: string;
   parameters: CreativeJsonObject;
+  /** Null only for migrated legacy rows whose input snapshot is unprovable. */
+  inputs: readonly CreativeTaskInput[] | null;
   status: CreativeTaskStatus;
   error: CreativeTaskError | null;
   resultAssetIds: string[];
@@ -184,6 +196,12 @@ export function isCanvasNodeTaskOwner(
   return owner.kind === 'canvas_node';
 }
 
+export function isStandaloneWorkbenchTaskOwner(
+  owner: CreativeTaskOwner
+): owner is Extract<CreativeTaskOwner, { kind: 'standalone_workbench' }> {
+  return owner.kind === 'standalone_workbench';
+}
+
 export function sameCreativeTaskOwner(
   left: CreativeTaskOwner,
   right: CreativeTaskOwner
@@ -191,6 +209,15 @@ export function sameCreativeTaskOwner(
   if (left.kind !== right.kind) return false;
   if (left.kind === 'canvas_node' && right.kind === 'canvas_node') {
     return left.projectId === right.projectId && left.nodeId === right.nodeId;
+  }
+  if (
+    left.kind === 'standalone_workbench' &&
+    right.kind === 'standalone_workbench'
+  ) {
+    return (
+      left.projectId === right.projectId &&
+      left.workbenchKind === right.workbenchKind
+    );
   }
   return (
     left.kind === 'workflow_step' &&

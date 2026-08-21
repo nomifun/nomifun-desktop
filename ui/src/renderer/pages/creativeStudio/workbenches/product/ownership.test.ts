@@ -144,6 +144,7 @@ describe('standalone workbench ownership', () => {
     const task: CreativeTask = {
       ...reference,
       parameters: { prompt: '海边日落' },
+      inputs: [],
       status: 'succeeded',
       error: null,
       resultAssetIds: [ASSET_ID],

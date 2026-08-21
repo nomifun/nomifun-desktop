@@ -84,12 +84,95 @@ impl TaskStatus {
     }
 }
 
-/// One input reference to a task (contract §3.3 `inputs[]`). `role` is a free
-/// string (`reference|mask|first_frame|last_frame|video|audio`) an adapter
-/// interprets.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Canonical media kind captured with every ordered task input. It is part of
+/// the durable retry snapshot rather than something reconstructed later from a
+/// mutable asset row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CreationInputKind {
+    Image,
+    Video,
+    Audio,
+    Text,
+}
+
+impl CreationInputKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Audio => "audio",
+            Self::Text => "text",
+        }
+    }
+
+    pub fn matches_mime(self, mime: &str) -> bool {
+        let essence = mime
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        match self {
+            Self::Image => essence.starts_with("image/"),
+            Self::Video => essence.starts_with("video/"),
+            Self::Audio => essence.starts_with("audio/"),
+            Self::Text => essence.starts_with("text/"),
+        }
+    }
+}
+
+/// Stable aggregate discriminator for generation outside an individual canvas
+/// node. It is part of task ownership and therefore immutable after creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StandaloneWorkbenchKind {
+    Image,
+    Video,
+    Audio,
+}
+
+impl StandaloneWorkbenchKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Audio => "audio",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "image" => Self::Image,
+            "video" => Self::Video,
+            "audio" => Self::Audio,
+            _ => return None,
+        })
+    }
+
+    pub fn accepts_capability(self, capability: MediaCapability) -> bool {
+        match self {
+            Self::Image => matches!(
+                capability,
+                MediaCapability::T2i | MediaCapability::I2i | MediaCapability::Inpaint
+            ),
+            Self::Video => matches!(
+                capability,
+                MediaCapability::T2v | MediaCapability::I2v | MediaCapability::V2v
+            ),
+            Self::Audio => capability == MediaCapability::Tts,
+        }
+    }
+}
+
+/// One ordered input binding to a task (contract §3.3 `inputs[]`). `kind` and
+/// `role` are both explicit so history/retry never guesses from a URL, file
+/// extension, or a later asset-library state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreationInput {
     pub asset_id: String,
+    pub kind: CreationInputKind,
     pub role: String,
 }
 
@@ -173,5 +256,25 @@ impl From<nomifun_model_invoke::InvokeError> for CreationError {
             | K::NotPollable => "provider_error",
         };
         Self { kind: kind.to_string(), message: e.message, http_status: e.http_status }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MediaCapability, StandaloneWorkbenchKind};
+
+    #[test]
+    fn standalone_workbench_kind_accepts_only_its_media_family() {
+        assert!(StandaloneWorkbenchKind::Image.accepts_capability(MediaCapability::T2i));
+        assert!(StandaloneWorkbenchKind::Image.accepts_capability(MediaCapability::I2i));
+        assert!(StandaloneWorkbenchKind::Image.accepts_capability(MediaCapability::Inpaint));
+        assert!(!StandaloneWorkbenchKind::Image.accepts_capability(MediaCapability::T2v));
+        assert!(StandaloneWorkbenchKind::Video.accepts_capability(MediaCapability::T2v));
+        assert!(StandaloneWorkbenchKind::Video.accepts_capability(MediaCapability::I2v));
+        assert!(StandaloneWorkbenchKind::Video.accepts_capability(MediaCapability::V2v));
+        assert!(!StandaloneWorkbenchKind::Video.accepts_capability(MediaCapability::Tts));
+        assert!(StandaloneWorkbenchKind::Audio.accepts_capability(MediaCapability::Tts));
+        assert!(!StandaloneWorkbenchKind::Audio.accepts_capability(MediaCapability::T2i));
+        assert!(!StandaloneWorkbenchKind::Audio.accepts_capability(MediaCapability::Text));
     }
 }

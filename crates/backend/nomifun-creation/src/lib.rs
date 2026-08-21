@@ -29,4 +29,7 @@ pub use service::{
     TaskArtifactIssue, TaskArtifactManifest, TaskArtifactReconcileReport,
 };
 pub use state::CreationRouterState;
-pub use types::{CreationError, CreationInput, MediaCapability, TaskStatus};
+pub use types::{
+    CreationError, CreationInput, CreationInputKind, MediaCapability, StandaloneWorkbenchKind,
+    TaskStatus,
+};

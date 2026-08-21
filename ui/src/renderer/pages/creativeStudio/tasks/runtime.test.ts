@@ -58,6 +58,7 @@ function task(
     taskId: TASK_ID,
     ...identity,
     parameters: { prompt: 'Aurora' },
+    inputs: [],
     status,
     error: status === 'failed' ? { kind: 'provider_error', message: 'failed', httpStatus: null } : null,
     resultAssetIds: status === 'succeeded' ? [ASSET_ID] : [],

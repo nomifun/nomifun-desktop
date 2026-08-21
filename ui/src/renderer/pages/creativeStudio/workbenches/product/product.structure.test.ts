@@ -32,8 +32,13 @@ describe('standalone workbench product wiring', () => {
     expect(wiring.includes('never borrows or creates a recent project implicitly')).toBe(true);
   });
 
-  test('documents the canonical multi-video ownership blocker', () => {
+  test('documents the durable owner foundation and coordinated route blocker', () => {
     expect(video.includes('STANDALONE_VIDEO_MAX_CONCURRENT_TASKS')).toBe(true);
-    expect(wiring.includes('standalone_workbench` owner union')).toBe(true);
+    expect(
+      wiring.includes('standalone_workbench { projectId, workbenchKind }')
+    ).toBe(true);
+    expect(wiring.includes('{ assetId, kind, role }')).toBe(true);
+    expect(wiring.includes('inputs: null')).toBe(true);
+    expect(wiring.includes('owner-scoped list/recovery')).toBe(true);
   });
 });

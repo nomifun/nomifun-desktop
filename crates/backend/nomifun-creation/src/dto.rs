@@ -9,6 +9,8 @@ use nomifun_db::CreationTaskRow;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::types::CreationInput;
+
 #[cfg(test)]
 use nomifun_common::generate_id;
 
@@ -17,6 +19,7 @@ use nomifun_common::generate_id;
 pub struct CreationTask {
     pub creation_task_id: String,
     pub project_id: Option<String>,
+    pub workbench_kind: Option<String>,
     pub workflow_id: Option<String>,
     pub workflow_run_id: Option<String>,
     pub workflow_step_id: Option<String>,
@@ -25,6 +28,7 @@ pub struct CreationTask {
     pub model: String,
     pub capability: String,
     pub params: Value,
+    pub inputs: Option<Vec<CreationInput>>,
     pub status: String,
     pub error: Option<Value>,
     pub result_asset_ids: Vec<String>,
@@ -64,6 +68,16 @@ impl TryFrom<CreationTaskRow> for CreationTask {
 
         let params = serde_json::from_str::<Value>(&row.params)
             .map_err(|error| AppError::Internal(format!("invalid creation_tasks.params JSON: {error}")))?;
+        let inputs = row
+            .input_bindings
+            .as_deref()
+            .map(serde_json::from_str::<Vec<CreationInput>>)
+            .transpose()
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "invalid creation_tasks.input_bindings JSON: {error}"
+                ))
+            })?;
         let error = row
             .error
             .as_deref()
@@ -84,13 +98,15 @@ impl TryFrom<CreationTaskRow> for CreationTask {
         }
         match (
             row.project_id.as_ref(),
+            row.workbench_kind.as_deref(),
             row.workflow_id.as_ref(),
             row.workflow_run_id.as_ref(),
             row.workflow_step_id.as_ref(),
             row.node_id.as_ref(),
         ) {
-            (Some(_), None, None, None, Some(_))
-            | (None, Some(_), Some(_), Some(_), None) => {}
+            (Some(_), None, None, None, None, Some(_))
+            | (Some(_), Some("image" | "video" | "audio"), None, None, None, None)
+            | (None, None, Some(_), Some(_), Some(_), None) => {}
             _ => {
                 return Err(AppError::Internal(format!(
                     "creation task {} does not have one canonical Creative Studio owner",
@@ -102,6 +118,7 @@ impl TryFrom<CreationTaskRow> for CreationTask {
         Ok(Self {
             creation_task_id: row.creation_task_id,
             project_id: row.project_id,
+            workbench_kind: row.workbench_kind,
             workflow_id: row.workflow_id,
             workflow_run_id: row.workflow_run_id,
             workflow_step_id: row.workflow_step_id,
@@ -110,6 +127,7 @@ impl TryFrom<CreationTaskRow> for CreationTask {
             model: row.model,
             capability: row.capability,
             params,
+            inputs,
             status: row.status,
             error,
             result_asset_ids,
@@ -129,6 +147,10 @@ pub enum CreativeCreationTaskOwner {
         project_id: String,
         node_id: String,
     },
+    StandaloneWorkbench {
+        project_id: String,
+        workbench_kind: String,
+    },
     WorkflowStep {
         workflow_id: String,
         workflow_run_id: String,
@@ -146,6 +168,9 @@ pub struct CreativeCreationTask {
     pub model: String,
     pub capability: String,
     pub params: Value,
+    /// `null` is an explicit legacy-unprovable snapshot, never an inferred
+    /// empty input list.
+    pub inputs: Option<Vec<CreationInput>>,
     pub status: String,
     pub error: Option<Value>,
     pub result_asset_ids: Vec<String>,
@@ -161,18 +186,25 @@ impl TryFrom<CreationTask> for CreativeCreationTask {
     fn try_from(task: CreationTask) -> Result<Self, Self::Error> {
         let owner = match (
             task.project_id,
+            task.workbench_kind,
             task.workflow_id,
             task.workflow_run_id,
             task.workflow_step_id,
             task.node_id,
         ) {
-            (Some(project_id), None, None, None, Some(node_id)) => {
+            (Some(project_id), None, None, None, None, Some(node_id)) => {
                 CreativeCreationTaskOwner::CanvasNode {
                     project_id,
                     node_id,
                 }
             }
-            (None, Some(workflow_id), Some(workflow_run_id), Some(workflow_step_id), None) => {
+            (Some(project_id), Some(workbench_kind), None, None, None, None) => {
+                CreativeCreationTaskOwner::StandaloneWorkbench {
+                    project_id,
+                    workbench_kind,
+                }
+            }
+            (None, None, Some(workflow_id), Some(workflow_run_id), Some(workflow_step_id), None) => {
                 CreativeCreationTaskOwner::WorkflowStep {
                     workflow_id,
                     workflow_run_id,
@@ -193,6 +225,7 @@ impl TryFrom<CreationTask> for CreativeCreationTask {
             model: task.model,
             capability: task.capability,
             params: task.params,
+            inputs: task.inputs,
             status: task.status,
             error: task.error,
             result_asset_ids: task.result_asset_ids,
@@ -222,6 +255,7 @@ mod tests {
         let row = CreationTaskRow {
             creation_task_id: creation_task_id.clone(),
             project_id: Some(project_id),
+            workbench_kind: None,
             workflow_id: None,
             workflow_run_id: None,
             workflow_step_id: None,
@@ -230,6 +264,7 @@ mod tests {
             model: "m".into(),
             capability: "t2i".into(),
             params: r#"{"prompt":"cat"}"#.into(),
+            input_bindings: Some("[]".into()),
             status: "failed".into(),
             error: Some(r#"{"kind":"adapter_unavailable","message":"x"}"#.into()),
             result_asset_ids: serde_json::to_string(&[&asset_id]).unwrap(),
@@ -252,10 +287,55 @@ mod tests {
     }
 
     #[test]
+    fn standalone_owner_and_ordered_inputs_round_trip_without_guessing() {
+        let project_id = CreativeStudioProjectId::new().into_string();
+        let input_asset_id = WorkshopAssetId::new().into_string();
+        let row = CreationTaskRow {
+            creation_task_id: generate_id(),
+            project_id: Some(project_id.clone()),
+            workbench_kind: Some("video".into()),
+            workflow_id: None,
+            workflow_run_id: None,
+            workflow_step_id: None,
+            node_id: None,
+            provider_id: ProviderId::new().into_string(),
+            model: "video-model".into(),
+            capability: "i2v".into(),
+            params: r#"{"prompt":"Aurora","seconds":5}"#.into(),
+            input_bindings: Some(
+                serde_json::json!([{
+                    "asset_id": input_asset_id,
+                    "kind": "image",
+                    "role": "first_frame"
+                }])
+                .to_string(),
+            ),
+            status: "failed".into(),
+            error: Some(r#"{"kind":"provider_error","message":"failed"}"#.into()),
+            result_asset_ids: "[]".into(),
+            remote_task_id: None,
+            attempt: 1,
+            submitted_at: 1,
+            started_at: Some(2),
+            finished_at: Some(3),
+        };
+        let task = CreationTask::try_from(row).unwrap();
+        assert_eq!(task.inputs.as_ref().unwrap()[0].asset_id, input_asset_id);
+        let wire = serde_json::to_value(CreativeCreationTask::try_from(task).unwrap()).unwrap();
+        assert_eq!(wire["owner"]["kind"], "standalone_workbench");
+        assert_eq!(wire["owner"]["project_id"], project_id);
+        assert_eq!(wire["owner"]["workbench_kind"], "video");
+        assert_eq!(wire["inputs"][0]["asset_id"], input_asset_id);
+        assert_eq!(wire["inputs"][0]["kind"], "image");
+        assert_eq!(wire["inputs"][0]["role"], "first_frame");
+    }
+
+    #[test]
     fn succeeded_without_artifacts_fails_closed() {
         let row = CreationTaskRow {
             creation_task_id: generate_id(),
             project_id: Some(CreativeStudioProjectId::new().into_string()),
+            workbench_kind: None,
             workflow_id: None,
             workflow_run_id: None,
             workflow_step_id: None,
@@ -264,6 +344,7 @@ mod tests {
             model: "m".into(),
             capability: "t2i".into(),
             params: "{}".into(),
+            input_bindings: Some("[]".into()),
             status: "succeeded".into(),
             error: None,
             result_asset_ids: "[]".into(),
@@ -292,6 +373,7 @@ mod tests {
             let row = CreationTaskRow {
                 creation_task_id: creation_task_id.into(),
                 project_id: Some(CreativeStudioProjectId::new().into_string()),
+                workbench_kind: None,
                 workflow_id: None,
                 workflow_run_id: None,
                 workflow_step_id: None,
@@ -300,6 +382,7 @@ mod tests {
                 model: "m".into(),
                 capability: "t2i".into(),
                 params: "{}".into(),
+                input_bindings: Some("[]".into()),
                 status: "failed".into(),
                 error: None,
                 result_asset_ids: "[]".into(),

@@ -478,6 +478,8 @@ async fn runtime_v3_schema_has_no_physical_foreign_keys_or_cascades_and_only_gua
             "trg_requirements_pre_effect_abandon_guard_insert",
             "trg_terminal_turn_admissions_open_insert_guard",
             "trg_terminal_turn_admissions_open_update_guard",
+            "validate_creation_task_input_bindings_insert",
+            "validate_creation_task_input_bindings_update",
             "validate_creative_asset_origin_insert",
             "validate_creative_asset_origin_update",
         ],
@@ -1152,6 +1154,19 @@ async fn remaining_uuid_logical_links_and_json_registry_enforce_text_values() {
 
     let project_id = nomifun_common::generate_id();
     let node_id = nomifun_common::generate_id();
+    assert!(
+        sqlx::query(
+            "INSERT INTO workshop_assets \
+             (asset_id, kind, title, origin, created_at, updated_at) \
+             VALUES (?, 'image', 'incomplete project owner', ?, 1, 1)",
+        )
+        .bind(nomifun_common::generate_id())
+        .bind(serde_json::json!({"project_id": project_id.clone()}).to_string())
+        .execute(pool)
+        .await
+        .is_err(),
+        "origin inserts must reject an incomplete project owner branch"
+    );
     let project_owner_asset_id = nomifun_common::generate_id();
     sqlx::query(
         "INSERT INTO workshop_assets \

@@ -164,6 +164,7 @@ const taskFor = (
   task: prepared.plan.input.task,
   capability: prepared.plan.input.capability,
   parameters: structuredClone(prepared.plan.input.parameters),
+  inputs: structuredClone(prepared.plan.input.inputs),
   status: 'running',
   error: null,
   resultAssetIds: [],
@@ -242,7 +243,7 @@ describe('canvas video composer product model', () => {
     expect(prepared.plan.input).toMatchObject({
       task: 'video_generation',
       capability: 'i2v',
-      inputs: [{ assetId: IMAGE_ASSET_ID, role: 'reference' }],
+      inputs: [{ assetId: IMAGE_ASSET_ID, kind: 'image', role: 'reference' }],
       parameters: {
         width: 720,
         height: 720,

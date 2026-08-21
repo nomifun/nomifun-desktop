@@ -238,6 +238,7 @@ export function createImageTaskInput(
   };
   const inputs: CreativeTaskInput[] = assetIds.map((assetId) => ({
     assetId,
+    kind: 'image',
     role: 'reference',
   }));
   return {

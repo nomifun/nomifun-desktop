@@ -10,7 +10,7 @@ use nomifun_common::{
     CreationTaskId, CreativeStudioNodeId, CreativeStudioProjectId,
 };
 use nomifun_creation::{
-    CreationInput, CreativeCreationTask, CreativeTaskOwner, NewCreationTask,
+    CreationInput, CreationInputKind, CreativeCreationTask, CreativeTaskOwner, NewCreationTask,
 };
 use nomifun_workshop::creative_studio::{
     CreativeConfigNodeData, CreativeGenerationStatus, CreativeNode, CreativeNodeData,
@@ -365,6 +365,16 @@ fn generation_request(
     if config.capability.trim().is_empty() {
         return Err("config node has no capability".to_owned());
     }
+    let input_kind = match config.capability.as_str() {
+        "i2i" | "inpaint" | "i2v" => Some(CreationInputKind::Image),
+        "v2v" => Some(CreationInputKind::Video),
+        "t2i" | "t2v" | "tts" | "text" if config.input_asset_ids.is_empty() => None,
+        capability => {
+            return Err(format!(
+                "config capability {capability:?} cannot prove the kind of its reference inputs"
+            ));
+        }
+    };
     let mut params = config.parameters.clone();
     params.insert("prompt".to_owned(), json!(config.prompt));
     if !config.negative_prompt.is_empty() {
@@ -375,6 +385,7 @@ fn generation_request(
         .iter()
         .map(|asset_id| CreationInput {
             asset_id: asset_id.clone(),
+            kind: input_kind.expect("non-empty input list has a proven kind"),
             role: "reference".to_owned(),
         })
         .collect();
