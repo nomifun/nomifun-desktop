@@ -216,6 +216,7 @@ mod tests {
             text: text.to_owned(),
             usage: TokenUsage::default(),
             turns: 1,
+            durable_effect_targets: Vec::new(),
             is_error,
         }
     }

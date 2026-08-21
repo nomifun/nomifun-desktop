@@ -7,7 +7,7 @@ import type { ProtocolExecutorKind } from "./ProtocolExecutorKind";
 import type { ProtocolScope } from "./ProtocolScope";
 import type { ProtocolTransportKind } from "./ProtocolTransportKind";
 
-export type ProtocolDescriptor = { protocol_id: string, supported_tasks: Array<ModelTask>, executor: ProtocolExecutorKind, transport: ProtocolTransportKind, 
+export type ProtocolDescriptor = { protocol_id: string, supported_tasks: Array<ModelTask>, executor: ProtocolExecutorKind, transport: ProtocolTransportKind,
 /**
  * Whether this protocol's request body requires an explicit output limit.
  */
@@ -17,7 +17,7 @@ requires_output_ceiling: boolean,
  * generic transports use `header_key:<name>` / `query_key:<param>` as
  * wildcard vocabulary; Agent protocols list their exact required scheme.
  */
-allowed_auth_schemes: Array<string>, scopes: Array<ProtocolScope>, platforms: Array<string>, default_connections: Array<ProtocolDefaultConnection>, endpoints: Array<ProtocolEndpointDescriptor>, 
+allowed_auth_schemes: Array<string>, scopes: Array<ProtocolScope>, platforms: Array<string>, default_connections: Array<ProtocolDefaultConnection>, endpoints: Array<ProtocolEndpointDescriptor>,
 /**
  * The shape shared by every endpoint of this protocol. `None` for `sdk`
  * transports, which build no URL at all.

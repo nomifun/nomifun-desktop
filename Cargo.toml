@@ -180,6 +180,7 @@ which = "7"
 # --- Office ---
 sha1 = "0.10"
 sha2 = "0.10"
+same-file = "1.0.6"
 hmac = "0.12"
 
 # --- AWS ---

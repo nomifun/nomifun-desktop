@@ -102,6 +102,8 @@ fn make_compact_engine_with_output(
     super::AgentEngine {
         provider: Arc::new(NullProvider),
         tools: ToolRegistry::new(),
+        workspace_root: std::path::PathBuf::from("."),
+        completion_evidence_mode: super::CompletionEvidenceMode::LocalFingerprint,
         messages,
         system_prompt: String::new(),
         model: "test-model".to_string(),

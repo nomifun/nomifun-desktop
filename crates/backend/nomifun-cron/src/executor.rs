@@ -1551,16 +1551,21 @@ fn replayed_delivery_result(
             ),
         };
     }
-    if delivery.result_ok == Some(false) {
-        return ExecutionResult::Error {
+    match delivery.result_ok {
+        Some(true) => ExecutionResult::Success {
+            conversation_id: conversation_id.to_owned(),
+        },
+        Some(false) => ExecutionResult::Error {
             message: delivery
                 .result_error
                 .or(delivery.result_text)
                 .unwrap_or_else(|| format!("cron run {run_id} completed with an error")),
-        };
-    }
-    ExecutionResult::Success {
-        conversation_id: conversation_id.to_owned(),
+        },
+        None => ExecutionResult::Quarantined {
+            message: format!(
+                "cron run {run_id} completed without an exact durable terminal result"
+            ),
+        },
     }
 }
 
@@ -1801,6 +1806,97 @@ mod tests {
         })
         .await
         .expect("agent send should complete");
+    }
+
+    #[test]
+    fn replayed_delivery_result_requires_an_explicit_completed_success() {
+        const RUN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000201";
+        const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000202";
+
+        struct Case {
+            name: &'static str,
+            completed: bool,
+            result_ok: Option<bool>,
+            result_error: Option<&'static str>,
+            expected: ExecutionResult,
+        }
+
+        let accepted_without_terminal = ExecutionResult::Quarantined {
+            message: format!(
+                "cron run {RUN_ID} remains accepted without an exact durable terminal outcome"
+            ),
+        };
+        let cases = [
+            Case {
+                name: "completed true",
+                completed: true,
+                result_ok: Some(true),
+                result_error: None,
+                expected: ExecutionResult::Success {
+                    conversation_id: CONVERSATION_ID.to_owned(),
+                },
+            },
+            Case {
+                name: "completed false",
+                completed: true,
+                result_ok: Some(false),
+                result_error: Some("durable failure"),
+                expected: ExecutionResult::Error {
+                    message: "durable failure".to_owned(),
+                },
+            },
+            Case {
+                name: "completed without a result",
+                completed: true,
+                result_ok: None,
+                result_error: None,
+                expected: ExecutionResult::Quarantined {
+                    message: format!(
+                        "cron run {RUN_ID} completed without an exact durable terminal result"
+                    ),
+                },
+            },
+            Case {
+                name: "incomplete despite true result",
+                completed: false,
+                result_ok: Some(true),
+                result_error: None,
+                expected: accepted_without_terminal.clone(),
+            },
+            Case {
+                name: "incomplete despite false result",
+                completed: false,
+                result_ok: Some(false),
+                result_error: Some("premature failure"),
+                expected: accepted_without_terminal.clone(),
+            },
+            Case {
+                name: "incomplete without a result",
+                completed: false,
+                result_ok: None,
+                result_error: None,
+                expected: accepted_without_terminal,
+            },
+        ];
+
+        for case in cases {
+            let actual = replayed_delivery_result(
+                RUN_ID,
+                CONVERSATION_ID,
+                IdempotentMessageDelivery {
+                    message_id: "0190f5fe-7c00-7a00-8000-000000000203".to_owned(),
+                    replayed: true,
+                    completed: case.completed,
+                    result_ok: case.result_ok,
+                    result_text: None,
+                    result_error: case.result_error.map(str::to_owned),
+                    result_error_code: None,
+                    result_error_retryable: None,
+                },
+            );
+
+            assert_eq!(actual, case.expected, "{}", case.name);
+        }
     }
 
     #[test]

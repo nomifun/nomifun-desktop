@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime};
 use base64::Engine as _;
 use fs2::FileExt;
 use nomifun_common::PersistedArtifactId;
+use same_file::Handle as SameFileHandle;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -180,6 +181,104 @@ struct ValidatedArtifact {
     sha256: String,
 }
 
+/// A workspace source whose exact bytes were verified before a tool result was
+/// accepted. Persistence must still re-read the source, but it may commit only
+/// when that terminal snapshot has this same digest. Keeping the expectation
+/// beside the path closes the preflight-to-import rename/rewrite window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedExistingArtifactSource {
+    pub(crate) path: PathBuf,
+    pub(crate) sha256: String,
+}
+
+#[derive(Debug)]
+struct ExistingFileSnapshot {
+    canonical_path: PathBuf,
+    bytes: Vec<u8>,
+    sha256: String,
+}
+
+fn open_file_still_names_path(file: &File, path: &Path) -> Result<bool, ArtifactStoreError> {
+    let open_identity = SameFileHandle::from_file(file.try_clone()?)?;
+    let path_identity = SameFileHandle::from_path(path)?;
+    Ok(open_identity == path_identity)
+}
+
+fn read_existing_file_snapshot(
+    workspace: &Path,
+    requested: &Path,
+) -> Result<ExistingFileSnapshot, ArtifactStoreError> {
+    read_existing_file_snapshot_with(workspace, requested, |_| {})
+}
+
+/// Read one workspace source through a stable file handle. The callback is a
+/// deterministic test seam at the formerly vulnerable point: bytes have been
+/// read, but the path/handle stability checks have not yet run.
+fn read_existing_file_snapshot_with<F>(
+    workspace: &Path,
+    requested: &Path,
+    after_read: F,
+) -> Result<ExistingFileSnapshot, ArtifactStoreError>
+where
+    F: FnOnce(&Path),
+{
+    let candidate = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        workspace.join(requested)
+    };
+    let canonical_path = fs::canonicalize(candidate)?;
+    if !canonical_path.starts_with(workspace) {
+        return Err(ArtifactStoreError::OutsideWorkspace);
+    }
+
+    let mut file = File::open(&canonical_path)?;
+    let before = file.metadata()?;
+    if !before.is_file() || before.len() == 0 {
+        return Err(ArtifactStoreError::VerificationFailed);
+    }
+    if before.len() > MAX_EXISTING_ARTIFACT_BYTES {
+        return Err(ArtifactStoreError::TooLarge {
+            limit: MAX_EXISTING_ARTIFACT_BYTES as usize,
+        });
+    }
+    let before_modified = before.modified()?;
+    let path_before = fs::metadata(&canonical_path)?;
+    if !path_before.is_file()
+        || path_before.len() != before.len()
+        || path_before.modified()? != before_modified
+        || !open_file_still_names_path(&file, &canonical_path)?
+    {
+        return Err(ArtifactStoreError::VerificationFailed);
+    }
+
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    file.read_to_end(&mut bytes)?;
+    after_read(&canonical_path);
+
+    let handle_after = file.metadata()?;
+    let path_after = fs::metadata(&canonical_path)?;
+    if !handle_after.is_file()
+        || !path_after.is_file()
+        || handle_after.len() != before.len()
+        || path_after.len() != before.len()
+        || bytes.len() as u64 != before.len()
+        || handle_after.modified()? != before_modified
+        || path_after.modified()? != before_modified
+        || fs::canonicalize(&canonical_path)? != canonical_path
+        || !open_file_still_names_path(&file, &canonical_path)?
+    {
+        return Err(ArtifactStoreError::VerificationFailed);
+    }
+
+    let sha256 = hex::encode(Sha256::digest(&bytes));
+    Ok(ExistingFileSnapshot {
+        canonical_path,
+        bytes,
+        sha256,
+    })
+}
+
 impl ArtifactStore {
     pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
         let workspace_root = workspace_root.into();
@@ -282,43 +381,18 @@ impl ArtifactStore {
     /// can be published as a successful artifact.
     pub fn verify_existing_path(&self, path: impl AsRef<Path>) -> Result<PersistedArtifact, ArtifactStoreError> {
         let workspace = fs::canonicalize(&self.workspace_root)?;
-        let requested = path.as_ref();
-        let candidate = if requested.is_absolute() {
-            requested.to_path_buf()
-        } else {
-            workspace.join(requested)
-        };
-        let canonical_path = fs::canonicalize(candidate)?;
-        if !canonical_path.starts_with(&workspace) {
-            return Err(ArtifactStoreError::OutsideWorkspace);
-        }
-
-        let metadata = fs::metadata(&canonical_path)?;
-        if !metadata.is_file() || metadata.len() == 0 {
-            return Err(ArtifactStoreError::VerificationFailed);
-        }
-        if metadata.len() > MAX_EXISTING_ARTIFACT_BYTES {
-            return Err(ArtifactStoreError::TooLarge {
-                limit: MAX_EXISTING_ARTIFACT_BYTES as usize,
-            });
-        }
-
         // Known media and document formats must be checked over the complete
-        // container. Reading only a prefix lets a header-only or truncated file
-        // acquire a success receipt. The metadata limit above bounds this read.
-        let bytes = fs::read(&canonical_path)?;
-        let metadata_after_read = fs::metadata(&canonical_path)?;
-        if !metadata_after_read.is_file()
-            || metadata_after_read.len() != metadata.len()
-            || bytes.len() as u64 != metadata.len()
-        {
-            return Err(ArtifactStoreError::VerificationFailed);
-        }
-        let (kind, mime_type, _) = validate_existing_file(&canonical_path, &bytes)?;
-        let relative = canonical_path
+        // container. The snapshot binds those bytes to one stable open handle
+        // and to the path that still names it after the read.
+        let snapshot = read_existing_file_snapshot(&workspace, path.as_ref())?;
+        let (kind, mime_type, _) =
+            validate_existing_file(&snapshot.canonical_path, &snapshot.bytes)?;
+        let relative = snapshot
+            .canonical_path
             .strip_prefix(&workspace)
             .map_err(|_| ArtifactStoreError::OutsideWorkspace)?;
-        let canonical_locator = canonical_path
+        let canonical_locator = snapshot
+            .canonical_path
             .to_str()
             .ok_or(ArtifactStoreError::VerificationFailed)?;
         let relative_locator = relative
@@ -331,8 +405,8 @@ impl ArtifactStore {
             mime_type,
             path: canonical_locator.to_owned(),
             relative_path: relative_locator.replace('\\', "/"),
-            size_bytes: metadata.len(),
-            sha256: hex::encode(Sha256::digest(&bytes)),
+            size_bytes: snapshot.bytes.len() as u64,
+            sha256: snapshot.sha256,
         })
     }
 
@@ -955,6 +1029,29 @@ impl ArtifactStore {
         self.persist_validated_batch(existing)
     }
 
+    /// Persist preflight-verified workspace sources while binding the imported
+    /// receipts to the exact digests observed by that preflight. A path that is
+    /// rewritten or rename-replaced between the two phases fails before any
+    /// immutable artifact is committed.
+    pub(crate) fn persist_inline_and_verified_existing_batch<I, M, D>(
+        &self,
+        inline: I,
+        existing_sources: &[VerifiedExistingArtifactSource],
+    ) -> Result<Vec<PersistedArtifact>, ArtifactStoreError>
+    where
+        I: IntoIterator<Item = (ArtifactKind, M, D)>,
+        M: AsRef<str>,
+        D: AsRef<str>,
+    {
+        let mut existing = self.prepare_verified_existing_batch(existing_sources)?;
+        let mut validated_inline = validate_inline_batch(inline)?;
+        existing.append(&mut validated_inline);
+        if existing.is_empty() {
+            return Err(ArtifactStoreError::Empty);
+        }
+        self.persist_validated_batch(existing)
+    }
+
     /// Persist a batch whose ownership has not yet transferred to conversation
     /// history. A crash-durable `Unprepared` recovery record is committed
     /// before each artifact rename, so an emitted receipt can never become an
@@ -973,6 +1070,31 @@ impl ArtifactStore {
         P: AsRef<Path>,
     {
         let mut existing = self.prepare_existing_batch(existing_paths)?;
+        let mut validated_inline = validate_inline_batch(inline)?;
+        existing.append(&mut validated_inline);
+        if existing.is_empty() {
+            return Err(ArtifactStoreError::Empty);
+        }
+        if source.conversation_id.trim().is_empty() || source.wire_msg_id.trim().is_empty() {
+            return Err(ArtifactStoreError::Recovery(
+                "artifact recovery source is incomplete".to_owned(),
+            ));
+        }
+        self.persist_validated_batch_with_recovery(existing, Some(source))
+    }
+
+    pub(crate) fn persist_inline_and_verified_existing_batch_recoverable<I, M, D>(
+        &self,
+        inline: I,
+        existing_sources: &[VerifiedExistingArtifactSource],
+        source: &ArtifactRecoverySource,
+    ) -> Result<Vec<PersistedArtifact>, ArtifactStoreError>
+    where
+        I: IntoIterator<Item = (ArtifactKind, M, D)>,
+        M: AsRef<str>,
+        D: AsRef<str>,
+    {
+        let mut existing = self.prepare_verified_existing_batch(existing_sources)?;
         let mut validated_inline = validate_inline_batch(inline)?;
         existing.append(&mut validated_inline);
         if existing.is_empty() {
@@ -1015,64 +1137,78 @@ impl ArtifactStore {
         I: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
+        self.prepare_existing_sources(
+            paths
+                .into_iter()
+                .map(|path| (path.as_ref().to_path_buf(), None)),
+        )
+    }
+
+    fn prepare_verified_existing_batch(
+        &self,
+        sources: &[VerifiedExistingArtifactSource],
+    ) -> Result<Vec<ValidatedArtifact>, ArtifactStoreError> {
+        self.prepare_existing_sources(
+            sources
+                .iter()
+                .map(|source| (source.path.clone(), Some(source.sha256.clone()))),
+        )
+    }
+
+    fn prepare_existing_sources<I>(
+        &self,
+        requests: I,
+    ) -> Result<Vec<ValidatedArtifact>, ArtifactStoreError>
+    where
+        I: IntoIterator<Item = (PathBuf, Option<String>)>,
+    {
         let workspace = fs::canonicalize(&self.workspace_root)?;
-        let mut prepared = Vec::<(PathBuf, ValidatedArtifact)>::new();
-        let mut sources = std::collections::HashSet::new();
-        for requested in paths {
-            let requested = requested.as_ref();
-            let candidate = if requested.is_absolute() {
-                requested.to_path_buf()
-            } else {
-                workspace.join(requested)
-            };
-            let canonical_path = fs::canonicalize(candidate)?;
-            if !canonical_path.starts_with(&workspace) {
-                return Err(ArtifactStoreError::OutsideWorkspace);
-            }
-            if !sources.insert(canonical_path.clone()) {
+        let mut prepared = Vec::<(PathBuf, Option<String>, ValidatedArtifact)>::new();
+        let mut seen_sources = std::collections::HashSet::new();
+        for (requested, expected_sha256) in requests {
+            let snapshot = read_existing_file_snapshot(&workspace, &requested)?;
+            if !seen_sources.insert(snapshot.canonical_path.clone()) {
                 return Err(ArtifactStoreError::VerificationFailed);
             }
-            let metadata = fs::metadata(&canonical_path)?;
-            if !metadata.is_file() || metadata.len() == 0 {
+            if expected_sha256
+                .as_ref()
+                .is_some_and(|expected| !snapshot.sha256.eq_ignore_ascii_case(expected))
+            {
                 return Err(ArtifactStoreError::VerificationFailed);
             }
-            if metadata.len() > MAX_EXISTING_ARTIFACT_BYTES {
-                return Err(ArtifactStoreError::TooLarge {
-                    limit: MAX_EXISTING_ARTIFACT_BYTES as usize,
-                });
-            }
-            let bytes = fs::read(&canonical_path)?;
-            if bytes.len() as u64 != metadata.len() {
-                return Err(ArtifactStoreError::VerificationFailed);
-            }
-            let (kind, mime_type, extension) = validate_existing_file(&canonical_path, &bytes)?;
-            let sha256 = hex::encode(Sha256::digest(&bytes));
+            let (kind, mime_type, extension) =
+                validate_existing_file(&snapshot.canonical_path, &snapshot.bytes)?;
             prepared.push((
-                canonical_path,
+                snapshot.canonical_path,
+                expected_sha256,
                 ValidatedArtifact {
                     kind,
                     mime_type,
                     extension,
-                    bytes,
-                    sha256,
+                    bytes: snapshot.bytes,
+                    sha256: snapshot.sha256,
                 },
             ));
         }
         // Re-read every source only after the whole batch has passed format
         // validation. A change to an earlier source while a later source was
         // being inspected therefore aborts before `nomifun-artifacts` exists.
-        for (canonical_path, artifact) in &prepared {
-            let current = fs::read(canonical_path)?;
-            let current_metadata = fs::metadata(canonical_path)?;
-            if !current_metadata.is_file()
-                || current.len() != artifact.bytes.len()
-                || current_metadata.len() != artifact.bytes.len() as u64
-                || hex::encode(Sha256::digest(&current)) != artifact.sha256
+        for (canonical_path, expected_sha256, artifact) in &prepared {
+            let current = read_existing_file_snapshot(&workspace, canonical_path)?;
+            if current.canonical_path != *canonical_path
+                || current.bytes.len() != artifact.bytes.len()
+                || current.sha256 != artifact.sha256
+                || expected_sha256
+                    .as_ref()
+                    .is_some_and(|expected| !current.sha256.eq_ignore_ascii_case(expected))
             {
                 return Err(ArtifactStoreError::VerificationFailed);
             }
         }
-        Ok(prepared.into_iter().map(|(_, artifact)| artifact).collect())
+        Ok(prepared
+            .into_iter()
+            .map(|(_, _, artifact)| artifact)
+            .collect())
     }
 
     fn prepare_root(&self) -> Result<PathBuf, ArtifactStoreError> {
@@ -4697,6 +4833,77 @@ mod tests {
             store.verify_existing_path(&outside),
             Err(ArtifactStoreError::OutsideWorkspace)
         ));
+    }
+
+    #[test]
+    fn existing_path_snapshot_rejects_same_size_rename_replacement_at_read_boundary() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("report.md");
+        let displaced = workspace.path().join("report.before.md");
+        fs::write(&source, b"old report").unwrap();
+        let canonical_workspace = fs::canonicalize(workspace.path()).unwrap();
+
+        let result = read_existing_file_snapshot_with(
+            &canonical_workspace,
+            &source,
+            |canonical_source| {
+                fs::rename(canonical_source, &displaced).unwrap();
+                fs::write(canonical_source, b"new report").unwrap();
+            },
+        );
+
+        assert!(matches!(result, Err(ArtifactStoreError::VerificationFailed)));
+    }
+
+    #[test]
+    fn verified_existing_source_digest_rejects_same_size_in_place_rewrite() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("report.md");
+        fs::write(&source, b"first body").unwrap();
+        let store = ArtifactStore::new(workspace.path());
+        let preflight = store.verify_existing_path(&source).unwrap();
+        let expectation = VerifiedExistingArtifactSource {
+            path: PathBuf::from(preflight.path),
+            sha256: preflight.sha256,
+        };
+
+        fs::write(&source, b"other body").unwrap();
+        let result = store.persist_inline_and_verified_existing_batch(
+            std::iter::empty::<(ArtifactKind, &str, &str)>(),
+            &[expectation],
+        );
+
+        assert!(matches!(result, Err(ArtifactStoreError::VerificationFailed)));
+        assert!(
+            !store.artifact_root().exists(),
+            "digest mismatch must fail before immutable artifact publication"
+        );
+    }
+
+    #[test]
+    fn verified_existing_source_digest_persists_the_preflight_bytes() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("report.md");
+        let body = b"stable report";
+        fs::write(&source, body).unwrap();
+        let store = ArtifactStore::new(workspace.path());
+        let preflight = store.verify_existing_path(&source).unwrap();
+        let preflight_sha256 = preflight.sha256.clone();
+        let expectation = VerifiedExistingArtifactSource {
+            path: PathBuf::from(preflight.path),
+            sha256: preflight.sha256,
+        };
+
+        let artifacts = store
+            .persist_inline_and_verified_existing_batch(
+                std::iter::empty::<(ArtifactKind, &str, &str)>(),
+                &[expectation],
+            )
+            .unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(fs::read(&artifacts[0].path).unwrap(), body);
+        assert_eq!(artifacts[0].sha256, preflight_sha256);
     }
 
     #[test]

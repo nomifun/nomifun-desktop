@@ -18,9 +18,26 @@ use nomifun_api_types::{
     SaveProviderConnectionRequest, SaveProviderModelRequest,
 };
 
+// ts-rs preserves formatting whitespace from wrapped declarations. Keep
+// committed bindings platform-independent and stable across test runs.
+fn normalize_typescript_binding(generated: &str) -> String {
+    let mut normalized = generated
+        .lines()
+        .map(|line| line.trim_end_matches([' ', '\t']))
+        .collect::<Vec<_>>()
+        .join("\n");
+    while normalized.ends_with('\n') {
+        normalized.pop();
+    }
+    normalized.push('\n');
+    normalized
+}
+
 fn export_binding_if_changed<T: TS + 'static>(file_name: &str) {
-    let generated = T::export_to_string(&Config::default())
-        .unwrap_or_else(|error| panic!("{file_name} must export to TypeScript: {error}"));
+    let generated = normalize_typescript_binding(
+        &T::export_to_string(&Config::default())
+            .unwrap_or_else(|error| panic!("{file_name} must export to TypeScript: {error}")),
+    );
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../ui/src/common/protocolBindings")
         .join(file_name);
@@ -76,6 +93,14 @@ fn export_provider_domain_bindings() {
     export_binding_if_changed::<ProtocolRecommendation>("ProtocolRecommendation.ts");
     export_binding_if_changed::<AuthSchemeDescriptor>("AuthSchemeDescriptor.ts");
     export_binding_if_changed::<ModelProtocolManifestResponse>("ModelProtocolManifestResponse.ts");
+}
+
+#[test]
+fn generated_bindings_have_deterministic_whitespace() {
+    assert_eq!(
+        normalize_typescript_binding("export type Value = { \r\nfield: string,\t\r\n}\r\n\r\n"),
+        "export type Value = {\nfield: string,\n}\n"
+    );
 }
 
 #[test]

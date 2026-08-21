@@ -991,6 +991,9 @@ impl AgentBootstrap {
                 cwd_path.to_path_buf(),
             )
         };
+        if ssh_backend.is_some() {
+            engine.set_remote_completion_evidence();
+        }
         engine.set_plan_active_flag(plan_active_flag);
         engine.set_process_supervisor(Arc::clone(&process_supervisor));
         if let Some(spec) = self.goal {

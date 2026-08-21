@@ -145,6 +145,66 @@ async fn editable_channel_retracts_discarded_draft_and_keeps_the_steering_prefix
 }
 
 #[tokio::test]
+async fn editable_channel_accepted_turn_discard_retracts_every_race_tail_pass_before_error() {
+    let (event_tx, _) = broadcast::channel::<AgentStreamEvent>(64);
+    let recorder = Arc::new(MessageRecorder::new());
+    let relay = relay(
+        RelayConfig {
+            platform: PluginType::Telegram,
+            plugin_id: TELEGRAM_CHANNEL_PLUGIN_ID.to_owned(),
+            chat_id: "chat_root_discard".into(),
+            throttle_ms: 10_000,
+            conversation_id: CONVERSATION_ID.into(),
+        },
+        recorder.clone(),
+    );
+    let rx = event_tx.subscribe();
+
+    event_tx
+        .send(AgentStreamEvent::Start(StartEventData::default()))
+        .unwrap();
+    event_tx
+        .send(AgentStreamEvent::Text(TextEventData {
+            content: "pass A".into(),
+        }))
+        .unwrap();
+    event_tx
+        .send(AgentStreamEvent::Start(StartEventData::default()))
+        .unwrap();
+    event_tx
+        .send(AgentStreamEvent::Text(TextEventData {
+            content: " + pass B".into(),
+        }))
+        .unwrap();
+    event_tx
+        .send(AgentStreamEvent::OutputDiscarded(
+            OutputDiscardedEventData { restart_attempt: 0 },
+        ))
+        .unwrap();
+    event_tx
+        .send(AgentStreamEvent::Error(ErrorEventData::legacy(
+            "host commit rolled back",
+            None,
+        )))
+        .unwrap();
+
+    relay.run(rx).await;
+
+    let edits = recorder.take_edits();
+    assert!(!edits.is_empty());
+    assert!(
+        edits
+            .iter()
+            .any(|message| message.text.as_deref().is_some_and(|text| text.contains("pass A"))),
+        "the test must exercise retraction of an already-visible first pass"
+    );
+    let final_text = edits.last().and_then(|message| message.text.as_deref()).unwrap();
+    assert!(final_text.contains("host commit rolled back"));
+    assert!(!final_text.contains("pass A"));
+    assert!(!final_text.contains("pass B"));
+}
+
+#[tokio::test]
 async fn send_once_channel_never_releases_discarded_draft() {
     let (event_tx, _) = broadcast::channel::<AgentStreamEvent>(64);
     let recorder = Arc::new(MessageRecorder::new());
@@ -193,6 +253,60 @@ async fn send_once_channel_never_releases_discarded_draft() {
     let final_text = sends[0].text.as_deref().unwrap();
     assert!(final_text.contains("prefix answer"));
     assert!(!final_text.contains("discard me"));
+}
+
+#[tokio::test]
+async fn send_once_channel_accepted_turn_discard_retracts_every_race_tail_pass_before_error() {
+    let (event_tx, _) = broadcast::channel::<AgentStreamEvent>(64);
+    let recorder = Arc::new(MessageRecorder::new());
+    let relay = relay(
+        RelayConfig {
+            platform: PluginType::Weixin,
+            plugin_id: WEIXIN_CHANNEL_PLUGIN_ID.to_owned(),
+            chat_id: "chat_root_discard".into(),
+            throttle_ms: 10_000,
+            conversation_id: CONVERSATION_ID.into(),
+        },
+        recorder.clone(),
+    );
+    let rx = event_tx.subscribe();
+
+    event_tx
+        .send(AgentStreamEvent::Start(StartEventData::default()))
+        .unwrap();
+    event_tx
+        .send(AgentStreamEvent::Text(TextEventData {
+            content: "pass A".into(),
+        }))
+        .unwrap();
+    event_tx
+        .send(AgentStreamEvent::Start(StartEventData::default()))
+        .unwrap();
+    event_tx
+        .send(AgentStreamEvent::Text(TextEventData {
+            content: " + pass B".into(),
+        }))
+        .unwrap();
+    event_tx
+        .send(AgentStreamEvent::OutputDiscarded(
+            OutputDiscardedEventData { restart_attempt: 0 },
+        ))
+        .unwrap();
+    event_tx
+        .send(AgentStreamEvent::Error(ErrorEventData::legacy(
+            "host commit rolled back",
+            None,
+        )))
+        .unwrap();
+
+    relay.run(rx).await;
+
+    let sends = recorder.take_sends();
+    assert_eq!(sends.len(), 1);
+    let text = sends[0].text.as_deref().unwrap();
+    assert!(text.contains("host commit rolled back"));
+    assert!(!text.contains("pass A"));
+    assert!(!text.contains("pass B"));
 }
 
 #[tokio::test]

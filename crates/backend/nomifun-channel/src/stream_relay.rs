@@ -399,7 +399,8 @@ impl ChannelStreamRelay {
     /// then send once.
     async fn run_send_once(self, mut rx: broadcast::Receiver<AgentStreamEvent>) {
         let mut text_buffer = String::new();
-        let mut text_checkpoint: Option<usize> = None;
+        let mut accepted_turn_text_checkpoint: Option<usize> = None;
+        let mut attempt_text_checkpoint: Option<usize> = None;
         let mut has_content = false;
         let mut media_ids: Vec<String> = Vec::new();
         let mut media_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -416,10 +417,17 @@ impl ChannelStreamRelay {
                     }
                     match ChannelMessageService::process_stream_event(&event) {
                     Some(StreamAction::StartCheckpoint) => {
-                        text_checkpoint = Some(text_buffer.len());
+                        let checkpoint = text_buffer.len();
+                        accepted_turn_text_checkpoint.get_or_insert(checkpoint);
+                        attempt_text_checkpoint = Some(checkpoint);
                     }
                     Some(StreamAction::DiscardOutput { restart_attempt }) => {
-                        let Some(checkpoint) = text_checkpoint else {
+                        let checkpoint = if restart_attempt == 0 {
+                            accepted_turn_text_checkpoint
+                        } else {
+                            attempt_text_checkpoint
+                        };
+                        let Some(checkpoint) = checkpoint else {
                             let error_msg = UnifiedOutgoingMessage {
                                 message_type: OutgoingMessageType::Text,
                                 text: Some(format!(
@@ -458,7 +466,7 @@ impl ChannelStreamRelay {
                         }
                         text_buffer.truncate(checkpoint);
                         has_content = !text_buffer.is_empty();
-                        text_checkpoint = Some(text_buffer.len());
+                        attempt_text_checkpoint = Some(text_buffer.len());
                     }
                     Some(StreamAction::AppendText(chunk)) => {
                         text_buffer.push_str(&chunk);
@@ -638,7 +646,8 @@ impl ChannelStreamRelay {
         };
 
         let mut text_buffer = String::new();
-        let mut text_checkpoint: Option<usize> = None;
+        let mut accepted_turn_text_checkpoint: Option<usize> = None;
+        let mut attempt_text_checkpoint: Option<usize> = None;
         let mut last_edit = Instant::now() - throttle;
         // Whether a blocking decision was forwarded during this turn. When a
         // decision is pending, the thinking/streaming card is deliberately left
@@ -660,10 +669,17 @@ impl ChannelStreamRelay {
                     }
                     match ChannelMessageService::process_stream_event(&event) {
                     Some(StreamAction::StartCheckpoint) => {
-                        text_checkpoint = Some(text_buffer.len());
+                        let checkpoint = text_buffer.len();
+                        accepted_turn_text_checkpoint.get_or_insert(checkpoint);
+                        attempt_text_checkpoint = Some(checkpoint);
                     }
                     Some(StreamAction::DiscardOutput { restart_attempt }) => {
-                        let Some(checkpoint) = text_checkpoint else {
+                        let checkpoint = if restart_attempt == 0 {
+                            accepted_turn_text_checkpoint
+                        } else {
+                            attempt_text_checkpoint
+                        };
+                        let Some(checkpoint) = checkpoint else {
                             let error_msg = self.terminal_failure_message(
                                 &text_buffer,
                                 &format!(
@@ -694,7 +710,7 @@ impl ChannelStreamRelay {
                             break;
                         }
                         text_buffer.truncate(checkpoint);
-                        text_checkpoint = Some(text_buffer.len());
+                        attempt_text_checkpoint = Some(text_buffer.len());
                         let visible = strip_reasoning(&text_buffer, Stage::Streaming);
                         let replacement = if visible.trim().is_empty() {
                             ChannelMessageService::build_thinking_message()
