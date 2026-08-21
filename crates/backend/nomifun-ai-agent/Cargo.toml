@@ -27,6 +27,7 @@ rustls.workspace = true
 url.workspace = true
 ed25519-dalek.workspace = true
 sha2.workspace = true
+same-file.workspace = true
 hex.workspace = true
 dirs.workspace = true
 getrandom.workspace = true

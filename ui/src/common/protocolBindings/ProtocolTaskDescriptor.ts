@@ -5,7 +5,7 @@ import type { ProtocolEndpointDescriptor } from "./ProtocolEndpointDescriptor";
 import type { ProtocolExecutorKind } from "./ProtocolExecutorKind";
 import type { ProtocolTransportKind } from "./ProtocolTransportKind";
 
-export type ProtocolTaskDescriptor = { protocol_id: string, task: ModelTask, executor: ProtocolExecutorKind, transport: ProtocolTransportKind, endpoints: Array<ProtocolEndpointDescriptor>, 
+export type ProtocolTaskDescriptor = { protocol_id: string, task: ModelTask, executor: ProtocolExecutorKind, transport: ProtocolTransportKind, endpoints: Array<ProtocolEndpointDescriptor>,
 /**
  * The shape shared by every endpoint of this protocol. `None` for `sdk`
  * transports, which build no URL at all.

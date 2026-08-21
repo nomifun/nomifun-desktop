@@ -17,6 +17,7 @@ use nomi_types::message::{
 use nomi_types::skill_types::{ContextModifier, PlanModeTransition, effort_to_string};
 use serde_json::Value;
 use tracing::Instrument;
+use sha2::{Digest, Sha256};
 
 use crate::cache_diagnostics::{CacheBreakDetector, CacheDiagnostic, CacheStats};
 use crate::compact::state::CompactState;
@@ -30,7 +31,392 @@ use crate::output::{OutputSink, ToolCallExecutionContext, ToolCallRetryContext};
 use crate::plan::prompt as plan_prompt;
 use crate::plan::state::PlanState;
 use crate::round;
-use crate::session::{EditableTurnCheckpoint, Session, SessionManager};
+use crate::session::{AcceptedTurnRoot, EditableTurnCheckpoint, Session, SessionManager};
+
+mod runtime_authority;
+use runtime_authority::AcceptedTurnRuntimeAuthority;
+
+/// Trusted accepted-turn scope supplied by a host that decorates provider
+/// input or performs same-turn race-tail re-runs.
+///
+/// `requirement` is the original user-authored content, before RAG/knowledge
+/// prefixes. `prior_durable_effect_targets` carries machine evidence from an
+/// earlier engine pass of the same accepted turn so a late steering re-run
+/// cannot erase work that is already visible in the shared workspace.
+const MAX_COMPLETION_EVIDENCE_TARGETS: usize = 32;
+const MAX_COMPLETION_EVIDENCE_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_COMPLETION_EVIDENCE_TOTAL_HASH_BYTES: u64 = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompletionEvidenceMode {
+    /// Ordinary engines can prove the final parent-workspace state directly.
+    LocalFingerprint,
+    /// SSH tools mutate a remote namespace. Only correlated successful atomic
+    /// file-tool receipts are accepted; local paths must never stand in for
+    /// the remote host.
+    RemoteExactReceipts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CompletionTargetFingerprint {
+    Absent,
+    Present {
+        size_bytes: u64,
+        modified_nanos: Option<u128>,
+        /// Large files and targets beyond the bounded accepted-turn hashing
+        /// budget retain a metadata fingerprint instead of becoming a silent
+        /// adjudication bypass.
+        sha256: Option<[u8; 32]>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CompletionFingerprintProbe {
+    State(CompletionTargetFingerprint),
+    /// The lexical target resolves through a symlink, outside the workspace,
+    /// or to a non-regular object. It is outside the local hard-verdict domain.
+    Unsafe,
+    /// A transient I/O failure prevented a point-in-time final observation.
+    /// Unlike `Unsafe`, this does not silently exempt a positive claim.
+    Unavailable,
+    /// Accepted-turn resource bounds prevented a content fingerprint. A clear
+    /// completion claim remains failed unless a correlated terminal exact
+    /// receipt supplies the narrow final-presence fallback.
+    ResourceLimited,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CompletionEvidenceContext {
+    pub requirement: Vec<ContentBlock>,
+    pub prior_durable_effect_targets: Vec<String>,
+    /// One corrective completion-evidence pass per accepted user turn, even
+    /// when the host performs additional same-turn race-tail executions.
+    pub corrective_nudge_used: bool,
+    target_baselines: HashMap<String, CompletionTargetFingerprint>,
+    baseline_unavailable_targets: HashSet<String>,
+    unsafe_targets: HashSet<String>,
+    known_requirement_targets: HashSet<String>,
+    /// Targets whose pre-effect content could not be fingerprinted (late
+    /// steering, resource cap, or probe failure). They remain in the hard gate;
+    /// only a still-terminal exact receipt may provide the narrow fallback.
+    unfingerprinted_targets: HashSet<String>,
+    baseline_hashed_bytes: u64,
+    /// A successful state-changing call observed anywhere in this accepted
+    /// turn. A coincidental external filesystem change cannot by itself back a
+    /// model completion claim.
+    successful_mutation_observed: bool,
+    /// Ordered terminal proof for SSH-bound sessions. A later successful
+    /// opaque remote mutation invalidates earlier path receipts because the
+    /// host cannot probe the remote final state.
+    terminal_exact_receipts: Vec<String>,
+    turn_root: Option<AcceptedTurnRoot>,
+    /// Hidden in-memory authority as it stood before this accepted turn's first
+    /// provider await. Captured exactly once, in the same guarded step as
+    /// `turn_root`, so a host race-tail pass restores the state that preceded
+    /// pass A rather than whatever pass A left behind.
+    turn_authority: Option<AcceptedTurnRuntimeAuthority>,
+    /// Shared with the desktop termination guard. It becomes true only after
+    /// an accepted-turn recovery root is durably present and stays true through
+    /// the host-terminal phase. An abnormal unwind can then publish the typed
+    /// session-consistency error that makes Conversation perform an exact
+    /// persisted rewind instead of treating the provisional transcript as a
+    /// normal cancellation.
+    host_recovery_required: Arc<AtomicBool>,
+}
+
+impl CompletionEvidenceContext {
+    pub fn new(requirement: Vec<ContentBlock>) -> Self {
+        Self {
+            requirement,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_host_recovery_signal(
+        requirement: Vec<ContentBlock>,
+        host_recovery_required: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            requirement,
+            host_recovery_required,
+            ..Self::default()
+        }
+    }
+
+    pub fn host_recovery_signal(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.host_recovery_required)
+    }
+
+    /// Whether the engine has crossed the accepted-turn transaction boundary.
+    /// A biased host cancellation may win before the engine future is first
+    /// polled; in that case there is no marker or transcript suffix to restore.
+    pub fn turn_root_captured(&self) -> bool {
+        self.turn_root.is_some()
+    }
+
+    fn capture_turn_root(
+        &mut self,
+        source_message_id: &str,
+        messages: &[Message],
+        editable_turn: &Option<EditableTurnCheckpoint>,
+        host_context: &BTreeMap<String, String>,
+        activated_deferred_tools: Vec<String>,
+        runtime_authority: AcceptedTurnRuntimeAuthority,
+    ) -> Result<(), AgentError> {
+        if let Some(root) = &self.turn_root {
+            if root.source_message_id != source_message_id {
+                return Err(AgentError::ApiError(
+                    "completion evidence context was reused for a different accepted turn"
+                        .to_owned(),
+                ));
+            }
+            return Ok(());
+        }
+        self.turn_root = Some(AcceptedTurnRoot {
+            source_message_id: source_message_id.to_owned(),
+            messages: messages.to_vec(),
+            editable_turn: editable_turn.clone(),
+            host_context: host_context.clone(),
+            activated_deferred_tools,
+        });
+        // Same guarded step as the transcript root, so the two can never
+        // disagree about which pass of an accepted turn is the rollback floor.
+        // A host race-tail pass returns early above and keeps pass A's snapshot.
+        self.turn_authority = Some(runtime_authority);
+        Ok(())
+    }
+
+    async fn ensure_target_baselines(
+        &mut self,
+        workspace_root: &std::path::Path,
+        mode: CompletionEvidenceMode,
+    ) {
+        let mut pending = Vec::new();
+        for target in required_state_change_targets(&self.requirement, workspace_root, mode) {
+            if self.known_requirement_targets.insert(target.clone())
+                && self.successful_mutation_observed
+            {
+                self.unfingerprinted_targets.insert(target.clone());
+            }
+            if mode == CompletionEvidenceMode::RemoteExactReceipts
+                || self.unfingerprinted_targets.contains(&target)
+            {
+                continue;
+            }
+            if self.target_baselines.contains_key(&target)
+                || self.baseline_unavailable_targets.contains(&target)
+                || self.unsafe_targets.contains(&target)
+            {
+                continue;
+            }
+            if self.target_baselines.len()
+                + self.baseline_unavailable_targets.len()
+                + self.unsafe_targets.len()
+                >= MAX_COMPLETION_EVIDENCE_TARGETS
+            {
+                self.unfingerprinted_targets.insert(target);
+                continue;
+            }
+            pending.push(target);
+        }
+        if pending.is_empty() {
+            return;
+        }
+        let root = workspace_root.to_path_buf();
+        let remaining = MAX_COMPLETION_EVIDENCE_TOTAL_HASH_BYTES
+            .saturating_sub(self.baseline_hashed_bytes);
+        let pending_for_failure = pending.clone();
+        let probes = match tokio::task::spawn_blocking(move || {
+            completion_target_fingerprints(&root, pending, remaining)
+        })
+        .await
+        {
+            Ok(probes) => probes,
+            Err(_) => {
+                self.unfingerprinted_targets
+                    .extend(pending_for_failure);
+                return;
+            }
+        };
+        for (target, probe, bytes_hashed) in probes {
+            self.baseline_hashed_bytes =
+                self.baseline_hashed_bytes.saturating_add(bytes_hashed);
+            match probe {
+                CompletionFingerprintProbe::State(fingerprint) => {
+                    self.target_baselines.insert(target, fingerprint);
+                }
+                CompletionFingerprintProbe::Unsafe => {
+                    self.unsafe_targets.insert(target);
+                }
+                CompletionFingerprintProbe::Unavailable => {
+                    self.baseline_unavailable_targets.insert(target);
+                }
+                CompletionFingerprintProbe::ResourceLimited => {
+                    self.unfingerprinted_targets.insert(target);
+                }
+            }
+        }
+    }
+
+    async fn supported_targets(
+        &self,
+        answer: &str,
+        workspace_root: &std::path::Path,
+        mode: CompletionEvidenceMode,
+        exact_receipts: &[String],
+    ) -> Vec<String> {
+        let required = required_state_change_targets(&self.requirement, workspace_root, mode);
+        let claimed = effective_claimed_state_change_targets(
+            answer,
+            &required,
+            workspace_root,
+            mode,
+        );
+        let candidates = required
+            .into_iter()
+            .filter(|target| {
+                claimed.contains(target)
+                    && (!self.unfingerprinted_targets.contains(target)
+                        || exact_receipts.contains(target))
+            })
+            .collect::<Vec<_>>();
+        if mode == CompletionEvidenceMode::RemoteExactReceipts {
+            return candidates
+                .iter()
+                .filter(|target| exact_receipts.contains(target))
+                .cloned()
+                .collect::<Vec<_>>();
+        }
+
+        let probe_targets = candidates
+            .iter()
+            .filter(|target| !self.unsafe_targets.contains(*target))
+            .cloned()
+            .collect::<Vec<_>>();
+        let root = workspace_root.to_path_buf();
+        // Each terminal evaluation receives its own bounded final budget. A
+        // corrective pass must not turn a previously adjudicable target into a
+        // bypass merely because the first evaluation consumed the budget.
+        let probes = tokio::task::spawn_blocking(move || {
+            completion_target_fingerprints(
+                &root,
+                probe_targets,
+                MAX_COMPLETION_EVIDENCE_TOTAL_HASH_BYTES,
+            )
+        })
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(target, probe, _)| (target, probe))
+        .collect::<HashMap<_, _>>();
+
+        let mut supported = Vec::new();
+        for target in candidates {
+            if self.unsafe_targets.contains(&target) {
+                continue;
+            }
+            let exact = exact_receipts.contains(&target);
+            let Some(final_probe) = probes.get(&target) else {
+                continue;
+            };
+            let final_state = match final_probe {
+                CompletionFingerprintProbe::State(state) => state,
+                CompletionFingerprintProbe::Unsafe => continue,
+                CompletionFingerprintProbe::Unavailable => continue,
+                CompletionFingerprintProbe::ResourceLimited
+                    if exact
+                        && matches!(
+                            self.target_baselines.get(&target),
+                            Some(CompletionTargetFingerprint::Absent)
+                        ) =>
+                {
+                    supported.push(target);
+                    continue;
+                }
+                CompletionFingerprintProbe::ResourceLimited => continue,
+            };
+            let proves_change = match (self.target_baselines.get(&target), final_state) {
+                (
+                    Some(CompletionTargetFingerprint::Absent),
+                    CompletionTargetFingerprint::Present { .. },
+                ) => true,
+                (
+                    Some(CompletionTargetFingerprint::Present {
+                        size_bytes: before_size,
+                        modified_nanos: before_modified,
+                        sha256: before_hash,
+                    }),
+                    CompletionTargetFingerprint::Present {
+                        size_bytes: after_size,
+                        modified_nanos: after_modified,
+                        sha256: after_hash,
+                    },
+                ) => {
+                    if let (Some(before_hash), Some(after_hash)) = (before_hash, after_hash) {
+                        before_size != after_size || before_hash != after_hash
+                    } else {
+                        exact
+                            && (before_size != after_size
+                                || before_modified != after_modified)
+                    }
+                }
+                // No final regular file is never durable creation/update proof.
+                (_, CompletionTargetFingerprint::Absent) => false,
+                // Without a pre-effect state, even two exact writes can restore
+                // the original bytes. Path presence is not a delta proof.
+                (None, CompletionTargetFingerprint::Present { .. }) => false,
+            };
+            if proves_change && (self.successful_mutation_observed || exact) {
+                supported.push(target);
+            }
+        }
+        supported
+    }
+}
+
+fn apply_terminal_effect_evidence(
+    context: &mut CompletionEvidenceContext,
+    ledger: &mut round::RoundLedger,
+    invocation_may_mutate: bool,
+    is_error: bool,
+    exact_targets: Vec<String>,
+    deleted_targets: Vec<String>,
+) {
+    if invocation_may_mutate && (is_error || exact_targets.is_empty()) {
+        // Failed state-changing calls are not known to be side-effect free (a
+        // shell can delete then exit 1). A successful opaque call is equally
+        // capable of reverting an earlier exact write. In either case, all
+        // monotonic path receipts cease to be terminal proof, including the
+        // host-race-tail seed.
+        context.terminal_exact_receipts.clear();
+        context.prior_durable_effect_targets.clear();
+        ledger.durable_effect_targets.clear();
+        return;
+    }
+    if is_error {
+        return;
+    }
+    for deleted in deleted_targets {
+        context
+            .terminal_exact_receipts
+            .retain(|target| target != &deleted);
+        context
+            .prior_durable_effect_targets
+            .retain(|target| target != &deleted);
+        ledger
+            .durable_effect_targets
+            .retain(|target| target != &deleted);
+    }
+    ledger.record_durable_effect_targets(exact_targets.iter().cloned());
+    for target in exact_targets {
+        if !context.prior_durable_effect_targets.contains(&target) {
+            context.prior_durable_effect_targets.push(target.clone());
+        }
+        if !context.terminal_exact_receipts.contains(&target) {
+            context.terminal_exact_receipts.push(target);
+        }
+    }
+}
 
 /// Decide how a prompt-cache-break diagnostic should surface to the user.
 /// Returns the info-level message to emit, or `None` to stay silent.
@@ -424,18 +810,37 @@ impl ToolEfficiencyStats {
         result: &Result<AgentResult, AgentError>,
     ) -> (&'static str, &'static str, &'static str, usize) {
         match result {
-            Ok(result) => (
-                "ok",
-                match result.stop_reason {
+            Ok(result) => {
+                let stop_reason = match result.stop_reason {
                     StopReason::EndTurn => "end_turn",
                     StopReason::ToolUse => "tool_use",
                     StopReason::MaxTokens => "max_tokens",
                     StopReason::MaxTurns => "max_turns",
                     StopReason::Refusal => "refusal",
-                },
-                "none",
-                result.turns,
-            ),
+                };
+                if let Some(issue) = &result.completion_adjudication {
+                    ("error", stop_reason, issue.kind(), result.turns)
+                } else {
+                    match result.stop_reason {
+                        StopReason::EndTurn => ("ok", stop_reason, "none", result.turns),
+                        StopReason::MaxTokens => {
+                            ("error", stop_reason, "output_truncated", result.turns)
+                        }
+                        StopReason::MaxTurns => (
+                            "error",
+                            stop_reason,
+                            "turn_requests_exhausted",
+                            result.turns,
+                        ),
+                        StopReason::Refusal => {
+                            ("error", stop_reason, "model_refused", result.turns)
+                        }
+                        StopReason::ToolUse => {
+                            ("error", stop_reason, "protocol_error", result.turns)
+                        }
+                    }
+                }
+            }
             Err(error) => (
                 "error",
                 "error",
@@ -507,6 +912,10 @@ pub(crate) const STAGNATION_THRESHOLD: usize = 3;
 pub struct AgentEngine {
     provider: Arc<dyn LlmProvider>,
     tools: ToolRegistry,
+    /// Workspace namespace used to turn absolute atomic-tool paths into the
+    /// same relative identifiers used by user requirements and nested Agents.
+    workspace_root: PathBuf,
+    completion_evidence_mode: CompletionEvidenceMode,
     messages: Vec<Message>,
     system_prompt: String,
     model: String,
@@ -612,6 +1021,8 @@ impl AgentEngine {
         Self {
             provider,
             tools,
+            workspace_root: cwd.clone(),
+            completion_evidence_mode: CompletionEvidenceMode::LocalFingerprint,
             messages: Vec::new(),
             system_prompt,
             model: config.model,
@@ -691,6 +1102,8 @@ impl AgentEngine {
         Self {
             provider,
             tools,
+            workspace_root: cwd.clone(),
+            completion_evidence_mode: CompletionEvidenceMode::LocalFingerprint,
             messages: session.messages.clone(),
             system_prompt,
             model: config.model.clone(),
@@ -950,6 +1363,12 @@ impl AgentEngine {
         self.plan_active_flag = Some(flag);
     }
 
+    /// Bind completion evidence to the remote tool namespace. Remote sessions
+    /// must never probe the host application's local cwd as proof of SSH work.
+    pub(crate) fn set_remote_completion_evidence(&mut self) {
+        self.completion_evidence_mode = CompletionEvidenceMode::RemoteExactReceipts;
+    }
+
     /// Whether execution is currently constrained to plan-mode tools.
     ///
     /// This is deliberately read-only: host routers need to avoid creating an
@@ -1149,6 +1568,52 @@ impl AgentEngine {
         source_message_id: &str,
         tool_allowlist: Option<&HashSet<String>>,
     ) -> Result<AgentResult, AgentError> {
+        self.execute_turn_with_completion_evidence_context(
+            user_content,
+            msg_id,
+            source_message_id,
+            tool_allowlist,
+            None,
+        )
+        .await
+    }
+
+    /// Execute one engine pass with an optional host-owned accepted-turn
+    /// completion scope. Direct/CLI callers use the ordinary entrypoint above;
+    /// decorated desktop turns use this seam to keep adjudication tied to the
+    /// raw user request and to union evidence across steering race-tail passes.
+    pub async fn execute_turn_with_completion_evidence_context(
+        &mut self,
+        user_content: Vec<ContentBlock>,
+        msg_id: &str,
+        source_message_id: &str,
+        tool_allowlist: Option<&HashSet<String>>,
+        completion_context: Option<&mut CompletionEvidenceContext>,
+    ) -> Result<AgentResult, AgentError> {
+        let host_owns_terminal_commit = completion_context.is_some();
+        let mut local_completion_context = CompletionEvidenceContext::new(user_content.clone());
+        let completion_context = completion_context.unwrap_or(&mut local_completion_context);
+        let runtime_authority = self.snapshot_runtime_authority();
+        completion_context.capture_turn_root(
+            source_message_id,
+            &self.messages,
+            &self.editable_turn,
+            &self.host_context,
+            self.tools.session_deferred_tool_identities(),
+            runtime_authority,
+        )?;
+        self.persist_accepted_turn_root(completion_context)?;
+        if host_owns_terminal_commit
+            && self.session_manager.is_some()
+            && self.current_session.is_some()
+        {
+            completion_context
+                .host_recovery_required
+                .store(true, Ordering::Release);
+        }
+        completion_context
+            .ensure_target_baselines(&self.workspace_root, self.completion_evidence_mode)
+            .await;
         let first_new_message = self.messages.len();
         let session_id = self
             .current_session
@@ -1164,23 +1629,49 @@ impl AgentEngine {
         let mut efficiency = ToolEfficiencyStats::default();
         let mut safe_messages = self.messages.clone();
         let mut turn_started = false;
-        let result = async {
-            let result = self
-                .execute_turn_inner(
+        let mut result = async {
+            self.execute_turn_inner(
                     user_content,
                     msg_id,
                     source_message_id,
                     tool_allowlist,
+                    completion_context,
                     &mut efficiency,
                     &mut safe_messages,
                     &mut turn_started,
                 )
-                .await;
-            efficiency.log(&session_id, msg_id, &result);
-            result
+                .await
         }
         .instrument(span)
         .await;
+
+        if !host_owns_terminal_commit
+            && result.as_ref().is_ok_and(|agent_result| {
+                agent_result.completion_adjudication.is_none()
+            })
+            && !self.finalize_committed_completion_turn(completion_context)
+            && let Ok(agent_result) = &mut result
+        {
+            agent_result.completion_adjudication = Some(
+                CompletionAdjudication::SessionCommitFailed {
+                    detail: "the accepted Agent turn could not be durably committed".to_owned(),
+                },
+            );
+        }
+
+        if let Ok(agent_result) = &result {
+            completion_context.successful_mutation_observed |= agent_result.effects_ok > 0;
+            for target in &agent_result.durable_effect_targets {
+                if !completion_context
+                    .prior_durable_effect_targets
+                    .contains(target)
+                {
+                    completion_context
+                        .prior_durable_effect_targets
+                        .push(target.clone());
+                }
+            }
+        }
 
         // Keep the image available for every provider/tool iteration in this
         // turn execution, then remove it before the engine is reused. `execute_turn_inner`
@@ -1189,7 +1680,65 @@ impl AgentEngine {
         // wrapper and save the redacted transcript once more. If the host drops
         // this future during non-cooperative cancellation, `abort_current_turn`
         // performs the same cleanup explicitly.
-        if result.is_err() && turn_started {
+        if result
+            .as_ref()
+            .is_ok_and(|result| result.completion_adjudication.is_some())
+            && turn_started
+        {
+            if result.as_ref().is_ok_and(|agent_result| {
+                matches!(
+                    agent_result.completion_adjudication,
+                    Some(CompletionAdjudication::SessionCommitFailed { .. })
+                )
+            }) {
+                // Inner A2 verdicts already retract their provider pass before
+                // returning. A direct-call session commit failure is detected
+                // only here, after the text streamed, so publish the matching
+                // rollback signal before restoring history.
+                self.output
+                    .emit_accepted_turn_output_discarded(&self.current_msg_id);
+            }
+            // Restore the accepted-turn root captured by the host-owned
+            // context, not merely this execute call's pre-state. A host
+            // race-tail pass may be the second engine call for one accepted
+            // turn, and compaction may already have invalidated the ordinary
+            // editable checkpoint.
+            let rollback_persisted = if let Some(root) = completion_context.turn_root.clone() {
+                // Hidden in-memory authority first: a rejected turn must not
+                // leave behind auto-approvals, hooks, or plan/model state that a
+                // fresh reload would not have.
+                self.restore_runtime_authority(completion_context);
+                self.tools
+                    .replace_deferred_tool_activations(&root.activated_deferred_tools);
+                self.messages = root.messages;
+                self.editable_turn = root.editable_turn;
+                self.host_context = root.host_context;
+                if let Some(session) = &mut self.current_session {
+                    session.accepted_turn_root = None;
+                    session.pending_host_terminal_root = None;
+                    session.last_interrupted_turn_source =
+                        Some(root.source_message_id.clone());
+                }
+                self.try_save_session().is_ok()
+            } else {
+                false
+            };
+            if !rollback_persisted
+                && let Ok(agent_result) = &mut result
+                && let Some(issue) = &mut agent_result.completion_adjudication
+            {
+                issue.mark_history_rollback_failed();
+            } else {
+                completion_context
+                    .host_recovery_required
+                    .store(false, Ordering::Release);
+            }
+        } else if result.is_err() && turn_started {
+            // A provider error (or a dropped/cancelled turn observed as one)
+            // rewinds this attempt. Host-owned turns additionally restore the
+            // exact root through `restore_uncommitted_completion_attempt`; both
+            // paths must undo the authority this attempt granted itself.
+            self.restore_runtime_authority(completion_context);
             self.messages = safe_messages;
             if matches!(
                 &result,
@@ -1199,11 +1748,148 @@ impl AgentEngine {
             ) {
                 self.strip_tool_images_after_provider_error();
             }
+            if !host_owns_terminal_commit
+                && let Some(session) = &mut self.current_session
+            {
+                session.accepted_turn_root = None;
+            }
             self.save_session();
+        } else if !host_owns_terminal_commit && !turn_started {
+            // Slash commands and pre-provider validation do not create a
+            // provider transaction. Do not leave their preflight marker to be
+            // mistaken for a crash-interrupted turn on the next resume.
+            let _ = self.finalize_committed_completion_turn(completion_context);
         } else if self.redact_user_images_since(first_new_message) {
             self.save_session();
         }
+        efficiency.log(&session_id, msg_id, &result);
         result
+    }
+
+    /// Retract a completed engine pass whose host-side delivery transaction did
+    /// not commit, and durably restore the exact accepted-turn root captured
+    /// before provider work began. Hosts must treat `false` as a quarantining
+    /// state-consistency failure: the in-memory root was restored, but the
+    /// resumable session could not be made authoritative.
+    pub fn restore_uncommitted_completion_turn(
+        &mut self,
+        completion_context: &CompletionEvidenceContext,
+    ) -> bool {
+        self.output
+            .emit_accepted_turn_output_discarded(&self.current_msg_id);
+        self.restore_uncommitted_completion_root(completion_context)
+    }
+
+    /// Restore the exact transcript root while retracting only the current
+    /// provider attempt from the visible failed-turn evidence. Provider errors
+    /// and in-flight cancellation intentionally retain an earlier valid
+    /// race-tail prefix; host transaction failures use the full-turn method.
+    pub fn restore_uncommitted_completion_attempt(
+        &mut self,
+        completion_context: &CompletionEvidenceContext,
+    ) -> bool {
+        self.output
+            .emit_current_attempt_output_discarded(&self.current_msg_id, 1);
+        self.restore_uncommitted_completion_root(completion_context)
+    }
+
+    fn restore_uncommitted_completion_root(
+        &mut self,
+        completion_context: &CompletionEvidenceContext,
+    ) -> bool {
+        let Some(root) = completion_context.turn_root.clone() else {
+            return false;
+        };
+        // Hidden in-memory authority first, so a failed session write below
+        // still reports a state-consistency failure for a runtime that is no
+        // longer carrying the rejected turn's grants.
+        self.restore_runtime_authority(completion_context);
+        self.tools
+            .replace_deferred_tool_activations(&root.activated_deferred_tools);
+        self.messages = root.messages;
+        self.editable_turn = root.editable_turn;
+        self.host_context = root.host_context;
+        if let Some(session) = &mut self.current_session {
+            session.accepted_turn_root = None;
+            session.pending_host_terminal_root = None;
+            session.last_interrupted_turn_source = Some(root.source_message_id.clone());
+        }
+        let restored = self.try_save_session().is_ok();
+        if restored {
+            completion_context
+                .host_recovery_required
+                .store(false, Ordering::Release);
+        }
+        restored
+    }
+
+    /// Commit the accepted-turn transcript after its owner has completed every
+    /// post-model effect. Clearing the durable root marker and saving the
+    /// current transcript is the session-side half of the terminal commit; a
+    /// failed write must prevent the host from publishing `Finish`.
+    pub fn finalize_committed_completion_turn(
+        &mut self,
+        completion_context: &CompletionEvidenceContext,
+    ) -> bool {
+        let Some(expected_root) = completion_context.turn_root.as_ref() else {
+            return false;
+        };
+        let Some(session) = &mut self.current_session else {
+            return true;
+        };
+        match session.accepted_turn_root.as_ref() {
+            Some(persisted)
+                if persisted.source_message_id == expected_root.source_message_id =>
+            {
+                session.accepted_turn_root = None;
+                session.pending_host_terminal_root = None;
+                session.last_interrupted_turn_source = None;
+                let committed = self.try_save_session().is_ok();
+                if committed {
+                    completion_context
+                        .host_recovery_required
+                        .store(false, Ordering::Release);
+                }
+                committed
+            }
+            // A marker-free in-memory-only engine has no resumable state to
+            // commit. A persisted session reaching this branch is a lifecycle
+            // mismatch and must fail closed.
+            None if self.session_manager.is_none() => true,
+            _ => false,
+        }
+    }
+
+    /// Durably seal a desktop-hosted transcript before any verified artifact
+    /// or terminal event becomes visible. Unlike a direct CLI commit, retain
+    /// the exact root in a host-terminal phase: Conversation boot may still
+    /// observe the authoritative receipt as Running if the process dies in
+    /// the narrow no-await publish window. Ordinary session resume treats this
+    /// phase as committed and never rolls it back on its own.
+    pub fn seal_completion_for_host_terminal(
+        &mut self,
+        completion_context: &CompletionEvidenceContext,
+    ) -> bool {
+        let Some(expected_root) = completion_context.turn_root.as_ref() else {
+            return false;
+        };
+        let Some(session) = &mut self.current_session else {
+            return true;
+        };
+        match session.accepted_turn_root.take() {
+            Some(persisted)
+                if persisted.source_message_id == expected_root.source_message_id =>
+            {
+                session.pending_host_terminal_root = Some(persisted);
+                session.last_interrupted_turn_source = None;
+                self.try_save_session().is_ok()
+            }
+            Some(persisted) => {
+                session.accepted_turn_root = Some(persisted);
+                false
+            }
+            None => false,
+        }
     }
 
     /// Persist a deterministic host response as a normal text exchange without
@@ -1224,6 +1910,10 @@ impl AgentEngine {
                 "host text turns require non-empty user and assistant text".to_owned(),
             ));
         }
+        let prior_messages = self.messages.clone();
+        let prior_editable_turn = self.editable_turn.clone();
+        let prior_host_context = self.host_context.clone();
+        let prior_session = self.current_session.clone();
         self.editable_turn = Some(EditableTurnCheckpoint {
             source_message_id: source_message_id.to_owned(),
             start_len: self.messages.len(),
@@ -1239,7 +1929,21 @@ impl AgentEngine {
                 text: assistant_text,
             }],
         ));
-        self.save_session();
+        if let Err(error) = self.try_save_session() {
+            self.messages = prior_messages;
+            self.editable_turn = prior_editable_turn;
+            self.host_context = prior_host_context;
+            self.current_session = prior_session;
+            let rollback = self.try_save_session();
+            return Err(AgentError::ApiError(match rollback {
+                Ok(()) => format!(
+                    "failed to persist the deterministic host turn; the prior session was restored: {error}"
+                ),
+                Err(rollback_error) => format!(
+                    "failed to persist the deterministic host turn ({error}) and failed to restore the prior session ({rollback_error})"
+                ),
+            }));
+        }
         Ok(())
     }
 
@@ -1258,6 +1962,7 @@ impl AgentEngine {
         msg_id: &str,
         source_message_id: &str,
         tool_allowlist: Option<&HashSet<String>>,
+        completion_context: &mut CompletionEvidenceContext,
         efficiency: &mut ToolEfficiencyStats,
         safe_messages: &mut Vec<Message>,
         turn_started: &mut bool,
@@ -1297,8 +2002,10 @@ impl AgentEngine {
                         // A slash command runs no provider pass at all.
                         rounds: 1,
                         effects_ok: 0,
+                        durable_effect_targets: Vec::new(),
                         cutoff_state_changing: 0,
                         state_changing_tools_advertised: false,
+                        completion_adjudication: None,
                     })
                 }
                 Err(e) => {
@@ -1331,6 +2038,7 @@ impl AgentEngine {
         // autocompaction, which replaces the whole message vector (and can
         // reduce the root user message to a summary) from inside this very loop.
         let round_requirement = user_content.clone();
+        let mut completion_requirement = completion_context.requirement.clone();
         self.messages.push(Message::now(Role::User, user_content));
         *turn_started = true;
         // Persist before the first provider await. A stop or process exit must
@@ -1338,6 +2046,12 @@ impl AgentEngine {
         self.save_session();
 
         let mut round = round::RoundState::new(round_requirement);
+        round.ledger.record_durable_effect_targets(
+            completion_context
+                .prior_durable_effect_targets
+                .iter()
+                .cloned(),
+        );
         // Accumulated across every pass of this turn, so a later tool-less pass
         // cannot erase the fact that state-changing work was on the table.
         let mut state_changing_tools_advertised = false;
@@ -1345,9 +2059,11 @@ impl AgentEngine {
         let mut tool_retry_tracker = ToolRetryTracker::default();
         let mut routed_tool_calls_seen = 0usize;
         let mut artifact_retry_blocked = false;
+        let mut completion_evidence_nudged = completion_context.corrective_nudge_used;
         let mut spec_recheck_nudged = false;
         let mut tool_error_budget_nudged = false;
         let mut batch_read_nudged = false;
+        let mut provider_pass_started = false;
         loop {
             // Hard safety net: an unconfigured (`None`) max_turns still gets a
             // bounded cap so a runaway tool-call loop cannot run forever. A
@@ -1362,8 +2078,10 @@ impl AgentEngine {
                     turns: turn,
                     rounds: round.attempt,
                     effects_ok: round.ledger.effects_ok_total,
+                    durable_effect_targets: round.ledger.durable_effect_targets.clone(),
                     cutoff_state_changing: round.ledger.cutoff_state_changing_total,
                     state_changing_tools_advertised,
+                    completion_adjudication: None,
                 });
             }
             // Enforce the per-request provider ceiling on preloaded/resumed
@@ -1514,6 +2232,11 @@ impl AgentEngine {
                 retain_provider_round: self.compat.chain_rounds(),
             };
 
+            if provider_pass_started {
+                self.output.emit_output_checkpoint(&self.current_msg_id);
+            } else {
+                provider_pass_started = true;
+            }
             efficiency.observe_model_turn_attempt();
             let stream_start = std::time::Instant::now();
             let mut rx = self.provider.stream(&request).await?;
@@ -2167,15 +2890,23 @@ impl AgentEngine {
                     // restart does not increment `turn`, so a provider pass is
                     // guaranteed to follow.
                     for text in self.drain_steering() {
-                        self.messages
-                            .push(Message::now(Role::User, vec![ContentBlock::Text { text }]));
+                        let block = ContentBlock::Text { text };
+                        completion_requirement.push(block.clone());
+                        completion_context.requirement.push(block.clone());
+                        self.messages.push(Message::now(Role::User, vec![block]));
                     }
+                    completion_context
+                        .ensure_target_baselines(
+                            &self.workspace_root,
+                            self.completion_evidence_mode,
+                        )
+                        .await;
                     // Fail-closed settlement of any tool card the truncated pass
                     // published but never completed, plus an explicit retraction
                     // boundary for every provisional text sink. `Start` remains
                     // non-destructive because host steering deliberately shares
                     // the current response bubble.
-                    self.output.emit_output_discarded(
+                    self.output.emit_current_attempt_output_discarded(
                         &self.current_msg_id,
                         u32::try_from(round.attempt)
                             .expect("round attempts are bounded below u32::MAX"),
@@ -2224,9 +2955,17 @@ impl AgentEngine {
                 };
                 if !steered.is_empty() {
                     for text in steered {
-                        self.messages
-                            .push(Message::now(Role::User, vec![ContentBlock::Text { text }]));
+                        let block = ContentBlock::Text { text };
+                        completion_requirement.push(block.clone());
+                        completion_context.requirement.push(block.clone());
+                        self.messages.push(Message::now(Role::User, vec![block]));
                     }
+                    completion_context
+                        .ensure_target_baselines(
+                            &self.workspace_root,
+                            self.completion_evidence_mode,
+                        )
+                        .await;
                     self.save_session();
                     turn += 1;
                     continue;
@@ -2242,25 +2981,100 @@ impl AgentEngine {
                     turn += 1;
                     continue; // don't return — run another turn toward the goal
                 }
-                // Verification gate: a claim of delivered spec-driven work whose
-                // spec was never re-read after editing began gets exactly one
-                // corrective pass. Mirrors the steering/goal continuations above,
-                // and fires at most once per turn so a model that stands by its
-                // claim still terminates.
-                if !spec_recheck_nudged
+                // Verification gate: an unsupported delivery claim gets one
+                // corrective pass when budget permits. The typed issue is still
+                // returned after that pass (or immediately for max_turns=1), so
+                // repeating the claim can never become a successful terminal.
+                let completion_adjudication = if stop_reason == StopReason::EndTurn {
+                    completion_context.successful_mutation_observed |=
+                        round.ledger.effects_ok_total > 0;
+                    let exact_receipts = completion_context.terminal_exact_receipts.clone();
+                    let supported_targets = completion_context
+                        .supported_targets(
+                            &assistant_text,
+                            &self.workspace_root,
+                            self.completion_evidence_mode,
+                            &exact_receipts,
+                        )
+                        .await;
+                    // Promote only terminally verified targets into the typed
+                    // child/delegation channel. This closes the fork-Skill
+                    // chain even when the child used Bash (its local delta +
+                    // successful mutation were proven here), without changing
+                    // ToolCategory or approval semantics.
+                    round
+                        .ledger
+                        .record_durable_effect_targets(supported_targets.iter().cloned());
+                    completion_adjudication(
+                        &assistant_text,
+                        &completion_requirement,
+                        &supported_targets,
+                        &self.workspace_root,
+                        self.completion_evidence_mode,
+                    )
+                } else {
+                    None
+                };
+                if !completion_evidence_nudged
                     && turn + 1 < limit
-                    && let Some(nudge) = unbacked_completion_claim(&assistant_text, &self.messages)
+                    && let Some(issue) = completion_adjudication.as_ref()
                 {
                     tracing::warn!(
                         target: "nomi_agent",
                         turn = turn + 1,
-                        "completion claimed without re-reading the spec after editing — requesting a clause-by-clause recheck"
+                        issue = issue.kind(),
+                        "required file mutation lacks durable verification — requesting one corrective pass"
                     );
-                    spec_recheck_nudged = true;
+                    completion_evidence_nudged = true;
+                    completion_context.corrective_nudge_used = true;
+                    let dropped = self.messages.pop().expect(
+                        "the unsupported assistant completion is still the transcript tail",
+                    );
+                    debug_assert_eq!(dropped.role, Role::Assistant);
+                    self.output.emit_current_attempt_output_discarded(
+                        &self.current_msg_id,
+                        u32::try_from(round.attempt)
+                            .expect("round attempts are bounded below u32::MAX"),
+                    );
+                    // The discarded claim must not survive as a rollback floor,
+                    // KB/distillation input, or the prefix of the corrected
+                    // answer. Prior tool results remain intact.
+                    *safe_messages = self.messages.clone();
                     self.messages.push(Message::now(
                         Role::User,
                         vec![ContentBlock::Text {
-                            text: nudge.to_owned(),
+                            text: issue.nudge().to_owned(),
+                        }],
+                    ));
+                    self.save_session();
+                    turn += 1;
+                    continue;
+                }
+                // The older spec-recheck heuristic remains a one-pass quality
+                // nudge only. Its prose classifier is intentionally not a hard
+                // terminal verdict; hard adjudication above is derived solely
+                // from the trusted user requirement and exact durable targets.
+                if completion_adjudication.is_none()
+                    && !spec_recheck_nudged
+                    && turn + 1 < limit
+                    && unbacked_completion_claim(&assistant_text, &self.messages).is_some()
+                {
+                    spec_recheck_nudged = true;
+                    let dropped = self
+                        .messages
+                        .pop()
+                        .expect("the unsupported assistant completion is still the transcript tail");
+                    debug_assert_eq!(dropped.role, Role::Assistant);
+                    self.output.emit_current_attempt_output_discarded(
+                        &self.current_msg_id,
+                        u32::try_from(round.attempt)
+                            .expect("round attempts are bounded below u32::MAX"),
+                    );
+                    *safe_messages = self.messages.clone();
+                    self.messages.push(Message::now(
+                        Role::User,
+                        vec![ContentBlock::Text {
+                            text: SPEC_RECHECK_NUDGE.to_owned(),
                         }],
                     ));
                     self.save_session();
@@ -2268,7 +3082,23 @@ impl AgentEngine {
                     continue;
                 }
 
-                self.save_session();
+                if completion_adjudication.is_some() {
+                    // The typed result retains this text for diagnostics and
+                    // usage accounting, but the live stream must match the
+                    // accepted-turn transcript root restored by the outer
+                    // wrapper. A host race-tail may have emitted an earlier
+                    // provider pass, so retract the immutable turn checkpoint
+                    // rather than only this final attempt.
+                    self.output
+                        .emit_accepted_turn_output_discarded(&self.current_msg_id);
+                    // Do not persist the rejected assistant claim here. The
+                    // outer accepted-turn wrapper owns one checked write of
+                    // the captured root. If that write fails, the previous
+                    // durable state can contain at most the already-admitted
+                    // user request, never this unsupported completion claim.
+                } else {
+                    self.save_session();
+                }
                 return Ok(AgentResult {
                     text: assistant_text,
                     stop_reason,
@@ -2276,8 +3106,10 @@ impl AgentEngine {
                     turns: turn + 1,
                     rounds: round.attempt,
                     effects_ok: round.ledger.effects_ok_total,
+                    durable_effect_targets: round.ledger.durable_effect_targets.clone(),
                     cutoff_state_changing: round.ledger.cutoff_state_changing_total,
                     state_changing_tools_advertised,
+                    completion_adjudication,
                 });
             }
 
@@ -2342,6 +3174,7 @@ impl AgentEngine {
             // The handled error is returned to the model, while subsequent
             // passes in this accepted turn no longer advertise artifact tools.
             let mut artifact_delivery_succeeded = false;
+            let mut delivered_exact_targets: HashMap<String, Vec<String>> = HashMap::new();
             for result in &mut outcome.results {
                 if let ContentBlock::ToolResult {
                     tool_use_id,
@@ -2410,7 +3243,10 @@ impl AgentEngine {
                                 images.clear();
                             }
                         }
-                        crate::output::ToolMediaDelivery::Delivered { context } => {
+                        crate::output::ToolMediaDelivery::Delivered {
+                            context,
+                            durable_workspace_targets,
+                        } => {
                             if !context.trim().is_empty() {
                                 if !content.is_empty() {
                                     content.push('\n');
@@ -2428,6 +3264,18 @@ impl AgentEngine {
                             if crate::output::artifact_contract(artifact_identity).is_some() {
                                 artifact_delivery_succeeded = true;
                             }
+                            let verified_targets = durable_workspace_targets
+                                .iter()
+                                .filter_map(|target| {
+                                    workspace_evidence_file_target(
+                                        target,
+                                        &self.workspace_root,
+                                        self.completion_evidence_mode,
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            delivered_exact_targets
+                                .insert(tool_use_id.clone(), verified_targets.clone());
                         }
                         crate::output::ToolMediaDelivery::Failed { error } => {
                             *is_error = true;
@@ -2458,7 +3306,8 @@ impl AgentEngine {
             // transcript prose (which is how a phantom tool call reached the
             // observed production trace), no summarization pass is run, and the
             // filesystem is never probed.
-            for result in &outcome.results {
+            debug_assert_eq!(outcome.results.len(), outcome.delegated_effects.len());
+            for (result_index, result) in outcome.results.iter().enumerate() {
                 let ContentBlock::ToolResult {
                     tool_use_id,
                     is_error,
@@ -2478,6 +3327,57 @@ impl AgentEngine {
                 let Some(tool) = self.tools.get(name) else {
                     continue;
                 };
+                let invocation_may_mutate = tool.may_have_workspace_side_effects(input);
+                if !*is_error && invocation_may_mutate {
+                    completion_context.successful_mutation_observed = true;
+                }
+                let mut exact_targets = if *is_error {
+                    Vec::new()
+                } else {
+                    outcome
+                        .delegated_effects
+                        .get(result_index)
+                        .cloned()
+                        .unwrap_or_default()
+                };
+                if !*is_error {
+                    exact_targets.extend(
+                        delivered_exact_targets
+                            .get(tool_use_id)
+                            .into_iter()
+                            .flatten()
+                            .cloned(),
+                    );
+                }
+                if !*is_error && FILE_WRITE_TOOLS.contains(&name.as_str()) {
+                    exact_targets.extend(durable_targets_for_tool(
+                        name,
+                        input,
+                        &self.workspace_root,
+                        self.completion_evidence_mode,
+                    ));
+                }
+                exact_targets.sort();
+                exact_targets.dedup();
+
+                let deleted_targets = if *is_error {
+                    Vec::new()
+                } else {
+                    deleted_targets_for_tool(
+                        name,
+                        input,
+                        &self.workspace_root,
+                        self.completion_evidence_mode,
+                    )
+                };
+                apply_terminal_effect_evidence(
+                    completion_context,
+                    &mut round.ledger,
+                    invocation_may_mutate,
+                    *is_error,
+                    exact_targets,
+                    deleted_targets,
+                );
                 // Producer A: the model's own plan snapshot. Gated on success
                 // because `update_plan` errors on invalid arguments and on an
                 // empty plan, and neither may clobber a good ledger. Replaced
@@ -2514,8 +3414,8 @@ impl AgentEngine {
                 // such a tool arm the no-progress verdict without ever being
                 // able to satisfy it. The rendered label still describes exactly
                 // what ran, so the ledger stays honest either way.
-                if round::is_state_changing(tool.category())
-                    || round::is_state_changing(tool.category_for(input))
+                if name != "nomi_delegate"
+                    && invocation_may_mutate
                 {
                     round.ledger.push_effect(
                         name.clone(),
@@ -2588,6 +3488,17 @@ impl AgentEngine {
             };
             let had_steering = !steered.is_empty();
             if !steered.is_empty() {
+                for text in &steered {
+                    let block = ContentBlock::Text { text: text.clone() };
+                    completion_requirement.push(block.clone());
+                    completion_context.requirement.push(block);
+                }
+                completion_context
+                    .ensure_target_baselines(
+                        &self.workspace_root,
+                        self.completion_evidence_mode,
+                    )
+                    .await;
                 self.stagnation_guard.reset();
                 tool_retry_tracker.clear();
                 stagnation_action = crate::loop_guard::StagnationAction::Continue;
@@ -2670,8 +3581,10 @@ impl AgentEngine {
                     turns: turn + 1,
                     rounds: round.attempt,
                     effects_ok: round.ledger.effects_ok_total,
+                    durable_effect_targets: round.ledger.durable_effect_targets.clone(),
                     cutoff_state_changing: round.ledger.cutoff_state_changing_total,
                     state_changing_tools_advertised,
+                    completion_adjudication: None,
                 });
             }
             if tool_allowlist.is_some() && artifact_delivery_succeeded && !had_steering {
@@ -2689,8 +3602,10 @@ impl AgentEngine {
                     turns: turn + 1,
                     rounds: round.attempt,
                     effects_ok: round.ledger.effects_ok_total,
+                    durable_effect_targets: round.ledger.durable_effect_targets.clone(),
                     cutoff_state_changing: round.ledger.cutoff_state_changing_total,
                     state_changing_tools_advertised,
+                    completion_adjudication: None,
                 });
             }
             if stagnation_action == crate::loop_guard::StagnationAction::Abort {
@@ -2952,22 +3867,157 @@ impl AgentEngine {
         }
     }
 
-    fn save_session(&mut self) {
-        if let (Some(mgr), Some(session)) = (&self.session_manager, &mut self.current_session) {
+    fn sync_current_session_state(&mut self) {
+        if let Some(session) = &mut self.current_session {
             session.messages = self.messages.clone();
             session.total_usage = self.total_usage.clone();
             session.activated_deferred_tools = self.tools.session_deferred_tool_identities();
             session.editable_turn = self.editable_turn.clone();
             session.host_context = self.host_context.clone();
             session.updated_at = chrono::Utc::now();
-            if let Err(e) = mgr.save(session) {
-                self.output
-                    .emit_warning(&format!("Failed to save session: {}", e));
+        }
+    }
+
+    fn try_save_session_document(&mut self) -> anyhow::Result<()> {
+        self.sync_current_session_state();
+        if let (Some(mgr), Some(session)) = (&self.session_manager, &self.current_session) {
+            mgr.save(session)?;
+        }
+        Ok(())
+    }
+
+    fn try_save_session(&mut self) -> anyhow::Result<()> {
+        self.try_save_session_document()?;
+        if let (Some(mgr), Some(session)) = (&self.session_manager, &self.current_session) {
+            mgr.update_index_for(session)?;
+        }
+        Ok(())
+    }
+
+    /// Capture the hidden in-memory authority this turn is allowed to mutate.
+    ///
+    /// See [`runtime_authority`] for the field-by-field audit, including what is
+    /// intentionally excluded (`total_usage`, external side effects, and the
+    /// operator's own approval decisions).
+    fn snapshot_runtime_authority(&self) -> AcceptedTurnRuntimeAuthority {
+        AcceptedTurnRuntimeAuthority {
+            model: self.model.clone(),
+            thinking: self.thinking.clone(),
+            current_reasoning_effort: self.current_reasoning_effort.clone(),
+            compaction_level: self.compaction_level,
+            compact_state: self.compact_state.clone(),
+            allow_list: self.allow_list.clone(),
+            confirmer: self
+                .confirmer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .authority_snapshot(),
+            hooks: self
+                .hooks
+                .as_ref()
+                .map(|hooks| hooks.hooks_config().clone()),
+            plan_state: self.plan_state.clone(),
+            plan_active: self
+                .plan_active_flag
+                .as_ref()
+                .map(|flag| flag.load(Ordering::Acquire)),
+            goal: self.goal.as_ref().map(|goal| goal.snapshot_state()),
+            cache_detector: self.cache_detector.clone(),
+            stagnation_guard: self.stagnation_guard.clone(),
+        }
+    }
+
+    /// Restore the accepted turn's captured runtime authority.
+    ///
+    /// The snapshot is captured in the same guarded step as the transcript root,
+    /// so any context holding a root also holds the matching authority; a caller
+    /// that has already matched a root cannot observe a missing snapshot here.
+    /// Every write is an infallible in-memory assignment, which keeps the
+    /// callers' checked session write the single failure gate: if that write
+    /// fails the turn is reported as a state-consistency failure and the runtime
+    /// is retired instead of reused.
+    fn restore_runtime_authority(&mut self, completion_context: &CompletionEvidenceContext) {
+        let Some(authority) = completion_context.turn_authority.clone() else {
+            return;
+        };
+        self.model = authority.model;
+        self.thinking = authority.thinking;
+        self.current_reasoning_effort = authority.current_reasoning_effort;
+        self.compaction_level = authority.compaction_level;
+        self.compact_state = authority.compact_state;
+        self.allow_list = authority.allow_list;
+        self.confirmer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .restore_authority(&authority.confirmer);
+        // Replace only the hook config. The supervised shell and its process
+        // supervisor are live turn authority and must survive the rollback.
+        if let (Some(hooks), Some(config)) = (self.hooks.as_mut(), authority.hooks) {
+            hooks.replace_hooks_config(config);
+        }
+        self.plan_state = authority.plan_state;
+        if let (Some(flag), Some(active)) = (&self.plan_active_flag, authority.plan_active) {
+            flag.store(active, Ordering::Release);
+        }
+        // Write through the shared handle: `UpdateGoalTool` holds a clone of it.
+        if let (Some(goal), Some(state)) = (self.goal.as_ref(), authority.goal) {
+            goal.restore_state(state);
+        }
+        self.cache_detector = authority.cache_detector;
+        self.stagnation_guard = authority.stagnation_guard;
+    }
+
+    fn persist_accepted_turn_root(
+        &mut self,
+        completion_context: &CompletionEvidenceContext,
+    ) -> Result<(), AgentError> {
+        if self.session_manager.is_none() || self.current_session.is_none() {
+            return Ok(());
+        }
+        let root = completion_context.turn_root.as_ref().ok_or_else(|| {
+            AgentError::ApiError("accepted turn is missing its completion root".to_owned())
+        })?;
+        match self
+            .current_session
+            .as_ref()
+            .and_then(|session| session.accepted_turn_root.as_ref())
+        {
+            Some(persisted) if persisted.source_message_id == root.source_message_id => {
+                return Ok(());
             }
-            if let Err(e) = mgr.update_index_for(session) {
-                self.output
-                    .emit_warning(&format!("Failed to update session index: {}", e));
+            Some(_) => {
+                return Err(AgentError::ApiError(
+                    "a different accepted turn is still pending in this session".to_owned(),
+                ));
             }
+            None => {}
+        }
+        self.current_session
+            .as_mut()
+            .expect("checked above")
+            .accepted_turn_root = Some(root.clone());
+        if let Some(session) = &mut self.current_session {
+            session.pending_host_terminal_root = None;
+            session.last_interrupted_turn_source = None;
+        }
+        if let Err(error) = self.try_save_session_document() {
+            // The session document is atomically replaced, so a failed write
+            // left the old committed document authoritative. Revert the
+            // in-memory marker as well and fail before any provider await.
+            if let Some(session) = &mut self.current_session {
+                session.accepted_turn_root = None;
+            }
+            return Err(AgentError::ApiError(format!(
+                "failed to persist the accepted-turn recovery root: {error}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn save_session(&mut self) {
+        if let Err(error) = self.try_save_session() {
+            self.output
+                .emit_warning(&format!("Failed to save session: {error}"));
         }
     }
 
@@ -3000,13 +4050,44 @@ impl AgentEngine {
     /// operation (mirrors the interactive `/clear` slash command, which mutates
     /// the same `messages` + `compact_state`). The session id is preserved so
     /// the conversation keeps its identity; only its contents are emptied.
-    pub fn clear_context(&mut self) {
+    pub fn clear_context(&mut self) -> anyhow::Result<()> {
+        let prior_messages = self.messages.clone();
+        let prior_editable_turn = self.editable_turn.clone();
+        let prior_host_context = self.host_context.clone();
+        let prior_compact_state = self.compact_state.clone();
+        let prior_total_usage = self.total_usage.clone();
+        let prior_session = self.current_session.clone();
         self.messages.clear();
         self.editable_turn = None;
         self.host_context.clear();
         self.compact_state = CompactState::new();
         self.total_usage = TokenUsage::default();
-        self.save_session();
+        if let Some(session) = &mut self.current_session {
+            // An explicit quiescent reset is authoritative over every
+            // accepted-turn recovery phase. Keeping either root would retain
+            // the cleared transcript (and could resurrect it on restart).
+            session.accepted_turn_root = None;
+            session.pending_host_terminal_root = None;
+            session.last_interrupted_turn_source = None;
+        }
+        if let Err(error) = self.try_save_session() {
+            self.messages = prior_messages;
+            self.editable_turn = prior_editable_turn;
+            self.host_context = prior_host_context;
+            self.compact_state = prior_compact_state;
+            self.total_usage = prior_total_usage;
+            self.current_session = prior_session;
+            let rollback = self.try_save_session();
+            anyhow::bail!(match rollback {
+                Ok(()) => format!(
+                    "failed to persist the cleared Agent context; the prior session was restored: {error}"
+                ),
+                Err(rollback_error) => format!(
+                    "failed to persist the cleared Agent context ({error}) and failed to restore the prior session ({rollback_error})"
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Validate that the exact durable user message still owns the latest
@@ -3031,20 +4112,41 @@ impl AgentEngine {
     ///
     /// The source id is checked again at mutation time so a stale preflight can
     /// never truncate a different turn.
-    pub fn rewind_last_turn(&mut self, expected_source_message_id: &str) -> bool {
+    pub fn rewind_last_turn(
+        &mut self,
+        expected_source_message_id: &str,
+    ) -> anyhow::Result<bool> {
         let Some(checkpoint) = self.editable_turn.as_ref().cloned() else {
-            return !expected_source_message_id.is_empty() && self.messages.is_empty();
+            return Ok(!expected_source_message_id.is_empty() && self.messages.is_empty());
         };
         if checkpoint.source_message_id != expected_source_message_id
             || checkpoint.start_len > self.messages.len()
         {
-            return false;
+            return Ok(false);
         }
+        let prior_messages = self.messages.clone();
+        let prior_editable_turn = self.editable_turn.clone();
+        let prior_host_context = self.host_context.clone();
+        let prior_session = self.current_session.clone();
         self.messages.truncate(checkpoint.start_len);
         self.host_context = checkpoint.prior_host_context;
         self.editable_turn = None;
-        self.save_session();
-        true
+        if let Err(error) = self.try_save_session() {
+            self.messages = prior_messages;
+            self.editable_turn = prior_editable_turn;
+            self.host_context = prior_host_context;
+            self.current_session = prior_session;
+            let rollback = self.try_save_session();
+            anyhow::bail!(match rollback {
+                Ok(()) => format!(
+                    "failed to persist the Agent turn rewind; the prior session was restored: {error}"
+                ),
+                Err(rollback_error) => format!(
+                    "failed to persist the Agent turn rewind ({error}) and failed to restore the prior session ({rollback_error})"
+                ),
+            });
+        }
+        Ok(true)
     }
 
     /// Close a partially recorded turn after the host cancels execution.
@@ -3149,6 +4251,12 @@ behavior, and for each one state the concrete evidence that it works (the exact 
 real output) or that it does not. If any clause is unmet or unverified, say so instead of \
 reporting the work as deliverable.";
 
+pub(crate) const STATE_CHANGE_EVIDENCE_NUDGE: &str = "Completion evidence gate: the accepted \
+request requires a specific workspace file to be created or changed, but this turn has no durable \
+evidence for that target. Use the file tools to perform and verify the requested change now. If it \
+is genuinely blocked, report the blocker accurately; the host will keep the turn failed instead of \
+recording an unfinished state-changing request as successful.";
+
 /// Phrases that assert verified completion. Matched case-insensitively against
 /// the final answer; Chinese is included because the observed false-green
 /// summary was written in Chinese.
@@ -3238,11 +4346,7 @@ pub(crate) fn unbacked_completion_claim(
     answer: &str,
     messages: &[Message],
 ) -> Option<&'static str> {
-    let lowered = answer.to_lowercase();
-    if !COMPLETION_CLAIM_MARKERS
-        .iter()
-        .any(|marker| lowered.contains(marker))
-    {
+    if !positive_spec_delivery_assertion(answer) {
         return None;
     }
     let (spec_reads, first_write) = spec_and_write_positions(messages);
@@ -3251,6 +4355,1422 @@ pub(crate) fn unbacked_completion_claim(
         return None;
     }
     Some(SPEC_RECHECK_NUDGE)
+}
+
+const STATE_CHANGE_REQUIREMENT_MARKERS: &[&str] = &[
+    "create",
+    "write",
+    "rewrite",
+    "generate",
+    "build",
+    "implement",
+    "fix",
+    "edit",
+    "modify",
+    "update",
+    "produce",
+    "save",
+    "add",
+    "创建",
+    "新建",
+    "编写",
+    "写入",
+    "生成",
+    "构建",
+    "实现",
+    "修复",
+    "编辑",
+    "修改",
+    "更新",
+    "产出",
+    "保存",
+    "添加",
+];
+
+const NON_MUTATING_REQUIREMENT_MARKERS: &[&str] = &[
+    "how to",
+    "explain",
+    "describe",
+    "summarize",
+    "show",
+    "read",
+    "inspect",
+    "analyze",
+    "example",
+    "review",
+    "report whether",
+    "confirm whether",
+    "check whether",
+    "whether",
+    "did you",
+    "have you",
+    "what would",
+    "would this",
+    "will this",
+    "should this",
+    "review only",
+    "read-only",
+    "do not modify",
+    "do not create",
+    "don't modify",
+    "don't create",
+    "don't want you to",
+    "do not want you to",
+    "without modifying",
+    "without creating",
+    "如何",
+    "怎么",
+    "解释",
+    "说明",
+    "总结",
+    "展示",
+    "示例",
+    "读取",
+    "检查",
+    "分析",
+    "审查",
+    "报告是否",
+    "确认是否",
+    "判断是否",
+    "核实是否",
+    "检查是否",
+    "是否",
+    "是否已",
+    "是否会",
+    "会不会",
+    "有没有",
+    "仅审查",
+    "只读",
+    "不要修改",
+    "不要创建",
+    "不要实际写入",
+    "无需修改",
+    "无需创建",
+];
+
+const STATE_CHANGE_CLAIM_MARKERS: &[&str] = &[
+    "created",
+    "written",
+    "wrote",
+    "generated",
+    "built",
+    "implemented",
+    "fixed",
+    "edited",
+    "modified",
+    "updated",
+    "produced",
+    "saved",
+    "added",
+    "已创建",
+    "已新建",
+    "已编写",
+    "已写入",
+    "已生成",
+    "已构建",
+    "已实现",
+    "已修复",
+    "已修改",
+    "已更新",
+    "已产出",
+];
+
+const NON_COMPLETION_CLAIM_MARKERS: &[&str] = &[
+    "not created",
+    "wasn't created",
+    "isn't created",
+    "did not create",
+    "didn't create",
+    "failed to create",
+    "not fixed",
+    "not modified",
+    "not written",
+    "not generated",
+    "not implemented",
+    "not complete",
+    "not deliverable",
+    "not all tests pass",
+    "still missing",
+    "is missing",
+    "does not exist",
+    "doesn't exist",
+    "would create",
+    "could create",
+    "will create",
+    "should create",
+    "would modify",
+    "could modify",
+    "will modify",
+    "going to",
+    "plan to",
+    "next",
+    "no file",
+    "couldn't",
+    "could not",
+    "can't",
+    "cannot",
+    "unable",
+    "blocked",
+    "permission denied",
+    "deleted",
+    "removed",
+    "rolled back",
+    "the log says",
+    "log says",
+    "previous answer",
+    "previous response",
+    "previously claimed",
+    "previous run",
+    "prior run",
+    "last turn",
+    "last session",
+    "before this turn",
+    "earlier",
+    "was false",
+    "is false",
+    "false claim",
+    "model's final answer",
+    "model final answer",
+    "the answer says",
+    "the response says",
+    "claimed",
+    "would",
+    "could",
+    "will",
+    "should",
+    "未创建",
+    "没有创建",
+    "并未创建",
+    "尚未创建",
+    "创建失败",
+    "未修复",
+    "没有修复",
+    "并未修复",
+    "尚未修复",
+    "未写入",
+    "未生成",
+    "未实现",
+    "未完成",
+    "尚未完成",
+    "不可交付",
+    "并非全部通过",
+    "仍不存在",
+    "不存在",
+    "文件缺失",
+    "将创建",
+    "可以创建",
+    "会创建",
+    "应创建",
+    "将修改",
+    "可以修改",
+    "无法创建",
+    "不能创建",
+    "被阻塞",
+    "权限不足",
+    "已删除",
+    "删除了",
+    "已回滚",
+    "日志声称",
+    "日志显示",
+    "上一轮声称",
+    "之前声称",
+    "上一轮",
+    "上一会话",
+    "之前",
+    "此前",
+    "先前",
+    "上次",
+    "声称",
+    "错误",
+    "不实",
+    "计划",
+    "准备",
+    "是否",
+];
+
+fn clauses(text: &str) -> impl Iterator<Item = &str> {
+    text.split_inclusive(|character| {
+        matches!(
+            character,
+            '\n' | ';' | '；' | '。' | '!' | '！' | '?' | '？'
+        )
+    })
+    .map(str::trim)
+    .filter(|clause| !clause.is_empty())
+}
+
+fn contains_marker(text: &str, marker: &str) -> bool {
+    if !marker.is_ascii() {
+        return text.contains(marker);
+    }
+    text.match_indices(marker).any(|(start, _)| {
+        let end = start + marker.len();
+        let before_is_word = text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+        let after_is_word = text[end..]
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+        !before_is_word && !after_is_word
+    })
+}
+
+fn contains_any_marker(text: &str, markers: &[&str]) -> bool {
+    markers.iter().any(|marker| contains_marker(text, marker))
+}
+
+fn positive_spec_delivery_assertion(answer: &str) -> bool {
+    clauses(answer).any(|clause| {
+        let clause = clause.to_lowercase();
+        contains_any_marker(&clause, &COMPLETION_CLAIM_MARKERS)
+            && !contains_any_marker(&clause, NON_COMPLETION_CLAIM_MARKERS)
+            && !clause.contains(['?', '？', '"', '“', '”'])
+    })
+}
+
+fn normalized_file_target(raw: &str, mode: CompletionEvidenceMode) -> Option<String> {
+    if raw.contains("://") {
+        return None;
+    }
+    let candidate = raw.trim_matches(|character: char| {
+            matches!(
+                character,
+                '`' | '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'
+                    | ':' | '!' | '?' | '。' | '，' | '；' | '：' | '！' | '？'
+            )
+        });
+    let candidate = candidate.trim_end_matches('.');
+    if mode == CompletionEvidenceMode::RemoteExactReceipts && candidate.contains('\\') {
+        // The SSH backend does not expose the remote OS/path rules. Restrict
+        // hard adjudication to unambiguous POSIX-style relative identifiers
+        // rather than applying the desktop host's Windows semantics.
+        return None;
+    }
+    let normalized = if mode == CompletionEvidenceMode::LocalFingerprint {
+        candidate.replace('\\', "/")
+    } else {
+        candidate.to_owned()
+    };
+    let mut components = Vec::new();
+    for component in normalized.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => return None,
+            component => components.push(component),
+        }
+    }
+    let normalized = components.join("/");
+    let leaf = normalized.rsplit('/').next().unwrap_or(&normalized);
+    const HIGH_CONFIDENCE_BASENAMES: &[&str] = &[
+        ".env",
+        ".gitignore",
+        ".gitattributes",
+        ".editorconfig",
+        ".npmrc",
+        ".nvmrc",
+        "Dockerfile",
+        "Makefile",
+        "Justfile",
+        "Procfile",
+        "LICENSE",
+    ];
+    let conventional_basename = HIGH_CONFIDENCE_BASENAMES.iter().any(|known| {
+        if cfg!(windows) {
+            leaf.eq_ignore_ascii_case(known)
+        } else {
+            leaf == *known
+        }
+    });
+    if conventional_basename {
+        return Some(normalized);
+    }
+    let (stem, extension) = leaf.rsplit_once('.')?;
+    const HIGH_CONFIDENCE_EXTENSIONS: &[&str] = &[
+        "rs", "ts", "tsx", "js", "jsx", "json", "html", "htm", "css", "scss", "sass",
+        "less", "vue", "svelte", "md", "markdown", "txt", "toml", "yaml", "yml", "xml",
+        "csv", "sql", "py", "go", "java", "kt", "kts", "c", "h", "cc", "cpp", "hpp",
+        "cs", "rb", "php", "swift", "sh", "ps1", "bat", "cmd", "lock", "env", "png",
+        "jpg", "jpeg", "webp", "gif", "svg", "pdf", "zip", "docx", "xlsx", "pptx", "mp3",
+        "wav", "ogg", "mp4", "webm", "mov",
+    ];
+    if stem.is_empty()
+        || extension.is_empty()
+        || extension.len() > 12
+        || !extension
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+        || !HIGH_CONFIDENCE_EXTENSIONS
+            .iter()
+            .any(|known| extension.eq_ignore_ascii_case(known))
+    {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn workspace_relative_file_target(
+    raw: &str,
+    workspace_root: &std::path::Path,
+    mode: CompletionEvidenceMode,
+) -> Option<String> {
+    let trimmed = raw.trim_matches(|character: char| {
+        matches!(
+            character,
+            '`' | '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'
+                | ':' | '!' | '?' | '。' | '，' | '；' | '：' | '！' | '？'
+        )
+    });
+    if mode == CompletionEvidenceMode::RemoteExactReceipts {
+        if let Some(home_relative) = trimmed.strip_prefix("~/") {
+            let normalized = normalized_file_target(home_relative, mode)?;
+            return Some(format!("remote-home:{normalized}"));
+        }
+        if let Some(posix) = trimmed.strip_prefix('/') {
+            if posix.is_empty() || trimmed.contains(['\\', ':']) {
+                return None;
+            }
+            let normalized = normalized_file_target(posix, mode)?;
+            return Some(format!("remote-posix:/{normalized}"));
+        }
+        let path = std::path::Path::new(trimmed);
+        if trimmed.starts_with('\\')
+            || trimmed.contains([':', '\\'])
+            || path.has_root()
+            || path.is_absolute()
+        {
+            return None;
+        }
+        return normalized_file_target(trimmed, mode).map(|target| format!("remote-rel:{target}"));
+    }
+    if trimmed.starts_with("~/") {
+        return None;
+    }
+    let path = std::path::Path::new(trimmed);
+    if !path.is_absolute() {
+        return normalized_file_target(trimmed, mode);
+    }
+
+    #[cfg(not(windows))]
+    fn lexical_key(path: &std::path::Path) -> Option<String> {
+        let mut parts = Vec::new();
+        for component in dunce::simplified(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+            .split('/')
+        {
+            match component {
+                "" | "." => {}
+                ".." => {
+                    parts.pop()?;
+                }
+                component => parts.push(component.to_owned()),
+            }
+        }
+        let path = parts.join("/");
+        Some(path)
+    }
+
+    let root = if workspace_root.is_absolute() {
+        workspace_root.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(workspace_root)
+    };
+    #[cfg(windows)]
+    {
+        let root = dunce::canonicalize(root).ok()?;
+        let absolute = resolve_workspace_target(&root, trimmed)?;
+        let relative = absolute.strip_prefix(&root).ok()?;
+        return normalized_file_target(&relative.to_string_lossy(), mode);
+    }
+    #[cfg(not(windows))]
+    {
+        let root = lexical_key(&root)?;
+        let absolute = lexical_key(path)?;
+        let prefix = format!("{}/", root.trim_end_matches('/'));
+        let relative = absolute.strip_prefix(&prefix)?;
+        normalized_file_target(relative, mode)
+    }
+}
+
+fn resolve_workspace_target(
+    workspace_root: &std::path::Path,
+    target: &str,
+) -> Option<std::path::PathBuf> {
+    let root = dunce::canonicalize(workspace_root).ok()?;
+    if !std::fs::metadata(&root).ok()?.is_dir() {
+        return None;
+    }
+    let candidate = root.join(target);
+    let mut ancestor = candidate.as_path();
+    let mut suffix = Vec::new();
+    let canonical_ancestor = loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => break dunce::canonicalize(ancestor).ok()?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                suffix.push(ancestor.file_name()?.to_os_string());
+                ancestor = ancestor.parent()?;
+            }
+            Err(_) => return None,
+        }
+    };
+    if !canonical_ancestor.starts_with(&root) {
+        return None;
+    }
+    let mut resolved = canonical_ancestor;
+    for component in suffix.iter().rev() {
+        resolved.push(component);
+    }
+    resolved.starts_with(&root).then_some(resolved)
+}
+
+fn metadata_modified_nanos(metadata: &std::fs::Metadata) -> Option<u128> {
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_nanos())
+}
+
+fn metadata_refers_to_open_file(file: &std::fs::File, path: &std::path::Path) -> bool {
+    let Ok(cloned) = file.try_clone() else {
+        return false;
+    };
+    let Ok(open_handle) = same_file::Handle::from_file(cloned) else {
+        return false;
+    };
+    let Ok(path_handle) = same_file::Handle::from_path(path) else {
+        return false;
+    };
+    open_handle == path_handle
+}
+
+fn completion_target_fingerprint(
+    workspace_root: &std::path::Path,
+    target: &str,
+    remaining_hash_bytes: u64,
+) -> (CompletionFingerprintProbe, u64) {
+    let Some(root) = dunce::canonicalize(workspace_root).ok() else {
+        return (CompletionFingerprintProbe::Unavailable, 0);
+    };
+    let Some(path) = resolve_workspace_target(workspace_root, target) else {
+        return (CompletionFingerprintProbe::Unsafe, 0);
+    };
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                CompletionFingerprintProbe::State(CompletionTargetFingerprint::Absent),
+                0,
+            );
+        }
+        Err(_) => return (CompletionFingerprintProbe::Unavailable, 0),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return (CompletionFingerprintProbe::Unsafe, 0);
+    }
+    let Some(canonical) = dunce::canonicalize(&path).ok() else {
+        return (CompletionFingerprintProbe::Unavailable, 0);
+    };
+    if !canonical.starts_with(root) {
+        return (CompletionFingerprintProbe::Unsafe, 0);
+    }
+    let Some(mut file) = std::fs::File::open(&canonical).ok() else {
+        return (CompletionFingerprintProbe::Unavailable, 0);
+    };
+    let Some(before) = file.metadata().ok() else {
+        return (CompletionFingerprintProbe::Unavailable, 0);
+    };
+    if !before.is_file() {
+        return (CompletionFingerprintProbe::Unsafe, 0);
+    }
+    let modified_nanos = metadata_modified_nanos(&before);
+    let hash_allowed = before.len() <= MAX_COMPLETION_EVIDENCE_FILE_BYTES
+        && before.len() <= remaining_hash_bytes;
+    if !hash_allowed {
+        // Metadata/mtime cannot prove content identity: Write(B) followed by a
+        // Bash restore(A) leaves a changed mtime while the final bytes equal the
+        // baseline. Stay fail-closed when the bounded hash cannot be taken.
+        return (CompletionFingerprintProbe::ResourceLimited, 0);
+    }
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let Some(read) = std::io::Read::read(&mut file, &mut buffer).ok() else {
+            return (CompletionFingerprintProbe::Unavailable, 0);
+        };
+        if read == 0 {
+            break;
+        }
+        let Some(next_total) = total.checked_add(read as u64) else {
+            return (CompletionFingerprintProbe::Unavailable, 0);
+        };
+        total = next_total;
+        if total > MAX_COMPLETION_EVIDENCE_FILE_BYTES {
+            return (CompletionFingerprintProbe::Unavailable, 0);
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let Some(handle_after) = file.metadata().ok() else {
+        return (CompletionFingerprintProbe::Unavailable, 0);
+    };
+    let path_after = std::fs::metadata(&path).ok();
+    let canonical_after = dunce::canonicalize(&path).ok();
+    let stable = handle_after.is_file()
+        && handle_after.len() == before.len()
+        && metadata_modified_nanos(&handle_after) == modified_nanos
+        && total == before.len()
+        && canonical_after.as_ref() == Some(&canonical)
+        && metadata_refers_to_open_file(&file, &path)
+        && path_after.as_ref().is_some_and(|after| {
+            after.is_file()
+                && after.len() == before.len()
+                && metadata_modified_nanos(after) == modified_nanos
+        });
+    if !stable {
+        return (CompletionFingerprintProbe::Unavailable, 0);
+    }
+    (
+        CompletionFingerprintProbe::State(CompletionTargetFingerprint::Present {
+            size_bytes: total,
+            modified_nanos,
+            sha256: Some(hasher.finalize().into()),
+        }),
+        total,
+    )
+}
+
+fn completion_target_fingerprints(
+    workspace_root: &std::path::Path,
+    targets: Vec<String>,
+    hash_budget: u64,
+) -> Vec<(String, CompletionFingerprintProbe, u64)> {
+    let mut hashed = 0u64;
+    targets
+        .into_iter()
+        .map(|target| {
+            let remaining = hash_budget.saturating_sub(hashed);
+            let (probe, bytes) =
+                completion_target_fingerprint(workspace_root, &target, remaining);
+            hashed = hashed.saturating_add(bytes);
+            (target, probe, bytes)
+        })
+        .collect()
+}
+
+fn workspace_evidence_file_target(
+    raw: &str,
+    workspace_root: &std::path::Path,
+    mode: CompletionEvidenceMode,
+) -> Option<String> {
+    let target = workspace_relative_file_target(raw, workspace_root, mode)?;
+    if mode == CompletionEvidenceMode::LocalFingerprint {
+        resolve_workspace_target(workspace_root, &target)?;
+        let lexical = workspace_root.join(&target);
+        if std::fs::symlink_metadata(lexical)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return None;
+        }
+    }
+    Some(target)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TargetSpan {
+    start: usize,
+    end: usize,
+    normalized: String,
+}
+
+/// Extract targets that are explicitly delimited by inline code or a Markdown
+/// link label, and return every range the ordinary ASCII scanner must ignore.
+///
+/// Treating the delimited value as one token is load-bearing for paths with
+/// spaces: `` `my app.html` `` must never degrade into the unrelated suffix
+/// `app.html`. Markdown destinations are never task targets (and may be URLs).
+fn delimited_targets_and_exclusions(
+    text: &str,
+    workspace_root: &std::path::Path,
+    mode: CompletionEvidenceMode,
+) -> (Vec<TargetSpan>, Vec<(usize, usize)>) {
+    let mut spans = Vec::new();
+    let mut ranges = Vec::new();
+    let mut cursor = 0;
+    while let Some(start_rel) = text[cursor..].find("```") {
+        let start = cursor + start_rel;
+        let content_start = start + 3;
+        let Some(end_rel) = text[content_start..].find("```") else {
+            ranges.push((start, text.len()));
+            break;
+        };
+        let end = content_start + end_rel + 3;
+        ranges.push((start, end));
+        cursor = end;
+    }
+
+    cursor = 0;
+    while let Some(start_rel) = text[cursor..].find('`') {
+        let start = cursor + start_rel;
+        if ranges
+            .iter()
+            .any(|(excluded_start, excluded_end)| start >= *excluded_start && start < *excluded_end)
+        {
+            cursor = start + 1;
+            continue;
+        }
+        let content_start = start + 1;
+        let Some(end_rel) = text[content_start..].find('`') else {
+            ranges.push((start, text.len()));
+            break;
+        };
+        let content_end = content_start + end_rel;
+        let end = content_end + 1;
+        ranges.push((start, end));
+        if let Some(normalized) =
+            workspace_relative_file_target(
+                &text[content_start..content_end],
+                workspace_root,
+                mode,
+            )
+        {
+            spans.push(TargetSpan {
+                start: content_start,
+                end: content_end,
+                normalized,
+            });
+        }
+        cursor = end;
+    }
+
+    cursor = 0;
+    while let Some(open_rel) = text[cursor..].find('[') {
+        let open = cursor + open_rel;
+        let label_start = open + 1;
+        let Some(label_end_rel) = text[label_start..].find("](") else {
+            break;
+        };
+        let label_end = label_start + label_end_rel;
+        let destination_start = label_end + 2;
+        let Some(destination_end_rel) = text[destination_start..].find(')') else {
+            break;
+        };
+        let end = destination_start + destination_end_rel + 1;
+        ranges.push((open, end));
+        if !ranges.iter().any(|(excluded_start, excluded_end)| {
+            *excluded_start < open && open < *excluded_end
+        }) && let Some(normalized) =
+            workspace_relative_file_target(&text[label_start..label_end], workspace_root, mode)
+        {
+            spans.push(TargetSpan {
+                start: label_start,
+                // The destination is excluded from identity, but belongs to
+                // the syntactic target token for suffix/claim boundaries.
+                end,
+                normalized,
+            });
+        }
+        cursor = end;
+    }
+    (spans, ranges)
+}
+
+fn lex_targets(
+    text: &str,
+    workspace_root: &std::path::Path,
+    mode: CompletionEvidenceMode,
+) -> Vec<TargetSpan> {
+    let (mut spans, excluded) =
+        delimited_targets_and_exclusions(text, workspace_root, mode);
+    let mut run_start = None;
+    let mut finish_run = |start: usize, end: usize| {
+        if excluded
+            .iter()
+            .any(|(excluded_start, excluded_end)| start >= *excluded_start && start < *excluded_end)
+        {
+            return;
+        }
+        let token_end = start
+            + text[start..end]
+                .trim_end_matches(['?', '!'])
+                .len();
+        if token_end == start {
+            return;
+        }
+        let raw = &text[start..token_end];
+        let lowered = raw.to_ascii_lowercase();
+        if lowered.starts_with("www.")
+            || raw.contains("://")
+            || raw.contains(['?', '#', '@'])
+        {
+            return;
+        }
+        if let Some(normalized) = workspace_relative_file_target(raw, workspace_root, mode) {
+            spans.push(TargetSpan {
+                start,
+                end: token_end,
+                normalized,
+            });
+        }
+    };
+    for (index, character) in text.char_indices() {
+        let allowed = character.is_ascii_alphanumeric()
+            || matches!(
+                character,
+                '_' | '-' | '.' | '/' | '\\' | ':' | '?' | '#' | '@' | '~'
+            );
+        match (run_start, allowed) {
+            (None, true) => run_start = Some(index),
+            (Some(start), false) => {
+                finish_run(start, index);
+                run_start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(start) = run_start {
+        finish_run(start, text.len());
+    }
+    spans.sort_by_key(|span| span.start);
+    spans.dedup_by(|left, right| left.start == right.start && left.end == right.end);
+    spans
+}
+
+pub(crate) fn durable_targets_for_tool(
+    name: &str,
+    input: &Value,
+    workspace_root: &std::path::Path,
+    mode: CompletionEvidenceMode,
+) -> Vec<String> {
+    match name {
+        "Write" | "Edit" => input
+            .get("file_path")
+            .and_then(Value::as_str)
+            .and_then(|path| workspace_evidence_file_target(path, workspace_root, mode))
+            .into_iter()
+            .collect(),
+        "ApplyPatch" => input
+            .get("files")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|file| !file.get("delete").and_then(Value::as_bool).unwrap_or(false))
+            .filter_map(|file| file.get("file_path").and_then(Value::as_str))
+            .filter_map(|path| workspace_evidence_file_target(path, workspace_root, mode))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn deleted_targets_for_tool(
+    name: &str,
+    input: &Value,
+    workspace_root: &std::path::Path,
+    mode: CompletionEvidenceMode,
+) -> Vec<String> {
+    if name != "ApplyPatch" {
+        return Vec::new();
+    }
+    input
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|file| file.get("delete").and_then(Value::as_bool) == Some(true))
+        .filter_map(|file| file.get("file_path").and_then(Value::as_str))
+        .filter_map(|path| workspace_evidence_file_target(path, workspace_root, mode))
+        .collect()
+}
+
+fn marker_spans(text: &str, markers: &[&str]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    for marker in markers {
+        for (start, _) in text.match_indices(marker) {
+            let end = start + marker.len();
+            let bounded = !marker.is_ascii()
+                || (!text[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|character| {
+                        character.is_ascii_alphanumeric() || character == '_'
+                    })
+                    && !text[end..].chars().next().is_some_and(|character| {
+                        character.is_ascii_alphanumeric() || character == '_'
+                    }));
+            if bounded {
+                spans.push((start, end));
+            }
+        }
+    }
+    spans.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| (right.1 - right.0).cmp(&(left.1 - left.0)))
+    });
+    let mut disjoint = Vec::new();
+    for span in spans {
+        if disjoint
+            .last()
+            .is_some_and(|(_, previous_end)| span.0 < *previous_end)
+        {
+            continue;
+        }
+        disjoint.push(span);
+    }
+    disjoint
+}
+
+/// Lowercase the ASCII command vocabulary without changing UTF-8 byte
+/// offsets. Classifier spans are measured against the original text, so full
+/// Unicode case folding (for example `İ` -> `i` + combining dot) cannot be
+/// used before slicing with those offsets.
+fn ascii_lowercase_preserving_offsets(text: &str) -> String {
+    let mut lowered = text.to_owned();
+    lowered.make_ascii_lowercase();
+    lowered
+}
+
+fn clause_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for (index, character) in text.char_indices() {
+        let ascii_sentence_period = character == '.'
+            && text[index + character.len_utf8()..]
+                .chars()
+                .next()
+                .is_none_or(char::is_whitespace);
+        if ascii_sentence_period
+            || matches!(
+                character,
+                '\n' | ';' | '；' | '。' | '!' | '！' | '?' | '？'
+            )
+        {
+            let end = index + character.len_utf8();
+            if !text[start..end].trim().is_empty() {
+                ranges.push((start, end));
+            }
+            start = end;
+        }
+    }
+    if start < text.len() && !text[start..].trim().is_empty() {
+        ranges.push((start, text.len()));
+    }
+    ranges
+}
+
+fn directive_prefix_is_allowed(prefix: &str) -> bool {
+    let prefix = prefix
+        .trim_matches(|character: char| character.is_whitespace() || character.is_ascii_punctuation())
+        .to_lowercase();
+    if prefix.is_empty() {
+        return true;
+    }
+    const SEQUENCE_ANCHORS: &[&str] = &["and", "and then", "then", "先", "然后", "再"];
+    if SEQUENCE_ANCHORS
+        .iter()
+        .any(|anchor| prefix.trim_end().ends_with(anchor))
+    {
+        return true;
+    }
+    const ENGLISH_POLITE_PREFIXES: &[&str] = &[
+        "please",
+        "kindly",
+        "can you",
+        "could you",
+        "would you",
+        "will you",
+        "i need you to",
+        "i want you to",
+        "we need you to",
+        "you need to",
+        "help me",
+        "help me to",
+    ];
+    if ENGLISH_POLITE_PREFIXES.contains(&prefix.as_str()) {
+        return true;
+    }
+    const CHINESE_POLITE_PREFIXES: &[&str] = &[
+        "请", "请你", "请帮我", "可以帮我", "能否", "能否帮我", "能不能", "麻烦", "麻烦你",
+        "帮我", "需要你", "我需要你", "我要你", "直接",
+    ];
+    if CHINESE_POLITE_PREFIXES.contains(&prefix.as_str()) {
+        return true;
+    }
+
+    // A comma is not itself command authority: prose such as "the log says,
+    // create x failed" must remain history. Only an explicit local directive
+    // anchor after the last comma starts a new imperative segment.
+    let local = prefix
+        .rsplit([',', '，'])
+        .next()
+        .unwrap_or(&prefix)
+        .trim();
+    SEQUENCE_ANCHORS.contains(&local)
+        || ENGLISH_POLITE_PREFIXES.contains(&local)
+        || CHINESE_POLITE_PREFIXES.contains(&local)
+}
+
+fn claim_prefix_is_allowed(prefix: &str) -> bool {
+    let prefix = prefix
+        .trim_matches(|character: char| character.is_whitespace() || character.is_ascii_punctuation())
+        .to_lowercase();
+    matches!(
+        prefix.as_str(),
+        "" | "i"
+            | "i've"
+            | "i have"
+            | "we"
+            | "we've"
+            | "we have"
+            | "successfully"
+            | "now"
+            | "done"
+            | "我"
+            | "我们"
+            | "已经"
+            | "现已"
+            | "成功"
+    )
+}
+
+fn cancellation_prefix_is_allowed(_prefix: &str) -> bool {
+    // Cancellation is fail-open for the hard verdict: missing a trusted user
+    // correction such as "Actually, don't create..." can falsely punish a
+    // model for obeying it. Positive mutation authority remains strict; a
+    // broad cancellation can only disable this optional adjudication gate.
+    true
+}
+
+const SOURCE_CUES: &[&str] = &[
+    "from",
+    "using",
+    "based on",
+    "according to",
+    "根据",
+    "使用",
+    "从",
+];
+
+fn direct_target_gap(gap: &str) -> bool {
+    let mut gap = gap
+        .trim_matches(|character: char| character.is_whitespace() || character.is_ascii_punctuation())
+        .to_lowercase();
+    for allowed in ["新文件", "文件", "一个", "新的", "了"] {
+        gap = gap.replace(allowed, "");
+    }
+    let gap = gap.trim();
+    gap.is_empty()
+        || gap
+            .split_whitespace()
+            .all(|word| matches!(word, "a" | "an" | "the" | "file" | "new"))
+}
+
+const CANCELLATION_ACTION_MARKERS: &[&str] = &[
+    "do not create",
+    "do not write",
+    "do not generate",
+    "do not implement",
+    "do not fix",
+    "do not edit",
+    "do not modify",
+    "don't create",
+    "don't write",
+    "don't modify",
+    "stop creating",
+    "cancel creating",
+    "不要创建",
+    "不要再创建",
+    "不要新建",
+    "不要编写",
+    "不要写入",
+    "不要生成",
+    "不要实现",
+    "不要修复",
+    "不要编辑",
+    "不要修改",
+    "不要再修改",
+    "别创建",
+    "别再创建",
+    "别新建",
+    "别编写",
+    "别写入",
+    "别生成",
+    "别实现",
+    "别修复",
+    "别编辑",
+    "别修改",
+    "别再修改",
+    "取消创建",
+    "不用创建",
+    "不用修改",
+    "无需创建",
+    "无需修改",
+    "禁止创建",
+    "禁止修改",
+];
+
+fn bind_first_target_after_actions(
+    clause: &str,
+    action_markers: &[&str],
+    targets: &[TargetSpan],
+    prefix_allowed: fn(&str) -> bool,
+    veto_markers: &[&str],
+) -> Vec<(usize, usize, String)> {
+    let lowered = ascii_lowercase_preserving_offsets(clause);
+    let actions = marker_spans(&lowered, action_markers);
+    let mut bound = Vec::new();
+    for (index, (action_start, action_end)) in actions.iter().copied().enumerate() {
+        if !prefix_allowed(&lowered[..action_start]) {
+            continue;
+        }
+        let window_end = actions
+            .get(index + 1)
+            .map(|(start, _)| *start)
+            .unwrap_or(clause.len());
+        let Some(target) = targets
+            .iter()
+            .filter(|target| target.start >= action_end && target.start < window_end)
+            .min_by_key(|target| target.start)
+        else {
+            continue;
+        };
+        let gap = &lowered[action_end..target.start];
+        if !direct_target_gap(gap)
+            || contains_any_marker(gap, SOURCE_CUES)
+            || contains_any_marker(gap, veto_markers)
+        {
+            continue;
+        }
+        bound.push((action_start, target.end, target.normalized.clone()));
+    }
+    bound
+}
+
+fn required_state_change_targets(
+    requirement: &[ContentBlock],
+    workspace_root: &std::path::Path,
+    mode: CompletionEvidenceMode,
+) -> Vec<String> {
+    let requirement_text = requirement
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let all_targets = lex_targets(&requirement_text, workspace_root, mode);
+    let mut required = Vec::new();
+    for (clause_start, clause_end) in clause_ranges(&requirement_text) {
+        let clause = &requirement_text[clause_start..clause_end];
+        if clause.trim_start().starts_with('>') {
+            continue;
+        }
+        let targets = all_targets
+            .iter()
+            .filter(|target| target.start >= clause_start && target.start < clause_end)
+            .map(|target| TargetSpan {
+                start: target.start - clause_start,
+                end: target.end - clause_start,
+                normalized: target.normalized.clone(),
+            })
+            .collect::<Vec<_>>();
+        let lowered_clause = ascii_lowercase_preserving_offsets(clause);
+        let cancellation_spans = marker_spans(&lowered_clause, CANCELLATION_ACTION_MARKERS);
+        let mut directives = bind_first_target_after_actions(
+            clause,
+            STATE_CHANGE_REQUIREMENT_MARKERS,
+            &targets,
+            directive_prefix_is_allowed,
+            NON_MUTATING_REQUIREMENT_MARKERS,
+        )
+        .into_iter()
+        .filter(|(position, _, _)| {
+            !cancellation_spans
+                .iter()
+                .any(|(start, end)| *position >= *start && *position < *end)
+        })
+        .map(|(position, _, target)| (position, true, target))
+        .chain(
+            bind_first_target_after_actions(
+                clause,
+                CANCELLATION_ACTION_MARKERS,
+                &targets,
+                cancellation_prefix_is_allowed,
+                &[],
+            )
+            .into_iter()
+            .map(|(position, _, target)| (position, false, target)),
+        )
+        .collect::<Vec<_>>();
+        directives.sort_by_key(|(position, _, _)| *position);
+        for (_, positive, target) in directives {
+            if positive {
+                if !required.contains(&target) {
+                    required.push(target);
+                }
+            } else {
+                required.retain(|known| known != &target);
+            }
+        }
+    }
+    required
+}
+
+fn trim_claim_suffix(suffix: &str) -> &str {
+    suffix.trim_matches(|character: char| {
+        character.is_whitespace()
+            || character.is_ascii_punctuation()
+            || matches!(
+                character,
+                '。' | '，' | '；' | '：' | '！' | '？' | '—' | '–'
+            )
+    })
+}
+
+fn claim_target_suffix_is_allowed(
+    suffix: &str,
+    target: &str,
+    workspace_root: &std::path::Path,
+    mode: CompletionEvidenceMode,
+) -> bool {
+    let lowered = ascii_lowercase_preserving_offsets(suffix);
+    const CAVEAT_BOUNDARIES: &[&str] = &[", but", " but ", " however", " though", "—", "–", "，但", "但是", "不过"];
+    let boundary = CAVEAT_BOUNDARIES
+        .iter()
+        .filter_map(|marker| lowered.find(marker).map(|index| (index, marker.len())))
+        .min_by_key(|(index, _)| *index);
+    let (primary, caveat) = boundary.map_or((lowered.as_str(), None), |(index, length)| {
+        (&lowered[..index], Some(&lowered[index + length..]))
+    });
+    let primary = trim_claim_suffix(primary);
+    if !matches!(
+        primary,
+        ""
+            | "now"
+            | "successfully"
+            | "as requested"
+            | "successfully as requested"
+            | "了"
+            | "现已"
+            | "已按要求完成"
+    ) {
+        return false;
+    }
+    let Some(caveat) = caveat.map(trim_claim_suffix).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+
+    // A caveat naming another high-confidence file is scoped to that file and
+    // must not launder away the already-complete target assertion.
+    let caveat_targets = lex_targets(caveat, workspace_root, mode);
+    if !caveat_targets.is_empty()
+        && caveat_targets
+            .iter()
+            .all(|other| other.normalized != target)
+    {
+        return true;
+    }
+
+    const DURABILITY_VETOES: &[&str] = &[
+        "did not save",
+        "didn't save",
+        "not saved",
+        "not persisted",
+        "not written to disk",
+        "not to disk",
+        "still missing",
+        "is missing",
+        "does not exist",
+        "doesn't exist",
+        "rolled back",
+        "deleted it",
+        "removed it",
+        "未保存",
+        "未落盘",
+        "未写入磁盘",
+        "仍不存在",
+        "文件缺失",
+        "已回滚",
+        "只是草稿",
+    ];
+    if contains_any_marker(caveat, DURABILITY_VETOES) {
+        return false;
+    }
+
+    contains_any_marker(
+        caveat,
+        &[
+            "run the tests",
+            "run tests",
+            "tests failed",
+            "would you like anything else",
+            "anything else",
+            "未生成预览图",
+            "预览图失败",
+            "还需要其他",
+        ],
+    )
+}
+
+fn claimed_state_change_targets(
+    answer: &str,
+    workspace_root: &std::path::Path,
+    mode: CompletionEvidenceMode,
+) -> Vec<String> {
+    let all_targets = lex_targets(answer, workspace_root, mode);
+    let mut claimed = Vec::new();
+    for (clause_start, clause_end) in clause_ranges(answer) {
+        let clause = &answer[clause_start..clause_end];
+        let lowered = ascii_lowercase_preserving_offsets(clause);
+        let trimmed = clause.trim();
+        let quoted_whole = (trimmed.starts_with('`') && trimmed.ends_with('`'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\''));
+        if clause.trim_start().starts_with('>') || quoted_whole {
+            continue;
+        }
+        let targets = all_targets
+            .iter()
+            .filter(|target| target.start >= clause_start && target.start < clause_end)
+            .map(|target| TargetSpan {
+                start: target.start - clause_start,
+                end: target.end - clause_start,
+                normalized: target.normalized.clone(),
+            })
+            .collect::<Vec<_>>();
+        for (_, target_end, target) in bind_first_target_after_actions(
+            clause,
+            STATE_CHANGE_CLAIM_MARKERS,
+            &targets,
+            claim_prefix_is_allowed,
+            NON_COMPLETION_CLAIM_MARKERS,
+        ) {
+            if claim_target_suffix_is_allowed(
+                &clause[target_end..],
+                &target,
+                workspace_root,
+                mode,
+            ) && !claimed.contains(&target)
+            {
+                claimed.push(target);
+            }
+        }
+        const TARGET_FIRST_CHINESE_CLAIMS: &[&str] = &[
+            "已创建", "已新建", "已编写", "已写入", "已生成", "已构建", "已实现", "已修复",
+            "已修改", "已更新", "已产出",
+        ];
+        for target in &targets {
+            let suffix = &lowered[target.end..];
+            let target_first_prefix = TARGET_FIRST_CHINESE_CLAIMS
+                .iter()
+                .copied()
+                .find(|claim| trim_claim_suffix(suffix).starts_with(claim))
+                .or_else(|| {
+                    [
+                        "is now in the workspace",
+                        "is ready",
+                        "is now ready",
+                        "now contains the implementation",
+                        "has been created",
+                        "has been written",
+                        "has been fixed",
+                        "has been updated",
+                    ]
+                    .into_iter()
+                    .find(|claim| trim_claim_suffix(suffix).starts_with(claim))
+                });
+            if let Some(prefix) = target_first_prefix {
+                let trimmed_suffix = trim_claim_suffix(suffix);
+                let remainder = &trimmed_suffix[prefix.len()..];
+                if claim_target_suffix_is_allowed(
+                    remainder,
+                    &target.normalized,
+                    workspace_root,
+                    mode,
+                ) && !claimed.contains(&target.normalized)
+                {
+                    claimed.push(target.normalized.clone());
+                }
+            }
+        }
+    }
+    claimed
+}
+
+fn effective_claimed_state_change_targets(
+    answer: &str,
+    required_targets: &[String],
+    workspace_root: &std::path::Path,
+    mode: CompletionEvidenceMode,
+) -> Vec<String> {
+    let claimed = claimed_state_change_targets(answer, workspace_root, mode);
+    if !claimed.is_empty() || required_targets.is_empty() {
+        return claimed;
+    }
+    let trimmed = answer.trim();
+    let lowered = ascii_lowercase_preserving_offsets(trimmed);
+    let task_complete_prefixes = [
+        "task complete — see ",
+        "task complete - see ",
+        "task complete: see ",
+    ];
+    if let Some(prefix) = task_complete_prefixes
+        .iter()
+        .find(|prefix| lowered.starts_with(**prefix))
+    {
+        let targets = lex_targets(trimmed, workspace_root, mode);
+        if targets.len() == 1 {
+            let target = &targets[0];
+            let before = lowered[..target.start]
+                .trim_matches(|character: char| character.is_whitespace() || character == '"');
+            let after = lowered[target.end..].trim_matches(|character: char| {
+                character.is_whitespace()
+                    || character.is_ascii_punctuation()
+                    || matches!(character, '。' | '！')
+            });
+            if before == prefix.trim()
+                && after.is_empty()
+                && required_targets.contains(&target.normalized)
+            {
+                return vec![target.normalized.clone()];
+            }
+        }
+    }
+    let generic = answer
+        .trim()
+        .trim_end_matches(['.', '!', '。', '！'])
+        .trim();
+    let generic_completion = generic.eq_ignore_ascii_case("done")
+        || generic.eq_ignore_ascii_case("completed")
+        || matches!(generic, "已完成" | "完成了");
+    generic_completion
+        .then(|| required_targets.to_vec())
+        .unwrap_or_default()
+}
+
+pub(crate) fn completion_adjudication(
+    answer: &str,
+    requirement: &[ContentBlock],
+    supported_targets: &[String],
+    workspace_root: &std::path::Path,
+    mode: CompletionEvidenceMode,
+) -> Option<CompletionAdjudication> {
+    let required_targets = required_state_change_targets(requirement, workspace_root, mode);
+    let claimed_targets = effective_claimed_state_change_targets(
+        answer,
+        &required_targets,
+        workspace_root,
+        mode,
+    );
+    required_targets
+        .into_iter()
+        .find(|target| {
+            claimed_targets.contains(target) && !supported_targets.contains(target)
+        })
+        .map(|target| CompletionAdjudication::UnbackedStateChangeClaim { target })
 }
 
 /// Cumulative failed tool results in one user turn before the engine stops
@@ -3481,6 +6001,66 @@ mod plan_mode_tests;
 mod handle_command_tests;
 
 #[derive(Debug)]
+pub enum CompletionAdjudication {
+    /// The accepted requirement explicitly required a workspace file mutation,
+    /// but the logical turn ended without durable direct, delegated, or
+    /// artifact evidence for that exact target.
+    UnbackedStateChangeClaim { target: String },
+    /// The model verdict was detected, but restoring the accepted-turn root
+    /// could not be durably persisted. Hosts must surface the non-retryable
+    /// state-consistency error and retire this runtime.
+    HistoryRollbackFailed { target: String },
+    /// A direct caller reached a clean model terminal, but the durable session
+    /// transaction marker could not be cleared. The apparent completion must
+    /// not be published or the resumable transcript reused.
+    SessionCommitFailed { detail: String },
+}
+
+impl CompletionAdjudication {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::UnbackedStateChangeClaim { .. } => "unbacked_state_change_claim",
+            Self::HistoryRollbackFailed { .. } => "completion_history_rollback_failed",
+            Self::SessionCommitFailed { .. } => "completion_history_commit_failed",
+        }
+    }
+
+    pub fn nudge(&self) -> &'static str {
+        match self {
+            Self::UnbackedStateChangeClaim { .. } => STATE_CHANGE_EVIDENCE_NUDGE,
+            Self::HistoryRollbackFailed { .. } => STATE_CHANGE_EVIDENCE_NUDGE,
+            Self::SessionCommitFailed { .. } => STATE_CHANGE_EVIDENCE_NUDGE,
+        }
+    }
+
+    pub fn detail(&self) -> String {
+        match self {
+            Self::UnbackedStateChangeClaim { target } => format!(
+                "The accepted request required '{target}' to be created or changed, but the turn ended without durable workspace or artifact evidence for that target."
+            ),
+            Self::HistoryRollbackFailed { target } => format!(
+                "The unsupported completion claim for '{target}' was rejected, but restoring its conversation history could not be persisted. The runtime must not be reused."
+            ),
+            Self::SessionCommitFailed { detail } => format!(
+                "{detail}. The resumable Agent session could not be committed safely and must not be reused."
+            ),
+        }
+    }
+
+    pub fn history_rollback_succeeded(&self) -> bool {
+        matches!(self, Self::UnbackedStateChangeClaim { .. })
+    }
+
+    fn mark_history_rollback_failed(&mut self) {
+        if let Self::UnbackedStateChangeClaim { target } = self {
+            *self = Self::HistoryRollbackFailed {
+                target: std::mem::take(target),
+            };
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct AgentResult {
     pub text: String,
     pub stop_reason: StopReason,
@@ -3492,6 +6072,10 @@ pub struct AgentResult {
     /// Successful state-changing tool effects across every round of this turn.
     /// Carried from a monotonic counter, never from a bounded render window.
     pub effects_ok: usize,
+    /// Successful, durable workspace effects proven by atomic file tools or a
+    /// correlated nested Agent. Unlike `effects_ok`, a generic successful
+    /// shell/browser/tool result is not enough.
+    pub durable_effect_targets: Vec<String>,
     /// State-changing tool calls the output ceiling cut off across every round.
     /// Non-zero is machine evidence that the turn was reaching for an effect.
     pub cutoff_state_changing: usize,
@@ -3499,6 +6083,9 @@ pub struct AgentResult {
     /// for plan mode and model-only runtimes, whose turns must never be judged
     /// for producing no state-changing effect.
     pub state_changing_tools_advertised: bool,
+    /// Typed hard verdict carried with text and usage so hosts can emit metrics
+    /// before failing the delivery instead of discarding accounting in `Err`.
+    pub completion_adjudication: Option<CompletionAdjudication>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -3529,3 +6116,6 @@ mod superseded_draft_tests;
 
 #[cfg(test)]
 mod completion_evidence_tests;
+
+#[cfg(test)]
+mod runtime_authority_tests;

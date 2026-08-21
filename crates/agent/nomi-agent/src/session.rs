@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -20,6 +23,25 @@ pub struct EditableTurnCheckpoint {
     /// this exact snapshot instead of guessing from free-form transcript text.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub prior_host_context: BTreeMap<String, String>,
+}
+
+/// Durable transaction root for one accepted Agent turn.
+///
+/// The engine persists this snapshot before the first provider await and does
+/// not clear it until the host has committed every post-model effect (artifact
+/// delivery, memory projection, and the terminal receipt).  A process restart
+/// that observes the marker restores this exact root before the session can be
+/// resumed, so an interrupted or rejected assistant claim is never replayed as
+/// committed history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcceptedTurnRoot {
+    pub source_message_id: String,
+    pub messages: Vec<Message>,
+    pub editable_turn: Option<EditableTurnCheckpoint>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub host_context: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activated_deferred_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +84,44 @@ pub struct Session {
     /// from free-form transcript text after a restart.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub host_context: BTreeMap<String, String>,
+    /// Exact pre-turn state while an accepted turn is not yet durably
+    /// committed by its owner. Legacy sessions deserialize as committed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_turn_root: Option<AcceptedTurnRoot>,
+    /// Recovery root retained after the engine transcript is checked but
+    /// before/after the host publishes its durable terminal. It is not an
+    /// interrupted marker for ordinary resume; Conversation boot uses it only
+    /// when its authoritative receipt still says the exact turn was Running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_host_terminal_root: Option<AcceptedTurnRoot>,
+    /// Idempotence proof for crash recovery. Conversation boot may retry its
+    /// durable receipt transition after the transcript root was already
+    /// repaired; this exact source id proves the retry is not accepting an
+    /// unrelated marker-free session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_interrupted_turn_source: Option<String>,
+}
+
+impl Session {
+    /// Recover a crash-interrupted accepted turn in memory.
+    ///
+    /// Usage is intentionally retained: provider cost remains true even when
+    /// the provisional transcript is rejected. All resumable conversational
+    /// state is restored from the marker and the marker is consumed; callers
+    /// must atomically persist the returned state before allowing resume.
+    pub fn recover_interrupted_accepted_turn(&mut self) -> bool {
+        let Some(root) = self.accepted_turn_root.take() else {
+            return false;
+        };
+        self.last_interrupted_turn_source = Some(root.source_message_id);
+        self.pending_host_terminal_root = None;
+        self.messages = root.messages;
+        self.editable_turn = root.editable_turn;
+        self.host_context = root.host_context;
+        self.activated_deferred_tools = root.activated_deferred_tools;
+        self.updated_at = Utc::now();
+        true
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +143,8 @@ pub struct SessionMeta {
 pub struct SessionManager {
     directory: PathBuf,
     max_sessions: usize,
+    #[cfg(test)]
+    fail_next_save: AtomicUsize,
 }
 
 impl SessionManager {
@@ -90,7 +152,14 @@ impl SessionManager {
         Self {
             directory,
             max_sessions,
+            #[cfg(test)]
+            fail_next_save: AtomicUsize::new(0),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_save_for_test(&self) {
+        self.fail_next_save.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Create a new session, return it
@@ -126,6 +195,9 @@ impl SessionManager {
             activated_deferred_tools: Vec::new(),
             editable_turn: None,
             host_context: BTreeMap::new(),
+            accepted_turn_root: None,
+            pending_host_terminal_root: None,
+            last_interrupted_turn_source: None,
         };
         self.save(&session)?;
         self.update_index(&session)?;
@@ -135,6 +207,16 @@ impl SessionManager {
 
     /// Save current session state (called after each turn)
     pub fn save(&self, session: &Session) -> anyhow::Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_next_save
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            anyhow::bail!("injected session save failure");
+        }
         std::fs::create_dir_all(&self.directory)?;
         let filename = format!(
             "{}_{}.json",
@@ -142,9 +224,7 @@ impl SessionManager {
             session.id
         );
         let path = self.directory.join(&filename);
-        let json = serde_json::to_string_pretty(session)?;
-        std::fs::write(path, json)?;
-        Ok(())
+        write_json_atomic(&path, session)
     }
 
     /// Load a session by ID (or "latest")
@@ -175,7 +255,16 @@ impl SessionManager {
             .ok_or_else(|| anyhow::anyhow!("Session file not found for '{}'", meta.id))?;
 
         let content = std::fs::read_to_string(path)?;
-        let session: Session = serde_json::from_str(&content)?;
+        let mut session: Session = serde_json::from_str(&content)?;
+        if session.recover_interrupted_accepted_turn() {
+            // A resumable session is a committed-history boundary. Refuse to
+            // return the recovered root until both transcript and index have
+            // been durably repaired; a retry will see either the still-marked
+            // old document or the fully recovered root, never a provisional
+            // suffix accepted as success.
+            self.save(&session)?;
+            self.update_index(&session)?;
+        }
         Ok(session)
     }
 
@@ -236,9 +325,7 @@ impl SessionManager {
         }
 
         let index_path = self.directory.join("index.json");
-        let json = serde_json::to_string_pretty(&index)?;
-        std::fs::write(index_path, json)?;
-        Ok(())
+        write_json_atomic(&index_path, &index)
     }
 
     /// Remove oldest sessions beyond max_sessions
@@ -266,8 +353,7 @@ impl SessionManager {
 
         // Save updated index
         let index_path = self.directory.join("index.json");
-        let json = serde_json::to_string_pretty(&index)?;
-        std::fs::write(index_path, json)?;
+        write_json_atomic(&index_path, &index)?;
         Ok(())
     }
 
@@ -288,12 +374,38 @@ impl SessionManager {
             let before = index.sessions.len();
             index.sessions.retain(|s| s.id != id);
             if index.sessions.len() != before {
-                let json = serde_json::to_string_pretty(&index)?;
-                std::fs::write(index_path, json)?;
+                write_json_atomic(&index_path, &index)?;
             }
         }
         Ok(())
     }
+}
+
+/// Commit one JSON document without exposing a partially-written transcript
+/// or index to a concurrent/crash-time resume. The temporary file is flushed
+/// before the platform's replace operation and the containing directory is
+/// synced where the platform exposes that durability primitive.
+fn write_json_atomic(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("session path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(directory)?;
+    let bytes = serde_json::to_vec_pretty(value)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("session.json");
+    let mut temporary = tempfile::Builder::new()
+        .prefix(&format!(".{file_name}.write."))
+        .tempfile_in(directory)?;
+    temporary.write_all(&bytes)?;
+    temporary.as_file_mut().sync_all()?;
+    temporary
+        .persist(path)
+        .map_err(|error| anyhow::Error::new(error.error))?;
+    #[cfg(unix)]
+    std::fs::File::open(directory)?.sync_all()?;
+    Ok(())
 }
 
 /// Decide whether a loaded session may be resumed for the conversation instance
@@ -377,6 +489,143 @@ mod tests {
     }
 
     #[test]
+    fn load_durably_recovers_an_interrupted_accepted_turn_root() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let mut session = manager
+            .create("anthropic", "claude-3", "/workspace", Some("recover-root"))
+            .unwrap();
+        let prior = Message::new(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "trusted prior history".to_owned(),
+            }],
+        );
+        let prior_checkpoint = EditableTurnCheckpoint {
+            source_message_id: "prior-source".to_owned(),
+            start_len: 0,
+            prior_host_context: Default::default(),
+        };
+        let mut prior_host_context = BTreeMap::new();
+        prior_host_context.insert("route".to_owned(), "prior".to_owned());
+        session.messages = vec![prior.clone()];
+        session.editable_turn = Some(prior_checkpoint.clone());
+        session.host_context = prior_host_context.clone();
+        session.activated_deferred_tools = vec!["prior_tool".to_owned()];
+        session.accepted_turn_root = Some(AcceptedTurnRoot {
+            source_message_id: "active-source".to_owned(),
+            messages: vec![prior.clone()],
+            editable_turn: Some(prior_checkpoint.clone()),
+            host_context: prior_host_context.clone(),
+            activated_deferred_tools: vec!["prior_tool".to_owned()],
+        });
+        session.messages.push(Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "provisional request".to_owned(),
+            }],
+        ));
+        session.messages.push(Message::new(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "provisional answer".to_owned(),
+            }],
+        ));
+        session.host_context.insert("route".to_owned(), "provisional".to_owned());
+        session.activated_deferred_tools.push("provisional_tool".to_owned());
+        session.total_usage.input_tokens = 17;
+        manager.save(&session).unwrap();
+        manager.update_index_for(&session).unwrap();
+
+        let loaded = manager.load("recover-root").unwrap();
+        assert_eq!(
+            serde_json::to_value(&loaded.messages).unwrap(),
+            serde_json::to_value(vec![prior]).unwrap()
+        );
+        assert_eq!(loaded.editable_turn, Some(prior_checkpoint));
+        assert_eq!(loaded.host_context, prior_host_context);
+        assert_eq!(loaded.activated_deferred_tools, vec!["prior_tool"]);
+        assert_eq!(loaded.total_usage.input_tokens, 17);
+        assert!(loaded.accepted_turn_root.is_none());
+
+        let fresh = SessionManager::new(dir.path().to_path_buf(), 10)
+            .load("recover-root")
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&fresh.messages).unwrap(),
+            serde_json::to_value(&loaded.messages).unwrap()
+        );
+        assert!(fresh.accepted_turn_root.is_none());
+        let meta = manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|meta| meta.id == "recover-root")
+            .unwrap();
+        assert_eq!(meta.message_count, 1);
+    }
+
+    #[test]
+    fn ordinary_load_preserves_a_pending_host_terminal_as_committed_history() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let mut session = manager
+            .create("anthropic", "claude-3", "/workspace", Some("pending-host"))
+            .unwrap();
+        let prior = Message::new(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "trusted prior history".to_owned(),
+            }],
+        );
+        let committed = Message::new(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "host-sealed answer".to_owned(),
+            }],
+        );
+        session.messages = vec![prior.clone(), committed.clone()];
+        session.pending_host_terminal_root = Some(AcceptedTurnRoot {
+            source_message_id: "host-source".to_owned(),
+            messages: vec![prior],
+            editable_turn: None,
+            host_context: BTreeMap::new(),
+            activated_deferred_tools: Vec::new(),
+        });
+        manager.save(&session).unwrap();
+        manager.update_index_for(&session).unwrap();
+
+        let loaded = manager.load("pending-host").unwrap();
+        assert_eq!(
+            serde_json::to_value(&loaded.messages).unwrap(),
+            serde_json::to_value(vec![
+                Message::new(
+                    Role::Assistant,
+                    vec![ContentBlock::Text {
+                        text: "trusted prior history".to_owned(),
+                    }],
+                ),
+                committed,
+            ])
+            .unwrap()
+        );
+        assert!(loaded.accepted_turn_root.is_none());
+        assert_eq!(
+            loaded
+                .pending_host_terminal_root
+                .as_ref()
+                .map(|root| root.source_message_id.as_str()),
+            Some("host-source")
+        );
+
+        let fresh = SessionManager::new(dir.path().to_path_buf(), 10)
+            .load("pending-host")
+            .unwrap();
+        assert_eq!(fresh.messages.len(), 2);
+        assert!(fresh.pending_host_terminal_root.is_some());
+    }
+
+    #[test]
     fn legacy_session_without_deferred_activations_defaults_to_empty() {
         let dir = tempdir().unwrap();
         let manager = SessionManager::new(dir.path().to_path_buf(), 10);
@@ -403,6 +652,33 @@ mod tests {
         let loaded: Session = serde_json::from_value(value).unwrap();
 
         assert!(loaded.editable_turn.is_none());
+    }
+
+    #[test]
+    fn legacy_session_without_accepted_turn_root_is_committed() {
+        let manager = SessionManager::new(tempdir().unwrap().path().to_path_buf(), 10);
+        let session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        let mut value = serde_json::to_value(&session).unwrap();
+        value.as_object_mut().unwrap().remove("accepted_turn_root");
+
+        let loaded: Session = serde_json::from_value(value).unwrap();
+
+        assert!(loaded.accepted_turn_root.is_none());
+    }
+
+    #[test]
+    fn legacy_session_without_pending_host_terminal_root_is_committed() {
+        let manager = SessionManager::new(tempdir().unwrap().path().to_path_buf(), 10);
+        let session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        let mut value = serde_json::to_value(&session).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("pending_host_terminal_root");
+
+        let loaded: Session = serde_json::from_value(value).unwrap();
+
+        assert!(loaded.pending_host_terminal_root.is_none());
     }
 
     #[test]

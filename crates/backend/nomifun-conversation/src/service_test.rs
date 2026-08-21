@@ -12,7 +12,8 @@ use nomifun_ai_agent::protocol::events::{
 };
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
 use nomifun_ai_agent::{
-    AgentRuntimeRegistry, AgentSendError, NomiSessionResetOutcome, TurnStopReason,
+    AgentRuntimeRegistry, AgentSendError, NomiSessionRecoveryRewindOutcome,
+    NomiSessionResetOutcome, TurnStopReason,
 };
 
 use crate::response_middleware::{CronCommandResult, CronCreateParams, CronUpdateParams, ICronService};
@@ -5006,6 +5007,30 @@ impl AgentRuntimeRegistry for MockAgentRuntimeRegistry {
         )))
     }
 
+    fn rewind_persisted_nomi_live_recovery(
+        &self,
+        conversation_id: &str,
+        conversation_created_at: TimestampMs,
+        _source_message_id: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<NomiSessionRecoveryRewindOutcome, AppError>,
+                > + Send,
+        >,
+    > {
+        self.nomi_reset_records
+            .lock()
+            .unwrap()
+            .push((conversation_id.to_owned(), conversation_created_at));
+        if let Some(error) = self.fail_next_nomi_reset.lock().unwrap().take() {
+            return Box::pin(std::future::ready(Err(AppError::Internal(error))));
+        }
+        Box::pin(std::future::ready(Ok(
+            NomiSessionRecoveryRewindOutcome::AlreadyRewound,
+        )))
+    }
+
     fn terminate_all(&self) {
         self.agents.lock().unwrap().clear();
         self.workspace_bindings.lock().unwrap().clear();
@@ -5021,6 +5046,7 @@ struct SlowAgentRuntimeRegistry {
     built: AtomicBool,
     build_calls: AtomicUsize,
     nomi_reset_records: Mutex<Vec<(String, TimestampMs)>>,
+    fail_nomi_reset: AtomicBool,
 }
 
 impl SlowAgentRuntimeRegistry {
@@ -5030,6 +5056,7 @@ impl SlowAgentRuntimeRegistry {
             built: AtomicBool::new(false),
             build_calls: AtomicUsize::new(0),
             nomi_reset_records: Mutex::new(Vec::new()),
+            fail_nomi_reset: AtomicBool::new(false),
         }
     }
 
@@ -5044,6 +5071,10 @@ impl SlowAgentRuntimeRegistry {
     #[allow(dead_code)]
     fn nomi_reset_records(&self) -> Vec<(String, TimestampMs)> {
         self.nomi_reset_records.lock().unwrap().clone()
+    }
+
+    fn fail_nomi_reset(&self, fail: bool) {
+        self.fail_nomi_reset.store(fail, Ordering::SeqCst);
     }
 }
 
@@ -5088,8 +5119,40 @@ impl AgentRuntimeRegistry for SlowAgentRuntimeRegistry {
             .lock()
             .unwrap()
             .push((conversation_id.to_owned(), conversation_created_at));
+        if self.fail_nomi_reset.load(Ordering::SeqCst) {
+            return Box::pin(std::future::ready(Err(AppError::Internal(
+                "injected persisted Nomi session reset failure".to_owned(),
+            ))));
+        }
         Box::pin(std::future::ready(Ok(
             NomiSessionResetOutcome::AlreadyAbsent,
+        )))
+    }
+
+
+    fn rewind_persisted_nomi_live_recovery(
+        &self,
+        conversation_id: &str,
+        conversation_created_at: TimestampMs,
+        _source_message_id: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<NomiSessionRecoveryRewindOutcome, AppError>,
+                > + Send,
+        >,
+    > {
+        self.nomi_reset_records
+            .lock()
+            .unwrap()
+            .push((conversation_id.to_owned(), conversation_created_at));
+        if self.fail_nomi_reset.load(Ordering::SeqCst) {
+            return Box::pin(std::future::ready(Err(AppError::Internal(
+                "injected persisted Nomi live recovery failure".to_owned(),
+            ))));
+        }
+        Box::pin(std::future::ready(Ok(
+            NomiSessionRecoveryRewindOutcome::AlreadyRewound,
         )))
     }
 
@@ -8863,6 +8926,11 @@ async fn boot_reconcile_heals_proven_orphan_as_interrupted_failure() {
         // The healed generation is a durable, structured interrupted failure.
         let row = repo.get(&conversation_id).await.unwrap().unwrap();
         assert_eq!(row.status.as_deref(), Some("finished"), "{backend}");
+        assert_eq!(
+            slow_registry.nomi_reset_records(),
+            vec![(conversation_id.clone(), row.created_at)],
+            "{backend}: boot healing must clear the exact persisted Nomi generation before unlocking"
+        );
         let admission = repo
             .get_turn_admission_state(SQLITE_TEST_OWNER, &conversation_id)
             .await
@@ -8921,6 +8989,65 @@ async fn boot_reconcile_heals_proven_orphan_as_interrupted_failure() {
             claim_background_turn_for_test(repo.as_ref(), &conversation_id, "post-heal").await;
         assert_eq!(next_epoch, admitted_epoch + 2, "{backend}");
     }
+}
+
+#[tokio::test]
+async fn boot_reconcile_keeps_running_quarantined_until_nomi_session_reset_succeeds() {
+    const KEY: &str = "boot-heal-reset-failure";
+    let (service, repo, slow_registry, runtime_registry, _database, conversation_id) =
+        background_reconciliation_fixture(
+            KEY,
+            Arc::new(crate::NoExecutionConversationBoundary),
+        )
+        .await;
+    let (operation_id, _, _, admitted_epoch) =
+        claim_background_turn_for_test(repo.as_ref(), &conversation_id, KEY).await;
+    let provider = StubTerminalProofProvider::new();
+    provider.arm(&conversation_id, admitted_epoch, Some(&operation_id));
+    service.with_terminal_proof_provider(provider);
+    slow_registry.fail_nomi_reset(true);
+
+    service
+        .reconcile_locally_quiescent_orphan_on_boot(
+            SQLITE_TEST_OWNER,
+            &conversation_id,
+            &runtime_registry,
+        )
+        .await
+        .expect_err("a failed session reset must retain the durable Running quarantine");
+    let row = repo.get(&conversation_id).await.unwrap().unwrap();
+    assert_eq!(row.status.as_deref(), Some("running"));
+    assert_eq!(
+        repo.get_delivery_receipt(SQLITE_TEST_OWNER, &conversation_id, &operation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "accepted"
+    );
+
+    slow_registry.fail_nomi_reset(false);
+    assert_eq!(
+        service
+            .reconcile_locally_quiescent_orphan_on_boot(
+                SQLITE_TEST_OWNER,
+                &conversation_id,
+                &runtime_registry,
+            )
+            .await
+            .unwrap(),
+        QuiescentOrphanReconciliation::Reconciled
+    );
+    assert_eq!(
+        repo.get(&conversation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+            .as_deref(),
+        Some("finished")
+    );
+    assert_eq!(slow_registry.nomi_reset_records().len(), 2);
 }
 
 #[tokio::test]

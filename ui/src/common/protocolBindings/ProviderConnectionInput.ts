@@ -6,7 +6,7 @@
  * schemes such as SDK default-chain may use an empty object, but the field is
  * never omitted.
  */
-export type ProviderConnectionInput = { role: string, label?: string | null, base_url: string, auth_scheme: string, 
+export type ProviderConnectionInput = { role: string, label?: string | null, base_url: string, auth_scheme: string,
 /**
  * Write-only structured credentials (shape depends on `auth_scheme`). Key
  * schemes use `{ "api_keys": ["..."] }`. Values are encrypted at rest.

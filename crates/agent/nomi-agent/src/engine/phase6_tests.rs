@@ -28,6 +28,8 @@ fn make_engine(model: &str, allow_list: Vec<String>) -> super::AgentEngine {
     super::AgentEngine {
         provider: Arc::new(NullProvider),
         tools: ToolRegistry::new(),
+        workspace_root: std::path::PathBuf::from("."),
+        completion_evidence_mode: super::CompletionEvidenceMode::LocalFingerprint,
         messages: vec![],
         system_prompt: String::new(),
         model: model.to_string(),

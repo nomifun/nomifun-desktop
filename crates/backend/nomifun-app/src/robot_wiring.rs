@@ -977,12 +977,15 @@ impl SpokenReplyReducer {
                 self.candidate.clear();
                 self.output_checkpoint = None;
                 // `provider_fault` decides whether a fallback-model retry makes
-                // sense. The platform already classifies upstream ownership.
+                // sense. A replay is permitted only when the platform proved
+                // retryability and classified the failure as provider-owned or
+                // explicitly unknown-upstream. Non-retryable provider-quality
+                // failures must not duplicate a possibly side-effecting turn.
                 let provider_fault = matches!(
                     data.ownership,
                     Some(AgentErrorOwnership::UserLlmProvider)
                         | Some(AgentErrorOwnership::UnknownUpstream)
-                );
+                ) && data.retryable == Some(true);
                 vec![TurnEvent::Failed {
                     message: data.message,
                     provider_fault,
@@ -1179,49 +1182,57 @@ mod tests {
     }
 
     #[test]
-    fn only_upstream_faults_are_worth_a_fallback_retry() {
-        let error = |ownership| {
+    fn only_explicitly_retryable_upstream_faults_are_worth_a_fallback_retry() {
+        let error = |ownership, retryable| {
             AgentStreamEvent::Error(nomifun_api_types::AgentStreamErrorData {
                 message: "boom".to_owned(),
                 code: None,
                 ownership,
                 detail: None,
                 workspace_path: None,
-                retryable: None,
+                retryable,
                 feedback_recommended: None,
                 resolution: None,
             })
         };
         assert_eq!(
             SpokenReplyReducer::default()
-                .push(error(Some(AgentErrorOwnership::UserLlmProvider))),
+                .push(error(
+                    Some(AgentErrorOwnership::UserLlmProvider),
+                    Some(true),
+                )),
             vec![TurnEvent::Failed {
                 message: "boom".to_owned(),
                 provider_fault: true
             }]
         );
-        assert_eq!(
-            SpokenReplyReducer::default()
-                .push(error(Some(AgentErrorOwnership::UnknownUpstream))),
-            vec![TurnEvent::Failed {
-                message: "boom".to_owned(),
-                provider_fault: true
-            }]
-        );
-        for ours in [
-            Some(AgentErrorOwnership::Nomifun),
-            Some(AgentErrorOwnership::UserAgent),
-            None,
+        for (ownership, retryable) in [
+            (Some(AgentErrorOwnership::UserLlmProvider), Some(false)),
+            (Some(AgentErrorOwnership::UserLlmProvider), None),
+            (Some(AgentErrorOwnership::Nomifun), Some(true)),
+            (Some(AgentErrorOwnership::UserAgent), Some(true)),
+            (None, Some(true)),
         ] {
             assert_eq!(
-                SpokenReplyReducer::default().push(error(ours)),
+                SpokenReplyReducer::default().push(error(ownership, retryable)),
                 vec![TurnEvent::Failed {
                     message: "boom".to_owned(),
                     provider_fault: false
                 }],
-                "{ours:?} would fail the same way on the fallback model"
+                "{ownership:?} with retryable={retryable:?} must not replay on the fallback model"
             );
         }
+        assert_eq!(
+            SpokenReplyReducer::default().push(error(
+                Some(AgentErrorOwnership::UnknownUpstream),
+                Some(true),
+            )),
+            vec![TurnEvent::Failed {
+                message: "boom".to_owned(),
+                provider_fault: true,
+            }],
+            "an explicitly retryable unknown-upstream failure keeps its existing fallback path"
+        );
     }
 
     #[test]

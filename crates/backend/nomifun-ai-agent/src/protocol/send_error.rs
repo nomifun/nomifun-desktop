@@ -55,6 +55,45 @@ impl AgentSendError {
         )
     }
 
+    /// A model/provider quality failure: the response claimed a required
+    /// deliverable was complete without the engine's machine evidence for it.
+    /// Retrying the same model automatically could duplicate real side effects,
+    /// so this remains non-retryable while directing the user to change model.
+    pub fn provider_unbacked_completion(detail: impl Into<String>) -> Self {
+        Self::new(
+            "The model reported completion without verified deliverable evidence",
+            AgentErrorCode::UserLlmProviderUnbackedCompletion,
+            AgentErrorOwnership::UserLlmProvider,
+            Some(detail.into()),
+            false,
+            false,
+            resolution(
+                AgentErrorResolutionKind::ChangeModel,
+                Some(AgentErrorResolutionTarget::ProviderSettings),
+            ),
+        )
+    }
+
+    /// The engine rejected an unsupported completion claim and restored its
+    /// accepted-turn root in memory, but the checked persistence write failed.
+    /// This code is intentionally narrower than the generic state-consistency
+    /// error: Conversation uses it as authority to retire the exact runtime and
+    /// reset only its generation-owned Nomi session before admitting a successor.
+    pub fn agent_session_inconsistent(detail: impl Into<String>) -> Self {
+        Self::new(
+            "The Agent conversation state could not be restored safely",
+            AgentErrorCode::NomifunAgentSessionInconsistent,
+            AgentErrorOwnership::Nomifun,
+            Some(detail.into()),
+            false,
+            true,
+            resolution(
+                AgentErrorResolutionKind::StartNewSession,
+                Some(AgentErrorResolutionTarget::NewConversation),
+            ),
+        )
+    }
+
     pub fn new(
         message: impl Into<String>,
         code: AgentErrorCode,
@@ -938,6 +977,58 @@ mod tests {
         assert_eq!(err.ownership(), Some(AgentErrorOwnership::UserLlmProvider));
         assert_eq!(err.stream_error().retryable, Some(false));
         assert_eq!(err.stream_error().feedback_recommended, Some(false));
+    }
+
+    #[test]
+    fn unbacked_completion_is_a_non_retryable_provider_quality_failure() {
+        let err = AgentSendError::provider_unbacked_completion(
+            "The accepted request required 'miniapp.html', but no durable evidence matched it.",
+        );
+
+        assert_eq!(
+            err.code(),
+            Some(AgentErrorCode::UserLlmProviderUnbackedCompletion)
+        );
+        assert_eq!(
+            err.ownership(),
+            Some(AgentErrorOwnership::UserLlmProvider)
+        );
+        assert_eq!(err.stream_error().retryable, Some(false));
+        assert_eq!(err.stream_error().feedback_recommended, Some(false));
+        assert_eq!(
+            err.stream_error().resolution,
+            Some(AgentErrorResolution::new(
+                AgentErrorResolutionKind::ChangeModel,
+                Some(AgentErrorResolutionTarget::ProviderSettings),
+            ))
+        );
+        assert_eq!(
+            err.stream_error().detail.as_deref(),
+            Some(
+                "The accepted request required 'miniapp.html', but no durable evidence matched it."
+            )
+        );
+    }
+
+    #[test]
+    fn agent_session_inconsistent_is_non_retryable_and_requires_a_new_session() {
+        let err = AgentSendError::agent_session_inconsistent(
+            "the accepted-turn root could not be persisted",
+        );
+
+        assert_eq!(
+            err.code(),
+            Some(AgentErrorCode::NomifunAgentSessionInconsistent)
+        );
+        assert_eq!(err.ownership(), Some(AgentErrorOwnership::Nomifun));
+        assert_eq!(err.stream_error().retryable, Some(false));
+        assert_eq!(
+            err.stream_error().resolution,
+            Some(AgentErrorResolution::new(
+                AgentErrorResolutionKind::StartNewSession,
+                Some(AgentErrorResolutionTarget::NewConversation),
+            ))
+        );
     }
 
     #[test]

@@ -1787,6 +1787,9 @@ mod tests {
             activated_deferred_tools: Vec::new(),
             editable_turn: None,
             host_context: Default::default(),
+            accepted_turn_root: None,
+            pending_host_terminal_root: None,
+            last_interrupted_turn_source: None,
         };
 
         assert!(retarget_resumed_session(
@@ -1847,6 +1850,9 @@ mod tests {
                 prior_host_context: Default::default(),
             }),
             host_context: Default::default(),
+            accepted_turn_root: None,
+            pending_host_terminal_root: None,
+            last_interrupted_turn_source: None,
         };
 
         let repair = sanitize_resumed_session(&mut session, false);

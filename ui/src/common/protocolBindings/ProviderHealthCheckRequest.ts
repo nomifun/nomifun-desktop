@@ -4,7 +4,7 @@ import type { ModelTask } from "./ModelTask";
 /**
  * Request body for `POST /api/agents/provider-health-check`.
  */
-export type ProviderHealthCheckRequest = { provider_id: string, model: string, 
+export type ProviderHealthCheckRequest = { provider_id: string, model: string,
 /**
  * Exact persisted capability to probe. There is no primary-task or chat
  * fallback.

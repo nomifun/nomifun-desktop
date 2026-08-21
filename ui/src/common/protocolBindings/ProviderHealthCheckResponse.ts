@@ -6,7 +6,7 @@ import type { ProviderHealthCheckErrorKind } from "./ProviderHealthCheckErrorKin
 /**
  * Response body for `POST /api/agents/provider-health-check`.
  */
-export type ProviderHealthCheckResponse = { provider_id: string, platform: string, model: string, task: ModelTask, status: HealthStatus, elapsed_ms: number, message?: string, error_kind?: ProviderHealthCheckErrorKind, http_status?: number, timeout_stage?: string, 
+export type ProviderHealthCheckResponse = { provider_id: string, platform: string, model: string, task: ModelTask, status: HealthStatus, elapsed_ms: number, message?: string, error_kind?: ProviderHealthCheckErrorKind, http_status?: number, timeout_stage?: string,
 /**
  * The URL this check actually requested, with query material redacted.
  *

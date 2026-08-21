@@ -4,10 +4,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nomi_agent::bootstrap::AgentBootstrap;
-use nomi_agent::engine::AgentEngine;
+use nomi_agent::engine::{AgentEngine, AgentResult};
 use nomi_agent::output::OutputSink;
 use nomi_agent::output::null_sink::NullSink;
 use nomi_config::config::{CliArgs, Config};
+use nomi_types::message::StopReason;
 use nomifun_api_types::{
     CapabilityHealth, HealthStatus, ModelTask, ProviderHealthCheckErrorKind,
     ProviderHealthCheckRequest, ProviderHealthCheckResponse,
@@ -61,7 +62,8 @@ impl ProviderHealthCheckService {
         let platform = resolved.platform.clone();
         let model = resolved.model.clone();
 
-        let response = if task == ModelTask::Chat {            let config = self.resolve_probe_config(&provider_id, &model).await?;
+        let response = if task == ModelTask::Chat {
+            let config = self.resolve_probe_config(&provider_id, &model).await?;
             run_probe(provider_id, platform, model, task, config).await?
         } else {
             info!(
@@ -286,7 +288,7 @@ async fn run_probe(
     )
     .await
     {
-        Ok(Ok(_)) => {
+        Ok(Ok(result)) if probe_terminal_failure(&result).is_none() => {
             let response = ProviderHealthCheckResponse {
                 provider_id,
                 platform,
@@ -300,6 +302,21 @@ async fn run_probe(
                 timeout_stage: None,
                 attempted_url: None,
             };
+            log_health_check_result(&response);
+            Ok(response)
+        }
+        Ok(Ok(result)) => {
+            let message = probe_terminal_failure(&result)
+                .expect("the healthy terminal arm already handled clean EndTurn");
+            let response = unhealthy_response(
+                provider_id,
+                platform,
+                model,
+                task,
+                started.elapsed(),
+                message,
+                None,
+            );
             log_health_check_result(&response);
             Ok(response)
         }
@@ -330,6 +347,42 @@ async fn run_probe(
             log_health_check_result(&response);
             Ok(response)
         }
+    }
+}
+
+fn probe_terminal_failure(result: &AgentResult) -> Option<String> {
+    if let Some(adjudication) = &result.completion_adjudication {
+        return Some(format!(
+            "ProviderError: provider health probe failed completion adjudication ({}): {}",
+            adjudication.kind(),
+            adjudication.detail()
+        ));
+    }
+
+    if result.stop_reason == StopReason::EndTurn && result.text.trim().is_empty() {
+        return Some(
+            "ProviderError: provider health probe returned no final text (empty_final_text)"
+                .to_owned(),
+        );
+    }
+
+    match result.stop_reason {
+        StopReason::EndTurn => None,
+        StopReason::MaxTokens => Some(
+            "ProviderError: provider health probe reached its output limit (output_truncated)"
+                .to_owned(),
+        ),
+        StopReason::MaxTurns => Some(
+            "ProviderError: provider health probe exhausted its request budget (turn_requests_exhausted)"
+                .to_owned(),
+        ),
+        StopReason::Refusal => {
+            Some("ContentPolicy: provider health probe was refused (model_refused)".to_owned())
+        }
+        StopReason::ToolUse => Some(
+            "ProviderError: provider health probe ended with unresolved tool use (protocol_error)"
+                .to_owned(),
+        ),
     }
 }
 
@@ -606,6 +659,8 @@ pub(crate) fn extract_http_status(message: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nomi_agent::engine::CompletionAdjudication;
+    use nomi_types::message::TokenUsage;
     use nomifun_common::encrypt_string;
     use nomifun_db::{
         CreateProviderParams, IProviderModelCapabilityRepository, IProviderRepository,
@@ -616,6 +671,53 @@ mod tests {
     use nomifun_model_invoke::{AdapterRegistry, default_adapters};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn probe_result(stop_reason: StopReason) -> AgentResult {
+        AgentResult {
+            text: "OK".to_owned(),
+            stop_reason,
+            usage: TokenUsage::default(),
+            turns: 1,
+            rounds: 1,
+            effects_ok: 0,
+            durable_effect_targets: Vec::new(),
+            cutoff_state_changing: 0,
+            state_changing_tools_advertised: false,
+            completion_adjudication: None,
+        }
+    }
+
+    #[test]
+    fn chat_probe_is_healthy_only_for_clean_end_turn() {
+        assert!(probe_terminal_failure(&probe_result(StopReason::EndTurn)).is_none());
+
+        let mut empty = probe_result(StopReason::EndTurn);
+        empty.text.clear();
+        let failure = probe_terminal_failure(&empty)
+            .expect("an empty EndTurn must not be reported healthy");
+        assert!(failure.contains("empty_final_text"));
+
+        for (stop_reason, code) in [
+            (StopReason::MaxTokens, "output_truncated"),
+            (StopReason::MaxTurns, "turn_requests_exhausted"),
+            (StopReason::Refusal, "model_refused"),
+            (StopReason::ToolUse, "protocol_error"),
+        ] {
+            let failure = probe_terminal_failure(&probe_result(stop_reason))
+                .expect("every non-EndTurn terminal must fail the probe");
+            assert!(failure.contains(code), "failure={failure}");
+        }
+
+        let mut adjudicated = probe_result(StopReason::EndTurn);
+        adjudicated.completion_adjudication = Some(
+            CompletionAdjudication::UnbackedStateChangeClaim {
+                target: "miniapp.html".to_owned(),
+            },
+        );
+        let failure = probe_terminal_failure(&adjudicated)
+            .expect("adjudicated EndTurn must not be reported healthy");
+        assert!(failure.contains("unbacked_state_change_claim"));
+    }
 
     #[test]
     fn classifies_invoke_errors_without_transport_fallbacks() {

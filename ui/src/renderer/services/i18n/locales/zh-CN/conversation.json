@@ -162,6 +162,10 @@
         "title": "会话状态不一致",
         "body": "当前对话状态和后台记录不同步。请重新打开应用或新建会话后再试。"
       },
+      "NOMIFUN_AGENT_SESSION_INCONSISTENT": {
+        "title": "Agent 会话无法安全恢复",
+        "body": "应用已拒绝未经验证的完成结果，但无法安全恢复已保存的 Agent 会话。请新建会话后再继续。"
+      },
       "NOMIFUN_PERMISSION_ERROR": {
         "title": "无法访问所需资源",
         "body": "本地权限或文件访问检查失败。请确认项目路径和应用权限后重试。"
@@ -285,6 +289,10 @@
       "USER_LLM_PROVIDER_EMPTY_RESPONSE": {
         "title": "模型服务商返回了空响应",
         "body": "服务商完成了请求，但没有返回可用内容。请先重试一次；如果反复出现，可切换服务商。"
+      },
+      "USER_LLM_PROVIDER_UNBACKED_COMPLETION": {
+        "title": "模型未能验证所要求的交付物",
+        "body": "模型声称任务已经完成，但没有已验证证据能对应到必需文件。已有的实际成果均已保留，请先切换模型再继续。"
       },
       "WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED": {
         "title": "该工作区路径无法运行",
