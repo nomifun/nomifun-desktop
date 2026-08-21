@@ -65,6 +65,8 @@ describe('Creative Canvas Agent document model', () => {
     expect(pending.pendingTurn).toEqual({
       idempotencyKey,
       prompt: '制作一个分镜',
+      modelInput: '制作一个分镜',
+      skillIds: [],
       createdAt: 20,
     });
     expect(creativeCanvasAgentModelSelection(pending.model)).toEqual(model);
@@ -79,6 +81,83 @@ describe('Creative Canvas Agent document model', () => {
       })
     );
     expect(differentModelError?.message.includes('immutable')).toBe(true);
+  });
+
+  test('copies exact planning input while deriving the title only from the user prompt', () => {
+    const skillIds = ['canvas.inspect', 'asset-search_v2'];
+    const pending = creativeCanvasAgentSessionWithPendingTurn({
+      session: createCreativeCanvasAgentSession(sessionId, 10),
+      model,
+      idempotencyKey,
+      prompt: '  用户可见标题  ',
+      modelInput: 'System planning envelope\n\n用户可见标题',
+      skillIds,
+      now: 20,
+    });
+    skillIds.push('mutated.after.creation');
+
+    expect(pending.title).toBe('用户可见标题');
+    expect(pending.pendingTurn).toEqual({
+      idempotencyKey,
+      prompt: '用户可见标题',
+      modelInput: 'System planning envelope\n\n用户可见标题',
+      skillIds: ['canvas.inspect', 'asset-search_v2'],
+      createdAt: 20,
+    });
+  });
+
+  test('strictly rejects invalid explicit planning input and accepts exact boundaries', () => {
+    const boundary = creativeCanvasAgentSessionWithPendingTurn({
+      session: createCreativeCanvasAgentSession(sessionId, 10),
+      model,
+      idempotencyKey,
+      prompt: '边界',
+      modelInput: 'x'.repeat(262_144),
+      skillIds: ['a'.repeat(128)],
+      now: 20,
+    });
+    expect(boundary.pendingTurn?.modelInput.length).toBe(262_144);
+    expect(boundary.pendingTurn?.skillIds).toEqual(['a'.repeat(128)]);
+
+    const invalidCases: Array<{
+      modelInput?: unknown;
+      skillIds?: unknown;
+      message: string;
+    }> = [
+      { modelInput: '', message: 'model input' },
+      { modelInput: ' padded ', message: 'model input' },
+      { modelInput: 'x'.repeat(262_145), message: 'model input' },
+      { modelInput: null, message: 'model input' },
+      { skillIds: null, message: 'skill ids' },
+      {
+        skillIds: Array.from({ length: 9 }, (_, index) => `skill-${index}`),
+        message: 'at most 8',
+      },
+      { skillIds: ['a'.repeat(129)], message: 'skill id 0' },
+      { skillIds: [' canvas.read'], message: 'skill id 0' },
+      { skillIds: ['canvas/read'], message: 'skill id 0' },
+      { skillIds: ['canvas.检查'], message: 'skill id 0' },
+      { skillIds: ['canvas.read', 'canvas.read'], message: 'unique' },
+    ];
+
+    for (const invalid of invalidCases) {
+      const error = captureError(() =>
+        creativeCanvasAgentSessionWithPendingTurn({
+          session: createCreativeCanvasAgentSession(sessionId, 10),
+          model,
+          idempotencyKey,
+          prompt: '继续',
+          ...(invalid.modelInput === undefined
+            ? {}
+            : { modelInput: invalid.modelInput as string }),
+          ...(invalid.skillIds === undefined
+            ? {}
+            : { skillIds: invalid.skillIds as readonly string[] }),
+          now: 20,
+        })
+      );
+      expect(error?.message.includes(invalid.message)).toBe(true);
+    }
   });
 
   test('accepts only the current durable prefix or one completed pending pair', () => {

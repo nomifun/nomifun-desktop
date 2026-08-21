@@ -846,7 +846,7 @@ const parseChatSession = (value: unknown, path: string): CreativeChatSessionRefe
     exactKeys(
       pendingRecord,
       ['idempotencyKey', 'prompt', 'createdAt'],
-      [],
+      ['modelInput', 'skillIds'],
       `${path}.pendingTurn`,
       code
     );
@@ -856,6 +856,38 @@ const parseChatSession = (value: unknown, path: string): CreativeChatSessionRefe
     if (prompt !== prompt.trim()) {
       fail(code, `${path}.pendingTurn.prompt`, 'trimmed non-empty prompt');
     }
+    const hasModelInput = Object.prototype.hasOwnProperty.call(pendingRecord, 'modelInput');
+    const modelInput =
+      !hasModelInput || pendingRecord.modelInput === null
+        ? prompt
+        : asString(pendingRecord.modelInput, `${path}.pendingTurn.modelInput`, code, {
+            maxLength: 262_144,
+          });
+    if (modelInput !== modelInput.trim()) {
+      fail(code, `${path}.pendingTurn.modelInput`, 'trimmed non-empty model input');
+    }
+    let skillIds: string[] = [];
+    if (Object.prototype.hasOwnProperty.call(pendingRecord, 'skillIds')) {
+      const rawSkillIds = Array.isArray(pendingRecord.skillIds)
+        ? pendingRecord.skillIds
+        : fail(code, `${path}.pendingTurn.skillIds`, 'array');
+      if (rawSkillIds.length > 8) {
+        fail(code, `${path}.pendingTurn.skillIds`, 'array with at most 8 skill ids');
+      }
+      skillIds = asArray(
+        rawSkillIds,
+        `${path}.pendingTurn.skillIds`,
+        code,
+        (item, itemPath) => {
+          const skillId = asString(item, itemPath, code, { maxLength: 128 });
+          if (skillId !== skillId.trim() || !/^[A-Za-z0-9._-]+$/.test(skillId)) {
+            fail(code, itemPath, 'trimmed ASCII skill id matching [A-Za-z0-9._-]');
+          }
+          return skillId;
+        }
+      );
+      assertUnique(skillIds, `${path}.pendingTurn.skillIds`, code);
+    }
     pendingTurn = {
       idempotencyKey: asUuidV7Id(
         pendingRecord.idempotencyKey,
@@ -863,6 +895,8 @@ const parseChatSession = (value: unknown, path: string): CreativeChatSessionRefe
         code
       ),
       prompt,
+      modelInput,
+      skillIds,
       createdAt: asNumber(pendingRecord.createdAt, `${path}.pendingTurn.createdAt`, code, {
         min: 0,
         integer: true,

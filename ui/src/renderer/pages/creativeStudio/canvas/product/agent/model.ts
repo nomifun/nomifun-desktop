@@ -20,6 +20,44 @@ const sameModel = (
   right: CreativeChatModelReference
 ): boolean => left.providerId === right.providerId && left.model === right.model;
 
+const validatePlanningModelInput = (value: unknown): string => {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > 262_144 ||
+    value !== value.trim()
+  ) {
+    throw new TypeError(
+      'Creative Studio Agent model input must be trimmed, non-empty, and at most 262144 characters'
+    );
+  }
+  return value;
+};
+
+const copyPlanningSkillIds = (value: unknown): string[] => {
+  if (!Array.isArray(value) || value.length > 8) {
+    throw new TypeError('Creative Studio Agent skill ids must be an array of at most 8 items');
+  }
+  const skillIds = value.map((skillId, index) => {
+    if (
+      typeof skillId !== 'string' ||
+      skillId.length === 0 ||
+      skillId.length > 128 ||
+      skillId !== skillId.trim() ||
+      !/^[A-Za-z0-9._-]+$/.test(skillId)
+    ) {
+      throw new TypeError(
+        `Creative Studio Agent skill id ${index} must be a trimmed 1-128 character ASCII id`
+      );
+    }
+    return skillId;
+  });
+  if (new Set(skillIds).size !== skillIds.length) {
+    throw new TypeError('Creative Studio Agent skill ids must be unique');
+  }
+  return skillIds;
+};
+
 /** Re-establish the branded NomiFun provider ID at the product/runtime boundary. */
 export function creativeCanvasAgentModelSelection(
   model: CreativeChatModelReference | null
@@ -52,10 +90,18 @@ export function creativeCanvasAgentSessionWithPendingTurn(input: {
   model: CreativeModelSelectionRef;
   idempotencyKey: string;
   prompt: string;
+  modelInput?: string;
+  skillIds?: readonly string[];
   now: number;
 }): CreativeChatSessionReference {
   const prompt = input.prompt.trim();
   if (!prompt) throw new Error('Creative Studio Agent prompt must be non-empty');
+  const modelInput = validatePlanningModelInput(
+    input.modelInput === undefined ? prompt : input.modelInput
+  );
+  const skillIds = copyPlanningSkillIds(
+    input.skillIds === undefined ? [] : input.skillIds
+  );
   if (input.session.pendingTurn) {
     throw new Error('Creative Studio Agent session already has a pending turn');
   }
@@ -73,6 +119,8 @@ export function creativeCanvasAgentSessionWithPendingTurn(input: {
     pendingTurn: {
       idempotencyKey: input.idempotencyKey,
       prompt,
+      modelInput,
+      skillIds,
       createdAt: input.now,
     },
     updatedAt: input.now,

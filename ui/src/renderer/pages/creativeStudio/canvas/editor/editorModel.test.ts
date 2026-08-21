@@ -246,6 +246,8 @@ describe('creative canvas editor model', () => {
         pendingTurn: {
           idempotencyKey: testUuid(214),
           prompt: '继续制作海报',
+          modelInput: '继续制作海报',
+          skillIds: [],
           createdAt: 10,
         },
         createdAt: 1,

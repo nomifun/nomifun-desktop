@@ -62,6 +62,27 @@ canvas action. The product will invoke this gateway only after presenting a
 strict planning artifact for manual “应用到画布” approval, then reload the
 authoritative project rather than mutating a second optimistic graph.
 
+Agent pending turns now persist both the user-facing `prompt` and the exact
+`modelInput` envelope plus ordered `skillIds`. Reload and response-loss recovery
+therefore replay the same model input and Skill snapshot instead of rebuilding
+them from whatever canvas selection happens to exist later. Coordinated v1
+readers accept an older pending turn with no new fields and normalize it to
+`modelInput = prompt` / `skillIds = []`; every new frontend serialization writes
+the complete shape. Model input is trimmed/non-empty and bounded to 262144
+UTF-16 units. Skill IDs are an ordered unique ASCII set of at most eight items,
+each no longer than 128 units.
+
+The pure canvas-context builder is also established for the next product
+connection. It includes selected nodes first, then only their one-hop graph,
+group and operation references, with at most 32 nodes and 64 relevant
+connections. Text/prompt fields are capped at 2000 Unicode characters, data/blob payloads are
+removed, and neither resolved media URLs nor opaque Provider parameters enter
+the envelope. The v1 planning envelope names the allowed canvas-op artifact,
+requires explicit user approval and forbids node deletion or media generation.
+This commit establishes and tests the durable/context contract only; the Agent
+composer and Nomi transport are wired to consume it in the following product
+slice.
+
 The source geometry is canonical for views that currently have no resize handle:
 the left library is 280px and opening Agent normalizes the right panel to 390px.
 The Agent supplies its own single header; the generic right-panel tab header is

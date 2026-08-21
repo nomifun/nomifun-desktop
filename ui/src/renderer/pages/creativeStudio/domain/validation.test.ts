@@ -89,6 +89,8 @@ describe('Creative Studio v1 document contract', () => {
         pendingTurn: {
           idempotencyKey: IDEMPOTENCY_KEY,
           prompt: '生成一张海报',
+          modelInput: 'Canvas context\n\n生成一张海报',
+          skillIds: ['canvas.inspect', 'asset-search_v2'],
           createdAt: 20,
         },
         createdAt: 10,
@@ -126,6 +128,154 @@ describe('Creative Studio v1 document contract', () => {
       'INVALID_DOCUMENT',
       '$.activeChatId'
     );
+  });
+
+  test('normalizes old pending-turn planning input and writes the complete new shape', () => {
+    const current = createEmptyCreativeProjectDocument(PROJECT_ID);
+    current.chatSessions = [
+      {
+        id: CHAT_ID,
+        title: '海报创作',
+        messageIds: [],
+        model: { providerId: '0198f8bb-8424-7b3d-8f17-bc6a1676f118', model: 'gpt-5' },
+        pendingTurn: {
+          idempotencyKey: IDEMPOTENCY_KEY,
+          prompt: '生成一张海报',
+          modelInput: 'Use the selected canvas\n\n生成一张海报',
+          skillIds: ['canvas.inspect', 'asset-search_v2'],
+          createdAt: 20,
+        },
+        createdAt: 10,
+        updatedAt: 20,
+      },
+    ];
+    current.activeChatId = CHAT_ID;
+
+    const parsedCurrent = parseCreativeProjectDocument(current);
+    expect(parseCreativeProjectDocument(JSON.parse(JSON.stringify(parsedCurrent)))).toEqual(
+      parsedCurrent
+    );
+
+    const oldWire = structuredClone(current) as unknown as {
+      chatSessions: Array<{ pendingTurn: Record<string, unknown> }>;
+    };
+    delete oldWire.chatSessions[0]!.pendingTurn.modelInput;
+    delete oldWire.chatSessions[0]!.pendingTurn.skillIds;
+    const normalizedOld = parseCreativeProjectDocument(oldWire);
+    expect(normalizedOld.chatSessions[0]!.pendingTurn).toEqual({
+      idempotencyKey: IDEMPOTENCY_KEY,
+      prompt: '生成一张海报',
+      modelInput: '生成一张海报',
+      skillIds: [],
+      createdAt: 20,
+    });
+
+    const normalizedWire = JSON.parse(JSON.stringify(normalizedOld)) as {
+      chatSessions: Array<{ pendingTurn: Record<string, unknown> }>;
+    };
+    expect(Object.hasOwn(normalizedWire.chatSessions[0]!.pendingTurn, 'modelInput')).toBe(true);
+    expect(Object.hasOwn(normalizedWire.chatSessions[0]!.pendingTurn, 'skillIds')).toBe(true);
+
+    const nullModelInput = structuredClone(current) as unknown as {
+      chatSessions: Array<{ pendingTurn: Record<string, unknown> }>;
+    };
+    nullModelInput.chatSessions[0]!.pendingTurn.modelInput = null;
+    expect(
+      parseCreativeProjectDocument(nullModelInput).chatSessions[0]!.pendingTurn?.modelInput
+    ).toBe('生成一张海报');
+  });
+
+  test('rejects invalid or unknown pending-turn planning input without widening the wire', () => {
+    const document = createEmptyCreativeProjectDocument(PROJECT_ID);
+    const session = {
+      id: CHAT_ID,
+      title: '海报创作',
+      messageIds: [],
+      model: {
+        providerId: '0198f8bb-8424-7b3d-8f17-bc6a1676f118',
+        model: 'gpt-5',
+      },
+      pendingTurn: {
+        idempotencyKey: IDEMPOTENCY_KEY,
+        prompt: '生成一张海报',
+        modelInput: 'Planning envelope',
+        skillIds: ['canvas.inspect'],
+        createdAt: 20,
+      } as Record<string, unknown>,
+      createdAt: 10,
+      updatedAt: 20,
+    };
+    document.activeChatId = CHAT_ID;
+    const parsePendingTurn = (pendingTurn: Record<string, unknown>) =>
+      parseCreativeProjectDocument({
+        ...document,
+        chatSessions: [{ ...session, pendingTurn }],
+      });
+
+    const boundary = structuredClone(session.pendingTurn);
+    boundary.modelInput = 'x'.repeat(262_144);
+    boundary.skillIds = ['a'.repeat(128)];
+    expect(parsePendingTurn(boundary).chatSessions[0]!.pendingTurn).toMatchObject({
+      modelInput: 'x'.repeat(262_144),
+      skillIds: ['a'.repeat(128)],
+    });
+
+    const invalidCases: Array<{
+      field: string;
+      value: unknown;
+      path: string;
+    }> = [
+      { field: 'modelInput', value: '', path: '$.chatSessions[0].pendingTurn.modelInput' },
+      {
+        field: 'modelInput',
+        value: ' padded ',
+        path: '$.chatSessions[0].pendingTurn.modelInput',
+      },
+      {
+        field: 'modelInput',
+        value: 'x'.repeat(262_145),
+        path: '$.chatSessions[0].pendingTurn.modelInput',
+      },
+      {
+        field: 'skillIds',
+        value: Array.from({ length: 9 }, (_, index) => `skill-${index}`),
+        path: '$.chatSessions[0].pendingTurn.skillIds',
+      },
+      { field: 'skillIds', value: null, path: '$.chatSessions[0].pendingTurn.skillIds' },
+      {
+        field: 'skillIds',
+        value: ['a'.repeat(129)],
+        path: '$.chatSessions[0].pendingTurn.skillIds[0]',
+      },
+      {
+        field: 'skillIds',
+        value: ['canvas/read'],
+        path: '$.chatSessions[0].pendingTurn.skillIds[0]',
+      },
+      {
+        field: 'skillIds',
+        value: ['canvas.检查'],
+        path: '$.chatSessions[0].pendingTurn.skillIds[0]',
+      },
+      {
+        field: 'skillIds',
+        value: ['canvas.read', 'canvas.read'],
+        path: '$.chatSessions[0].pendingTurn.skillIds',
+      },
+      {
+        field: 'opaqueContext',
+        value: {},
+        path: '$.chatSessions[0].pendingTurn.opaqueContext',
+      },
+    ];
+
+    for (const invalid of invalidCases) {
+      expectContractError(
+        () => parsePendingTurn({ ...session.pendingTurn, [invalid.field]: invalid.value }),
+        'INVALID_DOCUMENT',
+        invalid.path
+      );
+    }
   });
 
   test('rejects unknown fields and mismatched project ownership', () => {
