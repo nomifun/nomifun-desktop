@@ -2,7 +2,7 @@
 
 > 用途：在长任务发生上下文压缩或人员切换时，从可验证提交继续，而不是重新审计整仓。
 > 分支：`codex/infinite-canvas-rebuild`
-> 最后功能锚点：`8e5f83cf`（`feat(creative-studio): add standalone task ownership`）
+> 最后功能锚点：`1dd4b9e9`（`feat(creative-studio): add standalone task history API`）
 > 参考产品锚点：`ef7303d`
 
 ## 1. 续接协议
@@ -26,7 +26,7 @@
 | P3 | `nomifun.creative-studio/v1`、UUIDv7、项目 CRUD/CAS、项目中心、自包含 ZIP 导入导出与完整引用重映射 | `d03a6a64`、`b4361084`、`44933dd3`…`2ad53b01`、`c12b8db` |
 | P4 | 画布 reducer/history、视口、节点、连线、小地图、选择/分组/快捷键、Editor CAS、离开/reload 门禁；首节点居中、参考节点几何、固定创作配色、直接节点工具、图片节点生成/上传面板、图片/视频/音频持久 composer 草稿与双客户端冲突恢复；空视频节点 T2V/单图 I2V、空音频节点 TTS 与真实任务终态回填 | `b2e19806`…`dc6c3c34`、`dd18dc6f`、`451dc013`、`5352954c`、`b2e103c8`、`46c1ba1e`、`777caba7`、`ef26f4cb`、`60982e38`、`9fffd526` |
 | P5 | Canonical 资产 API/库、文本/图像/视频/音频节点、素材选择与结果回填 | `57128727`、`e05b18a8`、`04f805a3`、`444db764` |
-| P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化；画布视频/音频 owner、提交响应不明状态确认与 authoritative 404 orphan 清理；真实 `standalone_workbench` owner 与完整有序输入快照 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44`、`60982e38`、`9fffd526`、`8e5f83cf` |
+| P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化；画布视频/音频 owner、提交响应不明状态确认与 authoritative 404 orphan 清理；真实 `standalone_workbench` owner、完整有序输入快照与 owner-scoped keyset 历史读取合同 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44`、`60982e38`、`9fffd526`、`8e5f83cf`、`1dd4b9e9` |
 | P7 | 生图/视频工作台、工作流定义/运行中心、提示词与素材中心 | `2283ee74`、`1414846e`、`ebd17f3a`…`aad21d9d`、`7e45f8ad` |
 | P8 | 持久化画布 Agent、原子操作、裁剪/切分/遮罩编辑与真实任务回填 | `e5368474`…`00f407c6`、`cac4bca8`…`bc01849e` |
 | P9 | Director v1 domain、Three.js runtime、CAS sidecar、时间轴、截图回填、sidecar 全资产闭包与归档重映射 | `1ccbd013`、`d3a609f6`、`7b7712c0`、`dfa3c0b3`、`f25825f1`、`c12b8db` |
@@ -66,7 +66,9 @@
 - migration 043 新增第三种 canonical task owner：`standalone_workbench { projectId, workbenchKind }`，其中 kind 仅允许 image/video/audio，并与 canvas node、workflow step 三分支严格互斥。Creation 会校验 workbench kind 与 capability 媒体族匹配；owner、Provider、模型、capability、params 和有序 inputs 全部参与同一幂等一致性比较，旧 key 不能换 owner、换输入或换顺序。
 - 每个新任务显式持久并返回有序 `{ assetId, kind, role }` 输入快照；`kind` 只允许 image/video/audio/text，worker 会用真实 MIME 再校验声明。迁移旧任务只有在 fingerprint 含完整有序 inputs、每个 asset 仍存在且 kind 可证明时才恢复；否则响应为 `inputs:null`，前端将其视为“不可原参数重试”，绝不伪装成 `[]`。新零输入任务始终返回 `inputs:[]`，create 响应若不精确回显输入快照会失败关闭。
 - 输入与结果资产进入 DB logical-reference registry；新 standalone 产物 origin 使用 `project_id + workbench_kind + creation_task_id`，并在写入时与真实任务 owner 逐字段比对。043 的旧输入解析、insert/update input trigger 与 asset-origin owner trigger 均使用 NULL-safe SQLite 判断，缺字段、显式 null、重复键、未知字段或混合 owner 都不能通过三值逻辑绕过。
-- 当前独立图片/视频产品路由仍有意保留 config-node owner，直到下一切片提供 owner-scoped list/recovery；现在提前切换 POST 会导致刷新后无法找回正在运行的任务。底层合同和前端 strict wire 已就绪，但不把尚未接线的持久历史描述成可用产品功能。
+- `GET /api/creative-studio/tasks` 已提供严格 owner-scoped 历史分页：必填 canonical project/kind，默认 30、上限 100，按 `submitted_at DESC, creation_task_id DESC` 使用二列 keyset，只有存在下一页时返回最后可见任务的 cursor。未知/重复 query、非法 UUID/kind/limit/cursor、owner 或 capability 逃逸均失败关闭；返回成功资产仍经过现有 artifact audit。
+- 前端 history client 会验证精确字段、owner、排序、页长、请求 cursor 窗口与返回 cursor 锚点；history model 将同一任务的持久/live 状态合并但不拆分多结果，不允许陈旧 live 降级 durable 终态，也不允许把其他任务资产挂入输出。冲突终态失败关闭，只有 failed/canceled 且 `inputs` 可证明的任务允许精确重试。
+- 当前独立图片/视频产品路由仍有意保留 config-node owner，直到下一切片同时切换 POST owner 并消费 owner-scoped list/recovery。底层历史 API、strict wire 和纯合并模型已经就绪，但不把尚未接到产品路由的持久历史描述成可用 UI 功能。
 
 `dd18dc6f` 的提交前检查：
 
@@ -149,6 +151,13 @@
 - Creative Studio 广域 UI 测试运行得到 604 passed / 3 failed；本切片的 WIRING 断言已修正并定向复跑通过，剩余 2 项是未改动的 Director capture 几何旧期望（期望 x=900/y=2160，当前 canonical 结果 x=920/y=2320），不作为本数据合同提交的伪阻断，也未篡改测试掩盖。
 - 隔离 8788 在原 QA 数据根真实应用 043 后正常启动；提交 `image` owner + `t2v` 的错误媒体族请求返回 400，随后同 task ID GET 为 404，证明门禁发生在 Provider/任务落库前。现有画布重载仍为原 3 节点，Console 0 error / 0 warning；未调用付费 Provider。
 
+`1dd4b9e9` 的提交前检查：
+
+- `cargo test -p nomifun-creation --lib`：67 passed；SQLite standalone owner/keyset 定向门禁通过。覆盖严格 query/cursor、limit + 1、两列倒序分页、owner/capability 二次审计与结果资产审计。
+- standalone history client/model/workbench planner：24 passed / 105 assertions；覆盖 page/cursor 精确绑定、三类 owner 媒体族、durable/live 单调合并、终态冲突、结果资产同序绑定、legacy retry 禁用与多结果不拆分。
+- `bun run typecheck`、Rust 定向 fmt、`git diff --cached --check`：通过。UI production build 通过；仅保留仓库既存的动态/静态重复导入与大 chunk 提示。
+- 隔离 8788 真实 GET 空历史返回 200/`next_cursor:null`，非 canonical cursor 返回 400；同一项目 API 经 8788 与 5174 代理均返回 200。完整重载后画布为原 3 节点/0 连接，结构树恢复且新鲜 Console 0 error / 0 warning；未触发付费生成。
+
 `7e45f8ad` 的提交前检查：
 
 - `cargo test -p nomifun-workshop`：70 passed。
@@ -165,9 +174,9 @@
 ## 4. 仍需明确保留的限制
 
 - Standalone 工作台必须显式选择真实项目；不会借用或偷偷创建最近项目。
-- `standalone_workbench` owner 与完整 inputs 快照已经落地，但图片/视频产品尚未切换到 owner-scoped 历史读取；在 list/recovery API 完成前仍使用旧 config-node 持久化。不得仅改 POST owner 制造刷新后失联任务。
+- `standalone_workbench` owner、完整 inputs 快照、owner-scoped list client 和 durable/live 合并模型已经落地，但图片/视频产品尚未消费它们，仍使用旧 config-node 持久化。下一切片必须同时切换 POST owner、启动恢复和终态历史，不能只改其中一段制造刷新后失联任务。
 - 迁移旧任务的 `inputs:null` 表示输入快照无法证明，只允许审计展示，必须禁用精确重试；不能把它归一为空数组或猜测素材 kind/role。
-- 当前 standalone 路由仍由只拥有一个 `taskId` 的 v1 config node 持久化，因此视频批量数固定为 1。要支持 1-6 并行任务，必须先切换到已落地的 standalone owner，并让 owner-scoped list/recovery 与多任务 UI 同步接通。
+- 当前 standalone 路由仍由只拥有一个 `taskId` 的 v1 config node 持久化，因此视频批量数固定为 1。要支持 1-6 并行任务，必须先切换到已落地的 standalone owner/history，并让 owner-scoped recovery 与多任务 UI 同步接通。
 - 画布视频当前只开放空节点 T2V 与一张直接连接真实图片的 I2V。Creation engine 对 V2V 返回 `unsupported_capability`；首尾帧、多图、视频/音频混合参考和 Provider 特有高级参数必须等协议能力矩阵完成后再开放。
 - 视频任务“取消”是 NomiFun 本地权威取消：会阻止晚到结果覆盖和入库，但现有 adapter 没有远端 cancel 契约，不能承诺 Provider 作业或计费必然停止。
 - 画布音频当前只开放空节点 TTS，零输入且每次一个真实音频结果。参考音频、VoiceClone、声音设计、speed/instructions、AAC/PCM 与音频到音频必须先扩展 typed TTS 输入、协议 profile 和 artifact gate，不能只添加 UI 控件。
@@ -182,9 +191,9 @@
 
 ## 5. 下一步单线程优先级
 
-1. Standalone：先建立真实 `standalone_workbench` task owner 与完整任务快照，再为图片/视频工作台增加可分页持久终态历史和引用安全软删除；不要继续用一个 config node 或 React hidden IDs 冒充历史。
+1. Standalone：基础 owner、完整任务快照、可分页 list client 与纯历史合并合同已经完成；下一提交把图片/视频产品路由成套切到真实 owner/recovery/终态历史，随后实现引用安全软删除。不要继续用一个 config node 或 React hidden IDs 冒充历史。
 2. 模型与 Agent：消除单模型删除的 Creative Studio 引用缺口，再补首页 Agent 启动画布、选择上下文/创作技能和 Workflow AI 创建。
 3. 高级媒体：视频多任务/首尾帧/高级引用、音频上传/时长/VoiceClone、Director/全景与完整视频输出均须先补 typed 后端能力。
 4. P11：1280×720、1024×768、390×844、Tauri 慢环、真实 provider 冒烟、UI build/桌面打包和最终能力文档。
 
-不要因为主体代码已存在就跳过这些门禁；画布 image/video/audio 基础生成闭环已完成，下一功能提交从第 1 项 standalone task owner 与持久历史数据合同开始。
+不要因为主体代码已存在就跳过这些门禁；画布 image/video/audio 基础生成闭环和 standalone 历史数据合同已完成，下一功能提交从第 1 项图片/视频产品路由的 owner/history/recovery 协调切换开始。
