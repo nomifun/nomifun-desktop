@@ -2,7 +2,7 @@
 
 > 用途：在长任务发生上下文压缩或人员切换时，从可验证提交继续，而不是重新审计整仓。
 > 分支：`codex/infinite-canvas-rebuild`
-> 最后功能锚点：`3b8a1b03`（`feat(creative-studio): wire safe history removal`）
+> 最后功能锚点：`a394b1e6`（`feat(creative-studio): coordinate exact model deletion`）
 > 参考产品锚点：`ef7303d`
 
 ## 1. 续接协议
@@ -26,7 +26,7 @@
 | P3 | `nomifun.creative-studio/v1`、UUIDv7、项目 CRUD/CAS、项目中心、自包含 ZIP 导入导出与完整引用重映射 | `d03a6a64`、`b4361084`、`44933dd3`…`2ad53b01`、`c12b8db` |
 | P4 | 画布 reducer/history、视口、节点、连线、小地图、选择/分组/快捷键、Editor CAS、离开/reload 门禁；首节点居中、参考节点几何、固定创作配色、直接节点工具、图片节点生成/上传面板、图片/视频/音频持久 composer 草稿与双客户端冲突恢复；空视频节点 T2V/单图 I2V、空音频节点 TTS 与真实任务终态回填 | `b2e19806`…`dc6c3c34`、`dd18dc6f`、`451dc013`、`5352954c`、`b2e103c8`、`46c1ba1e`、`777caba7`、`ef26f4cb`、`60982e38`、`9fffd526` |
 | P5 | Canonical 资产 API/库、文本/图像/视频/音频节点、素材选择与结果回填 | `57128727`、`e05b18a8`、`04f805a3`、`444db764` |
-| P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化；画布视频/音频 owner、提交响应不明状态确认与 authoritative 404 orphan 清理；真实 `standalone_workbench` owner、完整有序输入快照、owner-scoped keyset/active 历史与安全退役合同 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44`、`60982e38`、`9fffd526`、`8e5f83cf`、`1dd4b9e9`、`9990921c`、`53093740` |
+| P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化；画布视频/音频 owner、提交响应不明状态确认与 authoritative 404 orphan 清理；真实 `standalone_workbench` owner、完整有序输入快照、owner-scoped keyset/active 历史与安全退役合同；单模型删除的 Creative Studio exact-pair 原子清理与硬绑定门禁 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44`、`60982e38`、`9fffd526`、`8e5f83cf`、`1dd4b9e9`、`9990921c`、`53093740`、`a394b1e6` |
 | P7 | 生图/视频工作台、owner-scoped 持久终态历史、live 恢复/取消/载入/精确重试、terminal-only 安全移除、工作流定义/运行中心、提示词与素材中心 | `2283ee74`、`1414846e`、`ebd17f3a`…`aad21d9d`、`7e45f8ad`、`9990921c`、`3b8a1b03` |
 | P8 | 持久化画布 Agent、原子操作、裁剪/切分/遮罩编辑与真实任务回填 | `e5368474`…`00f407c6`、`cac4bca8`…`bc01849e` |
 | P9 | Director v1 domain、Three.js runtime、CAS sidecar、时间轴、截图回填、sidecar 全资产闭包与归档重映射 | `1ccbd013`、`d3a609f6`、`7b7712c0`、`dfa3c0b3`、`f25825f1`、`c12b8db` |
@@ -75,6 +75,9 @@
 - migration 044 新增独立历史 `deleted_at` tombstone 和严格批量 `POST /api/creative-studio/tasks/retire`：只允许同一精确 standalone owner 的 1-100 个 terminal task，live/missing/错 owner/重复或损坏产物会整批失败；`COALESCE` 保留首次时间戳。普通/active list 隐藏 tombstone，direct GET、幂等回放、boot audit 继续保留并返回 `deleted_at`。
 - 任务 input/result 资产均改为 Restrict，repository 与 DB DELETE trigger 双层阻止绕过；不再剪短 succeeded `result_asset_ids`。项目存在 queued/running task 时删除返回 conflict，terminal/tombstone history 与生成资产继续 KeepHistory。该提交只建立后端与严格前端 adapter/presentation 能力，产品路由尚未恢复移除按钮。
 - 图片/视频历史现在只为 terminal 卡显示单条/批量选择与“移除”，live 卡仍只有取消。固定 stone 确认框明确说明任务审计、输入和结果资产继续保留；成功响应后先 dismiss terminal runtime entry、再从第一页 reload。响应丢失可在同一对话框安全重试，409 不产生局部隐藏。
+- 单独删除一个 Provider model 现在必须经过 app 层协调器：Workshop 只生成精确 `{ providerId, model }` 的项目/工作流清理计划，`SqliteProviderModelRepository` 在一个 writer transaction 内复核 active creation task 与 nonterminal Workflow snapshot、对全部 project/workflow 做 revision CAS、删除 exact capability/model 并只递增一次 Provider `config_revision`。任一 stale/missing/hard binding 都整笔回滚；旧 repository delete 旁路已移除，System 构造器也必须显式注入协调器。
+- 只清除 config、图片/视频/音频 composer、Workflow generator/planner 和无消息空 Agent session 的当前选择；同 Provider 其他模型、completed Agent session、terminal task、asset origin 与 terminal Workflow snapshot 保留为历史。live config、pending Agent turn、queued/running task 或 nonterminal Workflow run 返回冲突。新 creation task 在同一写事务内证明 Provider/model 均 enabled 且具有 exact task capability；既有幂等历史回放仍在 live-parent 门禁前返回。
+- 图片/视频独立工作台在目录刷新后会清空已消失的 exact 选择，不自动替换成同 Provider 的其他模型。真实 API 创建临时 Provider、两个模型与双 config 项目后删除目标模型，项目 revision 2→3、目标选择清空且 prompt 保留、sibling 模型/选择保留；临时项目与 Provider 最终精确清理为 0。稳定后端下图片/视频完整 reload 均 Console 0 error / 0 warning，固定 stone token 为 `#f4f2ed / #292524 / 87,83,78`；未调用付费 Provider。
 
 `dd18dc6f` 的提交前检查：
 
@@ -184,6 +187,12 @@
 - 真实 API mixed failed+queued 批次返回 409，四条记录均未 tombstone。真实图片 UI 完成单条确认取消、单条 4→3、terminal-only 全选批量 3→1、live 先取消后退役到 0；视频 live 同样无移除入口，取消后退役到 0。Direct GET 保留 tombstone，重复三条批次回显原顺序且首次时间戳不变。
 - 全新标签页与完整 reload 均为空历史、Console 0 error / 0 warning；画布仍为 3 节点/0 连接。5 条专用 QA task 按 project/model 精确硬清理并确认剩余 0；未调用 Provider、未生成或删除资产。
 
+`a394b1e6` 的提交前检查：
+
+- `nomifun-db` provider repository：23 passed；creation-task repository：18 passed；model-delete 定向：5 passed。覆盖全量 CAS rollback、active task/run 硬冲突、missing model 零写入、same-provider sibling 保留、terminal history 不阻塞、删除后新 key 失败与 exact replay 继续可读。
+- `nomifun-workshop` exact cleanup 与整 Provider 回归：3 passed；`nomifun-system` provider-model route：6 passed；`nomifun-app` 真实协调器：2 passed；`cargo check -p nomifun-app --lib`、Rust fmt、`bun run typecheck`、Product route 8 tests / 42 assertions、`git diff --check` 通过。输出仅有未改模块既存 warning。
+- 隔离后端真实 HTTP 冒烟通过并清理 QA Provider/项目为 0。图片/视频页面完整 reload、返回入口、空历史与 fixed palette 通过；稳定 reload Console 0 error / 0 warning。没有发起模型调用或产生 Provider 成本。
+
 `7e45f8ad` 的提交前检查：
 
 - `cargo test -p nomifun-workshop`：70 passed。
@@ -213,12 +222,12 @@
 - 浏览器刷新/关闭时会在 pending revision 上启动 flush 并请求原生确认；浏览器仍不能等待异步持久化，用户若明确接受离开，最后一段编辑仍可能尚未得到服务端确认。Tauri 普通关闭只隐藏窗口，renderer 会继续保存。
 - 真实付费 provider 端到端冒烟尚未执行，需要可用凭证和单独的成本授权。
 - `data.composer` 是协调发布的 v1 可选扩展：当前前后端均向后读取缺字段文档，但 `ef26f4cb` 之前带 `deny_unknown_fields` 的旧二进制不能读取新字段，不能把新数据库回退给旧程序。
-- 整个 Provider 删除会清理 config 与图片 composer 引用；单独删除一个 Provider model 仍未经过 Creative Studio 清理协调器，这是 config 节点既存但必须在最终模型管理门禁消除的系统性缺口。
+- 单模型删除已原子覆盖 Creative Studio exact-pair 当前选择与运行中硬绑定，但非 Creative Studio 的 Conversation 主模型、Companion/customer-service、Agent Execution/template、Cron 等仍只有 Provider 级 usage/清理合同，尚未统一成 exact-model scanner。本提交不宣称这些外部模块的单模型引用已自动迁移或清除。
 
 ## 5. 下一步单线程优先级
 
-1. 模型与 Agent：消除单模型删除的 Creative Studio 引用缺口，再补首页 Agent 启动画布、选择上下文/创作技能和 Workflow AI 创建。
+1. 规划型 Agent：补首页 Agent 启动画布、画布选择上下文、正规 NomiFun 创作 Skill 注入、安全文本/结构 ops 与 Workflow AI draft→预览→编辑器→人工保存；首批不触发高级媒体生成。
 2. 高级媒体：视频多任务/首尾帧/高级引用、音频上传/时长/VoiceClone、Director/全景与完整视频输出均须先补 typed 后端能力。
 3. P11：1280×720、1024×768、390×844、Tauri 慢环、真实 provider 冒烟、UI build/桌面打包和最终能力文档。
 
-不要因为主体代码已存在就跳过这些门禁；standalone owner/history/recovery/安全移除闭环已完成，下一功能提交从第 1 项模型引用清理与首页/画布 Agent 产品能力开始。
+不要因为主体代码已存在就跳过这些门禁；standalone owner/history/recovery/安全移除与 Creative Studio exact-model 删除闭环已完成，下一功能提交从首页/画布规划 Agent 与 Workflow AI 产品能力开始。
