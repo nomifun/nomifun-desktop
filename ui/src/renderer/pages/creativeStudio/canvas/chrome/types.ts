@@ -40,7 +40,6 @@ export interface CreativeCanvasChromeProps {
   leftView: CreativeCanvasLeftView;
   rightView: CreativeCanvasRightView | null;
   bottomView: CreativeCanvasBottomView | null;
-  nodeMenuOpen: boolean;
   backgroundMenuOpen: boolean;
   compact?: boolean;
   disabled?: boolean;
@@ -49,7 +48,6 @@ export interface CreativeCanvasChromeProps {
   onBackToProjects(): void;
   onToolChange(tool: CreativeCanvasChromeTool): void;
   onAddNode(kind: CreativeCanvasChromeNodeKind): void;
-  onNodeMenuOpenChange(open: boolean): void;
   onBackgroundChange(background: CreativeCanvasChromeBackground): void;
   onBackgroundMenuOpenChange(open: boolean): void;
   onUndo(): void;
@@ -70,6 +68,16 @@ export const CREATIVE_CANVAS_CHROME_NODE_KINDS = [
   'config',
   'director',
   'group',
+] as const satisfies readonly CreativeCanvasChromeNodeKind[];
+
+export const CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS = [
+  'text',
+  'image',
+  'video',
+  'audio',
+  'panorama',
+  'director',
+  'config',
 ] as const satisfies readonly CreativeCanvasChromeNodeKind[];
 
 export const CREATIVE_CANVAS_CHROME_BACKGROUNDS = [
