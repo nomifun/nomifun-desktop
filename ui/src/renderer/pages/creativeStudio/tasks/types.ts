@@ -115,6 +115,18 @@ export interface CreativeTaskOutput {
   assetIds: string[];
 }
 
+export interface CreativeStandaloneTaskHistoryQuery {
+  projectId: string;
+  workbenchKind: CreativeStandaloneWorkbenchKind;
+  limit?: number;
+  cursor?: string | null;
+}
+
+export interface CreativeStandaloneTaskHistoryPage {
+  items: CreativeTask[];
+  nextCursor: string | null;
+}
+
 export type CreativeTaskContractErrorCode =
   | 'invalid_request'
   | 'invalid_response'

@@ -13,7 +13,9 @@ import type { CreativeAsset, CreativeAssetPort } from "../../assets";
 import type { CreativeModelCatalogSnapshot } from "../../models";
 import type {
   CreateCreativeTaskInput,
+  CreativeStandaloneWorkbenchKind,
   CreativeTask,
+  CreativeTaskOwner,
   CreativeTaskPort,
   CreativeTaskReference,
 } from "../../tasks";
@@ -109,11 +111,22 @@ function task(
   };
 }
 
-function imagePlan() {
+const ownerScope = (owner?: CreativeTaskOwner) =>
+  owner ? { owner } : { nodeId: NODE_ID };
+
+const standaloneOwner = (
+  workbenchKind: CreativeStandaloneWorkbenchKind,
+): CreativeTaskOwner => ({
+  kind: "standalone_workbench",
+  projectId: PROJECT_ID,
+  workbenchKind,
+});
+
+function imagePlan(owner?: CreativeTaskOwner) {
   return prepareImageWorkbenchRun({
     catalog: catalog("image_generation"),
     projectId: PROJECT_ID,
-    nodeId: NODE_ID,
+    ...ownerScope(owner),
     model: { providerId: PROVIDER_ID, model: "image_generation-model" },
     references: { bindings: [], assets: [] },
     operation: { task: "image_generation", capability: "t2i" },
@@ -127,11 +140,11 @@ function imagePlan() {
   });
 }
 
-function videoPlan(taskCount = 2) {
+function videoPlan(taskCount = 2, owner?: CreativeTaskOwner) {
   return prepareVideoWorkbenchRun({
     catalog: catalog("video_generation"),
     projectId: PROJECT_ID,
-    nodeId: NODE_ID,
+    ...ownerScope(owner),
     model: { providerId: PROVIDER_ID, model: "video_generation-model" },
     references: { bindings: [], assets: [] },
     operation: { task: "video_generation", capability: "t2v" },
@@ -143,11 +156,11 @@ function videoPlan(taskCount = 2) {
   });
 }
 
-function audioPlan() {
+function audioPlan(owner?: CreativeTaskOwner) {
   return prepareAudioWorkbenchRun({
     catalog: catalog("speech_synthesis"),
     projectId: PROJECT_ID,
-    nodeId: NODE_ID,
+    ...ownerScope(owner),
     model: {
       providerId: PROVIDER_ID,
       model: "speech_synthesis-model",
@@ -548,6 +561,62 @@ describe("Creative workbench planning and presentation boundaries", () => {
       imageWorkbenchReferencesFromAssets([audio]),
     );
     expect(error?.message.includes("is audio")).toBe(true);
+  });
+
+  test("builds an exact standalone owner without inventing a config node", () => {
+    const base = {
+      catalog: catalog("image_generation"),
+      projectId: PROJECT_ID,
+      model: {
+        providerId: PROVIDER_ID,
+        model: "image_generation-model",
+      },
+      references: { bindings: [], assets: [] },
+      operation: { task: "image_generation" as const, capability: "t2i" as const },
+      prompt: "A standalone prompt",
+      interfaceMode: "images" as const,
+      quality: "high" as const,
+      width: 1024,
+      height: 1024,
+      aspectRatio: "1:1",
+      count: 1,
+    };
+    const plan = prepareImageWorkbenchRun({
+      ...base,
+      owner: {
+        kind: "standalone_workbench",
+        projectId: PROJECT_ID,
+        workbenchKind: "image",
+      },
+    });
+    expect(plan.input.owner).toEqual({
+      kind: "standalone_workbench",
+      projectId: PROJECT_ID,
+      workbenchKind: "image",
+    });
+    const ambiguous = captureError(() =>
+      prepareImageWorkbenchRun({
+        ...base,
+        nodeId: NODE_ID,
+        owner: {
+          kind: "standalone_workbench",
+          projectId: PROJECT_ID,
+          workbenchKind: "image",
+        },
+      })
+    );
+    expect(ambiguous?.message.includes("either owner or nodeId")).toBe(true);
+
+    for (const [expectedKind, action] of [
+      ["image", () => imagePlan(standaloneOwner("video"))],
+      ["video", () => videoPlan(1, standaloneOwner("audio"))],
+      ["audio", () => audioPlan(standaloneOwner("image"))],
+    ] as const) {
+      const mismatch = captureError(action);
+      expect(mismatch?.message.includes(`exact ${expectedKind} standalone owner`)).toBe(
+        true,
+      );
+    }
   });
 
   test("keeps audio cancellation enabled for an authoritative queued task", async () => {

@@ -11,7 +11,12 @@ import {
   assertTaskCapabilityPair,
   createCreativeTaskIdempotencyKey,
 } from "../../tasks";
-import type { CreativeTaskInput, CreativeTaskInputRole } from "../../tasks";
+import type {
+  CreativeStandaloneWorkbenchKind,
+  CreativeTaskInput,
+  CreativeTaskInputRole,
+  CreativeTaskOwner,
+} from "../../tasks";
 import type { AudioWorkbenchFieldSupport, AudioWorkbenchValue } from "../audio";
 import type {
   ImageWorkbenchInterfaceMode,
@@ -46,10 +51,50 @@ export function isPreparedCreativeWorkbenchRun(
 interface WorkbenchPlanBase {
   catalog: CreativeModelCatalogSnapshot;
   projectId: string;
-  nodeId: string;
+  nodeId?: string;
+  owner?: CreativeTaskOwner;
   model: CreativeWorkbenchModelSelection | null;
   references: CreativeWorkbenchReferences;
   extraParameters?: CreativeJsonObject;
+}
+
+function workbenchTaskOwner(
+  input: WorkbenchPlanBase,
+  expectedKind: CreativeStandaloneWorkbenchKind,
+): CreativeTaskOwner {
+  if (input.owner && input.nodeId) {
+    throw new CreativeWorkbenchRuntimeError(
+      "invalid_parameters",
+      "Workbench plan must provide either owner or nodeId, not both",
+      "owner",
+    );
+  }
+  if (input.owner) {
+    if (
+      input.owner.kind === "standalone_workbench" &&
+      input.owner.projectId === input.projectId &&
+      input.owner.workbenchKind === expectedKind
+    ) {
+      return { ...input.owner };
+    }
+    throw new CreativeWorkbenchRuntimeError(
+      "invalid_parameters",
+      `Workbench plan owner must be an exact ${expectedKind} standalone owner for this project`,
+      "owner",
+    );
+  }
+  if (!input.nodeId) {
+    throw new CreativeWorkbenchRuntimeError(
+      "invalid_parameters",
+      "Canvas workbench plan requires a nodeId",
+      "nodeId",
+    );
+  }
+  return {
+    kind: "canvas_node",
+    projectId: input.projectId,
+    nodeId: input.nodeId,
+  };
 }
 
 export type ImageWorkbenchOperation =
@@ -297,7 +342,7 @@ export function prepareImageWorkbenchRun(
     references: assets,
     input: {
       idempotencyKey: createCreativeTaskIdempotencyKey(),
-      owner: { kind: "canvas_node", projectId: input.projectId, nodeId: input.nodeId },
+      owner: workbenchTaskOwner(input, "image"),
       providerId: model.providerId,
       model: model.model,
       task: input.operation.task,
@@ -368,7 +413,7 @@ export function prepareVideoWorkbenchRun(
     references: assets,
     input: {
       idempotencyKey: createCreativeTaskIdempotencyKey(),
-      owner: { kind: "canvas_node", projectId: input.projectId, nodeId: input.nodeId },
+      owner: workbenchTaskOwner(input, "video"),
       providerId: model.providerId,
       model: model.model,
       task: "video_generation",
@@ -457,7 +502,7 @@ export function prepareAudioWorkbenchRun(
     references: [],
     input: {
       idempotencyKey: createCreativeTaskIdempotencyKey(),
-      owner: { kind: "canvas_node", projectId: input.projectId, nodeId: input.nodeId },
+      owner: workbenchTaskOwner(input, "audio"),
       providerId: model.providerId,
       model: model.model,
       task,

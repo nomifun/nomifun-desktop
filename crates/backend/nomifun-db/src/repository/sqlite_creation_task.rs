@@ -14,7 +14,7 @@ use crate::models::CreationTaskRow;
 use crate::repository::ICreationTaskRepository;
 use crate::repository::creation_task::{
     CreateCreativeTaskParams, CreativeTaskOwnerRef, IdempotentCreationTask,
-    UpdateCreationTaskParams,
+    ListStandaloneWorkbenchTasksParams, UpdateCreationTaskParams,
 };
 
 /// SQLite-backed implementation of [`ICreationTaskRepository`].
@@ -732,6 +732,70 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         row.map(TryInto::try_into).transpose()
     }
 
+    async fn list_standalone_workbench_tasks_page(
+        &self,
+        params: ListStandaloneWorkbenchTasksParams<'_>,
+    ) -> Result<Vec<CreationTaskRow>, DbError> {
+        let project_id = CreativeStudioProjectId::parse(params.project_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "Creative task project_id {:?} is not a canonical UUIDv7: {error}",
+                params.project_id
+            ))
+        })?;
+        if !matches!(params.workbench_kind, "image" | "video" | "audio") {
+            return Err(DbError::Conflict(format!(
+                "Creative task workbench_kind {:?} is invalid",
+                params.workbench_kind
+            )));
+        }
+        if !(1..=100).contains(&params.limit) {
+            return Err(DbError::Conflict(
+                "standalone workbench task page limit must be between 1 and 100".into(),
+            ));
+        }
+        if let Some(before) = params.before {
+            if before.submitted_at < 0 {
+                return Err(DbError::Conflict(
+                    "standalone workbench task cursor timestamp must be non-negative".into(),
+                ));
+            }
+            validate_creation_task_id(before.creation_task_id)?;
+        }
+        let fetch_limit = i64::try_from(params.limit + 1)
+            .map_err(|_| DbError::Conflict("standalone workbench task page limit overflow".into()))?;
+        let rows = if let Some(before) = params.before {
+            sqlx::query_as::<_, CreationTaskDbRow>(
+                "SELECT * FROM creation_tasks \
+                 WHERE project_id = ?1 AND workbench_kind = ?2 \
+                   AND node_id IS NULL AND workflow_id IS NULL \
+                   AND workflow_run_id IS NULL AND workflow_step_id IS NULL \
+                   AND (submitted_at < ?3 OR (submitted_at = ?3 AND creation_task_id < ?4)) \
+                 ORDER BY submitted_at DESC, creation_task_id DESC LIMIT ?5",
+            )
+            .bind(project_id.as_str())
+            .bind(params.workbench_kind)
+            .bind(before.submitted_at)
+            .bind(before.creation_task_id)
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, CreationTaskDbRow>(
+                "SELECT * FROM creation_tasks \
+                 WHERE project_id = ?1 AND workbench_kind = ?2 \
+                   AND node_id IS NULL AND workflow_id IS NULL \
+                   AND workflow_run_id IS NULL AND workflow_step_id IS NULL \
+                 ORDER BY submitted_at DESC, creation_task_id DESC LIMIT ?3",
+            )
+            .bind(project_id.as_str())
+            .bind(params.workbench_kind)
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
     async fn list_all_tasks(&self) -> Result<Vec<CreationTaskRow>, DbError> {
         sqlx::query_as::<_, CreationTaskDbRow>(
             "SELECT * FROM creation_tasks ORDER BY submitted_at ASC, creation_task_id ASC",
@@ -1275,6 +1339,83 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(wrong_inputs, DbError::Conflict(message) if message.contains("inconsistent")));
+    }
+
+    #[tokio::test]
+    async fn standalone_page_uses_descending_two_column_cursor_and_exact_owner_scope() {
+        let (repo, db, provider_id) = repo().await;
+        let project_id = seed_creative_project(&db).await;
+        let other_project_id = seed_creative_project(&db).await;
+        let mut matching = Vec::new();
+        for submitted_at in [300, 200, 200, 100] {
+            let task_id = CreationTaskId::new().into_string();
+            let fingerprint = serde_json::json!({"task": task_id}).to_string();
+            let mut params = standalone_creative_params(
+                &task_id,
+                &project_id,
+                "video",
+                &provider_id,
+                "[]",
+                &fingerprint,
+            );
+            params.submitted_at = submitted_at;
+            repo.get_or_create_creative_task(params).await.unwrap();
+            matching.push((submitted_at, task_id));
+        }
+        for (other_project, kind) in [(&other_project_id, "video"), (&project_id, "image")] {
+            let task_id = CreationTaskId::new().into_string();
+            let fingerprint = serde_json::json!({"task": task_id}).to_string();
+            let mut params = standalone_creative_params(
+                &task_id,
+                other_project,
+                kind,
+                &provider_id,
+                "[]",
+                &fingerprint,
+            );
+            params.submitted_at = 400;
+            repo.get_or_create_creative_task(params).await.unwrap();
+        }
+        matching.sort_by(|left, right| right.cmp(left));
+
+        let first = repo
+            .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
+                project_id: &project_id,
+                workbench_kind: "video",
+                before: None,
+                limit: 2,
+            })
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 3, "repository fetches limit + 1");
+        assert_eq!(
+            first
+                .iter()
+                .map(|row| (row.submitted_at, row.creation_task_id.clone()))
+                .collect::<Vec<_>>(),
+            matching[..3]
+        );
+
+        let visible_last = &first[1];
+        let second = repo
+            .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
+                project_id: &project_id,
+                workbench_kind: "video",
+                before: Some(crate::repository::CreationTaskPageCursorRef {
+                    submitted_at: visible_last.submitted_at,
+                    creation_task_id: &visible_last.creation_task_id,
+                }),
+                limit: 2,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            second
+                .iter()
+                .map(|row| (row.submitted_at, row.creation_task_id.clone()))
+                .collect::<Vec<_>>(),
+            matching[2..]
+        );
     }
 
     #[tokio::test]

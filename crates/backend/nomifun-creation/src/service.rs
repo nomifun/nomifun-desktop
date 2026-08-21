@@ -23,8 +23,8 @@ use nomifun_common::{
 #[cfg(test)]
 use nomifun_common::generate_id;
 use nomifun_db::{
-    CreateCreativeTaskParams, CreationTaskRow, CreativeTaskOwnerRef,
-    ICreationTaskRepository, UpdateCreationTaskParams,
+    CreateCreativeTaskParams, CreationTaskPageCursorRef, CreationTaskRow, CreativeTaskOwnerRef,
+    ICreationTaskRepository, ListStandaloneWorkbenchTasksParams, UpdateCreationTaskParams,
 };
 use nomifun_model_invoke::{
     ImageEditRequest, ImageGenRequest, InputAsset, InvokeErrorKind, JobHandle,
@@ -335,6 +335,53 @@ pub struct NewCreationTask {
     /// Opaque parameter map (prompt/size/quality/…).
     pub params: Value,
     pub inputs: Vec<CreationInput>,
+}
+
+pub const DEFAULT_STANDALONE_TASK_PAGE_LIMIT: usize = 30;
+pub const MAX_STANDALONE_TASK_PAGE_LIMIT: usize = 100;
+
+#[derive(Debug, Clone)]
+pub struct StandaloneWorkbenchTaskPage {
+    pub items: Vec<CreationTask>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StandaloneTaskPageCursor {
+    submitted_at: i64,
+    creation_task_id: String,
+}
+
+fn parse_standalone_task_cursor(raw: &str) -> Result<StandaloneTaskPageCursor, AppError> {
+    let (timestamp, task_id) = raw.split_once(':').ok_or_else(|| {
+        AppError::BadRequest(
+            "cursor must be '<submitted_at>:<creation_task_uuidv7>'".into(),
+        )
+    })?;
+    if timestamp.is_empty() || task_id.is_empty() || task_id.contains(':') {
+        return Err(AppError::BadRequest(
+            "cursor must contain exactly one timestamp/task separator".into(),
+        ));
+    }
+    let submitted_at = timestamp.parse::<i64>().map_err(|_| {
+        AppError::BadRequest("cursor submitted_at must be a canonical non-negative integer".into())
+    })?;
+    if submitted_at < 0 || submitted_at.to_string() != timestamp {
+        return Err(AppError::BadRequest(
+            "cursor submitted_at must be a canonical non-negative integer".into(),
+        ));
+    }
+    let creation_task_id = CreationTaskId::parse(task_id)
+        .map_err(|error| AppError::BadRequest(format!("invalid cursor task id: {error}")))?
+        .into_string();
+    Ok(StandaloneTaskPageCursor {
+        submitted_at,
+        creation_task_id,
+    })
+}
+
+fn encode_standalone_task_cursor(task: &CreationTaskRow) -> String {
+    format!("{}:{}", task.submitted_at, task.creation_task_id)
 }
 
 /// Canonical Creative Studio task owner. The API accepts this tagged union and
@@ -952,6 +999,68 @@ impl CreationService {
             .ok_or_else(|| AppError::NotFound(format!("creation task {creation_task_id} not found")))?;
         let mut rows = self.audit_rows_for_output(vec![row]).await?;
         rows.pop().expect("one task row remains after artifact audit").try_into()
+    }
+
+    pub async fn list_standalone_workbench_tasks(
+        &self,
+        project_id: &str,
+        workbench_kind: StandaloneWorkbenchKind,
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<StandaloneWorkbenchTaskPage, AppError> {
+        let project_id = CreativeStudioProjectId::parse(project_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid project_id: {error}")))?
+            .into_string();
+        let limit = limit.unwrap_or(DEFAULT_STANDALONE_TASK_PAGE_LIMIT);
+        if !(1..=MAX_STANDALONE_TASK_PAGE_LIMIT).contains(&limit) {
+            return Err(AppError::BadRequest(format!(
+                "limit must be between 1 and {MAX_STANDALONE_TASK_PAGE_LIMIT}"
+            )));
+        }
+        let cursor = cursor.map(parse_standalone_task_cursor).transpose()?;
+        let mut rows = self
+            .repo
+            .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
+                project_id: &project_id,
+                workbench_kind: workbench_kind.as_str(),
+                before: cursor.as_ref().map(|cursor| CreationTaskPageCursorRef {
+                    submitted_at: cursor.submitted_at,
+                    creation_task_id: &cursor.creation_task_id,
+                }),
+                limit,
+            })
+            .await?;
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        for row in &rows {
+            let exact_owner = row.project_id.as_deref() == Some(project_id.as_str())
+                && row.workbench_kind.as_deref() == Some(workbench_kind.as_str())
+                && row.node_id.is_none()
+                && row.workflow_id.is_none()
+                && row.workflow_run_id.is_none()
+                && row.workflow_step_id.is_none();
+            let capability_matches = MediaCapability::parse(&row.capability)
+                .is_some_and(|capability| workbench_kind.accepts_capability(capability));
+            if !exact_owner || !capability_matches {
+                return Err(AppError::Internal(format!(
+                    "standalone task {} escaped its exact owner/capability scope",
+                    row.creation_task_id
+                )));
+            }
+        }
+        let next_cursor = has_more && !rows.is_empty();
+        let encoded_cursor = next_cursor
+            .then(|| rows.last().map(encode_standalone_task_cursor))
+            .flatten();
+        let rows = self.audit_rows_for_output(rows).await?;
+        let items = rows
+            .into_iter()
+            .map(CreationTask::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(StandaloneWorkbenchTaskPage {
+            items,
+            next_cursor: encoded_cursor,
+        })
     }
 
     /// Cancel a task. Terminal tasks are returned unchanged (idempotent); a live
@@ -2795,6 +2904,101 @@ mod tests {
         assert!(matches!(&conflict, AppError::Conflict(_)));
         assert_eq!(conflict.status_code(), axum::http::StatusCode::CONFLICT);
         assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn standalone_task_page_is_owner_scoped_cursor_strict_and_audited() {
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let provider_id = seed_provider(db.pool(), "openai", "openai.videos").await;
+        let project_id = seed_service_test_project(db.pool()).await;
+        let repo = SqliteCreationTaskRepository::new(db.pool().clone());
+        let mut task_ids = Vec::new();
+        for submitted_at in [200, 100] {
+            let task_id = CreationTaskId::new().into_string();
+            let fingerprint = json!({"task": task_id}).to_string();
+            repo.get_or_create_creative_task(CreateCreativeTaskParams {
+                creation_task_id: &task_id,
+                owner: CreativeTaskOwnerRef::StandaloneWorkbench {
+                    project_id: &project_id,
+                    workbench_kind: "video",
+                },
+                provider_id: &provider_id,
+                model: "test-model",
+                capability: "t2v",
+                params: r#"{"prompt":"Aurora","seconds":5}"#,
+                input_bindings: "[]",
+                request_fingerprint: &fingerprint,
+                status: "queued",
+                submitted_at,
+            })
+            .await
+            .unwrap();
+            repo.update_task(
+                &task_id,
+                UpdateCreationTaskParams {
+                    status: Some("failed"),
+                    error: Some(Some(r#"{"kind":"provider_error","message":"fixture"}"#)),
+                    finished_at: Some(Some(submitted_at + 1)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            task_ids.push(task_id);
+        }
+        let service = CreationService::new(Arc::new(repo));
+
+        let first = service
+            .list_standalone_workbench_tasks(
+                &project_id,
+                StandaloneWorkbenchKind::Video,
+                Some(1),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.items[0].creation_task_id, task_ids[0]);
+        let cursor = first.next_cursor.expect("one more row requires a cursor");
+
+        let second = service
+            .list_standalone_workbench_tasks(
+                &project_id,
+                StandaloneWorkbenchKind::Video,
+                Some(1),
+                Some(&cursor),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.items[0].creation_task_id, task_ids[1]);
+        assert!(second.next_cursor.is_none());
+        assert!(
+            service
+                .list_standalone_workbench_tasks(
+                    &project_id,
+                    StandaloneWorkbenchKind::Image,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        for invalid in ["", "01:bad", "-1:0190f5fe-7c00-7a00-8000-000000000001"] {
+            assert!(matches!(
+                service
+                    .list_standalone_workbench_tasks(
+                        &project_id,
+                        StandaloneWorkbenchKind::Video,
+                        None,
+                        Some(invalid),
+                    )
+                    .await,
+                Err(AppError::BadRequest(_))
+            ));
+        }
     }
 
     #[tokio::test]

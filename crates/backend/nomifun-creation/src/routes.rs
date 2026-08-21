@@ -2,8 +2,8 @@
 //! `/api/creation/tasks` surface is deliberately not mounted.
 
 use axum::Router;
-use axum::extract::rejection::JsonRejection;
-use axum::extract::{Extension, Json, Path, State};
+use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::{Extension, Json, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -14,7 +14,7 @@ use nomifun_api_types::ApiResponse;
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
 
-use crate::dto::CreativeCreationTask;
+use crate::dto::{CreativeCreationTask, CreativeCreationTaskPage};
 #[cfg(test)]
 use crate::dto::CreationTask;
 use crate::service::{CreativeTaskOwner, NewCreationTask};
@@ -23,7 +23,10 @@ use crate::types::{CreationInput, CreationInputKind, StandaloneWorkbenchKind};
 
 pub fn creation_routes(state: CreationRouterState) -> Router {
     Router::new()
-        .route("/api/creative-studio/tasks", post(create_creative_task))
+        .route(
+            "/api/creative-studio/tasks",
+            get(list_standalone_workbench_tasks).post(create_creative_task),
+        )
         .route(
             "/api/creative-studio/tasks/{creation_task_id}",
             get(get_creative_task),
@@ -109,6 +112,15 @@ struct CreateCreativeTaskRequest {
     inputs: Vec<InputRef>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListStandaloneWorkbenchTasksQuery {
+    project_id: String,
+    workbench_kind: StandaloneWorkbenchKind,
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
 fn required_idempotency_key(headers: &HeaderMap) -> Result<String, AppError> {
     let mut values = headers.get_all("idempotency-key").iter();
     let value = values.next().ok_or_else(|| {
@@ -159,6 +171,27 @@ async fn create_creative_task(
         StatusCode::CREATED,
         Json(ApiResponse::ok(CreativeCreationTask::try_from(task)?)),
     ))
+}
+
+async fn list_standalone_workbench_tasks(
+    State(state): State<CreationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    query: Result<Query<ListStandaloneWorkbenchTasksQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<CreativeCreationTaskPage>>, AppError> {
+    let Query(query) = query.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let page = state
+        .service
+        .list_standalone_workbench_tasks(
+            &query.project_id,
+            query.workbench_kind,
+            query.limit,
+            query.cursor.as_deref(),
+        )
+        .await?;
+    Ok(Json(ApiResponse::ok(CreativeCreationTaskPage::try_new(
+        page.items,
+        page.next_cursor,
+    )?)))
 }
 
 async fn get_creative_task(
@@ -288,6 +321,30 @@ mod tests {
             HeaderValue::from_static("0190f5fe-7c00-7a00-8000-000000000002"),
         );
         assert!(required_idempotency_key(&headers).is_err());
+    }
+
+    #[test]
+    fn standalone_list_query_is_exact_and_rejects_unknown_or_duplicate_fields() {
+        let uri = "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=video&limit=30&cursor=1%3A0190f5fe-7c00-7a00-8000-000000000002"
+            .parse()
+            .unwrap();
+        let Query(query) = Query::<ListStandaloneWorkbenchTasksQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(query.project_id, "0190f5fe-7c00-7a00-8000-000000000001");
+        assert_eq!(query.workbench_kind, StandaloneWorkbenchKind::Video);
+        assert_eq!(query.limit, Some(30));
+        assert!(query.cursor.as_deref().unwrap().starts_with("1:"));
+
+        for invalid in [
+            "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=video&unknown=1",
+            "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&project_id=0190f5fe-7c00-7a00-8000-000000000002&workbench_kind=video",
+            "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=canvas",
+        ] {
+            let uri = invalid.parse().unwrap();
+            assert!(
+                Query::<ListStandaloneWorkbenchTasksQuery>::try_from_uri(&uri).is_err(),
+                "query must fail closed: {invalid}"
+            );
+        }
     }
 
     #[test]
