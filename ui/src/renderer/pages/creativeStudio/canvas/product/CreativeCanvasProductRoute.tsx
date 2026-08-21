@@ -57,8 +57,14 @@ import {
 import type { PromptLibrarySelection } from '../../prompts';
 import { useCreativeProject } from '../../services';
 import type { CreativeTaskReference } from '../../tasks';
+import type {
+  ImageWorkbenchAspectRatioOption,
+  ImageWorkbenchModelIdentity,
+  ImageWorkbenchSettings,
+} from '../../workbenches/image';
 import {
   exactWorkbenchModelOptions,
+  imageWorkbenchModelOptions,
   type CreativeWorkbenchRuntimeSnapshot,
   type PreparedCreativeWorkbenchRun,
 } from '../../workbenches/runtime';
@@ -125,6 +131,7 @@ import CreativeCanvasAgentPanel, {
   type CreativeCanvasAgentPanelHandle,
 } from './agent/CreativeCanvasAgentPanel';
 import CreativeCanvasConnectionEdge from './CreativeCanvasConnectionEdge';
+import CreativeCanvasImageComposer from './CreativeCanvasImageComposer';
 import CreativeCanvasInteractionOverlays, {
   type CreativeCanvasContextMenuState,
 } from './CreativeCanvasInteractionOverlays';
@@ -142,6 +149,18 @@ import {
   type CreativeCanvasAssetKindFilter,
 } from './CreativeCanvasProductLibraries';
 import {
+  canvasImageComposeSettings,
+  canvasImageComposeTaskSummary,
+  CREATIVE_IMAGE_COMPOSE_OPERATION,
+  DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS,
+  latestCanvasImageComposeConfig,
+  prepareCanvasImageCompose,
+} from './canvasImageComposerCanvas';
+import CanvasImageTaskRuntimeBridge, {
+  canvasImageTaskReferenceFromPlan,
+  type CanvasImageTaskRuntimeBridgeHandle,
+} from './CanvasImageTaskRuntimeBridge';
+import {
   createCreativeCanvasProductNode,
   CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
   creativeCanvasProductInsertionViewport,
@@ -157,10 +176,6 @@ import {
   withCreativeCanvasLeftView,
   withCreativeCanvasRightView,
 } from './productController';
-import CanvasImageMaskEditRuntimeBridge, {
-  canvasImageMaskEditReferenceFromPlan,
-  type CanvasImageMaskEditRuntimeBridgeHandle,
-} from './CanvasImageMaskEditRuntimeBridge';
 import {
   preferredCanvasImageMaskEditModel,
   prepareCanvasImageMaskEdit,
@@ -176,7 +191,7 @@ const INITIAL_SAVE: CanvasCasSaveSnapshot = {
   error: null,
 };
 
-const INITIAL_IMAGE_MASK_RUNTIME: CreativeWorkbenchRuntimeSnapshot = {
+const INITIAL_IMAGE_TASK_RUNTIME: CreativeWorkbenchRuntimeSnapshot = {
   state: 'idle',
   entries: [],
   submissionFailures: [],
@@ -224,6 +239,35 @@ interface PendingImageMaskEdit {
   asset: CreativeAsset;
   submission: PendingImageMaskSubmission | null;
 }
+
+interface CanvasImageComposeDraft {
+  prompt: string;
+  settings: ImageWorkbenchSettings;
+}
+
+interface PendingCanvasImageComposeSubmission {
+  nodeId: string;
+  plan: PreparedCreativeWorkbenchRun;
+  failureOrder: number;
+}
+
+interface CanvasImageComposeIssue {
+  nodeId: string;
+  message: string;
+}
+
+const canvasImageComposeDraftFromState = (
+  state: CanvasState,
+  nodeId: string
+): CanvasImageComposeDraft => {
+  const config = latestCanvasImageComposeConfig(state.document, nodeId);
+  return {
+    prompt: config?.data.prompt ?? '',
+    settings: config
+      ? canvasImageComposeSettings(config)
+      : structuredClone(DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS),
+  };
+};
 
 interface AgentDocumentState {
   sessions: readonly CreativeChatSessionReference[];
@@ -368,12 +412,16 @@ const SaveRecoveryAction: React.FC<{
   </>
 );
 
-const ImageMaskRuntimeAction: React.FC<{
+const ImageTaskRuntimeAction: React.FC<{
   snapshot: CreativeWorkbenchRuntimeSnapshot;
   busy: boolean;
   onCancel(taskId: string): void;
   onRetry(taskId: string): void;
 }> = ({ snapshot, busy, onCancel, onRetry }) => {
+  const taskLabel = (task: CreativeWorkbenchRuntimeSnapshot['entries'][number]['task']) =>
+    task.parameters?.canvasOperation === CREATIVE_IMAGE_COMPOSE_OPERATION
+      ? '图片创作'
+      : '局部编辑';
   const requestError = snapshot.entries.find(
     (entry) => entry.requestError !== null
   );
@@ -388,7 +436,7 @@ const ImageMaskRuntimeAction: React.FC<{
           role="alert"
           title={requestError.requestError?.message}
         >
-          局部编辑同步中断
+          {taskLabel(requestError.task)}同步中断
         </span>
         <button
           type="button"
@@ -411,8 +459,8 @@ const ImageMaskRuntimeAction: React.FC<{
       <>
         <span className={styles.notice} role="status">
           {active.task.status === 'queued'
-            ? '局部编辑等待执行'
-            : '局部编辑生成中'}
+            ? `${taskLabel(active.task)}等待执行`
+            : `${taskLabel(active.task)}生成中`}
         </span>
         <button
           type="button"
@@ -433,7 +481,7 @@ const ImageMaskRuntimeAction: React.FC<{
   if (snapshot.recoveringCount > 0) {
     return (
       <span className={styles.notice} role="status">
-        正在恢复局部编辑任务…
+        正在恢复图片任务…
       </span>
     );
   }
@@ -456,8 +504,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const workflowAssetPicker = useCreativeAssetPickerDialog();
 
   const editorRef = useRef<CreativeCanvasEditorHandle>(null);
-  const imageMaskRuntimeRef =
-    useRef<CanvasImageMaskEditRuntimeBridgeHandle>(null);
+  const imageTaskRuntimeRef = useRef<CanvasImageTaskRuntimeBridgeHandle>(null);
   const agentPanelRef = useRef<CreativeCanvasAgentPanelHandle>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const panelsRef = useRef<CreativeStudioPanelState>(
@@ -531,12 +578,22 @@ const CreativeCanvasProductRoute: React.FC = () => {
     null
   );
   const [imageMaskError, setImageMaskError] = useState<string | null>(null);
-  const [imageMaskRuntime, setImageMaskRuntime] =
-    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_IMAGE_MASK_RUNTIME);
-  const [imageMaskRuntimeReady, setImageMaskRuntimeReady] = useState(false);
-  const [imageMaskRuntimeEpoch, setImageMaskRuntimeEpoch] = useState(0);
-  const [imageMaskRuntimeActionBusy, setImageMaskRuntimeActionBusy] =
+  const [imageTaskRuntime, setImageTaskRuntime] =
+    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_IMAGE_TASK_RUNTIME);
+  const [imageTaskRuntimeReady, setImageTaskRuntimeReady] = useState(false);
+  const [imageTaskRuntimeEpoch, setImageTaskRuntimeEpoch] = useState(0);
+  const [imageTaskRuntimeActionBusy, setImageTaskRuntimeActionBusy] =
     useState(false);
+  const [imageComposeDrafts, setImageComposeDrafts] = useState<
+    Readonly<Record<string, CanvasImageComposeDraft>>
+  >({});
+  const [imageComposeBusy, setImageComposeBusy] = useState(false);
+  const [imageComposeIssue, setImageComposeIssue] =
+    useState<CanvasImageComposeIssue | null>(null);
+  const [imageComposeSubmission, setImageComposeSubmission] =
+    useState<PendingCanvasImageComposeSubmission | null>(null);
+  const [promptInsertTargetNodeId, setPromptInsertTargetNodeId] =
+    useState<string | null>(null);
   const [agentDocumentState, setAgentDocumentState] =
     useState<AgentDocumentState | null>(null);
   const [workflows, setWorkflows] = useState<WorkflowDefinitionV1[]>([]);
@@ -591,6 +648,18 @@ const CreativeCanvasProductRoute: React.FC = () => {
     () => exactWorkbenchModelOptions(modelCatalog, 'image_edit'),
     [modelCatalog]
   );
+  const imageComposeModelOptions = useMemo(
+    () => imageWorkbenchModelOptions(modelCatalog, 'image_edit'),
+    [modelCatalog]
+  );
+  const imageGenerationModelOptions = useMemo(
+    () => imageWorkbenchModelOptions(modelCatalog, 'image_generation'),
+    [modelCatalog]
+  );
+  const imageGenerationExactOptions = useMemo(
+    () => exactWorkbenchModelOptions(modelCatalog, 'image_generation'),
+    [modelCatalog]
+  );
 
   const knownAssetsById = useMemo(() => {
     const merged = new Map(knownAssetsRef.current);
@@ -639,10 +708,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setImageMaskBusy(false);
     setImageMaskProgress(null);
     setImageMaskError(null);
-    setImageMaskRuntime(INITIAL_IMAGE_MASK_RUNTIME);
-    setImageMaskRuntimeReady(false);
-    setImageMaskRuntimeEpoch(0);
-    setImageMaskRuntimeActionBusy(false);
+    setImageTaskRuntime(INITIAL_IMAGE_TASK_RUNTIME);
+    setImageTaskRuntimeReady(false);
+    setImageTaskRuntimeEpoch(0);
+    setImageTaskRuntimeActionBusy(false);
+    setImageComposeDrafts({});
+    setImageComposeBusy(false);
+    setImageComposeIssue(null);
+    setImageComposeSubmission(null);
+    setPromptInsertTargetNodeId(null);
     setAgentDocumentState(null);
     assetImportBusyRef.current = false;
     imageToolBusyRef.current = false;
@@ -653,7 +727,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, [projectId]);
 
   useEffect(() => {
-    if (imageMaskRuntimeReady) return;
+    if (imageTaskRuntimeReady) return;
     const detail = project.detail;
     if (!detail || detail.project.projectId !== projectId || !canvasState)
       return;
@@ -661,9 +735,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
       canvasState.document.nodes.map((node) => node.id)
     );
     if (detail.document.nodes.every((node) => currentNodeIds.has(node.id))) {
-      setImageMaskRuntimeReady(true);
+      setImageTaskRuntimeReady(true);
     }
-  }, [canvasState, imageMaskRuntimeReady, project.detail, projectId]);
+  }, [canvasState, imageTaskRuntimeReady, project.detail, projectId]);
 
   useEffect(() => {
     if (!imageMaskModel || pendingImageMaskEdit?.submission) return;
@@ -740,6 +814,28 @@ const CreativeCanvasProductRoute: React.FC = () => {
       persistPanels(withCreativeCanvasBottomView(panelsRef.current, view));
     },
     [persistPanels]
+  );
+
+  const updateImageComposeDraft = useCallback(
+    (
+      nodeId: string,
+      fallback: CanvasImageComposeDraft,
+      update: (current: CanvasImageComposeDraft) => CanvasImageComposeDraft
+    ) => {
+      setImageComposeDrafts((current) => ({
+        ...current,
+        [nodeId]: update(current[nodeId] ?? fallback),
+      }));
+    },
+    []
+  );
+
+  const openImageComposePromptLibrary = useCallback(
+    (nodeId: string) => {
+      setPromptInsertTargetNodeId(nodeId);
+      handleLeftViewChange('prompts');
+    },
+    [handleLeftViewChange]
   );
 
   const prepareCenteredInsertion = useCallback(() => {
@@ -1401,9 +1497,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
 
   const handleOpenImageMaskEdit = useCallback(
     async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
-      const runtime = imageMaskRuntimeRef.current?.snapshot();
+      const runtime = imageTaskRuntimeRef.current?.snapshot();
       const runtimeBlocked =
-        !imageMaskRuntimeReady ||
+        !imageTaskRuntimeReady ||
         !runtime ||
         runtime.submittingCount > 0 ||
         runtime.recoveringCount > 0 ||
@@ -1445,7 +1541,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     },
     [
       imageMaskModelOptions,
-      imageMaskRuntimeReady,
+      imageTaskRuntimeReady,
       projectId,
       resolveCanvasImageAsset,
     ]
@@ -1461,7 +1557,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const applyImageMaskAdmission = useCallback(
     (
       result: Awaited<
-        ReturnType<CanvasImageMaskEditRuntimeBridgeHandle['submit']>
+        ReturnType<CanvasImageTaskRuntimeBridgeHandle['submit']>
       >,
       plan: PreparedCreativeWorkbenchRun
     ) => {
@@ -1478,7 +1574,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
               ...current,
               submission: {
                 plan,
-                reference: canvasImageMaskEditReferenceFromPlan(plan),
+                reference: canvasImageTaskReferenceFromPlan(plan),
                 failureOrder: result.order,
               },
             }
@@ -1495,7 +1591,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     async (input: CreativeImageMaskEditSubmit) => {
       const request = pendingImageMaskEdit;
       const editor = editorRef.current;
-      const runtime = imageMaskRuntimeRef.current;
+      const runtime = imageTaskRuntimeRef.current;
       if (!request || !editor || !runtime || imageToolBusyRef.current) return;
 
       imageToolBusyRef.current = true;
@@ -1622,7 +1718,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
             // clean only an authoritative 404.
             await editor.addPendingTask(prepared.plan.input.idempotencyKey);
             void runtime
-              .recoverTask(canvasImageMaskEditReferenceFromPlan(prepared.plan))
+              .recoverTask(canvasImageTaskReferenceFromPlan(prepared.plan))
               .catch((recoveryError) =>
                 setNotice(
                   recoveryError instanceof Error
@@ -1657,7 +1753,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
 
   const abandonImageMaskSubmission = useCallback(async () => {
     const request = pendingImageMaskEdit;
-    const runtime = imageMaskRuntimeRef.current;
+    const runtime = imageTaskRuntimeRef.current;
     const editor = editorRef.current;
     if (!request?.submission || !runtime || !editor || imageToolBusyRef.current)
       return;
@@ -1682,8 +1778,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
         projectId,
         reference: request.submission.reference,
       });
-      setImageMaskRuntimeEpoch((value) => value + 1);
-      setImageMaskRuntime(INITIAL_IMAGE_MASK_RUNTIME);
+      setImageTaskRuntimeEpoch((value) => value + 1);
+      setImageTaskRuntime(INITIAL_IMAGE_TASK_RUNTIME);
       setPendingImageMaskEdit(null);
       setImageMaskProgress(null);
       setNotice('已确认服务器不存在该任务；配置节点记录为失败并清理恢复标记。');
@@ -1695,36 +1791,237 @@ const CreativeCanvasProductRoute: React.FC = () => {
     }
   }, [applyImageMaskAdmission, pendingImageMaskEdit, projectId]);
 
-  const retryImageMaskRuntimeTask = useCallback(
+  const retryImageRuntimeTask = useCallback(
     async (taskId: string) => {
-      const runtime = imageMaskRuntimeRef.current;
-      if (!runtime || imageMaskRuntimeActionBusy) return;
-      setImageMaskRuntimeActionBusy(true);
+      const runtime = imageTaskRuntimeRef.current;
+      if (!runtime || imageTaskRuntimeActionBusy) return;
+      setImageTaskRuntimeActionBusy(true);
       try {
         await runtime.retryTask(taskId);
       } catch (error) {
         setNotice(error instanceof Error ? error.message : String(error));
       } finally {
-        setImageMaskRuntimeActionBusy(false);
+        setImageTaskRuntimeActionBusy(false);
       }
     },
-    [imageMaskRuntimeActionBusy]
+    [imageTaskRuntimeActionBusy]
   );
 
-  const cancelImageMaskRuntimeTask = useCallback(
+  const cancelImageRuntimeTask = useCallback(
     async (taskId: string) => {
-      const runtime = imageMaskRuntimeRef.current;
-      if (!runtime || imageMaskRuntimeActionBusy) return;
-      setImageMaskRuntimeActionBusy(true);
+      const runtime = imageTaskRuntimeRef.current;
+      if (!runtime || imageTaskRuntimeActionBusy) return;
+      setImageTaskRuntimeActionBusy(true);
       try {
         await runtime.cancelTask(taskId);
       } catch (error) {
         setNotice(error instanceof Error ? error.message : String(error));
       } finally {
-        setImageMaskRuntimeActionBusy(false);
+        setImageTaskRuntimeActionBusy(false);
       }
     },
-    [imageMaskRuntimeActionBusy]
+    [imageTaskRuntimeActionBusy]
+  );
+
+  const applyImageComposeAdmission = useCallback(
+    (
+      nodeId: string,
+      plan: PreparedCreativeWorkbenchRun,
+      result: Awaited<ReturnType<CanvasImageTaskRuntimeBridgeHandle['submit']>>
+    ) => {
+      if (result.kind === 'admitted') {
+        setImageComposeSubmission(null);
+        setImageComposeIssue(null);
+        setNotice('图片创作任务已安全提交；配置节点会持续显示真实后端状态。');
+        return;
+      }
+      setImageComposeSubmission({
+        nodeId,
+        plan,
+        failureOrder: result.order,
+      });
+      setImageComposeIssue({
+        nodeId,
+        message: `任务提交结果尚未确认：${result.error.message}。请重试同一任务。`,
+      });
+    },
+    []
+  );
+
+  const generateFromCanvasImage = useCallback(
+    async (nodeId: string, prompt: string, settings: ImageWorkbenchSettings) => {
+      const editor = editorRef.current;
+      const runtime = imageTaskRuntimeRef.current;
+      if (!editor || !runtime || imageToolBusyRef.current || imageComposeSubmission) return;
+      if (!settings.model || modelCatalog.status !== 'ready') {
+        setImageComposeIssue({
+          nodeId,
+          message: '没有可用且明确选择的真实图片模型，未发起生成。',
+        });
+        return;
+      }
+      const snapshot = runtime.snapshot();
+      if (
+        snapshot.submittingCount > 0 ||
+        snapshot.recoveringCount > 0 ||
+        snapshot.submissionFailures.length > 0 ||
+        snapshot.requestError !== null ||
+        snapshot.entries.some(
+          (entry) => entry.task.status === 'queued' || entry.task.status === 'running'
+        )
+      ) {
+        setImageComposeIssue({ nodeId, message: '已有图片任务正在处理，请等待完成。' });
+        return;
+      }
+
+      imageToolBusyRef.current = true;
+      setImageComposeBusy(true);
+      setImageComposeIssue(null);
+      let prepared: ReturnType<typeof prepareCanvasImageCompose> | null = null;
+      let canvasOwned = false;
+      try {
+        const state = editor.getState();
+        const source = state.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
+            node.id === nodeId && node.type === 'image'
+        );
+        if (!source) throw new Error('图片节点已被删除，未创建图片创作任务。');
+        const selectedModelOptions = source.data.assetId
+          ? imageMaskModelOptions
+          : imageGenerationExactOptions;
+        const selectedModel = selectedModelOptions.find(
+          (option) =>
+            option.providerId === settings.model?.providerId &&
+            option.model === settings.model.model
+        );
+        if (!selectedModel) {
+          throw new Error(
+            source.data.assetId
+              ? '所选图片编辑模型已不可用，未发起生成。'
+              : '所选图片生成模型已不可用，未发起生成。'
+          );
+        }
+        const sourceAsset = source.data.assetId
+          ? await resolveCanvasImageAsset(source)
+          : null;
+        if (activeProjectIdRef.current !== projectId) {
+          throw new DOMException('Project changed', 'AbortError');
+        }
+        const currentState = editor.getState();
+        const currentSource = currentState.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
+            node.id === nodeId && node.type === 'image'
+        );
+        if (
+          !currentSource ||
+          currentSource.data.assetId !== (sourceAsset?.id ?? null)
+        ) {
+          throw new Error('原图片节点已被删除或替换，未创建图片创作任务。');
+        }
+        prepared = prepareCanvasImageCompose({
+          projectId,
+          state: currentState,
+          viewportSize: measuredSize(canvasHostRef.current),
+          sourceNode: currentSource,
+          sourceAsset,
+          catalog: modelCatalog,
+          model: selectedModel,
+          prompt,
+          settings: {
+            interfaceMode: settings.interfaceMode,
+            quality: settings.quality,
+            width: settings.width,
+            height: settings.height,
+            aspectRatio: settings.aspectRatio,
+            count: settings.count,
+          },
+        });
+        const at = Date.now();
+        const mergeKey = `image-compose:${source.id}:${prepared.plan.input.idempotencyKey}`;
+        editor.dispatch(canvasCommands.addNode(prepared.configNode, { at, mergeKey }));
+        editor.dispatch(
+          canvasCommands.connect(source.id, prepared.configNode.id, {
+            sourceHandle: prepared.connection.sourceHandle,
+            targetHandle: prepared.connection.targetHandle,
+            at,
+            mergeKey,
+          })
+        );
+        canvasOwned = true;
+        const result = await runtime.submit(prepared.plan);
+        applyImageComposeAdmission(nodeId, prepared.plan, result);
+      } catch (error) {
+        let message = error instanceof Error ? error.message : String(error);
+        if (canvasOwned && prepared) {
+          try {
+            await editor.addPendingTask(prepared.plan.input.idempotencyKey);
+            void runtime
+              .recoverTask(canvasImageTaskReferenceFromPlan(prepared.plan))
+              .catch((recoveryError) =>
+                setNotice(
+                  recoveryError instanceof Error
+                    ? recoveryError.message
+                    : String(recoveryError)
+                )
+              );
+            message = `任务接收状态未确认，已保留同一任务恢复标记：${message}`;
+          } catch (saveError) {
+            message = `${message}；${
+              saveError instanceof Error ? saveError.message : String(saveError)
+            }`;
+          }
+        }
+        if (activeProjectIdRef.current === projectId) {
+          setImageComposeIssue({ nodeId, message });
+        }
+      } finally {
+        imageToolBusyRef.current = false;
+        setImageComposeBusy(false);
+      }
+    },
+    [
+      applyImageComposeAdmission,
+      imageComposeSubmission,
+      imageGenerationExactOptions,
+      imageMaskModelOptions,
+      modelCatalog,
+      projectId,
+      resolveCanvasImageAsset,
+    ]
+  );
+
+  const retryCanvasImageComposeSubmission = useCallback(
+    async (nodeId: string) => {
+      const request = imageComposeSubmission;
+      const runtime = imageTaskRuntimeRef.current;
+      if (
+        !request ||
+        request.nodeId !== nodeId ||
+        !runtime ||
+        imageToolBusyRef.current
+      ) {
+        return;
+      }
+      imageToolBusyRef.current = true;
+      setImageComposeBusy(true);
+      setImageComposeIssue(null);
+      try {
+        const result = await runtime.retrySubmission(
+          request.failureOrder,
+          request.plan.input.idempotencyKey
+        );
+        applyImageComposeAdmission(nodeId, request.plan, result);
+      } catch (error) {
+        setImageComposeIssue({
+          nodeId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        imageToolBusyRef.current = false;
+        setImageComposeBusy(false);
+      }
+    },
+    [applyImageComposeAdmission, imageComposeSubmission]
   );
 
   const insertClipboardText = useCallback(
@@ -2214,6 +2511,24 @@ const CreativeCanvasProductRoute: React.FC = () => {
 
   const handleInsertPrompt = useCallback(
     (selection: PromptLibrarySelection) => {
+      if (promptInsertTargetNodeId) {
+        const state = editorRef.current?.getState();
+        const target = state?.document.nodes.find(
+          (node) => node.id === promptInsertTargetNodeId && node.type === 'image'
+        );
+        if (state && target?.type === 'image' && target.data.assetId) {
+          const fallback = canvasImageComposeDraftFromState(state, target.id);
+          updateImageComposeDraft(target.id, fallback, (current) => ({
+            ...current,
+            prompt: selection.prompt,
+          }));
+          setPromptInsertTargetNodeId(null);
+          setSelectedPromptId(selection.id);
+          setNotice(`已将“${selection.title}”填入图片创作提示词。`);
+          return;
+        }
+        setPromptInsertTargetNodeId(null);
+      }
       const insertion = prepareCenteredInsertion();
       if (!insertion) return;
       const { editor, state, viewportSize } = insertion;
@@ -2229,7 +2544,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
       setSelectedPromptId(selection.id);
       setNotice(`已将“${selection.title}”插入为文本节点。`);
     },
-    [prepareCenteredInsertion]
+    [prepareCenteredInsertion, promptInsertTargetNodeId, updateImageComposeDraft]
   );
 
   const selection = useMemo(
@@ -2237,12 +2552,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [canvasState]
   );
   const productDisabled = save.revision === null;
-  const imageMaskRuntimeBlocksNew =
-    imageMaskRuntime.submittingCount > 0 ||
-    imageMaskRuntime.recoveringCount > 0 ||
-    imageMaskRuntime.submissionFailures.length > 0 ||
-    imageMaskRuntime.requestError !== null ||
-    imageMaskRuntime.entries.some(
+  const imageTaskRuntimeBlocksNew =
+    imageTaskRuntime.submittingCount > 0 ||
+    imageTaskRuntime.recoveringCount > 0 ||
+    imageTaskRuntime.submissionFailures.length > 0 ||
+    imageTaskRuntime.requestError !== null ||
+    imageTaskRuntime.entries.some(
       (entry) =>
         entry.task.status === 'queued' || entry.task.status === 'running'
     );
@@ -2397,6 +2712,41 @@ const CreativeCanvasProductRoute: React.FC = () => {
                     />
                   );
                   if (node.type !== 'image') return nodeView;
+                  const composeConfig = canvasState
+                    ? latestCanvasImageComposeConfig(canvasState.document, node.id)
+                    : null;
+                  const composeFallback = canvasState
+                    ? canvasImageComposeDraftFromState(canvasState, node.id)
+                    : {
+                        prompt: '',
+                        settings: structuredClone(DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS),
+                      };
+                  const composeDraft = imageComposeDrafts[node.id] ?? composeFallback;
+                  const composeModelOptions = node.data.assetId
+                    ? imageComposeModelOptions
+                    : imageGenerationModelOptions;
+                  const selectedModel = composeDraft.settings.model;
+                  const exactModel = selectedModel
+                    ? composeModelOptions.find(
+                        (option) =>
+                          option.providerId === selectedModel.providerId &&
+                          option.model === selectedModel.model
+                      )
+                    : null;
+                  const onlyModel = composeModelOptions.length === 1
+                    ? composeModelOptions[0]
+                    : null;
+                  const composeSettings: ImageWorkbenchSettings = {
+                    ...composeDraft.settings,
+                    model: exactModel
+                      ? { providerId: exactModel.providerId, model: exactModel.model }
+                      : onlyModel
+                        ? { providerId: onlyModel.providerId, model: onlyModel.model }
+                        : null,
+                  };
+                  const singleSelected =
+                    selected && canvasState?.selection.nodeIds.length === 1;
+                  const retrySubmission = imageComposeSubmission?.nodeId === node.id;
                   return (
                     <CreativeCanvasImageToolbar
                       visible={selected && Boolean(node.data.assetId)}
@@ -2406,7 +2756,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
                         imageCropBusy ||
                         imageSplitBusy ||
                         imageMaskBusy ||
-                        imageMaskRuntimeBlocksNew
+                        imageComposeBusy ||
+                        imageTaskRuntimeBlocksNew
                       }
                       onCrop={() => void handleOpenImageCrop(node)}
                       onDownload={() => void handleDownloadImage(node)}
@@ -2414,6 +2765,115 @@ const CreativeCanvasProductRoute: React.FC = () => {
                       onSplit={() => void handleOpenImageSplit(node)}
                     >
                       {nodeView}
+                      {singleSelected ? (
+                        <CreativeCanvasImageComposer
+                          nodeId={node.id}
+                          hasImageContent={Boolean(node.data.assetId)}
+                          initialPrompt={composeDraft.prompt}
+                          settings={composeSettings}
+                          modelOptions={composeModelOptions}
+                          task={canvasImageComposeTaskSummary(composeConfig)}
+                          disabled={
+                            productDisabled ||
+                            assetImportBusy ||
+                            imageCropBusy ||
+                            imageSplitBusy ||
+                            imageMaskBusy ||
+                            imageComposeBusy ||
+                            (!retrySubmission &&
+                              imageTaskRuntimeBlocksNew &&
+                              composeConfig?.data.status !== 'queued' &&
+                              composeConfig?.data.status !== 'running')
+                          }
+                          error={
+                            imageComposeIssue?.nodeId === node.id
+                              ? imageComposeIssue.message
+                              : null
+                          }
+                          retrySubmission={retrySubmission}
+                          onPromptChange={(prompt) =>
+                            updateImageComposeDraft(
+                              node.id,
+                              composeFallback,
+                              (current) => ({ ...current, prompt })
+                            )
+                          }
+                          onOpenPromptLibrary={() =>
+                            openImageComposePromptLibrary(node.id)
+                          }
+                          onModelChange={(model: ImageWorkbenchModelIdentity | null) =>
+                            updateImageComposeDraft(
+                              node.id,
+                              composeFallback,
+                              (current) => ({
+                                ...current,
+                                settings: { ...current.settings, model },
+                              })
+                            )
+                          }
+                          onInterfaceModeChange={(interfaceMode) =>
+                            updateImageComposeDraft(
+                              node.id,
+                              composeFallback,
+                              (current) => ({
+                                ...current,
+                                settings: { ...current.settings, interfaceMode },
+                              })
+                            )
+                          }
+                          onQualityChange={(quality) =>
+                            updateImageComposeDraft(
+                              node.id,
+                              composeFallback,
+                              (current) => ({
+                                ...current,
+                                settings: { ...current.settings, quality },
+                              })
+                            )
+                          }
+                          onDimensionsChange={(dimensions) =>
+                            updateImageComposeDraft(
+                              node.id,
+                              composeFallback,
+                              (current) => ({
+                                ...current,
+                                settings: { ...current.settings, ...dimensions },
+                              })
+                            )
+                          }
+                          onAspectRatioChange={(option: ImageWorkbenchAspectRatioOption) =>
+                            updateImageComposeDraft(
+                              node.id,
+                              composeFallback,
+                              (current) => ({
+                                ...current,
+                                settings: {
+                                  ...current.settings,
+                                  aspectRatio: option.value,
+                                  width: option.width,
+                                  height: option.height,
+                                },
+                              })
+                            )
+                          }
+                          onCountChange={(count) =>
+                            updateImageComposeDraft(
+                              node.id,
+                              composeFallback,
+                              (current) => ({
+                                ...current,
+                                settings: { ...current.settings, count },
+                              })
+                            )
+                          }
+                          onGenerate={(prompt) =>
+                            void generateFromCanvasImage(node.id, prompt, composeSettings)
+                          }
+                          onRetrySubmission={() =>
+                            void retryCanvasImageComposeSubmission(node.id)
+                          }
+                        />
+                      ) : null}
                     </CreativeCanvasImageToolbar>
                   );
                 }}
@@ -2456,11 +2916,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
           ),
           topActions: (
             <>
-              <ImageMaskRuntimeAction
-                snapshot={imageMaskRuntime}
-                busy={imageMaskRuntimeActionBusy}
-                onCancel={(taskId) => void cancelImageMaskRuntimeTask(taskId)}
-                onRetry={(taskId) => void retryImageMaskRuntimeTask(taskId)}
+              <ImageTaskRuntimeAction
+                snapshot={imageTaskRuntime}
+                busy={imageTaskRuntimeActionBusy}
+                onCancel={(taskId) => void cancelImageRuntimeTask(taskId)}
+                onRetry={(taskId) => void retryImageRuntimeTask(taskId)}
               />
               <SaveRecoveryAction
                 save={save}
@@ -2569,10 +3029,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
           },
         }}
       />
-      {imageMaskRuntimeReady && project.detail ? (
-        <CanvasImageMaskEditRuntimeBridge
-          key={`${projectId}:${imageMaskRuntimeEpoch}`}
-          ref={imageMaskRuntimeRef}
+      {imageTaskRuntimeReady && project.detail ? (
+        <CanvasImageTaskRuntimeBridge
+          key={`${projectId}:${imageTaskRuntimeEpoch}`}
+          ref={imageTaskRuntimeRef}
           projectId={projectId}
           initialDocument={project.detail.document}
           editorRef={editorRef}
@@ -2584,7 +3044,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
             );
             void assets.reload();
           }}
-          onSnapshot={setImageMaskRuntime}
+          onSnapshot={setImageTaskRuntime}
           onNotice={setNotice}
         />
       ) : null}

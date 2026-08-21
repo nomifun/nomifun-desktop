@@ -48,14 +48,27 @@ The Agent supplies its own single header; the generic right-panel tab header is
 shown only for properties so the product never renders stacked title bars.
 
 The Editor also exposes the canonical pending-task recovery feed described in
-`../editor/WIRING.md`. Image-node local editing now instantiates one scoped
-workbench runtime only after the project and Editor graph are both hydrated.
-It uploads the blue-marked reference as a hidden real asset, persists the
-locked config owner plus `pendingTaskIds` before POST, and submits the exact
-`image_edit` / `i2i` model identity through the shared NomiFun task client.
-Queued/running state is reconciled without creating undo history; terminal
-results are fetched as real image assets and written as config-to-image nodes
-before pending removal performs the final CAS flush. Mount recovery is derived
-only from matching `image-mask-edit` config nodes. A transport-ambiguous create
-keeps the draft and idempotency key locked for safe retry; abandonment first
-probes the backend and is allowed only after an authoritative 404.
+`../editor/WIRING.md`. One project-scoped image-task runtime is mounted only
+after the project and Editor graph are both hydrated. It routes two strict
+persisted operations without creating a second controller:
+
+- `image-mask-edit` uploads the blue-marked reference as a hidden real asset.
+- `image-node-compose` submits empty image nodes as exact
+  `image_generation` / `t2i`, while an image with a real asset submits exact
+  `image_edit` / `i2i` with that asset as the implicit reference.
+
+Both operations persist a locked config owner plus `pendingTaskIds` before POST
+and submit the exact task/capability/provider/model identity through the shared
+NomiFun task client. Queued/running state is reconciled without creating
+undo history; terminal result IDs are resolved to real image assets and written
+as config-to-image nodes before pending removal performs the final CAS flush.
+Mount recovery accepts only either exact operation marker. A
+transport-ambiguous create keeps the same config and idempotency key for safe
+retry; only an authoritative 404 may clear an orphaned pending reference.
+
+The inline composer opens only for one selected image. A successful empty-node
+`t2i` task idempotently fills that source node with the first real result; any
+additional results become config-linked image nodes. If the empty source gains
+a different asset before completion, settlement fails closed instead of
+overwriting it. Existing-image `i2i` always writes new config-linked results and
+never mutates the source asset.
