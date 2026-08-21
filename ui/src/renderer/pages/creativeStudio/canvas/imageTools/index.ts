@@ -8,6 +8,11 @@ export { default as CreativeCanvasImageToolbar } from "./CreativeCanvasImageTool
 export type { CreativeCanvasImageToolbarProps } from "./CreativeCanvasImageToolbar";
 export { default as CreativeImageCropDialog } from "./CreativeImageCropDialog";
 export type { CreativeImageCropDialogProps } from "./CreativeImageCropDialog";
+export { default as CreativeImageMaskEditDialog } from "./CreativeImageMaskEditDialog";
+export type {
+  CreativeImageMaskEditDialogProps,
+  CreativeImageMaskEditSubmit,
+} from "./CreativeImageMaskEditDialog";
 export { default as CreativeImageSplitDialog } from "./CreativeImageSplitDialog";
 export type { CreativeImageSplitDialogProps } from "./CreativeImageSplitDialog";
 export * from "./browserCrop";
