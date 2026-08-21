@@ -77,3 +77,15 @@ additional results become config-linked image nodes. If the empty source gains
 a different asset before completion, settlement fails closed instead of
 overwriting it. Existing-image `i2i` always writes new config-linked results and
 never mutates the source asset.
+
+The same single-selection boundary owns the reference-style image toolbar.
+Empty images expose information, delete, and a real image-file chooser; filled
+images expose those base actions plus the implemented image tools. Information
+reuses the canonical properties panel, delete removes only the node/edges, and
+upload preserves the node identity while updating it through `node/update`.
+Uploads use a unique operation tag so a committed asset can be recovered after
+response loss, re-read the latest Editor state before filling, and immediately
+flush the full document CAS. A stale/deleted/already-filled node is never
+overwritten; the real uploaded asset remains available in the library. The
+toolbar uses a fixed dark focused palette and becomes a viewport overlay when a
+narrow canvas column cannot contain it.

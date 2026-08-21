@@ -98,6 +98,12 @@ the runtime cannot continue past a merely queued local mutation.
 each local feed mutation; `getPendingTaskIds()` provides the same snapshot to
 imperative adapters.
 
+For pending `image-node-compose`, the command guard protects both the config
+owner and its persisted `sourceNodeId`. User delete/update/undo commands cannot
+remove the source or replace its `assetId` while the task is live. The explicit
+`node/reconcile-runtime` path remains allowed so the authoritative terminal
+result can fill an empty source before the pending ID is removed.
+
 For a future standalone workbench route, build `initialResumeRequests` only
 after the hydration callback, using real config-node identity/model/capability
 data plus the returned IDs. Wire the runtime's `onPendingTask` and

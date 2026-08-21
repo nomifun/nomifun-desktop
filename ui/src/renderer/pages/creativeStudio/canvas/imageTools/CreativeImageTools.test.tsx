@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -40,11 +41,21 @@ const EMPTY_CATALOG: CreativeModelCatalogSnapshot = {
   error: null,
 };
 
+const imageToolsCss = readFileSync(
+  new URL("./CreativeImageTools.module.css", import.meta.url),
+  "utf8",
+);
+
 describe("creative image tool surfaces", () => {
   test("shows only real implemented node actions when selected", () => {
     const html = renderToStaticMarkup(
       <CreativeCanvasImageToolbar
+        nodeId="image-node"
         visible
+        hasImageContent
+        onInfo={() => undefined}
+        onDelete={() => undefined}
+        onUpload={() => undefined}
         onCrop={() => undefined}
         onDownload={() => undefined}
         onMaskEdit={() => undefined}
@@ -54,12 +65,45 @@ describe("creative image tool surfaces", () => {
       </CreativeCanvasImageToolbar>,
     );
     expect(html.includes('aria-label="图片工具"')).toBe(true);
+    expect(html.includes("查看节点信息")).toBe(true);
+    expect(html.includes("移除节点")).toBe(true);
     expect(html.includes("裁剪并生成新节点")).toBe(true);
     expect(html.includes("下载图片")).toBe(true);
     expect(html.includes("切分并生成图片子节点")).toBe(true);
     expect(html.includes("对图片进行局部修改")).toBe(true);
     expect(html.includes("局部编辑")).toBe(true);
     expect(html.includes("AI 超分")).toBe(false);
+  });
+
+  test("shows the source information, delete, and upload actions for an empty image", () => {
+    const html = renderToStaticMarkup(
+      <CreativeCanvasImageToolbar
+        nodeId="empty-image-node"
+        visible
+        hasImageContent={false}
+        onInfo={() => undefined}
+        onDelete={() => undefined}
+        onUpload={() => undefined}
+        onCrop={() => undefined}
+        onDownload={() => undefined}
+        onMaskEdit={() => undefined}
+        onSplit={() => undefined}
+      >
+        <article>empty image</article>
+      </CreativeCanvasImageToolbar>,
+    );
+    expect(html.includes("查看节点信息")).toBe(true);
+    expect(html.includes("移除节点")).toBe(true);
+    expect(html.includes("上传图片")).toBe(true);
+    expect(html.includes("下载图片")).toBe(false);
+    expect(html.includes("裁剪并生成新节点")).toBe(false);
+  });
+
+  test("keeps the node toolbar focused and viewport-safe", () => {
+    expect(imageToolsCss.includes("background: #242424")).toBe(true);
+    expect(imageToolsCss.includes("color: #f3f3f3")).toBe(true);
+    expect(imageToolsCss.includes(".nodeToolbar[data-overlay='true']")).toBe(true);
+    expect(imageToolsCss.includes("data-canvas-image-composer-anchor")).toBe(true);
   });
 
   test("renders the source mask editor geometry, controls, and exact task picker", () => {

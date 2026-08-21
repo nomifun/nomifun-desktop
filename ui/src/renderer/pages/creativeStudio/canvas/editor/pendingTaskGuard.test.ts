@@ -29,6 +29,27 @@ const pendingConfig = () => {
   };
 };
 
+const pendingImageCompose = () => {
+  const source = testNode('image', 2);
+  const owner = pendingConfig();
+  return {
+    source,
+    owner: {
+      ...owner,
+      data: {
+        ...owner.data,
+        task: 'image_generation' as const,
+        capability: 't2i',
+        parameters: {
+          canvasOperation: 'image-node-compose',
+          sourceNodeId: source.id,
+          sourceAssetId: null,
+        },
+      },
+    },
+  };
+};
+
 describe('canvas pending task owner guard', () => {
   test('blocks delete, owner mutation, and undo that would orphan a pending task', () => {
     const owner = pendingConfig();
@@ -104,5 +125,48 @@ describe('canvas pending task owner guard', () => {
       allowed: false,
       orphanedTaskIds: [owner.data.taskId, testUuid(99)],
     });
+  });
+
+  test('protects a pending image compose source but allows authoritative settlement', () => {
+    const { owner, source } = pendingImageCompose();
+    const state = createInitialCanvasState({
+      document: testDocument([owner, source]),
+    });
+    const taskIds = [owner.data.taskId as string];
+
+    expect(
+      canvasCommandPreservesPendingTaskOwners(
+        state,
+        taskIds,
+        canvasCommands.deleteSelection({ nodeIds: [source.id] })
+      )
+    ).toBe(false);
+    expect(
+      canvasCommandPreservesPendingTaskOwners(
+        state,
+        taskIds,
+        canvasCommands.updateNode({
+          ...source,
+          data: { ...source.data, assetId: testUuid(40) },
+        })
+      )
+    ).toBe(false);
+    expect(
+      canvasCommandPreservesPendingTaskOwners(
+        state,
+        taskIds,
+        canvasCommands.moveNodes({ x: 10, y: 4 }, { nodeIds: [source.id] })
+      )
+    ).toBe(true);
+    expect(
+      canvasCommandPreservesPendingTaskOwners(
+        state,
+        taskIds,
+        canvasCommands.reconcileRuntimeNode({
+          ...source,
+          data: { ...source.data, assetId: testUuid(40) },
+        })
+      )
+    ).toBe(true);
   });
 });

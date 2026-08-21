@@ -434,7 +434,13 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
 
   return (
     <>
-      <span ref={anchorRef} hidden aria-hidden='true' />
+      <span
+        ref={anchorRef}
+        hidden
+        aria-hidden='true'
+        data-canvas-image-composer-anchor
+        data-placement={placement}
+      />
       {overlay && typeof document !== 'undefined'
         ? createPortal(content, document.body)
         : content}
