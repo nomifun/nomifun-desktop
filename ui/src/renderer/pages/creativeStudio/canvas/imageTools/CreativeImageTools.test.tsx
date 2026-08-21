@@ -9,8 +9,10 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { CreativeAsset } from "../../assets";
+import type { CreativeModelCatalogSnapshot } from "../../models";
 import CreativeCanvasImageToolbar from "./CreativeCanvasImageToolbar";
 import { CreativeImageCropDialogContent } from "./CreativeImageCropDialog";
+import { CreativeImageMaskEditDialogContent } from "./CreativeImageMaskEditDialog";
 import { CreativeImageSplitDialogContent } from "./CreativeImageSplitDialog";
 
 const ASSET: CreativeAsset = {
@@ -32,6 +34,12 @@ const ASSET: CreativeAsset = {
   updatedAt: 1,
 };
 
+const EMPTY_CATALOG: CreativeModelCatalogSnapshot = {
+  status: "ready",
+  providers: [],
+  error: null,
+};
+
 describe("creative image tool surfaces", () => {
   test("shows only real implemented node actions when selected", () => {
     const html = renderToStaticMarkup(
@@ -39,6 +47,7 @@ describe("creative image tool surfaces", () => {
         visible
         onCrop={() => undefined}
         onDownload={() => undefined}
+        onMaskEdit={() => undefined}
         onSplit={() => undefined}
       >
         <article>image</article>
@@ -48,8 +57,32 @@ describe("creative image tool surfaces", () => {
     expect(html.includes("裁剪并生成新节点")).toBe(true);
     expect(html.includes("下载图片")).toBe(true);
     expect(html.includes("切分并生成图片子节点")).toBe(true);
-    expect(html.includes("局部编辑")).toBe(false);
+    expect(html.includes("对图片进行局部修改")).toBe(true);
+    expect(html.includes("局部编辑")).toBe(true);
     expect(html.includes("AI 超分")).toBe(false);
+  });
+
+  test("renders the source mask editor geometry, controls, and exact task picker", () => {
+    const html = renderToStaticMarkup(
+      <CreativeImageMaskEditDialogContent
+        visible
+        asset={ASSET}
+        catalog={EMPTY_CATALOG}
+        model={null}
+        onModelChange={() => undefined}
+        onClose={() => undefined}
+        onConfirm={() => undefined}
+      />,
+    );
+    expect(html.includes("data-creative-image-mask-edit-dialog")).toBe(true);
+    expect(html.includes("局部遮罩编辑")).toBe(true);
+    expect(html.includes("1920 × 1080px")).toBe(true);
+    expect(html.includes("画笔")).toBe(true);
+    expect(html.includes("擦除")).toBe(true);
+    expect(html.includes("100px")).toBe(true);
+    expect(html.includes("修改要求")).toBe(true);
+    expect(html.includes("AI 修改")).toBe(true);
+    expect(html.includes("image_edit")).toBe(true);
   });
 
   test("renders the source crop controls, exact dimensions, and all handles", () => {

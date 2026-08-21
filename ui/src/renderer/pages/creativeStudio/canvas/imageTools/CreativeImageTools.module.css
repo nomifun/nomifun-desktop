@@ -284,6 +284,128 @@
   gap: 8px;
 }
 
+.maskModal :global(.arco-modal-content) {
+  padding: 22px 24px 24px;
+}
+
+.maskDialog {
+  display: grid;
+  grid-template-columns: minmax(360px, 1fr) 320px;
+  gap: 20px;
+}
+
+.maskPreviewPane {
+  display: grid;
+  min-width: 0;
+  min-height: 360px;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--color-border-2);
+  border-radius: 12px;
+  background: transparent;
+}
+
+.maskStage {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: 8px;
+  background: transparent;
+  user-select: none;
+}
+
+.maskStage > img {
+  display: block;
+  max-width: 100%;
+  max-height: 68vh;
+  background: transparent;
+}
+
+.maskSourceCanvas {
+  display: none;
+}
+
+.maskPreviewCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.maskControls {
+  display: flex;
+  min-height: 360px;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.maskControls header h2 {
+  margin: 0;
+  color: var(--color-text-1);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.maskControls header p {
+  margin: 8px 0 0;
+  color: var(--color-text-3);
+  font-size: 13px;
+}
+
+.maskModeGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.maskField {
+  display: grid;
+  gap: 8px;
+}
+
+.maskFieldLabel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--color-text-2);
+  font-size: 13px;
+}
+
+.maskFieldLabel strong {
+  color: var(--color-text-1);
+  font-weight: 600;
+}
+
+.maskFieldTitle {
+  color: var(--color-text-2);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.maskError {
+  color: rgb(var(--danger-6));
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.maskFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.maskFooter > div {
+  display: flex;
+  gap: 8px;
+}
+
 .splitDialog {
   display: grid;
   gap: 14px;
@@ -573,6 +695,16 @@
 
   .splitGenerateButton {
     grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 920px) {
+  .maskDialog {
+    grid-template-columns: 1fr;
+  }
+
+  .maskPreviewPane {
+    min-height: 280px;
   }
 }
 

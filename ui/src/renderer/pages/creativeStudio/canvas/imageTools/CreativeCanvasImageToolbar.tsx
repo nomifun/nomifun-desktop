@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { CuttingOne, Download, GridNine } from "@icon-park/react";
+import { CuttingOne, Download, GridNine, MagicWand } from "@icon-park/react";
 import React from "react";
 
 import styles from "./CreativeImageTools.module.css";
@@ -15,6 +15,7 @@ export interface CreativeCanvasImageToolbarProps {
   disabled?: boolean;
   onCrop(): void;
   onDownload(): void;
+  onMaskEdit?: () => void;
   onSplit(): void;
 }
 
@@ -32,6 +33,7 @@ const CreativeCanvasImageToolbar: React.FC<CreativeCanvasImageToolbarProps> = ({
   disabled = false,
   onCrop,
   onDownload,
+  onMaskEdit,
   onSplit,
 }) => (
   <div className={styles.nodeHost} data-canvas-image-tools-host>
@@ -68,6 +70,20 @@ const CreativeCanvasImageToolbar: React.FC<CreativeCanvasImageToolbarProps> = ({
           <CuttingOne {...iconProps} />
           <span>裁剪</span>
         </button>
+        {onMaskEdit ? (
+          <button
+            type="button"
+            aria-label="对图片进行局部修改"
+            disabled={disabled}
+            onClick={(event) => {
+              event.stopPropagation();
+              onMaskEdit();
+            }}
+          >
+            <MagicWand {...iconProps} />
+            <span>局部编辑</span>
+          </button>
+        ) : null}
         <button
           type="button"
           aria-label="切分并生成图片子节点"
