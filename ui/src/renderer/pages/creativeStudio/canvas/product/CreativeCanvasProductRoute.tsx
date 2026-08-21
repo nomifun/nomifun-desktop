@@ -183,6 +183,10 @@ import {
   prepareCanvasImageMaskEdit,
 } from './imageMaskEditCanvas';
 import { orphanCanvasImageMaskEditTask } from './imageMaskEditRuntime';
+import {
+  fillEmptyCanvasImageNodeFromAsset,
+  uploadCanvasImageNodeAsset,
+} from './imageNodeUpload';
 import { registerCreativeCanvasProductBeforeLeave } from './beforeLeave';
 import styles from './CreativeCanvasProductRoute.module.css';
 
@@ -509,6 +513,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const imageTaskRuntimeRef = useRef<CanvasImageTaskRuntimeBridgeHandle>(null);
   const agentPanelRef = useRef<CreativeCanvasAgentPanelHandle>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
+  const imageNodeUploadInputRef = useRef<HTMLInputElement>(null);
+  const imageNodeUploadTargetRef = useRef<string | null>(null);
   const panelsRef = useRef<CreativeStudioPanelState>(
     structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS)
   );
@@ -685,6 +691,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
     activeProjectIdRef.current = projectId;
     imageToolAbortRef.current?.abort();
     imageToolAbortRef.current = null;
+    imageNodeUploadTargetRef.current = null;
+    if (imageNodeUploadInputRef.current) imageNodeUploadInputRef.current.value = '';
     const defaultPanels = structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS);
     panelsRef.current = defaultPanels;
     setPanels(defaultPanels);
@@ -1091,6 +1099,103 @@ const CreativeCanvasProductRoute: React.FC = () => {
       }
     },
     [insertAssetAtWorld]
+  );
+
+  const openImageNodeUpload = useCallback((nodeId: string) => {
+    if (assetImportBusyRef.current) {
+      setNotice('已有素材正在上传，请等待完成。');
+      return;
+    }
+    imageNodeUploadTargetRef.current = nodeId;
+    const input = imageNodeUploadInputRef.current;
+    if (!input) {
+      setNotice('图片文件选择器暂时不可用。');
+      return;
+    }
+    input.value = '';
+    input.click();
+  }, []);
+
+  const handleImageNodeUploadChange = useCallback(
+    async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const input = event.currentTarget;
+      const file = input.files?.[0] ?? null;
+      const nodeId = imageNodeUploadTargetRef.current;
+      imageNodeUploadTargetRef.current = null;
+      input.value = '';
+      if (!file || !nodeId) return;
+      if (!file.type.startsWith('image/')) {
+        setNotice('该节点只接受真实图片文件。');
+        return;
+      }
+      if (assetImportBusyRef.current) {
+        setNotice('已有素材正在上传，请等待完成。');
+        return;
+      }
+
+      assetImportBusyRef.current = true;
+      setAssetImportBusy(true);
+      setNotice(`正在上传“${file.name}”…`);
+      let uploadedAsset: CreativeAsset | null = null;
+      try {
+        const uploaded = await uploadCanvasImageNodeAsset({
+          port: creativeAssetClient,
+          file,
+          operationId: uuidv7(),
+          onProgress: (progress) =>
+            setNotice(`正在上传“${file.name}” ${Math.round(progress)}%`),
+        });
+        const asset = uploaded.asset;
+        uploadedAsset = asset;
+        if (activeProjectIdRef.current !== projectId) {
+          throw new DOMException('Project changed', 'AbortError');
+        }
+        const editor = editorRef.current;
+        if (!editor) throw new Error('画布已经关闭，图片保留在素材库中。');
+        const state = editor.getState();
+        const source = state.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
+            node.id === nodeId && node.type === 'image'
+        );
+        if (!source) throw new Error('图片节点已被删除，上传结果保留在素材库中。');
+        const updated = fillEmptyCanvasImageNodeFromAsset(source, asset);
+        knownAssetsRef.current = new Map(knownAssetsRef.current).set(asset.id, asset);
+        const updatedState = editor.dispatch(
+          canvasCommands.updateNode(updated, {
+            at: Date.now(),
+            mergeKey: `image-upload:${nodeId}`,
+          })
+        );
+        const linked = updatedState.document.nodes.find(
+          (node) => node.id === nodeId && node.type === 'image'
+        );
+        if (linked?.type !== 'image' || linked.data.assetId !== asset.id) {
+          throw new Error(
+            '图片节点当前受运行任务保护；上传素材已保留在素材库中。'
+          );
+        }
+        const flush = await editor.flush();
+        if (!canLeaveCreativeCanvasAfterFlush(flush)) {
+          throw new Error(
+            creativeCanvasBlockedLeaveMessage(flush) ?? '图片节点尚未安全保存。'
+          );
+        }
+        setNotice(
+          uploaded.recoveredAfterResponseLoss
+            ? `已找回上传结果并将“${asset.title}”填入原图片节点。`
+            : `已将“${asset.title}”填入原图片节点。`
+        );
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === 'AbortError')) {
+          setNotice(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        if (uploadedAsset) void assets.reload();
+        assetImportBusyRef.current = false;
+        setAssetImportBusy(false);
+      }
+    },
+    [assets, projectId]
   );
 
   const resolveCanvasImageAsset = useCallback(
@@ -2757,7 +2862,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
                   const retrySubmission = imageComposeSubmission?.nodeId === node.id;
                   return (
                     <CreativeCanvasImageToolbar
-                      visible={selected && Boolean(node.data.assetId)}
+                      nodeId={node.id}
+                      visible={Boolean(singleSelected)}
+                      hasImageContent={Boolean(node.data.assetId)}
                       disabled={
                         productDisabled ||
                         assetImportBusy ||
@@ -2767,6 +2874,16 @@ const CreativeCanvasProductRoute: React.FC = () => {
                         imageComposeBusy ||
                         imageTaskRuntimeBlocksNew
                       }
+                      onInfo={() => {
+                        handleRightViewChange('properties');
+                        setNotice('已在属性面板打开所选节点。');
+                      }}
+                      onDelete={() =>
+                        dispatch(
+                          canvasCommands.deleteSelection({ nodeIds: [node.id] })
+                        )
+                      }
+                      onUpload={() => openImageNodeUpload(node.id)}
                       onCrop={() => void handleOpenImageCrop(node)}
                       onDownload={() => void handleDownloadImage(node)}
                       onMaskEdit={() => void handleOpenImageMaskEdit(node)}
@@ -3131,6 +3248,14 @@ const CreativeCanvasProductRoute: React.FC = () => {
         onAbandon={() => void abandonImageMaskSubmission()}
         onClose={closeImageMaskEdit}
         onConfirm={(input) => void handleConfirmImageMaskEdit(input)}
+      />
+      <input
+        ref={imageNodeUploadInputRef}
+        hidden
+        type="file"
+        accept="image/*"
+        aria-label="上传图片到所选节点"
+        onChange={(event) => void handleImageNodeUploadChange(event)}
       />
       <Modal
         title="选择 2:1 图片的节点类型"

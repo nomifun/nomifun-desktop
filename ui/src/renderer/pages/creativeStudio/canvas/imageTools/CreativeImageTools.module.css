@@ -19,11 +19,11 @@
   gap: 2px;
   width: max-content;
   padding: 5px;
-  border: 1px solid color-mix(in srgb, var(--color-text-1) 68%, transparent);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 10px;
-  background: color-mix(in srgb, var(--color-text-1) 92%, black);
+  background: #242424;
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.24);
-  color: var(--color-bg-1);
+  color: #f3f3f3;
   pointer-events: auto;
   transform: translateX(-50%) scale(var(--creative-canvas-inverse-zoom));
   transform-origin: center bottom;
@@ -48,13 +48,38 @@
 
 .nodeToolbar button:hover,
 .nodeToolbar button:focus-visible {
-  background: color-mix(in srgb, var(--color-bg-1) 18%, transparent);
+  background: rgba(255, 255, 255, 0.1);
   outline: none;
 }
 
 .nodeToolbar button:disabled {
   cursor: not-allowed;
   opacity: 0.46;
+}
+
+.nodeToolbar button[data-danger] {
+  color: #ef4444;
+}
+
+.nodeToolbar[data-overlay='true'] {
+  position: fixed;
+  top: var(--creative-canvas-image-toolbar-overlay-top, 16px);
+  bottom: auto;
+  left: 50%;
+  z-index: 1601;
+  max-width: calc(100vw - 24px);
+  overflow-x: auto;
+  transform: translateX(-50%);
+  transform-origin: center;
+}
+
+.nodeHost:has(
+    [data-canvas-image-composer-anchor][data-placement='above']
+  )
+  .nodeToolbar {
+  top: calc(100% + 10px * var(--creative-canvas-inverse-zoom));
+  bottom: auto;
+  transform-origin: center top;
 }
 
 .cropModal :global(.arco-modal-content) {
@@ -664,7 +689,7 @@
 }
 
 @media (max-width: 720px) {
-  .nodeToolbar span {
+  .nodeToolbar .toolLabel {
     display: none;
   }
 
