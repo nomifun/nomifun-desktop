@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use nomifun_common::{AppError, WorkshopAssetId, zip_safe};
 use nomifun_db::WorkshopAssetRow;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::creative_studio::{
@@ -27,12 +27,20 @@ pub const CREATIVE_STUDIO_ARCHIVE_MIME: &str =
 pub const MAX_CREATIVE_ARCHIVE_COMPRESSED_BYTES: usize = 256 * 1024 * 1024;
 const CREATIVE_STUDIO_ARCHIVE_KIND: &str = "project-archive";
 const CREATIVE_STUDIO_ARCHIVE_VERSION: u32 = 1;
-const MAX_CREATIVE_ARCHIVE_ASSETS: usize = 255;
+// A legal Director v1 sidecar may own 5,000 captures plus 2,000 entity assets.
+// Keep the archive below the shared hardened ZIP entry ceiling rather than
+// silently making those canonical projects non-exportable.
+const MAX_CREATIVE_ARCHIVE_ASSETS: usize = zip_safe::ZipExtractionBudget::DEFAULT_MAX_ENTRIES - 1;
 const MAX_CREATIVE_ARCHIVE_ENTRIES: usize = MAX_CREATIVE_ARCHIVE_ASSETS + 1;
 const MAX_CREATIVE_ARCHIVE_MANIFEST_BYTES: usize =
     MAX_CREATIVE_PROJECT_DOCUMENT_BYTES + 8 * 1024 * 1024;
 const MAX_CREATIVE_ARCHIVE_UNCOMPRESSED_BYTES: u64 =
     zip_safe::ZipExtractionBudget::DEFAULT_MAX_TOTAL_UNCOMPRESSED_BYTES;
+const DIRECTOR_PROJECT_KIND: &str = "nomifun.director.project";
+const DIRECTOR_PROJECT_VERSION: u64 = 1;
+const MAX_DIRECTOR_SIDECAR_BYTES: usize = 16 * 1024 * 1024;
+const CANVAS_IMAGE_COMPOSE_OPERATION: &str = "image-node-compose";
+const CANVAS_IMAGE_MASK_EDIT_OPERATION: &str = "image-mask-edit";
 
 #[derive(Debug)]
 pub(crate) struct CreativeArchiveAssetSnapshot {
@@ -104,14 +112,6 @@ pub(crate) fn build_creative_project_archive(
     })?;
     validate_archive_title(title)?;
 
-    let referenced = collect_document_asset_ids(document)?;
-    if referenced.len() > MAX_CREATIVE_ARCHIVE_ASSETS {
-        return Err(AppError::BadRequest(format!(
-            "creative project references too many assets: {} (max {MAX_CREATIVE_ARCHIVE_ASSETS})",
-            referenced.len()
-        )));
-    }
-
     let mut snapshots = BTreeMap::new();
     for snapshot in assets {
         let asset_id = snapshot.row.asset_id.clone();
@@ -125,6 +125,13 @@ pub(crate) fn build_creative_project_archive(
                 "duplicate creative project asset {asset_id:?}"
             )));
         }
+    }
+    let referenced = collect_archive_asset_ids_from_snapshots(document, &snapshots)?;
+    if referenced.len() > MAX_CREATIVE_ARCHIVE_ASSETS {
+        return Err(AppError::BadRequest(format!(
+            "creative project references too many assets: {} (max {MAX_CREATIVE_ARCHIVE_ASSETS})",
+            referenced.len()
+        )));
     }
     let present = snapshots.keys().cloned().collect::<BTreeSet<_>>();
     if present != referenced {
@@ -326,7 +333,7 @@ fn parse_creative_project_archive_with_limits(
             manifest.assets.len()
         )));
     }
-    let referenced = collect_document_asset_ids(&manifest.project.document)?;
+    let mut referenced = collect_document_asset_ids(&manifest.project.document)?;
     let mut declared = BTreeSet::new();
     let mut imported_assets = Vec::with_capacity(manifest.assets.len());
     for metadata in manifest.assets {
@@ -373,6 +380,11 @@ fn parse_creative_project_archive_with_limits(
             "creative project archive contains undeclared entry {extra}"
         )));
     }
+    extend_archive_asset_ids_from_import(
+        &manifest.project.document,
+        &imported_assets,
+        &mut referenced,
+    )?;
     if declared != referenced {
         return Err(AppError::BadRequest(describe_asset_set_mismatch(
             &referenced,
@@ -391,6 +403,7 @@ pub(crate) fn remap_creative_archive_for_import(
     mut archive: CreativeArchiveImport,
     new_project_id: &str,
 ) -> Result<CreativeArchiveImport, AppError> {
+    let old_project_id = archive.document.project_id.clone();
     let mut asset_ids = BTreeMap::new();
     for asset in &archive.assets {
         asset_ids.insert(
@@ -403,6 +416,13 @@ pub(crate) fn remap_creative_archive_for_import(
     for node in &archive.document.nodes {
         node_ids.insert(node.id.clone(), uuid::Uuid::now_v7().to_string());
     }
+    remap_archive_director_sidecars(
+        &archive.document,
+        &mut archive.assets,
+        &old_project_id,
+        new_project_id,
+        &asset_ids,
+    )?;
     for node in &mut archive.document.nodes {
         node.id = node_ids
             .get(&node.id)
@@ -413,7 +433,7 @@ pub(crate) fn remap_creative_archive_for_import(
                 AppError::BadRequest("creative archive contains a dangling groupId".into())
             })?;
         }
-        remap_node_asset_ids(&mut node.data, &asset_ids)?;
+        remap_node_references(&mut node.data, &asset_ids, &node_ids)?;
         if let CreativeNodeData::Config(config) = &mut node.data {
             config.task_id = None;
             if matches!(
@@ -475,6 +495,23 @@ pub(crate) fn remap_creative_archive_for_import(
             .expect("asset map was built from this archive")
             .clone();
         asset.metadata.content_path = asset_content_path(&asset.metadata.asset_id);
+    }
+    let mut remapped_references = collect_document_asset_ids(&archive.document)?;
+    extend_archive_asset_ids_from_import(
+        &archive.document,
+        &archive.assets,
+        &mut remapped_references,
+    )?;
+    let remapped_assets = archive
+        .assets
+        .iter()
+        .map(|asset| asset.metadata.asset_id.clone())
+        .collect::<BTreeSet<_>>();
+    if remapped_assets != remapped_references {
+        return Err(AppError::BadRequest(describe_asset_set_mismatch(
+            &remapped_references,
+            &remapped_assets,
+        )));
     }
     archive
         .document
@@ -781,6 +818,11 @@ pub(crate) fn collect_document_asset_ids(
     document: &CreativeProjectDocument,
 ) -> Result<BTreeSet<String>, AppError> {
     let mut asset_ids = BTreeSet::new();
+    let node_ids = document
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<BTreeSet<_>>();
     for node in &document.nodes {
         match &node.data {
             CreativeNodeData::Image(data) => insert_optional_asset(&mut asset_ids, data.asset_id.as_deref())?,
@@ -791,6 +833,7 @@ pub(crate) fn collect_document_asset_ids(
                 for asset_id in data.input_asset_ids.iter().chain(&data.result_asset_ids) {
                     insert_asset(&mut asset_ids, asset_id)?;
                 }
+                collect_config_parameter_asset_ids(data, &mut asset_ids, &node_ids)?;
             }
             CreativeNodeData::Video(data) => {
                 insert_optional_asset(&mut asset_ids, data.asset_id.as_deref())?;
@@ -828,16 +871,447 @@ fn insert_asset(ids: &mut BTreeSet<String>, asset_id: &str) -> Result<(), AppErr
     Ok(())
 }
 
-fn remap_node_asset_ids(
+fn config_operation(parameters: &Map<String, Value>) -> Result<Option<&str>, AppError> {
+    match parameters.get("canvasOperation") {
+        None => Ok(None),
+        Some(Value::String(operation)) if !operation.trim().is_empty() => {
+            Ok(Some(operation.as_str()))
+        }
+        Some(_) => Err(AppError::BadRequest(
+            "creative config canvasOperation must be a non-empty string".into(),
+        )),
+    }
+}
+
+fn config_parameter_asset_id<'a>(
+    parameters: &'a Map<String, Value>,
+    operation: &str,
+    key: &str,
+    nullable: bool,
+) -> Result<Option<&'a str>, AppError> {
+    match parameters.get(key) {
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(value)),
+        Some(Value::Null) if nullable => Ok(None),
+        Some(_) => Err(AppError::BadRequest(format!(
+            "creative config operation {operation:?} parameter {key} must be {}asset id",
+            if nullable { "null or a valid " } else { "a valid " }
+        ))),
+        None => Err(AppError::BadRequest(format!(
+            "creative config operation {operation:?} is missing parameter {key}"
+        ))),
+    }
+}
+
+fn collect_config_parameter_asset_ids(
+    data: &crate::creative_studio::CreativeConfigNodeData,
+    asset_ids: &mut BTreeSet<String>,
+    node_ids: &BTreeSet<&str>,
+) -> Result<(), AppError> {
+    let Some(operation) = config_operation(&data.parameters)? else {
+        return Ok(());
+    };
+    match operation {
+        CANVAS_IMAGE_COMPOSE_OPERATION => {
+            validate_config_source_node(&data.parameters, operation, node_ids)?;
+            if let Some(asset_id) = config_parameter_asset_id(
+                &data.parameters,
+                operation,
+                "sourceAssetId",
+                true,
+            )? {
+                insert_asset(asset_ids, asset_id)?;
+            }
+        }
+        CANVAS_IMAGE_MASK_EDIT_OPERATION => {
+            validate_config_source_node(&data.parameters, operation, node_ids)?;
+            for key in ["sourceAssetId", "markedReferenceAssetId"] {
+                let asset_id = config_parameter_asset_id(
+                    &data.parameters,
+                    operation,
+                    key,
+                    false,
+                )?
+                .expect("non-null parameter was required");
+                insert_asset(asset_ids, asset_id)?;
+            }
+        }
+        _ => {
+            return Err(AppError::BadRequest(format!(
+                "creative project contains unsupported config canvasOperation {operation:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_config_source_node(
+    parameters: &Map<String, Value>,
+    operation: &str,
+    node_ids: &BTreeSet<&str>,
+) -> Result<(), AppError> {
+    let source_node_id = parameters
+        .get("sourceNodeId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "creative config operation {operation:?} parameter sourceNodeId must be a valid node id"
+            ))
+        })?;
+    if !node_ids.contains(source_node_id) {
+        return Err(AppError::BadRequest(format!(
+            "creative config operation {operation:?} references missing source node {source_node_id:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn remap_config_parameter(
+    parameters: &mut Map<String, Value>,
+    operation: &str,
+    key: &str,
+    identities: &BTreeMap<String, String>,
+    identity_kind: &str,
+    nullable: bool,
+) -> Result<(), AppError> {
+    let value = parameters.get_mut(key).ok_or_else(|| {
+        AppError::BadRequest(format!(
+            "creative config operation {operation:?} is missing parameter {key}"
+        ))
+    })?;
+    if value.is_null() && nullable {
+        return Ok(());
+    }
+    let old_id = value.as_str().filter(|value| !value.trim().is_empty()).ok_or_else(|| {
+        AppError::BadRequest(format!(
+            "creative config operation {operation:?} parameter {key} must be {}{identity_kind} id",
+            if nullable { "null or a valid " } else { "a valid " }
+        ))
+    })?;
+    let new_id = identities.get(old_id).cloned().ok_or_else(|| {
+        AppError::BadRequest(format!(
+            "creative archive config parameter {key} references undeclared {identity_kind} {old_id:?}"
+        ))
+    })?;
+    *value = Value::String(new_id);
+    Ok(())
+}
+
+fn remap_config_parameters(
+    data: &mut crate::creative_studio::CreativeConfigNodeData,
+    asset_ids: &BTreeMap<String, String>,
+    node_ids: &BTreeMap<String, String>,
+) -> Result<(), AppError> {
+    let Some(operation) = config_operation(&data.parameters)?.map(str::to_owned) else {
+        return Ok(());
+    };
+    match operation.as_str() {
+        CANVAS_IMAGE_COMPOSE_OPERATION => {
+            remap_config_parameter(
+                &mut data.parameters,
+                &operation,
+                "sourceNodeId",
+                node_ids,
+                "node",
+                false,
+            )?;
+            remap_config_parameter(
+                &mut data.parameters,
+                &operation,
+                "sourceAssetId",
+                asset_ids,
+                "asset",
+                true,
+            )
+        }
+        CANVAS_IMAGE_MASK_EDIT_OPERATION => {
+            remap_config_parameter(
+                &mut data.parameters,
+                &operation,
+                "sourceNodeId",
+                node_ids,
+                "node",
+                false,
+            )?;
+            for key in ["sourceAssetId", "markedReferenceAssetId"] {
+                remap_config_parameter(
+                    &mut data.parameters,
+                    &operation,
+                    key,
+                    asset_ids,
+                    "asset",
+                    false,
+                )?;
+            }
+            Ok(())
+        }
+        _ => Err(AppError::BadRequest(format!(
+            "creative project contains unsupported config canvasOperation {operation:?}"
+        ))),
+    }
+}
+
+fn director_scene_asset_ids(document: &CreativeProjectDocument) -> BTreeSet<String> {
+    document
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.data {
+            CreativeNodeData::Director(data) => data.scene_id.clone(),
+            _ => None,
+        })
+        .collect()
+}
+
+fn parse_director_sidecar(
+    bytes: &[u8],
+    expected_project_id: &str,
+) -> Result<Value, String> {
+    if bytes.len() > MAX_DIRECTOR_SIDECAR_BYTES {
+        return Err(format!(
+            "Director sidecar exceeds {MAX_DIRECTOR_SIDECAR_BYTES} bytes"
+        ));
+    }
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Director sidecar is not valid JSON: {error}"))?;
+    let root = value
+        .as_object()
+        .ok_or_else(|| "Director sidecar root must be an object".to_owned())?;
+    let expected_keys = ["kind", "version", "project"].into_iter().collect::<BTreeSet<_>>();
+    let actual_keys = root.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    if actual_keys != expected_keys {
+        return Err("Director sidecar must contain exactly kind, version, and project".into());
+    }
+    if root.get("kind").and_then(Value::as_str) != Some(DIRECTOR_PROJECT_KIND) {
+        return Err(format!(
+            "Director sidecar kind must be {DIRECTOR_PROJECT_KIND:?}"
+        ));
+    }
+    if root.get("version").and_then(Value::as_u64) != Some(DIRECTOR_PROJECT_VERSION) {
+        return Err(format!(
+            "Director sidecar version must be {DIRECTOR_PROJECT_VERSION}"
+        ));
+    }
+    let project = root
+        .get("project")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "Director sidecar project must be an object".to_owned())?;
+    let project_id = project
+        .get("projectId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Director sidecar project.projectId must be a string".to_owned())?;
+    if project_id != expected_project_id {
+        return Err(format!(
+            "Director sidecar projectId {project_id:?} does not match Creative Studio project {expected_project_id:?}"
+        ));
+    }
+    Ok(value)
+}
+
+fn collect_nested_asset_ids(
+    value: &Value,
+    path: &str,
+    asset_ids: &mut BTreeSet<String>,
+) -> Result<(), String> {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                let child_path = format!("{path}.{key}");
+                if key == "assetId" {
+                    let asset_id = child.as_str().ok_or_else(|| {
+                        format!("Director sidecar {child_path} must be an asset id string")
+                    })?;
+                    WorkshopAssetId::parse(asset_id).map_err(|error| {
+                        format!("Director sidecar {child_path} is invalid: {error}")
+                    })?;
+                    asset_ids.insert(asset_id.to_owned());
+                } else {
+                    collect_nested_asset_ids(child, &child_path, asset_ids)?;
+                }
+            }
+        }
+        Value::Array(values) => {
+            for (index, child) in values.iter().enumerate() {
+                collect_nested_asset_ids(child, &format!("{path}[{index}]"), asset_ids)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(crate) fn director_sidecar_asset_ids(
+    bytes: &[u8],
+    expected_project_id: &str,
+) -> Result<BTreeSet<String>, String> {
+    let value = parse_director_sidecar(bytes, expected_project_id)?;
+    let mut asset_ids = BTreeSet::new();
+    collect_nested_asset_ids(&value, "$", &mut asset_ids)?;
+    Ok(asset_ids)
+}
+
+fn collect_archive_asset_ids_from_snapshots(
+    document: &CreativeProjectDocument,
+    snapshots: &BTreeMap<String, CreativeArchiveAssetSnapshot>,
+) -> Result<BTreeSet<String>, AppError> {
+    let mut asset_ids = collect_document_asset_ids(document)?;
+    for scene_id in director_scene_asset_ids(document) {
+        let snapshot = snapshots.get(&scene_id).ok_or_else(|| {
+            AppError::Conflict(format!(
+                "creative project is missing Director sidecar asset {scene_id}"
+            ))
+        })?;
+        if snapshot.row.kind != "text" {
+            return Err(AppError::Conflict(format!(
+                "creative project Director sidecar {scene_id} is not a text asset"
+            )));
+        }
+        let nested = director_sidecar_asset_ids(&snapshot.bytes, &document.project_id).map_err(
+            |error| {
+                AppError::Conflict(format!(
+                    "creative project Director sidecar {scene_id} is invalid: {error}"
+                ))
+            },
+        )?;
+        asset_ids.extend(nested);
+    }
+    Ok(asset_ids)
+}
+
+fn extend_archive_asset_ids_from_import(
+    document: &CreativeProjectDocument,
+    assets: &[CreativeArchiveImportedAsset],
+    asset_ids: &mut BTreeSet<String>,
+) -> Result<(), AppError> {
+    for scene_id in director_scene_asset_ids(document) {
+        let sidecar = assets
+            .iter()
+            .find(|asset| asset.metadata.asset_id == scene_id)
+            .ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "creative project archive is missing Director sidecar asset {scene_id}"
+                ))
+            })?;
+        if sidecar.metadata.kind != "text" {
+            return Err(AppError::BadRequest(format!(
+                "creative project archive Director sidecar {scene_id} is not a text asset"
+            )));
+        }
+        let nested = director_sidecar_asset_ids(&sidecar.bytes, &document.project_id).map_err(
+            |error| {
+                AppError::BadRequest(format!(
+                    "creative project archive Director sidecar {scene_id} is invalid: {error}"
+                ))
+            },
+        )?;
+        asset_ids.extend(nested);
+    }
+    Ok(())
+}
+
+fn remap_nested_asset_ids(
+    value: &mut Value,
+    path: &str,
+    asset_ids: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                let child_path = format!("{path}.{key}");
+                if key == "assetId" {
+                    let old_id = child.as_str().ok_or_else(|| {
+                        format!("Director sidecar {child_path} must be an asset id string")
+                    })?;
+                    let new_id = asset_ids.get(old_id).cloned().ok_or_else(|| {
+                        format!(
+                            "Director sidecar {child_path} references undeclared asset {old_id:?}"
+                        )
+                    })?;
+                    *child = Value::String(new_id);
+                } else {
+                    remap_nested_asset_ids(child, &child_path, asset_ids)?;
+                }
+            }
+        }
+        Value::Array(values) => {
+            for (index, child) in values.iter_mut().enumerate() {
+                remap_nested_asset_ids(child, &format!("{path}[{index}]"), asset_ids)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn remap_director_sidecar_bytes(
+    bytes: &[u8],
+    old_project_id: &str,
+    new_project_id: &str,
+    asset_ids: &BTreeMap<String, String>,
+) -> Result<Vec<u8>, String> {
+    let mut value = parse_director_sidecar(bytes, old_project_id)?;
+    let project = value
+        .get_mut("project")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "Director sidecar project must be an object".to_owned())?;
+    project.insert(
+        "projectId".to_owned(),
+        Value::String(new_project_id.to_owned()),
+    );
+    remap_nested_asset_ids(&mut value, "$", asset_ids)?;
+    serde_json::to_vec_pretty(&value)
+        .map_err(|error| format!("encode remapped Director sidecar: {error}"))
+}
+
+fn remap_archive_director_sidecars(
+    document: &CreativeProjectDocument,
+    assets: &mut [CreativeArchiveImportedAsset],
+    old_project_id: &str,
+    new_project_id: &str,
+    asset_ids: &BTreeMap<String, String>,
+) -> Result<(), AppError> {
+    for scene_id in director_scene_asset_ids(document) {
+        let sidecar = assets
+            .iter_mut()
+            .find(|asset| asset.metadata.asset_id == scene_id)
+            .ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "creative archive is missing Director sidecar asset {scene_id}"
+                ))
+            })?;
+        if sidecar.metadata.kind != "text" {
+            return Err(AppError::BadRequest(format!(
+                "creative archive Director sidecar {scene_id} is not a text asset"
+            )));
+        }
+        sidecar.bytes = remap_director_sidecar_bytes(
+            &sidecar.bytes,
+            old_project_id,
+            new_project_id,
+            asset_ids,
+        )
+        .map_err(|error| {
+            AppError::BadRequest(format!(
+                "creative archive Director sidecar {scene_id} cannot be remapped: {error}"
+            ))
+        })?;
+        sidecar.metadata.byte_length = sidecar.bytes.len() as u64;
+        sidecar.metadata.sha256 = sha256_bytes(&sidecar.bytes);
+    }
+    Ok(())
+}
+
+fn remap_node_references(
     data: &mut CreativeNodeData,
     asset_ids: &BTreeMap<String, String>,
+    node_ids: &BTreeMap<String, String>,
 ) -> Result<(), AppError> {
     match data {
         CreativeNodeData::Image(data) => remap_optional_asset(&mut data.asset_id, asset_ids),
         CreativeNodeData::Panorama(data) => remap_optional_asset(&mut data.asset_id, asset_ids),
         CreativeNodeData::Config(data) => {
             remap_asset_vec(&mut data.input_asset_ids, asset_ids)?;
-            remap_asset_vec(&mut data.result_asset_ids, asset_ids)
+            remap_asset_vec(&mut data.result_asset_ids, asset_ids)?;
+            remap_config_parameters(data, asset_ids, node_ids)
         }
         CreativeNodeData::Video(data) => {
             remap_optional_asset(&mut data.asset_id, asset_ids)?;
@@ -926,6 +1400,12 @@ mod tests {
     const PROJECT_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000701";
     const ASSET_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000702";
     const DIRECTOR_SCENE_ASSET_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000705";
+    const DIRECTOR_PANORAMA_ASSET_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000707";
+    const DIRECTOR_CHARACTER_ASSET_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000708";
+    const DIRECTOR_OBJECT_ASSET_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000709";
+    const DIRECTOR_CAPTURE_ASSET_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000710";
+    const MASK_REFERENCE_ASSET_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000711";
+    const CONFIG_RESULT_ASSET_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000712";
 
     fn image_document() -> CreativeProjectDocument {
         let mut document = CreativeProjectDocument::empty(PROJECT_ID.into());
@@ -973,6 +1453,114 @@ mod tests {
         document
     }
 
+    fn config_reference_document() -> CreativeProjectDocument {
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.into());
+        let source: CreativeNode = serde_json::from_value(serde_json::json!({
+            "id": "config-source-node",
+            "type": "image",
+            "position": { "x": 0, "y": 0 },
+            "size": { "width": 320, "height": 180 },
+            "groupId": null,
+            "zIndex": 1,
+            "locked": false,
+            "data": {
+                "assetId": null,
+                "caption": "",
+                "alt": "",
+                "fit": "contain",
+                "naturalSize": null
+            }
+        }))
+        .unwrap();
+        let compose: CreativeNode = serde_json::from_value(serde_json::json!({
+            "id": "compose-config",
+            "type": "config",
+            "position": { "x": 400, "y": 0 },
+            "size": { "width": 320, "height": 180 },
+            "groupId": null,
+            "zIndex": 2,
+            "locked": false,
+            "data": {
+                "task": "image_edit",
+                "capability": "i2i",
+                "providerId": null,
+                "model": null,
+                "prompt": "edit",
+                "negativePrompt": "",
+                "parameters": {
+                    "canvasOperation": CANVAS_IMAGE_COMPOSE_OPERATION,
+                    "sourceNodeId": "config-source-node",
+                    "sourceAssetId": ASSET_ID
+                },
+                "inputAssetIds": [],
+                "taskId": null,
+                "resultAssetIds": [CONFIG_RESULT_ASSET_ID],
+                "status": "succeeded",
+                "errorMessage": null
+            }
+        }))
+        .unwrap();
+        let mask: CreativeNode = serde_json::from_value(serde_json::json!({
+            "id": "mask-config",
+            "type": "config",
+            "position": { "x": 800, "y": 0 },
+            "size": { "width": 320, "height": 180 },
+            "groupId": null,
+            "zIndex": 3,
+            "locked": false,
+            "data": {
+                "task": "image_edit",
+                "capability": "i2i",
+                "providerId": null,
+                "model": null,
+                "prompt": "mask edit",
+                "negativePrompt": "",
+                "parameters": {
+                    "canvasOperation": CANVAS_IMAGE_MASK_EDIT_OPERATION,
+                    "sourceNodeId": "config-source-node",
+                    "sourceAssetId": ASSET_ID,
+                    "markedReferenceAssetId": MASK_REFERENCE_ASSET_ID
+                },
+                "inputAssetIds": [MASK_REFERENCE_ASSET_ID],
+                "taskId": null,
+                "resultAssetIds": [],
+                "status": "succeeded",
+                "errorMessage": null
+            }
+        }))
+        .unwrap();
+        let t2i: CreativeNode = serde_json::from_value(serde_json::json!({
+            "id": "t2i-config",
+            "type": "config",
+            "position": { "x": 1200, "y": 0 },
+            "size": { "width": 320, "height": 180 },
+            "groupId": null,
+            "zIndex": 4,
+            "locked": false,
+            "data": {
+                "task": "image_generation",
+                "capability": "t2i",
+                "providerId": null,
+                "model": null,
+                "prompt": "generate",
+                "negativePrompt": "",
+                "parameters": {
+                    "canvasOperation": CANVAS_IMAGE_COMPOSE_OPERATION,
+                    "sourceNodeId": "config-source-node",
+                    "sourceAssetId": null
+                },
+                "inputAssetIds": [],
+                "taskId": null,
+                "resultAssetIds": [],
+                "status": "idle",
+                "errorMessage": null
+            }
+        }))
+        .unwrap();
+        document.nodes = vec![source, compose, mask, t2i];
+        document
+    }
+
     fn asset_snapshot() -> CreativeArchiveAssetSnapshot {
         let bytes = b"not-a-decoded-image-but-real-bytes".to_vec();
         CreativeArchiveAssetSnapshot {
@@ -992,6 +1580,36 @@ mod tests {
                 text_content: None,
                 in_library: true,
                 origin: Some(r#"{"prompt":"reference","provider_id":"0190f5fe-7c00-7a00-8abc-000000000703"}"#.into()),
+                created_at: 10,
+                updated_at: 20,
+            },
+            bytes,
+        }
+    }
+
+    fn opaque_image_asset_snapshot(
+        asset_id: &str,
+        title: &str,
+        in_library: bool,
+    ) -> CreativeArchiveAssetSnapshot {
+        let bytes = format!("opaque-image-{asset_id}").into_bytes();
+        CreativeArchiveAssetSnapshot {
+            row: WorkshopAssetRow {
+                id: 0,
+                asset_id: asset_id.into(),
+                kind: "image".into(),
+                title: title.into(),
+                collection: None,
+                tags: "[]".into(),
+                rel_path: Some(format!("workshop/assets/{asset_id}.png")),
+                thumb_rel_path: None,
+                mime: Some("image/png".into()),
+                width: None,
+                height: None,
+                bytes: Some(bytes.len() as i64),
+                text_content: None,
+                in_library,
+                origin: None,
                 created_at: 10,
                 updated_at: 20,
             },
@@ -1021,8 +1639,117 @@ mod tests {
         document
     }
 
+    fn director_scene_text() -> String {
+        serde_json::to_string_pretty(&serde_json::json!({
+            "kind": "nomifun.director.project",
+            "version": 1,
+            "project": {
+                "projectId": PROJECT_ID,
+                "name": "3D 导演项目",
+                "scene": {
+                    "name": "主场景",
+                    "transform": {
+                        "position": { "x": 0, "y": 0, "z": 0 },
+                        "rotation": { "x": 0, "y": 0, "z": 0 },
+                        "scale": { "x": 1, "y": 1, "z": 1 }
+                    },
+                    "environment": {
+                        "skyColor": "#101820",
+                        "panorama": { "assetId": DIRECTOR_PANORAMA_ASSET_ID },
+                        "panoramaYawDegrees": 0,
+                        "panoramaRadius": 50,
+                        "groundVisible": true,
+                        "gridVisible": true,
+                        "snapToGrid": false,
+                        "characterLabelsVisible": true
+                    }
+                },
+                "cameras": [{
+                    "kind": "camera",
+                    "id": "camera-1",
+                    "name": "主机位",
+                    "transform": {
+                        "position": { "x": 0, "y": 2, "z": 8 },
+                        "rotation": { "x": 0, "y": 0, "z": 0 },
+                        "scale": { "x": 1, "y": 1, "z": 1 }
+                    },
+                    "visible": true,
+                    "locked": false,
+                    "projection": "perspective",
+                    "focalLengthMm": 50,
+                    "orthographicSize": 10,
+                    "nearClip": 0.1,
+                    "farClip": 1000,
+                    "aspectRatio": { "width": 16, "height": 9 },
+                    "guides": { "frame": true, "center": true, "thirds": true, "safeArea": false }
+                }],
+                "characters": [{
+                    "kind": "character",
+                    "id": "character-1",
+                    "name": "角色",
+                    "transform": {
+                        "position": { "x": -1, "y": 0, "z": 0 },
+                        "rotation": { "x": 0, "y": 0, "z": 0 },
+                        "scale": { "x": 1, "y": 1, "z": 1 }
+                    },
+                    "visible": true,
+                    "locked": false,
+                    "asset": { "assetId": DIRECTOR_CHARACTER_ASSET_ID }
+                }],
+                "objects": [{
+                    "kind": "object",
+                    "id": "object-1",
+                    "name": "道具",
+                    "transform": {
+                        "position": { "x": 1, "y": 0, "z": 0 },
+                        "rotation": { "x": 0, "y": 0, "z": 0 },
+                        "scale": { "x": 1, "y": 1, "z": 1 }
+                    },
+                    "visible": true,
+                    "locked": false,
+                    "asset": { "assetId": DIRECTOR_OBJECT_ASSET_ID }
+                }],
+                "lights": [],
+                "activeCameraId": "camera-1",
+                "selection": null,
+                "viewMode": "director",
+                "panels": {
+                    "leftSidebarOpen": true,
+                    "rightSidebarOpen": true,
+                    "timelineOpen": true
+                },
+                "timeline": {
+                    "durationSeconds": 5,
+                    "currentTimeSeconds": 0,
+                    "framesPerSecond": 24,
+                    "loop": false,
+                    "tracks": []
+                },
+                "capture": {
+                    "settings": {
+                        "width": 1920,
+                        "height": 1080,
+                        "imageFormat": "png",
+                        "videoFramesPerSecond": 24
+                    },
+                    "records": [{
+                        "id": "capture-1",
+                        "kind": "image",
+                        "cameraId": "camera-1",
+                        "assetId": DIRECTOR_CAPTURE_ASSET_ID,
+                        "capturedAt": 123,
+                        "width": 1920,
+                        "height": 1080,
+                        "format": "png"
+                    }]
+                }
+            }
+        }))
+        .unwrap()
+    }
+
     fn director_scene_asset_snapshot() -> CreativeArchiveAssetSnapshot {
-        let text = r#"{"schema":"nomifun.director/v1","version":1}"#;
+        let text = director_scene_text();
         CreativeArchiveAssetSnapshot {
             row: WorkshopAssetRow {
                 id: 2,
@@ -1037,13 +1764,13 @@ mod tests {
                 width: None,
                 height: None,
                 bytes: Some(text.len() as i64),
-                text_content: Some(text.into()),
+                text_content: Some(text.clone()),
                 in_library: false,
                 origin: None,
                 created_at: 10,
                 updated_at: 20,
             },
-            bytes: text.as_bytes().to_vec(),
+            bytes: text.into_bytes(),
         }
     }
 
@@ -1083,30 +1810,206 @@ mod tests {
     }
 
     #[test]
-    fn director_scene_sidecar_round_trips_and_remaps_its_asset_pointer() {
+    fn known_canvas_config_parameters_join_the_archive_closure_and_remap() {
         let bytes = build_creative_project_archive(
-            "3D 导演项目",
-            &director_document(),
-            vec![director_scene_asset_snapshot()],
+            "生成历史项目",
+            &config_reference_document(),
+            vec![
+                opaque_image_asset_snapshot(ASSET_ID, "源图片", false),
+                opaque_image_asset_snapshot(MASK_REFERENCE_ASSET_ID, "遮罩参考", false),
+                opaque_image_asset_snapshot(CONFIG_RESULT_ASSET_ID, "生成结果", false),
+            ],
             30,
         )
         .unwrap();
         let parsed = parse_creative_project_archive(&bytes).unwrap();
-        assert_eq!(parsed.assets.len(), 1);
-        assert_eq!(parsed.assets[0].metadata.asset_id, DIRECTOR_SCENE_ASSET_ID);
-        assert_eq!(parsed.assets[0].metadata.kind, "text");
+        assert_eq!(parsed.assets.len(), 3);
+
+        let imported_project = "0190f5fe-7c00-7a00-8abc-000000000713";
+        let remapped = remap_creative_archive_for_import(parsed, imported_project).unwrap();
+        let source = &remapped.document.nodes[0];
+        assert_ne!(source.id, "config-source-node");
+        let asset_by_title = remapped
+            .assets
+            .iter()
+            .map(|asset| (asset.metadata.title.as_str(), asset.metadata.asset_id.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        let CreativeNodeData::Config(compose) = &remapped.document.nodes[1].data else {
+            panic!("expected compose config")
+        };
+        assert_eq!(compose.parameters["sourceNodeId"], source.id);
+        assert_eq!(compose.parameters["sourceAssetId"], asset_by_title["源图片"]);
+        assert_eq!(compose.result_asset_ids, [asset_by_title["生成结果"]]);
+        let CreativeNodeData::Config(mask) = &remapped.document.nodes[2].data else {
+            panic!("expected mask config")
+        };
+        assert_eq!(mask.parameters["sourceNodeId"], source.id);
+        assert_eq!(mask.parameters["sourceAssetId"], asset_by_title["源图片"]);
+        assert_eq!(
+            mask.parameters["markedReferenceAssetId"],
+            asset_by_title["遮罩参考"]
+        );
+        assert_eq!(mask.input_asset_ids, [asset_by_title["遮罩参考"]]);
+        let CreativeNodeData::Config(t2i) = &remapped.document.nodes[3].data else {
+            panic!("expected t2i config")
+        };
+        assert_eq!(t2i.parameters["sourceNodeId"], source.id);
+        assert_eq!(t2i.parameters["sourceAssetId"], Value::Null);
+        let remapped_json = serde_json::to_string(&remapped.document).unwrap();
+        for old_id in [
+            "config-source-node",
+            ASSET_ID,
+            MASK_REFERENCE_ASSET_ID,
+            CONFIG_RESULT_ASSET_ID,
+        ] {
+            assert!(!remapped_json.contains(old_id));
+        }
+
+        let mut unsupported = config_reference_document();
+        let CreativeNodeData::Config(config) = &mut unsupported.nodes[1].data else {
+            unreachable!()
+        };
+        config.parameters.insert(
+            "canvasOperation".into(),
+            Value::String("future-media-operation".into()),
+        );
+        assert!(matches!(
+            collect_document_asset_ids(&unsupported),
+            Err(AppError::BadRequest(message)) if message.contains("future-media-operation")
+        ));
+    }
+
+    #[test]
+    fn director_scene_sidecar_round_trips_and_remaps_its_asset_pointer() {
+        let bytes = build_creative_project_archive(
+            "3D 导演项目",
+            &director_document(),
+            vec![
+                director_scene_asset_snapshot(),
+                opaque_image_asset_snapshot(
+                    DIRECTOR_PANORAMA_ASSET_ID,
+                    "导演全景",
+                    false,
+                ),
+                opaque_image_asset_snapshot(
+                    DIRECTOR_CHARACTER_ASSET_ID,
+                    "角色资产",
+                    false,
+                ),
+                opaque_image_asset_snapshot(DIRECTOR_OBJECT_ASSET_ID, "道具资产", false),
+                opaque_image_asset_snapshot(
+                    DIRECTOR_CAPTURE_ASSET_ID,
+                    "未发送截图",
+                    false,
+                ),
+            ],
+            30,
+        )
+        .unwrap();
+        let parsed = parse_creative_project_archive(&bytes).unwrap();
+        assert_eq!(parsed.assets.len(), 5);
+        assert!(parsed
+            .assets
+            .iter()
+            .any(|asset| asset.metadata.asset_id == DIRECTOR_SCENE_ASSET_ID));
 
         let imported_project = "0190f5fe-7c00-7a00-8abc-000000000706";
         let remapped = remap_creative_archive_for_import(parsed, imported_project).unwrap();
         let CreativeNodeData::Director(director) = &remapped.document.nodes[0].data else {
             panic!("expected Director node")
         };
-        assert_eq!(
-            director.scene_id.as_deref(),
-            Some(remapped.assets[0].metadata.asset_id.as_str())
-        );
+        let sidecar = remapped
+            .assets
+            .iter()
+            .find(|asset| asset.metadata.kind == "text")
+            .expect("Director sidecar must remain a text asset");
+        assert_eq!(director.scene_id.as_deref(), Some(sidecar.metadata.asset_id.as_str()));
         assert_ne!(director.scene_id.as_deref(), Some(DIRECTOR_SCENE_ASSET_ID));
-        assert!(WorkshopAssetId::parse(&remapped.assets[0].metadata.asset_id).is_ok());
+        assert!(WorkshopAssetId::parse(&sidecar.metadata.asset_id).is_ok());
+
+        let sidecar_value: Value = serde_json::from_slice(&sidecar.bytes).unwrap();
+        assert_eq!(
+            sidecar_value["project"]["projectId"],
+            Value::String(imported_project.into())
+        );
+        let nested = director_sidecar_asset_ids(&sidecar.bytes, imported_project).unwrap();
+        let imported_media = remapped
+            .assets
+            .iter()
+            .filter(|asset| asset.metadata.kind != "text")
+            .map(|asset| asset.metadata.asset_id.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(nested, imported_media);
+        for old_id in [
+            PROJECT_ID,
+            DIRECTOR_PANORAMA_ASSET_ID,
+            DIRECTOR_CHARACTER_ASSET_ID,
+            DIRECTOR_OBJECT_ASSET_ID,
+            DIRECTOR_CAPTURE_ASSET_ID,
+        ] {
+            assert!(!String::from_utf8(sidecar.bytes.clone()).unwrap().contains(old_id));
+        }
+        assert_eq!(sidecar.metadata.byte_length, sidecar.bytes.len() as u64);
+        assert_eq!(sidecar.metadata.sha256, sha256_bytes(&sidecar.bytes));
+    }
+
+    #[test]
+    fn director_sidecar_closure_rejects_missing_or_nonportable_dependencies() {
+        let missing = build_creative_project_archive(
+            "3D 导演项目",
+            &director_document(),
+            vec![director_scene_asset_snapshot()],
+            30,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            missing,
+            AppError::Conflict(message) if message.contains("missing referenced asset")
+        ));
+
+        let mut wrong_project = director_scene_asset_snapshot();
+        let mut value: Value = serde_json::from_slice(&wrong_project.bytes).unwrap();
+        value["project"]["projectId"] =
+            Value::String("0190f5fe-7c00-7a00-8abc-000000000799".into());
+        wrong_project.bytes = serde_json::to_vec_pretty(&value).unwrap();
+        wrong_project.row.text_content = Some(String::from_utf8(wrong_project.bytes.clone()).unwrap());
+        let error = build_creative_project_archive(
+            "3D 导演项目",
+            &director_document(),
+            vec![
+                wrong_project,
+                opaque_image_asset_snapshot(
+                    DIRECTOR_PANORAMA_ASSET_ID,
+                    "导演全景",
+                    false,
+                ),
+                opaque_image_asset_snapshot(
+                    DIRECTOR_CHARACTER_ASSET_ID,
+                    "角色资产",
+                    false,
+                ),
+                opaque_image_asset_snapshot(DIRECTOR_OBJECT_ASSET_ID, "道具资产", false),
+                opaque_image_asset_snapshot(
+                    DIRECTOR_CAPTURE_ASSET_ID,
+                    "未发送截图",
+                    false,
+                ),
+            ],
+            30,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::Conflict(message) if message.contains("does not match Creative Studio project")
+        ));
+
+        let invalid_asset = director_scene_text().replace(
+            DIRECTOR_CAPTURE_ASSET_ID,
+            "https://example.invalid/capture.png",
+        );
+        assert!(director_sidecar_asset_ids(invalid_asset.as_bytes(), PROJECT_ID)
+            .unwrap_err()
+            .contains("assetId"));
     }
 
     #[test]
