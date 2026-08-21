@@ -8,7 +8,13 @@ export { default as CreativeCanvasImageToolbar } from "./CreativeCanvasImageTool
 export type { CreativeCanvasImageToolbarProps } from "./CreativeCanvasImageToolbar";
 export { default as CreativeImageCropDialog } from "./CreativeImageCropDialog";
 export type { CreativeImageCropDialogProps } from "./CreativeImageCropDialog";
+export { default as CreativeImageSplitDialog } from "./CreativeImageSplitDialog";
+export type { CreativeImageSplitDialogProps } from "./CreativeImageSplitDialog";
 export * from "./browserCrop";
+export * from "./browserSplit";
 export * from "./canvasResult";
 export * from "./cropModel";
+export * from "./splitModel";
+export * from "./splitCanvasResult";
 export * from "./uploadCrop";
+export * from "./uploadSplit";

@@ -284,6 +284,263 @@
   gap: 8px;
 }
 
+.splitDialog {
+  display: grid;
+  gap: 14px;
+  outline: none;
+}
+
+.splitSubtitle {
+  margin: -2px 0 0;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.splitWorkspace {
+  display: grid;
+  align-items: start;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 24px;
+  margin-top: 6px;
+}
+
+.splitPreviewPane {
+  display: grid;
+  min-width: 0;
+  gap: 9px;
+  padding: 16px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 10px;
+  background: var(--color-bg-2);
+}
+
+.splitPreviewWell {
+  display: grid;
+  height: min(304px, 70vw);
+  place-items: center;
+  border-radius: 8px;
+  background: var(--color-fill-1);
+}
+
+.splitStage {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 9px;
+  background: #080808;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  touch-action: none;
+}
+
+.splitStage > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  user-select: none;
+}
+
+.splitLine {
+  position: absolute;
+  z-index: 3;
+  padding: 0;
+  border: 5px solid transparent;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.94);
+  background-clip: content-box;
+  box-sizing: content-box;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.45),
+    0 0 8px rgba(0, 0, 0, 0.4);
+  transform: translate(-50%, -50%);
+}
+
+.splitLine[data-split-axis="horizontal"] {
+  right: 0;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  cursor: ns-resize;
+  transform: translateY(-50%);
+}
+
+.splitLine[data-split-axis="vertical"] {
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  height: 100%;
+  cursor: ew-resize;
+  transform: translateX(-50%);
+}
+
+.splitLine::after {
+  position: absolute;
+  border: 2px solid white;
+  border-radius: 50%;
+  background: rgb(var(--primary-6));
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.35);
+  content: "";
+  opacity: 0;
+}
+
+.splitLine[data-split-axis="horizontal"]::after {
+  top: 50%;
+  left: 50%;
+  width: 9px;
+  height: 9px;
+  transform: translate(-50%, -50%);
+}
+
+.splitLine[data-split-axis="vertical"]::after {
+  top: 50%;
+  left: 50%;
+  width: 9px;
+  height: 9px;
+  transform: translate(-50%, -50%);
+}
+
+.splitLine[data-selected="true"] {
+  background: rgb(var(--primary-6));
+}
+
+.splitLine[data-selected="true"]::after,
+.splitLine:hover::after {
+  opacity: 1;
+}
+
+.splitLine:focus-visible {
+  outline: 1px dotted rgba(255, 255, 255, 0.82);
+  outline-offset: 2px;
+}
+
+.splitOriginalSize {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.splitOriginalSize strong {
+  color: var(--color-text-2);
+  font-weight: 600;
+}
+
+.splitControlPane {
+  display: grid;
+  gap: 22px;
+  padding-top: 9px;
+}
+
+.splitControlSection,
+.splitSummary {
+  display: grid;
+  gap: 9px;
+}
+
+.splitSummary {
+  padding: 12px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 9px;
+  background: var(--color-fill-1);
+}
+
+.splitActionGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.splitCountGrid {
+  display: grid;
+  gap: 18px;
+}
+
+.splitCountGrid label {
+  display: grid;
+  align-items: center;
+  grid-template-columns: 30px 88px;
+  gap: 0;
+  color: var(--color-text-2);
+  font-size: 12px;
+}
+
+.splitCountGrid input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 7px;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  font: inherit;
+  font-size: 12px;
+}
+
+.splitActionGrid :global(.arco-btn) {
+  height: 32px;
+  min-width: 0;
+  padding-right: 7px;
+  padding-left: 7px;
+  font-size: 11px;
+}
+
+.splitSummary {
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 7px 12px;
+}
+
+.splitSummary span {
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.splitSummary strong {
+  color: var(--color-text-1);
+  font-size: 12px;
+  font-weight: 650;
+  text-align: right;
+}
+
+.splitGenerateButton {
+  --button-primary-text: var(--color-bg-1);
+
+  width: 100%;
+  height: 40px;
+  border-color: var(--color-text-1) !important;
+  background: var(--color-text-1) !important;
+  color: var(--color-bg-1) !important;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.splitModal :global(.arco-modal-title) {
+  text-align: left;
+  font-size: 20px;
+  font-weight: 600;
+  transform: translateY(5px);
+}
+
+.splitModal :global(.arco-modal-header) {
+  padding: 0 24px;
+  border-bottom: 0;
+}
+
+.splitModal :global(.arco-modal-close-icon) {
+  top: 4px;
+  right: 8px;
+  box-sizing: border-box;
+  width: 40px;
+  height: 40px;
+  padding: 11px;
+  border: 1px solid var(--color-border-3);
+  border-radius: 7px;
+  background: var(--color-bg-2);
+}
+
 @media (max-width: 720px) {
   .nodeToolbar span {
     display: none;
@@ -300,6 +557,22 @@
 
   .aspectSelect {
     justify-content: space-between;
+  }
+
+  .splitWorkspace {
+    grid-template-columns: 1fr;
+  }
+
+  .splitControlPane {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .splitSummary {
+    grid-column: 1 / -1;
+  }
+
+  .splitGenerateButton {
+    grid-column: 1 / -1;
   }
 }
 

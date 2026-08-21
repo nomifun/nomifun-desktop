@@ -11,6 +11,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { CreativeAsset } from "../../assets";
 import CreativeCanvasImageToolbar from "./CreativeCanvasImageToolbar";
 import { CreativeImageCropDialogContent } from "./CreativeImageCropDialog";
+import { CreativeImageSplitDialogContent } from "./CreativeImageSplitDialog";
 
 const ASSET: CreativeAsset = {
   id: "018f7a3c-1234-7abc-8abc-1234567890ab",
@@ -38,6 +39,7 @@ describe("creative image tool surfaces", () => {
         visible
         onCrop={() => undefined}
         onDownload={() => undefined}
+        onSplit={() => undefined}
       >
         <article>image</article>
       </CreativeCanvasImageToolbar>,
@@ -45,6 +47,7 @@ describe("creative image tool surfaces", () => {
     expect(html.includes('aria-label="图片工具"')).toBe(true);
     expect(html.includes("裁剪并生成新节点")).toBe(true);
     expect(html.includes("下载图片")).toBe(true);
+    expect(html.includes("切分并生成图片子节点")).toBe(true);
     expect(html.includes("局部编辑")).toBe(false);
     expect(html.includes("AI 超分")).toBe(false);
   });
@@ -65,5 +68,24 @@ describe("creative image tool surfaces", () => {
     expect(html.split("调整裁剪框：").length - 1).toBe(8);
     expect(html.includes("自由比例")).toBe(true);
     expect(html.includes("16:9")).toBe(true);
+  });
+
+  test("renders a real draggable 2 by 2 split with source dimensions", () => {
+    const html = renderToStaticMarkup(
+      <CreativeImageSplitDialogContent
+        visible
+        asset={ASSET}
+        onClose={() => undefined}
+        onConfirm={() => undefined}
+      />,
+    );
+    expect(html.includes("data-creative-image-split-dialog")).toBe(true);
+    expect(html.includes("生成 4 个图片子节点")).toBe(true);
+    expect(html.includes("1920 × 1080")).toBe(true);
+    expect(html.includes("960 × 540")).toBe(true);
+    expect(html.includes('data-split-axis="horizontal"')).toBe(true);
+    expect(html.includes('data-split-axis="vertical"')).toBe(true);
+    expect(html.includes("删除线")).toBe(true);
+    expect(html.includes("生成子节点")).toBe(true);
   });
 });

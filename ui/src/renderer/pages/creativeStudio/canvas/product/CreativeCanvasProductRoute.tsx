@@ -80,10 +80,20 @@ import {
 import {
   CreativeCanvasImageToolbar,
   CreativeImageCropDialog,
+  CreativeImageSplitDialog,
+  createCreativeImageSplitCanvasLayout,
+  creativeImageSplitColumns,
+  creativeImageSplitNodePosition,
+  creativeImageSplitRows,
   cropCreativeImageAsset,
   nextDerivedImagePosition,
+  removeUploadedCreativeImageSplit,
+  splitCreativeImageAsset,
   uploadCreativeImageCrop,
+  uploadCreativeImageSplit,
   type CreativeImageCropRect,
+  type CreativeImageSplitParams,
+  type UploadedCreativeImageSplitPiece,
 } from '../imageTools';
 import { CreativeNodeView } from '../nodes';
 import CreativeCanvasAgentPanel, {
@@ -150,6 +160,11 @@ interface PendingPanoramaChoice {
 }
 
 interface PendingImageCrop {
+  nodeId: string;
+  asset: CreativeAsset;
+}
+
+interface PendingImageSplit {
   nodeId: string;
   asset: CreativeAsset;
 }
@@ -342,6 +357,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [imageCropBusy, setImageCropBusy] = useState(false);
   const [imageCropProgress, setImageCropProgress] = useState<number | null>(null);
   const [imageCropError, setImageCropError] = useState<string | null>(null);
+  const [pendingImageSplit, setPendingImageSplit] = useState<PendingImageSplit | null>(null);
+  const [imageSplitBusy, setImageSplitBusy] = useState(false);
+  const [imageSplitProgress, setImageSplitProgress] = useState<number | null>(null);
+  const [imageSplitError, setImageSplitError] = useState<string | null>(null);
   const [agentDocumentState, setAgentDocumentState] = useState<AgentDocumentState | null>(null);
   const [workflows, setWorkflows] = useState<WorkflowDefinitionV1[]>([]);
   const [workflowLoading, setWorkflowLoading] = useState(false);
@@ -422,6 +441,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setImageCropBusy(false);
     setImageCropProgress(null);
     setImageCropError(null);
+    setPendingImageSplit(null);
+    setImageSplitBusy(false);
+    setImageSplitProgress(null);
+    setImageSplitError(null);
     setAgentDocumentState(null);
     assetImportBusyRef.current = false;
     imageToolBusyRef.current = false;
@@ -747,6 +770,26 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [projectId, resolveCanvasImageAsset]
   );
 
+  const handleOpenImageSplit = useCallback(
+    async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
+      if (imageToolBusyRef.current || assetImportBusyRef.current) {
+        setNotice('已有图片或素材操作正在进行，请等待完成。');
+        return;
+      }
+      setImageSplitError(null);
+      try {
+        const asset = await resolveCanvasImageAsset(node);
+        if (activeProjectIdRef.current !== projectId) return;
+        setImageSplitProgress(null);
+        setPendingImageSplit({ nodeId: node.id, asset });
+      } catch (error) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setNotice(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [projectId, resolveCanvasImageAsset]
+  );
+
   const closeImageCrop = useCallback(() => {
     if (imageToolBusyRef.current) return;
     setPendingImageCrop(null);
@@ -886,6 +929,181 @@ const CreativeCanvasProductRoute: React.FC = () => {
       }
     },
     [assets, pendingImageCrop, projectId]
+  );
+
+  const closeImageSplit = useCallback(() => {
+    if (imageToolBusyRef.current) return;
+    setPendingImageSplit(null);
+    setImageSplitProgress(null);
+    setImageSplitError(null);
+  }, []);
+
+  const handleConfirmImageSplit = useCallback(
+    async (params: CreativeImageSplitParams) => {
+      const request = pendingImageSplit;
+      const editor = editorRef.current;
+      if (!request || !editor || imageToolBusyRef.current) return;
+      if (assetImportBusyRef.current) {
+        setImageSplitError('另一个素材上传仍在进行，请等待完成后重试。');
+        return;
+      }
+
+      const controller = new AbortController();
+      const operationId = uuidv7();
+      imageToolAbortRef.current = controller;
+      imageToolBusyRef.current = true;
+      setImageSplitBusy(true);
+      setImageSplitProgress(0);
+      setImageSplitError(null);
+      let uploadedPieces: readonly UploadedCreativeImageSplitPiece[] | null = null;
+      let canvasMutated = false;
+
+      try {
+        const files = await splitCreativeImageAsset({
+          asset: request.asset,
+          params,
+          signal: controller.signal,
+        });
+        const uploaded = await uploadCreativeImageSplit({
+          port: creativeAssetClient,
+          source: request.asset,
+          pieces: files,
+          operationId,
+          signal: controller.signal,
+          onProgress: setImageSplitProgress,
+        });
+        uploadedPieces = uploaded;
+        controller.signal.throwIfAborted();
+        if (activeProjectIdRef.current !== projectId) {
+          throw new DOMException('Project changed', 'AbortError');
+        }
+
+        const current = editor.getState();
+        const source = current.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
+            node.id === request.nodeId && node.type === 'image'
+        );
+        if (!source || source.data.assetId !== request.asset.id) {
+          throw new Error('原图片节点已被删除或替换，未向画布写入切图结果。');
+        }
+
+        const rows = creativeImageSplitRows(params);
+        const columns = creativeImageSplitColumns(params);
+        const layout = createCreativeImageSplitCanvasLayout(
+          current.document,
+          source,
+          rows,
+          columns
+        );
+        const derivedNodes: Extract<CreativeCanvasNode, { type: 'image' }>[] = [];
+        let factoryState = current;
+        for (const piece of uploaded) {
+          const derived = creativeNodeFromAsset(
+            piece.asset,
+            factoryState,
+            measuredSize(canvasHostRef.current),
+            {
+              position: creativeImageSplitNodePosition(layout, piece.row, piece.column),
+              size: layout.cellSize,
+            }
+          );
+          if (derived.type !== 'image') {
+            throw new Error('切图结果未能构造成图片节点。');
+          }
+          derivedNodes.push(derived);
+          factoryState = {
+            ...factoryState,
+            document: {
+              ...factoryState.document,
+              nodes: [...factoryState.document.nodes, derived],
+            },
+          };
+        }
+
+        const prospectiveDocument = {
+          ...current.document,
+          nodes: [...current.document.nodes, ...derivedNodes],
+        };
+        for (const derived of derivedNodes) {
+          const validation = validateCanvasConnection(prospectiveDocument, {
+            sourceNodeId: source.id,
+            targetNodeId: derived.id,
+          });
+          if (!validation.ok) {
+            throw new Error(
+              `无法连接切图结果：${connectionErrorMessage(validation.code)}。`
+            );
+          }
+        }
+
+        const nextAssets = new Map(knownAssetsRef.current);
+        for (const piece of uploaded) nextAssets.set(piece.asset.id, piece.asset);
+        knownAssetsRef.current = nextAssets;
+
+        const at = Date.now();
+        const mergeKey = `image-split:${source.id}:${operationId}`;
+        canvasMutated = true;
+        for (const derived of derivedNodes) {
+          editor.dispatch(canvasCommands.addNode(derived, { at, mergeKey }));
+        }
+        for (const derived of derivedNodes) {
+          editor.dispatch(
+            canvasCommands.connect(source.id, derived.id, {
+              sourceHandle: 'source',
+              targetHandle: 'target',
+              at,
+              mergeKey,
+            })
+          );
+        }
+        editor.dispatch(canvasCommands.setSelection(derivedNodes.map((node) => node.id)));
+        setPendingImageSplit(null);
+        setImageSplitProgress(null);
+        void assets.reload();
+
+        const flush = await editor.flush();
+        if (flush.status === 'saved' || flush.status === 'noop') {
+          setNotice(
+            uploaded.some((piece) => piece.recoveredAfterResponseLoss)
+              ? `上传响应中断后已找回切图素材，创建并保存 ${derivedNodes.length} 个图片子节点。`
+              : `已切分真实原图，创建并保存 ${derivedNodes.length} 个图片子节点及连线。`
+          );
+        } else {
+          setNotice(`切图素材已上传，但画布保存失败：${flush.error.message}`);
+        }
+      } catch (error) {
+        const aborted =
+          controller.signal.aborted ||
+          (error instanceof Error && error.name === 'AbortError');
+        let message = error instanceof Error ? error.message : String(error);
+        if (uploadedPieces && !canvasMutated) {
+          try {
+            await removeUploadedCreativeImageSplit(creativeAssetClient, uploadedPieces);
+          } catch (cleanupError) {
+            const cleanupMessage =
+              cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+            message = `${message}；${cleanupMessage}`;
+          }
+          void assets.reload();
+        }
+        if (!aborted && activeProjectIdRef.current === projectId) {
+          if (canvasMutated) {
+            setPendingImageSplit(null);
+            setImageSplitProgress(null);
+            setNotice(message);
+          } else {
+            setImageSplitError(message);
+          }
+        }
+      } finally {
+        if (imageToolAbortRef.current === controller) {
+          imageToolAbortRef.current = null;
+          imageToolBusyRef.current = false;
+          setImageSplitBusy(false);
+        }
+      }
+    },
+    [assets, pendingImageSplit, projectId]
   );
 
   const insertClipboardText = useCallback((text: string, worldPosition: CanvasPoint) => {
@@ -1504,9 +1722,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
                   return (
                     <CreativeCanvasImageToolbar
                       visible={selected && Boolean(node.data.assetId)}
-                      disabled={productDisabled || assetImportBusy || imageCropBusy}
+                      disabled={
+                        productDisabled || assetImportBusy || imageCropBusy || imageSplitBusy
+                      }
                       onCrop={() => void handleOpenImageCrop(node)}
                       onDownload={() => void handleDownloadImage(node)}
+                      onSplit={() => void handleOpenImageSplit(node)}
                     >
                       {nodeView}
                     </CreativeCanvasImageToolbar>
@@ -1686,6 +1907,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
         error={imageCropError}
         onClose={closeImageCrop}
         onConfirm={(crop) => void handleConfirmImageCrop(crop)}
+      />
+      <CreativeImageSplitDialog
+        visible={pendingImageSplit !== null}
+        asset={pendingImageSplit?.asset ?? null}
+        busy={imageSplitBusy}
+        progress={imageSplitProgress}
+        error={imageSplitError}
+        onClose={closeImageSplit}
+        onConfirm={(params) => void handleConfirmImageSplit(params)}
       />
       <Modal
         title='选择 2:1 图片的节点类型'

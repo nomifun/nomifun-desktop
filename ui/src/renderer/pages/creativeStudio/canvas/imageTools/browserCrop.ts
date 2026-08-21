@@ -42,7 +42,7 @@ export interface CroppedCreativeImageFile {
   mimeType: string;
 }
 
-const outputMimeType = (asset: CreativeAsset): string => {
+export const creativeImageOutputMimeType = (asset: CreativeAsset): string => {
   switch (asset.mimeType?.toLowerCase()) {
     case "image/jpeg":
       return "image/jpeg";
@@ -53,7 +53,7 @@ const outputMimeType = (asset: CreativeAsset): string => {
   }
 };
 
-const extensionForMime = (mimeType: string): string => {
+export const creativeImageExtensionForMime = (mimeType: string): string => {
   switch (mimeType) {
     case "image/jpeg":
       return "jpg";
@@ -64,7 +64,7 @@ const extensionForMime = (mimeType: string): string => {
   }
 };
 
-const safeFileStem = (title: string): string =>
+export const creativeImageSafeFileStem = (title: string): string =>
   (title.trim() || "image")
     .replace(/[<>:"/\\|?*\u0000-\u001f]/gu, "-")
     .replace(/\s+/gu, " ")
@@ -150,10 +150,10 @@ export async function cropCreativeImageAsset(
   try {
     input.signal?.throwIfAborted();
     const pixels = creativeImageCropToPixels(input.crop, decoded);
-    const mimeType = outputMimeType(input.asset);
+    const mimeType = creativeImageOutputMimeType(input.asset);
     const output = await codec.encode(decoded, pixels, mimeType);
     input.signal?.throwIfAborted();
-    const name = `${safeFileStem(input.asset.title)}-crop.${extensionForMime(mimeType)}`;
+    const name = `${creativeImageSafeFileStem(input.asset.title)}-crop.${creativeImageExtensionForMime(mimeType)}`;
     return {
       file: new File([output], name, { type: mimeType }),
       width: pixels.width,
