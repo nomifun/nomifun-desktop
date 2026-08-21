@@ -34,6 +34,10 @@ describe("CreativeDirectorProductRoute structure", () => {
     expect(/\.glb['"`]/i.test(source)).toBe(false);
     expect(source.includes("MediaRecorder")).toBe(false);
     expect(source.includes("onTimelineExport=")).toBe(false);
-    expect(source.includes("onCaptureSendToCanvas=")).toBe(false);
+    expect(source.includes("onCaptureSendToCanvas=")).toBe(true);
+    expect(source.includes("onCaptureSendAll=")).toBe(true);
+    expect(source.includes("transferDirectorCapturesWithReconciliation({")).toBe(
+      true,
+    );
   });
 });

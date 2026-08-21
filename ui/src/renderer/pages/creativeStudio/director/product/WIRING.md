@@ -34,11 +34,17 @@ The Director close action awaits the same gate and returns to
 `creativeStudioCanvasProjectPath(projectId)`, preserving the current project's
 canvas context instead of dropping the user at the project index.
 
-The current workshop asset backend accepts image, video and audio uploads but
+The current Creative Studio asset backend accepts image, video and audio uploads but
 not GLB/glTF. The route therefore keeps model/character import explicitly
 unavailable instead of substituting unlicensed or fake geometry. Single-frame
-Three.js screenshots are uploaded through the real NomiFun asset client;
-multi-angle capture, video export and send-to-canvas remain visibly unwired.
+Three.js screenshots are uploaded through the real NomiFun asset client. An
+individual screenshot or all screenshots for the selected camera can be sent
+to the root canvas as canonical image nodes. The route flushes the Director
+sidecar first, resolves every asset through the authenticated asset client,
+then saves the root document with exact revision CAS. Existing asset nodes are
+reused, and an uncertain response is reconciled against the authoritative
+project before retry, so the action cannot create duplicates. Multi-angle
+capture and video export remain visibly unavailable.
 
 The current backend archive collector also ignores `director.sceneId`; route
 wiring alone therefore does not make Director sidecars portable. Project ZIP

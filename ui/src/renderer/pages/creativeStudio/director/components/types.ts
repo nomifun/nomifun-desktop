@@ -48,6 +48,7 @@ export interface DirectorModelLibraryItem {
 /** Captures always point to real renderer output supplied by the controller. */
 export interface DirectorCapture {
   id: string;
+  assetId: string;
   name: string;
   thumbnailUrl: string;
   imageUrl: string;

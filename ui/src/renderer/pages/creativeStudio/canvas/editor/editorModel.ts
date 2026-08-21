@@ -24,6 +24,7 @@ import type {
 import { parseCreativeProjectDocument } from '../../domain';
 import { isCreativeProjectRepositoryError } from '../../services';
 import type { CanvasBackgroundMode } from '../components';
+import type { CanvasCasSaveSnapshot } from './casSaveController';
 
 export type CreativeCanvasLoadState = 'loading' | 'not-found' | 'error' | 'ready';
 
@@ -46,6 +47,32 @@ export function classifyCreativeCanvasLoadState(input: {
     return 'ready';
   }
   return input.isLoading ? 'loading' : 'not-found';
+}
+
+/**
+ * SWR can synchronously expose an old cached revision before its mount
+ * revalidation finishes. Accept the authoritative follow-up only while the
+ * editor is still idle; never overwrite dirty, saving, failed, or conflicted
+ * local work.
+ */
+export function shouldHydrateCreativeCanvasDetail(input: {
+  projectId: string;
+  loadedProjectId: string | null;
+  loadedRevision: string | null;
+  detail: CreativeProjectDetail | undefined;
+  save: Pick<CanvasCasSaveSnapshot, 'status' | 'hasPendingChanges'>;
+}): boolean {
+  const detail = input.detail;
+  if (
+    !detail ||
+    detail.project.projectId !== input.projectId ||
+    detail.document.projectId !== input.projectId
+  ) {
+    return false;
+  }
+  if (input.loadedProjectId !== input.projectId) return true;
+  if (input.loadedRevision === detail.project.revision) return false;
+  return input.save.status === 'idle' && !input.save.hasPendingChanges;
 }
 
 export function canvasStateFromProjectDocument(

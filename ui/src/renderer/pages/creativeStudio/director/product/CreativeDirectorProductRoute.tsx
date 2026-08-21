@@ -50,11 +50,13 @@ import {
   type DirectorTimelineTrack,
 } from "../domain";
 import {
+  directorVerticalFovDegrees,
   DirectorRuntimeViewport,
   type DirectorRuntimeError,
   type DirectorRuntimeHandle,
 } from "../runtime";
 import { registerCreativeDirectorProductBeforeLeave } from "./beforeLeave";
+import { transferDirectorCapturesWithReconciliation } from "./directorCanvasTransfer";
 import {
   DirectorCasSaveController,
   type DirectorCasSaveSnapshot,
@@ -70,6 +72,7 @@ import {
 import {
   loadDirectorProjectBaseline,
   persistDirectorProject,
+  type DirectorProjectBaseline,
 } from "./directorProjectPersistence";
 import styles from "./CreativeDirectorProductRoute.module.css";
 
@@ -106,6 +109,13 @@ async function loadAllImageAssets(): Promise<CreativeAsset[]> {
     items.push(...result.items);
     if (items.length >= result.total || result.items.length === 0) return items;
   }
+}
+
+async function loadCurrentDirectorBaseline(
+  projectId: string,
+): Promise<DirectorProjectBaseline> {
+  const detail = await creativeProjectRepository.load(projectId);
+  return loadDirectorProjectBaseline(detail, creativeAssetClient);
 }
 
 function entityReferenceById(
@@ -200,6 +210,7 @@ const CreativeDirectorProductRoute: React.FC = () => {
   const stateRef = useRef<DirectorState | null>(null);
   const loadEpochRef = useRef(0);
   const captureInFlightRef = useRef(false);
+  const captureTransferInFlightRef = useRef(false);
 
   const controller = useMemo(
     () =>
@@ -246,6 +257,22 @@ const CreativeDirectorProductRoute: React.FC = () => {
   );
   const [autoKey, setAutoKey] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [captureTransferBusy, setCaptureTransferBusy] = useState(false);
+
+  const adoptBaseline = useCallback(
+    (baseline: DirectorProjectBaseline) => {
+      controller.reset(baseline);
+      stateRef.current = baseline.state;
+      setState(baseline.state);
+      setPanelsCollapsed(
+        !baseline.state.panels.leftSidebarOpen &&
+          !baseline.state.panels.rightSidebarOpen,
+      );
+      setSelectedTrackId(baseline.state.timeline.tracks[0]?.id ?? null);
+      setSelectedKeyframeId(null);
+    },
+    [controller],
+  );
 
   const hydrate = useCallback(async () => {
     const epoch = ++loadEpochRef.current;
@@ -260,22 +287,13 @@ const CreativeDirectorProductRoute: React.FC = () => {
       return;
     }
     try {
-      const detail = await creativeProjectRepository.load(projectId);
       const [baseline, imageAssets] = await Promise.all([
-        loadDirectorProjectBaseline(detail, creativeAssetClient),
+        loadCurrentDirectorBaseline(projectId),
         loadAllImageAssets(),
       ]);
       if (epoch !== loadEpochRef.current) return;
-      controller.reset(baseline);
-      stateRef.current = baseline.state;
-      setState(baseline.state);
+      adoptBaseline(baseline);
       setAssets(imageAssets);
-      setPanelsCollapsed(
-        !baseline.state.panels.leftSidebarOpen &&
-          !baseline.state.panels.rightSidebarOpen,
-      );
-      setSelectedTrackId(baseline.state.timeline.tracks[0]?.id ?? null);
-      setSelectedKeyframeId(null);
       setLoad({ status: "ready", error: null });
     } catch (cause) {
       if (epoch !== loadEpochRef.current) return;
@@ -284,7 +302,7 @@ const CreativeDirectorProductRoute: React.FC = () => {
         error: cause instanceof Error ? cause : new Error(String(cause)),
       });
     }
-  }, [controller, projectId]);
+  }, [adoptBaseline, projectId]);
 
   useEffect(() => {
     void hydrate();
@@ -330,8 +348,8 @@ const CreativeDirectorProductRoute: React.FC = () => {
   }, [applyCommands, state?.timeline.playing]);
 
   const flushBeforeLeave = useCallback(async (): Promise<boolean> => {
-    if (captureInFlightRef.current) {
-      setNotice("截图仍在上传，请等待完成后再离开。");
+    if (captureInFlightRef.current || captureTransferInFlightRef.current) {
+      setNotice("截图仍在处理，请等待完成后再离开。");
       return false;
     }
     const result = await controller.flush();
@@ -429,20 +447,33 @@ const CreativeDirectorProductRoute: React.FC = () => {
       if (!entity) return;
       if (value.kind === "camera" && entity.kind === "camera") {
         if (value.tab !== cameraTab) setCameraTab(value.tab);
-        applyCommands(
-          directorCommands.renameEntity(selection, value.name),
-          directorCommands.setEntityTransform(selection, {
+        const commands: DirectorCommand[] = [];
+        if (value.name !== entity.name) {
+          commands.push(directorCommands.renameEntity(selection, value.name));
+        }
+        if (
+          value.position.x !== entity.transform.position.x ||
+          value.position.y !== entity.transform.position.y ||
+          value.position.z !== entity.transform.position.z ||
+          value.rotation.x !== entity.transform.rotation.x ||
+          value.rotation.y !== entity.transform.rotation.y ||
+          value.rotation.z !== entity.transform.rotation.z
+        ) {
+          commands.push(directorCommands.setEntityTransform(selection, {
             ...entity.transform,
             position: { ...value.position },
             rotation: { ...value.rotation },
-          }),
-          directorCommands.configureCamera(entity.id, {
+          }));
+        }
+        if (value.fov !== directorVerticalFovDegrees(entity)) {
+          commands.push(directorCommands.configureCamera(entity.id, {
             focalLengthMm: directorFocalLengthForVerticalFov(
               value.fov,
               entity.aspectRatio,
             ),
-          }),
-        );
+          }));
+        }
+        if (commands.length > 0) applyCommands(...commands);
         return;
       }
       if (value.kind === "character" && entity.kind === "character") {
@@ -619,7 +650,7 @@ const CreativeDirectorProductRoute: React.FC = () => {
       );
       commitState(completed);
       setCameraTab("captures");
-      setNotice("截图已上传为真实 NomiFun 素材；发送到画布尚未接线。");
+      setNotice("截图已上传为真实 NomiFun 素材，可发送到画布。");
     } catch (cause) {
       const latest = stateRef.current ?? started;
       commitState(
@@ -652,6 +683,63 @@ const CreativeDirectorProductRoute: React.FC = () => {
     );
     setNotice("已清空场景截图记录；素材库原文件未删除。");
   }, [applyCommands]);
+
+  const sendCapturesToCanvas = useCallback(
+    async (captures: readonly DirectorCapture[]) => {
+      if (captures.length === 0 || captureTransferInFlightRef.current) return;
+      captureTransferInFlightRef.current = true;
+      setCaptureTransferBusy(true);
+      setNotice("正在校验真实截图素材并写入画布…");
+      try {
+        const flushed = await controller.flush();
+        if (flushed.status === "conflict" || flushed.status === "error") {
+          setNotice(`导演场景尚未保存，无法发送到画布：${flushed.error.message}`);
+          return;
+        }
+        const baseline = controller.getBaseline();
+        if (!baseline) throw new Error("导演项目尚未完成载入。");
+        const transfers = await Promise.all(
+          captures.map(async (capture) => ({
+            captureId: capture.id,
+            asset: await creativeAssetClient.get(capture.assetId),
+          })),
+        );
+        const outcome = await transferDirectorCapturesWithReconciliation({
+          baseline,
+          captures: transfers,
+          repository: creativeProjectRepository,
+          reloadBaseline: () => loadCurrentDirectorBaseline(projectId),
+        });
+        adoptBaseline(outcome.result.baseline);
+        setCameraTab("captures");
+        switch (outcome.status) {
+          case "inserted":
+            setNotice(
+              `已将 ${outcome.result.insertedNodes.length} 张真实截图发送到画布。`,
+            );
+            break;
+          case "already-present":
+            setNotice("所选截图已在画布中，没有创建重复节点。");
+            break;
+          case "confirmed-after-response-loss":
+            setNotice("发送响应曾中断，但已从权威项目确认截图位于画布中。");
+            break;
+          case "conflict":
+            setNotice("画布已被其他操作更新，已载入远端版本；请重试发送。");
+            break;
+          case "failed":
+            setNotice(`发送失败，已重新载入权威项目：${outcome.error.message}`);
+            break;
+        }
+      } catch (cause) {
+        setNotice(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        captureTransferInFlightRef.current = false;
+        setCaptureTransferBusy(false);
+      }
+    },
+    [adoptBaseline, controller, projectId],
+  );
 
   const addKeyframe = useCallback(
     (trackId: string, timeSeconds: number) => {
@@ -733,7 +821,7 @@ const CreativeDirectorProductRoute: React.FC = () => {
     selectedKeyframeId,
     autoKey,
   });
-  const disabled = save.revision === null || recoveryBusy;
+  const disabled = save.revision === null || recoveryBusy || captureTransferBusy;
 
   const saveActions = (
     <div className={styles.saveActions} data-save-status={save.status}>
@@ -870,7 +958,13 @@ const CreativeDirectorProductRoute: React.FC = () => {
           window.open(capture.imageUrl, "_blank", "noopener,noreferrer")
         }
         onCaptureDelete={deleteCapture}
+        onCaptureSendToCanvas={(capture) => void sendCapturesToCanvas([capture])}
         onCaptureClearAll={clearCaptures}
+        onCaptureSendAll={() => {
+          if (inspector.kind === "camera") {
+            void sendCapturesToCanvas(inspector.captures);
+          }
+        }}
         onAddCharacter={() => {
           setModelLibraryOpen(true);
           setNotice(

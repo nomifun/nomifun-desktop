@@ -208,9 +208,9 @@ const DirectorTimeline: React.FC<DirectorTimelineProps> = ({
       <div className={styles.timelineGrid}>
         <div className={styles.timelineListHeading}>场景轨道</div>
         <div className={styles.timelineRuler}>
-          {rulerTicks.map((tick) => (
+          {rulerTicks.map((tick, index) => (
             <span
-              key={tick}
+              key={`ruler-${index}-${tick}`}
               className={styles.timelineTick}
               style={{ left: percentAt(tick, timeline.durationSeconds) }}
             >
@@ -259,9 +259,9 @@ const DirectorTimeline: React.FC<DirectorTimelineProps> = ({
                 className={styles.timelineTrackRow}
                 data-timeline-track-kind={track.kind}
               >
-                {rulerTicks.map((tick) => (
+                {rulerTicks.map((tick, index) => (
                   <span
-                    key={tick}
+                    key={`guide-${index}-${tick}`}
                     className={styles.timelineGuide}
                     style={{ left: percentAt(tick, timeline.durationSeconds) }}
                   />

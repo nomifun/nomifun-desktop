@@ -24,6 +24,7 @@ import {
   projectDocumentWithAgentSessions,
   projectDocumentWithCanvasPanels,
   projectDocumentWithPendingTaskIds,
+  shouldHydrateCreativeCanvasDetail,
 } from './editorModel';
 
 const PROJECT_ID = testUuid(200);
@@ -89,6 +90,48 @@ describe('creative canvas editor model', () => {
         }),
       })
     ).toBe('error');
+  });
+
+  test('replaces an idle cached revision after mount without overwriting local work', () => {
+    const incoming = detail();
+    expect(
+      shouldHydrateCreativeCanvasDetail({
+        projectId: PROJECT_ID,
+        loadedProjectId: null,
+        loadedRevision: null,
+        detail: incoming,
+        save: { status: 'idle', hasPendingChanges: false },
+      })
+    ).toBe(true);
+    expect(
+      shouldHydrateCreativeCanvasDetail({
+        projectId: PROJECT_ID,
+        loadedProjectId: PROJECT_ID,
+        loadedRevision: '6',
+        detail: incoming,
+        save: { status: 'idle', hasPendingChanges: false },
+      })
+    ).toBe(true);
+    expect(
+      shouldHydrateCreativeCanvasDetail({
+        projectId: PROJECT_ID,
+        loadedProjectId: PROJECT_ID,
+        loadedRevision: '7',
+        detail: incoming,
+        save: { status: 'idle', hasPendingChanges: false },
+      })
+    ).toBe(false);
+    for (const status of ['dirty', 'saving', 'saved', 'conflict', 'error'] as const) {
+      expect(
+        shouldHydrateCreativeCanvasDetail({
+          projectId: PROJECT_ID,
+          loadedProjectId: PROJECT_ID,
+          loadedRevision: '6',
+          detail: incoming,
+          save: { status, hasPendingChanges: status !== 'saved' },
+        })
+      ).toBe(false);
+    }
   });
 
   test('round-trips only the canonical canvas fields and preserves project metadata', () => {

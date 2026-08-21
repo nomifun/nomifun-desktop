@@ -90,6 +90,7 @@ function capturePresentation(
     .filter((record) => record.kind === "image")
     .map((record, index) => ({
       id: record.id,
+      assetId: record.assetId,
       name: `机位截图 ${index + 1}`,
       thumbnailUrl: assetUrl(record.assetId),
       imageUrl: assetUrl(record.assetId),

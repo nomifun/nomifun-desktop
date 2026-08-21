@@ -356,7 +356,7 @@ const CameraInspector: React.FC<
         disabled={disabled || value.captures.length === 0 || !onCaptureSendAll}
         onClick={onCaptureSendAll}
       >
-        发送全部
+        发送到画布
       </Button>
     </footer>
   ) : undefined;
