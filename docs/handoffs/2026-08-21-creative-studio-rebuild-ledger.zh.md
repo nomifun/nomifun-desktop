@@ -2,7 +2,7 @@
 
 > 用途：在长任务发生上下文压缩或人员切换时，从可验证提交继续，而不是重新审计整仓。
 > 分支：`codex/infinite-canvas-rebuild`
-> 最后功能锚点：`ef26f4cb`（`feat(creative-studio): persist image composer drafts`）
+> 最后功能锚点：`c12b8db`（`fix(creative-studio): make canvas archives self-contained`）
 > 参考产品锚点：`ef7303d`
 
 ## 1. 续接协议
@@ -23,13 +23,13 @@
 | 阶段 | 当前实现 | 关键提交锚点 |
 | --- | --- | --- |
 | P1-P2 | 受保护运行时拆分、根主题、全屏 Focus Shell、侧栏入口与返回工作台 | `ed9c66df`…`954d6dcb` |
-| P3 | `nomifun.creative-studio/v1`、UUIDv7、项目 CRUD/CAS、项目中心、ZIP 导入导出 | `d03a6a64`、`b4361084`、`44933dd3`…`2ad53b01` |
+| P3 | `nomifun.creative-studio/v1`、UUIDv7、项目 CRUD/CAS、项目中心、自包含 ZIP 导入导出与完整引用重映射 | `d03a6a64`、`b4361084`、`44933dd3`…`2ad53b01`、`c12b8db` |
 | P4 | 画布 reducer/history、视口、节点、连线、小地图、选择/分组/快捷键、Editor CAS、离开/reload 门禁；首节点居中、参考节点几何、固定创作配色、直接节点工具、图片节点生成/上传面板、持久 composer 草稿与双客户端冲突恢复 | `b2e19806`…`dc6c3c34`、`dd18dc6f`、`451dc013`、`5352954c`、`b2e103c8`、`46c1ba1e`、`777caba7`、`ef26f4cb` |
 | P5 | Canonical 资产 API/库、文本/图像/视频/音频节点、素材选择与结果回填 | `57128727`、`e05b18a8`、`04f805a3`、`444db764` |
 | P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44` |
 | P7 | 生图/视频工作台、工作流定义/运行中心、提示词与素材中心 | `2283ee74`、`1414846e`、`ebd17f3a`…`aad21d9d`、`7e45f8ad` |
 | P8 | 持久化画布 Agent、原子操作、裁剪/切分/遮罩编辑与真实任务回填 | `e5368474`…`00f407c6`、`cac4bca8`…`bc01849e` |
-| P9 | Director v1 domain、Three.js runtime、CAS sidecar、时间轴、截图回填、归档重映射 | `1ccbd013`、`d3a609f6`、`7b7712c0`、`dfa3c0b3`、`f25825f1` |
+| P9 | Director v1 domain、Three.js runtime、CAS sidecar、时间轴、截图回填、sidecar 全资产闭包与归档重映射 | `1ccbd013`、`d3a609f6`、`7b7712c0`、`dfa3c0b3`、`f25825f1`、`c12b8db` |
 | P10 | 旧 Workshop UI、翻译、后端路由、旧画布存储与旧任务归属退出运行链 | `63c99d4f`…`7867fe3f` |
 
 主体采用 React/Vite + Rust 原生集成，没有 Next.js、Go sidecar、iframe 或第二套模型配置。模型调用只走 NomiFun 的 provider/model/capability 解析和任务体系。
@@ -53,6 +53,9 @@
 - 图片节点 composer 的未提交提示词、精确 Provider/model、接口模式、质量、宽高、比例和张数现在由图片节点 canonical `data.composer` 持有，不再依赖 React 临时 map。恢复顺序是节点草稿 → 最近一次已提交 config → 产品默认值；显式空提示词不会错误回退旧 config。旧 v1 图片缺少该可选字段时，双端解析器规范化为 `null`；新节点与新序列化始终写出字段。
 - 草稿更新走完整 `canvasCommands.updateNode`、统一 `image-composer:<nodeId>` history merge key 和现有 CAS 队列，因此 Undo/Redo、远端 reload 与 Provider 清理只有一个数据权威。空图通过上传或首个 T2I 结果变成有图时，只清除不再适配 I2I 的模型选择，提示词与其他设置保留；Provider 删除也只清目标 draft model，其他草稿及无关 Provider 保持不变。
 - 真实浏览器在 1440×900 依次验证唯一 marker、Responses、高质量、16:9、3 张、Undo、Redo、完整 reload 和第二个干净客户端，刷新后所有字段精确恢复；随后隔离项目已恢复为空提示词与默认 Images/自动/1:1/1 张。新会话 Console 0 error / 0 warning。空图片的提示词库入口不再误插入文本节点；composer 覆盖到更高 z-index 的相邻节点时也不会再点穿，节点总数保持 3。
+- 单项目 ZIP 现在从外层画布文档递归闭合 Director `sceneId` sidecar 及其中的 panorama、character、object、capture 资产，未发送到画布的截图也不会遗漏。导入先建立完整 asset/node identity map，再重写 sidecar `projectId`、所有嵌套 `assetId`、图片 composer/mask 的 `sourceNodeId`、`sourceAssetId` 与 `markedReferenceAssetId`，并重算 sidecar byteLength/SHA-256；内部 camera/entity/timeline 身份保持不变。
+- 归档只允许当前两种已知引用型 `canvasOperation`；未知 operation、缺依赖、悬空 source node、错误 Director envelope/project ownership、非法 asset ID、额外 entry 和 checksum/budget 漂移均失败关闭。合法 Director 可能拥有 5000 个 capture 与 2000 个 entity asset，因此资产上限已与共享 hardened ZIP 20000-entry 门禁对齐，仍受 256 MB 解压总预算和 manifest 大小约束，不会截断。
+- 导出、单资产删除保护、项目删除清理和启动 managed-data audit 现在共享同一个异步 Director 资产闭包。三套全新 service/data root 已真实完成 A 导出 → B 导入/资产读取/再导出 → C 再导入，B 删除项目后 sidecar、全景和未发送截图均确认删除。隔离 Web 项目中心也从新后端真实导出 1 个 ZIP 并显示成功，Console 0 error / 0 warning。
 
 `dd18dc6f` 的提交前检查：
 
@@ -104,6 +107,13 @@
 - UI production build：通过；仅保留仓库既存的动态/静态重复导入与大 chunk 提示。
 - 真实浏览器：参考项目仍运行在 3000，目标运行在隔离 5174/8788；marker 与全部设置跨 reload/第二客户端恢复，Undo/Redo 和空图片提示词入口通过，未触发付费生成或写入本地文件。
 
+`c12b8db` 的提交前检查：
+
+- `cargo test -p nomifun-workshop --lib`：75 passed；包含真实 Director v1 sidecar、两类 canvas config 参数、缺失/非法依赖，以及三套全新 data root 的导入/再导出/删除集成门禁。
+- `cargo check -p nomifun-app --lib`、Rust 定向 fmt、`bun run check:dead-css`、`git diff --cached --check`：通过；输出仅有其他 crate 的既存未使用代码警告。
+- 真实浏览器：8788 后端以原隔离数据目录重启，现有画布正常重载；项目中心真实导出“无限画布 2”并提示“已导出 1 个画布”，回归时间窗内 Console 0 error / 0 warning。
+- 参考项目保持运行在 3000，目标保持运行在 5174/8788；没有付费模型调用、没有上传本地文件、没有把隔离归档重新写入用户正式数据根。
+
 `7e45f8ad` 的提交前检查：
 
 - `cargo test -p nomifun-workshop`：70 passed。
@@ -131,9 +141,9 @@
 
 ## 5. 下一步单线程优先级
 
-1. 自包含归档：递归收集并重映射 Director sidecar 内部资产，以及 T2I/I2I/mask config 的已知 node/asset 引用；用删除原项目后的隔离导入证明 ZIP 可独立重开。
-2. 画布生成：分别补齐 video/audio canonical owner、无模型/失败/取消/恢复、终态资产节点与连线，再处理 standalone 终态历史和安全删除。
+1. 画布生成：分别补齐 video/audio canonical owner、无模型/失败/取消/恢复、终态资产节点与连线。
+2. Standalone：为图片/视频工作台增加持久终态历史与引用安全删除，再升级视频多任务/高级引用参数。
 3. 模型与 Agent：消除单模型删除的 Creative Studio 引用缺口，再补首页 Agent 启动画布、选择上下文/创作技能和 Workflow AI 创建。
 4. P11：Director/全景/高级媒体能力、1280×720、1024×768、390×844、Tauri 慢环、真实 provider 冒烟、UI build/桌面打包和最终能力文档。
 
-不要因为主体代码已存在就跳过这些门禁；下一提交应从第 1 项自包含归档闭包开始，发现问题只修归档、Director sidecar 与其直接契约。
+不要因为主体代码已存在就跳过这些门禁；下一提交应从第 1 项画布 video canonical owner 开始，先完成一个媒体类型的完整提交/恢复/终态闭环，再进入 audio。
