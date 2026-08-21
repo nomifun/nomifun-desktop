@@ -93,12 +93,19 @@ describe('Creative Canvas product route composition', () => {
       'pendingPanoramaChoice',
       '<CreativeCanvasImageToolbar',
       '<CreativeCanvasImageComposer',
+      '<CreativeCanvasVideoComposer',
       '<CreativeImageCropDialog',
       '<CreativeImageMaskEditDialog',
       '<CreativeImageSplitDialog',
       '<CanvasImageTaskRuntimeBridge',
+      '<CanvasVideoTaskRuntimeBridge',
       'prepareCanvasImageCompose',
-      'CREATIVE_IMAGE_COMPOSE_OPERATION',
+      'prepareCanvasVideoCompose',
+      'canvasVideoComposeMode',
+      'confirmCanvasVideoComposeSubmission',
+      'orphanCanvasVideoComposeTask',
+      'videoTaskRuntimeEpoch',
+      'key={`${projectId}:video:${videoTaskRuntimeEpoch}`}',
       'buildCreativeImageMaskReference',
       'uploadCreativeImageMaskReference',
       'prepareCanvasImageMaskEdit',
@@ -144,6 +151,8 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('runtime.submit(prepared.plan)')).toBe(true);
     expect(source.includes('runtime.retrySubmission(')).toBe(true);
     expect(source.includes('runtime.taskExists(')).toBe(true);
+    expect(source.includes('正在恢复{label}…')).toBe(true);
+    expect(source.includes('正在恢复图片任务…')).toBe(false);
     expect(source.includes('imageWorkbenchModelOptions(modelCatalog, \'image_edit\')')).toBe(true);
     expect(source.includes('withCanvasImageComposeDraft(node, update(current))')).toBe(true);
     expect(source.includes('mergeKey: `image-composer:${nodeId}`')).toBe(true);
@@ -151,7 +160,7 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes("if (state && target?.type === 'image')")).toBe(true);
     expect(source.includes('target.data.assetId)')).toBe(false);
     expect(
-      editorStyle.includes('.nodePlacement:has([data-canvas-image-composer])')
+      editorStyle.includes('[data-canvas-video-composer]')
     ).toBe(true);
   });
 

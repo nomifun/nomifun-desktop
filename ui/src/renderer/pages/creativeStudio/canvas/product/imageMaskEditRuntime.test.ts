@@ -51,11 +51,13 @@ const configNode = (): Extract<CreativeCanvasNode, { type: 'config' }> => {
       capability: 'i2i',
       providerId: PROVIDER_ID,
       model: 'edit-v1',
-      parameters: {
-        canvasOperation: 'image-mask-edit',
+      operation: {
+        kind: 'image-mask-edit',
+        sourceNodeId: testUuid(106),
         sourceAssetId: SOURCE_ASSET_ID,
         markedReferenceAssetId: MARKED_ASSET_ID,
       },
+      parameters: { prompt: 'masked edit' },
       inputAssetIds: [MARKED_ASSET_ID],
       taskId: TASK_ID,
       status: 'running',

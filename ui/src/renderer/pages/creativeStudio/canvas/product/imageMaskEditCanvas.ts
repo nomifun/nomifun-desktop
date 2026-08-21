@@ -53,7 +53,7 @@ export function isCanvasImageMaskEditConfig(
     node?.type === 'config' &&
     node.data.task === 'image_edit' &&
     node.data.capability === 'i2i' &&
-    node.data.parameters.canvasOperation === CREATIVE_IMAGE_MASK_EDIT_OPERATION
+    node.data.operation?.kind === CREATIVE_IMAGE_MASK_EDIT_OPERATION
   );
 }
 
@@ -166,15 +166,13 @@ export function prepareCanvasImageMaskEdit(input: {
       providerId: plan.model.providerId,
       model: plan.model.model,
       prompt,
-      parameters: {
-        canvasOperation: CREATIVE_IMAGE_MASK_EDIT_OPERATION,
-        userPrompt: input.userPrompt.trim(),
+      operation: {
+        kind: CREATIVE_IMAGE_MASK_EDIT_OPERATION,
         sourceNodeId: input.sourceNode.id,
         sourceAssetId: input.sourceAsset.id,
         markedReferenceAssetId: input.markedReference.id,
-        referenceWidth: input.referenceDimensions.width,
-        referenceHeight: input.referenceDimensions.height,
       },
+      parameters: structuredClone(plan.input.parameters),
       inputAssetIds: [input.markedReference.id],
       taskId: plan.input.idempotencyKey,
       resultAssetIds: [],

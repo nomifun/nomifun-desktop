@@ -172,7 +172,7 @@ export const CreativeVideoNode: React.FC<CreativeVideoNodeProps> = ({
       icon={<VideoTwo theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
       title={title}
       subtitle={asset?.label}
-      footer={trimLabel}
+      footer={resolved ? trimLabel : undefined}
       {...sharedFrameProps(props)}
     >
       {resolved ? (

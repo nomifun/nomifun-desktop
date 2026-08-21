@@ -72,11 +72,12 @@ const configNode = (): Extract<CreativeCanvasNode, { type: 'config' }> => {
       providerId: PROVIDER_ID,
       model: 'edit-v1',
       prompt: '改成清晨',
-      parameters: {
-        canvasOperation: 'image-node-compose',
+      operation: {
+        kind: 'image-node-compose',
         sourceNodeId: sourceNode().id,
         sourceAssetId: SOURCE_ASSET_ID,
       },
+      parameters: { prompt: '改成清晨' },
       inputAssetIds: [SOURCE_ASSET_ID],
       taskId: TASK_ID,
       status: 'queued',
@@ -100,11 +101,12 @@ const generationConfigNode = (): Extract<CreativeCanvasNode, { type: 'config' }>
       providerId: PROVIDER_ID,
       model: 'generate-v1',
       prompt: '清晨湖面上的薄雾',
-      parameters: {
-        canvasOperation: 'image-node-compose',
+      operation: {
+        kind: 'image-node-compose',
         sourceNodeId: emptySourceNode().id,
         sourceAssetId: null,
       },
+      parameters: { prompt: '清晨湖面上的薄雾' },
       inputAssetIds: [],
       taskId: TASK_ID,
       status: 'queued',
@@ -126,10 +128,7 @@ const task = (
   node = configNode()
 ): CreativeTask => ({
   ...reference(node),
-  parameters: {
-    canvasOperation: 'image-node-compose',
-    sourceNodeId: sourceNode().id,
-  },
+  parameters: { prompt: '改成清晨' },
   status,
   error:
     status === 'failed'
@@ -154,10 +153,7 @@ const generationTask = (
   model: 'generate-v1',
   task: 'image_generation',
   capability: 't2i',
-  parameters: {
-    canvasOperation: 'image-node-compose',
-    sourceNodeId: emptySourceNode().id,
-  },
+  parameters: { prompt: '清晨湖面上的薄雾' },
   status: 'succeeded',
   error: null,
   resultAssetIds: [RESULT_ASSET_ID, SECOND_RESULT_ASSET_ID],

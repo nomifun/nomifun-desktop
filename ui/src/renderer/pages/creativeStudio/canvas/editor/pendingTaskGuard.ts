@@ -5,7 +5,25 @@
  */
 
 import type { CanvasCommand, CanvasState } from '../core';
+import type { CreativeConfigOperation } from '../../domain';
 import { canvasReducer } from '../core';
+
+const sameOperation = (
+  left: CreativeConfigOperation | null,
+  right: CreativeConfigOperation | null
+): boolean => {
+  if (left === null || right === null) return left === right;
+  if (
+    left.kind !== right.kind ||
+    left.sourceNodeId !== right.sourceNodeId ||
+    left.sourceAssetId !== right.sourceAssetId
+  ) {
+    return false;
+  }
+  return left.kind !== 'image-mask-edit' ||
+    (right.kind === 'image-mask-edit' &&
+      left.markedReferenceAssetId === right.markedReferenceAssetId);
+};
 
 export interface PendingTaskCommandGuardResult {
   allowed: boolean;
@@ -30,34 +48,29 @@ export function pendingTaskCommandGuard(
       if (currentOwners.length !== 1 || nextOwners.length !== 1) return true;
       const currentOwner = currentOwners[0];
       const nextOwner = nextOwners[0];
-      if (
-        currentOwner.type !== 'config' ||
-        nextOwner.type !== 'config' ||
-        currentOwner.data.parameters.canvasOperation !== 'image-node-compose'
-      ) {
-        return false;
-      }
-      const sourceNodeId = currentOwner.data.parameters.sourceNodeId;
-      if (
-        typeof sourceNodeId !== 'string' ||
-        !sourceNodeId.trim() ||
-        nextOwner.data.parameters.sourceNodeId !== sourceNodeId
-      ) {
+      if (currentOwner.type !== 'config' || nextOwner.type !== 'config') {
         return true;
       }
+      const operation = currentOwner.data.operation;
+      if (!sameOperation(operation, nextOwner.data.operation)) return true;
+      if (!operation) return false;
+      const sourceNodeId = operation.sourceNodeId;
+      const sourceType = operation.kind === 'video-node-compose' ? 'video' : 'image';
       const currentSource = state.document.nodes.find(
-        (node): node is Extract<(typeof state.document.nodes)[number], { type: 'image' }> =>
-          node.id === sourceNodeId && node.type === 'image'
+        (node) => node.id === sourceNodeId && node.type === sourceType
       );
       const nextSource = next.document.nodes.find(
-        (node): node is Extract<(typeof next.document.nodes)[number], { type: 'image' }> =>
-          node.id === sourceNodeId && node.type === 'image'
+        (node) => node.id === sourceNodeId && node.type === sourceType
       );
       if (!currentSource || !nextSource) return true;
       const authoritativeSourceReconcile =
-        command.type === 'node/reconcile-runtime' && command.node.id === sourceNodeId;
+        operation.sourceAssetId === null &&
+        command.type === 'node/reconcile-runtime' &&
+        command.node.id === sourceNodeId;
       return (
         !authoritativeSourceReconcile &&
+        'assetId' in nextSource.data &&
+        'assetId' in currentSource.data &&
         nextSource.data.assetId !== currentSource.data.assetId
       );
     }

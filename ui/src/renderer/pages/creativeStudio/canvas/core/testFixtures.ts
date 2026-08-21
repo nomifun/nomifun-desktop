@@ -52,6 +52,7 @@ const TEST_DATA: CreativeCanvasNodeDataByKind = {
     model: null,
     prompt: '',
     negativePrompt: '',
+    operation: null,
     parameters: {},
     inputAssetIds: [],
     taskId: null,
@@ -67,6 +68,7 @@ const TEST_DATA: CreativeCanvasNodeDataByKind = {
     muted: false,
     trimStartMs: 0,
     trimEndMs: null,
+    composer: null,
   },
   audio: {
     assetId: null,

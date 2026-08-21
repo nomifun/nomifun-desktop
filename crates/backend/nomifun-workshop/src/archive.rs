@@ -13,12 +13,12 @@ use std::path::{Path, PathBuf};
 use nomifun_common::{AppError, WorkshopAssetId, zip_safe};
 use nomifun_db::WorkshopAssetRow;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::creative_studio::{
-    CREATIVE_STUDIO_SCHEMA, CreativeGenerationStatus, CreativeNodeData,
-    CreativeProjectDocument, MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
+    CREATIVE_STUDIO_SCHEMA, CreativeConfigOperation, CreativeGenerationStatus,
+    CreativeNodeData, CreativeProjectDocument, MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
 };
 use crate::MAX_ASSET_BYTES;
 
@@ -39,8 +39,6 @@ const MAX_CREATIVE_ARCHIVE_UNCOMPRESSED_BYTES: u64 =
 const DIRECTOR_PROJECT_KIND: &str = "nomifun.director.project";
 const DIRECTOR_PROJECT_VERSION: u64 = 1;
 const MAX_DIRECTOR_SIDECAR_BYTES: usize = 16 * 1024 * 1024;
-const CANVAS_IMAGE_COMPOSE_OPERATION: &str = "image-node-compose";
-const CANVAS_IMAGE_MASK_EDIT_OPERATION: &str = "image-mask-edit";
 
 #[derive(Debug)]
 pub(crate) struct CreativeArchiveAssetSnapshot {
@@ -833,7 +831,7 @@ pub(crate) fn collect_document_asset_ids(
                 for asset_id in data.input_asset_ids.iter().chain(&data.result_asset_ids) {
                     insert_asset(&mut asset_ids, asset_id)?;
                 }
-                collect_config_parameter_asset_ids(data, &mut asset_ids, &node_ids)?;
+                collect_config_operation_asset_ids(data, &mut asset_ids, &node_ids)?;
             }
             CreativeNodeData::Video(data) => {
                 insert_optional_asset(&mut asset_ids, data.asset_id.as_deref())?;
@@ -871,93 +869,46 @@ fn insert_asset(ids: &mut BTreeSet<String>, asset_id: &str) -> Result<(), AppErr
     Ok(())
 }
 
-fn config_operation(parameters: &Map<String, Value>) -> Result<Option<&str>, AppError> {
-    match parameters.get("canvasOperation") {
-        None => Ok(None),
-        Some(Value::String(operation)) if !operation.trim().is_empty() => {
-            Ok(Some(operation.as_str()))
-        }
-        Some(_) => Err(AppError::BadRequest(
-            "creative config canvasOperation must be a non-empty string".into(),
-        )),
-    }
-}
-
-fn config_parameter_asset_id<'a>(
-    parameters: &'a Map<String, Value>,
-    operation: &str,
-    key: &str,
-    nullable: bool,
-) -> Result<Option<&'a str>, AppError> {
-    match parameters.get(key) {
-        Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(value)),
-        Some(Value::Null) if nullable => Ok(None),
-        Some(_) => Err(AppError::BadRequest(format!(
-            "creative config operation {operation:?} parameter {key} must be {}asset id",
-            if nullable { "null or a valid " } else { "a valid " }
-        ))),
-        None => Err(AppError::BadRequest(format!(
-            "creative config operation {operation:?} is missing parameter {key}"
-        ))),
-    }
-}
-
-fn collect_config_parameter_asset_ids(
+fn collect_config_operation_asset_ids(
     data: &crate::creative_studio::CreativeConfigNodeData,
     asset_ids: &mut BTreeSet<String>,
     node_ids: &BTreeSet<&str>,
 ) -> Result<(), AppError> {
-    let Some(operation) = config_operation(&data.parameters)? else {
+    let Some(operation) = &data.operation else {
         return Ok(());
     };
     match operation {
-        CANVAS_IMAGE_COMPOSE_OPERATION => {
-            validate_config_source_node(&data.parameters, operation, node_ids)?;
-            if let Some(asset_id) = config_parameter_asset_id(
-                &data.parameters,
-                operation,
-                "sourceAssetId",
-                true,
-            )? {
+        CreativeConfigOperation::ImageNodeCompose {
+            source_node_id,
+            source_asset_id,
+        }
+        | CreativeConfigOperation::VideoNodeCompose {
+            source_node_id,
+            source_asset_id,
+        } => {
+            validate_config_source_node(source_node_id, operation, node_ids)?;
+            if let Some(asset_id) = source_asset_id {
                 insert_asset(asset_ids, asset_id)?;
             }
         }
-        CANVAS_IMAGE_MASK_EDIT_OPERATION => {
-            validate_config_source_node(&data.parameters, operation, node_ids)?;
-            for key in ["sourceAssetId", "markedReferenceAssetId"] {
-                let asset_id = config_parameter_asset_id(
-                    &data.parameters,
-                    operation,
-                    key,
-                    false,
-                )?
-                .expect("non-null parameter was required");
-                insert_asset(asset_ids, asset_id)?;
-            }
-        }
-        _ => {
-            return Err(AppError::BadRequest(format!(
-                "creative project contains unsupported config canvasOperation {operation:?}"
-            )));
+        CreativeConfigOperation::ImageMaskEdit {
+            source_node_id,
+            source_asset_id,
+            marked_reference_asset_id,
+        } => {
+            validate_config_source_node(source_node_id, operation, node_ids)?;
+            insert_asset(asset_ids, source_asset_id)?;
+            insert_asset(asset_ids, marked_reference_asset_id)?;
         }
     }
     Ok(())
 }
 
 fn validate_config_source_node(
-    parameters: &Map<String, Value>,
-    operation: &str,
+    source_node_id: &str,
+    operation: &CreativeConfigOperation,
     node_ids: &BTreeSet<&str>,
 ) -> Result<(), AppError> {
-    let source_node_id = parameters
-        .get("sourceNodeId")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            AppError::BadRequest(format!(
-                "creative config operation {operation:?} parameter sourceNodeId must be a valid node id"
-            ))
-        })?;
     if !node_ids.contains(source_node_id) {
         return Err(AppError::BadRequest(format!(
             "creative config operation {operation:?} references missing source node {source_node_id:?}"
@@ -966,88 +917,52 @@ fn validate_config_source_node(
     Ok(())
 }
 
-fn remap_config_parameter(
-    parameters: &mut Map<String, Value>,
-    operation: &str,
-    key: &str,
+fn remap_config_identity(
+    value: &mut String,
     identities: &BTreeMap<String, String>,
     identity_kind: &str,
-    nullable: bool,
 ) -> Result<(), AppError> {
-    let value = parameters.get_mut(key).ok_or_else(|| {
+    let new_id = identities.get(value).cloned().ok_or_else(|| {
         AppError::BadRequest(format!(
-            "creative config operation {operation:?} is missing parameter {key}"
+            "creative archive config operation references undeclared {identity_kind} {value:?}"
         ))
     })?;
-    if value.is_null() && nullable {
-        return Ok(());
-    }
-    let old_id = value.as_str().filter(|value| !value.trim().is_empty()).ok_or_else(|| {
-        AppError::BadRequest(format!(
-            "creative config operation {operation:?} parameter {key} must be {}{identity_kind} id",
-            if nullable { "null or a valid " } else { "a valid " }
-        ))
-    })?;
-    let new_id = identities.get(old_id).cloned().ok_or_else(|| {
-        AppError::BadRequest(format!(
-            "creative archive config parameter {key} references undeclared {identity_kind} {old_id:?}"
-        ))
-    })?;
-    *value = Value::String(new_id);
+    *value = new_id;
     Ok(())
 }
 
-fn remap_config_parameters(
+fn remap_config_operation(
     data: &mut crate::creative_studio::CreativeConfigNodeData,
     asset_ids: &BTreeMap<String, String>,
     node_ids: &BTreeMap<String, String>,
 ) -> Result<(), AppError> {
-    let Some(operation) = config_operation(&data.parameters)?.map(str::to_owned) else {
+    let Some(operation) = &mut data.operation else {
         return Ok(());
     };
-    match operation.as_str() {
-        CANVAS_IMAGE_COMPOSE_OPERATION => {
-            remap_config_parameter(
-                &mut data.parameters,
-                &operation,
-                "sourceNodeId",
-                node_ids,
-                "node",
-                false,
-            )?;
-            remap_config_parameter(
-                &mut data.parameters,
-                &operation,
-                "sourceAssetId",
-                asset_ids,
-                "asset",
-                true,
-            )
+    match operation {
+        CreativeConfigOperation::ImageNodeCompose {
+            source_node_id,
+            source_asset_id,
         }
-        CANVAS_IMAGE_MASK_EDIT_OPERATION => {
-            remap_config_parameter(
-                &mut data.parameters,
-                &operation,
-                "sourceNodeId",
-                node_ids,
-                "node",
-                false,
-            )?;
-            for key in ["sourceAssetId", "markedReferenceAssetId"] {
-                remap_config_parameter(
-                    &mut data.parameters,
-                    &operation,
-                    key,
-                    asset_ids,
-                    "asset",
-                    false,
-                )?;
+        | CreativeConfigOperation::VideoNodeCompose {
+            source_node_id,
+            source_asset_id,
+        } => {
+            remap_config_identity(source_node_id, node_ids, "node")?;
+            if let Some(asset_id) = source_asset_id {
+                remap_config_identity(asset_id, asset_ids, "asset")?;
             }
             Ok(())
         }
-        _ => Err(AppError::BadRequest(format!(
-            "creative project contains unsupported config canvasOperation {operation:?}"
-        ))),
+        CreativeConfigOperation::ImageMaskEdit {
+            source_node_id,
+            source_asset_id,
+            marked_reference_asset_id,
+        } => {
+            remap_config_identity(source_node_id, node_ids, "node")?;
+            remap_config_identity(source_asset_id, asset_ids, "asset")?;
+            remap_config_identity(marked_reference_asset_id, asset_ids, "asset")
+        }
     }
 }
 
@@ -1311,7 +1226,7 @@ fn remap_node_references(
         CreativeNodeData::Config(data) => {
             remap_asset_vec(&mut data.input_asset_ids, asset_ids)?;
             remap_asset_vec(&mut data.result_asset_ids, asset_ids)?;
-            remap_config_parameters(data, asset_ids, node_ids)
+            remap_config_operation(data, asset_ids, node_ids)
         }
         CreativeNodeData::Video(data) => {
             remap_optional_asset(&mut data.asset_id, asset_ids)?;
@@ -1395,7 +1310,9 @@ fn internal_zip_error(error: zip::result::ZipError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::creative_studio::{CreativeConnection, CreativeNode, CreativeNodeType};
+    use crate::creative_studio::{
+        CreativeConfigOperation, CreativeConnection, CreativeNode, CreativeNodeType,
+    };
 
     const PROJECT_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000701";
     const ASSET_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000702";
@@ -1488,7 +1405,7 @@ mod tests {
                 "prompt": "edit",
                 "negativePrompt": "",
                 "parameters": {
-                    "canvasOperation": CANVAS_IMAGE_COMPOSE_OPERATION,
+                    "canvasOperation": "image-node-compose",
                     "sourceNodeId": "config-source-node",
                     "sourceAssetId": ASSET_ID
                 },
@@ -1516,7 +1433,7 @@ mod tests {
                 "prompt": "mask edit",
                 "negativePrompt": "",
                 "parameters": {
-                    "canvasOperation": CANVAS_IMAGE_MASK_EDIT_OPERATION,
+                    "canvasOperation": "image-mask-edit",
                     "sourceNodeId": "config-source-node",
                     "sourceAssetId": ASSET_ID,
                     "markedReferenceAssetId": MASK_REFERENCE_ASSET_ID
@@ -1545,7 +1462,7 @@ mod tests {
                 "prompt": "generate",
                 "negativePrompt": "",
                 "parameters": {
-                    "canvasOperation": CANVAS_IMAGE_COMPOSE_OPERATION,
+                    "canvasOperation": "image-node-compose",
                     "sourceNodeId": "config-source-node",
                     "sourceAssetId": null
                 },
@@ -1557,7 +1474,61 @@ mod tests {
             }
         }))
         .unwrap();
-        document.nodes = vec![source, compose, mask, t2i];
+        let video_source: CreativeNode = serde_json::from_value(serde_json::json!({
+            "id": "video-source-node",
+            "type": "video",
+            "position": { "x": 0, "y": 300 },
+            "size": { "width": 420, "height": 236 },
+            "groupId": null,
+            "zIndex": 5,
+            "locked": false,
+            "data": {
+                "assetId": null,
+                "posterAssetId": null,
+                "autoplay": false,
+                "loop": false,
+                "muted": true,
+                "trimStartMs": 0,
+                "trimEndMs": null,
+                "composer": null
+            }
+        }))
+        .unwrap();
+        let video_config: CreativeNode = serde_json::from_value(serde_json::json!({
+            "id": "video-config",
+            "type": "config",
+            "position": { "x": 500, "y": 300 },
+            "size": { "width": 440, "height": 240 },
+            "groupId": null,
+            "zIndex": 6,
+            "locked": false,
+            "data": {
+                "task": "video_generation",
+                "capability": "t2v",
+                "providerId": null,
+                "model": null,
+                "prompt": "video",
+                "negativePrompt": "",
+                "operation": {
+                    "kind": "video-node-compose",
+                    "sourceNodeId": "video-source-node",
+                    "sourceAssetId": null
+                },
+                "parameters": {
+                    "prompt": "video",
+                    "seconds": 5,
+                    "width": 1920,
+                    "height": 1080
+                },
+                "inputAssetIds": [],
+                "taskId": null,
+                "resultAssetIds": [],
+                "status": "idle",
+                "errorMessage": null
+            }
+        }))
+        .unwrap();
+        document.nodes = vec![source, compose, mask, t2i, video_source, video_config];
         document
     }
 
@@ -1837,27 +1808,60 @@ mod tests {
         let CreativeNodeData::Config(compose) = &remapped.document.nodes[1].data else {
             panic!("expected compose config")
         };
-        assert_eq!(compose.parameters["sourceNodeId"], source.id);
-        assert_eq!(compose.parameters["sourceAssetId"], asset_by_title["源图片"]);
+        let Some(CreativeConfigOperation::ImageNodeCompose {
+            source_node_id,
+            source_asset_id,
+        }) = &compose.operation
+        else {
+            panic!("expected image compose operation")
+        };
+        assert_eq!(source_node_id, &source.id);
+        assert_eq!(source_asset_id.as_deref(), Some(asset_by_title["源图片"]));
         assert_eq!(compose.result_asset_ids, [asset_by_title["生成结果"]]);
         let CreativeNodeData::Config(mask) = &remapped.document.nodes[2].data else {
             panic!("expected mask config")
         };
-        assert_eq!(mask.parameters["sourceNodeId"], source.id);
-        assert_eq!(mask.parameters["sourceAssetId"], asset_by_title["源图片"]);
-        assert_eq!(
-            mask.parameters["markedReferenceAssetId"],
-            asset_by_title["遮罩参考"]
-        );
+        let Some(CreativeConfigOperation::ImageMaskEdit {
+            source_node_id,
+            source_asset_id,
+            marked_reference_asset_id,
+        }) = &mask.operation
+        else {
+            panic!("expected image mask operation")
+        };
+        assert_eq!(source_node_id, &source.id);
+        assert_eq!(source_asset_id, asset_by_title["源图片"]);
+        assert_eq!(marked_reference_asset_id, asset_by_title["遮罩参考"]);
         assert_eq!(mask.input_asset_ids, [asset_by_title["遮罩参考"]]);
         let CreativeNodeData::Config(t2i) = &remapped.document.nodes[3].data else {
             panic!("expected t2i config")
         };
-        assert_eq!(t2i.parameters["sourceNodeId"], source.id);
-        assert_eq!(t2i.parameters["sourceAssetId"], Value::Null);
+        let Some(CreativeConfigOperation::ImageNodeCompose {
+            source_node_id,
+            source_asset_id,
+        }) = &t2i.operation
+        else {
+            panic!("expected t2i operation")
+        };
+        assert_eq!(source_node_id, &source.id);
+        assert_eq!(source_asset_id, &None);
+        let video_source = &remapped.document.nodes[4];
+        let CreativeNodeData::Config(video_config) = &remapped.document.nodes[5].data else {
+            panic!("expected video config")
+        };
+        let Some(CreativeConfigOperation::VideoNodeCompose {
+            source_node_id,
+            source_asset_id,
+        }) = &video_config.operation
+        else {
+            panic!("expected video compose operation")
+        };
+        assert_eq!(source_node_id, &video_source.id);
+        assert_eq!(source_asset_id, &None);
         let remapped_json = serde_json::to_string(&remapped.document).unwrap();
         for old_id in [
             "config-source-node",
+            "video-source-node",
             ASSET_ID,
             MASK_REFERENCE_ASSET_ID,
             CONFIG_RESULT_ASSET_ID,
@@ -1865,18 +1869,6 @@ mod tests {
             assert!(!remapped_json.contains(old_id));
         }
 
-        let mut unsupported = config_reference_document();
-        let CreativeNodeData::Config(config) = &mut unsupported.nodes[1].data else {
-            unreachable!()
-        };
-        config.parameters.insert(
-            "canvasOperation".into(),
-            Value::String("future-media-operation".into()),
-        );
-        assert!(matches!(
-            collect_document_asset_ids(&unsupported),
-            Err(AppError::BadRequest(message)) if message.contains("future-media-operation")
-        ));
     }
 
     #[test]

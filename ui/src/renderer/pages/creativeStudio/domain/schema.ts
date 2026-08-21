@@ -58,7 +58,7 @@ export type CreativeJsonValue =
   | { [key: string]: CreativeJsonValue };
 export type CreativeJsonObject = { [key: string]: CreativeJsonValue };
 
-export interface CreativeImageComposerModel {
+export interface CreativeComposerModel {
   providerId: string;
   model: string;
 }
@@ -71,7 +71,7 @@ export interface CreativeImageComposerModel {
  */
 export interface CreativeImageComposerDraft {
   prompt: string;
-  model: CreativeImageComposerModel | null;
+  model: CreativeComposerModel | null;
   interfaceMode: 'images' | 'responses';
   quality: 'auto' | 'high' | 'medium' | 'low';
   width: number | null;
@@ -104,6 +104,25 @@ export interface CreativeTextNodeData {
   textAlign: 'left' | 'center' | 'right';
 }
 
+/** Local graph identity never crosses the model-provider request boundary. */
+export type CreativeConfigOperation =
+  | {
+      kind: 'image-node-compose';
+      sourceNodeId: string;
+      sourceAssetId: string | null;
+    }
+  | {
+      kind: 'image-mask-edit';
+      sourceNodeId: string;
+      sourceAssetId: string;
+      markedReferenceAssetId: string;
+    }
+  | {
+      kind: 'video-node-compose';
+      sourceNodeId: string;
+      sourceAssetId: string | null;
+    };
+
 /**
  * A persisted generation configuration. Provider/model identity is explicit;
  * the UI must not derive either value from a display name or another task.
@@ -115,6 +134,7 @@ export interface CreativeConfigNodeData {
   model: string | null;
   prompt: string;
   negativePrompt: string;
+  operation: CreativeConfigOperation | null;
   parameters: CreativeJsonObject;
   inputAssetIds: string[];
   taskId: string | null;
@@ -131,6 +151,15 @@ export interface CreativeVideoNodeData {
   muted: boolean;
   trimStartMs: number;
   trimEndMs: number | null;
+  composer: CreativeVideoComposerDraft | null;
+}
+
+export interface CreativeVideoComposerDraft {
+  prompt: string;
+  model: CreativeComposerModel | null;
+  resolution: string;
+  aspectRatio: string;
+  seconds: number;
 }
 
 export interface CreativeAudioNodeData {

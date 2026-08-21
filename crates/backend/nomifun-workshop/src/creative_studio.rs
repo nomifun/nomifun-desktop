@@ -464,7 +464,7 @@ impl CreativeImageNodeData {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreativeImageComposerDraft {
     pub prompt: String,
-    pub model: Option<CreativeImageComposerModel>,
+    pub model: Option<CreativeComposerModel>,
     pub interface_mode: CreativeImageComposerInterfaceMode,
     pub quality: CreativeImageComposerQuality,
     pub width: Option<u32>,
@@ -503,12 +503,12 @@ impl CreativeImageComposerDraft {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CreativeImageComposerModel {
+pub struct CreativeComposerModel {
     pub provider_id: String,
     pub model: String,
 }
 
-impl CreativeImageComposerModel {
+impl CreativeComposerModel {
     fn validate(&self, path: &str) -> Result<(), String> {
         require_uuidv7(&format!("{path}.providerId"), &self.provider_id)?;
         require_trimmed_string(&format!("{path}.model"), &self.model, 512)
@@ -599,7 +599,7 @@ pub enum CreativeTextAlign {
     Right,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreativeConfigNodeData {
     pub task: CreativeModelTask,
@@ -608,12 +608,66 @@ pub struct CreativeConfigNodeData {
     pub model: Option<String>,
     pub prompt: String,
     pub negative_prompt: String,
+    #[serde(default)]
+    pub operation: Option<CreativeConfigOperation>,
     pub parameters: Map<String, Value>,
     pub input_asset_ids: Vec<String>,
     pub task_id: Option<String>,
     pub result_asset_ids: Vec<String>,
     pub status: CreativeGenerationStatus,
     pub error_message: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreativeConfigNodeDataWire {
+    task: CreativeModelTask,
+    capability: String,
+    provider_id: Option<String>,
+    model: Option<String>,
+    prompt: String,
+    negative_prompt: String,
+    #[serde(default)]
+    operation: Option<CreativeConfigOperation>,
+    parameters: Map<String, Value>,
+    input_asset_ids: Vec<String>,
+    task_id: Option<String>,
+    result_asset_ids: Vec<String>,
+    status: CreativeGenerationStatus,
+    error_message: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CreativeConfigNodeData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut wire = CreativeConfigNodeDataWire::deserialize(deserializer)?;
+        if wire.operation.is_some() && wire.parameters.contains_key("canvasOperation") {
+            return Err(D::Error::custom(
+                "config parameters.canvasOperation must be absent when operation is present",
+            ));
+        }
+        if wire.operation.is_none() {
+            wire.operation = normalize_legacy_config_operation(&mut wire.parameters)
+                .map_err(D::Error::custom)?;
+        }
+        Ok(Self {
+            task: wire.task,
+            capability: wire.capability,
+            provider_id: wire.provider_id,
+            model: wire.model,
+            prompt: wire.prompt,
+            negative_prompt: wire.negative_prompt,
+            operation: wire.operation,
+            parameters: wire.parameters,
+            input_asset_ids: wire.input_asset_ids,
+            task_id: wire.task_id,
+            result_asset_ids: wire.result_asset_ids,
+            status: wire.status,
+            error_message: wire.error_message,
+        })
+    }
 }
 
 impl CreativeConfigNodeData {
@@ -635,6 +689,9 @@ impl CreativeConfigNodeData {
             true,
             1_000_000,
         )?;
+        if let Some(operation) = &self.operation {
+            operation.validate(&format!("{path}.operation"))?;
+        }
         validate_json_object(&format!("{path}.parameters"), &self.parameters)?;
         validate_id_array(&format!("{path}.inputAssetIds"), &self.input_asset_ids)?;
         require_optional_id(&format!("{path}.taskId"), self.task_id.as_deref())?;
@@ -649,6 +706,125 @@ impl CreativeConfigNodeData {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum CreativeConfigOperation {
+    ImageNodeCompose {
+        source_node_id: String,
+        source_asset_id: Option<String>,
+    },
+    ImageMaskEdit {
+        source_node_id: String,
+        source_asset_id: String,
+        marked_reference_asset_id: String,
+    },
+    VideoNodeCompose {
+        source_node_id: String,
+        source_asset_id: Option<String>,
+    },
+}
+
+impl CreativeConfigOperation {
+    fn validate(&self, path: &str) -> Result<(), String> {
+        match self {
+            Self::ImageNodeCompose {
+                source_node_id,
+                source_asset_id,
+            }
+            | Self::VideoNodeCompose {
+                source_node_id,
+                source_asset_id,
+            } => {
+                require_id(&format!("{path}.sourceNodeId"), source_node_id)?;
+                require_optional_id(
+                    &format!("{path}.sourceAssetId"),
+                    source_asset_id.as_deref(),
+                )
+            }
+            Self::ImageMaskEdit {
+                source_node_id,
+                source_asset_id,
+                marked_reference_asset_id,
+            } => {
+                require_id(&format!("{path}.sourceNodeId"), source_node_id)?;
+                require_id(&format!("{path}.sourceAssetId"), source_asset_id)?;
+                require_id(
+                    &format!("{path}.markedReferenceAssetId"),
+                    marked_reference_asset_id,
+                )
+            }
+        }
+    }
+}
+
+fn take_legacy_config_string(
+    parameters: &mut Map<String, Value>,
+    key: &str,
+) -> Result<String, String> {
+    match parameters.remove(key) {
+        Some(Value::String(value)) if !value.is_empty() => Ok(value),
+        _ => Err(format!(
+            "legacy config parameters.{key} must be a non-empty string"
+        )),
+    }
+}
+
+fn take_legacy_config_optional_string(
+    parameters: &mut Map<String, Value>,
+    key: &str,
+) -> Result<Option<String>, String> {
+    match parameters.remove(key) {
+        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value)),
+        Some(Value::Null) => Ok(None),
+        _ => Err(format!(
+            "legacy config parameters.{key} must be null or a non-empty string"
+        )),
+    }
+}
+
+fn normalize_legacy_config_operation(
+    parameters: &mut Map<String, Value>,
+) -> Result<Option<CreativeConfigOperation>, String> {
+    let Some(kind) = parameters.remove("canvasOperation") else {
+        return Ok(None);
+    };
+    let Value::String(kind) = kind else {
+        return Err("legacy config parameters.canvasOperation must be a string".into());
+    };
+    let source_node_id = take_legacy_config_string(parameters, "sourceNodeId")?;
+    let source_asset_id = take_legacy_config_optional_string(parameters, "sourceAssetId")?;
+    let operation = match kind.as_str() {
+        "image-node-compose" => CreativeConfigOperation::ImageNodeCompose {
+            source_node_id,
+            source_asset_id,
+        },
+        "video-node-compose" => CreativeConfigOperation::VideoNodeCompose {
+            source_node_id,
+            source_asset_id,
+        },
+        "image-mask-edit" => CreativeConfigOperation::ImageMaskEdit {
+            source_node_id,
+            source_asset_id: source_asset_id.ok_or_else(|| {
+                "legacy image-mask-edit sourceAssetId must not be null".to_owned()
+            })?,
+            marked_reference_asset_id: take_legacy_config_string(
+                parameters,
+                "markedReferenceAssetId",
+            )?,
+        },
+        _ => return Err(format!("unsupported legacy config canvasOperation {kind:?}")),
+    };
+    for key in ["userPrompt", "referenceWidth", "referenceHeight"] {
+        parameters.remove(key);
+    }
+    Ok(Some(operation))
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -682,6 +858,8 @@ pub struct CreativeVideoNodeData {
     pub muted: bool,
     pub trim_start_ms: f64,
     pub trim_end_ms: Option<f64>,
+    #[serde(default)]
+    pub composer: Option<CreativeVideoComposerDraft>,
 }
 
 impl CreativeVideoNodeData {
@@ -698,6 +876,34 @@ impl CreativeVideoNodeData {
                 trim_end_ms,
                 self.trim_start_ms,
             )?;
+        }
+        if let Some(composer) = &self.composer {
+            composer.validate(&format!("{path}.composer"))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreativeVideoComposerDraft {
+    pub prompt: String,
+    pub model: Option<CreativeComposerModel>,
+    pub resolution: String,
+    pub aspect_ratio: String,
+    pub seconds: u16,
+}
+
+impl CreativeVideoComposerDraft {
+    fn validate(&self, path: &str) -> Result<(), String> {
+        require_string(&format!("{path}.prompt"), &self.prompt, true, 1_000_000)?;
+        if let Some(model) = &self.model {
+            model.validate(&format!("{path}.model"))?;
+        }
+        require_trimmed_string(&format!("{path}.resolution"), &self.resolution, 128)?;
+        require_trimmed_string(&format!("{path}.aspectRatio"), &self.aspect_ratio, 128)?;
+        if !(1..=3_600).contains(&self.seconds) {
+            return Err(format!("{path}.seconds must be between 1 and 3600"));
         }
         Ok(())
     }
@@ -1108,7 +1314,17 @@ mod tests {
                 "loop": true,
                 "muted": true,
                 "trimStartMs": 100,
-                "trimEndMs": 2100
+                "trimEndMs": 2100,
+                "composer": {
+                    "prompt": "slow camera move",
+                    "model": {
+                        "providerId": "0190f5fe-7c00-7a00-8abc-000000000189",
+                        "model": "video-model-v1"
+                    },
+                    "resolution": "1080p",
+                    "aspectRatio": "16:9",
+                    "seconds": 5
+                }
             }),
             "audio" => serde_json::json!({
                 "assetId": "asset-audio",
@@ -1318,6 +1534,80 @@ mod tests {
         let mut unknown_nested = node_value("unknown-nested", "image");
         unknown_nested["data"]["composer"]["legacySetting"] = Value::Bool(true);
         assert!(serde_json::from_value::<CreativeNode>(unknown_nested).is_err());
+    }
+
+    #[test]
+    fn video_composer_draft_is_strict_but_old_v1_videos_default_to_none() {
+        let mut old_video = node_value("old-video", "video");
+        old_video["data"].as_object_mut().unwrap().remove("composer");
+        let old_video: CreativeNode = serde_json::from_value(old_video).unwrap();
+        let CreativeNodeData::Video(old_data) = &old_video.data else {
+            unreachable!()
+        };
+        assert_eq!(old_data.composer, None);
+        assert_eq!(
+            serde_json::to_value(old_video).unwrap()["data"]["composer"],
+            Value::Null
+        );
+
+        let mut invalid_seconds = node("invalid-video-composer", "video");
+        let CreativeNodeData::Video(data) = &mut invalid_seconds.data else {
+            unreachable!()
+        };
+        data.composer.as_mut().unwrap().seconds = 0;
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(invalid_seconds);
+        assert!(document
+            .validate_for_project(PROJECT_ID)
+            .unwrap_err()
+            .contains("composer.seconds"));
+
+        let mut unknown_nested = node_value("unknown-video-composer", "video");
+        unknown_nested["data"]["composer"]["legacySetting"] = Value::Bool(true);
+        assert!(serde_json::from_value::<CreativeNode>(unknown_nested).is_err());
+    }
+
+    #[test]
+    fn legacy_canvas_operation_is_normalized_out_of_provider_parameters() {
+        let mut legacy = node_value("legacy-mask", "config");
+        legacy["data"]["parameters"] = serde_json::json!({
+            "prompt": "provider prompt",
+            "width": 1024,
+            "canvasOperation": "image-mask-edit",
+            "sourceNodeId": "image-source",
+            "sourceAssetId": "asset-source",
+            "markedReferenceAssetId": "asset-mask",
+            "userPrompt": "local prompt",
+            "referenceWidth": 1024,
+            "referenceHeight": 1024
+        });
+        let parsed: CreativeNode = serde_json::from_value(legacy.clone()).unwrap();
+        let CreativeNodeData::Config(data) = &parsed.data else {
+            unreachable!()
+        };
+        assert_eq!(
+            data.operation,
+            Some(CreativeConfigOperation::ImageMaskEdit {
+                source_node_id: "image-source".into(),
+                source_asset_id: "asset-source".into(),
+                marked_reference_asset_id: "asset-mask".into(),
+            })
+        );
+        assert_eq!(
+            data.parameters,
+            serde_json::json!({ "prompt": "provider prompt", "width": 1024 })
+                .as_object()
+                .unwrap()
+                .clone()
+        );
+
+        legacy["data"]["operation"] = serde_json::json!({
+            "kind": "image-mask-edit",
+            "sourceNodeId": "image-source",
+            "sourceAssetId": "asset-source",
+            "markedReferenceAssetId": "asset-mask"
+        });
+        assert!(serde_json::from_value::<CreativeNode>(legacy).is_err());
     }
 
     #[test]

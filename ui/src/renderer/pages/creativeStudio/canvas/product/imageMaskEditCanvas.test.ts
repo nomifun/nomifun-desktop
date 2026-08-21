@@ -166,9 +166,11 @@ describe('canvas image mask edit product model', () => {
         inputAssetIds: [MARKED_ASSET_ID],
         taskId: prepared.plan.input.idempotencyKey,
         status: 'queued',
-        parameters: {
-          canvasOperation: 'image-mask-edit',
+        operation: {
+          kind: 'image-mask-edit',
+          sourceNodeId: source.id,
           sourceAssetId: SOURCE_ASSET_ID,
+          markedReferenceAssetId: MARKED_ASSET_ID,
         },
       },
     });
@@ -238,7 +240,12 @@ describe('canvas image mask edit product model', () => {
         model: 'edit-v1',
         taskId: testUuid(81),
         status: 'running' as const,
-        parameters: { canvasOperation: 'image-mask-edit' },
+        operation: {
+          kind: 'image-mask-edit' as const,
+          sourceNodeId: testUuid(82),
+          sourceAssetId: testUuid(83),
+          markedReferenceAssetId: testUuid(84),
+        },
       },
     };
     document.nodes = [config];
@@ -272,7 +279,12 @@ describe('canvas image mask edit product model', () => {
         ...testNode('config', 1).data,
         task: 'image_edit' as const,
         capability: 'i2i',
-        parameters: { canvasOperation: 'image-mask-edit' },
+        operation: {
+          kind: 'image-mask-edit' as const,
+          sourceNodeId: testUuid(82),
+          sourceAssetId: testUuid(83),
+          markedReferenceAssetId: testUuid(84),
+        },
       },
     };
     const blocker = testNode('image', 2, {

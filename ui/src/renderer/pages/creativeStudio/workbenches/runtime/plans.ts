@@ -75,8 +75,6 @@ export type VideoWorkbenchOperation = CreativeWorkbenchTaskOperation<
 export interface PrepareVideoWorkbenchRunInput extends WorkbenchPlanBase {
   operation: VideoWorkbenchOperation;
   prompt: string;
-  resolution: string;
-  aspectRatio: string;
   seconds: number;
   width: number | null;
   height: number | null;
@@ -354,13 +352,11 @@ export function prepareVideoWorkbenchRun(
   const parameters = mergeExtraParameters(
     {
       prompt: requirePrompt(input.prompt, "prompt"),
-      resolution: requirePrompt(input.resolution, "resolution"),
-      aspect: requirePrompt(input.aspectRatio, "aspectRatio"),
       seconds: requireInteger(input.seconds, "seconds", 1, 3_600),
       ...dimensions(input.width, input.height, 8_192),
     },
     input.extraParameters,
-    ["prompt", "resolution", "aspect", "seconds", "width", "height", "size"],
+    ["prompt", "seconds", "width", "height", "size", "resolution", "aspect"],
   );
 
   return markPreparedRun({

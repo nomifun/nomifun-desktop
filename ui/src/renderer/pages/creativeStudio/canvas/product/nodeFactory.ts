@@ -65,6 +65,7 @@ const DEFAULT_NODE_DATA: CreativeCanvasNodeDataByKind = {
     model: null,
     prompt: '',
     negativePrompt: '',
+    operation: null,
     parameters: {},
     inputAssetIds: [],
     taskId: null,
@@ -80,6 +81,7 @@ const DEFAULT_NODE_DATA: CreativeCanvasNodeDataByKind = {
     muted: false,
     trimStartMs: 0,
     trimEndMs: null,
+    composer: null,
   },
   audio: {
     assetId: null,
@@ -315,6 +317,7 @@ export function creativeNodeFromAsset(
           muted: false,
           trimStartMs: 0,
           trimEndMs: null,
+          composer: null,
         },
         state,
         viewportSize,

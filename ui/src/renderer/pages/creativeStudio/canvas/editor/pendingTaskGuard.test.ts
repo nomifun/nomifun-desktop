@@ -40,11 +40,12 @@ const pendingImageCompose = () => {
         ...owner.data,
         task: 'image_generation' as const,
         capability: 't2i',
-        parameters: {
-          canvasOperation: 'image-node-compose',
+        operation: {
+          kind: 'image-node-compose' as const,
           sourceNodeId: source.id,
           sourceAssetId: null,
         },
+        parameters: {},
       },
     },
   };
@@ -165,6 +166,64 @@ describe('canvas pending task owner guard', () => {
         canvasCommands.reconcileRuntimeNode({
           ...source,
           data: { ...source.data, assetId: testUuid(40) },
+        })
+      )
+    ).toBe(true);
+  });
+
+  test('protects a pending video compose source and rejects operation mutation', () => {
+    const source = testNode('video', 3);
+    const config = pendingConfig();
+    const owner = {
+      ...config,
+      data: {
+        ...config.data,
+        task: 'video_generation' as const,
+        capability: 't2v',
+        operation: {
+          kind: 'video-node-compose' as const,
+          sourceNodeId: source.id,
+          sourceAssetId: null,
+        },
+      },
+    };
+    const state = createInitialCanvasState({ document: testDocument([owner, source]) });
+    const taskIds = [owner.data.taskId as string];
+
+    expect(
+      canvasCommandPreservesPendingTaskOwners(
+        state,
+        taskIds,
+        canvasCommands.deleteSelection({ nodeIds: [source.id] })
+      )
+    ).toBe(false);
+    expect(
+      canvasCommandPreservesPendingTaskOwners(
+        state,
+        taskIds,
+        canvasCommands.updateNode({
+          ...owner,
+          data: { ...owner.data, operation: null },
+        })
+      )
+    ).toBe(false);
+    expect(
+      canvasCommandPreservesPendingTaskOwners(
+        state,
+        taskIds,
+        canvasCommands.updateNode({
+          ...source,
+          data: { ...source.data, assetId: testUuid(41) },
+        })
+      )
+    ).toBe(false);
+    expect(
+      canvasCommandPreservesPendingTaskOwners(
+        state,
+        taskIds,
+        canvasCommands.reconcileRuntimeNode({
+          ...source,
+          data: { ...source.data, assetId: testUuid(41) },
         })
       )
     ).toBe(true);

@@ -205,6 +205,33 @@ fn canonical_json(value: Value) -> Value {
     }
 }
 
+/// Provider adapters receive only protocol-specific extras. Canonical fields
+/// already projected into typed request members must not be sent a second time
+/// through multipart/scalar transports, and UI-local presentation keys must
+/// never leak to providers.
+fn request_extra(params: &Value, consumed: &[&str]) -> Value {
+    let Some(object) = params.as_object() else {
+        return params.clone();
+    };
+    let mut extra = object.clone();
+    for key in consumed {
+        extra.remove(*key);
+    }
+    for key in [
+        "canvasOperation",
+        "sourceNodeId",
+        "sourceAssetId",
+        "markedReferenceAssetId",
+        "userPrompt",
+        "referenceWidth",
+        "referenceHeight",
+        "nomifunStandaloneWorkbench",
+    ] {
+        extra.remove(key);
+    }
+    Value::Object(extra)
+}
+
 /// Map a creation capability + opaque params + loaded inputs onto the invoke
 /// layer's typed [`TaskRequest`]. The full params object rides along as
 /// `extra` so protocol-specific knobs (`max_tokens`, `steps`, …) stay
@@ -220,21 +247,30 @@ fn cap_to_task_request(
             count: param_count(params)?,
             size: param_size(params),
             quality: param_str(params, "quality"),
-            extra: params.clone(),
+            extra: request_extra(
+                params,
+                &["prompt", "count", "n", "width", "height", "size", "quality", "interface_mode"],
+            ),
         }),
         MediaCapability::I2i | MediaCapability::Inpaint => TaskRequest::ImageEdit(ImageEditRequest {
             prompt: param_prompt(params),
             count: param_count(params)?,
             size: param_size(params),
             inputs,
-            extra: params.clone(),
+            extra: request_extra(
+                params,
+                &["prompt", "count", "n", "width", "height", "size", "interface_mode"],
+            ),
         }),
         MediaCapability::T2v | MediaCapability::I2v => TaskRequest::VideoGeneration(VideoGenRequest {
             prompt: param_prompt(params),
             seconds: param_seconds(params)?,
             size: param_size(params),
             inputs,
-            extra: params.clone(),
+            extra: request_extra(
+                params,
+                &["prompt", "seconds", "width", "height", "size", "resolution", "aspect"],
+            ),
         }),
         MediaCapability::V2v => {
             return Err(CreationError::new(
@@ -246,7 +282,7 @@ fn cap_to_task_request(
             text: param_prompt(params),
             voice: param_str(params, "voice"),
             format: param_str(params, "format"),
-            extra: params.clone(),
+            extra: request_extra(params, &["prompt", "text", "voice", "format"]),
         }),
         MediaCapability::Text => {
             return Err(CreationError::config(
@@ -3679,7 +3715,10 @@ mod tests {
                 assert_eq!(r.count, 2);
                 assert_eq!(r.size.as_deref(), Some("512x512"));
                 assert_eq!(r.quality.as_deref(), Some("high"));
-                assert_eq!(r.extra, params);
+                assert_eq!(
+                    r.extra,
+                    json!({"seconds": 4, "voice": "alloy", "system": "be brief"})
+                );
             }
             _ => panic!("t2i must map to ImageGeneration"),
         }
@@ -3698,6 +3737,10 @@ mod tests {
                 TaskRequest::VideoGeneration(r) => {
                     assert_eq!(r.seconds, Some(4));
                     assert_eq!(r.size.as_deref(), Some("512x512"));
+                    assert_eq!(
+                        r.extra,
+                        json!({"count": 2, "quality": "high", "voice": "alloy", "system": "be brief"})
+                    );
                 }
                 _ => panic!("{cap:?} must map to VideoGeneration"),
             }
@@ -3736,6 +3779,32 @@ mod tests {
             panic!("count 0 must be rejected");
         };
         assert_eq!(err.kind, "invalid_params");
+    }
+
+    #[test]
+    fn canonical_video_fields_and_canvas_metadata_never_reach_provider_extra() {
+        let params = json!({
+            "prompt": "camera move",
+            "seconds": 5,
+            "width": 1920,
+            "height": 1080,
+            "resolution": "1080p",
+            "aspect": "16:9",
+            "canvasOperation": "video-node-compose",
+            "sourceNodeId": "video-node",
+            "sourceAssetId": null
+        });
+        let TaskRequest::VideoGeneration(request) =
+            cap_to_task_request(MediaCapability::T2v, &params, vec![]).unwrap()
+        else {
+            panic!("t2v must map to VideoGeneration");
+        };
+        assert_eq!(request.size.as_deref(), Some("1920x1080"));
+        assert_eq!(request.seconds, Some(5));
+        assert_eq!(
+            request.extra,
+            json!({})
+        );
     }
 
     #[test]
