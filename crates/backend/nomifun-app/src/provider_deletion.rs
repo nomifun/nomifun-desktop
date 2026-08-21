@@ -43,6 +43,16 @@ impl ProviderDeletionCoordinator for AppProviderDeletionCoordinator {
             .await
     }
 
+    async fn prepare_soft_model_cleanup(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<nomifun_db::ProviderModelCleanupPlan, AppError> {
+        self.workshop
+            .plan_provider_model_cleanup_under_lifecycle_write_guard(provider_id, model)
+            .await
+    }
+
     async fn usages(&self, provider_id: &str) -> Result<Vec<ProviderUsage>, AppError> {
         ProviderId::parse(provider_id)
             .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?;
@@ -617,5 +627,129 @@ mod tests {
         };
         assert_eq!(surviving.provider_id.as_deref(), Some(surviving_provider_id));
         assert_eq!(surviving.model.as_deref(), Some("keep-me"));
+    }
+
+    #[tokio::test]
+    async fn provider_model_delete_atomically_cleans_only_the_exact_workshop_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let (coord, db) = coordinator(dir.path()).await;
+        let workshop = coord.workshop.clone();
+        let provider_id = "0190f5fe-7c00-7a00-8000-000000000021";
+        for model in ["delete-me", "keep-same-provider"] {
+            nomifun_db::sqlx::query(
+                "INSERT INTO provider_models \
+                    (provider_id, model, enabled, sort_order, description, created_at, updated_at) \
+                 VALUES (?, ?, 1, 0, NULL, 1, 1)",
+            )
+            .bind(provider_id)
+            .bind(model)
+            .execute(db.pool())
+            .await
+            .unwrap();
+            nomifun_db::sqlx::query(
+                "INSERT INTO provider_model_capabilities \
+                    (provider_id, model, task, traits, protocol, connection_role, \
+                     allow_cross_origin_credentials, provider_params, created_at, updated_at) \
+                 VALUES (?, ?, 'image_generation', '[]', 'openai.images', 'default', \
+                         0, '{}', 1, 1)",
+            )
+            .bind(provider_id)
+            .bind(model)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+
+        let project = workshop
+            .create_creative_project(Some("exact model cleanup integration".into()))
+            .await
+            .unwrap();
+        let mut document =
+            nomifun_workshop::CreativeProjectDocument::empty(project.project_id.clone());
+        for (id, model) in [
+            ("delete-config", "delete-me"),
+            ("keep-config", "keep-same-provider"),
+        ] {
+            document.nodes.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": id,
+                    "type": "config",
+                    "position": { "x": 0, "y": 0 },
+                    "size": { "width": 320, "height": 240 },
+                    "groupId": null,
+                    "zIndex": 1,
+                    "locked": false,
+                    "data": {
+                        "task": "image_generation",
+                        "capability": "t2i",
+                        "providerId": provider_id,
+                        "model": model,
+                        "prompt": "preserve",
+                        "negativePrompt": "",
+                        "parameters": {},
+                        "inputAssetIds": [],
+                        "taskId": null,
+                        "resultAssetIds": [],
+                        "status": "idle",
+                        "errorMessage": null
+                    }
+                }))
+                .unwrap(),
+            );
+        }
+        workshop
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+
+        let model_service = nomifun_system::ProviderModelService::new(
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(
+                db.pool().clone(),
+            )),
+            Arc::new(nomifun_db::SqliteProviderModelCapabilityRepository::new(
+                db.pool().clone(),
+            )),
+            Arc::new(SqliteProviderRepository::new(db.pool().clone())),
+            Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(
+                db.pool().clone(),
+            )),
+            Arc::new(coord),
+        );
+
+        assert!(model_service.delete(provider_id, "delete-me").await.unwrap());
+        let deleted_count: i64 = nomifun_db::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM provider_models WHERE provider_id = ? AND model = 'delete-me'",
+        )
+        .bind(provider_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        let sibling_count: i64 = nomifun_db::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM provider_models WHERE provider_id = ? AND model = 'keep-same-provider'",
+        )
+        .bind(provider_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(deleted_count, 0);
+        assert_eq!(sibling_count, 1);
+
+        let cleaned = workshop.get_creative_project(&project.project_id).await.unwrap();
+        assert_eq!(cleaned.project.revision, "3");
+        let nomifun_workshop::creative_studio::CreativeNodeData::Config(deleted) =
+            &cleaned.document.nodes[0].data
+        else {
+            panic!("expected deleted config")
+        };
+        assert_eq!(deleted.provider_id, None);
+        assert_eq!(deleted.model, None);
+        assert_eq!(deleted.prompt, "preserve");
+        let nomifun_workshop::creative_studio::CreativeNodeData::Config(sibling) =
+            &cleaned.document.nodes[1].data
+        else {
+            panic!("expected sibling config")
+        };
+        assert_eq!(sibling.provider_id.as_deref(), Some(provider_id));
+        assert_eq!(sibling.model.as_deref(), Some("keep-same-provider"));
     }
 }

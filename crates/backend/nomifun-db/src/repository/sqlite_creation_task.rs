@@ -219,6 +219,17 @@ fn validate_creation_task_id(creation_task_id: &str) -> Result<(), DbError> {
     Ok(())
 }
 
+fn provider_task_for_creation_capability(capability: &str) -> Option<&'static str> {
+    match capability {
+        "t2i" => Some("image_generation"),
+        "i2i" | "inpaint" => Some("image_edit"),
+        "t2v" | "i2v" | "v2v" => Some("video_generation"),
+        "tts" => Some("speech_synthesis"),
+        "text" => Some("chat"),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone)]
 enum CanonicalTaskOwner {
     CanvasNode {
@@ -641,6 +652,34 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
             return Err(DbError::Conflict(format!(
                 "Creation task provider '{}' does not exist",
                 provider_id
+            )));
+        }
+        let provider_task = provider_task_for_creation_capability(params.capability).ok_or_else(|| {
+            DbError::Conflict(format!(
+                "Creation task capability {:?} is unsupported",
+                params.capability
+            ))
+        })?;
+        let exact_model_supports_task: bool = sqlx::query_scalar(
+            "SELECT EXISTS(\
+                 SELECT 1 FROM providers AS provider \
+                 JOIN provider_models AS model ON model.provider_id = provider.provider_id \
+                 JOIN provider_model_capabilities AS capability \
+                   ON capability.provider_id = model.provider_id \
+                  AND capability.model = model.model \
+                 WHERE provider.provider_id = ? AND provider.enabled = 1 \
+                   AND model.model = ? AND model.enabled = 1 AND capability.task = ?\
+             )",
+        )
+        .bind(provider_id.as_str())
+        .bind(params.model)
+        .bind(provider_task)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !exact_model_supports_task {
+            return Err(DbError::Conflict(format!(
+                "Creation task model '{}/{}' does not support capability '{}'",
+                provider_id, params.model, params.capability
             )));
         }
 
@@ -1111,6 +1150,10 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
 mod tests {
     use super::*;
     use crate::init_database_memory;
+    use crate::repository::{
+        CoordinatedProviderModelDelete, IProviderModelRepository, ProviderModelCleanupPlan,
+        SqliteProviderModelRepository,
+    };
     use nomifun_common::{WorkshopAssetId, generate_id};
     use std::sync::Arc;
 
@@ -1128,6 +1171,32 @@ mod tests {
         .execute(db.pool())
         .await
         .unwrap();
+        sqlx::query(
+            "INSERT INTO provider_models \
+                (provider_id, model, enabled, sort_order, description, created_at, updated_at) \
+             VALUES (?, 'image-model-v1', 1, 0, NULL, 0, 0)",
+        )
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        for (task, protocol) in [
+            ("image_generation", "openai.images"),
+            ("video_generation", "openai.videos"),
+        ] {
+            sqlx::query(
+                "INSERT INTO provider_model_capabilities \
+                    (provider_id, model, task, traits, protocol, connection_role, \
+                     provider_params, created_at, updated_at) \
+                 VALUES (?, 'image-model-v1', ?, '[]', ?, 'default', '{}', 0, 0)",
+            )
+            .bind(&provider_id)
+            .bind(task)
+            .bind(protocol)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
         let repo = SqliteCreationTaskRepository::new(db.pool().clone());
         (repo, db, provider_id)
     }
@@ -1837,6 +1906,174 @@ mod tests {
             new_submission,
             DbError::Conflict(message) if message.contains("does not exist")
         ));
+    }
+
+    #[tokio::test]
+    async fn exact_replay_survives_model_delete_but_a_new_key_requires_the_live_capability() {
+        let (repo, db, provider_id) = repo().await;
+        let project_id = seed_creative_project(&db).await;
+        let node_id = CreativeStudioNodeId::new().into_string();
+        let task_id = CreationTaskId::new().into_string();
+        let fingerprint = r#"{"project_id":"model-history"}"#;
+        let first = repo
+            .get_or_create_creative_task(creative_params(
+                &task_id,
+                &project_id,
+                &node_id,
+                &provider_id,
+                fingerprint,
+            ))
+            .await
+            .unwrap();
+        assert!(first.inserted);
+        repo.update_task(
+            &task_id,
+            UpdateCreationTaskParams {
+                status: Some("canceled"),
+                finished_at: Some(Some(200)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            SqliteProviderModelRepository::new(db.pool().clone())
+                .delete_coordinated(&CoordinatedProviderModelDelete {
+                    provider_id: provider_id.clone(),
+                    model: "image-model-v1".to_owned(),
+                    expected_config_revision: 0,
+                    cleanup: ProviderModelCleanupPlan::default(),
+                })
+                .await
+                .unwrap()
+        );
+
+        let replay = repo
+            .get_or_create_creative_task(creative_params(
+                &task_id,
+                &project_id,
+                &node_id,
+                &provider_id,
+                fingerprint,
+            ))
+            .await
+            .unwrap();
+        assert!(!replay.inserted);
+        assert_eq!(replay.row.status, "canceled");
+
+        let new_task_id = CreationTaskId::new().into_string();
+        let error = repo
+            .get_or_create_creative_task(creative_params(
+                &new_task_id,
+                &project_id,
+                &node_id,
+                &provider_id,
+                r#"{"project_id":"new-after-delete"}"#,
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            DbError::Conflict(message) if message.contains("does not support capability")
+        ));
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM creation_tasks")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn new_task_requires_enabled_provider_model_and_exact_capability() {
+        let (repo, db, provider_id) = repo().await;
+        let project_id = seed_creative_project(&db).await;
+        let node_id = CreativeStudioNodeId::new().into_string();
+
+        sqlx::query(
+            "DELETE FROM provider_model_capabilities \
+             WHERE provider_id = ? AND model = 'image-model-v1' AND task = 'image_generation'",
+        )
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let missing_capability_id = CreationTaskId::new().into_string();
+        let error = repo
+            .get_or_create_creative_task(creative_params(
+                &missing_capability_id,
+                &project_id,
+                &node_id,
+                &provider_id,
+                r#"{"gate":"capability"}"#,
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, DbError::Conflict(message) if message.contains("does not support")));
+
+        sqlx::query(
+            "INSERT INTO provider_model_capabilities \
+                (provider_id, model, task, traits, protocol, connection_role, provider_params, \
+                 created_at, updated_at) \
+             VALUES (?, 'image-model-v1', 'image_generation', '[]', 'openai.images', \
+                     'default', '{}', 0, 0)",
+        )
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE provider_models SET enabled = 0 \
+             WHERE provider_id = ? AND model = 'image-model-v1'",
+        )
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let disabled_model_id = CreationTaskId::new().into_string();
+        let error = repo
+            .get_or_create_creative_task(creative_params(
+                &disabled_model_id,
+                &project_id,
+                &node_id,
+                &provider_id,
+                r#"{"gate":"model"}"#,
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, DbError::Conflict(message) if message.contains("does not support")));
+
+        sqlx::query(
+            "UPDATE provider_models SET enabled = 1 \
+             WHERE provider_id = ? AND model = 'image-model-v1'",
+        )
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query("UPDATE providers SET enabled = 0 WHERE provider_id = ?")
+            .bind(&provider_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let disabled_provider_id = CreationTaskId::new().into_string();
+        let error = repo
+            .get_or_create_creative_task(creative_params(
+                &disabled_provider_id,
+                &project_id,
+                &node_id,
+                &provider_id,
+                r#"{"gate":"provider"}"#,
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, DbError::Conflict(message) if message.contains("does not support")));
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM creation_tasks")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]

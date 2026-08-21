@@ -76,4 +76,10 @@ describe('standalone workbench product wiring', () => {
     expect(image.includes('creativeTaskClient.cancel(creativeTaskReference(task))')).toBe(true);
     expect(video.includes('creativeTaskClient.cancel(creativeTaskReference(task))')).toBe(true);
   });
+
+  test('clears exact standalone selections when their catalog model disappears', () => {
+    expect(image.includes('exactWorkbenchModelOptions(catalog, modelTask).some')).toBe(true);
+    expect(video.includes("exactWorkbenchModelOptions(catalog, 'video_generation').some")).toBe(true);
+    expect(video.includes('if (!stillAvailable) setModel(null)')).toBe(true);
+  });
 });

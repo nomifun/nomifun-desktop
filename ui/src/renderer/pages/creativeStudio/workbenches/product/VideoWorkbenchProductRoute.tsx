@@ -36,6 +36,7 @@ import {
 } from '../history';
 import {
   createVideoWorkbenchRuntimeProps,
+  exactWorkbenchModelOptions,
   prepareStandaloneHistoryRetry,
   videoWorkbenchReferencesFromAssets,
   useVideoWorkbenchRuntime,
@@ -234,6 +235,14 @@ const OwnedVideoWorkbenchReady: React.FC<{
   const busy = presentationRuntime.entries.some(
     (entry) => entry.task.status === 'queued' || entry.task.status === 'running'
   ) || presentationRuntime.submittingCount > 0 || presentationRuntime.recoveringCount > 0;
+
+  useEffect(() => {
+    if (!model || catalog.status !== 'ready') return;
+    const stillAvailable = exactWorkbenchModelOptions(catalog, 'video_generation').some(
+      (option) => option.providerId === model.providerId && option.model === model.model
+    );
+    if (!stillAvailable) setModel(null);
+  }, [catalog, model]);
 
   useEffect(
     () => () => {
