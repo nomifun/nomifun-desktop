@@ -2,7 +2,7 @@
 
 > 用途：在长任务发生上下文压缩或人员切换时，从可验证提交继续，而不是重新审计整仓。
 > 分支：`codex/infinite-canvas-rebuild`
-> 最后功能锚点：`60982e38`（`feat(creative-studio): add canvas video generation`）
+> 最后功能锚点：`9fffd526`（`feat(creative-studio): add canvas audio generation`）
 > 参考产品锚点：`ef7303d`
 
 ## 1. 续接协议
@@ -24,9 +24,9 @@
 | --- | --- | --- |
 | P1-P2 | 受保护运行时拆分、根主题、全屏 Focus Shell、侧栏入口与返回工作台 | `ed9c66df`…`954d6dcb` |
 | P3 | `nomifun.creative-studio/v1`、UUIDv7、项目 CRUD/CAS、项目中心、自包含 ZIP 导入导出与完整引用重映射 | `d03a6a64`、`b4361084`、`44933dd3`…`2ad53b01`、`c12b8db` |
-| P4 | 画布 reducer/history、视口、节点、连线、小地图、选择/分组/快捷键、Editor CAS、离开/reload 门禁；首节点居中、参考节点几何、固定创作配色、直接节点工具、图片节点生成/上传面板、图片/视频持久 composer 草稿与双客户端冲突恢复；空视频节点 T2V、单图 I2V 与真实任务终态回填 | `b2e19806`…`dc6c3c34`、`dd18dc6f`、`451dc013`、`5352954c`、`b2e103c8`、`46c1ba1e`、`777caba7`、`ef26f4cb`、`60982e38` |
+| P4 | 画布 reducer/history、视口、节点、连线、小地图、选择/分组/快捷键、Editor CAS、离开/reload 门禁；首节点居中、参考节点几何、固定创作配色、直接节点工具、图片节点生成/上传面板、图片/视频/音频持久 composer 草稿与双客户端冲突恢复；空视频节点 T2V/单图 I2V、空音频节点 TTS 与真实任务终态回填 | `b2e19806`…`dc6c3c34`、`dd18dc6f`、`451dc013`、`5352954c`、`b2e103c8`、`46c1ba1e`、`777caba7`、`ef26f4cb`、`60982e38`、`9fffd526` |
 | P5 | Canonical 资产 API/库、文本/图像/视频/音频节点、素材选择与结果回填 | `57128727`、`e05b18a8`、`04f805a3`、`444db764` |
-| P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化；画布视频 owner、提交响应不明状态确认与 authoritative 404 orphan 清理 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44`、`60982e38` |
+| P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化；画布视频/音频 owner、提交响应不明状态确认与 authoritative 404 orphan 清理 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44`、`60982e38`、`9fffd526` |
 | P7 | 生图/视频工作台、工作流定义/运行中心、提示词与素材中心 | `2283ee74`、`1414846e`、`ebd17f3a`…`aad21d9d`、`7e45f8ad` |
 | P8 | 持久化画布 Agent、原子操作、裁剪/切分/遮罩编辑与真实任务回填 | `e5368474`…`00f407c6`、`cac4bca8`…`bc01849e` |
 | P9 | Director v1 domain、Three.js runtime、CAS sidecar、时间轴、截图回填、sidecar 全资产闭包与归档重映射 | `1ccbd013`、`d3a609f6`、`7b7712c0`、`dfa3c0b3`、`f25825f1`、`c12b8db` |
@@ -54,12 +54,15 @@
 - 草稿更新走完整 `canvasCommands.updateNode`、统一 `image-composer:<nodeId>` history merge key 和现有 CAS 队列，因此 Undo/Redo、远端 reload 与 Provider 清理只有一个数据权威。空图通过上传或首个 T2I 结果变成有图时，只清除不再适配 I2I 的模型选择，提示词与其他设置保留；Provider 删除也只清目标 draft model，其他草稿及无关 Provider 保持不变。
 - 真实浏览器在 1440×900 依次验证唯一 marker、Responses、高质量、16:9、3 张、Undo、Redo、完整 reload 和第二个干净客户端，刷新后所有字段精确恢复；随后隔离项目已恢复为空提示词与默认 Images/自动/1:1/1 张。新会话 Console 0 error / 0 warning。空图片的提示词库入口不再误插入文本节点；composer 覆盖到更高 z-index 的相邻节点时也不会再点穿，节点总数保持 3。
 - 单项目 ZIP 现在从外层画布文档递归闭合 Director `sceneId` sidecar 及其中的 panorama、character、object、capture 资产，未发送到画布的截图也不会遗漏。导入先建立完整 asset/node identity map，再重写 sidecar `projectId`、所有嵌套 `assetId`、图片 composer/mask 的 `sourceNodeId`、`sourceAssetId` 与 `markedReferenceAssetId`，并重算 sidecar byteLength/SHA-256；内部 camera/entity/timeline 身份保持不变。
-- 归档只允许当前三种已知引用型 operation：图片节点生成、图片遮罩编辑和视频节点生成；未知 operation、缺依赖、悬空 source node、错误 Director envelope/project ownership、非法 asset ID、额外 entry 和 checksum/budget 漂移均失败关闭。合法 Director 可能拥有 5000 个 capture 与 2000 个 entity asset，因此资产上限已与共享 hardened ZIP 20000-entry 门禁对齐，仍受 256 MB 解压总预算和 manifest 大小约束，不会截断。
+- 归档只允许当前四种已知引用型 operation：图片节点生成、图片遮罩编辑、视频节点生成和音频节点生成；未知 operation、缺依赖、悬空 source node、错误 Director envelope/project ownership、非法 asset ID、额外 entry 和 checksum/budget 漂移均失败关闭。合法 Director 可能拥有 5000 个 capture 与 2000 个 entity asset，因此资产上限已与共享 hardened ZIP 20000-entry 门禁对齐，仍受 256 MB 解压总预算和 manifest 大小约束，不会截断。
 - 导出、单资产删除保护、项目删除清理和启动 managed-data audit 现在共享同一个异步 Director 资产闭包。三套全新 service/data root 已真实完成 A 导出 → B 导入/资产读取/再导出 → C 再导入，B 删除项目后 sidecar、全景和未发送截图均确认删除。隔离 Web 项目中心也从新后端真实导出 1 个 ZIP 并显示成功，Console 0 error / 0 warning。
 - 单选空视频节点现在展开参考式固定浅 stone 视频 Composer。模式由直接连入的真实媒体自动推导：无引用为 T2V，恰好一张真实图片为 I2V；视频/音频引用、多图和非空视频目标明确禁用，当前后端不支持的 V2V 不会伪装成可用。模型只从 NomiFun 精确 `video_generation` Provider/model 目录选择；无兼容模型时生成按钮真实禁用，不显示参考项目中没有后端契约的 credits、Camera Control、首尾帧或混合引用。
 - 视频节点 canonical `data.composer` 持有提示词、精确模型、720p/1080p、16:9/9:16/1:1 与 5/10 秒草稿；画布本地 owner 身份单独保存在强类型 `data.operation`。Provider 参数只包含真实 prompt、seconds、width、height，720p/1080p 会映射为确定尺寸；后端同时剥离旧本地元数据，避免 `canvasOperation/sourceNodeId/sourceAssetId` 等泄漏到 provider `extra`。旧 v1 config 可规范化迁移，归档会重映射 operation 的节点/资产引用。
 - 每次视频生成固定一个 canonical config owner 和一个任务：pending 在 POST 前完成 CAS，queued/running 只做 runtime reconcile，刷新后按 exact owner 恢复；成功结果必须解析为真实 video asset，第一个结果原位填充空视频节点并保持 node ID，额外结果成为 config-linked 视频节点，重复 settlement 幂等且 pending 最后移除。失败、取消和 authoritative 404 均保留可审计 config；提交结果不明时可复用同一幂等键重试，也可显式“确认任务状态”，仅在后端确定 404 时清理恢复标记。
 - 真实浏览器完成唯一 marker、720p、9:16、10 秒、Undo、Redo 与完整 reload；1440×900、1024×768、390×844 均可操作。移动端设置按钮只隐藏摘要、保留真实设置图标；切换应用浅/深主题前后 Composer 的背景与文字计算色完全一致。最终用 UI 删除 QA 视频节点并重载回原 3 节点；最后新页面会话 Console 0 error / 0 warning。没有调用付费 Provider，也没有上传本地文件。
+- 单选空音频节点现在展开固定浅 stone 朗读 Composer，只走精确 `speech_synthesis` / `tts`、零输入和单任务。朗读正文、精确 Provider/model、Voice ID 与 MP3/WAV 草稿由 audio node canonical `data.composer` 持有；本地 source 身份只存在强类型 `audio-node-compose` operation，Provider 参数没有 canvas/node/asset 元数据。成功任务必须恰好返回一个真实 audio asset，并原位填充同一个节点 ID；失败、取消、响应丢失重试、恢复、authoritative 404 与 pending-last 均复用统一任务合同。
+- 音频可选字段按八个现有 adapter 的 exact protocol profile 显示：未知协议降级为 prompt-only，Deepgram 正文上限 2000，要求 Voice ID 的协议会在本地阻止空音色提交；format 只允许 artifact gate 已支持的 MP3/WAV。Voice ID 只在同一 Provider 且同一协议内保留，跨 Provider/协议、失效模型或单模型自动接管都会清空并要求重新确认。首批明确不发送 speed、instructions、参考音频、VoiceClone、AAC 或 PCM。
+- 真实浏览器完成音频唯一 marker、Undo、Redo、完整 reload 和提示词库入口；1440×900、1024×768、390×844 的 Composer 均完整可操作。空节点不再显示无意义的 `0:00 – ∞`；浅/深主题切换前后面板背景与文字计算色完全一致。最终用 UI 删除 QA 音频节点、恢复画布面板并重载回原 3 节点；最后新页面会话 Console 0 error / 0 warning。参考项目仍在 3000 打开并复核音频入口；没有调用付费 Provider、没有上传本地文件。
 
 `dd18dc6f` 的提交前检查：
 
@@ -126,6 +129,14 @@
 - UI production build：通过；仅保留仓库既存的动态/静态重复导入与大 chunk 提示。
 - 真实浏览器：参考项目运行在 3000，目标运行在隔离 5174/8788；桌面/中窄屏/390px、固定主题、草稿保存/撤销/重做/reload、无模型禁用、移动设置图标与 QA 清理通过，最终干净会话 Console 0 error / 0 warning；未触发付费生成。
 
+`9fffd526` 的提交前检查：
+
+- Canvas 全目录 + Creative Studio domain contract：286 passed / 1654 assertions；音频 domain/runtime/bridge/Composer、协议 profile、Voice ID 作用域、pending guard、旧 v1 草稿和路由接线均有定向门禁。
+- `cargo test -p nomifun-workshop --lib`：81 passed；`cargo test -p nomifun-creation --lib`：62 passed；覆盖 audio draft/operation、Provider cleanup、归档 remap、TTS typed 字段与 provider extra 隔离、真实音频 artifact。
+- `cargo check -p nomifun-app --lib`、Rust 定向 fmt、`bun run typecheck`、`bun run check:icons`、`bun run check:theme`、`bun run check:dead-css`、`git diff --cached --check`：通过；Rust 输出仅有其他 crate 的既存未使用代码警告。
+- UI production build：通过；仅保留仓库既存的动态/静态重复导入与大 chunk 提示。
+- 真实浏览器：参考项目运行在 3000，目标运行在隔离 5174/8788；草稿保存/撤销/重做/reload、提示词库、无模型禁用、1440/1024/390、固定主题和 QA 清理通过，最终干净会话 Console 0 error / 0 warning；未触发付费生成。
+
 `7e45f8ad` 的提交前检查：
 
 - `cargo test -p nomifun-workshop`：70 passed。
@@ -145,6 +156,8 @@
 - v1 config node 只拥有一个 `taskId`，因此 standalone 视频批量数固定为 1。要支持 1-6 并行任务，必须先升级 canonical owner/schema/archive 契约。
 - 画布视频当前只开放空节点 T2V 与一张直接连接真实图片的 I2V。Creation engine 对 V2V 返回 `unsupported_capability`；首尾帧、多图、视频/音频混合参考和 Provider 特有高级参数必须等协议能力矩阵完成后再开放。
 - 视频任务“取消”是 NomiFun 本地权威取消：会阻止晚到结果覆盖和入库，但现有 adapter 没有远端 cancel 契约，不能承诺 Provider 作业或计费必然停止。
+- 画布音频当前只开放空节点 TTS，零输入且每次一个真实音频结果。参考音频、VoiceClone、声音设计、speed/instructions、AAC/PCM 与音频到音频必须先扩展 typed TTS 输入、协议 profile 和 artifact gate，不能只添加 UI 控件。
+- 音频任务取消同样是本地权威取消；现有 TTS adapter 没有远端 cancel 方法，不能承诺 Provider 同步请求或计费已经停止。
 - 手工素材上传当前只支持图片与视频；音频可由生成任务入库，但不伪装成已支持的拖放上传。
 - Director 的 GLB/glTF 模型导入仍不可用；四/十二方位批量捕获和视频导出保持显式不可用。当前不使用参考项目的压缩 Director bundle 或来源不清模型。
 - 390px 只承诺关键入口和状态不白屏；尚未宣称完整移动触控生产体验。
@@ -155,9 +168,9 @@
 
 ## 5. 下一步单线程优先级
 
-1. 画布生成：按已审计边界补齐 audio canonical owner、无模型/失败/取消/恢复、真实音频资产原位回填与归档；首批只开放空音频节点单任务 TTS，不伪装 VoiceClone、参考音频、AAC/PCM 或通用协议参数。
-2. Standalone：为图片/视频工作台增加持久终态历史与引用安全删除，再升级视频多任务/高级引用参数。
-3. 模型与 Agent：消除单模型删除的 Creative Studio 引用缺口，再补首页 Agent 启动画布、选择上下文/创作技能和 Workflow AI 创建。
-4. P11：Director/全景/高级媒体能力、1280×720、1024×768、390×844、Tauri 慢环、真实 provider 冒烟、UI build/桌面打包和最终能力文档。
+1. Standalone：先建立真实 `standalone_workbench` task owner 与完整任务快照，再为图片/视频工作台增加可分页持久终态历史和引用安全软删除；不要继续用一个 config node 或 React hidden IDs 冒充历史。
+2. 模型与 Agent：消除单模型删除的 Creative Studio 引用缺口，再补首页 Agent 启动画布、选择上下文/创作技能和 Workflow AI 创建。
+3. 高级媒体：视频多任务/首尾帧/高级引用、音频上传/时长/VoiceClone、Director/全景与完整视频输出均须先补 typed 后端能力。
+4. P11：1280×720、1024×768、390×844、Tauri 慢环、真实 provider 冒烟、UI build/桌面打包和最终能力文档。
 
-不要因为主体代码已存在就跳过这些门禁；视频 canonical owner 已在 `60982e38` 完成，下一功能提交从第 1 项画布 audio 单任务 TTS 的完整提交/恢复/终态闭环开始。
+不要因为主体代码已存在就跳过这些门禁；画布 image/video/audio 基础生成闭环已完成，下一功能提交从第 1 项 standalone task owner 与持久历史数据合同开始。
