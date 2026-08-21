@@ -256,6 +256,17 @@ impl CreativeProjectDocument {
                     &pending.prompt,
                     65_536,
                 )?;
+                if let Some(model_input) = pending.model_input.as_deref() {
+                    require_trimmed_string(
+                        &format!("chatSessions[{index}].pendingTurn.modelInput"),
+                        model_input,
+                        262_144,
+                    )?;
+                }
+                validate_agent_skill_ids(
+                    &format!("chatSessions[{index}].pendingTurn.skillIds"),
+                    &pending.skill_ids,
+                )?;
                 if pending.created_at < chat.created_at || pending.created_at > chat.updated_at {
                     return Err(format!(
                         "chatSessions[{index}].pendingTurn.createdAt must be within the chat session lifetime"
@@ -1077,6 +1088,10 @@ pub struct CreativeChatModel {
 pub struct CreativeChatPendingTurn {
     pub idempotency_key: String,
     pub prompt: String,
+    #[serde(default)]
+    pub model_input: Option<String>,
+    #[serde(default)]
+    pub skill_ids: Vec<String>,
     pub created_at: TimestampMs,
 }
 
@@ -1239,6 +1254,28 @@ fn validate_id_array(path: &str, values: &[String]) -> Result<(), String> {
         require_id(&format!("{path}[{index}]"), value)?;
         if !unique.insert(value.as_str()) {
             return Err(format!("{path} must contain unique ids"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_agent_skill_ids(path: &str, values: &[String]) -> Result<(), String> {
+    if values.len() > 8 {
+        return Err(format!("{path} must contain at most 8 skill ids"));
+    }
+    let mut unique = BTreeSet::new();
+    for (index, value) in values.iter().enumerate() {
+        let item_path = format!("{path}[{index}]");
+        require_trimmed_string(&item_path, value, 128)?;
+        if !value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+        }) {
+            return Err(format!(
+                "{item_path} must contain only ASCII letters, digits, dots, underscores, or hyphens"
+            ));
+        }
+        if !unique.insert(value.as_str()) {
+            return Err(format!("{path} must contain unique skill ids"));
         }
     }
     Ok(())
@@ -1440,6 +1477,31 @@ mod tests {
             node("group", "group"),
         ];
         doc
+    }
+
+    fn pending_agent_document() -> CreativeProjectDocument {
+        let chat_id = "0190f5fe-7c00-7a00-8abc-000000000184";
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.chat_sessions.push(CreativeChatSession {
+            id: chat_id.into(),
+            title: "Poster".into(),
+            message_ids: Vec::new(),
+            model: Some(CreativeChatModel {
+                provider_id: "0190f5fe-7c00-7a00-8abc-000000000188".into(),
+                model: "gpt-5".into(),
+            }),
+            pending_turn: Some(CreativeChatPendingTurn {
+                idempotency_key: "0190f5fe-7c00-7a00-8abc-000000000185".into(),
+                prompt: "Create a poster".into(),
+                model_input: None,
+                skill_ids: Vec::new(),
+                created_at: 20,
+            }),
+            created_at: 10,
+            updated_at: 20,
+        });
+        document.active_chat_id = Some(chat_id.into());
+        document
     }
 
     #[test]
@@ -1911,25 +1973,7 @@ mod tests {
 
     #[test]
     fn agent_chat_sessions_pin_model_recovery_and_completed_pairs() {
-        let chat_id = "0190f5fe-7c00-7a00-8abc-000000000184";
-        let mut pending = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
-        pending.chat_sessions.push(CreativeChatSession {
-            id: chat_id.into(),
-            title: "Poster".into(),
-            message_ids: Vec::new(),
-            model: Some(CreativeChatModel {
-                provider_id: "0190f5fe-7c00-7a00-8abc-000000000188".into(),
-                model: "gpt-5".into(),
-            }),
-            pending_turn: Some(CreativeChatPendingTurn {
-                idempotency_key: "0190f5fe-7c00-7a00-8abc-000000000185".into(),
-                prompt: "Create a poster".into(),
-                created_at: 20,
-            }),
-            created_at: 10,
-            updated_at: 20,
-        });
-        pending.active_chat_id = Some(chat_id.into());
+        let pending = pending_agent_document();
         pending.validate_for_project(PROJECT_ID).unwrap();
 
         let mut completed = pending.clone();
@@ -1957,5 +2001,133 @@ mod tests {
                 .unwrap_err()
                 .contains("owning the pending Agent turn")
         );
+    }
+
+    #[test]
+    fn pending_agent_planning_input_defaults_old_wire_and_round_trips_new_wire() {
+        let mut document = pending_agent_document();
+        let pending = document.chat_sessions[0].pending_turn.as_mut().unwrap();
+        pending.model_input = Some("Use the selected canvas context".into());
+        pending.skill_ids = vec!["canvas.inspect".into(), "asset-search_v2".into()];
+        document.validate_for_project(PROJECT_ID).unwrap();
+
+        let value = serde_json::to_value(&document).unwrap();
+        assert_eq!(
+            value["chatSessions"][0]["pendingTurn"]["modelInput"],
+            "Use the selected canvas context"
+        );
+        assert_eq!(
+            value["chatSessions"][0]["pendingTurn"]["skillIds"],
+            serde_json::json!(["canvas.inspect", "asset-search_v2"])
+        );
+        let round_trip: CreativeProjectDocument = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(round_trip, document);
+
+        let mut old_wire = value;
+        let old_pending = old_wire["chatSessions"][0]["pendingTurn"]
+            .as_object_mut()
+            .unwrap();
+        old_pending.remove("modelInput");
+        old_pending.remove("skillIds");
+        let old_document: CreativeProjectDocument = serde_json::from_value(old_wire).unwrap();
+        old_document.validate_for_project(PROJECT_ID).unwrap();
+        let old_pending = old_document.chat_sessions[0]
+            .pending_turn
+            .as_ref()
+            .unwrap();
+        assert_eq!(old_pending.model_input, None);
+        assert!(old_pending.skill_ids.is_empty());
+
+        let normalized_wire = serde_json::to_value(old_document).unwrap();
+        assert!(normalized_wire["chatSessions"][0]["pendingTurn"]
+            .as_object()
+            .unwrap()
+            .contains_key("modelInput"));
+        assert_eq!(
+            normalized_wire["chatSessions"][0]["pendingTurn"]["modelInput"],
+            Value::Null
+        );
+        assert_eq!(
+            normalized_wire["chatSessions"][0]["pendingTurn"]["skillIds"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn pending_agent_planning_input_enforces_bounds_ascii_and_uniqueness() {
+        let mut boundary = pending_agent_document();
+        let pending = boundary.chat_sessions[0].pending_turn.as_mut().unwrap();
+        pending.model_input = Some("x".repeat(262_144));
+        pending.skill_ids = vec!["a".repeat(128); 1];
+        boundary.validate_for_project(PROJECT_ID).unwrap();
+
+        let cases = [
+            ("empty model input", Some(String::new()), Vec::new(), "modelInput"),
+            (
+                "padded model input",
+                Some(" context ".into()),
+                Vec::new(),
+                "modelInput",
+            ),
+            (
+                "long model input",
+                Some("x".repeat(262_145)),
+                Vec::new(),
+                "modelInput",
+            ),
+            (
+                "too many skills",
+                None,
+                (0..9).map(|index| format!("skill-{index}")).collect(),
+                "at most 8",
+            ),
+            (
+                "long skill id",
+                None,
+                vec!["a".repeat(129)],
+                "skillIds[0]",
+            ),
+            (
+                "padded skill id",
+                None,
+                vec![" skill".into()],
+                "skillIds[0]",
+            ),
+            (
+                "non ascii skill id",
+                None,
+                vec!["canvas.检查".into()],
+                "skillIds[0]",
+            ),
+            (
+                "invalid skill punctuation",
+                None,
+                vec!["canvas/read".into()],
+                "skillIds[0]",
+            ),
+            (
+                "duplicate skill id",
+                None,
+                vec!["canvas.read".into(), "canvas.read".into()],
+                "unique skill ids",
+            ),
+        ];
+
+        for (label, model_input, skill_ids, expected) in cases {
+            let mut document = pending_agent_document();
+            let pending = document.chat_sessions[0].pending_turn.as_mut().unwrap();
+            pending.model_input = model_input;
+            pending.skill_ids = skill_ids;
+            let error = document.validate_for_project(PROJECT_ID).unwrap_err();
+            assert!(
+                error.contains(expected),
+                "{label} produced unexpected error: {error}"
+            );
+        }
+
+        let mut unknown = serde_json::to_value(pending_agent_document()).unwrap();
+        unknown["chatSessions"][0]["pendingTurn"]["opaqueContext"] =
+            Value::String("forbidden".into());
+        assert!(serde_json::from_value::<CreativeProjectDocument>(unknown).is_err());
     }
 }

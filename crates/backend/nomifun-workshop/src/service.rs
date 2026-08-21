@@ -4298,6 +4298,8 @@ mod tests {
             pending_turn: Some(crate::creative_studio::CreativeChatPendingTurn {
                 idempotency_key: nomifun_common::generate_id(),
                 prompt: "continue".into(),
+                model_input: Some("continue".into()),
+                skill_ids: vec!["creative-studio-canvas".into()],
                 created_at: 1,
             }),
             created_at: 1,

@@ -244,6 +244,10 @@ export interface CreativeChatModelReference {
 export interface CreativeChatPendingTurn {
   idempotencyKey: string;
   prompt: string;
+  /** Exact durable input sent to the model after planning context is assembled. */
+  modelInput: string;
+  /** Ordered skill snapshot selected for this turn; never inferred during recovery. */
+  skillIds: string[];
   createdAt: number;
 }
 
