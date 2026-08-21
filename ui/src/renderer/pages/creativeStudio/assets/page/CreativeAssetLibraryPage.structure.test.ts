@@ -26,7 +26,10 @@ describe('CreativeAssetLibraryPage wiring', () => {
 
   test('matches the measured source-page geometry without changing default component styles', () => {
     const css = readFileSync(new URL('../components/CreativeAssetLibrary.module.css', import.meta.url), 'utf8');
-    expect(css.includes('width: min(1152px, calc(100% - 48px))')).toBe(true);
+    expect(css.includes('width: min(1280px, calc(100% - 48px))')).toBe(true);
+    expect(css.includes('width: min(1152px, 100%)')).toBe(true);
+    expect(css.includes('background: var(--color-bg-1)')).toBe(true);
+    expect(css.includes('background: var(--color-text-1)')).toBe(true);
     expect(css.includes('width: 672px')).toBe(true);
     expect(css.includes('font-size: 36px')).toBe(true);
     expect(css.includes(".root[data-asset-appearance='source-page'] .statePanel")).toBe(true);
