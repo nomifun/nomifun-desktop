@@ -30,6 +30,7 @@ use nomifun_common::{AppError, WorkshopAssetId};
 
 use crate::MAX_ASSET_BYTES;
 use crate::archive::MAX_CREATIVE_ARCHIVE_COMPRESSED_BYTES;
+use crate::creative_agent_ops::{CreativeAgentOp, CreativeAgentOpResult};
 use crate::creative_studio::{CreativeProjectDocument, CreativeProjectSummary};
 use crate::dto::WorkshopAsset;
 use crate::prompt_catalog::CreativePromptCatalogPage;
@@ -107,6 +108,10 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         .route(
             "/api/creative-studio/projects/{project_id}/document",
             axum::routing::put(save_creative_project),
+        )
+        .route(
+            "/api/creative-studio/projects/{project_id}/agent-ops",
+            post(apply_creative_agent_ops),
         )
         .route(
             "/api/creative-studio/projects/{project_id}/archive",
@@ -278,6 +283,54 @@ async fn save_creative_project(
         .save_creative_project(&project_id, &req.expected_revision, &req.document)
         .await?;
     Ok(Json(ApiResponse::ok(CreativeProjectResponse { project })))
+}
+
+const CREATIVE_STUDIO_AGENT_SOURCE: &str = "creative-studio-agent";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreativeAgentOpsRequest {
+    expected_revision: String,
+    ops: Vec<CreativeAgentOp>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreativeAgentOpsResponse {
+    project: CreativeProjectSummary,
+    ops: Vec<CreativeAgentOpResult>,
+}
+
+async fn apply_creative_agent_ops(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(project_id): Path<String>,
+    body: Result<Json<CreativeAgentOpsRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CreativeAgentOpsResponse>>, AppError> {
+    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    if request
+        .ops
+        .iter()
+        .any(|op| matches!(op, CreativeAgentOp::DeleteNode { .. }))
+    {
+        return Err(AppError::BadRequest(
+            "Creative Studio Agent operations cannot delete nodes; deletion requires explicit user confirmation"
+                .to_owned(),
+        ));
+    }
+    let applied = state
+        .service
+        .apply_creative_agent_ops(
+            &project_id,
+            &request.expected_revision,
+            request.ops,
+            CREATIVE_STUDIO_AGENT_SOURCE,
+        )
+        .await?;
+    Ok(Json(ApiResponse::ok(CreativeAgentOpsResponse {
+        project: applied.project,
+        ops: applied.ops,
+    })))
 }
 
 async fn delete_creative_project(
@@ -853,7 +906,7 @@ async fn serve_file(
 mod tests {
     use std::sync::Arc;
 
-    use nomifun_common::UserId;
+    use nomifun_common::{CreativeStudioNodeId, UserId};
     use nomifun_db::{IWorkshopRepository, SqliteWorkshopRepository};
     use serde_json::Value;
     use tower::ServiceExt;
@@ -951,6 +1004,289 @@ mod tests {
                     },
                 },
             ],
+        }
+    }
+
+    fn add_text_op(text: &str, x: f64, y: f64) -> Value {
+        serde_json::json!({
+            "type": "add_node",
+            "node_type": "text",
+            "x": x,
+            "y": y,
+            "data": {
+                "text": text,
+                "format": "plain",
+                "fontSize": 16,
+                "textAlign": "left"
+            }
+        })
+    }
+
+    fn add_idle_config_op() -> Value {
+        serde_json::json!({
+            "type": "add_node",
+            "node_type": "config",
+            "x": 0,
+            "y": 0,
+            "data": {
+                "task": "image_generation",
+                "capability": "t2i",
+                "providerId": null,
+                "model": null,
+                "prompt": "",
+                "negativePrompt": "",
+                "parameters": {},
+                "inputAssetIds": [],
+                "taskId": null,
+                "resultAssetIds": [],
+                "status": "idle",
+                "errorMessage": null
+            }
+        })
+    }
+
+    async fn post_agent_ops(app: &Router, project_id: &str, body: Value) -> Response {
+        app.clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/creative-studio/projects/{project_id}/agent-ops"
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn response_json(response: Response) -> Value {
+        serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn creative_agent_ops_route_commits_one_cas_batch_and_mints_ids() {
+        let (state, user, _data_dir) = test_state().await;
+        let project = state
+            .service
+            .create_creative_project(Some("Agent route".into()))
+            .await
+            .unwrap();
+        let app = workshop_routes(state.clone()).layer(Extension(user));
+
+        let seed = post_agent_ops(
+            &app,
+            &project.project_id,
+            serde_json::json!({
+                "expectedRevision": "1",
+                "ops": [
+                    add_text_op("first", 10.0, 20.0),
+                    add_text_op("second", 400.0, 20.0)
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(seed.status(), StatusCode::OK);
+        let seed = response_json(seed).await;
+        assert_eq!(seed["data"]["project"]["revision"], "2");
+        let first_id = seed["data"]["ops"][0]["node_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let second_id = seed["data"]["ops"][1]["node_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        CreativeStudioNodeId::parse(&first_id).unwrap();
+        CreativeStudioNodeId::parse(&second_id).unwrap();
+
+        let applied = post_agent_ops(
+            &app,
+            &project.project_id,
+            serde_json::json!({
+                "expectedRevision": "2",
+                "ops": [
+                    add_text_op("server minted", 800.0, 20.0),
+                    {
+                        "type": "move_node",
+                        "node_id": first_id,
+                        "x": 120.0,
+                        "y": 140.0
+                    },
+                    {
+                        "type": "connect",
+                        "source_node_id": first_id,
+                        "target_node_id": second_id
+                    }
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(applied.status(), StatusCode::OK);
+        let applied = response_json(applied).await;
+        let data = applied["data"].as_object().unwrap();
+        assert_eq!(data.len(), 2);
+        assert!(data.contains_key("project"));
+        assert!(data.contains_key("ops"));
+        assert_eq!(data["project"]["revision"], "3");
+        assert_eq!(data["project"]["nodeCount"], 3);
+        assert_eq!(data["project"]["connectionCount"], 1);
+        assert_eq!(data["ops"][0]["type"], "node_added");
+        assert_eq!(data["ops"][1]["type"], "node_moved");
+        assert_eq!(data["ops"][2]["type"], "nodes_connected");
+        let minted_id = data["ops"][0]["node_id"].as_str().unwrap();
+        CreativeStudioNodeId::parse(minted_id).unwrap();
+        assert_ne!(minted_id, first_id);
+        assert_ne!(minted_id, second_id);
+
+        let detail = state
+            .service
+            .get_creative_project(&project.project_id)
+            .await
+            .unwrap();
+        assert_eq!(detail.project.revision, "3");
+        assert_eq!(detail.document.nodes.len(), 3);
+        assert_eq!(detail.document.connections.len(), 1);
+        let moved = detail
+            .document
+            .nodes
+            .iter()
+            .find(|node| node.id == first_id)
+            .unwrap();
+        assert_eq!(moved.position.x, 120.0);
+        assert_eq!(moved.position.y, 140.0);
+        assert!(detail.document.nodes.iter().any(|node| node.id == minted_id));
+    }
+
+    #[tokio::test]
+    async fn creative_agent_ops_route_reports_stale_revision_without_writing() {
+        let (state, user, _data_dir) = test_state().await;
+        let project = state
+            .service
+            .create_creative_project(Some("Agent stale CAS".into()))
+            .await
+            .unwrap();
+        let app = workshop_routes(state.clone()).layer(Extension(user));
+
+        let first = post_agent_ops(
+            &app,
+            &project.project_id,
+            serde_json::json!({
+                "expectedRevision": "1",
+                "ops": [add_text_op("committed", 0.0, 0.0)]
+            }),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let before = state
+            .service
+            .get_creative_project(&project.project_id)
+            .await
+            .unwrap();
+
+        let stale = post_agent_ops(
+            &app,
+            &project.project_id,
+            serde_json::json!({
+                "expectedRevision": "1",
+                "ops": [add_text_op("must not persist", 20.0, 20.0)]
+            }),
+        )
+        .await;
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        let stale = response_json(stale).await;
+        assert_eq!(stale["code"], "REVISION_CONFLICT");
+
+        let after = state
+            .service
+            .get_creative_project(&project.project_id)
+            .await
+            .unwrap();
+        assert_eq!(after.project, before.project);
+        assert_eq!(after.document, before.document);
+    }
+
+    #[tokio::test]
+    async fn creative_agent_ops_route_rejects_extra_fields_destructive_ops_and_invalid_batches_atomically()
+    {
+        let (state, user, _data_dir) = test_state().await;
+        let project = state
+            .service
+            .create_creative_project(Some("Agent strict input".into()))
+            .await
+            .unwrap();
+        let app = workshop_routes(state.clone()).layer(Extension(user));
+
+        let seed = post_agent_ops(
+            &app,
+            &project.project_id,
+            serde_json::json!({
+                "expectedRevision": "1",
+                "ops": [add_idle_config_op()]
+            }),
+        )
+        .await;
+        assert_eq!(seed.status(), StatusCode::OK);
+        let seed = response_json(seed).await;
+        let config_id = seed["data"]["ops"][0]["node_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let before = state
+            .service
+            .get_creative_project(&project.project_id)
+            .await
+            .unwrap();
+
+        let rejected_bodies = [
+            serde_json::json!({
+                "expectedRevision": "2",
+                "ops": [add_text_op("client source rejected", 0.0, 0.0)],
+                "source": "client-controlled"
+            }),
+            serde_json::json!({
+                "expectedRevision": "2",
+                "ops": []
+            }),
+            serde_json::json!({
+                "expectedRevision": "2",
+                "ops": [{
+                    "type": "delete_node",
+                    "node_id": config_id
+                }]
+            }),
+            serde_json::json!({
+                "expectedRevision": "2",
+                "ops": [
+                    add_text_op("rolled back", 0.0, 0.0),
+                    {
+                        "type": "update_node_data",
+                        "node_id": config_id,
+                        "patch": {
+                            "taskId": CreativeStudioNodeId::new().into_string(),
+                            "status": "running"
+                        }
+                    }
+                ]
+            }),
+        ];
+
+        for body in rejected_bodies {
+            let rejected = post_agent_ops(&app, &project.project_id, body).await;
+            assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+            let after = state
+                .service
+                .get_creative_project(&project.project_id)
+                .await
+                .unwrap();
+            assert_eq!(after.project, before.project);
+            assert_eq!(after.document, before.document);
         }
     }
 

@@ -47,6 +47,21 @@ creation paths enforce one Director node per project; malformed documents with
 multiple Director nodes remain visible as a fail-closed conflict. The Director
 close action returns to this same canvas project.
 
+The authenticated Agent mutation gateway is
+`POST /api/creative-studio/projects/{projectId}/agent-ops`. Its wrapper accepts
+only `{ expectedRevision, ops }`; the audit source is server-owned and fixed to
+`creative-studio-agent`. Nested operations reuse the one canonical snake_case
+`CreativeAgentOp` wire contract, so the HTTP path, Gateway, service and domain do
+not drift through duplicate DTOs. One request is one project revision CAS: the
+server mints node/connection UUIDv7 values, validates the complete resulting
+document, and returns only the saved project summary plus ordered op results.
+A stale revision, unknown field, empty/invalid batch, runtime-owned task-field
+patch or late invalid op produces zero writes. `delete_node` is additionally
+rejected at this Agent route because deletion remains an explicit user-confirmed
+canvas action. The product will invoke this gateway only after presenting a
+strict planning artifact for manual “应用到画布” approval, then reload the
+authoritative project rather than mutating a second optimistic graph.
+
 The source geometry is canonical for views that currently have no resize handle:
 the left library is 280px and opening Agent normalizes the right panel to 390px.
 The Agent supplies its own single header; the generic right-panel tab header is
