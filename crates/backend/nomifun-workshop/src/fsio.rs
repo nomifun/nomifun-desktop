@@ -1,7 +1,6 @@
-//! Atomic temp+rename writes for the workshop domain's on-disk artifacts
-//! (canvas docs + asset binaries). Atomic write helpers,
-//! async (asset payloads can be tens of MB, so blocking the runtime on a sync
-//! write is unacceptable) and byte-oriented (docs/binaries, not typed configs).
+//! Atomic temp+rename writes for Creative Studio asset binaries. The helper is
+//! asynchronous because payloads can be tens of MB and must not block the
+//! runtime.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,16 +25,6 @@ pub(crate) async fn save_bytes_atomic(dir: &Path, file: &str, bytes: &[u8]) -> s
     result
 }
 
-/// Read a file to bytes, or `None` when it does not exist. Other IO errors
-/// propagate.
-pub(crate) async fn read_bytes_opt(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
-    match tokio::fs::read(path).await {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45,18 +34,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("a").join("b");
         save_bytes_atomic(&sub, "x.bin", b"hello").await.unwrap();
-        let read = read_bytes_opt(&sub.join("x.bin")).await.unwrap();
-        assert_eq!(read.as_deref(), Some(&b"hello"[..]));
+        let read = tokio::fs::read(sub.join("x.bin")).await.unwrap();
+        assert_eq!(read, b"hello");
         // no temp files linger
         let leftover = std::fs::read_dir(&sub).unwrap().filter(|e| {
             e.as_ref().unwrap().file_name().to_string_lossy().contains(".tmp.")
         });
         assert_eq!(leftover.count(), 0);
-    }
-
-    #[tokio::test]
-    async fn read_missing_is_none() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(read_bytes_opt(&dir.path().join("nope")).await.unwrap().is_none());
     }
 }

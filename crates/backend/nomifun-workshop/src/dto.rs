@@ -1,44 +1,11 @@
-//! Wire DTOs for the Creative Studio asset and legacy workshop canvas surfaces.
-//! All fields are snake_case (serde default) per the wire contract. These are response
-//! shapes the frontend `types.ts` mirrors; the domain crate owns them (the
-//! shared `api-types` crate is not in this module's ownership).
+//! Wire DTOs for the Creative Studio asset surface. All fields are snake_case
+//! (serde default) per the wire contract. The domain crate owns these response
+//! shapes directly.
 
 use nomifun_common::{AppError, TimestampMs};
-use nomifun_db::{WorkshopAssetRow, WorkshopCanvasRow};
+use nomifun_db::WorkshopAssetRow;
 use serde::Serialize;
 use serde_json::Value;
-
-/// A canvas index entry. `thumbnail_url` is populated once a canvas thumbnail
-/// has been set (via `PATCH …/{canvas_id}` with `thumbnail_asset_id`); it points
-/// at the dedicated `GET /api/workshop/canvas-thumbs/{canvas_id}` serve route.
-#[derive(Debug, Clone, Serialize)]
-pub struct WorkshopCanvasMeta {
-    pub canvas_id: String,
-    pub title: String,
-    pub thumbnail_url: Option<String>,
-    pub node_count: i64,
-    pub created_at: TimestampMs,
-    pub updated_at: TimestampMs,
-}
-
-impl From<WorkshopCanvasRow> for WorkshopCanvasMeta {
-    fn from(row: WorkshopCanvasRow) -> Self {
-        // Advertise a thumbnail URL only when a thumbnail file was actually
-        // written (rel_path present) — never a URL with no bytes behind it.
-        let thumbnail_url = row
-            .thumbnail_rel_path
-            .as_ref()
-            .map(|_| format!("/api/workshop/canvas-thumbs/{}", row.canvas_id));
-        Self {
-            canvas_id: row.canvas_id,
-            title: row.title,
-            thumbnail_url,
-            node_count: row.node_count,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        }
-    }
-}
 
 /// A workshop asset. `url` always points at the files route (a `text` asset has
 /// no binary, so its `url` 404s — the frontend uses `text_content` for those).
@@ -160,37 +127,4 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn canvas_meta_advertises_thumbnail_when_rel_path_present() {
-        let canvas_id = "0190f5fe-7c00-7a00-8000-000000000011";
-        let row = WorkshopCanvasRow {
-            id: 1,
-            canvas_id: canvas_id.into(),
-            title: "c".into(),
-            thumbnail_rel_path: Some(format!("workshop/canvases/{canvas_id}/thumb.jpg")),
-            node_count: 3,
-            created_at: 1,
-            updated_at: 2,
-        };
-        let meta = WorkshopCanvasMeta::from(row);
-        assert_eq!(
-            meta.thumbnail_url.as_deref(),
-            Some("/api/workshop/canvas-thumbs/0190f5fe-7c00-7a00-8000-000000000011")
-        );
-        assert_eq!(meta.node_count, 3);
-    }
-
-    #[test]
-    fn canvas_meta_no_thumbnail_url_when_absent() {
-        let row = WorkshopCanvasRow {
-            id: 2,
-            canvas_id: "0190f5fe-7c00-7a00-8000-000000000012".into(),
-            title: "c".into(),
-            thumbnail_rel_path: None,
-            node_count: 0,
-            created_at: 1,
-            updated_at: 2,
-        };
-        assert!(WorkshopCanvasMeta::from(row).thumbnail_url.is_none());
-    }
 }
