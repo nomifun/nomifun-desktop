@@ -568,6 +568,7 @@ impl OutputSink for DeliveredMediaOutput {
     ) -> ToolMediaDelivery {
         ToolMediaDelivery::Delivered {
             context: "Verified artifact receipt: nomifun-artifacts/image.png".to_owned(),
+            durable_workspace_targets: Vec::new(),
         }
     }
     fn emit_stream_start(&self, _: &str) {}
@@ -1091,6 +1092,8 @@ fn make_engine(model: &str) -> super::AgentEngine {
     super::AgentEngine {
         provider: Arc::new(NullProvider),
         tools: ToolRegistry::new(),
+        workspace_root: std::path::PathBuf::from("."),
+        completion_evidence_mode: super::CompletionEvidenceMode::LocalFingerprint,
         messages: vec![],
         system_prompt: String::new(),
         model: model.to_string(),
@@ -1416,13 +1419,13 @@ fn rewind_last_turn_truncates_to_marker() {
     assert_eq!(engine.messages.len(), 3);
 
     assert!(engine.can_rewind_last_turn("message-u1"));
-    assert!(engine.rewind_last_turn("message-u1"));
+    assert!(engine.rewind_last_turn("message-u1").unwrap());
     assert_eq!(engine.messages.len(), 2); // U1 被回退
     assert!(engine.editable_turn.is_none()); // 锚点被消费
     assert_eq!(engine.host_context, prior_host_context);
 
     // 再次回退无锚点 → false
-    assert!(!engine.rewind_last_turn("message-u1"));
+    assert!(!engine.rewind_last_turn("message-u1").unwrap());
 }
 
 #[test]
@@ -1434,7 +1437,7 @@ fn rewind_last_turn_rejects_stale_marker() {
         start_len: 5,
         prior_host_context: Default::default(),
     });
-    assert!(!engine.rewind_last_turn("message-stale"));
+    assert!(!engine.rewind_last_turn("message-stale").unwrap());
 }
 
 #[test]
@@ -1443,7 +1446,7 @@ fn rewind_last_turn_allows_only_an_empty_checkpointless_transcript() {
 
     let mut empty = make_engine("rewind-empty-no-checkpoint");
     assert!(empty.can_rewind_last_turn("message-empty"));
-    assert!(empty.rewind_last_turn("message-empty"));
+    assert!(empty.rewind_last_turn("message-empty").unwrap());
     assert!(empty.messages.is_empty());
     assert!(empty.editable_turn.is_none());
 
@@ -1455,7 +1458,7 @@ fn rewind_last_turn_allows_only_an_empty_checkpointless_transcript() {
         }],
     ));
     assert!(!non_empty.can_rewind_last_turn("message-legacy"));
-    assert!(!non_empty.rewind_last_turn("message-legacy"));
+    assert!(!non_empty.rewind_last_turn("message-legacy").unwrap());
     assert_eq!(non_empty.messages.len(), 1);
 }
 

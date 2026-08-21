@@ -115,6 +115,7 @@ impl LocalAgentInvocationRunner {
                 text: "Delegated Agent skipped: shared token budget exhausted.".to_string(),
                 usage: TokenUsage::default(),
                 turns: 0,
+                durable_effect_targets: Vec::new(),
                 is_error: true,
             };
         }
@@ -138,6 +139,7 @@ impl LocalAgentInvocationRunner {
                     text: format!("Delegated Agent capability denied: {error}"),
                     usage: TokenUsage::default(),
                     turns: 0,
+                    durable_effect_targets: Vec::new(),
                     is_error: true,
                 };
             }
@@ -278,6 +280,7 @@ impl LocalAgentInvocationRunner {
                                 ),
                                 usage: TokenUsage::default(),
                                 turns: 0,
+                                durable_effect_targets: Vec::new(),
                                 is_error: true,
                             },
                         }
@@ -306,6 +309,7 @@ impl LocalAgentInvocationRunner {
                     text: format!("Task join error: {}", e),
                     usage: TokenUsage::default(),
                     turns: 0,
+                    durable_effect_targets: Vec::new(),
                     is_error: true,
                 })
             })
@@ -327,6 +331,7 @@ impl LocalAgentInvocationRunner {
                     text: format!("Worktree isolation failed: {error}"),
                     usage: TokenUsage::default(),
                     turns: 0,
+                    durable_effect_targets: Vec::new(),
                     is_error: true,
                 };
             }
@@ -336,6 +341,7 @@ impl LocalAgentInvocationRunner {
                     text: format!("Worktree isolation task failed: {error}"),
                     usage: TokenUsage::default(),
                     turns: 0,
+                    durable_effect_targets: Vec::new(),
                     is_error: true,
                 };
             }
@@ -349,6 +355,7 @@ impl LocalAgentInvocationRunner {
                     text: format!("Worktree isolation capability setup failed: {error}"),
                     usage: TokenUsage::default(),
                     turns: 0,
+                    durable_effect_targets: Vec::new(),
                     is_error: true,
                 };
             }
@@ -356,6 +363,11 @@ impl LocalAgentInvocationRunner {
         let mut result = backend
             .invoke_with_effective_scope(config, contributor, effective_scope)
             .await;
+        // A detached worktree can prove that the child changed its own files,
+        // but those bytes are not visible in the parent workspace. Returning a
+        // reviewable patch is not equivalent to applying it, so clear the
+        // parent-bound evidence regardless of capture success or failure.
+        result.durable_effect_targets.clear();
         match tokio::task::spawn_blocking(move || worktree.capture_diff()).await {
             Ok(Ok(diff)) if !diff.trim().is_empty() => {
                 result.text.push_str(
@@ -565,14 +577,19 @@ fn map_agent_invocation_outcome(
 ) -> AgentInvocationOutput {
     match outcome {
         Ok(Ok(result)) => {
-            let incomplete = match result.stop_reason {
+            let incomplete = result.completion_adjudication.as_ref().map(|issue| {
+                format!(
+                    "made an unsupported completion claim ({})",
+                    issue.kind()
+                )
+            }).or_else(|| match result.stop_reason {
                 StopReason::MaxTokens => {
-                    Some("stopped at its output token ceiling before finishing")
+                    Some("stopped at its output token ceiling before finishing".to_owned())
                 }
                 StopReason::MaxTurns => {
-                    Some("exhausted its per-turn provider-request budget before finishing")
+                    Some("exhausted its per-turn provider-request budget before finishing".to_owned())
                 }
-                StopReason::Refusal => Some("was refused by the provider before finishing"),
+                StopReason::Refusal => Some("was refused by the provider before finishing".to_owned()),
                 // A delegate whose round restarted after the output ceiling, was
                 // cut off mid state-changing call, had such tools available, and
                 // still completed no state-changing effect has not done the work
@@ -584,19 +601,26 @@ fn map_agent_invocation_outcome(
                     if result.rounds > 1
                         && result.state_changing_tools_advertised
                         && result.cutoff_state_changing > 0
-                        && result.effects_ok == 0 =>
+                        && result.effects_ok == 0
+                        && result.durable_effect_targets.is_empty() =>
                 {
                     Some(
                         "restarted after its output token ceiling and never completed the \
-                         state-changing tool call it was cut off from",
+                         state-changing tool call it was cut off from".to_owned(),
                     )
                 }
                 StopReason::EndTurn | StopReason::ToolUse => None,
+            });
+            let is_error = incomplete.is_some();
+            let durable_effect_targets = if is_error {
+                Vec::new()
+            } else {
+                result.durable_effect_targets
             };
             AgentInvocationOutput {
                 name,
                 text: match incomplete {
-                    Some(reason) => format!(
+                    Some(ref reason) => format!(
                         "Delegated Agent {reason}; the work below is INCOMPLETE and must not be \
                          treated as a finished result:\n\n{}",
                         result.text
@@ -605,7 +629,8 @@ fn map_agent_invocation_outcome(
                 },
                 usage: result.usage,
                 turns: result.turns,
-                is_error: incomplete.is_some(),
+                durable_effect_targets,
+                is_error,
             }
         }
         Ok(Err(e)) => AgentInvocationOutput {
@@ -613,6 +638,7 @@ fn map_agent_invocation_outcome(
             text: format!("Delegated Agent error: {}", e),
             usage: TokenUsage::default(),
             turns: 0,
+            durable_effect_targets: Vec::new(),
             is_error: true,
         },
         Err(_elapsed) => AgentInvocationOutput {
@@ -620,6 +646,7 @@ fn map_agent_invocation_outcome(
             text: format!("Delegated Agent timed out after {timeout_secs}s and was aborted"),
             usage: TokenUsage::default(),
             turns: 0,
+            durable_effect_targets: Vec::new(),
             is_error: true,
         },
     }
@@ -655,6 +682,7 @@ async fn execute_delegated_agent(
                 .text
                 .push_str(" At least one process tree could not be proven reaped.");
             result.is_error = true;
+            result.durable_effect_targets.clear();
         }
         result
     }
@@ -1365,8 +1393,10 @@ mod phase7_tests {
                 turns: 3,
                 rounds: 1,
                 effects_ok: 0,
+                durable_effect_targets: Vec::new(),
                 cutoff_state_changing: 0,
                 state_changing_tools_advertised: true,
+                completion_adjudication: None,
             }));
         let r = map_agent_invocation_outcome("a".to_string(), ok, 300);
         assert!(!r.is_error);
@@ -1387,8 +1417,10 @@ mod phase7_tests {
             turns: 1,
             rounds,
             effects_ok,
+            durable_effect_targets: Vec::new(),
             cutoff_state_changing,
             state_changing_tools_advertised,
+            completion_adjudication: None,
         }))
     }
 
@@ -1433,6 +1465,26 @@ mod phase7_tests {
     fn a_restarted_delegate_that_did_change_state_is_not_judged() {
         let r = map_agent_invocation_outcome("a".to_string(), restarted(2, 1, 1, true), 300);
         assert!(!r.is_error, "text: {}", r.text);
+    }
+
+    #[test]
+    fn a_restarted_delegate_with_terminally_verified_target_is_not_judged() {
+        let outcome: Result<Result<AgentResult, AgentError>, tokio::time::error::Elapsed> =
+            Ok(Ok(AgentResult {
+                text: "Created miniapp.html.".to_owned(),
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+                turns: 1,
+                rounds: 2,
+                effects_ok: 0,
+                durable_effect_targets: vec!["miniapp.html".to_owned()],
+                cutoff_state_changing: 1,
+                state_changing_tools_advertised: true,
+                completion_adjudication: None,
+            }));
+        let result = map_agent_invocation_outcome("a".to_owned(), outcome, 300);
+        assert!(!result.is_error, "text: {}", result.text);
+        assert_eq!(result.durable_effect_targets, ["miniapp.html"]);
     }
 
     #[test]

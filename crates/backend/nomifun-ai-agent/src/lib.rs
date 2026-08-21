@@ -71,7 +71,9 @@ pub use knowledge_completer::LiveKnowledgeCompleter;
 pub use knowledge_completer::resolve_default_model;
 pub use knowledge_retrieval::LiveKnowledgeRetrievalSink;
 pub use knowledge_writeback::LiveKnowledgeWritebackSink;
-pub use nomi_session_persistence::{NomiSessionPersistence, NomiSessionResetOutcome};
+pub use nomi_session_persistence::{
+    NomiSessionPersistence, NomiSessionRecoveryRewindOutcome, NomiSessionResetOutcome,
+};
 pub use terminal_title_completer::LiveTerminalTitleCompleter;
 pub use nomifun_api_types::{NomiBuildExtra, SlashCommandItem};
 pub use protocol::events::{

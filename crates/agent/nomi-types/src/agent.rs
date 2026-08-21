@@ -410,6 +410,10 @@ pub struct AgentInvocationOutput {
     pub text: String,
     pub usage: TokenUsage,
     pub turns: usize,
+    /// Successful state-changing effects observed inside this exact delegated
+    /// invocation. This is machine evidence for the parent completion gate;
+    /// the delegate's prose is deliberately not treated as proof of work.
+    pub durable_effect_targets: Vec<String>,
     pub is_error: bool,
 }
 

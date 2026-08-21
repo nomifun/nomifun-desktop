@@ -11,7 +11,7 @@ use nomi_agent::companion_tools::{
 use nomi_agent::summon_tools::{
     SummonContextContributor, SummonContextSink,
 };
-use nomi_agent::engine::AgentEngine;
+use nomi_agent::engine::{AgentEngine, CompletionEvidenceContext};
 use nomi_agent::knowledge_tools::{KnowledgeReadTool, KnowledgeSearchTool, KnowledgeWriteTool};
 use nomi_agent::output::OutputSink;
 use nomi_agent::requirement_tools::{RequirementCompleteTool, RequirementSink, RequirementUpdateStatusTool};
@@ -1423,6 +1423,56 @@ impl NomiAgentManager {
         availability
     }
 
+    /// Roll back a model-complete engine pass when the host's deferred
+    /// artifact/cancellation transaction did not commit. The engine restores
+    /// the accepted-turn root in memory first and performs a checked session
+    /// write; a failed write permanently quarantines this manager and is
+    /// surfaced through the dedicated session-consistency code.
+    async fn restore_uncommitted_completion_turn(
+        &self,
+        completion_context: &CompletionEvidenceContext,
+        detail: impl Into<String>,
+    ) -> Result<(), AgentSendError> {
+        let persisted = self
+            .engine
+            .lock()
+            .await
+            .restore_uncommitted_completion_turn(completion_context);
+        // OutputDiscarded must observe the provider-pass checkpoint before
+        // abort clears held prose/artifact bookkeeping; reversing these calls
+        // can turn a valid checkpoint into a sink consistency Error that masks
+        // the actual delivery/session terminal.
+        self.backend_output_sink.abort_artifact_delivery_turn();
+        if persisted {
+            return Ok(());
+        }
+
+        self.runtime.mark_transport_broken();
+        Err(AgentSendError::agent_session_inconsistent(detail))
+    }
+
+    /// Provider failure/cancellation keeps any earlier valid race-tail prefix
+    /// visible as failure evidence, while the resumable engine transcript is
+    /// still restored to the exact accepted-turn root.
+    async fn restore_uncommitted_completion_attempt(
+        &self,
+        completion_context: &CompletionEvidenceContext,
+        detail: impl Into<String>,
+    ) -> Result<(), AgentSendError> {
+        let persisted = self
+            .engine
+            .lock()
+            .await
+            .restore_uncommitted_completion_attempt(completion_context);
+        self.backend_output_sink.abort_artifact_delivery_turn();
+        if persisted {
+            return Ok(());
+        }
+
+        self.runtime.mark_transport_broken();
+        Err(AgentSendError::agent_session_inconsistent(detail))
+    }
+
     fn request_stop(
         &self,
         reason: Option<AgentKillReason>,
@@ -1597,6 +1647,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
         // Backstop: guarantee a terminal event even if this turn unwinds
         // abnormally (engine panic / early-return). Disarmed on the normal path
         // after the real terminal event is emitted below. (Phase 0 F0.2)
+        let accepted_turn_recovery_required = Arc::new(AtomicBool::new(false));
         let mut term_guard = TurnTerminationGuard {
             runtime: self.runtime.clone(),
             turn: runtime_turn,
@@ -1607,6 +1658,9 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
             process_supervisor: process_supervisor.clone(),
             mcp_managers: self.mcp_managers.clone(),
             turn_teardown_fence: Arc::clone(&self.turn_teardown_fence),
+            accepted_turn_recovery_required: Arc::clone(
+                &accepted_turn_recovery_required,
+            ),
             #[cfg(feature = "browser-use")]
             browser_lane_binding: self.browser_lane_binding.clone(),
             armed: true,
@@ -1801,17 +1855,25 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 }
                 engine = self.engine.lock() => engine,
             };
-            engine
-                .record_host_text_turn(
-                    data.content.clone(),
-                    response.clone(),
-                    &source_message_id,
-                )
-                .map_err(|error| {
-                    AgentSendError::from_app_error(AppError::Internal(format!(
-                        "failed to persist image capability response: {error}"
-                    )))
-                })?;
+            if let Err(error) = engine.record_host_text_turn(
+                data.content.clone(),
+                response.clone(),
+                &source_message_id,
+            ) {
+                drop(engine);
+                self.runtime.mark_transport_broken();
+                let send_error = AgentSendError::agent_session_inconsistent(format!(
+                    "The deterministic image capability response could not be persisted safely: {error}"
+                ));
+                let stream_error = send_error.stream_error().clone();
+                term_guard
+                    .terminalize(move |runtime, turn| {
+                        runtime.emit_error_data_for_turn(turn, stream_error)
+                    })
+                    .await
+                    .map_err(AgentSendError::from_app_error)?;
+                return Err(send_error);
+            }
             let context_tokens = engine.context_tokens();
             let context_window = engine.context_window();
             drop(engine);
@@ -1832,11 +1894,27 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 .await
                 .map_err(AgentSendError::from_app_error)?;
             if !published {
-                let rewound = self.engine.lock().await.rewind_last_turn(&source_message_id);
-                if !rewound {
-                    return Err(AgentSendError::from_app_error(AppError::Internal(
-                        "cancelled image capability response could not be rewound".to_owned(),
-                    )));
+                let rewind = self
+                    .engine
+                    .lock()
+                    .await
+                    .rewind_last_turn(&source_message_id);
+                if !matches!(rewind, Ok(true)) {
+                    self.runtime.mark_transport_broken();
+                    let detail = match rewind {
+                        Ok(false) => "the deterministic response no longer owned the exact rewind checkpoint".to_owned(),
+                        Err(error) => format!("the deterministic response rewind could not be persisted: {error}"),
+                        Ok(true) => unreachable!(),
+                    };
+                    let send_error = AgentSendError::agent_session_inconsistent(detail);
+                    let stream_error = send_error.stream_error().clone();
+                    term_guard
+                        .terminalize(move |runtime, turn| {
+                            runtime.emit_error_data_for_turn(turn, stream_error)
+                        })
+                        .await
+                        .map_err(AgentSendError::from_app_error)?;
+                    return Err(send_error);
                 }
                 self.backend_output_sink.cancel_active_tool_calls(
                     "The image capability response was cancelled before publication.",
@@ -1893,6 +1971,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
         // Every asynchronous operation after entering Running belongs to this
         // durable cancellation domain. Preparation and execution converge on
         // one cancellation terminal below.
+        let mut cancelled_session_error = None;
         let accepted_turn = 'accepted: {
             let prepare_turn = async {
                 // A provider already known not to support vision receives the
@@ -1982,6 +2061,17 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
             }
             engine.set_steering_inbox(Some(self.steering_inbox.clone()));
             engine.set_system_resource_inbox(Some(self.system_resource_inbox.clone()));
+            // Completion adjudication is bound to trusted user-authored input,
+            // never the RAG/knowledge prelude sent to the provider. This
+            // host-owned scope survives bounded steering race-tail engine calls
+            // that still belong to this one admitted turn.
+            let mut completion_context =
+                CompletionEvidenceContext::with_host_recovery_signal(
+                    vec![ContentBlock::Text {
+                        text: data.content.clone(),
+                    }],
+                    Arc::clone(&accepted_turn_recovery_required),
+                );
             // Each iteration runs one engine pass inside the same accepted
             // Agent turn. Re-run only for steering race-tail interjections; the
             // engine owns output-truncation recovery, because only it can drop
@@ -2004,16 +2094,29 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                             conversation_id = %self.runtime.conversation_id(),
                             "Nomi engine.execute_turn() cancelled by stop signal"
                         );
-                        engine.abort_current_turn("Tool execution canceled by user");
+                        if completion_context.turn_root_captured() {
+                            engine.abort_current_turn("Tool execution canceled by user");
+                            if !engine
+                                .restore_uncommitted_completion_attempt(&completion_context)
+                            {
+                                self.runtime.mark_transport_broken();
+                                cancelled_session_error = Some(
+                                    AgentSendError::agent_session_inconsistent(
+                                        "The accepted Agent turn was cancelled in flight, but its durable session root could not be restored",
+                                    ),
+                                );
+                            }
+                        }
                         engine.set_steering_inbox(None);
                         engine.set_system_resource_inbox(None);
                         break 'accepted None;
                     }
-                    res = engine.execute_turn_with_content_for_source_and_tool_allowlist(
+                    res = engine.execute_turn_with_completion_evidence_context(
                         current_content,
                         &data.msg_id,
                         &source_message_id,
                         image_tool_allowlist.as_ref(),
+                        Some(&mut completion_context),
                     ) => res,
                 };
 
@@ -2023,6 +2126,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 // is absorbed by this exact turn's terminal transition.
                 if let Ok(agent_result) = &r
                     && agent_result.stop_reason == nomi_types::message::StopReason::EndTurn
+                    && agent_result.completion_adjudication.is_none()
                 {
                     if race_tail_reruns < MAX_STEERING_RACE_TAIL_RERUNS {
                         let leftover: Vec<String> = {
@@ -2040,6 +2144,11 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                             // second StreamStart under the same id for this logical turn.
                             // Benign — the UI keeps the same assistant bubble; a fresh id
                             // would instead spawn a new bubble. Intentional for this rare tail.
+                            for text in &leftover {
+                                completion_context.requirement.push(ContentBlock::Text {
+                                    text: text.clone(),
+                                });
+                            }
                             run_content = vec![ContentBlock::Text {
                                 text: leftover.join("\n\n"),
                             }];
@@ -2057,13 +2166,23 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
 
             engine.set_steering_inbox(None);
             engine.set_system_resource_inbox(None);
-            Some((result, engine))
+            Some((result, engine, completion_context))
         };
 
-        let Some((result, engine)) = accepted_turn else {
+        let Some((result, engine, completion_context)) = accepted_turn else {
             self.backend_output_sink.cancel_active_tool_calls(
                 "The tool call was cancelled because the user stopped the turn.",
             );
+            if let Some(session_error) = cancelled_session_error {
+                let stream_error = session_error.stream_error().clone();
+                term_guard
+                    .terminalize(move |runtime, turn| {
+                        runtime.emit_error_data_for_turn(turn, stream_error)
+                    })
+                    .await
+                    .map_err(AgentSendError::from_app_error)?;
+                return Err(session_error);
+            }
             // A stopped turn may have dropped an arbitrary hook/skill/tool
             // future. Its registered child process remains owned by the shared
             // supervisor, so do not publish the business terminal until every
@@ -2116,6 +2235,56 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     context_window,
                 };
 
+                if let Some(issue) = agent_result.completion_adjudication.as_ref() {
+                    let rollback_succeeded = issue.history_rollback_succeeded();
+                    let detail = issue.detail();
+                    let send_error = if rollback_succeeded {
+                        AgentSendError::provider_unbacked_completion(detail)
+                    } else {
+                        AgentSendError::agent_session_inconsistent(detail)
+                    };
+                    if !rollback_succeeded {
+                        // Persistence failed after the in-memory root restore.
+                        // Quarantine this reusable manager before releasing turn
+                        // admission so no successor can observe divergent state.
+                        self.runtime.mark_transport_broken();
+                    }
+                    self.backend_output_sink.fail_active_tool_calls(
+                        "The model reported completion without durable evidence for the requested deliverable.",
+                    );
+                    self.backend_output_sink.abort_artifact_delivery_turn();
+                    drop(engine);
+
+                    let stream_error = send_error.stream_error().clone();
+                    if term_guard
+                        .fail_adjudicated_turn_if_not_cancelled(
+                            &turn_cancel,
+                            completed_event,
+                            stream_error,
+                        )
+                        .await
+                        .map_err(AgentSendError::from_app_error)?
+                    {
+                        return Err(send_error);
+                    }
+
+                    // Stop won the lifecycle race before A2's metrics+Error
+                    // pair. Preserve the existing cancellation contract; no
+                    // A2 event escaped the locked transition above.
+                    term_guard.fence_cancelled_processes().await?;
+                    term_guard
+                        .terminalize(|runtime, turn| {
+                            runtime.emit_finish_for_turn(
+                                turn,
+                                None,
+                                Some(TurnStopReason::Cancelled),
+                            )
+                        })
+                        .await
+                        .map_err(AgentSendError::from_app_error)?;
+                    return Ok(());
+                }
+
                 // —— Post-session memory distillation (exact turn child) ——
                 // Eligibility gates, cheapest first:
                 //   1. host opt-in flag (token cost; default off)
@@ -2135,7 +2304,9 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     .map(str::trim)
                     .unwrap_or("")
                     .is_empty();
-                let distill_job = if origin_is_human
+                let distill_job = if agent_result.stop_reason
+                    == nomi_types::message::StopReason::EndTurn
+                    && origin_is_human
                     && super::distill::distill_enabled()
                     && let Some(dir) = self.distill_dir.clone()
                 {
@@ -2154,9 +2325,22 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 {
                     AsyncArtifactDeliveryOutcome::Verified(_) => {}
                     AsyncArtifactDeliveryOutcome::Cancelled => {
-                        self.backend_output_sink.cancel_active_tool_calls(
-                            "The tool call was cancelled during durable artifact delivery.",
-                        );
+                        if let Err(session_error) = self
+                            .restore_uncommitted_completion_turn(
+                                &completion_context,
+                                "Artifact delivery was cancelled after model completion, and the Agent session root could not be restored",
+                            )
+                            .await
+                        {
+                            let stream_error = session_error.stream_error().clone();
+                            term_guard
+                                .terminalize(move |runtime, turn| {
+                                    runtime.emit_error_data_for_turn(turn, stream_error)
+                                })
+                                .await
+                                .map_err(AgentSendError::from_app_error)?;
+                            return Err(session_error);
+                        }
                         term_guard.fence_cancelled_processes().await?;
                         term_guard
                             .terminalize(|runtime, turn| {
@@ -2177,10 +2361,21 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                             error = %delivery_error,
                             "Nomi turn ended without satisfying every artifact-delivery obligation"
                         );
-                        let send_error = image_artifact_delivery_error_to_send_error(
+                        let mut send_error = image_artifact_delivery_error_to_send_error(
                             image_generation_intent,
                             &delivery_error,
                         );
+                        if let Err(session_error) = self
+                            .restore_uncommitted_completion_turn(
+                                &completion_context,
+                                format!(
+                                    "Artifact delivery failed after model completion ({delivery_error}), and the Agent session root could not be restored"
+                                ),
+                            )
+                            .await
+                        {
+                            send_error = session_error;
+                        }
                         let stream_error = send_error.stream_error().clone();
                         term_guard
                             .terminalize(move |runtime, turn| {
@@ -2226,9 +2421,9 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     );
                 }
 
-                let distill_completed = match distill_job {
+                let prepared_distill = match distill_job {
                     Some((cfg, dir, transcript)) => {
-                        super::distill::run_distill_exact_turn(
+                        super::distill::prepare_distill_exact_turn(
                             &turn_cancel,
                             cfg,
                             dir,
@@ -2236,12 +2431,25 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                         )
                         .await
                     }
-                    None => !turn_cancel.is_cancelled(),
+                    None => (!turn_cancel.is_cancelled()).then_some(None),
                 };
-                if !distill_completed {
-                    self.backend_output_sink.cancel_active_tool_calls(
-                        "The tool call was cancelled because the user stopped the turn.",
-                    );
+                let Some(prepared_distill) = prepared_distill else {
+                    if let Err(session_error) = self
+                        .restore_uncommitted_completion_turn(
+                            &completion_context,
+                            "The accepted Agent turn was cancelled after model completion, and its session root could not be restored",
+                        )
+                        .await
+                    {
+                        let stream_error = session_error.stream_error().clone();
+                        term_guard
+                            .terminalize(move |runtime, turn| {
+                                runtime.emit_error_data_for_turn(turn, stream_error)
+                            })
+                            .await
+                            .map_err(AgentSendError::from_app_error)?;
+                        return Err(session_error);
+                    }
                     term_guard.fence_cancelled_processes().await?;
                     term_guard.terminalize(|runtime, turn| {
                         runtime.emit_finish_for_turn(
@@ -2251,17 +2459,42 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                         )
                     }).await.map_err(AgentSendError::from_app_error)?;
                     return Ok(());
-                }
+                };
 
-                match term_guard
+                let commit_outcome = match term_guard
                     .commit_verified_turn_if_not_cancelled(
                         &turn_cancel,
                         completed_event,
                         stop_reason,
+                        prepared_distill,
+                        &self.engine,
+                        &completion_context,
                     )
                     .await
-                    .map_err(AgentSendError::from_app_error)?
                 {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let mut send_error = AgentSendError::from_app_error(error);
+                        if let Err(session_error) = self
+                            .restore_uncommitted_completion_turn(
+                                &completion_context,
+                                "The verified turn could not enter its terminal commit, and the Agent session root could not be restored",
+                            )
+                            .await
+                        {
+                            send_error = session_error;
+                        }
+                        let stream_error = send_error.stream_error().clone();
+                        term_guard
+                            .terminalize(move |runtime, turn| {
+                                runtime.emit_error_data_for_turn(turn, stream_error)
+                            })
+                            .await
+                            .map_err(AgentSendError::from_app_error)?;
+                        return Err(send_error);
+                    }
+                };
+                match commit_outcome {
                     VerifiedTurnCommitOutcome::Committed => {
                         self.engine.lock().await.set_host_context_value(
                             IMAGE_ROUTE_CONTEXT_KEY,
@@ -2270,9 +2503,22 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                         Ok(())
                     }
                     VerifiedTurnCommitOutcome::Cancelled => {
-                        self.backend_output_sink.cancel_active_tool_calls(
-                            "The tool call was cancelled before its verified delivery was committed.",
-                        );
+                        if let Err(session_error) = self
+                            .restore_uncommitted_completion_turn(
+                                &completion_context,
+                                "The verified delivery was cancelled before commit, and the Agent session root could not be restored",
+                            )
+                            .await
+                        {
+                            let stream_error = session_error.stream_error().clone();
+                            term_guard
+                                .terminalize(move |runtime, turn| {
+                                    runtime.emit_error_data_for_turn(turn, stream_error)
+                                })
+                                .await
+                                .map_err(AgentSendError::from_app_error)?;
+                            return Err(session_error);
+                        }
                         term_guard.fence_cancelled_processes().await?;
                         term_guard
                             .terminalize(|runtime, turn| {
@@ -2293,10 +2539,42 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                             error = %delivery_error,
                             "artifact delivery changed before the exact turn commit"
                         );
-                        let send_error = image_artifact_delivery_error_to_send_error(
+                        let mut send_error = image_artifact_delivery_error_to_send_error(
                             image_generation_intent,
                             &delivery_error,
                         );
+                        if let Err(session_error) = self
+                            .restore_uncommitted_completion_turn(
+                                &completion_context,
+                                format!(
+                                    "Artifact delivery changed before commit ({delivery_error}), and the Agent session root could not be restored"
+                                ),
+                            )
+                            .await
+                        {
+                            send_error = session_error;
+                        }
+                        let stream_error = send_error.stream_error().clone();
+                        term_guard
+                            .terminalize(move |runtime, turn| {
+                                runtime.emit_error_data_for_turn(turn, stream_error)
+                            })
+                            .await
+                            .map_err(AgentSendError::from_app_error)?;
+                        Err(send_error)
+                    }
+                    VerifiedTurnCommitOutcome::SessionCommitFailed => {
+                        let detail = "The verified Agent turn could not be committed to its resumable session";
+                        let _ = self
+                            .restore_uncommitted_completion_turn(
+                                &completion_context,
+                                format!(
+                                    "{detail}, and the accepted-turn root could not be restored"
+                                ),
+                            )
+                            .await;
+                        self.runtime.mark_transport_broken();
+                        let send_error = AgentSendError::agent_session_inconsistent(detail);
                         let stream_error = send_error.stream_error().clone();
                         term_guard
                             .terminalize(move |runtime, turn| {
@@ -2309,6 +2587,10 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 }
             }
             Err(e) => {
+                // Release the turn's engine guard before the restore helper,
+                // which re-acquires it. `Mutex` is not reentrant, so keeping the
+                // guard here deadlocks every provider-error turn.
+                drop(engine);
                 let error_msg = format!("Nomi agent error: {e}");
                 error!(
                     conversation_id = %self.runtime.conversation_id(),
@@ -2316,11 +2598,21 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     error = %ErrorChain(&e),
                     "Nomi engine.execute_turn() failed, emitting terminal Error"
                 );
-                let send_error = nomi_engine_error_to_send_error(error_msg);
+                let mut send_error = nomi_engine_error_to_send_error(error_msg);
                 self.backend_output_sink.fail_active_tool_calls(&format!(
                     "The model/provider turn failed before this tool call completed: {e}"
                 ));
-                self.backend_output_sink.abort_artifact_delivery_turn();
+                if let Err(session_error) = self
+                    .restore_uncommitted_completion_attempt(
+                        &completion_context,
+                        format!(
+                            "The model/provider failed before the accepted turn committed ({e}), and the Agent session root could not be restored"
+                        ),
+                    )
+                    .await
+                {
+                    send_error = session_error;
+                }
                 let stream_error = send_error.stream_error().clone();
                 term_guard.terminalize(move |runtime, turn| {
                     runtime.emit_error_data_for_turn(turn, stream_error)
@@ -2379,6 +2671,11 @@ struct TurnTerminationGuard {
     process_supervisor: Option<Arc<nomi_process_runtime::ProcessSupervisor>>,
     mcp_managers: Vec<Arc<McpManager>>,
     turn_teardown_fence: Arc<TurnTeardownFence>,
+    /// Set by the engine only after it has durably registered the accepted
+    /// session root. If an unwind happens before the host terminal commits,
+    /// the backstop must publish the typed inconsistency terminal so the owner
+    /// retires the runtime and exactly rewinds that root.
+    accepted_turn_recovery_required: Arc<AtomicBool>,
     /// Reusable runtime binding. Turn cleanup closes its current Lanes but must
     /// not revoke the owner lease; the next turn lazily opens a fresh Lane.
     #[cfg(feature = "browser-use")]
@@ -2390,6 +2687,7 @@ enum VerifiedTurnCommitOutcome {
     Committed,
     Cancelled,
     DeliveryFailed(String),
+    SessionCommitFailed,
 }
 
 impl TurnTerminationGuard {
@@ -2467,6 +2765,45 @@ impl TurnTerminationGuard {
         Ok(emitted)
     }
 
+    /// Publish A2's accounting event and typed failure as one lifecycle
+    /// transition. Stop takes the same gate, so observers can never see
+    /// TurnCompleted followed by Cancelled, nor a double terminal.
+    async fn fail_adjudicated_turn_if_not_cancelled(
+        &mut self,
+        turn_cancel: &tokio_util::sync::CancellationToken,
+        completed: TurnCompletedEventData,
+        stream_error: crate::protocol::events::ErrorEventData,
+    ) -> Result<bool, AppError> {
+        #[cfg(feature = "browser-use")]
+        if let Some(binding) = &self.browser_lane_binding {
+            binding.close_turn_lanes().await?;
+        }
+
+        let _lifecycle = self
+            .lifecycle_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut active = self
+            .active_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.as_ref() != Some(&self.turn) || turn_cancel.is_cancelled() {
+            return Ok(false);
+        }
+
+        self.runtime.emit(AgentStreamEvent::TurnCompleted(completed));
+        let emitted = self
+            .runtime
+            .emit_error_data_for_turn(self.turn, stream_error);
+        self.steering_inbox
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        *active = None;
+        self.armed = false;
+        Ok(emitted)
+    }
+
     /// Atomically transfer verified artifacts/held prose to the visible turn
     /// and publish its terminal event. Stop uses the same lifecycle gate, so it
     /// must linearize either before this commit (no prose or receipt escapes) or
@@ -2476,6 +2813,9 @@ impl TurnTerminationGuard {
         turn_cancel: &tokio_util::sync::CancellationToken,
         completed: TurnCompletedEventData,
         stop_reason: TurnStopReason,
+        prepared_distill: Option<super::distill::PreparedDistill>,
+        engine: &Mutex<AgentEngine>,
+        completion_context: &CompletionEvidenceContext,
     ) -> Result<VerifiedTurnCommitOutcome, AppError> {
         #[cfg(feature = "browser-use")]
         if let Some(binding) = &self.browser_lane_binding {
@@ -2496,6 +2836,10 @@ impl TurnTerminationGuard {
             }
         };
 
+        // Acquire the async engine lock before the synchronous lifecycle gate.
+        // Stop never needs the engine lock, and the final cancellation check
+        // below ensures a stop that won while we waited remains authoritative.
+        let mut engine = engine.lock().await;
         let _lifecycle = self
             .lifecycle_gate
             .lock()
@@ -2507,6 +2851,9 @@ impl TurnTerminationGuard {
         if active.as_ref() != Some(&self.turn) || turn_cancel.is_cancelled() {
             return Ok(VerifiedTurnCommitOutcome::Cancelled);
         }
+        if !engine.seal_completion_for_host_terminal(completion_context) {
+            return Ok(VerifiedTurnCommitOutcome::SessionCommitFailed);
+        }
         if let Err(error) = self
             .backend_output_sink
             .finish_verified_artifact_delivery_turn(verified)
@@ -2514,6 +2861,7 @@ impl TurnTerminationGuard {
             return Ok(VerifiedTurnCommitOutcome::DeliveryFailed(error));
         }
 
+        super::distill::apply_prepared_distill(prepared_distill);
         self.runtime.emit(AgentStreamEvent::TurnCompleted(completed));
         self.runtime
             .emit_finish_for_turn(self.turn, None, Some(stop_reason));
@@ -2562,6 +2910,16 @@ impl Drop for TurnTerminationGuard {
             // ineligible for cache reuse and routes the owner through the
             // registry's bounded quarantine teardown path.
             self.runtime.mark_transport_broken();
+            let session_error = self
+                .accepted_turn_recovery_required
+                .load(Ordering::Acquire)
+                .then(|| {
+                    AgentSendError::agent_session_inconsistent(
+                        "The Agent turn ended unexpectedly after registering a durable session recovery root",
+                    )
+                    .stream_error()
+                    .clone()
+                });
             self.backend_output_sink.cancel_active_tool_calls(
                 "The turn ended unexpectedly before this tool call reached a terminal state.",
             );
@@ -2583,12 +2941,16 @@ impl Drop for TurnTerminationGuard {
                     &active_turn,
                     &steering_inbox,
                     turn,
-                    |runtime, turn| {
-                        runtime.emit_finish_for_turn(
-                            turn,
-                            None,
-                            Some(TurnStopReason::Cancelled),
-                        )
+                    move |runtime, turn| {
+                        if let Some(error) = session_error {
+                            runtime.emit_error_data_for_turn(turn, error)
+                        } else {
+                            runtime.emit_finish_for_turn(
+                                turn,
+                                None,
+                                Some(TurnStopReason::Cancelled),
+                            )
+                        }
                     },
                 );
                 turn_teardown_fence.complete();
@@ -3115,7 +3477,12 @@ impl NomiAgentManager {
         // mid-turn; the engine lock below then waits for it to release.
         self.request_stop(None, "clear_context", false);
         let mut engine = self.engine.lock().await;
-        engine.clear_context();
+        if let Err(error) = engine.clear_context() {
+            self.runtime.mark_transport_broken();
+            return Err(AppError::Internal(format!(
+                "Agent context could not be cleared durably; the runtime was quarantined: {error}"
+            )));
+        }
         Ok(())
     }
 
@@ -3149,12 +3516,18 @@ impl NomiAgentManager {
         );
         self.request_stop(None, "rewind_last_turn", false);
         let mut engine = self.engine.lock().await;
-        if !engine.rewind_last_turn(expected_source_message_id) {
-            return Err(AppError::BadRequest(
+        match engine.rewind_last_turn(expected_source_message_id) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(AppError::BadRequest(
                 "无法安全回退该历史消息：编辑检查点已失效，原消息未改变".into(),
-            ));
+            )),
+            Err(error) => {
+                self.runtime.mark_transport_broken();
+                Err(AppError::Internal(format!(
+                    "Agent turn rewind could not be persisted; the runtime was quarantined: {error}"
+                )))
+            }
         }
-        Ok(())
     }
 
     /// Test-only accessor for the resolved distillation target directory.
@@ -3776,6 +4149,7 @@ mod tests {
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
                 turn_teardown_fence: Arc::clone(&fence),
+                accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
                 browser_lane_binding: Some(binding),
                 armed: true,
             };
@@ -3829,6 +4203,7 @@ mod tests {
             process_supervisor: None,
             mcp_managers: Vec::new(),
             turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
+            accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
             browser_lane_binding: Some(binding),
             armed: true,
         };
@@ -4945,6 +5320,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unbacked_file_completion_emits_metrics_then_one_error_and_never_finish() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("Created miniapp.html.".into()),
+            LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: nomi_types::message::TokenUsage {
+                    input_tokens: 17,
+                    output_tokens: 5,
+                    ..Default::default()
+                },
+            },
+        ]]));
+        let agent = make_agent_with_provider_and_max_turns(provider.clone(), Some(1));
+        let mut rx = agent.subscribe();
+        agent
+            .steering_inbox
+            .lock()
+            .unwrap()
+            .push_back("irrelevant race-tail text".to_owned());
+
+        let error = agent
+            .send_message(SendMessageData {
+                content: "Create miniapp.html.".into(),
+                msg_id: "msg-unbacked-completion".into(),
+                source_message_id: Some("root-unbacked-completion".into()),
+                files: Vec::new(),
+                inject_skills: Vec::new(),
+                origin: None,
+            })
+            .await
+            .expect_err("unsupported completion must fail the delivery receipt");
+
+        assert_eq!(
+            error.code(),
+            Some(AgentErrorCode::UserLlmProviderUnbackedCompletion)
+        );
+        assert_eq!(provider.calls(), 1, "a typed verdict cannot be race-tail overwritten");
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentStreamEvent::TurnCompleted(_)))
+                .count(),
+            1,
+            "usage accounting is retained exactly once"
+        );
+        let errors = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentStreamEvent::Error(data) => Some(data),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].code,
+            Some(AgentErrorCode::UserLlmProviderUnbackedCompletion)
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentStreamEvent::Finish(_))),
+            "a failed delivery must never publish Finish"
+        );
+        assert!(agent.steering_inbox.lock().unwrap().is_empty());
+        assert!(
+            agent.engine.lock().await.messages_transcript().is_empty(),
+            "the rejected user/assistant/nudge exchange must not pollute history"
+        );
+    }
+
+    #[tokio::test]
     async fn native_image_request_without_model_short_circuits_without_provider_or_tools() {
         let provider = Arc::new(ScriptedProvider::new(Vec::new()));
         let mut agent = make_agent_with_provider(provider.clone());
@@ -5797,6 +6244,42 @@ mod tests {
         assert_eq!(provider.calls(), 2);
     }
 
+    // The manager's restore helpers re-acquire the engine mutex, which is not
+    // reentrant, so a failing turn must release its guard first. The failure mode
+    // of the reentrant shape is a deadlock, so bound it explicitly: a regression
+    // has to fail in seconds instead of hanging the suite.
+    #[tokio::test]
+    async fn a_provider_error_turn_releases_the_engine_lock_before_restoring() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![LlmEvent::Error(
+            "upstream refused the request".into(),
+        )]]));
+        let agent = make_agent_with_provider(provider.clone());
+
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            agent.send_message(SendMessageData {
+                content: "trigger a provider failure".into(),
+                msg_id: "msg-provider-error".into(),
+                source_message_id: None,
+                files: Vec::new(),
+                inject_skills: Vec::new(),
+                origin: None,
+            }),
+        )
+        .await
+        .expect("a provider-error turn must terminalize, not deadlock on the engine mutex");
+        assert!(sent.is_err(), "a provider error is never a successful turn");
+
+        // The guard must be free again, otherwise the next turn would deadlock.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(20), agent.engine.lock())
+                .await
+                .is_ok(),
+            "the failed turn must not leak its engine guard"
+        );
+        assert_eq!(provider.calls(), 1, "a provider error is not silently replayed");
+    }
+
     #[tokio::test]
     async fn cancel_drains_committed_tool_progress() {
         let provider = Arc::new(BlockingProvider::new());
@@ -6391,15 +6874,15 @@ mod tests {
                 })
                 .collect::<Vec<_>>(),
             vec![2],
-            "the retry must retract the first attempt without emitting a second Start"
+            "the retry must retract only the provider pass after its checkpoint"
         );
         assert_eq!(
             events
                 .iter()
                 .filter(|event| matches!(event, AgentStreamEvent::Start(_)))
                 .count(),
-            1,
-            "an internal restart is not a new host stream"
+            2,
+            "the second Start is a non-destructive provider-pass checkpoint"
         );
     }
 
@@ -6862,6 +7345,7 @@ mod tests {
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
+                accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
                 #[cfg(feature = "browser-use")]
                 browser_lane_binding: None,
                 armed: true,
@@ -6892,6 +7376,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn termination_guard_reports_session_inconsistency_after_root_registration() {
+        let rt = AgentRuntimeState::new("c-guard-session-root", "/w", 16);
+        let mut rx = rt.subscribe();
+        let turn = rt.reset_for_new_turn(ConversationStatus::Running);
+        let active_turn = Arc::new(std::sync::Mutex::new(Some(turn)));
+        let recovery_required = Arc::new(AtomicBool::new(true));
+        {
+            let _guard = TurnTerminationGuard {
+                runtime: rt.clone(),
+                turn,
+                active_turn: Arc::clone(&active_turn),
+                lifecycle_gate: Arc::new(std::sync::Mutex::new(())),
+                steering_inbox: Arc::new(std::sync::Mutex::new(
+                    std::collections::VecDeque::new(),
+                )),
+                backend_output_sink: Arc::new(BackendOutputSink::new(rt.event_sender())),
+                process_supervisor: None,
+                mcp_managers: Vec::new(),
+                turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
+                accepted_turn_recovery_required: recovery_required,
+                #[cfg(feature = "browser-use")]
+                browser_lane_binding: None,
+                armed: true,
+            };
+        }
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("armed drop must publish its typed terminal")
+            .expect("terminal channel closed unexpectedly");
+        match event {
+            AgentStreamEvent::Error(error) => assert_eq!(
+                error.code,
+                Some(nomifun_api_types::AgentErrorCode::NomifunAgentSessionInconsistent)
+            ),
+            other => panic!("expected session-consistency Error, got {other:?}"),
+        }
+        assert_eq!(rt.status(), Some(ConversationStatus::Finished));
+        assert!(active_turn.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn termination_guard_exact_terminalization_absorbs_steering_and_emits_once() {
         // On the normal path the guard owns both the terminal event and the
         // exact generation's steering cleanup. Its later Drop must stay silent.
@@ -6915,6 +7441,7 @@ mod tests {
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
+                accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
                 #[cfg(feature = "browser-use")]
                 browser_lane_binding: None,
                 armed: true,

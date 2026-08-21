@@ -162,6 +162,10 @@
         "title": "Conversation state is out of sync",
         "body": "The conversation state is out of sync. Restart this chat or reload the app before retrying."
       },
+      "NOMIFUN_AGENT_SESSION_INCONSISTENT": {
+        "title": "Agent session could not be restored",
+        "body": "The app rejected an unverified completion, but could not safely restore the saved Agent session. Start a new conversation before continuing."
+      },
       "NOMIFUN_PERMISSION_ERROR": {
         "title": "Could not access the requested resource",
         "body": "A local permission or filesystem check failed. Check the project path and app permissions, then retry."
@@ -285,6 +289,10 @@
       "USER_LLM_PROVIDER_EMPTY_RESPONSE": {
         "title": "Model provider returned an empty response",
         "body": "The provider completed the request without usable content. Retry once or switch providers if it repeats."
+      },
+      "USER_LLM_PROVIDER_UNBACKED_COMPLETION": {
+        "title": "The model did not verify the requested deliverable",
+        "body": "The model reported the task as complete, but no verified evidence matched a required file. Existing completed work was kept. Choose another model before continuing."
       },
       "WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED": {
         "title": "This workspace path cannot be used for execution",

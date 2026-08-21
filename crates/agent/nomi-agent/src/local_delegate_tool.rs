@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use nomifun_common::AgentExecutionId;
@@ -6,7 +7,7 @@ use serde_json::{Value, json};
 
 use crate::local_agent_invocation::LocalAgentInvocationRunner;
 use nomi_protocol::events::ToolCategory;
-use nomi_tools::Tool;
+use nomi_tools::{Tool, ToolExecutionContext};
 use nomi_types::agent::{
     AgentDelegationTask, AgentExecutionReceipt, AgentExecutionStatus, AgentExecutionStepResult,
     AgentExecutionSummary, AgentInvocationInput, AgentInvocationOutput, AgentToolPolicy,
@@ -48,37 +49,26 @@ fn local_delegate_json_schema() -> JsonSchema {
 /// scheduler, but uses the same request, receipt and lifecycle vocabulary.
 pub(crate) struct LocalDelegateTool {
     runner: Arc<LocalAgentInvocationRunner>,
+    /// Exact-operation sidecar for parent-visible effects completed by direct
+    /// child Agents. Isolated worktree results are scrubbed by the runner
+    /// before they reach this boundary, because returning a patch is not the
+    /// same as applying it to the parent's workspace.
+    delegated_effects: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl LocalDelegateTool {
     pub(crate) fn new(runner: Arc<LocalAgentInvocationRunner>) -> Self {
-        Self { runner }
-    }
-}
-
-#[async_trait]
-impl Tool for LocalDelegateTool {
-    fn name(&self) -> &str {
-        "nomi_delegate"
+        Self {
+            runner,
+            delegated_effects: Mutex::new(HashMap::new()),
+        }
     }
 
-    fn description(&self) -> &str {
-        DESCRIPTION
-    }
-
-    fn input_schema(&self) -> JsonSchema {
-        local_delegate_json_schema()
-    }
-
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
-        false
-    }
-
-    fn is_deferred(&self) -> bool {
-        true
-    }
-
-    async fn execute(&self, input: Value) -> ToolResult {
+    async fn execute_inner(
+        &self,
+        input: Value,
+        execution_context: Option<&ToolExecutionContext>,
+    ) -> ToolResult {
         let request = match parse_request(&input) {
             Ok(request) => request,
             Err(error) => return rejected(error),
@@ -112,7 +102,60 @@ impl Tool for LocalDelegateTool {
             None
         };
 
+        let durable_targets = delegated_targets(&results);
+        if let Some(context) = execution_context
+            && !durable_targets.is_empty()
+        {
+            self.delegated_effects
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(context.operation_id().to_owned(), durable_targets);
+        }
+
         completed(execution_id, &results, synthesis.as_ref())
+    }
+}
+
+#[async_trait]
+impl Tool for LocalDelegateTool {
+    fn name(&self) -> &str {
+        "nomi_delegate"
+    }
+
+    fn description(&self) -> &str {
+        DESCRIPTION
+    }
+
+    fn input_schema(&self) -> JsonSchema {
+        local_delegate_json_schema()
+    }
+
+    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        false
+    }
+
+    fn is_deferred(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, input: Value) -> ToolResult {
+        self.execute_inner(input, None).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        input: Value,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
+        self.execute_inner(input, Some(context)).await
+    }
+
+    fn take_delegated_effects(&self, context: &ToolExecutionContext) -> Vec<String> {
+        self.delegated_effects
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(context.operation_id())
+            .unwrap_or_default()
     }
 
     fn category(&self) -> ToolCategory {
@@ -132,6 +175,23 @@ impl Tool for LocalDelegateTool {
             format!("Delegate to {task_count} Agents")
         }
     }
+}
+
+/// Only successful child results whose runner-level workspace boundary says
+/// their bytes are visible in the parent may support a parent's completion
+/// claim. The runner clears evidence for isolated worktrees before this point.
+fn delegated_targets(results: &[AgentInvocationOutput]) -> Vec<String> {
+    let mut targets = Vec::new();
+    for target in results
+        .iter()
+        .filter(|result| !result.is_error)
+        .flat_map(|result| result.durable_effect_targets.iter())
+    {
+        if !targets.contains(target) {
+            targets.push(target.clone());
+        }
+    }
+    targets
 }
 
 fn parse_request(input: &Value) -> Result<ParallelDelegationRequest, String> {
@@ -259,7 +319,7 @@ fn rejected(error: String) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        DESCRIPTION, build_synthesis_prompt, completed, embedded_execution_id,
+        DESCRIPTION, build_synthesis_prompt, completed, delegated_targets, embedded_execution_id,
         local_delegate_json_schema, parse_request, rejected, task_invocation,
     };
     use nomifun_common::AgentExecutionId;
@@ -273,6 +333,7 @@ mod tests {
             text: text.to_owned(),
             usage: TokenUsage::default(),
             turns: 1,
+            durable_effect_targets: Vec::new(),
             is_error,
         }
     }
@@ -488,5 +549,19 @@ mod tests {
         assert!(prompt.contains("verify"));
         assert!(prompt.contains("ERROR"));
         assert!(prompt.to_ascii_lowercase().contains("conflict"));
+    }
+
+    #[test]
+    fn delegated_evidence_accepts_only_successful_parent_visible_targets() {
+        let mut direct = output("direct", "done", false);
+        direct.durable_effect_targets = vec!["src/lib.rs".to_owned()];
+        let mut failed = output("failed", "incomplete", true);
+        failed.durable_effect_targets = vec!["src/failed.rs".to_owned()];
+        let isolated = output("isolated", "patch only", false);
+
+        assert_eq!(
+            delegated_targets(&[direct, failed, isolated]),
+            vec!["src/lib.rs".to_owned()]
+        );
     }
 }

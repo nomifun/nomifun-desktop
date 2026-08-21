@@ -62,6 +62,21 @@ impl HookEngine {
         self.shell = SupervisedShell::new(supervisor, self.cwd.clone());
     }
 
+    /// The hook configuration currently in force.
+    ///
+    /// Callers that need to roll a mid-turn [`Self::merge_hooks`] back snapshot
+    /// this value rather than the engine, so the live supervised shell and its
+    /// process authority are never cloned or replaced.
+    pub fn hooks_config(&self) -> &HooksConfig {
+        &self.config
+    }
+
+    /// Replace the hook configuration in place, keeping the supervised shell and
+    /// cwd. This is the restore half of [`Self::hooks_config`].
+    pub fn replace_hooks_config(&mut self, config: HooksConfig) {
+        self.config = config;
+    }
+
     /// Run pre-tool-use hooks. Returns Err if any hook blocks execution.
     pub async fn run_pre_tool_use(
         &self,

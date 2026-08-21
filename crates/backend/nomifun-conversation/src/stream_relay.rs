@@ -167,10 +167,10 @@ struct PersistedTextSegment {
     id: String,
 }
 
-/// Exact relay-visible text boundary established by `Start`. The engine uses
-/// `OutputDiscarded` only for an in-turn restart; restoring this snapshot keeps
-/// host steering's repeated `Start` non-destructive while retracting precisely
-/// the filtered bytes produced by the failed attempt.
+/// Exact relay-visible text boundary established by `Start`. The first snapshot
+/// is retained as the immutable accepted-turn root while the latest snapshot is
+/// the rolling provider-attempt boundary. `OutputDiscarded { restart_attempt: 0 }`
+/// restores the former; positive attempts restore the latter.
 #[derive(Debug, Clone)]
 struct OutputCheckpoint {
     full_text_len: usize,
@@ -2174,6 +2174,7 @@ impl StreamRelay {
         let mut stage_filter = StageDirectionFilter::default();
         let mut text_segments: Vec<PersistedTextSegment> = Vec::new();
         let mut active_text: Option<TextSegmentState> = None;
+        let mut accepted_turn_output_checkpoint: Option<OutputCheckpoint> = None;
         let mut output_checkpoint: Option<OutputCheckpoint> = None;
         let mut active_thinking: Option<ThinkingSegmentState> = None;
         let mut active_tool_calls: HashMap<String, ToolCallEventData> = HashMap::new();
@@ -2196,6 +2197,7 @@ impl StreamRelay {
         // text, no duplicate tool side effect / billing).
         let mut emitted_response = false;
         let mut retained_non_text_response_since_checkpoint = false;
+        let mut retained_non_text_response_since_turn_start = false;
         let mut committed_artifact_count = 0usize;
         let mut send_error_done = send_error_rx.is_none();
 
@@ -2344,7 +2346,7 @@ impl StreamRelay {
                     match &event {
                         AgentStreamEvent::Start(_) => {
                             retained_non_text_response_since_checkpoint = false;
-                            output_checkpoint = Some(OutputCheckpoint {
+                            let checkpoint = OutputCheckpoint {
                                 full_text_len: full_text_buffer.len(),
                                 text_segments_len: text_segments.len(),
                                 active_text: active_text
@@ -2353,11 +2355,19 @@ impl StreamRelay {
                                     .cloned(),
                                 stage_filter: stage_filter.clone(),
                                 emitted_response,
-                            });
+                            };
+                            accepted_turn_output_checkpoint
+                                .get_or_insert_with(|| checkpoint.clone());
+                            output_checkpoint = Some(checkpoint);
                             self.forward_to_websocket(&event);
                         }
-                        AgentStreamEvent::OutputDiscarded(_) => {
-                            let Some(checkpoint) = output_checkpoint.as_ref() else {
+                        AgentStreamEvent::OutputDiscarded(data) => {
+                            let checkpoint = if data.restart_attempt == 0 {
+                                accepted_turn_output_checkpoint.clone()
+                            } else {
+                                output_checkpoint.clone()
+                            };
+                            let Some(checkpoint) = checkpoint else {
                                 fatal_tracking_error = Some(
                                     "The model discarded provisional output without a stream-start checkpoint"
                                         .to_owned(),
@@ -2368,7 +2378,7 @@ impl StreamRelay {
                                 .ordered_event_side_effect(
                                     "rollback_discarded_output",
                                     self.rollback_discarded_output(
-                                        checkpoint,
+                                        &checkpoint,
                                         &mut active_text,
                                         &mut text_segments,
                                         &mut full_text_buffer,
@@ -2385,7 +2395,11 @@ impl StreamRelay {
                                 continue;
                             }
                             emitted_response = checkpoint.emitted_response
-                                || retained_non_text_response_since_checkpoint;
+                                || if data.restart_attempt == 0 {
+                                    retained_non_text_response_since_turn_start
+                                } else {
+                                    retained_non_text_response_since_checkpoint
+                                };
                             retained_non_text_response_since_checkpoint = false;
                             self.forward_to_websocket(&event);
                             output_checkpoint = Some(OutputCheckpoint {
@@ -2412,6 +2426,7 @@ impl StreamRelay {
                             // longer pre-response, so the failover seam stands down.
                             emitted_response = true;
                             retained_non_text_response_since_checkpoint = true;
+                            retained_non_text_response_since_turn_start = true;
                             let _ = self
                                 .ordered_event_side_effect(
                                     "close_text_before_thinking",
@@ -2827,6 +2842,7 @@ impl StreamRelay {
                             // failover after this, or the tool would re-run.
                             emitted_response = true;
                             retained_non_text_response_since_checkpoint = true;
+                            retained_non_text_response_since_turn_start = true;
                             let has_artifact_delivery =
                                 data.status == ToolCallStatus::Completed && !data.artifacts.is_empty();
                             let active_contract_source = active_tool_calls.get(&data.call_id).cloned();
@@ -3023,6 +3039,7 @@ impl StreamRelay {
                             // side-effecting action; block failover.
                             emitted_response = true;
                             retained_non_text_response_since_checkpoint = true;
+                            retained_non_text_response_since_turn_start = true;
                             let artifact_contract_errors = tool_group_artifact_contract_errors(
                                 entries,
                                 &completed_artifact_tool_calls,
@@ -3124,6 +3141,7 @@ impl StreamRelay {
                         AgentStreamEvent::Plan(data) => {
                             emitted_response = true;
                             retained_non_text_response_since_checkpoint = true;
+                            retained_non_text_response_since_turn_start = true;
                             let _ = self
                                 .ordered_event_side_effect(
                                     "complete_thinking_before_plan",
@@ -7286,6 +7304,80 @@ mod tests {
             event.name == "message.stream"
                 && event.data["type"] == "output_discarded"
                 && event.data["data"]["restart_attempt"] == 2
+        }));
+    }
+
+    #[tokio::test]
+    async fn accepted_turn_discard_hides_all_race_tail_text_before_error() {
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(TestUserEventBus::new(128));
+        let mut events = bus.subscribe();
+        let (tx, _) = broadcast::channel(128);
+        let relay = StreamRelay::new(
+            test_conversation_id(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo.clone(),
+            bus,
+            None,
+        );
+        let rx = tx.subscribe();
+
+        tx.send(AgentStreamEvent::Start(StartEventData::default()))
+            .unwrap();
+        for _ in 0..FLUSH_INTERVAL {
+            tx.send(AgentStreamEvent::Text(TextEventData {
+                content: "A".into(),
+            }))
+            .unwrap();
+        }
+        // Race-tail provider pass B shares the same bubble and advances only
+        // the rolling checkpoint.
+        tx.send(AgentStreamEvent::Start(StartEventData::default()))
+            .unwrap();
+        for _ in 0..FLUSH_INTERVAL {
+            tx.send(AgentStreamEvent::Text(TextEventData {
+                content: "B".into(),
+            }))
+            .unwrap();
+        }
+        tx.send(AgentStreamEvent::OutputDiscarded(
+            OutputDiscardedEventData { restart_attempt: 0 },
+        ))
+        .unwrap();
+        tx.send(AgentStreamEvent::Error(ErrorEventData::legacy(
+            "host commit rolled back",
+            None,
+        )))
+        .unwrap();
+
+        let outcome = relay.consume(rx).await;
+        assert!(matches!(outcome.terminal, RelayTerminal::Error { .. }));
+        assert!(outcome.final_text.is_none());
+
+        let text_rows = repo
+            .take_inserts()
+            .into_iter()
+            .filter(|row| row.r#type == "text")
+            .collect::<Vec<_>>();
+        assert_eq!(text_rows.len(), 1, "race-tail Starts share one text bubble");
+        let text_id = &text_rows[0].message_id;
+        assert!(repo.take_updates().iter().any(|(id, update)| {
+            id == text_id
+                && update.hidden == Some(true)
+                && update.status.as_ref().and_then(|status| status.as_deref()) == Some("error")
+        }));
+
+        let projected = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+        assert!(projected.iter().any(|event| {
+            event.data["type"] == "content"
+                && event.data["replace"] == true
+                && event.data["hidden"] == true
+                && event.data["data"]["content"] == ""
+        }));
+        assert!(projected.iter().any(|event| {
+            event.data["type"] == "output_discarded"
+                && event.data["data"]["restart_attempt"] == 0
         }));
     }
 

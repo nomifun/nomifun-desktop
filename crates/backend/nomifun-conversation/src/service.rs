@@ -113,6 +113,25 @@ is still outstanding; do not repeat already completed state-changing actions, an
 discarded draft as a completed result. Verify the requested deliverables before claiming success. \
 The original user requirement follows verbatim:";
 
+fn terminal_error_requires_runtime_retirement(
+    code: Option<nomifun_api_types::AgentErrorCode>,
+) -> bool {
+    matches!(
+        code,
+        Some(
+            nomifun_api_types::AgentErrorCode::NomifunStreamBroken
+                | nomifun_api_types::AgentErrorCode::NomifunStateInconsistent
+                | nomifun_api_types::AgentErrorCode::NomifunAgentSessionInconsistent
+        )
+    )
+}
+
+fn terminal_error_requires_nomi_session_recovery(
+    code: Option<nomifun_api_types::AgentErrorCode>,
+) -> bool {
+    terminal_error_requires_runtime_retirement(code)
+}
+
 tokio::task_local! {
     static DELETED_CRON_JOB_IDS: Arc<[String]>;
 }
@@ -1393,6 +1412,47 @@ impl ConversationService {
         }
         runtime_state.clear_knowledge_signature(conversation_id);
         runtime_state.clear_turn_tokens(conversation_id);
+    }
+
+    /// Keep the exact accepted-turn admission quarantined until live-runtime
+    /// retirement has either rewound this source's exact recovery root/current
+    /// checkpoint or proved the source never entered the session. The strict
+    /// API never consumes a mismatched prior pending host-terminal root.
+    async fn rewind_inconsistent_nomi_session_until_confirmed(
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        conversation_id: &str,
+        conversation_created_at: i64,
+        source_message_id: &str,
+    ) {
+        let mut retry_delay = Duration::from_millis(25);
+        loop {
+            match runtime_registry
+                .rewind_persisted_nomi_live_recovery(
+                    conversation_id,
+                    conversation_created_at,
+                    source_message_id,
+                )
+                .await
+            {
+                Ok(outcome) => {
+                    info!(
+                        conversation_id,
+                        ?outcome,
+                        "Quarantined inconsistent persisted Nomi accepted turn was rewound"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    error!(
+                        conversation_id,
+                        error = %ErrorChain(&error),
+                        "Could not rewind inconsistent persisted Nomi accepted turn; retaining exact turn admission quarantine"
+                    );
+                }
+            }
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3285,6 +3345,7 @@ impl ConversationService {
         user_id: &str,
         row: &ConversationRow,
         admission: &ConversationTurnAdmissionState,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<bool, AppError> {
         let conversation_id = row.conversation_id.as_str();
         let Some(provider) = self.terminal_proof_provider() else {
@@ -3316,6 +3377,45 @@ impl ConversationService {
                 return Ok(false);
             }
         };
+
+        // A proven local Nomi orphan may have crashed after persisting any
+        // provisional accepted-turn suffix (user input, tool results, nudges,
+        // or a rejected completion) but before restoring its transaction root.
+        // Rewind only that exact generation-owned suffix before the DB
+        // lifecycle CAS makes the Conversation sendable again. Prior trusted
+        // history must survive restart recovery. Any rewind failure leaves
+        // Running + its receipt untouched, preserving quarantine across boot.
+        let operation_id = admission.active_operation_id.as_deref().ok_or_else(|| {
+            AppError::Conflict(
+                "restart-orphan Nomi turn has no active receipt operation to identify its source message"
+                    .to_owned(),
+            )
+        })?;
+        let receipt = self
+            .conversation_repo
+            .get_delivery_receipt(user_id, conversation_id, operation_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::Conflict(
+                    "restart-orphan Nomi turn lost its exact accepted receipt".to_owned(),
+                )
+            })?;
+        if receipt.conversation_id != conversation_id
+            || receipt.user_id != user_id
+            || receipt.operation_id != operation_id
+            || receipt.status != "accepted"
+        {
+            return Err(AppError::Conflict(
+                "restart-orphan Nomi receipt identity or state is invalid".to_owned(),
+            ));
+        }
+        runtime_registry
+            .rewind_persisted_nomi_live_recovery(
+                conversation_id,
+                row.created_at,
+                &receipt.message_id,
+            )
+            .await?;
 
         // The prior generation is provably terminal, so its detached
         // knowledge write-back workers are gone too: settle their durable
@@ -3463,7 +3563,7 @@ impl ConversationService {
         user_id: &str,
         conversation_id: &str,
         idempotency_key: &str,
-        _runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<BackgroundTurnReconciliationDisposition, AppError> {
         let conversation_id = parse_conv_id(conversation_id)?;
         validate_public_idempotency_key(idempotency_key)?;
@@ -3544,7 +3644,12 @@ impl ConversationService {
         // structured retryable failure, so consumers re-read the durable
         // outcome instead of waiting forever on an owner that cannot exist.
         if self
-            .try_finalize_proven_orphan_generation(user_id, &row, &admission)
+            .try_finalize_proven_orphan_generation(
+                user_id,
+                &row,
+                &admission,
+                runtime_registry,
+            )
             .await?
         {
             return Ok(BackgroundTurnReconciliationDisposition::ReconciledOrTerminalReRead);
@@ -3567,7 +3672,7 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
-        _runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<QuiescentOrphanReconciliation, AppError> {
         let conversation_id = parse_conv_id(conversation_id)?;
         let lease = self.begin_public_runtime_preparation(conversation_id, user_id)?;
@@ -3612,7 +3717,12 @@ impl ConversationService {
             return Err(self.unproven_running_generation_error(&row));
         }
         if self
-            .try_finalize_proven_orphan_generation(user_id, &row, &admission)
+            .try_finalize_proven_orphan_generation(
+                user_id,
+                &row,
+                &admission,
+                runtime_registry,
+            )
             .await?
         {
             return Ok(QuiescentOrphanReconciliation::Reconciled);
@@ -9104,7 +9214,11 @@ impl ConversationService {
                 committed_artifact_count = committed_artifact_count
                     .saturating_add(outcome.committed_artifact_count);
 
-                if turn_token.is_cancelled() || outcome.stop_reason == Some(TurnStopReason::Cancelled) {
+                let terminal_code = outcome.terminal.code();
+                if !terminal_error_requires_runtime_retirement(terminal_code)
+                    && (turn_token.is_cancelled()
+                        || outcome.stop_reason == Some(TurnStopReason::Cancelled))
+                {
                     durable_completion = Some((
                         false,
                         outcome.final_text.clone(),
@@ -9115,9 +9229,7 @@ impl ConversationService {
                     break;
                 }
 
-                if outcome.terminal.code()
-                    == Some(nomifun_api_types::AgentErrorCode::NomifunStreamBroken)
-                {
+                if terminal_error_requires_runtime_retirement(terminal_code) {
                     // A permanent manager relay may have exited, or a lagged
                     // broadcast may have skipped the real terminal while the
                     // producer is still running. Remove and await the cached
@@ -9127,13 +9239,37 @@ impl ConversationService {
                         &runtime_registry,
                         &conv_id,
                         AgentKillReason::AgentErrorRecovery,
-                        "broken event-stream recovery",
+                        "non-reusable agent runtime recovery",
                     )
                     .await;
+                    if agent.agent_type() == AgentType::Nomi
+                        && terminal_error_requires_nomi_session_recovery(terminal_code)
+                    {
+                        // Runtime retirement alone is not enough for any
+                        // stream/state/session-integrity terminal: a sealed or
+                        // still-active recovery root could otherwise be loaded
+                        // as committed by the replacement factory.
+                        Self::rewind_inconsistent_nomi_session_until_confirmed(
+                            &runtime_registry,
+                            &conv_id,
+                            row.created_at,
+                            &source_user_message_id,
+                        )
+                        .await;
+                    }
                     durable_completion = Some((
                         false,
                         outcome.final_text.clone(),
-                        Some("Agent event stream integrity was lost".to_owned()),
+                        Some(
+                            if agent.agent_type() == AgentType::Nomi
+                                && terminal_error_requires_nomi_session_recovery(terminal_code)
+                            {
+                                "Agent session state could not be restored safely"
+                            } else {
+                                "Agent event stream integrity was lost"
+                            }
+                            .to_owned(),
+                        ),
                         relay_error_code::map_turn_failure(&outcome, committed_artifact_count),
                     ));
                     final_turn_writeback = None;
@@ -14480,5 +14616,30 @@ mod tests {
             }))
             .is_ok()
         );
+    }
+
+    #[test]
+    fn state_consistency_and_stream_integrity_errors_retire_cached_runtimes() {
+        assert!(terminal_error_requires_runtime_retirement(Some(
+            nomifun_api_types::AgentErrorCode::NomifunStreamBroken,
+        )));
+        assert!(terminal_error_requires_runtime_retirement(Some(
+            nomifun_api_types::AgentErrorCode::NomifunAgentSessionInconsistent,
+        )));
+        assert!(terminal_error_requires_nomi_session_recovery(Some(
+            nomifun_api_types::AgentErrorCode::NomifunAgentSessionInconsistent,
+        )));
+        assert!(terminal_error_requires_runtime_retirement(Some(
+            nomifun_api_types::AgentErrorCode::NomifunStateInconsistent,
+        )));
+        assert!(terminal_error_requires_nomi_session_recovery(Some(
+            nomifun_api_types::AgentErrorCode::NomifunStateInconsistent,
+        )));
+        assert!(terminal_error_requires_nomi_session_recovery(Some(
+            nomifun_api_types::AgentErrorCode::NomifunStreamBroken,
+        )));
+        assert!(!terminal_error_requires_runtime_retirement(Some(
+            nomifun_api_types::AgentErrorCode::UserLlmProviderUnbackedCompletion,
+        )));
     }
 }

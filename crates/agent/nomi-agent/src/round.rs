@@ -125,6 +125,10 @@ pub struct RoundLedger {
     /// Monotonic count of those that succeeded. Never derived from
     /// `effects.len()`, which is a lossy render window.
     pub effects_ok_total: usize,
+    /// Successful effects with durable workspace evidence. Direct evidence is
+    /// limited to the atomic file tools; nested evidence is supplied by a
+    /// correlated child Agent and never inferred from its prose.
+    pub durable_effect_targets: Vec<String>,
     /// Monotonic count of truncated state-changing calls across every pass.
     pub cutoff_state_changing_total: usize,
 }
@@ -143,6 +147,20 @@ impl RoundLedger {
         if self.effects.len() > MAX_RENDERED_LINES {
             let overflow = self.effects.len() - MAX_RENDERED_LINES;
             self.effects.drain(..overflow);
+        }
+    }
+
+    /// Record durable effects without pretending the parent `Skill` call was
+    /// itself a state-changing tool. Nested counts come from the child engine's
+    /// exact file-tool ledger through a trusted operation-id sidecar.
+    pub fn record_durable_effect_targets(
+        &mut self,
+        targets: impl IntoIterator<Item = String>,
+    ) {
+        for target in targets {
+            if !self.durable_effect_targets.contains(&target) {
+                self.durable_effect_targets.push(target);
+            }
         }
     }
 
