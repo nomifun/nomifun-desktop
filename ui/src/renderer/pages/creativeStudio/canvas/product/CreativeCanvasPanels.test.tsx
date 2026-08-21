@@ -15,7 +15,6 @@ import {
   CreativeCanvasHistoryPanel,
   CreativeCanvasOutlinePanel,
   CreativeCanvasPropertiesPanel,
-  CreativeCanvasTimelineUnwiredPanel,
   CreativeCanvasWorkflowUnwiredPanel,
   creativeCanvasNodeDisplayName,
 } from './CreativeCanvasPanels';
@@ -139,12 +138,11 @@ describe('Creative Canvas product presentation panels', () => {
     expect(html.includes('不会臆造历史记录')).toBe(true);
   });
 
-  test('keeps agent, workflow, and timeline visibly unwired instead of fabricating data', () => {
+  test('keeps remaining unavailable agent and workflow adapters explicit', () => {
     const html = renderToStaticMarkup(
       <>
         <CreativeCanvasAssistantUnwiredPanel />
         <CreativeCanvasWorkflowUnwiredPanel />
-        <CreativeCanvasTimelineUnwiredPanel />
       </>
     );
 
@@ -152,8 +150,6 @@ describe('Creative Canvas product presentation panels', () => {
     expect(html.includes('项目专属会话绑定')).toBe(true);
     expect(html.includes('data-unavailable-kind="workflows"')).toBe(true);
     expect(html.includes('不会显示示例流程')).toBe(true);
-    expect(html.includes('data-unavailable-kind="timeline"')).toBe(true);
-    expect(html.includes('不会用导演节点的局部时间值伪造时间线')).toBe(true);
     expect(html.includes('<textarea')).toBe(false);
   });
 

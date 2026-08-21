@@ -49,8 +49,13 @@ an active exclusive Agent turn, then flushes the Editor. The left workflow panel
 uses the canonical workflow repository and durable run controller, opens the
 same typed runner and real asset picker as the standalone center, and resolves
 successful result IDs through the authenticated asset-detail endpoint before
-inserting canonical nodes. The global timeline remains an explicit unavailable
-state until its production projection is connected.
+inserting canonical nodes. The bottom timeline now projects the project's one
+canonical Director node without inventing global tracks or keyframes. It shows
+the saved scene pointer, camera pointer and timeline/duration values, and opens
+the real Director product only after the canvas CAS leave gate succeeds. New UI
+creation paths enforce one Director node per project; malformed documents with
+multiple Director nodes remain visible as a fail-closed conflict. The Director
+close action returns to this same canvas project.
 
 The source geometry is canonical for views that currently have no resize handle:
 the left library is 280px and opening Agent normalizes the right panel to 390px.

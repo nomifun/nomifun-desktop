@@ -26,7 +26,10 @@ import React, {
 import { useNavigate, useParams } from "react-router-dom";
 
 import { creativeAssetClient, type CreativeAsset } from "../../assets";
-import { CREATIVE_STUDIO_PROJECTS_PATH } from "../../app/routes";
+import {
+  CREATIVE_STUDIO_PROJECTS_PATH,
+  creativeStudioCanvasProjectPath,
+} from "../../app/routes";
 import { creativeProjectRepository } from "../../services";
 import {
   DirectorWorkbenchShell,
@@ -344,11 +347,12 @@ const CreativeDirectorProductRoute: React.FC = () => {
     if (recoveryBusy) return;
     setRecoveryBusy(true);
     try {
-      if (await flushBeforeLeave()) navigate(CREATIVE_STUDIO_PROJECTS_PATH);
+      if (await flushBeforeLeave())
+        navigate(creativeStudioCanvasProjectPath(projectId));
     } finally {
       setRecoveryBusy(false);
     }
-  }, [flushBeforeLeave, navigate, recoveryBusy]);
+  }, [flushBeforeLeave, navigate, projectId, recoveryBusy]);
 
   const handleRetrySave = useCallback(async () => {
     if (recoveryBusy) return;
@@ -695,9 +699,15 @@ const CreativeDirectorProductRoute: React.FC = () => {
           </Button>
           <Button
             type="primary"
-            onClick={() => navigate(CREATIVE_STUDIO_PROJECTS_PATH)}
+            onClick={() =>
+              navigate(
+                projectId
+                  ? creativeStudioCanvasProjectPath(projectId)
+                  : CREATIVE_STUDIO_PROJECTS_PATH,
+              )
+            }
           >
-            返回项目
+            返回画布
           </Button>
         </div>
       </main>

@@ -30,6 +30,9 @@ force-write.
 The product registers an asynchronous leave gate. Focus-shell navigation must
 also await `requestCreativeDirectorProductBeforeLeave()` and continue only when
 it returns `true`, just as it already does for the canvas product.
+The Director close action awaits the same gate and returns to
+`creativeStudioCanvasProjectPath(projectId)`, preserving the current project's
+canvas context instead of dropping the user at the project index.
 
 The current workshop asset backend accepts image, video and audio uploads but
 not GLB/glTF. The route therefore keeps model/character import explicitly
