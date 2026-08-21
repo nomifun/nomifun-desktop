@@ -13,6 +13,7 @@ import {
   EditTwo,
   Error,
   GridNine,
+  Inbox,
   Left,
   List,
   Loading,
@@ -21,7 +22,6 @@ import {
   Right,
   Search,
   Text,
-  Tray,
   Upload,
   VideoTwo,
   Voice,
@@ -141,6 +141,7 @@ const formatUpdatedAt = (timestamp: number, locale?: string): { label: string; d
 interface AssetItemProps {
   asset: CreativeAsset;
   view: CreativeAssetViewMode;
+  showActionLabels: boolean;
   selected: boolean;
   selectable: boolean;
   disabled: boolean;
@@ -156,6 +157,7 @@ interface AssetItemProps {
 const AssetItem: React.FC<AssetItemProps> = ({
   asset,
   view,
+  showActionLabels,
   selected,
   selectable,
   disabled,
@@ -218,10 +220,16 @@ const AssetItem: React.FC<AssetItemProps> = ({
         {view === 'list' ? <time dateTime={updatedAt.dateTime}>{updatedAt.label}</time> : null}
       </div>
 
-      <div className={styles.assetActions}>
+      <div className={styles.assetActions} data-action-labels={showActionLabels || undefined}>
+        {showActionLabels && onOpen ? (
+          <button type='button' disabled={disabled} aria-label={labels.open} onClick={() => onOpen(asset)}>
+            {labels.open}
+          </button>
+        ) : null}
         {onEdit ? (
           <button type='button' disabled={disabled} title={labels.edit} aria-label={labels.edit} onClick={() => onEdit(asset)}>
             <EditTwo theme='outline' size={15} fill='currentColor' strokeWidth={3} />
+            {showActionLabels ? <span>{labels.edit}</span> : null}
           </button>
         ) : null}
         {onDownload && asset.kind !== 'text' ? (
@@ -233,6 +241,7 @@ const AssetItem: React.FC<AssetItemProps> = ({
             onClick={() => onDownload(asset)}
           >
             <Download theme='outline' size={15} fill='currentColor' strokeWidth={3} />
+            {showActionLabels ? <span>{labels.download}</span> : null}
           </button>
         ) : null}
         {onRemove ? (
@@ -245,6 +254,7 @@ const AssetItem: React.FC<AssetItemProps> = ({
             onClick={() => onRemove(asset)}
           >
             <Delete theme='outline' size={15} fill='currentColor' strokeWidth={3} />
+            {showActionLabels ? <span>{labels.remove}</span> : null}
           </button>
         ) : null}
       </div>
@@ -616,7 +626,7 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
           <div className={styles.statePanel} data-empty-filtered={filtered || undefined}>
             <span className={styles.stateIcon} aria-hidden='true'>
               {sourceAppearance ? (
-                <Tray theme='outline' size={48} fill='currentColor' strokeWidth={2} />
+                <Inbox theme='outline' size={48} fill='currentColor' strokeWidth={2} />
               ) : kind === 'all' ? (
                 <AllApplication theme='outline' size={28} fill='currentColor' strokeWidth={3} />
               ) : creativeAssetKindIcon(kind, 28)}
@@ -631,6 +641,7 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
                 key={asset.id}
                 asset={asset}
                 view={view}
+                showActionLabels={sourceAppearance}
                 selected={selectable && selectedIds.has(asset.id)}
                 selectable={selectable}
                 disabled={busy}
@@ -664,7 +675,11 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
       </div>
 
       {sourceAppearance && pagination ? (
-        <nav className={styles.sourcePagination} aria-label={labels.pagination}>
+        <nav
+          className={styles.sourcePagination}
+          aria-label={labels.pagination}
+          data-empty={pagination.total <= 0 || undefined}
+        >
           <button
             type='button'
             aria-label={labels.previousPage}

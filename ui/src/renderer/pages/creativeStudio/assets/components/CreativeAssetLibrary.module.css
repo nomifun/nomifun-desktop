@@ -33,7 +33,7 @@
 
 .root[data-asset-appearance='source-page'] .frame {
   display: flex;
-  width: min(1152px, calc(100% - 48px));
+  width: min(1280px, calc(100% - 48px));
   min-height: 100%;
   flex: 0 0 auto;
   flex-direction: column;
@@ -70,54 +70,57 @@
 
 .root[data-asset-appearance='source-page'] .searchBox {
   width: 672px;
-  min-height: 41px;
-  gap: 10px;
+  min-height: 40px;
+  gap: 4px;
   padding: 0 0 0 13px;
   overflow: hidden;
-  border: 0;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--color-text-1) 78%, var(--color-bg-1));
-  color: color-mix(in srgb, var(--color-bg-1) 72%, var(--color-text-1));
+  border: 1px solid var(--color-border-3);
+  border-radius: 8px;
+  background: var(--color-bg-1);
+  color: var(--color-text-3);
 }
 
 .root[data-asset-appearance='source-page'] .searchBox:focus-within {
-  border-color: transparent;
+  border-color: rgb(var(--primary-6));
   box-shadow: 0 0 0 2px rgba(var(--primary-6), 0.26);
 }
 
 .root[data-asset-appearance='source-page'] .searchBox input {
-  height: 41px;
-  color: var(--color-bg-1);
+  height: 38px;
+  color: var(--color-text-1);
   font-size: 14px;
 }
 
 .root[data-asset-appearance='source-page'] .searchBox input::placeholder {
-  color: color-mix(in srgb, var(--color-bg-1) 46%, transparent);
+  color: var(--color-text-4);
 }
 
 .root[data-asset-appearance='source-page'] .searchBox > .clearSearchButton {
   width: 30px;
-  height: 41px;
+  height: 38px;
   flex-basis: 30px;
   border-radius: 0;
-  color: color-mix(in srgb, var(--color-bg-1) 62%, transparent);
+  color: var(--color-text-3);
 }
 
 .root[data-asset-appearance='source-page'] .searchBox > .sourceSearchButton {
   width: 40px;
-  height: 41px;
+  height: 38px;
   flex: 0 0 40px;
   border-radius: 0;
-  background: color-mix(in srgb, var(--color-text-1) 92%, black);
-  color: var(--color-bg-1);
+  border-left: 1px solid var(--color-border-3);
+  background: var(--color-bg-1);
+  color: var(--color-text-1);
 }
 
 .root[data-asset-appearance='source-page'] .searchBox > .sourceSearchButton:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-text-1) 82%, black);
-  color: var(--color-bg-1);
+  background: var(--color-fill-1);
+  color: var(--color-text-1);
 }
 
 .root[data-asset-appearance='source-page'] .filterRow {
+  width: min(1152px, 100%);
+  align-self: center;
   padding: 18px 0 8px;
   border-bottom: 0;
 }
@@ -145,12 +148,13 @@
 }
 
 .root[data-asset-appearance='source-page'] .kindFilters button {
-  min-height: 30px;
+  min-height: 22px;
   padding: 0 8px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 4px;
   color: var(--color-text-3);
   font-size: 12px;
+  line-height: 20px;
 }
 
 .root[data-asset-appearance='source-page'] .kindFilters button > span {
@@ -159,8 +163,9 @@
 
 .root[data-asset-appearance='source-page'] .kindFilters button[aria-pressed='true'] {
   border: 0;
-  background: var(--color-neutral-5);
-  color: var(--color-text-1);
+  background: var(--color-text-1);
+  color: var(--color-bg-1);
+  font-weight: 600;
 }
 
 .root[data-asset-appearance='source-page'] .sourceActions {
@@ -231,9 +236,15 @@
   color: var(--color-border-3);
 }
 
+.root[data-asset-appearance='source-page'] .statePanel[data-empty-filtered='true'] .stateIcon {
+  background: transparent;
+  color: var(--color-border-3);
+}
+
 .root[data-asset-appearance='source-page'] .assetGrid {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 20px;
+  margin-top: 6px;
 }
 
 .root[data-asset-appearance='source-page'] .assetItem {
@@ -243,6 +254,50 @@
 
 .root[data-asset-appearance='source-page'] .assetItem:hover {
   transform: none;
+}
+
+.root[data-asset-appearance='source-page'] .assetContent {
+  min-height: 143px;
+  box-sizing: border-box;
+  gap: 10px;
+  padding: 16px;
+}
+
+.root[data-asset-appearance='source-page'] .assetActions {
+  min-height: 40px;
+  box-sizing: border-box;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 0 16px 16px;
+  opacity: 1;
+  transform: none;
+}
+
+.root[data-asset-appearance='source-page'] .assetActions button {
+  display: inline-flex;
+  width: auto;
+  height: 24px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border-3);
+  border-radius: 4px;
+  background: var(--color-bg-1);
+  color: var(--color-text-2);
+  font-size: 12px;
+}
+
+.root[data-asset-appearance='source-page'] .assetActions button:hover:not(:disabled) {
+  border-color: var(--color-text-3);
+  background: var(--color-fill-1);
+  color: var(--color-text-1);
+}
+
+.root[data-asset-appearance='source-page'] .assetActions button[data-danger] {
+  border-color: rgba(var(--danger-6), 0.56);
+  background: var(--color-bg-1);
+  color: rgb(var(--danger-6));
 }
 
 .root[data-asset-appearance='source-page'] .sourcePagination {
@@ -258,16 +313,20 @@
 .root[data-asset-appearance='source-page'] .sourcePagination > button,
 .root[data-asset-appearance='source-page'] .sourcePageNumber {
   display: grid;
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   place-items: center;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--color-text-3);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--color-bg-1);
+  color: var(--color-text-1);
   font: inherit;
-  font-size: 12px;
+  font-size: 14px;
+}
+
+.root[data-asset-appearance='source-page'] .sourcePagination:not([data-empty='true']) .sourcePageNumber {
+  border-color: var(--color-text-1);
 }
 
 .root[data-asset-appearance='source-page'] .sourcePagination > button {
@@ -288,13 +347,17 @@
 
 .root[data-asset-appearance='source-page'] .sourcePageSize {
   display: inline-flex;
+  min-width: 94px;
   min-height: 32px;
+  box-sizing: border-box;
   align-items: center;
-  padding: 0 14px;
+  justify-content: center;
+  padding: 0 12px;
+  border: 1px solid var(--color-border-3);
   border-radius: 6px;
-  background: color-mix(in srgb, var(--color-text-1) 82%, var(--color-bg-1));
-  color: var(--color-bg-1);
-  font-size: 13px;
+  background: var(--color-bg-1);
+  color: var(--color-text-1);
+  font-size: 14px;
   white-space: nowrap;
 }
 
@@ -1352,7 +1415,7 @@
   }
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1279px) {
   .root[data-asset-appearance='source-page'] .assetGrid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }

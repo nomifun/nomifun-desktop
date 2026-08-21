@@ -193,6 +193,8 @@ describe('CreativeAssetLibrary', () => {
     expect(html.includes('aria-label="素材范围"')).toBe(false);
     expect(html.includes('aria-label="显示方式"')).toBe(false);
     expect(html.includes('type="checkbox"')).toBe(false);
+    expect(html.includes('data-action-labels="true"')).toBe(true);
+    expect(html.includes('aria-label="查看">查看</button>')).toBe(true);
     expect(html.includes('重命名合集')).toBe(true);
     expect(html.includes('图片和视频，单文件最大 64 MB')).toBe(true);
     expect(html.includes('aria-label="素材分页"')).toBe(true);
