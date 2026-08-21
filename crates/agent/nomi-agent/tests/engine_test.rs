@@ -1324,6 +1324,9 @@ fn resumed_engine_restores_the_exact_editable_turn_checkpoint() {
             prior_host_context: Default::default(),
         }),
         host_context: Default::default(),
+        accepted_turn_root: None,
+        pending_host_terminal_root: None,
+        last_interrupted_turn_source: None,
     };
     let engine = AgentEngine::resume_with_provider(
         Arc::new(MockLlmProvider::with_text_response("unused")),

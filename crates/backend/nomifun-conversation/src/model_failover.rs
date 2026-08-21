@@ -558,4 +558,11 @@ mod tests {
     fn image_unsupported_is_not_provider_fault() {
         assert!(!is_provider_fault(AgentErrorCode::UserLlmProviderImageUnsupported));
     }
+
+    #[test]
+    fn unbacked_completion_is_not_a_model_failover_provider_fault() {
+        assert!(!is_provider_fault(
+            AgentErrorCode::UserLlmProviderUnbackedCompletion
+        ));
+    }
 }

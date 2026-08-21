@@ -15,6 +15,11 @@ pub enum AgentErrorCode {
     NomifunConversationBusy,
     NomifunStreamBroken,
     NomifunStateInconsistent,
+    /// Nomi restored the accepted turn's in-memory root after rejecting an
+    /// unsupported completion claim, but could not durably persist that root.
+    /// The exact persisted Nomi session must be quarantined and reset before a
+    /// replacement runtime may be admitted.
+    NomifunAgentSessionInconsistent,
     NomifunPermissionError,
     NomifunInternalError,
     WorkspacePathEdgeWhitespaceRuntimeUnsupported,
@@ -49,6 +54,11 @@ pub enum AgentErrorCode {
     UserLlmProviderTimeout,
     UserLlmProviderNetworkError,
     UserLlmProviderEmptyResponse,
+    /// The provider/model ended normally at the protocol layer but asserted
+    /// completion without machine evidence for a required deliverable. This is
+    /// a provider-quality failure, not a transient transport fault: changing
+    /// model may help, while replaying the same turn automatically is unsafe.
+    UserLlmProviderUnbackedCompletion,
     UserLlmProviderGatewayError,
     UnknownUpstreamError,
 }
@@ -164,6 +174,24 @@ mod tests {
         let code = AgentErrorCode::UserLlmProviderImageUnsupported;
         let json = serde_json::to_string(&code).unwrap();
         assert_eq!(json, "\"USER_LLM_PROVIDER_IMAGE_UNSUPPORTED\"");
+        let back: AgentErrorCode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, code);
+    }
+
+    #[test]
+    fn unbacked_completion_serde_roundtrip() {
+        let code = AgentErrorCode::UserLlmProviderUnbackedCompletion;
+        let json = serde_json::to_string(&code).unwrap();
+        assert_eq!(json, "\"USER_LLM_PROVIDER_UNBACKED_COMPLETION\"");
+        let back: AgentErrorCode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, code);
+    }
+
+    #[test]
+    fn agent_session_inconsistent_serde_roundtrip() {
+        let code = AgentErrorCode::NomifunAgentSessionInconsistent;
+        let json = serde_json::to_string(&code).unwrap();
+        assert_eq!(json, "\"NOMIFUN_AGENT_SESSION_INCONSISTENT\"");
         let back: AgentErrorCode = serde_json::from_str(&json).unwrap();
         assert_eq!(back, code);
     }

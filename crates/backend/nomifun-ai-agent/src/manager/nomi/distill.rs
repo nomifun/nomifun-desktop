@@ -42,39 +42,48 @@ pub(super) fn distill_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Run distillation as an exact child of one accepted turn. `true` means the
-/// child completed and the caller may proceed toward its terminal transition;
-/// `false` means cancellation won and the provider future was dropped before
-/// any later filesystem stage could start.
-pub(super) async fn run_distill_exact_turn(
+pub(super) struct PreparedDistill {
+    dir: PathBuf,
+    output: DistillOutput,
+}
+
+/// Prepare distillation as an exact child of one accepted turn without
+/// mutating memory. `None` means cancellation won; `Some(None)` is an ordinary
+/// best-effort no-op (disabled-worthy transcript, provider/parse failure, or no
+/// memories); `Some(Some(_))` may be applied only inside the verified turn's
+/// final lifecycle commit.
+pub(super) async fn prepare_distill_exact_turn(
     cancel: &tokio_util::sync::CancellationToken,
     cfg: Arc<Config>,
     dir: PathBuf,
     transcript: String,
-) -> bool {
-    await_exact_turn_child(cancel, run_distill(cfg, dir, transcript)).await
+) -> Option<Option<PreparedDistill>> {
+    await_exact_turn_child(cancel, prepare_distill(cfg, dir, transcript)).await
 }
 
-async fn await_exact_turn_child(
+async fn await_exact_turn_child<T>(
     cancel: &tokio_util::sync::CancellationToken,
-    child: impl std::future::Future<Output = ()>,
-) -> bool {
+    child: impl std::future::Future<Output = T>,
+) -> Option<T> {
     tokio::pin!(child);
     tokio::select! {
         biased;
-        _ = cancel.cancelled() => false,
-        _ = &mut child => !cancel.is_cancelled(),
+        _ = cancel.cancelled() => None,
+        output = &mut child => (!cancel.is_cancelled()).then_some(output),
     }
 }
 
-/// Run one post-session distillation. Caller has already decided this turn is
-/// eligible (not companion, origin empty, `distill_dir` set) and that the gate
-/// is on. `transcript` is the engine's role-tagged history snapshot.
-async fn run_distill(cfg: Arc<Config>, dir: PathBuf, transcript: String) {
+/// Prepare one post-session distillation. Caller has already decided this turn
+/// is eligible. This function deliberately performs no filesystem mutation.
+async fn prepare_distill(
+    cfg: Arc<Config>,
+    dir: PathBuf,
+    transcript: String,
+) -> Option<PreparedDistill> {
     // Gate 1: redact the transcript before it is uploaded to the provider.
     let transcript = redact_secrets_owned(transcript);
     if transcript.trim().is_empty() {
-        return;
+        return None;
     }
     let prompt = build_distill_prompt(&transcript);
 
@@ -98,10 +107,10 @@ async fn run_distill(cfg: Arc<Config>, dir: PathBuf, transcript: String) {
     }
 
     let Some(mut out) = parsed else {
-        return;
+        return None;
     };
     if out.memories.is_empty() {
-        return; // no-op gate hit: nothing worth keeping
+        return None; // no-op gate hit: nothing worth keeping
     }
 
     // Gate 2: redact every distilled field before it touches disk.
@@ -110,13 +119,17 @@ async fn run_distill(cfg: Arc<Config>, dir: PathBuf, transcript: String) {
         m.description = redact_secrets_owned(std::mem::take(&mut m.description));
     }
 
-    // `apply_distilled` is a small synchronous atomic file update. Keep it in
-    // this future instead of `spawn_blocking`: dropping a JoinHandle cannot
-    // cancel a started blocking closure, which previously allowed a late write
-    // after cancellation/Finished. Once this section starts it has no await
-    // point, so the write completes before cancellation or terminal emission
-    // can be observed on this runtime thread.
-    match apply_distilled(&dir, &out) {
+    Some(PreparedDistill { dir, output: out })
+}
+
+/// Apply a prepared memory batch synchronously inside the verified terminal
+/// lifecycle gate. Best-effort by contract: failure is logged but does not turn
+/// an otherwise committed model/artifact turn into an error.
+pub(super) fn apply_prepared_distill(prepared: Option<PreparedDistill>) {
+    let Some(PreparedDistill { dir, output }) = prepared else {
+        return;
+    };
+    match apply_distilled(&dir, &output) {
         Ok(n) if n > 0 => {
             tracing::info!(written = n, dir = %dir.display(), "session distilled to file-based memory")
         }
@@ -152,9 +165,10 @@ mod tests {
         let completed = await_exact_turn_child(&cancel, async move {
             child_runs_ref.fetch_add(1, Ordering::SeqCst);
             child_phases.lock().unwrap().push("distill-apply");
+            "prepared"
         })
         .await;
-        assert!(completed);
+        assert_eq!(completed, Some("prepared"));
         phases.lock().unwrap().push("finish");
 
         assert_eq!(child_runs.load(Ordering::SeqCst), 1);
@@ -184,7 +198,7 @@ mod tests {
         });
         started_rx.await.expect("child started");
         cancel.cancel();
-        assert!(!child.await.expect("join exact child"));
+        assert_eq!(child.await.expect("join exact child"), None);
         tokio::task::yield_now().await;
         assert!(
             !late_write.load(Ordering::SeqCst),

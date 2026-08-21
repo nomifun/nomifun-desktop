@@ -148,6 +148,9 @@ fn resumed_session(id: &str) -> Session {
         activated_deferred_tools: vec![DEFERRED_TOOL.into()],
         editable_turn: None,
         host_context: Default::default(),
+        accepted_turn_root: None,
+        pending_host_terminal_root: None,
+        last_interrupted_turn_source: None,
     }
 }
 
