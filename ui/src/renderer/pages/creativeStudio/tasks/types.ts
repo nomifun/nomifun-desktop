@@ -102,6 +102,8 @@ export interface CreativeTask extends CreativeTaskIdentity {
   submittedAt: number;
   startedAt: number | null;
   finishedAt: number | null;
+  /** Non-null only for a terminal standalone task retired from owner history. */
+  deletedAt: number | null;
 }
 
 /** A task id is never fetched without the identity and ownership it must match. */
@@ -127,6 +129,16 @@ export interface CreativeStandaloneTaskHistoryQuery {
 export interface CreativeStandaloneTaskHistoryPage {
   items: CreativeTask[];
   nextCursor: string | null;
+}
+
+export interface CreativeStandaloneTaskRetireInput {
+  projectId: string;
+  workbenchKind: CreativeStandaloneWorkbenchKind;
+  taskIds: readonly string[];
+}
+
+export interface CreativeStandaloneTaskRetireResult {
+  retiredTaskIds: string[];
 }
 
 export type CreativeTaskContractErrorCode =

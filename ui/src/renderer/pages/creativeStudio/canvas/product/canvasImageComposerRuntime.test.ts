@@ -143,6 +143,7 @@ const task = (
     status === 'succeeded' || status === 'failed' || status === 'canceled'
       ? 3
       : null,
+  deletedAt: null,
 });
 
 const generationTask = (
@@ -163,6 +164,7 @@ const generationTask = (
   submittedAt: 1,
   startedAt: 2,
   finishedAt: 3,
+  deletedAt: null,
 });
 
 const resultAsset: CreativeAsset = {

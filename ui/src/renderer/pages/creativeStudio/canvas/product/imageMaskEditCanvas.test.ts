@@ -113,6 +113,7 @@ const taskFor = (
     status === 'succeeded' || status === 'failed' || status === 'canceled'
       ? 3
       : null,
+  deletedAt: null,
 });
 
 describe('canvas image mask edit product model', () => {

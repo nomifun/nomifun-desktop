@@ -12,12 +12,15 @@ import {
   isStandaloneWorkbenchTaskOwner,
   type CreativeStandaloneTaskHistoryPage,
   type CreativeStandaloneTaskHistoryQuery,
+  type CreativeStandaloneTaskRetireInput,
+  type CreativeStandaloneTaskRetireResult,
   type CreativeStandaloneWorkbenchKind,
   type CreativeTask,
 } from './types';
 
 export interface CreationTaskHistoryWireApi {
   listStandalone(query: string, signal?: AbortSignal): Promise<unknown>;
+  retireStandalone?(body: unknown, signal?: AbortSignal): Promise<unknown>;
 }
 
 const WORKBENCH_KINDS = new Set<CreativeStandaloneWorkbenchKind>([
@@ -136,7 +139,8 @@ const assertOwned = (
   if (
     !isStandaloneWorkbenchTaskOwner(task.owner) ||
     task.owner.projectId !== query.projectId ||
-    task.owner.workbenchKind !== query.workbenchKind
+    task.owner.workbenchKind !== query.workbenchKind ||
+    task.deletedAt !== null
   ) {
     throw new CreativeTaskContractError(
       'ownership_mismatch',
@@ -272,6 +276,76 @@ export class CreativeTaskHistoryClient {
       }
     }
     return { items, nextCursor: nextCursor?.raw ?? null };
+  }
+
+  async retireStandalone(
+    input: CreativeStandaloneTaskRetireInput,
+    signal?: AbortSignal
+  ): Promise<CreativeStandaloneTaskRetireResult> {
+    const query = normalizeQuery({
+      projectId: input.projectId,
+      workbenchKind: input.workbenchKind,
+      limit: 1,
+    });
+    if (
+      !Array.isArray(input.taskIds) ||
+      input.taskIds.length < 1 ||
+      input.taskIds.length > 100
+    ) {
+      throw new CreativeTaskContractError(
+        'invalid_request',
+        'Standalone history retirement requires 1 to 100 task ids',
+        'taskIds'
+      );
+    }
+    const taskIds = input.taskIds.map((taskId, index) => {
+      if (typeof taskId !== 'string' || !CANONICAL_UUID_V7.test(taskId)) {
+        throw new CreativeTaskContractError(
+          'invalid_request',
+          `Invalid standalone history task id at index ${index}`,
+          `taskIds[${index}]`
+        );
+      }
+      return taskId;
+    });
+    if (new Set(taskIds).size !== taskIds.length) {
+      throw new CreativeTaskContractError(
+        'invalid_request',
+        'Standalone history retirement task ids must be unique',
+        'taskIds'
+      );
+    }
+    if (!this.api.retireStandalone) {
+      throw new CreativeTaskContractError(
+        'invalid_request',
+        'Standalone history retirement is unavailable',
+        'retireStandalone'
+      );
+    }
+    const wire = record(
+      await this.api.retireStandalone(
+        {
+          project_id: query.projectId,
+          workbench_kind: query.workbenchKind,
+          task_ids: taskIds,
+        },
+        signal
+      ),
+      'retire_response'
+    );
+    exactKeys(wire, ['retired_task_ids'], 'retire_response');
+    if (
+      !Array.isArray(wire.retired_task_ids) ||
+      wire.retired_task_ids.length !== taskIds.length ||
+      wire.retired_task_ids.some((taskId, index) => taskId !== taskIds[index])
+    ) {
+      throw new CreativeTaskContractError(
+        'invalid_response',
+        'Standalone history retirement must echo every task id in request order',
+        'retire_response.retired_task_ids'
+      );
+    }
+    return { retiredTaskIds: [...taskIds] };
   }
 }
 

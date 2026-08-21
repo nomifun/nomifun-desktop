@@ -109,6 +109,7 @@ function task(
       status === "succeeded" || status === "failed" || status === "canceled"
         ? 1_500
         : null,
+    deletedAt: null,
   };
 }
 
@@ -387,6 +388,39 @@ describe("Creative workbench controller", () => {
       new Set(inputs.slice(0, 2).map((input) => input.idempotencyKey)).size,
     ).toBe(2);
     expect(inputs[2]?.idempotencyKey).not.toBe(inputs[1]?.idempotencyKey);
+  });
+
+  test("dismisses only terminal presentation entries", async () => {
+    const terminalPort: CreativeTaskPort = {
+      create: async (input) => task(input, "succeeded", { assetId: ASSET_A }),
+      get: async () => {
+        throw new Error("not used");
+      },
+      cancel: async () => {
+        throw new Error("not used");
+      },
+    };
+    const terminal = new CreativeWorkbenchRuntimeController(terminalPort, assets);
+    const completed = await terminal.run(videoPlan(2));
+    const firstId = completed.entries[0]?.task.taskId;
+    if (!firstId) throw new Error("expected terminal task");
+    expect(terminal.dismiss([firstId]).entries).toHaveLength(1);
+
+    const livePort: CreativeTaskPort = {
+      create: async (input) => task(input, "queued"),
+      get: async () => {
+        throw new Error("temporary transport failure");
+      },
+      cancel: async () => {
+        throw new Error("not used");
+      },
+    };
+    const live = new CreativeWorkbenchRuntimeController(livePort, assets);
+    const pending = await live.run(imagePlan());
+    const liveId = pending.entries[0]?.task.taskId;
+    if (!liveId) throw new Error("expected live task");
+    const error = captureError(() => live.dismiss([liveId]));
+    expect(error?.message.includes("Cannot dismiss live task")).toBe(true);
   });
 
   test("retains a pre-task submission failure and retries the same idempotency key", async () => {

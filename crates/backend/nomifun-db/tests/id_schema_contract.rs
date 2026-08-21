@@ -453,6 +453,7 @@ async fn runtime_v3_schema_has_no_physical_foreign_keys_or_cascades_and_only_gua
             "channel_inbound_receipts_no_delete",
             "channel_inbound_receipts_scope_set_once",
             "channel_session_bindings_identity_immutable",
+            "restrict_workshop_asset_delete_creation_task_refs",
             "trg_channel_plugins_owner_domain_insert_guard",
             "trg_channel_plugins_owner_domain_update_guard",
             "trg_conversation_delivery_receipts_identity_immutable",

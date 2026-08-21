@@ -24,7 +24,8 @@ use nomifun_common::{
 use nomifun_common::generate_id;
 use nomifun_db::{
     CreateCreativeTaskParams, CreationTaskPageCursorRef, CreationTaskRow, CreativeTaskOwnerRef,
-    ICreationTaskRepository, ListStandaloneWorkbenchTasksParams, UpdateCreationTaskParams,
+    ICreationTaskRepository, ListStandaloneWorkbenchTasksParams,
+    RetireStandaloneWorkbenchTasksParams, UpdateCreationTaskParams,
 };
 use nomifun_model_invoke::{
     ImageEditRequest, ImageGenRequest, InputAsset, InvokeErrorKind, JobHandle,
@@ -1063,6 +1064,98 @@ impl CreationService {
             items,
             next_cursor: encoded_cursor,
         })
+    }
+
+    pub async fn retire_standalone_workbench_tasks(
+        &self,
+        project_id: &str,
+        workbench_kind: StandaloneWorkbenchKind,
+        task_ids: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        let project_id = CreativeStudioProjectId::parse(project_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid project_id: {error}")))?
+            .into_string();
+        if task_ids.is_empty() || task_ids.len() > 100 {
+            return Err(AppError::BadRequest(
+                "retire requires between 1 and 100 task_ids".into(),
+            ));
+        }
+        let mut seen = HashSet::with_capacity(task_ids.len());
+        for task_id in task_ids {
+            CreationTaskId::parse(task_id).map_err(|error| {
+                AppError::BadRequest(format!("invalid retire task id {task_id:?}: {error}"))
+            })?;
+            if !seen.insert(task_id.as_str()) {
+                return Err(AppError::BadRequest(format!(
+                    "retire task_ids contains duplicate {task_id}"
+                )));
+            }
+        }
+
+        let mut rows = Vec::with_capacity(task_ids.len());
+        for task_id in task_ids {
+            let row = self
+                .repo
+                .get_task(task_id)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("creation task {task_id} not found")))?;
+            let exact_owner = row.project_id.as_deref() == Some(project_id.as_str())
+                && row.workbench_kind.as_deref() == Some(workbench_kind.as_str())
+                && row.node_id.is_none()
+                && row.workflow_id.is_none()
+                && row.workflow_run_id.is_none()
+                && row.workflow_step_id.is_none();
+            let capability_matches = MediaCapability::parse(&row.capability)
+                .is_some_and(|capability| workbench_kind.accepts_capability(capability));
+            if !exact_owner || !capability_matches {
+                return Err(AppError::Conflict(format!(
+                    "creation task {task_id} does not belong to the requested standalone workbench owner"
+                )));
+            }
+            if matches!(row.status.as_str(), "queued" | "running") {
+                return Err(AppError::Conflict(format!(
+                    "live creation task {task_id} cannot be retired"
+                )));
+            }
+            if !matches!(row.status.as_str(), "failed" | "canceled" | "succeeded") {
+                return Err(AppError::Conflict(format!(
+                    "creation task {task_id} is not in a supported terminal state"
+                )));
+            }
+            rows.push(row);
+        }
+        let deleted_at = rows
+            .iter()
+            .map(|row| row.submitted_at)
+            .max()
+            .unwrap_or_default()
+            .max(now_ms());
+        let rows = self.audit_rows_for_output(rows).await?;
+        for row in rows {
+            CreationTask::try_from(row)?;
+        }
+        let retired = self
+            .repo
+            .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
+                project_id: &project_id,
+                workbench_kind: workbench_kind.as_str(),
+                task_ids,
+                deleted_at,
+            })
+            .await?;
+        if retired.len() != task_ids.len() {
+            return Err(AppError::Internal(
+                "retirement returned an incomplete task batch".into(),
+            ));
+        }
+        for (expected, row) in task_ids.iter().zip(&retired) {
+            if row.creation_task_id != *expected || row.deleted_at.is_none() {
+                return Err(AppError::Internal(
+                    "retirement returned a reordered or untombstoned task".into(),
+                ));
+            }
+        }
+        Ok(task_ids.to_vec())
     }
 
     /// Cancel a task. Terminal tasks are returned unchanged (idempotent); a live
@@ -2948,7 +3041,7 @@ mod tests {
             .unwrap();
             task_ids.push(task_id);
         }
-        let service = CreationService::new(Arc::new(repo));
+        let service = CreationService::new(Arc::new(repo.clone()));
 
         let first = service
             .list_standalone_workbench_tasks(
@@ -3005,6 +3098,91 @@ mod tests {
                 Err(AppError::BadRequest(_))
             ));
         }
+
+        let retired = service
+            .retire_standalone_workbench_tasks(
+                &project_id,
+                StandaloneWorkbenchKind::Video,
+                &[task_ids[0].clone()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(retired, vec![task_ids[0].clone()]);
+        let direct = service.get_task(&task_ids[0]).await.unwrap();
+        let first_deleted_at = direct.deleted_at.expect("direct GET exposes tombstone");
+        assert!(
+            service
+                .list_standalone_workbench_tasks(
+                    &project_id,
+                    StandaloneWorkbenchKind::Video,
+                    false,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+                .items
+                .iter()
+                .all(|task| task.creation_task_id != task_ids[0])
+        );
+        service
+            .retire_standalone_workbench_tasks(
+                &project_id,
+                StandaloneWorkbenchKind::Video,
+                &[task_ids[0].clone()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            service.get_task(&task_ids[0]).await.unwrap().deleted_at,
+            Some(first_deleted_at),
+            "idempotent retire preserves the first tombstone timestamp"
+        );
+
+        let corrupt_id = CreationTaskId::new().into_string();
+        let fingerprint = json!({"task": corrupt_id}).to_string();
+        repo.get_or_create_creative_task(CreateCreativeTaskParams {
+            creation_task_id: &corrupt_id,
+            owner: CreativeTaskOwnerRef::StandaloneWorkbench {
+                project_id: &project_id,
+                workbench_kind: "video",
+            },
+            provider_id: &provider_id,
+            model: "test-model",
+            capability: "t2v",
+            params: r#"{"prompt":"missing output","seconds":5}"#,
+            input_bindings: "[]",
+            request_fingerprint: &fingerprint,
+            status: "queued",
+            submitted_at: 300,
+        })
+        .await
+        .unwrap();
+        let missing_asset = WorkshopAssetId::new().into_string();
+        let result_ids = serde_json::to_string(&[missing_asset]).unwrap();
+        repo.update_task(
+            &corrupt_id,
+            UpdateCreationTaskParams {
+                status: Some("succeeded"),
+                result_asset_ids: Some(&result_ids),
+                finished_at: Some(Some(301)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            service
+                .retire_standalone_workbench_tasks(
+                    &project_id,
+                    StandaloneWorkbenchKind::Video,
+                    &[corrupt_id.clone()],
+                )
+                .await
+                .is_err(),
+            "retirement must not hide a succeeded task before artifact audit"
+        );
+        assert!(repo.get_task(&corrupt_id).await.unwrap().unwrap().deleted_at.is_none());
     }
 
     #[tokio::test]

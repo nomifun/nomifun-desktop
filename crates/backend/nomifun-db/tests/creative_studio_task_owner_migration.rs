@@ -443,3 +443,92 @@ async fn migration_043_enforces_exact_standalone_owner_and_input_shape() {
         "insert trigger must reject a missing required role"
     );
 }
+
+#[tokio::test]
+async fn migration_044_allows_only_terminal_standalone_tombstones() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    seed_pre_040(&pool).await;
+    migrate_to(&pool, 43).await;
+
+    let terminal_id = "0190f5fe-7c00-7a00-8abc-000000000020";
+    let live_id = "0190f5fe-7c00-7a00-8abc-000000000021";
+    for (task_id, status) in [(terminal_id, "failed"), (live_id, "queued")] {
+        sqlx::query(
+            "INSERT INTO creation_tasks \
+                (creation_task_id, project_id, workbench_kind, provider_id, model, capability, \
+                 params, input_bindings, status, submitted_at, finished_at, request_fingerprint) \
+             VALUES (?, ?, 'video', ?, 'model', 't2v', '{}', '[]', ?, 10, \
+                     CASE WHEN ? = 'failed' THEN 11 ELSE NULL END, '{}')",
+        )
+        .bind(task_id)
+        .bind(PROJECT_ID)
+        .bind(PROVIDER_ID)
+        .bind(status)
+        .bind(status)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "UPDATE creation_tasks SET status = 'failed', finished_at = 11 \
+         WHERE creation_task_id = ?",
+    )
+    .bind(CREATIVE_TASK_ID)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    migrate_to(&pool, 44).await;
+    let preexisting_tombstones: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM creation_tasks WHERE deleted_at IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        preexisting_tombstones, 0,
+        "044 must not infer tombstones for existing task history"
+    );
+    sqlx::query("UPDATE creation_tasks SET deleted_at = 12 WHERE creation_task_id = ?")
+        .bind(terminal_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (label, task_id, deleted_at) in [
+        ("before submit", terminal_id, 9_i64),
+        ("live standalone", live_id, 12_i64),
+        ("canvas owner", CREATIVE_TASK_ID, 12_i64),
+    ] {
+        assert!(
+            sqlx::query("UPDATE creation_tasks SET deleted_at = ? WHERE creation_task_id = ?")
+                .bind(deleted_at)
+                .bind(task_id)
+                .execute(&pool)
+                .await
+                .is_err(),
+            "044 must reject {label} tombstone"
+        );
+    }
+    for live_status in ["queued", "running"] {
+        assert!(
+            sqlx::query("UPDATE creation_tasks SET status = ? WHERE creation_task_id = ?")
+                .bind(live_status)
+                .bind(terminal_id)
+                .execute(&pool)
+                .await
+                .is_err(),
+            "a tombstoned terminal task cannot be resurrected as {live_status}"
+        );
+    }
+    let index_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema \
+         WHERE type = 'index' AND name = 'idx_creation_tasks_workbench_owner_deleted_page'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(index_count, 1);
+}

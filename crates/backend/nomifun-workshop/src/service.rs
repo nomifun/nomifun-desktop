@@ -3051,6 +3051,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_delete_surfaces_live_task_conflict_and_keeps_terminal_tombstone() {
+        let (service, _dir, db) = service_with_database_and_lifecycle(None).await;
+        let project = service
+            .create_creative_project(Some("live task owner".into()))
+            .await
+            .unwrap();
+        let provider_id = ProviderId::new().into_string();
+        insert_provider(&db, &provider_id).await;
+        let task_id = nomifun_common::CreationTaskId::new().into_string();
+        nomifun_db::sqlx::query(
+            "INSERT INTO creation_tasks \
+             (creation_task_id, project_id, workbench_kind, provider_id, model, capability, params, \
+              input_bindings, status, submitted_at, request_fingerprint) \
+             VALUES (?, ?, 'video', ?, 'model', 't2v', '{}', '[]', 'queued', 1, '{}')",
+        )
+        .bind(&task_id)
+        .bind(&project.project_id)
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        assert!(matches!(
+            service.delete_creative_project(&project.project_id).await,
+            Err(AppError::Conflict(message)) if message.contains("live creation task")
+        ));
+
+        nomifun_db::sqlx::query(
+            "UPDATE creation_tasks SET status = 'failed', finished_at = 2, deleted_at = 3 \
+             WHERE creation_task_id = ?",
+        )
+        .bind(&task_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        service
+            .delete_creative_project(&project.project_id)
+            .await
+            .unwrap();
+        let retained: i64 = nomifun_db::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM creation_tasks WHERE creation_task_id = ? AND deleted_at = 3",
+        )
+        .bind(&task_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(retained, 1);
+    }
+
+    #[tokio::test]
     async fn creative_project_archive_round_trip_copies_assets_and_remaps_graph() {
         let (svc, _dir) = service().await;
         let image_bytes = png_1x1();

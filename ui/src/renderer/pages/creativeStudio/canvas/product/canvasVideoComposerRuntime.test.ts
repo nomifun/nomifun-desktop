@@ -131,6 +131,7 @@ const task = (
   submittedAt: 1,
   startedAt: status === 'queued' ? null : 2,
   finishedAt: status === 'succeeded' || status === 'failed' || status === 'canceled' ? 3 : null,
+  deletedAt: null,
 });
 
 const videoAsset = (id: string, title: string): CreativeAsset => ({

@@ -187,7 +187,12 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
   onLoadMoreResults,
 }) => {
   const deletionEnabled = Boolean(onDeleteResult && onDeleteSelected);
-  const allSelected = results.length > 0 && results.every((result) => selectedResultIds.includes(result.id));
+  const deletableResults = results.filter((result) => result.deletable);
+  const deletableIds = deletableResults.map((result) => result.id);
+  const selectedDeletableIds = selectedResultIds.filter((id) => deletableIds.includes(id));
+  const allSelected =
+    deletableResults.length > 0 &&
+    deletableResults.every((result) => selectedResultIds.includes(result.id));
   const stateLabel = taskStateLabel(task);
   const stateTone =
     task.state === 'failed' ? 'red' : task.state === 'canceled' ? 'gray' : 'arcoblue';
@@ -205,8 +210,8 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
           <Button
             size='small'
             icon={allSelected ? <CloseSmall /> : <Check />}
-            disabled={results.length === 0}
-            onClick={() => onSelectionChange(allSelected ? [] : results.map((result) => result.id))}
+            disabled={deletableResults.length === 0}
+            onClick={() => onSelectionChange(allSelected ? [] : deletableIds)}
           >
             {allSelected ? '取消全选' : '全选'}
           </Button>
@@ -214,10 +219,10 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
             size='small'
             status='danger'
             icon={<Delete />}
-            disabled={selectedResultIds.length === 0}
-            onClick={() => onDeleteSelected?.([...selectedResultIds])}
+            disabled={selectedDeletableIds.length === 0}
+            onClick={() => onDeleteSelected?.(selectedDeletableIds)}
           >
-            删除{selectedResultIds.length > 0 ? ` ${selectedResultIds.length}` : ''}
+            移除{selectedDeletableIds.length > 0 ? ` ${selectedDeletableIds.length}` : ''}
           </Button>
         </div> : null}
       </header>
@@ -231,7 +236,7 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
       ) : (
         <div className={styles.resultGrid}>
           {results.map((result) => {
-            const selected = selectedResultIds.includes(result.id);
+            const selected = Boolean(result.deletable && selectedResultIds.includes(result.id));
             return (
               <article
                 key={result.id}
@@ -241,7 +246,7 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
                 data-model={result.model.model}
                 data-selected={selected || undefined}
               >
-                {deletionEnabled ? <div className={styles.resultSelection}>
+                {deletionEnabled && result.deletable ? <div className={styles.resultSelection}>
                   <Checkbox
                     checked={selected}
                     aria-label={`选择结果 ${result.id}`}
@@ -256,7 +261,7 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
                     type='text'
                     status='danger'
                     icon={<Delete />}
-                    aria-label={`删除结果 ${result.id}`}
+                    aria-label={`从历史移除 ${result.id}`}
                     onClick={() => onDeleteResult?.(result.id)}
                   />
                 </div> : null}

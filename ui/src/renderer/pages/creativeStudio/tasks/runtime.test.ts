@@ -66,6 +66,7 @@ function task(
     submittedAt: 100,
     startedAt: status === 'queued' ? null : 110,
     finishedAt: terminal ? 150 : null,
+    deletedAt: null,
     ...overrides,
   };
 }

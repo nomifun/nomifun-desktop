@@ -179,6 +179,27 @@ describe('ImageWorkbench visual states', () => {
     expect(queued.includes('2 个排队中')).toBe(true);
     expect(canceled.includes('最近任务已取消')).toBe(true);
   });
+
+  test('offers history retirement only for terminal task cards', () => {
+    const html = renderWorkbench({
+      results: [
+        { ...resultBase, status: 'queued', deletable: false },
+        {
+          ...resultBase,
+          id: 'terminal-task',
+          taskId: 'terminal-task',
+          status: 'failed',
+          errorMessage: 'failed',
+          deletable: true,
+        },
+      ],
+      selectedResultIds: ['terminal-task'],
+    });
+    expect(html.includes('选择结果 result-1')).toBe(false);
+    expect(html.includes('选择结果 terminal-task')).toBe(true);
+    expect(html.includes('从历史移除 terminal-task')).toBe(true);
+    expect(html.includes('移除 1')).toBe(true);
+  });
 });
 
 describe('ImageWorkbench controlled contract', () => {

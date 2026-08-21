@@ -36,6 +36,7 @@ pub struct CreationTask {
     pub submitted_at: TimestampMs,
     pub started_at: Option<TimestampMs>,
     pub finished_at: Option<TimestampMs>,
+    pub deleted_at: Option<TimestampMs>,
 }
 
 impl TryFrom<CreationTaskRow> for CreationTask {
@@ -114,6 +115,16 @@ impl TryFrom<CreationTaskRow> for CreationTask {
                 )));
             }
         }
+        if row.deleted_at.is_some_and(|deleted_at| {
+            deleted_at < row.submitted_at
+                || row.workbench_kind.is_none()
+                || !matches!(row.status.as_str(), "failed" | "canceled" | "succeeded")
+        }) {
+            return Err(AppError::Internal(format!(
+                "creation task {} has an invalid retirement tombstone",
+                row.creation_task_id
+            )));
+        }
 
         Ok(Self {
             creation_task_id: row.creation_task_id,
@@ -135,6 +146,7 @@ impl TryFrom<CreationTaskRow> for CreationTask {
             submitted_at: row.submitted_at,
             started_at: row.started_at,
             finished_at: row.finished_at,
+            deleted_at: row.deleted_at,
         })
     }
 }
@@ -178,12 +190,18 @@ pub struct CreativeCreationTask {
     pub submitted_at: TimestampMs,
     pub started_at: Option<TimestampMs>,
     pub finished_at: Option<TimestampMs>,
+    pub deleted_at: Option<TimestampMs>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CreativeCreationTaskPage {
     pub items: Vec<CreativeCreationTask>,
     pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreativeCreationTaskRetireResult {
+    pub retired_task_ids: Vec<String>,
 }
 
 impl CreativeCreationTaskPage {
@@ -254,6 +272,7 @@ impl TryFrom<CreationTask> for CreativeCreationTask {
             submitted_at: task.submitted_at,
             started_at: task.started_at,
             finished_at: task.finished_at,
+            deleted_at: task.deleted_at,
         })
     }
 }
@@ -294,6 +313,7 @@ mod tests {
             submitted_at: 1,
             started_at: None,
             finished_at: Some(2),
+            deleted_at: None,
         };
         let dto = CreationTask::try_from(row).unwrap();
         assert_eq!(dto.params["prompt"], "cat");
@@ -339,6 +359,7 @@ mod tests {
             submitted_at: 1,
             started_at: Some(2),
             finished_at: Some(3),
+            deleted_at: Some(3),
         };
         let task = CreationTask::try_from(row).unwrap();
         assert_eq!(task.inputs.as_ref().unwrap()[0].asset_id, input_asset_id);
@@ -354,6 +375,7 @@ mod tests {
         assert_eq!(wire["items"][0]["inputs"][0]["asset_id"], input_asset_id);
         assert_eq!(wire["items"][0]["inputs"][0]["kind"], "image");
         assert_eq!(wire["items"][0]["inputs"][0]["role"], "first_frame");
+        assert_eq!(wire["items"][0]["deleted_at"], 3);
         assert!(wire["next_cursor"].as_str().is_some());
     }
 
@@ -380,6 +402,7 @@ mod tests {
             submitted_at: 1,
             started_at: Some(1),
             finished_at: Some(2),
+            deleted_at: None,
         };
         assert!(matches!(
             CreationTask::try_from(row),
@@ -418,6 +441,7 @@ mod tests {
                 submitted_at: 1,
                 started_at: None,
                 finished_at: Some(2),
+                deleted_at: None,
             };
             assert!(matches!(CreationTask::try_from(row), Err(AppError::Internal(_))));
         }

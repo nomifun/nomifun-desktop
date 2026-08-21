@@ -22,6 +22,7 @@ pub mod state;
 pub use artifact::validate_artifact_payload;
 pub use dto::{
     CreationTask, CreativeCreationTask, CreativeCreationTaskOwner, CreativeCreationTaskPage,
+    CreativeCreationTaskRetireResult,
 };
 pub use routes::creation_routes;
 pub use service::{

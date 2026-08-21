@@ -65,6 +65,7 @@ function wireTask(
     submitted_at: 100,
     started_at: status === 'queued' ? null : 110,
     finished_at: terminal ? 150 : null,
+    deleted_at: null,
     ...overrides,
   };
 }
@@ -132,6 +133,7 @@ describe('CreativeTaskClient', () => {
       submittedAt: 100,
       startedAt: null,
       finishedAt: null,
+      deletedAt: null,
     });
   });
 
@@ -216,6 +218,31 @@ describe('CreativeTaskClient', () => {
       inputs: [{ asset_id: ASSET_ID, kind: 'image', role: 'reference' }],
     });
     expect(task.owner).toEqual(owner);
+  });
+
+  test('does not resurrect a retired exact replay through create', async () => {
+    const owner = {
+      kind: 'standalone_workbench' as const,
+      projectId: PROJECT_ID,
+      workbenchKind: 'image' as const,
+    };
+    const client = new CreativeTaskClient({
+      create: async (_value, key) =>
+        wireTask('failed', {
+          creation_task_id: key,
+          owner: {
+            kind: 'standalone_workbench',
+            project_id: PROJECT_ID,
+            workbench_kind: 'image',
+          },
+          deleted_at: 200,
+        }),
+      get: async () => wireTask(),
+      cancel: async () => wireTask('canceled'),
+    });
+    const error = await caught(client.create(createInput({ owner })));
+    expect(error instanceof CreativeTaskContractError).toBe(true);
+    expect((error as CreativeTaskContractError).field).toBe('deleted_at');
   });
 
   test('keeps unprovable legacy inputs nullable and rejects invented kinds', () => {
@@ -356,6 +383,32 @@ describe('CreativeTaskClient', () => {
       'invalid_response',
       'invalid_response',
     ]);
+  });
+
+  test('accepts tombstones only for terminal standalone history tasks', () => {
+    const owner = {
+      kind: 'standalone_workbench',
+      project_id: PROJECT_ID,
+      workbench_kind: 'image',
+    };
+    expect(
+      mapCreationTaskWire(
+        wireTask('failed', { owner, deleted_at: 200 }),
+      ).deletedAt
+    ).toBe(200);
+    for (const value of [
+      wireTask('queued', { owner, deleted_at: 200 }),
+      wireTask('succeeded', { deleted_at: 200 }),
+      wireTask('failed', { owner, deleted_at: 50 }),
+    ]) {
+      let error: unknown = null;
+      try {
+        mapCreationTaskWire(value);
+      } catch (reason) {
+        error = reason;
+      }
+      expect(error instanceof CreativeTaskContractError).toBe(true);
+    }
   });
 });
 describe('HttpCreationTaskApi', () => {

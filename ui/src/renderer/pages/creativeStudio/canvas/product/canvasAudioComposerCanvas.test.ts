@@ -180,6 +180,7 @@ const taskFor = (
   submittedAt: 1,
   startedAt: 2,
   finishedAt: null,
+  deletedAt: null,
   ...overrides,
 });
 

@@ -120,6 +120,7 @@ function taskFrom(
     submittedAt: 2_100,
     startedAt: status === 'queued' ? null : 2_101,
     finishedAt: status === 'queued' || status === 'running' ? null : 2_102,
+    deletedAt: null,
   };
 }
 

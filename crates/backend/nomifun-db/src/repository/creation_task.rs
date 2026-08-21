@@ -43,6 +43,18 @@ pub trait ICreationTaskRepository: Send + Sync {
         ))
     }
 
+    /// Atomically tombstone one exact terminal standalone-owner batch. Existing
+    /// tombstones are idempotent. Implementations return rows in request order.
+    async fn retire_standalone_workbench_tasks(
+        &self,
+        params: RetireStandaloneWorkbenchTasksParams<'_>,
+    ) -> Result<Vec<CreationTaskRow>, DbError> {
+        let _ = params;
+        Err(DbError::Init(
+            "standalone workbench task retirement is unavailable in this repository".into(),
+        ))
+    }
+
     /// Complete task inventory for boot-time artifact reconciliation. Unlike
     /// the paginated API listing, this intentionally has no 500-row cap.
     async fn list_all_tasks(&self) -> Result<Vec<CreationTaskRow>, DbError>;
@@ -101,6 +113,14 @@ pub struct ListStandaloneWorkbenchTasksParams<'a> {
     pub before: Option<CreationTaskPageCursorRef<'a>>,
     /// Requested visible page size. The repository reads one additional row.
     pub limit: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetireStandaloneWorkbenchTasksParams<'a> {
+    pub project_id: &'a str,
+    pub workbench_kind: &'a str,
+    pub task_ids: &'a [String],
+    pub deleted_at: i64,
 }
 
 /// Strict canonical Creative Studio task owner. No field is shared between

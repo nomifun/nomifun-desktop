@@ -54,6 +54,7 @@ const task = (
   submittedAt,
   startedAt: null,
   finishedAt: null,
+  deletedAt: null,
   ...overrides,
 });
 
@@ -296,8 +297,9 @@ describe('standalone workbench history model', () => {
         nodeId: testUuid(518),
       },
     });
+    const retired = task(518, 396, { deletedAt: 500 });
 
-    for (const candidate of [foreignProject, foreignKind, canvasOwned]) {
+    for (const candidate of [foreignProject, foreignKind, canvasOwned, retired]) {
       const error = captureError(() =>
         mergeStandaloneWorkbenchHistory({
           scope,

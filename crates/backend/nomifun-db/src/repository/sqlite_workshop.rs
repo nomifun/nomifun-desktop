@@ -498,15 +498,36 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
     }
 
     async fn delete_creative_project(&self, project_id: &str) -> Result<(), DbError> {
-        let result = sqlx::query("DELETE FROM creative_studio_projects WHERE project_id = ?")
+        let mut tx = self.pool.begin().await?;
+        let locked = sqlx::query(
+            "UPDATE creative_studio_projects SET updated_at = updated_at WHERE project_id = ?",
+        )
             .bind(project_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
-        if result.rows_affected() == 0 {
+        if locked.rows_affected() == 0 {
             return Err(DbError::NotFound(format!(
                 "creative studio project '{project_id}' not found"
             )));
         }
+        let live_task: Option<String> = sqlx::query_scalar(
+            "SELECT creation_task_id FROM creation_tasks \
+             WHERE project_id = ? AND status IN ('queued', 'running') \
+             ORDER BY submitted_at ASC, creation_task_id ASC LIMIT 1",
+        )
+        .bind(project_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(task_id) = live_task {
+            return Err(DbError::Conflict(format!(
+                "creative studio project '{project_id}' has live creation task '{task_id}'"
+            )));
+        }
+        sqlx::query("DELETE FROM creative_studio_projects WHERE project_id = ?")
+            .bind(project_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1102,31 +1123,29 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                 )));
             }
         }
-        let referencing_tasks: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT DISTINCT task.id, task.result_asset_ids \
-             FROM creation_tasks task, json_each(task.result_asset_ids) item \
-             WHERE item.value = ?",
+        let referencing_task: Option<(String, String)> = sqlx::query_as(
+            "SELECT creation_task_id, \
+                    CASE WHEN EXISTS ( \
+                        SELECT 1 FROM json_each(input_bindings) input \
+                        WHERE json_extract(input.value, '$.asset_id') = ?1 \
+                    ) THEN 'input' ELSE 'result' END AS reference_kind \
+             FROM creation_tasks \
+             WHERE EXISTS ( \
+                 SELECT 1 FROM json_each(input_bindings) input \
+                 WHERE json_extract(input.value, '$.asset_id') = ?1 \
+             ) OR EXISTS ( \
+                 SELECT 1 FROM json_each(result_asset_ids) result \
+                 WHERE result.value = ?1 \
+             ) \
+             ORDER BY creation_task_id ASC LIMIT 1",
         )
         .bind(id)
-        .fetch_all(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
-        for (task_id, encoded) in referencing_tasks {
-            let mut asset_ids: Vec<String> = serde_json::from_str(&encoded).map_err(|error| {
-                DbError::Conflict(format!(
-                    "creation task '{task_id}' has invalid result_asset_ids: {error}"
-                ))
-            })?;
-            asset_ids.retain(|asset_id| asset_id != id);
-            let encoded = serde_json::to_string(&asset_ids).map_err(|error| {
-                DbError::Init(format!(
-                    "failed to encode creation task '{task_id}' result_asset_ids: {error}"
-                ))
-            })?;
-            sqlx::query("UPDATE creation_tasks SET result_asset_ids = ? WHERE id = ?")
-                .bind(encoded)
-                .bind(task_id)
-                .execute(&mut *tx)
-                .await?;
+        if let Some((task_id, reference_kind)) = referencing_task {
+            return Err(DbError::Conflict(format!(
+                "workshop asset '{id}' is referenced as a creation task {reference_kind} by '{task_id}'"
+            )));
         }
         sqlx::query("DELETE FROM workshop_assets WHERE asset_id = ?")
             .bind(id)
@@ -1761,6 +1780,133 @@ mod tests {
             repo.update_asset("nope", UpdateAssetParams::default(), 1).await.unwrap_err(),
             DbError::NotFound(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn task_input_and_result_assets_remain_restricted_after_retirement() {
+        let (repo, db) = repo().await;
+        repo.create_creative_project(
+            CREATIVE_PROJECT_A,
+            "task assets",
+            &format!(
+                r#"{{"schema":"nomifun.creative-studio/v1","projectId":"{CREATIVE_PROJECT_A}","nodes":[]}}"#
+            ),
+            1,
+        )
+        .await
+        .unwrap();
+        repo.create_asset(&sample_asset(1, ASSET_1, "image", "input"))
+            .await
+            .unwrap();
+        repo.create_asset(&sample_asset(2, ASSET_2, "image", "result"))
+            .await
+            .unwrap();
+        let provider_id = nomifun_common::generate_id();
+        sqlx::query(
+            "INSERT INTO providers \
+             (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, created_at, updated_at) \
+             VALUES (?, 'test', 'retire provider', 'https://example.invalid', 'bearer', '', 1, 1)",
+        )
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let task_id = nomifun_common::generate_id();
+        let inputs = serde_json::json!([{
+            "asset_id": ASSET_1,
+            "kind": "image",
+            "role": "reference"
+        }]);
+        sqlx::query(
+            "INSERT INTO creation_tasks \
+             (creation_task_id, project_id, workbench_kind, provider_id, model, capability, params, \
+              input_bindings, status, result_asset_ids, submitted_at, finished_at, deleted_at, request_fingerprint) \
+             VALUES (?, ?, 'image', ?, 'model', 'i2i', '{}', ?, 'succeeded', ?, 1, 2, 3, '{}')",
+        )
+        .bind(&task_id)
+        .bind(CREATIVE_PROJECT_A)
+        .bind(&provider_id)
+        .bind(inputs.to_string())
+        .bind(serde_json::to_string(&[ASSET_2]).unwrap())
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        for (asset_id, kind) in [(ASSET_1, "input"), (ASSET_2, "result")] {
+            assert!(matches!(
+                repo.delete_asset(asset_id).await,
+                Err(DbError::Conflict(message)) if message.contains(kind) && message.contains(&task_id)
+            ));
+        }
+        assert!(
+            sqlx::query("DELETE FROM workshop_assets WHERE asset_id = ?")
+                .bind(ASSET_2)
+                .execute(db.pool())
+                .await
+                .is_err(),
+            "database trigger is the final task-result deletion guard"
+        );
+    }
+
+    #[tokio::test]
+    async fn project_delete_rejects_live_tasks_but_keeps_terminal_history() {
+        let (repo, db) = repo().await;
+        repo.create_creative_project(
+            CREATIVE_PROJECT_A,
+            "live task owner",
+            &format!(
+                r#"{{"schema":"nomifun.creative-studio/v1","projectId":"{CREATIVE_PROJECT_A}","nodes":[]}}"#
+            ),
+            1,
+        )
+        .await
+        .unwrap();
+        let provider_id = nomifun_common::generate_id();
+        sqlx::query(
+            "INSERT INTO providers \
+             (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, created_at, updated_at) \
+             VALUES (?, 'test', 'project gate provider', 'https://example.invalid', 'bearer', '', 1, 1)",
+        )
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let task_id = nomifun_common::generate_id();
+        sqlx::query(
+            "INSERT INTO creation_tasks \
+             (creation_task_id, project_id, workbench_kind, provider_id, model, capability, params, \
+              input_bindings, status, submitted_at, request_fingerprint) \
+             VALUES (?, ?, 'video', ?, 'model', 't2v', '{}', '[]', 'queued', 1, '{}')",
+        )
+        .bind(&task_id)
+        .bind(CREATIVE_PROJECT_A)
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        assert!(matches!(
+            repo.delete_creative_project(CREATIVE_PROJECT_A).await,
+            Err(DbError::Conflict(message)) if message.contains("live creation task")
+        ));
+        sqlx::query(
+            "UPDATE creation_tasks SET status = 'failed', finished_at = 2, deleted_at = 3 \
+             WHERE creation_task_id = ?",
+        )
+        .bind(&task_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        repo.delete_creative_project(CREATIVE_PROJECT_A)
+            .await
+            .unwrap();
+        let retained: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM creation_tasks WHERE creation_task_id = ? AND deleted_at = 3",
+        )
+        .bind(&task_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(retained, 1, "terminal tombstone survives project deletion");
     }
 
     #[tokio::test]
