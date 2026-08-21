@@ -29,7 +29,7 @@ pub use models::{
     UpdateAgentHandshakeParams,
     UpdateKnowledgeTagParams,
     UpsertAgentMetadataParams, UpsertSkillTagParams, WebhookRow,
-    WorkshopAssetRow, WorkshopCanvasRow, ConversationExecutionLinkRow,
+    WorkshopAssetRow, ConversationExecutionLinkRow,
 };
 pub use models::{
     CreatePresetTagParams, PresetAgentPreferenceRow, PresetExampleRow,

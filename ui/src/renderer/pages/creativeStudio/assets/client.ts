@@ -65,7 +65,7 @@ function mapOrigin(value: unknown): CreativeAssetOrigin | null {
     model: optionalString(origin.model),
     providerId: optionalString(origin.provider_id),
     params: optionalRecord(origin.params),
-    projectId: optionalString(origin.canvas_id),
+    projectId: optionalString(origin.project_id),
     nodeId: optionalString(origin.node_id),
     generationTaskId: optionalString(origin.creation_task_id),
   };

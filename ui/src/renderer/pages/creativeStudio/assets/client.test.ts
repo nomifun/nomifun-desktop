@@ -28,7 +28,7 @@ function assetDto(overrides: Partial<WorkshopAssetDto> = {}): WorkshopAssetDto {
     text_content: null,
     origin: {
       provider_id: '0190f5fe-7c00-7a00-8000-000000000002',
-      canvas_id: '0190f5fe-7c00-7a00-8000-000000000003',
+      project_id: '0190f5fe-7c00-7a00-8000-000000000003',
       node_id: '0190f5fe-7c00-7a00-8000-000000000004',
       creation_task_id: '0190f5fe-7c00-7a00-8000-000000000005',
     },

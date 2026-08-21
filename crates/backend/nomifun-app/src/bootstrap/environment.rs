@@ -1013,7 +1013,7 @@ mod tests {
             "INSERT INTO workshop_assets \
                 (asset_id, kind, title, tags, in_library, origin, created_at, updated_at) \
              VALUES (?, 'image', 'corrupt origin', '[]', 1, \
-                     '{\"canvas_id\":null}', 1, 1)",
+                     '{\"provider_id\":null}', 1, 1)",
         )
         .bind(asset_id.as_str())
         .execute(&mut *connection)
@@ -1030,7 +1030,7 @@ mod tests {
             probe_existing_v3_database(&path).await.unwrap(),
             ExistingV3DatabaseProbe::Incompatible(reason)
                 if reason.contains("complete v3 ID data contract")
-                    && reason.contains("origin.canvas_id")
+                    && reason.contains("origin.provider_id")
         ));
     }
 

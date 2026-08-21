@@ -2,10 +2,6 @@ use nomifun_common::TimestampMs;
 use serde::{Deserialize, Serialize};
 
 /// Row mapping for the canonical Creative Studio project index + document.
-///
-/// This table is deliberately separate from `workshop_canvases`: the new
-/// product accepts only the `nomifun.creative-studio/v1` document contract and
-/// has no runtime compatibility path for the retired canvas schema.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct CreativeStudioProjectRow {
     pub id: i64,
@@ -58,23 +54,6 @@ pub struct CreativeStudioWorkflowRunRow {
     pub updated_at: TimestampMs,
 }
 
-/// Row mapping for the `workshop_canvases` table (创意工坊 画布轻索引).
-///
-/// The canvas *body* (nodes/edges/viewport/settings) lives in a file
-/// (`{data_dir}/workshop/canvases/{canvas_id}/canvas.json`) and is opaque to the
-/// backend — this row only carries the metadata + a `node_count` the service
-/// keeps in sync from the doc on each save.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct WorkshopCanvasRow {
-    pub id: i64,
-    pub canvas_id: String,
-    pub title: String,
-    pub thumbnail_rel_path: Option<String>,
-    pub node_count: i64,
-    pub created_at: TimestampMs,
-    pub updated_at: TimestampMs,
-}
-
 /// Row mapping for the `workshop_assets` table (创意工坊 资产库).
 ///
 /// Metadata is indexed here; the binary lives under the data dir at `rel_path`
@@ -99,9 +78,10 @@ pub struct WorkshopAssetRow {
     pub height: Option<i64>,
     pub bytes: Option<i64>,
     pub text_content: Option<String>,
-    /// `1` = appears in the asset library; `0` = canvas-internal material.
+    /// `1` = appears in the asset library; `0` = project-internal material.
     pub in_library: bool,
-    /// JSON object (`{prompt,model,provider_id,params,canvas_id,node_id,creation_task_id}`); `None`.
+    /// Canonical provenance object. Durable ownership is either
+    /// `{project_id,node_id}` or `{workflow_id,workflow_run_id,workflow_step_id}`.
     pub origin: Option<String>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
