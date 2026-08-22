@@ -5,6 +5,10 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+No unreleased changes yet.
+
+## v0.6.5 - 2026-08-22
+
 - **Browser Use no longer mistakes a healthy browser for a leak.** An ordinary
   single-agent session was getting its Lane force-closed within about one
   sampling period (5s) of finishing page load, and was told the *user* had closed

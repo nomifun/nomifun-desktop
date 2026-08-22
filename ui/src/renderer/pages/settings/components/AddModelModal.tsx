@@ -15,6 +15,7 @@ import useModeModeList from '@renderer/hooks/agent/useModeModeList';
 import ModelDefinitionEditor, { type ModelCatalogSuggestion } from './ModelDefinitionEditor';
 import {
   capabilityInputsFromDefinition,
+  describeValidationErrors,
   normalizeModelId,
   validateModelDefinition,
   type ModelDefinitionDraft,
@@ -92,10 +93,17 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
 
     const handleConfirm = useCallback(async () => {
       if (!data || !validation.valid) {
+        // Name the blockers. A bare "finish configuring each task" left a
+        // new-api provider — which requires an explicit protocol per model —
+        // with no way to discover what was missing.
+        const detail = describeValidationErrors(validation.errors, (key, fallback) =>
+          t(key, { defaultValue: fallback })
+        );
         message.warning(
-          t('settings.completeCapabilityConfiguration', {
-            defaultValue: '请完成每个已选模态的协议、地址和参数配置。',
-          })
+          detail ||
+            t('settings.completeCapabilityConfiguration', {
+              defaultValue: '请完成每个已选模态的协议、地址和参数配置。',
+            })
         );
         return;
       }
@@ -125,7 +133,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
       } finally {
         setSaving(false);
       }
-    }, [data, definition, message, modalCtrl, onSubmit, t, validation.valid]);
+    }, [data, definition, message, modalCtrl, onSubmit, t, validation.errors, validation.valid]);
 
     return (
       <>

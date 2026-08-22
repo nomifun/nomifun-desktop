@@ -12,7 +12,10 @@ import {
   catalogSuggestionsForTask,
   capabilityDraftFromResponse,
   capabilityInputsFromDefinition,
+  capabilityHasConfiguration,
+  capabilityValidationMessageKey,
   changeCapabilityProtocol,
+  describeValidationErrors,
   effectiveBaseUrl,
   emptyCapabilityDraft,
   isProtocolAuthSchemeAllowed,
@@ -248,6 +251,83 @@ describe('model definition capability selection', () => {
     const result = validateModelDefinition(definition, manifests, 'https://api.stepfun.com/v1');
     expect(result.errors).toEqual([]);
     expect(result.valid).toBe(true);
+  });
+
+  test('a gateway that ships no recommended protocol says so instead of just failing', () => {
+    // Reported: with a `new-api` provider the top of the form is complete
+    // (base URL, key, model) but the model cannot be saved and nothing says
+    // why. new-api deliberately gets no preset protocol recommendation
+    // (routes_table.rs: ("custom" | "new-api", _) => None), so a blank protocol
+    // is the real and only blocker — it just has to be stated.
+    const manifests = { chat: manifest('chat', 'openai.chat_text') };
+    const definition: ModelDefinitionDraft = {
+      model: 'gpt-4o',
+      // No recommendation was applied, so the protocol stays blank.
+      capabilities: [emptyCapabilityDraft('chat')],
+    };
+
+    const result = validateModelDefinition(definition, manifests, 'https://gateway.example/v1');
+    expect(result.errors).toEqual([{ task: 'chat', code: 'protocol_required' }]);
+
+    const described = describeValidationErrors(
+      result.errors,
+      (key, fallback) => (key === 'settings.capabilityError.protocol_required' ? '请选择调用协议' : fallback)
+    );
+    expect(described).toBe('chat · 请选择调用协议');
+  });
+
+  test('validation messages are named per code and deduplicated', () => {
+    expect(capabilityValidationMessageKey('protocol_required')).toBe(
+      'settings.capabilityError.protocol_required'
+    );
+    // The same code on two tasks stays two lines; an identical model-level code
+    // collapses to one.
+    expect(
+      describeValidationErrors(
+        [
+          { code: 'model_required' },
+          { code: 'model_required' },
+          { task: 'chat', code: 'base_url_required' },
+          { task: 'embedding', code: 'base_url_required' },
+        ],
+        (_key, fallback) => fallback
+      )
+    ).toBe('model_required · chat · base_url_required · embedding · base_url_required');
+  });
+
+  test('only a configured capability is worth confirming before removal', () => {
+    // A task's capability IS its configuration, so removing the task deletes
+    // that work. The multi-select's tag "×" therefore has to confirm — but only
+    // when there is something to lose, or every stray click would nag.
+    expect(capabilityHasConfiguration(emptyCapabilityDraft('chat'))).toBe(false);
+    // Auto-applied recommendations are not the user's work.
+    expect(
+      capabilityHasConfiguration({
+        ...emptyCapabilityDraft('chat'),
+        transportSource: 'recommendation',
+        protocol: 'openai.chat_text',
+      })
+    ).toBe(false);
+
+    const worthKeeping: Array<Partial<ModelCapabilityDraft>> = [
+      { transportSource: 'user' },
+      { transportSource: 'persisted' },
+      { traits: ['reasoning'] },
+      { contextLimit: 32_000 },
+      { outputLimit: 4096 },
+      { allowCrossOriginCredentials: true },
+      { baseUrlOverride: 'https://override.example/v1' },
+      { endpoint: '/chat/completions' },
+      { pollEndpoint: '/jobs/{id}' },
+      { contentEndpoint: '/jobs/{id}/content' },
+      { realtimeEndpoint: 'wss://example/realtime' },
+      { providerParamsJson: '{"voice":"alloy"}' },
+    ];
+    for (const patch of worthKeeping) {
+      expect(
+        capabilityHasConfiguration({ ...emptyCapabilityDraft('chat'), ...patch })
+      ).toBe(true);
+    }
   });
 
   test('does not touch traits when the selected task is absent from the entry', () => {
