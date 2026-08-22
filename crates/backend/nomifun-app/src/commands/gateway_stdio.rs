@@ -502,13 +502,13 @@ mod tests {
         assert!(names.contains(&"nomi_delegate"));
         assert!(names.contains(&"nomi_execution_get"));
         assert!(names.contains(&"nomi_execution_update"));
-        assert!(!names.contains(&"nomi_workshop_generate"));
+        assert!(!names.contains(&"nomi_creative_studio_generate"));
         assert!(!names.contains(&"nomi_system_update_settings"));
         assert!(!names.contains(&"nomi_mcp_add_server"));
     }
 
     #[test]
-    fn work_profile_blocks_workshop_for_conversations_and_companions() {
+    fn work_profile_blocks_creative_studio_for_conversations_and_companions() {
         let mut claims = test_claims();
         claims.scope.profile = GatewayMcpConfig::PROFILE_WORK.into();
 
@@ -526,13 +526,54 @@ mod tests {
                 .iter()
                 .map(|spec| spec.name)
                 .collect();
-            assert!(!names.iter().any(|name| name.starts_with("nomi_workshop_")));
+            assert!(
+                !names
+                    .iter()
+                    .any(|name| name.starts_with("nomi_creative_studio_"))
+            );
             assert!(
                 GatewayStdioServer::blocked_tool_message(
                     &claims,
-                    "nomi_workshop_generate",
+                    "nomi_creative_studio_generate",
                 )
                 .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn creative_studio_discovery_and_direct_calls_require_dedicated_profiles() {
+        for (profile, allowed) in [
+            (GatewayMcpConfig::PROFILE_DESKTOP, true),
+            (GatewayMcpConfig::PROFILE_ADMIN, true),
+            (GatewayMcpConfig::PROFILE_WORK, false),
+            (GatewayMcpConfig::PROFILE_LITE, false),
+        ] {
+            let mut claims = test_claims();
+            claims.scope.profile = profile.into();
+            let names: Vec<&str> = GatewayStdioServer::visible_tool_specs(&claims)
+                .iter()
+                .map(|spec| spec.name)
+                .collect();
+
+            assert_eq!(
+                names.contains(&"nomi_creative_studio_list_projects"),
+                allowed,
+                "profile {profile} discovery drifted"
+            );
+            assert_eq!(
+                names.contains(&"nomi_creative_studio_generate"),
+                allowed,
+                "profile {profile} write-tool discovery drifted"
+            );
+            assert_eq!(
+                GatewayStdioServer::blocked_tool_message(
+                    &claims,
+                    "nomi_creative_studio_generate"
+                )
+                .is_none(),
+                allowed,
+                "profile {profile} direct-call policy drifted"
             );
         }
     }
@@ -623,6 +664,20 @@ mod tests {
         assert!(!names.contains(&"nomi_knowledge_list_bases"));
         assert!(GatewayStdioServer::blocked_tool_message(&claims, "nomi_requirement_create").is_some());
         assert!(GatewayStdioServer::blocked_tool_message(&claims, "nomi_delegate").is_some());
+
+        claims.scope.profile = GatewayMcpConfig::PROFILE_DESKTOP.into();
+        let desktop_names: Vec<&str> = GatewayStdioServer::visible_tool_specs(&claims)
+            .iter()
+            .map(|spec| spec.name)
+            .collect();
+        assert!(!desktop_names.contains(&"nomi_creative_studio_list_projects"));
+        assert!(
+            GatewayStdioServer::blocked_tool_message(
+                &claims,
+                "nomi_creative_studio_list_projects"
+            )
+            .is_some()
+        );
     }
 
     #[test]

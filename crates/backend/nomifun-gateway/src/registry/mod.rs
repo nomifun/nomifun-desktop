@@ -601,11 +601,18 @@ mod tests {
         assert!(!names.contains(&"nomi_system_get_settings"));
         assert!(!names.contains(&"nomi_requirement_list"));
         assert!(!names.contains(&"nomi_knowledge_list_bases"));
+        assert!(!names.contains(&"nomi_creative_studio_list_projects"));
         assert!(!reg.tool_visible_for_caller(
             Surface::Desktop,
             None,
             false,
             "nomi_system_get_settings"
+        ));
+        assert!(!reg.tool_visible_for_caller(
+            Surface::Desktop,
+            None,
+            false,
+            "nomi_creative_studio_list_projects"
         ));
     }
 
@@ -643,6 +650,30 @@ mod tests {
             reg.tool_specs_for(Surface::Remote, &["does_not_exist"])
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn creative_studio_domain_visibility_matches_every_curated_profile() {
+        let registry = Registry::global();
+        for (profile, allowed) in [
+            (GatewayMcpConfig::PROFILE_DESKTOP, true),
+            (GatewayMcpConfig::PROFILE_ADMIN, true),
+            (GatewayMcpConfig::PROFILE_WORK, false),
+            (GatewayMcpConfig::PROFILE_LITE, false),
+        ] {
+            let domains = GatewayMcpConfig::domains_for_profile(profile)
+                .expect("curated profiles must use an explicit domain allow-list");
+            assert_eq!(
+                registry.tool_visible_for_caller(
+                    Surface::Desktop,
+                    Some(domains),
+                    true,
+                    "nomi_creative_studio_generate"
+                ),
+                allowed,
+                "profile {profile} registry visibility drifted"
+            );
+        }
     }
 
     /// **Anti-drift guard (the structural fix for the historical ~10% coverage gap).**
