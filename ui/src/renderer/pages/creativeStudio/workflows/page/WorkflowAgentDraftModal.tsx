@@ -6,7 +6,7 @@
 
 import { Button, Input, Modal } from '@arco-design/web-react';
 import { MagicWand } from '@icon-park/react';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   CreativeModelSelect,
@@ -122,6 +122,7 @@ const WorkflowAgentDraftModal: React.FC<WorkflowAgentDraftModalProps> = ({
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState<GeneratedWorkflowAgentDraft | null>(null);
+  const modalContentRef = useRef<HTMLDivElement>(null);
   const groups = useMemo(
     () => buildCreativeModelGroups(catalog.providers, CHAT_FILTER),
     [catalog.providers]
@@ -191,7 +192,11 @@ const WorkflowAgentDraftModal: React.FC<WorkflowAgentDraftModalProps> = ({
       }
       onCancel={() => !generating && onClose()}
     >
-      <div className={styles.layout} data-workflow-agent-draft-modal>
+      <div
+        ref={modalContentRef}
+        className={styles.layout}
+        data-workflow-agent-draft-modal
+      >
         <section className={styles.form} aria-label='Workflow 草稿需求'>
           <label>
             <span>工作流需求</span>
@@ -226,7 +231,9 @@ const WorkflowAgentDraftModal: React.FC<WorkflowAgentDraftModalProps> = ({
             }}
             onOpenModelSettings={onOpenModelSettings}
             getPopupContainer={() =>
-              document.getElementById('creative-studio-portal-root') ?? document.body
+              modalContentRef.current ??
+              document.getElementById('creative-studio-portal-root') ??
+              document.body
             }
           />
           <p className={styles.note}>
