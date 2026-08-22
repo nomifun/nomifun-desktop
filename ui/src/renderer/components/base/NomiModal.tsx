@@ -20,7 +20,9 @@ export type ModalSize = 'small' | 'medium' | 'large' | 'xlarge' | 'full';
 
 /** 预设尺寸配置 */
 export const MODAL_SIZES: Record<ModalSize, { width: string; height?: string }> = {
-  small: { width: '400px', height: '300px' },
+  // Small dialogs are commonly short forms or confirmations. Let their height
+  // follow the content so the shared footer never floats above empty space.
+  small: { width: '400px' },
   medium: { width: '600px', height: '400px' },
   large: { width: '800px', height: '600px' },
   xlarge: { width: '1000px', height: '700px' },
@@ -96,10 +98,10 @@ export interface NomiModalProps extends Omit<ModalProps, 'title' | 'footer'> {
 
 // ==================== 样式常量 / Style Constants ====================
 
-const HEADER_BASE_CLASS = 'flex items-center justify-between pb-8px';
-const TITLE_BASE_CLASS = 'text-16px font-500 text-t-primary m-0';
+const HEADER_BASE_CLASS = 'flex items-center justify-between pb-6px';
+const TITLE_BASE_CLASS = 'm-0 text-14px font-600 leading-20px text-t-primary';
 const CLOSE_BUTTON_CLASS =
-  'w-28px h-28px flex items-center justify-center rd-8px transition-colors duration-200 cursor-pointer border-0 bg-transparent p-0 hover:bg-2 focus:outline-none';
+  'h-24px w-24px flex shrink-0 items-center justify-center rd-6px border-0 bg-transparent p-0 text-t-tertiary transition-colors duration-200 cursor-pointer hover:bg-2 hover:text-t-primary focus:outline-none';
 const FOOTER_BASE_CLASS = 'nomifun-modal-footer flex-shrink-0 bg-transparent';
 
 /**
@@ -350,7 +352,7 @@ const NomiModal: React.FC<NomiModalProps> = ({
         {headerConfig.title && <h3 className={TITLE_BASE_CLASS}>{headerConfig.title}</h3>}
         {headerConfig.showClose && (
           <button onClick={onCancel} className={CLOSE_BUTTON_CLASS} aria-label='Close'>
-            {headerConfig.closeIcon || <Close size={20} fill='#86909c' />}
+            {headerConfig.closeIcon || <Close size={16} fill='currentColor' />}
           </button>
         )}
       </div>

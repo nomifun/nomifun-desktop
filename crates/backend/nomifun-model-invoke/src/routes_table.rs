@@ -28,7 +28,15 @@ fn openai_route(task: ModelTask) -> Option<TaskRoute> {
         // they must never be coerced into the one-shot OpenAI HTTP adapter.
         RealtimeConversation => None,
         ImageGeneration | ImageEdit => route("openai.images"),
-        VideoGeneration => route("openai.videos"),
+        // OpenAI announced that the Sora video API shuts down permanently on
+        // 2026-09-24 (openai-python marks every `videos` method deprecated with
+        // that date, and the OpenAPI spec flags the whole `/videos` family), and
+        // it publishes no successor path. So it is no longer offered as a
+        // preset: nothing auto-selects it, and `sora-*` is no longer classified
+        // as a video model. `openai.videos` stays in the registry until the
+        // shutdown so already-saved capabilities keep resolving; delete the spec
+        // and its adapter after that date.
+        VideoGeneration => None,
         SpeechSynthesis => route("openai.audio_speech"),
         SpeechRecognition => route("openai.audio_transcriptions"),
         Embedding => route("openai.embeddings"),
@@ -39,9 +47,10 @@ fn openai_route(task: ModelTask) -> Option<TaskRoute> {
 
 /// Return the verified configuration recommendation for `(platform, task)`.
 ///
-/// `None` means there is no safe default. In particular, `custom` and
-/// `new-api` intentionally have no recommendation: users must select and
-/// persist a protocol explicitly.
+/// `None` means there is no unconditional platform default. In particular,
+/// `custom` and `new-api` stay absent here so runtime probes never guess a
+/// protocol. The model-aware configuration manifest may separately recommend
+/// a registry-verified generic protocol for `custom`; callers must persist it.
 pub fn preset_protocol_recommendation(platform: &str, task: ModelTask) -> Option<TaskRoute> {
     use ModelTask::*;
 
@@ -194,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_gateways_have_no_implicit_protocol_defaults() {
+    fn custom_gateways_have_no_unconditional_preset_defaults() {
         for platform in ["custom", "new-api"] {
             for task in [
                 Chat,
@@ -213,11 +222,13 @@ mod tests {
     }
 
     #[test]
-    fn openai_has_no_rerank_route() {
+    fn openai_has_no_rerank_or_video_route() {
         assert_eq!(platform_route("openai", Chat), plain("openai.chat_text"));
         assert_eq!(platform_route("openai", ImageGeneration), plain("openai.images"));
         assert_eq!(platform_route("openai", ImageEdit), plain("openai.images"));
-        assert_eq!(platform_route("openai", VideoGeneration), plain("openai.videos"));
+        // Sora shuts down 2026-09-24 with no successor path, so OpenAI video is
+        // no longer a preset. The adapter stays registered for saved rows.
+        assert_eq!(platform_route("openai", VideoGeneration), None);
         assert_eq!(platform_route("openai", SpeechSynthesis), plain("openai.audio_speech"));
         assert_eq!(platform_route("openai", SpeechRecognition), plain("openai.audio_transcriptions"));
         assert_eq!(platform_route("openai", Embedding), plain("openai.embeddings"));

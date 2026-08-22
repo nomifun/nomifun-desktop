@@ -132,6 +132,9 @@ pub struct ProviderModelCapabilityInput {
     #[serde(default)]
     #[ts(optional, type = "number")]
     pub context_limit: Option<i64>,
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub output_limit: Option<i64>,
 }
 
 /// Latest health observation for one task-scoped capability.
@@ -195,6 +198,9 @@ pub struct ProviderModelCapabilityResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub context_limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub output_limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub health: Option<CapabilityHealth>,

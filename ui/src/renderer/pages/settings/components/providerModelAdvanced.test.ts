@@ -12,21 +12,24 @@ import {
   catalogSuggestionsForTask,
   capabilityDraftFromResponse,
   capabilityInputsFromDefinition,
-  changePrimaryModelTask,
   changeCapabilityProtocol,
   effectiveBaseUrl,
   emptyCapabilityDraft,
   isProtocolAuthSchemeAllowed,
   isDuplicateModelId,
   normalizeModelId,
+  patchCapabilityDraft,
+  providerParamChainRounds,
   providerParamVoice,
   reconcileCapabilityRecommendations,
   removeCapabilityTask,
   resolveModelInputChange,
   requiresCrossOriginConsent,
   withProviderParamVoice,
+  withProviderParamChainRounds,
   validateModelDefinition,
   type ModelCapabilityDraft,
+  type ModelDefinitionDraft,
   type ModelProtocolManifest,
 } from './providerModelAdvanced';
 
@@ -57,6 +60,7 @@ const manifest = (
       supported_tasks: [task],
       executor: 'model_invoke',
       transport: task === 'realtime_conversation' ? 'websocket' : 'http',
+      requires_output_ceiling: false,
       allowed_auth_schemes: ['bearer'],
       scopes: [],
       platforms: ['stepfun'],
@@ -125,7 +129,7 @@ describe('model definition capability selection', () => {
     expect(catalogSuggestionsForTask(suggestions, undefined)).toEqual([]);
   });
 
-  test('selecting a catalog model initializes only the previously selected primary task', () => {
+  test('adopting a catalog model preserves every other configured task', () => {
     const oldChat: ModelCapabilityDraft = {
       ...emptyCapabilityDraft('chat'),
       traits: ['reasoning'],
@@ -149,13 +153,107 @@ describe('model definition capability selection', () => {
       },
       'speech_synthesis'
     );
+
     expect(applied.model).toBe('catalog/model');
-    expect(applied.capabilities).toEqual([emptyCapabilityDraft('speech_synthesis')]);
+    // The catalog is advisory. It may add the task it was chosen for; it may
+    // never discard a task the user already configured.
+    expect(applied.capabilities).toEqual([oldChat, emptyCapabilityDraft('speech_synthesis')]);
+    expect(applied.capabilities[0]).toBe(oldChat);
   });
 
-  test('does not apply catalog traits when the selected type is absent from the entry', () => {
-    const oldSpeech = {
+  test('adopting a catalog model keeps the chosen task transport and only refreshes its traits', () => {
+    const configuredChat: ModelCapabilityDraft = {
+      ...emptyCapabilityDraft('chat'),
+      traits: ['audio_input'],
+      protocol: 'openai.chat_text',
+      endpoint: '/chat/completions',
+      providerParamsJson: '{"temperature":0.2}',
+    };
+
+    expect(
+      applyCatalogSuggestionForTask(
+        { model: 'old/model', capabilities: [configuredChat] },
+        { model: 'catalog/chat', tasks: ['chat'], traits: ['reasoning', 'vision_input'] },
+        'chat'
+      )
+    ).toEqual({
+      model: 'catalog/chat',
+      capabilities: [{ ...configuredChat, traits: ['vision_input', 'reasoning'] }],
+    });
+  });
+
+  test('prefills a provider-declared context window without overriding the user', () => {
+    // The provider catalog is the only automatic source for this number — the
+    // fallback is a silent 200k assumption that miscalibrates compaction.
+    expect(
+      applyCatalogSuggestionForTask(
+        { model: '', capabilities: [] },
+        { model: 'catalog/chat', tasks: ['chat'], traits: [], contextLimit: 32_000 },
+        'chat'
+      ).capabilities[0]?.contextLimit
+    ).toBe(32_000);
+
+    // An explicit user value wins: correcting the provider is the point.
+    expect(
+      applyCatalogSuggestionForTask(
+        {
+          model: '',
+          capabilities: [{ ...emptyCapabilityDraft('chat'), contextLimit: 8_000 }],
+        },
+        { model: 'catalog/chat', tasks: ['chat'], traits: [], contextLimit: 32_000 },
+        'chat'
+      ).capabilities[0]?.contextLimit
+    ).toBe(8_000);
+
+    // A provider that declares nothing must not manufacture a window.
+    expect(
+      applyCatalogSuggestionForTask(
+        { model: '', capabilities: [] },
+        { model: 'catalog/chat', tasks: ['chat'], traits: [] },
+        'chat'
+      ).capabilities[0]?.contextLimit
+    ).toBeUndefined();
+  });
+
+  test('the add-model sequence reaches a saveable draft', () => {
+    // Exactly what a user does now that the task picker comes first:
+    // declare a task, then type a model id. Regression guard: a reported
+    // "cannot save" after picking a task in the supported-task selector.
+    const manifests = { chat: manifest('chat', 'openai.chat_text') };
+
+    // 1. Empty draft — only the missing model and the missing task.
+    let definition: ModelDefinitionDraft = { model: '', capabilities: [] };
+    expect(
+      validateModelDefinition(definition, manifests, 'https://api.stepfun.com/v1').errors.map(
+        (error) => error.code
+      )
+    ).toEqual(['model_required', 'capability_required']);
+
+    // 2. Pick "对话" in the supported-task picker.
+    definition = {
+      ...definition,
+      capabilities: addCapabilityTask(definition.capabilities, 'chat'),
+    };
+    expect(definition.capabilities.map((capability) => capability.task)).toEqual(['chat']);
+
+    // 3. The backend recommendation lands and fills the transport.
+    definition = {
+      ...definition,
+      capabilities: reconcileCapabilityRecommendations(definition.capabilities, manifests),
+    };
+    expect(definition.capabilities[0]?.protocol).toBe('openai.chat_text');
+
+    // 4. Type the model id. Nothing else should be required.
+    definition = { ...definition, model: 'step-3.7-flash' };
+    const result = validateModelDefinition(definition, manifests, 'https://api.stepfun.com/v1');
+    expect(result.errors).toEqual([]);
+    expect(result.valid).toBe(true);
+  });
+
+  test('does not touch traits when the selected task is absent from the entry', () => {
+    const oldSpeech: ModelCapabilityDraft = {
       ...emptyCapabilityDraft('speech_synthesis'),
+      traits: ['audio_output'],
       protocol: 'old.speech',
       endpoint: '/old/speech',
     };
@@ -166,32 +264,7 @@ describe('model definition capability selection', () => {
         { model: 'catalog/unknown', tasks: [], traits: ['audio_output'] },
         'speech_synthesis'
       )
-    ).toEqual({ model: 'catalog/unknown', capabilities: [emptyCapabilityDraft('speech_synthesis')] });
-  });
-
-  test('preserves a deep-link model id when choosing its first primary type', () => {
-    expect(changePrimaryModelTask({ model: 'prefilled/model', capabilities: [] }, 'chat')).toEqual({
-      model: 'prefilled/model',
-      capabilities: [emptyCapabilityDraft('chat')],
-    });
-  });
-
-  test('switching an existing primary type clears the model and all task-specific configuration', () => {
-    const changed = changePrimaryModelTask(
-      {
-        model: 'catalog/chat-model',
-        capabilities: [
-          { ...emptyCapabilityDraft('chat'), protocol: 'openai.chat_text', endpoint: '/old-chat' },
-          { ...emptyCapabilityDraft('embedding'), protocol: 'openai.embeddings' },
-        ],
-      },
-      'image_generation'
-    );
-
-    expect(changed).toEqual({
-      model: '',
-      capabilities: [emptyCapabilityDraft('image_generation')],
-    });
+    ).toEqual({ model: 'catalog/unknown', capabilities: [oldSpeech] });
   });
 
   test('adds and removes task capabilities without changing unrelated drafts', () => {
@@ -210,9 +283,11 @@ describe('model definition capability selection', () => {
     expect(removeCapabilityTask(withSpeech, 'embedding')).toEqual(withSpeech);
   });
 
-  test('applies StepFun task recommendations only to blank structured fields', () => {
+  test('applies recommendations only to blank transport and preserves user-owned transport', () => {
     const tts = emptyCapabilityDraft('speech_synthesis');
-    const realtime = { ...emptyCapabilityDraft('realtime_conversation'), protocol: 'manual.realtime' };
+    const realtime = patchCapabilityDraft(emptyCapabilityDraft('realtime_conversation'), {
+      protocol: 'manual.realtime',
+    });
     const manifests = {
       speech_synthesis: manifest('speech_synthesis', 'stepfun.audio_speech'),
       realtime_conversation: manifest('realtime_conversation', 'stepfun.realtime_s2s'),
@@ -222,6 +297,79 @@ describe('model definition capability selection', () => {
       { task: 'speech_synthesis', protocol: 'stepfun.audio_speech', connectionRole: 'default' },
       { task: 'realtime_conversation', protocol: 'manual.realtime', connectionRole: 'default' },
     ]);
+  });
+
+  test('replaces a previous automatic recommendation when the selected model recommendation changes', () => {
+    const firstManifest = manifest('chat', 'openai.chat_text');
+    firstManifest.recommendation!.base_url_override_required = true;
+    firstManifest.recommendation!.default_base_url = 'https://first.example/v1';
+    const [first] = reconcileCapabilityRecommendations([emptyCapabilityDraft('chat')], {
+      chat: firstManifest,
+    });
+    expect(first).toMatchObject({
+      protocol: 'openai.chat_text',
+      baseUrlOverride: 'https://first.example/v1',
+      transportSource: 'recommendation',
+    });
+
+    const secondManifest = manifest('chat', 'anthropic.messages', 'https://second.example');
+    secondManifest.recommendation!.base_url_override_required = false;
+    const [second] = reconcileCapabilityRecommendations([first], { chat: secondManifest });
+    expect(second).toMatchObject({
+      protocol: 'anthropic.messages',
+      connectionRole: 'default',
+      baseUrlOverride: '',
+      endpoint: '',
+      providerParamsJson: '',
+      transportSource: 'recommendation',
+    });
+  });
+
+  test('never replaces user-edited or persisted transport when recommendations refresh', () => {
+    const user = patchCapabilityDraft(emptyCapabilityDraft('chat'), {
+      protocol: 'manual.chat',
+      connectionRole: 'custom_api',
+      endpoint: '/manual',
+    });
+    const persisted = capabilityDraftFromResponse({
+      task: 'chat',
+      protocol: 'stored.chat',
+      connection_role: 'default',
+      endpoint: '/stored',
+    });
+    const recommendation = { chat: manifest('chat', 'openai.chat_text') };
+
+    const reconciled = reconcileCapabilityRecommendations([user, persisted], recommendation);
+    expect(reconciled[0]).toBe(user);
+    expect(reconciled[1]).toBe(persisted);
+  });
+
+  test('clears only recommendation-owned transport when a model no longer has a safe default', () => {
+    const [recommended] = reconcileCapabilityRecommendations([emptyCapabilityDraft('chat')], {
+      chat: manifest('chat', 'openai.chat_text'),
+    });
+    expect(reconcileCapabilityRecommendations([recommended], {})[0]).toBe(recommended);
+
+    const withoutRecommendation = manifest('chat', 'openai.chat_text');
+    withoutRecommendation.recommendation = null;
+
+    expect(
+      reconcileCapabilityRecommendations([recommended], { chat: withoutRecommendation })[0]
+    ).toEqual(emptyCapabilityDraft('chat'));
+  });
+
+  test('keeps an automatic protocol after the user explicitly confirms the same option', () => {
+    const taskManifest = manifest('chat', 'openai.chat_text');
+    const [recommended] = reconcileCapabilityRecommendations([emptyCapabilityDraft('chat')], {
+      chat: taskManifest,
+    });
+    const confirmed = changeCapabilityProtocol(recommended, recommended.protocol, taskManifest);
+    expect(confirmed.transportSource).toBe('user');
+
+    taskManifest.recommendation = null;
+    expect(reconcileCapabilityRecommendations([confirmed], { chat: taskManifest })[0]).toBe(
+      confirmed
+    );
   });
 
   test('persists required task base overrides and keeps named-role base URLs out of capabilities', () => {
@@ -288,12 +436,17 @@ describe('model definition capability selection', () => {
       allowCrossOriginCredentials: true,
       providerParamsJson: '{"voice":"alloy"}',
       contextLimit: 32_000,
+      outputLimit: 8_192,
     };
 
-    expect(changeCapabilityProtocol(current, current.protocol, taskManifest)).toBe(current);
+    expect(changeCapabilityProtocol(current, current.protocol, taskManifest)).toEqual({
+      ...current,
+      transportSource: 'user',
+    });
     const changed = changeCapabilityProtocol(current, 'openai.audio_speech', taskManifest);
     expect(changed).toEqual({
       ...current,
+      transportSource: 'user',
       protocol: 'openai.audio_speech',
       connectionRole: 'default',
       baseUrlOverride: '',
@@ -429,6 +582,34 @@ describe('capability validation and serialization', () => {
     expect(result.valid).toBe(true);
   });
 
+  test('requires an output limit only when the selected protocol declares it mandatory', () => {
+    const chatManifest = manifest('chat', 'anthropic.messages');
+    chatManifest.protocols[0].requires_output_ceiling = true;
+    const chat = reconcileCapabilityRecommendations([emptyCapabilityDraft('chat')], {
+      chat: chatManifest,
+    })[0];
+
+    expect(
+      validateModelDefinition(
+        { model: 'claude', capabilities: [chat] },
+        { chat: chatManifest },
+        'https://api.anthropic.com'
+      ).errors.some(
+        (error) => error.task === 'chat' && error.code === 'output_ceiling_required'
+      )
+    ).toBe(true);
+
+    expect(
+      validateModelDefinition(
+        { model: 'claude', capabilities: [{ ...chat, outputLimit: 8_192 }] },
+        { chat: chatManifest },
+        'https://api.anthropic.com'
+      ).errors.some(
+        (error) => error.task === 'chat' && error.code === 'output_ceiling_required'
+      )
+    ).toBe(false);
+  });
+
   test('serializes multiple capabilities as typed task records', () => {
     const definition = {
       model: 'step-audio-latest',
@@ -439,6 +620,7 @@ describe('capability validation and serialization', () => {
           endpoint: '/v1/audio/speech',
           providerParamsJson: '{"voice":"cixingnansheng"}',
           contextLimit: 32000,
+          outputLimit: 16384,
         },
         {
           ...emptyCapabilityDraft('realtime_conversation'),
@@ -463,6 +645,7 @@ describe('capability validation and serialization', () => {
         endpoint: '/v1/audio/speech',
         provider_params: { voice: 'cixingnansheng' },
         context_limit: 32000,
+        output_limit: 16384,
       },
       {
         task: 'realtime_conversation',
@@ -492,10 +675,12 @@ describe('capability validation and serialization', () => {
         allow_cross_origin_credentials: true,
         provider_params: { voice: 'alloy' },
         context_limit: 4096,
+        output_limit: 8192,
       })
     ).toEqual({
       task: 'speech_synthesis',
       traits: ['audio_output'],
+      transportSource: 'persisted',
       protocol: 'stepfun.audio_speech',
       connectionRole: 'voice',
       baseUrlOverride: 'https://voice.example/v1',
@@ -506,6 +691,7 @@ describe('capability validation and serialization', () => {
       allowCrossOriginCredentials: true,
       providerParamsJson: '{\n  "voice": "alloy"\n}',
       contextLimit: 4096,
+      outputLimit: 8192,
     });
   });
 });
@@ -653,5 +839,42 @@ describe('provider params voice', () => {
 
   test('leaves malformed JSON untouched so a typo cannot silently discard the user text', () => {
     expect(withProviderParamVoice('not json', 'cixingnansheng')).toBe('not json');
+  });
+});
+
+describe('openai.responses round chaining provider param', () => {
+  test('reads only an explicit boolean true opt-in', () => {
+    expect(providerParamChainRounds('{"chain_rounds":true}')).toBe(true);
+    expect(providerParamChainRounds('{"chain_rounds":false}')).toBe(false);
+    expect(providerParamChainRounds('{"chain_rounds":"true"}')).toBe(false);
+    expect(providerParamChainRounds('{"temperature":0.2}')).toBe(false);
+    expect(providerParamChainRounds('not json')).toBe(false);
+  });
+
+  test('writes true and preserves every unrelated provider param', () => {
+    const updated = withProviderParamChainRounds(
+      '{"temperature":0.2,"nested":{"keep":true}}',
+      true
+    );
+    expect(JSON.parse(updated)).toEqual({
+      temperature: 0.2,
+      nested: { keep: true },
+      chain_rounds: true,
+    });
+    expect(providerParamChainRounds(updated)).toBe(true);
+  });
+
+  test('disabled deletes the key and collapses an otherwise empty object', () => {
+    expect(JSON.parse(withProviderParamChainRounds('{"chain_rounds":true,"temperature":0.2}', false))).toEqual({
+      temperature: 0.2,
+    });
+    expect(withProviderParamChainRounds('{"chain_rounds":false}', false)).toBe('');
+    expect(withProviderParamChainRounds('{"chain_rounds":true}', false)).toBe('');
+  });
+
+  test('leaves malformed input byte-identical', () => {
+    const malformed = ' {\n  "chain_rounds": tru';
+    expect(withProviderParamChainRounds(malformed, true)).toBe(malformed);
+    expect(withProviderParamChainRounds(malformed, false)).toBe(malformed);
   });
 });

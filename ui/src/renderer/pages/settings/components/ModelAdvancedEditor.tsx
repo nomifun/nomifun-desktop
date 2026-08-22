@@ -48,7 +48,12 @@ const ModelAdvancedEditor: React.FC<{
     () => definition.capabilities.map((capability) => capability.task),
     [definition.capabilities]
   );
-  const manifests = useModelProtocolManifests(preset, selectedTasks, undefined, providerBaseUrl);
+  const manifests = useModelProtocolManifests({
+    preset,
+    tasks: selectedTasks,
+    baseUrlHint: providerBaseUrl,
+    modelHint: definition.model,
+  });
   const connectionState = useProviderConnections(providerId, open);
   const validation = useMemo(
     () =>

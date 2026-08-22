@@ -20,6 +20,7 @@ nomi-mcp.workspace      = true
 nomi-protocol.workspace = true
 nomi-skills.workspace   = true
 nomi-process-runtime.workspace = true
+nomi-types.workspace    = true
 
 tokio.workspace              = true
 anyhow.workspace             = true

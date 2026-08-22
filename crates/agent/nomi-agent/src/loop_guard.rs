@@ -190,6 +190,11 @@ pub enum StagnationAction {
 }
 
 /// Tracks consecutive identical outcomes and consecutive all-failed turns.
+///
+/// `Clone` exists so an accepted turn can capture the guard alongside its
+/// transcript root: the guard is state derived from the turn's tool history, and
+/// a rejected turn must not leave a progress window describing discarded work.
+#[derive(Debug, Clone)]
 pub struct StagnationGuard {
     nudge_threshold: usize,
     abort_threshold: usize,

@@ -35,6 +35,12 @@ interface WebuiControlPanelProps {
   mode?: 'popover' | 'page';
 }
 
+const CREDENTIAL_PILL_CLASS =
+  'inline-flex min-w-0 items-center rd-100px border border-solid border-arco-2 bg-fill-1 px-8px py-2px';
+const CREDENTIAL_ACTIONS_CLASS = 'ml-6px inline-flex shrink-0 items-center gap-0';
+const CREDENTIAL_ICON_BUTTON_CLASS =
+  'rd-100px !h-20px !w-20px !min-w-20px !p-0 inline-flex items-center justify-center';
+
 const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' }) => {
   const { t } = useTranslation();
 
@@ -364,71 +370,77 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
 
       {/* 一次性初始密码块 / One-time initial password block */}
       {running && initialPassword && (
-        <div className='flex flex-col gap-6px'>
+        <div className='flex flex-col gap-4px'>
           <div className='text-12px font-500 text-t-tertiary px-2px'>{t('settings.webui.initialPassword')}</div>
-          <div className='inline-flex items-center gap-8px rd-100px border border-solid border-arco-2 bg-fill-1 px-10px py-4px min-w-0'>
+          <div className={CREDENTIAL_PILL_CLASS}>
             <span className='text-13px text-t-primary truncate flex-1'>{initialPassword}</span>
-            <Tooltip content={t('common.copy')}>
-              <Button
-                type='text'
-                size='mini'
-                className='rd-100px !px-6px inline-flex items-center !h-24px'
-                onClick={() => handleCopy(initialPassword)}
-              >
-                <Copy size={14} />
-              </Button>
-            </Tooltip>
+            <div className={CREDENTIAL_ACTIONS_CLASS}>
+              <Tooltip content={t('common.copy')}>
+                <Button
+                  type='text'
+                  size='mini'
+                  className={CREDENTIAL_ICON_BUTTON_CLASS}
+                  onClick={() => handleCopy(initialPassword)}
+                >
+                  <Copy size={13} />
+                </Button>
+              </Tooltip>
+            </div>
           </div>
         </div>
       )}
 
       {/* 登录信息 / Login Info */}
-      <div className='flex flex-col gap-6px'>
+      <div className='flex flex-col gap-4px'>
         <div className='text-12px font-500 text-t-tertiary px-2px'>{t('settings.webui.loginInfo')}</div>
 
         {/* 账号 / Account */}
         <div className='flex items-center justify-between gap-12px'>
           <span className='text-13px text-t-secondary shrink-0'>{t('settings.webui.username')}:</span>
-          <div className='inline-flex items-center gap-6px rd-100px border border-solid border-arco-2 bg-fill-1 px-10px py-4px min-w-0'>
+          <div className={CREDENTIAL_PILL_CLASS}>
             <span className='text-13px text-t-primary truncate'>{displayUsername}</span>
-            <Tooltip content={t('common.copy')}>
-              <Button
-                type='text'
-                size='mini'
-                className='rd-100px !px-6px inline-flex items-center !h-24px'
-                onClick={() => handleCopy(displayUsername)}
-              >
-                <Copy size={14} />
-              </Button>
-            </Tooltip>
-            <Tooltip content={t('settings.webui.editUsernameTooltip')}>
-              <Button
-                type='text'
-                size='mini'
-                className='rd-100px !px-6px inline-flex items-center !h-24px'
-                onClick={handleResetUsername}
-              >
-                <EditTwo size={14} />
-              </Button>
-            </Tooltip>
+            <div className={CREDENTIAL_ACTIONS_CLASS}>
+              <Tooltip content={t('common.copy')}>
+                <Button
+                  type='text'
+                  size='mini'
+                  className={CREDENTIAL_ICON_BUTTON_CLASS}
+                  onClick={() => handleCopy(displayUsername)}
+                >
+                  <Copy size={13} />
+                </Button>
+              </Tooltip>
+              <Tooltip content={t('settings.webui.editUsernameTooltip')}>
+                <Button
+                  type='text'
+                  size='mini'
+                  className={CREDENTIAL_ICON_BUTTON_CLASS}
+                  onClick={handleResetUsername}
+                >
+                  <EditTwo size={13} />
+                </Button>
+              </Tooltip>
+            </div>
           </div>
         </div>
 
         {/* 密码 / Password */}
         <div className='flex items-center justify-between gap-12px'>
           <span className='text-13px text-t-secondary shrink-0'>{t('settings.webui.initialPassword')}:</span>
-          <div className='inline-flex items-center gap-6px rd-100px border border-solid border-arco-2 bg-fill-1 px-10px py-4px min-w-0'>
+          <div className={CREDENTIAL_PILL_CLASS}>
             <span className='text-13px text-t-primary truncate'>{displayPassword}</span>
-            <Tooltip content={t('settings.webui.resetPasswordTooltip')}>
-              <Button
-                type='text'
-                size='mini'
-                className='rd-100px !px-6px inline-flex items-center !h-24px'
-                onClick={handleResetPassword}
-              >
-                <EditTwo size={14} />
-              </Button>
-            </Tooltip>
+            <div className={CREDENTIAL_ACTIONS_CLASS}>
+              <Tooltip content={t('settings.webui.resetPasswordTooltip')}>
+                <Button
+                  type='text'
+                  size='mini'
+                  className={CREDENTIAL_ICON_BUTTON_CLASS}
+                  onClick={handleResetPassword}
+                >
+                  <EditTwo size={13} />
+                </Button>
+              </Tooltip>
+            </div>
           </div>
         </div>
       </div>
@@ -539,10 +551,10 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
         onCancel={() => setSetUsernameModalVisible(false)}
         onOk={handleSetNewUsername}
         confirmLoading={usernameLoading}
-        title={t('settings.webui.setNewUsername')}
+        header={{ title: t('settings.webui.setNewUsername'), showClose: true }}
         size='small'
       >
-        <Form form={usernameForm} layout='vertical' className='pt-16px'>
+        <Form form={usernameForm} layout='vertical' className='pt-12px'>
           {!lifecycleSupported && (
             <Form.Item
               label={t('settings.webui.currentPassword')}
@@ -601,10 +613,10 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
         onCancel={() => setSetPasswordModalVisible(false)}
         onOk={handleSetNewPassword}
         confirmLoading={passwordLoading}
-        title={t('settings.webui.setNewPassword')}
+        header={{ title: t('settings.webui.setNewPassword'), showClose: true }}
         size='small'
       >
-        <Form form={form} layout='vertical' className='pt-16px'>
+        <Form form={form} layout='vertical' className='pt-12px'>
           {!lifecycleSupported && (
             <Form.Item
               label={t('settings.webui.currentPassword')}

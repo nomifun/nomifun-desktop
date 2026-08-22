@@ -4,7 +4,9 @@ use crate::shell::{
 };
 use crate::substitution::substitute_arguments;
 use crate::types::SkillMetadata;
-use nomi_types::agent::{AgentInvocationInput, AgentInvocationRunner, AgentToolPolicy};
+use nomi_types::agent::{
+    AgentInvocationInput, AgentInvocationOutput, AgentInvocationRunner, AgentToolPolicy,
+};
 use nomi_config::shell::SupervisedShell;
 
 /// Prepare skill content for inline execution.
@@ -74,7 +76,7 @@ pub async fn execute_fork_with_shell(
     cwd: &str,
     invocation_runner: &dyn AgentInvocationRunner,
     shell: &SupervisedShell,
-) -> Result<String, String> {
+) -> Result<AgentInvocationOutput, String> {
     // Prepare content (substitution + shell) — same pipeline as inline mode
     let prompt = prepare_inline_content_with_shell(skill, args, session_id, cwd, shell)
         .await
@@ -84,7 +86,6 @@ pub async fn execute_fork_with_shell(
         name: skill.name.clone(),
         prompt,
         max_turns: 10,
-        max_tokens: 16384,
         system_prompt: None,
         model: skill.model.clone(),
         effort: skill.effort.map(effort_to_string),
@@ -95,11 +96,7 @@ pub async fn execute_fork_with_shell(
     };
 
     let result = invocation_runner.invoke(invocation).await;
-    if result.is_error {
-        Err(result.text)
-    } else {
-        Ok(result.text)
-    }
+    if result.is_error { Err(result.text) } else { Ok(result) }
 }
 
 // ---------------------------------------------------------------------------
@@ -477,7 +474,9 @@ mod phase7_tests {
         invocation_runner: &dyn AgentInvocationRunner,
     ) -> Result<String, String> {
         let shell = SupervisedShell::standalone(PathBuf::from(cwd));
-        execute_fork_with_shell(skill, args, session_id, cwd, invocation_runner, &shell).await
+        execute_fork_with_shell(skill, args, session_id, cwd, invocation_runner, &shell)
+            .await
+            .map(|output| output.text)
     }
 
     // ---------------------------------------------------------------------------
@@ -525,6 +524,7 @@ mod phase7_tests {
                 text: self.text.clone(),
                 usage: TokenUsage::default(),
                 turns: 1,
+                durable_effect_targets: Vec::new(),
                 is_error: self.is_error,
             }
         }
@@ -727,18 +727,6 @@ mod phase7_tests {
             .unwrap();
         let config = delegation_backend.take_input();
         assert_eq!(config.max_turns, 10);
-    }
-
-    // TC-7.46: AgentInvocationInput.max_tokens defaults to 16384.
-    #[tokio::test]
-    async fn tc_7_46_max_tokens_default_is_16384() {
-        let skill = make_fork_skill("tokens-fork", "content");
-        let delegation_backend = MockInvocationRunner::success("ok");
-        execute_fork(&skill, None, None, "/tmp", &delegation_backend)
-            .await
-            .unwrap();
-        let config = delegation_backend.take_input();
-        assert_eq!(config.max_tokens, 16384);
     }
 
     // TC-7.47: AgentInvocationInput.system_prompt defaults to None.

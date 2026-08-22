@@ -79,6 +79,11 @@ pub struct ProviderCompat {
     /// fields, so saved capability parameters take effect without being able
     /// to replace protocol invariants.
     pub extra_body: Option<Map<String, Value>>,
+
+    /// Opt in to provider-retained response chaining. This is only the
+    /// provider/capability half of the decision; each `LlmRequest` must also
+    /// explicitly mark the request as a retainable agent round.
+    pub chain_rounds: Option<bool>,
 }
 
 impl ProviderCompat {
@@ -119,6 +124,25 @@ impl ProviderCompat {
             supports_thinking: Some(false),
             supports_effort: Some(true),
             effort_levels: Some(vec!["low".into(), "medium".into(), "high".into()]),
+            ..Default::default()
+        }
+    }
+
+    /// Defaults for OpenAI's native Responses API.
+    ///
+    /// The app resolver supplies a fully expanded `/responses` endpoint and
+    /// replaces `api_path` with an empty suffix. The `/v1/responses` value is
+    /// retained for direct CLI/provider construction.
+    pub fn openai_responses_defaults() -> Self {
+        Self {
+            max_tokens_field: Some("max_output_tokens".into()),
+            api_path: Some("/v1/responses".into()),
+            clean_orphan_tool_calls: Some(true),
+            dedup_tool_results: Some(true),
+            supports_thinking: Some(false),
+            supports_effort: Some(true),
+            effort_levels: Some(vec!["low".into(), "medium".into(), "high".into()]),
+            chain_rounds: None,
             ..Default::default()
         }
     }
@@ -166,6 +190,7 @@ impl ProviderCompat {
                 .require_reasoning_content
                 .or(defaults.require_reasoning_content),
             extra_body: user.extra_body.or(defaults.extra_body),
+            chain_rounds: user.chain_rounds.or(defaults.chain_rounds),
         }
     }
 
@@ -223,6 +248,10 @@ impl ProviderCompat {
 
     pub fn require_reasoning_content(&self) -> bool {
         self.require_reasoning_content.unwrap_or(false)
+    }
+
+    pub fn chain_rounds(&self) -> bool {
+        self.chain_rounds.unwrap_or(false)
     }
 
     pub fn extra_body(&self) -> Map<String, Value> {
@@ -644,6 +673,41 @@ mod tests {
         assert!(!compat.ensure_alternation());
     }
 
+    /// `openai_defaults` is shared by every `openai.chat_text` platform — the
+    /// genuine OpenAI endpoint plus ~30 OpenAI-*compatible* gateways — and
+    /// nothing downstream can tell them apart, because the resolved `Config`
+    /// carries a `ProviderType`, never the platform id.
+    ///
+    /// So this default must stay `max_tokens`, even though OpenAI has deprecated
+    /// it in favour of `max_completion_tokens` and its reasoning families reject
+    /// it outright. Renaming it here would send an unrecognized field to the
+    /// compatible gateways that accept only `max_tokens`; most ignore unknown
+    /// fields, so the ceiling would silently stop applying and generation would
+    /// run unbounded. Two narrower mechanisms cover the OpenAI case instead: the
+    /// per-capability `max_tokens_field` override, and — when neither is set —
+    /// the provider's renegotiation off the endpoint's own rejection
+    /// (`nomi_providers::ProviderError::suggested_output_ceiling_key`).
+    #[test]
+    fn the_shared_openai_chat_ceiling_field_stays_the_compatible_spelling() {
+        assert_eq!(
+            ProviderCompat::openai_defaults().max_tokens_field.as_deref(),
+            Some("max_tokens"),
+        );
+
+        // A saved capability override remains authoritative over the default.
+        let overridden = ProviderCompat::merge(
+            ProviderCompat::openai_defaults(),
+            ProviderCompat {
+                max_tokens_field: Some("max_completion_tokens".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            overridden.max_tokens_field.as_deref(),
+            Some("max_completion_tokens")
+        );
+    }
+
     #[test]
     fn test_gemini_defaults() {
         let compat = ProviderCompat::gemini_defaults();
@@ -949,6 +1013,26 @@ mod tests {
                 "high".to_string()
             ])
         );
+    }
+
+    #[test]
+    fn openai_responses_defaults_are_protocol_specific_and_retention_is_opt_in() {
+        let compat = ProviderCompat::openai_responses_defaults();
+        assert_eq!(compat.api_path(), "/v1/responses");
+        assert_eq!(compat.max_tokens_field.as_deref(), Some("max_output_tokens"));
+        assert!(compat.clean_orphan_tool_calls());
+        assert!(compat.dedup_tool_results());
+        assert!(compat.supports_effort());
+        assert!(!compat.chain_rounds());
+
+        let enabled = ProviderCompat::merge(
+            compat,
+            ProviderCompat {
+                chain_rounds: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(enabled.chain_rounds());
     }
 
     #[test]

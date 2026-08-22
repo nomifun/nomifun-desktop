@@ -598,6 +598,44 @@ async fn fetch_models_gemini_success() {
 }
 
 #[tokio::test]
+async fn fetch_models_carries_the_provider_declared_context_window_to_the_client() {
+    // The catalog response is the only automatic source for a model's context
+    // window, so the number the provider already sent must survive all the way
+    // to the HTTP body — and stay absent, not null, where it was never sent.
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [
+                {"name": "models/gemini-2.5-pro", "inputTokenLimit": 1048576},
+                {"name": "models/text-embedding-005"}
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let (router, db) = setup().await;
+    let id = create_provider(&db, "gemini", &mock_server.uri(), "gemini-key").await;
+
+    let req = post_request(&format!("/api/providers/{id}/models"), json!({}));
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = body_json(resp).await;
+    let models = json["data"]["models"].as_array().unwrap();
+    assert_eq!(models[0]["id"], "gemini-2.5-pro");
+    assert_eq!(models[0]["context_limit"], json!(1_048_576_i64));
+    assert!(
+        !models[1]
+            .as_object()
+            .unwrap()
+            .contains_key("context_limit"),
+        "an undeclared window must be omitted: {}",
+        models[1]
+    );
+}
+
+#[tokio::test]
 async fn fetch_models_gemini_does_not_mask_forbidden_api_key() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))

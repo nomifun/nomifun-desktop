@@ -2581,6 +2581,202 @@ impl IConversationRepository for SqliteConversationRepository {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_truncated_continuation_receipt_and_admit_with_candidate(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        candidate_message_id: &str,
+        request_payload: &str,
+        source_message_id: &str,
+        source_request_payload: &str,
+        source_error_code: &str,
+        expected_admission_epoch: i64,
+        now: i64,
+    ) -> Result<ConversationDeliveryReceiptClaim, DbError> {
+        if expected_admission_epoch < 0
+            || !matches!(
+                source_error_code,
+                "output_truncated" | "turn_requests_exhausted"
+            )
+        {
+            return Err(DbError::Conflict(
+                "Truncated-turn continuation requires an exact retryable source failure"
+                    .to_owned(),
+            ));
+        }
+        MessageId::parse(candidate_message_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "Truncated-turn continuation candidate_message_id is invalid: {error}"
+            ))
+        })?;
+        MessageId::parse(source_message_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "Truncated-turn continuation source_message_id is invalid: {error}"
+            ))
+        })?;
+
+        let mut tx = self.pool.begin().await?;
+        // Acquire SQLite's writer lock before inspecting source/latest state.
+        // A later public turn, reset, or edit therefore orders wholly before
+        // this proof (and makes it stale) or wholly after continuation
+        // receipt + Running admission commit.
+        let owned = sqlx::query(
+            "UPDATE conversations SET updated_at = updated_at \
+             WHERE conversation_id = ? AND user_id = ?",
+        )
+        .bind(conversation_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        if owned.rows_affected() != 1 {
+            return Err(DbError::NotFound("conversation".to_owned()));
+        }
+
+        // Existing operation identity is absorbing even if the source was
+        // subsequently superseded. Replays must never start another turn.
+        if let Some(receipt) = sqlx::query_as::<_, ConversationDeliveryReceiptRow>(
+            "SELECT * FROM conversation_delivery_receipts WHERE operation_id = ?",
+        )
+        .bind(operation_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            if receipt.user_id != user_id
+                || receipt.conversation_id != conversation_id
+                || receipt.kind != "turn"
+                || receipt.request_payload != request_payload
+            {
+                return Err(DbError::Conflict(
+                    "truncated-turn continuation operation identity was reused".to_owned(),
+                ));
+            }
+            tx.commit().await?;
+            return Ok(ConversationDeliveryReceiptClaim {
+                receipt,
+                claimed_new: false,
+            });
+        }
+
+        let source = sqlx::query_as::<_, ConversationDeliveryReceiptRow>(
+            "SELECT * FROM conversation_delivery_receipts \
+             WHERE user_id = ? AND conversation_id = ? \
+               AND message_id = ? AND kind = 'turn'",
+        )
+        .bind(user_id)
+        .bind(conversation_id)
+        .bind(source_message_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| {
+            DbError::Conflict(
+                "Truncated-turn continuation source receipt was not found".to_owned(),
+            )
+        })?;
+        let public_turn_prefix = format!("public-turn:v1:{user_id}:{conversation_id}:");
+        let public_continuation_prefix =
+            format!("public-truncation-continue:v1:{user_id}:{conversation_id}:");
+        let latest_turn_receipt_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM conversation_delivery_receipts \
+             WHERE user_id = ? AND conversation_id = ? AND kind = 'turn' \
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(conversation_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if (!source
+            .operation_id
+            .strip_prefix(&public_turn_prefix)
+            .is_some_and(|suffix| !suffix.is_empty())
+            && !source
+                .operation_id
+                .strip_prefix(&public_continuation_prefix)
+                .is_some_and(|suffix| !suffix.is_empty()))
+            || source.request_payload != source_request_payload
+            || source.status != "completed"
+            || source.completed_at.is_none()
+            || source.result_ok != Some(false)
+            || source.result_error_retryable != Some(true)
+            || source.result_error_code.as_deref() != Some(source_error_code)
+            || source.projected_conversation_id.as_deref() != Some(conversation_id)
+            || source.projected_message_id.as_deref() != Some(source_message_id)
+            || source.id != latest_turn_receipt_id
+        {
+            return Err(DbError::Conflict(
+                "Truncated-turn continuation source is stale or not an eligible public failure"
+                    .to_owned(),
+            ));
+        }
+
+        sqlx::query(
+            "INSERT INTO conversation_delivery_receipts (\
+                operation_id, message_id, conversation_id, projected_conversation_id, \
+                projected_message_id, user_id, kind, request_payload, status, created_at, updated_at\
+             ) VALUES (?, ?, ?, ?, NULL, ?, 'turn', ?, 'accepted', ?, ?)",
+        )
+        .bind(operation_id)
+        .bind(candidate_message_id)
+        .bind(conversation_id)
+        .bind(conversation_id)
+        .bind(user_id)
+        .bind(request_payload)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        let admitted = sqlx::query(
+            "UPDATE conversations SET status = 'running', \
+                active_turn_operation_id = ?, admission_epoch = admission_epoch + 1, \
+                updated_at = MAX(updated_at, ?) \
+             WHERE conversation_id = ? AND user_id = ? \
+               AND status = 'finished' AND admission_epoch = ? \
+               AND active_turn_operation_id IS NULL \
+               AND admission_epoch < 9223372036854775806 \
+               AND json_type(extra, '$._edit_resubmit_fence') IS NULL \
+               AND NOT EXISTS( \
+                   SELECT 1 FROM conversation_execution_links execution_link \
+                    WHERE execution_link.conversation_id = conversations.conversation_id \
+                      AND execution_link.relation = 'attempt' \
+               ) \
+               AND NOT EXISTS( \
+                   SELECT 1 FROM conversation_delivery_receipts owner \
+                    WHERE owner.conversation_id = conversations.conversation_id \
+                      AND owner.user_id = conversations.user_id \
+                      AND owner.kind = 'turn' AND owner.status = 'accepted' \
+                      AND owner.operation_id <> ? \
+               )",
+        )
+        .bind(operation_id)
+        .bind(now)
+        .bind(conversation_id)
+        .bind(user_id)
+        .bind(expected_admission_epoch)
+        .bind(operation_id)
+        .execute(&mut *tx)
+        .await?;
+        if admitted.rows_affected() != 1 {
+            return Err(DbError::Conflict(
+                "Conversation lifecycle rejected truncated-turn continuation admission"
+                    .to_owned(),
+            ));
+        }
+
+        let receipt = sqlx::query_as::<_, ConversationDeliveryReceiptRow>(
+            "SELECT * FROM conversation_delivery_receipts WHERE operation_id = ?",
+        )
+        .bind(operation_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(ConversationDeliveryReceiptClaim {
+            receipt,
+            claimed_new: true,
+        })
+    }
+
     async fn claim_initial_turn_delivery_receipt_and_admit_with_candidate(
         &self,
         user_id: &str,
@@ -3530,6 +3726,29 @@ impl IConversationRepository for SqliteConversationRepository {
              WHERE operation_id = ? AND conversation_id = ? AND user_id = ?",
         )
         .bind(operation_id)
+        .bind(conversation_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    async fn get_turn_delivery_receipt_by_message_id(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<Option<ConversationDeliveryReceiptRow>, DbError> {
+        MessageId::parse(message_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "Conversation turn receipt message_id is invalid: {error}"
+            ))
+        })?;
+        Ok(sqlx::query_as::<_, ConversationDeliveryReceiptRow>(
+            "SELECT * FROM conversation_delivery_receipts \
+             WHERE message_id = ? AND conversation_id = ? AND user_id = ? \
+               AND kind = 'turn'",
+        )
+        .bind(message_id)
         .bind(conversation_id)
         .bind(user_id)
         .fetch_optional(&self.pool)
@@ -7515,6 +7734,230 @@ mod tests {
     }
 
     // ── Message tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn truncated_public_turn_can_be_continued_more_than_once_without_reopening_old_receipts() {
+        let (repo, _db) = setup().await;
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
+        conv.status = Some("finished".into());
+        conv.conversation_id = repo.create(&conv).await.unwrap();
+        let now = nomifun_common::now_ms();
+        let source_operation = format!(
+            "public-turn:v1:{}:{}:source",
+            TEST_INSTALLATION_OWNER, conv.conversation_id
+        );
+        let source_payload = serde_json::json!({
+            "content": "build the image-backed artifact",
+            "files": ["C:/workspace/reference.png"],
+            "inject_skills": [],
+            "hidden": false,
+            "origin": null,
+            "channel_platform": null,
+        })
+        .to_string();
+        let source_claim = repo
+            .claim_delivery_receipt_once(
+                TEST_INSTALLATION_OWNER,
+                &conv.conversation_id,
+                &source_operation,
+                "turn",
+                &source_payload,
+                now,
+            )
+            .await
+            .unwrap();
+        let mut source_message = sample_message(conv.conversation_id.clone());
+        source_message.message_id = source_claim.receipt.message_id.clone();
+        source_message.msg_id = Some(source_message.message_id.clone());
+        repo.insert_message(&source_message).await.unwrap();
+        assert!(
+            repo.complete_delivery_receipt(
+                TEST_INSTALLATION_OWNER,
+                &conv.conversation_id,
+                &source_operation,
+                false,
+                None,
+                Some("output ceiling"),
+                Some("output_truncated"),
+                Some(true),
+                now + 1,
+            )
+            .await
+            .unwrap()
+        );
+        let before_first = repo
+            .get_turn_admission_state(TEST_INSTALLATION_OWNER, &conv.conversation_id)
+            .await
+            .unwrap();
+        assert_eq!(before_first.epoch, 0);
+        assert!(before_first.active_operation_id.is_none());
+        assert_eq!(
+            repo.get(&conv.conversation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .as_deref(),
+            Some("finished")
+        );
+
+        let first_operation = format!(
+            "public-truncation-continue:v1:{}:{}:first",
+            TEST_INSTALLATION_OWNER, conv.conversation_id
+        );
+        let first_candidate_a = MessageId::new().into_string();
+        let first_candidate_b = MessageId::new().into_string();
+        let first_payload = serde_json::json!({
+            "workflow": "continue-truncated",
+            "source_message_id": source_claim.receipt.message_id,
+            "source_error_code": "output_truncated",
+            "original_delivery": serde_json::from_str::<serde_json::Value>(&source_payload).unwrap(),
+            "delivery": {
+                "content": "continue safely",
+                "files": ["C:/workspace/reference.png"],
+                "inject_skills": [],
+                "hidden": true,
+                "origin": null,
+                "channel_platform": null,
+            },
+        })
+        .to_string();
+        let first_claim = repo.claim_truncated_continuation_receipt_and_admit_with_candidate(
+            TEST_INSTALLATION_OWNER,
+            &conv.conversation_id,
+            &first_operation,
+            &first_candidate_a,
+            &first_payload,
+            &source_claim.receipt.message_id,
+            &source_payload,
+            "output_truncated",
+            before_first.epoch,
+            now + 2,
+        );
+        let double_click = repo.claim_truncated_continuation_receipt_and_admit_with_candidate(
+            TEST_INSTALLATION_OWNER,
+            &conv.conversation_id,
+            &first_operation,
+            &first_candidate_b,
+            &first_payload,
+            &source_claim.receipt.message_id,
+            &source_payload,
+            "output_truncated",
+            before_first.epoch,
+            now + 2,
+        );
+        let (first, replay) = tokio::join!(first_claim, double_click);
+        let first = first.unwrap();
+        let replay = replay.unwrap();
+        assert_ne!(
+            first.claimed_new, replay.claimed_new,
+            "exactly one concurrent double-click may own the continuation"
+        );
+        let (first, replay) = if first.claimed_new {
+            (first, replay)
+        } else {
+            (replay, first)
+        };
+        assert!(first.claimed_new);
+        assert!(!replay.claimed_new);
+        assert_eq!(replay.receipt.message_id, first.receipt.message_id);
+        let first_candidate = first.receipt.message_id.clone();
+
+        let absorbed_replay = repo
+            .claim_truncated_continuation_receipt_and_admit_with_candidate(
+                TEST_INSTALLATION_OWNER,
+                &conv.conversation_id,
+                &first_operation,
+                &MessageId::new().into_string(),
+                &first_payload,
+                &source_claim.receipt.message_id,
+                &source_payload,
+                "output_truncated",
+                before_first.epoch,
+                now + 3,
+            )
+            .await
+            .unwrap();
+        assert!(!absorbed_replay.claimed_new);
+        assert_eq!(absorbed_replay.receipt.message_id, first_candidate);
+
+        let mut first_message = sample_message(conv.conversation_id.clone());
+        first_message.message_id = first_candidate.clone();
+        first_message.msg_id = Some(first_candidate.clone());
+        first_message.hidden = true;
+        first_message.created_at = now + 3;
+        repo.insert_message(&first_message).await.unwrap();
+        assert_eq!(
+            repo.finalize_exact_turn_operation(
+                TEST_INSTALLATION_OWNER,
+                &conv.conversation_id,
+                &TurnReceiptCompletion {
+                    operation_id: first_operation.clone(),
+                    kind: "turn".to_owned(),
+                    request_payload: first_payload.clone(),
+                    result_ok: false,
+                    result_text: None,
+                    result_error: Some("request budget".to_owned()),
+                    result_error_code: Some("turn_requests_exhausted".to_owned()),
+                    result_error_retryable: Some(true),
+                },
+                now + 4,
+            )
+            .await
+            .unwrap(),
+            TurnLifecycleTransition::Committed
+        );
+        let before_second = repo
+            .get_turn_admission_state(TEST_INSTALLATION_OWNER, &conv.conversation_id)
+            .await
+            .unwrap();
+        assert_eq!(before_second.epoch, before_first.epoch + 2);
+        assert!(before_second.active_operation_id.is_none());
+
+        let second_operation = format!(
+            "public-truncation-continue:v1:{}:{}:second",
+            TEST_INSTALLATION_OWNER, conv.conversation_id
+        );
+        let second_candidate = MessageId::new().into_string();
+        let mut second_payload_value =
+            serde_json::from_str::<serde_json::Value>(&first_payload).unwrap();
+        second_payload_value["source_message_id"] =
+            serde_json::Value::String(first_candidate.clone());
+        second_payload_value["source_error_code"] =
+            serde_json::Value::String("turn_requests_exhausted".to_owned());
+        let second_payload = second_payload_value.to_string();
+        let second = repo
+            .claim_truncated_continuation_receipt_and_admit_with_candidate(
+                TEST_INSTALLATION_OWNER,
+                &conv.conversation_id,
+                &second_operation,
+                &second_candidate,
+                &second_payload,
+                &first_candidate,
+                &first_payload,
+                "turn_requests_exhausted",
+                before_second.epoch,
+                now + 5,
+            )
+            .await
+            .unwrap();
+        assert!(second.claimed_new);
+        assert_eq!(second.receipt.message_id, second_candidate);
+        let original = repo
+            .get_delivery_receipt(
+                TEST_INSTALLATION_OWNER,
+                &conv.conversation_id,
+                &source_operation,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(original.result_ok, Some(false));
+        assert_eq!(
+            original.result_error_code.as_deref(),
+            Some("output_truncated")
+        );
+    }
 
     #[tokio::test]
     async fn reset_detaches_delivery_projections_but_permanently_absorbs_old_operations() {

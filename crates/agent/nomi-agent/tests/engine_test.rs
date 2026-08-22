@@ -66,6 +66,7 @@ impl OutputSink for RecordingOutputSink {
     }
 
     fn emit_stream_start(&self, _msg_id: &str) {}
+    fn emit_output_discarded(&self, _msg_id: &str, _restart_attempt: u32) {}
     fn emit_stream_end(
         &self,
         _msg_id: &str,
@@ -685,8 +686,7 @@ async fn test_engine_tool_use_executes_and_continues() {
             usage: TokenUsage {
                 input_tokens: 80,
                 output_tokens: 30,
-                cache_creation_tokens: 0,
-                cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ];
@@ -697,8 +697,7 @@ async fn test_engine_tool_use_executes_and_continues() {
             usage: TokenUsage {
                 input_tokens: 100,
                 output_tokens: 50,
-                cache_creation_tokens: 0,
-                cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ];
@@ -904,6 +903,204 @@ async fn test_engine_round_trips_thinking_signature_into_tool_followup_request()
 }
 
 #[tokio::test]
+async fn test_engine_attaches_a_provider_round_id_only_to_a_retainable_assistant_round() {
+    let provider = Arc::new(RecordingRequestProvider::new(vec![
+        vec![
+            LlmEvent::ToolUse {
+                id: "call_1".to_string(),
+                name: "mock_tool".to_string(),
+                input: json!({}),
+                extra: None,
+            },
+            LlmEvent::ProviderRoundId("resp_parent".to_string()),
+            LlmEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: TokenUsage::default(),
+            },
+        ],
+        vec![
+            LlmEvent::TextDelta("done".to_string()),
+            LlmEvent::ProviderRoundId("resp_child".to_string()),
+            LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            },
+        ],
+    ]));
+    let requests = provider.requests();
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(MockTool::new("mock_tool", "tool result", false)));
+    let mut config = test_config();
+    config.compat.chain_rounds = Some(true);
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        config,
+        registry,
+        silent_output(),
+        std::env::temp_dir(),
+    );
+
+    let result = engine.execute_turn("use tool", "").await.unwrap();
+    assert_eq!(result.text, "done");
+    let requests = requests.lock().unwrap();
+    let parent = requests[1]
+        .iter()
+        .find(|message| message.role == Role::Assistant)
+        .expect("the completed tool round is sent to the follow-up");
+    assert_eq!(parent.provider_round_id.as_deref(), Some("resp_parent"));
+}
+
+#[tokio::test]
+async fn test_engine_rejects_a_provider_round_id_for_a_non_retainable_request() {
+    let provider = Arc::new(MockLlmProvider::with_events(vec![
+        LlmEvent::TextDelta("draft".to_string()),
+        LlmEvent::ProviderRoundId("resp_unexpected".to_string()),
+        LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        },
+    ]));
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        test_config(),
+        ToolRegistry::new(),
+        silent_output(),
+        std::env::temp_dir(),
+    );
+
+    let error = engine.execute_turn("answer", "").await.unwrap_err();
+    assert!(matches!(
+        error,
+        AgentError::ApiError(message)
+            if message.contains("non-retainable request")
+    ));
+}
+
+#[tokio::test]
+async fn test_engine_requires_a_provider_round_id_to_be_immediately_before_done() {
+    let provider = Arc::new(MockLlmProvider::with_events(vec![
+        LlmEvent::ProviderRoundId("resp_early".to_string()),
+        LlmEvent::TextDelta("not part of the committed parent".to_string()),
+        LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        },
+    ]));
+    let mut config = test_config();
+    config.compat.chain_rounds = Some(true);
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        config,
+        ToolRegistry::new(),
+        silent_output(),
+        std::env::temp_dir(),
+    );
+
+    let error = engine.execute_turn("answer", "").await.unwrap_err();
+    assert!(matches!(
+        error,
+        AgentError::ApiError(message)
+            if message.contains("immediately followed by terminal Done")
+    ));
+}
+
+#[tokio::test]
+async fn test_engine_rejects_a_cursor_for_any_truncated_tool_use() {
+    let provider = Arc::new(MockLlmProvider::with_events(vec![
+        // Deliberately unadvertised: it is excluded from the recovery ledger,
+        // but still proves the retained remote response has an unresolved
+        // function call and is unsafe to link.
+        LlmEvent::ToolUseTruncated {
+            id: "call_unknown".to_string(),
+            name: "not_advertised".to_string(),
+            argument_bytes: 17,
+        },
+        LlmEvent::ProviderRoundId("resp_unsafe".to_string()),
+        LlmEvent::Done {
+            stop_reason: StopReason::MaxTokens,
+            usage: TokenUsage::default(),
+        },
+    ]));
+    let mut config = test_config();
+    config.compat.chain_rounds = Some(true);
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        config,
+        ToolRegistry::new(),
+        silent_output(),
+        std::env::temp_dir(),
+    );
+
+    let error = engine.execute_turn("answer", "").await.unwrap_err();
+    assert!(matches!(
+        error,
+        AgentError::ApiError(message) if message.contains("unsafe round id")
+    ));
+}
+
+#[tokio::test]
+async fn test_engine_rejects_a_cursor_while_a_tool_preview_is_unresolved() {
+    let provider = Arc::new(MockLlmProvider::with_events(vec![
+        LlmEvent::ToolUseDelta {
+            id: "call_preview".to_string(),
+            name: "mock_tool".to_string(),
+            input: Some(json!({"path": "partial"})),
+        },
+        LlmEvent::ProviderRoundId("resp_preview".to_string()),
+        LlmEvent::Done {
+            stop_reason: StopReason::MaxTokens,
+            usage: TokenUsage::default(),
+        },
+    ]));
+    let mut config = test_config();
+    config.compat.chain_rounds = Some(true);
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(MockTool::new("mock_tool", "unused", false)));
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        config,
+        tools,
+        silent_output(),
+        std::env::temp_dir(),
+    );
+
+    let error = engine.execute_turn("answer", "").await.unwrap_err();
+    assert!(matches!(
+        error,
+        AgentError::ApiError(message) if message.contains("unsafe round id")
+    ));
+}
+
+#[tokio::test]
+async fn test_engine_requires_truncated_tool_evidence_to_end_with_max_tokens() {
+    let provider = Arc::new(MockLlmProvider::with_events(vec![
+        LlmEvent::ToolUseTruncated {
+            id: "call_cut".to_string(),
+            name: "not_advertised".to_string(),
+            argument_bytes: 8,
+        },
+        LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        },
+    ]));
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        test_config(),
+        ToolRegistry::new(),
+        silent_output(),
+        std::env::temp_dir(),
+    );
+
+    let error = engine.execute_turn("answer", "").await.unwrap_err();
+    assert!(matches!(
+        error,
+        AgentError::ApiError(message)
+            if message.contains("truncated tool evidence requires MaxTokens")
+    ));
+}
+
+#[tokio::test]
 async fn duplicate_tool_names_emit_distinct_tool_use_ids() {
     let turn1 = vec![
         LlmEvent::ToolUse {
@@ -923,8 +1120,7 @@ async fn duplicate_tool_names_emit_distinct_tool_use_ids() {
             usage: TokenUsage {
                 input_tokens: 80,
                 output_tokens: 30,
-                cache_creation_tokens: 0,
-                cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ];
@@ -935,8 +1131,7 @@ async fn duplicate_tool_names_emit_distinct_tool_use_ids() {
             usage: TokenUsage {
                 input_tokens: 100,
                 output_tokens: 50,
-                cache_creation_tokens: 0,
-                cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ];
@@ -991,8 +1186,7 @@ async fn test_engine_max_tokens_handling() {
             usage: TokenUsage {
                 input_tokens: 200,
                 output_tokens: 100,
-                cache_creation_tokens: 0,
-                cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ];
@@ -1036,8 +1230,7 @@ async fn test_engine_message_accumulation() {
                 usage: TokenUsage {
                     input_tokens: 10,
                     output_tokens: 5,
-                    cache_creation_tokens: 0,
-                    cache_read_tokens: 0,
+                    ..Default::default()
                 },
             },
         ],
@@ -1048,8 +1241,7 @@ async fn test_engine_message_accumulation() {
                 usage: TokenUsage {
                     input_tokens: 10,
                     output_tokens: 5,
-                    cache_creation_tokens: 0,
-                    cache_read_tokens: 0,
+                    ..Default::default()
                 },
             },
         ],
@@ -1132,6 +1324,9 @@ fn resumed_engine_restores_the_exact_editable_turn_checkpoint() {
             prior_host_context: Default::default(),
         }),
         host_context: Default::default(),
+        accepted_turn_root: None,
+        pending_host_terminal_root: None,
+        last_interrupted_turn_source: None,
     };
     let engine = AgentEngine::resume_with_provider(
         Arc::new(MockLlmProvider::with_text_response("unused")),
@@ -1168,8 +1363,7 @@ async fn test_engine_token_usage_tracking() {
             usage: TokenUsage {
                 input_tokens: 80,
                 output_tokens: 30,
-                cache_creation_tokens: 0,
-                cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ];
@@ -1180,8 +1374,7 @@ async fn test_engine_token_usage_tracking() {
             usage: TokenUsage {
                 input_tokens: 100,
                 output_tokens: 50,
-                cache_creation_tokens: 0,
-                cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ];
@@ -1233,8 +1426,7 @@ async fn test_engine_max_turns_returns_ok() {
                 usage: TokenUsage {
                     input_tokens: 50,
                     output_tokens: 20,
-                    cache_creation_tokens: 0,
-                    cache_read_tokens: 0,
+                    ..Default::default()
                 },
             },
         ]

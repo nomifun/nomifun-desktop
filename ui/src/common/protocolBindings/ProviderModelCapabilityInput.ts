@@ -9,4 +9,4 @@ import type { ModelTrait } from "./ModelTrait";
  * Even the default provider connection is represented explicitly as
  * `connection_role = "default"`; there is no implicit or legacy fallback.
  */
-export type ProviderModelCapabilityInput = { task: ModelTask, traits?: Array<ModelTrait>, protocol: string, connection_role: string, base_url_override?: string, endpoint?: string, poll_endpoint?: string, content_endpoint?: string, realtime_endpoint?: string, allow_cross_origin_credentials?: boolean, provider_params?: unknown, context_limit?: number, };
+export type ProviderModelCapabilityInput = { task: ModelTask, traits?: Array<ModelTrait>, protocol: string, connection_role: string, base_url_override?: string, endpoint?: string, poll_endpoint?: string, content_endpoint?: string, realtime_endpoint?: string, allow_cross_origin_credentials?: boolean, provider_params?: unknown, context_limit?: number, output_limit?: number, };

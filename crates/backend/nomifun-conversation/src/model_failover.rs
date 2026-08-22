@@ -307,6 +307,7 @@ mod tests {
             allow_cross_origin_credentials: false,
             provider_params: "{}".into(),
             context_limit: None,
+            output_limit: None,
             health,
             health_checked_at: None,
             created_at: 0,
@@ -556,5 +557,12 @@ mod tests {
     #[test]
     fn image_unsupported_is_not_provider_fault() {
         assert!(!is_provider_fault(AgentErrorCode::UserLlmProviderImageUnsupported));
+    }
+
+    #[test]
+    fn unbacked_completion_is_not_a_model_failover_provider_fault() {
+        assert!(!is_provider_fault(
+            AgentErrorCode::UserLlmProviderUnbackedCompletion
+        ));
     }
 }

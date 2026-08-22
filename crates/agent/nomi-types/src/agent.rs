@@ -394,7 +394,6 @@ pub struct AgentInvocationInput {
     pub name: String,
     pub prompt: String,
     pub max_turns: usize,
-    pub max_tokens: u32,
     pub system_prompt: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -411,6 +410,10 @@ pub struct AgentInvocationOutput {
     pub text: String,
     pub usage: TokenUsage,
     pub turns: usize,
+    /// Successful state-changing effects observed inside this exact delegated
+    /// invocation. This is machine evidence for the parent completion gate;
+    /// the delegate's prose is deliberately not treated as proof of work.
+    pub durable_effect_targets: Vec<String>,
     pub is_error: bool,
 }
 

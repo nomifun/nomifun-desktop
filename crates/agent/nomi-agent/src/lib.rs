@@ -19,6 +19,7 @@ pub mod tool_execution;
 pub mod output;
 pub mod plan;
 pub mod requirement_tools;
+pub mod round;
 pub mod ssh_backend;
 pub mod ssh_tools;
 pub mod session;

@@ -1,11 +1,11 @@
-use super::ToolEfficiencyStats;
+use super::{AgentResult, CompletionAdjudication, ToolEfficiencyStats};
 use crate::tool_execution::SKIPPED_AFTER_PRIOR_ERROR;
 use nomi_process_runtime::{CapabilityPolicy, ProcessSupervisor, SupervisorConfig};
 use nomi_tools::{
     exec_command::ExecCommandTool, process_store::ProcessStore, read::ReadTool,
     registry::ToolRegistry,
 };
-use nomi_types::message::ContentBlock;
+use nomi_types::message::{ContentBlock, StopReason, TokenUsage};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -106,4 +106,77 @@ fn accounting_counts_errors_and_prior_error_skips() {
 
     assert_eq!(stats.error_results, 2);
     assert_eq!(stats.skipped_after_prior_error, 1);
+}
+
+#[test]
+fn terminal_dimensions_report_only_clean_end_turn_as_success() {
+    let stats = ToolEfficiencyStats::default();
+    for (stop_reason, terminal, error_kind) in [
+        (StopReason::EndTurn, "ok", "none"),
+        (StopReason::MaxTokens, "error", "output_truncated"),
+        (
+            StopReason::MaxTurns,
+            "error",
+            "turn_requests_exhausted",
+        ),
+        (StopReason::Refusal, "error", "model_refused"),
+        (StopReason::ToolUse, "error", "protocol_error"),
+    ] {
+        let result = Ok(AgentResult {
+            text: String::new(),
+            stop_reason,
+            usage: TokenUsage::default(),
+            turns: 1,
+            rounds: 1,
+            effects_ok: 0,
+            durable_effect_targets: Vec::new(),
+            cutoff_state_changing: 0,
+            state_changing_tools_advertised: false,
+            completion_adjudication: None,
+        });
+        let dimensions = stats.terminal_dimensions(&result);
+        assert_eq!(dimensions.0, terminal, "stop_reason={stop_reason:?}");
+        assert_eq!(dimensions.2, error_kind, "stop_reason={stop_reason:?}");
+    }
+}
+
+#[test]
+fn terminal_dimensions_preserve_each_typed_adjudication_kind() {
+    let stats = ToolEfficiencyStats::default();
+    for (issue, expected) in [
+        (
+            CompletionAdjudication::UnbackedStateChangeClaim {
+                target: "miniapp.html".to_owned(),
+            },
+            "unbacked_state_change_claim",
+        ),
+        (
+            CompletionAdjudication::HistoryRollbackFailed {
+                target: "miniapp.html".to_owned(),
+            },
+            "completion_history_rollback_failed",
+        ),
+        (
+            CompletionAdjudication::SessionCommitFailed {
+                detail: "save failed".to_owned(),
+            },
+            "completion_history_commit_failed",
+        ),
+    ] {
+        let result = Ok(AgentResult {
+            text: String::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+            turns: 1,
+            rounds: 1,
+            effects_ok: 0,
+            durable_effect_targets: Vec::new(),
+            cutoff_state_changing: 0,
+            state_changing_tools_advertised: false,
+            completion_adjudication: Some(issue),
+        });
+        let dimensions = stats.terminal_dimensions(&result);
+        assert_eq!(dimensions.0, "error");
+        assert_eq!(dimensions.2, expected);
+    }
 }

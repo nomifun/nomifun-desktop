@@ -4,12 +4,12 @@ import type { ModelTask } from "./ModelTask";
 /**
  * Request body for `POST /api/providers/{provider_id}/probe-connection`.
  */
-export type ProbeProviderConnectionRequest = { 
+export type ProbeProviderConnectionRequest = {
 /**
  * Protocol whose endpoint template defines the path to probe. Required for
  * custom providers, which get no recommendation to fall back on.
  */
-protocol?: string, task?: ModelTask, 
+protocol?: string, task?: ModelTask,
 /**
  * Probe alternative roots when the configured one is unreachable.
  */

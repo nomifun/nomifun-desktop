@@ -1018,7 +1018,15 @@ const NomiSendBox: React.FC<{
               className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0'
               data-testid='nomi-sendbox-config-group'
             >
-              {hasContextUsage && <ContextUsageRing used={tokenUsage?.context_tokens} max={tokenUsage?.context_window} />}
+              {hasContextUsage && (
+                <ContextUsageRing
+                  used={tokenUsage?.context_tokens}
+                  max={tokenUsage?.context_window}
+                  inputTokens={tokenUsage?.input_tokens}
+                  outputTokens={tokenUsage?.output_tokens}
+                  reasoningTokens={tokenUsage?.reasoning_tokens}
+                />
+              )}
               <NomiModelSelector selection={modelSelection} className='nomi-sendbox-model-btn' />
               {/* 召唤伙伴（设计 B5）：仅普通工作会话可见 —— 伙伴/客服等锁定面
                   通过 hideModeSelector 隐藏整个配置组，天然不渲染。 */}

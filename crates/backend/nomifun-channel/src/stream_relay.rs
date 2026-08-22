@@ -399,6 +399,8 @@ impl ChannelStreamRelay {
     /// then send once.
     async fn run_send_once(self, mut rx: broadcast::Receiver<AgentStreamEvent>) {
         let mut text_buffer = String::new();
+        let mut accepted_turn_text_checkpoint: Option<usize> = None;
+        let mut attempt_text_checkpoint: Option<usize> = None;
         let mut has_content = false;
         let mut media_ids: Vec<String> = Vec::new();
         let mut media_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -414,6 +416,58 @@ impl ChannelStreamRelay {
                         continue;
                     }
                     match ChannelMessageService::process_stream_event(&event) {
+                    Some(StreamAction::StartCheckpoint) => {
+                        let checkpoint = text_buffer.len();
+                        accepted_turn_text_checkpoint.get_or_insert(checkpoint);
+                        attempt_text_checkpoint = Some(checkpoint);
+                    }
+                    Some(StreamAction::DiscardOutput { restart_attempt }) => {
+                        let checkpoint = if restart_attempt == 0 {
+                            accepted_turn_text_checkpoint
+                        } else {
+                            attempt_text_checkpoint
+                        };
+                        let Some(checkpoint) = checkpoint else {
+                            let error_msg = UnifiedOutgoingMessage {
+                                message_type: OutgoingMessageType::Text,
+                                text: Some(format!(
+                                    "❌ Attempt {restart_attempt} could not start because its discarded output had no checkpoint."
+                                )),
+                                parse_mode: None,
+                                buttons: None,
+                                keyboard: None,
+                                image_url: None,
+                                file_url: None,
+                                file_name: None,
+                                media_actions: None,
+                                reply_to_message_id: None,
+                                silent: None,
+                            };
+                            let _ = self.sender.send_message(
+                                &self.config.plugin_id,
+                                &self.config.chat_id,
+                                error_msg,
+                            ).await;
+                            break;
+                        };
+                        if checkpoint > text_buffer.len()
+                            || !text_buffer.is_char_boundary(checkpoint)
+                        {
+                            let error_msg = self.terminal_failure_message(
+                                &text_buffer,
+                                "Discarded output checkpoint no longer matched the channel stream.",
+                            );
+                            let _ = self.sender.send_message(
+                                &self.config.plugin_id,
+                                &self.config.chat_id,
+                                error_msg,
+                            ).await;
+                            break;
+                        }
+                        text_buffer.truncate(checkpoint);
+                        has_content = !text_buffer.is_empty();
+                        attempt_text_checkpoint = Some(text_buffer.len());
+                    }
                     Some(StreamAction::AppendText(chunk)) => {
                         text_buffer.push_str(&chunk);
                         has_content = true;
@@ -592,6 +646,8 @@ impl ChannelStreamRelay {
         };
 
         let mut text_buffer = String::new();
+        let mut accepted_turn_text_checkpoint: Option<usize> = None;
+        let mut attempt_text_checkpoint: Option<usize> = None;
         let mut last_edit = Instant::now() - throttle;
         // Whether a blocking decision was forwarded during this turn. When a
         // decision is pending, the thinking/streaming card is deliberately left
@@ -612,6 +668,66 @@ impl ChannelStreamRelay {
                         continue;
                     }
                     match ChannelMessageService::process_stream_event(&event) {
+                    Some(StreamAction::StartCheckpoint) => {
+                        let checkpoint = text_buffer.len();
+                        accepted_turn_text_checkpoint.get_or_insert(checkpoint);
+                        attempt_text_checkpoint = Some(checkpoint);
+                    }
+                    Some(StreamAction::DiscardOutput { restart_attempt }) => {
+                        let checkpoint = if restart_attempt == 0 {
+                            accepted_turn_text_checkpoint
+                        } else {
+                            attempt_text_checkpoint
+                        };
+                        let Some(checkpoint) = checkpoint else {
+                            let error_msg = self.terminal_failure_message(
+                                &text_buffer,
+                                &format!(
+                                    "Attempt {restart_attempt} discarded output without a channel checkpoint."
+                                ),
+                            );
+                            let _ = self.sender.edit_message(
+                                &self.config.plugin_id,
+                                &self.config.chat_id,
+                                &thinking_msg_id,
+                                error_msg,
+                            ).await;
+                            break;
+                        };
+                        if checkpoint > text_buffer.len()
+                            || !text_buffer.is_char_boundary(checkpoint)
+                        {
+                            let error_msg = self.terminal_failure_message(
+                                &text_buffer,
+                                "Discarded output checkpoint no longer matched the channel stream.",
+                            );
+                            let _ = self.sender.edit_message(
+                                &self.config.plugin_id,
+                                &self.config.chat_id,
+                                &thinking_msg_id,
+                                error_msg,
+                            ).await;
+                            break;
+                        }
+                        text_buffer.truncate(checkpoint);
+                        attempt_text_checkpoint = Some(text_buffer.len());
+                        let visible = strip_reasoning(&text_buffer, Stage::Streaming);
+                        let replacement = if visible.trim().is_empty() {
+                            ChannelMessageService::build_thinking_message()
+                        } else {
+                            let formatted = format_text_for_platform(&visible, self.config.platform);
+                            let mut message = ChannelMessageService::build_streaming_message(&formatted);
+                            message.parse_mode = formatted_parse_mode(self.config.platform);
+                            message
+                        };
+                        let _ = self.sender.edit_message(
+                            &self.config.plugin_id,
+                            &self.config.chat_id,
+                            &thinking_msg_id,
+                            replacement,
+                        ).await;
+                        last_edit = Instant::now();
+                    }
                     Some(StreamAction::AppendText(chunk)) => {
                         text_buffer.push_str(&chunk);
                         if last_edit.elapsed() >= throttle {

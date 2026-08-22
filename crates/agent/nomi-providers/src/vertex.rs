@@ -38,6 +38,32 @@ struct CachedToken {
     expires_at: u64,
 }
 
+/// The Vertex AI API host that serves a given `location` value.
+///
+/// Only true *locational* endpoints carry a `{region}-` host prefix. The global
+/// endpoint is the bare service host, and the `us`/`eu` data-residency
+/// multi-regions get an infix instead. Google's `aiplatform` v1 discovery
+/// document enumerates every published endpoint — 46 `{region}-aiplatform`
+/// locational hosts, `aiplatform.{us,eu}.rep` regional hosts, `aiplatform.mtls`
+/// and the bare `aiplatform.googleapis.com` base URL — and no `global-`
+/// prefixed host appears anywhere in it.
+///
+/// `global-aiplatform.googleapis.com` therefore is not an endpoint. It answers
+/// DNS only because `*.googleapis.com` is wildcarded (so does
+/// `bogusxyz-aiplatform.googleapis.com`), which is why a resolvable name is not
+/// evidence that a request would ever reach Vertex.
+///
+/// The `locations/{region}` path segment is unaffected: `global`, `us` and `eu`
+/// all stay in the resource path exactly as given. This mirrors the branch in
+/// Anthropic's official Vertex SDKs and in Google's own `python-genai` client.
+fn vertex_api_host(region: &str) -> String {
+    match region {
+        "global" => "aiplatform.googleapis.com".to_owned(),
+        "us" | "eu" => format!("aiplatform.{region}.rep.googleapis.com"),
+        _ => format!("{region}-aiplatform.googleapis.com"),
+    }
+}
+
 impl VertexProvider {
     pub fn new(
         project_id: &str,
@@ -58,12 +84,21 @@ impl VertexProvider {
 
     fn build_url(&self, model: &str) -> String {
         format!(
-            "https://{}-aiplatform.googleapis.com/v1/projects/{}/locations/{}/publishers/anthropic/models/{}:streamRawPredict",
-            self.region, self.project_id, self.region, model
+            "https://{}/v1/projects/{}/locations/{}/publishers/anthropic/models/{}:streamRawPredict",
+            vertex_api_host(&self.region),
+            self.project_id,
+            self.region,
+            model
         )
     }
 
-    fn build_request_body(&self, request: &LlmRequest) -> Value {
+    fn build_request_body(&self, request: &LlmRequest) -> Result<Value, ProviderError> {
+        let max_tokens = request.max_tokens.ok_or_else(|| {
+            ProviderError::Config(
+                "vertex anthropic protocol requires an explicit output ceiling; pass --max-tokens (or set [default].max_tokens) in the CLI, or set Max output tokens on the desktop model capability"
+                    .into(),
+            )
+        })?;
         let system = if self.cache_enabled {
             json!([{
                 "type": "text",
@@ -76,7 +111,7 @@ impl VertexProvider {
 
         let mut body = json!({
             "anthropic_version": "vertex-2023-10-16",
-            "max_tokens": request.max_tokens,
+            "max_tokens": max_tokens,
             "system": system,
             "messages": anthropic_shared::build_messages(&request.messages, &self.compat),
             "stream": true
@@ -97,7 +132,7 @@ impl VertexProvider {
             });
         }
 
-        body
+        Ok(body)
     }
 
     async fn get_access_token(&self) -> Result<String, ProviderError> {
@@ -255,7 +290,7 @@ impl LlmProvider for VertexProvider {
         request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         let url = self.build_url(&request.model);
-        let body = self.build_request_body(request);
+        let body = self.build_request_body(request)?;
 
         tracing::debug!(target: "nomi_providers", body = %serde_json::to_string_pretty(&body).unwrap_or_default(), "outgoing request");
 
@@ -351,6 +386,83 @@ impl LlmProvider for VertexProvider {
         });
 
         Ok(rx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vertex_rejects_an_omitted_output_ceiling_before_authentication() {
+        let provider = VertexProvider::new(
+            "project",
+            "us-central1",
+            GcpAuth::ApplicationDefault,
+            false,
+            ProviderCompat::anthropic_defaults(),
+        );
+        let request = LlmRequest {
+            model: "claude-test".into(),
+            system: "test".into(),
+            messages: vec![],
+            tools: vec![],
+            max_tokens: None,
+            thinking: None,
+            reasoning_effort: None,
+            retain_provider_round: false,
+        };
+
+        let error = provider.build_request_body(&request).unwrap_err();
+        assert!(matches!(error, ProviderError::Config(message) if
+            message.contains("--max-tokens") && message.contains("desktop")));
+    }
+
+    fn url_for_region(region: &str) -> String {
+        VertexProvider::new(
+            "my-project",
+            region,
+            GcpAuth::ApplicationDefault,
+            false,
+            ProviderCompat::anthropic_defaults(),
+        )
+        .build_url("claude-sonnet-4@20250514")
+    }
+
+    #[test]
+    fn a_regional_location_keeps_the_region_host_prefix() {
+        assert_eq!(
+            url_for_region("us-central1"),
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/my-project/locations/us-central1/publishers/anthropic/models/claude-sonnet-4@20250514:streamRawPredict"
+        );
+    }
+
+    #[test]
+    fn the_global_location_uses_the_bare_host_and_keeps_global_in_the_path() {
+        // `global` is a location value Anthropic's official Vertex SDKs accept
+        // and document for Claude, but it is NOT a locational endpoint:
+        // prefixing the host would address `global-aiplatform.googleapis.com`,
+        // which is not a published Vertex host (it only answers DNS because
+        // `*.googleapis.com` is wildcarded).
+        assert_eq!(
+            url_for_region("global"),
+            "https://aiplatform.googleapis.com/v1/projects/my-project/locations/global/publishers/anthropic/models/claude-sonnet-4@20250514:streamRawPredict"
+        );
+    }
+
+    #[test]
+    fn data_residency_multi_regions_use_the_rep_host_infix() {
+        for (region, host) in [
+            ("us", "aiplatform.us.rep.googleapis.com"),
+            ("eu", "aiplatform.eu.rep.googleapis.com"),
+        ] {
+            assert_eq!(
+                url_for_region(region),
+                format!(
+                    "https://{host}/v1/projects/my-project/locations/{region}/publishers/anthropic/models/claude-sonnet-4@20250514:streamRawPredict"
+                )
+            );
+        }
     }
 }
 

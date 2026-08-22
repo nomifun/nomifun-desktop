@@ -14,6 +14,7 @@ describe('Nomi sendbox control layout', () => {
     const source = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('../../../../components/chat/SendBox/index.tsx', import.meta.url));
     const contextRingSource = readSource(new URL('./ContextUsageRing.tsx', import.meta.url));
+    const useNomiMessageSource = readSource(new URL('./useNomiMessage.ts', import.meta.url));
     const sendBoxIndex = source.indexOf('<SendBox');
     const rightToolsIndex = source.indexOf('rightTools={');
     const modelIndex = source.indexOf('<NomiModelSelector', rightToolsIndex);
@@ -40,6 +41,13 @@ describe('Nomi sendbox control layout', () => {
     expect(contextRingSource.includes('h-22px w-22px')).toBe(true);
     expect(contextRingSource.includes('formatTokenCount(used)')).toBe(true);
     expect(contextRingSource.includes('formatTokenCount(max)')).toBe(true);
+    expect(contextRingSource.includes('inputTokens != null || outputTokens != null || reasoningTokens != null')).toBe(
+      true
+    );
+    expect(contextRingSource.includes('formatTokenCount(outputTokens)')).toBe(true);
+    expect(contextRingSource.includes('formatTokenCount(reasoningTokens)')).toBe(true);
+    expect(contextRingSource.includes('included in output')).toBe(true);
+    expect(useNomiMessageSource.includes('total_tokens: (inputTokens ?? 0) + (outputTokens ?? 0)')).toBe(true);
     expect(contextRingSource.includes("data-testid='nomi-context-usage'")).toBe(false);
     expect(contextRingSource.includes('rd-999px b b-solid px-10px')).toBe(false);
   });

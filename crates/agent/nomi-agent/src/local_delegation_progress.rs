@@ -202,7 +202,6 @@ mod tests {
             name: name.to_owned(),
             prompt: prompt.to_owned(),
             max_turns: 1,
-            max_tokens: 1,
             system_prompt: None,
             model: None,
             effort: None,
@@ -217,6 +216,7 @@ mod tests {
             text: text.to_owned(),
             usage: TokenUsage::default(),
             turns: 1,
+            durable_effect_targets: Vec::new(),
             is_error,
         }
     }

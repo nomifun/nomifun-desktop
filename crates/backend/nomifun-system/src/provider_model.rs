@@ -210,7 +210,8 @@ impl ProviderModelService {
                     task_wire(capability.task)?
                 )));
             }
-            validate_context_limit(capability.context_limit)?;
+            validate_positive_token_limit("context_limit", capability.context_limit)?;
+            validate_positive_token_limit("output_limit", capability.output_limit)?;
             validate_provider_params(
                 &capability.protocol,
                 capability.task,
@@ -263,11 +264,14 @@ fn validate_sort_order(value: i64) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(crate) fn validate_context_limit(value: Option<i64>) -> Result<(), AppError> {
+pub(crate) fn validate_positive_token_limit(
+    field: &str,
+    value: Option<i64>,
+) -> Result<(), AppError> {
     if value.is_some_and(|value| value <= 0) {
-        return Err(AppError::BadRequest(
-            "capability context_limit must be greater than zero".into(),
-        ));
+        return Err(AppError::BadRequest(format!(
+            "capability {field} must be greater than zero"
+        )));
     }
     Ok(())
 }
@@ -289,6 +293,11 @@ pub(crate) fn validate_protocol(
         return Err(AppError::BadRequest(format!(
             "protocol {protocol:?} does not support task {}",
             task_wire(capability.task)?
+        )));
+    }
+    if descriptor.requires_output_ceiling && capability.output_limit.is_none() {
+        return Err(AppError::BadRequest(format!(
+            "protocol {protocol:?} requires capability output_limit (Max output tokens)"
         )));
     }
     let supports_platform = descriptor
@@ -637,6 +646,7 @@ pub(crate) struct SerializedCapability {
     allow_cross_origin_credentials: bool,
     provider_params: String,
     context_limit: Option<i64>,
+    output_limit: Option<i64>,
 }
 
 impl SerializedCapability {
@@ -654,6 +664,7 @@ impl SerializedCapability {
             allow_cross_origin_credentials: self.allow_cross_origin_credentials,
             provider_params: &self.provider_params,
             context_limit: self.context_limit,
+            output_limit: self.output_limit,
         }
     }
 }
@@ -685,6 +696,7 @@ pub(crate) fn serialize_capabilities(
                     },
                 )?,
                 context_limit: capability.context_limit,
+                output_limit: capability.output_limit,
             })
         })
         .collect()
@@ -801,6 +813,7 @@ pub(crate) fn capability_row_to_response(
         allow_cross_origin_credentials: row.allow_cross_origin_credentials,
         provider_params,
         context_limit: row.context_limit,
+        output_limit: row.output_limit,
         health,
         health_checked_at: row.health_checked_at,
         created_at: row.created_at,
@@ -826,6 +839,7 @@ mod tests {
             allow_cross_origin_credentials: false,
             provider_params: serde_json::json!({}),
             context_limit: None,
+            output_limit: None,
         }
     }
 

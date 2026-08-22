@@ -52,6 +52,7 @@ const manifest = (task: ModelTask): ModelProtocolManifest => ({
       supported_tasks: [task],
       executor: task === 'realtime_conversation' ? 'realtime_session' : 'model_invoke',
       transport: task === 'realtime_conversation' ? 'websocket' : 'http',
+      requires_output_ceiling: false,
       allowed_auth_schemes: ['bearer'],
       scopes: ['native'],
       platforms: ['stepfun'],
@@ -220,7 +221,38 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('data-effective-base-url="https://override.example.com/v1"')).toBe(true);
   });
 
-  test('puts the model type before one unified catalog and free-text model input', () => {    const html = render({ model: '', capabilities: [] }, manifests, 'bearer', [], {
+  test('shows the declared task next to the picker and unlocks the model input', () => {
+    // Regression: after picking a task the picker resets to its placeholder, so
+    // if nothing restates the declared set the form looks like it discarded the
+    // choice — and the user never reaches the model field, so saving is blocked
+    // on `model_required` with only a generic toast to explain it.
+    const html = render({ model: '', capabilities: [emptyCapabilityDraft('chat')] });
+
+    expect(html.includes('data-declared-tasks')).toBe(true);
+    expect(html.includes('data-declared-task="chat"')).toBe(true);
+    // Loud enough to be noticed: an explicit lead-in and a primary-coloured tag,
+    // not a bare grey chip under a Select.
+    expect(html.includes('已添加')).toBe(true);
+    const marker = html.indexOf('data-declared-tasks');
+    // The window spans the container's class attribute (rendered before the data
+    // attribute) and the tags that follow it.
+    const declaredRow = html.slice(Math.max(0, marker - 300), marker + 400);
+    expect(declaredRow.includes('arcoblue')).toBe(true);
+    expect(declaredRow.includes('bg-fill-1')).toBe(true);
+    // The declared task is stated inside the task section, before the model input.
+    expect(html.indexOf('data-declared-task="chat"')).toBeLessThan(
+      html.indexOf('data-unified-model-input')
+    );
+    // One task is enough to unlock the model field; the placeholder must no
+    // longer be the "pick a task first" prompt.
+    expect(html.includes('请先在上方选择任务')).toBe(false);
+    expect(html.includes('搜索目录模型，或直接输入官网模型 ID')).toBe(true);
+    // ...and the picker keeps offering the remaining eight tasks.
+    expect(html.includes('data-model-task-picker')).toBe(true);
+  });
+
+  test('puts the supported-task picker before one unified catalog and free-text model input', () => {
+    const html = render({ model: '', capabilities: [] }, manifests, 'bearer', [], {
       catalogSuggestions: [
         {
           value: 'chat-model',
@@ -237,12 +269,46 @@ describe('unified model definition editor rendering and interactions', () => {
       ],
     });
 
-    expect(html.indexOf('data-primary-model-task-picker')).toBeLessThan(
+    // The task picker must exist with zero capabilities: it is the only control
+    // that can create the first one, so gating it would deadlock the form.
+    expect(html.includes('data-model-task-picker')).toBe(true);
+    expect(html.indexOf('data-model-task-picker')).toBeLessThan(
       html.indexOf('data-unified-model-input')
     );
     expect(html.includes('data-model-catalog-picker')).toBe(false);
+    expect(html.includes('data-primary-model-task-picker')).toBe(false);
     expect(html.includes('disabled=""')).toBe(true);
-    expect(html.includes('请先选择模型类型')).toBe(true);
+    expect(html.includes('请先在上方选择任务')).toBe(true);
+  });
+
+  test('keeps traits answerable without expanding a capability card', () => {
+    const html = render({
+      model: 'step-ready',
+      capabilities: [
+        { ...emptyCapabilityDraft('chat'), transportSource: 'persisted' as const, protocol: 'stepfun.chat' },
+      ],
+    });
+
+    // Traits describe what the model can do — the same kind of question as the
+    // task itself. They must sit outside the collapsed transport details.
+    expect(html.includes('data-capability-traits="chat"')).toBe(true);
+    expect(html.indexOf('data-capability-traits="chat"')).toBeLessThan(
+      html.indexOf('data-capability-details="chat"')
+    );
+    expect(html.includes('data-capability-expanded="false"')).toBe(true);
+  });
+
+  test('groups both token ceilings under one heading', () => {
+    const html = render({
+      model: 'step-ready',
+      capabilities: [
+        { ...emptyCapabilityDraft('chat'), transportSource: 'persisted' as const, protocol: 'stepfun.chat' },
+      ],
+    });
+
+    expect(html.includes('data-token-limits')).toBe(true);
+    expect(html.includes('上下文窗口')).toBe(true);
+    expect(html.includes('最大输出 tokens')).toBe(true);
   });
 
   test('only exposes catalog models compatible with the selected primary type', () => {
@@ -283,6 +349,7 @@ describe('unified model definition editor rendering and interactions', () => {
       model: 'step-ready',
       capabilities: ['chat', 'video_generation'].map((task) => ({
         ...emptyCapabilityDraft(task as ModelTask),
+        transportSource: 'persisted' as const,
         protocol: `stepfun.${task}`,
       })),
     };
@@ -303,6 +370,7 @@ describe('unified model definition editor rendering and interactions', () => {
       model: 'step-needs-attention',
       capabilities: ['chat', 'video_generation', 'speech_synthesis'].map((task) => ({
         ...emptyCapabilityDraft(task as ModelTask),
+        transportSource: 'persisted' as const,
         protocol: `stepfun.${task}`,
       })),
     };
@@ -399,6 +467,49 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('header_key:&lt;name&gt;')).toBe(true);
   });
 
+  test('treats the backend-recommended Custom compatibility protocol as ready', () => {
+    const chatManifest = manifest('chat');
+    const customProtocol: ModelProtocolManifest['protocols'][number] = {
+      ...chatManifest.protocols[0],
+      protocol_id: 'openai.chat_text',
+      scopes: ['official_compat', 'custom'],
+      platforms: ['openai'],
+      default_connections: [],
+    };
+    const customManifest: ModelProtocolManifest = {
+      ...chatManifest,
+      preset: 'custom',
+      platform: 'custom',
+      platform_default_base_url: null,
+      requires_user_input: true,
+      recommendation: {
+        protocol_id: customProtocol.protocol_id,
+        connection_role: null,
+        default_base_url: null,
+        default_auth_scheme: 'bearer',
+        base_url_override_required: false,
+      },
+      protocols: [customProtocol],
+    };
+    const html = render(
+      {
+        model: 'gateway/model',
+        capabilities: [
+          {
+            ...emptyCapabilityDraft('chat'),
+            transportSource: 'recommendation',
+            protocol: customProtocol.protocol_id,
+          },
+        ],
+      },
+      { chat: customManifest }
+    );
+
+    expect(html.includes('默认配置已就绪')).toBe(true);
+    expect(html.includes('当前供应商推荐')).toBe(true);
+    expect(html.includes('data-generic-protocol-warning="true"')).toBe(false);
+  });
+
   /**
    * StepFun TTS rejects a request with no voice locally, so model management
    * has to offer the field. Before this control the only way to set one was to
@@ -454,5 +565,74 @@ describe('unified model definition editor rendering and interactions', () => {
       });
       expect(html.includes('默认音色')).toBe(false);
     }
+  });
+
+  test('shows Responses round chaining only for openai.responses and before raw provider params', () => {
+    const responsesManifest = manifest('chat');
+    responsesManifest.recommendation!.protocol_id = 'openai.responses';
+    responsesManifest.protocols[0] = {
+      ...responsesManifest.protocols[0],
+      protocol_id: 'openai.responses',
+      platforms: ['openai'],
+    };
+    const html = render(
+      {
+        model: 'gpt-5.4',
+        capabilities: [
+          {
+            ...emptyCapabilityDraft('chat'),
+            protocol: 'openai.responses',
+            providerParamsJson: '{"chain_rounds":true,"temperature":0.2}',
+          },
+        ],
+      },
+      { ...manifests, chat: responsesManifest }
+    );
+
+    const chainRounds = html.indexOf('data-chain-rounds-control="true"');
+    const rawParams = html.indexOf('data-provider-params-json="true"');
+    expect(chainRounds).toBeGreaterThan(-1);
+    expect(rawParams).toBeGreaterThan(chainRounds);
+    expect(html.includes('data-chain-rounds-enabled="true"')).toBe(true);
+    expect(html.includes('store: true')).toBe(true);
+    expect(html.includes('至少 30 天')).toBe(true);
+    expect(html.includes('不会减少计费的输入 tokens')).toBe(true);
+
+    const otherProtocol = render({
+      model: 'step-3.7-flash',
+      capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: 'stepfun.chat' }],
+    });
+    expect(otherProtocol.includes('data-chain-rounds-control')).toBe(false);
+  });
+
+  test('disables the Responses round-chaining checkbox while raw JSON is invalid', () => {
+    const responsesManifest = manifest('chat');
+    responsesManifest.recommendation!.protocol_id = 'openai.responses';
+    responsesManifest.protocols[0] = {
+      ...responsesManifest.protocols[0],
+      protocol_id: 'openai.responses',
+      platforms: ['openai'],
+    };
+    const html = render(
+      {
+        model: 'gpt-5.4',
+        capabilities: [
+          {
+            ...emptyCapabilityDraft('chat'),
+            protocol: 'openai.responses',
+            providerParamsJson: ' {"chain_rounds": tru',
+          },
+        ],
+      },
+      { ...manifests, chat: responsesManifest }
+    );
+    const start = html.indexOf('data-chain-rounds-control="true"');
+    const end = html.indexOf('data-provider-params-json="true"', start);
+    const control = html.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(control.includes('data-chain-rounds-json-valid="false"')).toBe(true);
+    expect(control.includes('disabled=""')).toBe(true);
+    expect(control.includes('修正后才能更改此选项')).toBe(true);
   });
 });

@@ -24,7 +24,7 @@ use crate::provider_deletion::SharedProviderDeletionCoordinator;
 use crate::provider_model::{
     capability_row_to_response, row_to_model_response, rows_to_model_responses,
     serialize_capabilities, validate_capability_auth_scheme, validate_capability_urls,
-    validate_context_limit, validate_protocol, validate_provider_params,
+    validate_positive_token_limit, validate_protocol, validate_provider_params,
 };
 
 #[derive(Clone)]
@@ -346,6 +346,7 @@ impl ProviderService {
                 allow_cross_origin_credentials: response.allow_cross_origin_credentials,
                 provider_params: response.provider_params,
                 context_limit: response.context_limit,
+                output_limit: response.output_limit,
             };
             validate_capability(
                 platform,
@@ -450,7 +451,8 @@ fn validate_capability(
     capability: &ProviderModelCapabilityInput,
 ) -> Result<(), AppError> {
     validate_protocol(platform, capability)?;
-    validate_context_limit(capability.context_limit)?;
+    validate_positive_token_limit("context_limit", capability.context_limit)?;
+    validate_positive_token_limit("output_limit", capability.output_limit)?;
     validate_provider_params(
         &capability.protocol,
         capability.task,
