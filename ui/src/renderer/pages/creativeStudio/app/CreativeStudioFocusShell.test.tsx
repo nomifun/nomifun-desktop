@@ -42,6 +42,21 @@ const renderFocusShell = (path = CREATIVE_STUDIO_ROOT_PATH) =>
   );
 
 describe('Creative Studio focus shell', () => {
+  test('keeps product overlays on the fixed focused palette', () => {
+    const css = readFileSync(
+      new URL('./CreativeStudioFocusShell.module.css', import.meta.url),
+      'utf8'
+    );
+
+    expect(css.includes('.portalRoot')).toBe(true);
+    expect(css.includes('--color-bg-1: #f4f2ed')).toBe(true);
+    expect(css.includes('--color-bg-popup: #fbfaf7')).toBe(true);
+    expect(css.includes('--dialog-fill-0: #f4f2ed')).toBe(true);
+    expect(css.includes('--nomi-modal-control-bg: #ffffff')).toBe(true);
+    expect(css.includes('--primary-6: 87, 83, 78')).toBe(true);
+    expect(css.includes('color-scheme: light')).toBe(true);
+  });
+
   test('coordinates shell navigation with every active product CAS gate', () => {
     const source = readFileSync(new URL('./CreativeStudioFocusShell.tsx', import.meta.url), 'utf8');
 

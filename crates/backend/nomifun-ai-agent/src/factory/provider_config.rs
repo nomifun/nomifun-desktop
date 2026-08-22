@@ -303,6 +303,37 @@ pub async fn one_shot_completion(
     streaming_completion(cfg, system, messages, max_tokens, |_| {}).await
 }
 
+/// Perform one provider completion while enforcing a hard UTF-8 output-byte
+/// budget across all visible text deltas.
+///
+/// `max_tokens` is only an upstream generation hint and cannot bound local
+/// memory. This variant checks each delta before appending it; on overflow it
+/// immediately drops the provider receiver so the cancellation chain can stop
+/// the active HTTP drain and any pending provider transport retry.
+pub async fn one_shot_completion_bounded(
+    cfg: &Config,
+    system: &str,
+    messages: Vec<Message>,
+    max_tokens: u32,
+    max_output_utf8_bytes: usize,
+) -> Result<String, AppError> {
+    let provider: Arc<dyn LlmProvider> = create_provider(cfg);
+    let request = LlmRequest {
+        model: cfg.model.clone(),
+        system: system.to_owned(),
+        messages,
+        tools: vec![],
+        max_tokens,
+        thinking: None,
+        reasoning_effort: None,
+    };
+    let rx = provider
+        .stream(&request)
+        .await
+        .map_err(provider_error_to_app_error)?;
+    drain_text_response_bounded(rx, max_output_utf8_bytes).await
+}
+
 /// Like [`one_shot_completion`] but invokes `on_delta` for every text chunk
 /// as it streams in, so callers can fan deltas out (e.g. over WebSocket)
 /// while the full reply is still being assembled.
@@ -398,6 +429,46 @@ async fn drain_text_response_with(
     }
 
     // Channel closed without a Done event
+    if output.is_empty() {
+        Err(AppError::BadGateway(
+            "LLM stream ended without producing a response".into(),
+        ))
+    } else {
+        Ok(output)
+    }
+}
+
+async fn drain_text_response_bounded(
+    mut rx: tokio::sync::mpsc::Receiver<LlmEvent>,
+    max_output_utf8_bytes: usize,
+) -> Result<String, AppError> {
+    let mut output = String::new();
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            LlmEvent::TextDelta(delta) => {
+                let within_limit = output
+                    .len()
+                    .checked_add(delta.len())
+                    .is_some_and(|next| next <= max_output_utf8_bytes);
+                if !within_limit {
+                    drop(rx);
+                    return Err(AppError::BadGateway(format!(
+                        "LLM response exceeded the {max_output_utf8_bytes}-byte output limit"
+                    )));
+                }
+                output.push_str(&delta);
+            }
+            LlmEvent::Done { .. } => return Ok(output),
+            LlmEvent::Error(message) => {
+                return Err(AppError::BadGateway(format!(
+                    "LLM stream error: {message}"
+                )));
+            }
+            _ => {}
+        }
+    }
+
     if output.is_empty() {
         Err(AppError::BadGateway(
             "LLM stream ended without producing a response".into(),
@@ -763,6 +834,34 @@ mod tests {
 
         let result = drain_text_response(rx).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn bounded_drain_rejects_multi_delta_utf8_overflow_and_drops_receiver() {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        tx.send(LlmEvent::TextDelta("ab".into())).await.unwrap();
+        tx.send(LlmEvent::TextDelta("你好".into())).await.unwrap();
+
+        let error = drain_text_response_bounded(rx, 7).await.unwrap_err();
+        assert!(matches!(error, AppError::BadGateway(_)));
+        assert!(error.to_string().contains("7-byte output limit"));
+        assert!(tx.is_closed(), "overflow must drop the provider receiver");
+    }
+
+    #[tokio::test]
+    async fn bounded_drain_accepts_exact_utf8_boundary_across_deltas() {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        tx.send(LlmEvent::TextDelta("ab".into())).await.unwrap();
+        tx.send(LlmEvent::TextDelta("你".into())).await.unwrap();
+        tx.send(LlmEvent::Done {
+            stop_reason: nomi_types::message::StopReason::EndTurn,
+            usage: nomi_types::message::TokenUsage::default(),
+        })
+        .await
+        .unwrap();
+
+        let result = drain_text_response_bounded(rx, 5).await.unwrap();
+        assert_eq!(result, "ab你");
     }
 
     #[test]

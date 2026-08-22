@@ -43,6 +43,56 @@ fn require_utf8_executable_path(path: &std::path::Path) -> anyhow::Result<String
     })
 }
 
+/// Stateless Creative Studio Workflow draft bridge.
+///
+/// This intentionally uses the provider factory's stateless completion
+/// surface: one exact managed Chat config, one user message, and a
+/// construction-time empty tool table. It creates no Conversation/Skill/MCP
+/// state and schedules no product-level retry or model failover. The selected
+/// provider may still perform its existing bounded transport negotiation while
+/// the downstream receiver remains live.
+pub(crate) struct AgentWorkflowDraftRunner {
+    pub model_invoke: Arc<nomifun_model_invoke::ModelInvokeService>,
+    pub workspace: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl nomifun_workshop::WorkflowDraftRunner for AgentWorkflowDraftRunner {
+    async fn run(
+        &self,
+        request: nomifun_workshop::WorkflowDraftRunRequest,
+    ) -> Result<String, nomifun_common::AppError> {
+        let completion = async {
+            let config = nomifun_ai_agent::resolve_provider_config(
+                self.model_invoke.as_ref(),
+                &request.provider_id,
+                &request.model,
+                &self.workspace,
+            )
+            .await?;
+            nomifun_ai_agent::one_shot_completion_bounded(
+                &config,
+                request.system_prompt,
+                vec![nomifun_ai_agent::user_message(request.user_text)],
+                nomifun_workshop::WORKFLOW_DRAFT_MAX_TOKENS,
+                nomifun_workshop::MAX_WORKFLOW_DRAFT_RESPONSE_BYTES,
+            )
+            .await
+        };
+
+        tokio::time::timeout(
+            Duration::from_secs(nomifun_workshop::WORKFLOW_DRAFT_TIMEOUT_SECS),
+            completion,
+        )
+        .await
+        .map_err(|_| {
+            nomifun_common::AppError::Timeout(
+                "Creative Studio workflow draft generation timed out".into(),
+            )
+        })?
+    }
+}
+
 /// Workshop text-node executor over the production Agent Chat stack.
 ///
 /// The selected model's persisted Chat capability is resolved by

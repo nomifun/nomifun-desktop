@@ -499,6 +499,17 @@ class StrictJsonScanner {
   }
 }
 
+/**
+ * Validate one JSON source before decoding it with `JSON.parse`.
+ *
+ * Besides JSON grammar and nesting limits, this rejects duplicate decoded
+ * object keys such as `"name"` plus `"\u006eame"`, which `JSON.parse` would
+ * otherwise silently collapse with last-write-wins semantics.
+ */
+export function assertStrictJsonWithoutDuplicateKeys(source: string): void {
+  new StrictJsonScanner(source).scan();
+}
+
 const artifactFromValue = (value: unknown): CreativeCanvasAgentArtifact | null => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const record = value as UnknownRecord;
@@ -559,7 +570,7 @@ export function parseCreativeCanvasAgentArtifact(
 
   let strictJson = true;
   try {
-    new StrictJsonScanner(jsonText).scan();
+    assertStrictJsonWithoutDuplicateKeys(jsonText);
   } catch {
     strictJson = false;
   }

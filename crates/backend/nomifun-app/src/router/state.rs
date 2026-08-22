@@ -1366,7 +1366,13 @@ pub fn build_webhook_state(services: &AppServices) -> WebhookRouterState {
 /// Build the Creative Studio router state, reusing the singleton project/asset
 /// service and its on-disk asset binaries.
 pub fn build_workshop_state(services: &AppServices) -> WorkshopRouterState {
-    WorkshopRouterState::new(services.workshop_service.clone())
+    WorkshopRouterState::new(
+        services.workshop_service.clone(),
+        Arc::new(crate::services::AgentWorkflowDraftRunner {
+            model_invoke: services.model_invoke_service.clone(),
+            workspace: services.data_dir.clone(),
+        }),
+    )
 }
 
 /// Build the 小程序 (mini-app) router state, reusing the singleton

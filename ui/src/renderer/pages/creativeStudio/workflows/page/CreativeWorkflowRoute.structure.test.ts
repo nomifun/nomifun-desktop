@@ -12,6 +12,10 @@ const page = readFileSync(
   new URL('./CreativeWorkflowWorkspacePage.tsx', import.meta.url),
   'utf8'
 );
+const agentModal = readFileSync(
+  new URL('./WorkflowAgentDraftModal.tsx', import.meta.url),
+  'utf8'
+);
 
 describe('Creative Workflow route composition', () => {
   test('uses the canonical repository and does not revive source local persistence', () => {
@@ -25,5 +29,18 @@ describe('Creative Workflow route composition', () => {
     expect(route.includes('useCreativeAssetPickerDialog')).toBe(true);
     expect(route.includes('initialSelectedIds: selectedAssetIds')).toBe(true);
     expect(route.includes("acceptedKinds: ['image']")).toBe(true);
+  });
+
+  test('wires the minimal one-shot Workflow draft through the model catalog and backend port', () => {
+    expect(route.includes('useNomiCreativeModelCatalog')).toBe(true);
+    expect(route.includes('workflowDraftPort')).toBe(true);
+    expect(route.includes('agentDraftPort={workflowDraftPort}')).toBe(true);
+    expect(route.includes('agentModelCatalog={modelCatalog}')).toBe(true);
+    expect(page.includes('<WorkflowAgentDraftModal')).toBe(true);
+    expect(page.includes('setEditing(workflow)')).toBe(true);
+    expect(page.includes('setEditingIsNew(true)')).toBe(true);
+    expect(agentModal.includes('repository.create')).toBe(false);
+    expect(agentModal.includes('repository.save')).toBe(false);
+    expect(agentModal.includes('conversation')).toBe(false);
   });
 });

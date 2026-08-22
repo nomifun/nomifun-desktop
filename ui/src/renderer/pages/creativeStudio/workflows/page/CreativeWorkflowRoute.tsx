@@ -11,6 +11,8 @@ import {
   creativeAssetClient,
   useCreativeAssetPickerDialog,
 } from '../../assets';
+import { useNomiCreativeModelCatalog } from '../../models';
+import { workflowDraftPort } from '../agent';
 import { useCreativeWorkflowRuntime } from '../runtime';
 import CreativeWorkflowWorkspacePage from './CreativeWorkflowWorkspacePage';
 import type { CreativeWorkflowRunnerPort } from './WorkflowRunModal';
@@ -19,6 +21,7 @@ const CreativeWorkflowRoute: React.FC = () => {
   const navigate = useNavigate();
   const { controller, snapshot } = useCreativeWorkflowRuntime();
   const assetPicker = useCreativeAssetPickerDialog();
+  const modelCatalog = useNomiCreativeModelCatalog();
   const runner = useMemo<CreativeWorkflowRunnerPort>(() => ({
     async start(input) {
       await controller.start(input);
@@ -28,6 +31,8 @@ const CreativeWorkflowRoute: React.FC = () => {
   return (
     <>
       <CreativeWorkflowWorkspacePage
+        agentDraftPort={workflowDraftPort}
+        agentModelCatalog={modelCatalog}
         runner={runner}
         runCenter={{
           snapshot,

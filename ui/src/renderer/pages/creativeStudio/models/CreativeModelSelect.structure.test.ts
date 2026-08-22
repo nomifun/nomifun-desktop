@@ -15,6 +15,8 @@ describe('CreativeModelSelect integration boundary', () => {
     expect(component.includes('catalog: CreativeModelCatalogSnapshot')).toBe(true);
     expect(component.includes('value: CreativeModelSelectionRef | null')).toBe(true);
     expect(component.includes('onChange: (selection: CreativeModelOption) => void')).toBe(true);
+    expect(component.includes('getPopupContainer?: () => HTMLElement')).toBe(true);
+    expect(component.includes('getPopupContainer={getPopupContainer}')).toBe(true);
     expect(component.includes('useProvidersQuery')).toBe(false);
   });
 

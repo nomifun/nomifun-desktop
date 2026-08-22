@@ -286,13 +286,56 @@ impl WorkshopService {
         self.workshop_dir().join("assets")
     }
 
-    async fn provider_read_guard(
+    pub(crate) async fn provider_read_guard(
         &self,
     ) -> Option<tokio::sync::RwLockReadGuard<'_, ()>> {
         match &self.provider_lifecycle {
             Some(barrier) => Some(barrier.read().await),
             None => None,
         }
+    }
+
+    /// Defense-in-depth for private Creative Studio endpoints. The app router
+    /// already applies the installation-owner middleware; keeping the same
+    /// check in the domain prevents a directly-mounted router from widening
+    /// the model invocation surface.
+    pub(crate) async fn require_creative_studio_owner(
+        &self,
+        owner_id: &str,
+    ) -> Result<(), AppError> {
+        UserId::parse(owner_id).map_err(|error| {
+            AppError::Forbidden(format!(
+                "Creative Studio owner is not canonical: {error}"
+            ))
+        })?;
+        if !self.repo.is_creative_studio_owner(owner_id).await? {
+            return Err(AppError::Forbidden(
+                "Creative Studio is restricted to the installation owner".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Require one exact, currently enabled Chat capability. Callers hold the
+    /// provider lifecycle read guard across this check and the model call so a
+    /// destructive Provider/model deletion cannot invalidate the selected
+    /// binding. Ordinary catalog updates are not serialized by this barrier;
+    /// the app resolver reads and freezes one config snapshot for the call.
+    pub(crate) async fn require_workflow_draft_chat_model(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<(), AppError> {
+        if !self
+            .repo
+            .provider_model_supports_task(provider_id, model, "chat")
+            .await?
+        {
+            return Err(AppError::Conflict(format!(
+                "Creative Studio workflow drafts require an enabled exact Chat capability for '{provider_id}/{model}'"
+            )));
+        }
+        Ok(())
     }
 
     /// Validate every durable Creative Studio config-node selection against
@@ -477,16 +520,7 @@ impl WorkshopService {
         title: Option<String>,
         agent_kickoff: Option<CreativeProjectAgentKickoff>,
     ) -> Result<CreativeProjectSummary, AppError> {
-        UserId::parse(owner_id).map_err(|error| {
-            AppError::Forbidden(format!(
-                "Creative Studio project owner is not canonical: {error}"
-            ))
-        })?;
-        if !self.repo.is_creative_studio_owner(owner_id).await? {
-            return Err(AppError::Forbidden(
-                "Creative Studio projects are restricted to the installation owner".to_owned(),
-            ));
-        }
+        self.require_creative_studio_owner(owner_id).await?;
         self.create_creative_project_inner(title, agent_kickoff)
             .await
     }

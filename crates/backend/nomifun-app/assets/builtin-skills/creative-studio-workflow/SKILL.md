@@ -5,8 +5,28 @@ description: Design strict NomiFun Creative Studio workflow drafts for user revi
 
 # Creative Studio Workflow Designer
 
-Translate the user's goal and supplied context into a clear workflow plan. Explain variables, prompt templates, steps, dependencies, output expectations, and any assumptions.
+Translate the user's goal into one small workflow draft for manual review. The product supports only `single-image` and `multi-image-series` drafts in this first release.
 
-Until the dedicated `nomifun.creative-studio.workflow-draft/v1` parser is present in the current product surface, return planning prose only. Do not disguise arbitrary JSON as an applicable draft. Never save or run a workflow, call a Provider, generate media, invent asset/model IDs, or claim persistence succeeded.
+You may write a short explanation first. Finish with exactly one lowercase `json` fenced block and no content after it. The JSON must have this exact shape and no additional keys:
 
-If a canvas-ops artifact is also appropriate, it must follow the Creative Studio canvas skill and remain a manually approved proposal.
+```text
+{
+  "kind": "nomifun.creative-studio.workflow-draft/v1",
+  "summary": "short user-facing summary",
+  "draft": {
+    "mode": "single-image",
+    "name": "workflow name",
+    "description": "short description",
+    "category": "short category",
+    "promptTemplate": "Create an image for {{product_name}} highlighting {{selling_points}}."
+  }
+}
+```
+
+Set `mode` to exactly `single-image` or `multi-image-series`.
+
+For `single-image`, use only `{{product_name}}` and `{{selling_points}}` placeholders. For `multi-image-series`, use only `{{topic}}`, `{{style}}`, and `{{platform}}`. Use at least one allowed placeholder. Do not nest placeholders or invent others.
+
+The product owns IDs, timestamps, revisions, visibility, tags, variables, and model bindings. Never include them in the draft. Visibility is private, and the user must explicitly apply the draft and save it in the editor.
+
+Do not disguise arbitrary JSON as an applicable draft. Never save or run a workflow, call another Provider, generate media, invent asset/model IDs, or claim persistence succeeded.

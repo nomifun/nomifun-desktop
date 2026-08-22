@@ -188,7 +188,14 @@ impl LlmProvider for AnthropicProvider {
         let redactor = nomifun_net::secret_redaction::SecretRedactor::new(&self.api_keys);
 
         tokio::spawn(async move {
-            let outcome = anthropic_shared::process_sse_stream(response, &tx).await;
+            let Some(outcome) = crate::retry::until_receiver_closed(
+                &tx,
+                anthropic_shared::process_sse_stream(response, &tx),
+            )
+            .await
+            else {
+                return;
+            };
             crate::retry::finish_stream_with_retry(
                 outcome,
                 &tx,

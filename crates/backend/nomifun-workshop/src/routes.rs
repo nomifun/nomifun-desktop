@@ -42,6 +42,7 @@ use crate::service::{
 };
 use crate::state::WorkshopRouterState;
 use crate::workflow::{CreativeWorkflowDefinitionV1, MAX_WORKFLOW_DEFINITION_BYTES};
+use crate::workflow_draft::workflow_draft_run_request;
 use crate::workflow_run::{
     CreativeWorkflowRunAggregateV1, CreativeWorkflowRunCreateRequest,
     MAX_WORKFLOW_RUN_AGGREGATE_BYTES,
@@ -127,6 +128,10 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         .route(
             "/api/creative-studio/prompts/sync",
             post(sync_prompt_catalog),
+        )
+        .route(
+            "/api/creative-studio/workflow-drafts",
+            post(create_workflow_draft),
         )
         .route(
             "/api/creative-studio/workflows",
@@ -409,6 +414,60 @@ async fn sync_prompt_catalog(
 }
 
 // ── canonical Creative Studio workflows ────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateWorkflowDraftRequest {
+    prompt: String,
+    model: CreateWorkflowDraftModel,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateWorkflowDraftModel {
+    provider_id: String,
+    model: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateWorkflowDraftResponse {
+    text: String,
+}
+
+/// Run one owner-only, stateless model completion. The provider lifecycle read
+/// guard spans exact capability validation and the live stream to fence
+/// destructive Provider/model deletion. Ordinary updates are not covered by
+/// this barrier; the app runner resolves and freezes one config snapshot.
+async fn create_workflow_draft(
+    State(state): State<WorkshopRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    body: Result<Json<CreateWorkflowDraftRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CreateWorkflowDraftResponse>>, AppError> {
+    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    state
+        .service
+        .require_creative_studio_owner(user.id.as_str())
+        .await?;
+    let run_request = workflow_draft_run_request(
+        request.prompt,
+        request.model.provider_id,
+        request.model.model,
+    )?;
+
+    let _provider_guard = state.service.provider_read_guard().await;
+    state
+        .service
+        .require_workflow_draft_chat_model(&run_request.provider_id, &run_request.model)
+        .await?;
+    let text = state.workflow_draft_runner.run(run_request).await?;
+    if text.trim().is_empty() {
+        return Err(AppError::BadGateway(
+            "workflow draft model returned an empty response".into(),
+        ));
+    }
+    Ok(Json(ApiResponse::ok(CreateWorkflowDraftResponse { text })))
+}
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -943,7 +1002,7 @@ async fn serve_file(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use nomifun_common::{CreativeStudioNodeId, MessageId, ProviderId, UserId};
     use nomifun_db::{IWorkshopRepository, SqliteWorkshopRepository};
@@ -951,12 +1010,64 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::WorkshopService;
+    use crate::{WorkshopService, WorkflowDraftRunRequest, WorkflowDraftRunner};
     use crate::workflow::{
         CreativeWorkflowMetadata, CreativeWorkflowOutputPlan, CreativeWorkflowPromptSource,
         CreativeWorkflowStep, CreativeWorkflowTemplate, CreativeWorkflowTemplateSegment,
         CreativeWorkflowVariable, CreativeWorkflowVisibility,
     };
+
+    struct RecordingWorkflowDraftRunner {
+        calls: Mutex<Vec<WorkflowDraftRunRequest>>,
+        response: String,
+    }
+
+    impl RecordingWorkflowDraftRunner {
+        fn new(response: impl Into<String>) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                response: response.into(),
+            }
+        }
+
+        fn calls(&self) -> Vec<WorkflowDraftRunRequest> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowDraftRunner for RecordingWorkflowDraftRunner {
+        async fn run(&self, request: WorkflowDraftRunRequest) -> Result<String, AppError> {
+            self.calls.lock().unwrap().push(request);
+            Ok(self.response.clone())
+        }
+    }
+
+    struct BlockingWorkflowDraftRunner {
+        calls: Mutex<Vec<WorkflowDraftRunRequest>>,
+        entered: tokio::sync::Semaphore,
+        release: tokio::sync::Semaphore,
+    }
+
+    impl BlockingWorkflowDraftRunner {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                entered: tokio::sync::Semaphore::new(0),
+                release: tokio::sync::Semaphore::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowDraftRunner for BlockingWorkflowDraftRunner {
+        async fn run(&self, request: WorkflowDraftRunRequest) -> Result<String, AppError> {
+            self.calls.lock().unwrap().push(request);
+            self.entered.add_permits(1);
+            self.release.acquire().await.unwrap().forget();
+            Ok("```json\n{\"kind\":\"nomifun.creative-studio.workflow-draft/v1\"}\n```".into())
+        }
+    }
 
     async fn test_state() -> (WorkshopRouterState, CurrentUser, tempfile::TempDir) {
         let (state, user, data_dir, _database) = test_state_with_database().await;
@@ -964,6 +1075,20 @@ mod tests {
     }
 
     async fn test_state_with_database() -> (
+        WorkshopRouterState,
+        CurrentUser,
+        tempfile::TempDir,
+        Arc<nomifun_db::Database>,
+    ) {
+        test_state_with_database_and_runner(Arc::new(RecordingWorkflowDraftRunner::new(
+            "unused workflow draft",
+        )))
+        .await
+    }
+
+    async fn test_state_with_database_and_runner(
+        workflow_draft_runner: Arc<dyn WorkflowDraftRunner>,
+    ) -> (
         WorkshopRouterState,
         CurrentUser,
         tempfile::TempDir,
@@ -981,7 +1106,12 @@ mod tests {
             id: UserId::parse(owner_id).unwrap(),
             username: "owner".into(),
         };
-        (WorkshopRouterState::new(service), user, data_dir, database)
+        (
+            WorkshopRouterState::new(service, workflow_draft_runner),
+            user,
+            data_dir,
+            database,
+        )
     }
 
     fn workflow_definition() -> CreativeWorkflowDefinitionV1 {
@@ -1124,6 +1254,56 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    async fn post_workflow_draft(app: &Router, body: Value) -> Response {
+        app.clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/creative-studio/workflow-drafts")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct WorkflowDraftPersistenceCounts {
+        conversations: i64,
+        messages: i64,
+        projects: i64,
+        workflows: i64,
+        workflow_runs: i64,
+        agent_sessions: i64,
+        proposal_receipts: i64,
+        creation_tasks: i64,
+        assets: i64,
+    }
+
+    async fn workflow_draft_persistence_counts(
+        database: &nomifun_db::Database,
+    ) -> WorkflowDraftPersistenceCounts {
+        async fn count(database: &nomifun_db::Database, table: &str) -> i64 {
+            let query = format!("SELECT COUNT(*) FROM {table}");
+            nomifun_db::sqlx::query_scalar(&query)
+                .fetch_one(database.pool())
+                .await
+                .unwrap()
+        }
+        WorkflowDraftPersistenceCounts {
+            conversations: count(database, "conversations").await,
+            messages: count(database, "messages").await,
+            projects: count(database, "creative_studio_projects").await,
+            workflows: count(database, "creative_studio_workflows").await,
+            workflow_runs: count(database, "creative_studio_workflow_runs").await,
+            agent_sessions: count(database, "creative_studio_agent_sessions").await,
+            proposal_receipts: count(database, "creative_studio_agent_proposal_receipts").await,
+            creation_tasks: count(database, "creation_tasks").await,
+            assets: count(database, "workshop_assets").await,
+        }
     }
 
     async fn seed_enabled_chat_model(
@@ -1682,6 +1862,219 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(receipt_count, 0);
+    }
+
+    #[tokio::test]
+    async fn workflow_draft_route_runs_one_exact_stateless_completion_without_persisting() {
+        let artifact = r#"```json
+{"kind":"nomifun.creative-studio.workflow-draft/v1","summary":"三张社交海报","draft":{"mode":"multi-image-series","name":"社交海报组","description":"同一主题的三张海报","category":"社交媒体","promptTemplate":"为 {{topic}} 设计 {{style}} 风格的 {{platform}} 海报"}}
+```"#;
+        let runner = Arc::new(RecordingWorkflowDraftRunner::new(artifact));
+        let (state, owner, _data_dir, database) =
+            test_state_with_database_and_runner(runner.clone()).await;
+        let provider_id = ProviderId::new().into_string();
+        seed_enabled_chat_model(&database, &provider_id, "chat-model").await;
+        let before = workflow_draft_persistence_counts(&database).await;
+        let app = workshop_routes(state).layer(Extension(owner));
+
+        let response = post_workflow_draft(
+            &app,
+            serde_json::json!({
+                "prompt": "  设计三张统一风格的社交媒体海报  ",
+                "model": {
+                    "providerId": provider_id,
+                    "model": "chat-model"
+                }
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = response_json(response).await;
+        assert_eq!(response["data"]["text"], artifact);
+        assert_eq!(response["data"].as_object().unwrap().len(), 1);
+
+        let calls = runner.calls();
+        assert_eq!(
+            calls.len(),
+            1,
+            "one route request must invoke the product runner once"
+        );
+        assert_eq!(calls[0].provider_id, provider_id);
+        assert_eq!(calls[0].model, "chat-model");
+        assert_eq!(calls[0].user_text, "设计三张统一风格的社交媒体海报");
+        assert_eq!(
+            calls[0].system_prompt,
+            crate::workflow_draft::WORKFLOW_DRAFT_SYSTEM_PROMPT
+        );
+        assert!(calls[0]
+            .system_prompt
+            .contains("nomifun.creative-studio.workflow-draft/v1"));
+        assert!(calls[0].system_prompt.contains("{{product_name}}"));
+        assert!(calls[0].system_prompt.contains("{{topic}}"));
+        assert!(calls[0].system_prompt.contains("Never save or run a workflow"));
+
+        let after = workflow_draft_persistence_counts(&database).await;
+        assert_eq!(after, before, "draft completion must not persist product state");
+    }
+
+    #[tokio::test]
+    async fn workflow_draft_route_rejects_owner_body_and_catalog_failures_before_runner() {
+        let runner = Arc::new(RecordingWorkflowDraftRunner::new("must not run"));
+        let (state, owner, _data_dir, database) =
+            test_state_with_database_and_runner(runner.clone()).await;
+        let provider_id = ProviderId::new().into_string();
+        seed_enabled_chat_model(&database, &provider_id, "chat-model").await;
+        let before = workflow_draft_persistence_counts(&database).await;
+        let valid = || {
+            serde_json::json!({
+                "prompt": "设计一张产品海报",
+                "model": {
+                    "providerId": provider_id,
+                    "model": "chat-model"
+                }
+            })
+        };
+
+        let non_owner_app = workshop_routes(state.clone()).layer(Extension(CurrentUser {
+            id: UserId::new(),
+            username: "not-owner".into(),
+        }));
+        let non_owner = post_workflow_draft(&non_owner_app, valid()).await;
+        assert_eq!(non_owner.status(), StatusCode::FORBIDDEN);
+
+        let app = workshop_routes(state).layer(Extension(owner));
+        let rejected = [
+            serde_json::json!({
+                "prompt": " \r\n ",
+                "model": { "providerId": provider_id, "model": "chat-model" }
+            }),
+            serde_json::json!({
+                "prompt": "😀".repeat(
+                    crate::workflow_draft::MAX_WORKFLOW_DRAFT_PROMPT_UTF16 / 2 + 1
+                ),
+                "model": { "providerId": provider_id, "model": "chat-model" }
+            }),
+            serde_json::json!({
+                "prompt": "设计海报",
+                "model": { "providerId": "not-a-provider", "model": "chat-model" }
+            }),
+            serde_json::json!({
+                "prompt": "设计海报",
+                "model": { "providerId": provider_id, "model": " chat-model " }
+            }),
+            serde_json::json!({
+                "prompt": "设计海报",
+                "model": {
+                    "providerId": provider_id,
+                    "model": "m".repeat(
+                        crate::workflow_draft::MAX_WORKFLOW_DRAFT_MODEL_UTF16 + 1
+                    )
+                }
+            }),
+            serde_json::json!({
+                "prompt": "设计海报",
+                "model": {
+                    "providerId": provider_id,
+                    "model": "chat-model",
+                    "useModel": "client-controlled"
+                }
+            }),
+            serde_json::json!({
+                "prompt": "设计海报",
+                "model": { "providerId": provider_id, "model": "chat-model" },
+                "history": []
+            }),
+        ];
+        for body in rejected {
+            let response = post_workflow_draft(&app, body).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+
+        let missing_exact = post_workflow_draft(
+            &app,
+            serde_json::json!({
+                "prompt": "设计海报",
+                "model": { "providerId": provider_id, "model": "other-model" }
+            }),
+        )
+        .await;
+        assert_eq!(missing_exact.status(), StatusCode::CONFLICT);
+
+        nomifun_db::sqlx::query(
+            "UPDATE provider_models SET enabled = 0 WHERE provider_id = ? AND model = ?",
+        )
+        .bind(&provider_id)
+        .bind("chat-model")
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let disabled = post_workflow_draft(&app, valid()).await;
+        assert_eq!(disabled.status(), StatusCode::CONFLICT);
+
+        assert!(
+            runner.calls().is_empty(),
+            "authorization, input, and catalog failures must precede model invocation"
+        );
+        let after = workflow_draft_persistence_counts(&database).await;
+        assert_eq!(after, before, "rejected drafts must not persist product state");
+    }
+
+    #[tokio::test]
+    async fn workflow_draft_route_blocks_provider_deletion_guard_through_completion() {
+        let database = Arc::new(nomifun_db::init_database_memory().await.unwrap());
+        let repo: Arc<dyn IWorkshopRepository> = Arc::new(SqliteWorkshopRepository::new(
+            database.pool().clone(),
+        ));
+        let data_dir = tempfile::tempdir().unwrap();
+        let provider_lifecycle = Arc::new(nomifun_common::ProviderLifecycleBarrier::new());
+        let service = WorkshopService::start_with_provider_lifecycle(
+            data_dir.path(),
+            repo,
+            provider_lifecycle.clone(),
+        );
+        let runner = Arc::new(BlockingWorkflowDraftRunner::new());
+        let owner_id = nomifun_db::installation_owner_id(database.pool())
+            .await
+            .unwrap();
+        let owner = CurrentUser {
+            id: UserId::parse(owner_id).unwrap(),
+            username: "owner".into(),
+        };
+        let provider_id = ProviderId::new().into_string();
+        seed_enabled_chat_model(&database, &provider_id, "chat-model").await;
+        let app = workshop_routes(WorkshopRouterState::new(service, runner.clone()))
+            .layer(Extension(owner));
+
+        let response_task = tokio::spawn(async move {
+            post_workflow_draft(
+                &app,
+                serde_json::json!({
+                    "prompt": "设计产品海报",
+                    "model": { "providerId": provider_id, "model": "chat-model" }
+                }),
+            )
+            .await
+        });
+        runner.entered.acquire().await.unwrap().forget();
+
+        let mut writer = tokio::spawn(async move {
+            let _guard = provider_lifecycle.write().await;
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut writer)
+                .await
+                .is_err(),
+            "destructive provider deletion must wait for the in-flight completion"
+        );
+
+        runner.release.add_permits(1);
+        let response = response_task.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        tokio::time::timeout(std::time::Duration::from_secs(1), writer)
+            .await
+            .expect("provider deletion guard remained blocked after completion")
+            .unwrap();
+        assert_eq!(runner.calls.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
