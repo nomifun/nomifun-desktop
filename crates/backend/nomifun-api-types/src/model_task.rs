@@ -147,7 +147,10 @@ fn verified_provider_profile(
             | "chatgpt-image-latest" => Some((vec![ImageGeneration, ImageEdit], vec![])),
             "dall-e-2" => Some((vec![ImageGeneration, ImageEdit], vec![])),
             "dall-e-3" => Some((vec![ImageGeneration], vec![])),
-            _ if base.starts_with("sora-2") => Some((vec![VideoGeneration], vec![])),
+            // `sora-*` is deliberately absent: OpenAI shuts the Sora video API
+            // down permanently on 2026-09-24 with no successor path, so
+            // classifying it as a video model would only steer users into a
+            // capability that has no preset route left (`routes_table.rs`).
             _ => None,
         },
         "xai" => match base.as_str() {
@@ -228,17 +231,20 @@ fn verified_provider_profile(
             _ => None,
         },
         "moonshot-cn" | "moonshot-global" => match base.as_str() {
+            // No `VideoInput`: Moonshot documents only image input, and this
+            // repo has no video content part to send anyway (`ContentBlock` has
+            // no video variant and the chat path emits only text and
+            // `image_url`), so declaring it produced a badge that meant nothing.
             "kimi-k3" | "kimi-k2.6" | "kimi-k2.5" => Some((
                 vec![Chat],
-                vec![
-                    ModelTrait::VisionInput,
-                    ModelTrait::VideoInput,
-                    ModelTrait::Streaming,
-                ],
+                vec![ModelTrait::VisionInput, ModelTrait::Streaming],
             )),
-            "kimi-k2.7-code" | "kimi-k2.7-code-highspeed" => {
-                Some((vec![Chat], vec![ModelTrait::Streaming]))
-            }
+            // The code models accept images too; omitting `VisionInput` made the
+            // app silently drop attachments the vendor would have accepted.
+            "kimi-k2.7-code" | "kimi-k2.7-code-highspeed" => Some((
+                vec![Chat],
+                vec![ModelTrait::VisionInput, ModelTrait::Streaming],
+            )),
             _ if base.contains("vision-preview") => Some((
                 vec![Chat],
                 vec![ModelTrait::VisionInput, ModelTrait::Streaming],
@@ -539,13 +545,19 @@ mod tests {
             let (tasks, traits) = infer_catalog_tasks_and_traits("moonshot-global", model);
             assert_eq!(tasks, vec![ModelTask::Chat], "{model}");
             assert!(traits.contains(&ModelTrait::VisionInput), "{model}");
-            assert!(traits.contains(&ModelTrait::VideoInput), "{model}");
+            // No VideoInput: this repo cannot send a video content part, so the
+            // trait was a badge with nothing behind it.
+            assert!(!traits.contains(&ModelTrait::VideoInput), "{model}");
             assert!(traits.contains(&ModelTrait::Streaming), "{model}");
         }
 
-        let (_, code_traits) = infer_catalog_tasks_and_traits("moonshot-cn", "kimi-k2.7-code");
-        assert!(!code_traits.contains(&ModelTrait::VisionInput));
-        assert!(!code_traits.contains(&ModelTrait::VideoInput));
+        // The code models do accept images; omitting the trait made the app
+        // silently drop attachments Moonshot would have accepted.
+        for model in ["kimi-k2.7-code", "kimi-k2.7-code-highspeed"] {
+            let (_, code_traits) = infer_catalog_tasks_and_traits("moonshot-cn", model);
+            assert!(code_traits.contains(&ModelTrait::VisionInput), "{model}");
+            assert!(!code_traits.contains(&ModelTrait::VideoInput), "{model}");
+        }
     }
 
     #[test]
@@ -556,7 +568,10 @@ mod tests {
 
     #[test]
     fn video_generation() {
-        assert!(tasks_of("openai", "sora-2").contains(&ModelTask::VideoGeneration));
+        assert!(tasks_of("ark", "seedance-1.0-pro").contains(&ModelTask::VideoGeneration));
+        // OpenAI's Sora API shuts down permanently on 2026-09-24 and has no
+        // preset route left, so it must not be steered into VideoGeneration.
+        assert!(!tasks_of("openai", "sora-2").contains(&ModelTask::VideoGeneration));
     }
 
     #[test]
