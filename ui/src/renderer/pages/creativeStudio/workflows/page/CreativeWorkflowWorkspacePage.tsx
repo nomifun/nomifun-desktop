@@ -41,6 +41,7 @@ import WorkflowRunCenter, {
 import {
   createBlankWorkflow,
   duplicateWorkflow,
+  withPrivateWorkflowVisibility,
   workflowOutputLabel,
   workflowPromptPreview,
 } from './workflowViewModel';
@@ -117,12 +118,6 @@ const WorkflowCard: React.FC<{
               {workflowOutputLabel(workflow.output)}
             </span>
             <span className={styles.chip}>{workflow.variables.length} 个变量</span>
-            <span
-              className={styles.chip}
-              data-tone={workflow.metadata.visibility === 'public' ? 'blue' : undefined}
-            >
-              {workflow.metadata.visibility === 'public' ? '公开' : '个人'}
-            </span>
           </div>
         </div>
         <Button
@@ -258,13 +253,14 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
   }, [category, query, workflows]);
 
   const beginCreate = (mode: 'single-image' | 'multi-image-series') => {
-    setEditing(createBlankWorkflow(mode));
+    setEditing(withPrivateWorkflowVisibility(createBlankWorkflow(mode)));
     setEditingIsNew(true);
   };
 
   const saveEditing = async () => {
     if (!editing || action) return;
-    const validation = validateWorkflowDefinition(editing);
+    const privateEditing = withPrivateWorkflowVisibility(editing);
+    const validation = validateWorkflowDefinition(privateEditing);
     if (!validation.ok) {
       Message.error(`${validation.error.path}: ${validation.error.message}`);
       return;
@@ -272,10 +268,10 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
     setAction('save');
     try {
       const saved = editingIsNew
-        ? await repository.create({ ...editing, revision: 1 })
-        : await repository.save(editing.id, editing.revision, {
-            ...editing,
-            revision: editing.revision + 1,
+        ? await repository.create({ ...privateEditing, revision: 1 })
+        : await repository.save(privateEditing.id, privateEditing.revision, {
+            ...privateEditing,
+            revision: privateEditing.revision + 1,
           });
       setWorkflows((current) => upsertWorkflow(current, saved));
       setEditing(null);
@@ -292,7 +288,9 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
     if (action) return;
     setAction('copy');
     try {
-      const created = await repository.create(duplicateWorkflow(workflow));
+      const created = await repository.create(
+        withPrivateWorkflowVisibility(duplicateWorkflow(workflow))
+      );
       setWorkflows((current) => upsertWorkflow(current, created));
       Message.success('工作流副本已创建');
     } catch (error) {
@@ -418,7 +416,9 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
                 disabled={action !== null}
                 onRun={() => setRunning(cloneWorkflowDefinition(workflow))}
                 onEdit={() => {
-                  setEditing(cloneWorkflowDefinition(workflow));
+                  setEditing(
+                    withPrivateWorkflowVisibility(cloneWorkflowDefinition(workflow))
+                  );
                   setEditingIsNew(false);
                 }}
                 onCopy={() => void copyWorkflow(workflow)}
@@ -437,7 +437,7 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
           catalog={agentModelCatalog}
           port={agentDraftPort}
           onApply={(workflow) => {
-            setEditing(workflow);
+            setEditing(withPrivateWorkflowVisibility(workflow));
             setEditingIsNew(true);
             setAgentDraftOpen(false);
           }}
@@ -449,7 +449,7 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
         workflow={editing}
         isNew={editingIsNew}
         saving={action === 'save'}
-        onChange={setEditing}
+        onChange={(workflow) => setEditing(withPrivateWorkflowVisibility(workflow))}
         onCancel={() => {
           if (action !== 'save') {
             setEditing(null);

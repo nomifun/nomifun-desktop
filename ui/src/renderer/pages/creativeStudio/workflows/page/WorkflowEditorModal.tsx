@@ -255,7 +255,11 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
   const output = workflow.output;
   const promptPlanning = draftPromptsStep(workflow)?.planning ?? null;
 
-  const patchMetadata = (patch: Partial<WorkflowDefinitionV1['metadata']>) =>
+  const patchMetadata = (
+    patch: Partial<
+      Pick<WorkflowDefinitionV1['metadata'], 'name' | 'description' | 'category'>
+    >
+  ) =>
     onChange({ ...workflow, metadata: { ...workflow.metadata, ...patch } });
 
   return (
@@ -277,25 +281,7 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
       <div className={styles.editorGrid} data-workflow-editor>
         <div className={styles.editorMain}>
           <section className={styles.editorSection}>
-            <div className={styles.sectionHeadingRow}>
-              <h3>基础信息</h3>
-              <div className={styles.visibilitySwitch} aria-label='可见范围'>
-                <button
-                  type='button'
-                  data-active={workflow.metadata.visibility === 'private' || undefined}
-                  onClick={() => patchMetadata({ visibility: 'private' })}
-                >
-                  个人
-                </button>
-                <button
-                  type='button'
-                  data-active={workflow.metadata.visibility === 'public' || undefined}
-                  onClick={() => patchMetadata({ visibility: 'public' })}
-                >
-                  公开
-                </button>
-              </div>
-            </div>
+            <h3>基础信息</h3>
             <Input
               value={workflow.metadata.name}
               placeholder='工作流名称'

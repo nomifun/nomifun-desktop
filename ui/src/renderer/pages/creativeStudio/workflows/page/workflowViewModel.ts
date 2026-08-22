@@ -230,6 +230,18 @@ export function createBlankWorkflow(mode: WorkflowEditorMode): WorkflowDefinitio
   };
 }
 
+export function withPrivateWorkflowVisibility(
+  workflow: WorkflowDefinitionV1
+): WorkflowDefinitionV1 {
+  return {
+    ...workflow,
+    metadata: {
+      ...workflow.metadata,
+      visibility: 'private',
+    },
+  };
+}
+
 export function workflowMode(workflow: WorkflowDefinitionV1): WorkflowEditorMode {
   return workflow.output.kind;
 }
@@ -417,6 +429,7 @@ export function duplicateWorkflow(workflow: WorkflowDefinitionV1): WorkflowDefin
   next.metadata = {
     ...next.metadata,
     name: `${next.metadata.name} 副本`,
+    visibility: 'private',
     createdAt: 0,
     updatedAt: 0,
   };
