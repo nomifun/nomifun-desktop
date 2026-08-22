@@ -46,13 +46,13 @@ export interface CreativeStudioTopBarProps {
 }
 
 interface NavigationItem {
-  section: Exclude<CreativeStudioSection, 'home' | 'canvas' | 'director'>;
+  section: Exclude<CreativeStudioSection, 'home' | 'canvas' | 'director' | 'workflows'>;
   path: string;
   label: string;
   icon: React.ReactNode;
 }
 
-/** Source product navigation for every standalone Creative Studio destination. */
+/** Source product's five-item top-level navigation; workflows stays canvas-reachable. */
 const CreativeStudioTopBar: React.FC<CreativeStudioTopBarProps> = ({
   title,
   backLabel,
