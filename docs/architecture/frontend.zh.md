@@ -106,7 +106,9 @@ export function getBaseUrl(): string {
 
 路由表的顶层条目涵盖会话运行时（`/guid`、`/conversation/:id`）、模型（`/models`）、设定（`/presets`）、技能（`/skills`）、MCP（`/mcp`）、开放能力（`/open-capabilities`）、终端（`/terminal-new`、`/terminal/:id`）、需求/AutoWork（`/requirements/*`、`/autowork` redirect）、定时任务（`/scheduled`、`/scheduled/:job_id`）、桌面伙伴（`/nomi` 配置页、`/companion` 桌面窗口）、知识库（`/knowledge`、`/knowledge/:id`）、小程序（`/mini-apps` 库页面、`/mini-apps/:id` 单栏运行页：`MiniAppFrame` 直出已发布快照 + 工具栏，「继续迭代」置备工作副本后落地普通 `/conversation/:id`，页面本身不挂载任何会话 UI）以及认证（`/login`）。旧 settings 路径只作为重定向保留。Agent 协作不建立独立路由或单独页面；AgentExecution 投影直接显示在所属 Conversation 内，避免导航层再产生一个产品对象。
 
-创意工坊使用全屏聚焦外壳，不进入普通应用侧边栏布局。其子路由如下：
+创意工坊位于普通应用布局内，复用默认标题栏的回退、前进、侧栏开关与系统窗口控制；
+进入产品后，左侧主侧栏会像“设置”一样切换为创意工坊内部导航，并把“返回工作台”
+固定在底部。其子路由如下：
 
 | 路由 | 用户界面 |
 | --- | --- |

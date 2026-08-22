@@ -24,6 +24,7 @@ import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useNavigationHistory } from '@/renderer/hooks/context/NavigationHistoryContext';
 import { isDesktopShell, isMacOS } from '@/renderer/utils/platform';
 import { parseSessionRoute } from '@/renderer/utils/routes/sessionRoute';
+import { requestCreativeStudioBeforeLeave } from '@renderer/pages/creativeStudio/app/beforeLeave';
 import './titlebar.css';
 
 interface TitlebarProps {
@@ -180,13 +181,22 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
     dispatchWorkspaceToggleEvent(activeWorkspaceTarget);
   };
 
+  const navigateAfterCreativeStudioFlush = (action: () => void) => {
+    void (async () => {
+      if (!(await requestCreativeStudioBeforeLeave())) return;
+      action();
+    })();
+  };
+
   const handleBackToChat = () => {
-    const target = lastNonSettingsPathRef.current;
-    if (target && !target.startsWith('/settings')) {
-      void navigate(target);
-      return;
-    }
-    void navigate(-1);
+    navigateAfterCreativeStudioFlush(() => {
+      const target = lastNonSettingsPathRef.current;
+      if (target && !target.startsWith('/settings')) {
+        void navigate(target);
+        return;
+      }
+      void navigate(-1);
+    });
   };
 
   // Windows/Linux: double-clicking the titlebar drag region toggles maximize,
@@ -345,14 +355,14 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
             {renderIconButton({
               tooltip: historyBackTooltip,
               className: 'app-titlebar__button app-titlebar__button--nav',
-              onClick: () => navigationHistory?.back(),
+              onClick: () => navigateAfterCreativeStudioFlush(() => navigationHistory?.back()),
               disabled: !navigationHistory?.canBack,
               children: <ArrowLeft theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />,
             })}
             {renderIconButton({
               tooltip: historyForwardTooltip,
               className: 'app-titlebar__button app-titlebar__button--nav',
-              onClick: () => navigationHistory?.forward(),
+              onClick: () => navigateAfterCreativeStudioFlush(() => navigationHistory?.forward()),
               disabled: !navigationHistory?.canForward,
               children: <ArrowRight theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />,
             })}
@@ -364,13 +374,14 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
             {renderIconButton({
               tooltip: t('terminal.newConversation'),
               className: 'app-titlebar__button app-titlebar__button--nav',
-              onClick: () => navigate('/guid', { state: { resetPreset: true } }),
+              onClick: () =>
+                navigateAfterCreativeStudioFlush(() => navigate('/guid', { state: { resetPreset: true } })),
               children: <Plus theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />,
             })}
             {renderIconButton({
               tooltip: t('terminal.newTerminal'),
               className: 'app-titlebar__button app-titlebar__button--nav',
-              onClick: () => navigate('/terminal-new'),
+              onClick: () => navigateAfterCreativeStudioFlush(() => navigate('/terminal-new')),
               children: <Terminal theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />,
             })}
           </>

@@ -161,20 +161,20 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
         {/* The desktop-companion window route: fullscreen transparent, no app layout/sidebar. */}
         <Route path='/companion' element={withRouteFallback(CompanionPage)} />
         <Route element={<ProtectedAppRuntime />}>
-          {/* Creative Studio is a focused product: no workbench rail, shortcuts, or pull-to-refresh shell. */}
-          <Route path={CREATIVE_STUDIO_ROOT_PATH} element={withRouteFallback(CreativeStudioFocusShell)}>
-            <Route index element={withRouteFallback(CreativeStudioHomePage)} />
-            <Route path='projects' element={withRouteFallback(CreativeStudioProjectsRoute)} />
-            <Route path='canvas/:projectId' element={withRouteFallback(CreativeStudioCanvasRoute)} />
-            <Route path='director/:projectId' element={withRouteFallback(CreativeStudioDirectorRoute)} />
-            <Route path='image' element={withRouteFallback(CreativeStudioImageWorkbenchRoute)} />
-            <Route path='video' element={withRouteFallback(CreativeStudioVideoWorkbenchRoute)} />
-            <Route path='prompts' element={withRouteFallback(CreativeStudioPromptsRoute)} />
-            <Route path='assets' element={withRouteFallback(CreativeStudioAssetsRoute)} />
-            <Route path='workflows' element={withRouteFallback(CreativeStudioWorkflowRoute)} />
-          </Route>
           <Route element={layout}>
             <Route index element={<Navigate to='/guid' replace />} />
+            {/* Creative Studio reuses the application titlebar and swaps the primary rail like Settings. */}
+            <Route path={CREATIVE_STUDIO_ROOT_PATH} element={withRouteFallback(CreativeStudioFocusShell)}>
+              <Route index element={withRouteFallback(CreativeStudioHomePage)} />
+              <Route path='projects' element={withRouteFallback(CreativeStudioProjectsRoute)} />
+              <Route path='canvas/:projectId' element={withRouteFallback(CreativeStudioCanvasRoute)} />
+              <Route path='director/:projectId' element={withRouteFallback(CreativeStudioDirectorRoute)} />
+              <Route path='image' element={withRouteFallback(CreativeStudioImageWorkbenchRoute)} />
+              <Route path='video' element={withRouteFallback(CreativeStudioVideoWorkbenchRoute)} />
+              <Route path='prompts' element={withRouteFallback(CreativeStudioPromptsRoute)} />
+              <Route path='assets' element={withRouteFallback(CreativeStudioAssetsRoute)} />
+              <Route path='workflows' element={withRouteFallback(CreativeStudioWorkflowRoute)} />
+            </Route>
             {/* Models, presets, skills, and MCP are independent top-level capabilities. */}
             <Route path='/models' element={withRouteFallback(ModelHubPage)} />
             <Route path='/extensions' element={<LegacyExtensionsRedirect />} />

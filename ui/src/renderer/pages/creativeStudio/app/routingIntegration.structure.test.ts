@@ -10,7 +10,14 @@ import { readFileSync } from 'node:fs';
 const router = readFileSync(new URL('../../../components/layout/Router.tsx', import.meta.url), 'utf8');
 
 describe('Creative Studio product route integration', () => {
-  test('mounts every implemented product inside the focused shell', () => {
+  test('mounts every implemented product inside the shared application layout', () => {
+    const layoutAt = router.indexOf('<Route element={layout}>');
+    const creativeStudioAt = router.indexOf(
+      '<Route path={CREATIVE_STUDIO_ROOT_PATH} element={withRouteFallback(CreativeStudioFocusShell)}>'
+    );
+
+    expect(layoutAt).toBeGreaterThan(-1);
+    expect(creativeStudioAt).toBeGreaterThan(layoutAt);
     expect(router.includes('CreativeStudioHomePage')).toBe(true);
     expect(router.includes('<Route index element={withRouteFallback(CreativeStudioHomePage)} />')).toBe(true);
     expect(router.includes("path='projects' element={withRouteFallback(CreativeStudioProjectsRoute)}")).toBe(true);

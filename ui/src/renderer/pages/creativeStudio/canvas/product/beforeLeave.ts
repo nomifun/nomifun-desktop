@@ -27,7 +27,7 @@ export function registerCreativeCanvasProductBeforeLeave(
   };
 }
 
-/** Shell/topbar navigation should await this and continue only on `true`. */
+/** App-level navigation should await this and continue only on `true`. */
 export async function requestCreativeCanvasProductBeforeLeave(): Promise<boolean> {
   const registration = activeBeforeLeave;
   if (!registration) return true;

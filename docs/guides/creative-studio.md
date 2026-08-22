@@ -10,9 +10,12 @@ model catalog; it does not maintain a second model configuration system.
 
 ## Open the product
 
-Open **Creative Studio** from the application sidebar. The focused shell hides
-the ordinary workbench rail; **Back to Workbench** returns to `/guid` after any
-pending canvas or Director save has been resolved.
+Open **Creative Studio** from the application sidebar. The page reuses
+NomiFun's default titlebar controls for the sidebar, history, and system window.
+Like Settings, the primary rail switches to Creative Studio navigation and can
+be collapsed to recover working space. **Back to Workbench** stays pinned to the
+bottom of that rail and returns to `/guid` after any pending canvas or Director
+save has been resolved.
 
 The active route surface is:
 
@@ -100,7 +103,7 @@ Canvas edits use a short debounced compare-and-swap (CAS) save. Every write
 sends the last authoritative revision. A conflict stops automatic saving; it
 never force-writes or silently retries over a newer document. Resolve the
 visible conflict by loading the authoritative remote version, then reapply the
-intended change. Navigation out of the focused product flushes pending canvas
+intended change. Navigation out of Creative Studio flushes pending canvas
 or Director writes and remains blocked if their result is not safe.
 
 Image, video, and audio composer drafts are stored on their owning nodes.
@@ -191,8 +194,8 @@ unavailable.
 - Provider protocols differ. Controls appear only when their exact typed
   protocol profile supports them; unknown protocols use the smaller safe
   subset.
-- The focused-shell navigation follows the application locale, but much of the
-  launch canvas and editor body copy remains Simplified Chinese.
+- The default titlebar and Creative Studio rail follow the application locale,
+  but much of the launch canvas and editor body remains Simplified Chinese.
 - A configured model is not evidence that its remote provider is reachable or
   that a paid request was executed. Keep provider billing and data policies in
   mind before generating.
