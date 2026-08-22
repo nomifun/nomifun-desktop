@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use nomifun_common::AgentExecutionId;
@@ -6,7 +7,7 @@ use serde_json::{Value, json};
 
 use crate::local_agent_invocation::LocalAgentInvocationRunner;
 use nomi_protocol::events::ToolCategory;
-use nomi_tools::Tool;
+use nomi_tools::{Tool, ToolExecutionContext};
 use nomi_types::agent::{
     AgentDelegationTask, AgentExecutionReceipt, AgentExecutionStatus, AgentExecutionStepResult,
     AgentExecutionSummary, AgentInvocationInput, AgentInvocationOutput, AgentToolPolicy,
@@ -16,11 +17,10 @@ use nomi_types::message::TokenUsage;
 use nomi_types::tool::{JsonSchema, ToolResult};
 
 const DEFAULT_AGENT_MAX_TURNS: usize = 200;
-const DEFAULT_AGENT_MAX_TOKENS: u32 = 4096;
 
 const DESCRIPTION: &str = concat!(
     "Start one embedded Agent Execution with strategy=parallel. It synchronously invokes ",
-    "1-16 Agents (200 turns and 4096 output tokens each) and returns the same ",
+    "1-16 Agents (200 turns each, inheriting the session output limit) and returns the same ",
     "execution_id/status/message receipt as a platform execution, plus terminal results. ",
     "Sibling progress is coordinated by the host without adding another model tool. ",
     "Use synthesize=true to add a read-only consolidation pass. Dependency DAGs and ",
@@ -49,11 +49,70 @@ fn local_delegate_json_schema() -> JsonSchema {
 /// scheduler, but uses the same request, receipt and lifecycle vocabulary.
 pub(crate) struct LocalDelegateTool {
     runner: Arc<LocalAgentInvocationRunner>,
+    /// Exact-operation sidecar for parent-visible effects completed by direct
+    /// child Agents. Isolated worktree results are scrubbed by the runner
+    /// before they reach this boundary, because returning a patch is not the
+    /// same as applying it to the parent's workspace.
+    delegated_effects: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl LocalDelegateTool {
     pub(crate) fn new(runner: Arc<LocalAgentInvocationRunner>) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            delegated_effects: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn execute_inner(
+        &self,
+        input: Value,
+        execution_context: Option<&ToolExecutionContext>,
+    ) -> ToolResult {
+        let request = match parse_request(&input) {
+            Ok(request) => request,
+            Err(error) => return rejected(error),
+        };
+
+        let execution_id = embedded_execution_id();
+        let synthesize = request.synthesize;
+        let invocations = request
+            .tasks
+            .into_iter()
+            .map(task_invocation)
+            .collect::<Vec<_>>();
+        let results = self.runner.execute_fanout(invocations).await;
+
+        let synthesis = if synthesize && results.len() >= 2 {
+            Some(
+                self.runner
+                    .invoke_one(AgentInvocationInput {
+                        name: "synthesizer".to_owned(),
+                        prompt: build_synthesis_prompt(&results),
+                        max_turns: DEFAULT_AGENT_MAX_TURNS,
+                        system_prompt: None,
+                        model: None,
+                        effort: None,
+                        tool_policy: AgentToolPolicy::ReadOnly,
+                        exact_tools: Vec::new(),
+                    })
+                    .await,
+            )
+        } else {
+            None
+        };
+
+        let durable_targets = delegated_targets(&results);
+        if let Some(context) = execution_context
+            && !durable_targets.is_empty()
+        {
+            self.delegated_effects
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(context.operation_id().to_owned(), durable_targets);
+        }
+
+        completed(execution_id, &results, synthesis.as_ref())
     }
 }
 
@@ -80,41 +139,23 @@ impl Tool for LocalDelegateTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        let request = match parse_request(&input) {
-            Ok(request) => request,
-            Err(error) => return rejected(error),
-        };
+        self.execute_inner(input, None).await
+    }
 
-        let execution_id = embedded_execution_id();
-        let synthesize = request.synthesize;
-        let invocations = request
-            .tasks
-            .into_iter()
-            .map(task_invocation)
-            .collect::<Vec<_>>();
-        let results = self.runner.execute_fanout(invocations).await;
+    async fn execute_with_context(
+        &self,
+        input: Value,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
+        self.execute_inner(input, Some(context)).await
+    }
 
-        let synthesis = if synthesize && results.len() >= 2 {
-            Some(
-                self.runner
-                    .invoke_one(AgentInvocationInput {
-                        name: "synthesizer".to_owned(),
-                        prompt: build_synthesis_prompt(&results),
-                        max_turns: DEFAULT_AGENT_MAX_TURNS,
-                        max_tokens: DEFAULT_AGENT_MAX_TOKENS,
-                        system_prompt: None,
-                        model: None,
-                        effort: None,
-                        tool_policy: AgentToolPolicy::ReadOnly,
-                        exact_tools: Vec::new(),
-                    })
-                    .await,
-            )
-        } else {
-            None
-        };
-
-        completed(execution_id, &results, synthesis.as_ref())
+    fn take_delegated_effects(&self, context: &ToolExecutionContext) -> Vec<String> {
+        self.delegated_effects
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(context.operation_id())
+            .unwrap_or_default()
     }
 
     fn category(&self) -> ToolCategory {
@@ -134,6 +175,23 @@ impl Tool for LocalDelegateTool {
             format!("Delegate to {task_count} Agents")
         }
     }
+}
+
+/// Only successful child results whose runner-level workspace boundary says
+/// their bytes are visible in the parent may support a parent's completion
+/// claim. The runner clears evidence for isolated worktrees before this point.
+fn delegated_targets(results: &[AgentInvocationOutput]) -> Vec<String> {
+    let mut targets = Vec::new();
+    for target in results
+        .iter()
+        .filter(|result| !result.is_error)
+        .flat_map(|result| result.durable_effect_targets.iter())
+    {
+        if !targets.contains(target) {
+            targets.push(target.clone());
+        }
+    }
+    targets
 }
 
 fn parse_request(input: &Value) -> Result<ParallelDelegationRequest, String> {
@@ -158,7 +216,6 @@ fn task_invocation(task: AgentDelegationTask) -> AgentInvocationInput {
         name,
         prompt: apply_agent_role_context(prompt, role.as_deref()),
         max_turns: DEFAULT_AGENT_MAX_TURNS,
-        max_tokens: DEFAULT_AGENT_MAX_TOKENS,
         system_prompt: None,
         model: None,
         effort: None,
@@ -223,6 +280,7 @@ fn completed(
     let usage = all_outputs.clone().fold(TokenUsage::default(), |mut total, output| {
         total.input_tokens += output.usage.input_tokens;
         total.output_tokens += output.usage.output_tokens;
+        total.reasoning_tokens += output.usage.reasoning_tokens;
         total.cache_creation_tokens += output.usage.cache_creation_tokens;
         total.cache_read_tokens += output.usage.cache_read_tokens;
         total
@@ -261,7 +319,7 @@ fn rejected(error: String) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        DESCRIPTION, build_synthesis_prompt, completed, embedded_execution_id,
+        DESCRIPTION, build_synthesis_prompt, completed, delegated_targets, embedded_execution_id,
         local_delegate_json_schema, parse_request, rejected, task_invocation,
     };
     use nomifun_common::AgentExecutionId;
@@ -275,15 +333,23 @@ mod tests {
             text: text.to_owned(),
             usage: TokenUsage::default(),
             turns: 1,
+            durable_effect_targets: Vec::new(),
             is_error,
         }
     }
 
     #[test]
     fn description_exposes_one_execution_contract_and_capacity() {
-        for required in ["16", "parallel", "200", "4096", "execution_id/status/message"] {
+        for required in [
+            "16",
+            "parallel",
+            "200",
+            "inheriting the session output limit",
+            "execution_id/status/message",
+        ] {
             assert!(DESCRIPTION.contains(required), "missing {required}: {DESCRIPTION}");
         }
+        assert!(!DESCRIPTION.contains("4096"));
         assert!(!DESCRIPTION.contains(&["local", "immediate"].join("_")));
         assert!(!DESCRIPTION.contains(&["persistent", "execution"].join("_")));
         assert!(!DESCRIPTION.contains("execution mode"));
@@ -418,6 +484,22 @@ mod tests {
     }
 
     #[test]
+    fn embedded_receipt_aggregates_reasoning_usage() {
+        let mut first = output("A", "done", false);
+        first.usage.reasoning_tokens = 7;
+        let mut synthesis = output("synthesis", "done", false);
+        synthesis.usage.reasoning_tokens = 11;
+
+        let result = completed(
+            AgentExecutionId::new().into_string(),
+            &[first],
+            Some(&synthesis),
+        );
+        let payload: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(payload["result"]["summary"]["usage"]["reasoning_tokens"], 18);
+    }
+
+    #[test]
     fn embedded_terminal_statuses_match_agent_execution_wire_values() {
         let partial_id = AgentExecutionId::new().into_string();
         let partial = completed(
@@ -467,5 +549,19 @@ mod tests {
         assert!(prompt.contains("verify"));
         assert!(prompt.contains("ERROR"));
         assert!(prompt.to_ascii_lowercase().contains("conflict"));
+    }
+
+    #[test]
+    fn delegated_evidence_accepts_only_successful_parent_visible_targets() {
+        let mut direct = output("direct", "done", false);
+        direct.durable_effect_targets = vec!["src/lib.rs".to_owned()];
+        let mut failed = output("failed", "incomplete", true);
+        failed.durable_effect_targets = vec!["src/failed.rs".to_owned()];
+        let isolated = output("isolated", "patch only", false);
+
+        assert_eq!(
+            delegated_targets(&[direct, failed, isolated]),
+            vec!["src/lib.rs".to_owned()]
+        );
     }
 }

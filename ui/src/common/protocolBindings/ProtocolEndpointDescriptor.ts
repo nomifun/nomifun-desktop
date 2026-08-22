@@ -3,15 +3,15 @@ import type { EndpointRootShape } from "./EndpointRootShape";
 import type { ModelTask } from "./ModelTask";
 import type { ProtocolEndpointPurpose } from "./ProtocolEndpointPurpose";
 
-export type ProtocolEndpointDescriptor = { task: ModelTask, field: string, purpose: ProtocolEndpointPurpose, method: string | null, default_value: string, 
+export type ProtocolEndpointDescriptor = { task: ModelTask, field: string, purpose: ProtocolEndpointPurpose, method: string | null, default_value: string,
 /**
  * Which half of the URL owns the version segment for this endpoint.
  */
-root_shape: EndpointRootShape, 
+root_shape: EndpointRootShape,
 /**
  * The complete placeholder vocabulary accepted by this protocol field.
  */
-allowed_placeholders: Array<string>, 
+allowed_placeholders: Array<string>,
 /**
  * Alternatives of which at least one must occur in every configured
  * override. Poll/content job identifiers are required; submit/session

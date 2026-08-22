@@ -3,8 +3,9 @@ use std::path::Path;
 use ts_rs::{Config, TS};
 
 use nomifun_api_types::{
-    AuthSchemeDescriptor, CapabilityHealth, CloneProviderRequest, EndpointRootShape, HealthStatus,
-    KnowledgeEmbeddingConfig, KnowledgeRerankConfig, KnowledgeRetrievalConfig,
+    AuthSchemeDescriptor, CapabilityHealth, CloneProviderRequest, EndpointRootShape,
+    FetchModelsResponse, HealthStatus,
+    KnowledgeEmbeddingConfig, KnowledgeRerankConfig, KnowledgeRetrievalConfig, ModelInfo,
     ModelProtocolManifestResponse, ModelTask, ModelTrait, PlatformPresetDescriptor,
     ProtocolDefaultConnection, ProtocolDescriptor, ProtocolEndpointDescriptor,
     ProtocolEndpointPurpose, ProtocolExecutorKind, ProtocolRecommendation, ProtocolScope,
@@ -18,9 +19,26 @@ use nomifun_api_types::{
     SaveProviderConnectionRequest, SaveProviderModelRequest,
 };
 
+// ts-rs preserves formatting whitespace from wrapped declarations. Keep
+// committed bindings platform-independent and stable across test runs.
+fn normalize_typescript_binding(generated: &str) -> String {
+    let mut normalized = generated
+        .lines()
+        .map(|line| line.trim_end_matches([' ', '\t']))
+        .collect::<Vec<_>>()
+        .join("\n");
+    while normalized.ends_with('\n') {
+        normalized.pop();
+    }
+    normalized.push('\n');
+    normalized
+}
+
 fn export_binding_if_changed<T: TS + 'static>(file_name: &str) {
-    let generated = T::export_to_string(&Config::default())
-        .unwrap_or_else(|error| panic!("{file_name} must export to TypeScript: {error}"));
+    let generated = normalize_typescript_binding(
+        &T::export_to_string(&Config::default())
+            .unwrap_or_else(|error| panic!("{file_name} must export to TypeScript: {error}")),
+    );
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../ui/src/common/protocolBindings")
         .join(file_name);
@@ -59,6 +77,8 @@ fn export_provider_domain_bindings() {
     export_binding_if_changed::<ProviderModelResponse>("ProviderModelResponse.ts");
     export_binding_if_changed::<SaveProviderModelRequest>("SaveProviderModelRequest.ts");
     export_binding_if_changed::<ProviderModelKeyRequest>("ProviderModelKeyRequest.ts");
+    export_binding_if_changed::<ModelInfo>("ModelInfo.ts");
+    export_binding_if_changed::<FetchModelsResponse>("FetchModelsResponse.ts");
     export_binding_if_changed::<ProviderConnectionInput>("ProviderConnectionInput.ts");
     export_binding_if_changed::<SaveProviderConnectionRequest>("SaveProviderConnectionRequest.ts");
     export_binding_if_changed::<ProviderConnectionResponse>("ProviderConnectionResponse.ts");
@@ -76,6 +96,14 @@ fn export_provider_domain_bindings() {
     export_binding_if_changed::<ProtocolRecommendation>("ProtocolRecommendation.ts");
     export_binding_if_changed::<AuthSchemeDescriptor>("AuthSchemeDescriptor.ts");
     export_binding_if_changed::<ModelProtocolManifestResponse>("ModelProtocolManifestResponse.ts");
+}
+
+#[test]
+fn generated_bindings_have_deterministic_whitespace() {
+    assert_eq!(
+        normalize_typescript_binding("export type Value = { \r\nfield: string,\t\r\n}\r\n\r\n"),
+        "export type Value = {\nfield: string,\n}\n"
+    );
 }
 
 #[test]
@@ -121,11 +149,43 @@ fn generated_shapes_mirror_single_source_wire_contract() {
         capability.contains("context_limit?: number,"),
         "got: {capability}"
     );
+    assert!(
+        capability.contains("output_limit?: number,"),
+        "got: {capability}"
+    );
 
     let response = ProviderModelResponse::export_to_string(&cfg).unwrap();
     assert!(response.contains("capabilities: Array<ProviderModelCapabilityResponse>"));
     assert!(!response.contains("protocol?:"));
     assert!(!response.contains("tasks:"));
+
+    // The catalog carries the provider's own declared window under the same
+    // name the capability persists it as, so the UI can prefill one from the
+    // other without a translation table. Optional in both types.
+    let catalog_model = ModelInfo::export_to_string(&cfg).unwrap();
+    assert!(
+        catalog_model.contains("context_limit?: number,"),
+        "got: {catalog_model}"
+    );
+    // `tasks`/`traits` are omitted when empty and `name` is always sent, so the
+    // optionality of each field must keep mirroring its serde attributes.
+    assert!(
+        catalog_model.contains("tasks?: Array<ModelTask>,"),
+        "got: {catalog_model}"
+    );
+    assert!(
+        catalog_model.contains("name: string | null,"),
+        "got: {catalog_model}"
+    );
+    let catalog = FetchModelsResponse::export_to_string(&cfg).unwrap();
+    assert!(
+        catalog.contains("models: Array<ModelInfo>,"),
+        "got: {catalog}"
+    );
+    assert!(
+        catalog.contains("fixed_base_url?: string,"),
+        "got: {catalog}"
+    );
 
     let connection = ProviderConnectionResponse::export_to_string(&cfg).unwrap();
     assert!(!connection.contains("is_full_url"));
@@ -159,6 +219,10 @@ fn generated_shapes_mirror_single_source_wire_contract() {
     let protocol = ProtocolDescriptor::export_to_string(&cfg).unwrap();
     assert!(
         protocol.contains("root_shape: EndpointRootShape | null"),
+        "got: {protocol}"
+    );
+    assert!(
+        protocol.contains("requires_output_ceiling: boolean"),
         "got: {protocol}"
     );
 }

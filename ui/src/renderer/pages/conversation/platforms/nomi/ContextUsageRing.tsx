@@ -8,11 +8,17 @@ import { Popover } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { formatTokenCount } from './turnMetrics';
 
-export type ContextUsageRingProps = { used?: number; max?: number };
+export type ContextUsageRingProps = {
+  used?: number;
+  max?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+};
 
 /** Icon-only context gauge shown beside the active model. The ring carries the
  * compact status; click opens exact context-window details. */
-export function ContextUsageRing({ used, max }: ContextUsageRingProps) {
+export function ContextUsageRing({ used, max, inputTokens, outputTokens, reasoningTokens }: ContextUsageRingProps) {
   const { t } = useTranslation();
   if (!max || max <= 0 || used == null) return null;
 
@@ -48,6 +54,34 @@ export function ContextUsageRing({ used, max }: ContextUsageRingProps) {
           defaultValue: '{{used}} tokens used, {{max}} total',
         })}
       </div>
+      {(inputTokens != null || outputTokens != null || reasoningTokens != null) && (
+        <div className='mt-8px pt-6px b-t b-t-solid b-t-[var(--color-border-2)] text-12px leading-18px text-t-secondary tabular-nums'>
+          {inputTokens != null && (
+            <div>
+              {t('conversation.contextUsage.inputLine', {
+                tokens: formatTokenCount(inputTokens),
+                defaultValue: 'Input: {{tokens}}',
+              })}
+            </div>
+          )}
+          {outputTokens != null && (
+            <div>
+              {t('conversation.contextUsage.outputLine', {
+                tokens: formatTokenCount(outputTokens),
+                defaultValue: 'Output: {{tokens}}',
+              })}
+            </div>
+          )}
+          {reasoningTokens != null && (
+            <div>
+              {t('conversation.contextUsage.reasoningLine', {
+                tokens: formatTokenCount(reasoningTokens),
+                defaultValue: 'Reasoning: {{tokens}} (included in output)',
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 

@@ -5,13 +5,11 @@
  */
 
 import React from 'react';
-import { SafeRetrieval } from '@icon-park/react';
 import ModalityModelsPanel from './ModalityModelsPanel';
 
 const RerankModelsContent: React.FC = () => (
   <ModalityModelsPanel
     modality='rerank'
-    icon={<SafeRetrieval theme='outline' size='18' strokeWidth={3} />}
     titleKey='settings.modelHub.modality.rerankTitle'
     subtitleKey='settings.modelHub.modality.rerankSubtitle'
   />

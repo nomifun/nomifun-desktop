@@ -151,6 +151,10 @@ struct ProviderModelCapabilityParams {
     provider_params: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     context_limit: Option<i64>,
+    /// Declared maximum output tokens for this model/task. Required by
+    /// Anthropic Messages protocols; omit to use the provider default where supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_limit: Option<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]

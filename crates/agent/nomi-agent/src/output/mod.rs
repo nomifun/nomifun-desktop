@@ -14,7 +14,13 @@ use std::io::{self, Write};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolMediaDelivery {
     Unmanaged,
-    Delivered { context: String },
+    Delivered {
+        context: String,
+        /// Exact workspace paths whose pre-call baseline and post-call bytes
+        /// the sink verified. Inline-only artifacts deliberately leave this
+        /// empty; a receipt count or model-facing locator is not target proof.
+        durable_workspace_targets: Vec<String>,
+    },
     Failed { error: String },
 }
 
@@ -1091,6 +1097,25 @@ pub trait OutputSink: Send + Sync {
     }
     /// Signal start of a new message stream
     fn emit_stream_start(&self, msg_id: &str);
+    /// Establish a non-destructive checkpoint for another provider pass in the
+    /// same logical stream. Sinks without retained turn state can use the
+    /// ordinary Start event as the checkpoint boundary.
+    fn emit_output_checkpoint(&self, msg_id: &str) {
+        self.emit_stream_start(msg_id);
+    }
+    /// Low-level discard event. `restart_attempt == 0` restores the immutable
+    /// first-Start boundary for the accepted turn; positive values restore the
+    /// most recent rolling provider-attempt checkpoint.
+    fn emit_output_discarded(&self, msg_id: &str, restart_attempt: u32);
+    /// Retract every provider pass belonging to the accepted user turn.
+    fn emit_accepted_turn_output_discarded(&self, msg_id: &str) {
+        self.emit_output_discarded(msg_id, 0);
+    }
+    /// Retract only the current provider attempt while retaining earlier
+    /// race-tail/steering output in the same assistant bubble.
+    fn emit_current_attempt_output_discarded(&self, msg_id: &str, restart_attempt: u32) {
+        self.emit_output_discarded(msg_id, restart_attempt.max(1));
+    }
     /// Signal end of a message stream with usage stats
     fn emit_stream_end(
         &self,
@@ -1321,6 +1346,7 @@ mod tests {
             self.0.lock().unwrap().push((is_error, content.to_owned()));
         }
         fn emit_stream_start(&self, _msg_id: &str) {}
+        fn emit_output_discarded(&self, _msg_id: &str, _restart_attempt: u32) {}
         fn emit_stream_end(
             &self,
             _msg_id: &str,

@@ -391,6 +391,103 @@ async fn migration_32_materializes_explicit_default_auth_schemes() {
 }
 
 #[tokio::test]
+async fn migration_46_declares_output_limits_and_removes_legacy_body_ceilings() {
+    const OPENAI: &str = "0190f5fe-7c00-7a00-8abc-012345678920";
+    const ANTHROPIC: &str = "0190f5fe-7c00-7a00-8abc-012345678921";
+    const BEDROCK: &str = "0190f5fe-7c00-7a00-8abc-012345678922";
+    const GEMINI: &str = "0190f5fe-7c00-7a00-8abc-012345678923";
+    const LEGACY_PARAMS: &str = r#"{
+        "max_tokens":111,
+        "max_completion_tokens":222,
+        "maxOutputTokens":333,
+        "max_output_tokens":444,
+        "max_tokens_field":"custom.limit",
+        "custom.limit":555,
+        "generationConfig":{"maxOutputTokens":666,"temperature":0.5},
+        "temperature":0.2
+    }"#;
+
+    let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
+    apply_through(&mut connection, 30).await;
+    for (provider_id, platform) in [
+        (OPENAI, "openai"),
+        (ANTHROPIC, "anthropic"),
+        (BEDROCK, "bedrock"),
+        (GEMINI, "gemini"),
+    ] {
+        seed_provider(
+            &mut connection,
+            provider_id,
+            platform,
+            "https://api.example.test",
+        )
+        .await;
+        seed_model(
+            &mut connection,
+            provider_id,
+            "chat-model",
+            "[\"chat\"]",
+            LEGACY_PARAMS,
+        )
+        .await;
+    }
+
+    apply_through(&mut connection, 46).await;
+
+    for (provider_id, expected_protocol, expected_limit) in [
+        (OPENAI, "openai.chat_text", None),
+        (ANTHROPIC, "anthropic.messages", Some(8192_i64)),
+        (
+            BEDROCK,
+            "bedrock.anthropic_messages",
+            Some(8192_i64),
+        ),
+        (GEMINI, "gemini.generate_text", None),
+    ] {
+        let (protocol, output_limit, provider_params): (String, Option<i64>, String) =
+            sqlx::query_as(
+                "SELECT protocol, output_limit, provider_params \
+                 FROM provider_model_capabilities \
+                 WHERE provider_id = ? AND model = 'chat-model' AND task = 'chat'",
+            )
+            .bind(provider_id)
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(protocol, expected_protocol);
+        assert_eq!(output_limit, expected_limit);
+
+        let params: serde_json::Value = serde_json::from_str(&provider_params).unwrap();
+        for retired in [
+            "max_tokens",
+            "max_completion_tokens",
+            "maxOutputTokens",
+            "max_output_tokens",
+            "custom.limit",
+        ] {
+            assert!(params.get(retired).is_none(), "legacy key {retired} survived");
+        }
+        assert_eq!(params["max_tokens_field"], "custom.limit");
+        assert_eq!(params["generationConfig"]["temperature"], 0.5);
+        assert!(params["generationConfig"].get("maxOutputTokens").is_none());
+        assert_eq!(params["temperature"], 0.2);
+    }
+
+    for invalid in [0_i64, -1_i64] {
+        let error = sqlx::query(
+            "UPDATE provider_model_capabilities SET output_limit = ? \
+             WHERE provider_id = ? AND model = 'chat-model' AND task = 'chat'",
+        )
+        .bind(invalid)
+        .bind(OPENAI)
+        .execute(&mut connection)
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("CHECK constraint failed"));
+    }
+}
+
+#[tokio::test]
 async fn migration_32_preserves_full_urls_and_only_matching_task_health() {
     const DEFAULT_FULL: &str = "0190f5fe-7c00-7a00-8abc-012345678920";
     const ARK: &str = "0190f5fe-7c00-7a00-8abc-012345678921";

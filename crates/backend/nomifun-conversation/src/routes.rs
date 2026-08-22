@@ -48,6 +48,10 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
             post(edit_resubmit),
         )
         .route(
+            "/api/conversations/{conversation_id}/messages/{message_id}/continue-truncated",
+            post(continue_truncated),
+        )
+        .route(
             "/api/conversations/{conversation_id}/messages/{message_id}/knowledge-writeback/retry",
             post(retry_knowledge_writeback),
         )
@@ -372,6 +376,29 @@ async fn edit_resubmit(
             params.message_id.as_str(),
             &idempotency_key,
             req,
+            &state.runtime_registry,
+        )
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ApiResponse::ok(send_message_response(delivery))),
+    ))
+}
+
+async fn continue_truncated(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(params): Path<MessagePathParams>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<ApiResponse<SendMessageResponse>>), AppError> {
+    let idempotency_key = public_idempotency_key_from_headers(&headers)?;
+    let delivery = state
+        .service
+        .continue_truncated_turn_with_idempotency_key(
+            &user.id,
+            params.conversation_id.as_str(),
+            params.message_id.as_str(),
+            &idempotency_key,
             &state.runtime_registry,
         )
         .await?;

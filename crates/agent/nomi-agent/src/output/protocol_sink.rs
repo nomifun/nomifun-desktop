@@ -100,6 +100,13 @@ impl OutputSink for ProtocolSink {
         });
     }
 
+    fn emit_output_discarded(&self, msg_id: &str, restart_attempt: u32) {
+        let _ = self.writer.emit(&ProtocolEvent::OutputDiscarded {
+            msg_id: msg_id.to_string(),
+            restart_attempt,
+        });
+    }
+
     fn emit_stream_end(
         &self,
         msg_id: &str,

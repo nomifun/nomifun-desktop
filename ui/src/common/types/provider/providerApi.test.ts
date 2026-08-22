@@ -30,6 +30,7 @@ const initialModel: ProviderModelInput = {
       allow_cross_origin_credentials: false,
       provider_params: {},
       context_limit: 128_000,
+      output_limit: 16_384,
     },
   ],
 };
@@ -83,6 +84,7 @@ describe('provider wire contract', () => {
       task: 'chat',
       protocol: 'openai.chat_text',
       context_limit: 128_000,
+      output_limit: 16_384,
     });
     expect(Object.keys(provider).sort()).toEqual([
       'auth_scheme',

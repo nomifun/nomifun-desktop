@@ -11,21 +11,21 @@
 }
 
 .modal :global(.arco-modal-header) {
-  height: 40px;
-  flex: 0 0 40px;
+  height: 36px;
+  flex: 0 0 36px;
   padding: 0 var(--nomi-modal-inline-padding);
   border-color: var(--color-border-1);
 }
 
 .modal :global(.arco-modal-title) {
-  font-size: 17px;
-  font-weight: 700;
-  line-height: 24px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
   color: var(--color-text-1);
 }
 
 .modal :global(.arco-modal-close-icon) {
-  top: 14px;
+  top: 6px;
   right: var(--nomi-modal-inline-padding);
 }
 

@@ -11,7 +11,7 @@ use nomi_agent::companion_tools::{
 use nomi_agent::summon_tools::{
     SummonContextContributor, SummonContextSink,
 };
-use nomi_agent::engine::AgentEngine;
+use nomi_agent::engine::{AgentEngine, CompletionEvidenceContext};
 use nomi_agent::knowledge_tools::{KnowledgeReadTool, KnowledgeSearchTool, KnowledgeWriteTool};
 use nomi_agent::output::OutputSink;
 use nomi_agent::requirement_tools::{RequirementCompleteTool, RequirementSink, RequirementUpdateStatusTool};
@@ -52,13 +52,115 @@ use crate::types::{NomiResolvedConfig, SendMessageData};
 
 use super::image_attachments::{ImageAttachmentError, load_image_blocks};
 
-fn apply_provider_context_budget(config: &mut Config, context_limit: Option<u64>) {
+/// Process-level memory of which `(provider, model)` pairs have already been
+/// reported as running on an assumed context window.
+///
+/// `apply_provider_token_budget` runs on every runtime build, and a runtime is
+/// rebuilt whenever the registry has to recreate one for a turn — so an
+/// unannotated capability would repeat the same diagnostic indefinitely. Keying
+/// on provider + model keeps a second, differently-sized model on the same
+/// provider reportable while collapsing the repeats for one session.
+///
+/// This mirrors [`nomifun_common::VisionUnsupportedRegistry`]: a plain
+/// `std::sync::Mutex<HashSet<_>>` behind a `OnceLock`, with `new()` for tests.
+/// It deliberately owns no reference to `Mutex<AgentEngine>` and is only ever
+/// locked for a single `HashSet::insert` — never across an await and never while
+/// an engine lock is being acquired — so it cannot participate in the engine
+/// mutex's non-reentrant ordering.
+#[derive(Default)]
+struct AssumedContextWindowLog {
+    reported: std::sync::Mutex<HashSet<String>>,
+}
+
+impl AssumedContextWindowLog {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// True the first time this `(provider, model)` pair is seen, false
+    /// afterwards. A poisoned lock reports `true`: a repeated diagnostic is
+    /// strictly better than a silenced one, which is the bug being fixed.
+    fn claim(&self, provider: &str, model: &str) -> bool {
+        self.reported
+            .lock()
+            .map(|mut reported| reported.insert(format!("{provider}\u{1f}{model}")))
+            .unwrap_or(true)
+    }
+
+    fn global() -> &'static Self {
+        static GLOBAL: std::sync::OnceLock<AssumedContextWindowLog> = std::sync::OnceLock::new();
+        GLOBAL.get_or_init(AssumedContextWindowLog::new)
+    }
+}
+
+/// Whether a capability's `context_limit` leaves the engine running on the
+/// resolved default window instead of the model's real one.
+///
+/// This is deliberately the same predicate as
+/// `nomi_config::compact::resolve_context_window`, which also treats an explicit
+/// `0` as unset. Anything that silently falls back must be reported.
+fn assumes_default_context_window(context_limit: Option<u64>) -> bool {
+    !matches!(context_limit, Some(limit) if limit > 0)
+}
+
+/// Report — once per provider+model — that the engine is compacting against an
+/// assumed window rather than a declared one.
+///
+/// Without this line the failure mode is invisible: autocompact and the
+/// emergency `ContextTooLong` guard are both calibrated to
+/// `assumed_context_window`, so a model whose real window is smaller is rejected
+/// by the provider with a non-retryable error before either can fire.
+///
+/// Returns whether a line was emitted, so the dedupe is observable in tests.
+fn report_assumed_context_window(
+    log: &AssumedContextWindowLog,
+    context_limit: Option<u64>,
+    provider: &str,
+    model: &str,
+    assumed_context_window: usize,
+) -> bool {
+    if !assumes_default_context_window(context_limit) || !log.claim(provider, model) {
+        return false;
+    }
+    tracing::warn!(
+        provider,
+        model,
+        assumed_context_window,
+        "chat capability declares no context window; compacting against the assumed default. \
+         Autocompact and the emergency context guard are calibrated to this value, so a model \
+         with a smaller real window is rejected by the provider instead of compacted. Set \
+         Context limit on this model's chat capability in Settings -> Models."
+    );
+    true
+}
+
+fn apply_provider_token_budget(
+    config: &mut Config,
+    context_limit: Option<u64>,
+    declared_output_limit: Option<u32>,
+) -> Result<(), AppError> {
     config.compact.context_window = nomi_config::compact::resolve_context_window(
         context_limit,
         config.compact.context_window,
     );
-    config.max_tokens =
-        nomi_config::compact::fit_context_budget(&mut config.compact, config.max_tokens);
+    report_assumed_context_window(
+        AssumedContextWindowLog::global(),
+        context_limit,
+        &config.provider_label,
+        &config.model,
+        config.compact.context_window,
+    );
+    // The capability is authoritative on the desktop path. In particular,
+    // None must erase a legacy ~/.nomi/config.toml value rather than revive it.
+    config.output_max_tokens =
+        nomi_config::compact::fit_context_budget(&mut config.compact, declared_output_limit);
+    if config.output_max_tokens.is_none() && config.provider.requires_output_ceiling() {
+        return Err(AppError::BadRequest(format!(
+            "the {} protocol requires an explicit output ceiling; set Max output tokens on the {} chat capability in Settings -> Models",
+            config.provider_label, config.model
+        )));
+    }
+    Ok(())
 }
 
 struct TurnTeardownFence {
@@ -712,26 +814,6 @@ fn terminalize_exact_nomi_turn(
     emitted
 }
 
-/// Cap on automatic continuation passes when a model response is truncated
-/// before the task is complete. This keeps the UX moving without letting a bad
-/// prompt or provider loop spend unbounded tokens.
-const MAX_TRUNCATION_AUTO_CONTINUES: usize = 2;
-
-fn truncation_continuation_prompt(attempt: usize, max_attempts: usize, reason: &str) -> String {
-    format!(
-        "[Automatic continuation {attempt}/{max_attempts}]\n\
-The previous pass reached {reason} before the user's request was fully delivered.\n\n\
-Recovery mode:\n\
-- Continue the same task from the last valid state. Do not restart unless necessary.\n\
-- If a file write or tool argument was interrupted, do not repeat the same oversized call.\n\
-- Do not call Write with a full large file in one call.\n\
-- First create a small complete deliverable that satisfies the user request end-to-end.\n\
-- Then improve it by using Bash, Edit, or Write to append or edit in chunks; keep each chunk small.\n\
-- For HTML/CSS/JS deliverables, prefer a concise valid file first, then add sections/styles incrementally.\n\
-- Before finalizing, verify the target file exists in the active workspace and briefly report what was created."
-    )
-}
-
 /// Prepend the one-shot knowledge prelude to the first user turn, if present.
 pub(crate) fn apply_knowledge_prelude(prelude: Option<String>, content: &str) -> String {
     match prelude {
@@ -766,9 +848,8 @@ pub(crate) fn prepend_knowledge_context(
 
 /// Normalize the engine's [`StopReason`](nomi_types::message::StopReason) into
 /// the cross-backend [`TurnStopReason`] carried on `TurnCompleted` / `Finish`.
-/// `EndTurn`/`ToolUse` are clean completions; `MaxTokens`/`MaxTurns` mean the
-/// turn was truncated and did NOT accomplish its goal (AutoWork / IDMM read
-/// this to avoid treating a capped turn as success).
+/// `EndTurn`/`ToolUse` are clean completions; ceilings, request exhaustion and
+/// refusal remain explicit non-success terminals for AutoWork / IDMM.
 pub(crate) fn map_engine_stop_reason(
     reason: nomi_types::message::StopReason,
 ) -> TurnStopReason {
@@ -777,6 +858,7 @@ pub(crate) fn map_engine_stop_reason(
         StopReason::EndTurn | StopReason::ToolUse => TurnStopReason::EndTurn,
         StopReason::MaxTokens => TurnStopReason::MaxTokens,
         StopReason::MaxTurns => TurnStopReason::MaxTurnRequests,
+        StopReason::Refusal => TurnStopReason::Refusal,
     }
 }
 
@@ -945,7 +1027,9 @@ impl NomiAgentManager {
             api_key: Some(config_extra.api_key.clone()),
             base_url: config_extra.base_url.clone(),
             model: Some(config_extra.model.clone()),
-            max_tokens: Some(config_extra.max_tokens),
+            // Capability data is applied authoritatively below. Do not let a
+            // process-local CLI/TOML value become this model's hidden ceiling.
+            max_tokens: None,
             max_turns: config_extra.max_turns,
             system_prompt: config_extra.system_prompt.clone(),
             profile: None,
@@ -970,6 +1054,9 @@ impl NomiAgentManager {
         if let Some(required) = config_extra.compat_overrides.require_reasoning_content {
             config.compat.require_reasoning_content = Some(required);
         }
+        if let Some(chain_rounds) = config_extra.compat_overrides.chain_rounds {
+            config.compat.chain_rounds = Some(chain_rounds);
+        }
         config.compat.extra_body = config_extra.compat_overrides.extra_body;
         // 图片支持 override(主动剔除):工厂据 VisionUnsupportedRegistry 命中注入
         // Some(false),灌进 compat.supports_image → build_messages 发送时剔图。
@@ -981,7 +1068,11 @@ impl NomiAgentManager {
         // Make the engine compact against the provider's declared context
         // window when set (else keep the resolved default). Same value the
         // context-usage gauge reports as the denominator.
-        apply_provider_context_budget(&mut config, config_extra.context_limit);
+        apply_provider_token_budget(
+            &mut config,
+            config_extra.context_limit,
+            config_extra.output_ceiling,
+        )?;
 
         if !config_extra.extra_mcp_servers.is_empty() {
             config.mcp.servers.extend(config_extra.extra_mcp_servers.clone());
@@ -1421,6 +1512,56 @@ impl NomiAgentManager {
         availability
     }
 
+    /// Roll back a model-complete engine pass when the host's deferred
+    /// artifact/cancellation transaction did not commit. The engine restores
+    /// the accepted-turn root in memory first and performs a checked session
+    /// write; a failed write permanently quarantines this manager and is
+    /// surfaced through the dedicated session-consistency code.
+    async fn restore_uncommitted_completion_turn(
+        &self,
+        completion_context: &CompletionEvidenceContext,
+        detail: impl Into<String>,
+    ) -> Result<(), AgentSendError> {
+        let persisted = self
+            .engine
+            .lock()
+            .await
+            .restore_uncommitted_completion_turn(completion_context);
+        // OutputDiscarded must observe the provider-pass checkpoint before
+        // abort clears held prose/artifact bookkeeping; reversing these calls
+        // can turn a valid checkpoint into a sink consistency Error that masks
+        // the actual delivery/session terminal.
+        self.backend_output_sink.abort_artifact_delivery_turn();
+        if persisted {
+            return Ok(());
+        }
+
+        self.runtime.mark_transport_broken();
+        Err(AgentSendError::agent_session_inconsistent(detail))
+    }
+
+    /// Provider failure/cancellation keeps any earlier valid race-tail prefix
+    /// visible as failure evidence, while the resumable engine transcript is
+    /// still restored to the exact accepted-turn root.
+    async fn restore_uncommitted_completion_attempt(
+        &self,
+        completion_context: &CompletionEvidenceContext,
+        detail: impl Into<String>,
+    ) -> Result<(), AgentSendError> {
+        let persisted = self
+            .engine
+            .lock()
+            .await
+            .restore_uncommitted_completion_attempt(completion_context);
+        self.backend_output_sink.abort_artifact_delivery_turn();
+        if persisted {
+            return Ok(());
+        }
+
+        self.runtime.mark_transport_broken();
+        Err(AgentSendError::agent_session_inconsistent(detail))
+    }
+
     fn request_stop(
         &self,
         reason: Option<AgentKillReason>,
@@ -1595,6 +1736,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
         // Backstop: guarantee a terminal event even if this turn unwinds
         // abnormally (engine panic / early-return). Disarmed on the normal path
         // after the real terminal event is emitted below. (Phase 0 F0.2)
+        let accepted_turn_recovery_required = Arc::new(AtomicBool::new(false));
         let mut term_guard = TurnTerminationGuard {
             runtime: self.runtime.clone(),
             turn: runtime_turn,
@@ -1605,6 +1747,9 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
             process_supervisor: process_supervisor.clone(),
             mcp_managers: self.mcp_managers.clone(),
             turn_teardown_fence: Arc::clone(&self.turn_teardown_fence),
+            accepted_turn_recovery_required: Arc::clone(
+                &accepted_turn_recovery_required,
+            ),
             #[cfg(feature = "browser-use")]
             browser_lane_binding: self.browser_lane_binding.clone(),
             armed: true,
@@ -1799,17 +1944,25 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 }
                 engine = self.engine.lock() => engine,
             };
-            engine
-                .record_host_text_turn(
-                    data.content.clone(),
-                    response.clone(),
-                    &source_message_id,
-                )
-                .map_err(|error| {
-                    AgentSendError::from_app_error(AppError::Internal(format!(
-                        "failed to persist image capability response: {error}"
-                    )))
-                })?;
+            if let Err(error) = engine.record_host_text_turn(
+                data.content.clone(),
+                response.clone(),
+                &source_message_id,
+            ) {
+                drop(engine);
+                self.runtime.mark_transport_broken();
+                let send_error = AgentSendError::agent_session_inconsistent(format!(
+                    "The deterministic image capability response could not be persisted safely: {error}"
+                ));
+                let stream_error = send_error.stream_error().clone();
+                term_guard
+                    .terminalize(move |runtime, turn| {
+                        runtime.emit_error_data_for_turn(turn, stream_error)
+                    })
+                    .await
+                    .map_err(AgentSendError::from_app_error)?;
+                return Err(send_error);
+            }
             let context_tokens = engine.context_tokens();
             let context_window = engine.context_window();
             drop(engine);
@@ -1822,6 +1975,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                         elapsed_ms: now_ms() - started_at,
                         input_tokens: 0,
                         output_tokens: 0,
+                        reasoning_tokens: 0,
                         context_tokens,
                         context_window,
                     },
@@ -1829,11 +1983,27 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 .await
                 .map_err(AgentSendError::from_app_error)?;
             if !published {
-                let rewound = self.engine.lock().await.rewind_last_turn(&source_message_id);
-                if !rewound {
-                    return Err(AgentSendError::from_app_error(AppError::Internal(
-                        "cancelled image capability response could not be rewound".to_owned(),
-                    )));
+                let rewind = self
+                    .engine
+                    .lock()
+                    .await
+                    .rewind_last_turn(&source_message_id);
+                if !matches!(rewind, Ok(true)) {
+                    self.runtime.mark_transport_broken();
+                    let detail = match rewind {
+                        Ok(false) => "the deterministic response no longer owned the exact rewind checkpoint".to_owned(),
+                        Err(error) => format!("the deterministic response rewind could not be persisted: {error}"),
+                        Ok(true) => unreachable!(),
+                    };
+                    let send_error = AgentSendError::agent_session_inconsistent(detail);
+                    let stream_error = send_error.stream_error().clone();
+                    term_guard
+                        .terminalize(move |runtime, turn| {
+                            runtime.emit_error_data_for_turn(turn, stream_error)
+                        })
+                        .await
+                        .map_err(AgentSendError::from_app_error)?;
+                    return Err(send_error);
                 }
                 self.backend_output_sink.cancel_active_tool_calls(
                     "The image capability response was cancelled before publication.",
@@ -1890,6 +2060,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
         // Every asynchronous operation after entering Running belongs to this
         // durable cancellation domain. Preparation and execution converge on
         // one cancellation terminal below.
+        let mut cancelled_session_error = None;
         let accepted_turn = 'accepted: {
             let prepare_turn = async {
                 // A provider already known not to support vision receives the
@@ -1979,14 +2150,26 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
             }
             engine.set_steering_inbox(Some(self.steering_inbox.clone()));
             engine.set_system_resource_inbox(Some(self.system_resource_inbox.clone()));
+            // Completion adjudication is bound to trusted user-authored input,
+            // never the RAG/knowledge prelude sent to the provider. This
+            // host-owned scope survives bounded steering race-tail engine calls
+            // that still belong to this one admitted turn.
+            let mut completion_context =
+                CompletionEvidenceContext::with_host_recovery_signal(
+                    vec![ContentBlock::Text {
+                        text: data.content.clone(),
+                    }],
+                    Arc::clone(&accepted_turn_recovery_required),
+                );
             // Each iteration runs one engine pass inside the same accepted
-            // Agent turn. Re-run only for steering race-tail interjections or
-            // bounded output truncation continuation.
+            // Agent turn. Re-run only for steering race-tail interjections; the
+            // engine owns output-truncation recovery, because only it can drop
+            // the truncated draft, re-push the original requirement, and carry a
+            // machine-built ledger forward without resetting its own loop guard.
             let mut run_content = Vec::with_capacity(1 + image_blocks.len());
             run_content.push(ContentBlock::Text { text: content });
             run_content.extend(image_blocks);
             let mut race_tail_reruns = 0usize;
-            let mut truncation_auto_continues = 0usize;
             let result = loop {
                 let current_content = std::mem::take(&mut run_content);
                 // Cancellation has one fail-closed lifecycle: drop the in-flight
@@ -2000,16 +2183,29 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                             conversation_id = %self.runtime.conversation_id(),
                             "Nomi engine.execute_turn() cancelled by stop signal"
                         );
-                        engine.abort_current_turn("Tool execution canceled by user");
+                        if completion_context.turn_root_captured() {
+                            engine.abort_current_turn("Tool execution canceled by user");
+                            if !engine
+                                .restore_uncommitted_completion_attempt(&completion_context)
+                            {
+                                self.runtime.mark_transport_broken();
+                                cancelled_session_error = Some(
+                                    AgentSendError::agent_session_inconsistent(
+                                        "The accepted Agent turn was cancelled in flight, but its durable session root could not be restored",
+                                    ),
+                                );
+                            }
+                        }
                         engine.set_steering_inbox(None);
                         engine.set_system_resource_inbox(None);
                         break 'accepted None;
                     }
-                    res = engine.execute_turn_with_content_for_source_and_tool_allowlist(
+                    res = engine.execute_turn_with_completion_evidence_context(
                         current_content,
                         &data.msg_id,
                         &source_message_id,
                         image_tool_allowlist.as_ref(),
+                        Some(&mut completion_context),
                     ) => res,
                 };
 
@@ -2019,6 +2215,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 // is absorbed by this exact turn's terminal transition.
                 if let Ok(agent_result) = &r
                     && agent_result.stop_reason == nomi_types::message::StopReason::EndTurn
+                    && agent_result.completion_adjudication.is_none()
                 {
                     if race_tail_reruns < MAX_STEERING_RACE_TAIL_RERUNS {
                         let leftover: Vec<String> = {
@@ -2036,6 +2233,11 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                             // second StreamStart under the same id for this logical turn.
                             // Benign — the UI keeps the same assistant bubble; a fresh id
                             // would instead spawn a new bubble. Intentional for this rare tail.
+                            for text in &leftover {
+                                completion_context.requirement.push(ContentBlock::Text {
+                                    text: text.clone(),
+                                });
+                            }
                             run_content = vec![ContentBlock::Text {
                                 text: leftover.join("\n\n"),
                             }];
@@ -2048,54 +2250,28 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                         );
                     }
                 }
-                if let Ok(agent_result) = &r {
-                    // Only a token-length truncation can be continued safely. A
-                    // MaxTurns result means the model already consumed the full
-                    // per-pass request budget; starting a fresh pass resets the
-                    // engine's loop guard and used to multiply a deterministic
-                    // tool loop by the host continuation cap.
-                    if agent_result.stop_reason == nomi_types::message::StopReason::MaxTokens {
-                        let reason = "the output token limit";
-                        if truncation_auto_continues < MAX_TRUNCATION_AUTO_CONTINUES {
-                            truncation_auto_continues += 1;
-                            info!(
-                                conversation_id = %self.runtime.conversation_id(),
-                                attempt = truncation_auto_continues,
-                                max_attempts = MAX_TRUNCATION_AUTO_CONTINUES,
-                                stop_reason = ?agent_result.stop_reason,
-                                "Nomi turn truncated; auto-continuing before Finish"
-                            );
-                            self.backend_output_sink
-                                .truncate_active_tool_calls_for_auto_continue(reason);
-                            run_content = vec![ContentBlock::Text {
-                                text: truncation_continuation_prompt(
-                                    truncation_auto_continues,
-                                    MAX_TRUNCATION_AUTO_CONTINUES,
-                                    reason,
-                                ),
-                            }];
-                            continue;
-                        }
-                        tracing::warn!(
-                            conversation_id = %self.runtime.conversation_id(),
-                            attempts = truncation_auto_continues,
-                            stop_reason = ?agent_result.stop_reason,
-                            "Nomi truncation auto-continue cap reached; emitting final Finish"
-                        );
-                    }
-                }
                 break r;
             };
 
             engine.set_steering_inbox(None);
             engine.set_system_resource_inbox(None);
-            Some((result, engine))
+            Some((result, engine, completion_context))
         };
 
-        let Some((result, engine)) = accepted_turn else {
+        let Some((result, engine, completion_context)) = accepted_turn else {
             self.backend_output_sink.cancel_active_tool_calls(
                 "The tool call was cancelled because the user stopped the turn.",
             );
+            if let Some(session_error) = cancelled_session_error {
+                let stream_error = session_error.stream_error().clone();
+                term_guard
+                    .terminalize(move |runtime, turn| {
+                        runtime.emit_error_data_for_turn(turn, stream_error)
+                    })
+                    .await
+                    .map_err(AgentSendError::from_app_error)?;
+                return Err(session_error);
+            }
             // A stopped turn may have dropped an arbitrary hook/skill/tool
             // future. Its registered child process remains owned by the shared
             // supervisor, so do not publish the business terminal until every
@@ -2143,9 +2319,60 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     elapsed_ms,
                     input_tokens: agent_result.usage.input_tokens,
                     output_tokens: agent_result.usage.output_tokens,
+                    reasoning_tokens: agent_result.usage.reasoning_tokens,
                     context_tokens,
                     context_window,
                 };
+
+                if let Some(issue) = agent_result.completion_adjudication.as_ref() {
+                    let rollback_succeeded = issue.history_rollback_succeeded();
+                    let detail = issue.detail();
+                    let send_error = if rollback_succeeded {
+                        AgentSendError::provider_unbacked_completion(detail)
+                    } else {
+                        AgentSendError::agent_session_inconsistent(detail)
+                    };
+                    if !rollback_succeeded {
+                        // Persistence failed after the in-memory root restore.
+                        // Quarantine this reusable manager before releasing turn
+                        // admission so no successor can observe divergent state.
+                        self.runtime.mark_transport_broken();
+                    }
+                    self.backend_output_sink.fail_active_tool_calls(
+                        "The model reported completion without durable evidence for the requested deliverable.",
+                    );
+                    self.backend_output_sink.abort_artifact_delivery_turn();
+                    drop(engine);
+
+                    let stream_error = send_error.stream_error().clone();
+                    if term_guard
+                        .fail_adjudicated_turn_if_not_cancelled(
+                            &turn_cancel,
+                            completed_event,
+                            stream_error,
+                        )
+                        .await
+                        .map_err(AgentSendError::from_app_error)?
+                    {
+                        return Err(send_error);
+                    }
+
+                    // Stop won the lifecycle race before A2's metrics+Error
+                    // pair. Preserve the existing cancellation contract; no
+                    // A2 event escaped the locked transition above.
+                    term_guard.fence_cancelled_processes().await?;
+                    term_guard
+                        .terminalize(|runtime, turn| {
+                            runtime.emit_finish_for_turn(
+                                turn,
+                                None,
+                                Some(TurnStopReason::Cancelled),
+                            )
+                        })
+                        .await
+                        .map_err(AgentSendError::from_app_error)?;
+                    return Ok(());
+                }
 
                 // —— Post-session memory distillation (exact turn child) ——
                 // Eligibility gates, cheapest first:
@@ -2166,7 +2393,9 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     .map(str::trim)
                     .unwrap_or("")
                     .is_empty();
-                let distill_job = if origin_is_human
+                let distill_job = if agent_result.stop_reason
+                    == nomi_types::message::StopReason::EndTurn
+                    && origin_is_human
                     && super::distill::distill_enabled()
                     && let Some(dir) = self.distill_dir.clone()
                 {
@@ -2185,9 +2414,22 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 {
                     AsyncArtifactDeliveryOutcome::Verified(_) => {}
                     AsyncArtifactDeliveryOutcome::Cancelled => {
-                        self.backend_output_sink.cancel_active_tool_calls(
-                            "The tool call was cancelled during durable artifact delivery.",
-                        );
+                        if let Err(session_error) = self
+                            .restore_uncommitted_completion_turn(
+                                &completion_context,
+                                "Artifact delivery was cancelled after model completion, and the Agent session root could not be restored",
+                            )
+                            .await
+                        {
+                            let stream_error = session_error.stream_error().clone();
+                            term_guard
+                                .terminalize(move |runtime, turn| {
+                                    runtime.emit_error_data_for_turn(turn, stream_error)
+                                })
+                                .await
+                                .map_err(AgentSendError::from_app_error)?;
+                            return Err(session_error);
+                        }
                         term_guard.fence_cancelled_processes().await?;
                         term_guard
                             .terminalize(|runtime, turn| {
@@ -2208,10 +2450,21 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                             error = %delivery_error,
                             "Nomi turn ended without satisfying every artifact-delivery obligation"
                         );
-                        let send_error = image_artifact_delivery_error_to_send_error(
+                        let mut send_error = image_artifact_delivery_error_to_send_error(
                             image_generation_intent,
                             &delivery_error,
                         );
+                        if let Err(session_error) = self
+                            .restore_uncommitted_completion_turn(
+                                &completion_context,
+                                format!(
+                                    "Artifact delivery failed after model completion ({delivery_error}), and the Agent session root could not be restored"
+                                ),
+                            )
+                            .await
+                        {
+                            send_error = session_error;
+                        }
                         let stream_error = send_error.stream_error().clone();
                         term_guard
                             .terminalize(move |runtime, turn| {
@@ -2223,9 +2476,43 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     }
                 }
 
-                let distill_completed = match distill_job {
+                // Observability for the one shape B1's restart could in
+                // principle launder into a false success: a turn that restarted
+                // after the ceiling, was cut off mid state-changing call, had
+                // such tools advertised, and still completed no state-changing
+                // effect — while its prose says otherwise. `EndTurn` with
+                // non-empty text is precisely what the receipt's stop-reason
+                // check cannot see.
+                //
+                // Recorded, NOT enforced. Turning this into a terminal failure
+                // would convert a completed turn into a hard error, and review
+                // found a real class it would misjudge: a fork-mode `Skill`
+                // delegate does genuine file and exec work while the tool itself
+                // is `Info`-categorised, so a turn whose deliverable arrived that
+                // way scores no state-changing effect. Enforcing it also skips
+                // the TurnCompleted metrics event and needs error-card i18n that
+                // does not exist yet. Adjudicating a completion claim belongs
+                // with the workstream that owns unbacked claims generally; B1's
+                // obligation is only to not manufacture the shape, and to make it
+                // measurable.
+                if agent_result.stop_reason == nomi_types::message::StopReason::EndTurn
+                    && agent_result.rounds > 1
+                    && agent_result.state_changing_tools_advertised
+                    && agent_result.cutoff_state_changing > 0
+                    && agent_result.effects_ok == 0
+                {
+                    tracing::warn!(
+                        conversation_id = %self.runtime.conversation_id(),
+                        elapsed_ms,
+                        rounds = agent_result.rounds,
+                        cutoff_state_changing = agent_result.cutoff_state_changing,
+                        "Nomi turn restarted after the output ceiling and completed no state-changing tool call"
+                    );
+                }
+
+                let prepared_distill = match distill_job {
                     Some((cfg, dir, transcript)) => {
-                        super::distill::run_distill_exact_turn(
+                        super::distill::prepare_distill_exact_turn(
                             &turn_cancel,
                             cfg,
                             dir,
@@ -2233,12 +2520,25 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                         )
                         .await
                     }
-                    None => !turn_cancel.is_cancelled(),
+                    None => (!turn_cancel.is_cancelled()).then_some(None),
                 };
-                if !distill_completed {
-                    self.backend_output_sink.cancel_active_tool_calls(
-                        "The tool call was cancelled because the user stopped the turn.",
-                    );
+                let Some(prepared_distill) = prepared_distill else {
+                    if let Err(session_error) = self
+                        .restore_uncommitted_completion_turn(
+                            &completion_context,
+                            "The accepted Agent turn was cancelled after model completion, and its session root could not be restored",
+                        )
+                        .await
+                    {
+                        let stream_error = session_error.stream_error().clone();
+                        term_guard
+                            .terminalize(move |runtime, turn| {
+                                runtime.emit_error_data_for_turn(turn, stream_error)
+                            })
+                            .await
+                            .map_err(AgentSendError::from_app_error)?;
+                        return Err(session_error);
+                    }
                     term_guard.fence_cancelled_processes().await?;
                     term_guard.terminalize(|runtime, turn| {
                         runtime.emit_finish_for_turn(
@@ -2248,17 +2548,42 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                         )
                     }).await.map_err(AgentSendError::from_app_error)?;
                     return Ok(());
-                }
+                };
 
-                match term_guard
+                let commit_outcome = match term_guard
                     .commit_verified_turn_if_not_cancelled(
                         &turn_cancel,
                         completed_event,
                         stop_reason,
+                        prepared_distill,
+                        &self.engine,
+                        &completion_context,
                     )
                     .await
-                    .map_err(AgentSendError::from_app_error)?
                 {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let mut send_error = AgentSendError::from_app_error(error);
+                        if let Err(session_error) = self
+                            .restore_uncommitted_completion_turn(
+                                &completion_context,
+                                "The verified turn could not enter its terminal commit, and the Agent session root could not be restored",
+                            )
+                            .await
+                        {
+                            send_error = session_error;
+                        }
+                        let stream_error = send_error.stream_error().clone();
+                        term_guard
+                            .terminalize(move |runtime, turn| {
+                                runtime.emit_error_data_for_turn(turn, stream_error)
+                            })
+                            .await
+                            .map_err(AgentSendError::from_app_error)?;
+                        return Err(send_error);
+                    }
+                };
+                match commit_outcome {
                     VerifiedTurnCommitOutcome::Committed => {
                         self.engine.lock().await.set_host_context_value(
                             IMAGE_ROUTE_CONTEXT_KEY,
@@ -2267,9 +2592,22 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                         Ok(())
                     }
                     VerifiedTurnCommitOutcome::Cancelled => {
-                        self.backend_output_sink.cancel_active_tool_calls(
-                            "The tool call was cancelled before its verified delivery was committed.",
-                        );
+                        if let Err(session_error) = self
+                            .restore_uncommitted_completion_turn(
+                                &completion_context,
+                                "The verified delivery was cancelled before commit, and the Agent session root could not be restored",
+                            )
+                            .await
+                        {
+                            let stream_error = session_error.stream_error().clone();
+                            term_guard
+                                .terminalize(move |runtime, turn| {
+                                    runtime.emit_error_data_for_turn(turn, stream_error)
+                                })
+                                .await
+                                .map_err(AgentSendError::from_app_error)?;
+                            return Err(session_error);
+                        }
                         term_guard.fence_cancelled_processes().await?;
                         term_guard
                             .terminalize(|runtime, turn| {
@@ -2290,10 +2628,42 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                             error = %delivery_error,
                             "artifact delivery changed before the exact turn commit"
                         );
-                        let send_error = image_artifact_delivery_error_to_send_error(
+                        let mut send_error = image_artifact_delivery_error_to_send_error(
                             image_generation_intent,
                             &delivery_error,
                         );
+                        if let Err(session_error) = self
+                            .restore_uncommitted_completion_turn(
+                                &completion_context,
+                                format!(
+                                    "Artifact delivery changed before commit ({delivery_error}), and the Agent session root could not be restored"
+                                ),
+                            )
+                            .await
+                        {
+                            send_error = session_error;
+                        }
+                        let stream_error = send_error.stream_error().clone();
+                        term_guard
+                            .terminalize(move |runtime, turn| {
+                                runtime.emit_error_data_for_turn(turn, stream_error)
+                            })
+                            .await
+                            .map_err(AgentSendError::from_app_error)?;
+                        Err(send_error)
+                    }
+                    VerifiedTurnCommitOutcome::SessionCommitFailed => {
+                        let detail = "The verified Agent turn could not be committed to its resumable session";
+                        let _ = self
+                            .restore_uncommitted_completion_turn(
+                                &completion_context,
+                                format!(
+                                    "{detail}, and the accepted-turn root could not be restored"
+                                ),
+                            )
+                            .await;
+                        self.runtime.mark_transport_broken();
+                        let send_error = AgentSendError::agent_session_inconsistent(detail);
                         let stream_error = send_error.stream_error().clone();
                         term_guard
                             .terminalize(move |runtime, turn| {
@@ -2306,6 +2676,10 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 }
             }
             Err(e) => {
+                // Release the turn's engine guard before the restore helper,
+                // which re-acquires it. `Mutex` is not reentrant, so keeping the
+                // guard here deadlocks every provider-error turn.
+                drop(engine);
                 let error_msg = format!("Nomi agent error: {e}");
                 error!(
                     conversation_id = %self.runtime.conversation_id(),
@@ -2313,11 +2687,21 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     error = %ErrorChain(&e),
                     "Nomi engine.execute_turn() failed, emitting terminal Error"
                 );
-                let send_error = nomi_engine_error_to_send_error(error_msg);
+                let mut send_error = nomi_engine_error_to_send_error(error_msg);
                 self.backend_output_sink.fail_active_tool_calls(&format!(
                     "The model/provider turn failed before this tool call completed: {e}"
                 ));
-                self.backend_output_sink.abort_artifact_delivery_turn();
+                if let Err(session_error) = self
+                    .restore_uncommitted_completion_attempt(
+                        &completion_context,
+                        format!(
+                            "The model/provider failed before the accepted turn committed ({e}), and the Agent session root could not be restored"
+                        ),
+                    )
+                    .await
+                {
+                    send_error = session_error;
+                }
                 let stream_error = send_error.stream_error().clone();
                 term_guard.terminalize(move |runtime, turn| {
                     runtime.emit_error_data_for_turn(turn, stream_error)
@@ -2376,6 +2760,11 @@ struct TurnTerminationGuard {
     process_supervisor: Option<Arc<nomi_process_runtime::ProcessSupervisor>>,
     mcp_managers: Vec<Arc<McpManager>>,
     turn_teardown_fence: Arc<TurnTeardownFence>,
+    /// Set by the engine only after it has durably registered the accepted
+    /// session root. If an unwind happens before the host terminal commits,
+    /// the backstop must publish the typed inconsistency terminal so the owner
+    /// retires the runtime and exactly rewinds that root.
+    accepted_turn_recovery_required: Arc<AtomicBool>,
     /// Reusable runtime binding. Turn cleanup closes its current Lanes but must
     /// not revoke the owner lease; the next turn lazily opens a fresh Lane.
     #[cfg(feature = "browser-use")]
@@ -2387,6 +2776,7 @@ enum VerifiedTurnCommitOutcome {
     Committed,
     Cancelled,
     DeliveryFailed(String),
+    SessionCommitFailed,
 }
 
 impl TurnTerminationGuard {
@@ -2464,6 +2854,45 @@ impl TurnTerminationGuard {
         Ok(emitted)
     }
 
+    /// Publish A2's accounting event and typed failure as one lifecycle
+    /// transition. Stop takes the same gate, so observers can never see
+    /// TurnCompleted followed by Cancelled, nor a double terminal.
+    async fn fail_adjudicated_turn_if_not_cancelled(
+        &mut self,
+        turn_cancel: &tokio_util::sync::CancellationToken,
+        completed: TurnCompletedEventData,
+        stream_error: crate::protocol::events::ErrorEventData,
+    ) -> Result<bool, AppError> {
+        #[cfg(feature = "browser-use")]
+        if let Some(binding) = &self.browser_lane_binding {
+            binding.close_turn_lanes().await?;
+        }
+
+        let _lifecycle = self
+            .lifecycle_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut active = self
+            .active_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.as_ref() != Some(&self.turn) || turn_cancel.is_cancelled() {
+            return Ok(false);
+        }
+
+        self.runtime.emit(AgentStreamEvent::TurnCompleted(completed));
+        let emitted = self
+            .runtime
+            .emit_error_data_for_turn(self.turn, stream_error);
+        self.steering_inbox
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        *active = None;
+        self.armed = false;
+        Ok(emitted)
+    }
+
     /// Atomically transfer verified artifacts/held prose to the visible turn
     /// and publish its terminal event. Stop uses the same lifecycle gate, so it
     /// must linearize either before this commit (no prose or receipt escapes) or
@@ -2473,6 +2902,9 @@ impl TurnTerminationGuard {
         turn_cancel: &tokio_util::sync::CancellationToken,
         completed: TurnCompletedEventData,
         stop_reason: TurnStopReason,
+        prepared_distill: Option<super::distill::PreparedDistill>,
+        engine: &Mutex<AgentEngine>,
+        completion_context: &CompletionEvidenceContext,
     ) -> Result<VerifiedTurnCommitOutcome, AppError> {
         #[cfg(feature = "browser-use")]
         if let Some(binding) = &self.browser_lane_binding {
@@ -2493,6 +2925,10 @@ impl TurnTerminationGuard {
             }
         };
 
+        // Acquire the async engine lock before the synchronous lifecycle gate.
+        // Stop never needs the engine lock, and the final cancellation check
+        // below ensures a stop that won while we waited remains authoritative.
+        let mut engine = engine.lock().await;
         let _lifecycle = self
             .lifecycle_gate
             .lock()
@@ -2504,6 +2940,9 @@ impl TurnTerminationGuard {
         if active.as_ref() != Some(&self.turn) || turn_cancel.is_cancelled() {
             return Ok(VerifiedTurnCommitOutcome::Cancelled);
         }
+        if !engine.seal_completion_for_host_terminal(completion_context) {
+            return Ok(VerifiedTurnCommitOutcome::SessionCommitFailed);
+        }
         if let Err(error) = self
             .backend_output_sink
             .finish_verified_artifact_delivery_turn(verified)
@@ -2511,6 +2950,7 @@ impl TurnTerminationGuard {
             return Ok(VerifiedTurnCommitOutcome::DeliveryFailed(error));
         }
 
+        super::distill::apply_prepared_distill(prepared_distill);
         self.runtime.emit(AgentStreamEvent::TurnCompleted(completed));
         self.runtime
             .emit_finish_for_turn(self.turn, None, Some(stop_reason));
@@ -2559,6 +2999,16 @@ impl Drop for TurnTerminationGuard {
             // ineligible for cache reuse and routes the owner through the
             // registry's bounded quarantine teardown path.
             self.runtime.mark_transport_broken();
+            let session_error = self
+                .accepted_turn_recovery_required
+                .load(Ordering::Acquire)
+                .then(|| {
+                    AgentSendError::agent_session_inconsistent(
+                        "The Agent turn ended unexpectedly after registering a durable session recovery root",
+                    )
+                    .stream_error()
+                    .clone()
+                });
             self.backend_output_sink.cancel_active_tool_calls(
                 "The turn ended unexpectedly before this tool call reached a terminal state.",
             );
@@ -2580,12 +3030,16 @@ impl Drop for TurnTerminationGuard {
                     &active_turn,
                     &steering_inbox,
                     turn,
-                    |runtime, turn| {
-                        runtime.emit_finish_for_turn(
-                            turn,
-                            None,
-                            Some(TurnStopReason::Cancelled),
-                        )
+                    move |runtime, turn| {
+                        if let Some(error) = session_error {
+                            runtime.emit_error_data_for_turn(turn, error)
+                        } else {
+                            runtime.emit_finish_for_turn(
+                                turn,
+                                None,
+                                Some(TurnStopReason::Cancelled),
+                            )
+                        }
                     },
                 );
                 turn_teardown_fence.complete();
@@ -3112,7 +3566,12 @@ impl NomiAgentManager {
         // mid-turn; the engine lock below then waits for it to release.
         self.request_stop(None, "clear_context", false);
         let mut engine = self.engine.lock().await;
-        engine.clear_context();
+        if let Err(error) = engine.clear_context() {
+            self.runtime.mark_transport_broken();
+            return Err(AppError::Internal(format!(
+                "Agent context could not be cleared durably; the runtime was quarantined: {error}"
+            )));
+        }
         Ok(())
     }
 
@@ -3146,12 +3605,18 @@ impl NomiAgentManager {
         );
         self.request_stop(None, "rewind_last_turn", false);
         let mut engine = self.engine.lock().await;
-        if !engine.rewind_last_turn(expected_source_message_id) {
-            return Err(AppError::BadRequest(
+        match engine.rewind_last_turn(expected_source_message_id) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(AppError::BadRequest(
                 "无法安全回退该历史消息：编辑检查点已失效，原消息未改变".into(),
-            ));
+            )),
+            Err(error) => {
+                self.runtime.mark_transport_broken();
+                Err(AppError::Internal(format!(
+                    "Agent turn rewind could not be persisted; the runtime was quarantined: {error}"
+                )))
+            }
         }
-        Ok(())
     }
 
     /// Test-only accessor for the resolved distillation target directory.
@@ -3230,6 +3695,7 @@ fn image_artifact_delivery_error_to_send_error(
         "Artifact delivery failed: {delivery_error}"
     )))
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -3772,6 +4238,7 @@ mod tests {
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
                 turn_teardown_fence: Arc::clone(&fence),
+                accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
                 browser_lane_binding: Some(binding),
                 armed: true,
             };
@@ -3825,6 +4292,7 @@ mod tests {
             process_supervisor: None,
             mcp_managers: Vec::new(),
             turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
+            accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
             browser_lane_binding: Some(binding),
             armed: true,
         };
@@ -3958,7 +4426,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".into(),
             base_url: None,
             system_prompt: None,
-            max_tokens: 4096,
+            output_ceiling: Some(4096),
             max_turns: None,
             context_limit: None,
             compat_overrides: Default::default(),
@@ -4452,17 +4920,146 @@ mod tests {
     }
 
     #[test]
-    fn provider_context_budget_is_applied_before_engine_bootstrap() {
+    fn declared_provider_token_budget_is_applied_before_engine_bootstrap() {
         let mut config = make_test_engine_config();
-        config.max_tokens = 8192;
 
-        apply_provider_context_budget(&mut config, Some(4096));
+        apply_provider_token_budget(&mut config, Some(4096), Some(8192)).unwrap();
 
         assert_eq!(config.compact.context_window, 4096);
-        assert_eq!(config.max_tokens, 1024);
+        assert_eq!(config.output_max_tokens, Some(1024));
         assert_eq!(config.compact.output_reserve, 1024);
         assert_eq!(config.compact.autocompact_buffer, 512);
         assert_eq!(config.compact.emergency_buffer, 256);
+    }
+
+    #[test]
+    fn absent_capability_ceiling_erases_desktop_local_config_for_optional_protocol() {
+        let mut config = make_test_engine_config();
+        config.provider = nomi_config::config::ProviderType::OpenAI;
+        config.output_max_tokens = Some(8192);
+
+        apply_provider_token_budget(&mut config, Some(200_000), None).unwrap();
+
+        assert_eq!(config.output_max_tokens, None);
+        assert_eq!(config.compact.output_reserve, 20_000);
+    }
+
+    #[test]
+    fn required_protocol_rejects_an_absent_capability_ceiling() {
+        let mut config = make_test_engine_config();
+
+        let error = apply_provider_token_budget(&mut config, Some(200_000), None)
+            .expect_err("Anthropic requires an explicit output ceiling");
+
+        assert!(error.to_string().contains("Max output tokens"));
+    }
+
+    #[derive(Clone)]
+    struct CapturedLogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs(run: impl FnOnce()) -> String {
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer_output = Arc::clone(&output);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(move || CapturedLogWriter(Arc::clone(&writer_output)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+
+        let bytes = output
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        String::from_utf8(bytes).expect("test tracing output is UTF-8")
+    }
+
+    #[test]
+    fn an_undeclared_context_window_is_reported_once_per_provider_model() {
+        // A dedicated instance rather than the process singleton: the shared
+        // `global()` set is consumed by every other test that builds a manager
+        // from a capability without a context limit, which would make an
+        // order-dependent assertion here.
+        let log = AssumedContextWindowLog::new();
+
+        // (a) The silent fallback is now visible, with the identity and the
+        // window that will actually be used.
+        let logs = capture_logs(|| {
+            assert!(report_assumed_context_window(
+                &log,
+                None,
+                "Local vLLM",
+                "qwen3-32b",
+                200_000,
+            ));
+        });
+        assert!(logs.contains("WARN"), "got: {logs}");
+        assert!(logs.contains("Local vLLM"), "got: {logs}");
+        assert!(logs.contains("qwen3-32b"), "got: {logs}");
+        assert!(logs.contains("assumed_context_window=200000"), "got: {logs}");
+        assert!(logs.contains("Context limit"), "got: {logs}");
+
+        // (b) The same pair on a later turn/runtime rebuild stays quiet.
+        let repeats = capture_logs(|| {
+            for _ in 0..5 {
+                assert!(!report_assumed_context_window(
+                    &log,
+                    None,
+                    "Local vLLM",
+                    "qwen3-32b",
+                    200_000,
+                ));
+            }
+        });
+        assert!(repeats.is_empty(), "got: {repeats}");
+
+        // A second, differently sized model behind the same provider is still
+        // its own diagnostic, and so is the same model id on another provider.
+        for (provider, model) in [("Local vLLM", "qwen3-4b"), ("Other gateway", "qwen3-32b")] {
+            let logs = capture_logs(|| {
+                assert!(report_assumed_context_window(
+                    &log, None, provider, model, 200_000,
+                ));
+            });
+            assert!(logs.contains(model), "got: {logs}");
+        }
+    }
+
+    #[test]
+    fn a_declared_context_window_is_never_reported_as_assumed() {
+        let log = AssumedContextWindowLog::new();
+        let logs = capture_logs(|| {
+            assert!(!report_assumed_context_window(
+                &log,
+                Some(32_768),
+                "Local vLLM",
+                "qwen3-32b",
+                32_768,
+            ));
+        });
+        assert!(logs.is_empty(), "got: {logs}");
+
+        // The predicate matches `resolve_context_window`, which also treats an
+        // explicit zero as unset — that path falls back just as silently.
+        assert!(assumes_default_context_window(None));
+        assert!(assumes_default_context_window(Some(0)));
+        assert!(!assumes_default_context_window(Some(1)));
+        assert!(!assumes_default_context_window(Some(200_000)));
     }
 
     fn make_agent_with_provider(provider: Arc<dyn LlmProvider>) -> NomiAgentManager {
@@ -4860,24 +5457,20 @@ mod tests {
         ));
     }
 
+    /// The observed production shape: a long prose answer cut off at the output
+    /// ceiling, with no tool ever called. Restarting it would spend a second and
+    /// third full ceiling reproducing the same wall, which is exactly what the
+    /// deleted host-side auto-continue did (`output_tokens = 3 × 8192`). The
+    /// engine must decline, and the receipt must carry the truthful terminal.
     #[tokio::test]
-    async fn send_message_auto_continues_after_max_tokens_before_finish() {
-        let provider = Arc::new(ScriptedProvider::new(vec![
-            vec![
-                LlmEvent::TextDelta("partial".into()),
-                LlmEvent::Done {
-                    stop_reason: StopReason::MaxTokens,
-                    usage: Default::default(),
-                },
-            ],
-            vec![
-                LlmEvent::TextDelta(" done".into()),
-                LlmEvent::Done {
-                    stop_reason: StopReason::EndTurn,
-                    usage: Default::default(),
-                },
-            ],
-        ]));
+    async fn a_prose_only_truncation_is_not_restarted_and_finishes_as_max_tokens() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("partial".into()),
+            LlmEvent::Done {
+                stop_reason: StopReason::MaxTokens,
+                usage: Default::default(),
+            },
+        ]]));
         let agent = make_agent_with_provider(provider.clone());
         let mut rx = agent.subscribe();
 
@@ -4893,20 +5486,106 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(provider.calls(), 2, "MaxTokens should trigger one continuation pass");
+        assert_eq!(
+            provider.calls(),
+            1,
+            "a truncation with no carry-forward evidence must not burn another ceiling"
+        );
 
         let mut completed_turns = 0;
         let mut finish_reason = None;
+        let mut streamed = String::new();
         while let Ok(event) = rx.try_recv() {
             match event {
                 AgentStreamEvent::TurnCompleted(_) => completed_turns += 1,
                 AgentStreamEvent::Finish(data) => finish_reason = data.stop_reason,
+                AgentStreamEvent::Text(data) => streamed.push_str(&data.content),
                 _ => {}
             }
         }
 
-        assert_eq!(completed_turns, 1, "continuation must collapse into one completed turn");
-        assert_eq!(finish_reason, Some(TurnStopReason::EndTurn));
+        assert_eq!(completed_turns, 1);
+        assert_eq!(
+            finish_reason,
+            Some(TurnStopReason::MaxTokens),
+            "the turn must report the ceiling it actually hit, not a clean EndTurn"
+        );
+        assert!(
+            streamed.contains("partial"),
+            "the already-visible prose stays durable evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn unbacked_file_completion_emits_metrics_then_one_error_and_never_finish() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("Created miniapp.html.".into()),
+            LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: nomi_types::message::TokenUsage {
+                    input_tokens: 17,
+                    output_tokens: 5,
+                    ..Default::default()
+                },
+            },
+        ]]));
+        let agent = make_agent_with_provider_and_max_turns(provider.clone(), Some(1));
+        let mut rx = agent.subscribe();
+        agent
+            .steering_inbox
+            .lock()
+            .unwrap()
+            .push_back("irrelevant race-tail text".to_owned());
+
+        let error = agent
+            .send_message(SendMessageData {
+                content: "Create miniapp.html.".into(),
+                msg_id: "msg-unbacked-completion".into(),
+                source_message_id: Some("root-unbacked-completion".into()),
+                files: Vec::new(),
+                inject_skills: Vec::new(),
+                origin: None,
+            })
+            .await
+            .expect_err("unsupported completion must fail the delivery receipt");
+
+        assert_eq!(
+            error.code(),
+            Some(AgentErrorCode::UserLlmProviderUnbackedCompletion)
+        );
+        assert_eq!(provider.calls(), 1, "a typed verdict cannot be race-tail overwritten");
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentStreamEvent::TurnCompleted(_)))
+                .count(),
+            1,
+            "usage accounting is retained exactly once"
+        );
+        let errors = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentStreamEvent::Error(data) => Some(data),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].code,
+            Some(AgentErrorCode::UserLlmProviderUnbackedCompletion)
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentStreamEvent::Finish(_))),
+            "a failed delivery must never publish Finish"
+        );
+        assert!(agent.steering_inbox.lock().unwrap().is_empty());
+        assert!(
+            agent.engine.lock().await.messages_transcript().is_empty(),
+            "the rejected user/assistant/nudge exchange must not pollute history"
+        );
     }
 
     #[tokio::test]
@@ -5755,7 +6434,47 @@ mod tests {
             !resurrected,
             "a later MaxTokens continuation must not recover a failed prior call"
         );
-        assert_eq!(provider.calls(), 3);
+        // Two passes, not three: the second turn's MaxTokens carries no truncated
+        // call, no declared plan and no effect, so the engine correctly declines
+        // to restart it. Re-running an identical request against an identical
+        // ceiling can only reproduce the identical result.
+        assert_eq!(provider.calls(), 2);
+    }
+
+    // The manager's restore helpers re-acquire the engine mutex, which is not
+    // reentrant, so a failing turn must release its guard first. The failure mode
+    // of the reentrant shape is a deadlock, so bound it explicitly: a regression
+    // has to fail in seconds instead of hanging the suite.
+    #[tokio::test]
+    async fn a_provider_error_turn_releases_the_engine_lock_before_restoring() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![LlmEvent::Error(
+            "upstream refused the request".into(),
+        )]]));
+        let agent = make_agent_with_provider(provider.clone());
+
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            agent.send_message(SendMessageData {
+                content: "trigger a provider failure".into(),
+                msg_id: "msg-provider-error".into(),
+                source_message_id: None,
+                files: Vec::new(),
+                inject_skills: Vec::new(),
+                origin: None,
+            }),
+        )
+        .await
+        .expect("a provider-error turn must terminalize, not deadlock on the engine mutex");
+        assert!(sent.is_err(), "a provider error is never a successful turn");
+
+        // The guard must be free again, otherwise the next turn would deadlock.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(20), agent.engine.lock())
+                .await
+                .is_ok(),
+            "the failed turn must not leak its engine guard"
+        );
+        assert_eq!(provider.calls(), 1, "a provider error is not silently replayed");
     }
 
     #[tokio::test]
@@ -6249,14 +6968,19 @@ mod tests {
         assert!(agent.steering_inbox.lock().unwrap().is_empty());
     }
 
+    /// The recoverable shape, end to end through the host: a state-changing tool
+    /// call cut off at the ceiling must restart the round against the ORIGINAL
+    /// requirement — not append an English "continue where you left off" prompt,
+    /// and not replay the truncated draft.
     #[tokio::test]
-    async fn max_tokens_continuation_prompt_forbids_repeating_large_write() {
+    async fn a_truncated_tool_call_restarts_the_round_against_the_original_requirement() {
         let provider = Arc::new(ScriptedProvider::new(vec![
             vec![
-                LlmEvent::ToolUseDelta {
+                LlmEvent::TextDelta("Here is the whole file inline: <html>".into()),
+                LlmEvent::ToolUseTruncated {
                     id: "call-large-write".into(),
                     name: "Write".into(),
-                    input: None,
+                    argument_bytes: 6142,
                 },
                 LlmEvent::Done {
                     stop_reason: StopReason::MaxTokens,
@@ -6275,7 +6999,7 @@ mod tests {
                 .get_mut()
                 .registry_mut()
                 .register(Box::new(PreviewOnlyWriteTool)),
-            "Write must be advertised in the request that emits its progress"
+            "Write must be advertised for the truncated call to be an authorized fact"
         );
         let mut rx = agent.subscribe();
 
@@ -6289,29 +7013,46 @@ mod tests {
                 origin: None,
             })
             .await
-            .unwrap();
+            .expect("a restarted round is a normal outcome, not a hard failure");
 
         let requests = provider.requests();
-        assert_eq!(requests.len(), 2);
-        let continuation_text = requests[1]
-            .messages
-            .iter()
-            .rev()
-            .find(|message| message.role == Role::User)
-            .and_then(|message| {
-                message.content.iter().find_map(|block| match block {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-            })
-            .expect("continuation request should contain a user text prompt");
+        assert_eq!(requests.len(), 2, "the truncated Write must earn one restart");
 
-        assert!(continuation_text.contains("Do not call Write with a full large file in one call"));
-        assert!(continuation_text.contains("First create a small complete deliverable"));
-        assert!(continuation_text.contains("append or edit in chunks"));
-        assert!(continuation_text.contains("verify the target file exists"));
+        // The round facts travel on the SYSTEM channel, never as a user message:
+        // a user message would pollute the durable transcript and teach the model
+        // that host bookkeeping is user instruction.
+        let system = &requests[1].system;
+        assert!(system.contains("[resumable round 2/3]"), "system: {system}");
+        assert!(system.contains("WHAT WAS CUT OFF"));
+        assert!(system.contains("Write (6142 bytes of arguments streamed, NOT executed)"));
 
-        let leaked_partial_call = std::iter::from_fn(|| rx.try_recv().ok()).any(|event| {
+        // The tail message is the original requirement, verbatim and exactly
+        // once — not a continuation prompt, and not the truncated draft.
+        let messages = &requests[1].messages;
+        let tail = messages.last().expect("the restart re-pushes the requirement");
+        assert_eq!(tail.role, Role::User);
+        assert!(matches!(
+            &tail.content[..],
+            [ContentBlock::Text { text }] if text.contains("create a polished single page site")
+        ));
+
+        let serialized = serde_json::to_string(messages).expect("messages serialize");
+        assert!(
+            !serialized.contains("Here is the whole file inline"),
+            "the truncated draft must leave the provider request entirely: {serialized}"
+        );
+        assert_eq!(
+            serialized.matches("create a polished single page site").count(),
+            1,
+            "the requirement must appear exactly once: {serialized}"
+        );
+        assert!(
+            !serialized.contains("Automatic continuation"),
+            "the deleted host continuation prompt must not come back"
+        );
+
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let leaked_partial_call = events.iter().any(|event| {
             matches!(
                 event,
                 AgentStreamEvent::ToolCall(data) if data.call_id == "nomi-call-large-write"
@@ -6319,7 +7060,26 @@ mod tests {
         });
         assert!(
             !leaked_partial_call,
-            "an uncommitted partial tool call must never enter the frontend lifecycle"
+            "a truncated tool call must never enter the frontend lifecycle"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentStreamEvent::OutputDiscarded(data) => Some(data.restart_attempt),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![2],
+            "the retry must retract only the provider pass after its checkpoint"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentStreamEvent::Start(_)))
+                .count(),
+            2,
+            "the second Start is a non-destructive provider-pass checkpoint"
         );
     }
 
@@ -6782,6 +7542,7 @@ mod tests {
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
+                accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
                 #[cfg(feature = "browser-use")]
                 browser_lane_binding: None,
                 armed: true,
@@ -6812,6 +7573,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn termination_guard_reports_session_inconsistency_after_root_registration() {
+        let rt = AgentRuntimeState::new("c-guard-session-root", "/w", 16);
+        let mut rx = rt.subscribe();
+        let turn = rt.reset_for_new_turn(ConversationStatus::Running);
+        let active_turn = Arc::new(std::sync::Mutex::new(Some(turn)));
+        let recovery_required = Arc::new(AtomicBool::new(true));
+        {
+            let _guard = TurnTerminationGuard {
+                runtime: rt.clone(),
+                turn,
+                active_turn: Arc::clone(&active_turn),
+                lifecycle_gate: Arc::new(std::sync::Mutex::new(())),
+                steering_inbox: Arc::new(std::sync::Mutex::new(
+                    std::collections::VecDeque::new(),
+                )),
+                backend_output_sink: Arc::new(BackendOutputSink::new(rt.event_sender())),
+                process_supervisor: None,
+                mcp_managers: Vec::new(),
+                turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
+                accepted_turn_recovery_required: recovery_required,
+                #[cfg(feature = "browser-use")]
+                browser_lane_binding: None,
+                armed: true,
+            };
+        }
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("armed drop must publish its typed terminal")
+            .expect("terminal channel closed unexpectedly");
+        match event {
+            AgentStreamEvent::Error(error) => assert_eq!(
+                error.code,
+                Some(nomifun_api_types::AgentErrorCode::NomifunAgentSessionInconsistent)
+            ),
+            other => panic!("expected session-consistency Error, got {other:?}"),
+        }
+        assert_eq!(rt.status(), Some(ConversationStatus::Finished));
+        assert!(active_turn.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn termination_guard_exact_terminalization_absorbs_steering_and_emits_once() {
         // On the normal path the guard owns both the terminal event and the
         // exact generation's steering cleanup. Its later Drop must stay silent.
@@ -6835,6 +7638,7 @@ mod tests {
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
+                accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
                 #[cfg(feature = "browser-use")]
                 browser_lane_binding: None,
                 armed: true,
@@ -6997,5 +7801,6 @@ mod turn_completed_mapping_tests {
         assert_eq!(map_engine_stop_reason(StopReason::MaxTokens), TurnStopReason::MaxTokens);
         // Per-turn request cap — likewise a truncated turn.
         assert_eq!(map_engine_stop_reason(StopReason::MaxTurns), TurnStopReason::MaxTurnRequests);
+        assert_eq!(map_engine_stop_reason(StopReason::Refusal), TurnStopReason::Refusal);
     }
 }

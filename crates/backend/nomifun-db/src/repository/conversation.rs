@@ -510,6 +510,35 @@ pub trait IConversationRepository: Send + Sync {
         ))
     }
 
+    /// Claims one explicit user-authorized continuation of a truncated public
+    /// turn and admits it as a new turn in the same transaction.
+    ///
+    /// A fresh claim is valid only when `source_message_id` still identifies
+    /// the latest projected public `turn` receipt for this Conversation and
+    /// that receipt is a completed, retryable `output_truncated` or
+    /// `turn_requests_exhausted` failure with the exact immutable request
+    /// payload supplied by the caller. Existing matching operation receipts
+    /// are absorbing replays and do not revalidate or mutate lifecycle.
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_truncated_continuation_receipt_and_admit_with_candidate(
+        &self,
+        _user_id: &str,
+        _conversation_id: &str,
+        _operation_id: &str,
+        _candidate_message_id: &str,
+        _request_payload: &str,
+        _source_message_id: &str,
+        _source_request_payload: &str,
+        _source_error_code: &str,
+        _expected_admission_epoch: i64,
+        _now: i64,
+    ) -> Result<ConversationDeliveryReceiptClaim, DbError> {
+        Err(DbError::Init(
+            "conversation repository cannot atomically validate and admit a truncated-turn continuation"
+                .to_owned(),
+        ))
+    }
+
     /// Initial-auto-delivery variant of exact public turn admission.
     ///
     /// A fresh claim may commit only for the never-started Conversation
@@ -702,6 +731,18 @@ pub trait IConversationRepository: Send + Sync {
         _user_id: &str,
         _conversation_id: &str,
         _operation_id: &str,
+    ) -> Result<Option<ConversationDeliveryReceiptRow>, DbError> {
+        Ok(None)
+    }
+
+    /// Resolves the immutable turn receipt whose canonical user-message
+    /// identity is `message_id`. This read grants no execution authority; a
+    /// continuation must still use the atomic claim method above.
+    async fn get_turn_delivery_receipt_by_message_id(
+        &self,
+        _user_id: &str,
+        _conversation_id: &str,
+        _message_id: &str,
     ) -> Result<Option<ConversationDeliveryReceiptRow>, DbError> {
         Ok(None)
     }

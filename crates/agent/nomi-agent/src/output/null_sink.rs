@@ -15,6 +15,7 @@ impl OutputSink for NullSink {
     fn emit_tool_call(&self, _tool_use_id: &str, _name: &str, _input: &str) {}
     fn emit_tool_result(&self, _tool_use_id: &str, _name: &str, _is_error: bool, _content: &str) {}
     fn emit_stream_start(&self, _msg_id: &str) {}
+    fn emit_output_discarded(&self, _msg_id: &str, _restart_attempt: u32) {}
     fn emit_stream_end(
         &self,
         _msg_id: &str,

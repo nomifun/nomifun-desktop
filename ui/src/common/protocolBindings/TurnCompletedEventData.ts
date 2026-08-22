@@ -3,15 +3,19 @@
 /**
  * Data for the `TurnCompleted` event — aggregate metrics for one turn.
  */
-export type TurnCompletedEventData = { 
+export type TurnCompletedEventData = {
 /**
  * Wall-clock duration of the turn in milliseconds.
  */
-elapsed_ms: number, input_tokens: number, output_tokens: number, 
+elapsed_ms: number, input_tokens: number, output_tokens: number,
+/**
+ * Provider-reported reasoning tokens; a subset of output_tokens.
+ */
+reasoning_tokens: number,
 /**
  * Current context occupancy (last request's prompt tokens). Gauge numerator.
  */
-context_tokens: number, 
+context_tokens: number,
 /**
  * Effective context budget (engine compaction window). Gauge denominator.
  */

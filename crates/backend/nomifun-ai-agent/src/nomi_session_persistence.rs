@@ -23,6 +23,17 @@ pub enum NomiSessionResetOutcome {
     RepairedStaleIndex,
 }
 
+/// Result of exact persisted-turn recovery for live retirement and boot
+/// orphan healing. The contract never guesses from a mismatched active root
+/// and can prove that a pre-poll failure left the exact source untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NomiSessionRecoveryRewindOutcome {
+    RewoundRoot,
+    RewoundCurrentCheckpoint,
+    AlreadyRewound,
+    ProvenUnchanged,
+}
+
 /// Owns the filesystem location used by Nomi's [`SessionManager`].
 ///
 /// The reset operation is synchronous because it performs a small bounded
@@ -42,6 +53,199 @@ impl NomiSessionPersistence {
 
     pub fn session_directory(&self) -> &Path {
         &self.session_directory
+    }
+
+    /// Rewind recovery state for one exact source without consuming a
+    /// different turn's pending host-terminal root. This is used after the
+    /// runtime has been proven dead, both during live integrity retirement and
+    /// boot/background orphan healing.
+    ///
+    /// A matching accepted/pending root is authoritative. A matching current
+    /// editable checkpoint covers deterministic host turns that do not enter
+    /// the provider marker protocol. A mismatched accepted root conflicts;
+    /// a mismatched pending root is prior committed history and is preserved.
+    /// With no evidence that this source ever crossed the transaction boundary,
+    /// `ProvenUnchanged` lets a pre-poll stream failure release admission safely.
+    pub fn rewind_owned_live_recovery(
+        &self,
+        conversation_id: &str,
+        conversation_created_at: i64,
+        source_message_id: &str,
+    ) -> Result<NomiSessionRecoveryRewindOutcome, AppError> {
+        ConversationId::parse(conversation_id).map_err(|error| {
+            AppError::BadRequest(format!(
+                "invalid conversation id for Nomi live recovery rewind: {error}"
+            ))
+        })?;
+        if conversation_created_at <= 0 || source_message_id.trim().is_empty() {
+            return Err(AppError::BadRequest(
+                "conversation_created_at and source_message_id are required for Nomi live recovery rewind"
+                    .to_owned(),
+            ));
+        }
+
+        let directory_metadata = std::fs::symlink_metadata(&self.session_directory).map_err(
+            |error| {
+                io_error(
+                    "inspect Nomi session directory",
+                    &self.session_directory,
+                    error,
+                )
+            },
+        )?;
+        if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+            return Err(AppError::Internal(format!(
+                "Nomi session directory is not a real directory: {}",
+                self.session_directory.display()
+            )));
+        }
+
+        let index_path = self.session_directory.join("index.json");
+        let index = load_optional_index(&index_path)?.ok_or_else(|| {
+            AppError::Internal(format!(
+                "Nomi session index is missing while rewinding conversation {conversation_id}"
+            ))
+        })?;
+        let indexed_matches = index
+            .sessions
+            .iter()
+            .filter(|meta| meta.id == conversation_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if indexed_matches.len() != 1 {
+            return Err(AppError::Internal(format!(
+                "Nomi session index must contain exactly one entry for conversation {conversation_id}"
+            )));
+        }
+        let candidates = session_candidates(&self.session_directory, conversation_id)?;
+        if candidates.len() != 1 {
+            return Err(AppError::Internal(format!(
+                "Nomi session storage must contain exactly one transcript for conversation {conversation_id}"
+            )));
+        }
+        let path = &candidates[0];
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|error| io_error("inspect Nomi session transcript", path, error))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(AppError::Internal(format!(
+                "Nomi session transcript is not a real file: {}",
+                path.display()
+            )));
+        }
+        let raw = std::fs::read(path)
+            .map_err(|error| io_error("read Nomi session transcript", path, error))?;
+        let mut session: Session = serde_json::from_slice(&raw).map_err(|error| {
+            AppError::Internal(format!(
+                "parse Nomi session transcript {}: {error}",
+                path.display()
+            ))
+        })?;
+        if session.id != conversation_id || indexed_matches[0].created_at != session.created_at {
+            return Err(AppError::Internal(format!(
+                "Nomi session identity does not match conversation {conversation_id}"
+            )));
+        }
+        let expected_owner = conversation_created_at.to_string();
+        if !session_belongs_to(
+            session.owner_token.as_deref(),
+            session.created_at.timestamp_millis(),
+            &expected_owner,
+            conversation_created_at,
+        ) {
+            return Err(AppError::Conflict(format!(
+                "persisted Nomi session does not belong to the current generation of conversation {conversation_id}"
+            )));
+        }
+        if session.accepted_turn_root.is_some() && session.pending_host_terminal_root.is_some() {
+            return Err(AppError::Internal(format!(
+                "persisted Nomi session has two active recovery roots for conversation {conversation_id}"
+            )));
+        }
+
+        let mut changed = false;
+        let outcome = if let Some(root) = session.accepted_turn_root.as_ref() {
+            if root.source_message_id != source_message_id {
+                return Err(AppError::Conflict(format!(
+                    "persisted Nomi accepted turn belongs to source {}, not {source_message_id}",
+                    root.source_message_id
+                )));
+            }
+            let root = session.accepted_turn_root.take().expect("checked above");
+            session.messages = root.messages;
+            session.editable_turn = root.editable_turn;
+            session.host_context = root.host_context;
+            session.activated_deferred_tools = root.activated_deferred_tools;
+            session.last_interrupted_turn_source = Some(source_message_id.to_owned());
+            changed = true;
+            NomiSessionRecoveryRewindOutcome::RewoundRoot
+        } else if session
+            .pending_host_terminal_root
+            .as_ref()
+            .is_some_and(|root| root.source_message_id == source_message_id)
+        {
+            let root = session
+                .pending_host_terminal_root
+                .take()
+                .expect("matching root checked above");
+            session.messages = root.messages;
+            session.editable_turn = root.editable_turn;
+            session.host_context = root.host_context;
+            session.activated_deferred_tools = root.activated_deferred_tools;
+            session.last_interrupted_turn_source = Some(source_message_id.to_owned());
+            changed = true;
+            NomiSessionRecoveryRewindOutcome::RewoundRoot
+        } else if session.last_interrupted_turn_source.as_deref() == Some(source_message_id) {
+            NomiSessionRecoveryRewindOutcome::AlreadyRewound
+        } else if session
+            .editable_turn
+            .as_ref()
+            .is_some_and(|checkpoint| checkpoint.source_message_id == source_message_id)
+        {
+            let checkpoint = session.editable_turn.clone().expect("checked above");
+            if checkpoint.start_len > session.messages.len() {
+                return Err(AppError::Conflict(format!(
+                    "persisted Nomi rewind checkpoint is invalid for source {source_message_id}"
+                )));
+            }
+            session.messages.truncate(checkpoint.start_len);
+            session.host_context = checkpoint.prior_host_context;
+            session.editable_turn = None;
+            session.last_interrupted_turn_source = Some(source_message_id.to_owned());
+            changed = true;
+            NomiSessionRecoveryRewindOutcome::RewoundCurrentCheckpoint
+        } else {
+            NomiSessionRecoveryRewindOutcome::ProvenUnchanged
+        };
+
+        if changed {
+            session.updated_at = chrono::Utc::now();
+            save_json_atomic(path, &session)?;
+            let mut repaired_index = index;
+            let meta = repaired_index
+                .sessions
+                .iter_mut()
+                .find(|meta| meta.id == conversation_id)
+                .expect("validated exact index entry");
+            meta.updated_at = session.updated_at;
+            meta.model = session.model.clone();
+            meta.summary = session
+                .messages
+                .iter()
+                .find(|message| message.role == nomi_types::message::Role::User)
+                .and_then(|message| {
+                    message.content.iter().find_map(|block| match block {
+                        nomi_types::message::ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                })
+                .unwrap_or_default()
+                .chars()
+                .take(80)
+                .collect();
+            meta.message_count = session.messages.len();
+            save_json_atomic(&index_path, &repaired_index)?;
+        }
+        Ok(outcome)
     }
 
     /// Atomically clear the resumable state belonging to the exact conversation
@@ -178,6 +382,10 @@ impl NomiSessionPersistence {
         session.total_usage = Default::default();
         session.activated_deferred_tools.clear();
         session.editable_turn = None;
+        session.host_context.clear();
+        session.accepted_turn_root = None;
+        session.pending_host_terminal_root = None;
+        session.last_interrupted_turn_source = None;
         session.updated_at = chrono::Utc::now();
         save_json_atomic(path, &session)?;
 
@@ -350,7 +558,7 @@ fn io_error(operation: &str, path: &Path, error: std::io::Error) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomi_agent::session::{EditableTurnCheckpoint, SessionManager};
+    use nomi_agent::session::{AcceptedTurnRoot, EditableTurnCheckpoint, SessionManager};
     use nomi_types::message::{ContentBlock, Message, Role};
 
     fn add_context(manager: &SessionManager, session: &mut Session, text: &str, owner: i64) {
@@ -387,6 +595,13 @@ mod tests {
             start_len: 0,
             prior_host_context: Default::default(),
         });
+        target.accepted_turn_root = Some(AcceptedTurnRoot {
+            source_message_id: "target-message".to_owned(),
+            messages: target.messages.clone(),
+            editable_turn: target.editable_turn.clone(),
+            host_context: target.host_context.clone(),
+            activated_deferred_tools: target.activated_deferred_tools.clone(),
+        });
         manager.save(&target).expect("save target checkpoint");
         let mut sibling = manager
             .create("openai", "model", "/sibling", Some(&sibling_id))
@@ -420,6 +635,9 @@ mod tests {
         assert!(cleared.messages.is_empty());
         assert!(cleared.activated_deferred_tools.is_empty());
         assert!(cleared.editable_turn.is_none());
+        assert!(cleared.accepted_turn_root.is_none());
+        assert!(cleared.pending_host_terminal_root.is_none());
+        assert!(cleared.last_interrupted_turn_source.is_none());
         assert_eq!(cleared.total_usage, Default::default());
         let fresh_index = fresh_loader.list().expect("load repaired session index");
         let cleared_meta = fresh_index
@@ -449,6 +667,226 @@ mod tests {
             .expect("unrelated sibling remains indexed");
         assert_eq!(sibling_meta.summary, "unrelated context must survive");
         assert_eq!(sibling_meta.message_count, 1);
+    }
+
+    #[test]
+    fn strict_live_recovery_rewinds_matching_pending_root_and_is_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("nomi-sessions");
+        let manager = SessionManager::new(session_dir.clone(), 100);
+        let conversation_id = ConversationId::new().into_string();
+        let owner = chrono::Utc::now().timestamp_millis() - 1_000;
+        let mut session = manager
+            .create("openai", "model", "/workspace", Some(&conversation_id))
+            .unwrap();
+        session.owner_token = Some(owner.to_string());
+        let prior = Message::new(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "trusted prior".to_owned(),
+            }],
+        );
+        session.pending_host_terminal_root = Some(AcceptedTurnRoot {
+            source_message_id: "current-source".to_owned(),
+            messages: vec![prior.clone()],
+            editable_turn: None,
+            host_context: Default::default(),
+            activated_deferred_tools: Vec::new(),
+        });
+        session.messages = vec![
+            prior.clone(),
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Text {
+                    text: "sealed but uncommitted".to_owned(),
+                }],
+            ),
+        ];
+        manager.save(&session).unwrap();
+        manager.update_index_for(&session).unwrap();
+
+        let persistence = NomiSessionPersistence::new(session_dir.clone());
+        assert_eq!(
+            persistence
+                .rewind_owned_live_recovery(&conversation_id, owner, "current-source")
+                .unwrap(),
+            NomiSessionRecoveryRewindOutcome::RewoundRoot
+        );
+        assert_eq!(
+            persistence
+                .rewind_owned_live_recovery(&conversation_id, owner, "current-source")
+                .unwrap(),
+            NomiSessionRecoveryRewindOutcome::AlreadyRewound
+        );
+        let fresh = SessionManager::new(session_dir, 100)
+            .load(&conversation_id)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&fresh.messages).unwrap(),
+            serde_json::to_value(vec![prior]).unwrap()
+        );
+        assert!(fresh.pending_host_terminal_root.is_none());
+    }
+
+    #[test]
+    fn strict_live_recovery_preserves_prior_pending_root_and_rewinds_only_current_checkpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("nomi-sessions");
+        let manager = SessionManager::new(session_dir.clone(), 100);
+        let conversation_id = ConversationId::new().into_string();
+        let owner = chrono::Utc::now().timestamp_millis() - 1_000;
+        let mut session = manager
+            .create("openai", "model", "/workspace", Some(&conversation_id))
+            .unwrap();
+        session.owner_token = Some(owner.to_string());
+        let prior = Message::new(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "trusted prior".to_owned(),
+            }],
+        );
+        session.pending_host_terminal_root = Some(AcceptedTurnRoot {
+            source_message_id: "prior-committed-source".to_owned(),
+            messages: Vec::new(),
+            editable_turn: None,
+            host_context: Default::default(),
+            activated_deferred_tools: Vec::new(),
+        });
+        session.editable_turn = Some(EditableTurnCheckpoint {
+            source_message_id: "current-source".to_owned(),
+            start_len: 1,
+            prior_host_context: Default::default(),
+        });
+        session.messages = vec![
+            prior.clone(),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "current request".to_owned(),
+                }],
+            ),
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Text {
+                    text: "current deterministic answer".to_owned(),
+                }],
+            ),
+        ];
+        manager.save(&session).unwrap();
+        manager.update_index_for(&session).unwrap();
+
+        let persistence = NomiSessionPersistence::new(session_dir.clone());
+        assert_eq!(
+            persistence
+                .rewind_owned_live_recovery(&conversation_id, owner, "current-source")
+                .unwrap(),
+            NomiSessionRecoveryRewindOutcome::RewoundCurrentCheckpoint
+        );
+        let fresh = SessionManager::new(session_dir.clone(), 100)
+            .load(&conversation_id)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&fresh.messages).unwrap(),
+            serde_json::to_value(vec![prior]).unwrap()
+        );
+        assert_eq!(
+            fresh
+                .pending_host_terminal_root
+                .as_ref()
+                .map(|root| root.source_message_id.as_str()),
+            Some("prior-committed-source")
+        );
+
+        assert_eq!(
+            persistence
+                .rewind_owned_live_recovery(&conversation_id, owner, "never-started-source")
+                .unwrap(),
+            NomiSessionRecoveryRewindOutcome::ProvenUnchanged
+        );
+        let unchanged = SessionManager::new(session_dir, 100)
+            .load(&conversation_id)
+            .unwrap();
+        assert_eq!(unchanged.messages.len(), 1);
+        assert!(unchanged.pending_host_terminal_root.is_some());
+    }
+
+    #[test]
+    fn strict_recovery_proves_a_pre_poll_source_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("nomi-sessions");
+        let manager = SessionManager::new(session_dir.clone(), 100);
+        let conversation_id = ConversationId::new().into_string();
+        let owner = chrono::Utc::now().timestamp_millis() - 1_000;
+        let mut session = manager
+            .create("openai", "model", "/workspace", Some(&conversation_id))
+            .unwrap();
+        session.owner_token = Some(owner.to_string());
+        session.messages.push(Message::new(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "trusted prior".to_owned(),
+            }],
+        ));
+        manager.save(&session).unwrap();
+        manager.update_index_for(&session).unwrap();
+
+        let persistence = NomiSessionPersistence::new(session_dir.clone());
+        assert_eq!(
+            persistence
+                .rewind_owned_live_recovery(&conversation_id, owner, "never-polled-source")
+                .unwrap(),
+            NomiSessionRecoveryRewindOutcome::ProvenUnchanged
+        );
+        let fresh = SessionManager::new(session_dir, 100)
+            .load(&conversation_id)
+            .unwrap();
+        assert_eq!(fresh.messages.len(), 1);
+        assert!(fresh.accepted_turn_root.is_none());
+        assert!(fresh.pending_host_terminal_root.is_none());
+        assert!(fresh.editable_turn.is_none());
+    }
+
+    #[test]
+    fn strict_recovery_rejects_a_mismatched_active_root_without_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("nomi-sessions");
+        let manager = SessionManager::new(session_dir.clone(), 100);
+        let conversation_id = ConversationId::new().into_string();
+        let owner = chrono::Utc::now().timestamp_millis() - 1_000;
+        let mut session = manager
+            .create("openai", "model", "/workspace", Some(&conversation_id))
+            .unwrap();
+        session.owner_token = Some(owner.to_string());
+        session.accepted_turn_root = Some(AcceptedTurnRoot {
+            source_message_id: "other-source".to_owned(),
+            messages: Vec::new(),
+            editable_turn: None,
+            host_context: Default::default(),
+            activated_deferred_tools: Vec::new(),
+        });
+        session.messages.push(Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "other provisional request".to_owned(),
+            }],
+        ));
+        manager.save(&session).unwrap();
+        manager.update_index_for(&session).unwrap();
+
+        let result = NomiSessionPersistence::new(session_dir.clone())
+            .rewind_owned_live_recovery(&conversation_id, owner, "current-source");
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+        let path = session_candidates(&session_dir, &conversation_id)
+            .unwrap()
+            .remove(0);
+        let raw: Session = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(raw.messages.len(), 1);
+        assert_eq!(
+            raw.accepted_turn_root
+                .as_ref()
+                .map(|root| root.source_message_id.as_str()),
+            Some("other-source")
+        );
     }
 
     #[test]

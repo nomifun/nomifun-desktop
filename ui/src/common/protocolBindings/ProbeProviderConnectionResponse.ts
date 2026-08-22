@@ -8,15 +8,15 @@ import type { ProviderReachability } from "./ProviderReachability";
 /**
  * Response for both probe-connection routes.
  */
-export type ProbeProviderConnectionResponse = { reachability: ProviderReachability, protocol: string, task: ModelTask, 
+export type ProbeProviderConnectionResponse = { reachability: ProviderReachability, protocol: string, task: ModelTask,
 /**
  * Which half of the URL the chosen protocol expects to carry the version.
  */
-root_shape: EndpointRootShape, 
+root_shape: EndpointRootShape,
 /**
  * The exact URL requested, with query material redacted.
  */
-attempted_url: string, http_status?: number, error_kind?: ProviderHealthCheckErrorKind, content_type?: string, message?: string, elapsed_ms: number, 
+attempted_url: string, http_status?: number, error_kind?: ProviderHealthCheckErrorKind, content_type?: string, message?: string, elapsed_ms: number,
 /**
  * A root that answered better than the configured one, offered for one-click
  * adoption. This is what the previously-discarded `fixed_base_url` should

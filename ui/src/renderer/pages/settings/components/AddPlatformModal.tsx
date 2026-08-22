@@ -89,7 +89,12 @@ const AddPlatformModal = ModalHOC<{
     () => definition.capabilities.map((capability) => capability.task),
     [definition.capabilities]
   );
-  const manifestState = useModelProtocolManifests(preset, tasks, 'chat');
+  const manifestState = useModelProtocolManifests({
+    preset,
+    tasks,
+    bootstrapTask: 'chat',
+    modelHint: definition.model,
+  });
   const providerManifest =
     manifestState.loadingTasks.length > 0
       ? undefined
@@ -152,6 +157,7 @@ const AddPlatformModal = ModalHOC<{
         label: model.label,
         tasks: model.tasks,
         traits: model.traits,
+        ...(model.contextLimit === undefined ? {} : { contextLimit: model.contextLimit }),
       })),
     [modelListState.data?.models]
   );

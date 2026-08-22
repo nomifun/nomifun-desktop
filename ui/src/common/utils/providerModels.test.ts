@@ -30,6 +30,7 @@ const row = (model: string, extra?: Partial<ProviderModelResponse>): ProviderMod
       connection_role: 'default',
       allow_cross_origin_credentials: false,
       provider_params: {},
+      output_limit: 16_384,
       health: { status: 'healthy', latency: 120 },
       health_checked_at: 42,
       created_at: 1,
@@ -96,6 +97,7 @@ describe('nested provider models', () => {
           allow_cross_origin_credentials: false,
           provider_params: {},
           context_limit: undefined,
+          output_limit: 16_384,
         },
       ],
     });

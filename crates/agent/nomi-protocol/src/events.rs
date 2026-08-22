@@ -17,6 +17,10 @@ pub enum ProtocolEvent {
     StreamStart {
         msg_id: String,
     },
+    OutputDiscarded {
+        msg_id: String,
+        restart_attempt: u32,
+    },
     TextDelta {
         text: String,
         msg_id: String,
@@ -207,6 +211,18 @@ mod tests {
         assert_eq!(json["type"], "text_delta");
         assert_eq!(json["text"], "hello");
         assert_eq!(json["msg_id"], "m1");
+    }
+
+    #[test]
+    fn test_output_discarded_event_serialization() {
+        let event = ProtocolEvent::OutputDiscarded {
+            msg_id: "m1".to_owned(),
+            restart_attempt: 2,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "output_discarded");
+        assert_eq!(json["msg_id"], "m1");
+        assert_eq!(json["restart_attempt"], 2);
     }
 
     #[test]

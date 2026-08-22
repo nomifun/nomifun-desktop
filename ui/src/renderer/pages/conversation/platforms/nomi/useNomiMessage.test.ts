@@ -52,4 +52,18 @@ describe('useNomiMessage live event subscriptions', () => {
     expect(source.includes('ipcBridge.conversation.userCreated.on')).toBe(true);
     expect(source.includes('transformUserCreatedEvent')).toBe(true);
   });
+
+  test('treats output_discarded as an in-turn rollback boundary without clearing valid prefixes', () => {
+    const source = readFileSync(fileURLToPath(import.meta.resolve('./useNomiMessage.ts')), 'utf8');
+    const start = source.indexOf("case 'output_discarded':");
+    const end = source.indexOf("case 'turn_completed':", start);
+    const handler = source.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(handler.includes("dispatchTurnIfOpen({ type: 'activity' })")).toBe(true);
+    expect(handler.includes("setThought({ subject: '', description: '' })")).toBe(true);
+    expect(handler.includes('resetState')).toBe(false);
+    expect(handler.includes('clearNomiMessageBuffer')).toBe(false);
+  });
 });

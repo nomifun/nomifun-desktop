@@ -1,5 +1,5 @@
 .modal :global(.arco-modal-header) {
-  height: 40px;
+  height: 36px;
   padding: 0 var(--nomi-modal-inline-padding);
 }
 
@@ -12,7 +12,7 @@
 }
 
 .modal :global(.arco-modal-close-icon) {
-  top: 14px;
+  top: 6px;
   right: var(--nomi-modal-inline-padding);
 }
 

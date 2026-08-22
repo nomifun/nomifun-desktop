@@ -374,11 +374,11 @@ impl IProviderRepository for SqliteProviderRepository {
                 "INSERT INTO provider_model_capabilities \
                     (provider_id, model, task, traits, protocol, connection_role, \
                      base_url_override, endpoint, poll_endpoint, content_endpoint, realtime_endpoint, \
-                     allow_cross_origin_credentials, provider_params, context_limit, \
+                     allow_cross_origin_credentials, provider_params, context_limit, output_limit, \
                      created_at, updated_at) \
                  SELECT ?, model, task, traits, protocol, connection_role, \
                      base_url_override, endpoint, poll_endpoint, content_endpoint, realtime_endpoint, \
-                     allow_cross_origin_credentials, provider_params, context_limit, ?, ? \
+                     allow_cross_origin_credentials, provider_params, context_limit, output_limit, ?, ? \
                  FROM provider_model_capabilities WHERE provider_id = ? AND model = ?",
             )
             .bind(&new_id)

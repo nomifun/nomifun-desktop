@@ -40,6 +40,26 @@ impl GoalRuntime {
         Arc::clone(&self.state)
     }
 
+    /// Capture the shared goal state for accepted-turn rollback.
+    pub fn snapshot_state(&self) -> GoalState {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Restore a captured goal state through the shared handle.
+    ///
+    /// The `Arc` is deliberately not replaced: `UpdateGoalTool` already holds a
+    /// clone of it, so a rejected turn must write through the same allocation
+    /// rather than leave the tool pointing at orphaned state.
+    pub fn restore_state(&self, state: GoalState) {
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = state;
+    }
+
     /// Called at the engine's natural-termination point. Returns `Some(message)`
     /// to inject a continuation and run another turn, or `None` to stop
     /// (goal reached a terminal state, or the auto-continuation cap was hit).
@@ -95,5 +115,32 @@ mod tests {
         assert!(text.contains("migrate the database"));
         assert!(text.contains("连续 3 个目标轮次"));
         assert!(!text.contains("{{")); // all placeholders substituted
+    }
+
+    // A rejected turn must be able to undo the goal progress it claimed, and the
+    // tool's shared handle has to observe the restored value.
+    #[test]
+    fn restore_state_writes_through_the_tool_handle() {
+        let rt = GoalRuntime::new("ship the feature".into(), 8);
+        let tool_handle = rt.shared_state();
+        let root = rt.snapshot_state();
+
+        assert!(rt.maybe_continuation().is_some());
+        tool_handle.lock().unwrap().status = GoalStatus::Complete;
+
+        rt.restore_state(root);
+
+        let observed = tool_handle.lock().unwrap();
+        assert_eq!(observed.status, GoalStatus::Active);
+        assert_eq!(observed.auto_continuations, 0);
+    }
+
+    // The snapshot must be a value copy, not a view of the live state.
+    #[test]
+    fn snapshot_state_is_independent_of_later_progress() {
+        let rt = GoalRuntime::new("ship the feature".into(), 8);
+        let root = rt.snapshot_state();
+        rt.shared_state().lock().unwrap().auto_continuations = 5;
+        assert_eq!(root.auto_continuations, 0);
     }
 }

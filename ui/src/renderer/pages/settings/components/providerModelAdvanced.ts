@@ -43,6 +43,12 @@ export type ModelProtocolManifestMap = Partial<Record<ModelTask, ModelProtocolMa
 export interface ModelCapabilityDraft {
   task: ModelTask;
   traits: ModelTrait[];
+  /**
+   * UI-only ownership for protocol-dependent fields. Runtime never sees this
+   * value: it exists so an async recommendation may update its own previous
+   * value without overwriting a user edit or an already-persisted capability.
+   */
+  transportSource: 'blank' | 'recommendation' | 'user' | 'persisted';
   protocol: string;
   connectionRole: string;
   baseUrlOverride: string;
@@ -53,7 +59,12 @@ export interface ModelCapabilityDraft {
   allowCrossOriginCredentials: boolean;
   providerParamsJson: string;
   contextLimit?: number;
+  outputLimit?: number;
 }
+
+export type ModelCapabilityDraftPatch = Partial<
+  Omit<ModelCapabilityDraft, 'task' | 'transportSource'>
+>;
 
 export interface ModelDefinitionDraft {
   model: string;
@@ -64,6 +75,8 @@ export interface CatalogCapabilitySuggestion {
   model: string;
   tasks: ModelTask[];
   traits: ModelTrait[];
+  /** Context window the provider's catalog declares, when it declares one. */
+  contextLimit?: number;
 }
 
 export type ProviderModelCapabilityInput = CanonicalProviderModelCapabilityInput;
@@ -88,6 +101,7 @@ export type CapabilityValidationError =
   | 'connection_role_required'
   | 'connection_missing'
   | 'base_url_required'
+  | 'output_ceiling_required'
   | 'cross_origin_consent_required'
   | 'invalid_provider_params';
 
@@ -110,6 +124,7 @@ export const isDuplicateModelId = (value: string, existing: readonly string[]): 
 export const emptyCapabilityDraft = (task: ModelTask): ModelCapabilityDraft => ({
   task,
   traits: [],
+  transportSource: 'blank',
   protocol: '',
   connectionRole: 'default',
   baseUrlOverride: '',
@@ -120,6 +135,7 @@ export const emptyCapabilityDraft = (task: ModelTask): ModelCapabilityDraft => (
   allowCrossOriginCredentials: false,
   providerParamsJson: '',
   contextLimit: undefined,
+  outputLimit: undefined,
 });
 
 export const capabilityDraftFromResponse = (capability: {
@@ -135,9 +151,11 @@ export const capabilityDraftFromResponse = (capability: {
   allow_cross_origin_credentials?: boolean;
   provider_params?: unknown;
   context_limit?: number;
+  output_limit?: number;
 }): ModelCapabilityDraft => ({
   task: capability.task,
   traits: capability.traits ?? [],
+  transportSource: 'persisted',
   protocol: capability.protocol,
   connectionRole: capability.connection_role,
   baseUrlOverride: capability.base_url_override ?? '',
@@ -151,6 +169,7 @@ export const capabilityDraftFromResponse = (capability: {
       ? JSON.stringify(capability.provider_params, null, 2)
       : '',
   contextLimit: capability.context_limit,
+  outputLimit: capability.output_limit,
 });
 
 /** Append one task without disturbing any existing task draft. */
@@ -200,62 +219,147 @@ export const catalogSuggestionsForTask = <T extends { tasks: readonly ModelTask[
 ): T[] => (task ? suggestions.filter((suggestion) => suggestion.tasks.includes(task)) : []);
 
 /**
- * A catalog choice fills only the type the user selected first. Other catalog
- * tasks remain available through the explicit "add another task" flow.
+ * Adopt a catalog entry's model id, enriching only the task it was chosen for.
+ *
+ * Non-destructive by contract. This used to return a single fresh capability,
+ * which silently discarded every other declared task, plus that task's own
+ * protocol/endpoint work, the moment a user clicked a suggestion. The catalog is
+ * advisory, so it may never overwrite configuration the user already entered.
+ *
+ * Traits and the context window are the fields it owns, and only when the entry
+ * actually declares this task: an entry that says nothing about the task says
+ * nothing about its capabilities either. A window the user already chose wins —
+ * they may be correcting the provider, which is the whole point of the field.
  */
 export const applyCatalogSuggestionForTask = (
-  _definition: ModelDefinitionDraft,
+  definition: ModelDefinitionDraft,
   suggestion: CatalogCapabilitySuggestion,
   task: ModelTask
-): ModelDefinitionDraft => ({
-  model: suggestion.model,
-  capabilities: [
-    {
-      ...emptyCapabilityDraft(task),
-      traits: suggestion.tasks.includes(task)
-        ? MODEL_TRAIT_ORDER.filter(
-            (trait) => suggestion.traits.includes(trait) && CATALOG_TRAITS_BY_TASK[task].includes(trait)
-          )
-        : [],
-    },
-  ],
-});
+): ModelDefinitionDraft => {
+  const declaresTask = suggestion.tasks.includes(task);
+  const traits = declaresTask
+    ? MODEL_TRAIT_ORDER.filter(
+        (trait) => suggestion.traits.includes(trait) && CATALOG_TRAITS_BY_TASK[task].includes(trait)
+      )
+    : [];
+  const declaredWindow =
+    declaresTask && suggestion.contextLimit && suggestion.contextLimit > 0
+      ? suggestion.contextLimit
+      : undefined;
+  const known = definition.capabilities.some((capability) => capability.task === task);
+  return {
+    model: suggestion.model,
+    capabilities: known
+      ? definition.capabilities.map((capability) =>
+          capability.task === task && declaresTask
+            ? {
+                ...capability,
+                traits,
+                contextLimit: capability.contextLimit ?? declaredWindow,
+              }
+            : capability
+        )
+      : [
+          ...definition.capabilities,
+          { ...emptyCapabilityDraft(task), traits, contextLimit: declaredWindow },
+        ],
+  };
+};
 
-/** Switching an existing primary type starts a clean task draft without leaking transport overrides. */
-export const changePrimaryModelTask = (
-  definition: ModelDefinitionDraft,
-  task: ModelTask
-): ModelDefinitionDraft => ({
-  model: definition.capabilities.length === 0 ? definition.model : '',
-  capabilities: [emptyCapabilityDraft(task)],
-});
-
-/** Fill only blank fields from the backend's provider × task recommendation. */
+/**
+ * Apply backend recommendations only to blank or recommendation-owned
+ * transport. User-edited and persisted transport remain authoritative.
+ */
 export const reconcileCapabilityRecommendations = (
   capabilities: readonly ModelCapabilityDraft[],
   manifests: ModelProtocolManifestMap
 ): ModelCapabilityDraft[] =>
   capabilities.map((capability) => {
-    const recommendation = manifests[capability.task]?.recommendation;
-    if (!recommendation) return capability;
-    const untouchedProtocol = !capability.protocol;
-    const protocol = capability.protocol || recommendation.protocol_id;
-    const connectionRole = untouchedProtocol
-      ? recommendation.connection_role || 'default'
-      : capability.connectionRole || recommendation.connection_role || 'default';
+    const manifest = manifests[capability.task];
+    // Missing data means the request is loading or failed. Only a resolved
+    // manifest with an explicit null recommendation may withdraw an automatic
+    // value; transient transport state must not mutate the user's draft.
+    if (!manifest) return capability;
+    const recommendation = manifest.recommendation;
+    if (capability.transportSource === 'user' || capability.transportSource === 'persisted') {
+      return capability;
+    }
+
+    if (!recommendation) {
+      return capability.transportSource === 'recommendation'
+        ? resetCapabilityTransport(capability, 'blank')
+        : capability;
+    }
+
+    const protocol = recommendation.protocol_id.trim();
+    const connectionRole = recommendation.connection_role || 'default';
     const baseUrlOverride =
-      !capability.baseUrlOverride &&
       connectionRole === 'default' &&
       recommendation.base_url_override_required &&
       recommendation.default_base_url
         ? recommendation.default_base_url
-        : capability.baseUrlOverride;
-    return protocol === capability.protocol &&
-      connectionRole === capability.connectionRole &&
-      baseUrlOverride === capability.baseUrlOverride
-      ? capability
-      : { ...capability, protocol, connectionRole, baseUrlOverride };
+        : '';
+    const protocolChanged = capability.protocol.trim() !== protocol;
+    const base = protocolChanged
+      ? resetCapabilityTransport(capability, 'recommendation')
+      : capability;
+    return base.protocol === protocol &&
+      base.connectionRole === connectionRole &&
+      base.baseUrlOverride === baseUrlOverride &&
+      base.transportSource === 'recommendation'
+      ? base
+      : {
+          ...base,
+          protocol,
+          connectionRole,
+          baseUrlOverride,
+          transportSource: 'recommendation',
+        };
   });
+
+const resetCapabilityTransport = (
+  capability: ModelCapabilityDraft,
+  transportSource: ModelCapabilityDraft['transportSource']
+): ModelCapabilityDraft => ({
+  ...capability,
+  transportSource,
+  protocol: '',
+  connectionRole: 'default',
+  baseUrlOverride: '',
+  endpoint: '',
+  pollEndpoint: '',
+  contentEndpoint: '',
+  realtimeEndpoint: '',
+  allowCrossOriginCredentials: false,
+  providerParamsJson: '',
+});
+
+const TRANSPORT_DRAFT_FIELDS = new Set<keyof ModelCapabilityDraft>([
+  'protocol',
+  'connectionRole',
+  'baseUrlOverride',
+  'endpoint',
+  'pollEndpoint',
+  'contentEndpoint',
+  'realtimeEndpoint',
+  'allowCrossOriginCredentials',
+  'providerParamsJson',
+]);
+
+/** Apply an editor patch and transfer recommendation-owned transport to the user. */
+export const patchCapabilityDraft = (
+  capability: ModelCapabilityDraft,
+  patch: ModelCapabilityDraftPatch
+): ModelCapabilityDraft => ({
+  ...capability,
+  ...patch,
+  task: capability.task,
+  ...(Object.keys(patch).some((key) =>
+    TRANSPORT_DRAFT_FIELDS.has(key as keyof ModelCapabilityDraft)
+  )
+    ? { transportSource: 'user' as const }
+    : {}),
+});
 
 /**
  * Switch protocols as one atomic edit. Transport-owned fields from the old
@@ -267,7 +371,11 @@ export const changeCapabilityProtocol = (
   manifest?: ModelProtocolManifest
 ): ModelCapabilityDraft => {
   const normalizedProtocol = protocol.trim();
-  if (normalizedProtocol === capability.protocol.trim()) return capability;
+  if (normalizedProtocol === capability.protocol.trim()) {
+    return capability.transportSource === 'recommendation' || capability.transportSource === 'blank'
+      ? { ...capability, transportSource: 'user' }
+      : capability;
+  }
   const recommendation = manifest?.recommendation;
   const isRecommendation = recommendation?.protocol_id === normalizedProtocol;
   const connectionRole = isRecommendation ? recommendation.connection_role || 'default' : 'default';
@@ -280,16 +388,10 @@ export const changeCapabilityProtocol = (
       : '';
 
   return {
-    ...capability,
+    ...resetCapabilityTransport(capability, 'user'),
     protocol: normalizedProtocol,
     connectionRole,
     baseUrlOverride,
-    endpoint: '',
-    pollEndpoint: '',
-    contentEndpoint: '',
-    realtimeEndpoint: '',
-    allowCrossOriginCredentials: false,
-    providerParamsJson: '',
   };
 };
 
@@ -533,6 +635,29 @@ export const withProviderParamVoice = (raw: string, voice: string): string => {
   return Object.keys(next).length > 0 ? JSON.stringify(next, null, 2) : '';
 };
 
+/** Read the explicit Responses round-chaining opt-in from provider params. */
+export const providerParamChainRounds = (raw: string): boolean => {
+  const parsed = parseProviderParams(raw);
+  return parsed.ok && parsed.value.chain_rounds === true;
+};
+
+/**
+ * Toggle Responses round chaining in the one canonical provider-params JSON.
+ *
+ * Disabled is represented by an absent key, not `false`: omission keeps the
+ * protocol's privacy-preserving default authoritative. Malformed JSON is
+ * returned byte-for-byte so this structured control can never erase a user's
+ * unfinished raw edit.
+ */
+export const withProviderParamChainRounds = (raw: string, enabled: boolean): string => {
+  const parsed = parseProviderParams(raw);
+  if (!parsed.ok) return raw;
+  const next = { ...parsed.value };
+  if (enabled) next.chain_rounds = true;
+  else delete next.chain_rounds;
+  return Object.keys(next).length > 0 ? JSON.stringify(next, null, 2) : '';
+};
+
 export const validateModelDefinition = (
   definition: ModelDefinitionDraft,
   manifests: ModelProtocolManifestMap,
@@ -565,6 +690,16 @@ export const validateModelDefinition = (
       errors.push({ task: capability.task, code: 'protocol_not_registered' });
     }
     const descriptor = protocolDescriptorForDraft(capability, manifest);
+    if (
+      descriptor?.requires_output_ceiling &&
+      !(
+        typeof capability.outputLimit === 'number' &&
+        Number.isFinite(capability.outputLimit) &&
+        capability.outputLimit > 0
+      )
+    ) {
+      errors.push({ task: capability.task, code: 'output_ceiling_required' });
+    }
     const selectedAuthScheme =
       capability.connectionRole.trim() === 'default'
         ? providerAuthScheme
@@ -640,6 +775,9 @@ export const capabilityInputFromDraft = (
     ...(Object.keys(providerParams.value).length > 0 ? { provider_params: providerParams.value } : {}),
     ...(capability.contextLimit && capability.contextLimit > 0
       ? { context_limit: capability.contextLimit }
+      : {}),
+    ...(capability.outputLimit && capability.outputLimit > 0
+      ? { output_limit: capability.outputLimit }
       : {}),
   };
 };

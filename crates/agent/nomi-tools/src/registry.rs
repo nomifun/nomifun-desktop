@@ -92,6 +92,33 @@ impl DeferredToolState {
         }
     }
 
+    /// Replace the session-owned activation set while retaining the current
+    /// searchable catalog. Accepted-turn rollback uses this to remove tools
+    /// activated only by a rejected/interrupted turn and to restore pending
+    /// identities that may register dynamically later.
+    fn replace_session_activations(&self, identities: impl IntoIterator<Item = String>) {
+        let mut inner = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.activated.clear();
+        inner.pending_restored.clear();
+        for identity in identities {
+            if identity.trim().is_empty() {
+                continue;
+            }
+            if inner
+                .catalog
+                .values()
+                .any(|entry| entry.activation_identity == identity)
+            {
+                inner.activated.insert(identity);
+            } else {
+                inner.pending_restored.insert(identity);
+            }
+        }
+    }
+
     /// Union of active and not-yet-registered identities for persistence.
     fn session_identities(&self) -> Vec<String> {
         let inner = self
@@ -602,6 +629,12 @@ impl ToolRegistry {
             self.deferred_state
                 .restore_activation(identity.to_owned());
         }
+    }
+
+    /// Restore the exact persisted activation snapshot for this session.
+    pub fn replace_deferred_tool_activations(&self, identities: &[String]) {
+        self.deferred_state
+            .replace_session_activations(identities.iter().cloned());
     }
 
     /// Activated deferred identities in stable order for session persistence.
@@ -2604,6 +2637,52 @@ mod tests {
         let definition = registry.to_tool_defs().pop().unwrap();
         assert!(!definition.deferred);
         assert_eq!(definition.input_schema["properties"]["x"]["type"], "string");
+    }
+
+    #[test]
+    fn exact_activation_snapshot_removes_later_turn_additions() {
+        let mut registry = ToolRegistry::new();
+        for name in ["prior_tool", "turn_tool"] {
+            registry.register(Box::new(DeferredMockTool {
+                tool_name: name.to_owned(),
+            }));
+        }
+        assert_eq!(
+            registry
+                .deferred_state()
+                .search_and_activate("prior_tool")
+                .len(),
+            1
+        );
+        assert_eq!(
+            registry
+                .deferred_state()
+                .search_and_activate("turn_tool")
+                .len(),
+            1
+        );
+
+        registry.replace_deferred_tool_activations(&["prior_tool".to_owned()]);
+
+        assert_eq!(
+            registry.activated_deferred_tool_identities(),
+            vec!["prior_tool".to_owned()]
+        );
+        let definitions = registry.to_tool_defs();
+        assert!(
+            !definitions
+                .iter()
+                .find(|definition| definition.name == "prior_tool")
+                .unwrap()
+                .deferred
+        );
+        assert!(
+            definitions
+                .iter()
+                .find(|definition| definition.name == "turn_tool")
+                .unwrap()
+                .deferred
+        );
     }
 
     #[test]

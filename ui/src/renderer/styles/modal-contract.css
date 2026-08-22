@@ -38,7 +38,7 @@
 }
 
 .arco-modal .arco-modal-header {
-  height: 40px;
+  height: 36px;
   padding: 0 var(--nomi-modal-inline-padding);
 }
 
@@ -58,8 +58,18 @@
 }
 
 .arco-modal .arco-modal-close-icon {
-  top: 14px;
+  top: 6px;
   right: var(--nomi-modal-inline-padding);
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 24px;
+}
+
+.arco-modal .arco-modal-close-icon svg {
+  width: 14px;
+  height: 14px;
 }
 
 /* NomiModal keeps its custom header/body/footer inside the shared compact
@@ -71,8 +81,15 @@
 }
 
 .arco-modal .arco-modal-title {
-  font-size: 15px;
-  font-weight: 550;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  line-height: 20px !important;
+}
+
+.arco-modal .arco-modal-confirm-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
 }
 
 .arco-modal .arco-form-item {

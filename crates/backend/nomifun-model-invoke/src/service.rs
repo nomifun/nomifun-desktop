@@ -672,8 +672,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        AdapterRegistry, ProducedData, ProtocolEndpointPurpose, TaskResult, default_adapters,
-        preset_protocol_recommendation, protocol_task_descriptor,
+        AdapterRegistry, ProducedData, ProtocolEndpointPurpose, TaskResult, TaskRoute,
+        default_adapters, preset_protocol_recommendation, protocol_task_descriptor,
     };
 
     const TEST_KEY: [u8; 32] = [0x42; 32];
@@ -688,8 +688,22 @@ mod tests {
         realtime_endpoint: Option<String>,
     }
 
+    /// Protocol for a fixture whose `(platform, task)` intentionally has no
+    /// preset route.
+    ///
+    /// `openai.videos` is still registered — already-saved capabilities must
+    /// keep resolving until OpenAI's 2026-09-24 Sora shutdown — but it is no
+    /// longer a preset, so the route table cannot supply it. These fixtures
+    /// exercise the async-job adapter itself, not the recommendation.
+    fn fixture_only_protocol(platform: &str, task: ModelTask) -> Option<&'static str> {
+        matches!((platform, task), ("openai", ModelTask::VideoGeneration))
+            .then_some("openai.videos")
+    }
+
     fn capability_seed(platform: &str, task: ModelTask) -> CapabilitySeed {
-        let route = preset_protocol_recommendation(platform, task)
+        let route = fixture_only_protocol(platform, task)
+            .map(|protocol| TaskRoute { protocol, connection_role: None })
+            .or_else(|| preset_protocol_recommendation(platform, task))
             .unwrap_or_else(|| panic!("test platform {platform:?} has no route for {task:?}"));
         let descriptor = protocol_task_descriptor(route.protocol, task)
             .unwrap_or_else(|| panic!("missing descriptor for {} {task:?}", route.protocol));
@@ -732,6 +746,7 @@ mod tests {
             allow_cross_origin_credentials: false,
             provider_params,
             context_limit: None,
+            output_limit: None,
         }
     }
 

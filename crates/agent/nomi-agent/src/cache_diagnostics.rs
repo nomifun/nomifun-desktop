@@ -47,6 +47,12 @@ pub enum CacheBreakCause {
 }
 
 /// Detects prompt cache breaks by comparing consecutive turns.
+///
+/// `Clone` exists so an accepted turn can capture the detector alongside its
+/// transcript root. The recorded prompt snapshots describe a specific transcript;
+/// once that transcript is rolled back, keeping the rejected turn's snapshots
+/// would attribute a bogus cache break to the next request.
+#[derive(Debug, Clone)]
 pub struct CacheBreakDetector {
     /// Snapshot from the PREVIOUS turn (used for attribution on cache break).
     prev_snapshot: Option<PromptSnapshot>,

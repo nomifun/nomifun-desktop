@@ -10,12 +10,12 @@ import type { ProviderHealthCheckErrorKind } from "./ProviderHealthCheckErrorKin
  * `deny_unknown_fields`; no migration is needed because the column is opaque
  * JSON.
  */
-export type CapabilityHealth = { status: HealthStatus, latency?: number, error?: string, 
+export type CapabilityHealth = { status: HealthStatus, latency?: number, error?: string,
 /**
  * Why it failed, as a machine-readable category. Persisting only `error`
  * meant a 404 and a 401 were indistinguishable once the check was over.
  */
-error_kind?: ProviderHealthCheckErrorKind, http_status?: number, 
+error_kind?: ProviderHealthCheckErrorKind, http_status?: number,
 /**
  * The URL that was requested, with query material redacted.
  */

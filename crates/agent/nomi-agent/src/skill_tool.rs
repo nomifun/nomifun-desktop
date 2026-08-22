@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -16,7 +17,7 @@ use nomi_skills::types::{ExecutionContext, SkillMetadata};
 use nomi_types::agent::AgentInvocationRunner;
 use nomi_types::tool::{JsonSchema, ToolResult};
 
-use nomi_tools::Tool;
+use nomi_tools::{Tool, ToolExecutionContext};
 
 /// A tool that allows the LLM to invoke named skills.
 ///
@@ -35,6 +36,10 @@ pub struct SkillTool {
     session_id: Option<String>,
     /// Shared one-Agent invocation primitive for fork-mode skills.
     invocation_runner: Option<Arc<dyn AgentInvocationRunner>>,
+    /// Exact-operation sidecar for nested effects. The engine consumes an
+    /// entry immediately after the correlated tool result returns; prose never
+    /// enters this evidence channel.
+    delegated_effects: Mutex<HashMap<String, Vec<String>>>,
     shell: SupervisedShell,
 }
 
@@ -51,6 +56,7 @@ impl SkillTool {
             checker,
             session_id: None,
             invocation_runner: None,
+            delegated_effects: Mutex::new(HashMap::new()),
         }
     }
 
@@ -68,6 +74,7 @@ impl SkillTool {
             checker,
             session_id,
             invocation_runner: None,
+            delegated_effects: Mutex::new(HashMap::new()),
         }
     }
 
@@ -86,6 +93,7 @@ impl SkillTool {
             checker,
             session_id,
             invocation_runner,
+            delegated_effects: Mutex::new(HashMap::new()),
         }
     }
 
@@ -111,43 +119,12 @@ impl SkillTool {
             .collect::<Vec<_>>()
             .join(", ")
     }
-}
 
-#[async_trait]
-impl Tool for SkillTool {
-    fn name(&self) -> &str {
-        "Skill"
-    }
-
-    fn description(&self) -> &str {
-        "Invoke a named skill by name. \
-         Use the skill name exactly as listed in the system prompt. \
-         Optionally pass arguments as a single string."
-    }
-
-    fn input_schema(&self) -> JsonSchema {
-        json!({
-            "type": "object",
-            "properties": {
-                "skill": {
-                    "type": "string",
-                    "description": "The skill name. E.g., \"commit\", \"review-pr\", or \"pdf\""
-                },
-                "args": {
-                    "type": "string",
-                    "description": "Optional arguments for the skill"
-                }
-            },
-            "required": ["skill"]
-        })
-    }
-
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
-        // Skills may modify context; conservatively mark as not concurrency-safe.
-        false
-    }
-
-    async fn execute(&self, input: Value) -> ToolResult {
+    async fn execute_inner(
+        &self,
+        input: Value,
+        execution_context: Option<&ToolExecutionContext>,
+    ) -> ToolResult {
         let Some(skill_name) = input["skill"].as_str() else {
             return ToolResult {
                 content: "Missing required parameter: skill".to_string(),
@@ -246,11 +223,24 @@ impl Tool for SkillTool {
                 )
                 .await
                 {
-                    Ok(content) => ToolResult {
-                        content,
-                        is_error: false,
-                        images: Vec::new(),
-                    },
+                    Ok(output) => {
+                        if let Some(context) = execution_context
+                            && !output.durable_effect_targets.is_empty()
+                        {
+                            self.delegated_effects
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .insert(
+                                    context.operation_id().to_owned(),
+                                    output.durable_effect_targets,
+                                );
+                        }
+                        ToolResult {
+                            content: output.text,
+                            is_error: false,
+                            images: Vec::new(),
+                        }
+                    }
                     Err(e) => ToolResult {
                         content: e,
                         is_error: true,
@@ -259,6 +249,68 @@ impl Tool for SkillTool {
                 }
             }
         }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillTool {
+    fn name(&self) -> &str {
+        "Skill"
+    }
+
+    fn description(&self) -> &str {
+        "Invoke a named skill by name. \
+         Use the skill name exactly as listed in the system prompt. \
+         Optionally pass arguments as a single string."
+    }
+
+    fn input_schema(&self) -> JsonSchema {
+        json!({
+            "type": "object",
+            "properties": {
+                "skill": {
+                    "type": "string",
+                    "description": "The skill name. E.g., \"commit\", \"review-pr\", or \"pdf\""
+                },
+                "args": {
+                    "type": "string",
+                    "description": "Optional arguments for the skill"
+                }
+            },
+            "required": ["skill"]
+        })
+    }
+
+    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        // Skills may modify context; conservatively mark as not concurrency-safe.
+        false
+    }
+
+    async fn execute(&self, input: Value) -> ToolResult {
+        self.execute_inner(input, None).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        input: Value,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
+        self.execute_inner(input, Some(context)).await
+    }
+
+    fn take_delegated_effects(&self, context: &ToolExecutionContext) -> Vec<String> {
+        self.delegated_effects
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(context.operation_id())
+            .unwrap_or_default()
+    }
+
+    fn may_have_workspace_side_effects(&self, input: &Value) -> bool {
+        input["skill"]
+            .as_str()
+            .and_then(|name| self.find_skill(name))
+            .is_some_and(|skill| skill.execution_context == ExecutionContext::Fork)
     }
 
     fn context_modifier_for(&self, input: &serde_json::Value) -> Option<ContextModifier> {
@@ -390,6 +442,19 @@ mod tests {
         let result = tool.execute(json!({ "skill": "fork-skill" })).await;
         assert!(result.is_error);
         assert!(result.content.contains("fork execution context"));
+    }
+
+    #[test]
+    fn fork_side_effect_evidence_is_orthogonal_to_approval_category() {
+        let inline = make_skill("inline", "body");
+        let mut fork = make_skill("fork", "body");
+        fork.execution_context = ExecutionContext::Fork;
+        let tool = tool_with(vec![inline, fork]);
+
+        assert_eq!(tool.category(), ToolCategory::Info);
+        assert!(!tool.may_have_workspace_side_effects(&json!({ "skill": "inline" })));
+        assert!(tool.may_have_workspace_side_effects(&json!({ "skill": "fork" })));
+        assert_eq!(tool.category(), ToolCategory::Info);
     }
 
     #[test]
@@ -986,6 +1051,7 @@ mod phase7_tests {
                 text: self.text.clone(),
                 usage: TokenUsage::default(),
                 turns: 1,
+                durable_effect_targets: Vec::new(),
                 is_error: self.is_error,
             }
         }

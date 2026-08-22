@@ -28,4 +28,6 @@ export interface ModelProtocolManifestRequest {
   task: ModelTask;
   /** Existing provider URL hint disambiguates regional presets sharing a platform. */
   base_url?: string;
+  /** Selected Custom model id; enables a task-scoped compatibility recommendation. */
+  model?: string;
 }

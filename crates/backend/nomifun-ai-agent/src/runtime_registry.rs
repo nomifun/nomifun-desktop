@@ -19,7 +19,9 @@ use tokio::sync::{Mutex as AsyncMutex, OnceCell};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::nomi_session_persistence::{NomiSessionPersistence, NomiSessionResetOutcome};
+use crate::nomi_session_persistence::{
+    NomiSessionPersistence, NomiSessionRecoveryRewindOutcome, NomiSessionResetOutcome,
+};
 use crate::runtime_handle::AgentRuntimeHandle;
 use crate::types::AgentRuntimeBuildOptions;
 
@@ -191,6 +193,27 @@ pub trait AgentRuntimeRegistry: Send + Sync {
         Box::pin(async move {
             Err(AppError::Internal(format!(
                 "Agent runtime registry has no Nomi session persistence configured for conversation {conversation_id}"
+            )))
+        })
+    }
+
+    /// Exact live/boot recovery. This may prove the exact source never entered
+    /// the session and never consumes a mismatched prior host-terminal root.
+    fn rewind_persisted_nomi_live_recovery(
+        &self,
+        conversation_id: &str,
+        _conversation_created_at: i64,
+        _source_message_id: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<NomiSessionRecoveryRewindOutcome, AppError>>
+                + Send,
+        >,
+    > {
+        let conversation_id = conversation_id.to_owned();
+        Box::pin(async move {
+            Err(AppError::Internal(format!(
+                "Agent runtime registry has no strict Nomi live recovery configured for conversation {conversation_id}"
             )))
         })
     }
@@ -1593,6 +1616,54 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
             .map_err(|error| {
                 AppError::Internal(format!(
                     "Nomi session reset worker failed for conversation {conversation_id}: {error}"
+                ))
+            })?
+        })
+    }
+
+
+    fn rewind_persisted_nomi_live_recovery(
+        &self,
+        conversation_id: &str,
+        conversation_created_at: i64,
+        source_message_id: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<NomiSessionRecoveryRewindOutcome, AppError>>
+                + Send,
+        >,
+    > {
+        let registry = self.clone();
+        let conversation_id = conversation_id.to_owned();
+        let source_message_id = source_message_id.to_owned();
+        Box::pin(async move {
+            let persistence = registry
+                .nomi_session_persistence
+                .clone()
+                .ok_or_else(|| {
+                    AppError::Internal(format!(
+                        "Nomi session persistence is not configured for conversation {conversation_id}"
+                    ))
+                })?;
+            let lifecycle_gate = registry.lifecycle_gate(&conversation_id);
+            let _lifecycle = lifecycle_gate.lock().await;
+            if registry.has_registered_runtime(&conversation_id) {
+                return Err(AppError::Conflict(format!(
+                    "Agent runtime for conversation {conversation_id} is still registered; refusing strict persisted Nomi live recovery"
+                )));
+            }
+            let rewind_conversation_id = conversation_id.clone();
+            tokio::task::spawn_blocking(move || {
+                persistence.rewind_owned_live_recovery(
+                    &rewind_conversation_id,
+                    conversation_created_at,
+                    &source_message_id,
+                )
+            })
+            .await
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "Nomi live recovery worker failed for conversation {conversation_id}: {error}"
                 ))
             })?
         })

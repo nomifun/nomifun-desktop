@@ -1,4 +1,4 @@
-//! Save-time contract tests for the four Agent Chat protocol families.
+//! Save-time contract tests for the five Agent Chat protocol families.
 
 mod common;
 
@@ -43,7 +43,7 @@ fn http_provider(
     model: &str,
     endpoint: &str,
 ) -> Value {
-    json!({
+    let mut body = json!({
         "platform": platform,
         "name": format!("{platform} contract"),
         "base_url": format!("https://api.{platform}.example"),
@@ -60,7 +60,11 @@ fn http_provider(
             }]
         },
         "connections": []
-    })
+    });
+    if protocol == "anthropic.messages" {
+        body["initial_model"]["capabilities"][0]["output_limit"] = json!(8192);
+    }
+    body
 }
 
 fn bedrock_provider() -> Value {
@@ -81,6 +85,7 @@ fn bedrock_provider() -> Value {
                 "task": "chat",
                 "protocol": "bedrock.anthropic_messages",
                 "connection_role": "default",
+                "output_limit": 8192,
                 "provider_params": {}
             }]
         },
@@ -90,6 +95,15 @@ fn bedrock_provider() -> Value {
 
 #[tokio::test]
 async fn agent_chat_protocols_accept_only_their_executable_auth_scheme() {
+    let mut responses = http_provider(
+        "openai",
+        "bearer",
+        "openai.responses",
+        "gpt-contract",
+        "/responses",
+    );
+    responses["initial_model"]["capabilities"][0]["provider_params"] =
+        json!({"chain_rounds": true});
     let valid = [
         http_provider(
             "openai",
@@ -98,6 +112,7 @@ async fn agent_chat_protocols_accept_only_their_executable_auth_scheme() {
             "gpt-contract",
             "/custom/chat?api-version=2026-08-11",
         ),
+        responses,
         http_provider(
             "anthropic",
             "header_key:x-api-key",
@@ -141,6 +156,13 @@ async fn agent_chat_protocols_accept_only_their_executable_auth_scheme() {
             "/chat/completions",
         ),
         http_provider(
+            "openai",
+            "header_key:x-api-key",
+            "openai.responses",
+            "gpt-contract",
+            "/responses",
+        ),
+        http_provider(
             "anthropic",
             "bearer",
             "anthropic.messages",
@@ -156,8 +178,71 @@ async fn agent_chat_protocols_accept_only_their_executable_auth_scheme() {
         ),
         bedrock_provider(),
     ];
-    invalid[3]["auth_scheme"] = json!("bearer");
-    invalid[3]["credentials"] = json!({"api_keys":["sk-contract"]});
+    invalid[4]["auth_scheme"] = json!("bearer");
+    invalid[4]["credentials"] = json!({"api_keys":["sk-contract"]});
+
+    for body in invalid {
+        let db = init_database_memory().await.unwrap();
+        let response = system_routes(build_state(&db))
+            .oneshot(request(body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn responses_save_is_openai_native_typed_and_endpoint_owned() {
+    let mut invalid = vec![
+        http_provider(
+            "stepfun",
+            "bearer",
+            "openai.responses",
+            "step-contract",
+            "/responses",
+        ),
+        http_provider(
+            "custom",
+            "bearer",
+            "openai.responses",
+            "custom-contract",
+            "/responses",
+        ),
+        http_provider(
+            "openai",
+            "bearer",
+            "openai.responses",
+            "gpt-contract",
+            "/chat/completions",
+        ),
+        http_provider(
+            "openai",
+            "bearer",
+            "openai.chat_text",
+            "gpt-contract",
+            "/responses",
+        ),
+    ];
+    let mut chat_with_chain = http_provider(
+        "openai",
+        "bearer",
+        "openai.chat_text",
+        "gpt-contract",
+        "/chat/completions",
+    );
+    chat_with_chain["initial_model"]["capabilities"][0]["provider_params"] =
+        json!({"chain_rounds": true});
+    invalid.push(chat_with_chain);
+    let mut responses_with_string = http_provider(
+        "openai",
+        "bearer",
+        "openai.responses",
+        "gpt-contract",
+        "/responses",
+    );
+    responses_with_string["initial_model"]["capabilities"][0]["provider_params"] =
+        json!({"chain_rounds": "true"});
+    invalid.push(responses_with_string);
 
     for body in invalid {
         let db = init_database_memory().await.unwrap();

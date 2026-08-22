@@ -30,9 +30,10 @@ fn make_request() -> LlmRequest {
             }],
         )],
         tools: vec![],
-        max_tokens: 512,
+        max_tokens: Some(512),
         thinking: None,
         reasoning_effort: None,
+        retain_provider_round: false,
     }
 }
 
@@ -174,6 +175,174 @@ async fn openai_gateway_recovers_and_remembers_bedrock_schema_requirement() {
         })
         .collect();
     assert_eq!(has_root_one_of, vec![true, false, false]);
+    server.verify().await;
+}
+
+/// A gateway that speaks the OpenAI chat protocol but rejects the deprecated
+/// `max_tokens` ceiling, naming its replacement exactly as genuine OpenAI does
+/// for its o-series/gpt-5 families.
+#[derive(Clone)]
+struct OpenAiCeilingFieldResponder;
+
+impl Respond for OpenAiCeilingFieldResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        if body.get("max_tokens").is_some() {
+            return ResponseTemplate::new(400).set_body_json(json!({
+                "error": {
+                    "message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+                    "type": "invalid_request_error",
+                    "param": "max_tokens",
+                    "code": "unsupported_parameter"
+                }
+            }));
+        }
+        let finish = json!({
+            "choices": [{ "delta": { "content": "Bounded" }, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        })
+        .to_string();
+        ResponseTemplate::new(200)
+            .set_body_raw(build_sse_body(&[&finish]), "text/event-stream")
+    }
+}
+
+/// Collect the output-ceiling field name each received request carried.
+async fn ceiling_fields_on_the_wire(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            ["max_tokens", "max_completion_tokens"]
+                .into_iter()
+                .filter(|key| body.get(*key).is_some())
+                .collect::<Vec<_>>()
+                .join("+")
+        })
+        .collect()
+}
+
+/// Genuine OpenAI reasoning models reject the deprecated chat `max_tokens` with
+/// a hard 400, so a user who sets a Max-output-tokens ceiling cannot call them
+/// at all. Nothing in this crate can identify the platform — `Config` carries a
+/// `ProviderType`, never the platform id — so the field is renegotiated from the
+/// endpoint's own rejection, once, and then remembered for the session.
+#[tokio::test]
+async fn openai_renegotiates_a_rejected_output_ceiling_field_and_remembers_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(OpenAiCeilingFieldResponder)
+        .expect(3)
+        .mount(&server)
+        .await;
+    let provider = OpenAIProvider::new(
+        "test-key",
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+    );
+    let request = make_request();
+    for _ in 0..2 {
+        let events = collect_events(provider.stream(&request).await.unwrap()).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LlmEvent::TextDelta(text) if text == "Bounded")),
+            "expected the retried request to stream, got {events:?}"
+        );
+    }
+
+    // Attempt 1 sends the protocol default; the retry adopts the field the
+    // endpoint named; the second turn pays no further rejected request. The
+    // ceiling is always present exactly once — never dropped, never doubled.
+    assert_eq!(
+        ceiling_fields_on_the_wire(&server).await,
+        vec![
+            "max_tokens".to_string(),
+            "max_completion_tokens".to_string(),
+            "max_completion_tokens".to_string(),
+        ]
+    );
+    server.verify().await;
+}
+
+/// The main risk in renaming this field: `openai.chat_text` also serves ~30
+/// OpenAI-*compatible* platforms, many of which accept only `max_tokens` and
+/// would silently ignore `max_completion_tokens`, leaving generation unbounded.
+/// Such a gateway never emits the rejection, so it must keep `max_tokens`
+/// forever — including across a turn that fails for an unrelated reason.
+#[tokio::test]
+async fn an_openai_compatible_gateway_that_only_accepts_max_tokens_keeps_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(|request: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            if body.get("max_completion_tokens").is_some() {
+                return ResponseTemplate::new(400).set_body_json(json!({
+                    "error": { "message": "unknown parameter: max_completion_tokens" }
+                }));
+            }
+            // An unrelated rejection that happens to name the ceiling must not
+            // be mistaken for a rename instruction.
+            if body["messages"].as_array().unwrap().len() > 2 {
+                return ResponseTemplate::new(400).set_body_json(json!({
+                    "error": {
+                        "message": "invalid parameter: max_tokens must be a positive integer"
+                    }
+                }));
+            }
+            let finish = json!({
+                "choices": [{ "delta": { "content": "Legacy" }, "finish_reason": "stop" }],
+                "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+            })
+            .to_string();
+            ResponseTemplate::new(200)
+                .set_body_raw(build_sse_body(&[&finish]), "text/event-stream")
+        })
+        .expect(3)
+        .mount(&server)
+        .await;
+    let provider = OpenAIProvider::new(
+        "test-key",
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+    );
+
+    for _ in 0..2 {
+        let events = collect_events(provider.stream(&make_request()).await.unwrap()).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LlmEvent::TextDelta(text) if text == "Legacy"))
+        );
+    }
+
+    let mut rejected = make_request();
+    rejected.messages.push(Message::new(
+        Role::Assistant,
+        vec![ContentBlock::Text { text: "ack".into() }],
+    ));
+    rejected.messages.push(Message::new(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "again".into(),
+        }],
+    ));
+    let error = provider.stream(&rejected).await.unwrap_err();
+    assert!(
+        matches!(error, ProviderError::Api { status: 400, .. }),
+        "an unrelated rejection must surface, not trigger a rename: {error:?}"
+    );
+
+    assert_eq!(
+        ceiling_fields_on_the_wire(&server).await,
+        vec!["max_tokens".to_string(); 3],
+        "a max_tokens-only gateway must never be renegotiated"
+    );
     server.verify().await;
 }
 

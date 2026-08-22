@@ -16,6 +16,7 @@ import TaskModelSelect, { type TaskModelSelection } from '@/renderer/components/
 import { buildModelFailoverConfigForSave } from './modelFailoverQueue';
 import type { ProviderId } from '@/common/types/ids';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
+import ModelHubPageHeader from './ModelHubPageHeader';
 
 const DEFAULT_CONFIG: IModelFailoverConfig = {
   enabled: false,
@@ -102,10 +103,7 @@ const ModelFailoverContent: React.FC = () => {
   return (
     <div className='flex flex-col gap-16px max-w-640px'>
       {messageContext}
-      <div>
-        <div className='text-t-primary text-15px font-600'>{t('modelFailover.title')}</div>
-        <div className='text-t-tertiary text-12px leading-18px mt-4px'>{t('modelFailover.desc')}</div>
-      </div>
+      <ModelHubPageHeader title={t('modelFailover.title')} description={t('modelFailover.desc')} />
 
       <div className='flex items-center justify-between'>
         <span className='text-t-secondary text-13px'>{t('modelFailover.enable')}</span>

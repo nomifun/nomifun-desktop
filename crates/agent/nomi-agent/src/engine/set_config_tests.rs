@@ -68,6 +68,7 @@ impl OutputSink for ArtifactIdentityOutput {
         }
     }
     fn emit_stream_start(&self, _: &str) {}
+    fn emit_output_discarded(&self, _: &str, _: u32) {}
     fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
     fn emit_error(&self, _: &str) {}
     fn emit_info(&self, _: &str) {}
@@ -95,6 +96,7 @@ impl OutputSink for ToolLifecycleRecordingOutput {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
     fn emit_stream_start(&self, _: &str) {}
+    fn emit_output_discarded(&self, _: &str, _: u32) {}
     fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
     fn emit_error(&self, _: &str) {}
     fn emit_info(&self, _: &str) {}
@@ -566,9 +568,11 @@ impl OutputSink for DeliveredMediaOutput {
     ) -> ToolMediaDelivery {
         ToolMediaDelivery::Delivered {
             context: "Verified artifact receipt: nomifun-artifacts/image.png".to_owned(),
+            durable_workspace_targets: Vec::new(),
         }
     }
     fn emit_stream_start(&self, _: &str) {}
+    fn emit_output_discarded(&self, _: &str, _: u32) {}
     fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
     fn emit_error(&self, _: &str) {}
     fn emit_info(&self, _: &str) {}
@@ -593,6 +597,7 @@ impl OutputSink for FailedMediaOutput {
         }
     }
     fn emit_stream_start(&self, _: &str) {}
+    fn emit_output_discarded(&self, _: &str, _: u32) {}
     fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
     fn emit_error(&self, _: &str) {}
     fn emit_info(&self, _: &str) {}
@@ -1087,10 +1092,12 @@ fn make_engine(model: &str) -> super::AgentEngine {
     super::AgentEngine {
         provider: Arc::new(NullProvider),
         tools: ToolRegistry::new(),
+        workspace_root: std::path::PathBuf::from("."),
+        completion_evidence_mode: super::CompletionEvidenceMode::LocalFingerprint,
         messages: vec![],
         system_prompt: String::new(),
         model: model.to_string(),
-        max_tokens: 4096,
+        output_max_tokens: Some(4096),
         max_turns: Some(10),
         total_usage: Default::default(),
         thinking: None,
@@ -1412,13 +1419,13 @@ fn rewind_last_turn_truncates_to_marker() {
     assert_eq!(engine.messages.len(), 3);
 
     assert!(engine.can_rewind_last_turn("message-u1"));
-    assert!(engine.rewind_last_turn("message-u1"));
+    assert!(engine.rewind_last_turn("message-u1").unwrap());
     assert_eq!(engine.messages.len(), 2); // U1 被回退
     assert!(engine.editable_turn.is_none()); // 锚点被消费
     assert_eq!(engine.host_context, prior_host_context);
 
     // 再次回退无锚点 → false
-    assert!(!engine.rewind_last_turn("message-u1"));
+    assert!(!engine.rewind_last_turn("message-u1").unwrap());
 }
 
 #[test]
@@ -1430,7 +1437,7 @@ fn rewind_last_turn_rejects_stale_marker() {
         start_len: 5,
         prior_host_context: Default::default(),
     });
-    assert!(!engine.rewind_last_turn("message-stale"));
+    assert!(!engine.rewind_last_turn("message-stale").unwrap());
 }
 
 #[test]
@@ -1439,7 +1446,7 @@ fn rewind_last_turn_allows_only_an_empty_checkpointless_transcript() {
 
     let mut empty = make_engine("rewind-empty-no-checkpoint");
     assert!(empty.can_rewind_last_turn("message-empty"));
-    assert!(empty.rewind_last_turn("message-empty"));
+    assert!(empty.rewind_last_turn("message-empty").unwrap());
     assert!(empty.messages.is_empty());
     assert!(empty.editable_turn.is_none());
 
@@ -1451,7 +1458,7 @@ fn rewind_last_turn_allows_only_an_empty_checkpointless_transcript() {
         }],
     ));
     assert!(!non_empty.can_rewind_last_turn("message-legacy"));
-    assert!(!non_empty.rewind_last_turn("message-legacy"));
+    assert!(!non_empty.rewind_last_turn("message-legacy").unwrap());
     assert_eq!(non_empty.messages.len(), 1);
 }
 
@@ -2845,6 +2852,9 @@ impl LlmProvider for DraftThenWriteProvider {
                 })
                 .await;
             let _ = tx
+                .send(LlmEvent::ProviderRoundId("resp_superseded".to_owned()))
+                .await;
+            let _ = tx
                 .send(LlmEvent::Done {
                     stop_reason: nomi_types::message::StopReason::ToolUse,
                     usage: Default::default(),
@@ -2878,6 +2888,7 @@ async fn a_draft_written_in_the_same_round_does_not_stay_in_engine_history() {
         ));
     }
     let mut engine = make_engine("draft-write");
+    engine.compat.chain_rounds = Some(true);
     engine.provider = Arc::new(DraftThenWriteProvider {
         calls: std::sync::atomic::AtomicUsize::new(0),
         draft: draft.clone(),
@@ -2926,5 +2937,9 @@ async fn a_draft_written_in_the_same_round_does_not_stay_in_engine_history() {
             .iter()
             .any(|b| matches!(b, ContentBlock::ToolUse { name, .. } if name == "Write")),
         "the Write call still carries the real body"
+    );
+    assert_eq!(
+        assistant.provider_round_id, None,
+        "a host-rewritten assistant round must not retain a provider cursor"
     );
 }

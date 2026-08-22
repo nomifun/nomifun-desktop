@@ -10,18 +10,19 @@ use nomi_agent::output::{
     artifact_contract_with_input, is_context_only_image_tool,
 };
 use nomi_types::tool::ToolImage;
+use same_file::Handle as SameFileHandle;
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::artifact_store::{
     ArtifactKind, ArtifactRecoveryEnvelope, ArtifactRecoverySource, ArtifactStore,
-    PersistedArtifact,
+    PersistedArtifact, VerifiedExistingArtifactSource,
 };
 use crate::protocol::events::{
     AgentStatusEventData, AgentStreamEvent, ErrorEventData, FinishEventData, PlanEventData,
-    StartEventData, TextEventData, ThinkingEventData, TipType, TipsEventData, ToolCallEventData,
-    ToolCallRetryData, ToolCallStatus,
+    OutputDiscardedEventData, StartEventData, TextEventData, ThinkingEventData, TipType,
+    TipsEventData, ToolCallEventData, ToolCallRetryData, ToolCallStatus,
 };
 
 pub struct BackendOutputSink {
@@ -35,8 +36,14 @@ pub struct BackendOutputSink {
     artifact_store: Option<ArtifactStore>,
     artifact_workspace: Option<PathBuf>,
     /// Accumulates this turn's assistant text so the `<nomi-mem-citation>`
-    /// block can be parsed at stream end. Reset on each stream start.
+    /// block can be parsed at stream end. Reset only at the accepted-turn
+    /// boundary; race-tail provider Starts remain part of the same buffer.
     turn_text: Mutex<String>,
+    /// Immutable boundary captured by the first Start of this accepted turn.
+    /// Host commit rollback uses it to retract every provider pass.
+    accepted_turn_output_checkpoint: Mutex<Option<SinkOutputCheckpoint>>,
+    /// Rolling boundary for B1/internal provider-attempt rollback.
+    attempt_output_checkpoint: Mutex<Option<SinkOutputCheckpoint>>,
     /// Schema-valid, committed tool calls announced to the frontend that have
     /// not yet produced a result. Unexpected termination and cancellation drain
     /// this map so no Running lifecycle can leak into a later turn.
@@ -50,6 +57,12 @@ pub struct BackendOutputSink {
     /// automatic continuations share this state; only the manager's accepted
     /// turn boundary begins/seals it.
     artifact_delivery_turn: Mutex<ArtifactDeliveryTurn>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SinkOutputCheckpoint {
+    turn_text_len: usize,
+    held_text_len: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -75,7 +88,12 @@ struct ToolTerminalContext {
 const MAX_DECLARED_ARTIFACT_PATHS: usize = 32;
 const MAX_DECLARED_PATH_LENGTH: usize = 4096;
 const MAX_ARTIFACT_OUTPUT_JSON_NODES: usize = 512;
-const MAX_BASELINE_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+/// Synchronous pre-call hashing runs on the model stream callback. Keep it
+/// tightly bounded: newly-created outputs use an `Absent` baseline and do not
+/// consume this budget, while overwriting a larger existing artifact must use
+/// a fresh output path instead of stalling the runtime before tool dispatch.
+const MAX_BASELINE_ARTIFACT_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_BASELINE_ARTIFACT_BATCH_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default)]
 struct ArtifactPathBaselines {
@@ -153,10 +171,10 @@ struct ArtifactDeliveryTurn {
     /// from a snapshot and may publish its result only when this value still
     /// matches, preventing a cancelled or successor turn from inheriting it.
     generation: u64,
-    /// Production Nomi turns defer inline image decode/validation/fsync to the
-    /// manager's cancellable blocking phase. The legacy synchronous mode is
-    /// retained for lightweight sink tests and non-manager callers.
-    defer_inline_images: bool,
+    /// Production Nomi turns defer every artifact persistence and successful
+    /// terminal card to the manager's cancellable commit phase. The synchronous
+    /// mode remains for lightweight sink tests and non-manager callers.
+    defer_artifact_terminals: bool,
     calls: HashMap<String, ArtifactCallObligation>,
     /// Host-routed output requirement for the accepted user turn. Unlike a
     /// call obligation this exists before the model chooses a tool, so a model
@@ -188,7 +206,7 @@ enum ArtifactCallDeliveryStatus {
     Persisting(DeferredToolResult),
     CompletedVerified {
         artifacts: Vec<PersistedArtifact>,
-        /// Deferred image cards are not published until final generation-CAS
+        /// Deferred artifact cards are not published until final generation-CAS
         /// commit. `None` means the synchronous path already emitted its card.
         deferred_terminal: Option<DeferredToolResult>,
     },
@@ -198,7 +216,7 @@ enum ArtifactCallDeliveryStatus {
 #[derive(Debug)]
 struct PendingArtifactDelivery {
     inline: Vec<OwnedInlineArtifact>,
-    existing_paths: Vec<PathBuf>,
+    existing_sources: Vec<VerifiedExistingArtifactSource>,
     terminal: DeferredToolResult,
 }
 
@@ -362,6 +380,21 @@ fn is_blocked_path_scope(key: &str) -> bool {
     )
 }
 
+fn is_blocked_input_read_model_scope(key: &str) -> bool {
+    matches!(
+        normalized_path_key(key).as_str(),
+        "filter"
+            | "filters"
+            | "query"
+            | "queries"
+            | "where"
+            | "history"
+            | "histories"
+            | "attempt"
+            | "attempts"
+    )
+}
+
 fn push_declared_path(declared: &mut DeclaredArtifactPaths, value: &str) {
     let value = value
         .trim()
@@ -494,17 +527,82 @@ fn collect_json_artifact_paths(
     }
 }
 
-fn input_artifact_paths(value: &serde_json::Value) -> DeclaredArtifactPaths {
+fn collect_input_artifact_paths(
+    value: &serde_json::Value,
+    declared: &mut DeclaredArtifactPaths,
+    nodes: &mut usize,
+    depth: usize,
+    allow_nested: bool,
+    at_direct_options: bool,
+) {
+    if depth > 12 {
+        declared.push_resource_limit_error("artifact contract JSON nesting exceeds 12 levels");
+    }
+    if *nodes >= MAX_ARTIFACT_OUTPUT_JSON_NODES {
+        declared.push_resource_limit_error(format!(
+            "artifact contract JSON exceeds {MAX_ARTIFACT_OUTPUT_JSON_NODES} nodes"
+        ));
+    } else {
+        *nodes += 1;
+    }
+
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                if is_blocked_path_scope(key) || is_blocked_input_read_model_scope(key) {
+                    continue;
+                }
+                let direct_options = depth == 0 && normalized_path_key(key) == "options";
+                if is_explicit_artifact_path_key(key)
+                    && (allow_nested || depth == 0 || at_direct_options)
+                {
+                    declared.saw_explicit_key = true;
+                    collect_path_value(child, declared);
+                }
+                // Ordinary tools may declare a destination only at the input
+                // root or immediately under the conventional `options`
+                // object. Deep output-shaped fields are commonly read-model
+                // filters/history, not files this invocation promises to make.
+                if allow_nested || direct_options {
+                    collect_input_artifact_paths(
+                        child,
+                        declared,
+                        nodes,
+                        depth + 1,
+                        allow_nested,
+                        direct_options,
+                    );
+                }
+            }
+        }
+        serde_json::Value::Array(values) if allow_nested => {
+            for child in values {
+                collect_input_artifact_paths(
+                    child,
+                    declared,
+                    nodes,
+                    depth + 1,
+                    allow_nested,
+                    false,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn input_artifact_paths(
+    value: &serde_json::Value,
+    allow_nested: bool,
+) -> DeclaredArtifactPaths {
     let mut declared = DeclaredArtifactPaths::default();
     let mut nodes = 0;
-    collect_json_artifact_paths(
+    collect_input_artifact_paths(
         value,
         &mut declared,
         &mut nodes,
         0,
-        false,
-        false,
-        false,
+        allow_nested,
         false,
     );
     declared.enforce_resource_limits_if_artifact_expected(false);
@@ -616,15 +714,68 @@ fn intended_artifact_path(workspace: &Path, value: &str) -> Result<PathBuf, Stri
     Ok(resolved)
 }
 
-fn hash_file_for_baseline(path: &Path, expected_size: u64) -> Result<String, String> {
-    if expected_size > MAX_BASELINE_ARTIFACT_BYTES {
+fn reserve_artifact_baseline_hash_bytes(
+    already_reserved: u64,
+    file_size: u64,
+) -> Result<u64, String> {
+    if file_size > MAX_BASELINE_ARTIFACT_FILE_BYTES {
         return Err(format!(
-            "artifact baseline exceeds the {} byte limit",
-            MAX_BASELINE_ARTIFACT_BYTES
+            "artifact baseline is {file_size} bytes, over the {} byte per-file hash limit",
+            MAX_BASELINE_ARTIFACT_FILE_BYTES
         ));
     }
+    let reserved = already_reserved
+        .checked_add(file_size)
+        .ok_or_else(|| "artifact baseline hash budget overflowed".to_owned())?;
+    if reserved > MAX_BASELINE_ARTIFACT_BATCH_BYTES {
+        return Err(format!(
+            "artifact baseline batch would exceed the {} byte aggregate hash limit",
+            MAX_BASELINE_ARTIFACT_BATCH_BYTES
+        ));
+    }
+    Ok(reserved)
+}
+
+fn ensure_artifact_baseline_path_identity(path: &Path, file: &File) -> Result<(), String> {
+    let open_identity = SameFileHandle::from_file(
+        file.try_clone()
+            .map_err(|error| format!("cannot clone artifact baseline handle: {error}"))?,
+    )
+    .map_err(|error| format!("cannot identify artifact baseline handle: {error}"))?;
+    let path_identity = SameFileHandle::from_path(path)
+        .map_err(|error| format!("cannot identify artifact baseline path: {error}"))?;
+    if open_identity != path_identity {
+        return Err("artifact baseline path was replaced while it was being fingerprinted".to_owned());
+    }
+    Ok(())
+}
+
+fn hash_file_for_baseline(path: &Path, expected_size: u64) -> Result<String, String> {
     let mut file = File::open(path)
         .map_err(|error| format!("cannot open artifact baseline: {error}"))?;
+    let handle_before = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect artifact baseline handle: {error}"))?;
+    let path_before = std::fs::metadata(path)
+        .map_err(|error| format!("cannot inspect artifact baseline path: {error}"))?;
+    let modified_before = handle_before
+        .modified()
+        .map_err(|error| format!("cannot timestamp artifact baseline handle: {error}"))?;
+    if !handle_before.is_file()
+        || !path_before.is_file()
+        || handle_before.len() != expected_size
+        || path_before.len() != expected_size
+        || path_before
+            .modified()
+            .map_err(|error| format!("cannot timestamp artifact baseline path: {error}"))?
+            != modified_before
+    {
+        return Err("artifact baseline changed before it could be fingerprinted".to_owned());
+    }
+    // Bind the digest to the file object currently named by `path`, both before
+    // and after the read. Size checks alone let a same-size rename replacement
+    // pair an old open handle's digest with a different current path.
+    ensure_artifact_baseline_path_identity(path, &file)?;
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     let mut bytes_read = 0_u64;
@@ -635,24 +786,43 @@ fn hash_file_for_baseline(path: &Path, expected_size: u64) -> Result<String, Str
         if read == 0 {
             break;
         }
-        bytes_read = bytes_read.saturating_add(read as u64);
-        if bytes_read > MAX_BASELINE_ARTIFACT_BYTES {
-            return Err(format!(
-                "artifact baseline exceeds the {} byte limit",
-                MAX_BASELINE_ARTIFACT_BYTES
-            ));
+        bytes_read = bytes_read
+            .checked_add(read as u64)
+            .ok_or_else(|| "artifact baseline byte count overflowed".to_owned())?;
+        if bytes_read > expected_size {
+            return Err("artifact baseline changed while it was being fingerprinted".to_owned());
         }
         digest.update(&buffer[..read]);
     }
-    let metadata = std::fs::metadata(path)
+    let handle_metadata = file
+        .metadata()
+        .map_err(|error| format!("cannot re-check artifact baseline handle: {error}"))?;
+    let path_metadata = std::fs::metadata(path)
         .map_err(|error| format!("cannot re-check artifact baseline: {error}"))?;
-    if !metadata.is_file() || metadata.len() != expected_size || bytes_read != expected_size {
+    if !handle_metadata.is_file()
+        || handle_metadata.len() != expected_size
+        || !path_metadata.is_file()
+        || path_metadata.len() != expected_size
+        || bytes_read != expected_size
+        || handle_metadata
+            .modified()
+            .map_err(|error| format!("cannot re-check artifact baseline timestamp: {error}"))?
+            != modified_before
+        || path_metadata
+            .modified()
+            .map_err(|error| format!("cannot re-check artifact baseline path timestamp: {error}"))?
+            != modified_before
+    {
         return Err("artifact baseline changed while it was being fingerprinted".to_owned());
     }
+    ensure_artifact_baseline_path_identity(path, &file)?;
     Ok(hex::encode(digest.finalize()))
 }
 
-fn capture_path_fingerprint(path: &Path) -> Result<ArtifactPathFingerprint, String> {
+fn capture_path_fingerprint(
+    path: &Path,
+    batch_hash_bytes: &mut u64,
+) -> Result<ArtifactPathFingerprint, String> {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -664,6 +834,9 @@ fn capture_path_fingerprint(path: &Path) -> Result<ArtifactPathFingerprint, Stri
         return Err("declared artifact baseline is not a regular file".to_owned());
     }
     let size_bytes = metadata.len();
+    // Reserve before reading so repeated files that race or fail their final
+    // stability check cannot each consume the full synchronous budget.
+    *batch_hash_bytes = reserve_artifact_baseline_hash_bytes(*batch_hash_bytes, size_bytes)?;
     let sha256 = hash_file_for_baseline(path, size_bytes)?;
     Ok(ArtifactPathFingerprint::Present { size_bytes, sha256 })
 }
@@ -690,6 +863,8 @@ impl BackendOutputSink {
             artifact_store: None,
             artifact_workspace: None,
             turn_text: Mutex::new(String::new()),
+            accepted_turn_output_checkpoint: Mutex::new(None),
+            attempt_output_checkpoint: Mutex::new(None),
             active_tool_calls: Mutex::new(HashMap::new()),
             tool_result_contexts: Mutex::new(HashMap::new()),
             artifact_delivery_turn: Mutex::new(ArtifactDeliveryTurn::default()),
@@ -720,9 +895,9 @@ impl BackendOutputSink {
         self.begin_artifact_delivery_turn_with_mode(false, None);
     }
 
-    /// Production Nomi entry point. Inline image payloads remain encoded in a
-    /// bounded provisional ledger until the manager can move all expensive
-    /// validation and durable I/O to `spawn_blocking`.
+    /// Production Nomi entry point. Artifact payloads and successful terminal
+    /// cards remain provisional until the manager can run durable I/O on the
+    /// blocking pool and atomically commit the accepted turn.
     #[cfg(test)]
     pub(crate) fn begin_deferred_artifact_delivery_turn(&self) {
         self.begin_artifact_delivery_turn_with_mode(true, None);
@@ -750,7 +925,7 @@ impl BackendOutputSink {
 
     fn begin_artifact_delivery_turn_with_mode(
         &self,
-        defer_inline_images: bool,
+        defer_artifact_terminals: bool,
         recovery_source: Option<ArtifactRecoverySource>,
     ) {
         let mut turn = self
@@ -759,13 +934,25 @@ impl BackendOutputSink {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let stale_calls = std::mem::take(&mut turn.calls);
         turn.advance_generation();
-        turn.defer_inline_images = defer_inline_images;
+        turn.defer_artifact_terminals = defer_artifact_terminals;
         turn.required_contract = None;
         turn.hold_text_until_verified = false;
         turn.held_text.clear();
         turn.recovery_source = recovery_source;
         turn.active = true;
         drop(turn);
+        self.turn_text
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        *self
+            .accepted_turn_output_checkpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *self
+            .attempt_output_checkpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         self.retire_artifact_calls(
             stale_calls,
             "artifact delivery was superseded by a new accepted turn",
@@ -813,7 +1000,7 @@ impl BackendOutputSink {
         let calls = std::mem::take(&mut turn.calls);
         turn.active = false;
         turn.advance_generation();
-        turn.defer_inline_images = false;
+        turn.defer_artifact_terminals = false;
         turn.required_contract = None;
         turn.hold_text_until_verified = false;
         turn.held_text.clear();
@@ -833,7 +1020,7 @@ impl BackendOutputSink {
         let calls = std::mem::take(&mut turn.calls);
         turn.active = false;
         turn.advance_generation();
-        turn.defer_inline_images = false;
+        turn.defer_artifact_terminals = false;
         turn.required_contract = None;
         turn.hold_text_until_verified = false;
         turn.held_text.clear();
@@ -1141,15 +1328,15 @@ impl BackendOutputSink {
                 )
             });
             let artifacts = match if let Some(source) = recovery_source.as_ref() {
-                store.persist_inline_and_existing_batch_recoverable(
+                store.persist_inline_and_verified_existing_batch_recoverable(
                     inline,
-                    &work_item.pending.existing_paths,
+                    &work_item.pending.existing_sources,
                     source,
                 )
             } else {
-                store.persist_inline_and_existing_batch(
+                store.persist_inline_and_verified_existing_batch(
                     inline,
-                    &work_item.pending.existing_paths,
+                    &work_item.pending.existing_sources,
                 )
             } {
                 Ok(artifacts) => artifacts,
@@ -1265,7 +1452,6 @@ impl BackendOutputSink {
         cancellation: &CancellationToken,
     ) -> AsyncArtifactDeliveryOutcome {
         if cancellation.is_cancelled() {
-            self.abort_artifact_delivery_turn_with_reason("artifact delivery was cancelled");
             return AsyncArtifactDeliveryOutcome::Cancelled;
         }
         let Some((generation, store, work, recovery_source)) = (match self.take_pending_artifact_work() {
@@ -1289,10 +1475,6 @@ impl BackendOutputSink {
             biased;
             _ = cancellation.cancelled() => {
                 Self::detach_persistence_cleanup(task, store);
-                self.abort_artifact_delivery_turn_if_generation(
-                    generation,
-                    "artifact delivery was cancelled during durable persistence",
-                );
                 return AsyncArtifactDeliveryOutcome::Cancelled;
             }
             result = &mut task => result,
@@ -1300,13 +1482,9 @@ impl BackendOutputSink {
 
         let persisted = match result {
             Ok(Ok(persisted)) => persisted,
-            Ok(Err(error)) => {
-                self.abort_artifact_delivery_turn_if_generation(generation, &error);
-                return AsyncArtifactDeliveryOutcome::Failed(error);
-            }
+            Ok(Err(error)) => return AsyncArtifactDeliveryOutcome::Failed(error),
             Err(error) => {
                 let error = format!("artifact persistence worker failed: {error}");
-                self.abort_artifact_delivery_turn_if_generation(generation, &error);
                 return AsyncArtifactDeliveryOutcome::Failed(error);
             }
         };
@@ -1316,15 +1494,10 @@ impl BackendOutputSink {
                 .flat_map(|item| item.artifacts)
                 .collect::<Vec<_>>();
             self.schedule_artifact_cleanup(receipts, Vec::new());
-            self.abort_artifact_delivery_turn_if_generation(
-                generation,
-                "artifact delivery was cancelled before persistence commit",
-            );
             return AsyncArtifactDeliveryOutcome::Cancelled;
         }
         if let Err((error, receipts)) = self.install_persisted_pending(generation, persisted) {
             self.schedule_artifact_cleanup(receipts, Vec::new());
-            self.abort_artifact_delivery_turn_if_generation(generation, &error);
             return if cancellation.is_cancelled() {
                 AsyncArtifactDeliveryOutcome::Cancelled
             } else {
@@ -1334,9 +1507,15 @@ impl BackendOutputSink {
         AsyncArtifactDeliveryOutcome::Verified(VerifiedArtifactDeliveryTurn { generation })
     }
 
-    /// Flush deferred image bytes and re-verify every receipt on the blocking
+    /// Flush deferred artifact payloads and re-verify every receipt on the blocking
     /// pool. Cancellation returns immediately; any detached persistence job is
     /// responsible for deleting receipts it may finish creating afterwards.
+    ///
+    /// A non-verified outcome intentionally leaves the output checkpoint and
+    /// artifact terminal ledger intact. The manager must first restore the
+    /// accepted-turn root (which emits `OutputDiscarded`) and only then abort
+    /// artifact delivery. Clearing held prose here would make a non-zero output
+    /// checkpoint invalid before the manager has a chance to retract it.
     pub(crate) async fn verify_artifact_delivery_turn_async(
         &self,
         cancellation: &CancellationToken,
@@ -1346,7 +1525,6 @@ impl BackendOutputSink {
             outcome => return outcome,
         }
         if cancellation.is_cancelled() {
-            self.abort_artifact_delivery_turn_with_reason("artifact delivery was cancelled");
             return AsyncArtifactDeliveryOutcome::Cancelled;
         }
         let snapshot = match self.artifact_verification_snapshot() {
@@ -1381,10 +1559,6 @@ impl BackendOutputSink {
                         }).await;
                     }
                 });
-                self.abort_artifact_delivery_turn_if_generation(
-                    snapshot.generation,
-                    "artifact delivery was cancelled during final verification",
-                );
                 return AsyncArtifactDeliveryOutcome::Cancelled;
             }
             result = &mut task => result,
@@ -1395,20 +1569,10 @@ impl BackendOutputSink {
                     generation: snapshot.generation,
                 })
             }
-            Ok(Ok(())) => {
-                self.abort_artifact_delivery_turn_if_generation(
-                    snapshot.generation,
-                    "artifact delivery was cancelled after final verification",
-                );
-                AsyncArtifactDeliveryOutcome::Cancelled
-            }
-            Ok(Err(error)) => {
-                self.abort_artifact_delivery_turn_if_generation(snapshot.generation, &error);
-                AsyncArtifactDeliveryOutcome::Failed(error)
-            }
+            Ok(Ok(())) => AsyncArtifactDeliveryOutcome::Cancelled,
+            Ok(Err(error)) => AsyncArtifactDeliveryOutcome::Failed(error),
             Err(error) => {
                 let error = format!("artifact verification worker failed: {error}");
-                self.abort_artifact_delivery_turn_if_generation(snapshot.generation, &error);
                 AsyncArtifactDeliveryOutcome::Failed(error)
             }
         }
@@ -1420,6 +1584,17 @@ impl BackendOutputSink {
         &self,
         verified: VerifiedArtifactDeliveryTurn,
     ) -> Result<(), String> {
+        self.finish_verified_artifact_delivery_turn_with(verified, |_| {})
+    }
+
+    fn finish_verified_artifact_delivery_turn_with<F>(
+        &self,
+        verified: VerifiedArtifactDeliveryTurn,
+        mut after_successful_send: F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(usize),
+    {
         let mut turn = self
             .artifact_delivery_turn
             .lock()
@@ -1436,9 +1611,14 @@ impl BackendOutputSink {
         let calls = std::mem::take(&mut turn.calls);
         turn.active = false;
         turn.advance_generation();
-        turn.defer_inline_images = false;
+        let sealed_generation = turn.generation;
+        turn.defer_artifact_terminals = false;
         turn.required_contract = None;
-        let held_text = std::mem::take(&mut turn.held_text);
+        // Keep the sealed prose in the ledger until every deferred artifact
+        // terminal is published. A failed prepare/send returns to the manager's
+        // accepted-root restore, whose OutputDiscarded must still be able to
+        // truncate this exact generation at its non-zero checkpoint.
+        let held_text = turn.held_text.clone();
         turn.hold_text_until_verified = false;
         let recovery_source = turn.recovery_source.take();
         drop(turn);
@@ -1476,8 +1656,21 @@ impl BackendOutputSink {
                 // Earlier successful sends keep their journals for the relay
                 // (or recovery scanner). This event and every later one were
                 // never exposed and are therefore safe to delete immediately.
+                // The manager truthfully fails the overall turn; an earlier
+                // journal-owned card is a durable partial delivery, not a
+                // success claim for the uncommitted remainder.
                 self.rollback_deferred_event_artifacts(&deferred_events[index..]);
                 return Err("artifact terminal event had no live relay receiver".to_owned());
+            }
+            after_successful_send(index);
+        }
+        {
+            let mut turn = self
+                .artifact_delivery_turn
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !turn.active && turn.generation == sealed_generation {
+                turn.held_text.clear();
             }
         }
         // Conversation projection is the final ownership transfer for native
@@ -1695,9 +1888,10 @@ impl BackendOutputSink {
 
     fn capture_artifact_path_baselines(
         &self,
+        artifact_identity: &str,
         input: &serde_json::Value,
     ) -> ArtifactPathBaselines {
-        let declared = input_artifact_paths(input);
+        let declared = input_artifact_paths(input, artifact_contract(artifact_identity).is_some());
         let mut baselines = ArtifactPathBaselines::default();
         if !declared.saw_explicit_key && declared.errors.is_empty() {
             return baselines;
@@ -1717,6 +1911,7 @@ impl BackendOutputSink {
                 .push("session has no workspace for artifact baselines".to_owned());
             return baselines;
         };
+        let mut batch_hash_bytes = 0_u64;
         for raw_path in declared.paths {
             let path = match intended_artifact_path(workspace, &raw_path) {
                 Ok(path) => path,
@@ -1730,7 +1925,7 @@ impl BackendOutputSink {
             if baselines.entries.iter().any(|known| known.path == path) {
                 continue;
             }
-            match capture_path_fingerprint(&path) {
+            match capture_path_fingerprint(&path, &mut batch_hash_bytes) {
                 Ok(fingerprint) => baselines
                     .entries
                     .push(ArtifactPathBaseline { path, fingerprint }),
@@ -1781,28 +1976,27 @@ impl BackendOutputSink {
         context
     }
 
-    fn should_defer_inline_images(&self, contract: ArtifactContract, has_images: bool) -> bool {
-        if !has_images || contract.expectation != ArtifactExpectation::Image {
-            return false;
-        }
+    fn should_defer_artifact_terminal(&self) -> bool {
         let turn = self
             .artifact_delivery_turn
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        turn.active && turn.defer_inline_images
+        turn.active && turn.defer_artifact_terminals
     }
 
-    fn queue_deferred_image_delivery(
+    fn queue_deferred_artifact_delivery(
         &self,
         call_id: String,
         name: &str,
         contract: ArtifactContract,
         content: &str,
         images: &[ToolImage],
-        path_sources: Vec<PathBuf>,
+        existing_sources: Vec<VerifiedExistingArtifactSource>,
     ) -> Result<String, String> {
-        ArtifactStore::preflight_inline_image_batch(images.iter().map(|image| &image.data))
-            .map_err(|error| error.to_string())?;
+        if !images.is_empty() {
+            ArtifactStore::preflight_inline_image_batch(images.iter().map(|image| &image.data))
+                .map_err(|error| error.to_string())?;
+        }
         let inline = images
             .iter()
             .map(|artifact| OwnedInlineArtifact {
@@ -1816,7 +2010,7 @@ impl BackendOutputSink {
             .artifact_delivery_turn
             .lock()
             .map_err(|_| "artifact-delivery ledger lock was poisoned".to_owned())?;
-        if !turn.active || !turn.defer_inline_images {
+        if !turn.active || !turn.defer_artifact_terminals {
             return Err("artifact-delivery turn changed before deferred persistence".to_owned());
         }
         let obligation = turn
@@ -1829,13 +2023,13 @@ impl BackendOutputSink {
         obligation.contract = contract;
         obligation.status = ArtifactCallDeliveryStatus::Pending(PendingArtifactDelivery {
             inline,
-            existing_paths: path_sources,
+            existing_sources,
             terminal,
         });
         turn.advance_generation();
         drop(turn);
         self.forget_active_tool_call(&call_id);
-        Ok("Image bytes received; durable host verification is pending.".to_owned())
+        Ok("Artifact payload received; durable host verification is pending.".to_owned())
     }
 
     fn preflight_declared_path_artifacts(
@@ -1843,7 +2037,7 @@ impl BackendOutputSink {
         active: Option<&ActiveToolCall>,
         contract: ArtifactContract,
         declared_output: &DeclaredArtifactPaths,
-    ) -> Result<Vec<PathBuf>, String> {
+    ) -> Result<Vec<VerifiedExistingArtifactSource>, String> {
         if !declared_output.errors.is_empty() {
             return Err(declared_output.errors.join("; "));
         }
@@ -1923,8 +2117,14 @@ impl BackendOutputSink {
                     size_bytes
                 ));
             }
-            if !verified.iter().any(|known| known == &baseline.path) {
-                verified.push(baseline.path.clone());
+            if !verified
+                .iter()
+                .any(|known: &VerifiedExistingArtifactSource| known.path == baseline.path)
+            {
+                verified.push(VerifiedExistingArtifactSource {
+                    path: baseline.path.clone(),
+                    sha256: artifact.sha256,
+                });
             }
         }
         Ok(verified)
@@ -2122,7 +2322,7 @@ impl BackendOutputSink {
         let artifact_path_baselines = if is_context_only_image_tool(&artifact_identity) {
             ArtifactPathBaselines::default()
         } else {
-            self.capture_artifact_path_baselines(&args)
+            self.capture_artifact_path_baselines(&artifact_identity, &args)
         };
         let (mut contract, contract_error) =
             match artifact_contract_with_input(&artifact_identity, &args) {
@@ -2260,22 +2460,6 @@ impl BackendOutputSink {
         self.abort_artifact_delivery_turn_with_reason(reason);
     }
 
-    /// Fail any active call defensively before a MaxTokens retry. The engine no
-    /// longer publishes partial provider deltas, so this is normally a no-op;
-    /// retaining the cleanup prevents an already-published committed call from
-    /// leaking into a following stream after an unexpected terminal path.
-    pub(crate) fn truncate_active_tool_calls_for_auto_continue(&self, reason: &str) {
-        let output = format!(
-            "The provider response ended at {reason}; this incomplete tool call was not executed. The task is continuing in a new stream."
-        );
-        self.terminate_active_tool_calls(
-            ToolCallStatus::Error,
-            output,
-            "Tool call truncated",
-            "Failed to resolve active tool calls before automatic continuation",
-        );
-    }
-
     /// Citation reflow: parse the `<nomi-mem-citation>` block from the turn's
     /// final assistant text and bump each cited memory file's usage stats.
     /// Silent on every failure — a stale citation or unreadable file must
@@ -2367,7 +2551,7 @@ impl OutputSink for BackendOutputSink {
                         Some(format!("invalid artifact contract input: {error}")),
                     ),
                 };
-            if contract.is_none() && input_artifact_paths(&parsed_input).saw_explicit_key {
+            if contract.is_none() && input_artifact_paths(&parsed_input, false).saw_explicit_key {
                 contract = Some(any_artifact_contract());
             }
             let reason = contract_error.as_deref().unwrap_or(
@@ -2649,7 +2833,7 @@ impl OutputSink for BackendOutputSink {
         // when an absent path appeared or an existing file's content hash
         // changed. Preflight these paths before writing inline bytes so mixed
         // output cannot leave a partial artifact batch.
-        let path_sources = match self.preflight_declared_path_artifacts(
+        let existing_sources = match self.preflight_declared_path_artifacts(
             active.as_ref(),
             contract,
             &declared_output,
@@ -2683,7 +2867,7 @@ impl OutputSink for BackendOutputSink {
             return ToolMediaDelivery::Failed { error };
         }
 
-        let actual_count = path_sources.len().saturating_add(images.len());
+        let actual_count = existing_sources.len().saturating_add(images.len());
         if actual_count < contract.expected_count() {
             let error = if actual_count == 0 && contract.expected_count() == 1 {
                 format!("artifact-producing tool returned no {}", contract.label())
@@ -2709,16 +2893,23 @@ impl OutputSink for BackendOutputSink {
             return ToolMediaDelivery::Failed { error };
         };
 
-        if self.should_defer_inline_images(contract, !images.is_empty()) {
-            return match self.queue_deferred_image_delivery(
+        if self.should_defer_artifact_terminal() {
+            let durable_workspace_targets = existing_sources
+                .iter()
+                .map(|source| source.path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            return match self.queue_deferred_artifact_delivery(
                 call_id.clone(),
                 name,
                 contract,
                 content,
                 images,
-                path_sources,
+                existing_sources,
             ) {
-                Ok(context) => ToolMediaDelivery::Delivered { context },
+                Ok(context) => ToolMediaDelivery::Delivered {
+                    context,
+                    durable_workspace_targets,
+                },
                 Err(error) => {
                     let output = Self::append_delivery_context(
                         content,
@@ -2744,19 +2935,25 @@ impl OutputSink for BackendOutputSink {
             )
         });
         match if let Some(source) = recovery_source.as_ref() {
-            store.persist_inline_and_existing_batch_recoverable(
+            store.persist_inline_and_verified_existing_batch_recoverable(
                 inline,
-                &path_sources,
+                &existing_sources,
                 source,
             )
         } else {
-            store.persist_inline_and_existing_batch(inline, &path_sources)
+            store.persist_inline_and_verified_existing_batch(inline, &existing_sources)
         } {
             Ok(artifacts) => {
                 let context = Self::delivery_context(&artifacts);
                 let output = Self::append_delivery_context(content, &context);
                 match self.emit_terminal_tool_result(call_id, name, false, &output, artifacts) {
-                    Ok(()) => ToolMediaDelivery::Delivered { context },
+                    Ok(()) => ToolMediaDelivery::Delivered {
+                        context,
+                        durable_workspace_targets: existing_sources
+                            .iter()
+                            .map(|source| source.path.to_string_lossy().into_owned())
+                            .collect(),
+                    },
                     Err(error) => ToolMediaDelivery::Failed { error },
                 }
             }
@@ -2812,13 +3009,151 @@ impl OutputSink for BackendOutputSink {
         self.fail_active_tool_calls(
             "A new model stream started before the previous tool call reached a terminal state.",
         );
-        // Reset the per-turn text buffer used for citation reflow.
-        if let Ok(mut buf) = self.turn_text.lock() {
-            buf.clear();
-        }
+        let turn_text_len = self
+            .turn_text
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
+        let held_text_len = self
+            .artifact_delivery_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .held_text
+            .len();
+        let checkpoint = SinkOutputCheckpoint {
+            turn_text_len,
+            held_text_len,
+        };
+        *self
+            .attempt_output_checkpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(checkpoint);
+        self.accepted_turn_output_checkpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_or_insert(checkpoint);
         let _ = self
             .event_tx
             .send(AgentStreamEvent::Start(StartEventData { session_id: None }));
+    }
+
+    fn emit_output_checkpoint(&self, _msg_id: &str) {
+        let turn_text_len = self
+            .turn_text
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
+        let held_text_len = self
+            .artifact_delivery_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .held_text
+            .len();
+        let checkpoint = SinkOutputCheckpoint {
+            turn_text_len,
+            held_text_len,
+        };
+        *self
+            .attempt_output_checkpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(checkpoint);
+        self.accepted_turn_output_checkpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_or_insert(checkpoint);
+        let _ = self
+            .event_tx
+            .send(AgentStreamEvent::Start(StartEventData { session_id: None }));
+    }
+
+    fn emit_output_discarded(&self, _msg_id: &str, restart_attempt: u32) {
+        let checkpoint = if restart_attempt == 0 {
+            *self
+                .accepted_turn_output_checkpoint
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        } else {
+            *self
+                .attempt_output_checkpoint
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        };
+        let Some(checkpoint) = checkpoint else {
+            let has_turn_text = !self
+                .turn_text
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty();
+            let has_held_text = !self
+                .artifact_delivery_turn
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .held_text
+                .is_empty();
+            let has_active_tool_calls = !self
+                .active_tool_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty();
+            if !has_turn_text && !has_held_text && !has_active_tool_calls {
+                // A host may reject/cancel before the provider emits Start.
+                // With no provisional output there is nothing to retract and
+                // emitting a competing protocol Error would obscure the host's
+                // authoritative terminal failure.
+                return;
+            }
+            self.fail_active_tool_calls(
+                "The model output was discarded before the tool call reached a terminal state.",
+            );
+            let _ = self.event_tx.send(AgentStreamEvent::Error(
+                ErrorEventData::legacy(
+                    "The model discarded provisional output without a stream-start checkpoint",
+                    None,
+                ),
+            ));
+            return;
+        };
+        self.fail_active_tool_calls(
+            "The model output was discarded before the tool call reached a terminal state.",
+        );
+        let mut turn_text = self
+            .turn_text
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut turn = self
+            .artifact_delivery_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if checkpoint.turn_text_len > turn_text.len()
+            || !turn_text.is_char_boundary(checkpoint.turn_text_len)
+            || checkpoint.held_text_len > turn.held_text.len()
+            || !turn.held_text.is_char_boundary(checkpoint.held_text_len)
+        {
+            drop(turn_text);
+            drop(turn);
+            let _ = self.event_tx.send(AgentStreamEvent::Error(
+                ErrorEventData::legacy(
+                    "The output checkpoint no longer matched the provisional text",
+                    None,
+                ),
+            ));
+            return;
+        }
+        turn_text.truncate(checkpoint.turn_text_len);
+        turn.held_text.truncate(checkpoint.held_text_len);
+        let retained = SinkOutputCheckpoint {
+            turn_text_len: turn_text.len(),
+            held_text_len: turn.held_text.len(),
+        };
+        drop(turn_text);
+        drop(turn);
+        *self
+            .attempt_output_checkpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(retained);
+        let _ = self.event_tx.send(AgentStreamEvent::OutputDiscarded(
+            OutputDiscardedEventData { restart_attempt },
+        ));
     }
 
     fn emit_stream_end(
@@ -2881,6 +3216,94 @@ mod tests {
     fn make_sink() -> (BackendOutputSink, broadcast::Receiver<AgentStreamEvent>) {
         let (tx, rx) = broadcast::channel(16);
         (BackendOutputSink::new(tx), rx)
+    }
+
+    #[test]
+    fn artifact_baseline_hash_budget_is_bounded_per_file_and_batch() {
+        assert_eq!(
+            reserve_artifact_baseline_hash_bytes(0, MAX_BASELINE_ARTIFACT_FILE_BYTES)
+                .unwrap(),
+            MAX_BASELINE_ARTIFACT_FILE_BYTES
+        );
+        assert_eq!(
+            reserve_artifact_baseline_hash_bytes(
+                MAX_BASELINE_ARTIFACT_BATCH_BYTES - MAX_BASELINE_ARTIFACT_FILE_BYTES,
+                MAX_BASELINE_ARTIFACT_FILE_BYTES,
+            )
+            .unwrap(),
+            MAX_BASELINE_ARTIFACT_BATCH_BYTES
+        );
+
+        let per_file = reserve_artifact_baseline_hash_bytes(
+            0,
+            MAX_BASELINE_ARTIFACT_FILE_BYTES + 1,
+        )
+        .unwrap_err();
+        assert!(per_file.contains("per-file hash limit"), "{per_file}");
+
+        let aggregate = reserve_artifact_baseline_hash_bytes(
+            MAX_BASELINE_ARTIFACT_BATCH_BYTES - MAX_BASELINE_ARTIFACT_FILE_BYTES + 1,
+            MAX_BASELINE_ARTIFACT_FILE_BYTES,
+        )
+        .unwrap_err();
+        assert!(aggregate.contains("aggregate hash limit"), "{aggregate}");
+    }
+
+    #[test]
+    fn sparse_oversized_artifact_baseline_is_rejected_before_hashing() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("existing-large.bin");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_BASELINE_ARTIFACT_FILE_BYTES + 1)
+            .unwrap();
+        drop(file);
+
+        let mut batch_hash_bytes = 0;
+        let error = capture_path_fingerprint(&path, &mut batch_hash_bytes).unwrap_err();
+
+        assert!(error.contains("per-file hash limit"), "{error}");
+        assert_eq!(batch_hash_bytes, 0, "a rejected file must not consume the batch budget");
+    }
+
+    #[test]
+    fn artifact_baseline_identity_rejects_a_same_size_rename_replacement() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("report.md");
+        let displaced = workspace.path().join("report.before.md");
+        std::fs::write(&path, b"old").unwrap();
+        let original = File::open(&path).unwrap();
+        ensure_artifact_baseline_path_identity(&path, &original).unwrap();
+
+        std::fs::rename(&path, &displaced).unwrap();
+        std::fs::write(&path, b"new").unwrap();
+
+        let error = ensure_artifact_baseline_path_identity(&path, &original).unwrap_err();
+        assert!(error.contains("replaced"), "{error}");
+    }
+
+    #[test]
+    fn absent_and_small_artifact_baselines_keep_existing_behavior() {
+        let workspace = tempfile::tempdir().unwrap();
+        let absent = workspace.path().join("future-report.md");
+        let existing = workspace.path().join("existing-report.md");
+        let body = b"# Existing report\n";
+        std::fs::write(&existing, body).unwrap();
+        let mut batch_hash_bytes = 0;
+
+        assert!(matches!(
+            capture_path_fingerprint(&absent, &mut batch_hash_bytes).unwrap(),
+            ArtifactPathFingerprint::Absent
+        ));
+        assert_eq!(batch_hash_bytes, 0, "an absent output performs no synchronous hashing");
+
+        match capture_path_fingerprint(&existing, &mut batch_hash_bytes).unwrap() {
+            ArtifactPathFingerprint::Present { size_bytes, sha256 } => {
+                assert_eq!(size_bytes, body.len() as u64);
+                assert_eq!(sha256, hex::encode(Sha256::digest(body)));
+            }
+            ArtifactPathFingerprint::Absent => panic!("the existing file lost its baseline"),
+        }
+        assert_eq!(batch_hash_bytes, body.len() as u64);
     }
 
     #[test]
@@ -3056,48 +3479,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_continue_marks_active_tool_as_truncated_not_completed() {
-        let (sink, mut rx) = make_sink();
-        sink.emit_tool_call(
-            "call_write_1",
-            "Write",
-            r#"{"file_path":"/tmp/index.html"}"#,
-        );
-        let _running = rx.try_recv().unwrap();
-
-        sink.truncate_active_tool_calls_for_auto_continue("output token limit");
-
-        match rx.try_recv().unwrap() {
-            AgentStreamEvent::ToolCall(data) => {
-                assert_eq!(data.call_id, "nomi-call_write_1");
-                assert_eq!(data.name, "Write");
-                assert_eq!(data.status, ToolCallStatus::Error);
-                assert_eq!(data.input.as_ref().unwrap()["file_path"], "/tmp/index.html");
-                assert!(
-                    data.output
-                        .as_deref()
-                        .unwrap()
-                        .contains("incomplete tool call was not executed")
-                );
-            }
-            other => panic!("Expected ToolCall, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn auto_continue_ignores_finished_tool() {
-        let (sink, mut rx) = make_sink();
-        sink.emit_tool_call("call_read_1", "Read", r#"{"path":"/tmp/a.txt"}"#);
-        let _running = rx.try_recv().unwrap();
-        sink.emit_tool_result("call_read_1", "Read", false, "ok");
-        let _completed = rx.try_recv().unwrap();
-
-        sink.truncate_active_tool_calls_for_auto_continue("output token limit");
-
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
     fn fail_active_tool_calls_marks_pending_tool_error_and_drains_it() {
         let (sink, mut rx) = make_sink();
         sink.emit_tool_call(
@@ -3122,7 +3503,7 @@ mod tests {
             other => panic!("Expected ToolCall, got {:?}", other),
         }
 
-        sink.truncate_active_tool_calls_for_auto_continue("output token limit");
+        sink.fail_active_tool_calls("a second attempt at the same call");
         assert!(rx.try_recv().is_err(), "a failed call must not be recovered twice");
     }
 
@@ -3275,6 +3656,161 @@ mod tests {
     }
 
     #[test]
+    fn output_discard_restores_held_text_checkpoint_and_clears_tool_survivors() {
+        let (sink, mut rx) = make_sink();
+        sink.begin_artifact_delivery_turn();
+        sink.require_image_artifact_for_turn().unwrap();
+        sink.emit_stream_start("msg-1");
+        assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::Start(_)));
+        sink.emit_text_delta("retained prefix", "msg-1");
+        assert!(rx.try_recv().is_err(), "receipt-gated text stays provisional");
+        sink.turn_text.lock().unwrap().push_str("citation prefix");
+        // A same-execute provider pass establishes the boundary without
+        // erasing accepted receipt-gated or citation-reflow text.
+        sink.emit_output_checkpoint("msg-1");
+        assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::Start(_)));
+        sink.emit_text_delta("discard me", "msg-1");
+        sink.turn_text.lock().unwrap().push_str("citation draft");
+        sink.emit_tool_call("running", "Read", "{}");
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentStreamEvent::ToolCall(ToolCallEventData {
+                status: ToolCallStatus::Running,
+                ..
+            })
+        ));
+
+        sink.emit_output_discarded("msg-1", 2);
+
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentStreamEvent::ToolCall(ToolCallEventData {
+                status: ToolCallStatus::Error,
+                ..
+            })
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentStreamEvent::OutputDiscarded(OutputDiscardedEventData {
+                restart_attempt: 2,
+            })
+        ));
+        assert!(sink.active_tool_calls.lock().unwrap().is_empty());
+        assert_eq!(*sink.turn_text.lock().unwrap(), "citation prefix");
+        let turn = sink.artifact_delivery_turn.lock().unwrap();
+        assert!(turn.active);
+        assert!(turn.required_contract.is_some());
+        assert!(turn.hold_text_until_verified);
+        assert_eq!(turn.held_text, "retained prefix");
+    }
+
+    #[test]
+    fn accepted_turn_discard_restores_the_immutable_first_start_across_race_tail() {
+        let (sink, mut rx) = make_sink();
+        sink.begin_artifact_delivery_turn();
+        sink.require_image_artifact_for_turn().unwrap();
+
+        sink.emit_stream_start("msg-root");
+        assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::Start(_)));
+        sink.emit_text_delta("pass A", "msg-root");
+        sink.turn_text.lock().unwrap().push_str("citation A");
+
+        // A host race-tail execute emits another ordinary Start. It advances
+        // the rolling attempt boundary but must not replace the accepted root.
+        sink.emit_stream_start("msg-root");
+        assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::Start(_)));
+        sink.emit_text_delta(" + pass B", "msg-root");
+        sink.turn_text.lock().unwrap().push_str(" + citation B");
+
+        sink.emit_accepted_turn_output_discarded("msg-root");
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentStreamEvent::OutputDiscarded(OutputDiscardedEventData {
+                restart_attempt: 0
+            })
+        ));
+        assert!(sink.turn_text.lock().unwrap().is_empty());
+        assert!(
+            sink.artifact_delivery_turn
+                .lock()
+                .unwrap()
+                .held_text
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn accepted_turn_discard_before_start_is_a_noop_without_provisional_output() {
+        let (sink, mut rx) = make_sink();
+        sink.begin_artifact_delivery_turn();
+
+        sink.emit_accepted_turn_output_discarded("msg-before-start");
+
+        assert!(
+            rx.try_recv().is_err(),
+            "an empty pre-Start rollback must leave the host terminal authoritative"
+        );
+        assert!(sink.turn_text.lock().unwrap().is_empty());
+        assert!(
+            sink.artifact_delivery_turn
+                .lock()
+                .unwrap()
+                .held_text
+                .is_empty()
+        );
+        assert!(sink.active_tool_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn discard_before_start_fails_closed_for_each_kind_of_provisional_output() {
+        let assert_legacy_error = |mut rx: broadcast::Receiver<AgentStreamEvent>| {
+            assert!(matches!(
+                rx.try_recv().unwrap(),
+                AgentStreamEvent::Error(ErrorEventData { ref message, .. })
+                    if message.contains("without a stream-start checkpoint")
+            ));
+        };
+
+        let (turn_text_sink, turn_text_rx) = make_sink();
+        turn_text_sink
+            .turn_text
+            .lock()
+            .unwrap()
+            .push_str("draft citation text");
+        turn_text_sink.emit_accepted_turn_output_discarded("turn-text");
+        assert_legacy_error(turn_text_rx);
+
+        let (held_text_sink, held_text_rx) = make_sink();
+        held_text_sink
+            .artifact_delivery_turn
+            .lock()
+            .unwrap()
+            .held_text
+            .push_str("receipt-gated draft");
+        held_text_sink.emit_accepted_turn_output_discarded("held-text");
+        assert_legacy_error(held_text_rx);
+
+        let (active_tool_sink, mut active_tool_rx) = make_sink();
+        active_tool_sink.emit_tool_call("running", "Read", "{}");
+        assert!(matches!(
+            active_tool_rx.try_recv().unwrap(),
+            AgentStreamEvent::ToolCall(ToolCallEventData {
+                status: ToolCallStatus::Running,
+                ..
+            })
+        ));
+        active_tool_sink.emit_accepted_turn_output_discarded("active-tool");
+        assert!(matches!(
+            active_tool_rx.try_recv().unwrap(),
+            AgentStreamEvent::ToolCall(ToolCallEventData {
+                status: ToolCallStatus::Error,
+                ..
+            })
+        ));
+        assert_legacy_error(active_tool_rx);
+    }
+
+    #[test]
     fn emit_stream_end_sends_finish_event() {
         let (sink, mut rx) = make_sink();
         sink.emit_stream_end("msg-1", 3, 1000, 500, 100, 200);
@@ -3382,7 +3918,17 @@ mod tests {
             }],
         );
 
-        assert!(matches!(delivery, ToolMediaDelivery::Delivered { .. }));
+        let ToolMediaDelivery::Delivered {
+            durable_workspace_targets,
+            ..
+        } = delivery
+        else {
+            panic!("a verified inline image was not delivered");
+        };
+        assert!(
+            durable_workspace_targets.is_empty(),
+            "inline-only artifacts are immutable store receipts, not workspace-path effects"
+        );
         match rx.try_recv().unwrap() {
             AgentStreamEvent::ToolCall(data) => {
                 assert_eq!(data.status, ToolCallStatus::Completed);
@@ -3689,10 +4235,11 @@ mod tests {
         sink.emit_tool_call(
             "report-path",
             "mcp__reports__export_report",
-            r#"{"output_path":"report.md"}"#,
+            r#"{"options":{"outputPath":"report.md"}}"#,
         );
         let _running = rx.try_recv().unwrap();
-        std::fs::write(workspace.path().join("report.md"), "# Generated report\n").unwrap();
+        let report_path = workspace.path().join("report.md");
+        std::fs::write(&report_path, "# Generated report\n").unwrap();
 
         let delivery = sink.emit_tool_result_with_images(
             "report-path",
@@ -3702,7 +4249,21 @@ mod tests {
             &[],
         );
 
-        assert!(matches!(delivery, ToolMediaDelivery::Delivered { .. }));
+        let ToolMediaDelivery::Delivered {
+            durable_workspace_targets,
+            ..
+        } = delivery
+        else {
+            panic!("a verified declared path was not delivered");
+        };
+        assert_eq!(
+            durable_workspace_targets,
+            vec![std::fs::canonicalize(&report_path)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()],
+            "only the verified caller-owned workspace source is completion evidence"
+        );
         let artifact = match rx.try_recv().unwrap() {
             AgentStreamEvent::ToolCall(data) => {
                 assert_eq!(data.status, ToolCallStatus::Completed);
@@ -3823,15 +4384,67 @@ mod tests {
 
     #[test]
     fn nested_input_output_path_still_creates_a_pre_call_declaration() {
-        let declared = input_artifact_paths(&serde_json::json!({
-            "options": {
-                "outputPath": "reports/generated.md"
-            }
-        }));
+        let declared = input_artifact_paths(
+            &serde_json::json!({
+                "options": {
+                    "outputPath": "reports/generated.md"
+                }
+            }),
+            false,
+        );
 
         assert!(declared.saw_explicit_key);
         assert_eq!(declared.paths, vec!["reports/generated.md"]);
         assert!(declared.errors.is_empty());
+    }
+
+    #[test]
+    fn read_model_input_scopes_never_create_artifact_declarations() {
+        let declared = input_artifact_paths(
+            &serde_json::json!({
+                "filter": { "output_file": "reports/prior.md" },
+                "query": { "where": { "output_path": "reports/prior.md" } },
+                "history": { "attempts": [{ "output_file": "reports/prior.md" }] }
+            }),
+            true,
+        );
+
+        assert!(!declared.saw_explicit_key);
+        assert!(declared.paths.is_empty());
+        assert!(declared.errors.is_empty());
+    }
+
+    #[test]
+    fn read_only_mcp_filter_output_file_is_not_an_artifact_obligation() {
+        let workspace = tempfile::tempdir().unwrap();
+        let prior = workspace.path().join("reports").join("prior.md");
+        std::fs::create_dir_all(prior.parent().unwrap()).unwrap();
+        std::fs::write(&prior, "# Prior run\n").unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+        let tool = "mcp__runs__search_runs";
+        assert!(artifact_contract(tool).is_none());
+
+        sink.emit_tool_call(
+            "search-runs",
+            tool,
+            r#"{"filter":{"output_file":"reports/prior.md"}}"#,
+        );
+        let _running = rx.try_recv().unwrap();
+        let content = r#"{"runs":[]}"#;
+        let delivery =
+            sink.emit_tool_result_with_images("search-runs", tool, false, content, &[]);
+
+        assert!(matches!(delivery, ToolMediaDelivery::Unmanaged));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Completed);
+                assert!(data.artifacts.is_empty());
+                assert_eq!(data.output.as_deref(), Some(content));
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+        assert!(!workspace.path().join("nomifun-artifacts").exists());
     }
 
     #[test]
@@ -4366,6 +4979,11 @@ mod tests {
             rx.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
         ));
+        sink.emit_text_delta("suppressed image completion prose", "native-deferred");
+        assert_eq!(
+            sink.artifact_delivery_turn.lock().unwrap().held_text,
+            "suppressed image completion prose"
+        );
 
         let cancellation = CancellationToken::new();
         assert!(matches!(
@@ -4394,6 +5012,104 @@ mod tests {
             }
             other => panic!("expected committed image card, got {other:?}"),
         }
+        assert!(sink.artifact_delivery_turn.lock().unwrap().held_text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn deferred_workspace_artifact_is_hidden_until_commit_and_abort_has_no_success_receipt() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+        let tool = "mcp__reports__export_report";
+
+        sink.begin_deferred_artifact_delivery_turn();
+        sink.emit_tool_call(
+            "report-abort",
+            tool,
+            r#"{"options":{"outputPath":"abort.md"}}"#,
+        );
+        let _running = rx.try_recv().unwrap();
+        std::fs::write(workspace.path().join("abort.md"), "# Provisional\n").unwrap();
+        assert!(matches!(
+            sink.emit_tool_result_with_images(
+                "report-abort",
+                tool,
+                false,
+                r#"{"path":"abort.md"}"#,
+                &[],
+            ),
+            ToolMediaDelivery::Delivered { .. }
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(
+            !workspace.path().join("nomifun-artifacts").exists(),
+            "pre-commit callback must not persist or publish a provisional artifact"
+        );
+
+        // Models this successful artifact tool being followed by an A2/provider
+        // failure. The only visible terminal is Error and it carries no receipt.
+        sink.abort_artifact_delivery_turn();
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert!(data.artifacts.is_empty());
+            }
+            other => panic!("expected aborted artifact terminal, got {other:?}"),
+        }
+        assert!(!workspace.path().join("nomifun-artifacts").exists());
+
+        sink.begin_deferred_artifact_delivery_turn();
+        sink.emit_tool_call(
+            "report-commit",
+            tool,
+            r#"{"options":{"outputPath":"commit.md"}}"#,
+        );
+        let _running = rx.try_recv().unwrap();
+        std::fs::write(workspace.path().join("commit.md"), "# Committed\n").unwrap();
+        assert!(matches!(
+            sink.emit_tool_result_with_images(
+                "report-commit",
+                tool,
+                false,
+                r#"{"path":"commit.md"}"#,
+                &[],
+            ),
+            ToolMediaDelivery::Delivered { .. }
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        let cancellation = CancellationToken::new();
+        let verified = match sink
+            .verify_artifact_delivery_turn_async(&cancellation)
+            .await
+        {
+            AsyncArtifactDeliveryOutcome::Verified(verified) => verified,
+            other => panic!("expected verified workspace artifact, got {other:?}"),
+        };
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        sink.finish_verified_artifact_delivery_turn(verified)
+            .unwrap();
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Completed);
+                assert_eq!(data.artifacts.len(), 1);
+                assert!(Path::new(&data.artifacts[0].path).is_file());
+            }
+            other => panic!("expected committed artifact terminal, got {other:?}"),
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]
@@ -4458,7 +5174,78 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn artifact_delivery_guard_cancel_never_decodes_or_publishes_success() {
+    async fn recovery_regression_receiver_loss_after_one_send_retains_only_the_exposed_journal() {
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(8);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+        sink.begin_deferred_artifact_delivery_turn_for("conversation-partial-send", "wire-partial-send")
+            .unwrap();
+
+        for call_id in ["image-first", "image-second"] {
+            sink.emit_tool_call(call_id, "image_gen", r#"{"prompt":"fox"}"#);
+            assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::ToolCall(_)));
+            assert!(matches!(
+                sink.emit_tool_result_with_images(
+                    call_id,
+                    "image_gen",
+                    false,
+                    "generated",
+                    &[ToolImage {
+                        media_type: "image/png".into(),
+                        data: PNG.into(),
+                    }],
+                ),
+                ToolMediaDelivery::Delivered { .. }
+            ));
+        }
+
+        let cancellation = CancellationToken::new();
+        let verified = match sink
+            .verify_artifact_delivery_turn_async(&cancellation)
+            .await
+        {
+            AsyncArtifactDeliveryOutcome::Verified(verified) => verified,
+            other => panic!("expected verified delivery, got {other:?}"),
+        };
+        let store = ArtifactStore::new(workspace.path());
+        let initial_records = store.recovery_records().unwrap();
+        assert_eq!(initial_records.len(), 2);
+        let paths = initial_records
+            .iter()
+            .map(|record| PathBuf::from(&record.receipt.path))
+            .collect::<Vec<_>>();
+
+        // Deterministic seam: the first broadcast succeeds, then its sole raw
+        // receiver disappears before the second send. In production the relay
+        // exposes only a receipt-free provisional card; Finish is the green
+        // commit barrier, so DeliveryFailed remains rollbackable and honest.
+        let mut receiver = Some(rx);
+        let error = sink
+            .finish_verified_artifact_delivery_turn_with(verified, |sent_index| {
+                if sent_index == 0 {
+                    drop(receiver.take());
+                }
+            })
+            .unwrap_err();
+        assert!(error.contains("no live relay receiver"), "{error}");
+
+        let retained = store.recovery_records().unwrap();
+        assert_eq!(retained.len(), 1);
+        assert!(matches!(
+            retained[0].state,
+            crate::artifact_store::ArtifactRecoveryState::Prepared { .. }
+        ));
+        assert!(Path::new(&retained[0].receipt.path).is_file());
+        assert_eq!(
+            paths.iter().filter(|path| path.is_file()).count(),
+            1,
+            "only the possibly observed provisional event keeps recovery ownership"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_artifact_verification_preserves_nonzero_output_checkpoint_until_discard() {
         const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
         let workspace = tempfile::tempdir().unwrap();
         let (tx, mut rx) = broadcast::channel(16);
@@ -4480,6 +5267,10 @@ mod tests {
             ),
             ToolMediaDelivery::Delivered { .. }
         ));
+        sink.emit_text_delta("retained prefix", "artifact-cancel");
+        sink.emit_output_checkpoint("artifact-cancel");
+        assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::Start(_)));
+        sink.emit_text_delta(" discarded draft", "artifact-cancel");
         let cancellation = CancellationToken::new();
         cancellation.cancel();
         assert!(matches!(
@@ -4487,6 +5278,28 @@ mod tests {
             AsyncArtifactDeliveryOutcome::Cancelled
         ));
         assert!(!workspace.path().join("nomifun-artifacts").exists());
+
+        {
+            let turn = sink.artifact_delivery_turn.lock().unwrap();
+            assert!(turn.active, "verification must leave rollback ownership live");
+            assert_eq!(turn.held_text, "retained prefix discarded draft");
+        }
+        sink.emit_output_discarded("artifact-cancel", 1);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentStreamEvent::OutputDiscarded(OutputDiscardedEventData {
+                restart_attempt: 1
+            })
+        ));
+        assert_eq!(
+            sink.artifact_delivery_turn.lock().unwrap().held_text,
+            "retained prefix"
+        );
+
+        // Mirrors the manager's ordered root restore: output is retracted while
+        // its checkpoint is still valid, then the provisional artifact ledger
+        // is retired with a non-success tool terminal.
+        sink.abort_artifact_delivery_turn();
         match rx.try_recv().unwrap() {
             AgentStreamEvent::ToolCall(data) => {
                 assert_eq!(data.status, ToolCallStatus::Error);
@@ -4495,6 +5308,147 @@ mod tests {
             }
             other => panic!("expected cancellation terminal, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn failed_artifact_reverification_preserves_nonzero_output_checkpoint_until_discard() {
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+        sink.begin_deferred_artifact_delivery_turn();
+        sink.require_image_artifact_for_turn().unwrap();
+        sink.emit_tool_call("failed-reverify", "image_gen", r#"{"prompt":"fox"}"#);
+        assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::ToolCall(_)));
+        assert!(matches!(
+            sink.emit_tool_result_with_images(
+                "failed-reverify",
+                "image_gen",
+                false,
+                "generated successfully",
+                &[ToolImage {
+                    media_type: "image/png".into(),
+                    data: PNG.into(),
+                }],
+            ),
+            ToolMediaDelivery::Delivered { .. }
+        ));
+        sink.emit_text_delta("retained prefix", "artifact-failure");
+        sink.emit_output_checkpoint("artifact-failure");
+        assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::Start(_)));
+        sink.emit_text_delta(" discarded draft", "artifact-failure");
+
+        let cancellation = CancellationToken::new();
+        assert!(matches!(
+            sink.verify_artifact_delivery_turn_async(&cancellation).await,
+            AsyncArtifactDeliveryOutcome::Verified(_)
+        ));
+        let artifact_path = {
+            let turn = sink.artifact_delivery_turn.lock().unwrap();
+            turn.calls
+                .values()
+                .find_map(|obligation| match &obligation.status {
+                    ArtifactCallDeliveryStatus::CompletedVerified { artifacts, .. } => {
+                        artifacts.first().map(|artifact| PathBuf::from(&artifact.path))
+                    }
+                    _ => None,
+                })
+                .expect("deferred persistence must install one verified receipt")
+        };
+        std::fs::remove_file(&artifact_path).unwrap();
+
+        let failure = sink
+            .verify_artifact_delivery_turn_async(&cancellation)
+            .await;
+        assert!(matches!(failure, AsyncArtifactDeliveryOutcome::Failed(_)));
+        {
+            let turn = sink.artifact_delivery_turn.lock().unwrap();
+            assert!(turn.active, "verification failure must preserve rollback ownership");
+            assert_eq!(turn.held_text, "retained prefix discarded draft");
+        }
+
+        sink.emit_output_discarded("artifact-failure", 2);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentStreamEvent::OutputDiscarded(OutputDiscardedEventData {
+                restart_attempt: 2
+            })
+        ));
+        assert_eq!(
+            sink.artifact_delivery_turn.lock().unwrap().held_text,
+            "retained prefix"
+        );
+        sink.abort_artifact_delivery_turn();
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert!(data.artifacts.is_empty());
+            }
+            other => panic!("expected failed artifact terminal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_final_artifact_publish_preserves_nonzero_output_checkpoint_until_discard() {
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+        sink.begin_deferred_artifact_delivery_turn();
+        sink.require_image_artifact_for_turn().unwrap();
+        sink.emit_tool_call("failed-publish", "image_gen", r#"{"prompt":"fox"}"#);
+        assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::ToolCall(_)));
+        assert!(matches!(
+            sink.emit_tool_result_with_images(
+                "failed-publish",
+                "image_gen",
+                false,
+                "generated successfully",
+                &[ToolImage {
+                    media_type: "image/png".into(),
+                    data: PNG.into(),
+                }],
+            ),
+            ToolMediaDelivery::Delivered { .. }
+        ));
+        sink.emit_text_delta("retained prefix", "artifact-publish");
+        sink.emit_output_checkpoint("artifact-publish");
+        assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::Start(_)));
+        sink.emit_text_delta(" discarded draft", "artifact-publish");
+
+        let cancellation = CancellationToken::new();
+        let verified = match sink
+            .verify_artifact_delivery_turn_async(&cancellation)
+            .await
+        {
+            AsyncArtifactDeliveryOutcome::Verified(verified) => verified,
+            other => panic!("expected verified delivery, got {other:?}"),
+        };
+        drop(rx);
+        let error = sink
+            .finish_verified_artifact_delivery_turn(verified)
+            .unwrap_err();
+        assert!(error.contains("no live relay receiver"), "{error}");
+        assert_eq!(
+            sink.artifact_delivery_turn.lock().unwrap().held_text,
+            "retained prefix discarded draft",
+            "a failed final publish must leave the sealed generation retractable"
+        );
+
+        let mut rollback_rx = sink.event_tx.subscribe();
+        sink.emit_output_discarded("artifact-publish", 3);
+        assert!(matches!(
+            rollback_rx.try_recv().unwrap(),
+            AgentStreamEvent::OutputDiscarded(OutputDiscardedEventData {
+                restart_attempt: 3
+            })
+        ));
+        assert_eq!(
+            sink.artifact_delivery_turn.lock().unwrap().held_text,
+            "retained prefix"
+        );
+        sink.abort_artifact_delivery_turn();
+        assert!(sink.artifact_delivery_turn.lock().unwrap().held_text.is_empty());
     }
 
     #[test]
@@ -4778,7 +5732,7 @@ mod tests {
             }
             other => panic!("expected Plan, got {other:?}"),
         }
-        sink.truncate_active_tool_calls_for_auto_continue("max_tokens");
+        sink.fail_active_tool_calls("a later lifecycle boundary");
         // The successful plan result must settle the source tool without
         // emitting a synthetic continuation recovery later.
         assert!(rx.try_recv().is_err());
@@ -4861,7 +5815,7 @@ mod tests {
 
         // The plan result must settle the active call so no synthetic
         // recovery frame is emitted at a later lifecycle boundary.
-        sink.truncate_active_tool_calls_for_auto_continue("max_tokens");
+        sink.fail_active_tool_calls("a later lifecycle boundary");
         assert!(rx.try_recv().is_err());
     }
 

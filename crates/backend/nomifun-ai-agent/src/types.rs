@@ -102,6 +102,9 @@ pub struct NomiCompatOverrides {
     pub supports_image: Option<bool>,
     /// Some(true) = gateway requires assistant reasoning_content placeholders.
     pub require_reasoning_content: Option<bool>,
+    /// Explicit opt-in for OpenAI Responses provider-side round retention.
+    /// Request builders still apply their own lifecycle gate.
+    pub chain_rounds: Option<bool>,
     /// Provider-native request body fields after local Agent controls have
     /// been removed. Typed serializer fields overwrite conflicts at send time.
     pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
@@ -120,8 +123,9 @@ pub struct NomiResolvedConfig {
     pub base_url: Option<String>,
     /// System prompt override.
     pub system_prompt: Option<String>,
-    /// Max tokens per response.
-    pub max_tokens: u32,
+    /// Capability-declared output ceiling. `None` means omit it where the
+    /// protocol permits; required protocols fail before a turn starts.
+    pub output_ceiling: Option<u32>,
     /// Max agentic turns.
     pub max_turns: Option<usize>,
     /// Provider's declared context window (tokens), if configured. Drives the
@@ -289,36 +293,10 @@ mod tests {
         let json = serde_json::to_value(&cmd).unwrap();
         assert_eq!(json["command"], "/review");
     }
-
-
-    #[test]
-    fn nomi_build_extra_serde_defaults() {
-        let json = json!({});
-        let extra: NomiBuildExtra = serde_json::from_value(json).unwrap();
-        assert!(extra.system_prompt.is_none());
-        assert!(extra.preset_rules.is_none());
-        assert_eq!(extra.max_tokens, 8192);
-        assert!(extra.max_turns.is_none());
-    }
-
-    #[test]
-    fn nomi_build_extra_serde_with_overrides() {
-        let json = json!({
-            "system_prompt": "You are a helpful assistant.",
-            "max_tokens": 4096,
-            "max_turns": 10
-        });
-        let extra: NomiBuildExtra = serde_json::from_value(json).unwrap();
-        assert_eq!(extra.system_prompt.unwrap(), "You are a helpful assistant.");
-        assert_eq!(extra.max_tokens, 4096);
-        assert_eq!(extra.max_turns.unwrap(), 10);
-    }
-
     #[test]
     fn nomi_build_extra_serde_with_preset_rules() {
         let json = json!({
-            "preset_rules": "You are a data analyst.",
-            "max_tokens": 8192
+            "preset_rules": "You are a data analyst."
         });
         let extra: NomiBuildExtra = serde_json::from_value(json).unwrap();
         assert!(extra.system_prompt.is_none());

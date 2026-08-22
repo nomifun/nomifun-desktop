@@ -27,6 +27,28 @@ describe('WebuiControlPanel QR login URL selection', () => {
   });
 });
 
+describe('WebuiControlPanel credential controls', () => {
+  test('keeps credential pills compact while separating text from grouped icons', () => {
+    const source = readSource(new URL('./WebuiControlPanel.tsx', import.meta.url));
+
+    expect(source.includes("px-8px py-2px'")).toBe(true);
+    expect(source.includes("'ml-6px inline-flex shrink-0 items-center gap-0'")).toBe(true);
+    expect(source.includes('!h-20px !w-20px !min-w-20px !p-0')).toBe(true);
+    expect(source.includes('<Copy size={13} />')).toBe(true);
+    expect(source.includes('<EditTwo size={13} />')).toBe(true);
+  });
+
+  test('uses content-height small modals with the current shared header contract', () => {
+    const source = readSource(new URL('./WebuiControlPanel.tsx', import.meta.url));
+    const modalSource = readSource(new URL('../../base/NomiModal.tsx', import.meta.url));
+
+    expect(modalSource.includes("small: { width: '400px' }")).toBe(true);
+    expect(modalSource.includes("small: { width: '400px', height: '300px' }")).toBe(false);
+    expect(source.match(/header=\{\{ title: t\('settings\.webui\.setNew/g)?.length).toBe(2);
+    expect(source.match(/layout='vertical' className='pt-12px'/g)?.length).toBe(2);
+  });
+});
+
 describe('Open Capabilities WebUI entry', () => {
   test('moves the full WebUI control out of the crowded footer into the Open Capabilities page', () => {
     const footerSource = readSource(new URL('./SiderFooter.tsx', import.meta.url));

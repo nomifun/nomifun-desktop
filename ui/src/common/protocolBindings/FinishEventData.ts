@@ -4,7 +4,7 @@ import type { TurnStopReason } from "./TurnStopReason";
 /**
  * Data for the `Finish` event.
  */
-export type FinishEventData = { session_id: string | null, 
+export type FinishEventData = { session_id: string | null,
 /**
  * Why the turn ended. `None` = the backend did not report (treated as
  * success for back-compat). `EndTurn` = normal completion; `MaxTokens` /

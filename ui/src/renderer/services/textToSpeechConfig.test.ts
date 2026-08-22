@@ -108,5 +108,6 @@ describe('tools.textToSpeech client service', () => {
     expect(panel.includes('<TaskModelSelect')).toBe(true);
     expect(panel.includes("task='speech_synthesis'")).toBe(true);
     expect(panel.includes('withVoice')).toBe(true);
+    expect(panel.includes('hideHint')).toBe(false);
   });
 });

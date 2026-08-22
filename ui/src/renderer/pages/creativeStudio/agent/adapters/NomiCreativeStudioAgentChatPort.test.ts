@@ -88,6 +88,8 @@ const acceptedReceipt = (
   result_ok: null,
   result_text: null,
   result_error: null,
+  result_error_code: null,
+  result_error_retryable: null,
   ...overrides,
 });
 

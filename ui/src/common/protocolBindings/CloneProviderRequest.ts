@@ -6,7 +6,7 @@
  * The body is optional on the wire: a missing/empty body clones with the
  * default `"{source name} copy"` name.
  */
-export type CloneProviderRequest = { 
+export type CloneProviderRequest = {
 /**
  * Optional display name for the clone. A trimmed non-empty value wins;
  * missing/blank falls back to `"{source name} copy"`.

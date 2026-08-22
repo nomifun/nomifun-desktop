@@ -142,6 +142,14 @@
         "title": "任务因应用退出而中断",
         "body": "应用在任务执行中途退出，本次任务未能完成。会话已恢复可用，可重新发送该请求。"
       },
+      "OUTPUT_TRUNCATED": {
+        "title": "模型已达到输出上限",
+        "body": "回复在任务完成前被截断。已有文件和已完成操作均已保留，可点击“继续执行”从持久状态安全续跑。"
+      },
+      "TURN_REQUESTS_EXHAUSTED": {
+        "title": "本轮模型请求次数已用尽",
+        "body": "任务在本轮请求额度用尽前未能完成。已有文件和已完成操作均已保留，可点击“继续执行”安全续跑。"
+      },
       "PROVIDER_UNAVAILABLE": {
         "title": "当前没有可用的模型",
         "body": "当前没有可用的模型供应商，请到「模型&Agent」添加并启用一个模型后重试。"
@@ -153,6 +161,10 @@
       "NOMIFUN_STATE_INCONSISTENT": {
         "title": "会话状态不一致",
         "body": "当前对话状态和后台记录不同步。请重新打开应用或新建会话后再试。"
+      },
+      "NOMIFUN_AGENT_SESSION_INCONSISTENT": {
+        "title": "Agent 会话无法安全恢复",
+        "body": "应用已拒绝未经验证的完成结果，但无法安全恢复已保存的 Agent 会话。请新建会话后再继续。"
       },
       "NOMIFUN_PERMISSION_ERROR": {
         "title": "无法访问所需资源",
@@ -277,6 +289,10 @@
       "USER_LLM_PROVIDER_EMPTY_RESPONSE": {
         "title": "模型服务商返回了空响应",
         "body": "服务商完成了请求，但没有返回可用内容。请先重试一次；如果反复出现，可切换服务商。"
+      },
+      "USER_LLM_PROVIDER_UNBACKED_COMPLETION": {
+        "title": "模型未能验证所要求的交付物",
+        "body": "模型声称任务已经完成，但没有已验证证据能对应到必需文件。已有的实际成果均已保留，请先切换模型再继续。"
       },
       "WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED": {
         "title": "该工作区路径无法运行",
@@ -471,7 +487,18 @@
     "title": "背景信息窗口",
     "percentLine": "已用 {{pct}}%（剩余 {{remaining}}%）",
     "tokenLine": "已用 {{used}} 标记，共 {{max}}",
+    "inputLine": "输入：{{tokens}}",
+    "outputLine": "输出：{{tokens}}",
+    "reasoningLine": "推理：{{tokens}}（已包含在输出中）",
     "tooltip": "上下文 {{used}} / {{max}} tokens（{{pct}}%）。接近上限将自动压缩。"
+  },
+  "truncation": {
+    "continue": "继续执行",
+    "continuing": "正在继续…",
+    "accepted": "已开始继续执行",
+    "superseded": "已被后续轮次取代",
+    "stale": "这次中断已被后续轮次取代。",
+    "failed": "无法继续这次中断的任务。"
   },
   "skill_generator": {
     "title": "生成 Skill/规则",

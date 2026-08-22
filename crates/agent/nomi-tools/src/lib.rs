@@ -226,6 +226,19 @@ pub trait Tool: Send + Sync {
         self.execute(input).await
     }
 
+    /// Consume machine-observed state-changing effects completed by a nested
+    /// Agent during this exact invocation.
+    ///
+    /// This channel is deliberately orthogonal to [`Self::category_for`]: tool
+    /// categories drive approval policy, while completion evidence must never
+    /// widen or bypass that policy. Native tools return zero and are accounted
+    /// for directly by the engine. Boundary tools such as fork-mode `Skill`
+    /// may override this after correlating evidence with the trusted operation
+    /// id supplied to [`Self::execute_with_context`].
+    fn take_delegated_effects(&self, _context: &ToolExecutionContext) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Return an optional context modifier based on the tool input.
     /// Called after execute() to collect any engine-level overrides.
     /// Only SkillTool overrides this; all other tools return None.
@@ -254,6 +267,17 @@ pub trait Tool: Send + Sync {
     /// gating can distinguish them from mutating actions.
     fn category_for(&self, _input: &Value) -> ToolCategory {
         self.category()
+    }
+
+    /// Whether this invocation may mutate durable workspace state, independent
+    /// of approval/UI categorization. Completion evidence uses this to
+    /// invalidate older path receipts after opaque or failed boundaries;
+    /// overriding it must never change whether approval is required.
+    fn may_have_workspace_side_effects(&self, input: &Value) -> bool {
+        matches!(
+            self.category_for(input),
+            ToolCategory::Edit | ToolCategory::Exec | ToolCategory::Irreversible
+        )
     }
 
     /// Whether this specific invocation can skip interactive approval even when

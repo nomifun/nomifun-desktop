@@ -5,6 +5,7 @@ use std::sync::Arc;
 use clap::Parser;
 
 use nomi_agent::bootstrap::AgentBootstrap;
+use nomi_agent::engine::AgentResult;
 use nomi_agent::output::OutputSink;
 use nomi_agent::output::protocol_sink::ProtocolSink;
 use nomi_agent::output::terminal::TerminalSink;
@@ -13,7 +14,7 @@ use nomi_config::config::{self, CliArgs, Config, McpServerConfig, TransportType}
 use nomi_mcp::manager::McpManager;
 use nomi_mcp::tool_proxy::register_single_server_tools;
 use nomi_protocol::commands::ProtocolCommand;
-use nomi_protocol::events::ProtocolEvent;
+use nomi_protocol::events::{ErrorInfo, ProtocolEvent, Usage};
 use nomi_protocol::reader::spawn_stdin_reader;
 use nomi_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 use nomi_protocol::{ToolApprovalManager, ToolApprovalResult};
@@ -40,6 +41,141 @@ impl ConnectedMcpServerNames {
     }
 }
 
+#[derive(Debug)]
+struct CompletionFailure {
+    code: &'static str,
+    message: String,
+    retryable: bool,
+    retire_runtime: bool,
+}
+
+fn completion_adjudication_failure(result: &AgentResult) -> Option<CompletionFailure> {
+    let issue = result.completion_adjudication.as_ref()?;
+    let detail = issue.detail();
+    tracing::error!(
+        target: "nomi_cli",
+        completion_adjudication = issue.kind(),
+        turns = result.turns,
+        input_tokens = result.usage.input_tokens,
+        output_tokens = result.usage.output_tokens,
+        reasoning_tokens = result.usage.reasoning_tokens,
+        cache_creation_tokens = result.usage.cache_creation_tokens,
+        cache_read_tokens = result.usage.cache_read_tokens,
+        detail = %detail,
+        "model turn failed completion adjudication"
+    );
+    Some(if issue.history_rollback_succeeded() {
+        CompletionFailure {
+            code: "unbacked_completion",
+            message: format!(
+                "The model reported completion without verified deliverable evidence: {detail}"
+            ),
+            retryable: false,
+            retire_runtime: false,
+        }
+    } else {
+        CompletionFailure {
+            code: "state_inconsistent",
+            message: format!("Agent session state could not be restored safely: {detail}"),
+            retryable: false,
+            retire_runtime: true,
+        }
+    })
+}
+
+fn terminal_turn_failure(result: &AgentResult) -> Option<CompletionFailure> {
+    if let Some(failure) = completion_adjudication_failure(result) {
+        return Some(failure);
+    }
+    use nomi_types::message::StopReason;
+    match result.stop_reason {
+        StopReason::EndTurn => None,
+        StopReason::MaxTokens => Some(CompletionFailure {
+            code: "output_truncated",
+            message: "The model response reached its output limit before the turn completed."
+                .to_owned(),
+            retryable: true,
+            retire_runtime: false,
+        }),
+        StopReason::MaxTurns => Some(CompletionFailure {
+            code: "turn_requests_exhausted",
+            message: "The Agent exhausted its model-request budget before the turn completed."
+                .to_owned(),
+            retryable: true,
+            retire_runtime: false,
+        }),
+        StopReason::Refusal => Some(CompletionFailure {
+            code: "model_refused",
+            message: "The model refused the request before completing the turn.".to_owned(),
+            retryable: false,
+            retire_runtime: false,
+        }),
+        StopReason::ToolUse => Some(CompletionFailure {
+            code: "protocol_error",
+            message: "The Agent returned an unresolved tool-use terminal.".to_owned(),
+            retryable: false,
+            retire_runtime: true,
+        }),
+    }
+}
+
+fn emit_terminal_turn_result(
+    output: &dyn OutputSink,
+    msg_id: &str,
+    result: &AgentResult,
+) -> Result<(), CompletionFailure> {
+    if let Some(failure) = terminal_turn_failure(result) {
+        output.emit_error(&failure.message);
+        return Err(failure);
+    }
+    output.emit_stream_end(
+        msg_id,
+        result.turns,
+        result.usage.input_tokens,
+        result.usage.output_tokens,
+        result.usage.cache_creation_tokens,
+        result.usage.cache_read_tokens,
+    );
+    Ok(())
+}
+
+fn emit_json_turn_result(
+    writer: &dyn ProtocolEmitter,
+    msg_id: &str,
+    result: &AgentResult,
+) -> std::io::Result<bool> {
+    if let Some(failure) = terminal_turn_failure(result) {
+        writer.emit(&ProtocolEvent::Error {
+            msg_id: Some(msg_id.to_owned()),
+            error: ErrorInfo {
+                code: failure.code.to_owned(),
+                message: failure.message,
+                retryable: failure.retryable,
+            },
+        })?;
+        return Ok(failure.retire_runtime);
+    }
+    writer.emit(&ProtocolEvent::StreamEnd {
+        msg_id: msg_id.to_owned(),
+        usage: Some(Usage {
+            input_tokens: result.usage.input_tokens,
+            output_tokens: result.usage.output_tokens,
+            cache_read_tokens: (result.usage.cache_read_tokens > 0)
+                .then_some(result.usage.cache_read_tokens),
+            cache_write_tokens: (result.usage.cache_creation_tokens > 0)
+                .then_some(result.usage.cache_creation_tokens),
+        }),
+    })?;
+    Ok(false)
+}
+
+fn emit_json_engine_error(output: &dyn OutputSink, error: &str) {
+    // Error is itself the terminal event. A trailing StreamEnd would turn the
+    // same failed request into a contradictory success terminal for protocol
+    // consumers.
+    output.emit_error(error);
+}
+
 #[derive(Parser)]
 #[command(
     name = "nomi",
@@ -63,7 +199,8 @@ struct Cli {
     #[arg(short, long, env = "MODEL")]
     model: Option<String>,
 
-    /// Max output tokens per response
+    /// Max output tokens per response. Required by anthropic/bedrock/vertex;
+    /// may also be set as [default].max_tokens in the config file.
     #[arg(long)]
     max_tokens: Option<u32>,
 
@@ -280,18 +417,20 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let prompt = cli.prompt.join(" ");
+    let mut turn_failure: Option<anyhow::Error> = None;
     if prompt.is_empty() {
-        repl_loop(&mut engine, &terminal, &output).await?;
+        if let Err(error) = repl_loop(&mut engine, &terminal, &output).await {
+            turn_failure = Some(error);
+        }
     } else {
-        let turn_result = engine.execute_turn(&prompt, "").await?;
-        output.emit_stream_end(
-            "",
-            turn_result.turns,
-            turn_result.usage.input_tokens,
-            turn_result.usage.output_tokens,
-            turn_result.usage.cache_creation_tokens,
-            turn_result.usage.cache_read_tokens,
-        );
+        match engine.execute_turn(&prompt, "").await {
+            Ok(turn_result) => {
+                turn_failure = emit_terminal_turn_result(output.as_ref(), "", &turn_result)
+                    .err()
+                    .map(|failure| anyhow::anyhow!(failure.message));
+            }
+            Err(error) => turn_failure = Some(error.into()),
+        }
     }
 
     engine.run_stop_hooks().await;
@@ -311,12 +450,105 @@ async fn main() -> anyhow::Result<()> {
 
     shutdown_mcp_managers_exact(result.mcp_managers.iter()).await?;
 
+    if let Some(failure) = turn_failure {
+        return Err(failure);
+    }
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ConnectedMcpServerNames;
+    use std::io;
+    use std::sync::Mutex;
+
+    use nomi_agent::engine::{AgentResult, CompletionAdjudication};
+    use nomi_agent::output::OutputSink;
+    use nomi_protocol::events::ProtocolEvent;
+    use nomi_protocol::writer::ProtocolEmitter;
+    use nomi_types::message::{StopReason, TokenUsage};
+
+    use super::{
+        ConnectedMcpServerNames, emit_json_engine_error, emit_json_turn_result,
+        emit_terminal_turn_result,
+    };
+
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Mutex<Vec<&'static str>>,
+    }
+
+    impl OutputSink for RecordingSink {
+        fn emit_text_delta(&self, _: &str, _: &str) {}
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str, _: &str) {}
+        fn emit_tool_result(&self, _: &str, _: &str, _: bool, _: &str) {}
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_output_discarded(&self, _: &str, _: u32) {}
+        fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {
+            self.events.lock().unwrap().push("stream_end");
+        }
+        fn emit_error(&self, _: &str) {
+            self.events.lock().unwrap().push("error");
+        }
+        fn emit_info(&self, _: &str) {}
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum RecordedProtocolEvent {
+        StreamEnd,
+        Error {
+            msg_id: Option<String>,
+            code: String,
+            retryable: bool,
+        },
+    }
+
+    #[derive(Default)]
+    struct RecordingEmitter {
+        events: Mutex<Vec<RecordedProtocolEvent>>,
+    }
+
+    impl ProtocolEmitter for RecordingEmitter {
+        fn emit(&self, event: &ProtocolEvent) -> io::Result<()> {
+            let recorded = match event {
+                ProtocolEvent::StreamEnd { .. } => RecordedProtocolEvent::StreamEnd,
+                ProtocolEvent::Error { msg_id, error } => RecordedProtocolEvent::Error {
+                    msg_id: msg_id.clone(),
+                    code: error.code.clone(),
+                    retryable: error.retryable,
+                },
+                _ => return Ok(()),
+            };
+            self.events.lock().unwrap().push(recorded);
+            Ok(())
+        }
+    }
+
+    fn completed_result(adjudicated: bool) -> AgentResult {
+        AgentResult {
+            text: "done".to_owned(),
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens: 120,
+                output_tokens: 30,
+                reasoning_tokens: 5,
+                cache_creation_tokens: 7,
+                cache_read_tokens: 11,
+            },
+            turns: 2,
+            rounds: 1,
+            effects_ok: 0,
+            durable_effect_targets: Vec::new(),
+            cutoff_state_changing: 0,
+            state_changing_tools_advertised: false,
+            completion_adjudication: adjudicated.then(|| {
+                CompletionAdjudication::UnbackedStateChangeClaim {
+                    target: "miniapp.html".to_owned(),
+                }
+            }),
+        }
+    }
 
     #[test]
     fn mcp_server_name_is_claimed_only_after_success_and_includes_static_connections() {
@@ -330,6 +562,119 @@ mod tests {
         assert!(names.record_success("dynamic-server".to_owned()));
         assert!(names.contains("dynamic-server"));
         assert!(!names.record_success("dynamic-server".to_owned()));
+    }
+
+    #[test]
+    fn terminal_consumers_fail_closed_on_completion_adjudication() {
+        let sink = RecordingSink::default();
+
+        let failure = emit_terminal_turn_result(&sink, "turn-1", &completed_result(true))
+            .expect_err("an adjudicated completion must fail");
+
+        assert!(failure.message.contains("miniapp.html"));
+        assert_eq!(*sink.events.lock().unwrap(), vec!["error"]);
+    }
+
+    #[test]
+    fn terminal_consumers_emit_stream_end_only_for_success() {
+        let sink = RecordingSink::default();
+
+        emit_terminal_turn_result(&sink, "turn-1", &completed_result(false)).unwrap();
+
+        assert_eq!(*sink.events.lock().unwrap(), vec!["stream_end"]);
+    }
+
+    #[test]
+    fn json_protocol_never_emits_success_stream_end_for_adjudicated_completion() {
+        let emitter = RecordingEmitter::default();
+
+        assert!(!emit_json_turn_result(&emitter, "turn-1", &completed_result(true)).unwrap());
+
+        assert_eq!(
+            *emitter.events.lock().unwrap(),
+            vec![RecordedProtocolEvent::Error {
+                msg_id: Some("turn-1".to_owned()),
+                code: "unbacked_completion".to_owned(),
+                retryable: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn json_protocol_emits_stream_end_for_a_supported_completion() {
+        let emitter = RecordingEmitter::default();
+
+        assert!(!emit_json_turn_result(&emitter, "turn-1", &completed_result(false)).unwrap());
+
+        assert_eq!(
+            *emitter.events.lock().unwrap(),
+            vec![RecordedProtocolEvent::StreamEnd]
+        );
+    }
+
+    #[test]
+    fn every_non_end_turn_terminal_is_error_only() {
+        for (stop_reason, code, retryable, retire_runtime) in [
+            (StopReason::MaxTokens, "output_truncated", true, false),
+            (
+                StopReason::MaxTurns,
+                "turn_requests_exhausted",
+                true,
+                false,
+            ),
+            (StopReason::Refusal, "model_refused", false, false),
+            (StopReason::ToolUse, "protocol_error", false, true),
+        ] {
+            let mut result = completed_result(false);
+            result.stop_reason = stop_reason;
+            let sink = RecordingSink::default();
+            let failure = emit_terminal_turn_result(&sink, "turn-1", &result)
+                .expect_err("non-EndTurn must not emit success");
+            assert_eq!(failure.code, code);
+            assert_eq!(failure.retryable, retryable);
+            assert_eq!(failure.retire_runtime, retire_runtime);
+            assert_eq!(*sink.events.lock().unwrap(), vec!["error"]);
+
+            let emitter = RecordingEmitter::default();
+            assert_eq!(
+                emit_json_turn_result(&emitter, "turn-1", &result).unwrap(),
+                retire_runtime
+            );
+            assert_eq!(
+                *emitter.events.lock().unwrap(),
+                vec![RecordedProtocolEvent::Error {
+                    msg_id: Some("turn-1".to_owned()),
+                    code: code.to_owned(),
+                    retryable,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn rollback_failure_uses_state_inconsistent_and_retires_reusable_loops() {
+        let emitter = RecordingEmitter::default();
+        let mut result = completed_result(true);
+        result.completion_adjudication = Some(CompletionAdjudication::HistoryRollbackFailed {
+            target: "miniapp.html".to_owned(),
+        });
+
+        assert!(emit_json_turn_result(&emitter, "turn-1", &result).unwrap());
+        assert_eq!(
+            *emitter.events.lock().unwrap(),
+            vec![RecordedProtocolEvent::Error {
+                msg_id: Some("turn-1".to_owned()),
+                code: "state_inconsistent".to_owned(),
+                retryable: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn ordinary_json_engine_errors_are_error_only() {
+        let sink = RecordingSink::default();
+        emit_json_engine_error(&sink, "provider failed");
+        assert_eq!(*sink.events.lock().unwrap(), vec!["error"]);
     }
 }
 
@@ -353,15 +698,13 @@ async fn repl_loop(
 
         match engine.execute_turn(input, "").await {
             Ok(result) => {
-                if result.turns > 0 {
-                    output.emit_stream_end(
-                        "",
-                        result.turns,
-                        result.usage.input_tokens,
-                        result.usage.output_tokens,
-                        result.usage.cache_creation_tokens,
-                        result.usage.cache_read_tokens,
-                    );
+                if result.turns > 0 || result.completion_adjudication.is_some() {
+                    if let Err(failure) =
+                        emit_terminal_turn_result(output.as_ref(), "", &result)
+                        && failure.retire_runtime
+                    {
+                        anyhow::bail!(failure.message);
+                    }
                 }
             }
             Err(nomi_agent::engine::AgentError::UserAborted) => break,
@@ -612,7 +955,7 @@ async fn run_json_stream_mode(
     let has_mcp = initial_has_mcp || !dynamic_managers.is_empty();
     let mut pending_cmd = first_cmd;
 
-    loop {
+    'commands: loop {
         let cmd = if let Some(c) = pending_cmd.take() {
             c
         } else {
@@ -637,18 +980,18 @@ async fn run_json_stream_mode(
                             result = &mut turn_execution => {
                                 match result {
                                     Ok(result) => {
-                                        output.emit_stream_end(
+                                        let retire_runtime = emit_json_turn_result(
+                                            writer.as_ref(),
                                             &msg_id,
-                                            result.turns,
-                                            result.usage.input_tokens,
-                                            result.usage.output_tokens,
-                                            result.usage.cache_creation_tokens,
-                                            result.usage.cache_read_tokens,
-                                        );
+                                            &result,
+                                        )
+                                        .unwrap_or(true);
+                                        if retire_runtime {
+                                            break 'commands;
+                                        }
                                     }
                                     Err(e) => {
-                                        output.emit_error(&e.to_string());
-                                        output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0);
+                                        emit_json_engine_error(output.as_ref(), &e.to_string());
                                     }
                                 }
                                 break;

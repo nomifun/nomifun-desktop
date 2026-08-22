@@ -13,7 +13,7 @@
 
 .modal :global(.arco-modal-header) {
   height: auto;
-  padding: 14px 18px 12px;
+  padding: 8px 14px;
   border-bottom: 1px solid var(--color-border-1);
   background: #fff;
 }
@@ -23,8 +23,8 @@
 }
 
 .modal :global(.arco-modal-close-icon) {
-  top: 14px;
-  right: 16px;
+  top: 8px;
+  right: 14px;
   color: var(--color-text-3);
 }
 
@@ -39,20 +39,21 @@
   align-items: center;
   gap: 8px;
   color: var(--color-text-1);
-  font-size: 16px;
-  font-weight: 650;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
 }
 
 .titleIcon {
   display: inline-flex;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   align-items: center;
   justify-content: center;
   border-radius: 8px;
   background: color-mix(in srgb, rgb(var(--primary-6)) 11%, transparent);
   color: rgb(var(--primary-6));
-  font-size: 16px;
+  font-size: 14px;
 }
 
 .pickerBody {

@@ -30,6 +30,9 @@ pub(crate) const TOOL_APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 pub struct ToolCallOutcome {
     pub results: Vec<ContentBlock>,
     pub modifiers: Vec<Option<ContextModifier>>,
+    /// Machine-observed state-changing effects completed by nested Agents,
+    /// paired by index with `results`. This never participates in approval.
+    pub delegated_effects: Vec<Vec<String>>,
 }
 
 /// Keeps the diagnostic `started`/`completed` lifecycle paired even when an
@@ -166,6 +169,7 @@ pub async fn execute_tool_calls_scoped(
 ) -> Result<ToolCallOutcome, ExecutionControl> {
     let mut results = Vec::new();
     let mut modifiers = Vec::new();
+    let mut delegated_effects = Vec::new();
     let mut halt_after_error = false;
     // Engine-produced calls are already canonical. Preparing again here keeps
     // direct/internal execution paths on the same boundary and guarantees that
@@ -180,6 +184,7 @@ pub async fn execute_tool_calls_scoped(
             for call in &batch.calls {
                 results.push(skipped_after_prior_error(call));
                 modifiers.push(None);
+                delegated_effects.push(Vec::new());
             }
             continue;
         }
@@ -189,7 +194,9 @@ pub async fn execute_tool_calls_scoped(
             // This preserves the provider-turn snapshot even when ToolSearch
             // and its target are emitted together, and guarantees deferred or
             // schema-invalid tools cannot trigger an interactive prompt.
-            let mut completed: Vec<Option<(ContentBlock, Option<ContextModifier>)>> =
+            let mut completed: Vec<
+                Option<(ContentBlock, Option<ContextModifier>, Vec<String>)>,
+            > =
                 std::iter::repeat_with(|| None)
                     .take(batch.calls.len())
                     .collect();
@@ -199,7 +206,7 @@ pub async fn execute_tool_calls_scoped(
                     call,
                     authority,
                 ) {
-                    completed[idx] = Some((gated, None));
+                    completed[idx] = Some((gated, None, Vec::new()));
                 }
             }
 
@@ -213,7 +220,7 @@ pub async fn execute_tool_calls_scoped(
                 }
                 match confirm_call(confirmer, call)? {
                     Some(denied) => {
-                        completed[idx] = Some((denied, None));
+                        completed[idx] = Some((denied, None, Vec::new()));
                     }
                     None => approved.push((idx, *call)),
                 }
@@ -239,18 +246,21 @@ pub async fn execute_tool_calls_scoped(
                 completed[idx] = Some(outcome);
             }
             for outcome in completed {
-                let (block, modifier) = outcome.expect("every concurrent call has an outcome");
+                let (block, modifier, nested_effects) =
+                    outcome.expect("every concurrent call has an outcome");
                 if block_is_error(&block) {
                     halt_after_error = true;
                 }
                 results.push(block);
                 modifiers.push(modifier);
+                delegated_effects.push(nested_effects);
             }
         } else {
             for call in &batch.calls {
                 if halt_after_error {
                     results.push(skipped_after_prior_error(call));
                     modifiers.push(None);
+                    delegated_effects.push(Vec::new());
                     continue;
                 }
                 if let Some(gated) = invocation_gate_result(
@@ -261,6 +271,7 @@ pub async fn execute_tool_calls_scoped(
                     halt_after_error = true;
                     results.push(gated);
                     modifiers.push(None);
+                    delegated_effects.push(Vec::new());
                     continue;
                 }
                 match confirm_call(confirmer, call)? {
@@ -268,14 +279,16 @@ pub async fn execute_tool_calls_scoped(
                         halt_after_error = true;
                         results.push(denied);
                         modifiers.push(None);
+                        delegated_effects.push(Vec::new());
                     }
                     None => {
                         // Reborrow as shared for execute_single, then reclaim mut for merge.
                         let block;
                         let modifier;
+                        let nested_effects;
                         {
                             let hooks_shared: Option<&HookEngine> = hooks.as_deref();
-                            (block, modifier) = execute_single_with_authority(
+                            (block, modifier, nested_effects) = execute_single_with_authority(
                                 registry,
                                 call,
                                 authority,
@@ -294,13 +307,18 @@ pub async fn execute_tool_calls_scoped(
                         }
                         results.push(block);
                         modifiers.push(modifier);
+                        delegated_effects.push(nested_effects);
                     }
                 }
             }
         }
     }
 
-    Ok(ToolCallOutcome { results, modifiers })
+    Ok(ToolCallOutcome {
+        results,
+        modifiers,
+        delegated_effects,
+    })
 }
 
 fn prepare_call_for_execution(
@@ -465,7 +483,7 @@ async fn execute_single(
     hooks: Option<&HookEngine>,
     compaction_level: nomi_compact::CompactionLevel,
     toon_enabled: bool,
-) -> (ContentBlock, Option<ContextModifier>) {
+) -> (ContentBlock, Option<ContextModifier>, Vec<String>) {
     let authority = ProviderToolAuthority::from_request_tools(&registry.to_tool_defs());
     execute_single_with_authority(
         registry,
@@ -487,14 +505,14 @@ async fn execute_single_with_authority(
     hooks: Option<&HookEngine>,
     compaction_level: nomi_compact::CompactionLevel,
     toon_enabled: bool,
-) -> (ContentBlock, Option<ContextModifier>) {
+) -> (ContentBlock, Option<ContextModifier>, Vec<String>) {
     let ContentBlock::ToolUse { name, input, .. } = call
     else {
         unreachable!("execute_single called with non-ToolUse block")
     };
 
     if let Some(gated) = invocation_gate_result(registry, call, authority) {
-        return (gated, None);
+        return (gated, None, Vec::new());
     }
 
     let timeout = registry
@@ -524,6 +542,15 @@ async fn execute_single_with_authority(
             let ContentBlock::ToolUse { id, name, .. } = call else {
                 unreachable!("execute_single called with non-ToolUse block")
             };
+            if let Some(tool) = registry.get(name) {
+                let execution_context =
+                    ToolExecutionContext::from_scoped_tool_call(execution_scope, id);
+                // The deadline drops the execution future before its ordinary
+                // finally-like sidecar drain. Consume any evidence staged by a
+                // boundary tool so a later reused provider call id cannot
+                // inherit it.
+                let _ = tool.take_delegated_effects(&execution_context);
+            }
             tracing::error!(
                 target: "nomi_agent",
                 tool = %name,
@@ -544,6 +571,7 @@ async fn execute_single_with_authority(
                     images: Vec::new(),
                 },
                 None,
+                Vec::new(),
             )
         }
     }
@@ -556,7 +584,7 @@ async fn execute_single_without_deadline(
     hooks: Option<&HookEngine>,
     compaction_level: nomi_compact::CompactionLevel,
     toon_enabled: bool,
-) -> (ContentBlock, Option<ContextModifier>) {
+) -> (ContentBlock, Option<ContextModifier>, Vec<String>) {
     let ContentBlock::ToolUse {
         id, name, input, ..
     } = call
@@ -579,11 +607,12 @@ async fn execute_single_without_deadline(
                 images: Vec::new(),
             },
             None,
+            Vec::new(),
         );
     }
 
     execution_log.enter("tool");
-    let (result, modifier) = match registry.get(name) {
+    let (result, modifier, delegated_effects) = match registry.get(name) {
         Some(tool) => {
             let max_size = tool.max_result_size();
             // `input` passed the strict object/schema preflight before
@@ -625,6 +654,15 @@ async fn execute_single_without_deadline(
             } else {
                 tool.context_modifier_for(input)
             };
+            // Always consume the operation-id sidecar. A boundary tool that
+            // staged evidence before returning an error must not leave a stale
+            // entry that can be observed by a later reused provider call id.
+            let staged_delegated_effects = tool.take_delegated_effects(&execution_context);
+            let delegated_effects = if r.is_error {
+                Vec::new()
+            } else {
+                staged_delegated_effects
+            };
             let content = truncate_result(&r.content, max_size);
             let content = nomi_compact::compact_output(&content, compaction_level);
             let content = if toon_enabled {
@@ -639,11 +677,13 @@ async fn execute_single_without_deadline(
                     images: r.images,
                 },
                 modifier,
+                delegated_effects,
             )
         }
         None => (
             ToolResult::error(format!("Unknown tool: {}", name)),
             None,
+            Vec::new(),
         ),
     };
 
@@ -677,6 +717,7 @@ async fn execute_single_without_deadline(
             images: result.images,
         },
         modifier,
+        delegated_effects,
     )
 }
 
@@ -774,6 +815,7 @@ async fn execute_tool_calls_with_approval_timeout(
 ) -> Result<ToolCallOutcome, ExecutionControl> {
     let mut results = Vec::new();
     let mut modifiers = Vec::new();
+    let mut delegated_effects = Vec::new();
     let mut halt_after_error = false;
     // Keep direct protocol callers on the same canonical boundary as the
     // engine and REPL path. Every later decision, approval payload, hook, and
@@ -820,6 +862,7 @@ async fn execute_tool_calls_with_approval_timeout(
                 let block = emit_skipped_after_prior_error(writer, msg_id, &tool_calls[idx]);
                 results.push(block);
                 modifiers.push(None);
+                delegated_effects.push(Vec::new());
             }
             continue;
         }
@@ -855,7 +898,9 @@ async fn execute_tool_calls_with_approval_timeout(
                 })
                 .collect();
             let batch_results = futures::future::join_all(futures).await;
-            for (offset, (block, modifier)) in batch_results.into_iter().enumerate() {
+            for (offset, (block, modifier, nested_effects)) in
+                batch_results.into_iter().enumerate()
+            {
                 let idx = group.start + offset;
                 if let (
                     ContentBlock::ToolUse { id, name, .. },
@@ -884,6 +929,7 @@ async fn execute_tool_calls_with_approval_timeout(
                 }
                 results.push(block);
                 modifiers.push(modifier);
+                delegated_effects.push(nested_effects);
             }
             continue;
         }
@@ -904,6 +950,7 @@ async fn execute_tool_calls_with_approval_timeout(
             halt_after_error = true;
             results.push(gated);
             modifiers.push(None);
+            delegated_effects.push(Vec::new());
             continue;
         }
 
@@ -961,6 +1008,7 @@ async fn execute_tool_calls_with_approval_timeout(
                         images: Vec::new(),
                     });
                     modifiers.push(None);
+                    delegated_effects.push(Vec::new());
                     continue;
                 }
                 Err(ApprovalWaitError::Disconnected) => {
@@ -990,6 +1038,7 @@ async fn execute_tool_calls_with_approval_timeout(
                     emit_tool_result_event(writer, msg_id, call, &result);
                     results.push(result);
                     modifiers.push(None);
+                    delegated_effects.push(Vec::new());
                     continue;
                 }
             }
@@ -1005,9 +1054,10 @@ async fn execute_tool_calls_with_approval_timeout(
         // Execute the tool (reborrow as shared for execute_single, then reclaim mut for merge).
         let result;
         let modifier;
+        let nested_effects;
         {
             let hooks_shared: Option<&HookEngine> = hooks.as_deref();
-            (result, modifier) = execute_single_with_authority(
+            (result, modifier, nested_effects) = execute_single_with_authority(
                 registry,
                 call,
                 authority,
@@ -1049,9 +1099,14 @@ async fn execute_tool_calls_with_approval_timeout(
 
         results.push(result);
         modifiers.push(modifier);
+        delegated_effects.push(nested_effects);
     }
 
-    Ok(ToolCallOutcome { results, modifiers })
+    Ok(ToolCallOutcome {
+        results,
+        modifiers,
+        delegated_effects,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1390,7 +1445,7 @@ mod tests {
         };
 
         for scope in ["conversation-a:turn-1", "conversation-a:turn-2"] {
-            let (result, _) = execute_single_with_authority(
+            let (result, _, _) = execute_single_with_authority(
                 &registry,
                 &call,
                 &authority,
@@ -2199,7 +2254,7 @@ mod tests {
         };
         let authority = ProviderToolAuthority::from_request_tools(&registry.to_tool_defs());
 
-        let (result, modifier) = execute_single_with_authority(
+        let (result, modifier, delegated_effects) = execute_single_with_authority(
             &registry,
             &call,
             &authority,
@@ -2211,6 +2266,7 @@ mod tests {
         .await;
 
         assert!(modifier.is_none());
+        assert!(delegated_effects.is_empty());
         assert!(matches!(
             result,
             ContentBlock::ToolResult {
@@ -2331,7 +2387,7 @@ mod tests {
             input: json!({}),
             extra: None,
         };
-        let (result, _) = execute_single(
+        let (result, _, _) = execute_single(
             &registry,
             &call,
             None,
@@ -2365,7 +2421,7 @@ mod tests {
             input: json!({}),
             extra: None,
         };
-        let (result, modifier) = execute_single(
+        let (result, modifier, delegated_effects) = execute_single(
             &registry,
             &call,
             None,
@@ -2374,6 +2430,7 @@ mod tests {
         )
         .await;
         assert!(modifier.is_none());
+        assert!(delegated_effects.is_empty());
         if let ContentBlock::ToolResult { content, is_error, .. } = &result {
             assert!(is_error, "a panicking tool must yield an error result");
             assert!(
@@ -2463,7 +2520,7 @@ mod tests {
             input: json!({"tasks": [{"name": "would_mutate"}]}),
             extra: None,
         };
-        let (result, _) = execute_single(
+        let (result, _, _) = execute_single(
             &registry,
             &call,
             None,
@@ -2691,7 +2748,7 @@ mod tests {
             input: json!({"tasks": [{"name": "t1", "prompt": "do x"}]}),
             extra: None,
         };
-        let (result, _) = execute_single(
+        let (result, _, _) = execute_single(
             &registry,
             &call,
             None,
@@ -2720,7 +2777,7 @@ mod tests {
             input: json!({"cmd": "fail"}),
             extra: None,
         };
-        let (result, _) = execute_single(
+        let (result, _, _) = execute_single(
             &registry,
             &call,
             None,

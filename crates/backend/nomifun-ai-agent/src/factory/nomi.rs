@@ -470,6 +470,15 @@ pub(super) async fn build(
     .await?;
 
     let session_directory = deps.data_dir.join("nomi-sessions");
+    let output_ceiling = fields
+        .output_limit
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| {
+            AppError::BadRequest(
+                "chat capability output_limit exceeds the supported u32 token range".to_owned(),
+            )
+        })?;
 
     // Stable identity of this conversation instance (row `created_at`).
     // `accept_owned` rejects a session file whose owner token does not match,
@@ -668,7 +677,7 @@ pub(super) async fn build(
         model: fields.model.clone(),
         base_url: fields.base_url,
         system_prompt: overrides.system_prompt,
-        max_tokens: overrides.max_tokens,
+        output_ceiling,
         max_turns: overrides.max_turns,
         context_limit: fields.context_limit.map(|v| v as u64),
         compat_overrides: fields.compat_overrides,
@@ -1778,6 +1787,9 @@ mod tests {
             activated_deferred_tools: Vec::new(),
             editable_turn: None,
             host_context: Default::default(),
+            accepted_turn_root: None,
+            pending_host_terminal_root: None,
+            last_interrupted_turn_source: None,
         };
 
         assert!(retarget_resumed_session(
@@ -1838,6 +1850,9 @@ mod tests {
                 prior_host_context: Default::default(),
             }),
             host_context: Default::default(),
+            accepted_turn_root: None,
+            pending_host_terminal_root: None,
+            last_interrupted_turn_source: None,
         };
 
         let repair = sanitize_resumed_session(&mut session, false);
