@@ -5,7 +5,7 @@
     "": {
       "name": "nomifun-tauri",
       "devDependencies": {
-        "@tauri-apps/cli": "^2.1.0",
+        "@tauri-apps/cli": "2.11.2",
         "concurrently": "^9.2.1",
       },
     },
