@@ -132,6 +132,45 @@ async fn a_401_on_the_correct_path_confirms_the_address() {
     assert_eq!(body["data"]["root_shape"], "versioned_root");
 }
 
+/// Protocols such as Gemini embed the selected model in the request path. The
+/// configuration probe must use the draft model instead of a placeholder that
+/// can turn a valid endpoint into a misleading model-not-found 404.
+#[tokio::test]
+async fn a_concrete_model_is_interpolated_into_the_probe_endpoint() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent",
+        ))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": "request body is required"
+        })))
+        .mount(&server)
+        .await;
+
+    let (router, db) = setup().await;
+    let provider_id = create_provider(&db, &server.uri()).await;
+    let body = probe(
+        &router,
+        &provider_id,
+        json!({
+            "protocol": "gemini.generate_text",
+            "task": "chat",
+            "model": "gemini-2.5-pro",
+            "probe_candidates": false
+        }),
+    )
+    .await;
+
+    assert_eq!(body["data"]["reachability"], "reachable");
+    assert!(
+        body["data"]["attempted_url"]
+            .as_str()
+            .unwrap()
+            .contains("/v1beta/models/gemini-2.5-pro:streamGenerateContent")
+    );
+}
+
 /// A gateway serving its SPA at a near-miss path answers `200 OK` with HTML.
 /// Calling that reachable is how a wrong base URL survives configuration review.
 #[tokio::test]

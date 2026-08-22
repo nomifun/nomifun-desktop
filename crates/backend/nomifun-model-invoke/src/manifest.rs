@@ -1127,16 +1127,15 @@ pub fn protocol_manifest_for_connection(
 
 /// Build configuration-time protocol metadata with an optional model-id hint.
 ///
-/// The model id is deliberately only a signal that the user has entered or
-/// selected a concrete model. It is never parsed to infer a vendor or protocol.
-/// For the `custom` preset, that signal allows the manifest to preselect the
-/// sole registry-declared generic compatibility protocol for the requested
-/// task. Callers still have to persist the selected protocol explicitly; this
-/// function is not consulted by runtime resolution or probing.
+/// Custom and New API providers immediately receive the sole registry-declared
+/// generic compatibility protocol for the requested task. The configuration
+/// probe may replace that default when the live endpoint proves a different
+/// registered wire protocol; runtime still uses only the protocol persisted on
+/// the capability.
 pub fn protocol_manifest_for_model_connection(
     preset: &str,
     base_url_hint: Option<&str>,
-    model_hint: Option<&str>,
+    _model_hint: Option<&str>,
     task: ModelTask,
 ) -> ModelProtocolManifestResponse {
     let selected = resolve_preset(preset, base_url_hint);
@@ -1176,12 +1175,8 @@ pub fn protocol_manifest_for_model_connection(
             .then_with(|| left.protocol_id.cmp(&right.protocol_id))
     });
 
-    let recommendation = if selected.platform == "custom"
-        && model_hint.is_some_and(|model| !model.trim().is_empty())
-    {
+    let recommendation = if custom_scope {
         generic_custom_protocol_recommendation(&registry, &selected, task)
-    } else if custom_scope {
-        None
     } else {
         preset_protocol_recommendation(&selected.platform, task).and_then(|route| {
             let descriptor = registry.get(route.protocol)?;

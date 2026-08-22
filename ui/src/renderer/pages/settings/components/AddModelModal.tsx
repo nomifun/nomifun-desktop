@@ -27,6 +27,12 @@ import {
 import useModelProtocolManifests from './useModelProtocolManifests';
 import { useProviderConnections } from './useProviderConnections';
 import ModelCallConfigModalFooter from './ModelCallConfigModalFooter';
+import ProviderAutoConfigurationNotice from './ProviderAutoConfigurationNotice';
+import {
+  applyProviderAutoConfiguration,
+  isAutoConfigurationPlatform,
+} from './providerAutoConfiguration';
+import useProviderAutoConfiguration from './useProviderAutoConfiguration';
 
 const EMPTY_DEFINITION: ModelDefinitionDraft = { model: '', capabilities: [] };
 
@@ -38,6 +44,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
     const [saving, setSaving] = useState(false);
     const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
     const modelEditorRef = useRef<ModelDefinitionEditorHandle>(null);
+    const appliedAutoConfigurationRef = useRef('');
     const tasks = useMemo(
       () => definition.capabilities.map((capability) => capability.task),
       [definition.capabilities]
@@ -46,11 +53,21 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
       preset: data?.platform,
       tasks,
       baseUrlHint: data?.base_url,
-      modelHint: definition.model,
     });
     const connectionState = useProviderConnections(data?.id, modalProps.visible && Boolean(data));
     const modelListState = useModeModeList({
       platform: data?.platform ?? '',
+      providerId: data?.id,
+    });
+    const autoConfigurationEnabled = isAutoConfigurationPlatform(data?.platform ?? '');
+    const autoConfiguration = useProviderAutoConfiguration({
+      enabled: modalProps.visible && autoConfigurationEnabled,
+      platform: data?.platform ?? '',
+      baseUrl: data?.base_url ?? '',
+      authScheme: data?.auth_scheme ?? '',
+      definition,
+      manifests: manifests.manifests,
+      loadingTasks: manifests.loadingTasks,
       providerId: data?.id,
     });
     const catalogSuggestions = useMemo<ModelCatalogSuggestion[]>(
@@ -96,10 +113,30 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
         setDefinition(EMPTY_DEFINITION);
         setSaving(false);
         setFocusedCallConfigTask(undefined);
+        appliedAutoConfigurationRef.current = '';
       }
     }, [data?.id, modalProps.visible]);
 
+    useEffect(() => {
+      const batch = autoConfiguration.data;
+      if (!batch || batch.detections.length === 0) return;
+      const signature = JSON.stringify(batch);
+      if (appliedAutoConfigurationRef.current === signature) return;
+      appliedAutoConfigurationRef.current = signature;
+      setDefinition((current) =>
+        applyProviderAutoConfiguration(current, batch.detections)
+      );
+    }, [autoConfiguration.data]);
+
     const handleConfirm = useCallback(async () => {
+      if (autoConfiguration.isLoading) {
+        message.warning(
+          t('settings.providerAutoConfiguration.detecting', {
+            defaultValue: '正在探测协议、鉴权方式和可用 API 地址…',
+          })
+        );
+        return;
+      }
       if (!data || !validation.valid) {
         // Name the blockers. A bare "finish configuring each task" left a
         // new-api provider — which requires an explicit protocol per model —
@@ -141,7 +178,17 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
       } finally {
         setSaving(false);
       }
-    }, [data, definition, message, modalCtrl, onSubmit, t, validation.errors, validation.valid]);
+    }, [
+      autoConfiguration.isLoading,
+      data,
+      definition,
+      message,
+      modalCtrl,
+      onSubmit,
+      t,
+      validation.errors,
+      validation.valid,
+    ]);
 
     return (
       <>
@@ -185,9 +232,20 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
           confirmLoading={saving}
           okText={t('common.confirm')}
           cancelText={t('common.cancel')}
-          okButtonProps={{ disabled: !validation.valid }}
+          okButtonProps={{
+            disabled: !validation.valid || autoConfiguration.isLoading,
+          }}
         >
           <div className={focusedCallConfigTask ? 'pt-4px' : 'pt-16px'}>
+            {!focusedCallConfigTask && (
+              <div className='mb-12px'>
+                <ProviderAutoConfigurationNotice
+                  enabled={autoConfigurationEnabled}
+                  loading={autoConfiguration.isLoading}
+                  batch={autoConfiguration.data}
+                />
+              </div>
+            )}
             <ModelDefinitionEditor
               ref={modelEditorRef}
               value={definition}
@@ -199,7 +257,9 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
               manifestLoadingTasks={manifests.loadingTasks}
               manifestErrorTasks={manifests.errorTasks}
               validationErrors={validation.errors}
-              validationPending={connectionState.isLoading}
+              validationPending={
+                connectionState.isLoading || autoConfiguration.isLoading
+              }
               existingModelIds={existingModelIds}
               catalogSuggestions={catalogSuggestions}
               catalogLoading={modelListState.isLoading}

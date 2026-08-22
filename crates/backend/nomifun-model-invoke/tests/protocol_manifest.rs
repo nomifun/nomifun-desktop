@@ -128,7 +128,7 @@ fn execution_registries_reject_duplicate_ids_and_enumerate_stably() {
 }
 
 #[test]
-fn manifest_prioritizes_preset_protocols_while_custom_without_a_model_stays_explicit() {
+fn manifest_prioritizes_preset_protocols_and_installs_a_custom_compat_default() {
     let stepfun = protocol_manifest_for("StepFun", ModelTask::RealtimeConversation);
     assert_eq!(stepfun.tasks, ALL_MODEL_TASKS);
     assert_eq!(stepfun.protocols.len(), 1);
@@ -142,7 +142,10 @@ fn manifest_prioritizes_preset_protocols_while_custom_without_a_model_stays_expl
     assert!(deepgram.recommendation.is_none());
 
     let custom = protocol_manifest_for("custom", ModelTask::Chat);
-    assert!(custom.recommendation.is_none());
+    assert_eq!(
+        custom.recommendation.as_ref().unwrap().protocol_id,
+        "openai.chat_text"
+    );
     assert_eq!(
         custom
             .protocols
@@ -158,7 +161,7 @@ fn manifest_prioritizes_preset_protocols_while_custom_without_a_model_stays_expl
 }
 
 #[test]
-fn custom_model_hint_recommends_the_unique_registry_declared_compat_protocol_per_task() {
+fn custom_presets_recommend_the_unique_registry_declared_compat_protocol_per_task() {
     let registry = default_protocol_registry();
     for (task, expected_protocol) in [
         (ModelTask::Chat, "openai.chat_text"),
@@ -211,10 +214,14 @@ fn custom_model_hint_recommends_the_unique_registry_declared_compat_protocol_per
 }
 
 #[test]
-fn custom_recommendation_requires_a_non_blank_model_and_has_no_realtime_default() {
+fn custom_recommendation_needs_no_model_hint_and_has_no_realtime_default() {
     for model in [None, Some(""), Some("  \n") ] {
         let view = protocol_manifest_for_model_connection("custom", None, model, ModelTask::Chat);
-        assert!(view.recommendation.is_none(), "blank model hint {model:?}");
+        assert_eq!(
+            view.recommendation.as_ref().map(|value| value.protocol_id.as_str()),
+            Some("openai.chat_text"),
+            "blank model hint {model:?}"
+        );
     }
 
     let realtime = protocol_manifest_for_model_connection(
@@ -228,14 +235,17 @@ fn custom_recommendation_requires_a_non_blank_model_and_has_no_realtime_default(
 }
 
 #[test]
-fn model_hint_does_not_change_new_api_or_built_in_platform_recommendations() {
+fn new_api_gets_the_generic_default_and_model_hint_does_not_change_built_in_recommendations() {
     let new_api = protocol_manifest_for_model_connection(
         "new-api",
         Some("https://gateway.example/v1"),
         Some("gpt-compatible-model"),
         ModelTask::Chat,
     );
-    assert!(new_api.recommendation.is_none());
+    assert_eq!(
+        new_api.recommendation.as_ref().map(|value| value.protocol_id.as_str()),
+        Some("openai.chat_text")
+    );
 
     for preset in platform_presets()
         .into_iter()
@@ -370,7 +380,18 @@ fn all_recommended_lifecycle_urls_match_the_locked_official_matrix() {
                 ));
                 continue;
             }
-            let base = recommendation.default_base_url.as_deref().expect("network base URL");
+            let Some(base) = recommendation.default_base_url.as_deref() else {
+                assert!(
+                    view.requires_user_input
+                        && matches!(view.platform.as_str(), "custom" | "new-api"),
+                    "{} {:?} recommended a network protocol without a URL",
+                    preset.preset,
+                    task
+                );
+                // Compatibility defaults intentionally inherit the user-entered
+                // provider root, so there is no official lifecycle URL to lock.
+                continue;
+            };
             for endpoint in descriptor.endpoints {
                 // Compose through the production joiner so this snapshot cannot
                 // stay green while the real URL assembly regresses.
