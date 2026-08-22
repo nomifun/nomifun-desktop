@@ -340,7 +340,10 @@ const AddPlatformModal = ModalHOC<{
       visible={modalProps.visible}
       onCancel={modalCtrl.close}
       unmountOnExit
-      header={{ title: t('settings.addModel'), showClose: true }}
+      header={{
+        title: t('settings.addProvider', { defaultValue: '添加供应商' }),
+        showClose: true,
+      }}
       style={{ width: 820, maxWidth: '95vw', maxHeight: '94vh', borderRadius: 16 }}
       contentStyle={{
         background: 'var(--dialog-fill-0)',
