@@ -2,7 +2,7 @@
 
 > 用途：在长任务发生上下文压缩或人员切换时，从可验证提交继续，而不是重新审计整仓。
 > 分支：`codex/infinite-canvas-rebuild`
-> 最后功能锚点：`6ccc7a24`（`feat(creative-studio): apply durable canvas proposals`）
+> 最后功能锚点：`67f3d2f8`（`feat(creative-studio): add minimal agent kickoff home`）
 > 参考产品锚点：`ef7303d`
 
 ## 1. 续接协议
@@ -28,7 +28,7 @@
 | P5 | Canonical 资产 API/库、文本/图像/视频/音频节点、素材选择与结果回填 | `57128727`、`e05b18a8`、`04f805a3`、`444db764` |
 | P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化；画布视频/音频 owner、提交响应不明状态确认与 authoritative 404 orphan 清理；真实 `standalone_workbench` owner、完整有序输入快照、owner-scoped keyset/active 历史与安全退役合同；单模型删除的 Creative Studio exact-pair 原子清理与硬绑定门禁 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44`、`60982e38`、`9fffd526`、`8e5f83cf`、`1dd4b9e9`、`9990921c`、`53093740`、`a394b1e6` |
 | P7 | 生图/视频工作台、owner-scoped 持久终态历史、live 恢复/取消/载入/精确重试、terminal-only 安全移除、工作流定义/运行中心、提示词与素材中心 | `2283ee74`、`1414846e`、`ebd17f3a`…`aad21d9d`、`7e45f8ad`、`9990921c`、`3b8a1b03` |
-| P8 | 持久化画布 Agent、原子操作、裁剪/切分/遮罩编辑与真实任务回填；owner-only Agent canvas-op HTTP 网关、durable exact `modelInput`/`skillIds`、有界 planning context、正规 Skill/Conversation transport；前后端严格 canvas-ops artifact、人工预览应用、assistant-message provenance、原子 receipt exactly-once、编辑锁与刷新恢复 | `e5368474`…`00f407c6`、`cac4bca8`…`bc01849e`、`bc879581`、`af300a40`、`4afae7af`、`6ccc7a24` |
+| P8 | 持久化画布 Agent、原子操作、裁剪/切分/遮罩编辑与真实任务回填；owner-only Agent canvas-op HTTP 网关、durable exact planning context/Skill/Conversation transport；严格 artifact、人工应用、assistant provenance、receipt exactly-once、编辑锁与刷新恢复；最小首页需求 + exact Chat → revision-1 pending Agent 画布 | `e5368474`…`00f407c6`、`cac4bca8`…`bc01849e`、`bc879581`、`af300a40`、`4afae7af`、`6ccc7a24`、`67f3d2f8` |
 | P9 | Director v1 domain、Three.js runtime、CAS sidecar、时间轴、截图回填、sidecar 全资产闭包与归档重映射 | `1ccbd013`、`d3a609f6`、`7b7712c0`、`dfa3c0b3`、`f25825f1`、`c12b8db` |
 | P10 | 旧 Workshop UI、翻译、后端路由、旧画布存储与旧任务归属退出运行链 | `63c99d4f`…`7867fe3f` |
 
@@ -84,6 +84,7 @@
 - 纯 context builder 以 document 顺序稳定输出 selected 节点→一跳连线/分组/operation 引用，最多 32 节点与 64 连接；文本/提示词最多 2000 Unicode characters，data/blob 媒体载荷被剥离，不包含 resolved URL 或 opaque Provider parameters。v1 planning envelope 固定声明只允许 canvas-ops artifact、必须人工批准并禁止 delete/media-generation。
 - Canvas Agent Composer 现在显示可移除 context chips，并由用户明确选择 1-3 个正规 NomiFun Skill：画布规划、整理布局、工作流设计；不会再按 prompt 正则伪推断能力。发送前把当前 chip ID、bounded envelope 与 skill 顺序一起持久化；Nomi transport 只发送 `modelInput`，把 skills 复制到 `inject_skills`，展示 prompt 只用于标题/聊天。replay/recovery 继续使用同一 envelope、skill list 与 idempotency key。
 - 三个 Skill 已进入 packaged builtin corpus 与本地化 metadata，并由安全合同限制为人工审阅提案：canvas 禁止 `delete_node`/媒体生成，organize 只整理现有结构，workflow 在 strict draft parser 接入前只给规划文本。Canvas assistant 完成消息现在会显示严格提案卡；只有用户点击“应用到画布”才进入产品级独占锁、提交 receipt/CAS 并权威 reload。reload 不可用时画布保持锁定并提供显式恢复；session resolve 用 receipt-backed message ID 在 remount 后直接恢复“已应用”。
+- `/workshop` 现在是固定浅 stone 的最小创作首页，`/workshop/projects` 保留项目库；品牌回首页、“我的画布”进入项目库。首页只含需求输入、exact Chat 模型和提交状态，不含 Banner、附件、提示墙、多会话或复杂历史。创建 API 在一次 revision-1 INSERT 中写入空画布、一个 active pending session、同值 prompt/modelInput、固定 `creative-studio-canvas` Skill 与 390px Agent 右栏；Provider/model/chat 和 installation owner 在写入前校验。
 
 `dd18dc6f` 的提交前检查：
 
@@ -225,6 +226,13 @@
 - 隔离 8788 真实应用 migration 045。真实 1280×720 页面先显示“应用到画布”，点击后新增 1 个文本节点并显示“已应用”；完整 reload 仍从 receipt 恢复已应用。相同请求重放返回 200/`replayed:true`/原 node ID，revision 3 与 nodeCount 1 不变；不同 payload 返回 409。新鲜 reload 时间窗 Console 0 error / 0 warning。
 - 临时 project、receipt、session binding、Conversation、messages 均按精确 ID 清理为 0；原 QA 画布仍为 revision 52、3 节点/0 连接、无 Chat session、右栏关闭。参考项目保持在 3000，目标保持在 5174/8788；未调用模型或生成媒体。
 
+`67f3d2f8` 的提交前检查：
+
+- 首页/Focus Shell/routes/domain/project API/repository/项目库集成：47 passed / 317 assertions；`bun run typecheck`、图标、主题、dead-css 与 `git diff --cached --check` 通过。UI production build 通过 7690 modules，只保留既存 NomiChat dynamic/static import 与大 chunk 提示。
+- `nomifun-workshop` kickoff route：2 passed；Provider lifecycle：1 passed；原空项目 CRUD：1 passed；Creative Studio domain：16 passed；本切片修改后 `cargo check -p nomifun-app --lib` 通过。Workshop 全量 106/106 在最终 guard 调整前通过，调整后全部相关定向门复跑通过。
+- 真实 1280×720 首页完成 exact Chat 下拉、按钮启用条件、`/workshop` ↔ `/workshop/projects` 导航和完整 reload；外层浅/深主题下创作表面计算色均为 `rgb(244,242,237)` / `rgb(41,37,36)` / `color-scheme: light`。新鲜 reload 时间窗 Console 0 error / 0 warning。参考首页保持在 3000，目标在 5174/8788。
+- 真实 kickoff API 返回 201、revision 1、0 节点/0 连接、1 个 active pending session、exact `big-pickle`、trimmed prompt/modelInput、固定 Canvas Skill 与 390px Assistant 右栏；未打开画布前 binding/Conversation 均为 0。临时项目随后 DELETE 204、GET 404。为避免触发模型，本轮没有点击页面“开始创作”，没有调用 Provider。
+
 `7e45f8ad` 的提交前检查：
 
 - `cargo test -p nomifun-workshop`：70 passed。
@@ -258,9 +266,8 @@
 
 ## 5. 下一步单线程优先级
 
-1. 最小首页创作闭环：只做需求输入、一个 exact Chat 模型、原子创建画布与单一当前 pending Agent turn，成功后进入画布自动继续；首批不做附件、复杂会话历史/分支或多会话编排。
-2. 最小 Workflow AI 闭环：简单需求 + exact Chat 模型 → strict draft 预览 → 应用编辑器 → 用户手动保存；首批不做参考附件、公开模板或复杂一次性会话产品。
-3. P11 上线门：1280×720、1024×768、390×844、Tauri 慢环、UI build/桌面打包和最终能力文档。真实付费 provider 冒烟仍需单独成本授权。
-4. 高级媒体后置：视频多任务/首尾帧/高级引用、音频上传/时长/VoiceClone、Director/全景与完整视频输出只在主路径可上线后再补 typed 后端能力。
+1. 最小 Workflow AI 闭环：简单需求 + exact Chat 模型 → strict draft 预览 → 应用编辑器 → 用户手动保存；首批不做参考附件、公开模板或复杂一次性会话产品。
+2. P11 上线门：1280×720、1024×768、390×844、Tauri 慢环、UI build/桌面打包和最终能力文档。真实付费 provider 冒烟仍需单独成本授权。
+3. 高级媒体后置：视频多任务/首尾帧/高级引用、音频上传/时长/VoiceClone、Director/全景与完整视频输出只在主路径可上线后再补 typed 后端能力。
 
-不要因为主体代码已存在就跳过上线门禁；strict artifact/人工应用已完成。按 2026-08-22 最新范围，后续会话与创作功能优先简单可用，不提前建设复杂会话、附件或编排体系。
+不要因为主体代码已存在就跳过上线门禁；strict artifact/人工应用与最小首页 kickoff 已完成。按 2026-08-22 最新范围，下一提交只做最小 Workflow draft→预览→编辑器→人工保存，不提前建设复杂会话、附件或编排体系。
