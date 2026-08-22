@@ -26,4 +26,11 @@ describe('Titlebar instant icon tooltips', () => {
       true
     );
   });
+
+  test('keeps shared history and quick-create navigation behind Creative Studio save gates', () => {
+    expect(titlebarSource.includes('requestCreativeStudioBeforeLeave')).toBe(true);
+    expect(titlebarSource.includes('navigateAfterCreativeStudioFlush')).toBe(true);
+    expect(titlebarSource.includes('navigateAfterCreativeStudioFlush(() => navigationHistory?.back())')).toBe(true);
+    expect(titlebarSource.includes('navigateAfterCreativeStudioFlush(() => navigationHistory?.forward())')).toBe(true);
+  });
 });

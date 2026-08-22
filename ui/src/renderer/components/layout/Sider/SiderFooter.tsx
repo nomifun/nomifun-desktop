@@ -19,6 +19,7 @@ interface SiderFooterProps {
   collapsed?: boolean;
   siderTooltipProps: SiderTooltipProps;
   onSettingsClick: () => void;
+  backLabel?: string;
   showLogout?: boolean;
   onLogoutClick?: () => void;
 }
@@ -29,12 +30,15 @@ const SiderFooter: React.FC<SiderFooterProps> = ({
   collapsed = false,
   siderTooltipProps,
   onSettingsClick,
+  backLabel,
   showLogout = false,
   onLogoutClick,
 }) => {
   const { t } = useTranslation();
 
-  const settingsIcon = isSettings ? (
+  const isBackAction = isSettings || Boolean(backLabel);
+  const actionLabel = isBackAction ? backLabel || t('common.back') : t('common.settings');
+  const settingsIcon = isBackAction ? (
     <ArrowCircleLeft
       theme='outline'
       size='16'
@@ -55,7 +59,7 @@ const SiderFooter: React.FC<SiderFooterProps> = ({
   return (
     <div className='shrink-0 sider-footer pb-5px'>
       <div className={classNames('flex', collapsed ? 'flex-col gap-1px' : 'items-center gap-1px')}>
-        <Tooltip {...siderTooltipProps} content={isSettings ? t('common.back') : t('common.settings')} position='right'>
+        <Tooltip {...siderTooltipProps} content={actionLabel} position='right'>
           <div
             onClick={onSettingsClick}
             className={classNames(
@@ -70,7 +74,7 @@ const SiderFooter: React.FC<SiderFooterProps> = ({
           >
             <span className={classNames('size-22px flex items-center justify-center shrink-0', isSettings ? 'text-primary-6' : 'text-t-secondary')}>{settingsIcon}</span>
             <span className={classNames('collapsed-hidden text-14px font-[500] leading-24px truncate', isSettings ? 'text-primary-6' : 'text-t-primary')}>
-              {isSettings ? t('common.back') : t('common.settings')}
+              {actionLabel}
             </span>
           </div>
         </Tooltip>

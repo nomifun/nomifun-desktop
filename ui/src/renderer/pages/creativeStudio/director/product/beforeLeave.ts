@@ -24,7 +24,7 @@ export function registerCreativeDirectorProductBeforeLeave(
   };
 }
 
-/** Focus-shell navigation must await this CAS gate and continue only on true. */
+/** App-level navigation must await this CAS gate and continue only on true. */
 export async function requestCreativeDirectorProductBeforeLeave(): Promise<boolean> {
   const registration = activeBeforeLeave;
   if (!registration) return true;

@@ -69,7 +69,7 @@ The source of truth is
 | `/requirements`, `/requirements/extensions`, `/requirements/sources` | Requirements Platform, AutoWork, notification/source extensions. |
 | `/nomi` | Companion configuration. |
 | `/knowledge`, `/knowledge/:id` | Knowledge base list/detail. |
-| `/workshop` | Creative Studio focused shell and project kickoff home. |
+| `/workshop` | Creative Studio project kickoff home inside the shared app layout. |
 | `/workshop/projects` | Creative Studio project center. |
 | `/workshop/canvas/:projectId`, `/workshop/director/:projectId` | Project-bound infinite canvas and bounded 3D Director. |
 | `/workshop/image`, `/workshop/video` | Project-owned standalone generation workbenches. |
@@ -83,8 +83,9 @@ Legacy settings paths such as `/settings/model`, `/settings/agent`,
 `/settings/webui` and `/settings/webhook` are
 redirects. Do not document them as primary navigation.
 
-Creative Studio owns the full-screen focused shell rather than the normal app
-sidebar layout. Its route constants and exact-match rules live in
+Creative Studio reuses the normal app titlebar and swaps the primary rail to a
+Settings-style product navigation surface, with **Back to Workbench** pinned at
+the bottom. Its route constants and exact-match rules live in
 [`pages/creativeStudio/app/routes.ts`](../../ui/src/renderer/pages/creativeStudio/app/routes.ts).
 `/workshop/audio` is retired; audio creation is available through canvas audio
 nodes, not a standalone route.

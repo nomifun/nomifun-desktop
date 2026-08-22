@@ -89,7 +89,10 @@ function* walkFiles(directory) {
   }
 }
 
-const files = trackedFiles();
+// `git ls-files` keeps unstaged deletions in the index. Ignore paths that no
+// longer exist in the worktree so this gate can validate legitimate removals
+// before the contributor stages or commits them.
+const files = trackedFiles().filter((path) => existsSync(join(ROOT, path)));
 const retiredTracked = files.filter((path) =>
   LEGACY_TRACKED_PATHS.some((pattern) => pattern.test(path))
 );

@@ -17,7 +17,10 @@ import { parseSessionRoute } from '@renderer/utils/routes/sessionRoute';
 import {
   CREATIVE_STUDIO_ASSETS_PATH,
   CREATIVE_STUDIO_ROOT_PATH,
+  WORKBENCH_HOME_PATH,
+  isCreativeStudioPath,
 } from '@renderer/pages/creativeStudio/app/routes';
+import { requestCreativeStudioBeforeLeave } from '@renderer/pages/creativeStudio/app/beforeLeave';
 import {
   SiderAssetLibraryEntry,
   SiderBrowserEntry,
@@ -39,6 +42,9 @@ import {
 import SiderFooter from './SiderFooter';
 
 const SettingsSider = React.lazy(() => import('@renderer/pages/settings/components/SettingsSider'));
+const CreativeStudioSider = React.lazy(
+  () => import('@renderer/pages/creativeStudio/app/CreativeStudioSider')
+);
 
 interface SiderProps {
   onSessionClick?: () => void;
@@ -74,6 +80,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const navigate = useNavigate();
   const { logout, status } = useAuth();
   const isSettings = pathname.startsWith('/settings');
+  const isCreativeStudio = isCreativeStudioPath(pathname);
   const lastNonSettingsPathRef = useRef('/guid');
   // Logout is a WebUI-only affordance: the bundled desktop shell (Electron or
   // Tauri) is single-user with no auth, so there is nothing to log out of.
@@ -86,10 +93,10 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   }, [pathname, search, hash]);
 
   const navTo = useCallback(
-    (target: string) => {
+    (target: string, replace = false) => {
       cleanupSiderTooltips();
       blurActiveElement();
-      Promise.resolve(navigate(target)).catch((error) => {
+      Promise.resolve(navigate(target, { replace })).catch((error) => {
         console.error('Navigation failed:', error);
       });
       if (onSessionClick) {
@@ -124,6 +131,16 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleMcpClick = () => navTo('/mcp');
   const handleOpenCapabilitiesClick = () => navTo('/open-capabilities');
   const handleModelHubClick = () => navTo('/models');
+  const handleCreativeStudioNavigation = useCallback(
+    async (target: string, replace = false) => {
+      if (!(await requestCreativeStudioBeforeLeave())) return;
+      navTo(target, replace);
+    },
+    [navTo]
+  );
+  const handleReturnToWorkbench = useCallback(() => {
+    void handleCreativeStudioNavigation(WORKBENCH_HOME_PATH, true);
+  }, [handleCreativeStudioNavigation]);
 
   const handleSettingsClick = () => {
     cleanupSiderTooltips();
@@ -191,6 +208,14 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
           <Suspense fallback={<div className='size-full' />}>
             <SettingsSider collapsed={collapsed} tooltipEnabled={tooltipEnabled} />
           </Suspense>
+        ) : isCreativeStudio ? (
+          <Suspense fallback={<div className='size-full' />}>
+            <CreativeStudioSider
+              collapsed={collapsed}
+              tooltipEnabled={tooltipEnabled}
+              onNavigate={(target) => void handleCreativeStudioNavigation(target)}
+            />
+          </Suspense>
         ) : (
           <div className='size-full flex flex-col gap-1px'>
             {/* 常用 — high-frequency primary destinations */}
@@ -211,10 +236,10 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleNomiClick}
             />
-            {/* Creative Studio (创意工坊) — rebuilt full-screen creation product */}
+            {/* Creative Studio (创意工坊) — swaps this rail to product navigation. */}
             <SiderCreativeStudioEntry
               isMobile={isMobile}
-              isActive={pathname.startsWith(CREATIVE_STUDIO_ROOT_PATH)}
+              isActive={isCreativeStudio}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleCreativeStudioClick}
@@ -237,7 +262,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleKnowledgeClick}
             />
-            {/* Asset library — enter the canonical full-screen Creative Studio surface. */}
+            {/* Asset library — enter the canonical Creative Studio surface. */}
             <SiderAssetLibraryEntry
               isMobile={isMobile}
               isActive={pathname === CREATIVE_STUDIO_ASSETS_PATH}
@@ -301,46 +326,59 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
           </div>
         )}
       </div>
-      {/* Bottom pinned group (设置) — Model & Agent and Open Capabilities sit directly above Settings */}
+      {/* Bottom pinned group — Creative Studio keeps its workbench exit here; other routes keep Settings. */}
       <div className='shrink-0 mt-auto pt-5px flex flex-col gap-1px border-t border-solid border-[var(--color-border-2)] border-l-0 border-r-0 border-b-0'>
-        {/* 设置 — section label; the enclosing border-t already separates this region when collapsed */}
-        <SiderSectionHeader label={t('common.siderSection.settings')} collapsed={collapsed} collapsedRule={false} />
-        {/* Unified Browser management — keep the entry reachable when Browser Use is
-            disabled so the user can open Settings and turn it back on. */}
-        {(isDesktopShell() || browserOverview?.supported !== false) && (
-          <SiderBrowserEntry
+        {isCreativeStudio ? (
+          <SiderFooter
             isMobile={isMobile}
-            isActive={pathname === '/browser'}
+            isSettings={false}
             collapsed={collapsed}
-            runningCount={browserOverview?.running_lanes ?? 0}
-            queuedCount={browserOverview?.queued_lanes ?? 0}
             siderTooltipProps={siderTooltipProps}
-            onClick={handleBrowserClick}
+            onSettingsClick={handleReturnToWorkbench}
+            backLabel={t('creativeStudio.focus.backToWorkbench')}
           />
+        ) : (
+          <>
+            {/* 设置 — section label; the enclosing border-t already separates this region when collapsed */}
+            <SiderSectionHeader label={t('common.siderSection.settings')} collapsed={collapsed} collapsedRule={false} />
+            {/* Unified Browser management — keep the entry reachable when Browser Use is
+                disabled so the user can open Settings and turn it back on. */}
+            {(isDesktopShell() || browserOverview?.supported !== false) && (
+              <SiderBrowserEntry
+                isMobile={isMobile}
+                isActive={pathname === '/browser'}
+                collapsed={collapsed}
+                runningCount={browserOverview?.running_lanes ?? 0}
+                queuedCount={browserOverview?.queued_lanes ?? 0}
+                siderTooltipProps={siderTooltipProps}
+                onClick={handleBrowserClick}
+              />
+            )}
+            <SiderModelHubEntry
+              isMobile={isMobile}
+              isActive={pathname.startsWith('/models')}
+              collapsed={collapsed}
+              siderTooltipProps={siderTooltipProps}
+              onClick={handleModelHubClick}
+            />
+            <SiderOpenCapabilitiesEntry
+              isMobile={isMobile}
+              isActive={pathname.startsWith('/open-capabilities')}
+              collapsed={collapsed}
+              siderTooltipProps={siderTooltipProps}
+              onClick={handleOpenCapabilitiesClick}
+            />
+            <SiderFooter
+              isMobile={isMobile}
+              isSettings={isSettings}
+              collapsed={collapsed}
+              siderTooltipProps={siderTooltipProps}
+              onSettingsClick={handleSettingsClick}
+              showLogout={showLogout}
+              onLogoutClick={handleLogout}
+            />
+          </>
         )}
-        <SiderModelHubEntry
-          isMobile={isMobile}
-          isActive={pathname.startsWith('/models')}
-          collapsed={collapsed}
-          siderTooltipProps={siderTooltipProps}
-          onClick={handleModelHubClick}
-        />
-        <SiderOpenCapabilitiesEntry
-          isMobile={isMobile}
-          isActive={pathname.startsWith('/open-capabilities')}
-          collapsed={collapsed}
-          siderTooltipProps={siderTooltipProps}
-          onClick={handleOpenCapabilitiesClick}
-        />
-        <SiderFooter
-          isMobile={isMobile}
-          isSettings={isSettings}
-          collapsed={collapsed}
-          siderTooltipProps={siderTooltipProps}
-          onSettingsClick={handleSettingsClick}
-          showLogout={showLogout}
-          onLogoutClick={handleLogout}
-        />
       </div>
     </div>
   );

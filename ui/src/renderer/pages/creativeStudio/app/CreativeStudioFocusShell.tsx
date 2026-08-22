@@ -5,46 +5,16 @@
  */
 
 import classNames from 'classnames';
-import React, { useCallback } from 'react';
-import { useTranslation } from 'react-i18next';
-import { Outlet, useLocation, useNavigate } from 'react-router-dom';
-
-import { useThemeContext } from '@renderer/hooks/context/ThemeContext';
-import { requestCreativeCanvasProductBeforeLeave } from '@renderer/pages/creativeStudio/canvas/product/beforeLeave';
-import { requestCreativeDirectorProductBeforeLeave } from '@renderer/pages/creativeStudio/director/product/beforeLeave';
+import React from 'react';
+import { Outlet, useLocation } from 'react-router-dom';
 
 import styles from './CreativeStudioFocusShell.module.css';
-import CreativeStudioTopBar from './CreativeStudioTopBar';
-import { creativeStudioSectionForPath, WORKBENCH_HOME_PATH } from './routes';
+import { creativeStudioSectionForPath } from './routes';
 
-/** Full-screen product boundary that preserves the app runtime without its ordinary sidebar. */
+/** Product route boundary hosted inside the application's shared titlebar and sidebar layout. */
 const CreativeStudioFocusShell: React.FC = () => {
-  const { t } = useTranslation();
   const location = useLocation();
-  const navigate = useNavigate();
-  const { theme, setTheme } = useThemeContext();
   const section = creativeStudioSectionForPath(location.pathname);
-
-  const navigateAfterProductFlush = useCallback(
-    async (path: string, replace = false) => {
-      if (!(await requestCreativeCanvasProductBeforeLeave())) return;
-      if (!(await requestCreativeDirectorProductBeforeLeave())) return;
-      void navigate(path, { replace });
-    },
-    [navigate]
-  );
-  const navigateWithinStudio = useCallback(
-    (path: string) => {
-      void navigateAfterProductFlush(path);
-    },
-    [navigateAfterProductFlush]
-  );
-  const returnToWorkbench = useCallback(() => {
-    void navigateAfterProductFlush(WORKBENCH_HOME_PATH, true);
-  }, [navigateAfterProductFlush]);
-  const toggleTheme = useCallback(() => {
-    void setTheme(theme === 'light' ? 'dark' : 'light');
-  }, [setTheme, theme]);
 
   return (
     <div
@@ -52,14 +22,6 @@ const CreativeStudioFocusShell: React.FC = () => {
       data-creative-studio-focus-shell
       data-creative-studio-section={section ?? 'unknown'}
     >
-      <CreativeStudioTopBar
-        title={t('creativeStudio.title')}
-        backLabel={t('creativeStudio.focus.backToWorkbench')}
-        theme={theme}
-        onToggleTheme={toggleTheme}
-        onNavigate={navigateWithinStudio}
-        onBack={returnToWorkbench}
-      />
       <main className={styles.content} data-creative-studio-route-outlet>
         <Outlet />
       </main>

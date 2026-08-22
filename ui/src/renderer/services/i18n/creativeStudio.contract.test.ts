@@ -32,8 +32,8 @@ const expectedKeys = [
 const referencedCreativeStudioKeys = (): string[] => {
   const sources = [
     new URL('../../components/layout/Sider/SiderNav/SiderCreativeStudioEntry.tsx', import.meta.url),
-    new URL('../../pages/creativeStudio/app/CreativeStudioFocusShell.tsx', import.meta.url),
-    new URL('../../pages/creativeStudio/app/CreativeStudioTopBar.tsx', import.meta.url),
+    new URL('../../components/layout/Sider/index.tsx', import.meta.url),
+    new URL('../../pages/creativeStudio/app/CreativeStudioSider.tsx', import.meta.url),
   ].map((url) => readFileSync(url, 'utf8'));
   const matches = sources.flatMap((source) =>
     [...source.matchAll(/t\(['"]creativeStudio\.([A-Za-z0-9_.-]+)['"]/g)].map(
@@ -44,7 +44,7 @@ const referencedCreativeStudioKeys = (): string[] => {
 };
 
 describe('Creative Studio locale contract', () => {
-  test('keeps Chinese and English on the same focused product surface', () => {
+  test('keeps Chinese and English on the same product navigation surface', () => {
     expect(flattenKeys(zhCreativeStudio).sort()).toEqual(expectedKeys);
     expect(flattenKeys(enCreativeStudio).sort()).toEqual(expectedKeys);
   });
@@ -53,7 +53,7 @@ describe('Creative Studio locale contract', () => {
     expect(referencedCreativeStudioKeys()).toEqual(expectedKeys);
   });
 
-  test('ships real navigation and focus-shell copy without the retired home pitch', () => {
+  test('ships real navigation and workbench-return copy without the retired home pitch', () => {
     expect(zhCreativeStudio).toEqual({
       title: '创意工坊',
       focus: { backToWorkbench: '返回工作台' },
