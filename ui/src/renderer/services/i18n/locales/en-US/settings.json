@@ -490,6 +490,7 @@
   "modelName": "Model Name",
   "modelId": "Model ID",
   "modelIdDuplicate": "This model ID already exists.",
+  "modelIdRequired": "Enter a model ID — the model cannot be saved without one.",
   "modelSelection": "Model",
   "modelSelectionPlaceholder": "Search catalog models or enter an official model ID",
   "modelSelectionRequiresTask": "Select a task above first",

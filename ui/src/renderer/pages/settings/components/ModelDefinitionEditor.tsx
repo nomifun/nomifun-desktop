@@ -412,6 +412,9 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
   }, [selectedTasks, settledValidationErrors]);
 
   const duplicateModel = isDuplicateModelId(value.model, existingModelIds);
+  // Only a fault once a task exists: before that the field is disabled on
+  // purpose and an empty value is simply the next step, not an error.
+  const missingModel = value.capabilities.length > 0 && !value.model.trim();
 
   const updateCapability = (task: ModelTask, patch: ModelCapabilityDraftPatch) => {
     onChange((current) => ({
@@ -478,6 +481,13 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
         )}
 
         <Select
+          // Remounted on every change to the declared set. This Select is a
+          // fire-and-reset action, not a field: `value={undefined}` makes Arco
+          // fall back to its own internal state, which would keep displaying the
+          // task just picked — except that task is immediately filtered out of
+          // `availableTasks`, so it renders as blank and reads as "my choice was
+          // discarded". The key forces a clean placeholder instead.
+          key={`model-task-picker-${selectedTasks.join('|')}`}
           value={undefined}
           disabled={availableTasks.length === 0}
           options={availableTasks.map((task) => ({
@@ -504,6 +514,25 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
           aria-label={t('settings.modelSupportedTasks', { defaultValue: '支持的任务' })}
           data-model-task-picker
         />
+
+        {/*
+          The declared set, restated next to the control that declares it.
+          Without this the picker resets to its placeholder after each pick and
+          the only evidence a task was accepted is a card further down, below the
+          model field — which reads as "the selector cleared and lost my choice".
+          Informational on purpose: removing a task discards its transport
+          config, so the single delete path stays on the card, behind a
+          Popconfirm.
+        */}
+        {value.capabilities.length > 0 && (
+          <div className='flex flex-wrap items-center gap-6px' data-declared-tasks>
+            {value.capabilities.map((capability) => (
+              <Tag key={capability.task} size='small' data-declared-task={capability.task}>
+                {t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task })}
+              </Tag>
+            ))}
+          </div>
+        )}
       </section>
 
       {!modelReadOnly ? (
@@ -571,16 +600,25 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
           />
           <div
             id={`${modelInputId}-hint`}
-            role={duplicateModel ? 'alert' : 'note'}
-            className={`text-11px leading-4 ${duplicateModel ? 'text-danger-6' : 'text-t-secondary'}`}
+            role={duplicateModel || missingModel ? 'alert' : 'note'}
+            className={`text-11px leading-4 ${
+              duplicateModel || missingModel ? 'text-danger-6' : 'text-t-secondary'
+            }`}
           >
             {duplicateModel
               ? t('settings.modelIdDuplicate', {
                   defaultValue: '该模型 ID 已存在。',
                 })
-              : t('settings.modelSelectionHint', {
-                  defaultValue: '目录仅提供第一个任务的建议；没有匹配项时可直接输入模型 ID。',
-                })}
+              : missingModel
+                ? // The field already turns red here, but a red border alone left
+                  // "save does nothing" unexplained: the modal only answers with a
+                  // generic "finish configuring each task" toast.
+                  t('settings.modelIdRequired', {
+                    defaultValue: '请填写模型 ID，否则无法保存。',
+                  })
+                : t('settings.modelSelectionHint', {
+                    defaultValue: '目录仅提供第一个任务的建议；没有匹配项时可直接输入模型 ID。',
+                  })}
           </div>
           {catalogFilterTask && !catalogLoading && filteredCatalogSuggestions.length === 0 && !catalogError && (
             <div className='text-11px text-t-tertiary' role='note' data-empty-filtered-model-catalog>

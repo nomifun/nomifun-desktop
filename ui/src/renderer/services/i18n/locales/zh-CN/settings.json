@@ -490,6 +490,7 @@
   "modelName": "模型名称",
   "modelId": "模型 ID",
   "modelIdDuplicate": "该模型 ID 已存在。",
+  "modelIdRequired": "请填写模型 ID，否则无法保存。",
   "modelSelection": "模型",
   "modelSelectionPlaceholder": "搜索目录模型，或直接输入官网模型 ID",
   "modelSelectionRequiresTask": "请先在上方选择任务",
