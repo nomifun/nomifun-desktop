@@ -44,9 +44,12 @@ describe('execution DAG edge projection', () => {
       dependencies.map((item) => executionDagEdgeId(item.blocker_step_id, item.blocked_step_id)),
     );
     for (const edge of edges) {
+      expect(edge.sourceHandle).toBe('step-output');
+      expect(edge.targetHandle).toBe('step-input');
       expect(edge.style?.stroke).toBe(EXECUTION_DAG_EDGE_STROKE.resting);
       expect(Number(edge.style?.strokeWidth)).toBeGreaterThanOrEqual(1.75);
       expect(Number(edge.style?.opacity)).toBeGreaterThanOrEqual(0.88);
+      expect(edge.zIndex).toBeGreaterThanOrEqual(1);
     }
   });
 

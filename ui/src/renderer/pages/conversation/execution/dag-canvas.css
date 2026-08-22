@@ -83,7 +83,7 @@
 }
 
 .nomi-dag-card[data-relation='muted'] {
-  opacity: 0.24;
+  opacity: 0.62;
 }
 
 .nomi-dag-card[data-relation='related'] {
@@ -362,6 +362,9 @@
 /* Edge default stroke (overridden inline per-edge, but covers selection paths). */
 .nomi-dag-flow .react-flow__edge-path {
   stroke: var(--border-base);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
   transition:
     stroke 0.18s ease,
     opacity 0.18s ease,
@@ -458,6 +461,7 @@
 /* Custom node host: react-flow wraps each node in .react-flow__node-step; we
    render our own card inside, so strip the default node chrome. */
 .nomi-dag-flow .react-flow__node-step {
+  z-index: 4;
   background: transparent;
   border: none;
   padding: 0;
