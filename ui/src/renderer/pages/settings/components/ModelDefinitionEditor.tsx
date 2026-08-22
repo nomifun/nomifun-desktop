@@ -520,17 +520,38 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
           Without this the picker resets to its placeholder after each pick and
           the only evidence a task was accepted is a card further down, below the
           model field — which reads as "the selector cleared and lost my choice".
+
+          Deliberately loud: a bare grey tag under a Select was still missed.
+          Filled row + primary-coloured tags + an explicit "已添加" lead-in, so
+          the confirmation is the first thing the eye lands on after picking.
+
           Informational on purpose: removing a task discards its transport
           config, so the single delete path stays on the card, behind a
           Popconfirm.
         */}
         {value.capabilities.length > 0 && (
-          <div className='flex flex-wrap items-center gap-6px' data-declared-tasks>
+          <div
+            className='flex flex-wrap items-center gap-6px rounded-8px bg-fill-1 px-10px py-8px'
+            data-declared-tasks
+          >
+            <span className='text-12px font-500 text-t-secondary'>
+              {t('settings.modelDeclaredTasks', { defaultValue: '已添加' })}
+            </span>
             {value.capabilities.map((capability) => (
-              <Tag key={capability.task} size='small' data-declared-task={capability.task}>
+              <Tag
+                key={capability.task}
+                size='small'
+                color='arcoblue'
+                data-declared-task={capability.task}
+              >
                 {t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task })}
               </Tag>
             ))}
+            <span className='text-11px text-t-tertiary'>
+              {t('settings.modelDeclaredTasksHint', {
+                defaultValue: '可在下方逐项配置或移除',
+              })}
+            </span>
           </div>
         )}
       </section>

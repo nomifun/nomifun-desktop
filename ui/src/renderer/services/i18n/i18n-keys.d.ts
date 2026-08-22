@@ -3792,6 +3792,8 @@ export type I18nKey =
   | 'settings.modelCatalogUnauthorized'
   | 'settings.modelCatalogUnavailable'
   | 'settings.modelCount'
+  | 'settings.modelDeclaredTasks'
+  | 'settings.modelDeclaredTasksHint'
   | 'settings.modelDescriptionPlaceholder'
   | 'settings.modelDescriptionTitle'
   | 'settings.modelHub.creation.capImage'

@@ -230,6 +230,15 @@ describe('unified model definition editor rendering and interactions', () => {
 
     expect(html.includes('data-declared-tasks')).toBe(true);
     expect(html.includes('data-declared-task="chat"')).toBe(true);
+    // Loud enough to be noticed: an explicit lead-in and a primary-coloured tag,
+    // not a bare grey chip under a Select.
+    expect(html.includes('已添加')).toBe(true);
+    const marker = html.indexOf('data-declared-tasks');
+    // The window spans the container's class attribute (rendered before the data
+    // attribute) and the tags that follow it.
+    const declaredRow = html.slice(Math.max(0, marker - 300), marker + 400);
+    expect(declaredRow.includes('arcoblue')).toBe(true);
+    expect(declaredRow.includes('bg-fill-1')).toBe(true);
     // The declared task is stated inside the task section, before the model input.
     expect(html.indexOf('data-declared-task="chat"')).toBeLessThan(
       html.indexOf('data-unified-model-input')

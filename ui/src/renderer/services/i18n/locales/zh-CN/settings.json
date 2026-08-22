@@ -497,6 +497,8 @@
   "modelSelectionHint": "目录仅提供第一个任务的建议；没有匹配项时可直接输入模型 ID。",
   "modelCatalogFilteredEmpty": "目录中暂无该类型的模型，请直接输入模型 ID。",
   "modelSupportedTasks": "支持的任务",
+  "modelDeclaredTasks": "已添加",
+  "modelDeclaredTasksHint": "可在下方逐项配置或移除",
   "modelSupportedTasksHint": "先选该模型支持的任务，候选模型会按其中第一个任务筛选。同一个模型 ID 支持多个任务时逐项添加，每个任务单独配置协议与地址。",
   "selectModelTask": "选择该模型支持的任务",
   "addAnotherModelTask": "添加其他任务",
