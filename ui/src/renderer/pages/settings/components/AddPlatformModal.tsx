@@ -44,6 +44,12 @@ import {
 import { buildAuthSchemeOptions } from './providerConnectionForm';
 import useModelProtocolManifests from './useModelProtocolManifests';
 import ModelCallConfigModalFooter from './ModelCallConfigModalFooter';
+import ProviderAutoConfigurationNotice from './ProviderAutoConfigurationNotice';
+import {
+  applyProviderAutoConfiguration,
+  isAutoConfigurationPlatform,
+} from './providerAutoConfiguration';
+import useProviderAutoConfiguration from './useProviderAutoConfiguration';
 
 const EMPTY_DEFINITION: ModelDefinitionDraft = { model: '', capabilities: [] };
 
@@ -82,6 +88,7 @@ const AddPlatformModal = ModalHOC<{
   const [saving, setSaving] = useState(false);
   const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
   const modelEditorRef = useRef<ModelDefinitionEditorHandle>(null);
+  const appliedAutoConfigurationRef = useRef('');
 
   const preset = Form.useWatch('platform', form) as string | undefined;
   const baseUrl = (Form.useWatch('base_url', form) as string | undefined) ?? '';
@@ -103,7 +110,6 @@ const AddPlatformModal = ModalHOC<{
     preset,
     tasks,
     bootstrapTask: 'chat',
-    modelHint: definition.model,
   });
   const providerManifest =
     manifestState.loadingTasks.length > 0
@@ -160,6 +166,20 @@ const AddPlatformModal = ModalHOC<{
     bedrockConfig,
     tryFix: true,
   });
+  const autoConfigurationEnabled = isAutoConfigurationPlatform(runtimePlatform);
+  const autoConfiguration = useProviderAutoConfiguration({
+    enabled: modalProps.visible && autoConfigurationEnabled,
+    platform: runtimePlatform,
+    baseUrl,
+    authScheme,
+    definition,
+    manifests: manifestState.manifests,
+    loadingTasks: manifestState.loadingTasks,
+    credentials:
+      credentialsResult.ok && credentialsResult.credentials !== undefined
+        ? credentialsResult.credentials
+        : undefined,
+  });
   const catalogSuggestions = useMemo<ModelCatalogSuggestion[]>(
     () =>
       (modelListState.data?.models ?? []).map((model) => ({
@@ -213,6 +233,7 @@ const AddPlatformModal = ModalHOC<{
     setAuthSchemeDirty(false);
     setSaving(false);
     setFocusedCallConfigTask(undefined);
+    appliedAutoConfigurationRef.current = '';
     const requestedPreset = deepLinkData?.platform;
     const matchedPreset = requestedPreset
       ? MODEL_PLATFORMS.find(
@@ -252,12 +273,49 @@ const AddPlatformModal = ModalHOC<{
     providerManifest,
   ]);
 
+  useEffect(() => {
+    const batch = autoConfiguration.data;
+    if (!batch || batch.detections.length === 0) return;
+    const signature = JSON.stringify(batch);
+    if (appliedAutoConfigurationRef.current === signature) return;
+    appliedAutoConfigurationRef.current = signature;
+
+    setDefinition((current) =>
+      applyProviderAutoConfiguration(current, batch.detections)
+    );
+    const primary = batch.detections[0];
+    const currentBaseUrl = String(form.getFieldValue('base_url') ?? '').trim();
+    if (
+      primary?.suggestedBaseUrl &&
+      currentBaseUrl === batch.requestBaseUrl
+    ) {
+      form.setFieldValue('base_url', primary.suggestedBaseUrl);
+    }
+    const currentAuthScheme = String(
+      form.getFieldValue('auth_scheme') ?? ''
+    ).trim();
+    if (
+      !authSchemeDirty &&
+      primary?.authScheme &&
+      currentAuthScheme === authScheme.trim() &&
+      currentAuthScheme !== primary.authScheme
+    ) {
+      form.setFieldValue('auth_scheme', primary.authScheme);
+    }
+  }, [
+    authScheme,
+    authSchemeDirty,
+    autoConfiguration.data,
+    form,
+  ]);
+
   const selectPreset = (nextPreset: string) => {
     const platform = getPlatformByValue(nextPreset);
     setDefinition(EMPTY_DEFINITION);
     setPendingConnections([]);
     setBaseUrlDirty(false);
     setAuthSchemeDirty(false);
+    appliedAutoConfigurationRef.current = '';
     form.setFieldsValue({
       name: providerDisplayName(platform),
       base_url: '',
@@ -280,6 +338,14 @@ const AddPlatformModal = ModalHOC<{
   };
 
   const submit = async () => {
+    if (autoConfiguration.isLoading) {
+      message.warning(
+        t('settings.providerAutoConfiguration.detecting', {
+          defaultValue: '正在探测协议、鉴权方式和可用 API 地址…',
+        })
+      );
+      return;
+    }
     if (!validation.valid) {
       // Name the blockers rather than restating that something is unfinished.
       const detail = describeValidationErrors(validation.errors, (key, fallback) =>
@@ -391,7 +457,9 @@ const AddPlatformModal = ModalHOC<{
       }}
       onOk={() => void submit()}
       confirmLoading={saving}
-      okButtonProps={{ disabled: !validation.valid }}
+      okButtonProps={{
+        disabled: !validation.valid || autoConfiguration.isLoading,
+      }}
       okText={t('common.confirm')}
       cancelText={t('common.cancel')}
     >
@@ -550,6 +618,14 @@ const AddPlatformModal = ModalHOC<{
           ) : null}
         </Form>
 
+        {!focusedCallConfigTask && (
+          <ProviderAutoConfigurationNotice
+            enabled={autoConfigurationEnabled}
+            loading={autoConfiguration.isLoading}
+            batch={autoConfiguration.data}
+          />
+        )}
+
         <ModelDefinitionEditor
           ref={modelEditorRef}
           value={definition}
@@ -561,6 +637,7 @@ const AddPlatformModal = ModalHOC<{
           manifestLoadingTasks={manifestState.loadingTasks}
           manifestErrorTasks={manifestState.errorTasks}
           validationErrors={validation.errors}
+          validationPending={autoConfiguration.isLoading}
           catalogSuggestions={catalogSuggestions}
           catalogLoading={modelListState.isLoading}
           catalogError={
