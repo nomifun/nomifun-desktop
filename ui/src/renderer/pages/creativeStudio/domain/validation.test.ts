@@ -9,6 +9,7 @@ import {
   CREATIVE_STUDIO_DOCUMENT_SCHEMA,
   createEmptyCreativeProjectDocument,
   CreativeStudioContractError,
+  parseCreateCreativeProjectRequest,
   parseCreativeProjectDetailResponse,
   parseCreativeProjectDocument,
   parseCreativeProjectListResponse,
@@ -49,6 +50,73 @@ const expectContractError = (
 };
 
 describe('Creative Studio v1 document contract', () => {
+  test('validates the optional exact Chat-model kickoff request without widening it', () => {
+    const request = {
+      title: '海报方向',
+      agentKickoff: {
+        prompt: '  规划一张新品海报  ',
+        model: {
+          providerId: '0198f8bb-8424-7b3d-8f17-bc6a1676f118',
+          model: 'gpt-5',
+        },
+      },
+    };
+
+    expect(parseCreateCreativeProjectRequest(request)).toEqual({
+      ...request,
+      agentKickoff: { ...request.agentKickoff, prompt: '规划一张新品海报' },
+    });
+    expect(parseCreateCreativeProjectRequest({ title: '空画布' })).toEqual({ title: '空画布' });
+
+    expectContractError(
+      () => parseCreateCreativeProjectRequest({ ...request, legacySession: true }),
+      'INVALID_REQUEST',
+      '$.legacySession'
+    );
+    expectContractError(
+      () =>
+        parseCreateCreativeProjectRequest({
+          ...request,
+          agentKickoff: { ...request.agentKickoff, skillIds: ['creative-studio-canvas'] },
+        }),
+      'INVALID_REQUEST',
+      '$.agentKickoff.skillIds'
+    );
+    expectContractError(
+      () =>
+        parseCreateCreativeProjectRequest({
+          ...request,
+          agentKickoff: { ...request.agentKickoff, prompt: '   ' },
+        }),
+      'INVALID_REQUEST',
+      '$.agentKickoff.prompt'
+    );
+    expectContractError(
+      () =>
+        parseCreateCreativeProjectRequest({
+          ...request,
+          agentKickoff: {
+            ...request.agentKickoff,
+            model: { ...request.agentKickoff.model, providerId: 'provider-legacy' },
+          },
+        }),
+      'INVALID_REQUEST',
+      '$.agentKickoff.model.providerId'
+    );
+    expectContractError(
+      () =>
+        parseCreateCreativeProjectRequest({
+          ...request,
+          agentKickoff: {
+            ...request.agentKickoff,
+            model: { ...request.agentKickoff.model, model: ' gpt-5 ' },
+          },
+        }),
+      'INVALID_REQUEST',
+      '$.agentKickoff.model.model'
+    );
+  });
+
   test('builds and parses the only supported empty document', () => {
     const document = createEmptyCreativeProjectDocument(PROJECT_ID);
 

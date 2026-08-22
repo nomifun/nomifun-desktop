@@ -35,6 +35,9 @@ const KnowledgeDetailPage = React.lazy(() => import('@renderer/pages/knowledge/K
 const CreativeStudioFocusShell = React.lazy(
   () => import('@renderer/pages/creativeStudio/app/CreativeStudioFocusShell')
 );
+const CreativeStudioHomePage = React.lazy(
+  () => import('@renderer/pages/creativeStudio/app/CreativeStudioHomePage')
+);
 const CreativeStudioProjectsRoute = React.lazy(
   () => import('@renderer/pages/creativeStudio/projects/CreativeStudioProjectsRoute')
 );
@@ -160,7 +163,8 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
         <Route element={<ProtectedAppRuntime />}>
           {/* Creative Studio is a focused product: no workbench rail, shortcuts, or pull-to-refresh shell. */}
           <Route path={CREATIVE_STUDIO_ROOT_PATH} element={withRouteFallback(CreativeStudioFocusShell)}>
-            <Route index element={withRouteFallback(CreativeStudioProjectsRoute)} />
+            <Route index element={withRouteFallback(CreativeStudioHomePage)} />
+            <Route path='projects' element={withRouteFallback(CreativeStudioProjectsRoute)} />
             <Route path='canvas/:projectId' element={withRouteFallback(CreativeStudioCanvasRoute)} />
             <Route path='director/:projectId' element={withRouteFallback(CreativeStudioDirectorRoute)} />
             <Route path='image' element={withRouteFallback(CreativeStudioImageWorkbenchRoute)} />

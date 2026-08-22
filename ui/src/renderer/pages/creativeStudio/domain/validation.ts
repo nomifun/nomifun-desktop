@@ -1168,10 +1168,42 @@ export function parseCreativeProjectDetailResponse(value: unknown): CreativeProj
 export function parseCreateCreativeProjectRequest(value: unknown): CreateCreativeProjectRequest {
   const code = 'INVALID_REQUEST';
   const record = asRecord(value, '$', code);
-  exactKeys(record, [], ['title'], '$', code);
-  return record.title === undefined
-    ? {}
-    : { title: asString(record.title, '$.title', code, { maxLength: 1_000 }) };
+  exactKeys(record, [], ['title', 'agentKickoff'], '$', code);
+  const request: CreateCreativeProjectRequest = {};
+
+  if (record.title !== undefined) {
+    request.title = asString(record.title, '$.title', code, { maxLength: 1_000 });
+  }
+  if (record.agentKickoff !== undefined) {
+    const kickoff = asRecord(record.agentKickoff, '$.agentKickoff', code);
+    exactKeys(kickoff, ['prompt', 'model'], [], '$.agentKickoff', code);
+    const prompt = asString(kickoff.prompt, '$.agentKickoff.prompt', code, {
+      maxLength: 65_536,
+    }).trim();
+    if (!prompt) fail(code, '$.agentKickoff.prompt', 'trimmed non-empty string <= 65536 chars');
+
+    const model = asRecord(kickoff.model, '$.agentKickoff.model', code);
+    exactKeys(model, ['providerId', 'model'], [], '$.agentKickoff.model', code);
+    const modelName = asString(model.model, '$.agentKickoff.model.model', code, {
+      maxLength: 512,
+    });
+    if (modelName !== modelName.trim()) {
+      fail(code, '$.agentKickoff.model.model', 'trimmed non-empty string <= 512 chars');
+    }
+    request.agentKickoff = {
+      prompt,
+      model: {
+        providerId: asUuidV7Id(
+          model.providerId,
+          '$.agentKickoff.model.providerId',
+          code
+        ),
+        model: modelName,
+      },
+    };
+  }
+
+  return request;
 }
 
 export function parseRenameCreativeProjectRequest(value: unknown): RenameCreativeProjectRequest {

@@ -37,7 +37,8 @@ use crate::creative_studio::{CreativeProjectDocument, CreativeProjectSummary};
 use crate::dto::WorkshopAsset;
 use crate::prompt_catalog::CreativePromptCatalogPage;
 use crate::service::{
-    AssetPatch, AssetQuery, NewAssetUpload, NewTextAsset, PromptCatalogAssetOrigin,
+    AssetPatch, AssetQuery, CreativeProjectAgentKickoff, NewAssetUpload, NewTextAsset,
+    PromptCatalogAssetOrigin,
 };
 use crate::state::WorkshopRouterState;
 use crate::workflow::{CreativeWorkflowDefinitionV1, MAX_WORKFLOW_DEFINITION_BYTES};
@@ -206,6 +207,22 @@ async fn list_creative_projects(
 struct CreateCreativeProjectRequest {
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    agent_kickoff: Option<CreateCreativeProjectAgentKickoff>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateCreativeProjectAgentKickoff {
+    prompt: String,
+    model: CreateCreativeProjectAgentModel,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateCreativeProjectAgentModel {
+    provider_id: String,
+    model: String,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -216,11 +233,19 @@ struct CreativeProjectResponse {
 
 async fn create_creative_project(
     State(state): State<WorkshopRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     body: Result<Json<CreateCreativeProjectRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
     let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
-    let project = state.service.create_creative_project(req.title).await?;
+    let agent_kickoff = req.agent_kickoff.map(|kickoff| CreativeProjectAgentKickoff {
+        prompt: kickoff.prompt,
+        provider_id: kickoff.model.provider_id,
+        model: kickoff.model.model,
+    });
+    let project = state
+        .service
+        .create_creative_project_for_owner(user.id.as_str(), req.title, agent_kickoff)
+        .await?;
     Ok((
         StatusCode::CREATED,
         Json(ApiResponse::ok(CreativeProjectResponse { project })),
@@ -1087,6 +1112,64 @@ mod tests {
         .unwrap()
     }
 
+    async fn post_create_project(app: &Router, body: Value) -> Response {
+        app.clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/creative-studio/projects")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn seed_enabled_chat_model(
+        database: &nomifun_db::Database,
+        provider_id: &str,
+        model: &str,
+    ) {
+        let credentials = nomifun_common::encrypt_string(
+            r#"{"api_keys":["test-only"]}"#,
+            &[0x31; 32],
+        )
+        .unwrap();
+        nomifun_db::sqlx::query(
+            "INSERT INTO providers \
+                (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, \
+                 enabled, created_at, updated_at) \
+             VALUES (?, 'openai', 'kickoff-test', 'https://example.invalid', 'bearer', ?, 1, 1, 1)",
+        )
+        .bind(provider_id)
+        .bind(credentials)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        nomifun_db::sqlx::query(
+            "INSERT INTO provider_models \
+                (provider_id, model, enabled, sort_order, description, created_at, updated_at) \
+             VALUES (?, ?, 1, 0, NULL, 1, 1)",
+        )
+        .bind(provider_id)
+        .bind(model)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        nomifun_db::sqlx::query(
+            "INSERT INTO provider_model_capabilities \
+                (provider_id, model, task, traits, protocol, connection_role, \
+                 allow_cross_origin_credentials, provider_params, created_at, updated_at) \
+             VALUES (?, ?, 'chat', '[]', 'openai.chat_text', 'default', 0, '{}', 1, 1)",
+        )
+        .bind(provider_id)
+        .bind(model)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    }
+
     async fn seed_bound_completed_agent_messages(
         database: &nomifun_db::Database,
         project_id: &str,
@@ -1602,6 +1685,198 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn creative_project_agent_kickoff_creates_one_ready_revision_one_document() {
+        let (state, owner, _data_dir, database) = test_state_with_database().await;
+        let provider_id = ProviderId::new().into_string();
+        seed_enabled_chat_model(&database, &provider_id, "chat-model").await;
+        let app = workshop_routes(state.clone()).layer(Extension(owner));
+
+        let response = post_create_project(
+            &app,
+            serde_json::json!({
+                "title": "  首页创作  ",
+                "agentKickoff": {
+                    "prompt": "  规划一张简约海报  ",
+                    "model": {
+                        "providerId": provider_id,
+                        "model": "chat-model"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let response = response_json(response).await;
+        let project_id = response["data"]["project"]["projectId"]
+            .as_str()
+            .unwrap();
+        assert_eq!(response["data"]["project"]["title"], "首页创作");
+        assert_eq!(response["data"]["project"]["revision"], "1");
+        assert_eq!(response["data"]["project"]["nodeCount"], 0);
+        assert_eq!(response["data"]["project"]["connectionCount"], 0);
+
+        let detail = state.service.get_creative_project(project_id).await.unwrap();
+        assert!(detail.document.nodes.is_empty());
+        assert!(detail.document.connections.is_empty());
+        assert_eq!(detail.document.chat_sessions.len(), 1);
+        let chat = &detail.document.chat_sessions[0];
+        assert_eq!(detail.document.active_chat_id.as_deref(), Some(chat.id.as_str()));
+        assert!(chat.message_ids.is_empty());
+        assert_eq!(chat.created_at, chat.updated_at);
+        assert_eq!(
+            chat.model.as_ref().unwrap(),
+            &crate::creative_studio::CreativeChatModel {
+                provider_id,
+                model: "chat-model".into(),
+            }
+        );
+        let pending = chat.pending_turn.as_ref().unwrap();
+        assert_eq!(pending.prompt, "规划一张简约海报");
+        assert_eq!(pending.model_input.as_deref(), Some("规划一张简约海报"));
+        assert_eq!(pending.skill_ids, ["creative-studio-canvas"]);
+        assert_eq!(pending.created_at, chat.created_at);
+        assert!(detail.document.panels.right.open);
+        assert_eq!(detail.document.panels.right.width, 390.0);
+        assert_eq!(
+            detail.document.panels.right.active_view,
+            crate::creative_studio::CreativeRightView::Assistant
+        );
+        let project_count: i64 = nomifun_db::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM creative_studio_projects",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(project_count, 1);
+    }
+
+    #[tokio::test]
+    async fn creative_project_agent_kickoff_fails_closed_before_insert() {
+        let (state, owner, _data_dir, database) = test_state_with_database().await;
+        let provider_id = ProviderId::new().into_string();
+        seed_enabled_chat_model(&database, &provider_id, "chat-model").await;
+        let request = |prompt: &str, model: &str| {
+            serde_json::json!({
+                "agentKickoff": {
+                    "prompt": prompt,
+                    "model": {
+                        "providerId": provider_id,
+                        "model": model
+                    }
+                }
+            })
+        };
+
+        let non_owner = CurrentUser {
+            id: UserId::new(),
+            username: "not-owner".into(),
+        };
+        let response = post_create_project(
+            &workshop_routes(state.clone()).layer(Extension(non_owner)),
+            request("请规划", "chat-model"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let app = workshop_routes(state.clone()).layer(Extension(owner));
+        let blank = post_create_project(&app, request(" \r\n ", "chat-model")).await;
+        assert_eq!(blank.status(), StatusCode::BAD_REQUEST);
+        let too_long_prompt = "x".repeat(65_536 + 1);
+        let too_long = post_create_project(&app, request(&too_long_prompt, "chat-model")).await;
+        assert_eq!(too_long.status(), StatusCode::BAD_REQUEST);
+        let untrimmed_model = post_create_project(&app, request("请规划", " chat-model ")).await;
+        assert_eq!(untrimmed_model.status(), StatusCode::BAD_REQUEST);
+
+        let invalid_provider = post_create_project(
+            &app,
+            serde_json::json!({
+                "agentKickoff": {
+                    "prompt": "请规划",
+                    "model": {
+                        "providerId": "not-a-provider-id",
+                        "model": "chat-model"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(invalid_provider.status(), StatusCode::BAD_REQUEST);
+
+        let missing_exact_model =
+            post_create_project(&app, request("请规划", "other-model")).await;
+        assert_eq!(missing_exact_model.status(), StatusCode::CONFLICT);
+
+        nomifun_db::sqlx::query(
+            "UPDATE provider_models SET enabled = 0 WHERE provider_id = ? AND model = ?",
+        )
+        .bind(&provider_id)
+        .bind("chat-model")
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let disabled = post_create_project(&app, request("请规划", "chat-model")).await;
+        assert_eq!(disabled.status(), StatusCode::CONFLICT);
+        nomifun_db::sqlx::query(
+            "UPDATE provider_models SET enabled = 1 WHERE provider_id = ? AND model = ?",
+        )
+        .bind(&provider_id)
+        .bind("chat-model")
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        nomifun_db::sqlx::query("UPDATE providers SET enabled = 0 WHERE provider_id = ?")
+            .bind(&provider_id)
+            .execute(database.pool())
+            .await
+            .unwrap();
+        let disabled_provider = post_create_project(&app, request("请规划", "chat-model")).await;
+        assert_eq!(disabled_provider.status(), StatusCode::CONFLICT);
+        nomifun_db::sqlx::query("UPDATE providers SET enabled = 1 WHERE provider_id = ?")
+            .bind(&provider_id)
+            .execute(database.pool())
+            .await
+            .unwrap();
+
+        nomifun_db::sqlx::query(
+            "DELETE FROM provider_model_capabilities \
+             WHERE provider_id = ? AND model = ? AND task = 'chat'",
+        )
+        .bind(&provider_id)
+        .bind("chat-model")
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let no_chat_capability =
+            post_create_project(&app, request("请规划", "chat-model")).await;
+        assert_eq!(no_chat_capability.status(), StatusCode::CONFLICT);
+
+        let unknown_nested_key = post_create_project(
+            &app,
+            serde_json::json!({
+                "agentKickoff": {
+                    "prompt": "请规划",
+                    "skillIds": ["creative-studio-canvas"],
+                    "model": {
+                        "providerId": provider_id,
+                        "model": "chat-model"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(unknown_nested_key.status(), StatusCode::BAD_REQUEST);
+
+        let project_count: i64 = nomifun_db::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM creative_studio_projects",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(project_count, 0);
+    }
+
+    #[tokio::test]
     async fn creative_project_handlers_cover_crud_and_revision_conflict() {
         let (state, user, _data_dir) = test_state().await;
 
@@ -1610,6 +1885,7 @@ mod tests {
             Extension(user.clone()),
             Ok::<_, JsonRejection>(Json(CreateCreativeProjectRequest {
                 title: Some("路由项目".into()),
+                agent_kickoff: None,
             })),
         )
         .await
@@ -1633,6 +1909,9 @@ mod tests {
         .unwrap();
         let document = detail.0.data.unwrap().document;
         assert_eq!(document.schema, "nomifun.creative-studio/v1");
+        assert!(document.chat_sessions.is_empty());
+        assert!(document.active_chat_id.is_none());
+        assert!(!document.panels.right.open);
 
         let saved = save_creative_project(
             State(state.clone()),

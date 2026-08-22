@@ -316,8 +316,14 @@ export interface CreativeProjectDetail {
   document: CreativeProjectDocument;
 }
 
+export interface CreativeProjectAgentKickoff {
+  prompt: string;
+  model: CreativeChatModelReference;
+}
+
 export interface CreateCreativeProjectRequest {
   title?: string;
+  agentKickoff?: CreativeProjectAgentKickoff;
 }
 
 export interface RenameCreativeProjectRequest {

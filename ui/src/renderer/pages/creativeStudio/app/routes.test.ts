@@ -28,7 +28,7 @@ import {
 describe('Creative Studio routes', () => {
   test('publishes the canonical deep-link contract', () => {
     expect(CREATIVE_STUDIO_ROOT_PATH).toBe('/workshop');
-    expect(CREATIVE_STUDIO_PROJECTS_PATH).toBe('/workshop');
+    expect(CREATIVE_STUDIO_PROJECTS_PATH).toBe('/workshop/projects');
     expect(CREATIVE_STUDIO_CANVAS_PROJECT_PATTERN).toBe('/workshop/canvas/:projectId');
     expect(CREATIVE_STUDIO_DIRECTOR_PROJECT_PATTERN).toBe('/workshop/director/:projectId');
     expect(CREATIVE_STUDIO_IMAGE_PATH).toBe('/workshop/image');
@@ -75,7 +75,8 @@ describe('Creative Studio routes', () => {
   });
 
   test('matches only exact product sections', () => {
-    expect(creativeStudioSectionForPath('/workshop')).toBe('projects');
+    expect(creativeStudioSectionForPath('/workshop')).toBe('home');
+    expect(creativeStudioSectionForPath('/workshop/projects')).toBe('projects');
     expect(creativeStudioSectionForPath('/workshop/canvas/project-1')).toBe('canvas');
     expect(creativeStudioSectionForPath('/workshop/director/project-1')).toBe('director');
     expect(creativeStudioSectionForPath('/workshop/image?draft=1')).toBe('image');
