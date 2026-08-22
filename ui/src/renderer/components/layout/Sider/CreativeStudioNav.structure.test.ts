@@ -22,7 +22,7 @@ const legacyAssetPageUrl = new URL('../../../pages/assets/index.tsx', import.met
 describe('Creative Studio primary navigation', () => {
   test('owns the former workshop slot with one canonical product route', () => {
     expect(routesSource.includes("CREATIVE_STUDIO_ROOT_PATH = '/workshop'")).toBe(true);
-    expect(siderSource.includes('navTo(CREATIVE_STUDIO_ROOT_PATH)')).toBe(true);
+    expect(siderSource.includes('navTo(CREATIVE_STUDIO_PROJECTS_PATH)')).toBe(true);
     expect(siderSource.includes('isCreativeStudioPath(pathname)')).toBe(true);
     expect(siderSource.includes('<SiderCreativeStudioEntry')).toBe(true);
     expect(siderSource.includes('<CreativeStudioSider')).toBe(true);

@@ -112,7 +112,7 @@ export function getBaseUrl(): string {
 
 | 路由 | 用户界面 |
 | --- | --- |
-| `/workshop` | 创意工坊首页与项目 kickoff。 |
+| `/workshop` | 兼容入口，重定向到创意工坊项目中心。 |
 | `/workshop/projects` | 项目中心。 |
 | `/workshop/canvas/:projectId`、`/workshop/director/:projectId` | 项目内无限画布与受限 3D 导演台。 |
 | `/workshop/image`、`/workshop/video` | 归属于项目的独立生成工作台。 |
@@ -120,6 +120,7 @@ export function getBaseUrl(): string {
 
 路由常量与 exact-match 规则在
 [`pages/creativeStudio/app/routes.ts`](../../ui/src/renderer/pages/creativeStudio/app/routes.ts)。
+原创意工坊 kickoff 首页已移除，创作入口统一放在画布内；应用入口直接打开项目中心。
 `/workshop/audio` 已退役；音频创作通过画布音频节点提供，不再设独立路由。
 
 页面通过 `React.lazy` 加载，使用 `<AppLoader>` 作为 fallback，使初始包保持精简。
