@@ -65,8 +65,22 @@ export function useConversationExecution(conversation: TChatConversation | null 
         void discoverRelation();
       }, RELATION_REFETCH_DEBOUNCE_MS);
     });
+    // Relation projection is carried by the Conversation response, not by
+    // the execution detail event itself. If the socket was disconnected while
+    // the lead execution was created, the outbox event may already be marked
+    // published when the renderer reconnects. Re-resolve the relation from
+    // the authoritative Conversation row instead of leaving the collaboration
+    // pane permanently absent until a full page refresh.
+    const unsubscribeReconnect = ipcBridge.conversation.reconnected.on(() => {
+      if (relationTimer.current !== null) clearTimeout(relationTimer.current);
+      relationTimer.current = setTimeout(() => {
+        relationTimer.current = null;
+        void discoverRelation();
+      }, RELATION_REFETCH_DEBOUNCE_MS);
+    });
     return () => {
       unsubscribe();
+      unsubscribeReconnect();
       relationRequestSequence.current += 1;
       if (relationTimer.current !== null) clearTimeout(relationTimer.current);
       relationTimer.current = null;

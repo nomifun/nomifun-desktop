@@ -639,6 +639,22 @@ fn classify_provider_api(lower: &str) -> Option<ClassifiedError> {
             Some(AgentErrorResolutionTarget::Feedback),
         ));
     }
+    // A request-scoped tool authority violation is deterministic for the
+    // selected provider/model. Retrying the same turn with the same tool
+    // contract commonly reproduces the same hallucinated tool name and makes
+    // execution nodes repeat without progress. Keep the security boundary
+    // fail-closed, but stop automatic retries for this specific class.
+    if lower.contains("was not advertised in this request")
+        || lower.contains("not advertised in this request")
+    {
+        return Some(provider_error(
+            "The model returned a tool that was not advertised for this request",
+            AgentErrorCode::UserLlmProviderGatewayError,
+            false,
+            AgentErrorResolutionKind::ChangeModel,
+            Some(AgentErrorResolutionTarget::ProviderSettings),
+        ));
+    }
     if contains_any(
         lower,
         &[
@@ -949,7 +965,6 @@ mod tests {
         for detail in [
             "Nomi agent error: API error: OpenAI-compatible provider emitted non-usage data after finish_reason",
             "Nomi agent error: API error: OpenAI-compatible provider returned a tool call with a missing function name (call `call_123`)",
-            "Nomi agent error: API error: provider stream protocol violation: tool progress 'Write' (call-123) was not advertised in this request",
             "Nomi agent error: API error: Provider stream truncated: OpenAI-compatible stream ended before finish_reason",
         ] {
             let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
@@ -963,6 +978,25 @@ mod tests {
                     .and_then(|resolution| resolution.target),
                 None,
                 "protocol/truncation errors must not send the user to Base URL settings"
+            );
+        }
+    }
+
+    #[test]
+    fn unadvertised_tool_protocol_failures_do_not_repeat_the_same_attempt() {
+        for detail in [
+            "Nomi agent error: API error: provider stream protocol violation: tool progress 'Bash' (call-123) was not advertised in this request",
+            "Nomi agent error: API error: provider stream protocol violation: tool progress 'update_plan' (call-456) was not advertised in this request",
+        ] {
+            let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
+            assert_eq!(
+                err.code(),
+                Some(AgentErrorCode::UserLlmProviderGatewayError)
+            );
+            assert_eq!(err.stream_error().retryable, Some(false));
+            assert_eq!(
+                err.stream_error().resolution.map(|resolution| resolution.kind),
+                Some(AgentErrorResolutionKind::ChangeModel)
             );
         }
     }

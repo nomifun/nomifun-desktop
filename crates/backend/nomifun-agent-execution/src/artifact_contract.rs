@@ -141,6 +141,10 @@ pub(crate) fn validate_required_artifacts(
     Ok(())
 }
 
+pub(crate) fn requires_artifact_delivery(step_spec: &str) -> bool {
+    infer_expected_artifacts(step_spec).is_some()
+}
+
 fn infer_expected_artifacts(step_spec: &str) -> Option<ExpectedArtifactContract> {
     let normalized = step_spec.to_lowercase();
     let mut requirements = Vec::new();
@@ -287,9 +291,10 @@ fn output_artifacts_after(
                 })
                 .map(move |position| (position, position + term.len(), *matcher))
         })
-        .filter(|(start, end, _)| {
+        .filter(|(start, end, matcher)| {
             clause[after..*start].chars().count() <= MAX_ARTIFACT_TERM_DISTANCE
                 && !artifact_is_input_context(&clause[after..*start])
+                && !artifact_is_descriptive_list_context(clause, *start, *end, *matcher)
                 && !artifact_is_modifier_context(&clause[*end..])
         })
         .collect::<Vec<_>>();
@@ -487,6 +492,90 @@ fn artifact_is_modifier_context(suffix: &str) -> bool {
     ]
     .iter()
     .any(|modifier| suffix.starts_with(modifier))
+}
+
+/// A task can ask the Agent to *describe* files without asking it to create a
+/// file.  Treating phrases such as "输出：关键文件清单" or "output a file
+/// list" as a durable artifact obligation makes an otherwise valid prose
+/// investigation fail after the model has already completed.  Keep this
+/// negative rule local to list/inventory language so real deliverables such as
+/// "export a CSV file" remain strict.
+fn artifact_is_descriptive_list_context(
+    clause: &str,
+    artifact_start: usize,
+    artifact_end: usize,
+    matcher: ArtifactMatcher,
+) -> bool {
+    let suffix = clause[artifact_end..].trim_start();
+    let prefix = clause[..artifact_start].trim_end();
+    let list_markers = [
+        "清单",
+        "列表",
+        "目录",
+        "明细",
+        "列表报告",
+        "list",
+        "listing",
+        "inventory",
+        "manifest",
+        "names",
+        "file tree",
+        "file names",
+        "文件名",
+        "文件列表",
+        "文件清单",
+    ];
+    if matcher == ArtifactMatcher::Any
+        && list_markers.iter().any(|marker| suffix.starts_with(marker))
+    {
+        return true;
+    }
+    // A later generic `file` token can be part of the explanation following
+    // the list noun (for example, "key file inventory; explain each file").
+    // Require an explanation cue immediately before the candidate, so a real
+    // second deliverable in "generate a file list and then generate a file"
+    // remains eligible.
+    if matcher == ArtifactMatcher::Any {
+        let explanation_cues = [
+            "每个",
+            "每份",
+            "each",
+            "every",
+            "their",
+            "its",
+            "说明每个",
+            "explain each",
+            "explain every",
+        ];
+        if list_markers.iter().any(|marker| prefix.contains(marker))
+            && explanation_cues
+                .iter()
+                .any(|cue| prefix.ends_with(cue))
+        {
+            return true;
+        }
+    }
+    // English compound forms where the matcher lands on "file" after an
+    // output verb: "output a list of files", "return a file inventory".
+    let descriptive_prefix = [
+        "list of",
+        "a list of",
+        "the list of",
+        "file list",
+        "file listing",
+        "file inventory",
+        "file manifest",
+        "key file",
+        "key files",
+        "关键",
+        "主要",
+        "全部",
+        "现有",
+        "当前",
+    ];
+    descriptive_prefix
+        .iter()
+        .any(|marker| prefix.ends_with(marker))
 }
 
 fn explicit_format_after(clause: &str, artifact_end: usize) -> Option<ArtifactMatcher> {
@@ -1017,6 +1106,35 @@ mod tests {
         for spec in specs {
             assert!(validate_required_artifacts(spec, &[]).is_ok(), "{spec}");
         }
+    }
+
+    #[test]
+    fn descriptive_file_lists_do_not_create_file_delivery_obligations() {
+        for spec in [
+            "输出：关键文件清单",
+            "输出关键文件列表报告",
+            "返回当前工作区的文件目录",
+            "Output: key file list and recommended test commands.",
+            "Return a file inventory for the workspace.",
+            "List the file names and explain their purpose.",
+            "输出：关键文件清单，并说明每个文件的作用",
+        ] {
+            assert!(
+                validate_required_artifacts(spec, &[]).is_ok(),
+                "descriptive list must remain prose-only: {spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn real_file_deliverables_remain_strict_after_list_negative_rules() {
+        assert!(validate_required_artifacts("Export a CSV file", &[]).is_err());
+        assert!(
+            validate_required_artifacts("Export a CSV file", &files(&["/w/result.csv"])).is_ok()
+        );
+        assert!(validate_required_artifacts("生成一个文件", &[]).is_err());
+        assert!(validate_required_artifacts("生成一个文件清单，然后再生成一个文件", &[]).is_err());
+        assert!(validate_required_artifacts("Generate a report file listing all errors", &[]).is_err());
     }
 
     #[test]
