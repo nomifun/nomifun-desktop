@@ -132,8 +132,10 @@ const CreativeStudioTopBar: React.FC<CreativeStudioTopBarProps> = ({
             onNavigate(CREATIVE_STUDIO_ROOT_PATH);
           }}
         >
-          <FolderOpen theme='outline' size={20} fill='currentColor' strokeWidth={3} />
-          <span>{title}</span>
+          <span className={styles.brandIcon} aria-hidden='true'>
+            <FolderOpen theme='outline' size={20} fill='currentColor' strokeWidth={3} />
+          </span>
+          <span className={styles.brandLabel}>{title}</span>
         </Link>
 
         <nav
@@ -155,8 +157,10 @@ const CreativeStudioTopBar: React.FC<CreativeStudioTopBarProps> = ({
                   onNavigate(item.path);
                 }}
               >
-                {item.icon}
-                <span>{item.label}</span>
+                <span className={styles.navigationIcon} aria-hidden='true'>
+                  {item.icon}
+                </span>
+                <span className={styles.navigationLabel}>{item.label}</span>
               </Link>
             );
           })}
@@ -171,11 +175,13 @@ const CreativeStudioTopBar: React.FC<CreativeStudioTopBarProps> = ({
               aria-label={themeToggleLabel}
               aria-pressed={theme === 'dark'}
             >
-              {theme === 'light' ? (
-                <Moon theme='outline' size={17} fill='currentColor' strokeWidth={3} />
-              ) : (
-                <SunOne theme='outline' size={17} fill='currentColor' strokeWidth={3} />
-              )}
+              <span className={styles.utilityIcon} aria-hidden='true'>
+                {theme === 'light' ? (
+                  <Moon theme='outline' size={17} fill='currentColor' strokeWidth={3} />
+                ) : (
+                  <SunOne theme='outline' size={17} fill='currentColor' strokeWidth={3} />
+                )}
+              </span>
             </button>
           </InstantHoverTooltip>
           <InstantHoverTooltip content={backLabel} position='bottom'>
@@ -185,8 +191,10 @@ const CreativeStudioTopBar: React.FC<CreativeStudioTopBarProps> = ({
               onClick={onBack}
               aria-label={backLabel}
             >
-              <ArrowLeft theme='outline' size={16} fill='currentColor' strokeWidth={3} />
-              <span>{backLabel}</span>
+              <span className={styles.backIcon} aria-hidden='true'>
+                <ArrowLeft theme='outline' size={16} fill='currentColor' strokeWidth={3} />
+              </span>
+              <span className={styles.backLabel}>{backLabel}</span>
             </button>
           </InstantHoverTooltip>
           {showWindowControls && <WindowControls />}

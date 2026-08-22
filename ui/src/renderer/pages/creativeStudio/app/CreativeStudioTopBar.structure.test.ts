@@ -27,15 +27,44 @@ describe('Creative Studio application navigation structure', () => {
     expect(topBarSource.includes('CREATIVE_STUDIO_AUDIO_PATH')).toBe(false);
   });
 
-  test('retains the measured 64px source header geometry', () => {
+  test('keeps the compact titlebar geometry on one shared centerline', () => {
     expect(
-      /\.topBar\s*\{[\s\S]*?height:\s*64px;[\s\S]*?min-height:\s*64px;/.test(topBarStyles)
+      /\.topBar\s*\{[\s\S]*?--creative-studio-top-bar-height:\s*45px;[\s\S]*?height:\s*var\(--creative-studio-top-bar-height\);[\s\S]*?min-height:\s*var\(--creative-studio-top-bar-height\);/.test(
+        topBarStyles
+      )
     ).toBe(true);
     expect(
-      /\.inner\s*\{[\s\S]*?max-width:\s*1280px;[\s\S]*?height:\s*64px;/.test(topBarStyles)
+      /\.inner\s*\{[\s\S]*?max-width:\s*1280px;[\s\S]*?height:\s*var\(--creative-studio-top-bar-height\);/.test(
+        topBarStyles
+      )
     ).toBe(true);
-    expect(topBarStyles.includes('margin-left: 32px;')).toBe(true);
-    expect(topBarStyles.includes('gap: 28px;')).toBe(true);
+    expect(topBarStyles.match(/^\s*height:\s*var\(--creative-studio-top-bar-height\);/gm)?.length).toBe(6);
+    expect(topBarStyles.includes('margin-left: 24px;')).toBe(true);
+    expect(/\.navigation\s*\{[\s\S]*?gap:\s*20px;/.test(topBarStyles)).toBe(true);
+    expect(topBarStyles.includes('padding-left: max(88px')).toBe(true);
+  });
+
+  test('optically aligns navigation icons with their labels', () => {
+    expect(topBarSource.includes('className={styles.brandIcon}')).toBe(true);
+    expect(topBarSource.includes('className={styles.brandLabel}')).toBe(true);
+    expect(topBarSource.includes('className={styles.navigationIcon}')).toBe(true);
+    expect(topBarSource.includes('className={styles.navigationLabel}')).toBe(true);
+    expect(/\.brandIcon,[\s\S]*?\.navigationIcon\s*\{[\s\S]*?transform:\s*translateY\(1px\);/.test(topBarStyles)).toBe(
+      true
+    );
+    expect(/\.brandLabel,[\s\S]*?\.navigationLabel\s*\{[\s\S]*?line-height:\s*20px;/.test(topBarStyles)).toBe(true);
+  });
+
+  test('keeps the trailing controls compact and optically aligned', () => {
+    expect(topBarSource.includes('className={styles.utilityIcon}')).toBe(true);
+    expect(topBarSource.includes('className={styles.backIcon}')).toBe(true);
+    expect(topBarSource.includes('className={styles.backLabel}')).toBe(true);
+    expect(/\.trailing\s*\{[\s\S]*?gap:\s*8px;[\s\S]*?padding-left:\s*16px;/.test(topBarStyles)).toBe(true);
+    expect(/\.backButton\s*\{[\s\S]*?height:\s*32px;[\s\S]*?gap:\s*6px;[\s\S]*?padding:\s*0 10px;/.test(topBarStyles)).toBe(
+      true
+    );
+    expect(/\.iconButton\s*\{[\s\S]*?width:\s*32px;[\s\S]*?height:\s*32px;/.test(topBarStyles)).toBe(true);
+    expect(/\.backIcon\s*\{[\s\S]*?transform:\s*translateY\(1px\);/.test(topBarStyles)).toBe(true);
   });
 
   test('keeps source light-dark switching inside the focused product shell', () => {

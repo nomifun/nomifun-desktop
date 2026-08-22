@@ -13,6 +13,7 @@ import {
   LeftBar,
   Loading,
   MagicWand,
+  Pic,
   SettingTwo,
   Time,
   Upload,
@@ -534,9 +535,12 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
   return (
     <aside className={styles.sideComposer} data-image-workbench-composer='side'>
       <header className={styles.composerHeader}>
-        <div>
-          <span className={styles.eyebrow}>IMAGE STUDIO</span>
-          <h1>生图工作台</h1>
+        <div className={styles.composerHeading}>
+          <Pic size={20} />
+          <span className={styles.composerHeadingText}>
+            <h1>生图工作台</h1>
+            <small>生成设置</small>
+          </span>
         </div>
         <LayoutSwitch layout={layout} onChange={onLayoutChange} />
       </header>
