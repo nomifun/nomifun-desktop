@@ -319,7 +319,7 @@
   border-radius: 13px;
   background: color-mix(in srgb, var(--color-bg-2) 90%, transparent);
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.17);
-  color: var(--color-text-2);
+  color: var(--color-text-1);
   pointer-events: auto;
   scrollbar-color: var(--color-fill-4) transparent;
   scrollbar-width: thin;
@@ -356,6 +356,45 @@
   width: 34px;
   flex: 0 0 34px;
   place-items: center;
+}
+
+/* Arco Tooltip wraps disabled controls in a span and moves the supplied class
+   to that wrapper. Keep the real button at the same 34px geometry so disabled
+   and enabled toolbar icons share one center line. */
+.iconButton > button {
+  appearance: none;
+  display: grid;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.iconButton :global(.i-icon) {
+  display: grid;
+  width: 17px;
+  height: 17px;
+  place-items: center;
+  line-height: 0;
+  vertical-align: middle;
+}
+
+.iconButton :global(.i-icon > svg) {
+  display: block;
+}
+
+.iconButton:has(> button:disabled) {
+  opacity: 0.52;
+}
+
+.iconButton:has(> button:disabled):hover {
+  background: transparent;
+  color: inherit;
 }
 
 .iconButton:hover:not(:disabled) {

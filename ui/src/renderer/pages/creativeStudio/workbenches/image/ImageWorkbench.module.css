@@ -99,20 +99,31 @@
   display: flex;
   flex: 0 0 auto;
   gap: 2px;
-  padding: 3px;
+  padding: 2px;
   border: 1px solid var(--color-border-2);
-  border-radius: 10px;
+  border-radius: 9px;
   background: var(--color-fill-1);
 }
 
 .layoutSwitch :global(.arco-btn) {
+  height: 28px;
+  padding: 0 9px;
   border-radius: 7px;
+  font-size: 12px;
+  line-height: 28px;
+}
+
+.layoutSwitch :global(.arco-btn-icon) {
+  display: inline-flex;
+  align-items: center;
+  font-size: 14px;
+  line-height: 0;
 }
 
 .composerScroll {
   min-height: 0;
   flex: 1;
-  padding: 0 16px 16px;
+  padding: 12px 16px 16px;
   overflow-y: auto;
   scrollbar-width: thin;
 }

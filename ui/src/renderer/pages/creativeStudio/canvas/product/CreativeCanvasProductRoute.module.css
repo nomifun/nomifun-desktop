@@ -103,7 +103,7 @@
 
 @media (min-width: 1181px) {
   .root :global([data-creative-canvas-chrome][data-right-view='closed'] [role='toolbar'][aria-label='画布工具栏']) {
-    transform: translate(clamp(0px, 10vw, 142px), -4px);
+    transform: translateY(-4px);
   }
 }
 
@@ -127,8 +127,45 @@
   place-items: center;
   border-radius: 9px;
   background: transparent;
-  color: var(--color-text-2);
+  color: var(--color-text-1);
   cursor: pointer;
+}
+
+.toolbarButton > button {
+  appearance: none;
+  display: grid;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.toolbarButton :global(.i-icon) {
+  display: grid;
+  width: 17px;
+  height: 17px;
+  place-items: center;
+  line-height: 0;
+  vertical-align: middle;
+}
+
+.toolbarButton :global(.i-icon > svg) {
+  display: block;
+}
+
+.toolbarButton:has(> button:disabled) {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.toolbarButton:has(> button:disabled):hover {
+  background: transparent;
+  color: var(--color-text-1);
 }
 
 .toolbarButton:hover:not(:disabled) {

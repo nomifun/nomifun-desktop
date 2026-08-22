@@ -11,6 +11,10 @@ const source = readFileSync(
   new URL('./CreativeCanvasProductRoute.tsx', import.meta.url),
   'utf8'
 );
+const chromeSource = readFileSync(
+  new URL('../chrome/CreativeCanvasChrome.tsx', import.meta.url),
+  'utf8'
+);
 const wiring = readFileSync(new URL('./WIRING.md', import.meta.url), 'utf8');
 const style = readFileSync(
   new URL('./CreativeCanvasProductRoute.module.css', import.meta.url),
@@ -18,6 +22,10 @@ const style = readFileSync(
 );
 const editorStyle = readFileSync(
   new URL('../editor/CreativeCanvasEditor.module.css', import.meta.url),
+  'utf8'
+);
+const chromeStyle = readFileSync(
+  new URL('../chrome/CreativeCanvasChrome.module.css', import.meta.url),
   'utf8'
 );
 
@@ -211,5 +219,18 @@ describe('Creative Canvas product route composition', () => {
     expect(style.includes('--primary-6: 87, 83, 78')).toBe(true);
     expect(style.includes('color-scheme: light')).toBe(true);
     expect(style.includes("[data-theme='dark']")).toBe(false);
+  });
+
+  test('keeps the bottom icon toolbar horizontally centered on wide canvases', () => {
+    expect(style.includes('transform: translateY(-4px)')).toBe(true);
+    expect(style.includes('translate(clamp(0px, 10vw, 142px), -4px)')).toBe(false);
+    expect(/\.toolbarButton > button\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;[\s\S]*?place-items:\s*center;/.test(style)).toBe(true);
+    expect(/\.iconButton > button\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;[\s\S]*?place-items:\s*center;/.test(chromeStyle)).toBe(true);
+    expect(/\.toolbarButton :global\(\.i-icon\)\s*\{[\s\S]*?width:\s*17px;[\s\S]*?height:\s*17px;[\s\S]*?line-height:\s*0;/.test(style)).toBe(true);
+    expect(/\.iconButton :global\(\.i-icon\)\s*\{[\s\S]*?width:\s*17px;[\s\S]*?height:\s*17px;[\s\S]*?line-height:\s*0;/.test(chromeStyle)).toBe(true);
+    expect(source.includes('strokeWidth: 3')).toBe(true);
+    expect(chromeSource.includes('strokeWidth: 3')).toBe(true);
+    expect(style.includes('opacity: 0.52')).toBe(true);
+    expect(chromeStyle.includes('opacity: 0.52')).toBe(true);
   });
 });
