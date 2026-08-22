@@ -497,6 +497,8 @@
   "modelSelectionHint": "The catalog only suggests models for the first task. Enter a model ID directly when none match.",
   "modelCatalogFilteredEmpty": "No catalog model matches this type. Enter a model ID directly.",
   "modelSupportedTasks": "Supported tasks",
+  "modelDeclaredTasks": "Added",
+  "modelDeclaredTasksHint": "configure or remove each one below",
   "modelSupportedTasksHint": "Pick the tasks this model supports. Catalog suggestions are filtered by the first one. When a single model ID serves several tasks, add them one by one — each task keeps its own protocol and URLs.",
   "selectModelTask": "Select a task this model supports",
   "addAnotherModelTask": "Add another task",
