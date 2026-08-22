@@ -3966,6 +3966,7 @@ export type I18nKey =
   | 'settings.modelHub.title'
   | 'settings.modelId'
   | 'settings.modelIdDuplicate'
+  | 'settings.modelIdRequired'
   | 'settings.modelName'
   | 'settings.modelPlatform'
   | 'settings.modelProtocol'

@@ -29,6 +29,7 @@ import {
   withProviderParamChainRounds,
   validateModelDefinition,
   type ModelCapabilityDraft,
+  type ModelDefinitionDraft,
   type ModelProtocolManifest,
 } from './providerModelAdvanced';
 
@@ -212,6 +213,41 @@ describe('model definition capability selection', () => {
         'chat'
       ).capabilities[0]?.contextLimit
     ).toBeUndefined();
+  });
+
+  test('the add-model sequence reaches a saveable draft', () => {
+    // Exactly what a user does now that the task picker comes first:
+    // declare a task, then type a model id. Regression guard: a reported
+    // "cannot save" after picking a task in the supported-task selector.
+    const manifests = { chat: manifest('chat', 'openai.chat_text') };
+
+    // 1. Empty draft — only the missing model and the missing task.
+    let definition: ModelDefinitionDraft = { model: '', capabilities: [] };
+    expect(
+      validateModelDefinition(definition, manifests, 'https://api.stepfun.com/v1').errors.map(
+        (error) => error.code
+      )
+    ).toEqual(['model_required', 'capability_required']);
+
+    // 2. Pick "对话" in the supported-task picker.
+    definition = {
+      ...definition,
+      capabilities: addCapabilityTask(definition.capabilities, 'chat'),
+    };
+    expect(definition.capabilities.map((capability) => capability.task)).toEqual(['chat']);
+
+    // 3. The backend recommendation lands and fills the transport.
+    definition = {
+      ...definition,
+      capabilities: reconcileCapabilityRecommendations(definition.capabilities, manifests),
+    };
+    expect(definition.capabilities[0]?.protocol).toBe('openai.chat_text');
+
+    // 4. Type the model id. Nothing else should be required.
+    definition = { ...definition, model: 'step-3.7-flash' };
+    const result = validateModelDefinition(definition, manifests, 'https://api.stepfun.com/v1');
+    expect(result.errors).toEqual([]);
+    expect(result.valid).toBe(true);
   });
 
   test('does not touch traits when the selected task is absent from the entry', () => {

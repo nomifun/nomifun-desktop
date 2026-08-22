@@ -221,6 +221,27 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('data-effective-base-url="https://override.example.com/v1"')).toBe(true);
   });
 
+  test('shows the declared task next to the picker and unlocks the model input', () => {
+    // Regression: after picking a task the picker resets to its placeholder, so
+    // if nothing restates the declared set the form looks like it discarded the
+    // choice — and the user never reaches the model field, so saving is blocked
+    // on `model_required` with only a generic toast to explain it.
+    const html = render({ model: '', capabilities: [emptyCapabilityDraft('chat')] });
+
+    expect(html.includes('data-declared-tasks')).toBe(true);
+    expect(html.includes('data-declared-task="chat"')).toBe(true);
+    // The declared task is stated inside the task section, before the model input.
+    expect(html.indexOf('data-declared-task="chat"')).toBeLessThan(
+      html.indexOf('data-unified-model-input')
+    );
+    // One task is enough to unlock the model field; the placeholder must no
+    // longer be the "pick a task first" prompt.
+    expect(html.includes('请先在上方选择任务')).toBe(false);
+    expect(html.includes('搜索目录模型，或直接输入官网模型 ID')).toBe(true);
+    // ...and the picker keeps offering the remaining eight tasks.
+    expect(html.includes('data-model-task-picker')).toBe(true);
+  });
+
   test('puts the supported-task picker before one unified catalog and free-text model input', () => {
     const html = render({ model: '', capabilities: [] }, manifests, 'bearer', [], {
       catalogSuggestions: [
