@@ -673,6 +673,41 @@ mod tests {
         assert!(!compat.ensure_alternation());
     }
 
+    /// `openai_defaults` is shared by every `openai.chat_text` platform — the
+    /// genuine OpenAI endpoint plus ~30 OpenAI-*compatible* gateways — and
+    /// nothing downstream can tell them apart, because the resolved `Config`
+    /// carries a `ProviderType`, never the platform id.
+    ///
+    /// So this default must stay `max_tokens`, even though OpenAI has deprecated
+    /// it in favour of `max_completion_tokens` and its reasoning families reject
+    /// it outright. Renaming it here would send an unrecognized field to the
+    /// compatible gateways that accept only `max_tokens`; most ignore unknown
+    /// fields, so the ceiling would silently stop applying and generation would
+    /// run unbounded. Two narrower mechanisms cover the OpenAI case instead: the
+    /// per-capability `max_tokens_field` override, and — when neither is set —
+    /// the provider's renegotiation off the endpoint's own rejection
+    /// (`nomi_providers::ProviderError::suggested_output_ceiling_key`).
+    #[test]
+    fn the_shared_openai_chat_ceiling_field_stays_the_compatible_spelling() {
+        assert_eq!(
+            ProviderCompat::openai_defaults().max_tokens_field.as_deref(),
+            Some("max_tokens"),
+        );
+
+        // A saved capability override remains authoritative over the default.
+        let overridden = ProviderCompat::merge(
+            ProviderCompat::openai_defaults(),
+            ProviderCompat {
+                max_tokens_field: Some("max_completion_tokens".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            overridden.max_tokens_field.as_deref(),
+            Some("max_completion_tokens")
+        );
+    }
+
     #[test]
     fn test_gemini_defaults() {
         let compat = ProviderCompat::gemini_defaults();
