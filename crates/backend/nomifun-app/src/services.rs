@@ -43,6 +43,56 @@ fn require_utf8_executable_path(path: &std::path::Path) -> anyhow::Result<String
     })
 }
 
+/// Stateless Creative Studio Workflow draft bridge.
+///
+/// This intentionally uses the provider factory's stateless completion
+/// surface: one exact managed Chat config, one user message, and a
+/// construction-time empty tool table. It creates no Conversation/Skill/MCP
+/// state and schedules no product-level retry or model failover. The selected
+/// provider may still perform its existing bounded transport negotiation while
+/// the downstream receiver remains live.
+pub(crate) struct AgentWorkflowDraftRunner {
+    pub model_invoke: Arc<nomifun_model_invoke::ModelInvokeService>,
+    pub workspace: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl nomifun_workshop::WorkflowDraftRunner for AgentWorkflowDraftRunner {
+    async fn run(
+        &self,
+        request: nomifun_workshop::WorkflowDraftRunRequest,
+    ) -> Result<String, nomifun_common::AppError> {
+        let completion = async {
+            let config = nomifun_ai_agent::resolve_provider_config(
+                self.model_invoke.as_ref(),
+                &request.provider_id,
+                &request.model,
+                &self.workspace,
+            )
+            .await?;
+            nomifun_ai_agent::one_shot_completion_bounded(
+                &config,
+                request.system_prompt,
+                vec![nomifun_ai_agent::user_message(request.user_text)],
+                nomifun_workshop::WORKFLOW_DRAFT_MAX_TOKENS,
+                nomifun_workshop::MAX_WORKFLOW_DRAFT_RESPONSE_BYTES,
+            )
+            .await
+        };
+
+        tokio::time::timeout(
+            Duration::from_secs(nomifun_workshop::WORKFLOW_DRAFT_TIMEOUT_SECS),
+            completion,
+        )
+        .await
+        .map_err(|_| {
+            nomifun_common::AppError::Timeout(
+                "Creative Studio workflow draft generation timed out".into(),
+            )
+        })?
+    }
+}
+
 /// Workshop text-node executor over the production Agent Chat stack.
 ///
 /// The selected model's persisted Chat capability is resolved by
@@ -1690,9 +1740,10 @@ pub struct AppServices {
     pub customer_service_service: Arc<nomifun_customer_service::CustomerServiceService>,
     /// 客服无状态并发回合执行器 (channel seam target).
     pub cs_dialogue_engine: Arc<nomifun_customer_service::CsDialogueEngine>,
-    /// Singleton 创意工坊 (Creative Workshop) service — canvas/asset CRUD +
-    /// on-disk canvas docs / asset binaries under `{data_dir}/workshop/`. Shared
-    /// by the `/api/workshop/*` routes.
+    /// Singleton Creative Studio service — canonical projects, assets,
+    /// workflows, and archives. Asset binaries live under
+    /// `{data_dir}/workshop/`; project documents live in SQLite. Shared by the
+    /// `/api/creative-studio/*` routes and Gateway capabilities.
     pub workshop_service: Arc<nomifun_workshop::WorkshopService>,
     /// Singleton 小程序 (mini-app) service — owner-scoped CRUD over the
     /// `miniapps` table, the document read the auth-exempt serve route uses, and
@@ -1700,8 +1751,8 @@ pub struct AppServices {
     /// Shared so the serve route and the publish route cannot disagree about
     /// which document a given id names.
     pub miniapp_service: Arc<nomifun_miniapp::MiniAppService>,
-    /// Singleton 生成引擎 (creation) service — the media generation task queue
-    /// behind the workshop canvas. Shared by the `/api/creation/*` routes.
+    /// Singleton generation service — the Creative Studio media task queue.
+    /// Shared by the `/api/creative-studio/tasks*` routes and Gateway tools.
     pub creation_service: Arc<nomifun_creation::CreationService>,
     /// Singleton unified multimodal invoke layer (P1 redesign): catalog
     /// resolution + protocol adapters over the shared proxy-aware HTTP client.

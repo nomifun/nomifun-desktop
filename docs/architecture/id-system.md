@@ -122,11 +122,15 @@ CREATE TABLE conversations (
 Examples of stable v3 entities include users, conversations, messages,
 terminal sessions, providers, requirements, agent executions and templates,
 Agent Execution Participant/Step/Attempt/Template Participant, knowledge
-bases, attachments, user presets, workshop canvases/assets,
-and Channel Plugin/User/Session. Requirements use `requirement_id` plus a
-human-facing `display_no`. The Agent Execution and Channel child entities use
-`participant_id`, `step_id`, `attempt_id`, `template_participant_id`,
-`channel_plugin_id`, `channel_user_id`, and `channel_session_id`.
+bases, attachments, user presets, Creative Studio projects/workflows/workflow
+runs/Agent sessions/assets/creation tasks, and Channel Plugin/User/Session.
+Creative Studio uses `project_id`, `workflow_id`, `workflow_run_id`,
+`session_id`, `asset_id`, and `creation_task_id`; embedded graph nodes and
+connections also carry canonical UUIDv7 identities in the project document.
+Requirements use `requirement_id` plus a human-facing `display_no`. The Agent
+Execution and Channel child entities use `participant_id`, `step_id`,
+`attempt_id`, `template_participant_id`, `channel_plugin_id`, `channel_user_id`,
+and `channel_session_id`.
 Managed Companion side-store records that can be addressed again through an
 API, file, or another record—memories, session windows, collected
 events, skills, and skill patterns—also use distinct named UUIDv7 newtypes.

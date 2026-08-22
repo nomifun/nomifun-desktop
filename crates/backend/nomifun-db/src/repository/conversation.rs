@@ -3,8 +3,36 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::DbError;
 use crate::models::{
-    ConversationArtifactRow, ConversationDeliveryReceiptRow, ConversationRow, MessageRow,
+    ConversationArtifactRow, ConversationDeliveryReceiptRow, ConversationRow,
+    CreativeStudioAgentSessionBindingRow, MessageRow,
 };
+
+/// Candidate used by the one transactional Creative Studio session resolver.
+/// `conversation` is inserted only by the binding winner; followers return the
+/// already committed aggregate and never materialize their candidate.
+#[derive(Debug, Clone)]
+pub struct ResolveCreativeStudioAgentSessionParams {
+    pub owner_id: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub expected_provider_id: String,
+    pub expected_model: String,
+    pub expected_pending_turn_idempotency_key: Option<String>,
+    pub conversation: ConversationRow,
+    pub create_if_missing: bool,
+}
+
+/// Exact persisted result of one Creative Studio session resolution.
+#[derive(Debug, Clone)]
+pub struct ResolvedCreativeStudioAgentSession {
+    pub binding: CreativeStudioAgentSessionBindingRow,
+    pub conversation: ConversationRow,
+    pub messages: Vec<MessageRow>,
+    pub project_message_ids: Vec<String>,
+    /// Receipt-backed assistant proposals belonging to this exact project session.
+    pub applied_proposal_message_ids: Vec<String>,
+    pub created: bool,
+}
 
 /// Remove only runtime/session instance state that can resume work after an
 /// explicit Conversation reset. User-authored configuration and execution
@@ -209,6 +237,35 @@ pub trait IConversationRepository: Send + Sync {
         _creation_key: &str,
     ) -> Result<Option<ConversationRow>, DbError> {
         Ok(None)
+    }
+
+    /// Atomically resolve or create an installation-owner Creative Studio
+    /// Agent session. Implementations must verify project existence and owner
+    /// authority, win the unique binding before inserting the Conversation,
+    /// and return the linked transcript from the same transaction snapshot.
+    async fn resolve_or_create_creative_studio_agent_session(
+        &self,
+        _params: &ResolveCreativeStudioAgentSessionParams,
+    ) -> Result<ResolvedCreativeStudioAgentSession, DbError> {
+        Err(DbError::Init(
+            "Conversation repository does not implement atomic Creative Studio Agent session resolution"
+            .to_owned(),
+        ))
+    }
+
+    /// Resolve the server-owned Creative Studio ownership marker for a
+    /// Conversation. Public Conversation update/delete paths use this to
+    /// reject mutations that must instead be coordinated by the product
+    /// session lifecycle.
+    async fn find_creative_studio_agent_session_by_conversation(
+        &self,
+        _owner_id: &str,
+        _conversation_id: &str,
+    ) -> Result<Option<CreativeStudioAgentSessionBindingRow>, DbError> {
+        Err(DbError::Init(
+            "Conversation repository does not implement Creative Studio Agent ownership lookup"
+                .to_owned(),
+        ))
     }
 
     /// Starts one explicit turn by compare-and-setting this owner's exact

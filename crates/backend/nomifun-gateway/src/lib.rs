@@ -67,7 +67,7 @@ mod caps_scheduling_ext;
 mod caps_system;
 mod caps_terminal;
 mod caps_terminal_ext;
-mod caps_workshop;
+mod caps_creative_studio;
 
 pub use deps::{CallerCtx, GatewayDeps};
 pub use registry::{Registry, Surface, ToolSpec};

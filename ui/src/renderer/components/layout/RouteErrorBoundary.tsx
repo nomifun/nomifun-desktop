@@ -19,6 +19,17 @@ interface RouteErrorBoundaryState {
   componentStack: string | null;
 }
 
+export function isRouteChunkLoadError(error: Error): boolean {
+  const text = `${error.name} ${error.message}`.toLocaleLowerCase();
+  return (
+    error.name === 'ChunkLoadError' ||
+    text.includes('failed to fetch dynamically imported module') ||
+    text.includes('error loading dynamically imported module') ||
+    text.includes('importing a module script failed') ||
+    /loading (css )?chunk [^ ]+ failed/.test(text)
+  );
+}
+
 /**
  * RouteErrorBoundary — 路由级错误边界
  *
@@ -59,6 +70,10 @@ class RouteErrorBoundary extends React.Component<RouteErrorBoundaryProps, RouteE
   }
 
   private handleReset = (): void => {
+    if (this.state.error && isRouteChunkLoadError(this.state.error)) {
+      window.location.reload();
+      return;
+    }
     this.setState({ error: null, componentStack: null });
   };
 
@@ -70,6 +85,8 @@ class RouteErrorBoundary extends React.Component<RouteErrorBoundaryProps, RouteE
     const { error, componentStack } = this.state;
     if (!error) return this.props.children;
     const isApplicationFailure = this.props.scope === 'application';
+    const requiresPageReload =
+      isApplicationFailure || isRouteChunkLoadError(error);
 
     return (
       <div
@@ -97,7 +114,7 @@ class RouteErrorBoundary extends React.Component<RouteErrorBoundaryProps, RouteE
         </div>
         <button
           type='button'
-          onClick={isApplicationFailure ? this.handleApplicationReload : this.handleReset}
+          onClick={requiresPageReload ? this.handleApplicationReload : this.handleReset}
           style={{
             marginBottom: '16px',
             padding: '4px 12px',
@@ -108,7 +125,11 @@ class RouteErrorBoundary extends React.Component<RouteErrorBoundaryProps, RouteE
             cursor: 'pointer',
           }}
         >
-          {isApplicationFailure ? '重新加载应用' : '重试'}
+          {isApplicationFailure
+            ? '重新加载应用'
+            : requiresPageReload
+              ? '重新加载页面'
+              : '重试'}
         </button>
         {error.stack ? (
           <>

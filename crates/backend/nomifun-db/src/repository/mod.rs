@@ -74,9 +74,14 @@ pub use client_preference::{IClientPreferenceRepository, KNOWLEDGE_RETRIEVAL_KEY
 pub(crate) use client_preference::{
     provider_preference_delete_action, ProviderPreferenceDeleteAction,
 };
-pub use conversation::IConversationRepository;
+pub use conversation::{
+    IConversationRepository, ResolveCreativeStudioAgentSessionParams,
+    ResolvedCreativeStudioAgentSession,
+};
 pub use creation_task::{
-    CreateCreationTaskParams, ICreationTaskRepository, ListCreationTasksParams, UpdateCreationTaskParams,
+    CreateCreativeTaskParams, CreationTaskPageCursorRef, CreativeTaskOwnerRef,
+    ICreationTaskRepository, IdempotentCreationTask, ListStandaloneWorkbenchTasksParams,
+    RetireStandaloneWorkbenchTasksParams, UpdateCreationTaskParams,
 };
 pub use cron::ICronRepository;
 pub use idmm_intervention::{
@@ -91,7 +96,10 @@ pub use mcp_server::IMcpServerRepository;
 pub use oauth_token::IOAuthTokenRepository;
 pub use provider::IProviderRepository;
 pub use provider_connection::IProviderConnectionRepository;
-pub use provider_model::IProviderModelRepository;
+pub use provider_model::{
+    CoordinatedProviderModelDelete, IProviderModelRepository, ProviderModelCleanupPlan,
+    ProviderModelProjectCleanup, ProviderModelWorkflowCleanup,
+};
 pub use provider_model_capability::IProviderModelCapabilityRepository;
 pub use preset::{IPresetRepository, IPresetStateRepository, IPresetTagRepository};
 pub use requirement::{
@@ -138,4 +146,7 @@ pub use terminal::{
 };
 pub use user::IUserRepository;
 pub use webhook::IWebhookRepository;
-pub use workshop::{AssetSort, IWorkshopRepository, ListAssetsParams, UpdateAssetParams};
+pub use workshop::{
+    ApplyCreativeAgentProposalParams, AssetSort, CreativeAgentProposalCommit,
+    IWorkshopRepository, ListAssetsParams, UpdateAssetParams,
+};

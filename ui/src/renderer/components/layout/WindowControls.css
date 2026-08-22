@@ -1,0 +1,45 @@
+/* Native-style Windows/Linux window controls shared by every product shell. */
+
+:root {
+  --window-close-danger: var(--danger, #e81123);
+  --window-close-danger-active: color-mix(in srgb, var(--danger, #c10f1f) 80%, #000);
+}
+
+.app-window-controls {
+  display: flex;
+  align-items: stretch;
+  align-self: stretch;
+  -webkit-app-region: no-drag;
+}
+
+.app-window-controls__button {
+  display: inline-flex;
+  width: 40px;
+  height: 100%;
+  align-self: stretch;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background-color 0.18s ease;
+}
+
+.app-window-controls__button:hover {
+  background-color: rgba(128, 128, 128, 0.2);
+}
+
+.app-window-controls__button:active {
+  background-color: rgba(128, 128, 128, 0.3);
+}
+
+.app-window-controls__button--close:hover {
+  background-color: var(--window-close-danger);
+  color: #fff;
+}
+
+.app-window-controls__button--close:active {
+  background-color: var(--window-close-danger-active);
+  color: #fff;
+}

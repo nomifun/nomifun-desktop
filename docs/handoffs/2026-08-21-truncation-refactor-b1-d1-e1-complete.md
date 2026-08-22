@@ -235,7 +235,7 @@ $env:CARGO_INCREMENTAL='0'
 - `cargo test -p nomifun-conversation --lib`：535；CRUD / extended / relay 集成也通过。
 - `cargo test -p nomifun-idmm --lib`：201。
 - `cargo test -p nomifun-model-invoke`：357，manifest / URL contract 通过。
-- `cargo test -p nomifun-db`：lib 374；全部 integration binary 通过；migration 036 为 7/7 中的一项。
+- `cargo test -p nomifun-db`：lib 374；全部 integration binary 通过；合并后的 migration 046 为 7/7 中的一项。
 - `cargo test -p nomifun-system --test agent_chat_protocol_contract`：3。
 - `cargo test -p nomifun-system --test provider_routes`：11。
 - `cargo test -p nomifun-terminal --lib`：130。

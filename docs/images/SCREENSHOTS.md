@@ -2,10 +2,10 @@
 
 This file tracks the user-facing screenshots used by the Desktop documentation.
 On 2026-08-15, the complete active set was freshly captured from the current
-`nomifun-desktop` checkout and synchronized to this repository and the sibling
-NomiFun Portal. These are real running-app captures, not mockups or copies of
-the retired product UI. Do not restore the retired screenshots in either
-repository.
+`nomifun-desktop` checkout. The two Creative Studio README captures were
+replaced again on 2026-08-22 from the production SPA and an isolated data root.
+These are real running-app captures, not mockups or copies of the retired
+product UI. Do not restore retired screenshots.
 
 ## Naming scheme
 
@@ -46,7 +46,7 @@ directory, then synchronize the verified files to Desktop and Portal.
    NomiFun data directory or real credentials.
 4. Capture current routes in the Codex in-app browser at `1280x720`, including
    list, dialog, settings, model, skill, companion, terminal, Mini App and
-   Creative Workshop views.
+   Creative Studio views.
 5. For authentication screens, start a second isolated host without
    `--insecure-no-auth` and capture exactly what the current SPA renders.
 6. Before copying, verify every expected file is non-empty. Afterwards compare
@@ -86,10 +86,12 @@ the guide uses text instead of an obsolete visual.
 ## README and product gallery set
 
 - `readme/en/` and `readme/zh/` contain current workspace, models, companions,
-  skills, and Creative Workshop captures.
+  skills, and Creative Studio captures. The English Creative Studio image is
+  intentionally unedited: its focused shell follows English while the launch
+  canvas body still exposes the documented Simplified-Chinese limitation.
 - `getting-started/en/` and `getting-started/zh/` contain current home captures.
-- Portal's `public/screenshots/desktop/` contains the same localized current
-  product views, including both English and Chinese Creative Workshop screens.
+- Portal copies must be synchronized and hash-checked separately before a
+  Portal publication; this manifest does not claim that synchronization.
 - `desktop-01-main-window.png` shows the current application content. It does
   not claim to document platform-specific native titlebar chrome.
 

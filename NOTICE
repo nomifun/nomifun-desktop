@@ -15,5 +15,31 @@ applicable:
   Copyright iOfficeAI
   Licensed under the Apache License, Version 2.0.
 
+This product's Creative Studio rebuild references and, where authorized,
+incorporates source material from:
+
+  infinite-canvas
+  https://github.com/tigerowo/infinite-canvas
+  Reference revision: ef7303d7bd66a7a62e300559ce878d0c06863875
+  Copyright (c) 2026 tigerowo
+  Root license at the reference revision: MIT License.
+
+The complete MIT notice is preserved in
+third_party/infinite-canvas/LICENSE. The source and authorization audit is
+recorded in docs/specs/2026-08-20-infinite-canvas-product-rebuild.zh.md; this
+attribution does not replace that audit or make a broader provenance claim.
+
+The Windows installer template is derived from:
+
+  Tauri
+  https://github.com/tauri-apps/tauri
+  Template tag: tauri-cli-v2.11.2
+  Template revision: 499df79be65ef8c0670abc0207cd9e37b55d8491
+  Copyright 2019-2026 Tauri Programme within The Commons Conservancy
+  Licensed under the Apache License, Version 2.0.
+
+The vendored template carries a prominent modification notice and preserves
+its exact upstream revision and checksum in apps/desktop/nsis/installer.nsi.
+
 Our sincere thanks to the maintainers and communities of the open-source
 projects NomiFun uses.

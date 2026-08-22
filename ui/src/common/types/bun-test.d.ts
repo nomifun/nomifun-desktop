@@ -26,7 +26,7 @@ declare module 'bun:test' {
   }
 
   interface Test {
-    (name: string, fn: TestFn): void;
+    (name: string, fn: TestFn, timeout?: number): void;
     each<T>(cases: readonly T[]): (name: string, fn: (caseValue: T) => void | Promise<void>) => void;
     each<T extends readonly unknown[]>(
       cases: readonly T[]

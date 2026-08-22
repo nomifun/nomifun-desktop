@@ -540,31 +540,72 @@ struct SecretRedactingProvider {
     redactor: SecretRedactor,
 }
 
+async fn forward_redacted_stream(
+    mut source: mpsc::Receiver<LlmEvent>,
+    tx: mpsc::Sender<LlmEvent>,
+    redactor: SecretRedactor,
+) {
+    loop {
+        let event = tokio::select! {
+            biased;
+            _ = tx.closed() => break,
+            event = source.recv() => event,
+        };
+        let Some(event) = event else {
+            break;
+        };
+        let event = match event {
+            LlmEvent::Error(message) => LlmEvent::Error(redactor.redact(&message)),
+            other => other,
+        };
+        if tx.send(event).await.is_err() {
+            break;
+        }
+    }
+    // Dropping `source` here propagates the outer consumer cancellation to the
+    // concrete provider's Sender, which then stops its HTTP drain/retry task.
+}
+
 #[async_trait]
 impl LlmProvider for SecretRedactingProvider {
     async fn stream(
         &self,
         request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
-        let mut source = self
+        let source = self
             .inner
             .stream(request)
             .await
             .map_err(|error| error.redacted(&self.redactor))?;
         let redactor = self.redactor.clone();
         let (tx, rx) = mpsc::channel(64);
-        tokio::spawn(async move {
-            while let Some(event) = source.recv().await {
-                let event = match event {
-                    LlmEvent::Error(message) => LlmEvent::Error(redactor.redact(&message)),
-                    other => other,
-                };
-                if tx.send(event).await.is_err() {
-                    break;
-                }
-            }
-        });
+        tokio::spawn(forward_redacted_stream(source, tx, redactor));
         Ok(rx)
+    }
+}
+
+#[cfg(test)]
+mod stream_cancellation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn redacting_wrapper_propagates_dropped_receiver_without_waiting_for_an_event() {
+        let (source_tx, source_rx) = mpsc::channel(1);
+        let (tx, rx) = mpsc::channel(1);
+        let task = tokio::spawn(forward_redacted_stream(
+            source_rx,
+            tx,
+            SecretRedactor::new(std::iter::empty::<String>()),
+        ));
+
+        drop(rx);
+        tokio::time::timeout(Duration::from_millis(100), source_tx.closed())
+            .await
+            .expect("inner provider receiver remained attached after outer cancellation");
+        tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("redacting forwarder did not stop after receiver cancellation")
+            .unwrap();
     }
 }
 

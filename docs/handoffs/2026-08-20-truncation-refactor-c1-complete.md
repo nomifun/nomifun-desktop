@@ -20,7 +20,7 @@ C1 开始前 HEAD：`4b2fec1d`（其父提交 `00dee682` 已完成 A1/A2）
 
 ### 1. Capability 与数据库成为唯一桌面事实源
 
-- 新增 migration `036_provider_model_output_limit.sql`：
+- 新增 migration `046_provider_model_output_limit.sql`（合并 Creative Studio 036–045 后的顺延编号）：
   - `provider_model_capabilities.output_limit INTEGER CHECK (output_limit IS NULL OR output_limit > 0)`；
   - 既有 `anthropic.messages` / `bedrock.anthropic_messages` chat 行回填 `8192`，保持升级前 wire 行为；
   - OpenAI-compatible / Gemini 保持 `NULL`，表示真正省略 wire 字段；
@@ -91,7 +91,7 @@ $env:CARGO_INCREMENTAL='0'
 - `cargo test -p nomifun-conversation --lib`：524 passed。
 - `cargo test -p nomifun-idmm --lib`：201 passed。
 - `cargo test -p nomifun-model-invoke`：354 unit + 8 manifest + 2 URL contract passed。
-- `cargo test -p nomifun-db --test provider_capabilities_migration migration_36_declares_output_limits_and_removes_legacy_body_ceilings`：passed。
+- `cargo test -p nomifun-db --test provider_capabilities_migration migration_46_declares_output_limits_and_removes_legacy_body_ceilings`：passed。
 - `cargo test -p nomifun-db --test provider_repository`：17 passed。
 - `cargo test -p nomifun-api-types --test ts_export`：2 passed。
 - `cargo test -p nomifun-system provider_model`：11 passed。

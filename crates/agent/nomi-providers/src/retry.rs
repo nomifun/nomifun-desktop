@@ -17,6 +17,33 @@ const MAX_BACKOFF: Duration = Duration::from_secs(15);
 const INITIAL_REQUEST_BACKOFF: Duration = Duration::from_millis(300);
 const MAX_INITIAL_REQUEST_BACKOFF: Duration = Duration::from_secs(2);
 
+/// Race provider work against the downstream receiver lifecycle.
+///
+/// Provider stream drains run in detached tasks, so dropping the consumer's
+/// `Receiver` does not cancel them automatically. Every active drain, retry
+/// send, response processor, and backoff uses this boundary; `None` means the
+/// receiver closed and the owned future was dropped immediately.
+pub(crate) async fn until_receiver_closed<T, F>(
+    tx: &mpsc::Sender<LlmEvent>,
+    future: F,
+) -> Option<T>
+where
+    F: Future<Output = T>,
+{
+    if tx.is_closed() {
+        return None;
+    }
+    tokio::select! {
+        biased;
+        _ = tx.closed() => None,
+        value = future => Some(value),
+    }
+}
+
+async fn emit_if_open(tx: &mpsc::Sender<LlmEvent>, event: LlmEvent) -> bool {
+    matches!(until_receiver_closed(tx, tx.send(event)).await, Some(Ok(())))
+}
+
 /// Retry bounded initial failures before any response is exposed locally:
 /// connection failures and transient gateway/service 500/502/503/504
 /// responses. The upstream may still have spent work before returning an
@@ -126,6 +153,25 @@ pub async fn backoff_sleep(attempt: u32, current_backoff: Duration) -> Duration 
     (current_backoff * 2).min(MAX_BACKOFF)
 }
 
+/// Cancellation-aware retry backoff. The downstream close signal interrupts
+/// the timer, so a timed-out consumer never waits out a provider retry delay.
+async fn backoff_sleep_until_closed(
+    tx: &mpsc::Sender<LlmEvent>,
+    attempt: u32,
+    current_backoff: Duration,
+) -> Option<Duration> {
+    if tx.is_closed() {
+        return None;
+    }
+    tracing::warn!(
+        attempt,
+        max = MAX_STREAM_RETRIES,
+        "retrying provider stream after an empty retryable failure"
+    );
+    until_receiver_closed(tx, tokio::time::sleep(current_backoff)).await?;
+    Some((current_backoff * 2).min(MAX_BACKOFF))
+}
+
 /// Evaluate a `StreamOutcome` within a retry loop. Returns:
 /// - `Ok(None)` — stream succeeded, stop retrying
 /// - `Ok(Some(err))` — non-retryable failure, caller should emit error
@@ -157,29 +203,32 @@ pub fn evaluate_outcome(
 /// - `FailedEmpty` — nothing was emitted yet; if the error is retryable,
 ///   re-send the request via `send` and re-process the response via
 ///   `process`, up to `MAX_STREAM_RETRIES` times.
-pub async fn finish_stream_with_retry<S, SFut, P, PFut>(
+pub async fn finish_stream_with_retry<S, SFut, P, PFut, R>(
     outcome: StreamOutcome,
     tx: &mpsc::Sender<LlmEvent>,
     send: S,
     mut process: P,
 ) where
     S: Fn() -> SFut,
-    SFut: Future<Output = Result<reqwest::Response, ProviderError>>,
-    P: FnMut(reqwest::Response) -> PFut,
+    SFut: Future<Output = Result<R, ProviderError>>,
+    P: FnMut(R) -> PFut,
     PFut: Future<Output = StreamOutcome>,
 {
+    if tx.is_closed() {
+        return;
+    }
     let initial_err = match outcome {
         StreamOutcome::Ok => return,
         StreamOutcome::FailedPartial(e) => {
             // Content already emitted — replaying would duplicate it.
-            let _ = tx.send(LlmEvent::Error(e.to_string())).await;
+            emit_if_open(tx, LlmEvent::Error(e.to_string())).await;
             return;
         }
         StreamOutcome::FailedEmpty(e) => e,
     };
 
     if !initial_err.is_retryable() {
-        let _ = tx.send(LlmEvent::Error(initial_err.to_string())).await;
+        emit_if_open(tx, LlmEvent::Error(initial_err.to_string())).await;
         return;
     }
 
@@ -187,10 +236,26 @@ pub async fn finish_stream_with_retry<S, SFut, P, PFut>(
     let mut final_err = Some(initial_err);
     let mut attempts_made = 0;
     for attempt in 1..=MAX_STREAM_RETRIES {
+        if tx.is_closed() {
+            return;
+        }
         attempts_made = attempt;
-        backoff = backoff_sleep(attempt, backoff).await;
-        match send().await {
-            Ok(resp) => match evaluate_outcome(process(resp).await, attempt) {
+        let Some(next_backoff) = backoff_sleep_until_closed(tx, attempt, backoff).await else {
+            return;
+        };
+        backoff = next_backoff;
+        let Some(send_result) = until_receiver_closed(tx, send()).await else {
+            return;
+        };
+        match send_result {
+            Ok(resp) => {
+                if tx.is_closed() {
+                    return;
+                }
+                let Some(process_outcome) = until_receiver_closed(tx, process(resp)).await else {
+                    return;
+                };
+                match evaluate_outcome(process_outcome, attempt) {
                 Ok(None) => {
                     final_err = None;
                     break;
@@ -200,7 +265,8 @@ pub async fn finish_stream_with_retry<S, SFut, P, PFut>(
                     break;
                 }
                 Err(_) => continue,
-            },
+                }
+            }
             Err(e) if !e.is_retryable() || attempt == MAX_STREAM_RETRIES => {
                 final_err = Some(e);
                 break;
@@ -209,6 +275,9 @@ pub async fn finish_stream_with_retry<S, SFut, P, PFut>(
         }
     }
     if let Some(err) = final_err {
+        if tx.is_closed() {
+            return;
+        }
         let (error_kind, status) = retry_log_classification(&err);
         tracing::warn!(
             attempts = attempts_made,
@@ -217,17 +286,198 @@ pub async fn finish_stream_with_retry<S, SFut, P, PFut>(
             status = status.unwrap_or_default(),
             "provider empty-stream retry ended with an error"
         );
-        let _ = tx.send(LlmEvent::Error(err.to_string())).await;
+        emit_if_open(tx, LlmEvent::Error(err.to_string())).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     use super::*;
     use crate::ProviderError;
+
+    struct DropProbe(Arc<AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn dropped_receiver_cancels_active_drain_future() {
+        let (tx, rx) = mpsc::channel(1);
+        let started = Arc::new(tokio::sync::Semaphore::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn({
+            let started = Arc::clone(&started);
+            let dropped = Arc::clone(&dropped);
+            async move {
+                until_receiver_closed(&tx, async move {
+                    let _probe = DropProbe(dropped);
+                    started.add_permits(1);
+                    std::future::pending::<()>().await;
+                })
+                .await
+            }
+        });
+
+        started.acquire().await.unwrap().forget();
+        drop(rx);
+        let result = tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("active stream drain ignored receiver cancellation")
+            .unwrap();
+        assert!(result.is_none());
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn dropped_receiver_interrupts_retry_backoff() {
+        let (tx, rx) = mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            backoff_sleep_until_closed(&tx, 1, Duration::from_secs(30)).await
+        });
+        tokio::task::yield_now().await;
+        drop(rx);
+
+        let result = tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("retry backoff waited after receiver cancellation")
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn already_dropped_receiver_never_sends_or_processes_a_retry() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let send_count = Arc::new(AtomicU32::new(0));
+        let process_count = Arc::new(AtomicU32::new(0));
+
+        finish_stream_with_retry(
+            StreamOutcome::FailedEmpty(ProviderError::Connection("empty".into())),
+            &tx,
+            || {
+                let send_count = Arc::clone(&send_count);
+                async move {
+                    send_count.fetch_add(1, Ordering::SeqCst);
+                    Ok::<(), ProviderError>(())
+                }
+            },
+            |()| {
+                let process_count = Arc::clone(&process_count);
+                async move {
+                    process_count.fetch_add(1, Ordering::SeqCst);
+                    StreamOutcome::Ok
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(send_count.load(Ordering::SeqCst), 0);
+        assert_eq!(process_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn dropped_receiver_cancels_inflight_retry_send_and_prevents_more_attempts() {
+        tokio::time::pause();
+        let (tx, rx) = mpsc::channel(1);
+        let send_count = Arc::new(AtomicU32::new(0));
+        let process_count = Arc::new(AtomicU32::new(0));
+        let send_started = Arc::new(tokio::sync::Semaphore::new(0));
+        let task = tokio::spawn({
+            let send_count = Arc::clone(&send_count);
+            let process_count = Arc::clone(&process_count);
+            let send_started = Arc::clone(&send_started);
+            async move {
+                finish_stream_with_retry(
+                    StreamOutcome::FailedEmpty(ProviderError::Connection("empty".into())),
+                    &tx,
+                    || {
+                        let send_count = Arc::clone(&send_count);
+                        let send_started = Arc::clone(&send_started);
+                        async move {
+                            send_count.fetch_add(1, Ordering::SeqCst);
+                            send_started.add_permits(1);
+                            std::future::pending::<Result<(), ProviderError>>().await
+                        }
+                    },
+                    move |()| {
+                        let process_count = Arc::clone(&process_count);
+                        async move {
+                            process_count.fetch_add(1, Ordering::SeqCst);
+                            StreamOutcome::Ok
+                        }
+                    },
+                )
+                .await;
+            }
+        });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        send_started.acquire().await.unwrap().forget();
+        drop(rx);
+        tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("in-flight retry send ignored receiver cancellation")
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert_eq!(send_count.load(Ordering::SeqCst), 1);
+        assert_eq!(process_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn dropped_receiver_cancels_inflight_retry_processor() {
+        tokio::time::pause();
+        let (tx, rx) = mpsc::channel(1);
+        let send_count = Arc::new(AtomicU32::new(0));
+        let process_count = Arc::new(AtomicU32::new(0));
+        let process_started = Arc::new(tokio::sync::Semaphore::new(0));
+        let task = tokio::spawn({
+            let send_count = Arc::clone(&send_count);
+            let process_count = Arc::clone(&process_count);
+            let process_started = Arc::clone(&process_started);
+            async move {
+                finish_stream_with_retry(
+                    StreamOutcome::FailedEmpty(ProviderError::Connection("empty".into())),
+                    &tx,
+                    || {
+                        let send_count = Arc::clone(&send_count);
+                        async move {
+                            send_count.fetch_add(1, Ordering::SeqCst);
+                            Ok::<(), ProviderError>(())
+                        }
+                    },
+                    move |()| {
+                        let process_count = Arc::clone(&process_count);
+                        let process_started = Arc::clone(&process_started);
+                        async move {
+                            process_count.fetch_add(1, Ordering::SeqCst);
+                            process_started.add_permits(1);
+                            std::future::pending::<StreamOutcome>().await
+                        }
+                    },
+                )
+                .await;
+            }
+        });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        process_started.acquire().await.unwrap().forget();
+        drop(rx);
+        tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("in-flight response processor ignored receiver cancellation")
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert_eq!(send_count.load(Ordering::SeqCst), 1);
+        assert_eq!(process_count.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test]
     async fn test_initial_connect_retry_succeeds_after_connection_failures() {

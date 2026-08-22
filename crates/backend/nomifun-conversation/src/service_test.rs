@@ -551,6 +551,14 @@ impl IConversationRepository for MockRepo {
         Ok(rows.iter().find(|r| r.conversation_id == id).cloned())
     }
 
+    async fn find_creative_studio_agent_session_by_conversation(
+        &self,
+        _owner_id: &str,
+        _conversation_id: &str,
+    ) -> Result<Option<nomifun_db::models::CreativeStudioAgentSessionBindingRow>, DbError> {
+        Ok(None)
+    }
+
     async fn has_accepted_delivery_receipt_operation_prefix(
         &self,
         user_id: &str,
@@ -15922,9 +15930,6 @@ impl nomifun_db::IProviderModelRepository for StubProviderModelRepo {
         _expected_config_revision: i64,
         _row: &nomifun_db::NewProviderModel<'_>,
     ) -> Result<nomifun_db::ProviderModelRow, DbError> {
-        unimplemented!("not used in failover tests")
-    }
-    async fn delete(&self, _provider_id: &str, _model: &str) -> Result<bool, DbError> {
         unimplemented!("not used in failover tests")
     }
 }

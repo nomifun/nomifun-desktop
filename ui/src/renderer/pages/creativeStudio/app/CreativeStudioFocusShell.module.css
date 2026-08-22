@@ -1,0 +1,111 @@
+.shell {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--color-bg-1);
+  color: var(--color-text-1);
+  isolation: isolate;
+}
+
+.content {
+  position: relative;
+  z-index: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.portalRoot {
+  /*
+   * Creative Studio overlays are part of the focused product surface. Keep
+   * Select/Modal portals on the same quiet stone palette as their owning page
+   * instead of inheriting the surrounding application's user theme.
+   */
+  --color-bg-1: #f4f2ed;
+  --color-bg-2: #fbfaf7;
+  --color-bg-3: #eeeae4;
+  --color-bg-4: #dedbd2;
+  --color-bg-5: #ffffff;
+  --color-bg-white: #ffffff;
+  --color-bg-popup: #fbfaf7;
+  --color-secondary: #eeeae4;
+  --color-secondary-hover: #e7e5df;
+  --color-secondary-active: #dedbd2;
+  --color-secondary-disabled: #f5f3ef;
+  --color-neutral-1: #faf9f7;
+  --color-neutral-2: #f1efea;
+  --color-neutral-3: #e1ded7;
+  --color-neutral-4: #d5d1c8;
+  --color-neutral-5: #bcb6ac;
+  --color-neutral-6: #a29b91;
+  --color-neutral-7: #777269;
+  --color-neutral-8: #4d4a45;
+  --color-neutral-9: #363330;
+  --color-neutral-10: #242321;
+  --gray-1: 250, 249, 247;
+  --gray-2: 245, 243, 239;
+  --gray-3: 225, 222, 215;
+  --gray-4: 213, 209, 200;
+  --gray-5: 188, 182, 172;
+  --gray-6: 162, 155, 145;
+  --gray-7: 119, 114, 105;
+  --gray-8: 77, 74, 69;
+  --gray-9: 36, 35, 33;
+  --gray-10: 17, 17, 15;
+  --color-primary: #57534e;
+  --primary: #57534e;
+  --primary-rgb: 87, 83, 78;
+  --color-primary-light-1: #f5f5f4;
+  --color-primary-light-2: #e7e5e4;
+  --color-primary-light-3: #d6d3d1;
+  --color-primary-light-4: #a8a29e;
+  --color-primary-dark-1: #44403c;
+  --brand: #57534e;
+  --bg-base: #f4f2ed;
+  --bg-1: #f4f2ed;
+  --bg-2: #fbfaf7;
+  --bg-3: #eeeae4;
+  --dialog-fill-0: #f4f2ed;
+  --border-base: #dedbd2;
+  --nomi-modal-control-bg: #ffffff;
+  --text-primary: #292524;
+  --text-secondary: #57534e;
+  --text-disabled: #b7b1a7;
+  --button-primary-text: #ffffff;
+  --button-primary-disabled-bg: rgba(68, 64, 60, 0.08);
+  --button-primary-disabled-border: #dedbd2;
+  --button-primary-disabled-text: #8a8479;
+  --control-selected-bg: #57534e;
+  --control-selected-fg: #ffffff;
+  --control-idle-bg: #fbfaf7;
+  --control-idle-border: #d6d3ca;
+  --control-hover-bg: #eeeae4;
+  --control-disabled-selected-bg: #d6d3ca;
+  --control-focus-ring: rgba(87, 83, 78, 0.24);
+  --color-fill-1: rgba(68, 64, 60, 0.04);
+  --color-fill-2: rgba(68, 64, 60, 0.08);
+  --color-fill-3: rgba(68, 64, 60, 0.12);
+  --color-fill-4: rgba(68, 64, 60, 0.18);
+  --color-text-1: #292524;
+  --color-text-2: #57534e;
+  --color-text-3: #8a8479;
+  --color-text-4: #b7b1a7;
+  --color-border-1: #ece9e2;
+  --color-border-2: #dedbd2;
+  --color-border-3: #d6d3ca;
+  --color-border-4: #a8a29e;
+  --primary-1: 250, 250, 249;
+  --primary-2: 245, 245, 244;
+  --primary-3: 231, 229, 228;
+  --primary-4: 214, 211, 209;
+  --primary-5: 120, 113, 108;
+  --primary-6: 87, 83, 78;
+  --primary-7: 68, 64, 60;
+  position: relative;
+  z-index: 1000;
+  color-scheme: light;
+}

@@ -2,6 +2,27 @@ use nomifun_common::{ConversationId, TerminalId, validate_uuidv7};
 use nomifun_db::{init_database_memory, validate_id_schema_contract};
 use sqlx::Row;
 
+async fn seed_creation_task_project(pool: &nomifun_db::SqlitePool) -> (String, String) {
+    let project_id = nomifun_common::generate_id();
+    let node_id = nomifun_common::generate_id();
+    let document = serde_json::json!({
+        "schema": "nomifun.creative-studio/v1",
+        "projectId": project_id,
+        "nodes": []
+    });
+    sqlx::query(
+        "INSERT INTO creative_studio_projects \
+         (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+         VALUES (?, 'ID Contract Task', 1, 0, 0, ?, 1, 1)",
+    )
+    .bind(&project_id)
+    .bind(document.to_string())
+    .execute(pool)
+    .await
+    .expect("creative task project");
+    (project_id, node_id)
+}
+
 const BASELINE: &str = include_str!("../migrations/001_v3_baseline.sql");
 
 fn executable_baseline_sql() -> String {
@@ -32,7 +53,6 @@ const UNCONDITIONAL_UUIDV7_BUSINESS_IDS: &[(&str, &str)] = &[
     ("knowledge_bases", "knowledge_base_id"),
     ("knowledge_bindings", "knowledge_binding_id"),
     ("attachments", "attachment_id"),
-    ("workshop_canvases", "canvas_id"),
     ("workshop_assets", "asset_id"),
     ("channel_plugins", "channel_plugin_id"),
     ("channel_sessions", "channel_session_id"),
@@ -50,6 +70,9 @@ const UNCONDITIONAL_UUIDV7_BUSINESS_IDS: &[(&str, &str)] = &[
     ("mcp_servers", "mcp_server_id"),
     ("webhooks", "webhook_id"),
     ("creation_tasks", "creation_task_id"),
+    ("creative_studio_agent_sessions", "session_id"),
+    ("creative_studio_workflow_runs", "workflow_run_id"),
+    ("creative_studio_workflows", "workflow_id"),
     ("conversation_artifacts", "conversation_artifact_id"),
     ("idmm_action_reservations", "reservation_id"),
     ("idmm_interventions", "intervention_id"),
@@ -145,6 +168,11 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "conversation_mcp_servers",
     "conversations",
     "creation_tasks",
+    "creative_studio_agent_proposal_receipts",
+    "creative_studio_agent_sessions",
+    "creative_studio_projects",
+    "creative_studio_workflow_runs",
+    "creative_studio_workflows",
     "cron_job_runs",
     "cron_jobs",
     "cron_run_reservations",
@@ -201,7 +229,6 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "users",
     "webhooks",
     "workshop_assets",
-    "workshop_canvases",
 ];
 
 /// True for the FTS5 virtual table and its shadow tables, whose physical shape
@@ -427,6 +454,7 @@ async fn runtime_v3_schema_has_no_physical_foreign_keys_or_cascades_and_only_gua
             "channel_inbound_receipts_no_delete",
             "channel_inbound_receipts_scope_set_once",
             "channel_session_bindings_identity_immutable",
+            "restrict_workshop_asset_delete_creation_task_refs",
             "trg_channel_plugins_owner_domain_insert_guard",
             "trg_channel_plugins_owner_domain_update_guard",
             "trg_conversation_delivery_receipts_identity_immutable",
@@ -452,6 +480,10 @@ async fn runtime_v3_schema_has_no_physical_foreign_keys_or_cascades_and_only_gua
             "trg_requirements_pre_effect_abandon_guard_insert",
             "trg_terminal_turn_admissions_open_insert_guard",
             "trg_terminal_turn_admissions_open_update_guard",
+            "validate_creation_task_input_bindings_insert",
+            "validate_creation_task_input_bindings_update",
+            "validate_creative_asset_origin_insert",
+            "validate_creative_asset_origin_update",
         ],
         "v3 schema permits only registered guard triggers"
     );
@@ -710,12 +742,16 @@ async fn remaining_product_business_ids_reject_duplicates_and_non_uuid_values() 
     }
 
     let creation_task_id = nomifun_common::generate_id();
+    let (task_project_id, task_node_id) = seed_creation_task_project(pool).await;
     sqlx::query(
         "INSERT INTO creation_tasks \
-         (creation_task_id, provider_id, model, capability, params, status, submitted_at) \
-         VALUES (?, ?, 'model', 'text', '{}', 'queued', 1)",
+         (creation_task_id, project_id, node_id, provider_id, model, capability, params, status, \
+          submitted_at, request_fingerprint) \
+         VALUES (?, ?, ?, ?, 'model', 'text', '{}', 'queued', 1, '{\"contract\":\"business-id\"}')",
     )
     .bind(&creation_task_id)
+    .bind(&task_project_id)
+    .bind(&task_node_id)
     .bind(&provider_id)
     .execute(pool)
     .await
@@ -723,10 +759,13 @@ async fn remaining_product_business_ids_reject_duplicates_and_non_uuid_values() 
     assert!(
         sqlx::query(
             "INSERT INTO creation_tasks \
-             (creation_task_id, provider_id, model, capability, params, status, submitted_at) \
-             VALUES (?, ?, 'duplicate', 'text', '{}', 'queued', 1)",
+             (creation_task_id, project_id, node_id, provider_id, model, capability, params, status, \
+              submitted_at, request_fingerprint) \
+             VALUES (?, ?, ?, ?, 'duplicate', 'text', '{}', 'queued', 1, '{\"contract\":\"business-id\"}')",
         )
         .bind(&creation_task_id)
+        .bind(&task_project_id)
+        .bind(&task_node_id)
         .bind(&provider_id)
         .execute(pool)
         .await
@@ -735,9 +774,12 @@ async fn remaining_product_business_ids_reject_duplicates_and_non_uuid_values() 
     assert!(
         sqlx::query(
             "INSERT INTO creation_tasks \
-             (creation_task_id, provider_id, model, capability, params, status, submitted_at) \
-             VALUES ('not-a-uuid', ?, 'model', 'text', '{}', 'queued', 1)",
+             (creation_task_id, project_id, node_id, provider_id, model, capability, params, status, \
+              submitted_at, request_fingerprint) \
+             VALUES ('not-a-uuid', ?, ?, ?, 'model', 'text', '{}', 'queued', 1, '{\"contract\":\"business-id\"}')",
         )
+        .bind(&task_project_id)
+        .bind(&task_node_id)
         .bind(&provider_id)
         .execute(pool)
         .await
@@ -1016,12 +1058,16 @@ async fn remaining_uuid_logical_links_and_json_registry_enforce_text_values() {
     .await
     .expect("provider");
     let creation_task_id = nomifun_common::generate_id();
+    let (task_project_id, task_node_id) = seed_creation_task_project(pool).await;
     sqlx::query(
         "INSERT INTO creation_tasks \
-         (creation_task_id, provider_id, model, capability, params, status, submitted_at) \
-         VALUES (?, ?, 'model', 'text', '{}', 'queued', 1)",
+         (creation_task_id, project_id, node_id, provider_id, model, capability, params, status, \
+          submitted_at, request_fingerprint) \
+         VALUES (?, ?, ?, ?, 'model', 'text', '{}', 'queued', 1, '{\"contract\":\"asset-origin\"}')",
     )
     .bind(&creation_task_id)
+    .bind(&task_project_id)
+    .bind(&task_node_id)
     .bind(&provider_id)
     .execute(pool)
     .await
@@ -1089,6 +1135,118 @@ async fn remaining_uuid_logical_links_and_json_registry_enforce_text_values() {
             "uppercase creation_task_id",
             serde_json::json!({
                 "creation_task_id": nomifun_common::generate_id().to_ascii_uppercase()
+            }),
+        ),
+    ] {
+        assert!(
+            sqlx::query(
+                "INSERT INTO workshop_assets \
+                 (asset_id, kind, title, origin, created_at, updated_at) \
+                 VALUES (?, 'image', ?, ?, 1, 1)",
+            )
+            .bind(nomifun_common::generate_id())
+            .bind(label)
+            .bind(invalid_origin.to_string())
+            .execute(pool)
+            .await
+            .is_err(),
+            "{label} must be rejected"
+        );
+    }
+
+    let project_id = nomifun_common::generate_id();
+    let node_id = nomifun_common::generate_id();
+    assert!(
+        sqlx::query(
+            "INSERT INTO workshop_assets \
+             (asset_id, kind, title, origin, created_at, updated_at) \
+             VALUES (?, 'image', 'incomplete project owner', ?, 1, 1)",
+        )
+        .bind(nomifun_common::generate_id())
+        .bind(serde_json::json!({"project_id": project_id.clone()}).to_string())
+        .execute(pool)
+        .await
+        .is_err(),
+        "origin inserts must reject an incomplete project owner branch"
+    );
+    let project_owner_asset_id = nomifun_common::generate_id();
+    sqlx::query(
+        "INSERT INTO workshop_assets \
+         (asset_id, kind, title, origin, created_at, updated_at) \
+         VALUES (?, 'image', 'project owner origin', ?, 1, 1)",
+    )
+    .bind(&project_owner_asset_id)
+    .bind(serde_json::json!({
+        "project_id": project_id,
+        "node_id": node_id
+    }).to_string())
+    .execute(pool)
+    .await
+    .expect("canonical project-node asset owner");
+    assert!(
+        sqlx::query("UPDATE workshop_assets SET origin = ? WHERE asset_id = ?")
+            .bind(serde_json::json!({"project_id": project_id}).to_string())
+            .bind(&project_owner_asset_id)
+            .execute(pool)
+            .await
+            .is_err(),
+        "origin updates must enforce the same tagged owner contract"
+    );
+
+    let workflow_id = nomifun_common::generate_id();
+    let workflow_run_id = nomifun_common::generate_id();
+    let workflow_step_id = nomifun_common::generate_id();
+    sqlx::query(
+        "INSERT INTO workshop_assets \
+         (asset_id, kind, title, origin, created_at, updated_at) \
+         VALUES (?, 'image', 'workflow owner origin', ?, 1, 1)",
+    )
+    .bind(nomifun_common::generate_id())
+    .bind(serde_json::json!({
+        "workflow_id": workflow_id,
+        "workflow_run_id": workflow_run_id,
+        "workflow_step_id": workflow_step_id
+    }).to_string())
+    .execute(pool)
+    .await
+    .expect("canonical workflow-step asset owner");
+
+    for (label, invalid_origin) in [
+        (
+            "project without node",
+            serde_json::json!({"project_id": nomifun_common::generate_id()}),
+        ),
+        (
+            "partial workflow owner",
+            serde_json::json!({
+                "workflow_id": nomifun_common::generate_id(),
+                "workflow_run_id": nomifun_common::generate_id()
+            }),
+        ),
+        (
+            "mixed owner branches",
+            serde_json::json!({
+                "project_id": nomifun_common::generate_id(),
+                "node_id": nomifun_common::generate_id(),
+                "workflow_id": nomifun_common::generate_id(),
+                "workflow_run_id": nomifun_common::generate_id(),
+                "workflow_step_id": nomifun_common::generate_id()
+            }),
+        ),
+        (
+            "non-v7 workflow step",
+            serde_json::json!({
+                "workflow_id": nomifun_common::generate_id(),
+                "workflow_run_id": nomifun_common::generate_id(),
+                "workflow_step_id": "550e8400-e29b-41d4-a716-446655440000"
+            }),
+        ),
+        (
+            "retired camel-case workflow owner",
+            serde_json::json!({
+                "workflowId": nomifun_common::generate_id(),
+                "workflowRunId": nomifun_common::generate_id(),
+                "workflowStepId": nomifun_common::generate_id()
             }),
         ),
     ] {

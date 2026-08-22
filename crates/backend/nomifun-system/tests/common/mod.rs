@@ -12,6 +12,28 @@ use nomifun_system::{
     VersionCheckService,
 };
 
+struct TestProviderDeletionCoordinator;
+
+#[async_trait::async_trait]
+impl nomifun_system::provider_deletion::ProviderDeletionCoordinator
+    for TestProviderDeletionCoordinator
+{
+    async fn usages(
+        &self,
+        _provider_id: &str,
+    ) -> Result<Vec<nomifun_common::ProviderUsage>, nomifun_common::AppError> {
+        Ok(Vec::new())
+    }
+
+    async fn prepare_soft_model_cleanup(
+        &self,
+        _provider_id: &str,
+        _model: &str,
+    ) -> Result<nomifun_db::ProviderModelCleanupPlan, nomifun_common::AppError> {
+        Ok(nomifun_db::ProviderModelCleanupPlan::default())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_system_state(
     db: &nomifun_db::Database,
@@ -60,6 +82,7 @@ pub fn build_system_state(
             capability_repo,
             provider_repo,
             connection_repo,
+            Arc::new(TestProviderDeletionCoordinator),
         ),
         managed_model_service,
         version_check_service,

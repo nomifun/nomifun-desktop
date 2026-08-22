@@ -1,0 +1,399 @@
+.emptyState,
+.conflictState,
+.readyState {
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  box-sizing: border-box;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+
+.emptyState *,
+.conflictState *,
+.readyState * {
+  box-sizing: border-box;
+}
+
+.emptyState {
+  display: grid;
+  min-height: 160px;
+  align-content: center;
+  align-items: center;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  gap: 13px;
+  padding: 22px 24px;
+}
+
+.emptyIcon,
+.identityIcon,
+.conflictIcon {
+  display: grid;
+  place-items: center;
+}
+
+.emptyIcon {
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgba(var(--primary-6), 0.16);
+  border-radius: 13px;
+  background: rgba(var(--primary-6), 0.08);
+  color: rgb(var(--primary-6));
+}
+
+.emptyCopy,
+.conflictCopy > div,
+.identityCopy {
+  min-width: 0;
+}
+
+.emptyCopy h2,
+.conflictCopy h2 {
+  margin: 0;
+  color: var(--color-text-1);
+  font-size: 13px;
+  font-weight: 680;
+  line-height: 1.4;
+}
+
+.emptyCopy p,
+.conflictCopy p,
+.timelineActions p {
+  margin: 4px 0 0;
+  color: var(--color-text-3);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.primaryAction,
+.openAction,
+.identityButton,
+.conflictNodes button {
+  appearance: none;
+  border: 0;
+  font: inherit;
+  outline: none;
+}
+
+.primaryAction,
+.openAction {
+  display: inline-flex;
+  height: 34px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 13px;
+  border-radius: 8px;
+  background: rgb(var(--primary-6));
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.primaryAction:hover:not(:disabled),
+.openAction:hover:not(:disabled) {
+  background: rgb(var(--primary-5));
+}
+
+.primaryAction:disabled,
+.openAction:disabled,
+.identityButton:disabled,
+.conflictNodes button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.readyState {
+  display: grid;
+  min-height: 160px;
+  align-items: stretch;
+  grid-template-columns: minmax(170px, 0.72fr) minmax(240px, 1.45fr) minmax(185px, 0.83fr);
+}
+
+.directorIdentity,
+.timelineProjection,
+.timelineActions {
+  min-width: 0;
+  padding: 16px 18px;
+}
+
+.directorIdentity,
+.timelineProjection {
+  border-right: 1px solid var(--color-border-2);
+}
+
+.directorIdentity {
+  display: flex;
+  align-items: center;
+}
+
+.identityButton {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+  padding: 9px;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.identityButton:hover:not(:disabled) {
+  background: var(--color-fill-1);
+}
+
+.identityIcon {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: 11px;
+  background: rgba(var(--primary-6), 0.1);
+  color: rgb(var(--primary-6));
+}
+
+.identityCopy {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.identityCopy small,
+.identityCopy span,
+.cameraRow,
+.timelineLabel {
+  color: var(--color-text-3);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.identityCopy strong {
+  color: var(--color-text-1);
+  font-size: 13px;
+  font-weight: 680;
+  line-height: 1.4;
+}
+
+.identityCopy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timelineProjection {
+  display: flex;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.timelineMeta,
+.cameraRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.timelineMeta {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.timelineLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.timelineMeta time {
+  color: var(--color-text-1);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-style: normal;
+}
+
+.timelineMeta time i {
+  margin: 0 6px;
+  color: var(--color-text-4);
+  font-style: normal;
+}
+
+.timelineProjection progress {
+  width: 100%;
+  height: 5px;
+  overflow: hidden;
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-fill-3);
+}
+
+.timelineProjection progress::-webkit-progress-bar {
+  border-radius: 999px;
+  background: var(--color-fill-3);
+}
+
+.timelineProjection progress::-webkit-progress-value {
+  border-radius: 999px;
+  background: rgb(var(--primary-6));
+}
+
+.timelineProjection progress::-moz-progress-bar {
+  border-radius: 999px;
+  background: rgb(var(--primary-6));
+}
+
+.cameraRow {
+  gap: 6px;
+}
+
+.cameraRow strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-2);
+  font-size: 10px;
+  font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timelineActions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.timelineActions p {
+  margin: 0;
+}
+
+.conflictState {
+  display: grid;
+  min-height: 160px;
+  align-items: center;
+  grid-template-columns: minmax(260px, 0.75fr) minmax(320px, 1.25fr);
+  gap: 22px;
+  padding: 18px 24px;
+}
+
+.conflictCopy {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 11px;
+}
+
+.conflictIcon {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: 11px;
+  background: rgba(var(--danger-6), 0.09);
+  color: rgb(var(--danger-6));
+}
+
+.conflictNodes {
+  display: grid;
+  min-width: 0;
+  max-height: 122px;
+  overflow: auto;
+  gap: 5px;
+  scrollbar-width: thin;
+}
+
+.conflictNodes button {
+  display: grid;
+  min-width: 0;
+  min-height: 34px;
+  align-items: center;
+  grid-template-columns: 18px auto minmax(80px, 1fr);
+  gap: 7px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  background: var(--color-fill-1);
+  color: var(--color-text-2);
+  cursor: pointer;
+  text-align: left;
+}
+
+.conflictNodes button:hover:not(:disabled) {
+  background: var(--color-fill-2);
+}
+
+.conflictNodes span {
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.conflictNodes small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-4);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 860px) {
+  .readyState {
+    grid-template-columns: minmax(190px, 0.85fr) minmax(280px, 1.15fr);
+  }
+
+  .timelineActions {
+    display: none;
+  }
+
+  .timelineProjection {
+    border-right: 0;
+  }
+
+  .emptyState {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .primaryAction {
+    grid-column: 2;
+    justify-self: start;
+  }
+}
+
+@media (max-width: 620px) {
+  .readyState,
+  .conflictState {
+    grid-template-columns: 1fr;
+  }
+
+  .directorIdentity {
+    display: none;
+  }
+
+  .timelineProjection {
+    padding-inline: 14px;
+  }
+
+  .conflictState {
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .emptyState {
+    padding: 18px 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .primaryAction,
+  .openAction,
+  .identityButton,
+  .conflictNodes button {
+    transition: none;
+  }
+}

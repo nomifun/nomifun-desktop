@@ -1,0 +1,500 @@
+.panel {
+  display: flex;
+  width: 390px;
+  min-width: 320px;
+  max-width: 100%;
+  height: 100%;
+  min-height: 0;
+  flex: 0 0 auto;
+  flex-direction: column;
+  overflow: hidden;
+  border-left: 1px solid var(--color-border-2);
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+.header {
+  display: flex;
+  min-height: 56px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px 10px 16px;
+  border-bottom: 1px solid var(--color-border-2);
+}
+
+.title,
+.headerActions,
+.agentIdentity,
+.composerFooter,
+.modelTrigger,
+.activityCard,
+.messageError {
+  display: flex;
+  align-items: center;
+}
+
+.title {
+  min-width: 0;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.headerActions {
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+.body {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.state,
+.emptyState,
+.historyEmpty {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  text-align: center;
+}
+
+.state {
+  gap: 9px;
+  padding: 32px;
+  color: var(--color-text-2);
+}
+
+.state strong,
+.emptyState strong {
+  color: var(--color-text-1);
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.state span,
+.emptyState span {
+  max-width: 270px;
+  color: var(--color-text-3);
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.emptyState {
+  gap: 0;
+  padding: 42px 32px;
+}
+
+.emptyIcon {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 16px;
+  place-items: center;
+  border-radius: 16px;
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
+}
+
+.emptyState span {
+  margin-top: 8px;
+}
+
+.historyList,
+.messageList {
+  height: 100%;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.historyList {
+  padding: 12px 10px;
+}
+
+.historyItem {
+  appearance: none;
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.historyItem:hover {
+  background: var(--color-fill-1);
+}
+
+.historyItem[data-active='true'] {
+  background: var(--color-fill-2);
+}
+
+.historyItem:focus-visible {
+  outline: 2px solid rgb(var(--primary-6));
+  outline-offset: -2px;
+}
+
+.historyTitle {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.historyMeta {
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.historyEmpty {
+  gap: 9px;
+  color: var(--color-text-3);
+  font-size: 13px;
+}
+
+.messageList {
+  display: flex;
+  gap: 16px;
+  padding: 16px;
+  flex-direction: column;
+}
+
+.userMessage,
+.assistantMessage {
+  display: flex;
+  max-width: 88%;
+  gap: 7px;
+  flex-direction: column;
+}
+
+.userMessage {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.assistantMessage {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
+.messageBubble {
+  max-width: 100%;
+  padding: 9px 12px;
+  overflow-wrap: anywhere;
+  border-radius: 16px;
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.userMessage .messageBubble {
+  background: rgb(var(--primary-6));
+  color: var(--color-white);
+}
+
+.messageBubble p,
+.messageBubble ul,
+.messageBubble ol,
+.messageBubble pre,
+.messageBubble blockquote {
+  margin: 7px 0;
+}
+
+.messageBubble > :first-child {
+  margin-top: 0;
+}
+
+.messageBubble > :last-child {
+  margin-bottom: 0;
+}
+
+.messageBubble pre {
+  max-width: 100%;
+  padding: 9px;
+  overflow-x: auto;
+  border-radius: 8px;
+  background: var(--color-fill-3);
+}
+
+.userText {
+  white-space: pre-wrap;
+}
+
+.agentIdentity {
+  gap: 5px;
+  margin-bottom: 4px;
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.activityCard,
+.messageError {
+  max-width: 270px;
+  gap: 8px;
+  padding: 9px 11px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 14px;
+  background: var(--color-bg-2);
+  color: var(--color-text-2);
+  font-size: 12px;
+}
+
+.messageError {
+  border-color: color-mix(in srgb, rgb(var(--danger-6)) 30%, var(--color-border-2));
+  background: color-mix(in srgb, rgb(var(--danger-6)) 7%, var(--color-bg-2));
+  color: rgb(var(--danger-6));
+}
+
+.stoppedLabel {
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.retryMessageButton {
+  color: var(--color-text-3) !important;
+}
+
+.proposalCard {
+  display: grid;
+  width: min(300px, 100%);
+  gap: 9px;
+  padding: 11px;
+  border: 1px solid color-mix(in srgb, rgb(var(--primary-6)) 32%, var(--color-border-2));
+  border-radius: 13px;
+  background: color-mix(in srgb, rgb(var(--primary-6)) 6%, var(--color-bg-2));
+}
+
+.proposalHeading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 8px;
+  color: rgb(var(--primary-6));
+}
+
+.proposalHeading > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.proposalHeading strong {
+  overflow-wrap: anywhere;
+  color: var(--color-text-1);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.proposalHeading span {
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.proposalCard[data-agent-proposal-state='applied'] {
+  border-color: color-mix(in srgb, rgb(var(--success-6)) 36%, var(--color-border-2));
+  background: color-mix(in srgb, rgb(var(--success-6)) 7%, var(--color-bg-2));
+}
+
+.proposalCard[data-agent-proposal-state='applied'] .proposalHeading {
+  color: rgb(var(--success-6));
+}
+
+.proposalCard[data-agent-proposal-state='failed'],
+.proposalCard[data-agent-proposal-state='invalid'] {
+  border-color: color-mix(in srgb, rgb(var(--danger-6)) 32%, var(--color-border-2));
+}
+
+.proposalError {
+  margin: 0;
+  color: rgb(var(--danger-6));
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.composerShell {
+  flex: 0 0 auto;
+  padding: 0 8px 8px;
+}
+
+.composerCard {
+  padding: 10px 10px 10px 12px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 16px;
+  background: var(--color-bg-2);
+}
+
+.planningField {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  margin-bottom: 9px;
+}
+
+.planningLabel {
+  color: var(--color-text-3);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.contextChips,
+.skillChips {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.contextChip,
+.skillChip {
+  max-width: 100%;
+  border: 1px solid var(--color-border-2);
+  border-radius: 999px;
+  background: var(--color-fill-1);
+  color: var(--color-text-2);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.contextChip {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 5px 3px 8px;
+}
+
+.contextChip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contextChip > button {
+  appearance: none;
+  display: grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--color-text-3);
+  cursor: pointer;
+}
+
+.contextChip > button:hover,
+.contextChip > button:focus-visible {
+  background: var(--color-fill-3);
+  color: var(--color-text-1);
+}
+
+.contextChip[data-selected='true'] {
+  border-color: color-mix(in srgb, rgb(var(--primary-6)) 35%, var(--color-border-2));
+}
+
+.skillChip {
+  appearance: none;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+
+.skillChip[data-active='true'] {
+  border-color: rgb(var(--primary-6));
+  background: color-mix(in srgb, rgb(var(--primary-6)) 11%, var(--color-bg-2));
+  color: rgb(var(--primary-6));
+}
+
+.contextChip > button:disabled,
+.skillChip:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.composerInput,
+.composerInput textarea {
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--color-text-1) !important;
+  font-size: 13px !important;
+  line-height: 1.6 !important;
+  resize: none !important;
+}
+
+.composerInput textarea::placeholder {
+  color: var(--color-text-4) !important;
+}
+
+.composerFooter {
+  min-width: 0;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.modelTrigger {
+  min-width: 0;
+  max-width: calc(100% - 52px);
+  justify-content: flex-start;
+  gap: 4px;
+  padding-inline: 8px !important;
+  border-radius: 999px !important;
+  background: var(--color-fill-2) !important;
+  color: var(--color-text-2) !important;
+}
+
+.modelTriggerLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modelPopover {
+  width: 290px;
+  max-width: calc(100vw - 32px);
+  padding: 4px;
+}
+
+.sendButton {
+  flex: 0 0 auto;
+}
+
+.spin {
+  animation: creative-agent-spin 0.9s linear infinite;
+}
+
+@keyframes creative-agent-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 640px) {
+  .panel {
+    width: 100%;
+    min-width: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation-duration: 1.8s;
+  }
+}

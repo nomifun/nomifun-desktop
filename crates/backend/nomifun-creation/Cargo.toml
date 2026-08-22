@@ -24,5 +24,6 @@ image = { workspace = true, features = ["jpeg", "gif", "webp"] }
 
 [dev-dependencies]
 base64.workspace = true
+sqlx.workspace = true
 tempfile.workspace = true
 wiremock.workspace = true

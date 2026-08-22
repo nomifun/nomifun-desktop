@@ -547,12 +547,13 @@ function utilityHead(token) {
  */
 const UTILITY_SHAPE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+(?:\.[a-z0-9]+)*)+(?:\/\d{1,3})?$/;
 
-/** CSS 属性名与 box-sizing 值等「形状合法但语义上不是工具类」的确定名单。 */
+/** CSS 属性名、box-sizing 值与领域协议标识等「形状合法但语义上不是工具类」的确定名单。 */
 const NOT_UTILITIES = new Set([
   'border-color', 'border-box', 'border-width', 'border-style', 'border-radius', 'border-spacing',
   'bg-animate', 'fill-box', 'stroke-dashoffset', 'stroke-dasharray', 'stroke-linecap', 'stroke-linejoin',
   'text-align', 'text-decoration', 'text-transform', 'text-overflow', 'text-shadow', 'text-indent',
   'outline-color', 'outline-style', 'outline-width', 'outline-offset',
+  'text-to-image',
 ]);
 
 function looksLikeUtility(token) {
@@ -594,7 +595,7 @@ async function selfTestBackstopShape() {
   const mustSkip = [
     'text/plain;charset=utf-8', 'border-color', 'border-box', 'stroke-dashoffset', 'bg-animate',
     'fill-box;', 'text-only.', 'nomi-input', 'katex-display', 'markdown-shadow',
-    'border-b-0', 'border-0', 'bg-[var(--x)]',
+    'text-to-image', 'border-b-0', 'border-0', 'bg-[var(--x)]',
   ];
   let failed = 0;
   for (const t of mustCompile) {

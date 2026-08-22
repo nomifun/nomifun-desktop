@@ -1,0 +1,740 @@
+.nodeHost {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.nodeHost > :first-child {
+  width: 100%;
+  height: 100%;
+}
+
+.nodeToolbar {
+  position: absolute;
+  bottom: calc(100% + 10px * var(--creative-canvas-inverse-zoom));
+  left: 50%;
+  z-index: 30;
+  display: flex;
+  gap: 2px;
+  width: max-content;
+  padding: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: #242424;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.24);
+  color: #f3f3f3;
+  pointer-events: auto;
+  transform: translateX(-50%) scale(var(--creative-canvas-inverse-zoom));
+  transform-origin: center bottom;
+}
+
+.nodeToolbar button {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.nodeToolbar button:hover,
+.nodeToolbar button:focus-visible {
+  background: rgba(255, 255, 255, 0.1);
+  outline: none;
+}
+
+.nodeToolbar button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.nodeToolbar button[data-danger] {
+  color: #ef4444;
+}
+
+.nodeToolbar[data-overlay='true'] {
+  position: fixed;
+  top: var(--creative-canvas-image-toolbar-overlay-top, 16px);
+  bottom: auto;
+  left: 50%;
+  z-index: 1601;
+  max-width: calc(100vw - 24px);
+  overflow-x: auto;
+  transform: translateX(-50%);
+  transform-origin: center;
+}
+
+.nodeHost:has(
+    [data-canvas-image-composer-anchor][data-placement='above']
+  )
+  .nodeToolbar {
+  top: calc(100% + 10px * var(--creative-canvas-inverse-zoom));
+  bottom: auto;
+  transform-origin: center top;
+}
+
+.cropModal :global(.arco-modal-content) {
+  padding: 18px 24px 20px;
+}
+
+.cropDialog {
+  display: grid;
+  gap: 14px;
+}
+
+.cropStage {
+  position: relative;
+  width: 100%;
+  max-height: min(52vh, 430px);
+  overflow: hidden;
+  border-radius: 10px;
+  background: #080808;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  touch-action: none;
+}
+
+.cropStage > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  user-select: none;
+}
+
+.cropImageError {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-height: 280px;
+  place-items: center;
+  padding: 24px;
+  color: rgba(255, 255, 255, 0.76);
+  font-size: 13px;
+}
+
+.cropBox {
+  position: absolute;
+  z-index: 2;
+  box-sizing: border-box;
+  border: 2px solid rgba(255, 255, 255, 0.96);
+  outline: none;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.48);
+  cursor: move;
+}
+
+.cropBox:focus-visible {
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.48);
+}
+
+.cropBox::before {
+  position: absolute;
+  inset: 0;
+  background-image: inherit;
+  content: "";
+  pointer-events: none;
+}
+
+.cropGridVerticalOne,
+.cropGridVerticalTwo,
+.cropGridHorizontalOne,
+.cropGridHorizontalTwo {
+  position: absolute;
+  z-index: 1;
+  display: block;
+  background: rgba(255, 255, 255, 0.42);
+  pointer-events: none;
+}
+
+.cropGridVerticalOne,
+.cropGridVerticalTwo {
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.cropGridVerticalOne {
+  left: 33.333%;
+}
+
+.cropGridVerticalTwo {
+  left: 66.666%;
+}
+
+.cropGridHorizontalOne,
+.cropGridHorizontalTwo {
+  right: 0;
+  left: 0;
+  height: 1px;
+}
+
+.cropGridHorizontalOne {
+  top: 33.333%;
+}
+
+.cropGridHorizontalTwo {
+  top: 66.666%;
+}
+
+.cropHandle {
+  position: absolute;
+  z-index: 3;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.28);
+  transform: translate(-50%, -50%);
+}
+
+.cropHandle[data-crop-handle="north-west"] {
+  top: 0;
+  left: 0;
+  cursor: nwse-resize;
+}
+
+.cropHandle[data-crop-handle="north"] {
+  top: 0;
+  left: 50%;
+  cursor: ns-resize;
+}
+
+.cropHandle[data-crop-handle="north-east"] {
+  top: 0;
+  left: 100%;
+  cursor: nesw-resize;
+}
+
+.cropHandle[data-crop-handle="east"] {
+  top: 50%;
+  left: 100%;
+  cursor: ew-resize;
+}
+
+.cropHandle[data-crop-handle="south-east"] {
+  top: 100%;
+  left: 100%;
+  cursor: nwse-resize;
+}
+
+.cropHandle[data-crop-handle="south"] {
+  top: 100%;
+  left: 50%;
+  cursor: ns-resize;
+}
+
+.cropHandle[data-crop-handle="south-west"] {
+  top: 100%;
+  left: 0;
+  cursor: nesw-resize;
+}
+
+.cropHandle[data-crop-handle="west"] {
+  top: 50%;
+  left: 0;
+  cursor: ew-resize;
+}
+
+.cropHandle:focus-visible {
+  outline: 2px solid rgb(var(--primary-6));
+  outline-offset: 2px;
+}
+
+.cropMetaBar {
+  display: flex;
+  box-sizing: border-box;
+  min-height: 50px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 9px;
+  background: var(--color-fill-1);
+}
+
+.cropMetrics {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  color: var(--color-text-2);
+  font-size: 12px;
+}
+
+.aspectSelect {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.aspectSelect select {
+  min-width: 110px;
+  height: 32px;
+  padding: 0 28px 0 10px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  font: inherit;
+  font-size: 12px;
+}
+
+.cropError {
+  padding: 9px 11px;
+  border: 1px solid rgba(var(--danger-6), 0.26);
+  border-radius: 8px;
+  background: rgba(var(--danger-6), 0.08);
+  color: rgb(var(--danger-6));
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.cropFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.maskModal :global(.arco-modal-content) {
+  padding: 22px 24px 24px;
+}
+
+.maskDialog {
+  display: grid;
+  grid-template-columns: minmax(360px, 1fr) 320px;
+  gap: 20px;
+}
+
+.maskPreviewPane {
+  display: grid;
+  min-width: 0;
+  min-height: 360px;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--color-border-2);
+  border-radius: 12px;
+  background: transparent;
+}
+
+.maskStage {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: 8px;
+  background: transparent;
+  user-select: none;
+}
+
+.maskStage > img {
+  display: block;
+  max-width: 100%;
+  max-height: 68vh;
+  background: transparent;
+}
+
+.maskSourceCanvas {
+  display: none;
+}
+
+.maskPreviewCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.maskControls {
+  display: flex;
+  min-height: 360px;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.maskControls header h2 {
+  margin: 0;
+  color: var(--color-text-1);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.maskControls header p {
+  margin: 8px 0 0;
+  color: var(--color-text-3);
+  font-size: 13px;
+}
+
+.maskModeGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.maskField {
+  display: grid;
+  gap: 8px;
+}
+
+.maskFieldLabel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--color-text-2);
+  font-size: 13px;
+}
+
+.maskFieldLabel strong {
+  color: var(--color-text-1);
+  font-weight: 600;
+}
+
+.maskFieldTitle {
+  color: var(--color-text-2);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.maskError {
+  color: rgb(var(--danger-6));
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.maskFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.maskFooter > div {
+  display: flex;
+  gap: 8px;
+}
+
+.splitDialog {
+  display: grid;
+  gap: 14px;
+  outline: none;
+}
+
+.splitSubtitle {
+  margin: -2px 0 0;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.splitWorkspace {
+  display: grid;
+  align-items: start;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 24px;
+  margin-top: 6px;
+}
+
+.splitPreviewPane {
+  display: grid;
+  min-width: 0;
+  gap: 9px;
+  padding: 16px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 10px;
+  background: var(--color-bg-2);
+}
+
+.splitPreviewWell {
+  display: grid;
+  height: min(304px, 70vw);
+  place-items: center;
+  border-radius: 8px;
+  background: var(--color-fill-1);
+}
+
+.splitStage {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 9px;
+  background: #080808;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  touch-action: none;
+}
+
+.splitStage > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  user-select: none;
+}
+
+.splitLine {
+  position: absolute;
+  z-index: 3;
+  padding: 0;
+  border: 5px solid transparent;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.94);
+  background-clip: content-box;
+  box-sizing: content-box;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.45),
+    0 0 8px rgba(0, 0, 0, 0.4);
+  transform: translate(-50%, -50%);
+}
+
+.splitLine[data-split-axis="horizontal"] {
+  right: 0;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  cursor: ns-resize;
+  transform: translateY(-50%);
+}
+
+.splitLine[data-split-axis="vertical"] {
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  height: 100%;
+  cursor: ew-resize;
+  transform: translateX(-50%);
+}
+
+.splitLine::after {
+  position: absolute;
+  border: 2px solid white;
+  border-radius: 50%;
+  background: rgb(var(--primary-6));
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.35);
+  content: "";
+  opacity: 0;
+}
+
+.splitLine[data-split-axis="horizontal"]::after {
+  top: 50%;
+  left: 50%;
+  width: 9px;
+  height: 9px;
+  transform: translate(-50%, -50%);
+}
+
+.splitLine[data-split-axis="vertical"]::after {
+  top: 50%;
+  left: 50%;
+  width: 9px;
+  height: 9px;
+  transform: translate(-50%, -50%);
+}
+
+.splitLine[data-selected="true"] {
+  background: rgb(var(--primary-6));
+}
+
+.splitLine[data-selected="true"]::after,
+.splitLine:hover::after {
+  opacity: 1;
+}
+
+.splitLine:focus-visible {
+  outline: 1px dotted rgba(255, 255, 255, 0.82);
+  outline-offset: 2px;
+}
+
+.splitOriginalSize {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.splitOriginalSize strong {
+  color: var(--color-text-2);
+  font-weight: 600;
+}
+
+.splitControlPane {
+  display: grid;
+  gap: 22px;
+  padding-top: 9px;
+}
+
+.splitControlSection,
+.splitSummary {
+  display: grid;
+  gap: 9px;
+}
+
+.splitSummary {
+  padding: 12px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 9px;
+  background: var(--color-fill-1);
+}
+
+.splitActionGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.splitCountGrid {
+  display: grid;
+  gap: 18px;
+}
+
+.splitCountGrid label {
+  display: grid;
+  align-items: center;
+  grid-template-columns: 30px 88px;
+  gap: 0;
+  color: var(--color-text-2);
+  font-size: 12px;
+}
+
+.splitCountGrid input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 7px;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  font: inherit;
+  font-size: 12px;
+}
+
+.splitActionGrid :global(.arco-btn) {
+  height: 32px;
+  min-width: 0;
+  padding-right: 7px;
+  padding-left: 7px;
+  font-size: 11px;
+}
+
+.splitSummary {
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 7px 12px;
+}
+
+.splitSummary span {
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.splitSummary strong {
+  color: var(--color-text-1);
+  font-size: 12px;
+  font-weight: 650;
+  text-align: right;
+}
+
+.splitGenerateButton {
+  --button-primary-text: var(--color-bg-1);
+
+  width: 100%;
+  height: 40px;
+  border-color: var(--color-text-1) !important;
+  background: var(--color-text-1) !important;
+  color: var(--color-bg-1) !important;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.splitModal :global(.arco-modal-title) {
+  text-align: left;
+  font-size: 20px;
+  font-weight: 600;
+  transform: translateY(5px);
+}
+
+.splitModal :global(.arco-modal-header) {
+  padding: 0 24px;
+  border-bottom: 0;
+}
+
+.splitModal :global(.arco-modal-close-icon) {
+  top: 4px;
+  right: 8px;
+  box-sizing: border-box;
+  width: 40px;
+  height: 40px;
+  padding: 11px;
+  border: 1px solid var(--color-border-3);
+  border-radius: 7px;
+  background: var(--color-bg-2);
+}
+
+@media (max-width: 720px) {
+  .nodeToolbar .toolLabel {
+    display: none;
+  }
+
+  .cropModal :global(.arco-modal-content) {
+    padding: 14px;
+  }
+
+  .cropMetaBar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .aspectSelect {
+    justify-content: space-between;
+  }
+
+  .splitWorkspace {
+    grid-template-columns: 1fr;
+  }
+
+  .splitControlPane {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .splitSummary {
+    grid-column: 1 / -1;
+  }
+
+  .splitGenerateButton {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 920px) {
+  .maskDialog {
+    grid-template-columns: 1fr;
+  }
+
+  .maskPreviewPane {
+    min-height: 280px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nodeToolbar button {
+    transition: none;
+  }
+}

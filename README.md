@@ -161,7 +161,7 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/readme/en/skills.png" alt="Current NomiFun Skills Hub"><br/><sub><b>Skills Hub · reusable, governed Agent capabilities</b></sub></td>
-    <td width="50%"><img src="docs/images/readme/en/creative-workshop.png" alt="NomiFun Creative Workshop Beta"><br/><sub><b>Creative Workshop · persistent multimodal creation canvas (Beta)</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/en/creative-workshop.png" alt="NomiFun Creative Studio"><br/><sub><b>Creative Studio · persistent canvas, workbenches, assets, and workflows</b></sub></td>
   </tr>
 </table>
 
@@ -181,7 +181,7 @@ memory, tools, permissions, and execution runtime:
 |---|---|
 | **Multi-Agent execution cluster** | Plans dependency-aware work, delegates steps to specialized Agents, schedules parallel execution, and exposes live state, transcripts, approvals, retry, and recovery. |
 | **Agent Mini Apps** | Turns a normal Agent conversation into a previewable and publishable local web tool, with an editable working copy and a durable published snapshot. |
-| **Creative Workshop (Beta)** | Provides a persistent visual canvas and asset library for model-driven image, text, video, and speech creation. |
+| **Creative Studio** | Combines a persistent infinite canvas with exact-model image, video, and speech tasks, reusable assets, minimal workflows, and a bounded 3D Director. |
 | **Task-aware multi-model control plane** | Manages extensible providers and models for chat, realtime, speech, vision, media generation, embedding, and reranking, with per-task routing and fallback. |
 | **NomiFun Free Models** | Ships a managed provider that can be enabled, refreshed, health-checked, and used without first creating your own provider entry. |
 | **Phone, robot, and open access** | Pairs Mobile directly with Desktop, binds a Xiaozhi robot to a companion, and exposes governed capabilities through WebUI, REST, MCP, IM channels, and NomiRelay. |
@@ -220,18 +220,25 @@ Every revision remains attached to a normal, auditable conversation rather than
 a hidden second chat system, and the resulting app can reuse the same local
 Agents, data, models, and governed tools.
 
-### 🎨 Creative Workshop — visual creation on a persistent canvas *(Beta)*
+### 🎨 Creative Studio — focused creation on an infinite canvas
 
-Creative Workshop combines a persistent canvas with a reusable asset library.
-Arrange image, text, video, generator, loop, compare, output, and group nodes to
-build visual workflows instead of losing each prompt in an isolated chat.
-Depending on the models you configure, the workshop can drive text-to-image,
-image-to-image, inpainting, text-to-video, image-to-video, text generation, and
-text-to-speech. Outputs stay on the canvas for comparison and further editing.
+> Guide: [`docs/guides/creative-studio.md`](docs/guides/creative-studio.md)
 
-> **Beta:** Creative Workshop is available in the current build, but its canvas
-> model and workflow format are still evolving. Keep original source assets and
-> avoid treating a workshop project as your only archival copy.
+Creative Studio combines a persistent infinite canvas, project center,
+standalone image and video workbenches, prompt and asset libraries, private
+workflows, and a bounded 3D Director. Its eight persisted node kinds are text,
+image, video, audio, panorama, config, director, and group; generation is owned
+by media nodes plus auditable config nodes rather than fictional loop, compare,
+or output node types.
+
+Every model request uses an exact enabled NomiFun provider/model task: Chat for
+one-shot drafts and manually approved proposals, image generation/edit for
+T2I/I2I, video generation for T2V or one-image I2V, and speech synthesis for
+TTS. Project documents use revision CAS, generation tasks can reconcile after
+reload, and a self-contained project ZIP carries the referenced asset and
+Director-sidecar closure. The minimal Workflow AI previews a strict one-shot draft, then waits
+for the user to Apply it to the editor and explicitly Save; it does not create
+a public template, complex conversation, or automatic run.
 
 ### 🧠 Multi-Agent execution cluster — plan, schedule, supervise
 

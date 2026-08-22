@@ -942,7 +942,14 @@ impl LlmProvider for OpenAIProvider {
         let redactor = nomifun_net::secret_redaction::SecretRedactor::new(&self.api_keys);
 
         tokio::spawn(async move {
-            let outcome = process_sse_stream(response, &tx, auto_tool_id).await;
+            let Some(outcome) = crate::retry::until_receiver_closed(
+                &tx,
+                process_sse_stream(response, &tx, auto_tool_id),
+            )
+            .await
+            else {
+                return;
+            };
             crate::retry::finish_stream_with_retry(
                 outcome,
                 &tx,

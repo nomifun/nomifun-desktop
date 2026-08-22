@@ -1,11 +1,10 @@
-import React, { Suspense, useEffect } from 'react';
-import { HashRouter, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
+import React, { Suspense } from 'react';
+import { HashRouter, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import AppLoader from '@renderer/components/layout/AppLoader';
+import ProtectedAppRuntime from '@renderer/components/layout/ProtectedAppRuntime';
 import RouteErrorBoundary from '@renderer/components/layout/RouteErrorBoundary';
 import { useAuth } from '@renderer/hooks/context/AuthContext';
-import { useCompanionWindowsSync } from '@renderer/hooks/useCompanionWindowsSync';
-import { useTrayLabels } from '@renderer/hooks/useTrayLabels';
-import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
+import { CREATIVE_STUDIO_ROOT_PATH } from '@renderer/pages/creativeStudio/app/routes';
 const Conversation = React.lazy(() => import('@renderer/pages/conversation'));
 const Guid = React.lazy(() => import('@renderer/pages/guid'));
 const PresetSettings = React.lazy(() => import('@renderer/pages/settings/PresetSettings'));
@@ -33,11 +32,40 @@ const CustomerServiceRosterPage = React.lazy(() => import('@renderer/pages/custo
 const CustomerServiceDetailPage = React.lazy(() => import('@renderer/pages/customerService/CsAgentDetailPage'));
 const KnowledgeListPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeListPage'));
 const KnowledgeDetailPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeDetailPage'));
-const WorkshopListPage = React.lazy(() => import('@renderer/pages/workshop'));
-const WorkshopCanvasPage = React.lazy(() => import('@renderer/pages/workshop/CanvasPage'));
+const CreativeStudioFocusShell = React.lazy(
+  () => import('@renderer/pages/creativeStudio/app/CreativeStudioFocusShell')
+);
+const CreativeStudioHomePage = React.lazy(
+  () => import('@renderer/pages/creativeStudio/app/CreativeStudioHomePage')
+);
+const CreativeStudioProjectsRoute = React.lazy(
+  () => import('@renderer/pages/creativeStudio/projects/CreativeStudioProjectsRoute')
+);
+const CreativeStudioPromptsRoute = React.lazy(
+  () => import('@renderer/pages/creativeStudio/prompts/page/CreativeStudioPromptsRoute')
+);
+const CreativeStudioAssetsRoute = React.lazy(
+  () => import('@renderer/pages/creativeStudio/assets/page/CreativeAssetLibraryPage')
+);
+const CreativeStudioCanvasRoute = React.lazy(
+  () => import('@renderer/pages/creativeStudio/canvas/product')
+);
+const CreativeStudioImageWorkbenchRoute = React.lazy(() =>
+  import('@renderer/pages/creativeStudio/workbenches/product').then((module) => ({
+    default: module.ImageWorkbenchProductRoute,
+  }))
+);
+const CreativeStudioVideoWorkbenchRoute = React.lazy(() =>
+  import('@renderer/pages/creativeStudio/workbenches/product').then((module) => ({
+    default: module.VideoWorkbenchProductRoute,
+  }))
+);
+const CreativeStudioDirectorRoute = React.lazy(() => import('@renderer/pages/creativeStudio/director/product'));
+const CreativeStudioWorkflowRoute = React.lazy(
+  () => import('@renderer/pages/creativeStudio/workflows/page/CreativeWorkflowRoute')
+);
 const MiniAppsListPage = React.lazy(() => import('@renderer/pages/miniApps'));
 const MiniAppRunnerPage = React.lazy(() => import('@renderer/pages/miniApps/RunnerPage'));
-const AssetLibraryPage = React.lazy(() => import('@renderer/pages/assets'));
 const CompanionPage = React.lazy(() => import('@renderer/pages/companion'));
 const ConversationShell = React.lazy(() => import('@renderer/pages/conversation/components/ConversationShell'));
 
@@ -114,69 +142,6 @@ const getHashRouteRedirectUrl = () => {
   return `${origin}/#${pathname}${search}`;
 };
 
-const ProtectedLayout: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
-  const { status } = useAuth();
-
-  if (status === 'checking') {
-    return <AppLoader />;
-  }
-
-  if (status !== 'authenticated') {
-    return <Navigate to='/login' replace />;
-  }
-
-  return (
-    <>
-      <CompanionNavigateListener />
-      <CompanionWindowsSyncMount />
-      <TrayLabelsMount />
-      {React.cloneElement(layout)}
-    </>
-  );
-};
-
-// Owns the native desktop-companion window set from the main window: reconciles one
-// `companion-{companion_id}` Tauri window per enabled companion (useCompanionWindowsSync). Inert
-// outside the Tauri desktop shell.
-const CompanionWindowsSyncMount: React.FC = () => {
-  useCompanionWindowsSync();
-  return null;
-};
-
-// Keeps the native system-tray menu labels (Show / Quit) in sync with the UI
-// locale. Inert outside the Tauri desktop shell.
-const TrayLabelsMount: React.FC = () => {
-  useTrayLabels();
-  return null;
-};
-
-// Listens for "companion-navigate" Tauri events emitted by the companion window (a click
-// on the companion bubble / its context menu) and routes the main window.
-// Inert outside the Tauri desktop shell.
-const CompanionNavigateListener: React.FC = () => {
-  const navigate = useNavigate();
-  useEffect(() => {
-    if (!isTauriRuntime()) return;
-    let unlisten: (() => void) | undefined;
-    let disposed = false;
-    void import('@tauri-apps/api/event').then(({ listen }) =>
-      listen<string>('companion-navigate', (event) => {
-        if (typeof event.payload === 'string' && event.payload.startsWith('/')) {
-          void navigate(event.payload);
-        }
-      }).then((fn) => {
-        if (disposed) fn();
-        else unlisten = fn;
-      })
-    );
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [navigate]);
-  return null;
-};
-
 const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
   const { status } = useAuth();
   const hashRouteRedirectUrl = getHashRouteRedirectUrl();
@@ -195,72 +160,81 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
         />
         {/* The desktop-companion window route: fullscreen transparent, no app layout/sidebar. */}
         <Route path='/companion' element={withRouteFallback(CompanionPage)} />
-        <Route element={<ProtectedLayout layout={layout} />}>
-          <Route index element={<Navigate to='/guid' replace />} />
-          {/* Models, presets, skills, and MCP are independent top-level capabilities. */}
-          <Route path='/models' element={withRouteFallback(ModelHubPage)} />
-          <Route path='/extensions' element={<LegacyExtensionsRedirect />} />
-          <Route path='/mcp' element={withRouteFallback(McpPage)} />
-          <Route path='/open-capabilities' element={withRouteFallback(OpenCapabilitiesPage)} />
-          <Route path='/browser' element={withRouteFallback(BrowserPage)} />
-          <Route path='/presets' element={withRouteFallback(PresetSettings)} />
-          <Route path='/skills' element={withRouteFallback(SkillsSettingsPage)} />
-          {/* Session section — the secondary sidebar (ContentSider) persists across these routes */}
-          <Route element={<SessionShellRoute />}>
-            <Route path='/guid' element={withRouteFallback(Guid)} />
-            <Route path='/conversation/:id' element={withRouteFallback(Conversation)} />
-            <Route path='/terminal-new' element={withRouteFallback(TerminalCreatePage)} />
-            <Route path='/terminal/:id' element={withRouteFallback(TerminalSessionPage)} />
+        <Route element={<ProtectedAppRuntime />}>
+          {/* Creative Studio is a focused product: no workbench rail, shortcuts, or pull-to-refresh shell. */}
+          <Route path={CREATIVE_STUDIO_ROOT_PATH} element={withRouteFallback(CreativeStudioFocusShell)}>
+            <Route index element={withRouteFallback(CreativeStudioHomePage)} />
+            <Route path='projects' element={withRouteFallback(CreativeStudioProjectsRoute)} />
+            <Route path='canvas/:projectId' element={withRouteFallback(CreativeStudioCanvasRoute)} />
+            <Route path='director/:projectId' element={withRouteFallback(CreativeStudioDirectorRoute)} />
+            <Route path='image' element={withRouteFallback(CreativeStudioImageWorkbenchRoute)} />
+            <Route path='video' element={withRouteFallback(CreativeStudioVideoWorkbenchRoute)} />
+            <Route path='prompts' element={withRouteFallback(CreativeStudioPromptsRoute)} />
+            <Route path='assets' element={withRouteFallback(CreativeStudioAssetsRoute)} />
+            <Route path='workflows' element={withRouteFallback(CreativeStudioWorkflowRoute)} />
           </Route>
-          {/* Relocated to the capability rail. */}
-          <Route path='/settings/model' element={<Navigate to='/models?section=models' replace />} />
-          <Route path='/settings/agent' element={<LegacyExecutionEngineRedirect />} />
-          <Route path='/settings/capabilities' element={<Navigate to='/skills' replace />} />
-          <Route path='/settings/skills-hub' element={<Navigate to='/skills' replace />} />
-          <Route path='/settings/tools' element={<Navigate to='/open-capabilities' replace />} />
-          <Route path='/settings/display' element={<Navigate to='/settings/system' replace />} />
-          <Route path='/settings/webui' element={<Navigate to='/open-capabilities' replace />} />
-          <Route path='/settings/system' element={withRouteFallback(SystemSettings)} />
-          <Route path='/settings/execution-engines' element={withRouteFallback(ExecutionEngineSettings)} />
-          <Route path='/settings/ssh-hosts' element={withRouteFallback(SshHostSettings)} />
-          <Route path='/settings/agent-runtime' element={<Navigate to='/settings/execution-engines' replace />} />
-          <Route path='/settings/browser-use' element={<Navigate to='/browser?tab=settings' replace />} />
-          <Route path='/settings/computer-use' element={withRouteFallback(SystemSettings)} />
-          <Route path='/settings/about' element={withRouteFallback(SystemSettings)} />
-          <Route path='/settings/ext/:tabId' element={withRouteFallback(ExtensionSettingsPage)} />
-          <Route path='/settings/webhook' element={<Navigate to='/requirements/extensions?tab=notify' replace />} />
-          <Route path='/settings' element={<Navigate to='/settings/system' replace />} />
-          <Route path='/test/components' element={withRouteFallback(ComponentsShowcase)} />
-          <Route path='/scheduled' element={withRouteFallback(ScheduledTasksPage)} />
-          <Route path='/scheduled/:cron_job_id' element={withRouteFallback(TaskDetailPage)} />
-          {/* Requirements platform — nested shell (ContentSider persists across sections) */}
-          <Route path='/requirements' element={withRouteFallback(RequirementsLayout)}>
-            <Route index element={withRouteFallback(WorkspacePage)} />
-            <Route path='extensions' element={withRouteFallback(ExtensionsPage)} />
-            <Route path='sources' element={withRouteFallback(SourcesPage)} />
+          <Route element={layout}>
+            <Route index element={<Navigate to='/guid' replace />} />
+            {/* Models, presets, skills, and MCP are independent top-level capabilities. */}
+            <Route path='/models' element={withRouteFallback(ModelHubPage)} />
+            <Route path='/extensions' element={<LegacyExtensionsRedirect />} />
+            <Route path='/mcp' element={withRouteFallback(McpPage)} />
+            <Route path='/open-capabilities' element={withRouteFallback(OpenCapabilitiesPage)} />
+            <Route path='/browser' element={withRouteFallback(BrowserPage)} />
+            <Route path='/presets' element={withRouteFallback(PresetSettings)} />
+            <Route path='/skills' element={withRouteFallback(SkillsSettingsPage)} />
+            {/* Session section — the secondary sidebar (ContentSider) persists across these routes */}
+            <Route element={<SessionShellRoute />}>
+              <Route path='/guid' element={withRouteFallback(Guid)} />
+              <Route path='/conversation/:id' element={withRouteFallback(Conversation)} />
+              <Route path='/terminal-new' element={withRouteFallback(TerminalCreatePage)} />
+              <Route path='/terminal/:id' element={withRouteFallback(TerminalSessionPage)} />
+            </Route>
+            {/* Relocated to the capability rail. */}
+            <Route path='/settings/model' element={<Navigate to='/models?section=models' replace />} />
+            <Route path='/settings/agent' element={<LegacyExecutionEngineRedirect />} />
+            <Route path='/settings/capabilities' element={<Navigate to='/skills' replace />} />
+            <Route path='/settings/skills-hub' element={<Navigate to='/skills' replace />} />
+            <Route path='/settings/tools' element={<Navigate to='/open-capabilities' replace />} />
+            <Route path='/settings/display' element={<Navigate to='/settings/system' replace />} />
+            <Route path='/settings/webui' element={<Navigate to='/open-capabilities' replace />} />
+            <Route path='/settings/system' element={withRouteFallback(SystemSettings)} />
+            <Route path='/settings/execution-engines' element={withRouteFallback(ExecutionEngineSettings)} />
+            <Route path='/settings/ssh-hosts' element={withRouteFallback(SshHostSettings)} />
+            <Route path='/settings/agent-runtime' element={<Navigate to='/settings/execution-engines' replace />} />
+            <Route path='/settings/browser-use' element={<Navigate to='/browser?tab=settings' replace />} />
+            <Route path='/settings/computer-use' element={withRouteFallback(SystemSettings)} />
+            <Route path='/settings/about' element={withRouteFallback(SystemSettings)} />
+            <Route path='/settings/ext/:tabId' element={withRouteFallback(ExtensionSettingsPage)} />
+            <Route path='/settings/webhook' element={<Navigate to='/requirements/extensions?tab=notify' replace />} />
+            <Route path='/settings' element={<Navigate to='/settings/system' replace />} />
+            <Route path='/test/components' element={withRouteFallback(ComponentsShowcase)} />
+            <Route path='/scheduled' element={withRouteFallback(ScheduledTasksPage)} />
+            <Route path='/scheduled/:cron_job_id' element={withRouteFallback(TaskDetailPage)} />
+            {/* Requirements platform — nested shell (ContentSider persists across sections) */}
+            <Route path='/requirements' element={withRouteFallback(RequirementsLayout)}>
+              <Route index element={withRouteFallback(WorkspacePage)} />
+              <Route path='extensions' element={withRouteFallback(ExtensionsPage)} />
+              <Route path='sources' element={withRouteFallback(SourcesPage)} />
+            </Route>
+            {/* Legacy requirement routes → fold into the new shell (preserve deep links) */}
+            <Route path='/requirements/kanban' element={<Navigate to='/requirements?view=board' replace />} />
+            <Route path='/requirements/new' element={<Navigate to='/requirements?new=1' replace />} />
+            <Route path='/requirements/:id/edit' element={<RequirementEditRedirect />} />
+            <Route path='/requirements/tag-sessions' element={<Navigate to='/requirements/extensions?tab=autowork' replace />} />
+            <Route path='/autowork' element={<Navigate to='/requirements/extensions?tab=autowork' replace />} />
+            {/* Webhook config relocated into 扩展能力 */}
+            <Route path='/other' element={<Navigate to='/requirements/extensions?tab=notify' replace />} />
+            <Route path='/nomi' element={withRouteFallback(NomiConfigPage)} />
+            {/* 客服 (Customer Service) — a first-class domain separate from desktop companions. */}
+            <Route path='/customer-service' element={withRouteFallback(CustomerServiceRosterPage)} />
+            <Route path='/customer-service/:cs_agent_id' element={withRouteFallback(CustomerServiceDetailPage)} />
+            <Route path='/knowledge' element={withRouteFallback(KnowledgeListPage)} />
+            <Route path='/knowledge/:id' element={withRouteFallback(KnowledgeDetailPage)} />
+            {/* 小程序 (Mini-apps) — the solidified library and its full-page runner. */}
+            <Route path='/mini-apps' element={withRouteFallback(MiniAppsListPage)} />
+            <Route path='/mini-apps/:id' element={withRouteFallback(MiniAppRunnerPage)} />
           </Route>
-          {/* Legacy requirement routes → fold into the new shell (preserve deep links) */}
-          <Route path='/requirements/kanban' element={<Navigate to='/requirements?view=board' replace />} />
-          <Route path='/requirements/new' element={<Navigate to='/requirements?new=1' replace />} />
-          <Route path='/requirements/:id/edit' element={<RequirementEditRedirect />} />
-          <Route path='/requirements/tag-sessions' element={<Navigate to='/requirements/extensions?tab=autowork' replace />} />
-          <Route path='/autowork' element={<Navigate to='/requirements/extensions?tab=autowork' replace />} />
-          {/* Webhook config relocated into 扩展能力 */}
-          <Route path='/other' element={<Navigate to='/requirements/extensions?tab=notify' replace />} />
-          <Route path='/nomi' element={withRouteFallback(NomiConfigPage)} />
-          {/* 客服 (Customer Service) — a first-class domain separate from desktop companions. */}
-          <Route path='/customer-service' element={withRouteFallback(CustomerServiceRosterPage)} />
-          <Route path='/customer-service/:cs_agent_id' element={withRouteFallback(CustomerServiceDetailPage)} />
-          <Route path='/knowledge' element={withRouteFallback(KnowledgeListPage)} />
-          <Route path='/knowledge/:id' element={withRouteFallback(KnowledgeDetailPage)} />
-          {/* 资产库 (Asset Library) — platform-level management of workshop assets. */}
-          <Route path='/assets' element={withRouteFallback(AssetLibraryPage)} />
-          {/* 创意工坊 (Creative Workshop) — infinite-canvas AI visual creation. */}
-          <Route path='/workshop' element={withRouteFallback(WorkshopListPage)} />
-          <Route path='/workshop/:id' element={withRouteFallback(WorkshopCanvasPage)} />
-          {/* 小程序 (Mini-apps) — the solidified library and its full-page runner. */}
-          <Route path='/mini-apps' element={withRouteFallback(MiniAppsListPage)} />
-          <Route path='/mini-apps/:id' element={withRouteFallback(MiniAppRunnerPage)} />
         </Route>
         <Route path='*' element={<Navigate to={status === 'authenticated' ? '/guid' : '/login'} replace />} />
       </Routes>
