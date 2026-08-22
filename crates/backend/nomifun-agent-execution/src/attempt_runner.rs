@@ -37,6 +37,9 @@ const ARTIFACT_RECEIPT_PAGE_SIZE: u32 = 100;
 // The store repeats this limit against real metadata before reading bytes, so
 // a forged small receipt cannot make us hash an arbitrarily large file.
 const MAX_VERIFIED_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+const DELIVERY_RECEIPT_GRACE: Duration = Duration::from_secs(5);
+const DELIVERY_RECEIPT_POLL: Duration = Duration::from_millis(100);
+pub(crate) const MISSING_DELIVERY_RECEIPT_CODE: &str = "agent_delivery_receipt_missing";
 
 /// Async callback invoked immediately after the Agent conversation is created
 /// and before its first message is sent. The scheduler uses it to persist the
@@ -56,6 +59,11 @@ pub(crate) struct AttemptOutcome {
     pub output_files: Vec<String>,
     pub ok: bool,
     pub tokens: Option<i64>,
+    /// Structured terminal delivery result. When present, this is more
+    /// authoritative than scraping the transcript for an error marker.
+    pub error: Option<String>,
+    pub error_code: Option<String>,
+    pub error_retryable: Option<bool>,
 }
 
 #[async_trait]
@@ -216,43 +224,44 @@ impl ConversationAttemptRunner {
                 output_files: projection.files,
                 ok: delivery.result_ok.unwrap_or(false) && projection.integrity_ok,
                 tokens: self.conv.take_turn_tokens(conversation_id),
+                error: delivery.result_error,
+                error_code: delivery.result_error_code,
+                error_retryable: delivery.result_error_retryable,
             });
         }
-        if !self
+        let became_idle = self
             .await_turn(conversation_id, timeout, Duration::from_millis(500))
-            .await
-        {
-            return Ok(AttemptOutcome {
-                conversation_id: conversation_id.to_owned(),
-                text: None,
-                output_files: Vec::new(),
-                ok: false,
-                tokens: self.conv.take_turn_tokens(conversation_id),
-            });
-        }
-        let _ = self
-            .await_turn(
-                conversation_id,
-                Duration::from_secs(5),
-                Duration::from_millis(25),
-            )
             .await;
-        if let Some(receipt) = self
-            .execution_port
-            .delivery_result(owner_id, conversation_id, operation_id)
-            .await?
-            .filter(|receipt| receipt.completed)
-        {
-            let projection = self
-                .output_files_for_turn(owner_id, conversation_id, &receipt.message_id)
-                .await;
-            return Ok(AttemptOutcome {
-                conversation_id: conversation_id.to_owned(),
-                text: receipt.result_text,
-                output_files: projection.files,
-                ok: receipt.result_ok.unwrap_or(false) && projection.integrity_ok,
-                tokens: self.conv.take_turn_tokens(conversation_id),
-            });
+        // A runtime can become idle a few milliseconds before the durable
+        // receipt finalizer commits (especially on macOS under filesystem or
+        // SQLite contention). Never convert that small commit window into a
+        // timeout; wait briefly for the exact operation receipt instead.
+        let receipt_deadline = Instant::now() + DELIVERY_RECEIPT_GRACE;
+        loop {
+            if let Some(receipt) = self
+                .execution_port
+                .delivery_result(owner_id, conversation_id, operation_id)
+                .await?
+                .filter(|receipt| receipt.completed)
+            {
+                let projection = self
+                    .output_files_for_turn(owner_id, conversation_id, &receipt.message_id)
+                    .await;
+                return Ok(AttemptOutcome {
+                    conversation_id: conversation_id.to_owned(),
+                    text: receipt.result_text,
+                    output_files: projection.files,
+                    ok: receipt.result_ok.unwrap_or(false) && projection.integrity_ok,
+                    tokens: self.conv.take_turn_tokens(conversation_id),
+                    error: receipt.result_error,
+                    error_code: receipt.result_error_code,
+                    error_retryable: receipt.result_error_retryable,
+                });
+            }
+            if Instant::now() >= receipt_deadline {
+                break;
+            }
+            tokio::time::sleep(DELIVERY_RECEIPT_POLL).await;
         }
         // Runtime idleness is not a delivery receipt. Reading the newest
         // assistant row here could select a previous or concurrently delivered
@@ -263,6 +272,7 @@ impl ConversationAttemptRunner {
             conversation_id,
             operation_id,
             boundary_message_id,
+            runtime_became_idle = became_idle,
             "agent turn became idle without a completed delivery receipt"
         );
         Ok(missing_delivery_receipt_outcome(
@@ -595,9 +605,28 @@ fn build_agent_extra(
     exclude_delegation: bool,
 ) -> Value {
     let restricted = tool_policy_allowed_tools(tool_policy);
+    let system_prompt = restricted
+        .as_ref()
+        .map(|tools| {
+            format!(
+                "{brief}\n\n\
+                 ## Execution tool authority (strict)\n\
+                 This is a restricted execution Attempt. The only callable tools for this \
+                 task are: {}. ToolSearch may be used only to discover one of those tools. \
+                 Do not call, preview, or emit progress for Bash, update_plan, Write, Edit, \
+                 ApplyPatch, or any other tool unless its exact name appears in that list. \
+                 A tool name mentioned in general instructions is not permission.",
+                tools
+                    .iter()
+                    .map(|tool| format!("`{tool}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .unwrap_or_else(|| brief.to_owned());
     let mut extra = json!({
         "session_mode": "yolo",
-        "system_prompt": brief,
+        "system_prompt": system_prompt,
         "preset_enabled_skills": enabled_skills,
         "exclude_auto_inject_skills": disabled_builtin_skills,
     });
@@ -659,6 +688,12 @@ fn missing_delivery_receipt_outcome(
         output_files: Vec::new(),
         ok: false,
         tokens,
+        error: Some(
+            "Agent turn ended without a completed delivery receipt; automatic retry is blocked because the outcome is ambiguous"
+                .to_owned(),
+        ),
+        error_code: Some(MISSING_DELIVERY_RECEIPT_CODE.to_owned()),
+        error_retryable: Some(false),
     }
 }
 
@@ -869,55 +904,40 @@ fn portable_relative_path(value: &str) -> Option<PathBuf> {
 }
 
 fn latest_error_retryable(value: &Value) -> bool {
-    match value {
-        Value::Array(values) => values.iter().find_map(error_retryable_flag).unwrap_or(false),
-        _ => error_retryable_flag(value).unwrap_or(false),
-    }
+    find_error_object(value)
+        .and_then(|error| error.get("retryable"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
-fn error_retryable_flag(value: &Value) -> Option<bool> {
-    let content = value.as_object()?.get("content")?;
-    if content.get("type").and_then(Value::as_str) != Some("error") {
-        return None;
+fn find_error_object(value: &Value) -> Option<&serde_json::Map<String, Value>> {
+    match value {
+        Value::Array(values) => values.iter().find_map(find_error_object),
+        Value::Object(object) => {
+            let content = object.get("content");
+            if content
+                .and_then(Value::as_object)
+                .and_then(|content| content.get("type"))
+                .and_then(Value::as_str)
+                == Some("error")
+            {
+                return content
+                    .and_then(Value::as_object)
+                    .and_then(|content| content.get("error"))
+                    .and_then(Value::as_object);
+            }
+            object.values().find_map(find_error_object)
+        }
+        _ => None,
     }
-    Some(
-        content
-            .get("error")
-            .and_then(|error| error.get("retryable"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    )
 }
 
 fn latest_error_present(value: &Value) -> bool {
-    match value {
-        Value::Array(values) => values.iter().any(error_marker_present),
-        _ => error_marker_present(value),
-    }
-}
-
-fn error_marker_present(value: &Value) -> bool {
-    value
-        .as_object()
-        .and_then(|object| object.get("content"))
-        .and_then(|content| content.get("type"))
-        .and_then(Value::as_str)
-        == Some("error")
+    find_error_object(value).is_some()
 }
 
 fn latest_error_summary(value: &Value) -> Option<String> {
-    match value {
-        Value::Array(values) => values.iter().find_map(error_summary),
-        _ => error_summary(value),
-    }
-}
-
-fn error_summary(value: &Value) -> Option<String> {
-    let content = value.as_object()?.get("content")?;
-    if content.get("type").and_then(Value::as_str) != Some("error") {
-        return None;
-    }
-    let error = content.get("error")?;
+    let error = find_error_object(value)?;
     match (
         error.get("code").and_then(Value::as_str),
         error.get("message").and_then(Value::as_str),
@@ -1088,6 +1108,23 @@ mod tests {
     }
 
     #[test]
+    fn restricted_attempt_prompt_declares_exact_tool_authority() {
+        let extra = build_agent_extra(
+            "inspect the workspace",
+            None,
+            None,
+            &[],
+            &[],
+            AgentToolPolicy::ReadOnly,
+            false,
+        );
+        let prompt = extra["system_prompt"].as_str().unwrap();
+        assert!(prompt.contains("`Read`, `Grep`, `Glob`"));
+        assert!(prompt.contains("Do not call, preview, or emit progress for Bash"));
+        assert!(prompt.contains("unless its exact name appears in that list"));
+    }
+
+    #[test]
     fn idle_without_delivery_receipt_ignores_old_or_concurrent_assistant_text() {
         let unrelated_transcript = json!([
             {
@@ -1112,6 +1149,37 @@ mod tests {
         assert_eq!(outcome.text, None);
         assert!(outcome.output_files.is_empty());
         assert_eq!(outcome.tokens, Some(17));
+        assert_eq!(
+            outcome.error_code.as_deref(),
+            Some(MISSING_DELIVERY_RECEIPT_CODE)
+        );
+        assert_eq!(outcome.error_retryable, Some(false));
+    }
+
+    #[test]
+    fn nested_error_messages_are_visible_to_attempt_settlement() {
+        let transcript = json!({
+            "items": [
+                {
+                    "type": "tips",
+                    "content": {
+                        "type": "error",
+                        "error": {
+                            "code": "USER_LLM_PROVIDER_GATEWAY_ERROR",
+                            "message": "provider stream protocol violation",
+                            "retryable": true
+                        }
+                    }
+                }
+            ],
+            "has_more": false
+        });
+        assert!(latest_error_present(&transcript));
+        assert!(latest_error_retryable(&transcript));
+        assert_eq!(
+            latest_error_summary(&transcript).as_deref(),
+            Some("USER_LLM_PROVIDER_GATEWAY_ERROR: provider stream protocol violation")
+        );
     }
 
     #[test]

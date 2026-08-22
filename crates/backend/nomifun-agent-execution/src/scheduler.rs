@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::hash::Hash;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
@@ -28,10 +28,10 @@ use nomifun_db::{
     SettleAgentExecutionAttemptParams, UpdateAgentExecutionParams,
 };
 use serde_json::json;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 use crate::attempt_runner::{AttemptOutcome, AttemptRunner};
-use crate::artifact_contract::validate_required_artifacts;
+use crate::artifact_contract::{requires_artifact_delivery, validate_required_artifacts};
 use crate::control_steps::{self, ControlResolution};
 use crate::conversation_effect::{AttemptConversationEffects, PendingConversationEffect};
 use crate::domain_mapper;
@@ -235,6 +235,7 @@ struct SchedulerInner {
 struct ActiveHandle {
     generation: String,
     cancel: watch::Sender<bool>,
+    wake: Arc<Notify>,
     restart_requested: bool,
     lease: Option<AgentExecutionLeaseToken>,
 }
@@ -269,39 +270,52 @@ impl ExecutionScheduler {
                 // prior generation is still unwinding. Remember one durable
                 // wake-up; the exiting generation starts its successor only
                 // after releasing the lease.
-                entry.get_mut().restart_requested = true;
+                let handle = entry.get_mut();
+                handle.restart_requested = true;
+                // A live scheduler may be asleep on an automatic retry
+                // backoff. New work or a manual retry must wake it immediately
+                // rather than waiting for the old timer to expire.
+                handle.wake.notify_one();
                 return;
             }
             Entry::Vacant(entry) => {
+                let wake = Arc::new(Notify::new());
                 entry.insert(ActiveHandle {
                     generation: generation.clone(),
                     cancel,
+                    wake: wake.clone(),
                     restart_requested: false,
                     lease: None,
                 });
+                let scheduler = self.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = scheduler
+                        .execute_loop(
+                            &owner_id,
+                            &execution_id,
+                            &generation,
+                            receiver,
+                            wake,
+                        )
+                        .await
+                    {
+                        tracing::error!(%execution_id, %error, "Agent Execution scheduler stopped with an error");
+                    }
+                    // Read restart_requested and remove this exact generation while
+                    // holding the same shard lock. A concurrent resume between a
+                    // separate read/remove pair would otherwise be lost.
+                    let restart = match scheduler.inner.active.entry(execution_id.clone()) {
+                        Entry::Occupied(entry) if entry.get().generation == generation => {
+                            entry.remove().restart_requested
+                        }
+                        _ => false,
+                    };
+                    if restart {
+                        scheduler.start(owner_id, execution_id);
+                    }
+                });
             }
         }
-        let scheduler = self.clone();
-        tokio::spawn(async move {
-            if let Err(error) = scheduler
-                .execute_loop(&owner_id, &execution_id, &generation, receiver)
-                .await
-            {
-                tracing::error!(%execution_id, %error, "Agent Execution scheduler stopped with an error");
-            }
-            // Read restart_requested and remove this exact generation while
-            // holding the same shard lock. A concurrent resume between a
-            // separate read/remove pair would otherwise be lost.
-            let restart = match scheduler.inner.active.entry(execution_id.clone()) {
-                Entry::Occupied(entry) if entry.get().generation == generation => {
-                    entry.remove().restart_requested
-                }
-                _ => false,
-            };
-            if restart {
-                scheduler.start(owner_id, execution_id);
-            }
-        });
     }
 
     pub fn stop(&self, execution_id: &str) {
@@ -777,6 +791,7 @@ impl ExecutionScheduler {
         execution_id: &str,
         generation: &str,
         mut cancelled: watch::Receiver<bool>,
+        wake: Arc<Notify>,
     ) -> Result<(), AppError> {
         let repository = &self.inner.deps.repository;
         let Some((lease, expiry)) = self
@@ -846,6 +861,7 @@ impl ExecutionScheduler {
                                 return Ok(SchedulerLoopExit::LeaseLost);
                             }
                         }
+                        _ = wake.notified() => {}
                     }
                     continue;
                 }
@@ -866,8 +882,7 @@ impl ExecutionScheduler {
                 {
                     continue;
                 }
-                if detail.execution.work_dir.is_none() {
-                    self.allocate_work_dir(owner_id, &mut detail, &lease).await?;
+                if self.ensure_work_dir(owner_id, &mut detail, &lease).await? {
                     continue;
                 }
                 if self
@@ -932,6 +947,7 @@ impl ExecutionScheduler {
                                 return Ok(SchedulerLoopExit::LeaseLost);
                             }
                         }
+                        _ = wake.notified() => {}
                     }
                     continue;
                 }
@@ -953,6 +969,7 @@ impl ExecutionScheduler {
                                 return Ok(SchedulerLoopExit::LeaseLost);
                             }
                         }
+                        _ = wake.notified() => {}
                     }
                     continue;
                 }
@@ -1376,21 +1393,142 @@ impl ExecutionScheduler {
         }
     }
 
-    async fn allocate_work_dir(
+    /// Resolve and provision the execution workspace before the first Attempt
+    /// is created.
+    ///
+    /// Conversation workspaces are normally absolute, backend-created paths.
+    /// Agent Execution also accepts an explicit `work_dir`, though, and older
+    /// callers were able to persist a relative/non-existent value verbatim.
+    /// That value later reached the knowledge broker and failed during
+    /// `canonicalize`, after the scheduler had already created retries.  Make
+    /// the boundary deterministic here:
+    ///
+    /// * omitted paths use the isolated execution root;
+    /// * relative paths are rooted below that execution root (never the
+    ///   process' current directory);
+    /// * every path is created, canonicalized, and persisted before dispatch;
+    /// * parent traversal and cross-platform path spellings are rejected.
+    ///
+    /// `true` means the execution row changed and the caller should reload its
+    /// detail before making a scheduling decision.
+    async fn ensure_work_dir(
         &self,
         owner_id: &str,
         detail: &mut AgentExecutionDetail,
         lease: &AgentExecutionLeaseToken,
-    ) -> Result<(), AppError> {
-        let path = self
+    ) -> Result<bool, AppError> {
+        let execution_root = self
             .inner
             .deps
             .data_dir
             .join("agent-executions")
             .join(&detail.execution.execution_id);
+        let requested = detail
+            .execution
+            .work_dir
+            .as_deref()
+            .filter(|value| !value.is_empty());
+        let path = match requested {
+            None => execution_root.clone(),
+            Some(raw) => resolve_requested_work_dir(&execution_root, raw)?,
+        };
+        if nomifun_common::workspace_path_has_edge_whitespace_segment(&path) {
+            return Err(AppError::BadRequest(format!(
+                "Agent Execution work_dir contains a directory name with leading/trailing whitespace: {}",
+                path.display()
+            )));
+        }
+
+        // Do not let `create_dir_all` follow an existing symlink/junction
+        // beneath an execution root before the containment check runs.  Find
+        // the nearest existing ancestor first, canonicalize that ancestor,
+        // and reject a relative request whose already-materialized prefix
+        // leaves the isolated execution root.  The final canonical check
+        // below still handles races and the newly-created suffix.
+        let canonical_root = if requested.is_some_and(|raw| !Path::new(raw).is_absolute()) {
+            tokio::fs::create_dir_all(&execution_root)
+                .await
+                .map_err(|error| {
+                    AppError::BadRequest(format!(
+                        "Agent Execution work root cannot be created '{}': {error}",
+                        execution_root.display()
+                    ))
+                })?;
+            Some(
+                nomifun_common::paths::canonicalize_simplified(&execution_root).map_err(
+                    |error| {
+                        AppError::Internal(format!(
+                            "canonicalize execution work root '{}': {error}",
+                            execution_root.display()
+                        ))
+                    },
+                )?,
+            )
+        } else {
+            None
+        };
+        if let Some(canonical_root) = canonical_root.as_ref() {
+            let existing_ancestor = nearest_existing_ancestor(&path).ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "relative Agent Execution work_dir has no usable ancestor: {}",
+                    path.display()
+                ))
+            })?;
+            let canonical_ancestor =
+                nomifun_common::paths::canonicalize_simplified(existing_ancestor).map_err(
+                    |error| {
+                        AppError::BadRequest(format!(
+                            "relative Agent Execution work_dir cannot be canonicalized '{}': {error}",
+                            existing_ancestor.display()
+                        ))
+                    },
+                )?;
+            if !canonical_ancestor.starts_with(canonical_root) {
+                return Err(AppError::BadRequest(format!(
+                    "relative Agent Execution work_dir resolves outside its execution root: {}",
+                    canonical_ancestor.display()
+                )));
+            }
+        }
+
         tokio::fs::create_dir_all(&path)
             .await
-            .map_err(|error| AppError::Internal(format!("create execution work dir: {error}")))?;
+            .map_err(|error| {
+                AppError::BadRequest(format!(
+                    "Agent Execution work_dir cannot be created '{}': {error}",
+                    path.display()
+                ))
+            })?;
+        let canonical = nomifun_common::paths::canonicalize_simplified(&path).map_err(|error| {
+            AppError::BadRequest(format!(
+                "Agent Execution work_dir cannot be canonicalized '{}': {error}",
+                path.display()
+            ))
+        })?;
+        let metadata = tokio::fs::metadata(&canonical).await.map_err(|error| {
+            AppError::BadRequest(format!(
+                "Agent Execution work_dir cannot be inspected '{}': {error}",
+                canonical.display()
+            ))
+        })?;
+        if !metadata.is_dir() {
+            return Err(AppError::BadRequest(format!(
+                "Agent Execution work_dir is not a directory: {}",
+                canonical.display()
+            )));
+        }
+        if let Some(canonical_root) = canonical_root {
+            if !canonical.starts_with(&canonical_root) {
+                return Err(AppError::BadRequest(format!(
+                    "relative Agent Execution work_dir resolves outside its execution root: {}",
+                    canonical.display()
+                )));
+            }
+        }
+        let canonical_string = canonical.to_string_lossy().into_owned();
+        if detail.execution.work_dir.as_deref() == Some(canonical_string.as_str()) {
+            return Ok(false);
+        }
         self.inner
             .deps
             .repository
@@ -1400,19 +1538,19 @@ impl ExecutionScheduler {
                 detail.execution.version,
                 Some(lease),
                 &UpdateAgentExecutionParams {
-                    work_dir: Some(Some(path.to_string_lossy().into_owned())),
+                    work_dir: Some(Some(canonical_string)),
                     ..Default::default()
                 },
                 &system_event(
                     AgentExecutionEventKind::StatusChanged,
                     None,
                     None,
-                    json!({"change":"work_dir_allocated"}),
+                    json!({"change":"work_dir_ready"}),
                 ),
             )
             .await?;
         self.publish().await;
-        Ok(())
+        Ok(true)
     }
 
     async fn skip_one_blocked_step(
@@ -1657,6 +1795,18 @@ impl ExecutionScheduler {
         {
             tracing::warn!(%execution_id, step_id = %step.step_id, %error, "Agent attempt failed before starting");
         }
+        if let Err(error) = &outcome {
+            tracing::warn!(
+                %execution_id,
+                step_id = %step.step_id,
+                attempt_id = %attempt_id,
+                attempt_no = previous_attempts + 1,
+                conversation_id = ?conversation_id,
+                error = %error,
+                error_code = error.error_code(),
+                "Agent attempt execution returned an error"
+            );
+        }
         self.settle_agent_outcome(
             owner_id,
             execution_id,
@@ -1721,49 +1871,66 @@ impl ExecutionScheduler {
                 None,
             ),
             Ok(outcome) => {
-                let artifact_contract_error = (outcome.ok
-                    && outcome
-                        .text
-                        .as_ref()
-                        .is_some_and(|text| !text.trim().is_empty()))
-                .then(|| validate_required_artifacts(&step.spec, &outcome.output_files).err())
-                .flatten();
-                let (retryable, has_marker, reason) =
-                    if let Some(error) = artifact_contract_error {
-                        // The turn itself finished, but its verified delivery
-                        // did not satisfy the immutable Step requirement. Make
-                        // the integrity failure visible and retryable under the
-                        // same bounded adaptive policy as other provider faults.
-                        (true, true, format!("Agent artifact delivery failed: {error}"))
-                    } else {
-                        let retryable = self
-                            .inner
-                            .deps
-                            .attempt_runner
-                            .last_error_retryable(owner_id, &outcome.conversation_id)
-                            .await;
-                        let has_marker = self
+                let artifact_contract_error = outcome
+                    .ok
+                    .then(|| validate_required_artifacts(&step.spec, &outcome.output_files).err())
+                    .flatten();
+                let (retryable, has_marker, reason) = if let Some(error) =
+                    artifact_contract_error
+                {
+                    // The turn itself finished, but its verified delivery did
+                    // not satisfy the immutable Step requirement. Make the
+                    // integrity failure visible and retryable under the same
+                    // bounded adaptive policy as other provider faults.
+                    (true, true, format!("Agent artifact delivery failed: {error}"))
+                } else {
+                    let retryable = match outcome.error_retryable {
+                        Some(value) => value,
+                        None => {
+                            self.inner
+                                .deps
+                                .attempt_runner
+                                .last_error_retryable(owner_id, &outcome.conversation_id)
+                                .await
+                        }
+                    };
+                    let has_marker = outcome.error.is_some()
+                        || outcome.error_code.is_some()
+                        || self
                             .inner
                             .deps
                             .attempt_runner
                             .last_error_present(owner_id, &outcome.conversation_id)
                             .await;
-                        let reason = self
-                            .inner
-                            .deps
-                            .attempt_runner
-                            .last_error_summary(owner_id, &outcome.conversation_id)
-                            .await
-                            .unwrap_or_else(|| {
-                                if has_marker {
-                                    "Agent attempt failed"
-                                } else {
-                                    "Agent attempt timed out"
-                                }
-                                .to_owned()
-                            });
-                        (retryable, has_marker, reason)
+                    let reason = if let Some(error) = outcome.error.clone() {
+                        error
+                    } else if let Some(code) = outcome.error_code.clone() {
+                        format!("Agent attempt failed ({code})")
+                    } else if let Some(summary) = self
+                        .inner
+                        .deps
+                        .attempt_runner
+                        .last_error_summary(owner_id, &outcome.conversation_id)
+                        .await
+                    {
+                        summary
+                    } else if has_marker {
+                        "Agent attempt failed".to_owned()
+                    } else {
+                        "Agent attempt timed out".to_owned()
                     };
+                    (retryable, has_marker, reason)
+                };
+                tracing::warn!(
+                    %execution_id,
+                    %step_id,
+                    %attempt_id,
+                    attempt_no,
+                    retryable,
+                    has_marker,
+                    reason = %reason,
+                    "classifying Agent attempt outcome for settlement"
+                );
                 let can_retry = detail.execution.adaptation_policy == AdaptationPolicy::Adaptive
                     && ((retryable && attempt_no <= MAX_PROVIDER_RETRIES)
                         || (!has_marker && attempt_no <= MAX_TIMEOUT_RETRIES));
@@ -1782,6 +1949,7 @@ impl ExecutionScheduler {
                     attempt.status,
                     detail.execution.adaptation_policy,
                     attempt_no,
+                    attempt_error_is_retryable(&error),
                 );
                 (
                     attempt_status,
@@ -2190,6 +2358,62 @@ fn next_effect_retry_delay(current: Duration) -> Duration {
     current.saturating_mul(2).min(EFFECT_RETRY_MAX)
 }
 
+fn resolve_requested_work_dir(root: &Path, raw: &str) -> Result<PathBuf, AppError> {
+    let original = raw;
+    let raw = original.trim();
+    if raw.is_empty() {
+        return Err(AppError::BadRequest(
+            "Agent Execution work_dir must not be empty".to_owned(),
+        ));
+    }
+    if raw != original {
+        return Err(AppError::BadRequest(
+            "Agent Execution work_dir must not contain surrounding whitespace".to_owned(),
+        ));
+    }
+
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    // A Windows path supplied to a Unix host (or vice versa) must not become
+    // an ordinary filename containing backslashes. Reject it explicitly
+    // instead of silently creating the wrong directory.
+    if (!cfg!(windows) && raw.contains('\\'))
+        || raw
+            .as_bytes()
+            .get(1)
+            .is_some_and(|byte| *byte == b':')
+    {
+        return Err(AppError::BadRequest(format!(
+            "Agent Execution work_dir uses an incompatible path spelling: {raw}"
+        )));
+    }
+
+    for component in path.components() {
+        if matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        ) {
+            return Err(AppError::BadRequest(
+                "relative Agent Execution work_dir must not escape its execution root".to_owned(),
+            ));
+        }
+    }
+    Ok(root.join(path))
+}
+
+fn nearest_existing_ancestor(path: &Path) -> Option<&Path> {
+    let mut candidate = path;
+    loop {
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        candidate = candidate.parent()?;
+    }
+}
+
 fn scheduler_error_is_recoverable(error: &AppError) -> bool {
     match error {
         // Aggregate/step CAS drift, deletion, and lease fencing are ordinary
@@ -2219,13 +2443,14 @@ fn attempt_error_transition(
     status: ExecutionAttemptStatus,
     adaptation: AdaptationPolicy,
     attempt_no: i64,
+    retryable_error: bool,
 ) -> (ExecutionAttemptStatus, ExecutionStepStatus, bool) {
     if status == ExecutionAttemptStatus::Queued {
         // No Conversation/model turn was started, so this is a dispatch
         // failure rather than a consumed model attempt. Retry it under a
         // small bounded start budget even for Fixed executions; exhausting
         // that budget fails the Step instead of spinning forever.
-        let can_retry = attempt_no <= MAX_PROVIDER_RETRIES;
+        let can_retry = retryable_error && attempt_no <= MAX_PROVIDER_RETRIES;
         return (
             ExecutionAttemptStatus::Cancelled,
             if can_retry {
@@ -2236,7 +2461,8 @@ fn attempt_error_transition(
             can_retry,
         );
     }
-    let can_retry = adaptation == AdaptationPolicy::Adaptive
+    let can_retry = retryable_error
+        && adaptation == AdaptationPolicy::Adaptive
         && attempt_no <= MAX_PROVIDER_RETRIES;
     (
         ExecutionAttemptStatus::Failed,
@@ -2249,13 +2475,34 @@ fn attempt_error_transition(
     )
 }
 
+fn attempt_error_is_retryable(error: &AppError) -> bool {
+    match error {
+        AppError::RateLimited | AppError::Timeout(_) => true,
+        AppError::BadGateway(_) => nomifun_ai_agent::AgentSendError::from_app_error_ref(error)
+            .stream_error()
+            .retryable
+            .unwrap_or(true),
+        AppError::Conflict(_) => true,
+        AppError::Internal(message) => {
+            message.starts_with("Database error:")
+                || message.starts_with("Database init error:")
+        }
+        // Invalid workspace/model/input/config errors are deterministic. A
+        // retry would create another Attempt with the same guaranteed failure
+        // and is exactly the repeated-node behavior seen in the field report.
+        _ => false,
+    }
+}
+
 fn agent_outcome_can_complete(outcome: &AttemptOutcome, step_spec: &str) -> bool {
-    outcome.ok
-        && outcome
-            .text
-            .as_ref()
-            .is_some_and(|text| !text.trim().is_empty())
-        && validate_required_artifacts(step_spec, &outcome.output_files).is_ok()
+    if !outcome.ok || validate_required_artifacts(step_spec, &outcome.output_files).is_err() {
+        return false;
+    }
+    let has_text = outcome
+        .text
+        .as_ref()
+        .is_some_and(|text| !text.trim().is_empty());
+    has_text || (requires_artifact_delivery(step_spec) && !outcome.output_files.is_empty())
 }
 
 fn ready_steps(detail: &AgentExecutionDetail, now: i64) -> Vec<&ExecutionStep> {
@@ -2691,6 +2938,21 @@ pub(crate) fn system_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::time::Instant as StdInstant;
+
+    use async_trait::async_trait;
+    use nomifun_api_types::WebSocketMessage;
+    use nomifun_common::{AgentToolPolicy, DecisionPolicy, DelegationPolicy};
+    use nomifun_db::{
+        CreateAgentExecutionParams, NewAgentExecutionParticipant, NewAgentExecutionStep,
+        NewAgentExecutionStepDependency, ReconcileAgentExecutionPlanParams,
+        SqliteAgentExecutionRepository, SqliteConversationRepository, IConversationRepository,
+    };
+    use nomifun_db::models::ConversationRow;
+    use nomifun_realtime::UserEventSink;
+    use tempfile::{TempDir, tempdir};
+    use tokio::sync::Barrier;
 
     #[derive(Debug)]
     struct TestCleanup {
@@ -2828,6 +3090,7 @@ mod tests {
             ExecutionAttemptStatus::Queued,
             AdaptationPolicy::Fixed,
             1,
+            true,
         );
         assert_eq!(attempt, ExecutionAttemptStatus::Cancelled);
         assert_eq!(step, ExecutionStepStatus::Pending);
@@ -2837,6 +3100,7 @@ mod tests {
             ExecutionAttemptStatus::Queued,
             AdaptationPolicy::Fixed,
             MAX_PROVIDER_RETRIES + 1,
+            true,
         );
         assert_eq!(attempt, ExecutionAttemptStatus::Cancelled);
         assert_eq!(step, ExecutionStepStatus::Failed);
@@ -2849,6 +3113,7 @@ mod tests {
             ExecutionAttemptStatus::Running,
             AdaptationPolicy::Fixed,
             1,
+            true,
         );
         assert_eq!(fixed_step, ExecutionStepStatus::Failed);
         assert!(!fixed_retry);
@@ -2857,9 +3122,32 @@ mod tests {
             ExecutionAttemptStatus::Running,
             AdaptationPolicy::Adaptive,
             1,
+            true,
         );
         assert_eq!(adaptive_step, ExecutionStepStatus::Pending);
         assert!(adaptive_retry);
+    }
+
+    #[test]
+    fn deterministic_dispatch_errors_do_not_repeat_the_same_step() {
+        let (_, step, retry) = attempt_error_transition(
+            ExecutionAttemptStatus::Queued,
+            AdaptationPolicy::Adaptive,
+            1,
+            false,
+        );
+        assert_eq!(step, ExecutionStepStatus::Failed);
+        assert!(!retry);
+        assert!(!attempt_error_is_retryable(&AppError::BadRequest(
+            "workspace does not exist".to_owned()
+        )));
+        assert!(attempt_error_is_retryable(&AppError::BadGateway(
+            "provider stream protocol violation".to_owned()
+        )));
+        assert!(!attempt_error_is_retryable(&AppError::BadGateway(
+            "Nomi agent error: API error: provider stream protocol violation: tool progress 'Bash' was not advertised in this request"
+                .to_owned()
+        )));
     }
 
     #[test]
@@ -2870,6 +3158,9 @@ mod tests {
             output_files: vec!["/untrusted/stale-output.png".to_owned()],
             ok,
             tokens: None,
+            error: None,
+            error_code: None,
+            error_retryable: None,
         };
 
         // Even a stale/concurrent assistant result cannot override ok=false.
@@ -2893,6 +3184,34 @@ mod tests {
     }
 
     #[test]
+    fn relative_execution_workspaces_are_rooted_and_traversal_is_rejected() {
+        let root = Path::new("/tmp/agent-execution-root");
+        assert_eq!(
+            resolve_requested_work_dir(root, "multi-agent-test").unwrap(),
+            root.join("multi-agent-test")
+        );
+        assert_eq!(
+            resolve_requested_work_dir(root, "./multi-agent-test").unwrap(),
+            root.join("./multi-agent-test")
+        );
+        assert!(resolve_requested_work_dir(root, "../outside").is_err());
+        assert!(resolve_requested_work_dir(root, "nested/../outside").is_err());
+        if cfg!(windows) {
+            assert_eq!(
+                resolve_requested_work_dir(root, r"nested\outside").unwrap(),
+                root.join(r"nested\outside")
+            );
+            assert_eq!(
+                resolve_requested_work_dir(root, r"C:\outside").unwrap(),
+                PathBuf::from(r"C:\outside")
+            );
+        } else {
+            assert!(resolve_requested_work_dir(root, r"nested\outside").is_err());
+            assert!(resolve_requested_work_dir(root, r"C:\outside").is_err());
+        }
+    }
+
+    #[test]
     fn artifact_step_cannot_complete_on_text_or_insufficient_files() {
         let outcome = |output_files: Vec<String>| AttemptOutcome {
             conversation_id: "0190f5fe-7c00-7a00-8000-000000000201".to_owned(),
@@ -2900,6 +3219,9 @@ mod tests {
             output_files,
             ok: true,
             tokens: None,
+            error: None,
+            error_code: None,
+            error_retryable: None,
         };
 
         assert!(!agent_outcome_can_complete(
@@ -2982,5 +3304,782 @@ mod tests {
             &business,
             &complete_edges,
         ));
+    }
+
+    // ---------------------------------------------------------------------
+    // Deterministic scheduler harness
+    //
+    // These tests deliberately exercise the real SQLite repository and the
+    // real scheduler loop. Only the external model/conversation boundary is
+    // replaced, so a green result proves the durable DAG/lease/attempt
+    // transitions rather than only the pure selection helpers.
+
+    const HARNESS_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000902";
+    const HARNESS_SOURCE_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000114";
+
+    struct NoopUserEventSink;
+
+    impl UserEventSink for NoopUserEventSink {
+        fn send_to_user(&self, _user_id: &str, _event: WebSocketMessage<serde_json::Value>) {}
+    }
+
+    struct NoopConversationEffects;
+
+    #[async_trait]
+    impl ConversationEffects for NoopConversationEffects {
+        async fn cancel_attempt(
+            &self,
+            _owner_id: &str,
+            _conversation_id: &str,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        async fn steer_attempt(
+            &self,
+            _owner_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+            _text: &str,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        async fn stop_attempt_turn(
+            &self,
+            _owner_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        async fn report_lead(
+            &self,
+            _owner_id: &str,
+            _detail: &AgentExecutionDetail,
+            _operation_id: &str,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    enum HarnessRunnerMode {
+        ParallelRoots {
+            barrier: Arc<Barrier>,
+            downstream_started_too_early: Arc<AtomicBool>,
+        },
+        DeterministicFailure {
+            failed_step: String,
+        },
+        RetryOnce {
+            remaining_failures: Arc<AtomicUsize>,
+        },
+    }
+
+    #[derive(Clone)]
+    struct HarnessAttemptRunner {
+        mode: HarnessRunnerMode,
+        calls: Arc<Mutex<Vec<String>>>,
+        workspace_dirs: Arc<Mutex<Vec<Option<String>>>>,
+        completed_successes: Arc<AtomicUsize>,
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+        conversation_repo: Arc<Mutex<Option<SqliteConversationRepository>>>,
+        owner_id: Arc<Mutex<Option<String>>>,
+    }
+
+    impl HarnessAttemptRunner {
+        fn parallel() -> Self {
+            Self {
+                mode: HarnessRunnerMode::ParallelRoots {
+                    barrier: Arc::new(Barrier::new(2)),
+                    downstream_started_too_early: Arc::new(AtomicBool::new(false)),
+                },
+                calls: Arc::new(Mutex::new(Vec::new())),
+                workspace_dirs: Arc::new(Mutex::new(Vec::new())),
+                completed_successes: Arc::new(AtomicUsize::new(0)),
+                active: Arc::new(AtomicUsize::new(0)),
+                max_active: Arc::new(AtomicUsize::new(0)),
+                conversation_repo: Arc::new(Mutex::new(None)),
+                owner_id: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn deterministic_failure(failed_step: &str) -> Self {
+            Self {
+                mode: HarnessRunnerMode::DeterministicFailure {
+                    failed_step: failed_step.to_owned(),
+                },
+                calls: Arc::new(Mutex::new(Vec::new())),
+                workspace_dirs: Arc::new(Mutex::new(Vec::new())),
+                completed_successes: Arc::new(AtomicUsize::new(0)),
+                active: Arc::new(AtomicUsize::new(0)),
+                max_active: Arc::new(AtomicUsize::new(0)),
+                conversation_repo: Arc::new(Mutex::new(None)),
+                owner_id: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn retry_once() -> Self {
+            Self {
+                mode: HarnessRunnerMode::RetryOnce {
+                    remaining_failures: Arc::new(AtomicUsize::new(1)),
+                },
+                calls: Arc::new(Mutex::new(Vec::new())),
+                workspace_dirs: Arc::new(Mutex::new(Vec::new())),
+                completed_successes: Arc::new(AtomicUsize::new(0)),
+                active: Arc::new(AtomicUsize::new(0)),
+                max_active: Arc::new(AtomicUsize::new(0)),
+                conversation_repo: Arc::new(Mutex::new(None)),
+                owner_id: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn bind_conversation_repo(&self, repository: SqliteConversationRepository) {
+            *self
+                .conversation_repo
+                .lock()
+                .expect("harness conversation repository is not poisoned") = Some(repository);
+        }
+
+        fn bind_owner(&self, owner_id: String) {
+            *self
+                .owner_id
+                .lock()
+                .expect("harness owner is not poisoned") = Some(owner_id);
+        }
+
+        fn call_count(&self, title: &str) -> usize {
+            self.calls
+                .lock()
+                .expect("harness call log is not poisoned")
+                .iter()
+                .filter(|called| called.as_str() == title)
+                .count()
+        }
+
+        fn workspace_dirs(&self) -> Vec<Option<String>> {
+            self.workspace_dirs
+                .lock()
+                .expect("harness workspace log is not poisoned")
+                .clone()
+        }
+
+        fn max_active(&self) -> usize {
+            self.max_active.load(Ordering::SeqCst)
+        }
+
+        fn downstream_started_too_early(&self) -> bool {
+            match &self.mode {
+                HarnessRunnerMode::ParallelRoots {
+                    downstream_started_too_early,
+                    ..
+                } => downstream_started_too_early.load(Ordering::SeqCst),
+                _ => false,
+            }
+        }
+    }
+
+    fn update_max_active(max_active: &AtomicUsize, candidate: usize) {
+        let mut observed = max_active.load(Ordering::SeqCst);
+        while candidate > observed {
+            match max_active.compare_exchange(
+                observed,
+                candidate,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(next) => observed = next,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AttemptRunner for HarnessAttemptRunner {
+        #[allow(clippy::too_many_arguments)]
+        async fn execute(
+            &self,
+            _owner_id: &str,
+            _participant: &ExecutionParticipant,
+            _execution_model_pool: &[ExecutionModelRef],
+            workspace_dir: Option<&str>,
+            step_title: &str,
+            _tool_policy: AgentToolPolicy,
+            _delegation_policy: DelegationPolicy,
+            _delegation_depth: i64,
+            _decision_policy: DecisionPolicy,
+            _attempt_creation_key: &str,
+            _brief: &str,
+            _step_spec: &str,
+            _timeout: Duration,
+            on_started: crate::attempt_runner::AttemptStarted,
+        ) -> Result<AttemptOutcome, AppError> {
+            self.workspace_dirs
+                .lock()
+                .expect("harness workspace log is not poisoned")
+                .push(workspace_dir.map(str::to_owned));
+            let conversation_id = nomifun_common::ConversationId::new().into_string();
+            let now = now_ms();
+            let owner_id = self
+                .owner_id
+                .lock()
+                .expect("harness owner is not poisoned")
+                .clone()
+                .ok_or_else(|| AppError::Internal("scheduler harness owner is missing".into()))?;
+            let conversation = ConversationRow {
+                id: 0,
+                conversation_id: conversation_id.clone(),
+                user_id: owner_id,
+                name: format!("Scheduler harness · {step_title}"),
+                r#type: "nomi".to_owned(),
+                extra: "{}".to_owned(),
+                delegation_policy: "automatic".to_owned(),
+                execution_model_pool: None,
+                decision_policy: "automatic".to_owned(),
+                execution_template_id: None,
+                model: None,
+                status: Some("pending".to_owned()),
+                source: Some("nomifun".to_owned()),
+                channel_chat_id: None,
+                pinned: false,
+                pinned_at: None,
+                cron_job_id: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
+                created_at: now,
+                updated_at: now,
+            };
+            let repository = self
+                .conversation_repo
+                .lock()
+                .expect("harness conversation repository is not poisoned")
+                .clone()
+                .ok_or_else(|| {
+                    AppError::Internal("scheduler harness conversation repository is missing".into())
+                })?;
+            repository
+                .create(&conversation)
+                .await
+                .map_err(|error| AppError::Internal(format!("create harness conversation: {error}")))?;
+            on_started(conversation_id.clone()).await?;
+
+            self.calls
+                .lock()
+                .expect("harness call log is not poisoned")
+                .push(step_title.to_owned());
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            update_max_active(&self.max_active, active);
+
+            let finish = |runner: &HarnessAttemptRunner| {
+                runner.active.fetch_sub(1, Ordering::SeqCst);
+            };
+            let failure = match &self.mode {
+                HarnessRunnerMode::DeterministicFailure { failed_step } => {
+                    step_title == failed_step
+                }
+                HarnessRunnerMode::RetryOnce {
+                    remaining_failures,
+                } => remaining_failures
+                    .compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok(),
+                HarnessRunnerMode::ParallelRoots { .. } => false,
+            };
+            if failure {
+                let (error, error_code, retryable) = match &self.mode {
+                    HarnessRunnerMode::RetryOnce { .. } => (
+                        "temporary deterministic harness provider failure",
+                        "USER_LLM_PROVIDER_GATEWAY_ERROR",
+                        true,
+                    ),
+                    _ => (
+                        "The model returned a tool that was not advertised for this request",
+                        "USER_LLM_PROVIDER_GATEWAY_ERROR",
+                        false,
+                    ),
+                };
+                finish(self);
+                return Ok(AttemptOutcome {
+                    conversation_id: format!("harness-{step_title}"),
+                    text: None,
+                    output_files: Vec::new(),
+                    ok: false,
+                    tokens: None,
+                    error: Some(error.to_owned()),
+                    error_code: Some(error_code.to_owned()),
+                    error_retryable: Some(retryable),
+                });
+            }
+
+            if let HarnessRunnerMode::ParallelRoots {
+                barrier,
+                downstream_started_too_early,
+            } = &self.mode
+            {
+                if step_title == "downstream" {
+                    if self.completed_successes.load(Ordering::SeqCst) < 2 {
+                        downstream_started_too_early.store(true, Ordering::SeqCst);
+                    }
+                } else if matches!(step_title, "upstream-a" | "upstream-b") {
+                    barrier.wait().await;
+                }
+            }
+
+            self.completed_successes.fetch_add(1, Ordering::SeqCst);
+            finish(self);
+            Ok(AttemptOutcome {
+                conversation_id: format!("harness-{step_title}"),
+                text: Some(format!("completed {step_title}")),
+                output_files: Vec::new(),
+                ok: true,
+                tokens: Some(1),
+                error: None,
+                error_code: None,
+                error_retryable: None,
+            })
+        }
+    }
+
+    fn harness_participant(participant_id: String) -> NewAgentExecutionParticipant {
+        NewAgentExecutionParticipant {
+            participant_id,
+            source_agent_id: HARNESS_SOURCE_AGENT_ID.to_owned(),
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
+            provider_id: Some(HARNESS_PROVIDER_ID.to_owned()),
+            model: Some("harness-model".to_owned()),
+            role: Some("builder".to_owned()),
+            capability: None,
+            constraints: None,
+            description: Some("deterministic scheduler harness".to_owned()),
+            system_prompt: None,
+            enabled_skills: "[]".to_owned(),
+            disabled_builtin_skills: "[]".to_owned(),
+            sort_order: 0,
+        }
+    }
+
+    fn harness_step(step_id: String, participant_id: &str, title: &str) -> NewAgentExecutionStep {
+        NewAgentExecutionStep {
+            step_id,
+            title: title.to_owned(),
+            spec: format!("Complete {title} in text."),
+            role: Some("builder".to_owned()),
+            tool_policy: AgentToolPolicy::Full,
+            kind: ExecutionStepKind::Agent,
+            agent_mode: Some(AgentStepMode::Normal),
+            profile: Some(
+                r#"{"kind":"research","needs_vision":false,"needs_web_search":false,"needs_long_context":false,"needs_high_reasoning":false,"bulk":false}"#
+                    .to_owned(),
+            ),
+            fanout_group: None,
+            control_policy: None,
+            status: ExecutionStepStatus::Pending,
+            assigned_participant_id: Some(participant_id.to_owned()),
+            assignment_score: Some(1.0),
+            assignment_rationale: Some("deterministic harness".to_owned()),
+            assignment_source: Some(nomifun_common::ParticipantAssignmentSource::Planner),
+            assignment_locked: false,
+            failure_policy: StepFailurePolicy::FailExecution,
+            preset_prompt: None,
+            graph_x: None,
+            graph_y: None,
+        }
+    }
+
+    async fn make_scheduler_harness(
+        runner: Arc<HarnessAttemptRunner>,
+        titles: &[&str],
+        dependencies: &[(&str, &str)],
+        max_parallel: i64,
+        adaptation_policy: AdaptationPolicy,
+        work_dir: Option<&str>,
+    ) -> (
+        ExecutionScheduler,
+        Arc<SqliteAgentExecutionRepository>,
+        String,
+        TempDir,
+        String,
+    ) {
+        let data_dir = tempdir().expect("scheduler data directory");
+        let database = nomifun_db::init_database(&data_dir.path().join("harness.sqlite"))
+            .await
+            .expect("file database");
+        let owner = nomifun_db::installation_owner_id(database.pool())
+            .await
+            .expect("installation owner");
+        runner.bind_owner(owner.clone());
+        sqlx::query(
+            "INSERT INTO providers (\
+                provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
+                created_at, updated_at\
+             ) VALUES (?, 'openai', 'Scheduler harness provider', 'https://example.invalid', \
+                       'bearer', '', 1, 1, 1)",
+        )
+        .bind(HARNESS_PROVIDER_ID)
+        .execute(database.pool())
+        .await
+        .expect("provider fixture");
+
+        let repository = Arc::new(SqliteAgentExecutionRepository::new(database.pool().clone()));
+        runner.bind_conversation_repo(SqliteConversationRepository::new(database.pool().clone()));
+        let participant_id = generate_id();
+        let created = repository
+            .create_execution_with_participants(
+                &owner,
+                &CreateAgentExecutionParams {
+                    goal: "deterministic scheduler integration".to_owned(),
+                    status: AgentExecutionStatus::Planning,
+                    plan_gate: nomifun_common::PlanGate::Automatic,
+                    adaptation_policy,
+                    decision_policy: nomifun_common::DecisionPolicy::Automatic,
+                    delegation_policy: DelegationPolicy::Automatic,
+                    max_parallel,
+                    work_dir: work_dir.map(str::to_owned),
+                    lead_conversation_id: None,
+                    initial_plan_input: r#"{"mode":"explicit"}"#.to_owned(),
+                },
+                &[harness_participant(participant_id.clone())],
+                &system_event(AgentExecutionEventKind::Created, None, None, json!({})),
+            )
+            .await
+            .expect("execution fixture");
+        let step_ids = titles
+            .iter()
+            .map(|_| generate_id())
+            .collect::<Vec<_>>();
+        let new_steps = step_ids
+            .iter()
+            .zip(titles.iter())
+            .map(|(step_id, title)| harness_step(step_id.clone(), &participant_id, title))
+            .collect::<Vec<_>>();
+        let id_by_title = titles
+            .iter()
+            .zip(step_ids.iter())
+            .map(|(title, id)| (*title, id.as_str()))
+            .collect::<HashMap<_, _>>();
+        let new_dependencies = dependencies
+            .iter()
+            .map(|(blocker, blocked)| NewAgentExecutionStepDependency {
+                blocker_step_id: id_by_title[blocker].to_owned(),
+                blocked_step_id: id_by_title[blocked].to_owned(),
+            })
+            .collect::<Vec<_>>();
+        repository
+            .reconcile_plan(
+                &owner,
+                &created.execution_id,
+                created.version,
+                &ReconcileAgentExecutionPlanParams {
+                    goal: None,
+                    plan_gate: None,
+                    adaptation_policy: None,
+                    decision_policy: None,
+                    delegation_policy: None,
+                    keep_step_ids: Vec::new(),
+                    new_participants: Vec::new(),
+                    retire_participant_ids: Vec::new(),
+                    new_steps,
+                    new_dependencies,
+                    execution_status: AgentExecutionStatus::Running,
+                },
+                &system_event(
+                    AgentExecutionEventKind::PlanChanged,
+                    None,
+                    None,
+                    json!({"change":"harness_plan"}),
+                ),
+            )
+            .await
+            .expect("materialize harness plan");
+
+        let publisher = AgentExecutionEventPublisher::new(Arc::new(NoopUserEventSink));
+        let mut deps = ExecutionSchedulerDeps::new(
+            repository.clone(),
+            runner,
+            Arc::new(NoopConversationEffects),
+            publisher,
+            data_dir.path().to_path_buf(),
+        );
+        deps.attempt_timeout = Duration::from_secs(5);
+        (
+            ExecutionScheduler::new(deps),
+            repository,
+            created.execution_id,
+            data_dir,
+            owner,
+        )
+    }
+
+    async fn wait_for_terminal(
+        repository: &SqliteAgentExecutionRepository,
+        owner_id: &str,
+        execution_id: &str,
+    ) -> nomifun_db::AgentExecutionDetailRows {
+        let deadline = StdInstant::now() + Duration::from_secs(5);
+        loop {
+            let detail = repository
+                .get_execution_detail(owner_id, execution_id)
+                .await
+                .expect("load harness detail")
+                .expect("harness execution exists");
+            let status = detail
+                .execution
+                .status
+                .parse::<AgentExecutionStatus>()
+                .expect("canonical harness status");
+            if status.is_terminal() {
+                return detail;
+            }
+            if StdInstant::now() >= deadline {
+                eprintln!(
+                    "scheduler harness timeout: status={}, version={}, steps={:?}, attempts={:?}",
+                    detail.execution.status,
+                    detail.execution.version,
+                    detail.steps.iter().map(|step| (&step.title, &step.status)).collect::<Vec<_>>(),
+                    detail
+                        .attempts
+                        .iter()
+                        .map(|attempt| (
+                            &attempt.attempt.attempt_id,
+                            &attempt.attempt.status,
+                            &attempt.attempt.error,
+                            &attempt.attempt.output_summary,
+                        ))
+                        .collect::<Vec<_>>(),
+                );
+                panic!("harness execution should settle");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scheduler_harness_runs_ready_roots_in_parallel_then_unblocks_downstream() {
+        let runner = Arc::new(HarnessAttemptRunner::parallel());
+        let downstream_guard = runner.clone();
+        let (scheduler, repository, execution_id, _data_dir, owner_id) = make_scheduler_harness(
+            runner,
+            &["upstream-a", "upstream-b", "downstream"],
+            &[("upstream-a", "downstream"), ("upstream-b", "downstream")],
+            2,
+            AdaptationPolicy::Fixed,
+            None,
+        )
+        .await;
+
+        scheduler.start(owner_id.clone(), execution_id.clone());
+        let detail = wait_for_terminal(&repository, &owner_id, &execution_id).await;
+        assert_eq!(detail.execution.status, "completed");
+        assert!(detail
+            .steps
+            .iter()
+            .all(|step| step.status == ExecutionStepStatus::Completed.to_string()));
+        assert_eq!(downstream_guard.call_count("upstream-a"), 1);
+        assert_eq!(downstream_guard.call_count("upstream-b"), 1);
+        assert_eq!(downstream_guard.call_count("downstream"), 1);
+        assert!(
+            downstream_guard.max_active() >= 2,
+            "two independent ready steps must overlap"
+        );
+        assert!(
+            !downstream_guard.downstream_started_too_early(),
+            "downstream work started before both blockers completed"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scheduler_harness_provisions_relative_workspace_before_dispatch() {
+        let runner = Arc::new(HarnessAttemptRunner::parallel());
+        let runner_guard = runner.clone();
+        let (scheduler, repository, execution_id, data_dir, owner_id) = make_scheduler_harness(
+            runner,
+            &["workspace-root"],
+            &[],
+            1,
+            AdaptationPolicy::Fixed,
+            Some("multi-agent-test"),
+        )
+        .await;
+
+        scheduler.start(owner_id.clone(), execution_id.clone());
+        let detail = wait_for_terminal(&repository, &owner_id, &execution_id).await;
+        assert_eq!(detail.execution.status, "completed");
+        let persisted_workspace = detail
+            .execution
+            .work_dir
+            .as_deref()
+            .expect("relative workspace must be persisted as an absolute path");
+        let canonical_workspace =
+            nomifun_common::paths::canonicalize_simplified(Path::new(persisted_workspace))
+                .expect("persisted workspace exists");
+        assert!(canonical_workspace.is_dir());
+        assert_eq!(
+            canonical_workspace.file_name().and_then(|name| name.to_str()),
+            Some("multi-agent-test")
+        );
+        assert!(
+            canonical_workspace
+                .parent()
+                .is_some_and(|parent| parent.ends_with(&execution_id))
+        );
+        let observed = runner_guard
+            .workspace_dirs()
+            .into_iter()
+            .flatten()
+            .next()
+            .expect("attempt runner receives the prepared workspace");
+        assert_eq!(
+            nomifun_common::paths::canonicalize_simplified(Path::new(&observed))
+                .expect("runner workspace exists"),
+            canonical_workspace
+        );
+        assert_eq!(runner_guard.call_count("workspace-root"), 1);
+        assert!(data_dir.path().join("agent-executions").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scheduler_harness_does_not_repeat_a_deterministic_provider_failure() {
+        let runner = Arc::new(HarnessAttemptRunner::deterministic_failure("failed-root"));
+        let runner_guard = runner.clone();
+        let (scheduler, repository, execution_id, _data_dir, owner_id) = make_scheduler_harness(
+            runner,
+            &["failed-root", "dependent"],
+            &[("failed-root", "dependent")],
+            2,
+            AdaptationPolicy::Adaptive,
+            None,
+        )
+        .await;
+
+        scheduler.start(owner_id.clone(), execution_id.clone());
+        let detail = wait_for_terminal(&repository, &owner_id, &execution_id).await;
+        assert_eq!(detail.execution.status, "failed");
+        assert_eq!(runner_guard.call_count("failed-root"), 1);
+        assert_eq!(runner_guard.call_count("dependent"), 0);
+        let failed = detail
+            .steps
+            .iter()
+            .find(|step| step.title == "failed-root")
+            .expect("failed root");
+        let dependent = detail
+            .steps
+            .iter()
+            .find(|step| step.title == "dependent")
+            .expect("dependent");
+        assert_eq!(failed.status, ExecutionStepStatus::Failed.to_string());
+        assert_eq!(dependent.status, ExecutionStepStatus::Skipped.to_string());
+        let attempts = detail
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.attempt.step_id == failed.step_id)
+            .collect::<Vec<_>>();
+        assert_eq!(attempts.len(), 1, "deterministic provider errors must not retry");
+        assert_eq!(
+            attempts[0].attempt.error.as_deref(),
+            Some("The model returned a tool that was not advertised for this request")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scheduler_harness_start_wakes_retry_backoff_without_waiting_for_timer() {
+        let runner = Arc::new(HarnessAttemptRunner::retry_once());
+        let runner_guard = runner.clone();
+        let (scheduler, repository, execution_id, _data_dir, owner_id) = make_scheduler_harness(
+            runner,
+            &["retry-root"],
+            &[],
+            1,
+            AdaptationPolicy::Adaptive,
+            None,
+        )
+        .await;
+
+        scheduler.start(owner_id.clone(), execution_id.clone());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if runner_guard.call_count("retry-root") == 1 {
+                    let detail = repository
+                        .get_execution_detail(&owner_id, &execution_id)
+                        .await
+                        .expect("load retry detail")
+                        .expect("retry execution exists");
+                    if detail.steps.iter().any(|step| {
+                        step.title == "retry-root"
+                            && step.status == ExecutionStepStatus::Pending.to_string()
+                            && step.dispatch_after.is_some_and(|retry_after| retry_after > now_ms())
+                    }) {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("first retry attempt should start");
+
+        // A manual retry clears the persisted backoff before asking the
+        // already-running scheduler to wake. This is the real command path:
+        // `start()` is a scheduling nudge, while the repository mutation is
+        // what makes the step immediately runnable.
+        let pending = repository
+            .get_execution_detail(&owner_id, &execution_id)
+            .await
+            .expect("load pending retry detail")
+            .expect("retry execution exists");
+        let retry_step = pending
+            .steps
+            .iter()
+            .find(|step| step.title == "retry-root")
+            .map(|step| (step.step_id.clone(), step.version))
+            .expect("retry step exists");
+        drop(pending);
+        repository
+            .reset_steps_for_retry(
+                &owner_id,
+                &execution_id,
+                repository
+                    .get_execution(&owner_id, &execution_id)
+                    .await
+                    .expect("reload retry execution")
+                    .expect("retry execution exists")
+                    .version,
+                &[RetryAgentExecutionStep {
+                    step_id: retry_step.0,
+                    expected_step_version: retry_step.1,
+                }],
+                &system_event(
+                    AgentExecutionEventKind::StepChanged,
+                    None,
+                    None,
+                    json!({"change":"manual_retry"}),
+                ),
+            )
+            .await
+            .expect("clear retry backoff");
+
+        let wake_requested_at = StdInstant::now();
+        scheduler.start(owner_id.clone(), execution_id.clone());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if runner_guard.call_count("retry-root") == 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("manual start should wake the retry loop");
+        let detail = wait_for_terminal(&repository, &owner_id, &execution_id).await;
+        assert_eq!(detail.execution.status, "completed");
+        assert_eq!(runner_guard.call_count("retry-root"), 2);
+        assert!(
+            wake_requested_at.elapsed() < Duration::from_secs(1),
+            "manual start should wake the retry loop instead of waiting for backoff"
+        );
     }
 }

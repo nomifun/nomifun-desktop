@@ -106,6 +106,8 @@ describe('conversation execution canvas integration', () => {
     expect(companionPanelSource.includes('<ExecutionConversationLayout')).toBe(true);
     expect(hookSource.includes("conversation?.type === 'nomi'")).toBe(false);
     expect(hookSource.includes('agentExecution.events.changed.on')).toBe(true);
+    expect(hookSource.includes('ipcBridge.conversation.reconnected.on')).toBe(true);
+    expect(readSource(new URL('./useExecutionLive.ts', import.meta.url)).includes('ipcBridge.conversation.reconnected.on')).toBe(true);
     expect(hookSource.includes('getConversationOrNull(conversationId)')).toBe(true);
     expect(chatSource.includes('isRetainedAttemptTranscript')).toBe(true);
     expect(chatSource.includes('<ReadOnlyConversationView')).toBe(true);
