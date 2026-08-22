@@ -73,7 +73,7 @@ describe('AddPlatformModal unified model input flow', () => {
   test('gets operational defaults only from the backend preset manifest', () => {
     expect(addSource.includes('useModelProtocolManifests({')).toBe(true);
     expect(addSource.includes("bootstrapTask: 'chat'")).toBe(true);
-    expect(addSource.includes('modelHint: definition.model')).toBe(true);
+    expect(addSource.includes('modelHint: definition.model')).toBe(false);
     expect(addSource.includes('providerManifest.platform_default_base_url')).toBe(true);
     expect(addSource.includes('providerManifest.default_auth_scheme')).toBe(true);
     expect(addSource.includes('providerManifest?.auth_schemes')).toBe(true);
@@ -83,6 +83,15 @@ describe('AddPlatformModal unified model input flow', () => {
     expect(
       editorSource.includes('const manifest = loading ? undefined : manifests[capability.task]')
     ).toBe(true);
+  });
+
+  test('auto-detects Custom and New API transport before save', () => {
+    expect(addSource.includes('useProviderAutoConfiguration({')).toBe(true);
+    expect(addSource.includes('applyProviderAutoConfiguration')).toBe(true);
+    expect(addSource.includes('<ProviderAutoConfigurationNotice')).toBe(true);
+    expect(addSource.includes('primary?.suggestedBaseUrl')).toBe(true);
+    expect(addSource.includes("form.setFieldValue('auth_scheme', primary.authScheme)")).toBe(true);
+    expect(addSource.includes('validationPending={autoConfiguration.isLoading}')).toBe(true);
   });
 
   test('keeps SDK-backed Bedrock providers free of transport URLs', () => {
