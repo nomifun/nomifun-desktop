@@ -34,6 +34,11 @@ const RUNTIME_MARKERS = [
     pattern: /\b(?:t|i18n\.t)\(\s*['"]workshop(?:Canvas|Assets|Editor|Generation|Agent)?\./g,
   },
   { label: 'retired HTTP namespace', pattern: /\/api\/workshop(?:\/|['"`])/g },
+  {
+    label: 'retired unowned creation task API',
+    pattern: /\/api\/creation\/tasks(?:[/?]|['"`])/g,
+  },
+  { label: 'retired Gateway tool name', pattern: /nomi_workshop_[A-Za-z0-9_]+/g },
 ];
 
 const DIST_MARKERS = [
@@ -44,6 +49,8 @@ const DIST_MARKERS = [
   },
   { label: 'retired canvas route pattern', pattern: /\/workshop\/:id/g },
   { label: 'retired HTTP namespace', pattern: /\/api\/workshop\//g },
+  { label: 'retired unowned creation task API', pattern: /\/api\/creation\/tasks(?:[/?'"`])/g },
+  { label: 'retired Gateway tool name', pattern: /nomi_workshop_[A-Za-z0-9_]+/g },
 ];
 
 const trackedFiles = () =>

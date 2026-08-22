@@ -112,20 +112,114 @@ async fn workshop_management_routes_still_require_auth() {
 
 #[tokio::test]
 async fn retired_workshop_and_unowned_creation_routes_are_not_mounted() {
-    let (app, _services) = build_app().await;
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
-    for uri in [
-        "/api/workshop/canvases",
-        "/api/workshop/canvases/0190f5fe-7c00-7a00-8000-000000009991",
-        "/api/workshop/canvas-thumbs/0190f5fe-7c00-7a00-8000-000000009992",
-        "/api/creation/tasks",
-        "/api/creation/tasks/0190f5fe-7c00-7a00-8000-000000009993",
+    async fn database_snapshot(database: &nomifun_db::Database) -> (i64, i64, i64, i64) {
+        nomifun_db::sqlx::query_as(
+            "SELECT \
+                (SELECT COUNT(*) FROM sqlite_master \
+                    WHERE type = 'table' AND name = 'workshop_canvases'), \
+                (SELECT COUNT(*) FROM creative_studio_projects), \
+                (SELECT COUNT(*) FROM creation_tasks), \
+                (SELECT COUNT(*) FROM workshop_assets)",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap()
+    }
+
+    let before = database_snapshot(&services.database).await;
+    assert_eq!(before.0, 0, "the retired workshop_canvases table must stay dropped");
+
+    // This is the exact historical Method + URI surface, not a GET-only sample.
+    // Authenticated requests bypass the auth/CSRF boundary so a 404 can only be
+    // the app router's unmatched-route fallback. The empty body distinguishes
+    // that fallback from a mounted resource handler returning domain NotFound.
+    for (method, uri, body) in [
+        ("GET", "/api/workshop/canvases", serde_json::json!({})),
+        (
+            "POST",
+            "/api/workshop/canvases",
+            serde_json::json!({ "title": "retired canvas" }),
+        ),
+        (
+            "GET",
+            "/api/workshop/canvases/0190f5fe-7c00-7a00-8000-000000009991",
+            serde_json::json!({}),
+        ),
+        (
+            "PATCH",
+            "/api/workshop/canvases/0190f5fe-7c00-7a00-8000-000000009991",
+            serde_json::json!({ "title": "retired canvas" }),
+        ),
+        (
+            "DELETE",
+            "/api/workshop/canvases/0190f5fe-7c00-7a00-8000-000000009991",
+            serde_json::json!({}),
+        ),
+        (
+            "PUT",
+            "/api/workshop/canvases/0190f5fe-7c00-7a00-8000-000000009991/doc",
+            serde_json::json!({ "doc": {} }),
+        ),
+        (
+            "GET",
+            "/api/workshop/canvases/0190f5fe-7c00-7a00-8000-000000009991/pending-ops",
+            serde_json::json!({}),
+        ),
+        (
+            "POST",
+            "/api/workshop/canvases/0190f5fe-7c00-7a00-8000-000000009991/pending-ops/ack",
+            serde_json::json!({ "op_ids": [] }),
+        ),
+        (
+            "GET",
+            "/api/workshop/canvas-thumbs/0190f5fe-7c00-7a00-8000-000000009991",
+            serde_json::json!({}),
+        ),
+        ("GET", "/api/creation/tasks", serde_json::json!({})),
+        (
+            "POST",
+            "/api/creation/tasks",
+            serde_json::json!({
+                "canvas_id": "0190f5fe-7c00-7a00-8000-000000009991",
+                "node_id": "0190f5fe-7c00-7a00-8000-000000009992",
+                "provider_id": "0190f5fe-7c00-7a00-8000-000000009993",
+                "model": "retired-model",
+                "capability": "t2i",
+                "params": {},
+                "inputs": []
+            }),
+        ),
+        (
+            "GET",
+            "/api/creation/tasks/0190f5fe-7c00-7a00-8000-000000009994",
+            serde_json::json!({}),
+        ),
+        (
+            "POST",
+            "/api/creation/tasks/0190f5fe-7c00-7a00-8000-000000009994/cancel",
+            serde_json::json!({}),
+        ),
     ] {
-        let response = app.clone().oneshot(get_request(uri)).await.unwrap();
+        let response = app
+            .clone()
+            .oneshot(json_with_token(method, uri, body, &token, &csrf))
+            .await
+            .unwrap();
         assert_eq!(
             response.status(),
             StatusCode::NOT_FOUND,
-            "retired route {uri} must not be mounted"
+            "retired {method} {uri} must not be mounted"
+        );
+        let response_body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            response_body.is_empty(),
+            "retired {method} {uri} must hit the empty router fallback, not a mounted handler"
         );
     }
+
+    let after = database_snapshot(&services.database).await;
+    assert_eq!(after, before, "retired HTTP requests must not write Creative Studio data");
 }
