@@ -23,6 +23,10 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    /// A compare-and-swap write used a stale authoritative revision.
+    #[error("Revision conflict: {0}")]
+    RevisionConflict(String),
+
     /// A provider cannot be deleted because features still reference it.
     #[error("Provider is in use: {} reference(s)", .0.usages.len())]
     ProviderInUse(crate::provider_usage::ProviderInUseDetails),
@@ -76,6 +80,7 @@ impl AppError {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::RevisionConflict(_) => StatusCode::CONFLICT,
             Self::ProviderInUse(_) => StatusCode::CONFLICT,
             Self::ProviderUnavailable(_) => StatusCode::BAD_REQUEST,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
@@ -102,6 +107,7 @@ impl AppError {
                 }
             }
             Self::Conflict(_) => "CONFLICT",
+            Self::RevisionConflict(_) => "REVISION_CONFLICT",
             Self::ProviderInUse(_) => "PROVIDER_IN_USE",
             Self::ProviderUnavailable(_) => "PROVIDER_UNAVAILABLE",
             Self::RateLimited => "RATE_LIMITED",
@@ -233,6 +239,10 @@ mod tests {
         );
         assert_eq!(AppError::Forbidden("x".into()).status_code(), StatusCode::FORBIDDEN);
         assert_eq!(AppError::Conflict("x".into()).status_code(), StatusCode::CONFLICT);
+        assert_eq!(
+            AppError::RevisionConflict("x".into()).status_code(),
+            StatusCode::CONFLICT
+        );
         assert_eq!(AppError::RateLimited.status_code(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
             AppError::Internal("x".into()).status_code(),
@@ -265,6 +275,10 @@ mod tests {
             "PATH_OUTSIDE_SANDBOX"
         );
         assert_eq!(AppError::Conflict("x".into()).error_code(), "CONFLICT");
+        assert_eq!(
+            AppError::RevisionConflict("x".into()).error_code(),
+            "REVISION_CONFLICT"
+        );
         assert_eq!(AppError::RateLimited.error_code(), "RATE_LIMITED");
         assert_eq!(AppError::Internal("x".into()).error_code(), "INTERNAL_ERROR");
         assert_eq!(AppError::BadGateway("x".into()).error_code(), "BAD_GATEWAY");

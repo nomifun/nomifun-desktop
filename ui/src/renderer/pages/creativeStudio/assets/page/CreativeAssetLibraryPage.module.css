@@ -1,0 +1,133 @@
+.root {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--color-bg-1);
+  color: var(--color-text-1);
+}
+
+.library {
+  min-height: 0;
+  height: auto;
+  flex: 1;
+}
+
+.modalForm,
+.modalBody,
+.previewBody {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.modalDescription,
+.modalError,
+.deleteText,
+.previewText,
+.previewMeta p {
+  margin: 0;
+}
+
+.modalDescription,
+.deleteText {
+  color: var(--color-text-2);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+  color: var(--color-text-2);
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.modalError {
+  padding: 9px 11px;
+  border: 1px solid rgba(var(--danger-6), 0.28);
+  border-radius: 8px;
+  background: rgba(var(--danger-6), 0.08);
+  color: rgb(var(--danger-6));
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.modalFooter,
+.previewFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.previewMedia {
+  display: grid;
+  min-height: 220px;
+  max-height: min(55vh, 560px);
+  place-items: center;
+  overflow: auto;
+  border: 1px solid var(--color-border-2);
+  border-radius: 12px;
+  background: var(--color-fill-1);
+}
+
+.previewMedia img,
+.previewMedia video {
+  display: block;
+  max-width: 100%;
+  max-height: min(55vh, 560px);
+  object-fit: contain;
+}
+
+.previewMedia audio {
+  width: min(520px, calc(100% - 40px));
+}
+
+.previewText {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 20px;
+  color: var(--color-text-1);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.75;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.previewMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  color: var(--color-text-3);
+  font-size: 12px;
+}
+
+.previewTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.previewTags span {
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--color-fill-2);
+  color: var(--color-text-2);
+  font-size: 11px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .root *,
+  .root *::before,
+  .root *::after {
+    scroll-behavior: auto !important;
+  }
+}

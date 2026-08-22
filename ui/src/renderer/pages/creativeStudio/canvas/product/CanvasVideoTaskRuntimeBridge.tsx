@@ -1,0 +1,262 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+} from 'react';
+
+import { creativeAssetClient, type CreativeAsset } from '../../assets';
+import type { CreativeProjectDocument, CreativeSize } from '../../domain';
+import {
+  creativeTaskClient,
+  type CreativeTask,
+  type CreativeTaskReference,
+} from '../../tasks';
+import {
+  useCreativeWorkbenchRuntime,
+  type CreativeWorkbenchRuntimeSnapshot,
+  type PreparedCreativeWorkbenchRun,
+} from '../../workbenches/runtime';
+import type { CreativeCanvasEditorHandle } from '../editor';
+import {
+  canvasVideoComposeConfigForReference,
+  canvasVideoComposeResumeRequests,
+} from './canvasVideoComposerCanvas';
+import {
+  orphanCanvasVideoComposeTask,
+  persistCanvasVideoComposePendingTask,
+  reconcileCanvasVideoComposeTask,
+  settleCanvasVideoComposeTask,
+} from './canvasVideoComposerRuntime';
+import {
+  creativeTaskReferenceFromInput,
+  isCanvasImageMaskEditTaskNotFound,
+  waitForCanvasImageMaskEditAdmission,
+  type CanvasImageMaskEditAdmission,
+} from './imageMaskEditRuntime';
+
+export type CanvasVideoTaskAdmission = CanvasImageMaskEditAdmission;
+
+export interface CanvasVideoTaskRuntimeBridgeHandle {
+  submit(plan: PreparedCreativeWorkbenchRun): Promise<CanvasVideoTaskAdmission>;
+  retrySubmission(
+    order: number,
+    idempotencyKey: string
+  ): Promise<CanvasVideoTaskAdmission>;
+  retryTask(taskId: string): Promise<CreativeWorkbenchRuntimeSnapshot>;
+  cancelTask(taskId: string): Promise<CreativeWorkbenchRuntimeSnapshot>;
+  recoverTask(
+    reference: CreativeTaskReference
+  ): Promise<CreativeWorkbenchRuntimeSnapshot>;
+  /** Returns false only when the backend authoritatively answers 404. */
+  taskExists(reference: CreativeTaskReference): Promise<boolean>;
+  snapshot(): CreativeWorkbenchRuntimeSnapshot;
+}
+
+export interface CanvasVideoTaskRuntimeBridgeProps {
+  projectId: string;
+  initialDocument: CreativeProjectDocument;
+  editorRef: React.RefObject<CreativeCanvasEditorHandle | null>;
+  viewportSize: CreativeSize;
+  onAsset(asset: CreativeAsset): void;
+  onSnapshot(snapshot: CreativeWorkbenchRuntimeSnapshot): void;
+  onNotice(message: string): void;
+}
+
+const requiredEditor = (
+  ref: React.RefObject<CreativeCanvasEditorHandle | null>
+): CreativeCanvasEditorHandle => {
+  const editor = ref.current;
+  if (!editor) throw new Error('画布尚未载入，无法同步视频任务。');
+  return editor;
+};
+
+/**
+ * Owns the single video-task controller for one hydrated project. Every
+ * callback revalidates the persisted canvasVideoCompose owner before it may
+ * mutate the document, so unrelated video workbench tasks cannot cross this
+ * bridge.
+ */
+const CanvasVideoTaskRuntimeBridge = forwardRef<
+  CanvasVideoTaskRuntimeBridgeHandle,
+  CanvasVideoTaskRuntimeBridgeProps
+>((props, ref) => {
+  const latest = useRef(props);
+  latest.current = props;
+  const initialResumeRequestsRef = useRef(
+    canvasVideoComposeResumeRequests(props.initialDocument)
+  );
+  const initialResumeRequests = initialResumeRequestsRef.current;
+
+  const onPendingTask = useCallback(
+    async (reference: CreativeTaskReference, signal: AbortSignal) => {
+      signal.throwIfAborted();
+      const current = latest.current;
+      await persistCanvasVideoComposePendingTask({
+        editor: requiredEditor(current.editorRef),
+        projectId: current.projectId,
+        reference,
+      });
+      signal.throwIfAborted();
+    },
+    []
+  );
+
+  const onSettledTask = useCallback(
+    async (task: CreativeTask, signal: AbortSignal) => {
+      signal.throwIfAborted();
+      const current = latest.current;
+      await settleCanvasVideoComposeTask({
+        editor: requiredEditor(current.editorRef),
+        projectId: current.projectId,
+        task,
+        assets: creativeAssetClient,
+        viewportSize: current.viewportSize,
+        onAsset: current.onAsset,
+      });
+      signal.throwIfAborted();
+      current.onNotice(
+        task.status === 'succeeded'
+          ? '视频创作已完成，真实结果及连线已保存到画布。'
+          : task.status === 'failed'
+            ? (task.error?.message ?? '视频创作失败，配置节点已保留。')
+            : '视频创作已取消，配置节点已保留。'
+      );
+    },
+    []
+  );
+
+  const onRecoveryFailure = useCallback(
+    async (
+      reference: CreativeTaskReference,
+      error: unknown,
+      signal: AbortSignal
+    ): Promise<boolean> => {
+      if (!isCanvasImageMaskEditTaskNotFound(error)) return false;
+      signal.throwIfAborted();
+      const current = latest.current;
+      await orphanCanvasVideoComposeTask({
+        editor: requiredEditor(current.editorRef),
+        projectId: current.projectId,
+        reference,
+      });
+      current.onNotice(
+        '服务器未找到遗留的视频创作任务，已只清理该任务的恢复标记。'
+      );
+      return true;
+    },
+    []
+  );
+
+  const runtime = useCreativeWorkbenchRuntime({
+    scopeKey: `${props.projectId}:canvas-video-tasks`,
+    tasks: creativeTaskClient,
+    assets: creativeAssetClient,
+    initialResumeRequests,
+    onPendingTask,
+    onSettledTask,
+    onRecoveryFailure,
+    onRuntimeError: (error) =>
+      latest.current.onNotice(
+        error instanceof Error ? error.message : String(error)
+      ),
+  });
+
+  useEffect(() => {
+    latest.current.onSnapshot(runtime.controller.snapshot());
+  }, [
+    runtime.controller,
+    runtime.entries,
+    runtime.recoveringCount,
+    runtime.requestError,
+    runtime.state,
+    runtime.submissionFailures,
+    runtime.submittingCount,
+  ]);
+
+  useEffect(() => {
+    const current = latest.current;
+    const editor = requiredEditor(current.editorRef);
+    for (const entry of runtime.entries) {
+      if (entry.task.status !== 'queued' && entry.task.status !== 'running') {
+        continue;
+      }
+      try {
+        reconcileCanvasVideoComposeTask({
+          editor,
+          projectId: current.projectId,
+          task: entry.task,
+        });
+      } catch (error) {
+        current.onNotice(error instanceof Error ? error.message : String(error));
+      }
+    }
+  }, [runtime.entries]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      submit: (plan) =>
+        waitForCanvasImageMaskEditAdmission({
+          controller: runtime.controller,
+          idempotencyKey: plan.input.idempotencyKey,
+          start: () => runtime.controller.run(plan),
+        }),
+      retrySubmission: (order, idempotencyKey) =>
+        waitForCanvasImageMaskEditAdmission({
+          controller: runtime.controller,
+          idempotencyKey,
+          start: () => runtime.controller.retrySubmission(order),
+        }),
+      retryTask: (taskId) => runtime.controller.retry(taskId),
+      cancelTask: (taskId) => runtime.controller.cancel(taskId),
+      recoverTask: (reference) => {
+        const current = latest.current;
+        canvasVideoComposeConfigForReference(
+          {
+            projectId: current.projectId,
+            nodes: requiredEditor(current.editorRef).getState().document.nodes,
+          },
+          reference
+        );
+        return runtime.controller.resume([{ reference, outputKind: 'video' }]);
+      },
+      taskExists: async (reference) => {
+        const current = latest.current;
+        canvasVideoComposeConfigForReference(
+          {
+            projectId: current.projectId,
+            nodes: requiredEditor(current.editorRef).getState().document.nodes,
+          },
+          reference
+        );
+        try {
+          await creativeTaskClient.get(reference);
+          return true;
+        } catch (error) {
+          if (isCanvasImageMaskEditTaskNotFound(error)) return false;
+          throw error;
+        }
+      },
+      snapshot: () => runtime.controller.snapshot(),
+    }),
+    [runtime.controller]
+  );
+
+  return null;
+});
+
+CanvasVideoTaskRuntimeBridge.displayName = 'CanvasVideoTaskRuntimeBridge';
+
+export const canvasVideoTaskReferenceFromPlan = (
+  plan: PreparedCreativeWorkbenchRun
+): CreativeTaskReference => creativeTaskReferenceFromInput(plan.input);
+
+export default CanvasVideoTaskRuntimeBridge;

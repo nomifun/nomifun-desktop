@@ -15,6 +15,9 @@ use nomifun_auth::CurrentUser;
 use nomifun_common::{AppError, ConversationId, MessageId};
 
 use crate::service::summon::SetSummonRequest;
+use crate::service::creative_studio_agent_session::{
+    ResolveCreativeStudioAgentSessionRequest, ResolveCreativeStudioAgentSessionResponse,
+};
 use crate::service::{
     IdempotentMessageDelivery, strip_clone_instance_state, validate_public_idempotency_key,
 };
@@ -86,7 +89,40 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
         .with_state(state)
 }
 
+/// Dedicated owner-scoped Creative Studio session resolver. The application
+/// mounts this Router behind `protect_instance_owner`; it is intentionally not
+/// part of the ordinary authenticated Conversation surface.
+pub fn creative_studio_agent_session_routes(state: ConversationRouterState) -> Router {
+    Router::new()
+        .route(
+            "/api/creative-studio/agent-sessions/resolve",
+            post(resolve_creative_studio_agent_session),
+        )
+        .with_state(state)
+}
+
 // ── Handlers ───────────────────────────────────────────────────────
+
+async fn resolve_creative_studio_agent_session(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    body: Result<Json<ResolveCreativeStudioAgentSessionRequest>, JsonRejection>,
+) -> Result<
+    (StatusCode, Json<ApiResponse<ResolveCreativeStudioAgentSessionResponse>>),
+    AppError,
+> {
+    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let response = state
+        .service
+        .resolve_creative_studio_agent_session(user.id.as_str(), request)
+        .await?;
+    let status = if response.created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(ApiResponse::ok(response))))
+}
 
 /// Remove every runtime-authority field from open JSON at the one untrusted
 /// HTTP boundary.  The service/factory derive owner authority and inject

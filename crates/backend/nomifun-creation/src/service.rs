@@ -16,14 +16,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use nomifun_common::{
-    AppError, CreationTaskId, ProviderId, WorkshopAssetId, WorkshopCanvasId, WorkshopNodeId,
-    now_ms, validate_uuidv7,
+    AppError, CreationTaskId, CreativeStudioNodeId, CreativeStudioProjectId,
+    CreativeStudioWorkflowId, CreativeStudioWorkflowRunId, CreativeStudioWorkflowStepId,
+    ProviderId, WorkshopAssetId, now_ms, validate_uuidv7,
 };
 #[cfg(test)]
 use nomifun_common::generate_id;
 use nomifun_db::{
-    CreateCreationTaskParams, CreationTaskRow, ICreationTaskRepository,
-    ListCreationTasksParams, UpdateCreationTaskParams,
+    CreateCreativeTaskParams, CreationTaskPageCursorRef, CreationTaskRow, CreativeTaskOwnerRef,
+    ICreationTaskRepository, ListStandaloneWorkbenchTasksParams,
+    RetireStandaloneWorkbenchTasksParams, UpdateCreationTaskParams,
 };
 use nomifun_model_invoke::{
     ImageEditRequest, ImageGenRequest, InputAsset, InvokeErrorKind, JobHandle,
@@ -31,6 +33,7 @@ use nomifun_model_invoke::{
     TaskRequest, TaskResult, TtsRequest, VideoGenRequest,
 };
 use nomifun_net::egress::{SafeHttpClient, SafeHttpError, SafeHttpErrorKind, redacted_url};
+use serde::Serialize;
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
@@ -39,7 +42,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::artifact::{reconcile_mime, validate_for_capability};
 use crate::dto::CreationTask;
-use crate::types::{CreationError, CreationInput, MediaCapability, TaskStatus};
+use crate::types::{
+    CreationError, CreationInput, CreationInputKind, MediaCapability, StandaloneWorkbenchKind,
+    TaskStatus,
+};
 
 /// Default per-provider in-flight cap (信号量).
 const DEFAULT_PER_PROVIDER_LIMIT: usize = 3;
@@ -186,6 +192,50 @@ fn param_text_max_tokens(params: &Value) -> Result<u32, CreationError> {
         })
 }
 
+fn canonical_json(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(canonical_json).collect()),
+        Value::Object(values) => {
+            let mut entries = values.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical_json(value)))
+                    .collect(),
+            )
+        }
+        scalar => scalar,
+    }
+}
+
+/// Provider adapters receive only protocol-specific extras. Canonical fields
+/// already projected into typed request members must not be sent a second time
+/// through multipart/scalar transports, and UI-local presentation keys must
+/// never leak to providers.
+fn request_extra(params: &Value, consumed: &[&str]) -> Value {
+    let Some(object) = params.as_object() else {
+        return params.clone();
+    };
+    let mut extra = object.clone();
+    for key in consumed {
+        extra.remove(*key);
+    }
+    for key in [
+        "canvasOperation",
+        "sourceNodeId",
+        "sourceAssetId",
+        "markedReferenceAssetId",
+        "userPrompt",
+        "referenceWidth",
+        "referenceHeight",
+        "nomifunStandaloneWorkbench",
+    ] {
+        extra.remove(key);
+    }
+    Value::Object(extra)
+}
+
 /// Map a creation capability + opaque params + loaded inputs onto the invoke
 /// layer's typed [`TaskRequest`]. The full params object rides along as
 /// `extra` so protocol-specific knobs (`max_tokens`, `steps`, …) stay
@@ -201,21 +251,30 @@ fn cap_to_task_request(
             count: param_count(params)?,
             size: param_size(params),
             quality: param_str(params, "quality"),
-            extra: params.clone(),
+            extra: request_extra(
+                params,
+                &["prompt", "count", "n", "width", "height", "size", "quality", "interface_mode"],
+            ),
         }),
         MediaCapability::I2i | MediaCapability::Inpaint => TaskRequest::ImageEdit(ImageEditRequest {
             prompt: param_prompt(params),
             count: param_count(params)?,
             size: param_size(params),
             inputs,
-            extra: params.clone(),
+            extra: request_extra(
+                params,
+                &["prompt", "count", "n", "width", "height", "size", "interface_mode"],
+            ),
         }),
         MediaCapability::T2v | MediaCapability::I2v => TaskRequest::VideoGeneration(VideoGenRequest {
             prompt: param_prompt(params),
             seconds: param_seconds(params)?,
             size: param_size(params),
             inputs,
-            extra: params.clone(),
+            extra: request_extra(
+                params,
+                &["prompt", "seconds", "width", "height", "size", "resolution", "aspect"],
+            ),
         }),
         MediaCapability::V2v => {
             return Err(CreationError::new(
@@ -227,7 +286,7 @@ fn cap_to_task_request(
             text: param_prompt(params),
             voice: param_str(params, "voice"),
             format: param_str(params, "format"),
-            extra: params.clone(),
+            extra: request_extra(params, &["prompt", "text", "voice", "format"]),
         }),
         MediaCapability::Text => {
             return Err(CreationError::config(
@@ -268,10 +327,8 @@ fn required_artifact_count(
     }
 }
 
-/// A generation request accepted by [`CreationService::create_task`].
+/// A generation request accepted by [`CreationService::create_creative_task`].
 pub struct NewCreationTask {
-    pub canvas_id: Option<String>,
-    pub node_id: Option<String>,
     pub provider_id: String,
     pub model: String,
     /// Wire capability code (`t2i|i2i|…`).
@@ -279,6 +336,230 @@ pub struct NewCreationTask {
     /// Opaque parameter map (prompt/size/quality/…).
     pub params: Value,
     pub inputs: Vec<CreationInput>,
+}
+
+pub const DEFAULT_STANDALONE_TASK_PAGE_LIMIT: usize = 30;
+pub const MAX_STANDALONE_TASK_PAGE_LIMIT: usize = 100;
+
+#[derive(Debug, Clone)]
+pub struct StandaloneWorkbenchTaskPage {
+    pub items: Vec<CreationTask>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StandaloneTaskPageCursor {
+    submitted_at: i64,
+    creation_task_id: String,
+}
+
+fn parse_standalone_task_cursor(raw: &str) -> Result<StandaloneTaskPageCursor, AppError> {
+    let (timestamp, task_id) = raw.split_once(':').ok_or_else(|| {
+        AppError::BadRequest(
+            "cursor must be '<submitted_at>:<creation_task_uuidv7>'".into(),
+        )
+    })?;
+    if timestamp.is_empty() || task_id.is_empty() || task_id.contains(':') {
+        return Err(AppError::BadRequest(
+            "cursor must contain exactly one timestamp/task separator".into(),
+        ));
+    }
+    let submitted_at = timestamp.parse::<i64>().map_err(|_| {
+        AppError::BadRequest("cursor submitted_at must be a canonical non-negative integer".into())
+    })?;
+    if submitted_at < 0 || submitted_at.to_string() != timestamp {
+        return Err(AppError::BadRequest(
+            "cursor submitted_at must be a canonical non-negative integer".into(),
+        ));
+    }
+    let creation_task_id = CreationTaskId::parse(task_id)
+        .map_err(|error| AppError::BadRequest(format!("invalid cursor task id: {error}")))?
+        .into_string();
+    Ok(StandaloneTaskPageCursor {
+        submitted_at,
+        creation_task_id,
+    })
+}
+
+fn encode_standalone_task_cursor(task: &CreationTaskRow) -> String {
+    format!("{}:{}", task.submitted_at, task.creation_task_id)
+}
+
+/// Canonical Creative Studio task owner. The API accepts this tagged union and
+/// persists exactly one branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CreativeTaskOwner {
+    CanvasNode {
+        project_id: String,
+        node_id: String,
+    },
+    StandaloneWorkbench {
+        project_id: String,
+        workbench_kind: StandaloneWorkbenchKind,
+    },
+    WorkflowStep {
+        workflow_id: String,
+        workflow_run_id: String,
+        workflow_step_id: String,
+    },
+}
+
+impl CreativeTaskOwner {
+    fn normalize(self) -> Result<Self, AppError> {
+        match self {
+            Self::CanvasNode {
+                project_id,
+                node_id,
+            } => Ok(Self::CanvasNode {
+                project_id: CreativeStudioProjectId::parse(project_id)
+                    .map_err(|error| AppError::BadRequest(format!("invalid project_id: {error}")))?
+                    .into_string(),
+                node_id: CreativeStudioNodeId::parse(node_id)
+                    .map_err(|error| AppError::BadRequest(format!("invalid node_id: {error}")))?
+                    .into_string(),
+            }),
+            Self::StandaloneWorkbench {
+                project_id,
+                workbench_kind,
+            } => Ok(Self::StandaloneWorkbench {
+                project_id: CreativeStudioProjectId::parse(project_id)
+                    .map_err(|error| AppError::BadRequest(format!("invalid project_id: {error}")))?
+                    .into_string(),
+                workbench_kind,
+            }),
+            Self::WorkflowStep {
+                workflow_id,
+                workflow_run_id,
+                workflow_step_id,
+            } => Ok(Self::WorkflowStep {
+                workflow_id: CreativeStudioWorkflowId::parse(workflow_id)
+                    .map_err(|error| AppError::BadRequest(format!("invalid workflow_id: {error}")))?
+                    .into_string(),
+                workflow_run_id: CreativeStudioWorkflowRunId::parse(workflow_run_id)
+                    .map_err(|error| {
+                        AppError::BadRequest(format!("invalid workflow_run_id: {error}"))
+                    })?
+                    .into_string(),
+                workflow_step_id: CreativeStudioWorkflowStepId::parse(workflow_step_id)
+                    .map_err(|error| {
+                        AppError::BadRequest(format!("invalid workflow_step_id: {error}"))
+                    })?
+                    .into_string(),
+            }),
+        }
+    }
+
+    fn as_repository_owner(&self) -> CreativeTaskOwnerRef<'_> {
+        match self {
+            Self::CanvasNode {
+                project_id,
+                node_id,
+            } => CreativeTaskOwnerRef::CanvasNode {
+                project_id,
+                node_id,
+            },
+            Self::StandaloneWorkbench {
+                project_id,
+                workbench_kind,
+            } => CreativeTaskOwnerRef::StandaloneWorkbench {
+                project_id,
+                workbench_kind: workbench_kind.as_str(),
+            },
+            Self::WorkflowStep {
+                workflow_id,
+                workflow_run_id,
+                workflow_step_id,
+            } => CreativeTaskOwnerRef::WorkflowStep {
+                workflow_id,
+                workflow_run_id,
+                workflow_step_id,
+            },
+        }
+    }
+}
+
+struct PreparedCreationTask {
+    provider_id: String,
+    model: String,
+    capability: MediaCapability,
+    params: Value,
+    params_json: String,
+    required_artifact_count: usize,
+    inputs: Vec<CreationInput>,
+}
+
+#[derive(Serialize)]
+struct CanonicalCreativeTaskRequest<'a> {
+    owner: &'a CreativeTaskOwner,
+    provider_id: &'a str,
+    model: &'a str,
+    capability: &'a str,
+    params: &'a Value,
+    inputs: &'a [CreationInput],
+}
+
+impl PreparedCreationTask {
+    fn into_worker_job(
+        self,
+        creation_task_id: String,
+        owner: CreativeTaskOwner,
+        submitted_at: i64,
+    ) -> WorkerJob {
+        let (
+            project_id,
+            workbench_kind,
+            workflow_id,
+            workflow_run_id,
+            workflow_step_id,
+            node_id,
+        ) = match owner {
+            CreativeTaskOwner::CanvasNode {
+                project_id,
+                node_id,
+            } => (Some(project_id), None, None, None, None, Some(node_id)),
+            CreativeTaskOwner::StandaloneWorkbench {
+                project_id,
+                workbench_kind,
+            } => (
+                Some(project_id),
+                Some(workbench_kind),
+                None,
+                None,
+                None,
+                None,
+            ),
+            CreativeTaskOwner::WorkflowStep {
+                workflow_id,
+                workflow_run_id,
+                workflow_step_id,
+            } => (
+                None,
+                None,
+                Some(workflow_id),
+                Some(workflow_run_id),
+                Some(workflow_step_id),
+                None,
+            ),
+        };
+        WorkerJob {
+            creation_task_id,
+            project_id,
+            workbench_kind,
+            workflow_id,
+            workflow_run_id,
+            workflow_step_id,
+            node_id,
+            provider_id: self.provider_id,
+            model: self.model,
+            capability: self.capability,
+            params: self.params,
+            required_artifact_count: self.required_artifact_count,
+            inputs: self.inputs,
+            submitted_at,
+            remote_task_id: None,
+        }
+    }
 }
 
 /// A produced artifact ready for persistence: resolved bytes (URL artifacts are
@@ -289,7 +570,8 @@ pub struct PersistAsset {
     /// Whether the produced asset appears in the asset library. Generated
     /// products default to `true` (see [`CreationService::persist_assets`]).
     pub in_library: bool,
-    /// `{prompt,model,provider_id,params,canvas_id,node_id,creation_task_id}`.
+    /// Canonical provenance, including exactly one project/workflow owner
+    /// branch plus provider/model/task metadata.
     pub origin: Value,
 }
 
@@ -376,7 +658,11 @@ pub trait AssetSource: Send + Sync {
 /// The persisted fields a worker needs to run (or resume) one task.
 struct WorkerJob {
     creation_task_id: String,
-    canvas_id: Option<String>,
+    project_id: Option<String>,
+    workbench_kind: Option<StandaloneWorkbenchKind>,
+    workflow_id: Option<String>,
+    workflow_run_id: Option<String>,
+    workflow_step_id: Option<String>,
     node_id: Option<String>,
     provider_id: String,
     model: String,
@@ -418,6 +704,8 @@ pub struct CreationService {
     inflight: Mutex<HashMap<String, CancellationToken>>,
     poll_interval: Duration,
     task_timeout: Duration,
+    #[cfg(test)]
+    test_project_id: Option<String>,
 }
 
 /// Builder for [`CreationService`] (the app wires the invoke layer + sink).
@@ -432,6 +720,8 @@ pub struct CreationServiceBuilder {
     global_limit: usize,
     poll_interval: Duration,
     task_timeout: Duration,
+    #[cfg(test)]
+    test_project_id: Option<String>,
 }
 
 impl CreationServiceBuilder {
@@ -451,6 +741,12 @@ impl CreationServiceBuilder {
     #[cfg(test)]
     fn with_artifact_downloader_for_tests(mut self, downloader: SafeHttpClient) -> Self {
         self.artifact_downloader = Some(downloader);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_test_project_id(mut self, project_id: String) -> Self {
+        self.test_project_id = Some(project_id);
         self
     }
 
@@ -493,6 +789,8 @@ impl CreationServiceBuilder {
             inflight: Mutex::new(HashMap::new()),
             poll_interval: self.poll_interval,
             task_timeout: self.task_timeout,
+            #[cfg(test)]
+            test_project_id: self.test_project_id,
         })
     }
 }
@@ -511,6 +809,8 @@ impl CreationService {
             global_limit: DEFAULT_GLOBAL_LIMIT,
             poll_interval: DEFAULT_POLL_INTERVAL,
             task_timeout: DEFAULT_TASK_TIMEOUT,
+            #[cfg(test)]
+            test_project_id: None,
         }
     }
 
@@ -525,10 +825,10 @@ impl CreationService {
     // Public surface (routes)
     // -----------------------------------------------------------------------
 
-    /// Enqueue a task (`queued`), spawn its worker, and return the queued task.
-    /// The worker resolves the provider, loads inputs, runs the adapter, and
-    /// drives the state machine to a terminal state asynchronously.
-    pub async fn create_task(self: &Arc<Self>, req: NewCreationTask) -> Result<CreationTask, AppError> {
+    async fn prepare_task(
+        &self,
+        req: NewCreationTask,
+    ) -> Result<PreparedCreationTask, AppError> {
         let capability = MediaCapability::parse(&req.capability).ok_or_else(|| {
             AppError::BadRequest(format!(
                 "unknown capability '{}' (expected t2i|i2i|inpaint|t2v|i2v|v2v|tts|text)",
@@ -540,25 +840,6 @@ impl CreationService {
         let provider_id = ProviderId::parse(req.provider_id)
             .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?
             .into_string();
-        if let Some(invoke) = &self.invoke
-            && invoke.provider_repo().find_by_id(&provider_id).await?.is_none()
-        {
-            return Err(AppError::NotFound(format!(
-                "provider {provider_id} not found"
-            )));
-        }
-        let canvas_id = req
-            .canvas_id
-            .map(WorkshopCanvasId::parse)
-            .transpose()
-            .map_err(|error| AppError::BadRequest(format!("invalid canvas_id: {error}")))?
-            .map(WorkshopCanvasId::into_string);
-        let node_id = req
-            .node_id
-            .map(WorkshopNodeId::parse)
-            .transpose()
-            .map_err(|error| AppError::BadRequest(format!("invalid node_id: {error}")))?
-            .map(WorkshopNodeId::into_string);
         if req.model.trim().is_empty() {
             return Err(AppError::BadRequest("model must not be empty".into()));
         }
@@ -569,44 +850,144 @@ impl CreationService {
                 let asset_id = WorkshopAssetId::parse(input.asset_id)
                     .map_err(|error| AppError::BadRequest(format!("invalid input asset_id: {error}")))?
                     .into_string();
-                Ok(CreationInput { asset_id, role: input.role })
+                Ok(CreationInput {
+                    asset_id,
+                    kind: input.kind,
+                    role: input.role,
+                })
             })
             .collect::<Result<Vec<_>, AppError>>()?;
-
-        let params_json = serde_json::to_string(&req.params)
+        let params = canonical_json(req.params);
+        let params_json = serde_json::to_string(&params)
             .map_err(|e| AppError::BadRequest(format!("invalid params json: {e}")))?;
-        let creation_task_id = CreationTaskId::new().into_string();
+
+        Ok(PreparedCreationTask {
+            provider_id,
+            model: req.model,
+            capability,
+            params,
+            params_json,
+            required_artifact_count,
+            inputs,
+        })
+    }
+
+    /// Canonical Creative Studio create. The UUIDv7 Idempotency-Key is also the
+    /// task business id, making response-loss retries durable across reloads
+    /// and process restarts. Only the transaction's `inserted` result may spawn
+    /// a worker.
+    pub async fn create_creative_task(
+        self: &Arc<Self>,
+        owner: CreativeTaskOwner,
+        idempotency_key: String,
+        req: NewCreationTask,
+    ) -> Result<CreationTask, AppError> {
+        let creation_task_id = CreationTaskId::parse(idempotency_key)
+            .map_err(|error| AppError::BadRequest(format!("invalid Idempotency-Key: {error}")))?
+            .into_string();
+        let owner = owner.normalize()?;
+        if !req.params.is_object() {
+            return Err(AppError::BadRequest(
+                "Creative Studio task params must be a JSON object".into(),
+            ));
+        }
+        // The atomic repository operation validates current project/provider
+        // state only for a brand-new key. Skipping the eager provider lookup
+        // here keeps an exact historical replay readable after retirement.
+        let prepared = self.prepare_task(req).await?;
+        if let CreativeTaskOwner::StandaloneWorkbench { workbench_kind, .. } = &owner
+            && !workbench_kind.accepts_capability(prepared.capability)
+        {
+            return Err(AppError::BadRequest(format!(
+                "standalone {} workbench cannot own capability {}",
+                workbench_kind.as_str(),
+                prepared.capability.as_str()
+            )));
+        }
+        if prepared.model.trim() != prepared.model {
+            return Err(AppError::BadRequest(
+                "Creative Studio model must be already normalized".into(),
+            ));
+        }
+        if let Some(input) = prepared.inputs.iter().find(|input| {
+            !matches!(
+                input.role.as_str(),
+                "reference" | "mask" | "first_frame" | "last_frame" | "video" | "audio"
+            )
+        }) {
+            return Err(AppError::BadRequest(format!(
+                "unsupported Creative Studio input role '{}'",
+                input.role
+            )));
+        }
+        if let Some(input) = prepared.inputs.iter().find(|input| match input.role.as_str() {
+            "mask" | "first_frame" | "last_frame" => input.kind != CreationInputKind::Image,
+            "video" => input.kind != CreationInputKind::Video,
+            "audio" => input.kind != CreationInputKind::Audio,
+            "reference" => false,
+            _ => false,
+        }) {
+            return Err(AppError::BadRequest(format!(
+                "Creative Studio input role '{}' is incompatible with kind '{}'",
+                input.role,
+                input.kind.as_str()
+            )));
+        }
+        let input_bindings = serde_json::to_string(&prepared.inputs)
+            .map_err(|error| AppError::BadRequest(format!("invalid input bindings: {error}")))?;
+        let request_fingerprint = serde_json::to_string(&CanonicalCreativeTaskRequest {
+            owner: &owner,
+            provider_id: &prepared.provider_id,
+            model: &prepared.model,
+            capability: prepared.capability.as_str(),
+            params: &prepared.params,
+            inputs: &prepared.inputs,
+        })
+        .map_err(|error| AppError::BadRequest(format!("invalid canonical creation request: {error}")))?;
         let now = now_ms();
-        let row = self
+        let outcome = self
             .repo
-            .create_task(CreateCreationTaskParams {
+            .get_or_create_creative_task(CreateCreativeTaskParams {
                 creation_task_id: &creation_task_id,
-                canvas_id: canvas_id.as_deref(),
-                node_id: node_id.as_deref(),
-                provider_id: &provider_id,
-                model: &req.model,
-                capability: capability.as_str(),
-                params: &params_json,
+                owner: owner.as_repository_owner(),
+                provider_id: &prepared.provider_id,
+                model: &prepared.model,
+                capability: prepared.capability.as_str(),
+                params: &prepared.params_json,
+                input_bindings: &input_bindings,
+                request_fingerprint: &request_fingerprint,
                 status: TaskStatus::Queued.as_str(),
                 submitted_at: now,
             })
             .await?;
+        if outcome.inserted {
+            self.spawn(prepared.into_worker_job(creation_task_id, owner, now));
+            return outcome.row.try_into();
+        }
+        let mut rows = self.audit_rows_for_output(vec![outcome.row]).await?;
+        rows.pop()
+            .expect("one idempotent task remains after artifact audit")
+            .try_into()
+    }
 
-        self.spawn(WorkerJob {
-            creation_task_id,
-            canvas_id,
-            node_id,
-            provider_id,
-            model: req.model,
-            capability,
-            params: req.params,
-            required_artifact_count,
-            inputs,
-            submitted_at: now,
-            remote_task_id: None,
-        });
-
-        row.try_into()
+    #[cfg(test)]
+    async fn create_test_task(
+        self: &Arc<Self>,
+        req: NewCreationTask,
+    ) -> Result<CreationTask, AppError> {
+        let project_id = self
+            .test_project_id
+            .clone()
+            .expect("test service must be configured with a canonical project");
+        self.create_creative_task(
+            CreativeTaskOwner::CanvasNode {
+                project_id,
+                node_id: CreativeStudioNodeId::new().into_string(),
+            },
+            CreationTaskId::new().into_string(),
+            req,
+        )
+        .await
     }
 
     pub async fn get_task(&self, creation_task_id: &str) -> Result<CreationTask, AppError> {
@@ -621,33 +1002,160 @@ impl CreationService {
         rows.pop().expect("one task row remains after artifact audit").try_into()
     }
 
-    pub async fn list_tasks(
+    pub async fn list_standalone_workbench_tasks(
         &self,
-        canvas_id: Option<&str>,
-        status: Option<&str>,
-        limit: i64,
-    ) -> Result<Vec<CreationTask>, AppError> {
-        let canvas_id = canvas_id
-            .map(WorkshopCanvasId::parse)
-            .transpose()
-            .map_err(|error| AppError::BadRequest(format!("invalid canvas_id: {error}")))?;
-        let rows = self
+        project_id: &str,
+        workbench_kind: StandaloneWorkbenchKind,
+        active_only: bool,
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<StandaloneWorkbenchTaskPage, AppError> {
+        let project_id = CreativeStudioProjectId::parse(project_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid project_id: {error}")))?
+            .into_string();
+        let limit = limit.unwrap_or(DEFAULT_STANDALONE_TASK_PAGE_LIMIT);
+        if !(1..=MAX_STANDALONE_TASK_PAGE_LIMIT).contains(&limit) {
+            return Err(AppError::BadRequest(format!(
+                "limit must be between 1 and {MAX_STANDALONE_TASK_PAGE_LIMIT}"
+            )));
+        }
+        let cursor = cursor.map(parse_standalone_task_cursor).transpose()?;
+        let mut rows = self
             .repo
-            .list_tasks(ListCreationTasksParams {
-                canvas_id: canvas_id.as_ref().map(WorkshopCanvasId::as_str),
-                status: status.filter(|s| !s.trim().is_empty()),
+            .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
+                project_id: &project_id,
+                workbench_kind: workbench_kind.as_str(),
+                active_only,
+                before: cursor.as_ref().map(|cursor| CreationTaskPageCursorRef {
+                    submitted_at: cursor.submitted_at,
+                    creation_task_id: &cursor.creation_task_id,
+                }),
                 limit,
             })
             .await?;
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        for row in &rows {
+            let exact_owner = row.project_id.as_deref() == Some(project_id.as_str())
+                && row.workbench_kind.as_deref() == Some(workbench_kind.as_str())
+                && row.node_id.is_none()
+                && row.workflow_id.is_none()
+                && row.workflow_run_id.is_none()
+                && row.workflow_step_id.is_none();
+            let capability_matches = MediaCapability::parse(&row.capability)
+                .is_some_and(|capability| workbench_kind.accepts_capability(capability));
+            if !exact_owner || !capability_matches {
+                return Err(AppError::Internal(format!(
+                    "standalone task {} escaped its exact owner/capability scope",
+                    row.creation_task_id
+                )));
+            }
+        }
+        let next_cursor = has_more && !rows.is_empty();
+        let encoded_cursor = next_cursor
+            .then(|| rows.last().map(encode_standalone_task_cursor))
+            .flatten();
         let rows = self.audit_rows_for_output(rows).await?;
-        let mut tasks = rows
+        let items = rows
             .into_iter()
             .map(CreationTask::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        if let Some(status) = status.filter(|value| !value.trim().is_empty()) {
-            tasks.retain(|task| task.status == status);
+        Ok(StandaloneWorkbenchTaskPage {
+            items,
+            next_cursor: encoded_cursor,
+        })
+    }
+
+    pub async fn retire_standalone_workbench_tasks(
+        &self,
+        project_id: &str,
+        workbench_kind: StandaloneWorkbenchKind,
+        task_ids: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        let project_id = CreativeStudioProjectId::parse(project_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid project_id: {error}")))?
+            .into_string();
+        if task_ids.is_empty() || task_ids.len() > 100 {
+            return Err(AppError::BadRequest(
+                "retire requires between 1 and 100 task_ids".into(),
+            ));
         }
-        Ok(tasks)
+        let mut seen = HashSet::with_capacity(task_ids.len());
+        for task_id in task_ids {
+            CreationTaskId::parse(task_id).map_err(|error| {
+                AppError::BadRequest(format!("invalid retire task id {task_id:?}: {error}"))
+            })?;
+            if !seen.insert(task_id.as_str()) {
+                return Err(AppError::BadRequest(format!(
+                    "retire task_ids contains duplicate {task_id}"
+                )));
+            }
+        }
+
+        let mut rows = Vec::with_capacity(task_ids.len());
+        for task_id in task_ids {
+            let row = self
+                .repo
+                .get_task(task_id)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("creation task {task_id} not found")))?;
+            let exact_owner = row.project_id.as_deref() == Some(project_id.as_str())
+                && row.workbench_kind.as_deref() == Some(workbench_kind.as_str())
+                && row.node_id.is_none()
+                && row.workflow_id.is_none()
+                && row.workflow_run_id.is_none()
+                && row.workflow_step_id.is_none();
+            let capability_matches = MediaCapability::parse(&row.capability)
+                .is_some_and(|capability| workbench_kind.accepts_capability(capability));
+            if !exact_owner || !capability_matches {
+                return Err(AppError::Conflict(format!(
+                    "creation task {task_id} does not belong to the requested standalone workbench owner"
+                )));
+            }
+            if matches!(row.status.as_str(), "queued" | "running") {
+                return Err(AppError::Conflict(format!(
+                    "live creation task {task_id} cannot be retired"
+                )));
+            }
+            if !matches!(row.status.as_str(), "failed" | "canceled" | "succeeded") {
+                return Err(AppError::Conflict(format!(
+                    "creation task {task_id} is not in a supported terminal state"
+                )));
+            }
+            rows.push(row);
+        }
+        let deleted_at = rows
+            .iter()
+            .map(|row| row.submitted_at)
+            .max()
+            .unwrap_or_default()
+            .max(now_ms());
+        let rows = self.audit_rows_for_output(rows).await?;
+        for row in rows {
+            CreationTask::try_from(row)?;
+        }
+        let retired = self
+            .repo
+            .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
+                project_id: &project_id,
+                workbench_kind: workbench_kind.as_str(),
+                task_ids,
+                deleted_at,
+            })
+            .await?;
+        if retired.len() != task_ids.len() {
+            return Err(AppError::Internal(
+                "retirement returned an incomplete task batch".into(),
+            ));
+        }
+        for (expected, row) in task_ids.iter().zip(&retired) {
+            if row.creation_task_id != *expected || row.deleted_at.is_none() {
+                return Err(AppError::Internal(
+                    "retirement returned a reordered or untombstoned task".into(),
+                ));
+            }
+        }
+        Ok(task_ids.to_vec())
     }
 
     /// Cancel a task. Terminal tasks are returned unchanged (idempotent); a live
@@ -899,7 +1407,14 @@ impl CreationService {
                     Ok((capability, params, required_artifact_count)) => {
                         self.spawn(WorkerJob {
                             creation_task_id: row.creation_task_id.clone(),
-                            canvas_id: row.canvas_id,
+                            project_id: row.project_id,
+                            workbench_kind: row
+                                .workbench_kind
+                                .as_deref()
+                                .and_then(StandaloneWorkbenchKind::parse),
+                            workflow_id: row.workflow_id,
+                            workflow_run_id: row.workflow_run_id,
+                            workflow_step_id: row.workflow_step_id,
                             node_id: row.node_id,
                             provider_id: row.provider_id,
                             model: row.model,
@@ -1246,6 +1761,17 @@ impl CreationService {
         let mut out = Vec::with_capacity(inputs.len());
         for i in inputs {
             let loaded = source.load(&i.asset_id).await?;
+            if !i.kind.matches_mime(&loaded.mime) {
+                return Err(CreationError::new(
+                    "input_kind_mismatch",
+                    format!(
+                        "input asset {} was bound as {}, but its MIME is {}",
+                        i.asset_id,
+                        i.kind.as_str(),
+                        loaded.mime
+                    ),
+                ));
+            }
             out.push(InputAsset {
                 id: Some(i.asset_id.clone()),
                 role: i.role.clone(),
@@ -1551,8 +2077,29 @@ fn build_origin(job: &WorkerJob) -> Value {
             Value::String(job.creation_task_id.as_str().to_owned()),
         ),
     ]);
-    if let Some(canvas_id) = &job.canvas_id {
-        origin.insert("canvas_id".into(), Value::String(canvas_id.clone()));
+    if let Some(project_id) = &job.project_id {
+        origin.insert("project_id".into(), Value::String(project_id.clone()));
+    }
+    if let Some(workbench_kind) = job.workbench_kind {
+        origin.insert(
+            "workbench_kind".into(),
+            Value::String(workbench_kind.as_str().to_owned()),
+        );
+    }
+    if let Some(workflow_id) = &job.workflow_id {
+        origin.insert("workflow_id".into(), Value::String(workflow_id.clone()));
+    }
+    if let Some(workflow_run_id) = &job.workflow_run_id {
+        origin.insert(
+            "workflow_run_id".into(),
+            Value::String(workflow_run_id.clone()),
+        );
+    }
+    if let Some(workflow_step_id) = &job.workflow_step_id {
+        origin.insert(
+            "workflow_step_id".into(),
+            Value::String(workflow_step_id.clone()),
+        );
     }
     if let Some(node_id) = &job.node_id {
         origin.insert("node_id".into(), Value::String(node_id.clone()));
@@ -1574,14 +2121,35 @@ impl TaskStatus {
 }
 
 #[cfg(test)]
+async fn seed_service_test_project(pool: &nomifun_db::SqlitePool) -> String {
+    let project_id = CreativeStudioProjectId::new().into_string();
+    let document = serde_json::json!({
+        "schema": "nomifun.creative-studio/v1",
+        "projectId": project_id,
+        "nodes": []
+    });
+    sqlx::query(
+        "INSERT INTO creative_studio_projects \
+            (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+         VALUES (?, 'Creation Service Test', 1, 0, 0, ?, 0, 0)",
+    )
+    .bind(&project_id)
+    .bind(document.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    project_id
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use nomifun_api_types::ModelTask;
     use nomifun_db::{
-        CreationTaskRow, DbError, IProviderRepository, NewProviderModel,
+        CreationTaskRow, DbError, IProviderRepository, IWorkshopRepository, NewProviderModel,
         NewProviderModelCapability, SqliteCreationTaskRepository,
         SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
-        SqliteProviderModelRepository, SqliteProviderRepository,
+        SqliteProviderModelRepository, SqliteProviderRepository, SqliteWorkshopRepository,
     };
     use nomifun_model_invoke::{AdapterRegistry, InvokeError, ProtocolAdapter, ResolvedCall};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1746,6 +2314,7 @@ mod tests {
 
     struct RecordingSink {
         count: AtomicUsize,
+        origins: Mutex<Vec<Value>>,
     }
 
     struct RecordingTextExecutor {
@@ -1941,16 +2510,15 @@ mod tests {
 
     #[async_trait]
     impl ICreationTaskRepository for ScriptedSucceededRepo {
-        async fn create_task(&self, params: CreateCreationTaskParams<'_>) -> Result<CreationTaskRow, DbError> {
-            self.inner.create_task(params).await
+        async fn get_or_create_creative_task(
+            &self,
+            params: CreateCreativeTaskParams<'_>,
+        ) -> Result<nomifun_db::IdempotentCreationTask, DbError> {
+            self.inner.get_or_create_creative_task(params).await
         }
 
         async fn get_task(&self, id: &str) -> Result<Option<CreationTaskRow>, DbError> {
             self.inner.get_task(id).await
-        }
-
-        async fn list_tasks(&self, params: ListCreationTasksParams<'_>) -> Result<Vec<CreationTaskRow>, DbError> {
-            self.inner.list_tasks(params).await
         }
 
         async fn list_all_tasks(&self) -> Result<Vec<CreationTaskRow>, DbError> {
@@ -2008,16 +2576,15 @@ mod tests {
 
     #[async_trait]
     impl ICreationTaskRepository for RemotePatchGateRepo {
-        async fn create_task(&self, params: CreateCreationTaskParams<'_>) -> Result<CreationTaskRow, DbError> {
-            self.inner.create_task(params).await
+        async fn get_or_create_creative_task(
+            &self,
+            params: CreateCreativeTaskParams<'_>,
+        ) -> Result<nomifun_db::IdempotentCreationTask, DbError> {
+            self.inner.get_or_create_creative_task(params).await
         }
 
         async fn get_task(&self, id: &str) -> Result<Option<CreationTaskRow>, DbError> {
             self.inner.get_task(id).await
-        }
-
-        async fn list_tasks(&self, params: ListCreationTasksParams<'_>) -> Result<Vec<CreationTaskRow>, DbError> {
-            self.inner.list_tasks(params).await
         }
 
         async fn list_all_tasks(&self) -> Result<Vec<CreationTaskRow>, DbError> {
@@ -2052,8 +2619,9 @@ mod tests {
     }
     #[async_trait]
     impl AssetSink for RecordingSink {
-        async fn persist(&self, _asset: PersistAsset) -> Result<String, CreationError> {
+        async fn persist(&self, asset: PersistAsset) -> Result<String, CreationError> {
             self.count.fetch_add(1, Ordering::SeqCst);
+            self.origins.lock().unwrap().push(asset.origin);
             Ok(WorkshopAssetId::new().into_string())
         }
 
@@ -2165,10 +2733,15 @@ mod tests {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let pool = db.pool().clone();
         let provider_id = seed_provider(&pool, platform, adapter.id).await;
+        let test_project_id = seed_service_test_project(&pool).await;
         let repo: Arc<dyn ICreationTaskRepository> = Arc::new(SqliteCreationTaskRepository::new(pool.clone()));
-        let sink = Arc::new(RecordingSink { count: AtomicUsize::new(0) });
+        let sink = Arc::new(RecordingSink {
+            count: AtomicUsize::new(0),
+            origins: Mutex::new(Vec::new()),
+        });
         let text_executor = RecordingTextExecutor::new("generated text");
         let svc = CreationService::builder(repo)
+            .with_test_project_id(test_project_id)
             .with_invoke(invoke_over(&pool, vec![adapter as Arc<dyn ProtocolAdapter>]))
             .with_text_executor(text_executor.clone())
             .with_asset_source(Arc::new(StaticSource))
@@ -2188,6 +2761,7 @@ mod tests {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let pool = db.pool().clone();
         let provider_id = seed_provider(&pool, platform, adapter.id).await;
+        let test_project_id = seed_service_test_project(&pool).await;
         let sqlite_repo: Arc<dyn ICreationTaskRepository> =
             Arc::new(SqliteCreationTaskRepository::new(pool.clone()));
         let repo: Arc<dyn ICreationTaskRepository> = match success_commit_fault {
@@ -2195,6 +2769,7 @@ mod tests {
             None => sqlite_repo,
         };
         let svc = CreationService::builder(repo)
+            .with_test_project_id(test_project_id)
             .with_invoke(invoke_over(&pool, vec![adapter as Arc<dyn ProtocolAdapter>]))
             .with_asset_source(Arc::new(StaticSource))
             .with_asset_sink(sink)
@@ -2216,23 +2791,34 @@ mod tests {
     }
 
     async fn create_test_task(
-        repo: &dyn ICreationTaskRepository,
+        svc: &CreationService,
         provider_id: &str,
         capability: &str,
         params: &str,
     ) -> String {
         let creation_task_id = generate_id();
-        repo.create_task(CreateCreationTaskParams {
-            creation_task_id: &creation_task_id,
-            canvas_id: None,
-            node_id: None,
-            provider_id,
-            model: "test-model",
-            capability,
-            params,
-            status: TaskStatus::Queued.as_str(),
-            submitted_at: now_ms(),
-        })
+        let project_id = svc
+            .test_project_id
+            .as_deref()
+            .expect("test service must have a canonical project");
+        let node_id = CreativeStudioNodeId::new().into_string();
+        let fingerprint = serde_json::json!({"test_task_id": creation_task_id}).to_string();
+        svc.repo
+            .get_or_create_creative_task(CreateCreativeTaskParams {
+                creation_task_id: &creation_task_id,
+                owner: CreativeTaskOwnerRef::CanvasNode {
+                    project_id,
+                    node_id: &node_id,
+                },
+                provider_id,
+                model: "test-model",
+                capability,
+                params,
+                input_bindings: "[]",
+                request_fingerprint: &fingerprint,
+                status: TaskStatus::Queued.as_str(),
+                submitted_at: now_ms(),
+            })
         .await
         .unwrap();
         creation_task_id
@@ -2246,7 +2832,7 @@ mod tests {
         status: &str,
         result_asset_ids: &str,
     ) -> String {
-        let creation_task_id = create_test_task(svc.repo.as_ref(), provider_id, capability, params).await;
+        let creation_task_id = create_test_task(svc, provider_id, capability, params).await;
         svc.repo
             .update_task(
                 &creation_task_id,
@@ -2264,8 +2850,6 @@ mod tests {
 
     fn new_task(provider_id: &str, capability: &str) -> NewCreationTask {
         NewCreationTask {
-            canvas_id: None,
-            node_id: None,
             provider_id: provider_id.into(),
             model: "test-model".into(),
             capability: capability.into(),
@@ -2274,10 +2858,451 @@ mod tests {
         }
     }
 
+    async fn seed_creative_project(pool: &nomifun_db::SqlitePool) -> String {
+        let project_id = CreativeStudioProjectId::new().into_string();
+        let document = json!({
+            "schema": "nomifun.creative-studio/v1",
+            "projectId": project_id,
+            "nodes": []
+        });
+        SqliteWorkshopRepository::new(pool.clone())
+            .create_creative_project(
+                &project_id,
+                "Creation Service Test",
+                &document.to_string(),
+                0,
+            )
+            .await
+            .unwrap();
+        project_id
+    }
+
+    async fn seed_creative_workflow_run(
+        pool: &nomifun_db::SqlitePool,
+    ) -> (String, String, String) {
+        let workflow_id = CreativeStudioWorkflowId::new().into_string();
+        let workflow_run_id = CreativeStudioWorkflowRunId::new().into_string();
+        let workflow_step_id = CreativeStudioWorkflowStepId::new().into_string();
+        sqlx::query(
+            "INSERT INTO creative_studio_workflows \
+                (workflow_id, revision, name, description, category, visibility, definition_json, \
+                 created_at, updated_at) \
+             VALUES (?, 1, 'Creation Workflow Test', '', '', 'private', ?, 0, 0)",
+        )
+        .bind(&workflow_id)
+        .bind(json!({"id": workflow_id, "revision": 1}).to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+        let aggregate = json!({
+            "kind": "nomifun.creative-studio.workflow-run",
+            "version": 1,
+            "revision": 1,
+            "workflowSnapshot": {"id": workflow_id, "revision": 1},
+            "request": {
+                "id": workflow_run_id,
+                "workflowId": workflow_id,
+                "workflowRevision": 1
+            },
+            "record": {
+                "requestId": workflow_run_id,
+                "workflowId": workflow_id,
+                "status": "running"
+            }
+        });
+        sqlx::query(
+            "INSERT INTO creative_studio_workflow_runs \
+                (workflow_run_id, workflow_id, workflow_revision, revision, status, step_ids_json, \
+                 aggregate_json, created_at, updated_at) \
+             VALUES (?, ?, 1, 1, 'running', ?, ?, 0, 0)",
+        )
+        .bind(&workflow_run_id)
+        .bind(&workflow_id)
+        .bind(serde_json::to_string(&[&workflow_step_id]).unwrap())
+        .bind(aggregate.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+        (workflow_id, workflow_run_id, workflow_step_id)
+    }
+
+    fn creative_task(provider_id: &str, prompt: &str) -> NewCreationTask {
+        NewCreationTask {
+            provider_id: provider_id.to_owned(),
+            model: "test-model".into(),
+            capability: "t2i".into(),
+            params: json!({"prompt": prompt, "count": 1}),
+            inputs: vec![],
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn creative_project_response_loss_retry_has_one_worker_authority() {
+        let adapter = MockAdapter::sync("openai.images");
+        let h = harness(adapter.clone(), "openai").await;
+        let project_id = seed_creative_project(h._db.pool()).await;
+        let node_id = CreativeStudioNodeId::new().into_string();
+        let idempotency_key = CreationTaskId::new().into_string();
+
+        let first_service = h.svc.clone();
+        let retry_service = h.svc.clone();
+        let owner = CreativeTaskOwner::CanvasNode {
+            project_id: project_id.clone(),
+            node_id: node_id.clone(),
+        };
+        let first = first_service.create_creative_task(
+            owner.clone(),
+            idempotency_key.clone(),
+            creative_task(&h.provider_id, "Aurora"),
+        );
+        let retry = retry_service.create_creative_task(
+            owner.clone(),
+            idempotency_key.clone(),
+            creative_task(&h.provider_id, "Aurora"),
+        );
+        let (first, retry) = tokio::join!(first, retry);
+        let first = first.unwrap();
+        let retry = retry.unwrap();
+        assert_eq!(first.creation_task_id, idempotency_key);
+        assert_eq!(retry.creation_task_id, idempotency_key);
+        assert_eq!(first.project_id.as_deref(), Some(project_id.as_str()));
+
+        let done = wait_terminal(&h.svc, &idempotency_key).await;
+        assert_eq!(done.status, "succeeded");
+        assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(h.sink.count.load(Ordering::SeqCst), 1);
+
+        let response_loss_retry = h
+            .svc
+            .create_creative_task(
+                owner,
+                idempotency_key.clone(),
+                creative_task(&h.provider_id, "Aurora"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response_loss_retry.status, "succeeded");
+        assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 1);
+
+        let conflict = h
+            .svc
+            .create_creative_task(
+                CreativeTaskOwner::CanvasNode {
+                    project_id,
+                    node_id,
+                },
+                idempotency_key,
+                creative_task(&h.provider_id, "Different request"),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(&conflict, AppError::Conflict(_)));
+        assert_eq!(conflict.status_code(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn standalone_task_page_is_owner_scoped_cursor_strict_and_audited() {
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let provider_id = seed_provider(db.pool(), "openai", "openai.videos").await;
+        let project_id = seed_service_test_project(db.pool()).await;
+        let repo = SqliteCreationTaskRepository::new(db.pool().clone());
+        let mut task_ids = Vec::new();
+        for submitted_at in [200, 100] {
+            let task_id = CreationTaskId::new().into_string();
+            let fingerprint = json!({"task": task_id}).to_string();
+            repo.get_or_create_creative_task(CreateCreativeTaskParams {
+                creation_task_id: &task_id,
+                owner: CreativeTaskOwnerRef::StandaloneWorkbench {
+                    project_id: &project_id,
+                    workbench_kind: "video",
+                },
+                provider_id: &provider_id,
+                model: "test-model",
+                capability: "t2v",
+                params: r#"{"prompt":"Aurora","seconds":5}"#,
+                input_bindings: "[]",
+                request_fingerprint: &fingerprint,
+                status: "queued",
+                submitted_at,
+            })
+            .await
+            .unwrap();
+            repo.update_task(
+                &task_id,
+                UpdateCreationTaskParams {
+                    status: Some("failed"),
+                    error: Some(Some(r#"{"kind":"provider_error","message":"fixture"}"#)),
+                    finished_at: Some(Some(submitted_at + 1)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            task_ids.push(task_id);
+        }
+        let service = CreationService::new(Arc::new(repo.clone()));
+
+        let first = service
+            .list_standalone_workbench_tasks(
+                &project_id,
+                StandaloneWorkbenchKind::Video,
+                false,
+                Some(1),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.items[0].creation_task_id, task_ids[0]);
+        let cursor = first.next_cursor.expect("one more row requires a cursor");
+
+        let second = service
+            .list_standalone_workbench_tasks(
+                &project_id,
+                StandaloneWorkbenchKind::Video,
+                false,
+                Some(1),
+                Some(&cursor),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.items[0].creation_task_id, task_ids[1]);
+        assert!(second.next_cursor.is_none());
+        assert!(
+            service
+                .list_standalone_workbench_tasks(
+                    &project_id,
+                    StandaloneWorkbenchKind::Image,
+                    false,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        for invalid in ["", "01:bad", "-1:0190f5fe-7c00-7a00-8000-000000000001"] {
+            assert!(matches!(
+                service
+                    .list_standalone_workbench_tasks(
+                        &project_id,
+                        StandaloneWorkbenchKind::Video,
+                        false,
+                        None,
+                        Some(invalid),
+                    )
+                    .await,
+                Err(AppError::BadRequest(_))
+            ));
+        }
+
+        let retired = service
+            .retire_standalone_workbench_tasks(
+                &project_id,
+                StandaloneWorkbenchKind::Video,
+                &[task_ids[0].clone()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(retired, vec![task_ids[0].clone()]);
+        let direct = service.get_task(&task_ids[0]).await.unwrap();
+        let first_deleted_at = direct.deleted_at.expect("direct GET exposes tombstone");
+        assert!(
+            service
+                .list_standalone_workbench_tasks(
+                    &project_id,
+                    StandaloneWorkbenchKind::Video,
+                    false,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+                .items
+                .iter()
+                .all(|task| task.creation_task_id != task_ids[0])
+        );
+        service
+            .retire_standalone_workbench_tasks(
+                &project_id,
+                StandaloneWorkbenchKind::Video,
+                &[task_ids[0].clone()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            service.get_task(&task_ids[0]).await.unwrap().deleted_at,
+            Some(first_deleted_at),
+            "idempotent retire preserves the first tombstone timestamp"
+        );
+
+        let corrupt_id = CreationTaskId::new().into_string();
+        let fingerprint = json!({"task": corrupt_id}).to_string();
+        repo.get_or_create_creative_task(CreateCreativeTaskParams {
+            creation_task_id: &corrupt_id,
+            owner: CreativeTaskOwnerRef::StandaloneWorkbench {
+                project_id: &project_id,
+                workbench_kind: "video",
+            },
+            provider_id: &provider_id,
+            model: "test-model",
+            capability: "t2v",
+            params: r#"{"prompt":"missing output","seconds":5}"#,
+            input_bindings: "[]",
+            request_fingerprint: &fingerprint,
+            status: "queued",
+            submitted_at: 300,
+        })
+        .await
+        .unwrap();
+        let missing_asset = WorkshopAssetId::new().into_string();
+        let result_ids = serde_json::to_string(&[missing_asset]).unwrap();
+        repo.update_task(
+            &corrupt_id,
+            UpdateCreationTaskParams {
+                status: Some("succeeded"),
+                result_asset_ids: Some(&result_ids),
+                finished_at: Some(Some(301)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            service
+                .retire_standalone_workbench_tasks(
+                    &project_id,
+                    StandaloneWorkbenchKind::Video,
+                    &[corrupt_id.clone()],
+                )
+                .await
+                .is_err(),
+            "retirement must not hide a succeeded task before artifact audit"
+        );
+        assert!(repo.get_task(&corrupt_id).await.unwrap().unwrap().deleted_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn standalone_active_page_excludes_every_terminal_status() {
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let provider_id = seed_provider(db.pool(), "openai", "openai.images").await;
+        let project_id = seed_service_test_project(db.pool()).await;
+        let repo = SqliteCreationTaskRepository::new(db.pool().clone());
+        let queued_id = CreationTaskId::new().into_string();
+        let failed_id = CreationTaskId::new().into_string();
+        for (task_id, submitted_at) in [(&queued_id, 20), (&failed_id, 10)] {
+            let fingerprint = json!({"task": task_id}).to_string();
+            repo.get_or_create_creative_task(CreateCreativeTaskParams {
+                creation_task_id: task_id,
+                owner: CreativeTaskOwnerRef::StandaloneWorkbench {
+                    project_id: &project_id,
+                    workbench_kind: "image",
+                },
+                provider_id: &provider_id,
+                model: "image-model",
+                capability: "t2i",
+                params: r#"{"prompt":"Aurora"}"#,
+                input_bindings: "[]",
+                request_fingerprint: &fingerprint,
+                status: "queued",
+                submitted_at,
+            })
+            .await
+            .unwrap();
+        }
+        repo.update_task(
+            &failed_id,
+            UpdateCreationTaskParams {
+                status: Some("failed"),
+                error: Some(Some(r#"{"kind":"provider_error","message":"fixture"}"#)),
+                finished_at: Some(Some(11)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let service = CreationService::new(Arc::new(repo));
+
+        let active = service
+            .list_standalone_workbench_tasks(
+                &project_id,
+                StandaloneWorkbenchKind::Image,
+                true,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(active.items.len(), 1);
+        assert_eq!(active.items[0].creation_task_id, queued_id);
+
+        let all = service
+            .list_standalone_workbench_tasks(
+                &project_id,
+                StandaloneWorkbenchKind::Image,
+                false,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(all.items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn creative_workflow_task_runs_with_exact_owner_and_provenance() {
+        let adapter = MockAdapter::sync("openai.images");
+        let h = harness(adapter.clone(), "openai").await;
+        let (workflow_id, workflow_run_id, workflow_step_id) =
+            seed_creative_workflow_run(h._db.pool()).await;
+        let creation_task_id = CreationTaskId::new().into_string();
+
+        let created = h
+            .svc
+            .create_creative_task(
+                CreativeTaskOwner::WorkflowStep {
+                    workflow_id: workflow_id.clone(),
+                    workflow_run_id: workflow_run_id.clone(),
+                    workflow_step_id: workflow_step_id.clone(),
+                },
+                creation_task_id.clone(),
+                creative_task(&h.provider_id, "Workflow Aurora"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.workflow_id.as_deref(), Some(workflow_id.as_str()));
+        assert_eq!(
+            created.workflow_run_id.as_deref(),
+            Some(workflow_run_id.as_str())
+        );
+        assert_eq!(
+            created.workflow_step_id.as_deref(),
+            Some(workflow_step_id.as_str())
+        );
+        assert!(created.project_id.is_none());
+        assert!(created.node_id.is_none());
+
+        let done = wait_terminal(&h.svc, &creation_task_id).await;
+        assert_eq!(done.status, "succeeded");
+        assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 1);
+        let origins = h.sink.origins.lock().unwrap();
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins[0]["workflow_id"], workflow_id);
+        assert_eq!(origins[0]["workflow_run_id"], workflow_run_id);
+        assert_eq!(origins[0]["workflow_step_id"], workflow_step_id);
+        assert_eq!(origins[0]["creation_task_id"], creation_task_id);
+        assert!(origins[0].get("project_id").is_none());
+        assert!(origins[0].get("canvas_id").is_none());
+        assert!(origins[0].get("node_id").is_none());
+    }
+
     #[tokio::test]
     async fn sync_task_succeeds_and_persists_asset() {
         let h = harness(MockAdapter::sync("openai.images"), "openai").await;
-        let created = h.svc.create_task(new_task(&h.provider_id, "t2i")).await.unwrap();
+        let created = h.svc.create_test_task(new_task(&h.provider_id, "t2i")).await.unwrap();
         assert_eq!(created.status, "queued");
         validate_uuidv7(&created.creation_task_id).unwrap();
 
@@ -2304,7 +3329,7 @@ mod tests {
             "max_tokens": 777
         });
 
-        let created = h.svc.create_task(task).await.unwrap();
+        let created = h.svc.create_test_task(task).await.unwrap();
         let done = wait_terminal(&h.svc, &created.creation_task_id).await;
 
         assert_eq!(done.status, "succeeded", "error={:?}", done.error);
@@ -2327,7 +3352,7 @@ mod tests {
             MockBehavior::DoneEmpty,
         );
         let h = harness(adapter, "openai").await;
-        let created = h.svc.create_task(new_task(&h.provider_id, "t2i")).await.unwrap();
+        let created = h.svc.create_test_task(new_task(&h.provider_id, "t2i")).await.unwrap();
         let done = wait_terminal(&h.svc, &created.creation_task_id).await;
         assert_eq!(done.status, "failed");
         assert!(done.result_asset_ids.is_empty());
@@ -2340,7 +3365,7 @@ mod tests {
         for behavior in [MockBehavior::DoneEmptyBytes, MockBehavior::DoneInvalidImage] {
             let adapter = MockAdapter::with("openai.images", vec![ModelTask::ImageGeneration], behavior);
             let h = harness(adapter, "openai").await;
-            let created = h.svc.create_task(new_task(&h.provider_id, "t2i")).await.unwrap();
+            let created = h.svc.create_test_task(new_task(&h.provider_id, "t2i")).await.unwrap();
             let done = wait_terminal(&h.svc, &created.creation_task_id).await;
             assert_eq!(done.status, "failed");
             assert!(done.result_asset_ids.is_empty());
@@ -2357,7 +3382,7 @@ mod tests {
             MockBehavior::DoneValidThenInvalid,
         );
         let h = harness(adapter, "openai").await;
-        let created = h.svc.create_task(new_task(&h.provider_id, "t2i")).await.unwrap();
+        let created = h.svc.create_test_task(new_task(&h.provider_id, "t2i")).await.unwrap();
         let done = wait_terminal(&h.svc, &created.creation_task_id).await;
         assert_eq!(done.status, "failed");
         assert_eq!(done.error.as_ref().unwrap()["kind"], "invalid_artifact");
@@ -2375,7 +3400,7 @@ mod tests {
         let (svc, provider_id, _db) =
             harness_with_sink_and_repo(adapter, "openai", sink.clone(), None).await;
 
-        let created = svc.create_task(new_task(&provider_id, "t2i")).await.unwrap();
+        let created = svc.create_test_task(new_task(&provider_id, "t2i")).await.unwrap();
         let done = wait_terminal(&svc, &created.creation_task_id).await;
 
         assert_eq!(done.status, "failed");
@@ -2393,7 +3418,7 @@ mod tests {
         let (svc, provider_id, _db) =
             harness_with_sink_and_repo(adapter, "openai", sink.clone(), None).await;
 
-        let created = svc.create_task(new_task(&provider_id, "t2i")).await.unwrap();
+        let created = svc.create_test_task(new_task(&provider_id, "t2i")).await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), sink.entered.acquire())
             .await
             .expect("persist did not enter its cancellation window")
@@ -2422,7 +3447,7 @@ mod tests {
         let (svc, provider_id, _db) =
             harness_with_sink_and_repo(adapter, "openai", sink.clone(), Some(SuccessCommitFault::Error)).await;
 
-        let created = svc.create_task(new_task(&provider_id, "t2i")).await.unwrap();
+        let created = svc.create_test_task(new_task(&provider_id, "t2i")).await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), sink.rolled_back.acquire())
             .await
             .expect("status-write failure did not roll the batch back")
@@ -2449,7 +3474,7 @@ mod tests {
         )
         .await;
 
-        let created = svc.create_task(new_task(&provider_id, "t2i")).await.unwrap();
+        let created = svc.create_test_task(new_task(&provider_id, "t2i")).await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), sink.rolled_back.acquire())
             .await
             .expect("lost terminal compare-and-set did not roll the batch back")
@@ -2471,7 +3496,7 @@ mod tests {
             MockBehavior::AsyncDone { pending_polls: 2 },
         );
         let h = harness(adapter, "openai").await;
-        let created = h.svc.create_task(new_task(&h.provider_id, "t2v")).await.unwrap();
+        let created = h.svc.create_test_task(new_task(&h.provider_id, "t2v")).await.unwrap();
         let done = wait_terminal(&h.svc, &created.creation_task_id).await;
         assert_eq!(done.status, "succeeded");
         assert_eq!(done.result_asset_ids.len(), 1);
@@ -2488,7 +3513,7 @@ mod tests {
             MockBehavior::SubmitError("boom".into()),
         );
         let h = harness(adapter, "openai").await;
-        let created = h.svc.create_task(new_task(&h.provider_id, "t2i")).await.unwrap();
+        let created = h.svc.create_test_task(new_task(&h.provider_id, "t2i")).await.unwrap();
         let done = wait_terminal(&h.svc, &created.creation_task_id).await;
         assert_eq!(done.status, "failed");
         assert_eq!(done.error.as_ref().unwrap()["kind"], "provider_error");
@@ -2503,7 +3528,7 @@ mod tests {
             MockBehavior::AsyncNever,
         );
         let h = harness(adapter, "openai").await;
-        let created = h.svc.create_task(new_task(&h.provider_id, "t2v")).await.unwrap();
+        let created = h.svc.create_test_task(new_task(&h.provider_id, "t2v")).await.unwrap();
 
         // Wait until it is running (submitted → pending → polling).
         let mut running = false;
@@ -2528,6 +3553,7 @@ mod tests {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let pool = db.pool().clone();
         let provider_id = seed_provider(&pool, "openai", "openai.videos").await;
+        let test_project_id = seed_service_test_project(&pool).await;
         let inner: Arc<dyn ICreationTaskRepository> =
             Arc::new(SqliteCreationTaskRepository::new(pool.clone()));
         let gated = Arc::new(RemotePatchGateRepo {
@@ -2540,14 +3566,18 @@ mod tests {
             vec![ModelTask::VideoGeneration],
             MockBehavior::AsyncNever,
         );
-        let sink = Arc::new(RecordingSink { count: AtomicUsize::new(0) });
+        let sink = Arc::new(RecordingSink {
+            count: AtomicUsize::new(0),
+            origins: Mutex::new(Vec::new()),
+        });
         let svc = CreationService::builder(gated.clone())
+            .with_test_project_id(test_project_id)
             .with_invoke(invoke_over(&pool, vec![adapter as Arc<dyn ProtocolAdapter>]))
             .with_asset_source(Arc::new(StaticSource))
             .with_asset_sink(sink)
             .with_poll_interval(Duration::from_millis(10))
             .build();
-        let created = svc.create_task(new_task(&provider_id, "t2v")).await.unwrap();
+        let created = svc.create_test_task(new_task(&provider_id, "t2v")).await.unwrap();
 
         tokio::time::timeout(Duration::from_secs(2), gated.entered.acquire())
             .await
@@ -2567,7 +3597,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_is_idempotent_on_terminal() {
         let h = harness(MockAdapter::sync("openai.images"), "openai").await;
-        let created = h.svc.create_task(new_task(&h.provider_id, "t2i")).await.unwrap();
+        let created = h.svc.create_test_task(new_task(&h.provider_id, "t2i")).await.unwrap();
         let done = wait_terminal(&h.svc, &created.creation_task_id).await;
         assert_eq!(done.status, "succeeded");
         // cancel of a terminal task returns it unchanged
@@ -2581,18 +3611,38 @@ mod tests {
     async fn malformed_entity_ids_are_rejected() {
         let h = harness(MockAdapter::sync("openai.images"), "openai").await;
         let mut bad = new_task(&h.provider_id, "nope");
-        assert!(matches!(h.svc.create_task(bad).await.unwrap_err(), AppError::BadRequest(_)));
+        assert!(matches!(h.svc.create_test_task(bad).await.unwrap_err(), AppError::BadRequest(_)));
         bad = new_task("  ", "t2i");
-        assert!(matches!(h.svc.create_task(bad).await.unwrap_err(), AppError::BadRequest(_)));
+        assert!(matches!(h.svc.create_test_task(bad).await.unwrap_err(), AppError::BadRequest(_)));
         bad = new_task(&h.provider_id, "t2i");
-        bad.canvas_id = Some("not-a-canvas-id".into());
-        assert!(matches!(h.svc.create_task(bad).await.unwrap_err(), AppError::BadRequest(_)));
-        bad = new_task(&h.provider_id, "t2i");
-        bad.node_id = Some("node_1".into());
-        assert!(matches!(h.svc.create_task(bad).await.unwrap_err(), AppError::BadRequest(_)));
-        bad = new_task(&h.provider_id, "t2i");
-        bad.inputs = vec![CreationInput { asset_id: String::new(), role: "reference".into() }];
-        assert!(matches!(h.svc.create_task(bad).await.unwrap_err(), AppError::BadRequest(_)));
+        bad.inputs = vec![CreationInput {
+            asset_id: String::new(),
+            kind: CreationInputKind::Image,
+            role: "reference".into(),
+        }];
+        assert!(matches!(h.svc.create_test_task(bad).await.unwrap_err(), AppError::BadRequest(_)));
+        for owner in [
+            CreativeTaskOwner::CanvasNode {
+                project_id: "not-a-project".into(),
+                node_id: CreativeStudioNodeId::new().into_string(),
+            },
+            CreativeTaskOwner::CanvasNode {
+                project_id: h.svc.test_project_id.clone().unwrap(),
+                node_id: "not-a-node".into(),
+            },
+        ] {
+            assert!(matches!(
+                h.svc
+                    .create_creative_task(
+                        owner,
+                        CreationTaskId::new().into_string(),
+                        new_task(&h.provider_id, "t2i"),
+                    )
+                    .await
+                    .unwrap_err(),
+                AppError::BadRequest(_)
+            ));
+        }
         for invalid_creation_task_id in [
             "0",
             "1",
@@ -2614,7 +3664,6 @@ mod tests {
                 AppError::BadRequest(_)
             ));
         }
-        assert!(matches!(h.svc.list_tasks(Some(""), None, 10).await.unwrap_err(), AppError::BadRequest(_)));
     }
 
     #[tokio::test]
@@ -2638,7 +3687,7 @@ mod tests {
             let mut task = new_task(&h.provider_id, "t2i");
             task.params = params;
             assert!(
-                matches!(h.svc.create_task(task).await.unwrap_err(), AppError::BadRequest(_)),
+                matches!(h.svc.create_test_task(task).await.unwrap_err(), AppError::BadRequest(_)),
                 "invalid image quantity must be rejected before enqueue"
             );
         }
@@ -2649,7 +3698,7 @@ mod tests {
         // alias), and the worker enforces that same prevalidated value.
         let mut task = new_task(&h.provider_id, "t2i");
         task.params = json!({"prompt": "cat", "count": 10, "n": 10});
-        let created = h.svc.create_task(task).await.unwrap();
+        let created = h.svc.create_test_task(task).await.unwrap();
         let done = wait_terminal(&h.svc, &created.creation_task_id).await;
         assert_eq!(done.status, "succeeded", "error={:?}", done.error);
         assert_eq!(done.result_asset_ids.len(), 10);
@@ -2657,13 +3706,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_provider_is_rejected_before_task_persistence() {
+    async fn missing_provider_conflicts_before_task_persistence() {
         let h = harness(MockAdapter::sync("openai.images"), "openai").await;
         let missing_provider = ProviderId::new().into_string();
         assert!(matches!(
-            h.svc.create_task(new_task(&missing_provider, "t2i")).await.unwrap_err(),
-            AppError::NotFound(_)
+            h.svc.create_test_task(new_task(&missing_provider, "t2i")).await.unwrap_err(),
+            AppError::Conflict(_)
         ));
+        assert!(h.svc.repo.list_all_tasks().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2672,8 +3722,8 @@ mod tests {
         let sink = TransactionalTestSink::new(None, None);
         let (svc, provider_id, _db) =
             harness_with_sink_and_repo(adapter, "openai", sink.clone(), None).await;
-        let queued_id = create_test_task(svc.repo.as_ref(), &provider_id, "t2i", "{}").await;
-        let running_id = create_test_task(svc.repo.as_ref(), &provider_id, "t2i", "{}").await;
+        let queued_id = create_test_task(&svc, &provider_id, "t2i", "{}").await;
+        let running_id = create_test_task(&svc, &provider_id, "t2i", "{}").await;
         svc.repo
             .update_task(
                 &running_id,
@@ -2737,7 +3787,7 @@ mod tests {
         });
         let (svc, provider_id, _db) =
             harness_with_sink_and_repo(adapter, "openai", flaky.clone(), None).await;
-        let creation_task_id = create_test_task(svc.repo.as_ref(), &provider_id, "t2i", "{}").await;
+        let creation_task_id = create_test_task(&svc, &provider_id, "t2i", "{}").await;
         let asset_id = flaky
             .persist(PersistAsset {
                 bytes: valid_png(),
@@ -2821,7 +3871,7 @@ mod tests {
         let sink = TransactionalTestSink::new(None, None);
         let (svc, provider_id, _db) =
             harness_with_sink_and_repo(adapter, "openai", sink, None).await;
-        let creation_task_id = create_test_task(svc.repo.as_ref(), &provider_id, "t2i", "{}").await;
+        let creation_task_id = create_test_task(&svc, &provider_id, "t2i", "{}").await;
         let missing_asset = WorkshopAssetId::new().into_string();
         let ids_json = serde_json::to_string(&[missing_asset]).unwrap();
         svc.repo
@@ -2845,7 +3895,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_and_list_fail_closed_for_short_image_successes_without_rewriting_rows() {
+    async fn task_reads_fail_closed_for_short_image_successes_without_rewriting_rows() {
         let h = harness(MockAdapter::sync("openai.images"), "openai").await;
 
         async fn seed_short_success(
@@ -2854,7 +3904,7 @@ mod tests {
             params: &str,
             result_count: usize,
         ) -> String {
-            let id = create_test_task(svc.repo.as_ref(), provider_id, "t2i", params).await;
+            let id = create_test_task(svc, provider_id, "t2i", params).await;
             let asset_ids = (0..result_count)
                 .map(|_| WorkshopAssetId::new().into_string())
                 .collect::<Vec<_>>();
@@ -2882,17 +3932,9 @@ mod tests {
             "succeeded"
         );
 
-        let list_id = seed_short_success(&h.svc, &h.provider_id, r#"{"n":3}"#, 2).await;
-        let list_error = h
-            .svc
-            .list_tasks(None, Some("succeeded"), 20)
-            .await
-            .unwrap_err();
-        assert!(list_error.to_string().contains("requires at least"));
-        assert_eq!(
-            h.svc.repo.get_task(&list_id).await.unwrap().unwrap().status,
-            "succeeded"
-        );
+        let second_id = seed_short_success(&h.svc, &h.provider_id, r#"{"n":3}"#, 2).await;
+        let second_error = h.svc.get_task(&second_id).await.unwrap_err();
+        assert!(second_error.to_string().contains("requires at least 3"));
     }
 
     #[tokio::test]
@@ -2912,7 +3954,7 @@ mod tests {
             provider_id: &str,
             params: &str,
         ) -> (String, String) {
-            let id = create_test_task(svc.repo.as_ref(), provider_id, "t2i", params).await;
+            let id = create_test_task(svc, provider_id, "t2i", params).await;
             let asset_id = sink
                 .persist(PersistAsset {
                     bytes: valid_png(),
@@ -2962,7 +4004,7 @@ mod tests {
         let sink = TransactionalTestSink::new(None, None);
         let (svc, provider_id, _db) =
             harness_with_sink_and_repo(adapter, "openai", sink, None).await;
-        let creation_task_id = create_test_task(svc.repo.as_ref(), &provider_id, "t2i", "{}").await;
+        let creation_task_id = create_test_task(&svc, &provider_id, "t2i", "{}").await;
         let missing_asset = WorkshopAssetId::new().into_string();
         let ids_json = serde_json::to_string(&[missing_asset]).unwrap();
         svc.repo
@@ -2996,9 +4038,9 @@ mod tests {
         );
         let h = harness(adapter, "openai").await;
         let repo = &h.svc.repo;
-        let queued_id = create_test_task(repo.as_ref(), &h.provider_id, "t2i", "{}").await;
-        let running_id = create_test_task(repo.as_ref(), &h.provider_id, "t2v", "{}").await;
-        let resume_id = create_test_task(repo.as_ref(), &h.provider_id, "t2v", "{}").await;
+        let queued_id = create_test_task(&h.svc, &h.provider_id, "t2i", "{}").await;
+        let running_id = create_test_task(&h.svc, &h.provider_id, "t2v", "{}").await;
+        let resume_id = create_test_task(&h.svc, &h.provider_id, "t2v", "{}").await;
 
         // (a) a queued leftover → should become failed(interrupted)
 
@@ -3057,15 +4099,21 @@ mod tests {
         // the first loop iteration WITHOUT ever polling the healthy remote job.
         let old = now_ms() - 3_600_000; // 1h ago
         let old_resume_id = generate_id();
+        let node_id = CreativeStudioNodeId::new().into_string();
+        let fingerprint = serde_json::json!({"test_task_id": old_resume_id}).to_string();
         repo
-            .create_task(CreateCreationTaskParams {
+            .get_or_create_creative_task(CreateCreativeTaskParams {
                 creation_task_id: &old_resume_id,
-                canvas_id: None,
-                node_id: None,
+                owner: CreativeTaskOwnerRef::CanvasNode {
+                    project_id: h.svc.test_project_id.as_deref().unwrap(),
+                    node_id: &node_id,
+                },
                 provider_id: &h.provider_id,
                 model: "test-model",
                 capability: "t2v",
                 params: "{}",
+                input_bindings: "[]",
+                request_fingerprint: &fingerprint,
                 status: "queued",
                 submitted_at: old,
             })
@@ -3101,10 +4149,13 @@ mod tests {
     async fn bare_service_without_adapter_fails_config() {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let provider_id = seed_provider(db.pool(), "openai", "openai.images").await;
+        let test_project_id = seed_service_test_project(db.pool()).await;
         let repo: Arc<dyn ICreationTaskRepository> = Arc::new(SqliteCreationTaskRepository::new(db.pool().clone()));
         Box::leak(Box::new(db));
-        let svc = CreationService::new(repo);
-        let created = svc.create_task(new_task(&provider_id, "t2i")).await.unwrap();
+        let svc = CreationService::builder(repo)
+            .with_test_project_id(test_project_id)
+            .build();
+        let created = svc.create_test_task(new_task(&provider_id, "t2i")).await.unwrap();
         assert_eq!(created.status, "queued");
         let done = wait_terminal(&svc, &created.creation_task_id).await;
         // No provider repo wired → resolution fails with a config error.
@@ -3115,12 +4166,16 @@ mod tests {
     #[test]
     fn build_origin_carries_provenance() {
         let creation_task_id = generate_id();
-        let canvas_id = WorkshopCanvasId::new().into_string();
-        let node_id = WorkshopNodeId::new().into_string();
+        let project_id = CreativeStudioProjectId::new().into_string();
+        let node_id = CreativeStudioNodeId::new().into_string();
         let provider_id = ProviderId::new().into_string();
         let job = WorkerJob {
             creation_task_id: creation_task_id.clone(),
-            canvas_id: Some(canvas_id.clone()),
+            project_id: Some(project_id.clone()),
+            workbench_kind: None,
+            workflow_id: None,
+            workflow_run_id: None,
+            workflow_step_id: None,
             node_id: Some(node_id.clone()),
             provider_id: provider_id.clone(),
             model: "gpt-image-1".into(),
@@ -3135,7 +4190,7 @@ mod tests {
         assert_eq!(o["prompt"], "sunset");
         assert_eq!(o["model"], "gpt-image-1");
         assert_eq!(o["provider_id"], provider_id);
-        assert_eq!(o["canvas_id"], canvas_id);
+        assert_eq!(o["project_id"], project_id);
         assert_eq!(o["node_id"], node_id);
         assert_eq!(o["creation_task_id"], creation_task_id.as_str());
         assert!(
@@ -3147,10 +4202,14 @@ mod tests {
     }
 
     #[test]
-    fn build_origin_omits_absent_optional_ids_instead_of_writing_null() {
+    fn build_origin_omits_absent_owner_branch_ids_instead_of_writing_null() {
         let job = WorkerJob {
             creation_task_id: CreationTaskId::new().into_string(),
-            canvas_id: None,
+            project_id: None,
+            workbench_kind: None,
+            workflow_id: Some(CreativeStudioWorkflowId::new().into_string()),
+            workflow_run_id: Some(CreativeStudioWorkflowRunId::new().into_string()),
+            workflow_step_id: Some(CreativeStudioWorkflowStepId::new().into_string()),
             node_id: None,
             provider_id: ProviderId::new().into_string(),
             model: "gpt-image-1".into(),
@@ -3163,8 +4222,36 @@ mod tests {
         };
 
         let origin = build_origin(&job);
-        assert!(!origin.as_object().unwrap().contains_key("canvas_id"));
+        assert!(!origin.as_object().unwrap().contains_key("project_id"));
         assert!(!origin.as_object().unwrap().contains_key("node_id"));
+    }
+
+    #[test]
+    fn build_origin_carries_exact_standalone_workbench_branch() {
+        let project_id = CreativeStudioProjectId::new().into_string();
+        let job = WorkerJob {
+            creation_task_id: CreationTaskId::new().into_string(),
+            project_id: Some(project_id.clone()),
+            workbench_kind: Some(StandaloneWorkbenchKind::Video),
+            workflow_id: None,
+            workflow_run_id: None,
+            workflow_step_id: None,
+            node_id: None,
+            provider_id: ProviderId::new().into_string(),
+            model: "video-model".into(),
+            capability: MediaCapability::I2v,
+            params: json!({"prompt": "Aurora", "seconds": 5}),
+            required_artifact_count: 1,
+            inputs: vec![],
+            submitted_at: 1,
+            remote_task_id: None,
+        };
+
+        let origin = build_origin(&job);
+        assert_eq!(origin["project_id"], project_id);
+        assert_eq!(origin["workbench_kind"], "video");
+        assert!(origin.get("node_id").is_none());
+        assert!(origin.get("workflow_id").is_none());
     }
 
     // ---- param helpers (ported verbatim from the retired adapters/mod.rs) ----
@@ -3212,7 +4299,10 @@ mod tests {
                 assert_eq!(r.count, 2);
                 assert_eq!(r.size.as_deref(), Some("512x512"));
                 assert_eq!(r.quality.as_deref(), Some("high"));
-                assert_eq!(r.extra, params);
+                assert_eq!(
+                    r.extra,
+                    json!({"seconds": 4, "voice": "alloy", "system": "be brief"})
+                );
             }
             _ => panic!("t2i must map to ImageGeneration"),
         }
@@ -3231,6 +4321,10 @@ mod tests {
                 TaskRequest::VideoGeneration(r) => {
                     assert_eq!(r.seconds, Some(4));
                     assert_eq!(r.size.as_deref(), Some("512x512"));
+                    assert_eq!(
+                        r.extra,
+                        json!({"count": 2, "quality": "high", "voice": "alloy", "system": "be brief"})
+                    );
                 }
                 _ => panic!("{cap:?} must map to VideoGeneration"),
             }
@@ -3269,6 +4363,62 @@ mod tests {
             panic!("count 0 must be rejected");
         };
         assert_eq!(err.kind, "invalid_params");
+    }
+
+    #[test]
+    fn canonical_video_fields_and_canvas_metadata_never_reach_provider_extra() {
+        let params = json!({
+            "prompt": "camera move",
+            "seconds": 5,
+            "width": 1920,
+            "height": 1080,
+            "resolution": "1080p",
+            "aspect": "16:9",
+            "canvasOperation": "video-node-compose",
+            "sourceNodeId": "video-node",
+            "sourceAssetId": null
+        });
+        let TaskRequest::VideoGeneration(request) =
+            cap_to_task_request(MediaCapability::T2v, &params, vec![]).unwrap()
+        else {
+            panic!("t2v must map to VideoGeneration");
+        };
+        assert_eq!(request.size.as_deref(), Some("1920x1080"));
+        assert_eq!(request.seconds, Some(5));
+        assert_eq!(
+            request.extra,
+            json!({})
+        );
+    }
+
+    #[test]
+    fn canonical_tts_fields_and_audio_canvas_metadata_never_reach_provider_extra() {
+        let params = json!({
+            "prompt": "literal narration",
+            "text": "legacy duplicate that must not be forwarded",
+            "voice": "alloy",
+            "format": "mp3",
+            "speed": 1.25,
+            "instructions": "warm and calm",
+            "canvasOperation": "audio-node-compose",
+            "sourceNodeId": "audio-node",
+            "sourceAssetId": null
+        });
+        let TaskRequest::SpeechSynthesis(request) =
+            cap_to_task_request(MediaCapability::Tts, &params, vec![]).unwrap()
+        else {
+            panic!("tts must map to SpeechSynthesis");
+        };
+        assert_eq!(request.text, "literal narration");
+        assert_eq!(request.voice.as_deref(), Some("alloy"));
+        assert_eq!(request.format.as_deref(), Some("mp3"));
+        assert_eq!(
+            request.extra,
+            json!({
+                "speed": 1.25,
+                "instructions": "warm and calm"
+            })
+        );
     }
 
     #[test]
@@ -3519,6 +4669,7 @@ mod http_e2e_tests {
             config_revision += 1;
         }
         let repo: Arc<dyn ICreationTaskRepository> = Arc::new(SqliteCreationTaskRepository::new(pool.clone()));
+        let test_project_id = seed_service_test_project(&pool).await;
         // Both provider calls and artifact downloads target loopback WireMock;
         // neither may inherit a developer-machine HTTP proxy.
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
@@ -3533,6 +4684,7 @@ mod http_e2e_tests {
         ));
         let sink = Arc::new(CountingSink { count: AtomicUsize::new(0), persisted: std::sync::Mutex::new(Vec::new()) });
         let svc = CreationService::builder(repo)
+            .with_test_project_id(test_project_id)
             .with_invoke(invoke)
             .with_artifact_downloader_for_tests(
                 SafeHttpClient::new(DOWNLOAD_TIMEOUT, MAX_ARTIFACT_BYTES as usize)
@@ -3560,8 +4712,6 @@ mod http_e2e_tests {
 
     fn t2i(provider_id: &str) -> NewCreationTask {
         NewCreationTask {
-            canvas_id: None,
-            node_id: None,
             provider_id: provider_id.into(),
             model: "gpt-image-1".into(),
             capability: "t2i".into(),
@@ -3581,7 +4731,7 @@ mod http_e2e_tests {
             .await;
 
         let (svc, provider_id, sink, _db) = build(&server.uri()).await;
-        let created = svc.create_task(t2i(&provider_id)).await.unwrap();
+        let created = svc.create_test_task(t2i(&provider_id)).await.unwrap();
         let done = wait_terminal(&svc, &created.creation_task_id).await;
         assert_eq!(done.status, "succeeded", "error={:?}", done.error);
         assert_eq!(done.result_asset_ids.len(), 1);
@@ -3605,7 +4755,7 @@ mod http_e2e_tests {
         let (svc, provider_id, sink, _db) = build(&server.uri()).await;
         let mut request = t2i(&provider_id);
         request.params["count"] = json!(4);
-        let created = svc.create_task(request).await.unwrap();
+        let created = svc.create_test_task(request).await.unwrap();
         let done = wait_terminal(&svc, &created.creation_task_id).await;
 
         assert_eq!(done.status, "failed");
@@ -3627,7 +4777,7 @@ mod http_e2e_tests {
             .await;
 
         let (svc, provider_id, sink, _db) = build(&server.uri()).await;
-        let created = svc.create_task(t2i(&provider_id)).await.unwrap();
+        let created = svc.create_test_task(t2i(&provider_id)).await.unwrap();
         let done = wait_terminal(&svc, &created.creation_task_id).await;
         assert_eq!(done.status, "failed");
         assert_eq!(done.error.as_ref().unwrap()["kind"], "invalid_artifact");
@@ -3654,7 +4804,7 @@ mod http_e2e_tests {
             .await;
 
         let (svc, provider_id, sink, _db) = build(&server.uri()).await;
-        let created = svc.create_task(t2i(&provider_id)).await.unwrap();
+        let created = svc.create_test_task(t2i(&provider_id)).await.unwrap();
         let done = wait_terminal(&svc, &created.creation_task_id).await;
         assert_eq!(done.status, "failed");
         assert_eq!(done.error.as_ref().unwrap()["kind"], "invalid_artifact");
@@ -3681,7 +4831,7 @@ mod http_e2e_tests {
             .await;
 
         let (svc, provider_id, sink, _db) = build(&server.uri()).await;
-        let created = svc.create_task(t2i(&provider_id)).await.unwrap();
+        let created = svc.create_test_task(t2i(&provider_id)).await.unwrap();
         let done = wait_terminal(&svc, &created.creation_task_id).await;
         assert_eq!(done.status, "succeeded", "error={:?}", done.error);
         assert_eq!(done.result_asset_ids.len(), 1);
@@ -3708,7 +4858,7 @@ mod http_e2e_tests {
             .await;
 
         let (svc, provider_id, sink, _db) = build(&server.uri()).await;
-        let created = svc.create_task(t2i(&provider_id)).await.unwrap();
+        let created = svc.create_test_task(t2i(&provider_id)).await.unwrap();
         let done = wait_terminal(&svc, &created.creation_task_id).await;
         assert_eq!(done.status, "failed");
         assert_eq!(done.error.as_ref().unwrap()["kind"], "invalid_artifact");
@@ -3725,7 +4875,7 @@ mod http_e2e_tests {
             .await;
 
         let (svc, provider_id, _sink, _db) = build(&server.uri()).await;
-        let created = svc.create_task(t2i(&provider_id)).await.unwrap();
+        let created = svc.create_test_task(t2i(&provider_id)).await.unwrap();
         let done = wait_terminal(&svc, &created.creation_task_id).await;
         assert_eq!(done.status, "failed");
         let err = done.error.unwrap();
@@ -3758,15 +4908,13 @@ mod http_e2e_tests {
 
         let (svc, provider_id, sink, _db) = build(&server.uri()).await;
         let task = NewCreationTask {
-            canvas_id: None,
-            node_id: None,
             provider_id: provider_id.clone(),
             model: "sora-2".into(),
             capability: "t2v".into(),
             params: json!({"prompt": "a wave", "seconds": 4}),
             inputs: vec![],
         };
-        let created = svc.create_task(task).await.unwrap();
+        let created = svc.create_test_task(task).await.unwrap();
         let done = wait_terminal(&svc, &created.creation_task_id).await;
         assert_eq!(done.status, "succeeded", "error={:?}", done.error);
         assert_eq!(sink.count.load(Ordering::SeqCst), 1);
@@ -3797,15 +4945,13 @@ mod http_e2e_tests {
 
         let (svc, provider_id, sink, _db) = build(&server.uri()).await;
         let task = NewCreationTask {
-            canvas_id: None,
-            node_id: None,
             provider_id: provider_id.clone(),
             model: "sora-2".into(),
             capability: "t2v".into(),
             params: json!({"prompt": "a wave", "seconds": 4}),
             inputs: vec![],
         };
-        let created = svc.create_task(task).await.unwrap();
+        let created = svc.create_test_task(task).await.unwrap();
         let done = wait_terminal(&svc, &created.creation_task_id).await;
         assert_eq!(done.status, "failed");
         let err = done.error.as_ref().unwrap();
@@ -3837,15 +4983,13 @@ mod http_e2e_tests {
 
         let (svc, provider_id, sink, _db) = build(&server.uri()).await;
         let task = NewCreationTask {
-            canvas_id: None,
-            node_id: None,
             provider_id: provider_id.clone(),
             model: "tts-1".into(),
             capability: "tts".into(),
             params: json!({"prompt": "hello there", "voice": "alloy"}),
             inputs: vec![],
         };
-        let created = svc.create_task(task).await.unwrap();
+        let created = svc.create_test_task(task).await.unwrap();
         let done = wait_terminal(&svc, &created.creation_task_id).await;
         assert_eq!(done.status, "succeeded", "error={:?}", done.error);
         assert_eq!(done.result_asset_ids.len(), 1);
@@ -3864,7 +5008,7 @@ mod http_e2e_tests {
         let (svc, provider_id, sink, _db) = build(&server.uri()).await;
         let mut request = t2i(&provider_id);
         request.model = "gpt-4o-mini".into(); // tagged ["chat"], not image_generation
-        let created = svc.create_task(request).await.unwrap();
+        let created = svc.create_test_task(request).await.unwrap();
         let done = wait_terminal(&svc, &created.creation_task_id).await;
         assert_eq!(done.status, "failed");
         assert_eq!(done.error.as_ref().unwrap()["kind"], "unsupported_capability");

@@ -1,0 +1,62 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+
+const topBarSource = readFileSync(new URL('./CreativeStudioTopBar.tsx', import.meta.url), 'utf8');
+const topBarStyles = readFileSync(new URL('./CreativeStudioTopBar.module.css', import.meta.url), 'utf8');
+const homeSource = readFileSync(new URL('./CreativeStudioHomePage.tsx', import.meta.url), 'utf8');
+
+describe('Creative Studio application navigation structure', () => {
+  test('keeps the five source top-level destinations in source order', () => {
+    const orderedRoutes = [
+      'CREATIVE_STUDIO_PROJECTS_PATH',
+      'CREATIVE_STUDIO_IMAGE_PATH',
+      'CREATIVE_STUDIO_VIDEO_PATH',
+      'CREATIVE_STUDIO_PROMPTS_PATH',
+      'CREATIVE_STUDIO_ASSETS_PATH',
+    ];
+    const positions = orderedRoutes.map((route) => topBarSource.indexOf(`path: ${route}`));
+
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions.every((position, index) => index === 0 || position > positions[index - 1])).toBe(true);
+    expect(topBarSource.includes('CREATIVE_STUDIO_AUDIO_PATH')).toBe(false);
+  });
+
+  test('retains the measured 64px source header geometry', () => {
+    expect(
+      /\.topBar\s*\{[\s\S]*?height:\s*64px;[\s\S]*?min-height:\s*64px;/.test(topBarStyles)
+    ).toBe(true);
+    expect(
+      /\.inner\s*\{[\s\S]*?max-width:\s*1280px;[\s\S]*?height:\s*64px;/.test(topBarStyles)
+    ).toBe(true);
+    expect(topBarStyles.includes('margin-left: 32px;')).toBe(true);
+    expect(topBarStyles.includes('gap: 28px;')).toBe(true);
+  });
+
+  test('keeps source light-dark switching inside the focused product shell', () => {
+    expect(topBarSource.includes('onToggleTheme')).toBe(true);
+    expect(topBarSource.includes("t('settings.darkMode', { defaultValue: '深色' })")).toBe(true);
+    expect(topBarSource.includes("t('settings.lightMode', { defaultValue: '浅色' })")).toBe(true);
+    expect(topBarSource.includes("aria-pressed={theme === 'dark'}")).toBe(true);
+    expect(topBarSource.includes("<Moon theme='outline' size={17}")).toBe(true);
+    expect(topBarSource.includes("<SunOne theme='outline' size={17}")).toBe(true);
+  });
+
+  test('routes every product-shell exit through the shared product CAS leave gate', () => {
+    expect(topBarSource.includes('onNavigate: (path: string) => void')).toBe(true);
+    expect(topBarSource.includes('onNavigate(CREATIVE_STUDIO_ROOT_PATH)')).toBe(true);
+    expect(topBarSource.includes('onNavigate(item.path)')).toBe(true);
+  });
+
+  test('keeps brand navigation and project-library navigation distinct', () => {
+    expect(topBarSource.includes('to={CREATIVE_STUDIO_ROOT_PATH}')).toBe(true);
+    expect(topBarSource.includes('path: CREATIVE_STUDIO_PROJECTS_PATH')).toBe(true);
+    expect(homeSource.includes('data-creative-studio-home')).toBe(true);
+    expect(homeSource.includes('CreativeStudioHomePage.module.css')).toBe(true);
+  });
+});

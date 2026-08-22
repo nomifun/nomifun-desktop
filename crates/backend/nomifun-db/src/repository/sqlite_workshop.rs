@@ -2,9 +2,15 @@ use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 use serde_json::Value;
 
 use crate::error::DbError;
-use crate::models::{WorkshopAssetRow, WorkshopCanvasRow};
+use crate::models::{
+    CreativeStudioAgentProposalReceiptRow, CreativeStudioProjectRow, CreativeStudioWorkflowRow,
+    CreativeStudioWorkflowRunRow, WorkshopAssetRow,
+};
 use crate::repository::IWorkshopRepository;
-use crate::repository::workshop::{AssetSort, ListAssetsParams, UpdateAssetParams};
+use crate::repository::workshop::{
+    ApplyCreativeAgentProposalParams, AssetSort, CreativeAgentProposalCommit, ListAssetsParams,
+    UpdateAssetParams,
+};
 
 /// SQLite-backed implementation of [`IWorkshopRepository`].
 #[derive(Clone, Debug)]
@@ -32,7 +38,12 @@ impl SqliteWorkshopRepository {
 
 struct OriginReferences {
     provider_id: Option<String>,
-    canvas_id: Option<String>,
+    project_id: Option<String>,
+    node_id: Option<String>,
+    workbench_kind: Option<String>,
+    workflow_id: Option<String>,
+    workflow_run_id: Option<String>,
+    workflow_step_id: Option<String>,
     creation_task_id: Option<String>,
 }
 
@@ -63,7 +74,12 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
     let Some(origin) = origin else {
         return Ok(OriginReferences {
             provider_id: None,
-            canvas_id: None,
+            project_id: None,
+            node_id: None,
+            workbench_kind: None,
+            workflow_id: None,
+            workflow_run_id: None,
+            workflow_step_id: None,
             creation_task_id: None,
         });
     };
@@ -75,9 +91,15 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
     for retired_key in [
         "task_id",
         "providerId",
+        "canvas_id",
         "canvasId",
         "nodeId",
         "creationTaskId",
+        "projectId",
+        "workbenchKind",
+        "workflowId",
+        "workflowRunId",
+        "workflowStepId",
     ] {
         if object.contains_key(retired_key) {
             return Err(DbError::Conflict(format!(
@@ -86,12 +108,70 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
         }
     }
     let provider_id = optional_origin_id(object, "provider_id")?;
-    let canvas_id = optional_origin_id(object, "canvas_id")?;
-    let _node_id = optional_origin_id(object, "node_id")?;
+    let project_id = optional_origin_id(object, "project_id")?;
+    let node_id = optional_origin_id(object, "node_id")?;
+    let workbench_kind = match object.get("workbench_kind") {
+        None => None,
+        Some(Value::String(value)) if matches!(value.as_str(), "image" | "video" | "audio") => {
+            Some(value.clone())
+        }
+        Some(Value::String(value)) => {
+            return Err(DbError::Conflict(format!(
+                "workshop asset origin.workbench_kind {value:?} is invalid"
+            )));
+        }
+        Some(Value::Null) => {
+            return Err(DbError::Conflict(
+                "workshop asset origin.workbench_kind must be omitted when absent".into(),
+            ));
+        }
+        Some(_) => {
+            return Err(DbError::Conflict(
+                "workshop asset origin.workbench_kind must be image, video, or audio".into(),
+            ));
+        }
+    };
+    let workflow_id = optional_origin_id(object, "workflow_id")?;
+    let workflow_run_id = optional_origin_id(object, "workflow_run_id")?;
+    let workflow_step_id = optional_origin_id(object, "workflow_step_id")?;
     let creation_task_id = optional_origin_id(object, "creation_task_id")?;
+    let canvas_owner = project_id.is_some() && node_id.is_some() && workbench_kind.is_none();
+    let standalone_owner =
+        project_id.is_some() && node_id.is_none() && workbench_kind.is_some();
+    let workflow_owner_count = [
+        workflow_id.is_some(),
+        workflow_run_id.is_some(),
+        workflow_step_id.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    if workflow_owner_count != 0 && workflow_owner_count != 3 {
+        return Err(DbError::Conflict(
+            "workshop asset workflow origin requires workflow_id, workflow_run_id, and workflow_step_id"
+                .into(),
+        ));
+    }
+    let any_project_owner = project_id.is_some() || node_id.is_some() || workbench_kind.is_some();
+    if any_project_owner && !canvas_owner && !standalone_owner {
+        return Err(DbError::Conflict(
+            "workshop asset project origin requires exactly one node_id or workbench_kind branch"
+                .into(),
+        ));
+    }
+    if any_project_owner && workflow_owner_count != 0 {
+        return Err(DbError::Conflict(
+            "workshop asset origin cannot combine project and workflow ownership".into(),
+        ));
+    }
     Ok(OriginReferences {
         provider_id,
-        canvas_id,
+        project_id,
+        node_id,
+        workbench_kind,
+        workflow_id,
+        workflow_run_id,
+        workflow_step_id,
         creation_task_id,
     })
 }
@@ -119,6 +199,53 @@ fn validate_asset_rows(rows: &[WorkshopAssetRow]) -> Result<(), DbError> {
     Ok(())
 }
 
+fn validate_creative_workflow_run_row_ids(
+    row: &CreativeStudioWorkflowRunRow,
+) -> Result<(), DbError> {
+    nomifun_common::CreativeStudioWorkflowRunId::parse(&row.workflow_run_id).map_err(|error| {
+        DbError::Conflict(format!(
+            "creative studio workflow_run_id {:?} is not a canonical UUIDv7: {error}",
+            row.workflow_run_id
+        ))
+    })?;
+    nomifun_common::CreativeStudioWorkflowId::parse(&row.workflow_id).map_err(|error| {
+        DbError::Conflict(format!(
+            "creative studio workflow_id {:?} is not a canonical UUIDv7: {error}",
+            row.workflow_id
+        ))
+    })?;
+    Ok(())
+}
+
+fn workflow_run_json_references_asset(
+    aggregate_json: &str,
+    asset_id: &str,
+) -> Result<bool, DbError> {
+    fn contains(value: &Value, asset_id: &str) -> bool {
+        match value {
+            Value::Object(object) => object.iter().any(|(key, value)| {
+                match key.as_str() {
+                    "assetId" | "defaultAssetId" => value.as_str() == Some(asset_id),
+                    "assetIds" | "defaultAssetIds" | "referenceAssetIds"
+                    | "resultAssetIds" => value.as_array().is_some_and(|values| {
+                        values.iter().any(|value| value.as_str() == Some(asset_id))
+                    }),
+                    _ => contains(value, asset_id),
+                }
+            }),
+            Value::Array(values) => values.iter().any(|value| contains(value, asset_id)),
+            _ => false,
+        }
+    }
+
+    let aggregate: Value = serde_json::from_str(aggregate_json).map_err(|error| {
+        DbError::Conflict(format!(
+            "stored creative studio workflow run has invalid aggregate JSON: {error}"
+        ))
+    })?;
+    Ok(contains(&aggregate, asset_id))
+}
+
 #[async_trait::async_trait]
 impl IWorkshopRepository for SqliteWorkshopRepository {
     async fn provider_exists(&self, provider_id: &str) -> Result<bool, DbError> {
@@ -130,130 +257,986 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         .await?)
     }
 
-    // ---- canvases ----
+    async fn provider_model_exists(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<bool, DbError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(\
+                SELECT 1 FROM provider_models \
+                WHERE provider_id = ? AND model = ?\
+            )",
+        )
+        .bind(provider_id)
+        .bind(model)
+        .fetch_one(&self.pool)
+        .await?)
+    }
 
-    async fn list_canvases(&self) -> Result<Vec<WorkshopCanvasRow>, DbError> {
-        let rows = sqlx::query_as::<_, WorkshopCanvasRow>(
-            "SELECT * FROM workshop_canvases ORDER BY updated_at DESC, id DESC",
+    async fn provider_model_supports_task(
+        &self,
+        provider_id: &str,
+        model: &str,
+        task: &str,
+    ) -> Result<bool, DbError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(\
+                SELECT 1 \
+                FROM provider_models model_row \
+                JOIN providers provider ON provider.provider_id = model_row.provider_id \
+                JOIN provider_model_capabilities capability \
+                  ON capability.provider_id = model_row.provider_id \
+                 AND capability.model = model_row.model \
+                WHERE model_row.provider_id = ? AND model_row.model = ? \
+                  AND capability.task = ? AND model_row.enabled = 1 AND provider.enabled = 1\
+            )",
+        )
+        .bind(provider_id)
+        .bind(model)
+        .bind(task)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    // ---- canonical Creative Studio projects ----
+
+    async fn list_creative_projects(&self) -> Result<Vec<CreativeStudioProjectRow>, DbError> {
+        let rows = sqlx::query_as::<_, CreativeStudioProjectRow>(
+            "SELECT * FROM creative_studio_projects ORDER BY updated_at DESC, id DESC",
         )
         .fetch_all(&self.pool)
         .await?;
+        for row in &rows {
+            nomifun_common::validate_uuidv7(&row.project_id).map_err(|error| {
+                DbError::Conflict(format!(
+                    "creative studio project_id {:?} is not a canonical UUIDv7: {error}",
+                    row.project_id
+                ))
+            })?;
+        }
         Ok(rows)
     }
 
-    async fn get_canvas(&self, id: &str) -> Result<Option<WorkshopCanvasRow>, DbError> {
-        let row = sqlx::query_as::<_, WorkshopCanvasRow>(
-            "SELECT * FROM workshop_canvases WHERE canvas_id = ?",
+    async fn get_creative_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<CreativeStudioProjectRow>, DbError> {
+        let row = sqlx::query_as::<_, CreativeStudioProjectRow>(
+            "SELECT * FROM creative_studio_projects WHERE project_id = ?",
         )
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = &row {
+            nomifun_common::validate_uuidv7(&row.project_id).map_err(|error| {
+                DbError::Conflict(format!(
+                    "creative studio project_id {:?} is not a canonical UUIDv7: {error}",
+                    row.project_id
+                ))
+            })?;
+        }
         Ok(row)
     }
 
-    async fn create_canvas(&self, id: &str, title: &str, now: i64) -> Result<WorkshopCanvasRow, DbError> {
-        let row_id: i64 = sqlx::query_scalar(
-            "INSERT INTO workshop_canvases \
-                (canvas_id, title, thumbnail_rel_path, node_count, created_at, updated_at) \
-             VALUES (?, ?, NULL, 0, ?, ?) RETURNING id",
+    async fn create_creative_project(
+        &self,
+        project_id: &str,
+        title: &str,
+        document_json: &str,
+        now: i64,
+    ) -> Result<CreativeStudioProjectRow, DbError> {
+        nomifun_common::validate_uuidv7(project_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio project_id {project_id:?} is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        let row = sqlx::query_as::<_, CreativeStudioProjectRow>(
+            "INSERT INTO creative_studio_projects \
+                (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+             VALUES (?, ?, 1, 0, 0, ?, ?, ?) RETURNING *",
         )
-        .bind(id)
+        .bind(project_id)
         .bind(title)
+        .bind(document_json)
         .bind(now)
         .bind(now)
         .fetch_one(&self.pool)
         .await?;
-        Ok(WorkshopCanvasRow {
-            id: row_id,
-            canvas_id: id.to_string(),
-            title: title.to_string(),
-            thumbnail_rel_path: None,
-            node_count: 0,
-            created_at: now,
-            updated_at: now,
+        Ok(row)
+    }
+
+    async fn rename_creative_project(
+        &self,
+        project_id: &str,
+        title: &str,
+        now: i64,
+    ) -> Result<CreativeStudioProjectRow, DbError> {
+        let row = sqlx::query_as::<_, CreativeStudioProjectRow>(
+            "UPDATE creative_studio_projects SET title = ?, updated_at = ? \
+             WHERE project_id = ? RETURNING *",
+        )
+        .bind(title)
+        .bind(now)
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            DbError::NotFound(format!("creative studio project '{project_id}' not found"))
+        })?;
+        Ok(row)
+    }
+
+    async fn save_creative_project(
+        &self,
+        project_id: &str,
+        expected_revision: i64,
+        document_json: &str,
+        node_count: i64,
+        connection_count: i64,
+        now: i64,
+    ) -> Result<CreativeStudioProjectRow, DbError> {
+        let row = sqlx::query_as::<_, CreativeStudioProjectRow>(
+            "UPDATE creative_studio_projects \
+             SET document_json = ?, node_count = ?, connection_count = ?, \
+                 revision = revision + 1, updated_at = ? \
+             WHERE project_id = ? AND revision = ? RETURNING *",
+        )
+        .bind(document_json)
+        .bind(node_count)
+        .bind(connection_count)
+        .bind(now)
+        .bind(project_id)
+        .bind(expected_revision)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = row {
+            return Ok(row);
+        }
+        if self.get_creative_project(project_id).await?.is_none() {
+            return Err(DbError::NotFound(format!(
+                "creative studio project '{project_id}' not found"
+            )));
+        }
+        Err(DbError::Conflict(format!(
+            "creative studio project '{project_id}' revision conflict"
+        )))
+    }
+
+    async fn get_creative_agent_proposal_receipt(
+        &self,
+        owner_id: &str,
+        project_id: &str,
+        assistant_message_id: &str,
+    ) -> Result<Option<CreativeStudioAgentProposalReceiptRow>, DbError> {
+        nomifun_common::UserId::parse(owner_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal owner_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        nomifun_common::CreativeStudioProjectId::parse(project_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal project_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        nomifun_common::MessageId::parse(assistant_message_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal assistant_message_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        Ok(sqlx::query_as::<_, CreativeStudioAgentProposalReceiptRow>(
+            "SELECT receipt.* \
+             FROM creative_studio_agent_proposal_receipts receipt \
+             WHERE receipt.project_id = ? AND receipt.assistant_message_id = ? \
+               AND EXISTS ( \
+                   SELECT 1 \
+                   FROM creative_studio_projects project \
+                   CROSS JOIN json_each(project.document_json, '$.chatSessions') session \
+                   CROSS JOIN json_each(session.value, '$.messageIds') message \
+                   JOIN creative_studio_agent_sessions binding \
+                     ON binding.project_id = project.project_id \
+                    AND binding.session_id = json_extract(session.value, '$.id') \
+                    AND binding.owner_id = ? \
+                   JOIN installation_identity identity \
+                     ON identity.singleton_key = 'installation' \
+                    AND identity.owner_user_id = binding.owner_id \
+                   JOIN messages persisted \
+                     ON persisted.conversation_id = binding.conversation_id \
+                    AND persisted.message_id = receipt.assistant_message_id \
+                   WHERE project.project_id = receipt.project_id \
+                     AND CAST(message.key AS INTEGER) % 2 = 1 \
+                     AND CAST(message.value AS TEXT) = receipt.assistant_message_id \
+                     AND persisted.position = 'left' \
+                     AND persisted.status = 'finish' \
+                     AND persisted.hidden = 0 \
+                     AND persisted.type = 'text' \
+               )",
+        )
+        .bind(project_id)
+        .bind(assistant_message_id)
+        .bind(owner_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    async fn is_creative_studio_owner(&self, owner_id: &str) -> Result<bool, DbError> {
+        nomifun_common::UserId::parse(owner_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio owner_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS( \
+                 SELECT 1 FROM installation_identity \
+                 WHERE singleton_key = 'installation' AND owner_user_id = ? \
+             )",
+        )
+        .bind(owner_id)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    async fn get_creative_agent_proposal_message_content(
+        &self,
+        owner_id: &str,
+        project_id: &str,
+        assistant_message_id: &str,
+    ) -> Result<Option<String>, DbError> {
+        nomifun_common::UserId::parse(owner_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal owner_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        nomifun_common::CreativeStudioProjectId::parse(project_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal project_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        nomifun_common::MessageId::parse(assistant_message_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal assistant_message_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        let contents = sqlx::query_scalar::<_, String>(
+            "SELECT persisted.content \
+             FROM creative_studio_projects project \
+             CROSS JOIN json_each(project.document_json, '$.chatSessions') session \
+             CROSS JOIN json_each(session.value, '$.messageIds') message \
+             JOIN creative_studio_agent_sessions binding \
+               ON binding.project_id = project.project_id \
+              AND binding.session_id = json_extract(session.value, '$.id') \
+              AND binding.owner_id = ? \
+             JOIN installation_identity identity \
+               ON identity.singleton_key = 'installation' \
+              AND identity.owner_user_id = binding.owner_id \
+             JOIN messages persisted \
+               ON persisted.conversation_id = binding.conversation_id \
+              AND persisted.message_id = CAST(message.value AS TEXT) \
+             WHERE project.project_id = ? \
+               AND CAST(message.key AS INTEGER) % 2 = 1 \
+               AND CAST(message.value AS TEXT) = ? \
+               AND persisted.position = 'left' \
+               AND persisted.status = 'finish' \
+               AND persisted.hidden = 0 \
+               AND persisted.type = 'text'",
+        )
+        .bind(owner_id)
+        .bind(project_id)
+        .bind(assistant_message_id)
+        .fetch_all(&self.pool)
+        .await?;
+        match contents.as_slice() {
+            [] => Ok(None),
+            [content] => Ok(Some(content.clone())),
+            _ => Err(DbError::Conflict(format!(
+                "assistantMessageId '{assistant_message_id}' is ambiguous across project chat sessions"
+            ))),
+        }
+    }
+
+    async fn apply_creative_agent_proposal(
+        &self,
+        params: ApplyCreativeAgentProposalParams<'_>,
+    ) -> Result<CreativeAgentProposalCommit, DbError> {
+        nomifun_common::UserId::parse(params.owner_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal owner_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        nomifun_common::CreativeStudioProjectId::parse(params.project_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal project_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        nomifun_common::MessageId::parse(params.assistant_message_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal assistant_message_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        if params.expected_revision < 1 {
+            return Err(DbError::Conflict(
+                "creative studio proposal expected revision must be positive".to_owned(),
+            ));
+        }
+        let applied_revision = params.expected_revision.checked_add(1).ok_or_else(|| {
+            DbError::Conflict("creative studio proposal revision overflow".to_owned())
+        })?;
+        if params.node_count < 0 || params.connection_count < 0 {
+            return Err(DbError::Conflict(
+                "creative studio proposal graph counts must be non-negative".to_owned(),
+            ));
+        }
+        if params.ops_fingerprint.len() != 64
+            || params
+                .ops_fingerprint
+                .bytes()
+                .any(|byte| !byte.is_ascii_hexdigit() || byte.is_ascii_uppercase())
+        {
+            return Err(DbError::Conflict(
+                "creative studio proposal fingerprint must be lowercase SHA-256 hex".to_owned(),
+            ));
+        }
+        for (label, json) in [
+            ("ops_json", params.ops_json),
+            ("results_json", params.results_json),
+        ] {
+            let value: Value = serde_json::from_str(json).map_err(|error| {
+                DbError::Conflict(format!(
+                    "creative studio proposal {label} is invalid JSON: {error}"
+                ))
+            })?;
+            if !value.is_array() {
+                return Err(DbError::Conflict(format!(
+                    "creative studio proposal {label} must be a JSON array"
+                )));
+            }
+        }
+
+        let mut tx = self.pool.begin().await?;
+        // This reversible proof-carrying sentinel write is deliberately the
+        // first statement. It takes SQLite's global writer position before any
+        // read snapshot, so concurrent proposals (including cross-project
+        // reuse of the same assistant UUID) serialize before inspecting the
+        // receipt table. First application overwrites the sentinel with `now`;
+        // replay restores the original timestamp before commit; every error
+        // rolls it back with the transaction.
+        let locked_updated_at = sqlx::query_scalar::<_, i64>(
+            "UPDATE creative_studio_projects \
+             SET updated_at = updated_at + 1 \
+             WHERE project_id = ? \
+               AND EXISTS ( \
+                 SELECT 1 \
+                 FROM creative_studio_projects project \
+                 CROSS JOIN json_each(project.document_json, '$.chatSessions') session \
+                 CROSS JOIN json_each(session.value, '$.messageIds') message \
+                 JOIN creative_studio_agent_sessions binding \
+                   ON binding.project_id = project.project_id \
+                  AND binding.session_id = json_extract(session.value, '$.id') \
+                 JOIN installation_identity identity \
+                   ON identity.singleton_key = 'installation' \
+                  AND identity.owner_user_id = binding.owner_id \
+                 JOIN messages persisted \
+                   ON persisted.conversation_id = binding.conversation_id \
+                  AND persisted.message_id = CAST(message.value AS TEXT) \
+                 WHERE project.project_id = ? \
+                   AND binding.owner_id = ? \
+                   AND CAST(message.key AS INTEGER) % 2 = 1 \
+                   AND CAST(message.value AS TEXT) = ? \
+                   AND persisted.content = ? \
+                   AND persisted.position = 'left' \
+                   AND persisted.status = 'finish' \
+                   AND persisted.hidden = 0 \
+                   AND persisted.type = 'text' \
+             ) \
+             RETURNING updated_at",
+        )
+        .bind(params.project_id)
+        .bind(params.project_id)
+        .bind(params.owner_id)
+        .bind(params.assistant_message_id)
+        .bind(params.assistant_message_content_json)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(locked_updated_at) = locked_updated_at else {
+            let project_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM creative_studio_projects WHERE project_id = ?)",
+            )
+            .bind(params.project_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !project_exists {
+                return Err(DbError::NotFound(format!(
+                    "creative studio project '{}' not found",
+                    params.project_id
+                )));
+            }
+            let owner_matches: bool = sqlx::query_scalar(
+                "SELECT EXISTS( \
+                     SELECT 1 FROM installation_identity \
+                     WHERE singleton_key = 'installation' AND owner_user_id = ? \
+                 )",
+            )
+            .bind(params.owner_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !owner_matches {
+                return Err(DbError::Conflict(
+                    "Creative Studio proposal requires the installation owner".to_owned(),
+                ));
+            }
+            let current_content = sqlx::query_scalar::<_, String>(
+                "SELECT persisted.content \
+                 FROM creative_studio_projects project \
+                 CROSS JOIN json_each(project.document_json, '$.chatSessions') session \
+                 CROSS JOIN json_each(session.value, '$.messageIds') message \
+                 JOIN creative_studio_agent_sessions binding \
+                   ON binding.project_id = project.project_id \
+                  AND binding.session_id = json_extract(session.value, '$.id') \
+                  AND binding.owner_id = ? \
+                 JOIN messages persisted \
+                   ON persisted.conversation_id = binding.conversation_id \
+                  AND persisted.message_id = CAST(message.value AS TEXT) \
+                 WHERE project.project_id = ? \
+                   AND CAST(message.key AS INTEGER) % 2 = 1 \
+                   AND CAST(message.value AS TEXT) = ? \
+                   AND persisted.position = 'left' \
+                   AND persisted.status = 'finish' \
+                   AND persisted.hidden = 0 \
+                   AND persisted.type = 'text' \
+                 LIMIT 1",
+            )
+            .bind(params.owner_id)
+            .bind(params.project_id)
+            .bind(params.assistant_message_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if current_content.as_deref().is_some_and(|content| {
+                content != params.assistant_message_content_json
+            }) {
+                return Err(DbError::Conflict(format!(
+                    "creative studio assistant proposal '{}' source content changed during application",
+                    params.assistant_message_id
+                )));
+            }
+            return Err(DbError::Conflict(format!(
+                "assistantMessageId '{}' is not a completed visible assistant message in a bound Creative Studio session",
+                params.assistant_message_id
+            )));
+        };
+
+        let receipt = sqlx::query_as::<_, CreativeStudioAgentProposalReceiptRow>(
+            "SELECT * FROM creative_studio_agent_proposal_receipts \
+             WHERE assistant_message_id = ?",
+        )
+        .bind(params.assistant_message_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(receipt) = receipt {
+            if receipt.project_id != params.project_id {
+                return Err(DbError::Conflict(format!(
+                    "creative studio assistant proposal '{}' is already owned by another project",
+                    params.assistant_message_id
+                )));
+            }
+            if receipt.ops_fingerprint != params.ops_fingerprint
+                || receipt.ops_json != params.ops_json
+            {
+                return Err(DbError::Conflict(format!(
+                    "creative studio assistant proposal '{}' payload mismatch",
+                    params.assistant_message_id
+                )));
+            }
+            sqlx::query(
+                "UPDATE creative_studio_projects SET updated_at = ? WHERE project_id = ?",
+            )
+            .bind(locked_updated_at - 1)
+            .bind(params.project_id)
+            .execute(&mut *tx)
+            .await?;
+            let project = sqlx::query_as::<_, CreativeStudioProjectRow>(
+                "SELECT * FROM creative_studio_projects WHERE project_id = ?",
+            )
+            .bind(params.project_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| {
+                DbError::NotFound(format!(
+                    "creative studio project '{}' not found",
+                    params.project_id
+                ))
+            })?;
+            tx.commit().await?;
+            return Ok(CreativeAgentProposalCommit {
+                project,
+                receipt,
+                replayed: true,
+            });
+        }
+
+        let project = sqlx::query_as::<_, CreativeStudioProjectRow>(
+            "UPDATE creative_studio_projects \
+             SET document_json = ?, node_count = ?, connection_count = ?, \
+                 revision = revision + 1, updated_at = ? \
+             WHERE project_id = ? AND revision = ? RETURNING *",
+        )
+        .bind(params.document_json)
+        .bind(params.node_count)
+        .bind(params.connection_count)
+        .bind(params.now)
+        .bind(params.project_id)
+        .bind(params.expected_revision)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(project) = project else {
+            // Dropping the transaction rolls the proof lock back without a
+            // receipt, so a corrected revision can claim this assistant ID.
+            return Err(DbError::Conflict(format!(
+                "creative studio project '{}' revision conflict",
+                params.project_id
+            )));
+        };
+        sqlx::query(
+            "INSERT INTO creative_studio_agent_proposal_receipts \
+                (project_id, assistant_message_id, ops_fingerprint, ops_json, results_json, \
+                 applied_revision, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(params.project_id)
+        .bind(params.assistant_message_id)
+        .bind(params.ops_fingerprint)
+        .bind(params.ops_json)
+        .bind(params.results_json)
+        .bind(applied_revision)
+        .bind(params.now)
+        .execute(&mut *tx)
+        .await?;
+        let receipt = sqlx::query_as::<_, CreativeStudioAgentProposalReceiptRow>(
+            "SELECT * FROM creative_studio_agent_proposal_receipts \
+             WHERE project_id = ? AND assistant_message_id = ?",
+        )
+        .bind(params.project_id)
+        .bind(params.assistant_message_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(CreativeAgentProposalCommit {
+            project,
+            receipt,
+            replayed: false,
         })
     }
 
-    async fn rename_canvas(&self, id: &str, title: &str, now: i64) -> Result<WorkshopCanvasRow, DbError> {
-        let result = sqlx::query(
-            "UPDATE workshop_canvases SET title = ?, updated_at = ? WHERE canvas_id = ?",
-        )
-            .bind(title)
-            .bind(now)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::NotFound(format!("workshop canvas '{id}' not found")));
+    async fn import_creative_project_with_assets(
+        &self,
+        project: &CreativeStudioProjectRow,
+        assets: &[WorkshopAssetRow],
+    ) -> Result<CreativeStudioProjectRow, DbError> {
+        nomifun_common::validate_uuidv7(&project.project_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "imported creative studio project_id {:?} is not a canonical UUIDv7: {error}",
+                project.project_id
+            ))
+        })?;
+        if project.revision != 1 || project.node_count < 0 || project.connection_count < 0 {
+            return Err(DbError::Conflict(
+                "imported creative studio project must start at revision 1 with non-negative counts"
+                    .into(),
+            ));
         }
-        self.get_canvas(id)
-            .await?
-            .ok_or_else(|| DbError::NotFound(format!("workshop canvas '{id}' not found")))
+        validate_asset_rows(assets)?;
+        for asset in assets {
+            let references = origin_references(asset.origin.as_deref())?;
+            if references.provider_id.is_some()
+                || references.project_id.is_some()
+                || references.workflow_id.is_some()
+                || references.creation_task_id.is_some()
+            {
+                return Err(DbError::Conflict(format!(
+                    "imported creative studio asset {} contains a nonportable durable origin reference",
+                    asset.asset_id
+                )));
+            }
+        }
+
+        let mut tx = self.pool.begin().await?;
+        for asset in assets {
+            sqlx::query(
+                "INSERT INTO workshop_assets \
+                    (asset_id, kind, title, collection, tags, rel_path, thumb_rel_path, mime, width, height, bytes, \
+                     text_content, in_library, origin, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&asset.asset_id)
+            .bind(&asset.kind)
+            .bind(&asset.title)
+            .bind(&asset.collection)
+            .bind(&asset.tags)
+            .bind(&asset.rel_path)
+            .bind(&asset.thumb_rel_path)
+            .bind(&asset.mime)
+            .bind(asset.width)
+            .bind(asset.height)
+            .bind(asset.bytes)
+            .bind(&asset.text_content)
+            .bind(asset.in_library)
+            .bind(&asset.origin)
+            .bind(asset.created_at)
+            .bind(asset.updated_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+        let imported = sqlx::query_as::<_, CreativeStudioProjectRow>(
+            "INSERT INTO creative_studio_projects \
+                (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+             VALUES (?, ?, 1, ?, ?, ?, ?, ?) RETURNING *",
+        )
+        .bind(&project.project_id)
+        .bind(&project.title)
+        .bind(project.node_count)
+        .bind(project.connection_count)
+        .bind(&project.document_json)
+        .bind(project.created_at)
+        .bind(project.updated_at)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(imported)
     }
 
-    async fn touch_canvas(&self, id: &str, node_count: i64, now: i64) -> Result<WorkshopCanvasRow, DbError> {
-        let result = sqlx::query(
-            "UPDATE workshop_canvases SET node_count = ?, updated_at = ? WHERE canvas_id = ?",
-        )
-            .bind(node_count)
-            .bind(now)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::NotFound(format!("workshop canvas '{id}' not found")));
-        }
-        self.get_canvas(id)
-            .await?
-            .ok_or_else(|| DbError::NotFound(format!("workshop canvas '{id}' not found")))
-    }
-
-    async fn delete_canvas(&self, id: &str) -> Result<(), DbError> {
+    async fn delete_creative_project(&self, project_id: &str) -> Result<(), DbError> {
         let mut tx = self.pool.begin().await?;
         let locked = sqlx::query(
-            "UPDATE workshop_canvases SET updated_at = updated_at WHERE canvas_id = ?",
+            "UPDATE creative_studio_projects SET updated_at = updated_at WHERE project_id = ?",
         )
-            .bind(id)
+            .bind(project_id)
             .execute(&mut *tx)
             .await?;
         if locked.rows_affected() == 0 {
-            return Err(DbError::NotFound(format!("workshop canvas '{id}' not found")));
+            return Err(DbError::NotFound(format!(
+                "creative studio project '{project_id}' not found"
+            )));
         }
-        sqlx::query("UPDATE creation_tasks SET canvas_id = NULL WHERE canvas_id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        // workshop_assets.origin.canvas_id is immutable provenance with the
-        // registry's KEEP_HISTORY policy. It intentionally retains the former
-        // business ID after the Canvas row is deleted.
-        sqlx::query("DELETE FROM workshop_canvases WHERE canvas_id = ?")
-            .bind(id)
+        let live_task: Option<String> = sqlx::query_scalar(
+            "SELECT creation_task_id FROM creation_tasks \
+             WHERE project_id = ? AND status IN ('queued', 'running') \
+             ORDER BY submitted_at ASC, creation_task_id ASC LIMIT 1",
+        )
+        .bind(project_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(task_id) = live_task {
+            return Err(DbError::Conflict(format!(
+                "creative studio project '{project_id}' has live creation task '{task_id}'"
+            )));
+        }
+        sqlx::query(
+            "DELETE FROM creative_studio_agent_proposal_receipts WHERE project_id = ?",
+        )
+        .bind(project_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM creative_studio_projects WHERE project_id = ?")
+            .bind(project_id)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
         Ok(())
     }
 
-    async fn set_canvas_thumbnail(
-        &self,
-        id: &str,
-        thumbnail_rel_path: &str,
-        now: i64,
-    ) -> Result<WorkshopCanvasRow, DbError> {
-        let result = sqlx::query(
-            "UPDATE workshop_canvases SET thumbnail_rel_path = ?, updated_at = ? WHERE canvas_id = ?",
+    // ---- canonical Creative Studio workflows ----
+
+    async fn list_creative_workflows(&self) -> Result<Vec<CreativeStudioWorkflowRow>, DbError> {
+        let rows = sqlx::query_as::<_, CreativeStudioWorkflowRow>(
+            "SELECT * FROM creative_studio_workflows ORDER BY updated_at DESC, id DESC",
         )
-            .bind(thumbnail_rel_path)
-            .bind(now)
-            .bind(id)
+        .fetch_all(&self.pool)
+        .await?;
+        for row in &rows {
+            nomifun_common::CreativeStudioWorkflowId::parse(&row.workflow_id).map_err(
+                |error| {
+                    DbError::Conflict(format!(
+                        "creative studio workflow_id {:?} is not a canonical UUIDv7: {error}",
+                        row.workflow_id
+                    ))
+                },
+            )?;
+        }
+        Ok(rows)
+    }
+
+    async fn get_creative_workflow(
+        &self,
+        workflow_id: &str,
+    ) -> Result<Option<CreativeStudioWorkflowRow>, DbError> {
+        let row = sqlx::query_as::<_, CreativeStudioWorkflowRow>(
+            "SELECT * FROM creative_studio_workflows WHERE workflow_id = ?",
+        )
+        .bind(workflow_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = &row {
+            nomifun_common::CreativeStudioWorkflowId::parse(&row.workflow_id).map_err(
+                |error| {
+                    DbError::Conflict(format!(
+                        "creative studio workflow_id {:?} is not a canonical UUIDv7: {error}",
+                        row.workflow_id
+                    ))
+                },
+            )?;
+        }
+        Ok(row)
+    }
+
+    async fn create_creative_workflow(
+        &self,
+        row: &CreativeStudioWorkflowRow,
+    ) -> Result<CreativeStudioWorkflowRow, DbError> {
+        nomifun_common::CreativeStudioWorkflowId::parse(&row.workflow_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio workflow_id {:?} is not a canonical UUIDv7: {error}",
+                row.workflow_id
+            ))
+        })?;
+        if row.revision != 1 {
+            return Err(DbError::Conflict(
+                "a creative studio workflow must start at revision 1".into(),
+            ));
+        }
+        Ok(sqlx::query_as::<_, CreativeStudioWorkflowRow>(
+            "INSERT INTO creative_studio_workflows \
+                (workflow_id, revision, name, description, category, visibility, definition_json, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
+        )
+        .bind(&row.workflow_id)
+        .bind(row.revision)
+        .bind(&row.name)
+        .bind(&row.description)
+        .bind(&row.category)
+        .bind(&row.visibility)
+        .bind(&row.definition_json)
+        .bind(row.created_at)
+        .bind(row.updated_at)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    async fn save_creative_workflow(
+        &self,
+        workflow_id: &str,
+        expected_revision: i64,
+        row: &CreativeStudioWorkflowRow,
+    ) -> Result<CreativeStudioWorkflowRow, DbError> {
+        if row.workflow_id != workflow_id || row.revision != expected_revision + 1 {
+            return Err(DbError::Conflict(
+                "creative studio workflow replacement must preserve its ID and increment revision once"
+                    .into(),
+            ));
+        }
+        let saved = sqlx::query_as::<_, CreativeStudioWorkflowRow>(
+            "UPDATE creative_studio_workflows \
+             SET revision = ?, name = ?, description = ?, category = ?, visibility = ?, \
+                 definition_json = ?, updated_at = ? \
+             WHERE workflow_id = ? AND revision = ? RETURNING *",
+        )
+        .bind(row.revision)
+        .bind(&row.name)
+        .bind(&row.description)
+        .bind(&row.category)
+        .bind(&row.visibility)
+        .bind(&row.definition_json)
+        .bind(row.updated_at)
+        .bind(workflow_id)
+        .bind(expected_revision)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(saved) = saved {
+            return Ok(saved);
+        }
+        if self.get_creative_workflow(workflow_id).await?.is_none() {
+            return Err(DbError::NotFound(format!(
+                "creative studio workflow '{workflow_id}' not found"
+            )));
+        }
+        Err(DbError::Conflict(format!(
+            "creative studio workflow '{workflow_id}' revision conflict"
+        )))
+    }
+
+    async fn delete_creative_workflow(&self, workflow_id: &str) -> Result<(), DbError> {
+        let result = sqlx::query("DELETE FROM creative_studio_workflows WHERE workflow_id = ?")
+            .bind(workflow_id)
             .execute(&self.pool)
             .await?;
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound(format!("workshop canvas '{id}' not found")));
+            return Err(DbError::NotFound(format!(
+                "creative studio workflow '{workflow_id}' not found"
+            )));
         }
-        self.get_canvas(id)
+        Ok(())
+    }
+
+    // ---- canonical Creative Studio workflow runs ----
+
+    async fn list_creative_workflow_runs(
+        &self,
+        workflow_id: Option<&str>,
+    ) -> Result<Vec<CreativeStudioWorkflowRunRow>, DbError> {
+        let rows = if let Some(workflow_id) = workflow_id {
+            nomifun_common::CreativeStudioWorkflowId::parse(workflow_id).map_err(|error| {
+                DbError::Conflict(format!(
+                    "creative studio workflow_id {workflow_id:?} is not a canonical UUIDv7: {error}"
+                ))
+            })?;
+            sqlx::query_as::<_, CreativeStudioWorkflowRunRow>(
+                "SELECT * FROM creative_studio_workflow_runs \
+                 WHERE workflow_id = ? ORDER BY updated_at DESC, id DESC",
+            )
+            .bind(workflow_id)
+            .fetch_all(&self.pool)
             .await?
-            .ok_or_else(|| DbError::NotFound(format!("workshop canvas '{id}' not found")))
+        } else {
+            sqlx::query_as::<_, CreativeStudioWorkflowRunRow>(
+                "SELECT * FROM creative_studio_workflow_runs ORDER BY updated_at DESC, id DESC",
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+        for row in &rows {
+            validate_creative_workflow_run_row_ids(row)?;
+        }
+        Ok(rows)
+    }
+
+    async fn get_creative_workflow_run(
+        &self,
+        workflow_run_id: &str,
+    ) -> Result<Option<CreativeStudioWorkflowRunRow>, DbError> {
+        nomifun_common::CreativeStudioWorkflowRunId::parse(workflow_run_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio workflow_run_id {workflow_run_id:?} is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        let row = sqlx::query_as::<_, CreativeStudioWorkflowRunRow>(
+            "SELECT * FROM creative_studio_workflow_runs WHERE workflow_run_id = ?",
+        )
+        .bind(workflow_run_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = row.as_ref() {
+            validate_creative_workflow_run_row_ids(row)?;
+        }
+        Ok(row)
+    }
+
+    async fn create_creative_workflow_run(
+        &self,
+        row: &CreativeStudioWorkflowRunRow,
+        referenced_asset_ids: &[String],
+    ) -> Result<CreativeStudioWorkflowRunRow, DbError> {
+        validate_creative_workflow_run_row_ids(row)?;
+        if row.revision != 1 {
+            return Err(DbError::Conflict(
+                "a creative studio workflow run must start at revision 1".into(),
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        for asset_id in referenced_asset_ids {
+            nomifun_common::WorkshopAssetId::parse(asset_id).map_err(|error| {
+                DbError::Conflict(format!(
+                    "creative studio workflow run asset_id {asset_id:?} is not a canonical UUIDv7: {error}"
+                ))
+            })?;
+            let locked = sqlx::query(
+                "UPDATE workshop_assets SET updated_at = updated_at \
+                 WHERE asset_id = ? AND kind = 'image'",
+            )
+            .bind(asset_id)
+            .execute(&mut *tx)
+            .await?;
+            if locked.rows_affected() == 0 {
+                return Err(DbError::Conflict(format!(
+                    "creative studio workflow run reference '{asset_id}' is missing or is not an image"
+                )));
+            }
+        }
+        sqlx::query(
+            "INSERT INTO creative_studio_workflow_runs \
+                (workflow_run_id, workflow_id, workflow_revision, revision, status, \
+                 step_ids_json, aggregate_json, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(workflow_run_id) DO NOTHING",
+        )
+        .bind(&row.workflow_run_id)
+        .bind(&row.workflow_id)
+        .bind(row.workflow_revision)
+        .bind(row.revision)
+        .bind(&row.status)
+        .bind(&row.step_ids_json)
+        .bind(&row.aggregate_json)
+        .bind(row.created_at)
+        .bind(row.updated_at)
+        .execute(&mut *tx)
+        .await?;
+        let persisted = sqlx::query_as::<_, CreativeStudioWorkflowRunRow>(
+            "SELECT * FROM creative_studio_workflow_runs WHERE workflow_run_id = ?",
+        )
+        .bind(&row.workflow_run_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| {
+            DbError::Init(format!(
+                "creative studio workflow run {} vanished after idempotent insert",
+                row.workflow_run_id
+            ))
+        })?;
+        validate_creative_workflow_run_row_ids(&persisted)?;
+        tx.commit().await?;
+        Ok(persisted)
+    }
+
+    async fn save_creative_workflow_run(
+        &self,
+        workflow_run_id: &str,
+        expected_revision: i64,
+        row: &CreativeStudioWorkflowRunRow,
+    ) -> Result<CreativeStudioWorkflowRunRow, DbError> {
+        validate_creative_workflow_run_row_ids(row)?;
+        if row.workflow_run_id != workflow_run_id || row.revision != expected_revision + 1 {
+            return Err(DbError::Conflict(
+                "creative studio workflow run replacement must preserve its ID and increment revision once"
+                    .into(),
+            ));
+        }
+        let saved = sqlx::query_as::<_, CreativeStudioWorkflowRunRow>(
+            "UPDATE creative_studio_workflow_runs \
+             SET revision = ?, status = ?, step_ids_json = ?, aggregate_json = ?, updated_at = ? \
+             WHERE workflow_run_id = ? AND revision = ? RETURNING *",
+        )
+        .bind(row.revision)
+        .bind(&row.status)
+        .bind(&row.step_ids_json)
+        .bind(&row.aggregate_json)
+        .bind(row.updated_at)
+        .bind(workflow_run_id)
+        .bind(expected_revision)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(saved) = saved {
+            return Ok(saved);
+        }
+        if self
+            .get_creative_workflow_run(workflow_run_id)
+            .await?
+            .is_none()
+        {
+            return Err(DbError::NotFound(format!(
+                "creative studio workflow run '{workflow_run_id}' not found"
+            )));
+        }
+        Err(DbError::Conflict(format!(
+            "creative studio workflow run '{workflow_run_id}' revision conflict"
+        )))
     }
 
     // ---- assets ----
@@ -275,29 +1258,89 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                 )));
             }
         }
-        if let Some(canvas_id) = references.canvas_id {
+        if let Some(project_id) = &references.project_id {
             let locked = sqlx::query(
-                "UPDATE workshop_canvases SET updated_at = updated_at WHERE canvas_id = ?",
+                "UPDATE creative_studio_projects SET updated_at = updated_at WHERE project_id = ?",
             )
-            .bind(&canvas_id)
+            .bind(project_id)
             .execute(&mut *tx)
             .await?;
             if locked.rows_affected() == 0 {
                 return Err(DbError::Conflict(format!(
-                    "workshop asset origin references missing canvas '{canvas_id}'"
+                    "workshop asset origin references missing creative studio project '{project_id}'"
+                )));
+            }
+        }
+        if let (Some(workflow_id), Some(workflow_run_id)) =
+            (&references.workflow_id, &references.workflow_run_id)
+        {
+            let workflow = sqlx::query(
+                "UPDATE creative_studio_workflows SET updated_at = updated_at WHERE workflow_id = ?",
+            )
+            .bind(workflow_id)
+            .execute(&mut *tx)
+            .await?;
+            if workflow.rows_affected() == 0 {
+                return Err(DbError::Conflict(format!(
+                    "workshop asset origin references missing creative studio workflow '{workflow_id}'"
+                )));
+            }
+            let run = sqlx::query(
+                "UPDATE creative_studio_workflow_runs SET updated_at = updated_at \
+                 WHERE workflow_run_id = ? AND workflow_id = ?",
+            )
+            .bind(workflow_run_id)
+            .bind(workflow_id)
+            .execute(&mut *tx)
+            .await?;
+            if run.rows_affected() == 0 {
+                return Err(DbError::Conflict(format!(
+                    "workshop asset origin references missing workflow run '{workflow_run_id}' for workflow '{workflow_id}'"
                 )));
             }
         }
         if let Some(creation_task_id) = references.creation_task_id {
-            let task = sqlx::query(
-                "UPDATE creation_tasks SET status = status WHERE creation_task_id = ?",
+            let task = sqlx::query_as::<
+                _,
+                (
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                ),
+            >(
+                "UPDATE creation_tasks SET status = status WHERE creation_task_id = ? \
+                 RETURNING project_id, node_id, workbench_kind, workflow_id, workflow_run_id, workflow_step_id",
             )
             .bind(&creation_task_id)
-            .execute(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await?;
-            if task.rows_affected() == 0 {
-                return Err(DbError::Conflict(format!(
+            let task = task.ok_or_else(|| {
+                DbError::Conflict(format!(
                     "workshop asset origin references missing creation task '{creation_task_id}'"
+                ))
+            })?;
+            let expected = (
+                references.project_id.as_deref(),
+                references.node_id.as_deref(),
+                references.workbench_kind.as_deref(),
+                references.workflow_id.as_deref(),
+                references.workflow_run_id.as_deref(),
+                references.workflow_step_id.as_deref(),
+            );
+            let actual = (
+                task.0.as_deref(),
+                task.1.as_deref(),
+                task.2.as_deref(),
+                task.3.as_deref(),
+                task.4.as_deref(),
+                task.5.as_deref(),
+            );
+            if expected != actual {
+                return Err(DbError::Conflict(format!(
+                    "workshop asset origin owner does not match creation task '{creation_task_id}'"
                 )));
             }
         }
@@ -481,31 +1524,41 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         if locked.rows_affected() == 0 {
             return Err(DbError::NotFound(format!("workshop asset '{id}' not found")));
         }
-        let referencing_tasks: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT DISTINCT task.id, task.result_asset_ids \
-             FROM creation_tasks task, json_each(task.result_asset_ids) item \
-             WHERE item.value = ?",
+        let workflow_runs: Vec<(String, String)> = sqlx::query_as(
+            "SELECT workflow_run_id, aggregate_json FROM creative_studio_workflow_runs",
         )
-        .bind(id)
         .fetch_all(&mut *tx)
         .await?;
-        for (task_id, encoded) in referencing_tasks {
-            let mut asset_ids: Vec<String> = serde_json::from_str(&encoded).map_err(|error| {
-                DbError::Conflict(format!(
-                    "creation task '{task_id}' has invalid result_asset_ids: {error}"
-                ))
-            })?;
-            asset_ids.retain(|asset_id| asset_id != id);
-            let encoded = serde_json::to_string(&asset_ids).map_err(|error| {
-                DbError::Init(format!(
-                    "failed to encode creation task '{task_id}' result_asset_ids: {error}"
-                ))
-            })?;
-            sqlx::query("UPDATE creation_tasks SET result_asset_ids = ? WHERE id = ?")
-                .bind(encoded)
-                .bind(task_id)
-                .execute(&mut *tx)
-                .await?;
+        for (workflow_run_id, aggregate_json) in workflow_runs {
+            if workflow_run_json_references_asset(&aggregate_json, id)? {
+                return Err(DbError::Conflict(format!(
+                    "workshop asset '{id}' is referenced by creative studio workflow run '{workflow_run_id}'"
+                )));
+            }
+        }
+        let referencing_task: Option<(String, String)> = sqlx::query_as(
+            "SELECT creation_task_id, \
+                    CASE WHEN EXISTS ( \
+                        SELECT 1 FROM json_each(input_bindings) input \
+                        WHERE json_extract(input.value, '$.asset_id') = ?1 \
+                    ) THEN 'input' ELSE 'result' END AS reference_kind \
+             FROM creation_tasks \
+             WHERE EXISTS ( \
+                 SELECT 1 FROM json_each(input_bindings) input \
+                 WHERE json_extract(input.value, '$.asset_id') = ?1 \
+             ) OR EXISTS ( \
+                 SELECT 1 FROM json_each(result_asset_ids) result \
+                 WHERE result.value = ?1 \
+             ) \
+             ORDER BY creation_task_id ASC LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((task_id, reference_kind)) = referencing_task {
+            return Err(DbError::Conflict(format!(
+                "workshop asset '{id}' is referenced as a creation task {reference_kind} by '{task_id}'"
+            )));
         }
         sqlx::query("DELETE FROM workshop_assets WHERE asset_id = ?")
             .bind(id)
@@ -531,10 +1584,6 @@ mod tests {
     use super::*;
     use crate::init_database_memory;
 
-    const CANVAS_A: &str = "0190f5fe-7c00-7a00-8abc-000000000001";
-    const CANVAS_1: &str = "0190f5fe-7c00-7a00-8abc-000000000002";
-    const CANVAS_2: &str = "0190f5fe-7c00-7a00-8abc-000000000003";
-
     const ASSET_1: &str = "0190f5fe-7c00-7a00-8abc-000000000101";
     const ASSET_2: &str = "0190f5fe-7c00-7a00-8abc-000000000102";
     const ASSET_3: &str = "0190f5fe-7c00-7a00-8abc-000000000103";
@@ -551,11 +1600,85 @@ mod tests {
     const ASSET_C1: &str = "0190f5fe-7c00-7a00-8abc-000000000161";
     const ASSET_C2: &str = "0190f5fe-7c00-7a00-8abc-000000000162";
     const ASSET_C3: &str = "0190f5fe-7c00-7a00-8abc-000000000163";
+    const CREATIVE_PROJECT_A: &str = "0190f5fe-7c00-7a00-8abc-000000000171";
+    const CREATIVE_WORKFLOW_A: &str = "0190f5fe-7c00-7a00-8abc-000000000172";
+    const CREATIVE_WORKFLOW_RUN_A: &str = "0190f5fe-7c00-7a00-8abc-000000000173";
+    const CREATIVE_WORKFLOW_STEP_A: &str = "0190f5fe-7c00-7a00-8abc-000000000174";
 
     async fn repo() -> (SqliteWorkshopRepository, crate::Database) {
         let db = init_database_memory().await.unwrap();
         let repo = SqliteWorkshopRepository::new(db.pool().clone());
         (repo, db)
+    }
+
+    async fn seed_agent_proposal_project(
+        repo: &SqliteWorkshopRepository,
+        db: &crate::Database,
+        project_id: &str,
+        assistant_message_ids: &[&str],
+    ) -> (String, Vec<String>) {
+        let owner_id = crate::installation_owner_id(db.pool()).await.unwrap();
+        let session_id = nomifun_common::generate_id();
+        let conversation_id = nomifun_common::ConversationId::new().into_string();
+        let mut message_ids = Vec::with_capacity(assistant_message_ids.len() * 2);
+        for assistant_message_id in assistant_message_ids {
+            message_ids.push(nomifun_common::MessageId::new().into_string());
+            message_ids.push((*assistant_message_id).to_owned());
+        }
+        let initial_doc = serde_json::json!({
+            "schema": "nomifun.creative-studio/v1",
+            "projectId": project_id,
+            "nodes": [],
+            "chatSessions": [{
+                "id": session_id,
+                "messageIds": message_ids
+            }]
+        })
+        .to_string();
+        repo.create_creative_project(project_id, "Agent proposal", &initial_doc, 100)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO conversations \
+                (conversation_id, user_id, name, type, extra, status, source, created_at, updated_at) \
+             VALUES (?, ?, 'Creative Studio Agent', 'nomi', '{}', 'finished', 'nomifun', 1, 1)",
+        )
+        .bind(&conversation_id)
+        .bind(&owner_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO creative_studio_agent_sessions \
+                (owner_id, project_id, session_id, conversation_id, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 1, 1)",
+        )
+        .bind(&owner_id)
+        .bind(project_id)
+        .bind(&session_id)
+        .bind(&conversation_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let artifact_text = "```json\n{\"kind\":\"nomifun.creative-studio.canvas-ops/v1\",\"summary\":\"Add durable text\",\"ops\":[{\"type\":\"add_node\",\"node_type\":\"text\",\"x\":0,\"y\":0,\"data\":{\"text\":\"durable\",\"format\":\"plain\",\"fontSize\":16,\"textAlign\":\"left\"}}]}\n```";
+        let mut assistant_contents = Vec::with_capacity(assistant_message_ids.len());
+        for assistant_message_id in assistant_message_ids {
+            let content_json = serde_json::json!({ "content": artifact_text }).to_string();
+            sqlx::query(
+                "INSERT INTO messages \
+                    (message_id, conversation_id, msg_id, type, content, position, status, hidden, created_at) \
+                 VALUES (?, ?, ?, 'text', ?, 'left', 'finish', 0, 1)",
+            )
+            .bind(assistant_message_id)
+            .bind(&conversation_id)
+            .bind(assistant_message_id)
+            .bind(&content_json)
+            .execute(db.pool())
+            .await
+            .unwrap();
+            assistant_contents.push(content_json);
+        }
+        (initial_doc, assistant_contents)
     }
 
     fn sample_asset(id: i64, asset_id: &str, kind: &str, title: &str) -> WorkshopAssetRow {
@@ -581,39 +1704,476 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn canvas_crud_flow() {
+    async fn creative_project_crud_and_revision_compare_and_swap() {
         let (repo, _db) = repo().await;
-        let c = repo.create_canvas(CANVAS_A, "画布", 1).await.unwrap();
-        assert!(c.id > 0);
-        assert_eq!(c.canvas_id, CANVAS_A);
-        assert_eq!(c.node_count, 0);
-        assert_eq!(c.title, "画布");
+        let initial_doc = format!(
+            r#"{{"schema":"nomifun.creative-studio/v1","projectId":"{CREATIVE_PROJECT_A}","nodes":[]}}"#
+        );
+        let created = repo
+            .create_creative_project(CREATIVE_PROJECT_A, "新项目", &initial_doc, 100)
+            .await
+            .unwrap();
+        assert_eq!(created.revision, 1);
+        assert_eq!(created.node_count, 0);
+        assert_eq!(created.connection_count, 0);
 
-        let renamed = repo.rename_canvas(CANVAS_A, "新名", 2).await.unwrap();
-        assert_eq!(renamed.title, "新名");
-        assert_eq!(renamed.updated_at, 2);
+        let renamed = repo
+            .rename_creative_project(CREATIVE_PROJECT_A, "重命名", 110)
+            .await
+            .unwrap();
+        assert_eq!(renamed.title, "重命名");
+        assert_eq!(renamed.revision, 1, "metadata rename must not invalidate autosave");
 
-        let touched = repo.touch_canvas(CANVAS_A, 7, 3).await.unwrap();
-        assert_eq!(touched.node_count, 7);
-        assert_eq!(touched.updated_at, 3);
+        let changed_doc = format!(
+            r#"{{"schema":"nomifun.creative-studio/v1","projectId":"{CREATIVE_PROJECT_A}","nodes":[{{}}]}}"#
+        );
+        let saved = repo
+            .save_creative_project(CREATIVE_PROJECT_A, 1, &changed_doc, 1, 2, 120)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, 2);
+        assert_eq!(saved.node_count, 1);
+        assert_eq!(saved.connection_count, 2);
 
-        assert_eq!(repo.list_canvases().await.unwrap().len(), 1);
-        repo.delete_canvas(CANVAS_A).await.unwrap();
-        assert!(repo.get_canvas(CANVAS_A).await.unwrap().is_none());
-        assert!(matches!(repo.delete_canvas(CANVAS_A).await.unwrap_err(), DbError::NotFound(_)));
-        assert!(matches!(repo.rename_canvas("nope", "x", 1).await.unwrap_err(), DbError::NotFound(_)));
+        let stale = repo
+            .save_creative_project(CREATIVE_PROJECT_A, 1, &initial_doc, 0, 0, 130)
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, DbError::Conflict(_)));
+        assert_eq!(
+            repo.get_creative_project(CREATIVE_PROJECT_A)
+                .await
+                .unwrap()
+                .unwrap()
+                .document_json,
+            changed_doc,
+            "a stale writer must not replace the canonical document"
+        );
+
+        repo.delete_creative_project(CREATIVE_PROJECT_A)
+            .await
+            .unwrap();
+        assert!(repo
+            .get_creative_project(CREATIVE_PROJECT_A)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
-    async fn list_canvases_orders_by_updated_desc() {
+    async fn creative_agent_proposal_receipt_replays_and_rolls_back_failed_cas() {
+        const ASSISTANT_A: &str = "0190f5fe-7c00-7a00-8abc-000000000181";
+        const ASSISTANT_B: &str = "0190f5fe-7c00-7a00-8abc-000000000182";
+        const ASSISTANT_C: &str = "0190f5fe-7c00-7a00-8abc-000000000184";
+        let (repo, db) = repo().await;
+        let owner_id = crate::installation_owner_id(db.pool()).await.unwrap();
+        let (initial, assistant_contents) = seed_agent_proposal_project(
+            &repo,
+            &db,
+            CREATIVE_PROJECT_A,
+            &[ASSISTANT_A, ASSISTANT_B, ASSISTANT_C],
+        )
+        .await;
+        let mut changed: Value = serde_json::from_str(&initial).unwrap();
+        changed["nodes"] = serde_json::json!([{}]);
+        let changed_doc = changed.to_string();
+        let first = repo
+            .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                owner_id: &owner_id,
+                project_id: CREATIVE_PROJECT_A,
+                assistant_message_id: ASSISTANT_A,
+                assistant_message_content_json: &assistant_contents[0],
+                ops_fingerprint: &"a".repeat(64),
+                ops_json: r#"[{"type":"add_node"}]"#,
+                results_json: r#"[{"type":"node_added","node_id":"winner"}]"#,
+                expected_revision: 1,
+                document_json: &changed_doc,
+                node_count: 1,
+                connection_count: 0,
+                now: 200,
+            })
+            .await
+            .unwrap();
+        assert!(!first.replayed);
+        assert_eq!(first.project.revision, 2);
+        assert_eq!(first.receipt.applied_revision, 2);
+
+        let replay = repo
+            .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                owner_id: &owner_id,
+                project_id: CREATIVE_PROJECT_A,
+                assistant_message_id: ASSISTANT_A,
+                assistant_message_content_json: &assistant_contents[0],
+                ops_fingerprint: &"a".repeat(64),
+                ops_json: r#"[{"type":"add_node"}]"#,
+                results_json: r#"[{"type":"node_added","node_id":"loser"}]"#,
+                expected_revision: 999,
+                document_json: &changed_doc,
+                node_count: 99,
+                connection_count: 0,
+                now: 300,
+            })
+            .await
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.project.revision, 2);
+        assert_eq!(replay.project.updated_at, first.project.updated_at);
+        assert_eq!(replay.receipt.results_json, first.receipt.results_json);
+
+        let mismatch = repo
+            .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                owner_id: &owner_id,
+                project_id: CREATIVE_PROJECT_A,
+                assistant_message_id: ASSISTANT_A,
+                assistant_message_content_json: &assistant_contents[0],
+                ops_fingerprint: &"b".repeat(64),
+                ops_json: r#"[{"type":"move_node"}]"#,
+                results_json: "[]",
+                expected_revision: 2,
+                document_json: &changed_doc,
+                node_count: 1,
+                connection_count: 0,
+                now: 400,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(mismatch, DbError::Conflict(message) if message.contains("payload mismatch")));
+
+        sqlx::query("UPDATE messages SET content = ? WHERE message_id = ?")
+            .bind(r#"{"content":"changed after provenance read"}"#)
+            .bind(ASSISTANT_B)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let source_race = repo
+            .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                owner_id: &owner_id,
+                project_id: CREATIVE_PROJECT_A,
+                assistant_message_id: ASSISTANT_B,
+                assistant_message_content_json: &assistant_contents[1],
+                ops_fingerprint: &"c".repeat(64),
+                ops_json: r#"[{"type":"add_node"}]"#,
+                results_json: r#"[{"type":"node_added","node_id":"never"}]"#,
+                expected_revision: 2,
+                document_json: &changed_doc,
+                node_count: 2,
+                connection_count: 0,
+                now: 450,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(source_race, DbError::Conflict(message) if message.contains("source content changed")));
+        assert!(repo
+            .get_creative_agent_proposal_receipt(&owner_id, CREATIVE_PROJECT_A, ASSISTANT_B)
+            .await
+            .unwrap()
+            .is_none());
+
+        let stale = repo
+            .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                owner_id: &owner_id,
+                project_id: CREATIVE_PROJECT_A,
+                assistant_message_id: ASSISTANT_C,
+                assistant_message_content_json: &assistant_contents[2],
+                ops_fingerprint: &"d".repeat(64),
+                ops_json: r#"[{"type":"add_node"}]"#,
+                results_json: r#"[{"type":"node_added","node_id":"never"}]"#,
+                expected_revision: 1,
+                document_json: &changed_doc,
+                node_count: 2,
+                connection_count: 0,
+                now: 500,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, DbError::Conflict(message) if message.contains("revision conflict")));
+        assert!(repo
+            .get_creative_agent_proposal_receipt(&owner_id, CREATIVE_PROJECT_A, ASSISTANT_C)
+            .await
+            .unwrap()
+            .is_none());
+        let current = repo
+            .get_creative_project(CREATIVE_PROJECT_A)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.revision, 2);
+        assert_eq!(current.node_count, 1);
+        repo.delete_creative_project(CREATIVE_PROJECT_A)
+            .await
+            .unwrap();
+        let remaining_receipts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM creative_studio_agent_proposal_receipts WHERE project_id = ?",
+        )
+        .bind(CREATIVE_PROJECT_A)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(remaining_receipts, 0, "project deletion must cascade receipts");
+    }
+
+    #[tokio::test]
+    async fn concurrent_creative_agent_proposal_claims_execute_once() {
+        const ASSISTANT: &str = "0190f5fe-7c00-7a00-8abc-000000000183";
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::init_database(&dir.path().join("proposal-concurrency.db"))
+            .await
+            .unwrap();
+        let repo = SqliteWorkshopRepository::new(db.pool().clone());
+        let owner_id = crate::installation_owner_id(db.pool()).await.unwrap();
+        let (initial, assistant_contents) =
+            seed_agent_proposal_project(&repo, &db, CREATIVE_PROJECT_A, &[ASSISTANT]).await;
+        let mut winner: Value = serde_json::from_str(&initial).unwrap();
+        winner["nodes"] = serde_json::json!([{"candidate": "a"}]);
+        let winner_doc = winner.to_string();
+        let mut loser: Value = serde_json::from_str(&initial).unwrap();
+        loser["nodes"] = serde_json::json!([{"candidate": "b"}]);
+        let loser_doc = loser.to_string();
+        let repo_a = repo.clone();
+        let repo_b = repo.clone();
+        let call_a = async {
+            repo_a
+                .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                    owner_id: &owner_id,
+                    project_id: CREATIVE_PROJECT_A,
+                    assistant_message_id: ASSISTANT,
+                    assistant_message_content_json: &assistant_contents[0],
+                    ops_fingerprint: &"d".repeat(64),
+                    ops_json: r#"[{"type":"add_node"}]"#,
+                    results_json: r#"[{"type":"node_added","node_id":"a"}]"#,
+                    expected_revision: 1,
+                    document_json: &winner_doc,
+                    node_count: 1,
+                    connection_count: 0,
+                    now: 200,
+                })
+                .await
+        };
+        let call_b = async {
+            repo_b
+                .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                    owner_id: &owner_id,
+                    project_id: CREATIVE_PROJECT_A,
+                    assistant_message_id: ASSISTANT,
+                    assistant_message_content_json: &assistant_contents[0],
+                    ops_fingerprint: &"d".repeat(64),
+                    ops_json: r#"[{"type":"add_node"}]"#,
+                    results_json: r#"[{"type":"node_added","node_id":"b"}]"#,
+                    expected_revision: 1,
+                    document_json: &loser_doc,
+                    node_count: 1,
+                    connection_count: 0,
+                    now: 201,
+                })
+                .await
+        };
+        let (a, b) = tokio::join!(call_a, call_b);
+        let a = a.unwrap();
+        let b = b.unwrap();
+        assert_ne!(a.replayed, b.replayed);
+        assert_eq!(a.receipt.results_json, b.receipt.results_json);
+        let current = repo
+            .get_creative_project(CREATIVE_PROJECT_A)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.revision, 2);
+        assert_eq!(current.node_count, 1);
+    }
+
+    #[tokio::test]
+    async fn creative_workflow_crud_and_revision_compare_and_swap() {
         let (repo, _db) = repo().await;
-        repo.create_canvas(CANVAS_1, "a", 100).await.unwrap();
-        repo.create_canvas(CANVAS_2, "b", 200).await.unwrap();
-        let all = repo.list_canvases().await.unwrap();
-        assert_eq!(all[0].id, 2);
-        assert_eq!(all[0].canvas_id, CANVAS_2);
-        assert_eq!(all[1].id, 1);
-        assert_eq!(all[1].canvas_id, CANVAS_1);
+        let definition = format!(
+            r#"{{"id":"{CREATIVE_WORKFLOW_A}","revision":1,"metadata":{{"name":"海报","description":"","category":"电商","visibility":"private","tags":[],"createdAt":100,"updatedAt":100}},"output":{{"kind":"single-image"}},"variables":[],"templates":[],"steps":[]}}"#
+        );
+        let created = repo
+            .create_creative_workflow(&CreativeStudioWorkflowRow {
+                id: 0,
+                workflow_id: CREATIVE_WORKFLOW_A.into(),
+                revision: 1,
+                name: "海报".into(),
+                description: String::new(),
+                category: "电商".into(),
+                visibility: "private".into(),
+                definition_json: definition,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .await
+            .unwrap();
+        assert_eq!(created.revision, 1);
+
+        let changed = CreativeStudioWorkflowRow {
+            id: created.id,
+            workflow_id: CREATIVE_WORKFLOW_A.into(),
+            revision: 2,
+            name: "海报 2".into(),
+            description: "更新".into(),
+            category: "营销".into(),
+            visibility: "public".into(),
+            definition_json: format!(
+                r#"{{"id":"{CREATIVE_WORKFLOW_A}","revision":2,"metadata":{{"name":"海报 2"}}}}"#
+            ),
+            created_at: 100,
+            updated_at: 200,
+        };
+        let saved = repo
+            .save_creative_workflow(CREATIVE_WORKFLOW_A, 1, &changed)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, 2);
+        assert_eq!(saved.name, "海报 2");
+
+        let stale = repo
+            .save_creative_workflow(CREATIVE_WORKFLOW_A, 1, &changed)
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, DbError::Conflict(_)));
+        assert_eq!(repo.list_creative_workflows().await.unwrap().len(), 1);
+
+        repo.delete_creative_workflow(CREATIVE_WORKFLOW_A)
+            .await
+            .unwrap();
+        assert!(repo
+            .get_creative_workflow(CREATIVE_WORKFLOW_A)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn creative_workflow_run_crud_filter_and_revision_compare_and_swap() {
+        let (repo, _db) = repo().await;
+        let aggregate = |revision: i64, status: &str| {
+            serde_json::json!({
+                "kind": "nomifun.creative-studio.workflow-run",
+                "version": 1,
+                "revision": revision,
+                "workflowSnapshot": {
+                    "id": CREATIVE_WORKFLOW_A,
+                    "revision": 3
+                },
+                "request": {
+                    "id": CREATIVE_WORKFLOW_RUN_A,
+                    "workflowId": CREATIVE_WORKFLOW_A,
+                    "workflowRevision": 3,
+                    "referenceAssetIds": [ASSET_1]
+                },
+                "record": {
+                    "requestId": CREATIVE_WORKFLOW_RUN_A,
+                    "workflowId": CREATIVE_WORKFLOW_A,
+                    "status": status
+                }
+            })
+            .to_string()
+        };
+        let requested_row = CreativeStudioWorkflowRunRow {
+            id: 0,
+            workflow_run_id: CREATIVE_WORKFLOW_RUN_A.into(),
+            workflow_id: CREATIVE_WORKFLOW_A.into(),
+            workflow_revision: 3,
+            revision: 1,
+            status: "requested".into(),
+            step_ids_json: serde_json::to_string(&[CREATIVE_WORKFLOW_STEP_A]).unwrap(),
+            aggregate_json: aggregate(1, "requested"),
+            created_at: 100,
+            updated_at: 100,
+        };
+        let missing_asset = repo
+            .create_creative_workflow_run(&requested_row, &[ASSET_1.into()])
+            .await
+            .unwrap_err();
+        assert!(matches!(missing_asset, DbError::Conflict(_)));
+        repo.create_asset(&sample_asset(0, ASSET_1, "image", "run input"))
+            .await
+            .unwrap();
+        let created = repo
+            .create_creative_workflow_run(&requested_row, &[ASSET_1.into()])
+            .await
+            .unwrap();
+        assert_eq!(created.revision, 1);
+        assert!(matches!(
+            repo.delete_asset(ASSET_1).await,
+            Err(DbError::Conflict(message)) if message.contains(CREATIVE_WORKFLOW_RUN_A)
+        ));
+        assert_eq!(
+            repo.list_creative_workflow_runs(Some(CREATIVE_WORKFLOW_A))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let replacement = CreativeStudioWorkflowRunRow {
+            revision: 2,
+            status: "queued".into(),
+            aggregate_json: aggregate(2, "queued"),
+            updated_at: 110,
+            ..created
+        };
+        let saved = repo
+            .save_creative_workflow_run(CREATIVE_WORKFLOW_RUN_A, 1, &replacement)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, 2);
+        assert_eq!(saved.status, "queued");
+
+        let stale = repo
+            .save_creative_workflow_run(CREATIVE_WORKFLOW_RUN_A, 1, &replacement)
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, DbError::Conflict(_)));
+        let missing = repo
+            .save_creative_workflow_run(
+                "0190f5fe-7c00-7a00-8abc-000000000175",
+                1,
+                &CreativeStudioWorkflowRunRow {
+                    workflow_run_id: "0190f5fe-7c00-7a00-8abc-000000000175".into(),
+                    ..replacement
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(missing, DbError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn creative_archive_import_rolls_back_project_and_assets_together() {
+        let (repo, _db) = repo().await;
+        let document_json = format!(
+            r#"{{"schema":"nomifun.creative-studio/v1","projectId":"{CREATIVE_PROJECT_A}","nodes":[]}}"#
+        );
+        let project = CreativeStudioProjectRow {
+            id: 0,
+            project_id: CREATIVE_PROJECT_A.into(),
+            title: "原子导入".into(),
+            revision: 1,
+            node_count: 0,
+            connection_count: 0,
+            document_json,
+            created_at: 100,
+            updated_at: 100,
+        };
+        let first = sample_asset(0, ASSET_1, "image", "first");
+        let duplicate = sample_asset(0, ASSET_1, "image", "duplicate");
+
+        let error = repo
+            .import_creative_project_with_assets(&project, &[first, duplicate])
+            .await
+            .unwrap_err();
+        assert!(matches!(error, DbError::Query(_)));
+        assert!(
+            repo.get_creative_project(CREATIVE_PROJECT_A)
+                .await
+                .unwrap()
+                .is_none(),
+            "project insert must roll back with the asset failure"
+        );
+        assert!(
+            repo.get_asset(ASSET_1).await.unwrap().is_none(),
+            "the first asset insert must also roll back"
+        );
     }
 
     #[tokio::test]
@@ -667,7 +2227,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn asset_origin_uses_creation_task_business_id_only() {
+    async fn asset_origin_requires_exact_canonical_task_owner() {
         let (repo, db) = repo().await;
         let provider_id = nomifun_common::generate_id();
         sqlx::query(
@@ -680,25 +2240,101 @@ mod tests {
         .await
         .unwrap();
         let creation_task_id = nomifun_common::generate_id();
+        let project_id = nomifun_common::generate_id();
+        let node_id = nomifun_common::generate_id();
+        let document = serde_json::json!({
+            "schema": "nomifun.creative-studio/v1",
+            "projectId": project_id,
+            "nodes": []
+        });
+        sqlx::query(
+            "INSERT INTO creative_studio_projects \
+             (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+             VALUES (?, 'Asset Origin Project', 1, 0, 0, ?, 1, 1)",
+        )
+        .bind(&project_id)
+        .bind(document.to_string())
+        .execute(db.pool())
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO creation_tasks \
-             (creation_task_id, provider_id, model, capability, params, status, submitted_at) \
-             VALUES (?, ?, 'model', 'image', '{}', 'succeeded', 1)",
+             (creation_task_id, project_id, node_id, provider_id, model, capability, params, status, \
+              submitted_at, request_fingerprint) \
+             VALUES (?, ?, ?, ?, 'model', 'image', '{}', 'succeeded', 1, \
+              '{\"asset_origin_fixture\":true}')",
         )
         .bind(&creation_task_id)
+        .bind(&project_id)
+        .bind(&node_id)
         .bind(&provider_id)
         .execute(db.pool())
         .await
         .unwrap();
 
         let mut valid = sample_asset(1, ASSET_1, "image", "business origin");
-        valid.origin =
-            Some(serde_json::json!({ "creation_task_id": creation_task_id.clone() }).to_string());
+        valid.origin = Some(
+            serde_json::json!({
+                "project_id": project_id,
+                "node_id": node_id,
+                "creation_task_id": creation_task_id.clone()
+            })
+            .to_string(),
+        );
         let created = repo.create_asset(&valid).await.unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(created.origin.as_deref().unwrap())
                 .unwrap()["creation_task_id"],
             creation_task_id
+        );
+
+        let standalone_task_id = nomifun_common::generate_id();
+        sqlx::query(
+            "INSERT INTO creation_tasks \
+             (creation_task_id, project_id, workbench_kind, provider_id, model, capability, params, \
+              input_bindings, status, submitted_at, request_fingerprint) \
+             VALUES (?, ?, 'video', ?, 'model', 't2v', '{}', '[]', 'running', 1, \
+              '{\"asset_origin_fixture\":\"standalone\"}')",
+        )
+        .bind(&standalone_task_id)
+        .bind(&project_id)
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let standalone_asset_id = nomifun_common::generate_id();
+        let mut standalone = sample_asset(
+            2,
+            &standalone_asset_id,
+            "video",
+            "standalone task owner",
+        );
+        standalone.origin = Some(
+            serde_json::json!({
+                "project_id": project_id,
+                "workbench_kind": "video",
+                "creation_task_id": standalone_task_id
+            })
+            .to_string(),
+        );
+        let standalone_created = repo.create_asset(&standalone).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(standalone_created.origin.as_deref().unwrap())
+                .unwrap()["workbench_kind"],
+            "video"
+        );
+
+        let mut wrong_owner = sample_asset(2, ASSET_2, "image", "wrong task owner");
+        wrong_owner.origin = Some(
+            serde_json::json!({ "creation_task_id": creation_task_id.clone() }).to_string(),
+        );
+        assert!(
+            matches!(
+                repo.create_asset(&wrong_owner).await,
+                Err(DbError::Conflict(message))
+                    if message.contains("owner does not match creation task")
+            ),
+            "origin ownership must exactly match the referenced task"
         );
 
         let mut missing_parent = sample_asset(2, ASSET_2, "image", "missing task");
@@ -851,18 +2487,135 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_canvas_thumbnail_and_asset_thumb() {
-        let (repo, _db) = repo().await;
-        repo.create_canvas(CANVAS_A, "画布", 1).await.unwrap();
-        let thumbnail = format!("workshop/canvases/{CANVAS_A}/thumb.jpg");
-        let c = repo.set_canvas_thumbnail(CANVAS_A, &thumbnail, 5).await.unwrap();
-        assert_eq!(c.thumbnail_rel_path.as_deref(), Some(thumbnail.as_str()));
-        assert_eq!(c.updated_at, 5);
-        assert!(matches!(
-            repo.set_canvas_thumbnail("nope", "x", 1).await.unwrap_err(),
-            DbError::NotFound(_)
-        ));
+    async fn task_input_and_result_assets_remain_restricted_after_retirement() {
+        let (repo, db) = repo().await;
+        repo.create_creative_project(
+            CREATIVE_PROJECT_A,
+            "task assets",
+            &format!(
+                r#"{{"schema":"nomifun.creative-studio/v1","projectId":"{CREATIVE_PROJECT_A}","nodes":[]}}"#
+            ),
+            1,
+        )
+        .await
+        .unwrap();
+        repo.create_asset(&sample_asset(1, ASSET_1, "image", "input"))
+            .await
+            .unwrap();
+        repo.create_asset(&sample_asset(2, ASSET_2, "image", "result"))
+            .await
+            .unwrap();
+        let provider_id = nomifun_common::generate_id();
+        sqlx::query(
+            "INSERT INTO providers \
+             (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, created_at, updated_at) \
+             VALUES (?, 'test', 'retire provider', 'https://example.invalid', 'bearer', '', 1, 1)",
+        )
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let task_id = nomifun_common::generate_id();
+        let inputs = serde_json::json!([{
+            "asset_id": ASSET_1,
+            "kind": "image",
+            "role": "reference"
+        }]);
+        sqlx::query(
+            "INSERT INTO creation_tasks \
+             (creation_task_id, project_id, workbench_kind, provider_id, model, capability, params, \
+              input_bindings, status, result_asset_ids, submitted_at, finished_at, deleted_at, request_fingerprint) \
+             VALUES (?, ?, 'image', ?, 'model', 'i2i', '{}', ?, 'succeeded', ?, 1, 2, 3, '{}')",
+        )
+        .bind(&task_id)
+        .bind(CREATIVE_PROJECT_A)
+        .bind(&provider_id)
+        .bind(inputs.to_string())
+        .bind(serde_json::to_string(&[ASSET_2]).unwrap())
+        .execute(db.pool())
+        .await
+        .unwrap();
 
+        for (asset_id, kind) in [(ASSET_1, "input"), (ASSET_2, "result")] {
+            assert!(matches!(
+                repo.delete_asset(asset_id).await,
+                Err(DbError::Conflict(message)) if message.contains(kind) && message.contains(&task_id)
+            ));
+        }
+        assert!(
+            sqlx::query("DELETE FROM workshop_assets WHERE asset_id = ?")
+                .bind(ASSET_2)
+                .execute(db.pool())
+                .await
+                .is_err(),
+            "database trigger is the final task-result deletion guard"
+        );
+    }
+
+    #[tokio::test]
+    async fn project_delete_rejects_live_tasks_but_keeps_terminal_history() {
+        let (repo, db) = repo().await;
+        repo.create_creative_project(
+            CREATIVE_PROJECT_A,
+            "live task owner",
+            &format!(
+                r#"{{"schema":"nomifun.creative-studio/v1","projectId":"{CREATIVE_PROJECT_A}","nodes":[]}}"#
+            ),
+            1,
+        )
+        .await
+        .unwrap();
+        let provider_id = nomifun_common::generate_id();
+        sqlx::query(
+            "INSERT INTO providers \
+             (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, created_at, updated_at) \
+             VALUES (?, 'test', 'project gate provider', 'https://example.invalid', 'bearer', '', 1, 1)",
+        )
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let task_id = nomifun_common::generate_id();
+        sqlx::query(
+            "INSERT INTO creation_tasks \
+             (creation_task_id, project_id, workbench_kind, provider_id, model, capability, params, \
+              input_bindings, status, submitted_at, request_fingerprint) \
+             VALUES (?, ?, 'video', ?, 'model', 't2v', '{}', '[]', 'queued', 1, '{}')",
+        )
+        .bind(&task_id)
+        .bind(CREATIVE_PROJECT_A)
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        assert!(matches!(
+            repo.delete_creative_project(CREATIVE_PROJECT_A).await,
+            Err(DbError::Conflict(message)) if message.contains("live creation task")
+        ));
+        sqlx::query(
+            "UPDATE creation_tasks SET status = 'failed', finished_at = 2, deleted_at = 3 \
+             WHERE creation_task_id = ?",
+        )
+        .bind(&task_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        repo.delete_creative_project(CREATIVE_PROJECT_A)
+            .await
+            .unwrap();
+        let retained: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM creation_tasks WHERE creation_task_id = ? AND deleted_at = 3",
+        )
+        .bind(&task_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(retained, 1, "terminal tombstone survives project deletion");
+    }
+
+    #[tokio::test]
+    async fn set_asset_thumb() {
+        let (repo, _db) = repo().await;
         repo.create_asset(&sample_asset(1, ASSET_T, "image", "img")).await.unwrap();
         let thumb = format!("workshop/assets/thumbs/{ASSET_T}.jpg");
         repo.set_asset_thumb(ASSET_T, &thumb, 6).await.unwrap();

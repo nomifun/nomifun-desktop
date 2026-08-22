@@ -819,8 +819,8 @@ impl ChannelMessageService {
                 {
                     return Some(StreamAction::ArtifactsProduced(data.artifacts.clone()));
                 }
-                // A completed tool call may carry produced workshop asset ids in
-                // its output JSON (nomi_workshop_get_task/generate `result_asset_ids`).
+                // A completed tool call may carry produced Creative Studio asset
+                // ids in its output JSON (`result_asset_ids`).
                 // Surface those as MediaProduced so the relay can send the picture;
                 // otherwise keep the cosmetic {name,status} progress update.
                 if matches!(
@@ -1041,8 +1041,8 @@ pub enum StreamAction {
     StopDenied {
         target_conversation_id: String,
     },
-    /// One or more workshop asset ids produced by a *completed* tool call
-    /// (e.g. `nomi_workshop_get_task` `result_asset_ids`). The relay resolves
+    /// One or more Creative Studio asset ids produced by a *completed* tool call
+    /// (e.g. `nomi_creative_studio_get_task` `result_asset_ids`). The relay resolves
     /// each to bytes and sends it as media after the final text.
     MediaProduced(Vec<String>),
     /// Verified workspace artifacts attached directly to a completed tool
@@ -1569,10 +1569,10 @@ mod tests {
     }
 
     #[test]
-    fn completed_workshop_tool_call_produces_media() {
+    fn completed_creative_studio_tool_call_produces_media() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "c1".into(),
-            name: "nomi_workshop_get_task".into(),
+            name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
             description: None,
@@ -1627,7 +1627,7 @@ mod tests {
     fn running_tool_call_still_produces_tool_call_status() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "c1".into(),
-            name: "nomi_workshop_generate".into(),
+            name: "nomi_creative_studio_generate".into(),
             args: serde_json::Value::Null,
             status: ToolCallStatus::Running,
             description: None,

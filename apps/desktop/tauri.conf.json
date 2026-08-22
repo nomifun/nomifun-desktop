@@ -19,7 +19,11 @@
     "active": true,
     "targets": ["nsis", "app", "dmg", "appimage", "deb", "rpm"],
     "resources": {
-      "../../ui/dist/": "webui-dist/"
+      "../../ui/dist/": "webui-dist/",
+      "../../LICENSE": "LICENSE",
+      "../../NOTICE": "NOTICE",
+      "../../third_party/infinite-canvas/LICENSE": "third_party/infinite-canvas/LICENSE",
+      "../../third_party/infinite-canvas/SOURCE.md": "third_party/infinite-canvas/SOURCE.md"
     },
     "icon": [
       "icons/32x32.png",
@@ -32,6 +36,10 @@
       "webviewInstallMode": {
         "type": "downloadBootstrapper",
         "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "template": "nsis/installer.nsi"
       }
     }
   },

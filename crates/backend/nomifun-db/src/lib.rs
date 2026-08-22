@@ -21,13 +21,15 @@ pub use models::{
     AgentExecutionTemplateRow,
     AgentMetadataRow,
     ConversationArtifactRow, IdmmActionReservationRow,
-    CreateKnowledgeTagParams, CreationTaskRow, CronJobRunRow, CronRunReservationRow,
+    CreateKnowledgeTagParams, CreationTaskRow, CreativeStudioAgentProposalReceiptRow,
+    CreativeStudioProjectRow, CreativeStudioWorkflowRow, CreativeStudioWorkflowRunRow, CronJobRunRow,
+    CronRunReservationRow,
     KnowledgeBaseRow, KnowledgeBindingRow,
     KnowledgeTagRow, SkillTagRow, TagSettingRow, TerminalSessionRow, TerminalTurnAdmissionRow,
     UpdateAgentHandshakeParams,
     UpdateKnowledgeTagParams,
     UpsertAgentMetadataParams, UpsertSkillTagParams, WebhookRow,
-    WorkshopAssetRow, WorkshopCanvasRow, ConversationExecutionLinkRow,
+    WorkshopAssetRow, ConversationExecutionLinkRow,
 };
 pub use models::{
     CreatePresetTagParams, PresetAgentPreferenceRow, PresetExampleRow,
@@ -100,13 +102,14 @@ pub use repository::{
     IdmmActionReservationKey, IdmmActionReserveResult, IdmmActionSettleResult,
     IdmmActionSettlement, IdmmActionTurnIdentity, IKnowledgeRepository,
     IMcpServerRepository, IOAuthTokenRepository,
-    IProviderConnectionRepository, IProviderModelCapabilityRepository, IProviderModelRepository,
-    IProviderRepository,
+    CoordinatedProviderModelDelete, IProviderConnectionRepository,
+    IProviderModelCapabilityRepository, IProviderModelRepository, IProviderRepository,
     IRequirementRepository, ISettingsRepository, ISkillTagRepository,
     ITagSettingRepository, ITerminalRepository, IUserRepository, IWebhookRepository,
     ListRequirementsParams, RequirementClaim, RequirementClaimResolution,
     MAX_IDMM_ACTION_FAILURE_REASON_CHARS, PER_TARGET_CAP, PER_USER_ACTIVITY_CAP,
-    ReserveIdmmActionParams,
+    ReserveIdmmActionParams, ResolveCreativeStudioAgentSessionParams,
+    ResolvedCreativeStudioAgentSession,
     SqliteAgentMetadataRepository, SqliteAttachmentRepository,
     SqliteAgentExecutionRepository,
     SqliteAgentExecutionTemplateRepository,
@@ -115,6 +118,7 @@ pub use repository::{
     SqliteIdmmInterventionRepository, SqliteKnowledgeRepository, SqliteMcpServerRepository,
     SqliteOAuthTokenRepository,
     SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
+    ProviderModelCleanupPlan, ProviderModelProjectCleanup, ProviderModelWorkflowCleanup,
     SqliteProviderModelRepository, SqliteProviderRepository,
     SqliteRequirementRepository, SqliteSettingsRepository,
     SqliteSkillTagRepository, SqliteTagSettingRepository, SqliteTerminalRepository,
@@ -128,9 +132,12 @@ pub use repository::{
 };
 // 创意工坊 (Creative Workshop) + 生成引擎 (creation) repository traits + sqlite impls + params.
 pub use repository::{
-    AssetSort, CreateCreationTaskParams, ICreationTaskRepository, IWorkshopRepository, ListAssetsParams,
-    ListCreationTasksParams, SqliteCreationTaskRepository, SqliteWorkshopRepository,
-    UpdateAssetParams, UpdateCreationTaskParams,
+    ApplyCreativeAgentProposalParams, AssetSort, CreateCreativeTaskParams,
+    CreationTaskPageCursorRef, CreativeAgentProposalCommit, CreativeTaskOwnerRef,
+    ICreationTaskRepository, IWorkshopRepository, IdempotentCreationTask, ListAssetsParams,
+    ListStandaloneWorkbenchTasksParams, RetireStandaloneWorkbenchTasksParams,
+    SqliteCreationTaskRepository, SqliteWorkshopRepository, UpdateAssetParams,
+    UpdateCreationTaskParams,
 };
 
 // Re-export sqlx (and its pool type) for downstream crates that run ad-hoc

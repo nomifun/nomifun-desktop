@@ -59,7 +59,10 @@ pub use id::{
     AgentId, AttachmentId, ChannelPendingPromptId, ChannelPluginId, ChannelSessionId, ChannelUserId,
     CompanionEventId, CompanionEvolutionFeedbackId, CompanionId,
     CompanionMemoryId, CompanionSessionWindowId, CompanionSkillId, CompanionSkillPatternId,
-    ConversationArtifactId, ConversationId, CreationTaskId, CronJobId, CronJobRunId,
+    ConversationArtifactId, ConversationId, CreationTaskId, CreativeStudioConnectionId,
+    CreativeStudioNodeId, CreativeStudioProjectId,
+    CreativeStudioWorkflowId, CreativeStudioWorkflowRunId, CreativeStudioWorkflowStepId,
+    CronJobId, CronJobRunId,
     CsAgentId, CsNoteId,
     EntityId, FigureId,
     IdmmInterventionId, KnowledgeBaseId, KnowledgeBindingId, McpServerId, MessageId,
@@ -67,8 +70,7 @@ pub use id::{
     PersistedArtifactId, PresetId, PresetTagId, PreviewSnapshotId, ProviderId,
     RemoteAgentId, TerminalId, UUID_STRING_LEN,
     RequirementId, SshHostId, UserId, UuidV7Error, WebhookId,
-    WorkshopAssetId, WorkshopCanvasId, WorkshopEdgeId, WorkshopNodeId, generate_id,
-    validate_uuidv7,
+    WorkshopAssetId, generate_id, validate_uuidv7,
 };
 pub use scoped_auth::{
     LOOPBACK_CAPABILITY_RENEW_PATH, LOOPBACK_CAPABILITY_RENEWAL_MARGIN_SECS,

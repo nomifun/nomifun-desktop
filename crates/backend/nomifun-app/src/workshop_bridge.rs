@@ -903,9 +903,11 @@ fn ext_for_mime(mime: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nomifun_common::{CreativeStudioNodeId, CreativeStudioProjectId};
     use nomifun_db::{
-        CreateCreationTaskParams, ICreationTaskRepository, SqliteCreationTaskRepository,
-        SqliteWorkshopRepository, init_database_memory,
+        CreateCreativeTaskParams, CreativeTaskOwnerRef, ICreationTaskRepository,
+        SqliteCreationTaskRepository, SqliteWorkshopRepository, UpdateCreationTaskParams,
+        init_database_memory,
     };
     use serde_json::json;
 
@@ -1014,18 +1016,50 @@ mod tests {
         .execute(db.pool())
         .await
         .unwrap();
+        let project_id = CreativeStudioProjectId::new().into_string();
+        let node_id = CreativeStudioNodeId::new().into_string();
+        let document = json!({
+            "schema": "nomifun.creative-studio/v1",
+            "projectId": project_id,
+            "nodes": []
+        });
+        nomifun_db::sqlx::query(
+            "INSERT INTO creative_studio_projects \
+             (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+             VALUES (?, 'Bridge Fixture', 1, 0, 0, ?, 1, 1)",
+        )
+        .bind(&project_id)
+        .bind(document.to_string())
+        .execute(db.pool())
+        .await
+        .unwrap();
         let repo = SqliteCreationTaskRepository::new(db.pool().clone());
-        repo.create_task(CreateCreationTaskParams {
+        let fingerprint = json!({"bridge_fixture": creation_task_id}).to_string();
+        repo.get_or_create_creative_task(CreateCreativeTaskParams {
             creation_task_id,
-            canvas_id: None,
-            node_id: None,
+            owner: CreativeTaskOwnerRef::CanvasNode {
+                project_id: &project_id,
+                node_id: &node_id,
+            },
             provider_id: &provider_id,
             model: "fixture",
-            capability: "image",
+            capability: "t2i",
             params: "{}",
-            status: "succeeded",
+            input_bindings: "[]",
+            request_fingerprint: &fingerprint,
+            status: "queued",
             submitted_at: 1,
         })
+        .await
+        .unwrap();
+        repo.update_task(
+            creation_task_id,
+            UpdateCreationTaskParams {
+                status: Some("succeeded"),
+                finished_at: Some(Some(1)),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     }

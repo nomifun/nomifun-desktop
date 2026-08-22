@@ -49,7 +49,10 @@ pub use channel::{
 };
 pub use client_preference::ClientPreference;
 pub use companion_token::CompanionApiTokenRow;
-pub use conversation::{ConversationDeliveryNotifyRow, ConversationDeliveryReceiptRow, ConversationRow};
+pub use conversation::{
+    ConversationDeliveryNotifyRow, ConversationDeliveryReceiptRow, ConversationRow,
+    CreativeStudioAgentSessionBindingRow,
+};
 pub use conversation_artifact::ConversationArtifactRow;
 pub use cron_job::CronJobRow;
 pub use cron_job_run::{CronJobRunRow, CronRunReservationRow};
@@ -83,4 +86,7 @@ pub use terminal_session::TerminalSessionRow;
 pub use terminal_turn::TerminalTurnAdmissionRow;
 pub use user::User;
 pub use webhook::WebhookRow;
-pub use workshop::{CreationTaskRow, WorkshopAssetRow, WorkshopCanvasRow};
+pub use workshop::{
+    CreationTaskRow, CreativeStudioAgentProposalReceiptRow, CreativeStudioProjectRow,
+    CreativeStudioWorkflowRow, CreativeStudioWorkflowRunRow, WorkshopAssetRow,
+};

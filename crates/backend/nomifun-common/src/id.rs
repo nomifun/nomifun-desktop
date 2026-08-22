@@ -350,8 +350,28 @@ define_entity_id!(
     CompanionEvolutionFeedbackId
 );
 define_entity_id!(
-    /// Globally unique workshop-canvas identifier.
-    WorkshopCanvasId
+    /// Globally unique canonical Creative Studio project identifier.
+    CreativeStudioProjectId
+);
+define_entity_id!(
+    /// Globally unique node identifier inside a canonical Creative Studio project.
+    CreativeStudioNodeId
+);
+define_entity_id!(
+    /// Globally unique connection identifier inside a canonical Creative Studio project.
+    CreativeStudioConnectionId
+);
+define_entity_id!(
+    /// Globally unique canonical Creative Studio workflow identifier.
+    CreativeStudioWorkflowId
+);
+define_entity_id!(
+    /// Globally unique canonical Creative Studio workflow-run identifier.
+    CreativeStudioWorkflowRunId
+);
+define_entity_id!(
+    /// Globally unique step identifier inside a canonical workflow definition.
+    CreativeStudioWorkflowStepId
 );
 define_entity_id!(
     /// Globally unique customer-service agent (客服员工) identifier.
@@ -368,14 +388,6 @@ define_entity_id!(
 define_entity_id!(
     /// Globally unique creation-task identifier.
     CreationTaskId
-);
-define_entity_id!(
-    /// Globally unique node identifier within a durable workshop canvas doc.
-    WorkshopNodeId
-);
-define_entity_id!(
-    /// Globally unique edge identifier within a durable workshop canvas doc.
-    WorkshopEdgeId
 );
 define_entity_id!(
     /// Globally unique MCP-server configuration identifier.

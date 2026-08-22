@@ -1,0 +1,14 @@
+{
+  "title": "创意工坊",
+  "focus": {
+    "backToWorkbench": "返回工作台"
+  },
+  "navigation": {
+    "label": "创意工坊",
+    "projects": "我的画布",
+    "image": "生图工作台",
+    "video": "视频创作台",
+    "prompts": "提示词库",
+    "assets": "我的素材"
+  }
+}

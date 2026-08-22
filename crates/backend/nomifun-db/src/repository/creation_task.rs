@@ -8,8 +8,21 @@ use crate::models::CreationTaskRow;
 /// JSON strings the caller builds.
 #[async_trait::async_trait]
 pub trait ICreationTaskRepository: Send + Sync {
-    /// Insert a task (typically `status = "queued"`).
-    async fn create_task(&self, params: CreateCreationTaskParams<'_>) -> Result<CreationTaskRow, DbError>;
+    /// Atomically insert or recover one canonical Creative Studio task.
+    ///
+    /// `creation_task_id` is the caller's UUIDv7 Idempotency-Key. An existing
+    /// row is returned only when its persisted canonical request fingerprint
+    /// is byte-for-byte identical; reusing a key for another request is a
+    /// conflict. `inserted` is the sole authority for spawning a worker.
+    async fn get_or_create_creative_task(
+        &self,
+        params: CreateCreativeTaskParams<'_>,
+    ) -> Result<IdempotentCreationTask, DbError> {
+        let _ = params;
+        Err(DbError::Init(
+            "canonical creative task idempotency is unavailable in this repository".into(),
+        ))
+    }
 
     /// One task by stable business id, or `None`.
     async fn get_task(
@@ -17,9 +30,30 @@ pub trait ICreationTaskRepository: Send + Sync {
         creation_task_id: &str,
     ) -> Result<Option<CreationTaskRow>, DbError>;
 
-    /// Filtered listing (optional canvas / status), newest-submitted first,
-    /// capped by `limit`.
-    async fn list_tasks(&self, params: ListCreationTasksParams<'_>) -> Result<Vec<CreationTaskRow>, DbError>;
+    /// Newest-first keyset page for one exact standalone-workbench aggregate.
+    /// Implementations fetch `limit + 1` rows so the service can derive an
+    /// opaque continuation cursor without a count query.
+    async fn list_standalone_workbench_tasks_page(
+        &self,
+        params: ListStandaloneWorkbenchTasksParams<'_>,
+    ) -> Result<Vec<CreationTaskRow>, DbError> {
+        let _ = params;
+        Err(DbError::Init(
+            "standalone workbench task paging is unavailable in this repository".into(),
+        ))
+    }
+
+    /// Atomically tombstone one exact terminal standalone-owner batch. Existing
+    /// tombstones are idempotent. Implementations return rows in request order.
+    async fn retire_standalone_workbench_tasks(
+        &self,
+        params: RetireStandaloneWorkbenchTasksParams<'_>,
+    ) -> Result<Vec<CreationTaskRow>, DbError> {
+        let _ = params;
+        Err(DbError::Init(
+            "standalone workbench task retirement is unavailable in this repository".into(),
+        ))
+    }
 
     /// Complete task inventory for boot-time artifact reconciliation. Unlike
     /// the paginated API listing, this intentionally has no 500-row cap.
@@ -59,29 +93,72 @@ pub trait ICreationTaskRepository: Send + Sync {
     async fn list_live_tasks(&self) -> Result<Vec<CreationTaskRow>, DbError>;
 }
 
-/// Params for [`ICreationTaskRepository::create_task`]. SQLite allocates the
-/// technical `id`; the caller supplies the stable UUIDv7 business id and clock.
-#[derive(Debug)]
-pub struct CreateCreationTaskParams<'a> {
+#[derive(Debug, Clone)]
+pub struct IdempotentCreationTask {
+    pub row: CreationTaskRow,
+    pub inserted: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CreationTaskPageCursorRef<'a> {
+    pub submitted_at: i64,
     pub creation_task_id: &'a str,
-    pub canvas_id: Option<&'a str>,
-    pub node_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ListStandaloneWorkbenchTasksParams<'a> {
+    pub project_id: &'a str,
+    pub workbench_kind: &'a str,
+    pub active_only: bool,
+    pub before: Option<CreationTaskPageCursorRef<'a>>,
+    /// Requested visible page size. The repository reads one additional row.
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetireStandaloneWorkbenchTasksParams<'a> {
+    pub project_id: &'a str,
+    pub workbench_kind: &'a str,
+    pub task_ids: &'a [String],
+    pub deleted_at: i64,
+}
+
+/// Strict canonical Creative Studio task owner. No field is shared between
+/// the two branches, so callers cannot accidentally reinterpret a workflow
+/// step as a canvas node.
+#[derive(Debug, Clone, Copy)]
+pub enum CreativeTaskOwnerRef<'a> {
+    CanvasNode {
+        project_id: &'a str,
+        node_id: &'a str,
+    },
+    StandaloneWorkbench {
+        project_id: &'a str,
+        workbench_kind: &'a str,
+    },
+    WorkflowStep {
+        workflow_id: &'a str,
+        workflow_run_id: &'a str,
+        workflow_step_id: &'a str,
+    },
+}
+
+/// Canonical Creative Studio create parameters. The exact tagged owner and
+/// request are persisted for durable idempotency comparison.
+#[derive(Debug)]
+pub struct CreateCreativeTaskParams<'a> {
+    pub creation_task_id: &'a str,
+    pub owner: CreativeTaskOwnerRef<'a>,
     pub provider_id: &'a str,
     pub model: &'a str,
     pub capability: &'a str,
-    /// JSON parameter snapshot.
     pub params: &'a str,
+    /// Canonical ordered JSON array of `{asset_id,kind,role}` objects. New
+    /// writes must always supply it, including `[]` for no inputs.
+    pub input_bindings: &'a str,
+    pub request_fingerprint: &'a str,
     pub status: &'a str,
     pub submitted_at: i64,
-}
-
-/// Filters for [`ICreationTaskRepository::list_tasks`].
-#[derive(Debug, Default)]
-pub struct ListCreationTasksParams<'a> {
-    pub canvas_id: Option<&'a str>,
-    pub status: Option<&'a str>,
-    /// Max rows (clamped by the caller).
-    pub limit: i64,
 }
 
 /// Partial-update params for [`ICreationTaskRepository::update_task`]. Each

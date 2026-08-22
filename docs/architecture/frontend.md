@@ -69,6 +69,11 @@ The source of truth is
 | `/requirements`, `/requirements/extensions`, `/requirements/sources` | Requirements Platform, AutoWork, notification/source extensions. |
 | `/nomi` | Companion configuration. |
 | `/knowledge`, `/knowledge/:id` | Knowledge base list/detail. |
+| `/workshop` | Creative Studio focused shell and project kickoff home. |
+| `/workshop/projects` | Creative Studio project center. |
+| `/workshop/canvas/:projectId`, `/workshop/director/:projectId` | Project-bound infinite canvas and bounded 3D Director. |
+| `/workshop/image`, `/workshop/video` | Project-owned standalone generation workbenches. |
+| `/workshop/prompts`, `/workshop/assets`, `/workshop/workflows` | Prompt, asset, and private-workflow libraries. |
 | `/mini-apps` | Mini-app library — the published single-file web tools, as a card grid. |
 | `/mini-apps/:id` | Mini-app runner — a single column: the PUBLISHED snapshot in a sandboxed iframe served straight from the backend, plus a toolbar (publish / 「继续迭代」 / refresh / open in browser / rename / delete). No conversation UI is mounted here; 「继续迭代」 provisions the working copy and navigates to an ordinary `/conversation/:id`, so the `pages/conversation/**` module graph never enters this route. |
 | `/settings/system` and related settings subroutes | System settings page and sub-sections. |
@@ -77,6 +82,12 @@ Legacy settings paths such as `/settings/model`, `/settings/agent`,
 `/settings/capabilities`, `/settings/skills-hub`, `/settings/tools`,
 `/settings/webui` and `/settings/webhook` are
 redirects. Do not document them as primary navigation.
+
+Creative Studio owns the full-screen focused shell rather than the normal app
+sidebar layout. Its route constants and exact-match rules live in
+[`pages/creativeStudio/app/routes.ts`](../../ui/src/renderer/pages/creativeStudio/app/routes.ts).
+`/workshop/audio` is retired; audio creation is available through canvas audio
+nodes, not a standalone route.
 
 Agent collaboration has no standalone route or separate page. Its
 AgentExecution projection is rendered inside the owning Conversation, so

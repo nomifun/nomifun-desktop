@@ -1,0 +1,54 @@
+.dismissLayer {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+}
+
+.contextMenu,
+.nodeMenuSurface {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid var(--color-border-2);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-bg-2) 97%, transparent);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
+  color: var(--color-text-1);
+  backdrop-filter: blur(18px) saturate(120%);
+}
+
+.contextMenu {
+  display: flex;
+  width: 188px;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px;
+}
+
+.contextMenu button {
+  appearance: none;
+  min-height: 36px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-2);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+}
+
+.contextMenu button:hover,
+.contextMenu button:focus-visible {
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
+  outline: none;
+}
+
+.contextMenu button[data-danger='true'] {
+  color: rgb(var(--danger-6));
+}
+
+.nodeMenuSurface {
+  width: 288px;
+  padding: 11px;
+}

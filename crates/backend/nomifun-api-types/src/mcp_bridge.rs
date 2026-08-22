@@ -568,7 +568,7 @@ impl GatewayMcpConfig {
         "browser",
         "computer",
         "agent_execution",
-        "workshop",
+        "creative_studio",
     ];
     pub const ADMIN_DOMAINS: &'static [&'static str] = &[
         "system",
@@ -583,7 +583,7 @@ impl GatewayMcpConfig {
         "memory",
         "provider",
         "confirmation",
-        "workshop",
+        "creative_studio",
     ];
     const EMPTY_DOMAINS: &'static [&'static str] = &[];
 
@@ -1384,12 +1384,16 @@ mod tests {
                 .contains(&"requirement")
         );
         // Ordinary conversations and companion sessions both use the work
-        // profile, so neither may call 创意工坊 tools. The dedicated desktop and
-        // admin profiles retain the domain for explicitly privileged surfaces.
-        assert!(!GatewayMcpConfig::WORK_DOMAINS.contains(&"workshop"));
-        assert!(GatewayMcpConfig::DESKTOP_DOMAINS.contains(&"workshop"));
-        assert!(GatewayMcpConfig::ADMIN_DOMAINS.contains(&"workshop"));
-        assert!(!GatewayMcpConfig::LITE_DOMAINS.contains(&"workshop"));
+        // profile, so neither may call Creative Studio tools. The dedicated
+        // desktop and admin profiles retain the new canonical domain.
+        assert!(!GatewayMcpConfig::WORK_DOMAINS.contains(&"creative_studio"));
+        assert!(
+            GatewayMcpConfig::DESKTOP_DOMAINS.contains(&"creative_studio")
+        );
+        assert!(GatewayMcpConfig::ADMIN_DOMAINS.contains(&"creative_studio"));
+        assert!(!GatewayMcpConfig::LITE_DOMAINS.contains(&"creative_studio"));
+        assert!(!GatewayMcpConfig::DESKTOP_DOMAINS.contains(&"workshop"));
+        assert!(!GatewayMcpConfig::ADMIN_DOMAINS.contains(&"workshop"));
         assert!(GatewayMcpConfig::WORK_DOMAINS.contains(&"agent_execution"));
         assert!(GatewayMcpConfig::DESKTOP_DOMAINS.contains(&"agent_execution"));
         assert!(!GatewayMcpConfig::LITE_DOMAINS.contains(&"agent_execution"));

@@ -24,7 +24,9 @@ use nomifun_customer_service::customer_service_routes;
 use nomifun_miniapp::{miniapp_public_routes, miniapp_routes};
 use nomifun_workshop::{workshop_public_routes, workshop_routes};
 use nomifun_creation::creation_routes;
-use nomifun_conversation::{conversation_ops_routes, conversation_routes};
+use nomifun_conversation::{
+    conversation_ops_routes, conversation_routes, creative_studio_agent_session_routes,
+};
 use nomifun_cron::cron_routes;
 use nomifun_extension::{extension_routes, hub_routes, skill_routes};
 use nomifun_file::file_routes;
@@ -276,15 +278,9 @@ pub async fn create_router(services: &AppServices) -> Router {
         ),
         idmm_service: states.idmm.service.clone(),
         knowledge_service: services.knowledge_service.clone(),
-        // 创意工坊 canvas index: a fresh repo over the same pool the workshop
-        // routes/service use, backing the read-only nomi_workshop_list_canvases cap.
-        workshop_repo: Arc::new(nomifun_db::SqliteWorkshopRepository::new(
-            services.database.pool().clone(),
-        )),
-        // 创意工坊 canvas/asset + 生成引擎 services: the SAME singletons the
-        // `/api/workshop/*` + `/api/creation/*` routes use, so the 画布助手 agent-op
-        // queue is shared (gateway enqueues; an open frontend polls/acks the same
-        // in-memory queue) and generation tasks land on the one live task queue.
+        // Creative Studio project/asset + generation services: the SAME
+        // singletons used by `/api/creative-studio/*`, so Gateway operations and
+        // product requests observe one project store and one live task queue.
         workshop_service: services.workshop_service.clone(),
         creation_service: services.creation_service.clone(),
         auto_work_runner: states.requirement.auto_work_runner.clone(),
@@ -732,6 +728,12 @@ pub fn create_router_with_all_state(
     let conversation_authenticated = conversation_routes(states.conversation.clone())
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
+    let creative_studio_agent_session_authenticated = protect_instance_owner(
+        creative_studio_agent_session_routes(states.conversation.clone()),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
+
     let conversation_ops_authenticated = conversation_ops_routes(states.conversation)
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
@@ -855,12 +857,11 @@ pub fn create_router_with_all_state(
         &instance_owner_state,
     );
 
-    // 创意工坊 (Creative Workshop) canvas/asset routes + 生成引擎 (creation) task
-    // routes — owner-only management surface, behind auth middleware (same as
-    // knowledge). The read-only binary serve routes (`/files/{id}`,
-    // `/canvas-thumbs/{id}`) are split off into `workshop_public_routes` below,
-    // mounted auth-exempt like the companion figure images. `states.workshop`
-    // is cloned so both routers share the one live service (agent-op queue etc).
+    // Creative Studio project/asset/workflow routes plus generation task routes
+    // — owner-only management surfaces behind auth middleware. The read-only
+    // `/api/creative-studio/files/{id}` asset channel is split into
+    // `workshop_public_routes` below because browser media elements cannot send
+    // the local-trust header. Both routers share one live service.
     let workshop_authenticated = protect_instance_owner(
         workshop_routes(states.workshop.clone()),
         &auth_mw_state,
@@ -1090,6 +1091,7 @@ pub fn create_router_with_all_state(
         .merge(knowledge_registration_read_authenticated)
         .merge(knowledge_registration_write_local)
         .merge(conversation_authenticated)
+        .merge(creative_studio_agent_session_authenticated)
         .merge(conversation_ops_authenticated)
         .merge(ssh_host_authenticated)
         .merge(miniapp_authenticated)

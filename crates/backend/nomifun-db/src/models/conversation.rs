@@ -50,6 +50,21 @@ pub struct ConversationRow {
     pub updated_at: TimestampMs,
 }
 
+/// Server-owned durable ownership row for one Creative Studio Agent session.
+/// The selected model remains authoritative on the linked Conversation row;
+/// this relation contains identity only and cannot drift into a second model
+/// configuration source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CreativeStudioAgentSessionBindingRow {
+    pub id: i64,
+    pub owner_id: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub conversation_id: String,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ConversationDeliveryReceiptRow {
     pub id: i64,

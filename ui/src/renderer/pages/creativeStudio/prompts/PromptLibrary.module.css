@@ -1,0 +1,541 @@
+.surface {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  color: var(--color-text-1);
+  background: var(--color-bg-1);
+}
+
+.page {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  padding: clamp(22px, 3vw, 38px);
+  background-image: radial-gradient(
+    color-mix(in srgb, var(--color-text-3) 17%, transparent) 0.8px,
+    transparent 0.8px
+  );
+  background-size: 18px 18px;
+}
+
+.sidebar {
+  height: 100%;
+  overflow: hidden;
+  border-right: 1px solid var(--color-border-2);
+  background: var(--color-bg-2);
+}
+
+.inner {
+  display: flex;
+  width: min(1180px, 100%);
+  min-height: 0;
+  flex-direction: column;
+  margin: 0 auto;
+}
+
+.sidebar .inner {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 20px;
+}
+
+.sidebar .header {
+  padding: 16px 14px 0;
+  margin-bottom: 14px;
+}
+
+.title {
+  margin: 0;
+  color: var(--color-text-1);
+  font-size: clamp(24px, 3vw, 38px);
+  font-weight: 720;
+  letter-spacing: -0.035em;
+  line-height: 1.1;
+}
+
+.sidebar .title {
+  font-size: 18px;
+  letter-spacing: -0.02em;
+}
+
+.description {
+  max-width: 680px;
+  margin: 9px 0 0;
+  color: var(--color-text-3);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.sidebar .description {
+  margin-top: 5px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.refreshButton,
+.insertButton,
+.resetButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 9px;
+  color: var(--color-text-1);
+  background: var(--color-bg-2);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+
+.refreshButton {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+}
+
+.refreshButton:hover,
+.resetButton:hover {
+  border-color: var(--color-border-3);
+  background: var(--color-fill-2);
+}
+
+.refreshButton:focus-visible,
+.insertButton:focus-visible,
+.resetButton:focus-visible,
+.chip:focus-visible,
+.cardBody:focus-visible {
+  outline: 2px solid rgb(var(--primary-6));
+  outline-offset: 2px;
+}
+
+.spinning {
+  animation: promptLibrarySpin 900ms linear infinite;
+}
+
+.toolbar {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--color-bg-2) 92%, transparent);
+}
+
+.sidebar .toolbar {
+  gap: 10px;
+  padding: 0 14px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--color-border-2);
+  border-radius: 0;
+  background: transparent;
+}
+
+.searchField {
+  display: flex;
+  height: 40px;
+  align-items: center;
+  gap: 9px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 10px;
+  color: var(--color-text-3);
+  background: var(--color-bg-1);
+}
+
+.searchField:focus-within {
+  border-color: rgb(var(--primary-6));
+  box-shadow: 0 0 0 2px color-mix(in srgb, rgb(var(--primary-6)) 14%, transparent);
+}
+
+.searchField input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  color: var(--color-text-1);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+}
+
+.searchField input::placeholder {
+  color: var(--color-text-3);
+}
+
+.facetRow {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.facetLabel {
+  padding-top: 5px;
+  color: var(--color-text-3);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.chips {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  min-height: 26px;
+  padding: 3px 9px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--color-text-2);
+  background: var(--color-fill-2);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.chip:hover {
+  color: var(--color-text-1);
+  background: var(--color-fill-3);
+}
+
+.chipActive {
+  border-color: color-mix(in srgb, rgb(var(--primary-6)) 28%, transparent);
+  color: rgb(var(--primary-6));
+  background: color-mix(in srgb, rgb(var(--primary-6)) 11%, var(--color-bg-2));
+}
+
+.statusLine {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 2px 7px;
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.sidebar .statusLine {
+  padding: 9px 14px 5px;
+}
+
+.warning {
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--color-warning-6) 30%, var(--color-border-2));
+  border-radius: 9px;
+  color: var(--color-text-2);
+  background: color-mix(in srgb, var(--color-warning-1) 68%, var(--color-bg-2));
+  font-size: 11px;
+}
+
+.sidebar .warning {
+  margin: 7px 14px 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(265px, 100%), 1fr));
+  gap: 12px;
+  padding-top: 6px;
+}
+
+.sidebar .grid {
+  grid-template-columns: 1fr;
+  gap: 8px;
+  overflow-y: auto;
+  padding: 6px 10px 14px;
+}
+
+.card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--color-border-2);
+  border-radius: 13px;
+  background: var(--color-bg-2);
+  box-shadow: 0 8px 24px color-mix(in srgb, #000 5%, transparent);
+  transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.card:hover {
+  transform: translateY(-1px);
+  border-color: var(--color-border-3);
+  box-shadow: 0 12px 28px color-mix(in srgb, #000 8%, transparent);
+}
+
+.selected {
+  border-color: color-mix(in srgb, rgb(var(--primary-6)) 62%, var(--color-border-2));
+  box-shadow: 0 0 0 2px color-mix(in srgb, rgb(var(--primary-6)) 10%, transparent);
+}
+
+.cardBody {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  flex: 1;
+  padding: 15px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.sidebar .cardBody {
+  padding: 12px;
+}
+
+.cardHeading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.cardIcon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  place-items: center;
+  border-radius: 8px;
+  color: rgb(var(--primary-6));
+  background: color-mix(in srgb, rgb(var(--primary-6)) 10%, var(--color-fill-2));
+}
+
+.cardTitle {
+  min-width: 0;
+  overflow: hidden;
+  margin: 0;
+  color: var(--color-text-1);
+  font-size: 14px;
+  font-weight: 680;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.category {
+  margin-left: auto;
+  color: var(--color-text-3);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.cardDescription,
+.promptPreview {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  margin: 10px 0 0;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.cardDescription {
+  -webkit-line-clamp: 2;
+}
+
+.promptPreview {
+  -webkit-line-clamp: 4;
+  color: var(--color-text-2);
+  white-space: pre-wrap;
+}
+
+.sidebar .cardDescription {
+  display: none;
+}
+
+.sidebar .promptPreview {
+  -webkit-line-clamp: 3;
+}
+
+.tagList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 12px;
+}
+
+.tag {
+  max-width: 130px;
+  overflow: hidden;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: var(--color-text-3);
+  background: var(--color-fill-2);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cardFooter {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 11px;
+  border-top: 1px solid var(--color-border-1);
+  color: var(--color-text-3);
+  font-size: 10px;
+}
+
+.insertButton {
+  min-height: 28px;
+  padding: 4px 10px;
+  border-color: color-mix(in srgb, rgb(var(--primary-6)) 22%, transparent);
+  color: rgb(var(--primary-6));
+  background: color-mix(in srgb, rgb(var(--primary-6)) 9%, var(--color-bg-2));
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.insertButton:hover {
+  background: color-mix(in srgb, rgb(var(--primary-6)) 15%, var(--color-bg-2));
+}
+
+.state {
+  display: grid;
+  min-height: 260px;
+  place-items: center;
+  padding: 28px;
+  text-align: center;
+}
+
+.sidebar .state {
+  min-height: 190px;
+}
+
+.stateIcon {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  margin: 0 auto 12px;
+  border-radius: 14px;
+  color: var(--color-text-3);
+  background: var(--color-fill-2);
+}
+
+.stateTitle {
+  margin: 0;
+  color: var(--color-text-1);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.stateDescription {
+  max-width: 390px;
+  margin: 7px auto 0;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.resetButton {
+  min-height: 30px;
+  padding: 5px 11px;
+  margin-top: 14px;
+  font-size: 11px;
+}
+
+.skeletonGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(265px, 100%), 1fr));
+  gap: 12px;
+  padding-top: 8px;
+}
+
+.sidebar .skeletonGrid {
+  grid-template-columns: 1fr;
+  padding: 8px 10px;
+}
+
+.skeleton {
+  height: 190px;
+  border: 1px solid var(--color-border-1);
+  border-radius: 13px;
+  background: linear-gradient(
+    100deg,
+    var(--color-fill-1) 25%,
+    var(--color-fill-2) 42%,
+    var(--color-fill-1) 60%
+  );
+  background-size: 220% 100%;
+  animation: promptLibrarySkeleton 1.2s ease-in-out infinite;
+}
+
+.sidebar .skeleton {
+  height: 150px;
+}
+
+@keyframes promptLibrarySpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes promptLibrarySkeleton {
+  to {
+    background-position-x: -220%;
+  }
+}
+
+@media (max-width: 680px) {
+  .page {
+    padding: 18px 14px;
+  }
+
+  .header {
+    gap: 12px;
+  }
+
+  .description {
+    display: none;
+  }
+
+  .toolbar {
+    padding: 12px;
+  }
+
+  .facetRow {
+    grid-template-columns: 1fr;
+    gap: 5px;
+  }
+
+  .facetLabel {
+    padding: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinning,
+  .skeleton {
+    animation: none;
+  }
+
+  .card,
+  .refreshButton,
+  .insertButton,
+  .resetButton {
+    transition: none;
+  }
+}

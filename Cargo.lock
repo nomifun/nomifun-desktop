@@ -6229,6 +6229,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -6914,20 +6915,28 @@ dependencies = [
 name = "nomifun-workshop"
 version = "0.6.5"
 dependencies = [
+ "async-trait",
  "axum",
+ "hex",
  "image",
  "mime_guess",
  "nomifun-api-types",
  "nomifun-auth",
  "nomifun-common",
  "nomifun-db",
+ "regex",
+ "reqwest 0.12.28",
  "schemars 1.2.1",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
+ "uuid",
+ "zip 2.4.2",
 ]
 
 [[package]]

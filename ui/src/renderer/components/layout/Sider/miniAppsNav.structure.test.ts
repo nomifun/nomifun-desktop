@@ -30,12 +30,12 @@ describe('mini-apps rail navigation', () => {
     expect(siderSource.includes("isActive={pathname === '/mini-apps'}")).toBe(false);
   });
 
-  test('the entry sits in the 常用 group directly after the workshop', () => {
-    const workshopAt = siderSource.indexOf('<SiderWorkshopEntry');
+  test('the entry sits in the 常用 group directly after Creative Studio', () => {
+    const creativeStudioAt = siderSource.indexOf('<SiderCreativeStudioEntry');
     const miniAppsAt = siderSource.indexOf('<SiderMiniAppsEntry');
     const dataSectionAt = siderSource.indexOf("t('common.siderSection.data')");
-    expect(workshopAt).toBeGreaterThan(-1);
-    expect(miniAppsAt).toBeGreaterThan(workshopAt);
+    expect(creativeStudioAt).toBeGreaterThan(-1);
+    expect(miniAppsAt).toBeGreaterThan(creativeStudioAt);
     expect(miniAppsAt).toBeLessThan(dataSectionAt);
   });
 

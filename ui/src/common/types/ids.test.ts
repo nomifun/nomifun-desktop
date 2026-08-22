@@ -14,6 +14,9 @@ import {
   parseChannelUserId,
   parseConversationId,
   parseConversationArtifactId,
+  parseCreativeStudioConnectionId,
+  parseCreativeStudioNodeId,
+  parseCreativeStudioProjectId,
   parseCreationTaskId,
   parseCronJobId,
   parseCronJobRunId,
@@ -29,8 +32,6 @@ import {
   parseRequirementId,
   parseTerminalId,
   parseWebhookId,
-  parseWorkshopEdgeId,
-  parseWorkshopNodeId,
   terminalTarget,
   tryParseEntityId,
 } from './ids';
@@ -135,11 +136,14 @@ describe('entity ids', () => {
     expect(parseCompanionEvolutionFeedbackId('0190f5fe-7c00-7a00-8000-000000000003')).toBe(
       '0190f5fe-7c00-7a00-8000-000000000003',
     );
-    expect(parseWorkshopNodeId('0190f5fe-7c00-7a00-8000-000000000004')).toBe(
+    expect(parseCreativeStudioProjectId('0190f5fe-7c00-7a00-8000-000000000004')).toBe(
       '0190f5fe-7c00-7a00-8000-000000000004',
     );
-    expect(parseWorkshopEdgeId('0190f5fe-7c00-7a00-8000-000000000005')).toBe(
+    expect(parseCreativeStudioNodeId('0190f5fe-7c00-7a00-8000-000000000005')).toBe(
       '0190f5fe-7c00-7a00-8000-000000000005',
+    );
+    expect(parseCreativeStudioConnectionId('0190f5fe-7c00-7a00-8000-000000000006')).toBe(
+      '0190f5fe-7c00-7a00-8000-000000000006',
     );
   });
 

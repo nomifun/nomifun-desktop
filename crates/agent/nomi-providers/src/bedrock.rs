@@ -360,9 +360,15 @@ impl LlmProvider for BedrockProvider {
 
         // AWS event stream uses binary framing.
         tokio::spawn(async move {
-            let outcome = process_aws_event_stream(response, &tx, &stream_redactor)
-                .await
-                .redacted(&stream_redactor);
+            let Some(outcome) = crate::retry::until_receiver_closed(&tx, async {
+                process_aws_event_stream(response, &tx, &stream_redactor)
+                    .await
+                    .redacted(&stream_redactor)
+            })
+            .await
+            else {
+                return;
+            };
             crate::retry::finish_stream_with_retry(
                 outcome,
                 &tx,

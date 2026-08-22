@@ -71,6 +71,11 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "conversation_mcp_servers",
     "conversations",
     "creation_tasks",
+    "creative_studio_agent_proposal_receipts",
+    "creative_studio_agent_sessions",
+    "creative_studio_projects",
+    "creative_studio_workflow_runs",
+    "creative_studio_workflows",
     "cron_job_runs",
     "cron_run_reservations",
     "cron_jobs",
@@ -122,7 +127,6 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "users",
     "webhooks",
     "workshop_assets",
-    "workshop_canvases",
 ];
 
 /// Business columns that carry a bare canonical UUIDv7 for every populated row.
@@ -145,6 +149,10 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("conversation_artifacts", "conversation_artifact_id"),
     ("conversations", "conversation_id"),
     ("creation_tasks", "creation_task_id"),
+    ("creative_studio_agent_sessions", "session_id"),
+    ("creative_studio_projects", "project_id"),
+    ("creative_studio_workflow_runs", "workflow_run_id"),
+    ("creative_studio_workflows", "workflow_id"),
     ("cron_job_runs", "cron_job_run_id"),
     ("cron_run_reservations", "cron_job_run_id"),
     ("cron_jobs", "cron_job_id"),
@@ -170,12 +178,14 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("users", "user_id"),
     ("webhooks", "webhook_id"),
     ("workshop_assets", "asset_id"),
-    ("workshop_canvases", "canvas_id"),
 ];
 
 /// Canonical UUIDv7 values owned by a managed side store rather than a
 /// relational entity row in SQLite.
-const UUIDV7_MANAGED_VALUE_COLUMNS: &[(&str, &str)] = &[("creation_tasks", "node_id")];
+const UUIDV7_MANAGED_VALUE_COLUMNS: &[(&str, &str)] = &[
+    ("creation_tasks", "node_id"),
+    ("creation_tasks", "workflow_step_id"),
+];
 
 /// `_id` columns that are identities, operation tokens, platform handles, or
 /// opaque remote handles rather than relational links. Every other physical
@@ -221,6 +231,11 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("creation_tasks", "creation_task_id"),
     ("creation_tasks", "node_id"),
     ("creation_tasks", "remote_task_id"),
+    ("creation_tasks", "workflow_step_id"),
+    ("creative_studio_agent_sessions", "session_id"),
+    ("creative_studio_projects", "project_id"),
+    ("creative_studio_workflow_runs", "workflow_run_id"),
+    ("creative_studio_workflows", "workflow_id"),
     ("cs_agents", "cs_agent_id"),
     ("cs_dialogues", "cs_dialogue_id"),
     ("cs_dialogues", "chat_id"),
@@ -244,7 +259,6 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("users", "user_id"),
     ("webhooks", "webhook_id"),
     ("workshop_assets", "asset_id"),
-    ("workshop_canvases", "canvas_id"),
 ];
 
 const PARTIAL_UNIQUE_INDEXES: &[PartialUniqueIndexContract] = &[
@@ -689,8 +703,20 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     // Audit events are retained after the agent is deleted; retention-days
     // cleanup is the only pruning authority.
     text_ref!("cs_audit_events", "cs_agent_id" => "cs_agents", "cs_agent_id", false, "idx_cs_audit_agent_time", KeepHistory),
-    text_ref!("creation_tasks", "canvas_id" => "workshop_canvases", "canvas_id", true, "idx_creation_tasks_canvas_id", SetNull),
+    // Canonical Creative Studio task history survives project deletion, while
+    // creation itself still locks and validates a live project row.
+    text_ref!("creation_tasks", "project_id" => "creative_studio_projects", "project_id", true, "idx_creation_tasks_project_id", KeepHistory),
+    text_ref!("creation_tasks", "workflow_id" => "creative_studio_workflows", "workflow_id", true, "idx_creation_tasks_workflow_id", KeepHistory),
+    text_ref!("creation_tasks", "workflow_run_id" => "creative_studio_workflow_runs", "workflow_run_id", true, "idx_creation_tasks_workflow_run_id", KeepHistory)
+        .with_aggregate_scope("parent.workflow_id = child.workflow_id"),
     text_ref!("creation_tasks", "provider_id" => "providers", "provider_id", false, "idx_creation_tasks_provider_id", Restrict),
+    text_ref!("creative_studio_workflow_runs", "workflow_id" => "creative_studio_workflows", "workflow_id", false, "idx_creative_workflow_runs_workflow_id", KeepHistory),
+    text_ref!("creative_studio_agent_proposal_receipts", "project_id" => "creative_studio_projects", "project_id", false, "idx_creative_agent_proposal_receipts_project", Cascade),
+    text_ref!("creative_studio_agent_proposal_receipts", "assistant_message_id" => "messages", "message_id", false, "idx_creative_agent_proposal_receipts_assistant_message", Restrict),
+    text_ref!("creative_studio_agent_sessions", "owner_id" => "users", "user_id", false, "idx_creative_agent_sessions_owner", Restrict),
+    text_ref!("creative_studio_agent_sessions", "project_id" => "creative_studio_projects", "project_id", false, "idx_creative_agent_sessions_project", Restrict),
+    text_ref!("creative_studio_agent_sessions", "conversation_id" => "conversations", "conversation_id", false, "idx_creative_agent_sessions_conversation", Restrict)
+        .with_aggregate_scope("parent.user_id = child.owner_id"),
     text_ref!("idmm_action_reservations", "user_id" => "users", "user_id", false, "idx_idmm_action_reservations_user_id", Cascade),
     text_ref!("idmm_action_reservations", "conversation_id" => "conversations", "conversation_id", false, "idx_idmm_action_reservations_conversation_id", Cascade)
         .with_aggregate_scope("parent.user_id = child.user_id"),
@@ -835,9 +861,24 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
         "providers", "provider_id", "idx_workshop_assets_origin_provider_id", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
-        "workshop_assets", "origin", "$.canvas_id",
-        "SELECT json_extract(origin, '$.canvas_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
-        "workshop_canvases", "canvas_id", "idx_workshop_assets_origin_canvas_id", KeepHistory, AllowMissingHistoricalParent
+        "workshop_assets", "origin", "$.project_id",
+        "SELECT json_extract(origin, '$.project_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
+        "creative_studio_projects", "project_id", "idx_workshop_assets_origin_project_id", KeepHistory, AllowMissingHistoricalParent
+    ),
+    json_text_ref!(
+        "workshop_assets", "origin", "$.workflow_id",
+        "SELECT json_extract(origin, '$.workflow_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
+        "creative_studio_workflows", "workflow_id", "idx_workshop_assets_origin_workflow_id", KeepHistory, AllowMissingHistoricalParent
+    ),
+    json_text_ref!(
+        "workshop_assets", "origin", "$.workflow_run_id",
+        "SELECT json_extract(origin, '$.workflow_run_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
+        "creative_studio_workflow_runs", "workflow_run_id", "idx_workshop_assets_origin_workflow_run_id", KeepHistory, AllowMissingHistoricalParent
+    ),
+    json_external_ref!(
+        "workshop_assets", "origin", "$.workflow_step_id",
+        "SELECT json_extract(origin, '$.workflow_step_id') AS value FROM workshop_assets WHERE origin IS NOT NULL",
+        "idx_workshop_assets_origin_workflow_step_id", KeepHistory
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.creation_task_id",
@@ -850,9 +891,14 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
         "idx_workshop_assets_origin_node_id", KeepHistory
     ),
     json_text_ref!(
+        "creation_tasks", "input_bindings", "$[].asset_id",
+        "SELECT json_extract(item.value, '$.asset_id') AS value FROM creation_tasks, json_each(creation_tasks.input_bindings) item WHERE creation_tasks.input_bindings IS NOT NULL" =>
+        "workshop_assets", "asset_id", "idx_creation_tasks_input_bindings_json", Restrict, RequireParent
+    ),
+    json_text_ref!(
         "creation_tasks", "result_asset_ids", "$[]",
         "SELECT item.value AS value FROM creation_tasks, json_each(creation_tasks.result_asset_ids) item" =>
-        "workshop_assets", "asset_id", "idx_creation_tasks_result_asset_ids_json", SetNull, RequireParent
+        "workshop_assets", "asset_id", "idx_creation_tasks_result_asset_ids_json", Restrict, RequireParent
     ),
     json_text_ref!(
         "client_preferences", "value", "$.queue[].provider_id",
@@ -955,6 +1001,20 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
     validate_no_row_id_columns(pool).await?;
 
     validate_business_id_registry(pool).await?;
+    require_column(
+        pool,
+        "creative_studio_agent_proposal_receipts",
+        "assistant_message_id",
+        "TEXT",
+        true,
+    )
+    .await?;
+    require_single_column_unique_index(
+        pool,
+        "creative_studio_agent_proposal_receipts",
+        "assistant_message_id",
+    )
+    .await?;
     require_column(pool, "conversations", "admission_epoch", "INTEGER", true).await?;
     require_column(
         pool,
@@ -1342,6 +1402,13 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             ],
         ),
         (
+            "restrict_workshop_asset_delete_creation_task_refs",
+            &[
+                "BEFORE DELETE ON WORKSHOP_ASSETS",
+                "RAISE(ABORT, 'WORKSHOP ASSET IS REFERENCED BY CREATION TASK INPUT OR RESULT')",
+            ],
+        ),
+        (
             "trg_channel_plugins_owner_domain_insert_guard",
             &[
                 "BEFORE INSERT ON CHANNEL_PLUGINS",
@@ -1666,6 +1733,46 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
                 "RAISE(ABORT, 'TERMINAL TURN ADMISSION CAPABILITY IS REQUIRED AND IMMUTABLE')",
             ],
         ),
+        (
+            "validate_creation_task_input_bindings_insert",
+            &[
+                "BEFORE INSERT ON CREATION_TASKS",
+                "RAISE(ABORT, 'INVALID CREATION TASK INPUT BINDING')",
+            ],
+        ),
+        (
+            "validate_creation_task_input_bindings_update",
+            &[
+                "BEFORE UPDATE OF INPUT_BINDINGS ON CREATION_TASKS",
+                "RAISE(ABORT, 'INVALID CREATION TASK INPUT BINDING')",
+            ],
+        ),
+        (
+            "validate_creative_asset_origin_insert",
+            &[
+                "BEFORE INSERT ON WORKSHOP_ASSETS",
+                "RAISE(ABORT, 'UNSUPPORTED CREATIVE ASSET ORIGIN ID KEY')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN PROJECT_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKBENCH_KIND')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_RUN_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_STEP_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET OWNER BRANCH')",
+            ],
+        ),
+        (
+            "validate_creative_asset_origin_update",
+            &[
+                "BEFORE UPDATE OF ORIGIN ON WORKSHOP_ASSETS",
+                "RAISE(ABORT, 'UNSUPPORTED CREATIVE ASSET ORIGIN ID KEY')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN PROJECT_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKBENCH_KIND')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_RUN_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_STEP_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET OWNER BRANCH')",
+            ],
+        ),
     ];
     let trigger_rows =
         sqlx::query("SELECT name, sql FROM sqlite_schema WHERE type = 'trigger' ORDER BY name")
@@ -1856,7 +1963,10 @@ async fn require_workshop_asset_origin_id_contract(
     pool: &SqlitePool,
 ) -> Result<(), DbError> {
     let create_sql: String = sqlx::query_scalar(
-        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'workshop_assets'",
+        "SELECT group_concat(sql, ' ') FROM sqlite_schema \
+         WHERE (type = 'table' AND name = 'workshop_assets') \
+            OR name IN ('validate_creative_asset_origin_insert', \
+                        'validate_creative_asset_origin_update')",
     )
     .fetch_one(pool)
     .await?;
@@ -1869,6 +1979,20 @@ async fn require_workshop_asset_origin_id_contract(
         "CREATIONTASKID",
     ] {
         let fragment = format!("JSON_TYPE(ORIGIN, '$.{retired_key}') IS NULL");
+        if !normalized.contains(&fragment) {
+            return Err(DbError::Init(format!(
+                "v3 workshop_assets.origin contract permits unsupported field {retired_key}"
+            )));
+        }
+    }
+    for retired_key in [
+        "PROJECTID",
+        "WORKBENCHKIND",
+        "WORKFLOWID",
+        "WORKFLOWRUNID",
+        "WORKFLOWSTEPID",
+    ] {
+        let fragment = format!("JSON_TYPE(NEW.ORIGIN, '$.{retired_key}') IS NOT NULL");
         if !normalized.contains(&fragment) {
             return Err(DbError::Init(format!(
                 "v3 workshop_assets.origin contract permits unsupported field {retired_key}"
@@ -1900,6 +2024,31 @@ async fn require_workshop_asset_origin_id_contract(
             }
         }
     }
+    for key in [
+        "PROJECT_ID",
+        "WORKFLOW_ID",
+        "WORKFLOW_RUN_ID",
+        "WORKFLOW_STEP_ID",
+    ] {
+        let fragments = [
+            format!("JSON_TYPE(NEW.ORIGIN, '$.{key}') IS NOT NULL"),
+            format!("JSON_TYPE(NEW.ORIGIN, '$.{key}') IS 'TEXT'"),
+            format!("LENGTH(JSON_EXTRACT(NEW.ORIGIN, '$.{key}')) = 36"),
+            format!(
+                "JSON_EXTRACT(NEW.ORIGIN, '$.{key}') GLOB '????????-????-7???-[89AB]???-????????????'"
+            ),
+            format!(
+                "REPLACE(JSON_EXTRACT(NEW.ORIGIN, '$.{key}'), '-', '') NOT GLOB '*[^0-9A-F]*'"
+            ),
+        ];
+        for fragment in fragments {
+            if !normalized.contains(&fragment) {
+                return Err(DbError::Init(format!(
+                    "v3 workshop_assets.origin {key} contract is missing trigger fragment {fragment}"
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1923,9 +2072,15 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
         for retired_key in [
             "task_id",
             "providerId",
+            "canvas_id",
             "canvasId",
             "nodeId",
             "creationTaskId",
+            "projectId",
+            "workbenchKind",
+            "workflowId",
+            "workflowRunId",
+            "workflowStepId",
         ] {
             if object.contains_key(retired_key) {
                 return Err(DbError::Init(format!(
@@ -1935,9 +2090,12 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
         }
         for key in [
             "provider_id",
-            "canvas_id",
             "node_id",
             "creation_task_id",
+            "project_id",
+            "workflow_id",
+            "workflow_run_id",
+            "workflow_step_id",
         ] {
             let Some(value) = object.get(key) else {
                 continue;
@@ -1952,6 +2110,43 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
                     "v3 workshop asset {asset_id} origin.{key}={value:?} is invalid: {error}"
                 ))
             })?;
+        }
+        let has_project = object.contains_key("project_id");
+        let has_node = object.contains_key("node_id");
+        let has_workbench = object.contains_key("workbench_kind");
+        if let Some(kind) = object.get("workbench_kind") {
+            let valid = kind
+                .as_str()
+                .is_some_and(|kind| matches!(kind, "image" | "video" | "audio"));
+            if !valid {
+                return Err(DbError::Init(format!(
+                    "v3 workshop asset {asset_id} origin.workbench_kind is invalid"
+                )));
+            }
+        }
+        let has_workflow = ["workflow_id", "workflow_run_id", "workflow_step_id"]
+            .iter()
+            .any(|key| object.contains_key(*key));
+        let canvas_owner = has_project && has_node && !has_workbench;
+        let standalone_owner = has_project && !has_node && has_workbench;
+        if (has_project || has_node || has_workbench)
+            && (!canvas_owner && !standalone_owner || has_workflow)
+        {
+            return Err(DbError::Init(format!(
+                "v3 workshop asset {asset_id} origin has an invalid project owner branch"
+            )));
+        }
+        if has_workflow
+            && (!["workflow_id", "workflow_run_id", "workflow_step_id"]
+                .iter()
+                .all(|key| object.contains_key(*key))
+                || object.contains_key("project_id")
+                || object.contains_key("node_id")
+                || object.contains_key("workbench_kind"))
+        {
+            return Err(DbError::Init(format!(
+                "v3 workshop asset {asset_id} origin has an invalid workflow-step owner branch"
+            )));
         }
     }
     Ok(())
@@ -2758,13 +2953,33 @@ mod tests {
         .await
         .expect("provider");
         let creation_task_id = nomifun_common::CreationTaskId::new();
+        let project_id = nomifun_common::CreativeStudioProjectId::new();
+        let node_id = nomifun_common::CreativeStudioNodeId::new();
+        let document = serde_json::json!({
+            "schema": "nomifun.creative-studio/v1",
+            "projectId": project_id.as_str(),
+            "nodes": []
+        });
+        sqlx::query(
+            "INSERT INTO creative_studio_projects \
+             (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+             VALUES (?, 'Creation Contract', 1, 0, 0, ?, 1, 1)",
+        )
+        .bind(project_id.as_str())
+        .bind(document.to_string())
+        .execute(pool)
+        .await
+        .expect("project");
         sqlx::query(
             "INSERT INTO creation_tasks \
-             (creation_task_id, provider_id, model, capability, params, status, \
-              result_asset_ids, submitted_at, finished_at) \
-             VALUES (?, ?, 'model', 't2i', '{}', 'succeeded', '[]', 1, 2)",
+             (creation_task_id, project_id, node_id, provider_id, model, capability, params, status, \
+              result_asset_ids, submitted_at, finished_at, request_fingerprint) \
+             VALUES (?, ?, ?, ?, 'model', 't2i', '{}', 'succeeded', '[]', 1, 2, \
+              '{\"contract\":\"invalid-success\"}')",
         )
         .bind(creation_task_id.as_str())
+        .bind(project_id.as_str())
+        .bind(node_id.as_str())
         .bind(provider_id.as_str())
         .execute(pool)
         .await

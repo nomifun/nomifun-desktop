@@ -59,6 +59,8 @@ use tracing::{debug, error, info, warn};
 /// service's private repos; file kept separate to protect service.rs size).
 #[path = "summon.rs"]
 pub mod summon;
+#[path = "creative_studio_agent_session.rs"]
+pub mod creative_studio_agent_session;
 
 use crate::convert::{
     TOOL_CONTENT_COMPACT_THRESHOLD_BYTES, message_needs_artifact_history_audit,
@@ -130,6 +132,18 @@ fn terminal_error_requires_nomi_session_recovery(
     code: Option<nomifun_api_types::AgentErrorCode>,
 ) -> bool {
     terminal_error_requires_runtime_retirement(code)
+}
+
+/// Product-owned persistence target used only by the Creative Studio session
+/// resolver. The ordinary public create DTO cannot select this path.
+#[derive(Debug, Clone)]
+pub(super) struct CreativeStudioAgentCreationTarget {
+    pub project_id: String,
+    pub session_id: String,
+    pub expected_provider_id: String,
+    pub expected_model: String,
+    pub expected_pending_turn_idempotency_key: Option<String>,
+    pub create_if_missing: bool,
 }
 
 tokio::task_local! {
@@ -2479,6 +2493,25 @@ impl ConversationService {
         &self.conversation_repo
     }
 
+    pub(crate) async fn ensure_not_creative_studio_agent_session(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        operation: &str,
+    ) -> Result<(), AppError> {
+        if self
+            .conversation_repo
+            .find_creative_studio_agent_session_by_conversation(user_id, conversation_id)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::Conflict(format!(
+                "Creative Studio Agent conversations cannot be {operation} through the ordinary Conversation API"
+            )));
+        }
+        Ok(())
+    }
+
     /// Snapshot of the registered failover deps (`None` until
     /// [`Self::with_failover_deps`] is called). Both must be present for the
     /// seam to run; either missing → failover disabled (fail-safe).
@@ -4067,7 +4100,9 @@ impl ConversationService {
         user_id: &str,
         req: CreateConversationRequest,
     ) -> Result<ConversationResponse, AppError> {
-        self.create_inner(user_id, req, None, None).await
+        self.create_inner(user_id, req, None, None, None)
+            .await
+            .map(|(response, _)| response)
     }
 
     /// Trusted in-process create with a durable operation identity.  This is
@@ -4079,7 +4114,9 @@ impl ConversationService {
         req: CreateConversationRequest,
         creation_key: &str,
     ) -> Result<ConversationResponse, AppError> {
-        self.create_inner(user_id, req, None, Some(creation_key)).await
+        self.create_inner(user_id, req, None, Some(creation_key), None)
+            .await
+            .map(|(response, _)| response)
     }
 
     /// Trusted in-process creation path for long-lived consumers that already
@@ -4094,7 +4131,9 @@ impl ConversationService {
     ) -> Result<ConversationResponse, AppError> {
         req.preset_id = None;
         req.preset_overrides = None;
-        self.create_inner(user_id, req, Some(snapshot), None).await
+        self.create_inner(user_id, req, Some(snapshot), None, None)
+            .await
+            .map(|(response, _)| response)
     }
 
     /// Snapshot-preserving counterpart of [`Self::create_idempotent`].
@@ -4107,8 +4146,15 @@ impl ConversationService {
     ) -> Result<ConversationResponse, AppError> {
         req.preset_id = None;
         req.preset_overrides = None;
-        self.create_inner(user_id, req, Some(snapshot), Some(creation_key))
-            .await
+        self.create_inner(
+            user_id,
+            req,
+            Some(snapshot),
+            Some(creation_key),
+            None,
+        )
+        .await
+        .map(|(response, _)| response)
     }
 
     /// Remove a creation-keyed conversation that never acquired its owning
@@ -4137,7 +4183,14 @@ impl ConversationService {
         mut req: CreateConversationRequest,
         trusted_snapshot: Option<nomifun_api_types::ResolvedPresetSnapshot>,
         creation_key: Option<&str>,
-    ) -> Result<ConversationResponse, AppError> {
+        creative_studio_target: Option<CreativeStudioAgentCreationTarget>,
+    ) -> Result<(ConversationResponse, bool), AppError> {
+        if creation_key.is_some() && creative_studio_target.is_some() {
+            return Err(AppError::Internal(
+                "Conversation creation cannot combine a public creation key with a Creative Studio session target"
+                    .to_owned(),
+            ));
+        }
         reject_backend_owned_lifecycle_extra_keys(&req.extra)?;
         let authority = self.execution_authority(user_id);
         if !authority.controls_host() {
@@ -4594,9 +4647,31 @@ impl ConversationService {
             updated_at: now,
         };
 
-        let (new_id, created_now) = match creation_key {
-            Some(key) => self.conversation_repo.create_idempotent(&row, key).await?,
-            None => (self.conversation_repo.create(&row).await?, true),
+        let (new_id, created_now) = match creative_studio_target.as_ref() {
+            Some(target) => {
+                let resolved = self
+                    .conversation_repo
+                    .resolve_or_create_creative_studio_agent_session(
+                        &nomifun_db::ResolveCreativeStudioAgentSessionParams {
+                            owner_id: user_id.to_owned(),
+                            project_id: target.project_id.clone(),
+                            session_id: target.session_id.clone(),
+                            expected_provider_id: target.expected_provider_id.clone(),
+                            expected_model: target.expected_model.clone(),
+                            expected_pending_turn_idempotency_key: target
+                                .expected_pending_turn_idempotency_key
+                                .clone(),
+                            conversation: row.clone(),
+                            create_if_missing: target.create_if_missing,
+                        },
+                    )
+                    .await?;
+                (resolved.binding.conversation_id, resolved.created)
+            }
+            None => match creation_key {
+                Some(key) => self.conversation_repo.create_idempotent(&row, key).await?,
+                None => (self.conversation_repo.create(&row).await?, true),
+            },
         };
         if !created_now {
             let existing = self
@@ -4613,7 +4688,7 @@ impl ConversationService {
             rebase_managed_workspace_in_row(&mut existing, &self.workspace_root)?;
             let mut response = row_to_response(existing, &self.workspace_root)?;
             self.project_execution_relation(user_id, &mut response).await?;
-            return Ok(response);
+            return Ok((response, false));
         }
 
         let managed_workspace = auto_workspace
@@ -4761,7 +4836,7 @@ impl ConversationService {
 
         log_conversation_created(&response, &extra);
 
-        Ok(response)
+        Ok((response, true))
     }
 
     /// Get a single conversation by ID.
@@ -4912,6 +4987,8 @@ impl ConversationService {
             .await?
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {id} not found")))?;
+        self.ensure_not_creative_studio_agent_session(user_id, conversation_id, "updated")
+            .await?;
         if let Some(incoming) = req.extra.as_ref() {
             reject_backend_owned_lifecycle_extra_keys(incoming)?;
         }
@@ -5522,6 +5599,8 @@ impl ConversationService {
             .await?
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {id} not found")))?;
+        self.ensure_not_creative_studio_agent_session(user_id, conv_id, "deleted")
+            .await?;
 
         if self
             .is_execution_attempt_conversation(user_id, conv_id)
@@ -5634,6 +5713,8 @@ impl ConversationService {
             .await?
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {id} not found")))?;
+        self.ensure_not_creative_studio_agent_session(user_id, conv_id, "reset")
+            .await?;
 
         self.ensure_not_retained_execution_attempt(user_id, conv_id)
             .await?;
@@ -10985,6 +11066,12 @@ impl ConversationService {
             return Err(AppError::BadRequest("Message content must not be empty".into()));
         }
         let conv_id = parse_conv_id(conversation_id)?;
+        self.ensure_not_creative_studio_agent_session(
+            user_id,
+            conv_id,
+            "edited and resubmitted",
+        )
+        .await?;
         let message_id = parse_message_id(message_id)?;
         let operation_id =
             Self::public_edit_resubmit_operation_id(user_id, conv_id, idempotency_key);
@@ -12208,6 +12295,8 @@ impl ConversationService {
             .await?
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+        self.ensure_not_creative_studio_agent_session(user_id, conv_id, "cleared")
+            .await?;
         self.ensure_not_retained_execution_attempt(user_id, conv_id)
             .await?;
 

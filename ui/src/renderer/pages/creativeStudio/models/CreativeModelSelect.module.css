@@ -1,0 +1,139 @@
+.root {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+}
+
+.labelRow {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.label {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--color-text-2);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.035em;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task {
+  flex: 0 0 auto;
+  color: var(--color-text-4);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.select {
+  width: 100%;
+  min-width: 0;
+}
+
+.option {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.optionModel {
+  min-width: 0;
+  overflow: hidden;
+  color: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.optionProtocol {
+  flex: 0 0 auto;
+  overflow: hidden;
+  max-width: 140px;
+  color: var(--color-text-4);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selectionMeta {
+  display: flex;
+  min-width: 0;
+  gap: 5px;
+  color: var(--color-text-3);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.selectionMeta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.separator {
+  flex: 0 0 auto;
+  opacity: 0.5;
+}
+
+.status {
+  display: flex;
+  min-width: 0;
+  min-height: 26px;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--color-border-2) 72%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--color-fill-1) 72%, transparent);
+  color: var(--color-text-3);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.status[data-tone='danger'] {
+  border-color: color-mix(in srgb, rgb(var(--danger-6)) 26%, var(--color-border-2));
+  background: color-mix(in srgb, rgb(var(--danger-6)) 7%, var(--color-bg-2));
+  color: rgb(var(--danger-6));
+}
+
+.status[data-tone='warning'] {
+  border-color: color-mix(in srgb, rgb(var(--warning-6)) 26%, var(--color-border-2));
+  background: color-mix(in srgb, rgb(var(--warning-6)) 7%, var(--color-bg-2));
+  color: rgb(var(--warning-6));
+}
+
+.statusText {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+
+.action {
+  appearance: none;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+.action:hover {
+  text-decoration: underline;
+}
+
+.action:focus-visible {
+  border-radius: 3px;
+  outline: 2px solid rgb(var(--primary-6));
+  outline-offset: 2px;
+}

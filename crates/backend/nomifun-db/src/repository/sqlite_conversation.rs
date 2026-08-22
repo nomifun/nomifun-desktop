@@ -10,13 +10,15 @@ use nomifun_common::{
 
 use crate::error::DbError;
 use crate::models::{
-    ConversationArtifactRow, ConversationDeliveryReceiptRow, ConversationRow, MessageRow,
+    ConversationArtifactRow, ConversationDeliveryReceiptRow, ConversationRow,
+    CreativeStudioAgentSessionBindingRow, MessageRow,
 };
 use crate::repository::bind::{BindValue, bind_value, bind_value_as};
 use crate::repository::conversation::{
     ConversationDeliveryReceiptClaim, ConversationFilters, ConversationMessageProjection,
     ConversationRowUpdate, ConversationTurnAdmissionState, IConversationRepository, MessageDayBucket, MessageRowUpdate, MessageSearchRow,
     MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
+    ResolveCreativeStudioAgentSessionParams, ResolvedCreativeStudioAgentSession,
     RequirementConversationTurnAuthority, SortOrder, TurnArtifactMessageCommit,
     TurnLifecycleTransition, TurnReceiptCompletion, UnsettledConversationTurnAdmission,
     strip_runtime_resume_extra,
@@ -1052,6 +1054,309 @@ impl IConversationRepository for SqliteConversationRepository {
         .bind(creation_key)
         .bind(user_id)
         .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    async fn resolve_or_create_creative_studio_agent_session(
+        &self,
+        params: &ResolveCreativeStudioAgentSessionParams,
+    ) -> Result<ResolvedCreativeStudioAgentSession, DbError> {
+        nomifun_common::UserId::parse(&params.owner_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio agent owner_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        nomifun_common::CreativeStudioProjectId::parse(&params.project_id).map_err(
+            |error| {
+                DbError::Conflict(format!(
+                    "creative studio agent project_id is not a canonical UUIDv7: {error}"
+                ))
+            },
+        )?;
+        validate_uuidv7(&params.session_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio agent session_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        ProviderId::parse(&params.expected_provider_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio agent expected_provider_id is invalid: {error}"
+            ))
+        })?;
+        if params.expected_model.trim().is_empty()
+            || params.expected_model.trim() != params.expected_model
+        {
+            return Err(DbError::Conflict(
+                "creative studio agent expected_model must be trimmed and non-empty".to_owned(),
+            ));
+        }
+        if let Some(key) = params.expected_pending_turn_idempotency_key.as_deref() {
+            validate_uuidv7(key).map_err(|error| {
+                DbError::Conflict(format!(
+                    "creative studio agent pending turn idempotency key is invalid: {error}"
+                ))
+            })?;
+        }
+        if params.create_if_missing && params.expected_pending_turn_idempotency_key.is_none() {
+            return Err(DbError::Conflict(
+                "creative studio agent binding creation requires a durable pending turn fence"
+                    .to_owned(),
+            ));
+        }
+        ConversationId::parse(&params.conversation.conversation_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio agent candidate conversation_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        if params.conversation.user_id != params.owner_id {
+            return Err(DbError::Conflict(
+                "creative studio agent candidate conversation owner mismatch".to_owned(),
+            ));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let created = if params.create_if_missing {
+            // This is intentionally the first statement in the transaction.
+            // It acquires SQLite's writer position before taking a read
+            // snapshot, so two deferred transactions cannot both observe a
+            // missing binding and then fail while upgrading their read locks.
+            // The unique scope picks one candidate conversation; followers
+            // wait for that commit and never insert their own candidate.
+            sqlx::query(
+                "INSERT INTO creative_studio_agent_sessions \
+                    (owner_id, project_id, session_id, conversation_id, created_at, updated_at) \
+                 SELECT ?, ?, ?, ?, ?, ? \
+                 WHERE EXISTS ( \
+                     SELECT 1 FROM installation_identity \
+                     WHERE singleton_key = 'installation' AND owner_user_id = ? \
+                 ) AND EXISTS ( \
+                     SELECT 1 FROM creative_studio_projects project, \
+                                  json_each(project.document_json, '$.chatSessions') session \
+                      WHERE project.project_id = ? \
+                        AND json_extract(session.value, '$.id') = ? \
+                        AND json_array_length(session.value, '$.messageIds') = 0 \
+                        AND json_extract(session.value, '$.model.providerId') = ? \
+                        AND json_extract(session.value, '$.model.model') = ? \
+                        AND json_extract(session.value, '$.pendingTurn.idempotencyKey') = ? \
+                  ) \
+                 ON CONFLICT(owner_id, project_id, session_id) DO NOTHING",
+            )
+            .bind(&params.owner_id)
+            .bind(&params.project_id)
+            .bind(&params.session_id)
+            .bind(&params.conversation.conversation_id)
+            .bind(params.conversation.created_at)
+            .bind(params.conversation.updated_at)
+            .bind(&params.owner_id)
+            .bind(&params.project_id)
+            .bind(&params.session_id)
+            .bind(&params.expected_provider_id)
+            .bind(&params.expected_model)
+            .bind(&params.expected_pending_turn_idempotency_key)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+                == 1
+        } else {
+            false
+        };
+
+        let project_session = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
+            "SELECT \
+                 CAST(json_extract(session.value, '$.model.providerId') AS TEXT), \
+                 CAST(json_extract(session.value, '$.model.model') AS TEXT), \
+                 CAST(json_extract(session.value, '$.pendingTurn.idempotencyKey') AS TEXT) \
+             FROM creative_studio_projects project \
+             JOIN installation_identity identity \
+               ON identity.singleton_key = 'installation' \
+              AND identity.owner_user_id = ? \
+             JOIN json_each(project.document_json, '$.chatSessions') session \
+             WHERE project.project_id = ? \
+               AND json_extract(session.value, '$.id') = ?",
+        )
+        .bind(&params.owner_id)
+        .bind(&params.project_id)
+        .bind(&params.session_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((project_provider_id, project_model, project_pending_key)) = project_session else {
+            return Err(DbError::NotFound(
+                "creative studio project/session is not owned by the installation user or does not exist"
+                    .to_owned(),
+            ));
+        };
+        if project_provider_id.as_deref() != Some(params.expected_provider_id.as_str())
+            || project_model.as_deref() != Some(params.expected_model.as_str())
+        {
+            return Err(DbError::Conflict(
+                "creative studio project session model does not match the requested binding"
+                    .to_owned(),
+            ));
+        }
+        if project_pending_key != params.expected_pending_turn_idempotency_key {
+            return Err(DbError::Conflict(
+                "creative studio project pending turn fence changed during session resolution"
+                    .to_owned(),
+            ));
+        }
+
+        let binding = sqlx::query_as::<_, CreativeStudioAgentSessionBindingRow>(
+            "SELECT * FROM creative_studio_agent_sessions \
+             WHERE owner_id = ? AND project_id = ? AND session_id = ?",
+        )
+        .bind(&params.owner_id)
+        .bind(&params.project_id)
+        .bind(&params.session_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| {
+            DbError::Conflict(
+                "creative studio agent session has no durable binding; non-empty history cannot seed a new conversation"
+                    .to_owned(),
+            )
+        })?;
+
+        if created {
+            if binding.conversation_id != params.conversation.conversation_id {
+                return Err(DbError::Conflict(
+                    "creative studio agent binding winner changed inside one transaction".to_owned(),
+                ));
+            }
+            validate_conversation_parents(&mut tx, &params.conversation).await?;
+            lock_provider_bindings(
+                &mut tx,
+                params.conversation.model.as_deref(),
+                params.conversation.execution_model_pool.as_deref(),
+            )
+            .await?;
+            lock_conversation_extra_references(&mut tx, &params.conversation.extra).await?;
+            sqlx::query(
+                "INSERT INTO conversations \
+                    (conversation_id, user_id, name, type, extra, delegation_policy, execution_model_pool, \
+                     decision_policy, execution_template_id, model, status, source, channel_chat_id, pinned, \
+                     pinned_at, cron_job_id, preset_id, preset_revision, preset_snapshot, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&params.conversation.conversation_id)
+            .bind(&params.conversation.user_id)
+            .bind(&params.conversation.name)
+            .bind(&params.conversation.r#type)
+            .bind(&params.conversation.extra)
+            .bind(&params.conversation.delegation_policy)
+            .bind(&params.conversation.execution_model_pool)
+            .bind(&params.conversation.decision_policy)
+            .bind(&params.conversation.execution_template_id)
+            .bind(&params.conversation.model)
+            .bind(&params.conversation.status)
+            .bind(&params.conversation.source)
+            .bind(&params.conversation.channel_chat_id)
+            .bind(params.conversation.pinned)
+            .bind(params.conversation.pinned_at)
+            .bind(&params.conversation.cron_job_id)
+            .bind(&params.conversation.preset_id)
+            .bind(params.conversation.preset_revision)
+            .bind(&params.conversation.preset_snapshot)
+            .bind(params.conversation.created_at)
+            .bind(params.conversation.updated_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        let conversation = sqlx::query_as::<_, ConversationRow>(
+            "SELECT * FROM conversations WHERE conversation_id = ? AND user_id = ?",
+        )
+        .bind(&binding.conversation_id)
+        .bind(&params.owner_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| {
+            DbError::Conflict(
+                "creative studio agent binding points to a missing or differently owned conversation"
+                    .to_owned(),
+            )
+        })?;
+        let messages = sqlx::query_as::<_, MessageRow>(
+            "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, id ASC",
+        )
+        .bind(&binding.conversation_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let project_message_ids = sqlx::query_scalar::<_, String>(
+            "SELECT CAST(message.value AS TEXT) \
+             FROM creative_studio_projects project, \
+                  json_each(project.document_json, '$.chatSessions') session, \
+                  json_each(session.value, '$.messageIds') message \
+             WHERE project.project_id = ? \
+               AND json_extract(session.value, '$.id') = ? \
+             ORDER BY CAST(message.key AS INTEGER) ASC",
+        )
+        .bind(&params.project_id)
+        .bind(&params.session_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let applied_proposal_message_ids = sqlx::query_scalar::<_, String>(
+            "SELECT receipt.assistant_message_id \
+             FROM creative_studio_agent_proposal_receipts receipt \
+             JOIN creative_studio_projects project \
+               ON project.project_id = receipt.project_id \
+             CROSS JOIN json_each(project.document_json, '$.chatSessions') session \
+             CROSS JOIN json_each(session.value, '$.messageIds') message \
+             JOIN creative_studio_agent_sessions binding \
+               ON binding.project_id = project.project_id \
+              AND binding.session_id = json_extract(session.value, '$.id') \
+              AND binding.owner_id = ? \
+             JOIN messages persisted \
+               ON persisted.conversation_id = binding.conversation_id \
+              AND persisted.message_id = receipt.assistant_message_id \
+             WHERE receipt.project_id = ? \
+               AND json_extract(session.value, '$.id') = ? \
+               AND CAST(message.key AS INTEGER) % 2 = 1 \
+               AND CAST(message.value AS TEXT) = receipt.assistant_message_id \
+               AND persisted.position = 'left' \
+               AND persisted.status = 'finish' \
+               AND persisted.hidden = 0 \
+               AND persisted.type = 'text' \
+             ORDER BY CAST(message.key AS INTEGER) ASC",
+        )
+        .bind(&params.owner_id)
+        .bind(&params.project_id)
+        .bind(&params.session_id)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(ResolvedCreativeStudioAgentSession {
+            binding,
+            conversation,
+            messages,
+            project_message_ids,
+            applied_proposal_message_ids,
+            created,
+        })
+    }
+
+    async fn find_creative_studio_agent_session_by_conversation(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<CreativeStudioAgentSessionBindingRow>, DbError> {
+        nomifun_common::UserId::parse(owner_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio agent owner_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        ConversationId::parse(conversation_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio agent conversation_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        Ok(sqlx::query_as::<_, CreativeStudioAgentSessionBindingRow>(
+            "SELECT * FROM creative_studio_agent_sessions \
+             WHERE owner_id = ? AND conversation_id = ?",
+        )
+        .bind(owner_id)
+        .bind(conversation_id)
         .fetch_optional(&self.pool)
         .await?)
     }
@@ -4282,6 +4587,14 @@ impl IConversationRepository for SqliteConversationRepository {
             .bind(conversation_id)
             .execute(&mut *tx)
             .await?;
+        // Product-owned callers remove their binding through this same atomic
+        // cleanup path. Ordinary ConversationService delete is fenced before
+        // it reaches the repository, while failed-creation compensation must
+        // be able to roll both rows back together.
+        sqlx::query("DELETE FROM creative_studio_agent_sessions WHERE conversation_id = ?")
+            .bind(conversation_id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM idmm_action_reservations WHERE conversation_id = ?")
             .bind(conversation_id)
             .execute(&mut *tx)
@@ -5273,7 +5586,11 @@ impl IConversationRepository for SqliteConversationRepository {
             "SELECT COUNT(*) FROM messages m \
              INNER JOIN conversations c ON m.conversation_id = c.conversation_id \
              WHERE c.user_id = ? AND m.content LIKE ? \
-               AND m.type <> 'turn_root'",
+               AND m.type <> 'turn_root' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM creative_studio_agent_sessions creative_session \
+                   WHERE creative_session.conversation_id = c.conversation_id \
+               )",
         )
         .bind(user_id)
         .bind(&like_pattern)
@@ -5307,6 +5624,10 @@ impl IConversationRepository for SqliteConversationRepository {
              INNER JOIN conversations c ON m.conversation_id = c.conversation_id \
              WHERE c.user_id = ? AND m.content LIKE ? \
                AND m.type <> 'turn_root' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM creative_studio_agent_sessions creative_session \
+                   WHERE creative_session.conversation_id = c.conversation_id \
+               ) \
              ORDER BY m.created_at DESC \
              LIMIT ? OFFSET ?",
         )
@@ -5681,6 +6002,14 @@ fn append_filter_conditions(filters: &ConversationFilters, where_parts: &mut Vec
            AND execution_link.relation = 'attempt')"
             .to_string(),
     );
+    // Creative Studio Agent conversations are aggregate-internal product
+    // sessions. Their server-owned binding, rather than client-writable
+    // `extra`, keeps them out of the ordinary chat list and count.
+    where_parts.push(
+        "NOT EXISTS (SELECT 1 FROM creative_studio_agent_sessions creative_session \
+         WHERE creative_session.conversation_id = c.conversation_id)"
+            .to_string(),
+    );
 }
 
 /// Builds a count query and bind values for the total (ignoring cursor).
@@ -5715,6 +6044,7 @@ mod tests {
 
     const TEST_INSTALLATION_OWNER: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const FIXTURE_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
+    const CREATIVE_PENDING_KEY: &str = "0190f5fe-7c00-7a00-8abc-012345678902";
 
     async fn init_database_memory() -> Result<crate::Database, crate::DbError> {
         crate::init_database_memory_with_owner(
@@ -5794,6 +6124,90 @@ mod tests {
             status: Some("finish".to_string()),
             hidden: false,
             created_at: now,
+        }
+    }
+
+    async fn insert_creative_project_session(
+        pool: &SqlitePool,
+        project_id: &str,
+        session_id: &str,
+    ) {
+        let document = serde_json::json!({
+            "schema": "nomifun.creative-studio/v1",
+            "projectId": project_id,
+            "viewport": { "x": 0, "y": 0, "zoom": 1 },
+            "background": "lines",
+            "nodes": [],
+            "connections": [],
+            "chatSessions": [{
+                "id": session_id,
+                "title": "Agent",
+                "messageIds": [],
+                "model": { "providerId": FIXTURE_PROVIDER_ID, "model": "nomi-chat" },
+                "pendingTurn": {
+                    "idempotencyKey": CREATIVE_PENDING_KEY,
+                    "prompt": "Create a poster",
+                    "createdAt": 1
+                },
+                "createdAt": 1,
+                "updatedAt": 1
+            }],
+            "activeChatId": session_id,
+            "panels": {
+                "left": { "open": true, "width": 288, "activeView": "canvas" },
+                "right": { "open": true, "width": 340, "activeView": "assistant" },
+                "bottom": { "open": false, "height": 240, "activeView": "history" }
+            },
+            "pendingTaskIds": []
+        });
+        sqlx::query(
+            "INSERT INTO creative_studio_projects \
+                (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+             VALUES (?, 'Agent project', 1, 0, 0, ?, 1, 1)",
+        )
+        .bind(project_id)
+        .bind(document.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn creative_session_params(
+        owner_id: &str,
+        project_id: &str,
+        session_id: &str,
+        conversation_id: String,
+    ) -> ResolveCreativeStudioAgentSessionParams {
+        let mut conversation = sample_conversation(owner_id);
+        conversation.conversation_id = conversation_id;
+        conversation.name = "Creative Studio Agent".to_owned();
+        conversation.r#type = "nomi".to_owned();
+        conversation.extra = serde_json::json!({
+            "temp_workspace_id": ConversationId::new().into_string(),
+            "skills": [],
+            "mcp_server_ids": [],
+            "mcp_servers": [],
+            "mcp_statuses": []
+        })
+        .to_string();
+        conversation.delegation_policy = "disabled".to_owned();
+        conversation.model = Some(
+            serde_json::json!({
+                "provider_id": FIXTURE_PROVIDER_ID,
+                "model": "nomi-chat",
+                "use_model": "nomi-chat"
+            })
+            .to_string(),
+        );
+        ResolveCreativeStudioAgentSessionParams {
+            owner_id: owner_id.to_owned(),
+            project_id: project_id.to_owned(),
+            session_id: session_id.to_owned(),
+            expected_provider_id: FIXTURE_PROVIDER_ID.to_owned(),
+            expected_model: "nomi-chat".to_owned(),
+            expected_pending_turn_idempotency_key: Some(CREATIVE_PENDING_KEY.to_owned()),
+            conversation,
+            create_if_missing: true,
         }
     }
 
@@ -8535,5 +8949,396 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn creative_studio_agent_concurrent_resolve_creates_one_bound_conversation() {
+        let (repo, db) = setup().await;
+        let project_id = nomifun_common::CreativeStudioProjectId::new().into_string();
+        let session_id = ConversationId::new().into_string();
+        insert_creative_project_session(db.pool(), &project_id, &session_id).await;
+
+        let first_candidate = ConversationId::new().into_string();
+        let second_candidate = ConversationId::new().into_string();
+        let first_params = creative_session_params(
+            TEST_INSTALLATION_OWNER,
+            &project_id,
+            &session_id,
+            first_candidate,
+        );
+        let second_params = creative_session_params(
+            TEST_INSTALLATION_OWNER,
+            &project_id,
+            &session_id,
+            second_candidate,
+        );
+        let second_repo = SqliteConversationRepository::new(db.pool().clone());
+        let (first, second) = tokio::join!(
+            repo.resolve_or_create_creative_studio_agent_session(&first_params),
+            second_repo.resolve_or_create_creative_studio_agent_session(&second_params),
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+
+        assert_eq!(first.binding.conversation_id, second.binding.conversation_id);
+        assert_ne!(first.created, second.created);
+        assert_eq!(first.conversation.user_id, TEST_INSTALLATION_OWNER);
+        assert_eq!(first.project_message_ids, Vec::<String>::new());
+        assert_eq!(first.applied_proposal_message_ids, Vec::<String>::new());
+        assert_eq!(first.messages.len(), 0);
+
+        let ordinary_list = repo
+            .list_paginated(
+                TEST_INSTALLATION_OWNER,
+                &ConversationFilters {
+                    limit: 20,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(ordinary_list.items.is_empty());
+        assert_eq!(ordinary_list.total, 0);
+
+        let mut private_message = sample_message(first.binding.conversation_id.clone());
+        private_message.content = r#"{"content":"creative-session-only"}"#.to_owned();
+        repo.insert_message(&private_message).await.unwrap();
+        let ordinary_search = repo
+            .search_messages(TEST_INSTALLATION_OWNER, "creative-session-only", 1, 20)
+            .await
+            .unwrap();
+        assert!(ordinary_search.items.is_empty());
+        assert_eq!(ordinary_search.total, 0);
+
+        let binding_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM creative_studio_agent_sessions")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        let conversation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM conversations WHERE name = 'Creative Studio Agent'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(binding_count, 1);
+        assert_eq!(conversation_count, 1);
+    }
+
+    #[tokio::test]
+    async fn creative_studio_agent_resolve_projects_applied_receipts_for_its_session() {
+        let (repo, db) = setup().await;
+        let project_id = nomifun_common::CreativeStudioProjectId::new().into_string();
+        let session_id = ConversationId::new().into_string();
+        insert_creative_project_session(db.pool(), &project_id, &session_id).await;
+        let params = creative_session_params(
+            TEST_INSTALLATION_OWNER,
+            &project_id,
+            &session_id,
+            ConversationId::new().into_string(),
+        );
+        let first = repo
+            .resolve_or_create_creative_studio_agent_session(&params)
+            .await
+            .unwrap();
+
+        let mut user = sample_message(first.binding.conversation_id.clone());
+        user.position = Some("right".to_owned());
+        let mut assistant = sample_message(first.binding.conversation_id.clone());
+        assistant.position = Some("left".to_owned());
+        assistant.created_at = user.created_at + 1;
+        repo.insert_message(&user).await.unwrap();
+        repo.insert_message(&assistant).await.unwrap();
+
+        let message_ids = serde_json::to_string(&vec![
+            user.message_id.clone(),
+            assistant.message_id.clone(),
+        ])
+        .unwrap();
+        sqlx::query(
+            "UPDATE creative_studio_projects \
+             SET document_json = json_set( \
+                     document_json, '$.chatSessions[0].messageIds', json(?) \
+                 ), revision = 2 \
+             WHERE project_id = ?",
+        )
+        .bind(message_ids)
+        .bind(&project_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO creative_studio_agent_proposal_receipts \
+                (project_id, assistant_message_id, ops_fingerprint, ops_json, results_json, \
+                 applied_revision, created_at) \
+             VALUES (?, ?, ?, '[]', '[]', 2, 1)",
+        )
+        .bind(&project_id)
+        .bind(&assistant.message_id)
+        .bind("a".repeat(64))
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let restored = repo
+            .resolve_or_create_creative_studio_agent_session(&params)
+            .await
+            .unwrap();
+        assert_eq!(
+            restored.project_message_ids,
+            vec![user.message_id, assistant.message_id.clone()]
+        );
+        assert_eq!(
+            restored.applied_proposal_message_ids,
+            vec![assistant.message_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn creative_studio_agent_binding_requires_exact_model_and_pending_turn_fences() {
+        let (repo, db) = setup().await;
+        let project_id = nomifun_common::CreativeStudioProjectId::new().into_string();
+        let session_id = ConversationId::new().into_string();
+        insert_creative_project_session(db.pool(), &project_id, &session_id).await;
+
+        let mut wrong_model = creative_session_params(
+            TEST_INSTALLATION_OWNER,
+            &project_id,
+            &session_id,
+            ConversationId::new().into_string(),
+        );
+        wrong_model.expected_model = "different-model".to_owned();
+        assert!(
+            repo.resolve_or_create_creative_studio_agent_session(&wrong_model)
+                .await
+                .is_err()
+        );
+
+        let mut wrong_pending = creative_session_params(
+            TEST_INSTALLATION_OWNER,
+            &project_id,
+            &session_id,
+            ConversationId::new().into_string(),
+        );
+        wrong_pending.expected_pending_turn_idempotency_key =
+            Some("0190f5fe-7c00-7a00-8abc-012345678903".to_owned());
+        assert!(
+            repo.resolve_or_create_creative_studio_agent_session(&wrong_pending)
+                .await
+                .is_err()
+        );
+
+        let mut missing_pending = creative_session_params(
+            TEST_INSTALLATION_OWNER,
+            &project_id,
+            &session_id,
+            ConversationId::new().into_string(),
+        );
+        missing_pending.expected_pending_turn_idempotency_key = None;
+        assert!(
+            repo.resolve_or_create_creative_studio_agent_session(&missing_pending)
+                .await
+                .is_err()
+        );
+
+        let binding_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM creative_studio_agent_sessions")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        let conversation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM conversations WHERE name = 'Creative Studio Agent'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(binding_count, 0);
+        assert_eq!(conversation_count, 0);
+    }
+
+    #[tokio::test]
+    async fn creative_studio_agent_binding_rejects_reused_conversation_identity() {
+        let (repo, db) = setup().await;
+        let project_id = nomifun_common::CreativeStudioProjectId::new().into_string();
+        let first_session_id = ConversationId::new().into_string();
+        insert_creative_project_session(db.pool(), &project_id, &first_session_id).await;
+        let shared_conversation_id = ConversationId::new().into_string();
+        let first = creative_session_params(
+            TEST_INSTALLATION_OWNER,
+            &project_id,
+            &first_session_id,
+            shared_conversation_id.clone(),
+        );
+        repo.resolve_or_create_creative_studio_agent_session(&first)
+            .await
+            .unwrap();
+
+        let second_session_id = ConversationId::new().into_string();
+        let mut document: serde_json::Value = serde_json::from_str(
+            &sqlx::query_scalar::<_, String>(
+                "SELECT document_json FROM creative_studio_projects WHERE project_id = ?",
+            )
+            .bind(&project_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        document["chatSessions"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": second_session_id,
+                "title": "Second",
+                "messageIds": [],
+                "model": { "providerId": FIXTURE_PROVIDER_ID, "model": "nomi-chat" },
+                "pendingTurn": {
+                    "idempotencyKey": CREATIVE_PENDING_KEY,
+                    "prompt": "Create a poster",
+                    "createdAt": 2
+                },
+                "createdAt": 2,
+                "updatedAt": 2
+            }));
+        sqlx::query(
+            "UPDATE creative_studio_projects SET document_json = ? WHERE project_id = ?",
+        )
+        .bind(document.to_string())
+        .bind(&project_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let second = creative_session_params(
+            TEST_INSTALLATION_OWNER,
+            &project_id,
+            &second_session_id,
+            shared_conversation_id,
+        );
+        assert!(
+            repo.resolve_or_create_creative_studio_agent_session(&second)
+                .await
+                .is_err()
+        );
+        let binding_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM creative_studio_agent_sessions")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(binding_count, 1);
+    }
+
+    #[tokio::test]
+    async fn creative_studio_agent_resolution_rejects_non_owner_missing_project_and_missing_session() {
+        let (repo, db) = setup().await;
+        let project_id = nomifun_common::CreativeStudioProjectId::new().into_string();
+        let session_id = ConversationId::new().into_string();
+        insert_creative_project_session(db.pool(), &project_id, &session_id).await;
+
+        let non_owner = nomifun_common::UserId::new().into_string();
+        sqlx::query(
+            "INSERT INTO users (user_id, username, password_hash, created_at, updated_at) \
+             VALUES (?, ?, 'hash', 1, 1)",
+        )
+        .bind(&non_owner)
+        .bind(&non_owner)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let wrong_owner = creative_session_params(
+            &non_owner,
+            &project_id,
+            &session_id,
+            ConversationId::new().into_string(),
+        );
+        assert!(
+            repo.resolve_or_create_creative_studio_agent_session(&wrong_owner)
+                .await
+                .is_err()
+        );
+
+        let missing_project = creative_session_params(
+            TEST_INSTALLATION_OWNER,
+            &nomifun_common::CreativeStudioProjectId::new().into_string(),
+            &session_id,
+            ConversationId::new().into_string(),
+        );
+        assert!(
+            repo.resolve_or_create_creative_studio_agent_session(&missing_project)
+                .await
+                .is_err()
+        );
+
+        let missing_session = creative_session_params(
+            TEST_INSTALLATION_OWNER,
+            &project_id,
+            &ConversationId::new().into_string(),
+            ConversationId::new().into_string(),
+        );
+        assert!(
+            repo.resolve_or_create_creative_studio_agent_session(&missing_session)
+                .await
+                .is_err()
+        );
+        let binding_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM creative_studio_agent_sessions")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(binding_count, 0);
+    }
+
+    #[tokio::test]
+    async fn creative_studio_agent_nonempty_project_history_cannot_seed_a_binding() {
+        let (repo, db) = setup().await;
+        let project_id = nomifun_common::CreativeStudioProjectId::new().into_string();
+        let session_id = ConversationId::new().into_string();
+        insert_creative_project_session(db.pool(), &project_id, &session_id).await;
+        let persisted_message_id = MessageId::new().into_string();
+        let mut document: serde_json::Value = serde_json::from_str(
+            &sqlx::query_scalar::<_, String>(
+                "SELECT document_json FROM creative_studio_projects WHERE project_id = ?",
+            )
+            .bind(&project_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        document["chatSessions"][0]["messageIds"] =
+            serde_json::json!([persisted_message_id]);
+        sqlx::query(
+            "UPDATE creative_studio_projects SET document_json = ? WHERE project_id = ?",
+        )
+        .bind(document.to_string())
+        .bind(&project_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let params = creative_session_params(
+            TEST_INSTALLATION_OWNER,
+            &project_id,
+            &session_id,
+            ConversationId::new().into_string(),
+        );
+        assert!(
+            repo.resolve_or_create_creative_studio_agent_session(&params)
+                .await
+                .is_err()
+        );
+        let binding_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM creative_studio_agent_sessions")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        let conversation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM conversations WHERE name = 'Creative Studio Agent'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(binding_count, 0);
+        assert_eq!(conversation_count, 0);
     }
 }

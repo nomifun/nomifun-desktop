@@ -1,0 +1,494 @@
+.panel {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  flex-direction: column;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+
+.panel,
+.panel * {
+  box-sizing: border-box;
+}
+
+.panelHeader {
+  display: flex;
+  min-height: 62px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--color-border-2);
+}
+
+.panelHeader h2,
+.unavailablePanel h2 {
+  margin: 0;
+  color: var(--color-text-1);
+  font-size: 13px;
+  font-weight: 680;
+  line-height: 1.35;
+}
+
+.panelHeader p,
+.unavailablePanel p,
+.unavailablePanel small,
+.emptyState p,
+.readOnlyNote,
+.historyDisclosure {
+  margin: 0;
+  color: var(--color-text-3);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.panelHeader p {
+  margin-top: 2px;
+}
+
+.textButton,
+.outlineItem,
+.selectionList button,
+.historyActions button {
+  appearance: none;
+  border: 0;
+  font: inherit;
+  outline: none;
+}
+
+.textButton {
+  flex: 0 0 auto;
+  padding: 5px 7px;
+  border-radius: 7px;
+  background: transparent;
+  color: rgb(var(--primary-6));
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.textButton:hover {
+  background: rgba(var(--primary-6), 0.08);
+}
+
+.outlineList,
+.selectionList,
+.propertiesBody {
+  min-height: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+
+.outlineList {
+  display: flex;
+  padding: 7px;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.outlineItem {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 8px;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--color-text-2);
+  cursor: pointer;
+  text-align: left;
+}
+
+.outlineItem[data-node-grouped='true'] {
+  padding-left: 22px;
+}
+
+.outlineItem:hover {
+  background: var(--color-fill-1);
+}
+
+.outlineItem[data-selected='true'] {
+  background: rgba(var(--primary-6), 0.1);
+  color: rgb(var(--primary-6));
+}
+
+.nodeIcon,
+.unavailableIcon,
+.emptyState > span {
+  display: grid;
+  place-items: center;
+}
+
+.nodeIcon {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border-radius: 8px;
+  background: var(--color-fill-2);
+  color: var(--color-text-2);
+}
+
+.outlineItem[data-selected='true'] .nodeIcon {
+  background: rgba(var(--primary-6), 0.12);
+  color: rgb(var(--primary-6));
+}
+
+.outlineIdentity {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.outlineIdentity strong,
+.selectionList strong,
+.inspectorIdentity strong {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 640;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outlineIdentity span,
+.selectionList small,
+.inspectorIdentity span {
+  overflow: hidden;
+  color: var(--color-text-3);
+  font-size: 10px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lockIcon {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  place-items: center;
+  color: var(--color-text-3);
+}
+
+.emptyState {
+  display: grid;
+  min-height: 220px;
+  flex: 1 1 auto;
+  align-content: center;
+  justify-items: center;
+  gap: 7px;
+  padding: 24px 18px;
+  text-align: center;
+}
+
+.emptyState > span {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  background: var(--color-fill-2);
+  color: var(--color-text-3);
+}
+
+.emptyState strong {
+  color: var(--color-text-2);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.outlineEmpty {
+  margin: 0;
+  padding: 4px 12px;
+  color: var(--color-text-4);
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.selectionList {
+  display: flex;
+  padding: 8px;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.selectionList button {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 7px;
+  border-radius: 9px;
+  background: var(--color-fill-1);
+  color: var(--color-text-2);
+  cursor: pointer;
+  text-align: left;
+}
+
+.selectionList button:disabled {
+  cursor: default;
+}
+
+.selectionList button:not(:disabled):hover {
+  background: var(--color-fill-2);
+}
+
+.selectionList button > span:last-child,
+.inspectorIdentity > div {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.propertiesBody {
+  flex: 1 1 auto;
+  padding-bottom: 14px;
+}
+
+.inspectorIdentity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 14px;
+  border-bottom: 1px solid var(--color-border-2);
+}
+
+.propertyList {
+  margin: 0;
+  padding: 8px 14px;
+}
+
+.propertyRow {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(72px, 0.72fr) minmax(0, 1.28fr);
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--color-border-1);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.propertyRow dt {
+  color: var(--color-text-3);
+}
+
+.propertyRow dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--color-text-1);
+  text-align: right;
+}
+
+.readOnlyNote {
+  margin: 4px 14px 0;
+  padding: 10px;
+  border-radius: 9px;
+  background: var(--color-fill-1);
+}
+
+.editorForm {
+  display: flex;
+  margin: 4px 14px 0;
+  padding: 12px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 10px;
+  background: var(--color-bg-1);
+  flex-direction: column;
+  gap: 10px;
+}
+
+.editorForm h3 {
+  margin: 0;
+  color: var(--color-text-2);
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.editorField {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--color-text-3);
+  font-size: 10px;
+}
+
+.editorField input:not([type='checkbox']):not([type='range']),
+.editorField select,
+.editorField textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--color-border-2);
+  border-radius: 7px;
+  outline: none;
+  background: var(--color-fill-1);
+  color: var(--color-text-1);
+  font: inherit;
+  font-size: 11px;
+}
+
+.editorField input:not([type='checkbox']):not([type='range']),
+.editorField select {
+  height: 30px;
+  padding: 0 8px;
+}
+
+.editorField textarea {
+  min-height: 58px;
+  padding: 7px 8px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.editorField input:focus-visible,
+.editorField select:focus-visible,
+.editorField textarea:focus-visible {
+  border-color: rgb(var(--primary-6));
+  box-shadow: 0 0 0 2px rgba(var(--primary-6), 0.15);
+}
+
+.editorField input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: rgb(var(--primary-6));
+}
+
+.editorField input[type='range'] {
+  width: 100%;
+  margin: 2px 0;
+  accent-color: rgb(var(--primary-6));
+}
+
+.historyPanel {
+  min-height: 0;
+}
+
+.historySummary {
+  display: grid;
+  width: min(620px, 100%);
+  padding: 14px;
+  grid-template-columns: repeat(2, minmax(100px, 1fr)) auto;
+  gap: 10px;
+}
+
+.historySummary > div:not(.historyActions) {
+  display: flex;
+  min-height: 70px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 10px;
+  background: var(--color-bg-1);
+}
+
+.historySummary span {
+  color: var(--color-text-3);
+  font-size: 10px;
+}
+
+.historySummary strong {
+  color: var(--color-text-1);
+  font-size: 22px;
+  font-weight: 680;
+  font-variant-numeric: tabular-nums;
+}
+
+.historyActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.historyActions button {
+  display: inline-flex;
+  height: 34px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: var(--color-fill-2);
+  color: var(--color-text-2);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.historyActions button:hover:not(:disabled) {
+  background: var(--color-fill-3);
+  color: var(--color-text-1);
+}
+
+.historyActions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.historyDisclosure {
+  margin: 0 14px 14px;
+  padding: 9px 11px;
+  border-left: 2px solid var(--color-border-3);
+  background: var(--color-fill-1);
+}
+
+.unavailablePanel {
+  display: grid;
+  min-height: 220px;
+  align-content: center;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 12px;
+  padding: 24px 18px;
+}
+
+.unavailableIcon {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: var(--color-fill-2);
+  color: var(--color-text-3);
+}
+
+.unavailablePanel > div {
+  min-width: 0;
+}
+
+.unavailablePanel p {
+  margin-top: 6px;
+}
+
+.unavailablePanel small {
+  display: block;
+  margin-top: 8px;
+  color: var(--color-text-4);
+}
+
+@media (max-width: 720px) {
+  .historySummary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .historyActions {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .outlineItem,
+  .textButton,
+  .selectionList button,
+  .historyActions button {
+    transition: none;
+  }
+}

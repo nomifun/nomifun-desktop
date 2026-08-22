@@ -1,0 +1,4642 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { uuidv7 } from '@/common/utils/uuidv7';
+import {
+  CloseOne,
+  Delete,
+  Group,
+  Loading,
+  Refresh,
+  Ungroup,
+} from '@icon-park/react';
+import { Button, Modal, Tooltip } from '@arco-design/web-react';
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import { flushSync } from 'react-dom';
+import { useTranslation } from 'react-i18next';
+import { useNavigate, useParams } from 'react-router-dom';
+
+import {
+  creativeAssetClient,
+  type CreativeAsset,
+  type CreativeAssetKind,
+  useCreativeAssetPickerDialog,
+  useCreativeAssets,
+} from '../../assets';
+import {
+  creativeAssetDownloadName,
+  manualUploadRejectionMessage,
+} from '../../assets/page/model';
+import {
+  CREATIVE_STUDIO_PROJECTS_PATH,
+  CREATIVE_STUDIO_WORKFLOWS_PATH,
+  creativeStudioDirectorProjectPath,
+} from '../../app/routes';
+import {
+  DEFAULT_CREATIVE_STUDIO_PANELS,
+  type CreativeCanvasBackground,
+  type CreativeCanvasNode,
+  type CreativeCanvasNodeKind,
+  type CreativeChatSessionReference,
+  type CreativeSize,
+  type CreativeStudioPanelState,
+} from '../../domain';
+import {
+  useNomiCreativeModelCatalog,
+  type CreativeModelSelectionRef,
+} from '../../models';
+import type { PromptLibrarySelection } from '../../prompts';
+import { useCreativeProject } from '../../services';
+import type { CreativeTaskReference } from '../../tasks';
+import type {
+  ImageWorkbenchAspectRatioOption,
+  ImageWorkbenchModelIdentity,
+  ImageWorkbenchSettings,
+} from '../../workbenches/image';
+import {
+  exactWorkbenchModelOptions,
+  imageWorkbenchModelOptions,
+  type CreativeWorkbenchRuntimeSnapshot,
+  type PreparedCreativeWorkbenchRun,
+} from '../../workbenches/runtime';
+import type {
+  WorkflowDefinitionV1,
+  WorkflowRunAggregateV1,
+} from '../../workflows/domain';
+import {
+  WorkflowRunModal,
+  type CreativeWorkflowRunnerPort,
+} from '../../workflows/page';
+import { useCreativeWorkflowRuntime } from '../../workflows/runtime';
+import { creativeWorkflowRepository } from '../../workflows/services';
+import { CreativeCanvasChrome } from '../chrome';
+import type { CanvasInteractionTool } from '../components';
+import {
+  canRedoCanvas,
+  canUndoCanvas,
+  canvasToClient,
+  canvasCommands,
+  clientToCanvas,
+  validateCanvasConnection,
+  type CanvasPoint,
+  type CanvasState,
+} from '../core';
+import {
+  CreativeCanvasEditor,
+  fitCanvasViewport,
+  type CanvasCasSaveSnapshot,
+  type CreativeCanvasEditorHandle,
+} from '../editor';
+import { CanvasMiniMap, type CanvasMiniMapNavigationRequest } from '../graph';
+import {
+  resolveCanvasContextAction,
+  type CanvasContextAction,
+  type CanvasContextTarget,
+  type CanvasIntegrationIntent,
+} from '../interactions';
+import {
+  CreativeCanvasImageToolbar,
+  CreativeImageCropDialog,
+  CreativeImageMaskEditDialog,
+  CreativeImageSplitDialog,
+  buildCreativeImageMaskReference,
+  createCreativeImageSplitCanvasLayout,
+  creativeImageSplitColumns,
+  creativeImageSplitNodePosition,
+  creativeImageSplitRows,
+  cropCreativeImageAsset,
+  nextDerivedImagePosition,
+  removeUploadedCreativeImageSplit,
+  removeCreativeImageMaskReference,
+  splitCreativeImageAsset,
+  uploadCreativeImageCrop,
+  uploadCreativeImageMaskReference,
+  uploadCreativeImageSplit,
+  type CreativeImageCropRect,
+  type CreativeImageMaskEditSubmit,
+  type CreativeImageSplitParams,
+  type UploadedCreativeImageSplitPiece,
+} from '../imageTools';
+import { CreativeNodeView } from '../nodes';
+import CreativeCanvasAgentPanel, {
+  type CreativeCanvasAgentPanelHandle,
+} from './agent/CreativeCanvasAgentPanel';
+import { buildCreativeCanvasAgentContext } from './agent/context';
+import type { CreativeCanvasAgentOp } from './agent/artifacts';
+import { creativeCanvasAgentOpsPort } from './agent/opsPort';
+import CreativeCanvasConnectionEdge from './CreativeCanvasConnectionEdge';
+import CreativeCanvasAudioComposer from './CreativeCanvasAudioComposer';
+import CreativeCanvasImageComposer from './CreativeCanvasImageComposer';
+import CreativeCanvasVideoComposer from './CreativeCanvasVideoComposer';
+import CreativeCanvasInteractionOverlays, {
+  type CreativeCanvasContextMenuState,
+} from './CreativeCanvasInteractionOverlays';
+import {
+  CreativeCanvasHistoryPanel,
+  CreativeCanvasOutlinePanel,
+  CreativeCanvasPropertiesPanel,
+  CreativeCanvasUnavailablePanel,
+} from './CreativeCanvasPanels';
+import CreativeCanvasTimelinePanel from './CreativeCanvasTimelinePanel';
+import CreativeCanvasWorkflowPanel from './CreativeCanvasWorkflowPanel';
+import {
+  CreativeCanvasProductAssetLibrary,
+  CreativeCanvasProductPromptLibrary,
+  type CreativeCanvasAssetKindFilter,
+} from './CreativeCanvasProductLibraries';
+import {
+  canvasImageComposeDraftFromState,
+  canvasImageComposeTaskSummary,
+  DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS,
+  latestCanvasImageComposeConfig,
+  prepareCanvasImageCompose,
+  withCanvasImageComposeDraft,
+  type CanvasImageComposeDraft,
+} from './canvasImageComposerCanvas';
+import CanvasImageTaskRuntimeBridge, {
+  canvasImageTaskReferenceFromPlan,
+  type CanvasImageTaskRuntimeBridgeHandle,
+} from './CanvasImageTaskRuntimeBridge';
+import CanvasVideoTaskRuntimeBridge, {
+  canvasVideoTaskReferenceFromPlan,
+  type CanvasVideoTaskRuntimeBridgeHandle,
+} from './CanvasVideoTaskRuntimeBridge';
+import CanvasAudioTaskRuntimeBridge, {
+  canvasAudioTaskReferenceFromPlan,
+  type CanvasAudioTaskRuntimeBridgeHandle,
+} from './CanvasAudioTaskRuntimeBridge';
+import {
+  canvasAudioComposeDraftFromState,
+  canvasAudioComposeEligibility,
+  canvasAudioComposeProtocolProfile,
+  canvasAudioComposeTaskSummary,
+  canvasAudioComposeVoiceAfterModelChange,
+  DEFAULT_CANVAS_AUDIO_COMPOSE_DRAFT,
+  latestCanvasAudioComposeConfig,
+  prepareCanvasAudioCompose,
+  withCanvasAudioComposeDraft,
+  type CanvasAudioComposeDraft,
+  type CanvasAudioComposeSettings,
+} from './canvasAudioComposerCanvas';
+import { orphanCanvasAudioComposeTask } from './canvasAudioComposerRuntime';
+import {
+  canvasVideoComposeDraftFromState,
+  canvasVideoComposeMode,
+  canvasVideoComposeTaskSummary,
+  DEFAULT_CANVAS_VIDEO_COMPOSE_DRAFT,
+  latestCanvasVideoComposeConfig,
+  prepareCanvasVideoCompose,
+  withCanvasVideoComposeDraft,
+  type CanvasVideoComposeDraft,
+  type CanvasVideoComposeMode,
+  type CanvasVideoComposeSettings,
+} from './canvasVideoComposerCanvas';
+import { orphanCanvasVideoComposeTask } from './canvasVideoComposerRuntime';
+import {
+  createCreativeCanvasProductNode,
+  CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
+  creativeCanvasProductInsertionViewport,
+  creativeNodeFromAsset,
+  creativeTextNodeFromPrompt,
+} from './nodeFactory';
+import {
+  canLeaveCreativeCanvasAfterFlush,
+  creativeCanvasBlockedLeaveMessage,
+  creativeCanvasProductPanelViews,
+  creativeCanvasProductSelectionCapabilities,
+  creativeCanvasSaveDisplayMessage,
+  resolveCreativeNodeAssetPresentation,
+  withCreativeCanvasBottomView,
+  withCreativeCanvasLeftView,
+  withCreativeCanvasRightView,
+} from './productController';
+import {
+  preferredCanvasImageMaskEditModel,
+  prepareCanvasImageMaskEdit,
+} from './imageMaskEditCanvas';
+import { orphanCanvasImageMaskEditTask } from './imageMaskEditRuntime';
+import {
+  fillEmptyCanvasImageNodeFromAsset,
+  uploadCanvasImageNodeAsset,
+} from './imageNodeUpload';
+import { registerCreativeCanvasProductBeforeLeave } from './beforeLeave';
+import styles from './CreativeCanvasProductRoute.module.css';
+
+const INITIAL_SAVE: CanvasCasSaveSnapshot = {
+  status: 'idle',
+  revision: null,
+  hasPendingChanges: false,
+  error: null,
+};
+
+const INITIAL_CANVAS_TASK_RUNTIME: CreativeWorkbenchRuntimeSnapshot = {
+  state: 'idle',
+  entries: [],
+  submissionFailures: [],
+  submittingCount: 0,
+  recoveringCount: 0,
+  requestError: null,
+};
+
+const FALLBACK_VIEWPORT_SIZE: CreativeSize = { width: 1, height: 1 };
+
+type ConnectionCreateNodeIntent = Extract<
+  CanvasIntegrationIntent,
+  { type: 'connection/create-node-menu/open' }
+>;
+
+interface ProductCreateNodeMenuState {
+  worldPosition: CanvasPoint;
+  clientPosition: CanvasPoint;
+  connection: ConnectionCreateNodeIntent | null;
+}
+
+interface PendingPanoramaChoice {
+  asset: CreativeAsset;
+  worldPosition: CanvasPoint;
+}
+
+interface PendingImageCrop {
+  nodeId: string;
+  asset: CreativeAsset;
+}
+
+interface PendingImageSplit {
+  nodeId: string;
+  asset: CreativeAsset;
+}
+
+interface PendingImageMaskSubmission {
+  plan: PreparedCreativeWorkbenchRun;
+  reference: CreativeTaskReference;
+  failureOrder: number;
+}
+
+interface PendingImageMaskEdit {
+  nodeId: string;
+  asset: CreativeAsset;
+  submission: PendingImageMaskSubmission | null;
+}
+
+interface PendingCanvasImageComposeSubmission {
+  nodeId: string;
+  plan: PreparedCreativeWorkbenchRun;
+  failureOrder: number;
+}
+
+interface CanvasImageComposeIssue {
+  nodeId: string;
+  message: string;
+}
+
+interface PendingCanvasVideoComposeSubmission {
+  nodeId: string;
+  plan: PreparedCreativeWorkbenchRun;
+  failureOrder: number;
+}
+
+interface CanvasVideoComposeIssue {
+  nodeId: string;
+  message: string;
+}
+
+interface PendingCanvasAudioComposeSubmission {
+  nodeId: string;
+  plan: PreparedCreativeWorkbenchRun;
+  failureOrder: number;
+}
+
+interface CanvasAudioComposeIssue {
+  nodeId: string;
+  message: string;
+}
+
+interface AgentDocumentState {
+  sessions: readonly CreativeChatSessionReference[];
+  activeSessionId: string | null;
+}
+
+const iconProps = {
+  theme: 'outline' as const,
+  size: 17,
+  fill: 'currentColor',
+  strokeWidth: 2.5,
+};
+
+function measuredSize(element: HTMLElement | null): CreativeSize {
+  const rect = element?.getBoundingClientRect();
+  return {
+    width:
+      rect && Number.isFinite(rect.width) && rect.width > 0 ? rect.width : 1,
+    height:
+      rect && Number.isFinite(rect.height) && rect.height > 0 ? rect.height : 1,
+  };
+}
+
+const centeredNodePosition = (
+  kind: CreativeCanvasNodeKind,
+  worldPosition: CanvasPoint
+): CanvasPoint => {
+  const size = CREATIVE_CANVAS_PRODUCT_NODE_SIZES[kind];
+  return {
+    x: worldPosition.x - size.width / 2,
+    y: worldPosition.y - size.height / 2,
+  };
+};
+
+const isTwoToOneImage = (asset: CreativeAsset): boolean =>
+  asset.kind === 'image' &&
+  asset.width !== null &&
+  asset.height !== null &&
+  asset.width > 0 &&
+  asset.height > 0 &&
+  Math.abs(asset.width / asset.height - 2) <= 0.03;
+
+const connectionErrorMessage = (
+  code: Extract<
+    CanvasIntegrationIntent,
+    { type: 'connection/rejected' }
+  >['code']
+): string => {
+  switch (code) {
+    case 'missing_source':
+    case 'missing_target':
+      return '连接端点已经不存在';
+    case 'self_connection':
+      return '节点不能连接到自身';
+    case 'duplicate_connection':
+      return '这两个节点已经连接';
+    case 'group_connection':
+      return '节点组不能参与生成连接';
+    case 'config_to_config':
+      return '两个配置节点不能直接连接';
+    case 'director_output_not_supported':
+      return '导演节点只能接收输入';
+    case 'director_requires_image_input':
+      return '导演节点只接受图片或全景图输入';
+    case 'no_valid_drop_target':
+      return '请将连接拖到对端节点的有效连接点';
+  }
+};
+
+interface ProductToolbarButtonProps {
+  label: string;
+  disabled?: boolean;
+  danger?: boolean;
+  icon: React.ReactNode;
+  onClick(): void;
+}
+
+const ProductToolbarButton: React.FC<ProductToolbarButtonProps> = ({
+  label,
+  disabled,
+  danger,
+  icon,
+  onClick,
+}) => (
+  <Tooltip content={label} position="top" mini>
+    <button
+      type="button"
+      className={styles.toolbarButton}
+      data-danger={danger || undefined}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {icon}
+    </button>
+  </Tooltip>
+);
+
+const SaveRecoveryAction: React.FC<{
+  save: CanvasCasSaveSnapshot;
+  busy: boolean;
+  notice: string | null;
+  requiresAuthoritativeReload: boolean;
+  onReload(): void;
+  onRetry(): void;
+}> = ({ save, busy, notice, requiresAuthoritativeReload, onReload, onRetry }) => (
+  <>
+    {notice ? (
+      <span className={styles.notice} role="status" title={notice}>
+        {notice}
+      </span>
+    ) : null}
+    {save.status === 'conflict' || requiresAuthoritativeReload ? (
+      <button
+        type="button"
+        className={styles.recoveryButton}
+        disabled={busy}
+        onClick={onReload}
+      >
+        {busy ? (
+          <Loading className={styles.spin} {...iconProps} />
+        ) : (
+          <Refresh {...iconProps} />
+        )}
+        重新载入远端
+      </button>
+    ) : null}
+    {save.status === 'error' ? (
+      <button
+        type="button"
+        className={styles.recoveryButton}
+        disabled={busy}
+        onClick={onRetry}
+      >
+        {busy ? (
+          <Loading className={styles.spin} {...iconProps} />
+        ) : (
+          <Refresh {...iconProps} />
+        )}
+        重试保存
+      </button>
+    ) : null}
+  </>
+);
+
+const CanvasTaskRuntimeAction: React.FC<{
+  label: string;
+  snapshot: CreativeWorkbenchRuntimeSnapshot;
+  busy: boolean;
+  onCancel(taskId: string): void;
+  onRetry(taskId: string): void;
+}> = ({ label, snapshot, busy, onCancel, onRetry }) => {
+  const taskLabel = (
+    _task: CreativeWorkbenchRuntimeSnapshot['entries'][number]['task']
+  ) => label;
+  const requestError = snapshot.entries.find(
+    (entry) => entry.requestError !== null
+  );
+  const active = snapshot.entries.find(
+    (entry) => entry.task.status === 'queued' || entry.task.status === 'running'
+  );
+  if (requestError) {
+    return (
+      <>
+        <span
+          className={styles.notice}
+          role="alert"
+          title={requestError.requestError?.message}
+        >
+          {taskLabel(requestError.task)}同步中断
+        </span>
+        <button
+          type="button"
+          className={styles.recoveryButton}
+          disabled={busy}
+          onClick={() => onRetry(requestError.task.taskId)}
+        >
+          {busy ? (
+            <Loading className={styles.spin} {...iconProps} />
+          ) : (
+            <Refresh {...iconProps} />
+          )}
+          重试任务同步
+        </button>
+      </>
+    );
+  }
+  if (active) {
+    return (
+      <>
+        <span className={styles.notice} role="status">
+          {active.task.status === 'queued'
+            ? `${taskLabel(active.task)}等待执行`
+            : `${taskLabel(active.task)}生成中`}
+        </span>
+        <button
+          type="button"
+          className={styles.recoveryButton}
+          disabled={busy}
+          onClick={() => onCancel(active.task.taskId)}
+        >
+          {busy ? (
+            <Loading className={styles.spin} {...iconProps} />
+          ) : (
+            <CloseOne {...iconProps} />
+          )}
+          取消任务
+        </button>
+      </>
+    );
+  }
+  if (snapshot.recoveringCount > 0) {
+    return (
+      <span className={styles.notice} role="status">
+        正在恢复{label}…
+      </span>
+    );
+  }
+  return null;
+};
+
+/**
+ * Route-level product composition. CreativeCanvasEditor remains the only
+ * reducer and CAS owner; this component mirrors state solely to drive chrome.
+ */
+const CreativeCanvasProductRoute: React.FC = () => {
+  const { projectId: routeProjectId } = useParams<{ projectId: string }>();
+  const projectId = routeProjectId?.trim() ?? '';
+  const navigate = useNavigate();
+  const { i18n } = useTranslation();
+  const locale = i18n.resolvedLanguage ?? i18n.language ?? 'zh-CN';
+  const project = useCreativeProject(projectId || null);
+  const modelCatalog = useNomiCreativeModelCatalog();
+  const workflowRuntime = useCreativeWorkflowRuntime();
+  const workflowAssetPicker = useCreativeAssetPickerDialog();
+
+  const editorRef = useRef<CreativeCanvasEditorHandle>(null);
+  const imageTaskRuntimeRef = useRef<CanvasImageTaskRuntimeBridgeHandle>(null);
+  const videoTaskRuntimeRef = useRef<CanvasVideoTaskRuntimeBridgeHandle>(null);
+  const audioTaskRuntimeRef = useRef<CanvasAudioTaskRuntimeBridgeHandle>(null);
+  const agentPanelRef = useRef<CreativeCanvasAgentPanelHandle>(null);
+  const agentOpsApplyRef = useRef<Promise<void> | null>(null);
+  const agentOpsReloadRequiredRef = useRef(false);
+  const canvasHostRef = useRef<HTMLDivElement>(null);
+  const imageNodeUploadInputRef = useRef<HTMLInputElement>(null);
+  const imageNodeUploadTargetRef = useRef<string | null>(null);
+  const panelsRef = useRef<CreativeStudioPanelState>(
+    structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS)
+  );
+  const hydratedPanelsRef = useRef<{
+    projectId: string;
+    revision: string;
+  } | null>(null);
+  const hydratedBackgroundRef = useRef<{
+    projectId: string;
+    revision: string;
+  } | null>(null);
+  const knownAssetsRef = useRef<ReadonlyMap<string, CreativeAsset>>(new Map());
+  const assetImportBusyRef = useRef(false);
+  const imageToolBusyRef = useRef(false);
+  const imageToolAbortRef = useRef<AbortController | null>(null);
+  const activeProjectIdRef = useRef(projectId);
+  const workflowRequestRef = useRef(0);
+
+  const [canvasState, setCanvasState] = useState<CanvasState | null>(null);
+  const [save, setSave] = useState<CanvasCasSaveSnapshot>(INITIAL_SAVE);
+  const [tool, setTool] = useState<CanvasInteractionTool>('select');
+  const [background, setBackground] =
+    useState<CreativeCanvasBackground>('lines');
+  const [viewportSize, setViewportSize] = useState<CreativeSize>(
+    FALLBACK_VIEWPORT_SIZE
+  );
+  const [miniMapOpen, setMiniMapOpen] = useState(false);
+  const [miniMapDragging, setMiniMapDragging] = useState(false);
+  const [panels, setPanels] = useState<CreativeStudioPanelState>(() =>
+    structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS)
+  );
+  const [backgroundMenuOpen, setBackgroundMenuOpen] = useState(false);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [assetSearch, setAssetSearch] = useState('');
+  const [assetKind, setAssetKind] =
+    useState<CreativeCanvasAssetKindFilter>('all');
+  const [selectedAssetIds, setSelectedAssetIds] = useState<ReadonlySet<string>>(
+    new Set()
+  );
+  const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] =
+    useState<CreativeCanvasContextMenuState | null>(null);
+  const [createNodeMenu, setCreateNodeMenu] =
+    useState<ProductCreateNodeMenuState | null>(null);
+  const [pendingPanoramaChoice, setPendingPanoramaChoice] =
+    useState<PendingPanoramaChoice | null>(null);
+  const [assetImportBusy, setAssetImportBusy] = useState(false);
+  const [pendingImageCrop, setPendingImageCrop] =
+    useState<PendingImageCrop | null>(null);
+  const [imageCropBusy, setImageCropBusy] = useState(false);
+  const [imageCropProgress, setImageCropProgress] = useState<number | null>(
+    null
+  );
+  const [imageCropError, setImageCropError] = useState<string | null>(null);
+  const [pendingImageSplit, setPendingImageSplit] =
+    useState<PendingImageSplit | null>(null);
+  const [imageSplitBusy, setImageSplitBusy] = useState(false);
+  const [imageSplitProgress, setImageSplitProgress] = useState<number | null>(
+    null
+  );
+  const [imageSplitError, setImageSplitError] = useState<string | null>(null);
+  const [pendingImageMaskEdit, setPendingImageMaskEdit] =
+    useState<PendingImageMaskEdit | null>(null);
+  const [imageMaskModel, setImageMaskModel] =
+    useState<CreativeModelSelectionRef | null>(null);
+  const [imageMaskBusy, setImageMaskBusy] = useState(false);
+  const [imageMaskProgress, setImageMaskProgress] = useState<number | null>(
+    null
+  );
+  const [imageMaskError, setImageMaskError] = useState<string | null>(null);
+  const [imageTaskRuntime, setImageTaskRuntime] =
+    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
+  const [imageTaskRuntimeReady, setImageTaskRuntimeReady] = useState(false);
+  const [imageTaskRuntimeEpoch, setImageTaskRuntimeEpoch] = useState(0);
+  const [imageTaskRuntimeActionBusy, setImageTaskRuntimeActionBusy] =
+    useState(false);
+  const [imageComposeBusy, setImageComposeBusy] = useState(false);
+  const [imageComposeIssue, setImageComposeIssue] =
+    useState<CanvasImageComposeIssue | null>(null);
+  const [imageComposeSubmission, setImageComposeSubmission] =
+    useState<PendingCanvasImageComposeSubmission | null>(null);
+  const [videoTaskRuntime, setVideoTaskRuntime] =
+    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
+  const [videoTaskRuntimeReady, setVideoTaskRuntimeReady] = useState(false);
+  const [videoTaskRuntimeEpoch, setVideoTaskRuntimeEpoch] = useState(0);
+  const [videoTaskRuntimeActionBusy, setVideoTaskRuntimeActionBusy] =
+    useState(false);
+  const [videoComposeBusy, setVideoComposeBusy] = useState(false);
+  const [videoComposeIssue, setVideoComposeIssue] =
+    useState<CanvasVideoComposeIssue | null>(null);
+  const [videoComposeSubmission, setVideoComposeSubmission] =
+    useState<PendingCanvasVideoComposeSubmission | null>(null);
+  const [audioTaskRuntime, setAudioTaskRuntime] =
+    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
+  const [audioTaskRuntimeReady, setAudioTaskRuntimeReady] = useState(false);
+  const [audioTaskRuntimeEpoch, setAudioTaskRuntimeEpoch] = useState(0);
+  const [audioTaskRuntimeActionBusy, setAudioTaskRuntimeActionBusy] =
+    useState(false);
+  const [audioComposeBusy, setAudioComposeBusy] = useState(false);
+  const [audioComposeIssue, setAudioComposeIssue] =
+    useState<CanvasAudioComposeIssue | null>(null);
+  const [audioComposeSubmission, setAudioComposeSubmission] =
+    useState<PendingCanvasAudioComposeSubmission | null>(null);
+  const [promptInsertTargetNodeId, setPromptInsertTargetNodeId] =
+    useState<string | null>(null);
+  const [agentDocumentState, setAgentDocumentState] =
+    useState<AgentDocumentState | null>(null);
+  const [agentOpsApplyBusy, setAgentOpsApplyBusy] = useState(false);
+  const [agentOpsReloadRequired, setAgentOpsReloadRequired] = useState(false);
+  const setAgentOpsReloadFence = useCallback((required: boolean) => {
+    agentOpsReloadRequiredRef.current = required;
+    setAgentOpsReloadRequired(required);
+  }, []);
+  const [workflows, setWorkflows] = useState<WorkflowDefinitionV1[]>([]);
+  const [workflowLoading, setWorkflowLoading] = useState(false);
+  const [workflowError, setWorkflowError] = useState<string | null>(null);
+  const [workflowToRun, setWorkflowToRun] =
+    useState<WorkflowDefinitionV1 | null>(null);
+  const [workflowInsertingRunId, setWorkflowInsertingRunId] = useState<
+    string | null
+  >(null);
+  const agentOpsBlockedByCanvasMutation =
+    recoveryBusy ||
+    assetImportBusy ||
+    imageCropBusy ||
+    imageSplitBusy ||
+    imageMaskBusy ||
+    imageTaskRuntimeActionBusy ||
+    imageComposeBusy ||
+    videoTaskRuntimeActionBusy ||
+    videoComposeBusy ||
+    audioTaskRuntimeActionBusy ||
+    audioComposeBusy ||
+    workflowInsertingRunId !== null ||
+    [imageTaskRuntime, videoTaskRuntime, audioTaskRuntime].some(
+      (runtime) =>
+        runtime.submittingCount > 0 ||
+        runtime.recoveringCount > 0 ||
+        runtime.entries.some(
+          (entry) => entry.task.status === 'queued' || entry.task.status === 'running'
+        )
+    );
+
+  const loadWorkflows = useCallback(async () => {
+    const request = ++workflowRequestRef.current;
+    setWorkflowLoading(true);
+    setWorkflowError(null);
+    try {
+      const loaded = await creativeWorkflowRepository.list();
+      if (request !== workflowRequestRef.current) return;
+      setWorkflows(
+        [...loaded].sort(
+          (left, right) => right.metadata.updatedAt - left.metadata.updatedAt
+        )
+      );
+    } catch (error) {
+      if (request !== workflowRequestRef.current) return;
+      setWorkflowError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (request === workflowRequestRef.current) setWorkflowLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadWorkflows();
+    return () => {
+      workflowRequestRef.current += 1;
+    };
+  }, [loadWorkflows]);
+
+  const assetQuery = useMemo(
+    () => ({
+      ...(assetSearch.trim() ? { search: assetSearch.trim() } : {}),
+      ...(assetKind !== 'all' ? { kind: assetKind as CreativeAssetKind } : {}),
+      sort: 'updated_desc' as const,
+    }),
+    [assetKind, assetSearch]
+  );
+  const assets = useCreativeAssets({
+    enabled: Boolean(projectId),
+    query: assetQuery,
+  });
+  const imageMaskModelOptions = useMemo(
+    () => exactWorkbenchModelOptions(modelCatalog, 'image_edit'),
+    [modelCatalog]
+  );
+  const imageComposeModelOptions = useMemo(
+    () => imageWorkbenchModelOptions(modelCatalog, 'image_edit'),
+    [modelCatalog]
+  );
+  const imageGenerationModelOptions = useMemo(
+    () => imageWorkbenchModelOptions(modelCatalog, 'image_generation'),
+    [modelCatalog]
+  );
+  const imageGenerationExactOptions = useMemo(
+    () => exactWorkbenchModelOptions(modelCatalog, 'image_generation'),
+    [modelCatalog]
+  );
+  const videoModelOptions = useMemo(
+    () => exactWorkbenchModelOptions(modelCatalog, 'video_generation'),
+    [modelCatalog]
+  );
+  const audioModelOptions = useMemo(
+    () => exactWorkbenchModelOptions(modelCatalog, 'speech_synthesis'),
+    [modelCatalog]
+  );
+
+  const knownAssetsById = useMemo(() => {
+    const merged = new Map(knownAssetsRef.current);
+    for (const asset of assets.assets) merged.set(asset.id, asset);
+    knownAssetsRef.current = merged;
+    return merged;
+  }, [assets.assets]);
+
+  useLayoutEffect(() => {
+    const host = canvasHostRef.current;
+    if (!host) return;
+    const update = () => setViewportSize(measuredSize(host));
+    update();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(update);
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, []);
+
+  useLayoutEffect(() => {
+    activeProjectIdRef.current = projectId;
+    imageToolAbortRef.current?.abort();
+    imageToolAbortRef.current = null;
+    imageNodeUploadTargetRef.current = null;
+    if (imageNodeUploadInputRef.current) imageNodeUploadInputRef.current.value = '';
+    const defaultPanels = structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS);
+    panelsRef.current = defaultPanels;
+    setPanels(defaultPanels);
+    hydratedPanelsRef.current = null;
+    hydratedBackgroundRef.current = null;
+    setCanvasState(null);
+    setSave(INITIAL_SAVE);
+    agentOpsReloadRequiredRef.current = false;
+    setAgentOpsReloadRequired(false);
+    setAgentOpsApplyBusy(false);
+    setNotice(null);
+    setContextMenu(null);
+    setCreateNodeMenu(null);
+    setPendingPanoramaChoice(null);
+    setAssetImportBusy(false);
+    setPendingImageCrop(null);
+    setImageCropBusy(false);
+    setImageCropProgress(null);
+    setImageCropError(null);
+    setPendingImageSplit(null);
+    setImageSplitBusy(false);
+    setImageSplitProgress(null);
+    setImageSplitError(null);
+    setPendingImageMaskEdit(null);
+    setImageMaskModel(null);
+    setImageMaskBusy(false);
+    setImageMaskProgress(null);
+    setImageMaskError(null);
+    setImageTaskRuntime(INITIAL_CANVAS_TASK_RUNTIME);
+    setImageTaskRuntimeReady(false);
+    setImageTaskRuntimeEpoch(0);
+    setImageTaskRuntimeActionBusy(false);
+    setImageComposeBusy(false);
+    setImageComposeIssue(null);
+    setImageComposeSubmission(null);
+    setVideoTaskRuntime(INITIAL_CANVAS_TASK_RUNTIME);
+    setVideoTaskRuntimeReady(false);
+    setVideoTaskRuntimeEpoch(0);
+    setVideoTaskRuntimeActionBusy(false);
+    setVideoComposeBusy(false);
+    setVideoComposeIssue(null);
+    setVideoComposeSubmission(null);
+    setAudioTaskRuntime(INITIAL_CANVAS_TASK_RUNTIME);
+    setAudioTaskRuntimeReady(false);
+    setAudioTaskRuntimeEpoch(0);
+    setAudioTaskRuntimeActionBusy(false);
+    setAudioComposeBusy(false);
+    setAudioComposeIssue(null);
+    setAudioComposeSubmission(null);
+    setPromptInsertTargetNodeId(null);
+    setAgentDocumentState(null);
+    assetImportBusyRef.current = false;
+    imageToolBusyRef.current = false;
+    knownAssetsRef.current = new Map();
+    return () => {
+      imageToolAbortRef.current?.abort();
+    };
+  }, [projectId]);
+
+  useEffect(() => {
+    if (
+      imageTaskRuntimeReady &&
+      videoTaskRuntimeReady &&
+      audioTaskRuntimeReady
+    ) {
+      return;
+    }
+    const detail = project.detail;
+    if (!detail || detail.project.projectId !== projectId || !canvasState)
+      return;
+    const currentNodeIds = new Set(
+      canvasState.document.nodes.map((node) => node.id)
+    );
+    if (detail.document.nodes.every((node) => currentNodeIds.has(node.id))) {
+      if (!imageTaskRuntimeReady) setImageTaskRuntimeReady(true);
+      if (!videoTaskRuntimeReady) setVideoTaskRuntimeReady(true);
+      if (!audioTaskRuntimeReady) setAudioTaskRuntimeReady(true);
+    }
+  }, [
+    audioTaskRuntimeReady,
+    canvasState,
+    imageTaskRuntimeReady,
+    project.detail,
+    projectId,
+    videoTaskRuntimeReady,
+  ]);
+
+  useEffect(() => {
+    if (!imageMaskModel || pendingImageMaskEdit?.submission) return;
+    const available = imageMaskModelOptions.some(
+      (option) =>
+        option.providerId === imageMaskModel.providerId &&
+        option.model === imageMaskModel.model
+    );
+    if (!available) setImageMaskModel(null);
+  }, [imageMaskModel, imageMaskModelOptions, pendingImageMaskEdit?.submission]);
+
+  useEffect(() => {
+    const detail = project.detail;
+    if (!detail || detail.project.projectId !== projectId) return;
+
+    const hydratedBackground = hydratedBackgroundRef.current;
+    if (
+      !hydratedBackground ||
+      hydratedBackground.projectId !== projectId ||
+      hydratedBackground.revision !== detail.project.revision
+    ) {
+      setBackground(detail.document.background);
+      hydratedBackgroundRef.current = {
+        projectId,
+        revision: detail.project.revision,
+      };
+    }
+
+    const hydrated = hydratedPanelsRef.current;
+    const shouldHydratePanels =
+      !hydrated ||
+      hydrated.projectId !== projectId ||
+      (save.status === 'idle' && hydrated.revision !== detail.project.revision);
+    if (!shouldHydratePanels) return;
+
+    const nextPanels = structuredClone(detail.document.panels);
+    panelsRef.current = nextPanels;
+    setPanels(nextPanels);
+    hydratedPanelsRef.current = {
+      projectId,
+      revision: detail.project.revision,
+    };
+  }, [project.detail, projectId, save.status]);
+
+  const dispatch = useCallback(
+    (command: Parameters<CreativeCanvasEditorHandle['dispatch']>[0]) => {
+      return editorRef.current?.dispatch(command) ?? null;
+    },
+    []
+  );
+
+  const persistPanels = useCallback((nextPanels: CreativeStudioPanelState) => {
+    panelsRef.current = nextPanels;
+    setPanels(nextPanels);
+    editorRef.current?.setPanels(nextPanels);
+  }, []);
+
+  const handleLeftViewChange = useCallback(
+    (view: CreativeStudioPanelState['left']['activeView']) => {
+      persistPanels(withCreativeCanvasLeftView(panelsRef.current, view));
+    },
+    [persistPanels]
+  );
+
+  const handleRightViewChange = useCallback(
+    (view: CreativeStudioPanelState['right']['activeView'] | null) => {
+      persistPanels(withCreativeCanvasRightView(panelsRef.current, view));
+    },
+    [persistPanels]
+  );
+
+  const handleBottomViewChange = useCallback(
+    (view: CreativeStudioPanelState['bottom']['activeView'] | null) => {
+      persistPanels(withCreativeCanvasBottomView(panelsRef.current, view));
+    },
+    [persistPanels]
+  );
+
+  const updateImageComposeDraft = useCallback(
+    (
+      nodeId: string,
+      update: (current: CanvasImageComposeDraft) => CanvasImageComposeDraft
+    ) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      const state = editor.getState();
+      const node = state.document.nodes.find(
+        (candidate): candidate is Extract<CreativeCanvasNode, { type: 'image' }> =>
+          candidate.id === nodeId && candidate.type === 'image'
+      );
+      if (!node) return;
+      const current = canvasImageComposeDraftFromState(state, nodeId);
+      const nextState = editor.dispatch(
+        canvasCommands.updateNode(withCanvasImageComposeDraft(node, update(current)), {
+          mergeKey: `image-composer:${nodeId}`,
+        })
+      );
+      setCanvasState(nextState);
+    },
+    []
+  );
+
+  const updateVideoComposeDraft = useCallback(
+    (
+      nodeId: string,
+      update: (current: CanvasVideoComposeDraft) => CanvasVideoComposeDraft
+    ) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      const state = editor.getState();
+      const node = state.document.nodes.find(
+        (candidate): candidate is Extract<CreativeCanvasNode, { type: 'video' }> =>
+          candidate.id === nodeId && candidate.type === 'video'
+      );
+      if (!node) return;
+      const current = canvasVideoComposeDraftFromState(state, nodeId);
+      const nextState = editor.dispatch(
+        canvasCommands.updateNode(withCanvasVideoComposeDraft(node, update(current)), {
+          mergeKey: `video-composer:${nodeId}`,
+        })
+      );
+      setCanvasState(nextState);
+    },
+    []
+  );
+
+  const updateAudioComposeDraft = useCallback(
+    (
+      nodeId: string,
+      update: (current: CanvasAudioComposeDraft) => CanvasAudioComposeDraft
+    ) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      const state = editor.getState();
+      const node = state.document.nodes.find(
+        (candidate): candidate is Extract<CreativeCanvasNode, { type: 'audio' }> =>
+          candidate.id === nodeId && candidate.type === 'audio'
+      );
+      if (!node) return;
+      const current = canvasAudioComposeDraftFromState(state, nodeId);
+      editor.dispatch(
+        canvasCommands.updateNode(
+          withCanvasAudioComposeDraft(node, update(current)),
+          { mergeKey: `audio-composer:${nodeId}` }
+        )
+      );
+      setCanvasState(editor.getState());
+    },
+    []
+  );
+
+  const openComposePromptLibrary = useCallback(
+    (nodeId: string) => {
+      setPromptInsertTargetNodeId(nodeId);
+      handleLeftViewChange('prompts');
+    },
+    [handleLeftViewChange]
+  );
+
+  const prepareCenteredInsertion = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return null;
+    const viewportSize = measuredSize(canvasHostRef.current);
+    let state = editor.getState();
+    const viewport = creativeCanvasProductInsertionViewport(state, viewportSize);
+    if (
+      viewport.x !== state.viewport.x ||
+      viewport.y !== state.viewport.y ||
+      viewport.zoom !== state.viewport.zoom
+    ) {
+      state = editor.dispatch(canvasCommands.setViewport(viewport));
+    }
+    return { editor, state, viewportSize };
+  }, []);
+
+  const addNode = useCallback(
+    (kind: CreativeCanvasNodeKind) => {
+      if (save.revision === null) return;
+      const insertion = prepareCenteredInsertion();
+      if (!insertion) return;
+      const { editor, state, viewportSize } = insertion;
+      if (kind === 'director') {
+        const directors = state.document.nodes.filter(
+          (node) => node.type === 'director'
+        );
+        if (directors.length > 0) {
+          editor.dispatch(
+            canvasCommands.setSelection(directors.map((node) => node.id))
+          );
+          handleBottomViewChange('timeline');
+          setNotice(
+            directors.length === 1
+              ? '项目已有唯一导演节点，已为你选中。'
+              : '项目存在多个导演节点，请在时间线面板中处理冲突。'
+          );
+          return;
+        }
+      }
+      const node = createCreativeCanvasProductNode(
+        kind,
+        state,
+        viewportSize
+      );
+      editor.dispatch(canvasCommands.addNode(node));
+      if (kind === 'director') {
+        handleBottomViewChange('timeline');
+        setNotice('已创建项目唯一的导演节点。');
+      } else {
+        setNotice(null);
+      }
+    },
+    [handleBottomViewChange, prepareCenteredInsertion, save.revision]
+  );
+
+  const handleBackgroundChange = useCallback(
+    (next: CreativeCanvasBackground) => {
+      setBackground(next);
+      editorRef.current?.setBackground(next);
+    },
+    []
+  );
+
+  const handleFit = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.dispatch(
+      canvasCommands.setViewport(
+        fitCanvasViewport(
+          editor.getState(),
+          measuredSize(canvasHostRef.current)
+        )
+      )
+    );
+  }, []);
+
+  const handleMiniMapNavigate = useCallback(
+    (request: CanvasMiniMapNavigationRequest) => {
+      setMiniMapDragging(request.phase !== 'end');
+      editorRef.current?.dispatch(canvasCommands.setViewport(request.viewport));
+    },
+    []
+  );
+
+  const flushBeforeLeave = useCallback(async (): Promise<boolean> => {
+    if (imageToolBusyRef.current) {
+      setNotice('图片工具仍在处理，请等待完成后再离开。');
+      return false;
+    }
+    if (agentOpsReloadRequiredRef.current) {
+      setNotice('必须先重新载入 Agent 提案提交后的远端画布。');
+      return false;
+    }
+    const agentOpsApply = agentOpsApplyRef.current;
+    if (agentOpsApply) {
+      try {
+        await agentOpsApply;
+      } catch {
+        setNotice('Agent 提案的应用结果尚未确认，请复核远端画布后再离开。');
+        return false;
+      }
+    }
+    if (agentOpsReloadRequiredRef.current) {
+      setNotice('必须先重新载入 Agent 提案提交后的远端画布。');
+      return false;
+    }
+    if (!((await agentPanelRef.current?.prepareToLeave()) ?? true))
+      return false;
+    if (agentOpsReloadRequiredRef.current) {
+      setNotice('必须先重新载入 Agent 提案提交后的远端画布。');
+      return false;
+    }
+    const editor = editorRef.current;
+    if (!editor) return true;
+    const result = await editor.flush();
+    const canLeave = canLeaveCreativeCanvasAfterFlush(result);
+    if (!canLeave) {
+      setNotice(creativeCanvasBlockedLeaveMessage(result) ?? '画布尚未安全保存。');
+    }
+    if (agentOpsReloadRequiredRef.current) {
+      setNotice('必须先重新载入 Agent 提案提交后的远端画布。');
+      return false;
+    }
+    return canLeave;
+  }, []);
+
+  const handlePersistAgentSessions = useCallback(
+    async (
+      sessions: readonly CreativeChatSessionReference[],
+      activeSessionId: string | null
+    ) => {
+      const editor = editorRef.current;
+      if (!editor) throw new Error('画布尚未载入，无法保存 Agent 会话。');
+      await editor.persistAgentSessions(sessions, activeSessionId);
+    },
+    []
+  );
+
+  const handleApplyCanvasAgentOps = useCallback(
+    async (
+      assistantMessageId: string,
+      ops: readonly CreativeCanvasAgentOp[]
+    ) => {
+      if (agentOpsApplyRef.current) {
+        throw new Error('已有 Agent 提案正在应用。');
+      }
+      if (
+        agentOpsBlockedByCanvasMutation ||
+        assetImportBusyRef.current ||
+        imageToolBusyRef.current
+      ) {
+        throw new Error('画布仍有创作或恢复任务，请等待完成后再应用 Agent 提案。');
+      }
+      const editor = editorRef.current;
+      if (!editor) throw new Error('画布尚未载入，无法应用 Agent 提案。');
+      flushSync(() => setAgentOpsApplyBusy(true));
+      setNotice(`正在应用 Agent 提案的 ${ops.length} 项画布操作…`);
+      const operation = (async () => {
+        const reloadRemoteSafely = async (): Promise<boolean> => {
+          try {
+            return await editor.reloadRemote();
+          } catch {
+            return false;
+          }
+        };
+        const flush = await editor.flush();
+        if (!canLeaveCreativeCanvasAfterFlush(flush)) {
+          setNotice(
+            creativeCanvasBlockedLeaveMessage(flush) ?? '画布尚未安全保存。'
+          );
+          throw new Error(
+            creativeCanvasBlockedLeaveMessage(flush) ?? '画布尚未安全保存。'
+          );
+        }
+        const expectedRevision = editor.getSaveState().revision;
+        if (expectedRevision === null) {
+          throw new Error('画布缺少可验证的远端 revision。');
+        }
+        let replayed = false;
+        try {
+          const applied = await creativeCanvasAgentOpsPort.apply({
+            projectId,
+            assistantMessageId,
+            expectedRevision,
+            ops,
+          });
+          replayed = applied.replayed;
+        } catch (error) {
+          const reloaded = await reloadRemoteSafely();
+          setAgentOpsReloadFence(!reloaded);
+          if (reloaded) agentPanelRef.current?.refreshAuthority();
+          setNotice(
+            reloaded
+              ? 'Agent 提案的应用结果未确认；已重新载入远端画布，请复核。'
+              : 'Agent 提案应用失败，远端画布也暂时无法重新载入。'
+          );
+          throw error;
+        }
+        if (!(await reloadRemoteSafely())) {
+          setAgentOpsReloadFence(true);
+          setNotice('Agent 提案已提交，但远端画布暂时无法重新载入。');
+          return;
+        }
+        setAgentOpsReloadFence(false);
+        setNotice(
+          replayed
+            ? `已确认该 Agent 提案此前应用的 ${ops.length} 项画布操作。`
+            : `已应用 Agent 提案的 ${ops.length} 项画布操作。`
+        );
+      })();
+      agentOpsApplyRef.current = operation;
+      try {
+        await operation;
+      } finally {
+        if (agentOpsApplyRef.current === operation) {
+          agentOpsApplyRef.current = null;
+        }
+        setAgentOpsApplyBusy(false);
+      }
+    },
+    [agentOpsBlockedByCanvasMutation, projectId, setAgentOpsReloadFence]
+  );
+
+  const handleAgentSessionsChange = useCallback(
+    (
+      sessions: readonly CreativeChatSessionReference[],
+      activeSessionId: string | null
+    ) => {
+      setAgentDocumentState({
+        sessions: structuredClone([...sessions]),
+        activeSessionId,
+      });
+    },
+    []
+  );
+
+  const handleOpenModelSettings = useCallback(async () => {
+    if (await flushBeforeLeave()) navigate('/models?section=models');
+  }, [flushBeforeLeave, navigate]);
+
+  const handleOpenWorkflowCenter = useCallback(async () => {
+    if (await flushBeforeLeave()) navigate(CREATIVE_STUDIO_WORKFLOWS_PATH);
+  }, [flushBeforeLeave, navigate]);
+
+  const workflowRunner = useMemo<CreativeWorkflowRunnerPort>(
+    () => ({
+      async start(input) {
+        await workflowRuntime.controller.start(input);
+      },
+    }),
+    [workflowRuntime.controller]
+  );
+
+  const dismissInteractionOverlays = useCallback(() => {
+    setContextMenu(null);
+    setCreateNodeMenu(null);
+  }, []);
+
+  const openCreateNodeMenu = useCallback(
+    (
+      worldPosition: CanvasPoint,
+      connection: ConnectionCreateNodeIntent | null = null
+    ) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      setContextMenu(null);
+      setCreateNodeMenu({
+        worldPosition: { ...worldPosition },
+        clientPosition: canvasToClient(
+          worldPosition,
+          editor.getState().viewport
+        ),
+        connection,
+      });
+    },
+    []
+  );
+
+  const insertAssetAtWorld = useCallback(
+    (asset: CreativeAsset, worldPosition: CanvasPoint, asPanorama = false) => {
+      const editor = editorRef.current;
+      if (!editor) throw new Error('画布尚未载入，无法插入素材。');
+      const state = editor.getState();
+      const kind = asPanorama ? 'panorama' : asset.kind;
+      const position = centeredNodePosition(kind, worldPosition);
+      const node = asPanorama
+        ? {
+            ...createCreativeCanvasProductNode(
+              'panorama',
+              state,
+              measuredSize(canvasHostRef.current),
+              { position }
+            ),
+            data: {
+              assetId: asset.id,
+              projection: 'equirectangular' as const,
+              yaw: 0,
+              pitch: 0,
+              fieldOfView: 75,
+            },
+          }
+        : creativeNodeFromAsset(
+            asset,
+            state,
+            measuredSize(canvasHostRef.current),
+            { position }
+          );
+      knownAssetsRef.current = new Map(knownAssetsRef.current).set(
+        asset.id,
+        asset
+      );
+      editor.dispatch(canvasCommands.addNode(node));
+      setNotice(
+        `已将“${asset.title}”插入为${asPanorama ? '全景图' : '素材'}节点。`
+      );
+      void assets.reload();
+    },
+    [assets]
+  );
+
+  const importCanvasFile = useCallback(
+    async (
+      file: File,
+      worldPosition: CanvasPoint,
+      panoramaChoice: 'after-upload-if-2-to-1' | 'not-applicable'
+    ) => {
+      if (assetImportBusyRef.current) {
+        setNotice('已有素材正在上传，请等待完成。');
+        return;
+      }
+      assetImportBusyRef.current = true;
+      setAssetImportBusy(true);
+      setNotice(`正在上传“${file.name}”…`);
+      try {
+        const asset = await creativeAssetClient.upload(
+          file,
+          { title: file.name, inLibrary: true, tags: ['canvas-import'] },
+          undefined,
+          (progress) =>
+            setNotice(`正在上传“${file.name}” ${Math.round(progress)}%`)
+        );
+        if (
+          panoramaChoice === 'after-upload-if-2-to-1' &&
+          isTwoToOneImage(asset)
+        ) {
+          setPendingPanoramaChoice({
+            asset,
+            worldPosition: { ...worldPosition },
+          });
+          setNotice('检测到真实 2:1 图片，请选择普通图片或全景图节点。');
+          return;
+        }
+        insertAssetAtWorld(asset, worldPosition);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        assetImportBusyRef.current = false;
+        setAssetImportBusy(false);
+      }
+    },
+    [insertAssetAtWorld]
+  );
+
+  const openImageNodeUpload = useCallback((nodeId: string) => {
+    if (assetImportBusyRef.current) {
+      setNotice('已有素材正在上传，请等待完成。');
+      return;
+    }
+    imageNodeUploadTargetRef.current = nodeId;
+    const input = imageNodeUploadInputRef.current;
+    if (!input) {
+      setNotice('图片文件选择器暂时不可用。');
+      return;
+    }
+    input.value = '';
+    input.click();
+  }, []);
+
+  const handleImageNodeUploadChange = useCallback(
+    async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const input = event.currentTarget;
+      const file = input.files?.[0] ?? null;
+      const nodeId = imageNodeUploadTargetRef.current;
+      imageNodeUploadTargetRef.current = null;
+      input.value = '';
+      if (!file || !nodeId) return;
+      if (!file.type.startsWith('image/')) {
+        setNotice('该节点只接受真实图片文件。');
+        return;
+      }
+      if (assetImportBusyRef.current) {
+        setNotice('已有素材正在上传，请等待完成。');
+        return;
+      }
+
+      assetImportBusyRef.current = true;
+      setAssetImportBusy(true);
+      setNotice(`正在上传“${file.name}”…`);
+      let uploadedAsset: CreativeAsset | null = null;
+      try {
+        const uploaded = await uploadCanvasImageNodeAsset({
+          port: creativeAssetClient,
+          file,
+          operationId: uuidv7(),
+          onProgress: (progress) =>
+            setNotice(`正在上传“${file.name}” ${Math.round(progress)}%`),
+        });
+        const asset = uploaded.asset;
+        uploadedAsset = asset;
+        if (activeProjectIdRef.current !== projectId) {
+          throw new DOMException('Project changed', 'AbortError');
+        }
+        const editor = editorRef.current;
+        if (!editor) throw new Error('画布已经关闭，图片保留在素材库中。');
+        const state = editor.getState();
+        const source = state.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
+            node.id === nodeId && node.type === 'image'
+        );
+        if (!source) throw new Error('图片节点已被删除，上传结果保留在素材库中。');
+        const updated = fillEmptyCanvasImageNodeFromAsset(source, asset);
+        knownAssetsRef.current = new Map(knownAssetsRef.current).set(asset.id, asset);
+        const updatedState = editor.dispatch(
+          canvasCommands.updateNode(updated, {
+            at: Date.now(),
+            mergeKey: `image-upload:${nodeId}`,
+          })
+        );
+        const linked = updatedState.document.nodes.find(
+          (node) => node.id === nodeId && node.type === 'image'
+        );
+        if (linked?.type !== 'image' || linked.data.assetId !== asset.id) {
+          throw new Error(
+            '图片节点当前受运行任务保护；上传素材已保留在素材库中。'
+          );
+        }
+        const flush = await editor.flush();
+        if (!canLeaveCreativeCanvasAfterFlush(flush)) {
+          throw new Error(
+            creativeCanvasBlockedLeaveMessage(flush) ?? '图片节点尚未安全保存。'
+          );
+        }
+        setNotice(
+          uploaded.recoveredAfterResponseLoss
+            ? `已找回上传结果并将“${asset.title}”填入原图片节点。`
+            : `已将“${asset.title}”填入原图片节点。`
+        );
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === 'AbortError')) {
+          setNotice(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        if (uploadedAsset) void assets.reload();
+        assetImportBusyRef.current = false;
+        setAssetImportBusy(false);
+      }
+    },
+    [assets, projectId]
+  );
+
+  const resolveCanvasImageAsset = useCallback(
+    async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
+      const assetId = node.data.assetId?.trim();
+      if (!assetId) throw new Error('该图片节点尚未关联真实素材。');
+      const cached = knownAssetsRef.current.get(assetId);
+      const asset = cached ?? (await creativeAssetClient.get(assetId));
+      if (asset.kind !== 'image') {
+        throw new Error('该节点关联的素材不是图片，已停止图片操作。');
+      }
+      knownAssetsRef.current = new Map(knownAssetsRef.current).set(
+        asset.id,
+        asset
+      );
+      return asset;
+    },
+    []
+  );
+
+  const handleOpenImageCrop = useCallback(
+    async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
+      if (imageToolBusyRef.current || assetImportBusyRef.current) {
+        setNotice('已有图片或素材操作正在进行，请等待完成。');
+        return;
+      }
+      setImageCropError(null);
+      try {
+        const asset = await resolveCanvasImageAsset(node);
+        if (activeProjectIdRef.current !== projectId) return;
+        setImageCropProgress(null);
+        setPendingImageCrop({ nodeId: node.id, asset });
+      } catch (error) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setNotice(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [projectId, resolveCanvasImageAsset]
+  );
+
+  const handleDownloadImage = useCallback(
+    async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
+      try {
+        const asset = await resolveCanvasImageAsset(node);
+        if (activeProjectIdRef.current !== projectId) return;
+        const anchor = document.createElement('a');
+        anchor.href = asset.originalUrl;
+        anchor.download = creativeAssetDownloadName(asset);
+        anchor.rel = 'noopener noreferrer';
+        anchor.click();
+      } catch (error) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setNotice(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [projectId, resolveCanvasImageAsset]
+  );
+
+  const handleOpenImageSplit = useCallback(
+    async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
+      if (imageToolBusyRef.current || assetImportBusyRef.current) {
+        setNotice('已有图片或素材操作正在进行，请等待完成。');
+        return;
+      }
+      setImageSplitError(null);
+      try {
+        const asset = await resolveCanvasImageAsset(node);
+        if (activeProjectIdRef.current !== projectId) return;
+        setImageSplitProgress(null);
+        setPendingImageSplit({ nodeId: node.id, asset });
+      } catch (error) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setNotice(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [projectId, resolveCanvasImageAsset]
+  );
+
+  const closeImageCrop = useCallback(() => {
+    if (imageToolBusyRef.current) return;
+    setPendingImageCrop(null);
+    setImageCropProgress(null);
+    setImageCropError(null);
+  }, []);
+
+  const handleConfirmImageCrop = useCallback(
+    async (crop: CreativeImageCropRect) => {
+      const request = pendingImageCrop;
+      const editor = editorRef.current;
+      if (!request || !editor || imageToolBusyRef.current) return;
+      if (assetImportBusyRef.current) {
+        setImageCropError('另一个素材上传仍在进行，请等待完成后重试。');
+        return;
+      }
+
+      const controller = new AbortController();
+      imageToolAbortRef.current = controller;
+      imageToolBusyRef.current = true;
+      setImageCropBusy(true);
+      setImageCropProgress(0);
+      setImageCropError(null);
+      let uploadedAsset: CreativeAsset | null = null;
+
+      try {
+        const cropped = await cropCreativeImageAsset({
+          asset: request.asset,
+          crop,
+          signal: controller.signal,
+        });
+        const uploaded = await uploadCreativeImageCrop({
+          port: creativeAssetClient,
+          source: request.asset,
+          file: cropped.file,
+          operationId: uuidv7(),
+          signal: controller.signal,
+          onProgress: setImageCropProgress,
+        });
+        uploadedAsset = uploaded.asset;
+        controller.signal.throwIfAborted();
+        if (activeProjectIdRef.current !== projectId) {
+          throw new DOMException('Project changed', 'AbortError');
+        }
+
+        const current = editor.getState();
+        const source = current.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
+            node.id === request.nodeId && node.type === 'image'
+        );
+        if (!source || source.data.assetId !== request.asset.id) {
+          throw new Error(
+            '原图片节点已被删除或替换；裁剪素材已保存在素材库中。'
+          );
+        }
+
+        const position = nextDerivedImagePosition(
+          current.document,
+          source,
+          CREATIVE_CANVAS_PRODUCT_NODE_SIZES.image
+        );
+        const derived = creativeNodeFromAsset(
+          uploaded.asset,
+          current,
+          measuredSize(canvasHostRef.current),
+          { position }
+        );
+        if (derived.type !== 'image') {
+          throw new Error('裁剪结果未能构造成图片节点。');
+        }
+        const connection = {
+          sourceNodeId: source.id,
+          targetNodeId: derived.id,
+        };
+        const validation = validateCanvasConnection(
+          {
+            ...current.document,
+            nodes: [...current.document.nodes, derived],
+          },
+          connection
+        );
+        if (!validation.ok) {
+          throw new Error(
+            `无法连接裁剪结果：${connectionErrorMessage(validation.code)}。`
+          );
+        }
+
+        knownAssetsRef.current = new Map(knownAssetsRef.current).set(
+          uploaded.asset.id,
+          uploaded.asset
+        );
+        const at = Date.now();
+        const mergeKey = `image-crop:${source.id}:${uploaded.asset.id}`;
+        editor.dispatch(canvasCommands.addNode(derived, { at, mergeKey }));
+        editor.dispatch(
+          canvasCommands.connect(source.id, derived.id, {
+            sourceHandle: 'source',
+            targetHandle: 'target',
+            at,
+            mergeKey,
+          })
+        );
+        editor.dispatch(canvasCommands.setSelection([derived.id]));
+        setPendingImageCrop(null);
+        setImageCropProgress(null);
+        void assets.reload();
+
+        const flush = await editor.flush();
+        if (flush.status === 'saved' || flush.status === 'noop') {
+          setNotice(
+            uploaded.recoveredAfterResponseLoss
+              ? '上传响应中断后已找回真实裁剪素材，并将派生节点保存到画布。'
+              : '已裁剪真实原图，创建派生图片节点并保存连线。'
+          );
+        } else {
+          setNotice(`裁剪素材已上传，但画布保存失败：${flush.error.message}`);
+        }
+      } catch (error) {
+        const aborted =
+          controller.signal.aborted ||
+          (error instanceof Error && error.name === 'AbortError');
+        if (!aborted && activeProjectIdRef.current === projectId) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          if (uploadedAsset) {
+            setPendingImageCrop(null);
+            setImageCropProgress(null);
+            void assets.reload();
+            setNotice(message);
+          } else {
+            setImageCropError(message);
+          }
+        }
+      } finally {
+        if (imageToolAbortRef.current === controller) {
+          imageToolAbortRef.current = null;
+          imageToolBusyRef.current = false;
+          setImageCropBusy(false);
+        }
+      }
+    },
+    [assets, pendingImageCrop, projectId]
+  );
+
+  const closeImageSplit = useCallback(() => {
+    if (imageToolBusyRef.current) return;
+    setPendingImageSplit(null);
+    setImageSplitProgress(null);
+    setImageSplitError(null);
+  }, []);
+
+  const handleConfirmImageSplit = useCallback(
+    async (params: CreativeImageSplitParams) => {
+      const request = pendingImageSplit;
+      const editor = editorRef.current;
+      if (!request || !editor || imageToolBusyRef.current) return;
+      if (assetImportBusyRef.current) {
+        setImageSplitError('另一个素材上传仍在进行，请等待完成后重试。');
+        return;
+      }
+
+      const controller = new AbortController();
+      const operationId = uuidv7();
+      imageToolAbortRef.current = controller;
+      imageToolBusyRef.current = true;
+      setImageSplitBusy(true);
+      setImageSplitProgress(0);
+      setImageSplitError(null);
+      let uploadedPieces: readonly UploadedCreativeImageSplitPiece[] | null =
+        null;
+      let canvasMutated = false;
+
+      try {
+        const files = await splitCreativeImageAsset({
+          asset: request.asset,
+          params,
+          signal: controller.signal,
+        });
+        const uploaded = await uploadCreativeImageSplit({
+          port: creativeAssetClient,
+          source: request.asset,
+          pieces: files,
+          operationId,
+          signal: controller.signal,
+          onProgress: setImageSplitProgress,
+        });
+        uploadedPieces = uploaded;
+        controller.signal.throwIfAborted();
+        if (activeProjectIdRef.current !== projectId) {
+          throw new DOMException('Project changed', 'AbortError');
+        }
+
+        const current = editor.getState();
+        const source = current.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
+            node.id === request.nodeId && node.type === 'image'
+        );
+        if (!source || source.data.assetId !== request.asset.id) {
+          throw new Error('原图片节点已被删除或替换，未向画布写入切图结果。');
+        }
+
+        const rows = creativeImageSplitRows(params);
+        const columns = creativeImageSplitColumns(params);
+        const layout = createCreativeImageSplitCanvasLayout(
+          current.document,
+          source,
+          rows,
+          columns
+        );
+        const derivedNodes: Extract<CreativeCanvasNode, { type: 'image' }>[] =
+          [];
+        let factoryState = current;
+        for (const piece of uploaded) {
+          const derived = creativeNodeFromAsset(
+            piece.asset,
+            factoryState,
+            measuredSize(canvasHostRef.current),
+            {
+              position: creativeImageSplitNodePosition(
+                layout,
+                piece.row,
+                piece.column
+              ),
+              size: layout.cellSize,
+            }
+          );
+          if (derived.type !== 'image') {
+            throw new Error('切图结果未能构造成图片节点。');
+          }
+          derivedNodes.push(derived);
+          factoryState = {
+            ...factoryState,
+            document: {
+              ...factoryState.document,
+              nodes: [...factoryState.document.nodes, derived],
+            },
+          };
+        }
+
+        const prospectiveDocument = {
+          ...current.document,
+          nodes: [...current.document.nodes, ...derivedNodes],
+        };
+        for (const derived of derivedNodes) {
+          const validation = validateCanvasConnection(prospectiveDocument, {
+            sourceNodeId: source.id,
+            targetNodeId: derived.id,
+          });
+          if (!validation.ok) {
+            throw new Error(
+              `无法连接切图结果：${connectionErrorMessage(validation.code)}。`
+            );
+          }
+        }
+
+        const nextAssets = new Map(knownAssetsRef.current);
+        for (const piece of uploaded)
+          nextAssets.set(piece.asset.id, piece.asset);
+        knownAssetsRef.current = nextAssets;
+
+        const at = Date.now();
+        const mergeKey = `image-split:${source.id}:${operationId}`;
+        canvasMutated = true;
+        for (const derived of derivedNodes) {
+          editor.dispatch(canvasCommands.addNode(derived, { at, mergeKey }));
+        }
+        for (const derived of derivedNodes) {
+          editor.dispatch(
+            canvasCommands.connect(source.id, derived.id, {
+              sourceHandle: 'source',
+              targetHandle: 'target',
+              at,
+              mergeKey,
+            })
+          );
+        }
+        editor.dispatch(
+          canvasCommands.setSelection(derivedNodes.map((node) => node.id))
+        );
+        setPendingImageSplit(null);
+        setImageSplitProgress(null);
+        void assets.reload();
+
+        const flush = await editor.flush();
+        if (flush.status === 'saved' || flush.status === 'noop') {
+          setNotice(
+            uploaded.some((piece) => piece.recoveredAfterResponseLoss)
+              ? `上传响应中断后已找回切图素材，创建并保存 ${derivedNodes.length} 个图片子节点。`
+              : `已切分真实原图，创建并保存 ${derivedNodes.length} 个图片子节点及连线。`
+          );
+        } else {
+          setNotice(`切图素材已上传，但画布保存失败：${flush.error.message}`);
+        }
+      } catch (error) {
+        const aborted =
+          controller.signal.aborted ||
+          (error instanceof Error && error.name === 'AbortError');
+        let message = error instanceof Error ? error.message : String(error);
+        if (uploadedPieces && !canvasMutated) {
+          try {
+            await removeUploadedCreativeImageSplit(
+              creativeAssetClient,
+              uploadedPieces
+            );
+          } catch (cleanupError) {
+            const cleanupMessage =
+              cleanupError instanceof Error
+                ? cleanupError.message
+                : String(cleanupError);
+            message = `${message}；${cleanupMessage}`;
+          }
+          void assets.reload();
+        }
+        if (!aborted && activeProjectIdRef.current === projectId) {
+          if (canvasMutated) {
+            setPendingImageSplit(null);
+            setImageSplitProgress(null);
+            setNotice(message);
+          } else {
+            setImageSplitError(message);
+          }
+        }
+      } finally {
+        if (imageToolAbortRef.current === controller) {
+          imageToolAbortRef.current = null;
+          imageToolBusyRef.current = false;
+          setImageSplitBusy(false);
+        }
+      }
+    },
+    [assets, pendingImageSplit, projectId]
+  );
+
+  const handleOpenImageMaskEdit = useCallback(
+    async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
+      const runtime = imageTaskRuntimeRef.current?.snapshot();
+      const runtimeBlocked =
+        !imageTaskRuntimeReady ||
+        !runtime ||
+        runtime.submittingCount > 0 ||
+        runtime.recoveringCount > 0 ||
+        runtime.submissionFailures.length > 0 ||
+        runtime.requestError !== null ||
+        runtime.entries.some(
+          (entry) =>
+            entry.task.status === 'queued' || entry.task.status === 'running'
+        );
+      if (
+        imageToolBusyRef.current ||
+        assetImportBusyRef.current ||
+        runtimeBlocked
+      ) {
+        setNotice(
+          runtimeBlocked
+            ? '已有局部编辑任务正在运行、恢复或等待确认，请先处理该任务。'
+            : '已有图片或素材操作正在进行，请等待完成。'
+        );
+        return;
+      }
+      setImageMaskError(null);
+      try {
+        const asset = await resolveCanvasImageAsset(node);
+        if (activeProjectIdRef.current !== projectId) return;
+        setImageMaskProgress(null);
+        setImageMaskModel((previous) =>
+          preferredCanvasImageMaskEditModel(
+            imageMaskModelOptions,
+            previous,
+            asset
+          )
+        );
+        setPendingImageMaskEdit({ nodeId: node.id, asset, submission: null });
+      } catch (error) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setNotice(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [
+      imageMaskModelOptions,
+      imageTaskRuntimeReady,
+      projectId,
+      resolveCanvasImageAsset,
+    ]
+  );
+
+  const closeImageMaskEdit = useCallback(() => {
+    if (imageToolBusyRef.current || pendingImageMaskEdit?.submission) return;
+    setPendingImageMaskEdit(null);
+    setImageMaskProgress(null);
+    setImageMaskError(null);
+  }, [pendingImageMaskEdit?.submission]);
+
+  const applyImageMaskAdmission = useCallback(
+    (
+      result: Awaited<
+        ReturnType<CanvasImageTaskRuntimeBridgeHandle['submit']>
+      >,
+      plan: PreparedCreativeWorkbenchRun
+    ) => {
+      if (result.kind === 'admitted') {
+        setPendingImageMaskEdit(null);
+        setImageMaskProgress(null);
+        setImageMaskError(null);
+        setNotice('局部编辑任务已安全提交；配置节点会持续显示真实后端状态。');
+        return;
+      }
+      setPendingImageMaskEdit((current) =>
+        current
+          ? {
+              ...current,
+              submission: {
+                plan,
+                reference: canvasImageTaskReferenceFromPlan(plan),
+                failureOrder: result.order,
+              },
+            }
+          : current
+      );
+      setImageMaskError(
+        `任务提交结果尚未确认：${result.error.message}。请安全重试同一任务，或确认服务器不存在后放弃。`
+      );
+    },
+    []
+  );
+
+  const handleConfirmImageMaskEdit = useCallback(
+    async (input: CreativeImageMaskEditSubmit) => {
+      const request = pendingImageMaskEdit;
+      const editor = editorRef.current;
+      const runtime = imageTaskRuntimeRef.current;
+      if (!request || !editor || !runtime || imageToolBusyRef.current) return;
+
+      imageToolBusyRef.current = true;
+      setImageMaskBusy(true);
+      setImageMaskError(null);
+
+      if (request.submission) {
+        try {
+          const result = await runtime.retrySubmission(
+            request.submission.failureOrder,
+            request.submission.plan.input.idempotencyKey
+          );
+          applyImageMaskAdmission(result, request.submission.plan);
+        } catch (error) {
+          setImageMaskError(
+            error instanceof Error ? error.message : String(error)
+          );
+        } finally {
+          imageToolBusyRef.current = false;
+          setImageMaskBusy(false);
+        }
+        return;
+      }
+
+      if (assetImportBusyRef.current) {
+        imageToolBusyRef.current = false;
+        setImageMaskBusy(false);
+        setImageMaskError('另一个素材上传仍在进行，请等待完成后重试。');
+        return;
+      }
+
+      const controller = new AbortController();
+      imageToolAbortRef.current = controller;
+      setImageMaskProgress(0);
+      let uploadedReference: CreativeAsset | null = null;
+      let prepared: ReturnType<typeof prepareCanvasImageMaskEdit> | null = null;
+      let canvasOwned = false;
+
+      try {
+        const marked = await buildCreativeImageMaskReference({
+          asset: request.asset,
+          selection: input.selection,
+          signal: controller.signal,
+        });
+        const uploaded = await uploadCreativeImageMaskReference({
+          port: creativeAssetClient,
+          source: request.asset,
+          file: marked.file,
+          operationId: uuidv7(),
+          signal: controller.signal,
+          onProgress: setImageMaskProgress,
+        });
+        uploadedReference = uploaded.asset;
+        controller.signal.throwIfAborted();
+        if (activeProjectIdRef.current !== projectId) {
+          throw new DOMException('Project changed', 'AbortError');
+        }
+
+        const current = editor.getState();
+        const source = current.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
+            node.id === request.nodeId && node.type === 'image'
+        );
+        if (!source || source.data.assetId !== request.asset.id) {
+          throw new Error('原图片节点已被删除或替换，未创建局部编辑任务。');
+        }
+        prepared = prepareCanvasImageMaskEdit({
+          projectId,
+          state: current,
+          viewportSize: measuredSize(canvasHostRef.current),
+          sourceNode: source,
+          sourceAsset: request.asset,
+          markedReference: uploaded.asset,
+          referenceDimensions: { width: marked.width, height: marked.height },
+          catalog: modelCatalog,
+          model: input.model,
+          userPrompt: input.prompt,
+        });
+
+        const at = Date.now();
+        const mergeKey = `image-mask-edit:${source.id}:${prepared.plan.input.idempotencyKey}`;
+        editor.dispatch(
+          canvasCommands.addNode(prepared.configNode, { at, mergeKey })
+        );
+        editor.dispatch(
+          canvasCommands.connect(source.id, prepared.configNode.id, {
+            sourceHandle: prepared.connection.sourceHandle,
+            targetHandle: prepared.connection.targetHandle,
+            at,
+            mergeKey,
+          })
+        );
+        editor.dispatch(canvasCommands.setSelection([prepared.configNode.id]));
+        canvasOwned = true;
+
+        const result = await runtime.submit(prepared.plan);
+        applyImageMaskAdmission(result, prepared.plan);
+        if (uploaded.recoveredAfterResponseLoss && result.kind === 'admitted') {
+          setNotice('上传响应中断后已找回标记参考图，并安全提交局部编辑任务。');
+        }
+      } catch (error) {
+        const aborted =
+          controller.signal.aborted ||
+          (error instanceof Error && error.name === 'AbortError');
+        let message = error instanceof Error ? error.message : String(error);
+        if (uploadedReference && !canvasOwned) {
+          try {
+            await removeCreativeImageMaskReference(
+              creativeAssetClient,
+              uploadedReference
+            );
+          } catch (cleanupError) {
+            const cleanupMessage =
+              cleanupError instanceof Error
+                ? cleanupError.message
+                : String(cleanupError);
+            message = `${message}；${cleanupMessage}`;
+          }
+        }
+        if (canvasOwned && prepared && !aborted) {
+          try {
+            // Once the config exists, an unclassified transport outcome must
+            // remain recoverable. A later mount will resolve the exact key or
+            // clean only an authoritative 404.
+            await editor.addPendingTask(prepared.plan.input.idempotencyKey);
+            void runtime
+              .recoverTask(canvasImageTaskReferenceFromPlan(prepared.plan))
+              .catch((recoveryError) =>
+                setNotice(
+                  recoveryError instanceof Error
+                    ? recoveryError.message
+                    : String(recoveryError)
+                )
+              );
+          } catch (saveError) {
+            message = `${message}；${
+              saveError instanceof Error ? saveError.message : String(saveError)
+            }`;
+          }
+        }
+        if (!aborted && activeProjectIdRef.current === projectId) {
+          if (canvasOwned) {
+            setPendingImageMaskEdit(null);
+            setImageMaskProgress(null);
+            setNotice(`任务接收状态未确认，已保留同一任务恢复标记：${message}`);
+          } else {
+            setImageMaskError(message);
+          }
+        }
+      } finally {
+        if (imageToolAbortRef.current === controller)
+          imageToolAbortRef.current = null;
+        imageToolBusyRef.current = false;
+        setImageMaskBusy(false);
+      }
+    },
+    [applyImageMaskAdmission, modelCatalog, pendingImageMaskEdit, projectId]
+  );
+
+  const abandonImageMaskSubmission = useCallback(async () => {
+    const request = pendingImageMaskEdit;
+    const runtime = imageTaskRuntimeRef.current;
+    const editor = editorRef.current;
+    if (!request?.submission || !runtime || !editor || imageToolBusyRef.current)
+      return;
+    imageToolBusyRef.current = true;
+    setImageMaskBusy(true);
+    setImageMaskError(null);
+    try {
+      const exists = await runtime.taskExists(request.submission.reference);
+      if (exists) {
+        const result = await runtime.retrySubmission(
+          request.submission.failureOrder,
+          request.submission.plan.input.idempotencyKey
+        );
+        applyImageMaskAdmission(result, request.submission.plan);
+        if (result.kind === 'admitted') {
+          setNotice('服务器已存在该任务，已安全恢复而未重复创建。');
+        }
+        return;
+      }
+      await orphanCanvasImageMaskEditTask({
+        editor,
+        projectId,
+        reference: request.submission.reference,
+      });
+      setImageTaskRuntimeEpoch((value) => value + 1);
+      setImageTaskRuntime(INITIAL_CANVAS_TASK_RUNTIME);
+      setPendingImageMaskEdit(null);
+      setImageMaskProgress(null);
+      setNotice('已确认服务器不存在该任务；配置节点记录为失败并清理恢复标记。');
+    } catch (error) {
+      setImageMaskError(error instanceof Error ? error.message : String(error));
+    } finally {
+      imageToolBusyRef.current = false;
+      setImageMaskBusy(false);
+    }
+  }, [applyImageMaskAdmission, pendingImageMaskEdit, projectId]);
+
+  const retryImageRuntimeTask = useCallback(
+    async (taskId: string) => {
+      const runtime = imageTaskRuntimeRef.current;
+      if (!runtime || imageTaskRuntimeActionBusy) return;
+      setImageTaskRuntimeActionBusy(true);
+      try {
+        await runtime.retryTask(taskId);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        setImageTaskRuntimeActionBusy(false);
+      }
+    },
+    [imageTaskRuntimeActionBusy]
+  );
+
+  const cancelImageRuntimeTask = useCallback(
+    async (taskId: string) => {
+      const runtime = imageTaskRuntimeRef.current;
+      if (!runtime || imageTaskRuntimeActionBusy) return;
+      setImageTaskRuntimeActionBusy(true);
+      try {
+        await runtime.cancelTask(taskId);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        setImageTaskRuntimeActionBusy(false);
+      }
+    },
+    [imageTaskRuntimeActionBusy]
+  );
+
+  const applyImageComposeAdmission = useCallback(
+    (
+      nodeId: string,
+      plan: PreparedCreativeWorkbenchRun,
+      result: Awaited<ReturnType<CanvasImageTaskRuntimeBridgeHandle['submit']>>
+    ) => {
+      if (result.kind === 'admitted') {
+        setImageComposeSubmission(null);
+        setImageComposeIssue(null);
+        setNotice('图片创作任务已安全提交；配置节点会持续显示真实后端状态。');
+        return;
+      }
+      setImageComposeSubmission({
+        nodeId,
+        plan,
+        failureOrder: result.order,
+      });
+      setImageComposeIssue({
+        nodeId,
+        message: `任务提交结果尚未确认：${result.error.message}。请重试同一任务。`,
+      });
+    },
+    []
+  );
+
+  const generateFromCanvasImage = useCallback(
+    async (nodeId: string, prompt: string, settings: ImageWorkbenchSettings) => {
+      const editor = editorRef.current;
+      const runtime = imageTaskRuntimeRef.current;
+      if (!editor || !runtime || imageToolBusyRef.current || imageComposeSubmission) return;
+      if (!settings.model || modelCatalog.status !== 'ready') {
+        setImageComposeIssue({
+          nodeId,
+          message: '没有可用且明确选择的真实图片模型，未发起生成。',
+        });
+        return;
+      }
+      const snapshot = runtime.snapshot();
+      if (
+        snapshot.submittingCount > 0 ||
+        snapshot.recoveringCount > 0 ||
+        snapshot.submissionFailures.length > 0 ||
+        snapshot.requestError !== null ||
+        snapshot.entries.some(
+          (entry) => entry.task.status === 'queued' || entry.task.status === 'running'
+        )
+      ) {
+        setImageComposeIssue({ nodeId, message: '已有图片任务正在处理，请等待完成。' });
+        return;
+      }
+
+      imageToolBusyRef.current = true;
+      setImageComposeBusy(true);
+      setImageComposeIssue(null);
+      let prepared: ReturnType<typeof prepareCanvasImageCompose> | null = null;
+      let canvasOwned = false;
+      try {
+        const state = editor.getState();
+        const sourceNode = state.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
+            node.id === nodeId && node.type === 'image'
+        );
+        if (!sourceNode) throw new Error('图片节点已被删除，未创建图片创作任务。');
+        const selectedModelOptions = sourceNode.data.assetId
+          ? imageMaskModelOptions
+          : imageGenerationExactOptions;
+        const selectedModel = selectedModelOptions.find(
+          (option) =>
+            option.providerId === settings.model?.providerId &&
+            option.model === settings.model.model
+        );
+        if (!selectedModel) {
+          throw new Error(
+            sourceNode.data.assetId
+              ? '所选图片编辑模型已不可用，未发起生成。'
+              : '所选图片生成模型已不可用，未发起生成。'
+          );
+        }
+        const source = withCanvasImageComposeDraft(sourceNode, {
+          prompt,
+          settings: {
+            ...settings,
+            model: {
+              providerId: selectedModel.providerId,
+              model: selectedModel.model,
+            },
+          },
+        });
+        editor.dispatch(
+          canvasCommands.updateNode(source, {
+            mergeKey: `image-composer:${nodeId}`,
+          })
+        );
+        const sourceAsset = source.data.assetId
+          ? await resolveCanvasImageAsset(source)
+          : null;
+        if (activeProjectIdRef.current !== projectId) {
+          throw new DOMException('Project changed', 'AbortError');
+        }
+        const currentState = editor.getState();
+        const currentSource = currentState.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
+            node.id === nodeId && node.type === 'image'
+        );
+        if (
+          !currentSource ||
+          currentSource.data.assetId !== (sourceAsset?.id ?? null)
+        ) {
+          throw new Error('原图片节点已被删除或替换，未创建图片创作任务。');
+        }
+        prepared = prepareCanvasImageCompose({
+          projectId,
+          state: currentState,
+          viewportSize: measuredSize(canvasHostRef.current),
+          sourceNode: currentSource,
+          sourceAsset,
+          catalog: modelCatalog,
+          model: selectedModel,
+          prompt,
+          settings: {
+            interfaceMode: settings.interfaceMode,
+            quality: settings.quality,
+            width: settings.width,
+            height: settings.height,
+            aspectRatio: settings.aspectRatio,
+            count: settings.count,
+          },
+        });
+        const at = Date.now();
+        const mergeKey = `image-compose:${source.id}:${prepared.plan.input.idempotencyKey}`;
+        editor.dispatch(canvasCommands.addNode(prepared.configNode, { at, mergeKey }));
+        editor.dispatch(
+          canvasCommands.connect(source.id, prepared.configNode.id, {
+            sourceHandle: prepared.connection.sourceHandle,
+            targetHandle: prepared.connection.targetHandle,
+            at,
+            mergeKey,
+          })
+        );
+        canvasOwned = true;
+        const result = await runtime.submit(prepared.plan);
+        applyImageComposeAdmission(nodeId, prepared.plan, result);
+      } catch (error) {
+        let message = error instanceof Error ? error.message : String(error);
+        if (canvasOwned && prepared) {
+          try {
+            await editor.addPendingTask(prepared.plan.input.idempotencyKey);
+            void runtime
+              .recoverTask(canvasImageTaskReferenceFromPlan(prepared.plan))
+              .catch((recoveryError) =>
+                setNotice(
+                  recoveryError instanceof Error
+                    ? recoveryError.message
+                    : String(recoveryError)
+                )
+              );
+            message = `任务接收状态未确认，已保留同一任务恢复标记：${message}`;
+          } catch (saveError) {
+            message = `${message}；${
+              saveError instanceof Error ? saveError.message : String(saveError)
+            }`;
+          }
+        }
+        if (activeProjectIdRef.current === projectId) {
+          setImageComposeIssue({ nodeId, message });
+        }
+      } finally {
+        imageToolBusyRef.current = false;
+        setImageComposeBusy(false);
+      }
+    },
+    [
+      applyImageComposeAdmission,
+      imageComposeSubmission,
+      imageGenerationExactOptions,
+      imageMaskModelOptions,
+      modelCatalog,
+      projectId,
+      resolveCanvasImageAsset,
+    ]
+  );
+
+  const retryCanvasImageComposeSubmission = useCallback(
+    async (nodeId: string) => {
+      const request = imageComposeSubmission;
+      const runtime = imageTaskRuntimeRef.current;
+      if (
+        !request ||
+        request.nodeId !== nodeId ||
+        !runtime ||
+        imageToolBusyRef.current
+      ) {
+        return;
+      }
+      imageToolBusyRef.current = true;
+      setImageComposeBusy(true);
+      setImageComposeIssue(null);
+      try {
+        const result = await runtime.retrySubmission(
+          request.failureOrder,
+          request.plan.input.idempotencyKey
+        );
+        applyImageComposeAdmission(nodeId, request.plan, result);
+      } catch (error) {
+        setImageComposeIssue({
+          nodeId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        imageToolBusyRef.current = false;
+        setImageComposeBusy(false);
+      }
+    },
+    [applyImageComposeAdmission, imageComposeSubmission]
+  );
+
+  const applyVideoComposeAdmission = useCallback(
+    (
+      nodeId: string,
+      plan: PreparedCreativeWorkbenchRun,
+      result: Awaited<ReturnType<CanvasVideoTaskRuntimeBridgeHandle['submit']>>
+    ) => {
+      if (result.kind === 'admitted') {
+        setVideoComposeSubmission(null);
+        setVideoComposeIssue(null);
+        setNotice('视频创作任务已安全提交；配置节点会持续显示真实后端状态。');
+        return;
+      }
+      setVideoComposeSubmission({ nodeId, plan, failureOrder: result.order });
+      setVideoComposeIssue({
+        nodeId,
+        message: `任务提交结果尚未确认：${result.error.message}。请重试同一任务。`,
+      });
+    },
+    []
+  );
+
+  const generateFromCanvasVideo = useCallback(
+    async (
+      nodeId: string,
+      prompt: string,
+      settings: CanvasVideoComposeSettings
+    ) => {
+      const editor = editorRef.current;
+      const runtime = videoTaskRuntimeRef.current;
+      if (
+        !editor ||
+        !runtime ||
+        videoComposeBusy ||
+        videoComposeSubmission
+      ) {
+        return;
+      }
+      if (!settings.model || modelCatalog.status !== 'ready') {
+        setVideoComposeIssue({
+          nodeId,
+          message: '没有可用且明确选择的真实视频模型，未发起生成。',
+        });
+        return;
+      }
+      const snapshot = runtime.snapshot();
+      if (
+        snapshot.submittingCount > 0 ||
+        snapshot.recoveringCount > 0 ||
+        snapshot.submissionFailures.length > 0 ||
+        snapshot.requestError !== null ||
+        snapshot.entries.some(
+          (entry) => entry.task.status === 'queued' || entry.task.status === 'running'
+        )
+      ) {
+        setVideoComposeIssue({ nodeId, message: '已有视频任务正在处理，请等待完成。' });
+        return;
+      }
+
+      setVideoComposeBusy(true);
+      setVideoComposeIssue(null);
+      let prepared: ReturnType<typeof prepareCanvasVideoCompose> | null = null;
+      let canvasOwned = false;
+      try {
+        const state = editor.getState();
+        const source = state.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'video' }> =>
+            node.id === nodeId && node.type === 'video'
+        );
+        if (!source) throw new Error('视频节点已被删除，未创建视频创作任务。');
+        const mode = canvasVideoComposeMode(state.document, nodeId);
+        if (mode.kind === 'unsupported') throw new Error(mode.message);
+        const selectedModel = videoModelOptions.find(
+          (option) =>
+            option.providerId === settings.model?.providerId &&
+            option.model === settings.model.model
+        );
+        if (!selectedModel) {
+          throw new Error('所选视频模型已不可用，未发起生成。');
+        }
+        const reference =
+          mode.kind === 'i2v'
+            ? (knownAssetsRef.current.get(mode.assetId) ??
+              (await creativeAssetClient.get(mode.assetId)))
+            : null;
+        if (reference && reference.kind !== 'image') {
+          throw new Error('I2V 引用没有解析为真实图片素材。');
+        }
+        if (reference) {
+          knownAssetsRef.current = new Map(knownAssetsRef.current).set(
+            reference.id,
+            reference
+          );
+        }
+        if (activeProjectIdRef.current !== projectId) {
+          throw new DOMException('Project changed', 'AbortError');
+        }
+        const currentState = editor.getState();
+        const currentSource = currentState.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'video' }> =>
+            node.id === nodeId && node.type === 'video'
+        );
+        const currentMode = canvasVideoComposeMode(currentState.document, nodeId);
+        if (
+          !currentSource ||
+          currentSource.data.assetId !== null ||
+          currentMode.kind !== mode.kind ||
+          (mode.kind === 'i2v' &&
+            (currentMode.kind !== 'i2v' || currentMode.assetId !== mode.assetId))
+        ) {
+          throw new Error('视频节点或其直接引用已变化，未创建视频创作任务。');
+        }
+        const durableSource = withCanvasVideoComposeDraft(currentSource, {
+          prompt,
+          settings: {
+            ...settings,
+            model: {
+              providerId: selectedModel.providerId,
+              model: selectedModel.model,
+            },
+          },
+        });
+        editor.dispatch(
+          canvasCommands.updateNode(durableSource, {
+            mergeKey: `video-composer:${nodeId}`,
+          })
+        );
+        prepared = prepareCanvasVideoCompose({
+          projectId,
+          state: editor.getState(),
+          viewportSize: measuredSize(canvasHostRef.current),
+          sourceNode: durableSource,
+          sourceAsset: null,
+          catalog: modelCatalog,
+          model: selectedModel,
+          operation: {
+            task: 'video_generation',
+            capability: mode.kind === 'i2v' ? 'i2v' : 't2v',
+          },
+          references: reference
+            ? {
+                assets: [reference],
+                bindings: [
+                  {
+                    assetId: reference.id,
+                    kind: 'image',
+                    role: 'reference',
+                  },
+                ],
+              }
+            : { assets: [], bindings: [] },
+          prompt,
+          settings: {
+            resolution: settings.resolution,
+            aspectRatio: settings.aspectRatio,
+            seconds: settings.seconds,
+          },
+        });
+        const at = Date.now();
+        const mergeKey = `video-compose:${nodeId}:${prepared.plan.input.idempotencyKey}`;
+        editor.dispatch(canvasCommands.addNode(prepared.configNode, { at, mergeKey }));
+        editor.dispatch(
+          canvasCommands.connect(nodeId, prepared.configNode.id, {
+            sourceHandle: prepared.connection.sourceHandle,
+            targetHandle: prepared.connection.targetHandle,
+            at,
+            mergeKey,
+          })
+        );
+        canvasOwned = true;
+        const result = await runtime.submit(prepared.plan);
+        applyVideoComposeAdmission(nodeId, prepared.plan, result);
+      } catch (error) {
+        let message = error instanceof Error ? error.message : String(error);
+        if (canvasOwned && prepared) {
+          try {
+            await editor.addPendingTask(prepared.plan.input.idempotencyKey);
+            void runtime
+              .recoverTask(canvasVideoTaskReferenceFromPlan(prepared.plan))
+              .catch((recoveryError) =>
+                setNotice(
+                  recoveryError instanceof Error
+                    ? recoveryError.message
+                    : String(recoveryError)
+                )
+              );
+            message = `任务接收状态未确认，已保留同一任务恢复标记：${message}`;
+          } catch (saveError) {
+            message = `${message}；${
+              saveError instanceof Error ? saveError.message : String(saveError)
+            }`;
+          }
+        }
+        if (activeProjectIdRef.current === projectId) {
+          setVideoComposeIssue({ nodeId, message });
+        }
+      } finally {
+        setVideoComposeBusy(false);
+      }
+    },
+    [
+      applyVideoComposeAdmission,
+      modelCatalog,
+      projectId,
+      videoComposeBusy,
+      videoComposeSubmission,
+      videoModelOptions,
+    ]
+  );
+
+  const retryCanvasVideoComposeSubmission = useCallback(
+    async (nodeId: string) => {
+      const request = videoComposeSubmission;
+      const runtime = videoTaskRuntimeRef.current;
+      if (!request || request.nodeId !== nodeId || !runtime || videoComposeBusy) {
+        return;
+      }
+      setVideoComposeBusy(true);
+      setVideoComposeIssue(null);
+      try {
+        const result = await runtime.retrySubmission(
+          request.failureOrder,
+          request.plan.input.idempotencyKey
+        );
+        applyVideoComposeAdmission(nodeId, request.plan, result);
+      } catch (error) {
+        setVideoComposeIssue({
+          nodeId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        setVideoComposeBusy(false);
+      }
+    },
+    [applyVideoComposeAdmission, videoComposeBusy, videoComposeSubmission]
+  );
+
+  const confirmCanvasVideoComposeSubmission = useCallback(
+    async (nodeId: string) => {
+      const request = videoComposeSubmission;
+      const runtime = videoTaskRuntimeRef.current;
+      const editor = editorRef.current;
+      if (
+        !request ||
+        request.nodeId !== nodeId ||
+        !runtime ||
+        !editor ||
+        videoComposeBusy
+      ) {
+        return;
+      }
+      setVideoComposeBusy(true);
+      setVideoComposeIssue(null);
+      const reference = canvasVideoTaskReferenceFromPlan(request.plan);
+      try {
+        const exists = await runtime.taskExists(reference);
+        if (activeProjectIdRef.current !== projectId) return;
+        if (exists) {
+          const result = await runtime.retrySubmission(
+            request.failureOrder,
+            request.plan.input.idempotencyKey
+          );
+          applyVideoComposeAdmission(nodeId, request.plan, result);
+          if (result.kind === 'admitted') {
+            setNotice('服务器已存在该视频任务，已安全恢复而未重复创建。');
+          }
+          return;
+        }
+        await orphanCanvasVideoComposeTask({
+          editor,
+          projectId,
+          reference,
+        });
+        if (activeProjectIdRef.current !== projectId) return;
+        setVideoComposeSubmission(null);
+        setVideoTaskRuntimeEpoch((value) => value + 1);
+        setVideoComposeIssue({
+          nodeId,
+          message: '服务器确认未创建该视频任务，已清理恢复标记，可以重新生成。',
+        });
+      } catch (error) {
+        if (activeProjectIdRef.current === projectId) {
+          setVideoComposeIssue({
+            nodeId,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setVideoComposeBusy(false);
+        }
+      }
+    },
+    [
+      applyVideoComposeAdmission,
+      projectId,
+      videoComposeBusy,
+      videoComposeSubmission,
+    ]
+  );
+
+  const retryVideoRuntimeTask = useCallback(
+    async (taskId: string) => {
+      const runtime = videoTaskRuntimeRef.current;
+      if (!runtime || videoTaskRuntimeActionBusy) return;
+      setVideoTaskRuntimeActionBusy(true);
+      try {
+        await runtime.retryTask(taskId);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        setVideoTaskRuntimeActionBusy(false);
+      }
+    },
+    [videoTaskRuntimeActionBusy]
+  );
+
+  const cancelVideoRuntimeTask = useCallback(
+    async (taskId: string) => {
+      const runtime = videoTaskRuntimeRef.current;
+      if (!runtime || videoTaskRuntimeActionBusy) return;
+      setVideoTaskRuntimeActionBusy(true);
+      try {
+        await runtime.cancelTask(taskId);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        setVideoTaskRuntimeActionBusy(false);
+      }
+    },
+    [videoTaskRuntimeActionBusy]
+  );
+
+  const applyAudioComposeAdmission = useCallback(
+    (
+      nodeId: string,
+      plan: PreparedCreativeWorkbenchRun,
+      result: Awaited<ReturnType<CanvasAudioTaskRuntimeBridgeHandle['submit']>>
+    ) => {
+      if (result.kind === 'admitted') {
+        setAudioComposeSubmission(null);
+        setAudioComposeIssue(null);
+        setNotice('音频创作任务已安全提交；配置节点会持续显示真实后端状态。');
+        return;
+      }
+      setAudioComposeSubmission({ nodeId, plan, failureOrder: result.order });
+      setAudioComposeIssue({
+        nodeId,
+        message: `任务提交结果尚未确认：${result.error.message}。请重试同一任务。`,
+      });
+    },
+    []
+  );
+
+  const generateFromCanvasAudio = useCallback(
+    async (
+      nodeId: string,
+      prompt: string,
+      settings: CanvasAudioComposeSettings
+    ) => {
+      const editor = editorRef.current;
+      const runtime = audioTaskRuntimeRef.current;
+      if (!editor || !runtime || audioComposeBusy || audioComposeSubmission) {
+        return;
+      }
+      if (!settings.model || modelCatalog.status !== 'ready') {
+        setAudioComposeIssue({
+          nodeId,
+          message: '没有可用且明确选择的真实语音合成模型，未发起生成。',
+        });
+        return;
+      }
+      const snapshot = runtime.snapshot();
+      if (
+        snapshot.submittingCount > 0 ||
+        snapshot.recoveringCount > 0 ||
+        snapshot.submissionFailures.length > 0 ||
+        snapshot.requestError !== null ||
+        snapshot.entries.some(
+          (entry) =>
+            entry.task.status === 'queued' || entry.task.status === 'running'
+        )
+      ) {
+        setAudioComposeIssue({
+          nodeId,
+          message: '已有音频任务正在处理，请等待完成。',
+        });
+        return;
+      }
+
+      setAudioComposeBusy(true);
+      setAudioComposeIssue(null);
+      let prepared: ReturnType<typeof prepareCanvasAudioCompose> | null = null;
+      let canvasOwned = false;
+      try {
+        const state = editor.getState();
+        const source = state.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'audio' }> =>
+            node.id === nodeId && node.type === 'audio'
+        );
+        if (!source) throw new Error('音频节点已被删除，未创建音频创作任务。');
+        const eligibility = canvasAudioComposeEligibility(
+          state.document,
+          nodeId
+        );
+        if (eligibility.kind === 'unsupported') {
+          throw new Error(eligibility.message);
+        }
+        const selectedModel = audioModelOptions.find(
+          (option) =>
+            option.providerId === settings.model?.providerId &&
+            option.model === settings.model.model
+        );
+        if (!selectedModel) {
+          throw new Error('所选语音合成模型已不可用，未发起生成。');
+        }
+        if (activeProjectIdRef.current !== projectId) {
+          throw new DOMException('Project changed', 'AbortError');
+        }
+        const currentState = editor.getState();
+        const currentSource = currentState.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'audio' }> =>
+            node.id === nodeId && node.type === 'audio'
+        );
+        const currentEligibility = canvasAudioComposeEligibility(
+          currentState.document,
+          nodeId
+        );
+        if (!currentSource || currentEligibility.kind !== 'tts') {
+          throw new Error('音频节点或其直接引用已变化，未创建音频创作任务。');
+        }
+        const durableSource = withCanvasAudioComposeDraft(currentSource, {
+          prompt,
+          settings: {
+            ...settings,
+            model: {
+              providerId: selectedModel.providerId,
+              model: selectedModel.model,
+            },
+          },
+        });
+        editor.dispatch(
+          canvasCommands.updateNode(durableSource, {
+            mergeKey: `audio-composer:${nodeId}`,
+          })
+        );
+        prepared = prepareCanvasAudioCompose({
+          projectId,
+          state: editor.getState(),
+          viewportSize: measuredSize(canvasHostRef.current),
+          sourceNode: durableSource,
+          sourceAsset: null,
+          catalog: modelCatalog,
+          model: selectedModel,
+          references: { assets: [], bindings: [] },
+          prompt,
+          settings: {
+            voice: settings.voice,
+            format: settings.format,
+          },
+        });
+        const at = Date.now();
+        const mergeKey = `audio-compose:${nodeId}:${prepared.plan.input.idempotencyKey}`;
+        editor.dispatch(
+          canvasCommands.addNode(prepared.configNode, { at, mergeKey })
+        );
+        editor.dispatch(
+          canvasCommands.connect(nodeId, prepared.configNode.id, {
+            sourceHandle: prepared.connection.sourceHandle,
+            targetHandle: prepared.connection.targetHandle,
+            at,
+            mergeKey,
+          })
+        );
+        canvasOwned = true;
+        const result = await runtime.submit(prepared.plan);
+        applyAudioComposeAdmission(nodeId, prepared.plan, result);
+      } catch (error) {
+        let message = error instanceof Error ? error.message : String(error);
+        if (canvasOwned && prepared) {
+          try {
+            await editor.addPendingTask(prepared.plan.input.idempotencyKey);
+            void runtime
+              .recoverTask(canvasAudioTaskReferenceFromPlan(prepared.plan))
+              .catch((recoveryError) =>
+                setNotice(
+                  recoveryError instanceof Error
+                    ? recoveryError.message
+                    : String(recoveryError)
+                )
+              );
+            message = `任务接收状态未确认，已保留同一任务恢复标记：${message}`;
+          } catch (saveError) {
+            message = `${message}；${
+              saveError instanceof Error ? saveError.message : String(saveError)
+            }`;
+          }
+        }
+        if (activeProjectIdRef.current === projectId) {
+          setAudioComposeIssue({ nodeId, message });
+        }
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setAudioComposeBusy(false);
+        }
+      }
+    },
+    [
+      applyAudioComposeAdmission,
+      audioComposeBusy,
+      audioComposeSubmission,
+      audioModelOptions,
+      modelCatalog,
+      projectId,
+    ]
+  );
+
+  const retryCanvasAudioComposeSubmission = useCallback(
+    async (nodeId: string) => {
+      const request = audioComposeSubmission;
+      const runtime = audioTaskRuntimeRef.current;
+      if (!request || request.nodeId !== nodeId || !runtime || audioComposeBusy) {
+        return;
+      }
+      setAudioComposeBusy(true);
+      setAudioComposeIssue(null);
+      try {
+        const result = await runtime.retrySubmission(
+          request.failureOrder,
+          request.plan.input.idempotencyKey
+        );
+        applyAudioComposeAdmission(nodeId, request.plan, result);
+      } catch (error) {
+        setAudioComposeIssue({
+          nodeId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        setAudioComposeBusy(false);
+      }
+    },
+    [applyAudioComposeAdmission, audioComposeBusy, audioComposeSubmission]
+  );
+
+  const confirmCanvasAudioComposeSubmission = useCallback(
+    async (nodeId: string) => {
+      const request = audioComposeSubmission;
+      const runtime = audioTaskRuntimeRef.current;
+      const editor = editorRef.current;
+      if (
+        !request ||
+        request.nodeId !== nodeId ||
+        !runtime ||
+        !editor ||
+        audioComposeBusy
+      ) {
+        return;
+      }
+      setAudioComposeBusy(true);
+      setAudioComposeIssue(null);
+      const reference = canvasAudioTaskReferenceFromPlan(request.plan);
+      try {
+        const exists = await runtime.taskExists(reference);
+        if (activeProjectIdRef.current !== projectId) return;
+        if (exists) {
+          const result = await runtime.retrySubmission(
+            request.failureOrder,
+            request.plan.input.idempotencyKey
+          );
+          applyAudioComposeAdmission(nodeId, request.plan, result);
+          if (result.kind === 'admitted') {
+            setNotice('服务器已存在该音频任务，已安全恢复而未重复创建。');
+          }
+          return;
+        }
+        await orphanCanvasAudioComposeTask({ editor, projectId, reference });
+        if (activeProjectIdRef.current !== projectId) return;
+        setAudioComposeSubmission(null);
+        setAudioTaskRuntimeEpoch((value) => value + 1);
+        setAudioComposeIssue({
+          nodeId,
+          message: '服务器确认未创建该音频任务，已清理恢复标记，可以重新生成。',
+        });
+      } catch (error) {
+        if (activeProjectIdRef.current === projectId) {
+          setAudioComposeIssue({
+            nodeId,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setAudioComposeBusy(false);
+        }
+      }
+    },
+    [
+      applyAudioComposeAdmission,
+      audioComposeBusy,
+      audioComposeSubmission,
+      projectId,
+    ]
+  );
+
+  const retryAudioRuntimeTask = useCallback(
+    async (taskId: string) => {
+      const runtime = audioTaskRuntimeRef.current;
+      if (!runtime || audioTaskRuntimeActionBusy) return;
+      setAudioTaskRuntimeActionBusy(true);
+      try {
+        await runtime.retryTask(taskId);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        setAudioTaskRuntimeActionBusy(false);
+      }
+    },
+    [audioTaskRuntimeActionBusy]
+  );
+
+  const cancelAudioRuntimeTask = useCallback(
+    async (taskId: string) => {
+      const runtime = audioTaskRuntimeRef.current;
+      if (!runtime || audioTaskRuntimeActionBusy) return;
+      setAudioTaskRuntimeActionBusy(true);
+      try {
+        await runtime.cancelTask(taskId);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        setAudioTaskRuntimeActionBusy(false);
+      }
+    },
+    [audioTaskRuntimeActionBusy]
+  );
+
+  const insertClipboardText = useCallback(
+    (text: string, worldPosition: CanvasPoint) => {
+      const editor = editorRef.current;
+      const normalized = text.trim();
+      if (!editor || !normalized) return false;
+      const state = editor.getState();
+      const node = createCreativeCanvasProductNode(
+        'text',
+        state,
+        measuredSize(canvasHostRef.current),
+        { position: centeredNodePosition('text', worldPosition) }
+      );
+      editor.dispatch(
+        canvasCommands.addNode({
+          ...node,
+          data: { ...node.data, text: normalized },
+        })
+      );
+      setNotice('已从真实系统剪贴板插入文本。');
+      return true;
+    },
+    []
+  );
+
+  const readSystemClipboard = useCallback(
+    async (worldPosition: CanvasPoint) => {
+      try {
+        if (typeof navigator === 'undefined' || !navigator.clipboard) {
+          throw new Error('当前运行环境不提供系统剪贴板读取能力。');
+        }
+        if (typeof navigator.clipboard.read === 'function') {
+          const items = await navigator.clipboard.read();
+          for (const item of items) {
+            const mediaType = item.types.find(
+              (type) => type.startsWith('image/') || type.startsWith('video/')
+            );
+            if (mediaType) {
+              const blob = await item.getType(mediaType);
+              const extension = mediaType.split('/')[1]?.split('+')[0] || 'bin';
+              const file = new File(
+                [blob],
+                `clipboard-${new Date().toISOString().replace(/[:.]/g, '-')}.${extension}`,
+                { type: mediaType }
+              );
+              await importCanvasFile(
+                file,
+                worldPosition,
+                mediaType.startsWith('image/')
+                  ? 'after-upload-if-2-to-1'
+                  : 'not-applicable'
+              );
+              return;
+            }
+            if (item.types.includes('text/plain')) {
+              const text = await (await item.getType('text/plain')).text();
+              if (insertClipboardText(text, worldPosition)) return;
+            }
+          }
+        }
+        if (typeof navigator.clipboard.readText === 'function') {
+          const text = await navigator.clipboard.readText();
+          if (insertClipboardText(text, worldPosition)) return;
+        }
+        setNotice('系统剪贴板中没有可插入的真实文本、图片或视频。');
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [importCanvasFile, insertClipboardText]
+  );
+
+  const handleOpenDirector = useCallback(
+    async (requestedNodeId?: string) => {
+      const editor = editorRef.current;
+      if (!editor || save.revision === null) return;
+      const directors = editor
+        .getState()
+        .document.nodes.filter((node) => node.type === 'director');
+      handleBottomViewChange('timeline');
+      if (directors.length === 0) {
+        setNotice('请先添加导演节点，再进入 3D 导演台。');
+        return;
+      }
+      if (directors.length > 1) {
+        editor.dispatch(
+          canvasCommands.setSelection(directors.map((node) => node.id))
+        );
+        setNotice('项目存在多个导演节点。请只保留一个，再进入 3D 导演台。');
+        return;
+      }
+      const director = directors[0];
+      if (requestedNodeId && requestedNodeId !== director.id) {
+        setNotice('请求的导演节点已不存在，请从时间线面板重新打开。');
+        return;
+      }
+      editor.dispatch(canvasCommands.setSelection([director.id]));
+      if (await flushBeforeLeave()) {
+        navigate(creativeStudioDirectorProjectPath(projectId));
+      }
+    },
+    [
+      flushBeforeLeave,
+      handleBottomViewChange,
+      navigate,
+      projectId,
+      save.revision,
+    ]
+  );
+
+  const handleIntegrationIntent = useCallback(
+    async (intent: CanvasIntegrationIntent) => {
+      switch (intent.type) {
+        case 'transient-ui/dismiss':
+          dismissInteractionOverlays();
+          return;
+        case 'context-menu/open': {
+          const nodeId =
+            intent.target.kind === 'node' ? intent.target.nodeId : null;
+          const node = nodeId
+            ? editorRef.current
+                ?.getState()
+                .document.nodes.find((candidate) => candidate.id === nodeId)
+            : null;
+          setCreateNodeMenu(null);
+          setContextMenu({
+            target: intent.target,
+            clientPosition: { ...intent.clientPosition },
+            ...(node ? { nodeLocked: node.locked } : {}),
+          });
+          return;
+        }
+        case 'canvas/create-node-menu/open':
+          openCreateNodeMenu(intent.worldPosition);
+          return;
+        case 'connection/create-node-menu/open':
+          openCreateNodeMenu(intent.worldPosition, intent);
+          return;
+        case 'connection/rejected':
+          setNotice(`无法创建连接：${connectionErrorMessage(intent.code)}。`);
+          return;
+        case 'connection/created':
+          setNotice('已创建连接。');
+          return;
+        case 'node/open':
+          dispatch(canvasCommands.setSelection([intent.nodeId]));
+          dismissInteractionOverlays();
+          if (intent.mode === 'open-director') {
+            await handleOpenDirector(intent.nodeId);
+            return;
+          }
+          persistPanels(
+            withCreativeCanvasRightView(panelsRef.current, 'properties')
+          );
+          setNotice('已在属性面板打开所选节点。');
+          return;
+        case 'system-clipboard/read': {
+          const editor = editorRef.current;
+          if (!editor) return;
+          const worldPosition =
+            intent.worldPosition ??
+            clientToCanvas(
+              { x: viewportSize.width / 2, y: viewportSize.height / 2 },
+              editor.getState().viewport
+            );
+          await readSystemClipboard(worldPosition);
+          return;
+        }
+        case 'asset/import-file':
+          await importCanvasFile(
+            intent.file,
+            intent.worldPosition,
+            intent.panoramaChoice
+          );
+          return;
+        case 'asset/import-feedback': {
+          const first = intent.rejected[0];
+          const rejected = first
+            ? `${intent.rejected.length} 个文件未导入（${first.fileName}: ${manualUploadRejectionMessage(first.reason)}）`
+            : '';
+          const ignored = intent.ignoredAcceptedFileNames.length
+            ? `${intent.ignoredAcceptedFileNames.length} 个额外文件按源产品规则未处理`
+            : '';
+          setNotice([rejected, ignored].filter(Boolean).join('；'));
+          return;
+        }
+      }
+    },
+    [
+      dismissInteractionOverlays,
+      dispatch,
+      handleOpenDirector,
+      importCanvasFile,
+      openCreateNodeMenu,
+      persistPanels,
+      readSystemClipboard,
+      viewportSize.height,
+      viewportSize.width,
+    ]
+  );
+
+  const handleContextAction = useCallback(
+    async (action: CanvasContextAction) => {
+      const editor = editorRef.current;
+      const menu = contextMenu;
+      if (!editor || !menu) return;
+      const resolution = resolveCanvasContextAction(
+        editor.getState(),
+        menu.target,
+        action
+      );
+      dismissInteractionOverlays();
+      for (const command of resolution.commands) editor.dispatch(command);
+      for (const intent of resolution.intents)
+        await handleIntegrationIntent(intent);
+    },
+    [contextMenu, dismissInteractionOverlays, handleIntegrationIntent]
+  );
+
+  const handleOpenCreateNodeMenuFromContext = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor || contextMenu?.target.kind !== 'canvas') return;
+    openCreateNodeMenu(
+      clientToCanvas(contextMenu.clientPosition, editor.getState().viewport)
+    );
+  }, [contextMenu, openCreateNodeMenu]);
+
+  const handlePasteFromContext = useCallback(async () => {
+    const editor = editorRef.current;
+    if (!editor || contextMenu?.target.kind !== 'canvas') return;
+    const worldPosition = clientToCanvas(
+      contextMenu.clientPosition,
+      editor.getState().viewport
+    );
+    dismissInteractionOverlays();
+    await readSystemClipboard(worldPosition);
+  }, [contextMenu, dismissInteractionOverlays, readSystemClipboard]);
+
+  const handleSelectCreatedNode = useCallback(
+    (kind: CreativeCanvasNodeKind) => {
+      const editor = editorRef.current;
+      const menu = createNodeMenu;
+      if (!editor || !menu || save.revision === null) return;
+      const state = editor.getState();
+      const directors =
+        kind === 'director'
+          ? state.document.nodes.filter((node) => node.type === 'director')
+          : [];
+      if (directors.length > 1) {
+        editor.dispatch(
+          canvasCommands.setSelection(directors.map((node) => node.id))
+        );
+        handleBottomViewChange('timeline');
+        setNotice('项目存在多个导演节点，请先处理冲突，未创建新的导演节点。');
+        dismissInteractionOverlays();
+        return;
+      }
+      const reusedDirector = directors[0] ?? null;
+      const node =
+        reusedDirector ??
+        createCreativeCanvasProductNode(
+          kind,
+          state,
+          measuredSize(canvasHostRef.current),
+          { position: centeredNodePosition(kind, menu.worldPosition) }
+        );
+
+      if (menu.connection) {
+        const sourceNodeId =
+          menu.connection.fixedHandle === 'source'
+            ? menu.connection.fixedNodeId
+            : node.id;
+        const targetNodeId =
+          menu.connection.fixedHandle === 'source'
+            ? node.id
+            : menu.connection.fixedNodeId;
+        const candidateDocument = {
+          ...state.document,
+          nodes: reusedDirector
+            ? state.document.nodes
+            : [...state.document.nodes, node],
+        };
+        const validation = validateCanvasConnection(candidateDocument, {
+          sourceNodeId,
+          targetNodeId,
+        });
+        if (!validation.ok) {
+          setNotice(
+            `无法创建连接：${connectionErrorMessage(validation.code)}。`
+          );
+          return;
+        }
+
+        const at = Date.now();
+        const mergeKey = `create-connected:${node.id}`;
+        if (!reusedDirector) {
+          editor.dispatch(canvasCommands.addNode(node, { at, mergeKey }));
+        }
+        editor.dispatch(
+          canvasCommands.connect(sourceNodeId, targetNodeId, {
+            at,
+            mergeKey,
+            sourceHandle:
+              menu.connection.fixedHandle === 'source'
+                ? menu.connection.fixedHandleId
+                : 'source',
+            targetHandle:
+              menu.connection.fixedHandle === 'target'
+                ? menu.connection.fixedHandleId
+                : 'target',
+          })
+        );
+        editor.dispatch(canvasCommands.setSelection([node.id]));
+        setNotice(
+          reusedDirector
+            ? '已复用项目唯一的导演节点并完成连接。'
+            : '已创建节点并完成连接。'
+        );
+      } else {
+        if (reusedDirector) {
+          editor.dispatch(canvasCommands.setSelection([node.id]));
+          setNotice('项目已有唯一导演节点，已为你选中。');
+        } else {
+          editor.dispatch(canvasCommands.addNode(node));
+          setNotice('已在指定位置创建节点。');
+        }
+      }
+      if (kind === 'director') {
+        handleBottomViewChange('timeline');
+      }
+      dismissInteractionOverlays();
+    },
+    [
+      createNodeMenu,
+      dismissInteractionOverlays,
+      handleBottomViewChange,
+      save.revision,
+    ]
+  );
+
+  const resolvePendingPanoramaChoice = useCallback(
+    (asPanorama: boolean) => {
+      const choice = pendingPanoramaChoice;
+      if (!choice) return;
+      setPendingPanoramaChoice(null);
+      try {
+        insertAssetAtWorld(choice.asset, choice.worldPosition, asPanorama);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [insertAssetAtWorld, pendingPanoramaChoice]
+  );
+
+  useEffect(
+    () => registerCreativeCanvasProductBeforeLeave(flushBeforeLeave),
+    [flushBeforeLeave]
+  );
+
+  const handleBackToProjects = useCallback(async () => {
+    if (recoveryBusy) return;
+    setRecoveryBusy(true);
+    try {
+      if (await flushBeforeLeave()) {
+        navigate(CREATIVE_STUDIO_PROJECTS_PATH);
+      }
+    } finally {
+      setRecoveryBusy(false);
+    }
+  }, [flushBeforeLeave, navigate, recoveryBusy]);
+
+  const handleReloadRemote = useCallback(async () => {
+    if (!editorRef.current || recoveryBusy) return;
+    setRecoveryBusy(true);
+    try {
+      const reloaded = await editorRef.current.reloadRemote();
+      if (reloaded) {
+        setAgentOpsReloadFence(false);
+        agentPanelRef.current?.refreshAuthority();
+      }
+      setNotice(reloaded ? '已重新载入远端版本。' : '远端版本暂时不可用。');
+    } catch {
+      setNotice('远端版本暂时不可用。');
+    } finally {
+      setRecoveryBusy(false);
+    }
+  }, [recoveryBusy, setAgentOpsReloadFence]);
+
+  const handleRetrySave = useCallback(async () => {
+    if (!editorRef.current || recoveryBusy) return;
+    setRecoveryBusy(true);
+    try {
+      const result = await editorRef.current.flush();
+      setNotice(
+        result.status === 'saved' || result.status === 'noop'
+          ? '保存已完成。'
+          : result.error.message
+      );
+    } finally {
+      setRecoveryBusy(false);
+    }
+  }, [recoveryBusy]);
+
+  const handleSelectOutlineNode = useCallback(
+    (nodeId: string, mode: 'replace' | 'toggle') => {
+      dispatch(
+        mode === 'toggle'
+          ? canvasCommands.toggleNodeSelection(nodeId)
+          : canvasCommands.setSelection([nodeId])
+      );
+    },
+    [dispatch]
+  );
+
+  const handleUpdateNode = useCallback(
+    (node: CreativeCanvasNode, field: string) => {
+      dispatch(
+        canvasCommands.updateNode(node, {
+          mergeKey: `property:${node.id}:${field}`,
+        })
+      );
+    },
+    [dispatch]
+  );
+
+  const handleToggleAsset = useCallback((assetId: string) => {
+    setSelectedAssetIds((current) => {
+      const next = new Set(current);
+      if (next.has(assetId)) next.delete(assetId);
+      else next.add(assetId);
+      return next;
+    });
+  }, []);
+
+  const handleInsertAssets = useCallback(
+    (selectedAssets: readonly CreativeAsset[]) => {
+      const insertion = prepareCenteredInsertion();
+      if (!insertion) return;
+      const { editor, viewportSize } = insertion;
+      let { state } = insertion;
+      let inserted = 0;
+      const errors: string[] = [];
+      for (const asset of selectedAssets) {
+        try {
+          const node = creativeNodeFromAsset(
+            asset,
+            state,
+            viewportSize,
+            { cascadeIndex: state.document.nodes.length }
+          );
+          state = editor.dispatch(canvasCommands.addNode(node));
+          inserted += 1;
+        } catch (error) {
+          errors.push(error instanceof Error ? error.message : String(error));
+        }
+      }
+      setSelectedAssetIds(new Set());
+      setNotice(
+        errors.length > 0
+          ? `${inserted} 项已插入；${errors.length} 项未插入：${errors[0]}`
+          : `${inserted} 项素材已插入画布。`
+      );
+    },
+    [prepareCenteredInsertion]
+  );
+
+  const handleInsertWorkflowResults = useCallback(
+    async (run: WorkflowRunAggregateV1) => {
+      if (workflowInsertingRunId || run.record.resultAssetIds.length === 0)
+        return;
+      setWorkflowInsertingRunId(run.request.id);
+      setNotice('正在解析工作流的真实结果素材…');
+      try {
+        const resolved = await Promise.all(
+          run.record.resultAssetIds.map((assetId) =>
+            creativeAssetClient.get(assetId)
+          )
+        );
+        const known = new Map(knownAssetsRef.current);
+        for (const asset of resolved) known.set(asset.id, asset);
+        knownAssetsRef.current = known;
+        handleInsertAssets(resolved);
+        void assets.reload();
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        setWorkflowInsertingRunId(null);
+      }
+    },
+    [assets, handleInsertAssets, workflowInsertingRunId]
+  );
+
+  const handleInsertPrompt = useCallback(
+    (selection: PromptLibrarySelection) => {
+      if (promptInsertTargetNodeId) {
+        const state = editorRef.current?.getState();
+        const target = state?.document.nodes.find(
+          (node) =>
+            node.id === promptInsertTargetNodeId &&
+            (node.type === 'image' ||
+              node.type === 'video' ||
+              node.type === 'audio')
+        );
+        if (state && target?.type === 'image') {
+          updateImageComposeDraft(target.id, (current) => ({
+            ...current,
+            prompt: selection.prompt,
+          }));
+          setPromptInsertTargetNodeId(null);
+          setSelectedPromptId(selection.id);
+          setNotice(`已将“${selection.title}”填入图片创作提示词。`);
+          return;
+        }
+        if (state && target?.type === 'video') {
+          updateVideoComposeDraft(target.id, (current) => ({
+            ...current,
+            prompt: selection.prompt,
+          }));
+          setPromptInsertTargetNodeId(null);
+          setSelectedPromptId(selection.id);
+          setNotice(`已将“${selection.title}”填入视频创作提示词。`);
+          return;
+        }
+        if (state && target?.type === 'audio') {
+          updateAudioComposeDraft(target.id, (current) => ({
+            ...current,
+            prompt: selection.prompt,
+          }));
+          setPromptInsertTargetNodeId(null);
+          setSelectedPromptId(selection.id);
+          setNotice(`已将“${selection.title}”填入音频朗读文本。`);
+          return;
+        }
+        setPromptInsertTargetNodeId(null);
+      }
+      const insertion = prepareCenteredInsertion();
+      if (!insertion) return;
+      const { editor, state, viewportSize } = insertion;
+      editor.dispatch(
+        canvasCommands.addNode(
+          creativeTextNodeFromPrompt(
+            selection,
+            state,
+            viewportSize
+          )
+        )
+      );
+      setSelectedPromptId(selection.id);
+      setNotice(`已将“${selection.title}”插入为文本节点。`);
+    },
+    [
+      prepareCenteredInsertion,
+      promptInsertTargetNodeId,
+      updateAudioComposeDraft,
+      updateImageComposeDraft,
+      updateVideoComposeDraft,
+    ]
+  );
+
+  const selection = useMemo(
+    () => creativeCanvasProductSelectionCapabilities(canvasState),
+    [canvasState]
+  );
+  const agentPlanningContext = useMemo(() => {
+    if (!project.detail || !canvasState || save.revision === null) return null;
+    return buildCreativeCanvasAgentContext({
+      document: {
+        ...project.detail.document,
+        nodes: canvasState.document.nodes,
+        connections: canvasState.document.connections,
+      },
+      projectRevision: save.revision,
+      selectedNodeIds: canvasState.selection.nodeIds,
+    });
+  }, [canvasState, project.detail, save.revision]);
+  const productDisabled =
+    save.revision === null ||
+    recoveryBusy ||
+    agentOpsApplyBusy ||
+    agentOpsReloadRequired;
+  const imageTaskRuntimeBlocksNew =
+    imageTaskRuntime.submittingCount > 0 ||
+    imageTaskRuntime.recoveringCount > 0 ||
+    imageTaskRuntime.submissionFailures.length > 0 ||
+    imageTaskRuntime.requestError !== null ||
+    imageTaskRuntime.entries.some(
+      (entry) =>
+        entry.task.status === 'queued' || entry.task.status === 'running'
+    );
+  const videoTaskRuntimeBlocksNew =
+    videoTaskRuntime.submittingCount > 0 ||
+    videoTaskRuntime.recoveringCount > 0 ||
+    videoTaskRuntime.submissionFailures.length > 0 ||
+    videoTaskRuntime.requestError !== null ||
+    videoTaskRuntime.entries.some(
+      (entry) =>
+        entry.task.status === 'queued' || entry.task.status === 'running'
+    );
+  const audioTaskRuntimeBlocksNew =
+    audioTaskRuntime.submittingCount > 0 ||
+    audioTaskRuntime.recoveringCount > 0 ||
+    audioTaskRuntime.submissionFailures.length > 0 ||
+    audioTaskRuntime.requestError !== null ||
+    audioTaskRuntime.entries.some(
+      (entry) =>
+        entry.task.status === 'queued' || entry.task.status === 'running'
+    );
+  const projectTitle =
+    project.detail?.project.title ??
+    (project.isLoading ? '正在载入项目…' : '画布项目');
+  const saveMessage = creativeCanvasSaveDisplayMessage(save);
+  const compact = viewportSize.width < 760;
+  const panelViews = creativeCanvasProductPanelViews(panels);
+  const canvasLayoutStyle = {
+    '--creative-canvas-left-panel-width': `${panels.left.open ? panels.left.width : 0}px`,
+    '--creative-canvas-right-panel-width': `${panels.right.width}px`,
+    '--creative-canvas-bottom-panel-height': `${panels.bottom.height}px`,
+  } as React.CSSProperties;
+
+  const renderCanvasState = canvasState;
+  const canvasOutline = renderCanvasState ? (
+    <CreativeCanvasOutlinePanel
+      state={renderCanvasState}
+      onSelectNode={handleSelectOutlineNode}
+      onClearSelection={() => dispatch(canvasCommands.clearSelection())}
+    />
+  ) : (
+    <CreativeCanvasUnavailablePanel
+      kind="generic"
+      title="正在载入画布结构"
+      description="等待项目文档通过 canonical v1 校验。"
+    />
+  );
+
+  const properties = renderCanvasState ? (
+    <CreativeCanvasPropertiesPanel
+      state={renderCanvasState}
+      onSelectNode={(nodeId) => dispatch(canvasCommands.setSelection([nodeId]))}
+      onUpdateNode={handleUpdateNode}
+    />
+  ) : (
+    <CreativeCanvasUnavailablePanel
+      kind="generic"
+      title="正在载入属性"
+      description="选择真实节点后才能查看 canonical 属性。"
+    />
+  );
+
+  const history = renderCanvasState ? (
+    <CreativeCanvasHistoryPanel
+      state={renderCanvasState}
+      onUndo={() => dispatch(canvasCommands.undo())}
+      onRedo={() => dispatch(canvasCommands.redo())}
+    />
+  ) : (
+    <CreativeCanvasUnavailablePanel
+      kind="generic"
+      title="正在载入撤销状态"
+      description="历史面板仅展示当前编辑会话的真实撤销栈。"
+    />
+  );
+
+  const timeline = renderCanvasState ? (
+    <CreativeCanvasTimelinePanel
+      state={renderCanvasState}
+      disabled={productDisabled}
+      onSelectNode={(nodeId) => dispatch(canvasCommands.setSelection([nodeId]))}
+      onAddDirector={() => addNode('director')}
+      onOpenDirector={(nodeId) => void handleOpenDirector(nodeId)}
+    />
+  ) : (
+    <CreativeCanvasUnavailablePanel
+      kind="generic"
+      title="正在载入导演时间线"
+      description="等待项目文档通过 canonical v1 校验。"
+    />
+  );
+
+  return (
+    <main
+      className={styles.root}
+      style={canvasLayoutStyle}
+      data-creative-canvas-product-route
+      data-project-id={projectId}
+    >
+      <CreativeCanvasChrome
+        projectTitle={projectTitle}
+        saveStatus={save.status}
+        saveMessage={saveMessage}
+        tool={tool}
+        background={background}
+        canUndo={Boolean(canvasState && canUndoCanvas(canvasState))}
+        canRedo={Boolean(canvasState && canRedoCanvas(canvasState))}
+        isMiniMapOpen={miniMapOpen}
+        leftView={panelViews.left}
+        rightView={panelViews.right}
+        bottomView={panelViews.bottom}
+        backgroundMenuOpen={backgroundMenuOpen}
+        compact={compact}
+        disabled={productDisabled}
+        onBackToProjects={() => void handleBackToProjects()}
+        onToolChange={setTool}
+        onAddNode={addNode}
+        onBackgroundChange={handleBackgroundChange}
+        onBackgroundMenuOpenChange={setBackgroundMenuOpen}
+        onUndo={() => dispatch(canvasCommands.undo())}
+        onRedo={() => dispatch(canvasCommands.redo())}
+        onFitView={handleFit}
+        onToggleMiniMap={() => setMiniMapOpen((open) => !open)}
+        onLeftViewChange={handleLeftViewChange}
+        onRightViewChange={handleRightViewChange}
+        onBottomViewChange={handleBottomViewChange}
+        slots={{
+          canvas: (
+            <div ref={canvasHostRef} className={styles.canvasHost}>
+              <CreativeCanvasEditor
+                ref={editorRef}
+                projectId={projectId}
+                tool={tool}
+                disabled={productDisabled}
+                showSaveState={false}
+                isMiniMapOpen={miniMapOpen}
+                onToggleMiniMap={() => setMiniMapOpen((open) => !open)}
+                onStateChange={setCanvasState}
+                onSaveStateChange={setSave}
+                onAgentSessionsChange={handleAgentSessionsChange}
+                onPendingTaskCommandBlocked={() =>
+                  setNotice(
+                    '运行中的生成任务必须保留配置节点；请等待任务结束后再删除或撤销。'
+                  )
+                }
+                onIntegrationIntent={(intent) =>
+                  void handleIntegrationIntent(intent)
+                }
+                renderNode={({
+                  node,
+                  selected,
+                  onActivate,
+                  onOpen,
+                  onToggleLock,
+                  dragHandleProps,
+                }) => {
+                  const nodeView = (
+                    <CreativeNodeView
+                      node={node}
+                      selected={selected}
+                      placement="contained"
+                      asset={
+                        resolveCreativeNodeAssetPresentation(
+                          node,
+                          knownAssetsById
+                        ) ?? undefined
+                      }
+                      onActivate={onActivate}
+                      onOpen={onOpen}
+                      onToggleLock={onToggleLock}
+                      onPointerDown={dragHandleProps.onPointerDown}
+                    />
+                  );
+                  if (node.type === 'video') {
+                    const composeConfig = canvasState
+                      ? latestCanvasVideoComposeConfig(canvasState.document, node.id)
+                      : null;
+                    const composeDraft = canvasState
+                      ? canvasVideoComposeDraftFromState(canvasState, node.id)
+                      : structuredClone(DEFAULT_CANVAS_VIDEO_COMPOSE_DRAFT);
+                    const mode: CanvasVideoComposeMode = canvasState
+                      ? canvasVideoComposeMode(canvasState.document, node.id)
+                      : {
+                          kind: 'unsupported',
+                          message: '画布尚未完成载入。',
+                        };
+                    const selectedModel = composeDraft.settings.model;
+                    const exactModel = selectedModel
+                      ? videoModelOptions.find(
+                          (option) =>
+                            option.providerId === selectedModel.providerId &&
+                            option.model === selectedModel.model
+                        )
+                      : null;
+                    const onlyModel =
+                      videoModelOptions.length === 1 ? videoModelOptions[0] : null;
+                    const composeSettings: CanvasVideoComposeSettings = {
+                      ...composeDraft.settings,
+                      model: exactModel
+                        ? {
+                            providerId: exactModel.providerId,
+                            model: exactModel.model,
+                          }
+                        : onlyModel
+                          ? {
+                              providerId: onlyModel.providerId,
+                              model: onlyModel.model,
+                            }
+                          : null,
+                    };
+                    const referenceAsset =
+                      mode.kind === 'i2v'
+                        ? knownAssetsById.get(mode.assetId) ?? null
+                        : null;
+                    const singleSelected =
+                      selected && canvasState?.selection.nodeIds.length === 1;
+                    const retrySubmission =
+                      videoComposeSubmission?.nodeId === node.id;
+                    return (
+                      <div className={styles.nodeComposerHost} data-video-composer-host>
+                        {nodeView}
+                        {singleSelected ? (
+                          <CreativeCanvasVideoComposer
+                            nodeId={node.id}
+                            mode={mode.kind}
+                            reference={
+                              mode.kind === 'i2v'
+                                ? {
+                                    name: referenceAsset?.title ?? '已连接图片',
+                                    previewUrl:
+                                      referenceAsset?.thumbnailUrl ??
+                                      referenceAsset?.originalUrl ??
+                                      creativeAssetClient.url(mode.assetId),
+                                  }
+                                : null
+                            }
+                            initialPrompt={composeDraft.prompt}
+                            settings={composeSettings}
+                            modelOptions={videoModelOptions}
+                            task={canvasVideoComposeTaskSummary(composeConfig)}
+                            disabled={
+                              productDisabled ||
+                              assetImportBusy ||
+                              videoComposeBusy ||
+                              !videoTaskRuntimeReady ||
+                              (!retrySubmission &&
+                                videoTaskRuntimeBlocksNew &&
+                                composeConfig?.data.status !== 'queued' &&
+                                composeConfig?.data.status !== 'running')
+                            }
+                            error={
+                              videoComposeIssue?.nodeId === node.id
+                                ? videoComposeIssue.message
+                                : mode.kind === 'unsupported'
+                                  ? mode.message
+                                  : null
+                            }
+                            retrySubmission={retrySubmission}
+                            onPromptChange={(prompt) =>
+                              updateVideoComposeDraft(node.id, (current) => ({
+                                ...current,
+                                prompt,
+                              }))
+                            }
+                            onOpenPromptLibrary={() =>
+                              openComposePromptLibrary(node.id)
+                            }
+                            onModelChange={(model) =>
+                              updateVideoComposeDraft(node.id, (current) => ({
+                                ...current,
+                                settings: { ...current.settings, model },
+                              }))
+                            }
+                            onResolutionChange={(resolution) =>
+                              updateVideoComposeDraft(node.id, (current) => ({
+                                ...current,
+                                settings: { ...current.settings, resolution },
+                              }))
+                            }
+                            onAspectRatioChange={(aspectRatio) =>
+                              updateVideoComposeDraft(node.id, (current) => ({
+                                ...current,
+                                settings: { ...current.settings, aspectRatio },
+                              }))
+                            }
+                            onSecondsChange={(seconds) =>
+                              updateVideoComposeDraft(node.id, (current) => ({
+                                ...current,
+                                settings: { ...current.settings, seconds },
+                              }))
+                            }
+                            onGenerate={(prompt) =>
+                              void generateFromCanvasVideo(
+                                node.id,
+                                prompt,
+                                composeSettings
+                              )
+                            }
+                            onRetrySubmission={() =>
+                              void retryCanvasVideoComposeSubmission(node.id)
+                            }
+                            onConfirmSubmission={() =>
+                              void confirmCanvasVideoComposeSubmission(node.id)
+                            }
+                          />
+                        ) : null}
+                      </div>
+                    );
+                  }
+                  if (node.type === 'audio') {
+                    const composeConfig = canvasState
+                      ? latestCanvasAudioComposeConfig(canvasState.document, node.id)
+                      : null;
+                    const composeDraft = canvasState
+                      ? canvasAudioComposeDraftFromState(canvasState, node.id)
+                      : structuredClone(DEFAULT_CANVAS_AUDIO_COMPOSE_DRAFT);
+                    const eligibility = canvasState
+                      ? canvasAudioComposeEligibility(canvasState.document, node.id)
+                      : {
+                          kind: 'unsupported' as const,
+                          message: '画布尚未完成载入。',
+                        };
+                    const selectedModel = composeDraft.settings.model;
+                    const exactModel = selectedModel
+                      ? audioModelOptions.find(
+                          (option) =>
+                            option.providerId === selectedModel.providerId &&
+                            option.model === selectedModel.model
+                        )
+                      : null;
+                    const onlyModel =
+                      audioModelOptions.length === 1 ? audioModelOptions[0] : null;
+                    const resolvedModel = exactModel ?? onlyModel;
+                    const composeSettings: CanvasAudioComposeSettings = {
+                      ...composeDraft.settings,
+                      voice: canvasAudioComposeVoiceAfterModelChange(
+                        exactModel ?? null,
+                        resolvedModel,
+                        composeDraft.settings.voice
+                      ),
+                      model: resolvedModel
+                        ? {
+                            providerId: resolvedModel.providerId,
+                            model: resolvedModel.model,
+                          }
+                        : null,
+                    };
+                    const protocolProfile = canvasAudioComposeProtocolProfile(
+                      resolvedModel?.protocol ?? ''
+                    );
+                    const singleSelected =
+                      selected && canvasState?.selection.nodeIds.length === 1;
+                    const retrySubmission =
+                      audioComposeSubmission?.nodeId === node.id;
+                    return (
+                      <div
+                        className={styles.nodeComposerHost}
+                        data-audio-composer-host
+                      >
+                        {nodeView}
+                        {singleSelected ? (
+                          <CreativeCanvasAudioComposer
+                            nodeId={node.id}
+                            initialPrompt={composeDraft.prompt}
+                            settings={composeSettings}
+                            modelOptions={audioModelOptions}
+                            task={canvasAudioComposeTaskSummary(composeConfig)}
+                            voiceSupported={protocolProfile.fieldSupport.voice}
+                            voiceRequired={protocolProfile.voiceRequired}
+                            formatSupported={protocolProfile.fieldSupport.format}
+                            maxTextLength={protocolProfile.maxTextLength}
+                            disabled={
+                              productDisabled ||
+                              assetImportBusy ||
+                              audioComposeBusy ||
+                              !audioTaskRuntimeReady ||
+                              eligibility.kind === 'unsupported' ||
+                              (!retrySubmission &&
+                                audioTaskRuntimeBlocksNew &&
+                                composeConfig?.data.status !== 'queued' &&
+                                composeConfig?.data.status !== 'running')
+                            }
+                            error={
+                              audioComposeIssue?.nodeId === node.id
+                                ? audioComposeIssue.message
+                                : eligibility.kind === 'unsupported'
+                                  ? eligibility.message
+                                  : null
+                            }
+                            retrySubmission={retrySubmission}
+                            onPromptChange={(prompt) =>
+                              updateAudioComposeDraft(node.id, (current) => ({
+                                ...current,
+                                prompt,
+                              }))
+                            }
+                            onOpenPromptLibrary={() =>
+                              openComposePromptLibrary(node.id)
+                            }
+                            onModelChange={(model) => {
+                              const nextModel = model
+                                ? (audioModelOptions.find(
+                                    (option) =>
+                                      option.providerId === model.providerId &&
+                                      option.model === model.model
+                                  ) ?? null)
+                                : null;
+                              updateAudioComposeDraft(node.id, (current) => ({
+                                ...current,
+                                settings: {
+                                  ...current.settings,
+                                  model,
+                                  voice: canvasAudioComposeVoiceAfterModelChange(
+                                    exactModel ?? null,
+                                    nextModel,
+                                    current.settings.voice
+                                  ),
+                                },
+                              }));
+                            }}
+                            onVoiceChange={(voice) =>
+                              updateAudioComposeDraft(node.id, (current) => ({
+                                ...current,
+                                settings: {
+                                  ...current.settings,
+                                  voice: voice.trim(),
+                                },
+                              }))
+                            }
+                            onFormatChange={(format) =>
+                              updateAudioComposeDraft(node.id, (current) => ({
+                                ...current,
+                                settings: { ...current.settings, format },
+                              }))
+                            }
+                            onGenerate={(prompt) =>
+                              void generateFromCanvasAudio(
+                                node.id,
+                                prompt,
+                                composeSettings
+                              )
+                            }
+                            onRetrySubmission={() =>
+                              void retryCanvasAudioComposeSubmission(node.id)
+                            }
+                            onConfirmSubmission={() =>
+                              void confirmCanvasAudioComposeSubmission(node.id)
+                            }
+                          />
+                        ) : null}
+                      </div>
+                    );
+                  }
+                  if (node.type !== 'image') return nodeView;
+                  const composeConfig = canvasState
+                    ? latestCanvasImageComposeConfig(canvasState.document, node.id)
+                    : null;
+                  const composeFallback = canvasState
+                    ? canvasImageComposeDraftFromState(canvasState, node.id)
+                    : {
+                        prompt: '',
+                        settings: structuredClone(DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS),
+                      };
+                  const composeDraft = composeFallback;
+                  const composeModelOptions = node.data.assetId
+                    ? imageComposeModelOptions
+                    : imageGenerationModelOptions;
+                  const selectedModel = composeDraft.settings.model;
+                  const exactModel = selectedModel
+                    ? composeModelOptions.find(
+                        (option) =>
+                          option.providerId === selectedModel.providerId &&
+                          option.model === selectedModel.model
+                      )
+                    : null;
+                  const onlyModel = composeModelOptions.length === 1
+                    ? composeModelOptions[0]
+                    : null;
+                  const composeSettings: ImageWorkbenchSettings = {
+                    ...composeDraft.settings,
+                    model: exactModel
+                      ? { providerId: exactModel.providerId, model: exactModel.model }
+                      : onlyModel
+                        ? { providerId: onlyModel.providerId, model: onlyModel.model }
+                        : null,
+                  };
+                  const singleSelected =
+                    selected && canvasState?.selection.nodeIds.length === 1;
+                  const retrySubmission = imageComposeSubmission?.nodeId === node.id;
+                  return (
+                    <CreativeCanvasImageToolbar
+                      nodeId={node.id}
+                      visible={Boolean(singleSelected)}
+                      hasImageContent={Boolean(node.data.assetId)}
+                      disabled={
+                        productDisabled ||
+                        assetImportBusy ||
+                        imageCropBusy ||
+                        imageSplitBusy ||
+                        imageMaskBusy ||
+                        imageComposeBusy ||
+                        imageTaskRuntimeBlocksNew
+                      }
+                      onInfo={() => {
+                        handleRightViewChange('properties');
+                        setNotice('已在属性面板打开所选节点。');
+                      }}
+                      onDelete={() =>
+                        dispatch(
+                          canvasCommands.deleteSelection({ nodeIds: [node.id] })
+                        )
+                      }
+                      onUpload={() => openImageNodeUpload(node.id)}
+                      onCrop={() => void handleOpenImageCrop(node)}
+                      onDownload={() => void handleDownloadImage(node)}
+                      onMaskEdit={() => void handleOpenImageMaskEdit(node)}
+                      onSplit={() => void handleOpenImageSplit(node)}
+                    >
+                      {nodeView}
+                      {singleSelected ? (
+                        <CreativeCanvasImageComposer
+                          nodeId={node.id}
+                          hasImageContent={Boolean(node.data.assetId)}
+                          initialPrompt={composeDraft.prompt}
+                          settings={composeSettings}
+                          modelOptions={composeModelOptions}
+                          task={canvasImageComposeTaskSummary(composeConfig)}
+                          disabled={
+                            productDisabled ||
+                            assetImportBusy ||
+                            imageCropBusy ||
+                            imageSplitBusy ||
+                            imageMaskBusy ||
+                            imageComposeBusy ||
+                            (!retrySubmission &&
+                              imageTaskRuntimeBlocksNew &&
+                              composeConfig?.data.status !== 'queued' &&
+                              composeConfig?.data.status !== 'running')
+                          }
+                          error={
+                            imageComposeIssue?.nodeId === node.id
+                              ? imageComposeIssue.message
+                              : null
+                          }
+                          retrySubmission={retrySubmission}
+                          onPromptChange={(prompt) =>
+                            updateImageComposeDraft(
+                              node.id,
+                              (current) => ({ ...current, prompt })
+                            )
+                          }
+                          onOpenPromptLibrary={() =>
+                            openComposePromptLibrary(node.id)
+                          }
+                          onModelChange={(model: ImageWorkbenchModelIdentity | null) =>
+                            updateImageComposeDraft(
+                              node.id,
+                              (current) => ({
+                                ...current,
+                                settings: { ...current.settings, model },
+                              })
+                            )
+                          }
+                          onInterfaceModeChange={(interfaceMode) =>
+                            updateImageComposeDraft(
+                              node.id,
+                              (current) => ({
+                                ...current,
+                                settings: { ...current.settings, interfaceMode },
+                              })
+                            )
+                          }
+                          onQualityChange={(quality) =>
+                            updateImageComposeDraft(
+                              node.id,
+                              (current) => ({
+                                ...current,
+                                settings: { ...current.settings, quality },
+                              })
+                            )
+                          }
+                          onDimensionsChange={(dimensions) =>
+                            updateImageComposeDraft(
+                              node.id,
+                              (current) => ({
+                                ...current,
+                                settings: { ...current.settings, ...dimensions },
+                              })
+                            )
+                          }
+                          onAspectRatioChange={(option: ImageWorkbenchAspectRatioOption) =>
+                            updateImageComposeDraft(
+                              node.id,
+                              (current) => ({
+                                ...current,
+                                settings: {
+                                  ...current.settings,
+                                  aspectRatio: option.value,
+                                  width: option.width,
+                                  height: option.height,
+                                },
+                              })
+                            )
+                          }
+                          onCountChange={(count) =>
+                            updateImageComposeDraft(
+                              node.id,
+                              (current) => ({
+                                ...current,
+                                settings: { ...current.settings, count },
+                              })
+                            )
+                          }
+                          onGenerate={(prompt) =>
+                            void generateFromCanvasImage(node.id, prompt, composeSettings)
+                          }
+                          onRetrySubmission={() =>
+                            void retryCanvasImageComposeSubmission(node.id)
+                          }
+                        />
+                      ) : null}
+                    </CreativeCanvasImageToolbar>
+                  );
+                }}
+                renderEdge={(context) => (
+                  <CreativeCanvasConnectionEdge {...context} />
+                )}
+                screenOverlay={
+                  <CreativeCanvasInteractionOverlays
+                    viewportSize={viewportSize}
+                    contextMenu={contextMenu}
+                    createNodeMenu={
+                      createNodeMenu
+                        ? { clientPosition: createNodeMenu.clientPosition }
+                        : null
+                    }
+                    disabled={productDisabled || assetImportBusy}
+                    onContextAction={(action) =>
+                      void handleContextAction(action)
+                    }
+                    onOpenCreateNodeMenu={handleOpenCreateNodeMenuFromContext}
+                    onPasteFromSystemClipboard={() =>
+                      void handlePasteFromContext()
+                    }
+                    onSelectNode={handleSelectCreatedNode}
+                    onDismiss={dismissInteractionOverlays}
+                  />
+                }
+                miniMap={({ state }) => (
+                  <CanvasMiniMap
+                    nodes={state.document.nodes}
+                    viewport={state.viewport}
+                    viewportSize={viewportSize}
+                    selectedNodeIds={new Set(state.selection.nodeIds)}
+                    dragging={miniMapDragging}
+                    onNavigate={handleMiniMapNavigate}
+                  />
+                )}
+              />
+            </div>
+          ),
+          topActions: (
+            <>
+              <CanvasTaskRuntimeAction
+                label="图片任务"
+                snapshot={imageTaskRuntime}
+                busy={imageTaskRuntimeActionBusy}
+                onCancel={(taskId) => void cancelImageRuntimeTask(taskId)}
+                onRetry={(taskId) => void retryImageRuntimeTask(taskId)}
+              />
+              <CanvasTaskRuntimeAction
+                label="视频任务"
+                snapshot={videoTaskRuntime}
+                busy={videoTaskRuntimeActionBusy}
+                onCancel={(taskId) => void cancelVideoRuntimeTask(taskId)}
+                onRetry={(taskId) => void retryVideoRuntimeTask(taskId)}
+              />
+              <CanvasTaskRuntimeAction
+                label="音频任务"
+                snapshot={audioTaskRuntime}
+                busy={audioTaskRuntimeActionBusy}
+                onCancel={(taskId) => void cancelAudioRuntimeTask(taskId)}
+                onRetry={(taskId) => void retryAudioRuntimeTask(taskId)}
+              />
+              <SaveRecoveryAction
+                save={save}
+                busy={recoveryBusy}
+                notice={notice}
+                requiresAuthoritativeReload={agentOpsReloadRequired}
+                onReload={() => void handleReloadRemote()}
+                onRetry={() => void handleRetrySave()}
+              />
+            </>
+          ),
+          toolbarTrailing: (
+            <>
+              <ProductToolbarButton
+                label="将所选节点分组"
+                icon={<Group {...iconProps} />}
+                disabled={productDisabled || !selection.canGroup}
+                onClick={() =>
+                  dispatch(
+                    canvasCommands.groupNodes({
+                      nodeIds: canvasState?.selection.nodeIds,
+                      title: '节点组',
+                    })
+                  )
+                }
+              />
+              <ProductToolbarButton
+                label="取消所选分组"
+                icon={<Ungroup {...iconProps} />}
+                disabled={productDisabled || selection.groupIds.length === 0}
+                onClick={() => {
+                  for (const groupId of selection.groupIds) {
+                    dispatch(canvasCommands.ungroup(groupId));
+                  }
+                }}
+              />
+              <ProductToolbarButton
+                label="删除所选节点或连接"
+                icon={<Delete {...iconProps} />}
+                danger
+                disabled={productDisabled || !selection.hasSelection}
+                onClick={() => dispatch(canvasCommands.deleteSelection())}
+              />
+            </>
+          ),
+          left: {
+            canvas: canvasOutline,
+            assets: (
+              <CreativeCanvasProductAssetLibrary
+                state={assets}
+                search={assetSearch}
+                kind={assetKind}
+                selectedIds={selectedAssetIds}
+                disabled={productDisabled}
+                onSearchChange={setAssetSearch}
+                onKindChange={setAssetKind}
+                onToggleAsset={handleToggleAsset}
+                onInsert={handleInsertAssets}
+              />
+            ),
+            prompts: (
+              <CreativeCanvasProductPromptLibrary
+                locale={locale}
+                enabled={!productDisabled}
+                selectedId={selectedPromptId}
+                onSelect={setSelectedPromptId}
+                onInsert={handleInsertPrompt}
+              />
+            ),
+            workflows: (
+              <CreativeCanvasWorkflowPanel
+                workflows={workflows}
+                runtime={workflowRuntime.snapshot}
+                loading={workflowLoading}
+                error={workflowError}
+                disabled={productDisabled}
+                insertingRunId={workflowInsertingRunId}
+                onRetry={() => {
+                  void loadWorkflows();
+                  void workflowRuntime.controller.load().catch(() => undefined);
+                }}
+                onRun={setWorkflowToRun}
+                onInsertResults={(run) => void handleInsertWorkflowResults(run)}
+                onOpenCenter={() => void handleOpenWorkflowCenter()}
+              />
+            ),
+          },
+          right: {
+            assistant: (
+              <CreativeCanvasAgentPanel
+                ref={agentPanelRef}
+                projectId={projectId}
+                hydrated={agentDocumentState !== null}
+                sessions={agentDocumentState?.sessions ?? []}
+                activeSessionId={agentDocumentState?.activeSessionId ?? null}
+                planningContext={agentPlanningContext}
+                disabled={productDisabled}
+                onPersist={handlePersistAgentSessions}
+                onApplyCanvasOps={handleApplyCanvasAgentOps}
+                onCollapse={() => handleRightViewChange(null)}
+                onOpenModelSettings={() => void handleOpenModelSettings()}
+              />
+            ),
+            properties,
+          },
+          bottom: {
+            history,
+            timeline,
+          },
+        }}
+      />
+      {imageTaskRuntimeReady && project.detail ? (
+        <CanvasImageTaskRuntimeBridge
+          key={`${projectId}:${imageTaskRuntimeEpoch}`}
+          ref={imageTaskRuntimeRef}
+          projectId={projectId}
+          initialDocument={project.detail.document}
+          editorRef={editorRef}
+          viewportSize={viewportSize}
+          onAsset={(asset) => {
+            knownAssetsRef.current = new Map(knownAssetsRef.current).set(
+              asset.id,
+              asset
+            );
+            void assets.reload();
+          }}
+          onSnapshot={setImageTaskRuntime}
+          onNotice={setNotice}
+        />
+      ) : null}
+      {videoTaskRuntimeReady && project.detail ? (
+        <CanvasVideoTaskRuntimeBridge
+          key={`${projectId}:video:${videoTaskRuntimeEpoch}`}
+          ref={videoTaskRuntimeRef}
+          projectId={projectId}
+          initialDocument={project.detail.document}
+          editorRef={editorRef}
+          viewportSize={viewportSize}
+          onAsset={(asset) => {
+            knownAssetsRef.current = new Map(knownAssetsRef.current).set(
+              asset.id,
+              asset
+            );
+            void assets.reload();
+          }}
+          onSnapshot={setVideoTaskRuntime}
+          onNotice={setNotice}
+        />
+      ) : null}
+      {audioTaskRuntimeReady && project.detail ? (
+        <CanvasAudioTaskRuntimeBridge
+          key={`${projectId}:audio:${audioTaskRuntimeEpoch}`}
+          ref={audioTaskRuntimeRef}
+          projectId={projectId}
+          initialDocument={project.detail.document}
+          editorRef={editorRef}
+          onAsset={(asset) => {
+            knownAssetsRef.current = new Map(knownAssetsRef.current).set(
+              asset.id,
+              asset
+            );
+            void assets.reload();
+          }}
+          onSnapshot={setAudioTaskRuntime}
+          onNotice={setNotice}
+        />
+      ) : null}
+      <WorkflowRunModal
+        workflow={workflowToRun}
+        runner={workflowRunner}
+        onClose={() => setWorkflowToRun(null)}
+        onPickAssets={(variable, selectedAssetIds) =>
+          workflowAssetPicker.pick({
+            acceptedKinds: ['image'],
+            initialSelectedIds: selectedAssetIds,
+            selectionLimit:
+              variable.type === 'image-series' ? variable.maxItems : 1,
+            title:
+              variable.type === 'image-series'
+                ? '选择变量图片'
+                : '选择变量参考图',
+          })
+        }
+        onPickReferenceAssets={(selectedAssetIds) =>
+          workflowAssetPicker.pick({
+            acceptedKinds: ['image'],
+            initialSelectedIds: selectedAssetIds,
+            selectionLimit: 100,
+            title: '选择工作流参考图',
+          })
+        }
+        onUploadReferenceImages={async (files, selectedAssetIds) => {
+          const uploaded = await Promise.all(
+            files.map((file) =>
+              creativeAssetClient.upload(file, {
+                title: file.name,
+                tags: ['workflow-reference'],
+                inLibrary: true,
+              })
+            )
+          );
+          return [
+            ...new Set([
+              ...selectedAssetIds,
+              ...uploaded.map((asset) => asset.id),
+            ]),
+          ];
+        }}
+      />
+      {workflowAssetPicker.dialog}
+      <CreativeImageCropDialog
+        visible={pendingImageCrop !== null}
+        asset={pendingImageCrop?.asset ?? null}
+        busy={imageCropBusy}
+        progress={imageCropProgress}
+        error={imageCropError}
+        onClose={closeImageCrop}
+        onConfirm={(crop) => void handleConfirmImageCrop(crop)}
+      />
+      <CreativeImageSplitDialog
+        visible={pendingImageSplit !== null}
+        asset={pendingImageSplit?.asset ?? null}
+        busy={imageSplitBusy}
+        progress={imageSplitProgress}
+        error={imageSplitError}
+        onClose={closeImageSplit}
+        onConfirm={(params) => void handleConfirmImageSplit(params)}
+      />
+      <CreativeImageMaskEditDialog
+        visible={pendingImageMaskEdit !== null}
+        asset={pendingImageMaskEdit?.asset ?? null}
+        catalog={modelCatalog}
+        model={imageMaskModel}
+        busy={imageMaskBusy}
+        retryLocked={Boolean(pendingImageMaskEdit?.submission)}
+        progress={imageMaskProgress}
+        error={imageMaskError}
+        onModelChange={setImageMaskModel}
+        onOpenModelSettings={() => void handleOpenModelSettings()}
+        onAbandon={() => void abandonImageMaskSubmission()}
+        onClose={closeImageMaskEdit}
+        onConfirm={(input) => void handleConfirmImageMaskEdit(input)}
+      />
+      <input
+        ref={imageNodeUploadInputRef}
+        hidden
+        type="file"
+        accept="image/*"
+        aria-label="上传图片到所选节点"
+        onChange={(event) => void handleImageNodeUploadChange(event)}
+      />
+      <Modal
+        title="选择 2:1 图片的节点类型"
+        visible={pendingPanoramaChoice !== null}
+        closable={false}
+        maskClosable={false}
+        escToExit={false}
+        footer={
+          <div className={styles.panoramaActions}>
+            <Button onClick={() => resolvePendingPanoramaChoice(false)}>
+              作为普通图片
+            </Button>
+            <Button
+              type="primary"
+              onClick={() => resolvePendingPanoramaChoice(true)}
+            >
+              作为全景图
+            </Button>
+          </div>
+        }
+      >
+        <p className={styles.panoramaDescription}>
+          图片已经真实上传并保存在素材库中。检测到宽高比接近
+          2:1，请确认它应作为普通图片还是等距柱状全景图插入当前画布。
+        </p>
+      </Modal>
+    </main>
+  );
+};
+
+export default CreativeCanvasProductRoute;

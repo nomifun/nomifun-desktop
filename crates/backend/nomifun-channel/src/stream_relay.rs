@@ -1240,7 +1240,7 @@ mod media_tests {
         for _ in 0..2 {
             tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
                 call_id: "t".into(),
-                name: "nomi_workshop_get_task".into(),
+                name: "nomi_creative_studio_get_task".into(),
                 args: serde_json::Value::Null,
                 status: ToolCallStatus::Completed,
                 description: None,
@@ -1281,7 +1281,7 @@ mod media_tests {
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "missing-workshop-asset".into(),
-            name: "nomi_workshop_get_task".into(),
+            name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
             description: None,
@@ -1337,7 +1337,7 @@ mod media_tests {
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "workshop-upload-fallback-ok".into(),
-            name: "nomi_workshop_get_task".into(),
+            name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
             description: None,
@@ -1396,7 +1396,7 @@ mod media_tests {
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "workshop-delivery-failed".into(),
-            name: "nomi_workshop_get_task".into(),
+            name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
             description: None,
@@ -1447,7 +1447,7 @@ mod media_tests {
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "workshop-no-resolver".into(),
-            name: "nomi_workshop_get_task".into(),
+            name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
             description: None,
@@ -2078,7 +2078,7 @@ mod media_tests {
         let (tx, rx) = tokio::sync::broadcast::channel(16);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "t".into(),
-            name: "nomi_workshop_get_task".into(),
+            name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,
             status: ToolCallStatus::Completed,
             description: None,

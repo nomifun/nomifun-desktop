@@ -5,7 +5,14 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
-No unreleased changes yet.
+- **Creative Studio replaces the legacy Creative Workshop.** The rebuilt focused
+  product includes project and asset management, a revision-safe infinite
+  canvas, canonical text/image/video/audio creation flows, prompt and workflow
+  centers, Director v1, strict human-reviewed AI apply flows, and NomiFun's exact
+  provider/model/task routing. Legacy Workshop UI, routes and persistence have
+  been retired; the initial Workflow assistant remains deliberately private and
+  one-shot, with preview, manual Apply and manual Save instead of automatic or
+  public execution.
 
 ## v0.6.5 - 2026-08-22
 

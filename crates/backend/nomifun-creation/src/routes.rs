@@ -1,11 +1,10 @@
-//! `/api/creation/tasks` route handlers (contract §3.3). Owner-only — mounted
-//! behind the app's authenticated router (same auth extractor as the workshop
-//! routes).
+//! Canonical `/api/creative-studio/tasks` handlers. The retired unowned
+//! `/api/creation/tasks` surface is deliberately not mounted.
 
 use axum::Router;
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Extension, Json, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use serde::Deserialize;
@@ -15,22 +14,41 @@ use nomifun_api_types::ApiResponse;
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
 
+use crate::dto::{
+    CreativeCreationTask, CreativeCreationTaskPage, CreativeCreationTaskRetireResult,
+};
+#[cfg(test)]
 use crate::dto::CreationTask;
-use crate::service::NewCreationTask;
+use crate::service::{CreativeTaskOwner, NewCreationTask};
 use crate::state::CreationRouterState;
-use crate::types::CreationInput;
+use crate::types::{CreationInput, CreationInputKind, StandaloneWorkbenchKind};
 
 pub fn creation_routes(state: CreationRouterState) -> Router {
     Router::new()
-        .route("/api/creation/tasks", get(list_tasks).post(create_task))
-        .route("/api/creation/tasks/{creation_task_id}", get(get_task))
-        .route("/api/creation/tasks/{creation_task_id}/cancel", post(cancel_task))
+        .route(
+            "/api/creative-studio/tasks",
+            get(list_standalone_workbench_tasks).post(create_creative_task),
+        )
+        .route(
+            "/api/creative-studio/tasks/{creation_task_id}",
+            get(get_creative_task),
+        )
+        .route(
+            "/api/creative-studio/tasks/retire",
+            post(retire_standalone_workbench_tasks),
+        )
+        .route(
+            "/api/creative-studio/tasks/{creation_task_id}/cancel",
+            post(cancel_creative_task),
+        )
         .with_state(state)
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InputRef {
     asset_id: String,
+    kind: CreationInputKind,
     #[serde(default = "default_role")]
     role: String,
 }
@@ -40,11 +58,57 @@ fn default_role() -> String {
 }
 
 #[derive(Deserialize)]
-struct CreateTaskRequest {
-    #[serde(default)]
-    canvas_id: Option<String>,
-    #[serde(default)]
-    node_id: Option<String>,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum CreativeTaskOwnerRequest {
+    CanvasNode {
+        project_id: String,
+        node_id: String,
+    },
+    StandaloneWorkbench {
+        project_id: String,
+        workbench_kind: StandaloneWorkbenchKind,
+    },
+    WorkflowStep {
+        workflow_id: String,
+        workflow_run_id: String,
+        workflow_step_id: String,
+    },
+}
+
+impl From<CreativeTaskOwnerRequest> for CreativeTaskOwner {
+    fn from(owner: CreativeTaskOwnerRequest) -> Self {
+        match owner {
+            CreativeTaskOwnerRequest::CanvasNode {
+                project_id,
+                node_id,
+            } => Self::CanvasNode {
+                project_id,
+                node_id,
+            },
+            CreativeTaskOwnerRequest::StandaloneWorkbench {
+                project_id,
+                workbench_kind,
+            } => Self::StandaloneWorkbench {
+                project_id,
+                workbench_kind,
+            },
+            CreativeTaskOwnerRequest::WorkflowStep {
+                workflow_id,
+                workflow_run_id,
+                workflow_step_id,
+            } => Self::WorkflowStep {
+                workflow_id,
+                workflow_run_id,
+                workflow_step_id,
+            },
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateCreativeTaskRequest {
+    owner: CreativeTaskOwnerRequest,
     provider_id: String,
     model: String,
     capability: String,
@@ -54,67 +118,324 @@ struct CreateTaskRequest {
     inputs: Vec<InputRef>,
 }
 
-async fn create_task(
-    State(state): State<CreationRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    body: Result<Json<CreateTaskRequest>, JsonRejection>,
-) -> Result<impl IntoResponse, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let task = state
-        .service
-        .create_task(NewCreationTask {
-            canvas_id: req.canvas_id,
-            node_id: req.node_id,
-            provider_id: req.provider_id,
-            model: req.model,
-            capability: req.capability,
-            params: req.params,
-            inputs: req
-                .inputs
-                .into_iter()
-                .map(|i| CreationInput { asset_id: i.asset_id, role: i.role })
-                .collect(),
-        })
-        .await?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::ok(task))))
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListStandaloneWorkbenchTasksQuery {
+    project_id: String,
+    workbench_kind: StandaloneWorkbenchKind,
+    limit: Option<usize>,
+    cursor: Option<String>,
+    active_only: Option<bool>,
 }
 
 #[derive(Deserialize)]
-struct ListTasksQuery {
-    canvas_id: Option<String>,
-    status: Option<String>,
-    limit: Option<i64>,
+#[serde(deny_unknown_fields)]
+struct RetireStandaloneWorkbenchTasksRequest {
+    project_id: String,
+    workbench_kind: StandaloneWorkbenchKind,
+    task_ids: Vec<String>,
 }
 
-#[derive(serde::Serialize)]
-struct TaskListResponse {
-    tasks: Vec<CreationTask>,
+fn required_idempotency_key(headers: &HeaderMap) -> Result<String, AppError> {
+    let mut values = headers.get_all("idempotency-key").iter();
+    let value = values.next().ok_or_else(|| {
+        AppError::BadRequest("Creative Studio task creation requires Idempotency-Key".into())
+    })?;
+    if values.next().is_some() {
+        return Err(AppError::BadRequest(
+            "Idempotency-Key must be sent exactly once".into(),
+        ));
+    }
+    value
+        .to_str()
+        .map(str::to_owned)
+        .map_err(|_| AppError::BadRequest("Idempotency-Key must be visible ASCII".into()))
 }
 
-async fn list_tasks(
+async fn create_creative_task(
     State(state): State<CreationRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Query(query): Query<ListTasksQuery>,
-) -> Result<Json<ApiResponse<TaskListResponse>>, AppError> {
-    let tasks = state
+    headers: HeaderMap,
+    body: Result<Json<CreateCreativeTaskRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, AppError> {
+    let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let task = state
         .service
-        .list_tasks(query.canvas_id.as_deref(), query.status.as_deref(), query.limit.unwrap_or(100))
+        .create_creative_task(
+            req.owner.into(),
+            idempotency_key,
+            NewCreationTask {
+                provider_id: req.provider_id,
+                model: req.model,
+                capability: req.capability,
+                params: req.params,
+                inputs: req
+                    .inputs
+                    .into_iter()
+                    .map(|input| CreationInput {
+                        asset_id: input.asset_id,
+                        kind: input.kind,
+                        role: input.role,
+                    })
+                    .collect(),
+            },
+        )
         .await?;
-    Ok(Json(ApiResponse::ok(TaskListResponse { tasks })))
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::ok(CreativeCreationTask::try_from(task)?)),
+    ))
 }
 
-async fn get_task(
+async fn list_standalone_workbench_tasks(
+    State(state): State<CreationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    query: Result<Query<ListStandaloneWorkbenchTasksQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<CreativeCreationTaskPage>>, AppError> {
+    let Query(query) = query.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let page = state
+        .service
+        .list_standalone_workbench_tasks(
+            &query.project_id,
+            query.workbench_kind,
+            query.active_only.unwrap_or(false),
+            query.limit,
+            query.cursor.as_deref(),
+        )
+        .await?;
+    Ok(Json(ApiResponse::ok(CreativeCreationTaskPage::try_new(
+        page.items,
+        page.next_cursor,
+    )?)))
+}
+
+async fn retire_standalone_workbench_tasks(
+    State(state): State<CreationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    body: Result<Json<RetireStandaloneWorkbenchTasksRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CreativeCreationTaskRetireResult>>, AppError> {
+    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let retired_task_ids = state
+        .service
+        .retire_standalone_workbench_tasks(
+            &request.project_id,
+            request.workbench_kind,
+            &request.task_ids,
+        )
+        .await?;
+    Ok(Json(ApiResponse::ok(CreativeCreationTaskRetireResult {
+        retired_task_ids,
+    })))
+}
+
+async fn get_creative_task(
     State(state): State<CreationRouterState>,
     Extension(_user): Extension<CurrentUser>,
     Path(creation_task_id): Path<String>,
-) -> Result<Json<ApiResponse<CreationTask>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.get_task(&creation_task_id).await?)))
+) -> Result<Json<ApiResponse<CreativeCreationTask>>, AppError> {
+    let task = state.service.get_task(&creation_task_id).await?;
+    Ok(Json(ApiResponse::ok(CreativeCreationTask::try_from(task)?)))
 }
 
-async fn cancel_task(
+async fn cancel_creative_task(
     State(state): State<CreationRouterState>,
     Extension(_user): Extension<CurrentUser>,
     Path(creation_task_id): Path<String>,
-) -> Result<Json<ApiResponse<CreationTask>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.cancel_task(&creation_task_id).await?)))
+) -> Result<Json<ApiResponse<CreativeCreationTask>>, AppError> {
+    let task = state.service.cancel_task(&creation_task_id).await?;
+    Ok(Json(ApiResponse::ok(CreativeCreationTask::try_from(task)?)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+    use serde_json::json;
+
+    #[test]
+    fn creative_task_request_accepts_only_the_tagged_owner_contract() {
+        let parsed = serde_json::from_value::<CreateCreativeTaskRequest>(json!({
+            "owner": {
+                "kind": "workflow_step",
+                "workflow_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                "workflow_run_id": "0190f5fe-7c00-7a00-8000-000000000002",
+                "workflow_step_id": "0190f5fe-7c00-7a00-8000-000000000003"
+            },
+            "provider_id": "0190f5fe-7c00-7a00-8000-000000000004",
+            "model": "image-model-v1",
+            "capability": "t2i",
+            "params": {"prompt": "Aurora"},
+            "inputs": []
+        }))
+        .unwrap();
+        assert!(matches!(
+            parsed.owner,
+            CreativeTaskOwnerRequest::WorkflowStep { .. }
+        ));
+
+        let standalone = serde_json::from_value::<CreateCreativeTaskRequest>(json!({
+            "owner": {
+                "kind": "standalone_workbench",
+                "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                "workbench_kind": "video"
+            },
+            "provider_id": "0190f5fe-7c00-7a00-8000-000000000004",
+            "model": "video-model-v1",
+            "capability": "i2v",
+            "params": {"prompt": "Aurora"},
+            "inputs": [{
+                "asset_id": "0190f5fe-7c00-7a00-8000-000000000006",
+                "kind": "image",
+                "role": "first_frame"
+            }]
+        }))
+        .unwrap();
+        assert!(matches!(
+            standalone.owner,
+            CreativeTaskOwnerRequest::StandaloneWorkbench {
+                workbench_kind: StandaloneWorkbenchKind::Video,
+                ..
+            }
+        ));
+
+        for invalid in [
+            json!({
+                "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                "node_id": "0190f5fe-7c00-7a00-8000-000000000002",
+                "provider_id": "0190f5fe-7c00-7a00-8000-000000000004",
+                "model": "image-model-v1",
+                "capability": "t2i"
+            }),
+            json!({
+                "owner": {
+                    "kind": "canvas_node",
+                    "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                    "node_id": "0190f5fe-7c00-7a00-8000-000000000002",
+                    "canvas_id": "0190f5fe-7c00-7a00-8000-000000000005"
+                },
+                "provider_id": "0190f5fe-7c00-7a00-8000-000000000004",
+                "model": "image-model-v1",
+                "capability": "t2i"
+            }),
+            json!({
+                "owner": {
+                    "kind": "standalone_workbench",
+                    "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                    "workbench_kind": "video"
+                },
+                "provider_id": "0190f5fe-7c00-7a00-8000-000000000004",
+                "model": "video-model-v1",
+                "capability": "i2v",
+                "inputs": [{
+                    "asset_id": "0190f5fe-7c00-7a00-8000-000000000006",
+                    "role": "first_frame"
+                }]
+            }),
+        ] {
+            assert!(serde_json::from_value::<CreateCreativeTaskRequest>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn creative_task_idempotency_key_is_required_exactly_once() {
+        let mut headers = HeaderMap::new();
+        assert!(required_idempotency_key(&headers).is_err());
+
+        headers.append(
+            "idempotency-key",
+            HeaderValue::from_static("0190f5fe-7c00-7a00-8000-000000000001"),
+        );
+        assert_eq!(
+            required_idempotency_key(&headers).unwrap(),
+            "0190f5fe-7c00-7a00-8000-000000000001"
+        );
+
+        headers.append(
+            "idempotency-key",
+            HeaderValue::from_static("0190f5fe-7c00-7a00-8000-000000000002"),
+        );
+        assert!(required_idempotency_key(&headers).is_err());
+    }
+
+    #[test]
+    fn standalone_list_query_is_exact_and_rejects_unknown_or_duplicate_fields() {
+        let uri = "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=video&limit=30&cursor=1%3A0190f5fe-7c00-7a00-8000-000000000002&active_only=true"
+            .parse()
+            .unwrap();
+        let Query(query) = Query::<ListStandaloneWorkbenchTasksQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(query.project_id, "0190f5fe-7c00-7a00-8000-000000000001");
+        assert_eq!(query.workbench_kind, StandaloneWorkbenchKind::Video);
+        assert_eq!(query.limit, Some(30));
+        assert_eq!(query.active_only, Some(true));
+        assert!(query.cursor.as_deref().unwrap().starts_with("1:"));
+
+        for invalid in [
+            "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=video&unknown=1",
+            "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&project_id=0190f5fe-7c00-7a00-8000-000000000002&workbench_kind=video",
+            "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=canvas",
+            "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=video&active_only=yes",
+            "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=video&active_only=true&active_only=false",
+        ] {
+            let uri = invalid.parse().unwrap();
+            assert!(
+                Query::<ListStandaloneWorkbenchTasksQuery>::try_from_uri(&uri).is_err(),
+                "query must fail closed: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_retire_body_is_flat_exact_and_typed() {
+        let request = serde_json::from_value::<RetireStandaloneWorkbenchTasksRequest>(json!({
+            "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
+            "workbench_kind": "image",
+            "task_ids": ["0190f5fe-7c00-7a00-8000-000000000002"]
+        }))
+        .unwrap();
+        assert_eq!(request.workbench_kind, StandaloneWorkbenchKind::Image);
+        assert_eq!(request.task_ids.len(), 1);
+        for invalid in [
+            json!({
+                "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                "workbench_kind": "image",
+                "task_ids": [],
+                "owner": {"kind": "standalone_workbench"}
+            }),
+            json!({
+                "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                "workbench_kind": "canvas",
+                "task_ids": []
+            }),
+        ] {
+            assert!(serde_json::from_value::<RetireStandaloneWorkbenchTasksRequest>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn creative_task_surface_rejects_invalid_owner_rows() {
+        let invalid = CreationTask {
+            creation_task_id: "0190f5fe-7c00-7a00-8000-000000000001".into(),
+            project_id: None,
+            workbench_kind: None,
+            workflow_id: None,
+            workflow_run_id: None,
+            workflow_step_id: None,
+            node_id: None,
+            provider_id: "0190f5fe-7c00-7a00-8000-000000000004".into(),
+            model: "image-model-v1".into(),
+            capability: "t2i".into(),
+            params: json!({}),
+            inputs: Some(Vec::new()),
+            status: "queued".into(),
+            error: None,
+            result_asset_ids: Vec::new(),
+            attempt: 0,
+            submitted_at: 1,
+            started_at: None,
+            finished_at: None,
+            deleted_at: None,
+        };
+        assert!(CreativeCreationTask::try_from(invalid).is_err());
+    }
 }

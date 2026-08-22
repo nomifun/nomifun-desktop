@@ -1,51 +1,52 @@
-//! `nomifun-workshop` — the 创意工坊 (Creative Workshop) domain: an
-//! infinite-canvas AI visual-creation workspace.
-//!
-//! Two backend crates back the domain: this one owns **canvases + assets**
-//! (index rows in `nomifun-db`, canvas bodies + asset binaries on disk under
-//! the data dir), while `nomifun-creation` owns the generation task queue.
-//!
-//! `fsio` (atomic
-//! temp+rename writes), `service` (the single handle the routes talk to),
-//! `state`/`routes` (the `/api/workshop/*` surface). The canvas *doc*
-//! (nodes/edges/viewport/settings) is a frontend-owned JSON contract. The
-//! backend does not duplicate its presentation schema, but it does enforce the
-//! durable identity envelope (bare UUIDv7 nodes, edges, and node references),
-//! caps its size, and derives `node_count` from it.
+//! `nomifun-workshop` — the canonical Creative Studio domain. It owns project
+//! documents, assets, workflows, archives, and their `/api/creative-studio/*`
+//! routes. `nomifun-creation` owns asynchronous model-generation execution.
 
-mod docscan;
 mod dto;
 mod fsio;
 mod imagemeta;
+mod prompt_catalog;
 mod thumbnail;
 
-pub mod agent_ops;
+mod archive;
+mod canvas_agent_artifact;
+pub mod creative_agent_ops;
+pub mod creative_studio;
 pub mod routes;
 pub mod service;
 pub mod state;
+pub mod workflow;
+pub mod workflow_draft;
+pub mod workflow_run;
 
-pub use agent_ops::{AddNodeSpec, AgentOp, AppliedOp, OpDisposition, PendingOp};
-pub use dto::{WorkshopAsset, WorkshopCanvasMeta};
+pub use creative_agent_ops::{
+    CreativeAgentOp, CreativeAgentOpResult, MAX_CREATIVE_AGENT_OPS_PER_CALL,
+    apply_creative_agent_ops,
+};
+pub use creative_studio::{
+    CREATIVE_STUDIO_SCHEMA, CreativeProjectDocument, CreativeProjectSummary,
+    MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
+};
+pub use dto::WorkshopAsset;
+pub use prompt_catalog::{CreativePromptCatalogItem, CreativePromptCatalogPage};
+pub use workflow::{CreativeWorkflowDefinitionV1, MAX_WORKFLOW_DEFINITION_BYTES};
+pub use workflow_draft::{
+    WorkflowDraftRunRequest, WorkflowDraftRunner, MAX_WORKFLOW_DRAFT_JSON_BYTES,
+    MAX_WORKFLOW_DRAFT_RESPONSE_BYTES, WORKFLOW_DRAFT_MAX_TOKENS,
+    WORKFLOW_DRAFT_TIMEOUT_SECS,
+};
+pub use workflow_run::{
+    CreativeWorkflowRunAggregateV1, CreativeWorkflowRunCreateRequest, CreativeWorkflowRunStatus,
+    MAX_WORKFLOW_RUN_AGGREGATE_BYTES,
+};
 pub use routes::{workshop_public_routes, workshop_routes};
 pub use service::WorkshopService;
 pub use state::WorkshopRouterState;
 
 /// Domain root under the backend data dir. Layout:
-/// - `{data_dir}/workshop/canvases/{id}/canvas.json` — canvas body (opaque).
-/// - `{data_dir}/workshop/canvases/{id}/thumb.jpg` — canvas gallery thumbnail.
 /// - `{data_dir}/workshop/assets/{id}.{ext}` — asset originals.
 /// - `{data_dir}/workshop/assets/thumbs/{id}.jpg` — asset thumbnails (JPEG).
 pub const WORKSHOP_REL_DIR: &str = "workshop";
 
-/// Max serialized canvas doc size (contract §1: ≤ 8 MB).
-pub const MAX_DOC_BYTES: usize = 8 * 1024 * 1024;
-
 /// Max uploaded asset size (contract §3.2: ≤ 64 MB).
 pub const MAX_ASSET_BYTES: usize = 64 * 1024 * 1024;
-
-/// The default (empty) canvas doc written on create — a valid, minimal
-/// [`WorkshopCanvasDoc`](../../docs) the frontend can load directly. Node/edge
-/// payloads remain frontend-owned; durable IDs are validated on every read and
-/// write.
-pub(crate) const DEFAULT_DOC: &str =
-    r#"{"schema":1,"viewport":{"x":0,"y":0,"zoom":1},"background":"dots","nodes":[],"edges":[]}"#;

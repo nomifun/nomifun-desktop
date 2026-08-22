@@ -1,42 +1,285 @@
 use crate::error::DbError;
-use crate::models::{WorkshopAssetRow, WorkshopCanvasRow};
+use crate::models::{
+    CreativeStudioAgentProposalReceiptRow, CreativeStudioProjectRow, CreativeStudioWorkflowRow,
+    CreativeStudioWorkflowRunRow, WorkshopAssetRow,
+};
 
-/// Data access for the 创意工坊 (Creative Workshop) domain: the canvas index
-/// (`workshop_canvases`) and the asset library (`workshop_assets`).
+/// Canonical candidate passed to the atomic proposal receipt + project CAS.
+/// `expected_revision` is deliberately not part of the persisted payload
+/// identity: a response-loss replay remains valid after the project advances.
+#[derive(Debug)]
+pub struct ApplyCreativeAgentProposalParams<'a> {
+    pub owner_id: &'a str,
+    pub project_id: &'a str,
+    pub assistant_message_id: &'a str,
+    /// Exact raw `messages.content` JSON read before artifact parsing. The
+    /// atomic proof rechecks byte equality to fence concurrent message edits.
+    pub assistant_message_content_json: &'a str,
+    pub ops_fingerprint: &'a str,
+    pub ops_json: &'a str,
+    pub results_json: &'a str,
+    pub expected_revision: i64,
+    pub document_json: &'a str,
+    pub node_count: i64,
+    pub connection_count: i64,
+    pub now: i64,
+}
+
+/// Result of the atomic repository operation. On replay, `project` is the
+/// current authoritative row while `receipt.applied_revision` remains the
+/// revision created by the first execution.
+#[derive(Debug)]
+pub struct CreativeAgentProposalCommit {
+    pub project: CreativeStudioProjectRow,
+    pub receipt: CreativeStudioAgentProposalReceiptRow,
+    pub replayed: bool,
+}
+
+/// Data access for canonical Creative Studio projects, workflows, runs, and
+/// the shared asset library.
 ///
-/// The canvas *body* is a file the `nomifun-workshop` service owns; this repo
-/// only touches the two index tables. Asset binaries likewise live on disk —
-/// the repo stores/serves metadata only.
+/// Project bodies live atomically in `creative_studio_projects`. Asset binaries
+/// remain service-owned files while this repository stores their indexed
+/// `workshop_assets` metadata.
 #[async_trait::async_trait]
 pub trait IWorkshopRepository: Send + Sync {
     /// Check that a Provider business ID exists. Workshop JSON references are
     /// logical links; callers must perform this check before persisting them.
     async fn provider_exists(&self, provider_id: &str) -> Result<bool, DbError>;
 
-    // ---- canvases ----
+    /// Check one exact Provider/model logical parent. Creative Studio config
+    /// nodes bind the pair, not merely the Provider, so accepting a Provider
+    /// with an unknown model would persist an invocation target that can never
+    /// be resolved by the managed model catalog.
+    async fn provider_model_exists(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<bool, DbError>;
 
-    /// Every canvas, newest-updated first.
-    async fn list_canvases(&self) -> Result<Vec<WorkshopCanvasRow>, DbError>;
+    /// Check one enabled Provider/model/task capability. Workflow definitions
+    /// persist exact NomiFun task bindings rather than inferring modality from
+    /// a model name.
+    async fn provider_model_supports_task(
+        &self,
+        provider_id: &str,
+        model: &str,
+        task: &str,
+    ) -> Result<bool, DbError> {
+        let _ = (provider_id, model, task);
+        Err(DbError::Init(
+            "task-scoped provider model validation is unavailable in this repository".into(),
+        ))
+    }
 
-    /// One canvas by id, or `None`.
-    async fn get_canvas(&self, id: &str) -> Result<Option<WorkshopCanvasRow>, DbError>;
+    // ---- canonical Creative Studio projects ----
 
-    /// Insert a canvas index row (the service creates its dir + empty doc).
-    async fn create_canvas(&self, id: &str, title: &str, now: i64) -> Result<WorkshopCanvasRow, DbError>;
+    /// Every canonical Creative Studio project, newest-updated first.
+    async fn list_creative_projects(&self) -> Result<Vec<CreativeStudioProjectRow>, DbError>;
 
-    /// Rename a canvas. `DbError::NotFound` when the id is unknown.
-    async fn rename_canvas(&self, id: &str, title: &str, now: i64) -> Result<WorkshopCanvasRow, DbError>;
+    /// One canonical Creative Studio project by business ID, or `None`.
+    async fn get_creative_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<CreativeStudioProjectRow>, DbError>;
 
-    /// Refresh `node_count` + `updated_at` after a doc save. `DbError::NotFound`
-    /// when the id is unknown.
-    async fn touch_canvas(&self, id: &str, node_count: i64, now: i64) -> Result<WorkshopCanvasRow, DbError>;
+    /// Insert the initial revision and canonical v1 document atomically.
+    async fn create_creative_project(
+        &self,
+        project_id: &str,
+        title: &str,
+        document_json: &str,
+        now: i64,
+    ) -> Result<CreativeStudioProjectRow, DbError>;
 
-    /// Delete a canvas index row. `DbError::NotFound` when the id is unknown.
-    async fn delete_canvas(&self, id: &str) -> Result<(), DbError>;
+    /// Rename project metadata. The document revision is deliberately kept so
+    /// an in-flight autosave does not conflict with a title-only edit.
+    async fn rename_creative_project(
+        &self,
+        project_id: &str,
+        title: &str,
+        now: i64,
+    ) -> Result<CreativeStudioProjectRow, DbError>;
 
-    /// Set (or replace) a canvas's gallery-thumbnail `rel_path`. The service
-    /// writes the thumbnail file first. `DbError::NotFound` when unknown.
-    async fn set_canvas_thumbnail(&self, id: &str, thumbnail_rel_path: &str, now: i64) -> Result<WorkshopCanvasRow, DbError>;
+    /// Compare-and-swap the canonical document. A stale expected revision is a
+    /// conflict; a successful write increments the revision exactly once.
+    async fn save_creative_project(
+        &self,
+        project_id: &str,
+        expected_revision: i64,
+        document_json: &str,
+        node_count: i64,
+        connection_count: i64,
+        now: i64,
+    ) -> Result<CreativeStudioProjectRow, DbError>;
+
+    /// Read an existing durable Canvas Agent proposal receipt.
+    async fn get_creative_agent_proposal_receipt(
+        &self,
+        owner_id: &str,
+        project_id: &str,
+        assistant_message_id: &str,
+    ) -> Result<Option<CreativeStudioAgentProposalReceiptRow>, DbError> {
+        let _ = (owner_id, project_id, assistant_message_id);
+        Err(DbError::Init(
+            "creative studio Agent proposal receipts are unavailable in this repository".into(),
+        ))
+    }
+
+    /// Read the exact persisted `messages.content` JSON for a completed,
+    /// visible assistant message in the owner-bound project chat session.
+    async fn get_creative_agent_proposal_message_content(
+        &self,
+        owner_id: &str,
+        project_id: &str,
+        assistant_message_id: &str,
+    ) -> Result<Option<String>, DbError> {
+        let _ = (owner_id, project_id, assistant_message_id);
+        Err(DbError::Init(
+            "creative studio Agent proposal provenance is unavailable in this repository".into(),
+        ))
+    }
+
+    /// Whether this canonical user is the installation owner authorized to
+    /// operate the private Creative Studio surface.
+    async fn is_creative_studio_owner(&self, owner_id: &str) -> Result<bool, DbError> {
+        let _ = owner_id;
+        Err(DbError::Init(
+            "creative studio owner validation is unavailable in this repository".into(),
+        ))
+    }
+
+    /// Atomically claim one assistant proposal, compare-and-swap the project,
+    /// and publish its durable result receipt. A concurrent identical claim
+    /// replays the winner; reusing the assistant ID for different canonical
+    /// operations is a conflict.
+    async fn apply_creative_agent_proposal(
+        &self,
+        params: ApplyCreativeAgentProposalParams<'_>,
+    ) -> Result<CreativeAgentProposalCommit, DbError> {
+        let _ = params;
+        Err(DbError::Init(
+            "creative studio Agent proposal receipts are unavailable in this repository".into(),
+        ))
+    }
+
+    /// Insert a freshly remapped canonical project and all of its imported
+    /// assets in one SQLite transaction. Callers stage binary files before
+    /// entering this method and remove them if the transaction fails; the DB
+    /// therefore never exposes a project without every referenced asset row.
+    async fn import_creative_project_with_assets(
+        &self,
+        project: &CreativeStudioProjectRow,
+        assets: &[WorkshopAssetRow],
+    ) -> Result<CreativeStudioProjectRow, DbError>;
+
+    /// Hard-delete one canonical project row. Managed assets are not deleted:
+    /// they have their own library lifecycle and may be shared by projects.
+    async fn delete_creative_project(&self, project_id: &str) -> Result<(), DbError>;
+
+    // ---- canonical Creative Studio workflows ----
+
+    /// Every workflow definition, newest-updated first.
+    async fn list_creative_workflows(&self) -> Result<Vec<CreativeStudioWorkflowRow>, DbError> {
+        Err(DbError::Init(
+            "creative studio workflow persistence is unavailable in this repository".into(),
+        ))
+    }
+
+    /// One workflow definition by business ID, or `None`.
+    async fn get_creative_workflow(
+        &self,
+        workflow_id: &str,
+    ) -> Result<Option<CreativeStudioWorkflowRow>, DbError> {
+        let _ = workflow_id;
+        Err(DbError::Init(
+            "creative studio workflow persistence is unavailable in this repository".into(),
+        ))
+    }
+
+    /// Insert revision one of a closed workflow definition.
+    async fn create_creative_workflow(
+        &self,
+        row: &CreativeStudioWorkflowRow,
+    ) -> Result<CreativeStudioWorkflowRow, DbError> {
+        let _ = row;
+        Err(DbError::Init(
+            "creative studio workflow persistence is unavailable in this repository".into(),
+        ))
+    }
+
+    /// Compare-and-swap the definition. The replacement row must carry
+    /// `expected_revision + 1`.
+    async fn save_creative_workflow(
+        &self,
+        workflow_id: &str,
+        expected_revision: i64,
+        row: &CreativeStudioWorkflowRow,
+    ) -> Result<CreativeStudioWorkflowRow, DbError> {
+        let _ = (workflow_id, expected_revision, row);
+        Err(DbError::Init(
+            "creative studio workflow persistence is unavailable in this repository".into(),
+        ))
+    }
+
+    /// Hard-delete one workflow definition.
+    async fn delete_creative_workflow(&self, workflow_id: &str) -> Result<(), DbError> {
+        let _ = workflow_id;
+        Err(DbError::Init(
+            "creative studio workflow persistence is unavailable in this repository".into(),
+        ))
+    }
+
+    // ---- canonical Creative Studio workflow runs ----
+
+    /// Durable runs, newest-updated first. When `workflow_id` is present the
+    /// result is restricted to that exact pinned definition family.
+    async fn list_creative_workflow_runs(
+        &self,
+        workflow_id: Option<&str>,
+    ) -> Result<Vec<CreativeStudioWorkflowRunRow>, DbError> {
+        let _ = workflow_id;
+        Err(DbError::Init(
+            "creative studio workflow run persistence is unavailable in this repository".into(),
+        ))
+    }
+
+    /// One durable workflow run by business ID, or `None`.
+    async fn get_creative_workflow_run(
+        &self,
+        workflow_run_id: &str,
+    ) -> Result<Option<CreativeStudioWorkflowRunRow>, DbError> {
+        let _ = workflow_run_id;
+        Err(DbError::Init(
+            "creative studio workflow run persistence is unavailable in this repository".into(),
+        ))
+    }
+
+    /// Insert revision one of a closed workflow-run aggregate.
+    async fn create_creative_workflow_run(
+        &self,
+        row: &CreativeStudioWorkflowRunRow,
+        referenced_asset_ids: &[String],
+    ) -> Result<CreativeStudioWorkflowRunRow, DbError> {
+        let _ = (row, referenced_asset_ids);
+        Err(DbError::Init(
+            "creative studio workflow run persistence is unavailable in this repository".into(),
+        ))
+    }
+
+    /// Compare-and-swap a workflow-run aggregate. The replacement must carry
+    /// the same identity and `expected_revision + 1`.
+    async fn save_creative_workflow_run(
+        &self,
+        workflow_run_id: &str,
+        expected_revision: i64,
+        row: &CreativeStudioWorkflowRunRow,
+    ) -> Result<CreativeStudioWorkflowRunRow, DbError> {
+        let _ = (workflow_run_id, expected_revision, row);
+        Err(DbError::Init(
+            "creative studio workflow run persistence is unavailable in this repository".into(),
+        ))
+    }
 
     // ---- assets ----
 

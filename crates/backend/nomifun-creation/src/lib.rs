@@ -1,5 +1,5 @@
-//! `nomifun-creation` — the 生成引擎 (media generation engine): the async task
-//! queue behind the 创意工坊 canvas's generation nodes.
+//! `nomifun-creation` — the provider-agnostic media generation engine behind
+//! Creative Studio canvas nodes and workflow steps.
 //!
 //! The engine is **provider-agnostic**: model execution is delegated to the
 //! unified invocation layer (`nomifun-model-invoke`), while text nodes use the
@@ -20,12 +20,19 @@ pub mod service;
 pub mod state;
 
 pub use artifact::validate_artifact_payload;
-pub use dto::CreationTask;
+pub use dto::{
+    CreationTask, CreativeCreationTask, CreativeCreationTaskOwner, CreativeCreationTaskPage,
+    CreativeCreationTaskRetireResult,
+};
 pub use routes::creation_routes;
 pub use service::{
-    AssetSink, AssetSource, CreationService, CreationServiceBuilder, CreationTextExecutor,
-    CreationTextRequest, LoadedAsset, NewCreationTask, PersistAsset, TaskArtifactCleanupFailure,
+    AssetSink, AssetSource, CreationService, CreationServiceBuilder, CreativeTaskOwner,
+    CreationTextExecutor, CreationTextRequest, LoadedAsset, NewCreationTask, PersistAsset,
+    TaskArtifactCleanupFailure,
     TaskArtifactIssue, TaskArtifactManifest, TaskArtifactReconcileReport,
 };
 pub use state::CreationRouterState;
-pub use types::{CreationError, CreationInput, MediaCapability, TaskStatus};
+pub use types::{
+    CreationError, CreationInput, CreationInputKind, MediaCapability, StandaloneWorkbenchKind,
+    TaskStatus,
+};

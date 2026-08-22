@@ -1,28 +1,90 @@
-//! [`WorkshopService`] — the single handle the `/api/workshop/*` routes talk
-//! to. Owns canvas CRUD + opaque-doc read/write, asset store/list/patch/delete,
-//! and traversal-safe file serving. Canvas bodies + asset binaries live on disk
-//! under the data dir; index rows live in `nomifun-db` via [`IWorkshopRepository`].
+//! [`WorkshopService`] — the canonical Creative Studio project, asset,
+//! workflow, archive, and generation-support service. Project documents live
+//! in SQLite; asset binaries live under the service data directory.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use nomifun_common::{
-    AppError, ProviderId, SharedProviderLifecycleBarrier, WorkshopAssetId, WorkshopCanvasId, now_ms,
+    AppError, CreativeStudioProjectId, CreativeStudioWorkflowId, CreativeStudioWorkflowRunId,
+    MessageId, ProviderId, SharedProviderLifecycleBarrier, UserId, WorkshopAssetId, now_ms,
 };
-use nomifun_db::{AssetSort, IWorkshopRepository, ListAssetsParams, UpdateAssetParams, WorkshopAssetRow};
+use nomifun_db::{
+    ApplyCreativeAgentProposalParams, AssetSort, CreativeStudioProjectRow,
+    CreativeStudioWorkflowRunRow, DbError, IWorkshopRepository, ListAssetsParams,
+    ProviderModelCleanupPlan,
+    ProviderModelProjectCleanup, ProviderModelWorkflowCleanup, UpdateAssetParams,
+    WorkshopAssetRow,
+};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
-use crate::dto::{WorkshopAsset, WorkshopCanvasMeta};
-use crate::{
-    DEFAULT_DOC, MAX_ASSET_BYTES, MAX_DOC_BYTES, WORKSHOP_REL_DIR, docscan, fsio, imagemeta,
-    thumbnail,
+use crate::archive::{
+    CREATIVE_STUDIO_ARCHIVE_MIME, CreativeArchiveAssetSnapshot,
+    build_creative_project_archive, collect_document_asset_ids,
+    director_sidecar_asset_ids, parse_creative_project_archive,
+    remap_creative_archive_for_import,
+    sanitized_archive_origin,
 };
+use crate::canvas_agent_artifact::{
+    CREATIVE_CANVAS_AGENT_ARTIFACT_KIND, parse_creative_canvas_agent_artifact,
+};
+use crate::creative_studio::{
+    CreativeChatModel, CreativeChatPendingTurn, CreativeChatSession, CreativeGenerationStatus,
+    CreativeNodeData, CreativeProjectDocument, CreativeProjectSummary,
+    MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
+};
+#[cfg(test)]
+use crate::creative_studio::CREATIVE_STUDIO_SCHEMA;
+use crate::creative_agent_ops::{CreativeAgentOp, CreativeAgentOpResult};
+use crate::dto::WorkshopAsset;
+use crate::prompt_catalog::{CreativePromptCatalogPage, PromptCatalogService};
+use crate::workflow::{CreativeWorkflowDefinitionV1, parse_workflow_row};
+use crate::workflow_run::{
+    CreativeWorkflowRunAggregateV1, CreativeWorkflowRunCreateRequest, parse_workflow_run_row,
+};
+use crate::{MAX_ASSET_BYTES, WORKSHOP_REL_DIR, fsio, imagemeta, thumbnail};
 
-/// A canvas plus its (opaque) doc — the `GET /canvases/{id}` payload.
-pub struct CanvasWithDoc {
-    pub meta: WorkshopCanvasMeta,
-    pub doc: Value,
+/// A canonical Creative Studio project and its validated v1 document.
+pub struct CreativeProjectWithDocument {
+    pub project: CreativeProjectSummary,
+    pub document: CreativeProjectDocument,
+}
+
+/// Minimal, owner-authored Agent kickoff persisted inside revision 1 of a new
+/// project. Skills and canvas context are deliberately server-owned so the
+/// launch endpoint cannot grow a second conversation-composition contract.
+#[derive(Debug)]
+pub struct CreativeProjectAgentKickoff {
+    pub prompt: String,
+    pub provider_id: String,
+    pub model: String,
+}
+
+/// One CAS-committed Agent graph mutation batch.
+#[derive(Debug)]
+pub struct CreativeAgentApplyResult {
+    pub project: CreativeProjectSummary,
+    pub ops: Vec<CreativeAgentOpResult>,
+}
+
+/// One durable Canvas Agent assistant proposal application. Replays return the
+/// original ordered operation results and applied revision without mutating
+/// the current project again.
+#[derive(Debug)]
+pub struct CreativeAgentProposalApplyResult {
+    pub project: CreativeProjectSummary,
+    pub ops: Vec<CreativeAgentOpResult>,
+    pub replayed: bool,
+    pub applied_revision: String,
+}
+
+/// A completed, bounded Creative Studio v1 project archive.
+pub struct CreativeProjectArchive {
+    pub file_name: String,
+    pub mime: &'static str,
+    pub bytes: Vec<u8>,
 }
 
 /// A paginated asset listing.
@@ -52,6 +114,46 @@ struct BinaryAsset {
     origin: Option<Value>,
 }
 
+/// Files are published before the SQLite import transaction so committed rows
+/// never point at absent media. Any early return or task cancellation removes
+/// the staged final paths; a successful DB commit disarms the guard.
+struct CreativeArchiveFileRollback {
+    paths: Vec<PathBuf>,
+    committed: bool,
+}
+
+impl CreativeArchiveFileRollback {
+    fn new() -> Self {
+        Self {
+            paths: Vec::new(),
+            committed: false,
+        }
+    }
+
+    fn track(&mut self, path: PathBuf) {
+        self.paths.push(path);
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for CreativeArchiveFileRollback {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        for path in &self.paths {
+            if let Err(error) = std::fs::remove_file(path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(path = %path.display(), %error, "failed to roll back creative archive asset file");
+            }
+        }
+    }
+}
+
 /// A multipart asset upload (binary + optional metadata).
 pub struct NewAssetUpload {
     pub file_name: String,
@@ -63,6 +165,16 @@ pub struct NewAssetUpload {
     pub in_library: Option<bool>,
 }
 
+/// Auditable provenance stored with a prompt-catalog text asset.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptCatalogAssetOrigin {
+    pub prompt_catalog_id: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
+}
+
 /// A `text`-kind asset (no binary; body lives in `text_content`).
 pub struct NewTextAsset {
     pub title: String,
@@ -70,6 +182,10 @@ pub struct NewTextAsset {
     pub collection: Option<String>,
     pub tags: Option<Vec<String>>,
     pub in_library: Option<bool>,
+    /// Optional bounded provenance for a prompt-catalog item. The text itself
+    /// remains authoritative in `text_content`; this metadata preserves source
+    /// attribution when the user adds a catalog prompt to My Assets.
+    pub origin: Option<PromptCatalogAssetOrigin>,
 }
 
 /// Filters + pagination for [`WorkshopService::list_assets`].
@@ -101,33 +217,24 @@ pub struct AssetPatch {
     pub in_library: Option<bool>,
 }
 
-/// GC recency grace (ms). An asset row or on-disk file created/modified more
-/// recently than this is never reclaimed by [`WorkshopService::gc`] or the
-/// `delete_canvas` internal-asset sweep — it may still be an in-flight upload
-/// (file on disk before its row is inserted) or a reference an open canvas has
-/// added but not yet autosaved. A truly orphaned asset is still older than this
-/// on the next pass and gets reclaimed then. 10 minutes ≫ the max
-/// write+thumbnail latency and the 800ms autosave debounce.
-const GC_GRACE_MS: i64 = 10 * 60 * 1000;
+const DEFAULT_CREATIVE_PROJECT_TITLE: &str = "未命名画布";
+const MAX_CREATIVE_PROJECT_TITLE_CHARS: usize = 1_000;
+const MAX_CREATIVE_AGENT_KICKOFF_PROMPT_CHARS: usize = 65_536;
+const MAX_CREATIVE_AGENT_MODEL_CHARS: usize = 512;
+const CREATIVE_CANVAS_SKILL_ID: &str = "creative-studio-canvas";
 
 pub struct WorkshopService {
     repo: Arc<dyn IWorkshopRepository>,
     /// Backend data dir root. Asset `rel_path`s are relative to this.
     data_dir: PathBuf,
-    /// 画布助手 (canvas assistant) agent-op queue — the in-memory buffer the
-    /// gateway enqueues into and the REST `pending-ops` routes drain. One
-    /// instance per singleton service, so the gateway and the routes share it.
-    agent_ops: crate::agent_ops::AgentOpsQueue,
-    /// GC recency grace (ms). Defaults to [`GC_GRACE_MS`]; tests override it to
-    /// `0` to drive immediate reclamation deterministically.
-    gc_grace_ms: i64,
     provider_lifecycle: Option<SharedProviderLifecycleBarrier>,
+    prompt_catalog: PromptCatalogService,
 }
 
 impl WorkshopService {
     /// Build the service over its index repo + the data dir root.
     pub fn start(data_dir: &Path, repo: Arc<dyn IWorkshopRepository>) -> Arc<Self> {
-        Self::start_with_gc_grace_and_provider_lifecycle(data_dir, repo, GC_GRACE_MS, None)
+        Self::start_with_optional_provider_lifecycle(data_dir, repo, None)
     }
 
     /// Build the service with the process-wide Provider lifecycle barrier.
@@ -136,34 +243,37 @@ impl WorkshopService {
         repo: Arc<dyn IWorkshopRepository>,
         provider_lifecycle: SharedProviderLifecycleBarrier,
     ) -> Arc<Self> {
-        Self::start_with_gc_grace_and_provider_lifecycle(
-            data_dir,
-            repo,
-            GC_GRACE_MS,
-            Some(provider_lifecycle),
-        )
+        Self::start_with_optional_provider_lifecycle(data_dir, repo, Some(provider_lifecycle))
     }
 
-    /// [`Self::start`] with an explicit GC recency grace (ms). Production uses
-    /// [`GC_GRACE_MS`]; tests pass `0` for immediate reclamation.
-    #[cfg(test)]
-    fn start_with_gc_grace(data_dir: &Path, repo: Arc<dyn IWorkshopRepository>, gc_grace_ms: i64) -> Arc<Self> {
-        Self::start_with_gc_grace_and_provider_lifecycle(data_dir, repo, gc_grace_ms, None)
-    }
-
-    fn start_with_gc_grace_and_provider_lifecycle(
+    fn start_with_optional_provider_lifecycle(
         data_dir: &Path,
         repo: Arc<dyn IWorkshopRepository>,
-        gc_grace_ms: i64,
         provider_lifecycle: Option<SharedProviderLifecycleBarrier>,
     ) -> Arc<Self> {
         Arc::new(Self {
             repo,
             data_dir: data_dir.to_path_buf(),
-            agent_ops: crate::agent_ops::AgentOpsQueue::new(),
-            gc_grace_ms,
             provider_lifecycle,
+            prompt_catalog: PromptCatalogService::start(data_dir),
         })
+    }
+
+    /// Read the last valid prompt-catalog snapshot without touching the
+    /// network. A fresh installation returns an empty, stale page so the
+    /// client can explicitly request the owner-only synchronization route.
+    pub async fn list_prompt_catalog(&self) -> Result<CreativePromptCatalogPage, AppError> {
+        self.prompt_catalog.list().await
+    }
+
+    /// Refresh the fixed, attributed upstream prompt sources. Per-source
+    /// failures retain the last valid cached entries; a completely empty first
+    /// sync fails instead of publishing an empty catalog as success.
+    pub async fn sync_prompt_catalog(
+        &self,
+        force: bool,
+    ) -> Result<CreativePromptCatalogPage, AppError> {
+        self.prompt_catalog.sync(force).await
     }
 
     // ---- path helpers ----
@@ -172,15 +282,11 @@ impl WorkshopService {
         self.data_dir.join(WORKSHOP_REL_DIR)
     }
 
-    fn canvas_dir(&self, id: &str) -> PathBuf {
-        self.workshop_dir().join("canvases").join(id)
-    }
-
     fn assets_dir(&self) -> PathBuf {
         self.workshop_dir().join("assets")
     }
 
-    async fn provider_read_guard(
+    pub(crate) async fn provider_read_guard(
         &self,
     ) -> Option<tokio::sync::RwLockReadGuard<'_, ()>> {
         match &self.provider_lifecycle {
@@ -189,34 +295,1241 @@ impl WorkshopService {
         }
     }
 
-    async fn validate_generator_providers(&self, doc: &Value) -> Result<(), AppError> {
-        let provider_ids = docscan::collect_generator_provider_refs(doc)
-            .map_err(|error| AppError::BadRequest(format!("invalid workshop canvas doc: {error}")))?;
-        for provider_id in provider_ids {
-            if !self.repo.provider_exists(&provider_id).await? {
+    /// Defense-in-depth for private Creative Studio endpoints. The app router
+    /// already applies the installation-owner middleware; keeping the same
+    /// check in the domain prevents a directly-mounted router from widening
+    /// the model invocation surface.
+    pub(crate) async fn require_creative_studio_owner(
+        &self,
+        owner_id: &str,
+    ) -> Result<(), AppError> {
+        UserId::parse(owner_id).map_err(|error| {
+            AppError::Forbidden(format!(
+                "Creative Studio owner is not canonical: {error}"
+            ))
+        })?;
+        if !self.repo.is_creative_studio_owner(owner_id).await? {
+            return Err(AppError::Forbidden(
+                "Creative Studio is restricted to the installation owner".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Require one exact, currently enabled Chat capability. Callers hold the
+    /// provider lifecycle read guard across this check and the model call so a
+    /// destructive Provider/model deletion cannot invalidate the selected
+    /// binding. Ordinary catalog updates are not serialized by this barrier;
+    /// the app resolver reads and freezes one config snapshot for the call.
+    pub(crate) async fn require_workflow_draft_chat_model(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<(), AppError> {
+        if !self
+            .repo
+            .provider_model_supports_task(provider_id, model, "chat")
+            .await?
+        {
+            return Err(AppError::Conflict(format!(
+                "Creative Studio workflow drafts require an enabled exact Chat capability for '{provider_id}/{model}'"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Validate every durable Creative Studio config-node selection against
+    /// the exact managed Provider/model pair. The lifecycle read guard is held
+    /// by callers across this check and the subsequent project CAS write.
+    async fn validate_creative_provider_models(
+        &self,
+        document: &CreativeProjectDocument,
+    ) -> Result<(), AppError> {
+        let mut references = BTreeMap::new();
+        for node in &document.nodes {
+            match &node.data {
+                CreativeNodeData::Config(config) => {
+                    match (config.provider_id.as_deref(), config.model.as_deref()) {
+                        (None, None) => {}
+                        (Some(provider_id), Some(model)) => {
+                            ProviderId::parse(provider_id).map_err(|error| {
+                                AppError::BadRequest(format!(
+                                    "creative config node {} providerId must be a canonical Provider UUIDv7: {error}",
+                                    node.id
+                                ))
+                            })?;
+                            references
+                                .entry((provider_id.to_owned(), model.to_owned()))
+                                .or_insert_with(|| format!("config node {}", node.id));
+                        }
+                        (Some(_), None) | (None, Some(_)) => {
+                            return Err(AppError::BadRequest(format!(
+                                "creative config node {} providerId and model must be set together",
+                                node.id
+                            )));
+                        }
+                    }
+                }
+                CreativeNodeData::Image(image) => {
+                    let Some(model) = image
+                        .composer
+                        .as_ref()
+                        .and_then(|composer| composer.model.as_ref())
+                    else {
+                        continue;
+                    };
+                    ProviderId::parse(&model.provider_id).map_err(|error| {
+                        AppError::BadRequest(format!(
+                            "creative image node {} composer providerId must be a canonical Provider UUIDv7: {error}",
+                            node.id
+                        ))
+                    })?;
+                    references
+                        .entry((model.provider_id.clone(), model.model.clone()))
+                        .or_insert_with(|| format!("image node {} composer", node.id));
+                }
+                CreativeNodeData::Video(video) => {
+                    let Some(model) = video
+                        .composer
+                        .as_ref()
+                        .and_then(|composer| composer.model.as_ref())
+                    else {
+                        continue;
+                    };
+                    ProviderId::parse(&model.provider_id).map_err(|error| {
+                        AppError::BadRequest(format!(
+                            "creative video node {} composer providerId must be a canonical Provider UUIDv7: {error}",
+                            node.id
+                        ))
+                    })?;
+                    references
+                        .entry((model.provider_id.clone(), model.model.clone()))
+                        .or_insert_with(|| format!("video node {} composer", node.id));
+                }
+                CreativeNodeData::Audio(audio) => {
+                    let Some(model) = audio
+                        .composer
+                        .as_ref()
+                        .and_then(|composer| composer.model.as_ref())
+                    else {
+                        continue;
+                    };
+                    ProviderId::parse(&model.provider_id).map_err(|error| {
+                        AppError::BadRequest(format!(
+                            "creative audio node {} composer providerId must be a canonical Provider UUIDv7: {error}",
+                            node.id
+                        ))
+                    })?;
+                    references
+                        .entry((model.provider_id.clone(), model.model.clone()))
+                        .or_insert_with(|| format!("audio node {} composer", node.id));
+                }
+                _ => {}
+            }
+        }
+        for ((provider_id, model), owner) in references {
+            if !self
+                .repo
+                .provider_model_exists(&provider_id, &model)
+                .await?
+            {
                 return Err(AppError::Conflict(format!(
-                    "workshop canvas references missing provider '{provider_id}'"
+                    "creative {owner} references missing provider-model '{provider_id}/{model}'"
                 )));
             }
         }
         Ok(())
     }
 
-    // ---- canvases ----
-
-    pub async fn list_canvases(&self) -> Result<Vec<WorkshopCanvasMeta>, AppError> {
-        Ok(self.repo.list_canvases().await?.into_iter().map(WorkshopCanvasMeta::from).collect())
+    /// Resolve the complete project-owned asset closure, including the hidden
+    /// Director v1 sidecar and every panorama/model/capture asset referenced by
+    /// that sidecar. All asset lifecycle paths share this authority so export,
+    /// deletion protection, project cleanup, and startup audit cannot drift.
+    async fn collect_creative_project_asset_closure(
+        &self,
+        document: &CreativeProjectDocument,
+    ) -> Result<BTreeSet<String>, AppError> {
+        let mut asset_ids = collect_document_asset_ids(document)?;
+        let scene_ids = document
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.data {
+                CreativeNodeData::Director(data) => data.scene_id.clone(),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for scene_id in scene_ids {
+            let row = self.repo.get_asset(&scene_id).await?.ok_or_else(|| {
+                AppError::Conflict(format!(
+                    "creative project {} references missing Director sidecar {scene_id}",
+                    document.project_id
+                ))
+            })?;
+            if row.kind != "text" {
+                return Err(AppError::Conflict(format!(
+                    "creative project {} Director sidecar {scene_id} is not a text asset",
+                    document.project_id
+                )));
+            }
+            let bytes = self.read_original(&row).await.map_err(|error| {
+                AppError::Conflict(format!(
+                    "creative project {} Director sidecar {scene_id} is unavailable: {error}",
+                    document.project_id
+                ))
+            })?.0;
+            let nested = director_sidecar_asset_ids(&bytes, &document.project_id).map_err(
+                |error| {
+                    AppError::Conflict(format!(
+                        "creative project {} Director sidecar {scene_id} is invalid: {error}",
+                        document.project_id
+                    ))
+                },
+            )?;
+            asset_ids.extend(nested);
+        }
+        Ok(asset_ids)
     }
 
-    /// Read-only startup audit for the Workshop database index and every
-    /// managed canvas/asset file. Any failure makes the current dataset
-    /// incompatible; callers must retire/reset it as a whole.
+    // ---- projects ----
+
+    pub async fn list_creative_projects(
+        &self,
+    ) -> Result<Vec<CreativeProjectSummary>, AppError> {
+        Ok(self
+            .repo
+            .list_creative_projects()
+            .await?
+            .into_iter()
+            .map(CreativeProjectSummary::from)
+            .collect())
+    }
+
+    pub async fn create_creative_project(
+        &self,
+        title: Option<String>,
+    ) -> Result<CreativeProjectSummary, AppError> {
+        self.create_creative_project_inner(title, None).await
+    }
+
+    /// Create one private Creative Studio project for the installation owner.
+    /// When a kickoff is present, its model and exact Chat capability are
+    /// validated before the single revision-1 project insert.
+    pub async fn create_creative_project_for_owner(
+        &self,
+        owner_id: &str,
+        title: Option<String>,
+        agent_kickoff: Option<CreativeProjectAgentKickoff>,
+    ) -> Result<CreativeProjectSummary, AppError> {
+        self.require_creative_studio_owner(owner_id).await?;
+        self.create_creative_project_inner(title, agent_kickoff)
+            .await
+    }
+
+    async fn create_creative_project_inner(
+        &self,
+        title: Option<String>,
+        agent_kickoff: Option<CreativeProjectAgentKickoff>,
+    ) -> Result<CreativeProjectSummary, AppError> {
+        let project_id = CreativeStudioProjectId::new().into_string();
+        let title = normalize_creative_project_title(title.as_deref(), true)?;
+        let _provider_guard = if agent_kickoff.is_some() {
+            self.provider_read_guard().await
+        } else {
+            None
+        };
+        let agent_kickoff = match agent_kickoff {
+            Some(kickoff) => {
+                let kickoff = normalize_creative_project_agent_kickoff(kickoff)?;
+                if !self
+                    .repo
+                    .provider_model_supports_task(
+                        &kickoff.provider_id,
+                        &kickoff.model,
+                        "chat",
+                    )
+                    .await?
+                {
+                    return Err(AppError::Conflict(format!(
+                        "Creative Studio Agent kickoff requires an enabled exact Chat capability for '{}/{}'",
+                        kickoff.provider_id, kickoff.model
+                    )));
+                }
+                Some(kickoff)
+            }
+            None => None,
+        };
+        let now = now_ms();
+        let mut document = CreativeProjectDocument::empty(project_id.clone());
+        if let Some(kickoff) = agent_kickoff {
+            let session_id = nomifun_common::generate_id();
+            document.chat_sessions.push(CreativeChatSession {
+                id: session_id.clone(),
+                title: "Agent".to_owned(),
+                message_ids: Vec::new(),
+                model: Some(CreativeChatModel {
+                    provider_id: kickoff.provider_id,
+                    model: kickoff.model,
+                }),
+                pending_turn: Some(CreativeChatPendingTurn {
+                    idempotency_key: MessageId::new().into_string(),
+                    prompt: kickoff.prompt.clone(),
+                    model_input: Some(kickoff.prompt),
+                    skill_ids: vec![CREATIVE_CANVAS_SKILL_ID.to_owned()],
+                    created_at: now,
+                }),
+                created_at: now,
+                updated_at: now,
+            });
+            document.active_chat_id = Some(session_id);
+            document.panels.right.open = true;
+        }
+        document
+            .validate_for_project(&project_id)
+            .map_err(|error| AppError::Internal(format!("invalid default creative project: {error}")))?;
+        let document_json = serialize_creative_project_document(&document)?;
+        let row = self
+            .repo
+            .create_creative_project(&project_id, &title, &document_json, now)
+            .await?;
+        Ok(row.into())
+    }
+
+    pub async fn get_creative_project(
+        &self,
+        project_id: &str,
+    ) -> Result<CreativeProjectWithDocument, AppError> {
+        validate_creative_project_id(project_id)?;
+        let row = self
+            .repo
+            .get_creative_project(project_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "creative studio project {project_id} not found"
+                ))
+            })?;
+        let document = parse_stored_creative_project_row(&row)?;
+        Ok(CreativeProjectWithDocument {
+            project: row.into(),
+            document,
+        })
+    }
+
+    pub async fn rename_creative_project(
+        &self,
+        project_id: &str,
+        title: &str,
+    ) -> Result<CreativeProjectSummary, AppError> {
+        validate_creative_project_id(project_id)?;
+        let title = normalize_creative_project_title(Some(title), false)?;
+        Ok(self
+            .repo
+            .rename_creative_project(project_id, &title, now_ms())
+            .await?
+            .into())
+    }
+
+    pub async fn save_creative_project(
+        &self,
+        project_id: &str,
+        expected_revision: &str,
+        document: &CreativeProjectDocument,
+    ) -> Result<CreativeProjectSummary, AppError> {
+        validate_creative_project_id(project_id)?;
+        let expected_revision = parse_creative_project_revision(expected_revision)?;
+        document
+            .validate_for_project(project_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid creative project document: {error}")))?;
+        let document_json = serialize_creative_project_document(document)?;
+        let node_count = i64::try_from(document.nodes.len())
+            .map_err(|_| AppError::BadRequest("creative project has too many nodes".into()))?;
+        let connection_count = i64::try_from(document.connections.len()).map_err(|_| {
+            AppError::BadRequest("creative project has too many connections".into())
+        })?;
+        let _provider_guard = self.provider_read_guard().await;
+        self.validate_creative_provider_models(document).await?;
+        let saved = self
+            .repo
+            .save_creative_project(
+                project_id,
+                expected_revision,
+                &document_json,
+                node_count,
+                connection_count,
+                now_ms(),
+            )
+            .await
+            .map_err(|error| match error {
+                DbError::Conflict(message) => AppError::RevisionConflict(message),
+                other => other.into(),
+            })?;
+        Ok(saved.into())
+    }
+
+    /// Apply Agent graph operations through the canonical project revision CAS.
+    /// The product editor and Agent therefore share one conflict model: neither
+    /// can overwrite a newer document snapshot silently.
+    pub async fn apply_creative_agent_ops(
+        &self,
+        project_id: &str,
+        expected_revision: &str,
+        ops: Vec<CreativeAgentOp>,
+        source: &str,
+    ) -> Result<CreativeAgentApplyResult, AppError> {
+        let expected_revision = parse_creative_project_revision(expected_revision)?;
+        let current = self.get_creative_project(project_id).await?;
+        if current.project.revision != expected_revision.to_string() {
+            return Err(AppError::RevisionConflict(format!(
+                "creative studio project {project_id} revision is {}, expected {expected_revision}",
+                current.project.revision
+            )));
+        }
+        let (document, results) = crate::creative_agent_ops::apply_creative_agent_ops(
+            &current.document,
+            ops,
+        )
+        .map_err(|error| AppError::BadRequest(format!("invalid Creative Studio operations: {error}")))?;
+        let project = self
+            .save_creative_project(project_id, &expected_revision.to_string(), &document)
+            .await?;
+        tracing::info!(
+            project_id,
+            source,
+            revision = project.revision,
+            ops = results.len(),
+            "Creative Studio Agent operations committed"
+        );
+        Ok(CreativeAgentApplyResult {
+            project,
+            ops: results,
+        })
+    }
+
+    /// Apply one completed assistant proposal exactly once. The assistant
+    /// message UUID is the idempotency key and must still occupy an assistant
+    /// position in a completed project chat pair. `expected_revision` is a CAS
+    /// fence only; it is intentionally excluded from the payload fingerprint
+    /// so response-loss replay survives later project revisions.
+    pub async fn apply_creative_agent_proposal(
+        &self,
+        owner_id: &str,
+        project_id: &str,
+        assistant_message_id: &str,
+        expected_revision: &str,
+        ops: Vec<CreativeAgentOp>,
+        source: &str,
+    ) -> Result<CreativeAgentProposalApplyResult, AppError> {
+        UserId::parse(owner_id).map_err(|error| {
+            AppError::Forbidden(format!(
+                "Creative Studio proposal owner is not canonical: {error}"
+            ))
+        })?;
+        if !self.repo.is_creative_studio_owner(owner_id).await? {
+            return Err(AppError::Forbidden(
+                "Creative Studio proposals are restricted to the installation owner".to_owned(),
+            ));
+        }
+        validate_creative_project_id(project_id)?;
+        MessageId::parse(assistant_message_id).map_err(|error| {
+            AppError::BadRequest(format!(
+                "assistantMessageId must be a canonical MessageId UUIDv7: {error}"
+            ))
+        })?;
+        let expected_revision = parse_creative_project_revision(expected_revision)?;
+        let ops_json = serde_json::to_string(&ops).map_err(|error| {
+            AppError::BadRequest(format!(
+                "Creative Studio operations could not be serialized: {error}"
+            ))
+        })?;
+        let assistant_message_content_json = self
+            .repo
+            .get_creative_agent_proposal_message_content(
+                owner_id,
+                project_id,
+                assistant_message_id,
+            )
+            .await?
+            .ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "assistantMessageId '{assistant_message_id}' is not a completed visible assistant message in this owner-bound project session"
+                ))
+            })?;
+        let assistant_text = persisted_creative_agent_message_text(
+            project_id,
+            assistant_message_id,
+            &assistant_message_content_json,
+        )?;
+        let artifact = parse_creative_canvas_agent_artifact(&assistant_text)
+            .map_err(|error| {
+                AppError::BadRequest(format!(
+                    "assistantMessageId '{assistant_message_id}' has an invalid Canvas operations artifact: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "assistantMessageId '{assistant_message_id}' does not contain a final {} artifact",
+                    CREATIVE_CANVAS_AGENT_ARTIFACT_KIND
+                ))
+            })?;
+        if artifact.kind != CREATIVE_CANVAS_AGENT_ARTIFACT_KIND || artifact.summary.is_empty() {
+            return Err(AppError::Internal(
+                "validated Canvas operations artifact lost its kind or summary invariant"
+                    .to_owned(),
+            ));
+        }
+        let artifact_ops_json = serde_json::to_string(&artifact.ops).map_err(|error| {
+            AppError::Internal(format!(
+                "validated Canvas operations artifact could not be serialized: {error}"
+            ))
+        })?;
+        if artifact_ops_json != ops_json {
+            return Err(AppError::Conflict(format!(
+                "creative studio assistant proposal '{assistant_message_id}' artifact does not match requested operations"
+            )));
+        }
+        let ops_fingerprint = creative_agent_ops_fingerprint(&ops_json)?;
+
+        // Consult the durable receipt before evaluating a candidate mutation.
+        // This is what makes a replay independent of the request's now-stale
+        // expected revision and avoids minting throwaway node IDs in the
+        // ordinary response-loss path.
+        let receipt = self
+            .repo
+            .get_creative_agent_proposal_receipt(
+                owner_id,
+                project_id,
+                assistant_message_id,
+            )
+            .await?;
+        let current = self.get_creative_project(project_id).await?;
+        validate_completed_assistant_message(&current.document, assistant_message_id)?;
+        if let Some(receipt) = receipt {
+            if receipt.ops_fingerprint != ops_fingerprint || receipt.ops_json != ops_json {
+                return Err(AppError::Conflict(format!(
+                    "creative studio assistant proposal '{assistant_message_id}' payload mismatch"
+                )));
+            }
+            let current_document_json = serialize_creative_project_document(&current.document)?;
+            let committed = self
+                .repo
+                .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                    owner_id,
+                    project_id,
+                    assistant_message_id,
+                    assistant_message_content_json: &assistant_message_content_json,
+                    ops_fingerprint: &ops_fingerprint,
+                    ops_json: &ops_json,
+                    results_json: &receipt.results_json,
+                    expected_revision,
+                    document_json: &current_document_json,
+                    node_count: current.project.node_count,
+                    connection_count: current.project.connection_count,
+                    now: now_ms(),
+                })
+                .await
+                .map_err(map_creative_agent_proposal_db_error)?;
+            let committed_results = parse_stored_creative_agent_results(
+                project_id,
+                assistant_message_id,
+                &committed.receipt.results_json,
+            )?;
+            return Ok(CreativeAgentProposalApplyResult {
+                project: committed.project.into(),
+                ops: committed_results,
+                replayed: committed.replayed,
+                applied_revision: committed.receipt.applied_revision.to_string(),
+            });
+        }
+
+        if current.project.revision != expected_revision.to_string() {
+            return Err(AppError::RevisionConflict(format!(
+                "creative studio project {project_id} revision is {}, expected {expected_revision}",
+                current.project.revision
+            )));
+        }
+        let (document, results) = crate::creative_agent_ops::apply_creative_agent_ops(
+            &current.document,
+            artifact.ops,
+        )
+        .map_err(|error| AppError::BadRequest(format!("invalid Creative Studio operations: {error}")))?;
+        let document_json = serialize_creative_project_document(&document)?;
+        let results_json = serde_json::to_string(&results).map_err(|error| {
+            AppError::Internal(format!(
+                "Creative Studio operation results could not be serialized: {error}"
+            ))
+        })?;
+        let node_count = i64::try_from(document.nodes.len())
+            .map_err(|_| AppError::BadRequest("creative project has too many nodes".into()))?;
+        let connection_count = i64::try_from(document.connections.len()).map_err(|_| {
+            AppError::BadRequest("creative project has too many connections".into())
+        })?;
+        let _provider_guard = self.provider_read_guard().await;
+        self.validate_creative_provider_models(&document).await?;
+        let committed = self
+            .repo
+            .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                owner_id,
+                project_id,
+                assistant_message_id,
+                assistant_message_content_json: &assistant_message_content_json,
+                ops_fingerprint: &ops_fingerprint,
+                ops_json: &ops_json,
+                results_json: &results_json,
+                expected_revision,
+                document_json: &document_json,
+                node_count,
+                connection_count,
+                now: now_ms(),
+            })
+            .await
+            .map_err(map_creative_agent_proposal_db_error)?;
+        let committed_results = parse_stored_creative_agent_results(
+            project_id,
+            assistant_message_id,
+            &committed.receipt.results_json,
+        )?;
+        tracing::info!(
+            project_id,
+            assistant_message_id,
+            source,
+            revision = committed.project.revision,
+            applied_revision = committed.receipt.applied_revision,
+            replayed = committed.replayed,
+            ops = committed_results.len(),
+            "Creative Studio Agent proposal committed"
+        );
+        Ok(CreativeAgentProposalApplyResult {
+            project: committed.project.into(),
+            ops: committed_results,
+            replayed: committed.replayed,
+            applied_revision: committed.receipt.applied_revision.to_string(),
+        })
+    }
+
+    pub async fn delete_creative_project(&self, project_id: &str) -> Result<(), AppError> {
+        validate_creative_project_id(project_id)?;
+        let project = self.get_creative_project(project_id).await?;
+        let referenced_asset_ids = self
+            .collect_creative_project_asset_closure(&project.document)
+            .await?;
+        self.repo.delete_creative_project(project_id).await?;
+        for asset_id in referenced_asset_ids {
+            let Some(asset) = self.repo.get_asset(&asset_id).await? else {
+                continue;
+            };
+            if asset.in_library {
+                continue;
+            }
+            if let Err(error) = self.delete_asset(&asset_id).await {
+                tracing::warn!(
+                    project_id,
+                    asset_id,
+                    %error,
+                    "Creative Studio project deleted but an internal asset remained referenced"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    // ---- canonical Creative Studio workflows ----
+
+    pub async fn list_creative_workflows(
+        &self,
+    ) -> Result<Vec<CreativeWorkflowDefinitionV1>, AppError> {
+        self.repo
+            .list_creative_workflows()
+            .await?
+            .into_iter()
+            .map(|row| {
+                parse_workflow_row(&row).map_err(|error| {
+                    AppError::Internal(format!(
+                        "stored creative studio workflow {} is corrupt: {error}",
+                        row.workflow_id
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    pub async fn get_creative_workflow(
+        &self,
+        workflow_id: &str,
+    ) -> Result<CreativeWorkflowDefinitionV1, AppError> {
+        validate_creative_workflow_id(workflow_id)?;
+        let row = self
+            .repo
+            .get_creative_workflow(workflow_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "creative studio workflow {workflow_id} not found"
+                ))
+            })?;
+        parse_workflow_row(&row).map_err(|error| {
+            AppError::Internal(format!(
+                "stored creative studio workflow {workflow_id} is corrupt: {error}"
+            ))
+        })
+    }
+
+    pub async fn create_creative_workflow(
+        &self,
+        mut definition: CreativeWorkflowDefinitionV1,
+    ) -> Result<CreativeWorkflowDefinitionV1, AppError> {
+        validate_creative_workflow_id(&definition.id)?;
+        if definition.revision != 1 {
+            return Err(AppError::BadRequest(
+                "a creative studio workflow must start at revision 1".into(),
+            ));
+        }
+        if self.repo.get_creative_workflow(&definition.id).await?.is_some() {
+            return Err(AppError::Conflict(format!(
+                "creative studio workflow {} already exists",
+                definition.id
+            )));
+        }
+        let now = now_ms();
+        definition.metadata.created_at = now;
+        definition.metadata.updated_at = now;
+        definition
+            .validate()
+            .map_err(|error| AppError::BadRequest(format!("invalid workflow definition: {error}")))?;
+        self.validate_creative_workflow_assets(&definition).await?;
+        let _provider_guard = self.provider_read_guard().await;
+        self.validate_creative_workflow_models_under_guard(&definition)
+            .await?;
+        let row = definition
+            .to_row()
+            .map_err(|error| AppError::BadRequest(format!("invalid workflow definition: {error}")))?;
+        let saved = self.repo.create_creative_workflow(&row).await?;
+        parse_workflow_row(&saved).map_err(|error| {
+            AppError::Internal(format!(
+                "created creative studio workflow {} is corrupt: {error}",
+                saved.workflow_id
+            ))
+        })
+    }
+
+    pub async fn save_creative_workflow(
+        &self,
+        workflow_id: &str,
+        expected_revision: &str,
+        mut definition: CreativeWorkflowDefinitionV1,
+    ) -> Result<CreativeWorkflowDefinitionV1, AppError> {
+        validate_creative_workflow_id(workflow_id)?;
+        let expected_revision = parse_creative_workflow_revision(expected_revision)?;
+        let current_row = self
+            .repo
+            .get_creative_workflow(workflow_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "creative studio workflow {workflow_id} not found"
+                ))
+            })?;
+        let current = parse_workflow_row(&current_row).map_err(|error| {
+            AppError::Internal(format!(
+                "stored creative studio workflow {workflow_id} is corrupt: {error}"
+            ))
+        })?;
+        if definition.id != workflow_id {
+            return Err(AppError::BadRequest(
+                "workflow definition id must match its route id".into(),
+            ));
+        }
+        if definition.revision != expected_revision + 1 {
+            return Err(AppError::BadRequest(
+                "workflow definition revision must increment expectedRevision exactly once".into(),
+            ));
+        }
+        definition.metadata.created_at = current.metadata.created_at;
+        definition.metadata.updated_at = now_ms();
+        definition
+            .validate()
+            .map_err(|error| AppError::BadRequest(format!("invalid workflow definition: {error}")))?;
+        self.validate_creative_workflow_assets(&definition).await?;
+        let _provider_guard = self.provider_read_guard().await;
+        self.validate_creative_workflow_models_under_guard(&definition)
+            .await?;
+        let replacement = definition
+            .to_row()
+            .map_err(|error| AppError::BadRequest(format!("invalid workflow definition: {error}")))?;
+        let saved = self
+            .repo
+            .save_creative_workflow(workflow_id, expected_revision, &replacement)
+            .await?;
+        parse_workflow_row(&saved).map_err(|error| {
+            AppError::Internal(format!(
+                "saved creative studio workflow {workflow_id} is corrupt: {error}"
+            ))
+        })
+    }
+
+    pub async fn delete_creative_workflow(&self, workflow_id: &str) -> Result<(), AppError> {
+        validate_creative_workflow_id(workflow_id)?;
+        self.repo.delete_creative_workflow(workflow_id).await?;
+        Ok(())
+    }
+
+    // ---- durable Creative Studio workflow runs ----
+
+    pub async fn list_creative_workflow_runs(
+        &self,
+        workflow_id: Option<&str>,
+    ) -> Result<Vec<CreativeWorkflowRunAggregateV1>, AppError> {
+        if let Some(workflow_id) = workflow_id {
+            validate_creative_workflow_id(workflow_id)?;
+        }
+        self.repo
+            .list_creative_workflow_runs(workflow_id)
+            .await?
+            .into_iter()
+            .map(|row| parse_stored_workflow_run(&row))
+            .collect()
+    }
+
+    pub async fn get_creative_workflow_run(
+        &self,
+        workflow_run_id: &str,
+    ) -> Result<CreativeWorkflowRunAggregateV1, AppError> {
+        validate_creative_workflow_run_id(workflow_run_id)?;
+        let row = self
+            .repo
+            .get_creative_workflow_run(workflow_run_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "creative studio workflow run {workflow_run_id} not found"
+                ))
+            })?;
+        parse_stored_workflow_run(&row)
+    }
+
+    pub async fn create_creative_workflow_run(
+        &self,
+        request: CreativeWorkflowRunCreateRequest,
+    ) -> Result<CreativeWorkflowRunAggregateV1, AppError> {
+        validate_creative_workflow_run_id(&request.run_id)?;
+        validate_creative_workflow_id(&request.workflow_id)?;
+        if request.workflow_revision < 1 {
+            return Err(AppError::BadRequest(
+                "workflowRevision must be a positive integer".into(),
+            ));
+        }
+
+        if let Some(existing) = self
+            .repo
+            .get_creative_workflow_run(&request.run_id)
+            .await?
+        {
+            let existing = parse_stored_workflow_run(&existing)?;
+            if existing.matches_create_request(&request) {
+                return Ok(existing);
+            }
+            return Err(AppError::Conflict(format!(
+                "workflow run {} idempotency key is already bound to another request",
+                request.run_id
+            )));
+        }
+
+        let definition_row = self
+            .repo
+            .get_creative_workflow(&request.workflow_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "creative studio workflow {} not found",
+                    request.workflow_id
+                ))
+            })?;
+        let definition = parse_workflow_row(&definition_row).map_err(|error| {
+            AppError::Internal(format!(
+                "stored creative studio workflow {} is corrupt: {error}",
+                request.workflow_id
+            ))
+        })?;
+        if definition.revision != request.workflow_revision {
+            return Err(AppError::Conflict(format!(
+                "creative studio workflow {} revision changed from {} to {}",
+                request.workflow_id, request.workflow_revision, definition.revision
+            )));
+        }
+
+        let now = now_ms();
+        let aggregate = CreativeWorkflowRunAggregateV1::requested(
+            definition,
+            request.run_id.clone(),
+            request.inputs.clone(),
+            request.reference_asset_ids.clone(),
+            now,
+        )
+        .map_err(|error| AppError::BadRequest(format!("invalid workflow run request: {error}")))?;
+        self.validate_creative_workflow_assets(&aggregate.workflow_snapshot)
+            .await?;
+        self.validate_workflow_run_input_assets(&aggregate).await?;
+        let _provider_guard = self.provider_read_guard().await;
+        self.validate_creative_workflow_models_under_guard(&aggregate.workflow_snapshot)
+            .await?;
+
+        let row = aggregate
+            .to_row(now, now)
+            .map_err(|error| AppError::BadRequest(format!("invalid workflow run request: {error}")))?;
+        let referenced_asset_ids = aggregate
+            .referenced_input_asset_ids()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let persisted = self
+            .repo
+            .create_creative_workflow_run(&row, &referenced_asset_ids)
+            .await?;
+        let persisted = parse_stored_workflow_run(&persisted)?;
+        if !persisted.matches_create_request(&request) {
+            return Err(AppError::Conflict(format!(
+                "workflow run {} idempotency key is already bound to another request",
+                request.run_id
+            )));
+        }
+        Ok(persisted)
+    }
+
+    pub async fn save_creative_workflow_run(
+        &self,
+        workflow_run_id: &str,
+        expected_revision: &str,
+        replacement: CreativeWorkflowRunAggregateV1,
+    ) -> Result<CreativeWorkflowRunAggregateV1, AppError> {
+        validate_creative_workflow_run_id(workflow_run_id)?;
+        let expected_revision = parse_creative_workflow_revision(expected_revision)?;
+        if replacement.request.id != workflow_run_id {
+            return Err(AppError::BadRequest(
+                "workflow run aggregate id must match its route id".into(),
+            ));
+        }
+        let current_row = self
+            .repo
+            .get_creative_workflow_run(workflow_run_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "creative studio workflow run {workflow_run_id} not found"
+                ))
+            })?;
+        let current = parse_stored_workflow_run(&current_row)?;
+        if current.revision != expected_revision {
+            return Err(AppError::Conflict(format!(
+                "creative studio workflow run {workflow_run_id} revision conflict"
+            )));
+        }
+        current.validate_transition(&replacement).map_err(|error| {
+            AppError::BadRequest(format!("invalid workflow run transition: {error}"))
+        })?;
+        self.validate_workflow_run_results(&replacement).await?;
+        let now = now_ms().max(current.request.requested_at);
+        let replacement_row = replacement
+            .to_row(current.request.requested_at, now)
+            .map_err(|error| AppError::BadRequest(format!("invalid workflow run: {error}")))?;
+        let saved = self
+            .repo
+            .save_creative_workflow_run(workflow_run_id, expected_revision, &replacement_row)
+            .await?;
+        parse_stored_workflow_run(&saved)
+    }
+
+    async fn validate_workflow_run_input_assets(
+        &self,
+        aggregate: &CreativeWorkflowRunAggregateV1,
+    ) -> Result<(), AppError> {
+        for asset_id in aggregate.referenced_input_asset_ids() {
+            let asset = self.repo.get_asset(asset_id).await?.ok_or_else(|| {
+                AppError::Conflict(format!("workflow run references missing asset {asset_id}"))
+            })?;
+            if asset.kind != "image" {
+                return Err(AppError::Conflict(format!(
+                    "workflow run reference {asset_id} must identify an image asset"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    async fn validate_workflow_run_results(
+        &self,
+        aggregate: &CreativeWorkflowRunAggregateV1,
+    ) -> Result<(), AppError> {
+        let executable_steps = aggregate
+            .executable_task_step_ids()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let task_ids = aggregate
+            .record
+            .task_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for asset_id in &aggregate.record.result_asset_ids {
+            let asset = self.repo.get_asset(asset_id).await?.ok_or_else(|| {
+                AppError::Conflict(format!(
+                    "workflow run result references missing asset {asset_id}"
+                ))
+            })?;
+            if asset.kind != "image" {
+                return Err(AppError::Conflict(format!(
+                    "workflow run result {asset_id} must identify an image asset"
+                )));
+            }
+            validate_workflow_result_origin(&asset, aggregate, &executable_steps, &task_ids)?;
+        }
+        Ok(())
+    }
+
+    async fn validate_creative_workflow_assets(
+        &self,
+        definition: &CreativeWorkflowDefinitionV1,
+    ) -> Result<(), AppError> {
+        for asset_id in definition.collect_asset_ids() {
+            WorkshopAssetId::parse(asset_id).map_err(|error| {
+                AppError::BadRequest(format!(
+                    "workflow references invalid asset id {asset_id:?}: {error}"
+                ))
+            })?;
+            let asset = self.repo.get_asset(asset_id).await?.ok_or_else(|| {
+                AppError::Conflict(format!("workflow references missing asset {asset_id}"))
+            })?;
+            if asset.kind != "image" {
+                return Err(AppError::Conflict(format!(
+                    "workflow reference {asset_id} must identify an image asset"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    async fn validate_creative_workflow_models_under_guard(
+        &self,
+        definition: &CreativeWorkflowDefinitionV1,
+    ) -> Result<(), AppError> {
+        for binding in definition.image_model_bindings() {
+            ProviderId::parse(&binding.provider_id).map_err(|error| {
+                AppError::BadRequest(format!(
+                    "workflow references invalid provider id {:?}: {error}",
+                    binding.provider_id
+                ))
+            })?;
+            if !self
+                .repo
+                .provider_model_supports_task(
+                    &binding.provider_id,
+                    &binding.model,
+                    binding.task.as_str(),
+                )
+                .await?
+            {
+                return Err(AppError::Conflict(format!(
+                    "workflow model binding {}/{} does not provide enabled task {}",
+                    binding.provider_id,
+                    binding.model,
+                    binding.task.as_str()
+                )));
+            }
+        }
+        for binding in definition.text_model_bindings() {
+            ProviderId::parse(&binding.provider_id).map_err(|error| {
+                AppError::BadRequest(format!(
+                    "workflow references invalid provider id {:?}: {error}",
+                    binding.provider_id
+                ))
+            })?;
+            if !self
+                .repo
+                .provider_model_supports_task(
+                    &binding.provider_id,
+                    &binding.model,
+                    binding.task.as_str(),
+                )
+                .await?
+            {
+                return Err(AppError::Conflict(format!(
+                    "workflow model binding {}/{} does not provide enabled task {}",
+                    binding.provider_id,
+                    binding.model,
+                    binding.task.as_str()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn export_creative_project_archive(
+        &self,
+        project_id: &str,
+    ) -> Result<CreativeProjectArchive, AppError> {
+        let detail = self.get_creative_project(project_id).await?;
+        let asset_ids = self
+            .collect_creative_project_asset_closure(&detail.document)
+            .await?;
+        let mut assets = Vec::with_capacity(asset_ids.len());
+        for asset_id in asset_ids {
+            let row = self
+                .repo
+                .get_asset(&asset_id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Conflict(format!(
+                        "creative project {project_id} references missing asset {asset_id}"
+                    ))
+                })?;
+            let bytes = self
+                .read_original(&row)
+                .await
+                .map_err(|error| match error {
+                    AppError::NotFound(message) => AppError::Conflict(format!(
+                        "creative project {project_id} asset cannot be exported: {message}"
+                    )),
+                    other => other,
+                })?
+                .0;
+            assets.push(CreativeArchiveAssetSnapshot { row, bytes });
+        }
+        let title = detail.project.title;
+        let document = detail.document;
+        let archive_bytes = tokio::task::spawn_blocking(move || {
+            build_creative_project_archive(&title, &document, assets, now_ms())
+        })
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!("creative project archive worker failed: {error}"))
+        })??;
+        Ok(CreativeProjectArchive {
+            file_name: format!("creative-studio-{project_id}.nomifun-canvas.zip"),
+            mime: CREATIVE_STUDIO_ARCHIVE_MIME,
+            bytes: archive_bytes,
+        })
+    }
+
+    pub async fn import_creative_project_archive(
+        &self,
+        archive_bytes: Vec<u8>,
+    ) -> Result<CreativeProjectSummary, AppError> {
+        let project_id = CreativeStudioProjectId::new().into_string();
+        let remap_project_id = project_id.clone();
+        let archive = tokio::task::spawn_blocking(move || {
+            let parsed = parse_creative_project_archive(&archive_bytes)?;
+            remap_creative_archive_for_import(parsed, &remap_project_id)
+        })
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!("creative project archive worker failed: {error}"))
+        })??;
+
+        let title = normalize_creative_project_title(Some(&archive.title), false)?;
+        let document_json = serialize_creative_project_document(&archive.document)?;
+        let node_count = i64::try_from(archive.document.nodes.len())
+            .map_err(|_| AppError::BadRequest("creative project has too many nodes".into()))?;
+        let connection_count = i64::try_from(archive.document.connections.len()).map_err(|_| {
+            AppError::BadRequest("creative project has too many connections".into())
+        })?;
+        let now = now_ms();
+        let mut rollback = CreativeArchiveFileRollback::new();
+        let mut asset_rows = Vec::with_capacity(archive.assets.len());
+        for asset in archive.assets {
+            let metadata = asset.metadata;
+            let tags = serde_json::to_string(&metadata.tags).map_err(|error| {
+                AppError::Internal(format!("encode imported creative asset tags: {error}"))
+            })?;
+            let origin = sanitized_archive_origin(metadata.origin)?;
+            let (rel_path, mime, bytes, text_content) = if metadata.kind == "text" {
+                let text = String::from_utf8(asset.bytes).map_err(|_| {
+                    AppError::BadRequest(format!(
+                        "creative archive text asset {} is not valid UTF-8",
+                        metadata.asset_id
+                    ))
+                })?;
+                (None, None, None, Some(text))
+            } else {
+                let (classified_kind, ext) = classify_mime(&metadata.mime)?;
+                if classified_kind != metadata.kind {
+                    return Err(AppError::BadRequest(format!(
+                        "creative archive asset {} kind does not match MIME type",
+                        metadata.asset_id
+                    )));
+                }
+                let disk_name = format!("{}.{}", metadata.asset_id, ext);
+                let rel_path = format!("{WORKSHOP_REL_DIR}/assets/{disk_name}");
+                fsio::save_bytes_atomic(&self.assets_dir(), &disk_name, &asset.bytes)
+                    .await
+                    .map_err(|error| {
+                        AppError::Internal(format!(
+                            "write imported creative asset {}: {error}",
+                            metadata.asset_id
+                        ))
+                    })?;
+                rollback.track(self.data_dir.join(&rel_path));
+                (
+                    Some(rel_path),
+                    Some(metadata.mime),
+                    Some(asset.bytes.len() as i64),
+                    None,
+                )
+            };
+            asset_rows.push(WorkshopAssetRow {
+                id: 0,
+                asset_id: metadata.asset_id,
+                kind: metadata.kind,
+                title: metadata.title,
+                collection: metadata.collection,
+                tags,
+                rel_path,
+                thumb_rel_path: None,
+                mime,
+                width: metadata.width,
+                height: metadata.height,
+                bytes,
+                text_content,
+                in_library: metadata.in_library,
+                origin,
+                created_at: now,
+                updated_at: now,
+            });
+        }
+        let project_row = CreativeStudioProjectRow {
+            id: 0,
+            project_id,
+            title,
+            revision: 1,
+            node_count,
+            connection_count,
+            document_json,
+            created_at: now,
+            updated_at: now,
+        };
+        let imported = self
+            .repo
+            .import_creative_project_with_assets(&project_row, &asset_rows)
+            .await?;
+        rollback.commit();
+        Ok(imported.into())
+    }
+
+    /// Read-only startup audit for canonical Creative Studio projects and the
+    /// shared asset store. It validates every managed reference without
+    /// rewriting or deleting user content.
     pub async fn audit_managed_data_on_boot(&self) -> Result<(), AppError> {
-        let canvases = self.repo.list_canvases().await?;
         let mut referenced_assets = BTreeSet::new();
-        for canvas in &canvases {
-            let doc = self.read_doc(&canvas.canvas_id).await?;
-            referenced_assets.extend(docscan::collect_asset_refs(&doc));
+        for project in self.repo.list_creative_projects().await? {
+            let document = parse_stored_creative_project_row(&project)?;
+            self.validate_creative_provider_models(&document).await?;
+            let project_assets = self
+                .collect_creative_project_asset_closure(&document)
+                .await
+                .map_err(|error| {
+                    AppError::Internal(format!(
+                        "managed creative studio project {} has an invalid asset closure: {error}",
+                        project.project_id
+                    ))
+                })?;
+            referenced_assets.extend(project_assets);
         }
 
         let assets = self.repo.list_all_assets().await?;
@@ -229,7 +1542,7 @@ impl WorkshopService {
             .find(|asset_id| !indexed_assets.contains(asset_id.as_str()))
         {
             return Err(AppError::Internal(format!(
-                "managed workshop canvas references missing asset {asset_id}"
+                "managed creative studio project references missing asset {asset_id}"
             )));
         }
 
@@ -291,368 +1604,6 @@ impl WorkshopService {
         Ok(())
     }
 
-    pub async fn create_canvas(&self, title: Option<String>) -> Result<WorkshopCanvasMeta, AppError> {
-        let id = WorkshopCanvasId::new().into_string();
-        let title = title
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| "未命名画布".to_string());
-        let now = now_ms();
-        // Write the empty doc first so a crash between INSERT and write cannot
-        // leave an indexed canvas without its managed document.
-        fsio::save_bytes_atomic(&self.canvas_dir(&id), "canvas.json", DEFAULT_DOC.as_bytes())
-            .await
-            .map_err(|e| AppError::Internal(format!("write canvas doc: {e}")))?;
-        let row = self.repo.create_canvas(&id, &title, now).await?;
-        Ok(row.into())
-    }
-
-    pub async fn get_canvas(&self, id: &str) -> Result<CanvasWithDoc, AppError> {
-        let row = self
-            .repo
-            .get_canvas(id)
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!("workshop canvas {id} not found")))?;
-        let doc = self.read_doc(id).await?;
-        Ok(CanvasWithDoc { meta: row.into(), doc })
-    }
-
-    /// The document payload remains frontend-owned, but its durable identity
-    /// envelope is a backend invariant: every node/edge ID and every declared
-    /// node reference must be canonical before data is served back to clients.
-    async fn read_doc(&self, id: &str) -> Result<Value, AppError> {
-        let path = self.canvas_dir(id).join("canvas.json");
-        let bytes = fsio::read_bytes_opt(&path)
-            .await
-            .map_err(|error| {
-                AppError::Internal(format!(
-                    "read managed workshop canvas {id} document: {error}"
-                ))
-            })?
-            .ok_or_else(|| {
-                AppError::Internal(format!(
-                    "managed workshop canvas {id} document is missing"
-                ))
-            })?;
-        let doc: Value = serde_json::from_slice(&bytes).map_err(|error| {
-            AppError::Internal(format!(
-                "managed workshop canvas {id} document is invalid JSON: {error}"
-            ))
-        })?;
-        docscan::validate_canvas_doc_ids(&doc).map_err(|error| {
-            AppError::Internal(format!(
-                "managed workshop canvas {id} has invalid durable IDs: {error}"
-            ))
-        })?;
-        docscan::collect_generator_provider_refs(&doc).map_err(|error| {
-            AppError::Internal(format!(
-                "managed workshop canvas {id} has invalid provider references: {error}"
-            ))
-        })?;
-        Ok(doc)
-    }
-
-    /// Persist a frontend-owned doc (≤ [`MAX_DOC_BYTES`]), sync `node_count`
-    /// from `doc.nodes`, and return the new `updated_at`.
-    ///
-    /// Although node payloads remain opaque, durable IDs are validated deeply:
-    /// `nodes[].id`/`groupId`, `edges[].id`/`from`/`to`, and `node:<id>` mention
-    /// references must all be canonical and internally resolvable.
-    pub async fn save_doc(&self, id: &str, doc: &Value) -> Result<i64, AppError> {
-        let _provider_guard = self.provider_read_guard().await;
-        self.save_doc_inner(id, doc, true).await
-    }
-
-    async fn save_doc_inner(
-        &self,
-        id: &str,
-        doc: &Value,
-        validate_providers: bool,
-    ) -> Result<i64, AppError> {
-        // Ensure the canvas exists before touching disk.
-        if self.repo.get_canvas(id).await?.is_none() {
-            return Err(AppError::NotFound(format!("workshop canvas {id} not found")));
-        }
-        let node_count = docscan::validate_canvas_doc_ids(doc)
-            .map_err(|error| AppError::BadRequest(format!("invalid workshop canvas doc: {error}")))?
-            as i64;
-        if validate_providers {
-            self.validate_generator_providers(doc).await?;
-        }
-        let bytes = serde_json::to_vec(doc).map_err(|e| AppError::BadRequest(format!("invalid doc json: {e}")))?;
-        if bytes.len() > MAX_DOC_BYTES {
-            return Err(AppError::BadRequest(format!(
-                "canvas doc is too large: {} bytes (max {MAX_DOC_BYTES})",
-                bytes.len()
-            )));
-        }
-        fsio::save_bytes_atomic(&self.canvas_dir(id), "canvas.json", &bytes)
-            .await
-            .map_err(|e| AppError::Internal(format!("write canvas doc: {e}")))?;
-        let row = self.repo.touch_canvas(id, node_count, now_ms()).await?;
-        Ok(row.updated_at)
-    }
-
-    pub async fn rename_canvas(&self, id: &str, title: &str) -> Result<WorkshopCanvasMeta, AppError> {
-        let title = title.trim();
-        if title.is_empty() {
-            return Err(AppError::BadRequest("title must not be empty".into()));
-        }
-        Ok(self.repo.rename_canvas(id, title, now_ms()).await?.into())
-    }
-
-    /// PATCH a canvas: optionally rename and/or set its gallery thumbnail from an
-    /// asset (append-only over `rename_canvas`). Returns the latest meta. A
-    /// request with no fields is a no-op that returns the current meta.
-    pub async fn patch_canvas(
-        &self,
-        id: &str,
-        title: Option<String>,
-        thumbnail_asset_id: Option<String>,
-    ) -> Result<WorkshopCanvasMeta, AppError> {
-        let mut latest: Option<WorkshopCanvasMeta> = None;
-        if let Some(title) = title {
-            latest = Some(self.rename_canvas(id, &title).await?);
-        }
-        if let Some(asset_id) = thumbnail_asset_id {
-            latest = Some(self.set_canvas_thumbnail(id, &asset_id).await?);
-        }
-        match latest {
-            Some(meta) => Ok(meta),
-            None => {
-                let row = self
-                    .repo
-                    .get_canvas(id)
-                    .await?
-                    .ok_or_else(|| AppError::NotFound(format!("workshop canvas {id} not found")))?;
-                Ok(row.into())
-            }
-        }
-    }
-
-    /// Point a canvas's gallery thumbnail at an asset's thumbnail. The asset
-    /// must be a decodable image (its JPEG thumbnail — generated on demand — is
-    /// copied to `{canvas_dir}/thumb.jpg`).
-    pub async fn set_canvas_thumbnail(&self, canvas_id: &str, asset_id: &str) -> Result<WorkshopCanvasMeta, AppError> {
-        if self.repo.get_canvas(canvas_id).await?.is_none() {
-            return Err(AppError::NotFound(format!("workshop canvas {canvas_id} not found")));
-        }
-        let row = self
-            .repo
-            .get_asset(asset_id)
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!("workshop asset {asset_id} not found")))?;
-        let bytes = self
-            .thumb_bytes(&row)
-            .await
-            .ok_or_else(|| AppError::BadRequest("thumbnail asset must be a decodable image".into()))?;
-        fsio::save_bytes_atomic(&self.canvas_dir(canvas_id), "thumb.jpg", &bytes)
-            .await
-            .map_err(|e| AppError::Internal(format!("write canvas thumbnail: {e}")))?;
-        let rel = format!("{WORKSHOP_REL_DIR}/canvases/{canvas_id}/thumb.jpg");
-        Ok(self.repo.set_canvas_thumbnail(canvas_id, &rel, now_ms()).await?.into())
-    }
-
-    /// Serve a canvas's gallery thumbnail bytes (JPEG). NotFound when the canvas
-    /// has no thumbnail set.
-    pub async fn serve_canvas_thumbnail(&self, canvas_id: &str) -> Result<ServedFile, AppError> {
-        let row = self
-            .repo
-            .get_canvas(canvas_id)
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!("workshop canvas {canvas_id} not found")))?;
-        let rel = row
-            .thumbnail_rel_path
-            .as_deref()
-            .ok_or_else(|| AppError::NotFound(format!("canvas {canvas_id} has no thumbnail")))?;
-        let abs = self.resolve_within_workshop(rel)?;
-        let bytes = tokio::fs::read(&abs)
-            .await
-            .map_err(|_| AppError::NotFound(format!("canvas {canvas_id} thumbnail is missing")))?;
-        Ok(ServedFile { mime: thumbnail::THUMB_MIME.to_string(), bytes })
-    }
-
-    pub async fn delete_canvas(&self, id: &str) -> Result<(), AppError> {
-        // Snapshot this canvas's asset references before its doc disappears, so
-        // we can GC canvas-internal assets it alone kept alive.
-        let doc = self.read_doc(id).await?;
-        let own_refs = docscan::collect_asset_refs(&doc);
-
-        self.repo.delete_canvas(id).await?;
-        // Best-effort remove the on-disk body dir (row is the source of truth).
-        if let Err(e) = tokio::fs::remove_dir_all(self.canvas_dir(id)).await
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(id, error = %e, "workshop canvas dir remove failed (row deleted)");
-        }
-
-        // GC: for each asset this canvas referenced, if it's canvas-internal
-        // (`in_library = 0`) and no *other* canvas still references it, drop it.
-        // A recency grace protects a freshly-created asset that another OPEN
-        // canvas may reference but hasn't autosaved yet (its ref isn't on disk).
-        if !own_refs.is_empty() {
-            let now = now_ms();
-            let still_referenced = self.collect_all_referenced_asset_ids().await.unwrap_or_default();
-            for asset_id in own_refs {
-                if still_referenced.contains(&asset_id) {
-                    continue;
-                }
-                if let Ok(Some(row)) = self.repo.get_asset(&asset_id).await
-                    && !row.in_library
-                    && now.saturating_sub(row.created_at.max(row.updated_at)) >= self.gc_grace_ms
-                    && let Err(e) = self.delete_asset(&asset_id).await
-                {
-                    tracing::warn!(asset_id, error = %e, "workshop GC: internal asset delete failed");
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Every asset id referenced by *any* canvas doc (scans all canvases; the
-    /// canvas count is small by design).
-    async fn collect_all_referenced_asset_ids(&self) -> Result<BTreeSet<String>, AppError> {
-        let mut out = BTreeSet::new();
-        for canvas in self.repo.list_canvases().await? {
-            let doc = self.read_doc(&canvas.canvas_id).await?;
-            out.extend(docscan::collect_asset_refs(&doc));
-        }
-        Ok(out)
-    }
-
-    // ---- agent ops (画布助手) ----
-
-    /// Enqueue or directly apply a batch of 画布助手 agent ops. See
-    /// [`crate::agent_ops`] for the open-frontend-authority rule.
-    ///
-    /// All ops are validated up front (a single bad op fails the whole call so
-    /// the agent can self-correct). Then, per op:
-    /// - an OPEN canvas (a frontend is polling) queues EVERY op for the live
-    ///   frontend to apply (preserving its write authority);
-    /// - a CLOSED canvas applies `add_node` / `connect` straight to `canvas.json`
-    ///   and queues the data-mutating ops (`update_node_data` / `delete_node`)
-    ///   for whenever a frontend next opens.
-    ///
-    /// Returns a per-op disposition (`queued` | `applied` | `skipped`).
-    pub async fn apply_agent_ops(
-        &self,
-        canvas_id: &str,
-        ops: Vec<crate::agent_ops::AgentOp>,
-        source: &str,
-    ) -> Result<Vec<crate::agent_ops::AppliedOp>, AppError> {
-        use crate::agent_ops::{self, AgentOp, AppliedOp, OpDisposition, PendingOp};
-        let _provider_guard = self.provider_read_guard().await;
-
-        if ops.is_empty() {
-            return Err(AppError::BadRequest("no ops provided".into()));
-        }
-        if ops.len() > agent_ops::MAX_OPS_PER_CALL {
-            return Err(AppError::BadRequest(format!(
-                "too many ops in one call: {} (max {})",
-                ops.len(),
-                agent_ops::MAX_OPS_PER_CALL
-            )));
-        }
-        if self.repo.get_canvas(canvas_id).await?.is_none() {
-            return Err(AppError::NotFound(format!("workshop canvas {canvas_id} not found")));
-        }
-        for (i, op) in ops.iter().enumerate() {
-            op.validate().map_err(|e| AppError::BadRequest(format!("ops[{i}]: {e}")))?;
-        }
-
-        let open = self.agent_ops.is_open(canvas_id);
-        let mut results: Vec<AppliedOp> = Vec::with_capacity(ops.len());
-        let mut to_queue: Vec<PendingOp> = Vec::new();
-        // Direct-apply path (closed canvas) mutates one doc snapshot, saved once.
-        let mut doc: Option<Value> = None;
-        let mut dirty = false;
-
-        for op in ops {
-            let op_id = agent_ops::new_op_id();
-            if !open && op.direct_applicable() {
-                if doc.is_none() {
-                    doc = Some(self.read_doc(canvas_id).await?);
-                }
-                let d = doc.as_mut().expect("doc loaded above");
-                match op {
-                    AgentOp::AddNode { node } => {
-                        let node_id = agent_ops::apply_add_node(d, &node);
-                        dirty = true;
-                        results.push(AppliedOp {
-                            op_id,
-                            disposition: OpDisposition::Applied,
-                            node_id: Some(node_id),
-                            note: None,
-                        });
-                    }
-                    AgentOp::Connect { from_node_id, to_node_id } => match agent_ops::apply_connect(d, &from_node_id, &to_node_id) {
-                        Ok(Some(_edge)) => {
-                            dirty = true;
-                            results.push(AppliedOp { op_id, disposition: OpDisposition::Applied, node_id: None, note: None });
-                        }
-                        Ok(None) => results.push(AppliedOp {
-                            op_id,
-                            disposition: OpDisposition::Applied,
-                            node_id: None,
-                            note: Some("edge already existed".into()),
-                        }),
-                        Err(reason) => results.push(AppliedOp {
-                            op_id,
-                            disposition: OpDisposition::Skipped,
-                            node_id: None,
-                            note: Some(reason),
-                        }),
-                    },
-                    // direct_applicable() only matches AddNode/Connect.
-                    other => to_queue.push(PendingOp::new(op_id, other)),
-                }
-            } else {
-                results.push(AppliedOp {
-                    op_id: op_id.clone(),
-                    disposition: OpDisposition::Queued,
-                    node_id: None,
-                    note: None,
-                });
-                to_queue.push(PendingOp::new(op_id, op));
-            }
-        }
-
-        if dirty
-            && let Some(d) = &doc
-        {
-            self.save_doc_inner(canvas_id, d, true).await?;
-        }
-        if !to_queue.is_empty() {
-            self.agent_ops.enqueue(canvas_id, to_queue);
-        }
-        tracing::info!(canvas_id, source, open, ops = results.len(), "workshop agent ops processed");
-        Ok(results)
-    }
-
-    /// Drain (idempotently — ops stay until acked) the pending 画布助手 ops for a
-    /// canvas, recording the poll so the canvas registers as "open".
-    pub async fn take_pending_ops(&self, canvas_id: &str) -> Result<Vec<crate::agent_ops::PendingOp>, AppError> {
-        if self.repo.get_canvas(canvas_id).await?.is_none() {
-            return Err(AppError::NotFound(format!("workshop canvas {canvas_id} not found")));
-        }
-        Ok(self.agent_ops.take_pending(canvas_id))
-    }
-
-    /// Acknowledge (remove) applied 画布助手 ops by id.
-    pub fn ack_agent_ops(&self, canvas_id: &str, op_ids: &[String]) {
-        self.agent_ops.ack(canvas_id, op_ids);
-    }
-
-    /// Register that an editor just opened this canvas (its doc was loaded via
-    /// the REST canvas-doc GET). Marks the canvas "open" immediately so a
-    /// concurrent agent `apply_ops` in the gap before the first pending-ops poll
-    /// is queued for the live editor rather than direct-written and then
-    /// clobbered by the editor's first autosave. See
-    /// [`crate::agent_ops::AgentOpsQueue::mark_open`].
-    pub fn mark_canvas_open(&self, canvas_id: &str) {
-        self.agent_ops.mark_open(canvas_id);
-    }
-
     // ---- assets ----
 
     pub async fn upload_asset(&self, input: NewAssetUpload) -> Result<WorkshopAsset, AppError> {
@@ -681,7 +1632,7 @@ impl WorkshopService {
     /// Programmatic asset ingest: store raw `bytes` of a given `mime` as a new
     /// asset row and return it. The shared entry point for other modules (e.g.
     /// the generation engine writing produced media). `origin` is the JSON
-    /// provenance blob (`{prompt,model,provider_id,params,canvas_id,…}`).
+    /// provenance blob (`{prompt,model,provider_id,params,project_id,…}`).
     pub async fn ingest_asset_bytes(
         &self,
         bytes: Vec<u8>,
@@ -707,54 +1658,284 @@ impl WorkshopService {
         .await
     }
 
-    /// Remove Provider selections from all generator nodes in all persisted
-    /// canvas documents. This is a SET_NULL logical-reference cleanup invoked
-    /// by the Provider deletion coordinator while holding the lifecycle write
-    /// guard. The operation is idempotent and validates every rewritten doc
-    /// before replacing it atomically.
+    /// Remove one Provider selection from every canonical Creative Studio
+    /// config node and workflow generation step. Full Provider deletion keeps
+    /// its existing coordinator contract; exact model deletion uses the atomic
+    /// plan below instead.
     pub async fn clear_provider_references_under_lifecycle_write_guard(
         &self,
         provider_id: &str,
     ) -> Result<(), AppError> {
+        let cleanup = self
+            .build_provider_model_cleanup_plan(provider_id, None)
+            .await?;
+        for project in cleanup.projects {
+            self.repo
+                .save_creative_project(
+                    &project.project_id,
+                    project.expected_revision,
+                    &project.document_json,
+                    project.node_count,
+                    project.connection_count,
+                    project.updated_at,
+                )
+                .await?;
+        }
+        for workflow in cleanup.workflows {
+            self.repo
+                .save_creative_workflow(
+                    &workflow.workflow_id,
+                    workflow.expected_revision,
+                    &workflow.replacement,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Build, validate, and serialize every soft-reference replacement for one
+    /// exact Provider/model pair. No row is written here: the model repository
+    /// applies the complete plan and deletes the catalog model in one SQLite
+    /// transaction. Historical tasks, completed Agent sessions, assets, and
+    /// terminal workflow snapshots remain immutable audit records.
+    pub async fn plan_provider_model_cleanup_under_lifecycle_write_guard(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<ProviderModelCleanupPlan, AppError> {
+        let model = model.trim();
+        if model.is_empty() || model.chars().count() > 512 {
+            return Err(AppError::BadRequest(
+                "provider model must contain 1 to 512 characters".into(),
+            ));
+        }
+        self.build_provider_model_cleanup_plan(provider_id, Some(model))
+            .await
+    }
+
+    async fn build_provider_model_cleanup_plan(
+        &self,
+        provider_id: &str,
+        target_model: Option<&str>,
+    ) -> Result<ProviderModelCleanupPlan, AppError> {
         let provider_id = ProviderId::parse(provider_id)
             .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?
             .into_string();
-        for canvas in self.repo.list_canvases().await? {
-            let path = self.canvas_dir(&canvas.canvas_id).join("canvas.json");
-            let bytes = fsio::read_bytes_opt(&path)
-                .await
-                .map_err(|error| {
-                    AppError::Internal(format!(
-                        "read workshop canvas {}: {error}",
-                        canvas.canvas_id
-                    ))
-                })?
-                .ok_or_else(|| {
-                    AppError::Conflict(format!(
-                        "workshop canvas {} is missing canvas.json",
-                        canvas.canvas_id
-                    ))
-                })?;
-            let mut doc: Value = serde_json::from_slice(&bytes).map_err(|error| {
-                AppError::Conflict(format!(
-                    "workshop canvas {} has invalid JSON: {error}",
-                    canvas.canvas_id
-                ))
-            })?;
-            docscan::validate_canvas_doc_ids(&doc).map_err(|error| {
-                AppError::Conflict(format!(
-                    "workshop canvas {} has invalid durable IDs: {error}",
-                    canvas.canvas_id
-                ))
-            })?;
-            if !docscan::clear_generator_provider_reference(&mut doc, &provider_id)
-                .map_err(|error| AppError::Conflict(format!("invalid workshop canvas: {error}")))?
-            {
+        let matches = |candidate_provider: &str, candidate_model: Option<&str>| {
+            candidate_provider == provider_id.as_str()
+                && target_model.is_none_or(|model| candidate_model == Some(model))
+        };
+        let mut project_cleanups = Vec::new();
+        for project in self.repo.list_creative_projects().await? {
+            let mut document = parse_stored_creative_project_row(&project)?;
+            let pending_task_ids = document
+                .pending_task_ids
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let mut changed = false;
+            for node in &mut document.nodes {
+                match &mut node.data {
+                    CreativeNodeData::Config(config)
+                        if config.provider_id.as_deref().is_some_and(|candidate| {
+                            matches(candidate, config.model.as_deref())
+                        }) =>
+                    {
+                        if target_model.is_some()
+                            && (matches!(
+                                config.status,
+                                CreativeGenerationStatus::Queued
+                                    | CreativeGenerationStatus::Running
+                            ) || config
+                                .task_id
+                                .as_ref()
+                                .is_some_and(|task_id| pending_task_ids.contains(task_id)))
+                        {
+                            return Err(AppError::Conflict(format!(
+                                "creative studio project {} config node {} is still using provider-model '{}/{}'",
+                                project.project_id,
+                                node.id,
+                                provider_id,
+                                target_model.expect("exact cleanup has a model")
+                            )));
+                        }
+                        config.provider_id = None;
+                        config.model = None;
+                        changed = true;
+                    }
+                    CreativeNodeData::Image(image) => {
+                        let clears_target = image
+                            .composer
+                            .as_ref()
+                            .and_then(|composer| composer.model.as_ref())
+                            .is_some_and(|model| {
+                                matches(&model.provider_id, Some(&model.model))
+                            });
+                        if clears_target {
+                            if let Some(composer) = image.composer.as_mut() {
+                                composer.model = None;
+                            }
+                            changed = true;
+                        }
+                    }
+                    CreativeNodeData::Video(video) => {
+                        let clears_target = video
+                            .composer
+                            .as_ref()
+                            .and_then(|composer| composer.model.as_ref())
+                            .is_some_and(|model| {
+                                matches(&model.provider_id, Some(&model.model))
+                            });
+                        if clears_target {
+                            if let Some(composer) = video.composer.as_mut() {
+                                composer.model = None;
+                            }
+                            changed = true;
+                        }
+                    }
+                    CreativeNodeData::Audio(audio) => {
+                        let clears_target = audio
+                            .composer
+                            .as_ref()
+                            .and_then(|composer| composer.model.as_ref())
+                            .is_some_and(|model| {
+                                matches(&model.provider_id, Some(&model.model))
+                            });
+                        if clears_target {
+                            if let Some(composer) = audio.composer.as_mut() {
+                                composer.model = None;
+                            }
+                            changed = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if target_model.is_some() {
+                for chat in &mut document.chat_sessions {
+                    let clears_target = chat.model.as_ref().is_some_and(|model| {
+                        matches(&model.provider_id, Some(&model.model))
+                    });
+                    if !clears_target {
+                        continue;
+                    }
+                    if chat.pending_turn.is_some() {
+                        return Err(AppError::Conflict(format!(
+                            "creative studio project {} Agent session {} has a pending turn using provider-model '{}/{}'",
+                            project.project_id,
+                            chat.id,
+                            provider_id,
+                            target_model.expect("exact cleanup has a model")
+                        )));
+                    }
+                    if chat.message_ids.is_empty() {
+                        chat.model = None;
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
                 continue;
             }
-            self.save_doc_inner(&canvas.canvas_id, &doc, false).await?;
+
+            document.validate_for_project(&project.project_id).map_err(|error| {
+                AppError::Conflict(format!(
+                    "creative studio project {} is invalid after provider cleanup: {error}",
+                    project.project_id
+                ))
+            })?;
+            self.validate_creative_provider_models(&document).await?;
+            let document_json = serialize_creative_project_document(&document)?;
+            let node_count = i64::try_from(document.nodes.len()).map_err(|_| {
+                AppError::Conflict(format!(
+                    "creative studio project {} has too many nodes",
+                    project.project_id
+                ))
+            })?;
+            let connection_count = i64::try_from(document.connections.len()).map_err(|_| {
+                AppError::Conflict(format!(
+                    "creative studio project {} has too many connections",
+                    project.project_id
+                ))
+            })?;
+            project_cleanups.push(ProviderModelProjectCleanup {
+                project_id: project.project_id,
+                expected_revision: project.revision,
+                document_json,
+                node_count,
+                connection_count,
+                updated_at: now_ms().max(project.updated_at),
+            });
         }
-        Ok(())
+        let mut workflow_cleanups = Vec::new();
+        for workflow_row in self.repo.list_creative_workflows().await? {
+            let mut workflow = parse_workflow_row(&workflow_row).map_err(|error| {
+                AppError::Conflict(format!(
+                    "creative studio workflow {} is corrupt during provider cleanup: {error}",
+                    workflow_row.workflow_id
+                ))
+            })?;
+            let mut changed = false;
+            for step in &mut workflow.steps {
+                match step {
+                    crate::workflow::CreativeWorkflowStep::GenerateImages {
+                        generation,
+                        ..
+                    } if generation
+                        .model
+                        .as_ref()
+                        .is_some_and(|binding| {
+                            matches(&binding.provider_id, Some(&binding.model))
+                        }) =>
+                    {
+                        generation.model = None;
+                        changed = true;
+                    }
+                    crate::workflow::CreativeWorkflowStep::DraftPrompts {
+                        planning,
+                        ..
+                    } if planning
+                        .model
+                        .as_ref()
+                        .is_some_and(|binding| {
+                            matches(&binding.provider_id, Some(&binding.model))
+                        }) =>
+                    {
+                        planning.model = None;
+                        changed = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !changed {
+                continue;
+            }
+            workflow.revision = workflow_row.revision + 1;
+            workflow.metadata.updated_at = now_ms().max(workflow_row.updated_at);
+            workflow.validate().map_err(|error| {
+                AppError::Conflict(format!(
+                    "creative studio workflow {} is invalid after provider cleanup: {error}",
+                    workflow.id
+                ))
+            })?;
+            self.validate_creative_workflow_models_under_guard(&workflow)
+                .await?;
+            let replacement = workflow.to_row().map_err(|error| {
+                AppError::Conflict(format!(
+                    "creative studio workflow {} cannot be saved after provider cleanup: {error}",
+                    workflow.id
+                ))
+            })?;
+            workflow_cleanups.push(ProviderModelWorkflowCleanup {
+                workflow_id: workflow.id,
+                expected_revision: workflow_row.revision,
+                replacement,
+            });
+        }
+        Ok(ProviderModelCleanupPlan {
+            projects: project_cleanups,
+            workflows: workflow_cleanups,
+        })
     }
 
     /// Read an asset's original binary + its resolved mime. Errors when the
@@ -924,7 +2105,7 @@ impl WorkshopService {
             bytes: None,
             text_content: Some(input.text_content),
             in_library: input.in_library.unwrap_or(true),
-            origin: None,
+            origin: serialize_text_asset_origin(input.origin)?,
             created_at: now,
             updated_at: now,
         };
@@ -951,6 +2132,16 @@ impl WorkshopService {
             .map(WorkshopAsset::try_from)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(AssetListPage { items, total })
+    }
+
+    /// Resolve one canonical asset record for authenticated product clients.
+    pub async fn get_asset(&self, id: &str) -> Result<WorkshopAsset, AppError> {
+        let row = self
+            .repo
+            .get_asset(id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("workshop asset {id} not found")))?;
+        WorkshopAsset::try_from(row)
     }
 
     pub async fn patch_asset(&self, id: &str, patch: AssetPatch) -> Result<WorkshopAsset, AppError> {
@@ -988,6 +2179,44 @@ impl WorkshopService {
             .get_asset(id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("workshop asset {id} not found")))?;
+        for project_row in self.repo.list_creative_projects().await? {
+            let document = parse_stored_creative_project_row(&project_row)?;
+            if self
+                .collect_creative_project_asset_closure(&document)
+                .await?
+                .contains(id)
+            {
+                return Err(AppError::Conflict(format!(
+                    "asset {id} is referenced by Creative Studio project {}",
+                    project_row.project_id
+                )));
+            }
+        }
+        for workflow_row in self.repo.list_creative_workflows().await? {
+            let workflow = parse_workflow_row(&workflow_row).map_err(|error| {
+                AppError::Internal(format!(
+                    "stored creative studio workflow {} is corrupt: {error}",
+                    workflow_row.workflow_id
+                ))
+            })?;
+            if workflow.collect_asset_ids().contains(id) {
+                return Err(AppError::Conflict(format!(
+                    "asset {id} is referenced by workflow {}",
+                    workflow.id
+                )));
+            }
+        }
+        for run_row in self.repo.list_creative_workflow_runs(None).await? {
+            let run = parse_stored_workflow_run(&run_row)?;
+            if run.referenced_input_asset_ids().contains(&id)
+                || run.record.result_asset_ids.iter().any(|asset_id| asset_id == id)
+            {
+                return Err(AppError::Conflict(format!(
+                    "asset {id} is referenced by workflow run {}",
+                    run.request.id
+                )));
+            }
+        }
         self.repo.delete_asset(id).await?;
         for rel in [row.rel_path.as_deref(), row.thumb_rel_path.as_deref()].into_iter().flatten() {
             let abs = self.data_dir.join(rel);
@@ -1037,9 +2266,337 @@ impl WorkshopService {
     }
 }
 
-#[cfg(test)]
-fn default_doc_value() -> Value {
-    serde_json::from_str(DEFAULT_DOC).expect("DEFAULT_DOC is valid json")
+fn validate_creative_project_id(project_id: &str) -> Result<(), AppError> {
+    nomifun_common::validate_uuidv7(project_id)
+        .map(|_| ())
+        .map_err(|error| {
+            AppError::BadRequest(format!(
+                "creative studio project id must be a canonical UUIDv7: {error}"
+            ))
+        })
+}
+
+fn serialize_text_asset_origin(
+    origin: Option<PromptCatalogAssetOrigin>,
+) -> Result<Option<String>, AppError> {
+    let Some(origin) = origin else {
+        return Ok(None);
+    };
+    let required = |key: &str, value: &str, max: usize| -> Result<(), AppError> {
+        let value = Some(value)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| AppError::BadRequest(format!("text asset origin.{key} is required")))?;
+        if value.len() > max || value.chars().any(char::is_control) {
+            return Err(AppError::BadRequest(format!(
+                "text asset origin.{key} is invalid"
+            )));
+        }
+        Ok(())
+    };
+    required("prompt_catalog_id", &origin.prompt_catalog_id, 255)?;
+    required("source_url", &origin.source_url, 4_096)?;
+    required("license", &origin.license, 120)?;
+    required("license_url", &origin.license_url, 4_096)?;
+    let valid_https_url = |value: &str| {
+        reqwest::Url::parse(value)
+            .is_ok_and(|url| url.scheme() == "https" && url.host().is_some())
+    };
+    if !valid_https_url(&origin.source_url) || !valid_https_url(&origin.license_url) {
+        return Err(AppError::BadRequest(
+            "text asset origin URLs must use HTTPS".into(),
+        ));
+    }
+    serde_json::to_string(&origin)
+        .map(Some)
+        .map_err(|error| AppError::BadRequest(format!("serialize text asset origin: {error}")))
+}
+
+fn validate_creative_workflow_id(workflow_id: &str) -> Result<(), AppError> {
+    CreativeStudioWorkflowId::parse(workflow_id)
+        .map(|_| ())
+        .map_err(|error| AppError::BadRequest(format!("invalid workflow id: {error}")))
+}
+
+fn validate_creative_workflow_run_id(workflow_run_id: &str) -> Result<(), AppError> {
+    CreativeStudioWorkflowRunId::parse(workflow_run_id)
+        .map(|_| ())
+        .map_err(|error| AppError::BadRequest(format!("invalid workflow run id: {error}")))
+}
+
+fn parse_stored_workflow_run(
+    row: &CreativeStudioWorkflowRunRow,
+) -> Result<CreativeWorkflowRunAggregateV1, AppError> {
+    parse_workflow_run_row(row).map_err(|error| {
+        AppError::Internal(format!(
+            "stored creative studio workflow run {} is corrupt: {error}",
+            row.workflow_run_id
+        ))
+    })
+}
+
+fn validate_workflow_result_origin(
+    asset: &WorkshopAssetRow,
+    aggregate: &CreativeWorkflowRunAggregateV1,
+    executable_steps: &BTreeSet<String>,
+    task_ids: &BTreeSet<String>,
+) -> Result<(), AppError> {
+    let origin = asset.origin.as_deref().ok_or_else(|| {
+        AppError::Conflict(format!(
+            "workflow run result {} has no durable provenance",
+            asset.asset_id
+        ))
+    })?;
+    let origin = serde_json::from_str::<Value>(origin).map_err(|error| {
+        AppError::Conflict(format!(
+            "workflow run result {} has invalid provenance: {error}",
+            asset.asset_id
+        ))
+    })?;
+    let origin = origin.as_object().ok_or_else(|| {
+        AppError::Conflict(format!(
+            "workflow run result {} provenance must be an object",
+            asset.asset_id
+        ))
+    })?;
+    let string = |key: &str| origin.get(key).and_then(Value::as_str);
+    let workflow_step_id = string("workflow_step_id");
+    let creation_task_id = string("creation_task_id");
+    if string("workflow_id") != Some(aggregate.request.workflow_id.as_str())
+        || string("workflow_run_id") != Some(aggregate.request.id.as_str())
+        || workflow_step_id.is_none_or(|id| !executable_steps.contains(id))
+        || creation_task_id.is_none_or(|id| !task_ids.contains(id))
+        || origin.contains_key("project_id")
+        || origin.contains_key("canvas_id")
+        || origin.contains_key("node_id")
+    {
+        return Err(AppError::Conflict(format!(
+            "workflow run result {} provenance does not match run {}",
+            asset.asset_id, aggregate.request.id
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_creative_project_title(
+    title: Option<&str>,
+    allow_default: bool,
+) -> Result<String, AppError> {
+    let title = title.map(str::trim).filter(|value| !value.is_empty());
+    let title = match title {
+        Some(title) => title,
+        None if allow_default => DEFAULT_CREATIVE_PROJECT_TITLE,
+        None => return Err(AppError::BadRequest("title must not be empty".into())),
+    };
+    if title.encode_utf16().count() > MAX_CREATIVE_PROJECT_TITLE_CHARS {
+        return Err(AppError::BadRequest(format!(
+            "title is too long (max {MAX_CREATIVE_PROJECT_TITLE_CHARS} UTF-16 code units)"
+        )));
+    }
+    Ok(title.to_owned())
+}
+
+fn normalize_creative_project_agent_kickoff(
+    kickoff: CreativeProjectAgentKickoff,
+) -> Result<CreativeProjectAgentKickoff, AppError> {
+    let prompt = kickoff.prompt.trim();
+    if prompt.is_empty() {
+        return Err(AppError::BadRequest(
+            "agentKickoff.prompt must not be empty".into(),
+        ));
+    }
+    if prompt.encode_utf16().count() > MAX_CREATIVE_AGENT_KICKOFF_PROMPT_CHARS {
+        return Err(AppError::BadRequest(format!(
+            "agentKickoff.prompt is too long (max {MAX_CREATIVE_AGENT_KICKOFF_PROMPT_CHARS} UTF-16 code units)"
+        )));
+    }
+    ProviderId::parse(&kickoff.provider_id).map_err(|error| {
+        AppError::BadRequest(format!(
+            "agentKickoff.model.providerId must be a canonical Provider UUIDv7: {error}"
+        ))
+    })?;
+    if kickoff.model.is_empty()
+        || kickoff.model.trim() != kickoff.model
+        || kickoff.model.encode_utf16().count() > MAX_CREATIVE_AGENT_MODEL_CHARS
+    {
+        return Err(AppError::BadRequest(format!(
+            "agentKickoff.model.model must be a non-empty trimmed string no longer than {MAX_CREATIVE_AGENT_MODEL_CHARS} UTF-16 code units"
+        )));
+    }
+    Ok(CreativeProjectAgentKickoff {
+        prompt: prompt.to_owned(),
+        provider_id: kickoff.provider_id,
+        model: kickoff.model,
+    })
+}
+
+fn parse_creative_project_revision(revision: &str) -> Result<i64, AppError> {
+    if revision.is_empty() || revision.starts_with('0') || !revision.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(AppError::BadRequest(
+            "expectedRevision must be a canonical positive decimal string".into(),
+        ));
+    }
+    let parsed = revision.parse::<i64>().map_err(|_| {
+        AppError::BadRequest(
+            "expectedRevision must be a canonical positive decimal string".into(),
+        )
+    })?;
+    if parsed < 1 || parsed.to_string() != revision {
+        return Err(AppError::BadRequest(
+            "expectedRevision must be a canonical positive decimal string".into(),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn validate_completed_assistant_message(
+    document: &CreativeProjectDocument,
+    assistant_message_id: &str,
+) -> Result<(), AppError> {
+    let occurrences = document
+        .chat_sessions
+        .iter()
+        .flat_map(|session| session.message_ids.iter().enumerate())
+        .filter(|(index, message_id)| *index % 2 == 1 && *message_id == assistant_message_id)
+        .count();
+    match occurrences {
+        1 => Ok(()),
+        0 => Err(AppError::BadRequest(format!(
+            "assistantMessageId '{assistant_message_id}' is not a completed assistant message in this project"
+        ))),
+        _ => Err(AppError::Conflict(format!(
+            "assistantMessageId '{assistant_message_id}' is ambiguous across project chat sessions"
+        ))),
+    }
+}
+
+fn persisted_creative_agent_message_text(
+    project_id: &str,
+    assistant_message_id: &str,
+    content_json: &str,
+) -> Result<String, AppError> {
+    let content: Value = serde_json::from_str(content_json).map_err(|error| {
+        AppError::Internal(format!(
+            "persisted Creative Studio assistant message {project_id}/{assistant_message_id} has invalid content JSON: {error}"
+        ))
+    })?;
+    content
+        .as_object()
+        .and_then(|object| object.get("content"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            AppError::Internal(format!(
+                "persisted Creative Studio assistant message {project_id}/{assistant_message_id} has no text content"
+            ))
+        })
+}
+
+fn map_creative_agent_proposal_db_error(error: DbError) -> AppError {
+    match error {
+        DbError::Conflict(message) if message.contains("revision conflict") => {
+            AppError::RevisionConflict(message)
+        }
+        DbError::Conflict(message)
+            if message.contains("not a completed visible assistant message") =>
+        {
+            AppError::BadRequest(message)
+        }
+        DbError::Conflict(message) => AppError::Conflict(message),
+        other => other.into(),
+    }
+}
+
+fn creative_agent_ops_fingerprint(ops_json: &str) -> Result<String, AppError> {
+    let ops_len = u64::try_from(ops_json.len())
+        .map_err(|_| AppError::BadRequest("Creative Studio operations are too large".to_owned()))?;
+    let mut fingerprint = Sha256::new();
+    fingerprint.update(CREATIVE_CANVAS_AGENT_ARTIFACT_KIND.as_bytes());
+    fingerprint.update([0]);
+    fingerprint.update(ops_len.to_be_bytes());
+    fingerprint.update(ops_json.as_bytes());
+    Ok(hex::encode(fingerprint.finalize()))
+}
+
+fn parse_stored_creative_agent_results(
+    project_id: &str,
+    assistant_message_id: &str,
+    results_json: &str,
+) -> Result<Vec<CreativeAgentOpResult>, AppError> {
+    serde_json::from_str(results_json).map_err(|error| {
+        AppError::Internal(format!(
+            "managed Creative Studio proposal receipt {project_id}/{assistant_message_id} has invalid results JSON: {error}"
+        ))
+    })
+}
+
+fn parse_creative_workflow_revision(revision: &str) -> Result<i64, AppError> {
+    let parsed = revision.parse::<i64>().map_err(|_| {
+        AppError::BadRequest("expectedRevision must be a positive decimal integer".into())
+    })?;
+    if parsed < 1 || parsed.to_string() != revision {
+        return Err(AppError::BadRequest(
+            "expectedRevision must be a positive canonical decimal integer".into(),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn serialize_creative_project_document(
+    document: &CreativeProjectDocument,
+) -> Result<String, AppError> {
+    let json = serde_json::to_string(document)
+        .map_err(|error| AppError::BadRequest(format!("invalid creative project document: {error}")))?;
+    if json.len() > MAX_CREATIVE_PROJECT_DOCUMENT_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "creative project document is too large: {} bytes (max {MAX_CREATIVE_PROJECT_DOCUMENT_BYTES})",
+            json.len()
+        )));
+    }
+    Ok(json)
+}
+
+fn parse_stored_creative_project_document(
+    document_json: &str,
+    project_id: &str,
+) -> Result<CreativeProjectDocument, AppError> {
+    let document = serde_json::from_str::<CreativeProjectDocument>(document_json).map_err(|error| {
+        AppError::Internal(format!(
+            "managed creative studio project {project_id} has an invalid v1 document: {error}"
+        ))
+    })?;
+    document.validate_for_project(project_id).map_err(|error| {
+        AppError::Internal(format!(
+            "managed creative studio project {project_id} violates the v1 contract: {error}"
+        ))
+    })?;
+    Ok(document)
+}
+
+fn parse_stored_creative_project_row(
+    row: &CreativeStudioProjectRow,
+) -> Result<CreativeProjectDocument, AppError> {
+    let document =
+        parse_stored_creative_project_document(&row.document_json, &row.project_id)?;
+    let node_count = i64::try_from(document.nodes.len()).map_err(|_| {
+        AppError::Internal(format!(
+            "managed creative studio project {} has too many nodes",
+            row.project_id
+        ))
+    })?;
+    let connection_count = i64::try_from(document.connections.len()).map_err(|_| {
+        AppError::Internal(format!(
+            "managed creative studio project {} has too many connections",
+            row.project_id
+        ))
+    })?;
+    if row.node_count != node_count || row.connection_count != connection_count {
+        return Err(AppError::Internal(format!(
+            "managed creative studio project {} summary counts do not match its document",
+            row.project_id
+        )));
+    }
+    Ok(document)
 }
 
 fn normalize_opt(v: Option<String>) -> Option<String> {
@@ -1109,23 +2666,26 @@ fn classify_mime(mime: &str) -> Result<(&'static str, String), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_common::{
-        ProviderLifecycleBarrier, WorkshopCanvasId, WorkshopEdgeId, WorkshopNodeId,
+    use crate::workflow::{
+        CreativeWorkflowMetadata, CreativeWorkflowOutputPlan, CreativeWorkflowPromptSource,
+        CreativeWorkflowStep, CreativeWorkflowTemplate, CreativeWorkflowTemplateSegment,
+        CreativeWorkflowVariable, CreativeWorkflowVisibility,
     };
-    use nomifun_db::SqliteWorkshopRepository;
+    use crate::workflow_run::{
+        CreativeWorkflowInputValue, CreativeWorkflowRunCreateRequest,
+        CreativeWorkflowRunStatus,
+    };
+    use nomifun_common::{
+        ConversationId, CreativeStudioNodeId, MessageId, ProviderLifecycleBarrier,
+    };
+    use nomifun_db::{IProviderRepository, SqliteProviderRepository, SqliteWorkshopRepository};
 
     async fn service() -> (Arc<WorkshopService>, tempfile::TempDir) {
-        // Default test harness reclaims immediately (grace 0) so GC/delete tests
-        // stay deterministic; the grace behavior is covered by dedicated tests.
-        service_with_gc_grace(0).await
-    }
-
-    async fn service_with_gc_grace(grace_ms: i64) -> (Arc<WorkshopService>, tempfile::TempDir) {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let repo: Arc<dyn IWorkshopRepository> = Arc::new(SqliteWorkshopRepository::new(db.pool().clone()));
         Box::leak(Box::new(db));
         let dir = tempfile::tempdir().unwrap();
-        (WorkshopService::start_with_gc_grace(dir.path(), repo, grace_ms), dir)
+        (WorkshopService::start(dir.path(), repo), dir)
     }
 
     async fn service_with_database_and_lifecycle(
@@ -1135,10 +2695,9 @@ mod tests {
         let repo: Arc<dyn IWorkshopRepository> =
             Arc::new(SqliteWorkshopRepository::new(db.pool().clone()));
         let dir = tempfile::tempdir().unwrap();
-        let service = WorkshopService::start_with_gc_grace_and_provider_lifecycle(
+        let service = WorkshopService::start_with_optional_provider_lifecycle(
             dir.path(),
             repo,
-            0,
             provider_lifecycle,
         );
         (service, dir, db)
@@ -1165,6 +2724,659 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn creative_agent_ops_fingerprint_is_artifact_kind_and_length_scoped() {
+        assert_eq!(
+            creative_agent_ops_fingerprint("[]").unwrap(),
+            "b9ebe725aaa9c6dd48b19e40c2a23f2fc599ae691e724e1874d9f0d9b69ccaf1"
+        );
+        assert_ne!(
+            creative_agent_ops_fingerprint("[]").unwrap(),
+            hex::encode(Sha256::digest(b"[]"))
+        );
+    }
+
+    fn workflow_definition() -> CreativeWorkflowDefinitionV1 {
+        let workflow_id = CreativeStudioWorkflowId::new().into_string();
+        let variable_id = nomifun_common::generate_id();
+        let template_id = nomifun_common::generate_id();
+        let render_id = nomifun_common::generate_id();
+        let generate_id = nomifun_common::generate_id();
+        CreativeWorkflowDefinitionV1 {
+            id: workflow_id,
+            revision: 1,
+            metadata: CreativeWorkflowMetadata {
+                name: "电商海报".into(),
+                description: "固定结构".into(),
+                category: "电商".into(),
+                visibility: CreativeWorkflowVisibility::Private,
+                tags: vec!["海报".into()],
+                created_at: 0,
+                updated_at: 0,
+            },
+            output: CreativeWorkflowOutputPlan::SingleImage,
+            variables: vec![CreativeWorkflowVariable::Text {
+                id: variable_id.clone(),
+                key: "product_name".into(),
+                label: "产品名称".into(),
+                description: String::new(),
+                required: true,
+                default_value: None,
+                placeholder: String::new(),
+                min_length: 0,
+                max_length: 200,
+            }],
+            templates: vec![CreativeWorkflowTemplate {
+                id: template_id.clone(),
+                name: "主提示词".into(),
+                segments: vec![
+                    CreativeWorkflowTemplateSegment::Text { text: "为 ".into() },
+                    CreativeWorkflowTemplateSegment::Variable { variable_id },
+                    CreativeWorkflowTemplateSegment::Text { text: " 生成海报".into() },
+                ],
+            }],
+            steps: vec![
+                CreativeWorkflowStep::RenderTemplate {
+                    id: render_id.clone(),
+                    name: "渲染提示词".into(),
+                    depends_on: Vec::new(),
+                    enabled: true,
+                    template_id: template_id.clone(),
+                },
+                CreativeWorkflowStep::GenerateImages {
+                    id: generate_id,
+                    name: "生成图片".into(),
+                    depends_on: vec![render_id],
+                    enabled: true,
+                    prompt_source: CreativeWorkflowPromptSource::Template { template_id },
+                    reference_variable_ids: Vec::new(),
+                    generation: crate::workflow::CreativeWorkflowImageGenerationSettings {
+                        model: None,
+                        quality: crate::workflow::CreativeWorkflowImageQuality::Auto,
+                        width: 1024,
+                        height: 1024,
+                        images_per_prompt: 1,
+                    },
+                },
+            ],
+        }
+    }
+
+    fn series_workflow_definition(
+        provider_id: &str,
+        model: &str,
+    ) -> CreativeWorkflowDefinitionV1 {
+        let mut definition = workflow_definition();
+        let template_id = definition.templates[0].id.clone();
+        let draft_id = nomifun_common::generate_id();
+        let generate_id = nomifun_common::generate_id();
+        definition.output = CreativeWorkflowOutputPlan::MultiImageSeries {
+            target_count: 2,
+            concurrency: 2,
+            review_required: true,
+        };
+        definition.steps = vec![
+            CreativeWorkflowStep::DraftPrompts {
+                id: draft_id.clone(),
+                name: "规划提示词".into(),
+                depends_on: Vec::new(),
+                enabled: true,
+                template_id,
+                planning: crate::workflow::CreativeWorkflowPromptPlanningSettings {
+                    model: Some(crate::workflow::CreativeWorkflowTextModelBinding {
+                        provider_id: provider_id.into(),
+                        model: model.into(),
+                        task: crate::workflow::CreativeWorkflowTextTask::Chat,
+                    }),
+                    instruction: "保持系列连贯".into(),
+                    max_tokens: 4096,
+                },
+            },
+            CreativeWorkflowStep::GenerateImages {
+                id: generate_id,
+                name: "生成图片".into(),
+                depends_on: vec![draft_id.clone()],
+                enabled: true,
+                prompt_source: CreativeWorkflowPromptSource::PromptDrafts {
+                    step_id: draft_id,
+                },
+                reference_variable_ids: Vec::new(),
+                generation: crate::workflow::CreativeWorkflowImageGenerationSettings {
+                    model: None,
+                    quality: crate::workflow::CreativeWorkflowImageQuality::Auto,
+                    width: 1024,
+                    height: 1024,
+                    images_per_prompt: 1,
+                },
+            },
+        ];
+        definition
+    }
+
+    #[tokio::test]
+    async fn creative_workflow_service_persists_closed_definitions_with_cas() {
+        let (service, _dir) = service().await;
+        let created = service
+            .create_creative_workflow(workflow_definition())
+            .await
+            .unwrap();
+        assert_eq!(created.revision, 1);
+        assert!(created.metadata.created_at > 0);
+        assert_eq!(
+            service.list_creative_workflows().await.unwrap(),
+            vec![created.clone()]
+        );
+
+        let mut replacement = created.clone();
+        replacement.revision = 2;
+        replacement.metadata.name = "高端电商海报".into();
+        let saved = service
+            .save_creative_workflow(&created.id, "1", replacement.clone())
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, 2);
+        assert_eq!(saved.metadata.name, "高端电商海报");
+        assert_eq!(saved.metadata.created_at, created.metadata.created_at);
+
+        let stale = service
+            .save_creative_workflow(&created.id, "1", replacement)
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, AppError::Conflict(_)));
+
+        service.delete_creative_workflow(&created.id).await.unwrap();
+        assert!(matches!(
+            service.get_creative_workflow(&created.id).await.unwrap_err(),
+            AppError::NotFound(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn creative_workflow_model_binding_requires_one_enabled_exact_task() {
+        let (service, _dir, database) = service_with_database_and_lifecycle(None).await;
+        let provider_id = ProviderId::new().into_string();
+        let mut definition = workflow_definition();
+        if let CreativeWorkflowStep::GenerateImages { generation, .. } = &mut definition.steps[1] {
+            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+                provider_id: provider_id.clone(),
+                model: "image-model".into(),
+                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+            });
+        }
+        assert!(matches!(
+            service.create_creative_workflow(definition.clone()).await,
+            Err(AppError::Conflict(_))
+        ));
+
+        insert_provider(&database, &provider_id).await;
+        insert_provider_model(&database, &provider_id, "image-model").await;
+        assert!(matches!(
+            service.create_creative_workflow(definition.clone()).await,
+            Err(AppError::Conflict(_))
+        ));
+
+        nomifun_db::sqlx::query(
+            "INSERT INTO provider_model_capabilities \
+             (provider_id, model, task, traits, protocol, connection_role, \
+              allow_cross_origin_credentials, provider_params, created_at, updated_at) \
+             VALUES (?, 'image-model', 'image_generation', '[]', 'openai.images', \
+                     'default', 0, '{}', 1, 1)",
+        )
+        .bind(&provider_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let created = service.create_creative_workflow(definition).await.unwrap();
+        assert_eq!(created.image_model_bindings().count(), 1);
+
+        let text_provider_id = ProviderId::new().into_string();
+        insert_provider(&database, &text_provider_id).await;
+        insert_provider_model(&database, &text_provider_id, "chat-model").await;
+        let text_definition = series_workflow_definition(&text_provider_id, "chat-model");
+        assert!(matches!(
+            service
+                .create_creative_workflow(text_definition.clone())
+                .await,
+            Err(AppError::Conflict(_))
+        ));
+        insert_provider_model_capability(
+            &database,
+            &text_provider_id,
+            "chat-model",
+            "chat",
+        )
+        .await;
+        let created = service
+            .create_creative_workflow(text_definition)
+            .await
+            .unwrap();
+        assert_eq!(created.text_model_bindings().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn creative_workflow_run_is_idempotent_cas_backed_and_checks_result_provenance() {
+        let (service, _dir, database) = service_with_database_and_lifecycle(None).await;
+        let provider_id = ProviderId::new().into_string();
+        insert_provider(&database, &provider_id).await;
+        insert_provider_model(&database, &provider_id, "image-model").await;
+        insert_provider_model_capability(
+            &database,
+            &provider_id,
+            "image-model",
+            "image_generation",
+        )
+        .await;
+
+        let mut definition = workflow_definition();
+        let CreativeWorkflowVariable::Text { id: variable_id, .. } = &definition.variables[0]
+        else {
+            panic!("workflow fixture must start with a text variable")
+        };
+        let variable_id = variable_id.clone();
+        if let CreativeWorkflowStep::GenerateImages { generation, .. } = &mut definition.steps[1]
+        {
+            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+                provider_id: provider_id.clone(),
+                model: "image-model".into(),
+                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+            });
+        }
+        let definition = service
+            .create_creative_workflow(definition)
+            .await
+            .unwrap();
+        let reference_asset = service
+            .ingest_asset_bytes(
+                png_1x1(),
+                "image/png",
+                "reference",
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        let run_id = CreativeStudioWorkflowRunId::new().into_string();
+        let request = CreativeWorkflowRunCreateRequest {
+            run_id: run_id.clone(),
+            workflow_id: definition.id.clone(),
+            workflow_revision: definition.revision,
+            inputs: vec![CreativeWorkflowInputValue::Text {
+                variable_id,
+                value: "NomiFun".into(),
+            }],
+            reference_asset_ids: vec![reference_asset.asset_id.clone()],
+        };
+        let created = service
+            .create_creative_workflow_run(request.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .create_creative_workflow_run(request.clone())
+                .await
+                .unwrap(),
+            created
+        );
+        let mut mismatched = request;
+        if let CreativeWorkflowInputValue::Text { value, .. } = &mut mismatched.inputs[0] {
+            *value = "another request".into();
+        }
+        assert!(matches!(
+            service.create_creative_workflow_run(mismatched).await,
+            Err(AppError::Conflict(_))
+        ));
+
+        let task_id = nomifun_common::generate_id();
+        let step_id = created.executable_task_step_ids()[0].clone();
+        let mut queued = created.clone();
+        queued.revision = 2;
+        queued.record.status = CreativeWorkflowRunStatus::Queued;
+        queued.record.task_ids = vec![task_id.clone()];
+        queued.record.queued_at = Some(created.request.requested_at + 1);
+        let queued = service
+            .save_creative_workflow_run(&run_id, "1", queued)
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .save_creative_workflow_run(&run_id, "1", queued.clone())
+                .await,
+            Err(AppError::Conflict(_))
+        ));
+
+        let mut running = queued.clone();
+        running.revision = 3;
+        running.record.status = CreativeWorkflowRunStatus::Running;
+        running.record.started_at = Some(created.request.requested_at + 2);
+        let running = service
+            .save_creative_workflow_run(&run_id, "2", running)
+            .await
+            .unwrap();
+        nomifun_db::sqlx::query(
+            "INSERT INTO creation_tasks \
+                (creation_task_id, workflow_id, workflow_run_id, workflow_step_id, \
+                 provider_id, model, capability, params, status, error, result_asset_ids, \
+                 remote_task_id, attempt, submitted_at, started_at, finished_at, request_fingerprint) \
+             VALUES (?, ?, ?, ?, ?, 'image-model', 'image_generation', '{}', 'running', \
+                     NULL, '[]', NULL, 1, ?, ?, NULL, '{}')",
+        )
+        .bind(&task_id)
+        .bind(&definition.id)
+        .bind(&run_id)
+        .bind(&step_id)
+        .bind(&provider_id)
+        .bind(created.request.requested_at + 1)
+        .bind(created.request.requested_at + 2)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let asset = service
+            .ingest_asset_bytes(
+                png_1x1(),
+                "image/png",
+                "result",
+                false,
+                Some(serde_json::json!({
+                    "workflow_id": definition.id,
+                    "workflow_run_id": run_id,
+                    "workflow_step_id": step_id,
+                    "creation_task_id": task_id
+                })),
+            )
+            .await
+            .unwrap();
+        let mut succeeded = running;
+        succeeded.revision = 4;
+        succeeded.record.status = CreativeWorkflowRunStatus::Succeeded;
+        succeeded.record.result_asset_ids = vec![asset.asset_id];
+        succeeded.record.completed_at = Some(created.request.requested_at + 3);
+        let succeeded = service
+            .save_creative_workflow_run(&run_id, "3", succeeded)
+            .await
+            .unwrap();
+        assert_eq!(succeeded.record.status, CreativeWorkflowRunStatus::Succeeded);
+        assert_eq!(
+            service
+                .list_creative_workflow_runs(Some(&succeeded.request.workflow_id))
+                .await
+                .unwrap(),
+            vec![succeeded]
+        );
+        assert!(matches!(
+            service.delete_asset(&reference_asset.asset_id).await,
+            Err(AppError::Conflict(message)) if message.contains("workflow run")
+        ));
+    }
+
+    async fn insert_provider_model(
+        db: &nomifun_db::Database,
+        provider_id: &str,
+        model: &str,
+    ) {
+        nomifun_db::sqlx::query(
+            "INSERT INTO provider_models \
+                (provider_id, model, enabled, sort_order, description, created_at, updated_at) \
+             VALUES (?, ?, 1, 0, NULL, 1, 1)",
+        )
+        .bind(provider_id)
+        .bind(model)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn insert_provider_model_capability(
+        db: &nomifun_db::Database,
+        provider_id: &str,
+        model: &str,
+        task: &str,
+    ) {
+        nomifun_db::sqlx::query(
+            "INSERT INTO provider_model_capabilities \
+                (provider_id, model, task, traits, protocol, connection_role, \
+                 allow_cross_origin_credentials, provider_params, created_at, updated_at) \
+             VALUES (?, ?, ?, '[]', 'openai.images', 'default', 0, '{}', 1, 1)",
+        )
+        .bind(provider_id)
+        .bind(model)
+        .bind(task)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    fn creative_config_node(
+        id: &str,
+        provider_id: Option<&str>,
+        model: Option<&str>,
+    ) -> crate::creative_studio::CreativeNode {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "type": "config",
+            "position": { "x": 0, "y": 0 },
+            "size": { "width": 320, "height": 240 },
+            "groupId": null,
+            "zIndex": 1,
+            "locked": false,
+            "data": {
+                "task": "image_generation",
+                "capability": "t2i",
+                "providerId": provider_id,
+                "model": model,
+                "prompt": "",
+                "negativePrompt": "",
+                "parameters": {},
+                "inputAssetIds": [],
+                "taskId": null,
+                "resultAssetIds": [],
+                "status": "idle",
+                "errorMessage": null
+            }
+        }))
+        .unwrap()
+    }
+
+    fn composer_model_value(provider_id: Option<&str>, model: Option<&str>) -> Value {
+        match (provider_id, model) {
+            (Some(provider_id), Some(model)) => serde_json::json!({
+                "providerId": provider_id,
+                "model": model
+            }),
+            (None, None) => Value::Null,
+            _ => panic!("composer model identity must be complete"),
+        }
+    }
+
+    fn creative_image_node(
+        id: &str,
+        provider_id: Option<&str>,
+        model: Option<&str>,
+    ) -> crate::creative_studio::CreativeNode {
+        let composer_model = composer_model_value(provider_id, model);
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "type": "image",
+            "position": { "x": 0, "y": 0 },
+            "size": { "width": 320, "height": 240 },
+            "groupId": null,
+            "zIndex": 1,
+            "locked": false,
+            "data": {
+                "assetId": null,
+                "caption": "",
+                "alt": "",
+                "fit": "contain",
+                "naturalSize": null,
+                "composer": {
+                    "prompt": "draft",
+                    "model": composer_model,
+                    "interfaceMode": "images",
+                    "quality": "auto",
+                    "width": 1024,
+                    "height": 1024,
+                    "aspectRatio": "1:1",
+                    "count": 1
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn creative_video_node(
+        id: &str,
+        provider_id: Option<&str>,
+        model: Option<&str>,
+    ) -> crate::creative_studio::CreativeNode {
+        let composer_model = composer_model_value(provider_id, model);
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "type": "video",
+            "position": { "x": 0, "y": 0 },
+            "size": { "width": 420, "height": 236 },
+            "groupId": null,
+            "zIndex": 1,
+            "locked": false,
+            "data": {
+                "assetId": null,
+                "posterAssetId": null,
+                "autoplay": false,
+                "loop": false,
+                "muted": true,
+                "trimStartMs": 0,
+                "trimEndMs": null,
+                "composer": {
+                    "prompt": "draft video",
+                    "model": composer_model,
+                    "resolution": "1080p",
+                    "aspectRatio": "16:9",
+                    "seconds": 5
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn creative_audio_node(
+        id: &str,
+        provider_id: Option<&str>,
+        model: Option<&str>,
+    ) -> crate::creative_studio::CreativeNode {
+        let composer_model = composer_model_value(provider_id, model);
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "type": "audio",
+            "position": { "x": 0, "y": 0 },
+            "size": { "width": 340, "height": 160 },
+            "groupId": null,
+            "zIndex": 1,
+            "locked": false,
+            "data": {
+                "assetId": null,
+                "title": "",
+                "loop": false,
+                "volume": 1,
+                "trimStartMs": 0,
+                "trimEndMs": null,
+                "composer": {
+                    "prompt": "literal narration",
+                    "model": composer_model,
+                    "voice": "alloy",
+                    "format": "mp3"
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn director_sidecar_text(
+        project_id: &str,
+        panorama_asset_id: &str,
+        capture_asset_id: &str,
+    ) -> String {
+        serde_json::to_string_pretty(&serde_json::json!({
+            "kind": "nomifun.director.project",
+            "version": 1,
+            "project": {
+                "projectId": project_id,
+                "name": "Portable Director",
+                "scene": {
+                    "name": "Scene",
+                    "transform": {
+                        "position": { "x": 0, "y": 0, "z": 0 },
+                        "rotation": { "x": 0, "y": 0, "z": 0 },
+                        "scale": { "x": 1, "y": 1, "z": 1 }
+                    },
+                    "environment": {
+                        "skyColor": "#101820",
+                        "panorama": { "assetId": panorama_asset_id },
+                        "panoramaYawDegrees": 0,
+                        "panoramaRadius": 50,
+                        "groundVisible": true,
+                        "gridVisible": true,
+                        "snapToGrid": false,
+                        "characterLabelsVisible": true
+                    }
+                },
+                "cameras": [{
+                    "kind": "camera",
+                    "id": "camera-1",
+                    "name": "Camera",
+                    "transform": {
+                        "position": { "x": 0, "y": 2, "z": 8 },
+                        "rotation": { "x": 0, "y": 0, "z": 0 },
+                        "scale": { "x": 1, "y": 1, "z": 1 }
+                    },
+                    "visible": true,
+                    "locked": false,
+                    "projection": "perspective",
+                    "focalLengthMm": 50,
+                    "orthographicSize": 10,
+                    "nearClip": 0.1,
+                    "farClip": 1000,
+                    "aspectRatio": { "width": 16, "height": 9 },
+                    "guides": { "frame": true, "center": true, "thirds": true, "safeArea": false }
+                }],
+                "characters": [],
+                "objects": [],
+                "lights": [],
+                "activeCameraId": "camera-1",
+                "selection": null,
+                "viewMode": "director",
+                "panels": {
+                    "leftSidebarOpen": true,
+                    "rightSidebarOpen": true,
+                    "timelineOpen": true
+                },
+                "timeline": {
+                    "durationSeconds": 5,
+                    "currentTimeSeconds": 0,
+                    "framesPerSecond": 24,
+                    "loop": false,
+                    "tracks": []
+                },
+                "capture": {
+                    "settings": {
+                        "width": 1920,
+                        "height": 1080,
+                        "imageFormat": "png",
+                        "videoFramesPerSecond": 24
+                    },
+                    "records": [{
+                        "id": "capture-1",
+                        "kind": "image",
+                        "cameraId": "camera-1",
+                        "assetId": capture_asset_id,
+                        "capturedAt": 123,
+                        "width": 1,
+                        "height": 1,
+                        "format": "png"
+                    }]
+                }
+            }
+        }))
+        .unwrap()
+    }
+
     // A 1x1 PNG.
     fn png_1x1() -> Vec<u8> {
         let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
@@ -1176,134 +3388,1122 @@ mod tests {
         b
     }
 
-    #[tokio::test]
-    async fn canvas_create_read_save_delete() {
-        let (svc, dir) = service().await;
-        let meta = svc.create_canvas(None).await.unwrap();
-        assert_eq!(meta.title, "未命名画布");
-        assert!(WorkshopCanvasId::parse(&meta.canvas_id).is_ok());
-        assert!(dir.path().join("workshop/canvases").join(&meta.canvas_id).join("canvas.json").exists());
-
-        // default doc parses; save a doc with 2 nodes → node_count syncs.
-        let read = svc.get_canvas(&meta.canvas_id).await.unwrap();
-        assert_eq!(read.doc["schema"], 1);
-        let doc = serde_json::json!({
-            "schema": 1,
-            "nodes": [
-                {"id": WorkshopNodeId::new().into_string()},
-                {"id": WorkshopNodeId::new().into_string()}
-            ],
-            "edges": []
-        });
-        let updated_at = svc.save_doc(&meta.canvas_id, &doc).await.unwrap();
-        assert!(updated_at >= meta.created_at);
-        let all = svc.list_canvases().await.unwrap();
-        assert_eq!(all[0].node_count, 2);
-
-        // rename
-        let renamed = svc.rename_canvas(&meta.canvas_id, "  我的画布  ").await.unwrap();
-        assert_eq!(renamed.title, "我的画布");
-        assert!(svc.rename_canvas(&meta.canvas_id, "   ").await.is_err());
-
-        // delete removes row + dir
-        svc.delete_canvas(&meta.canvas_id).await.unwrap();
-        assert!(!dir.path().join("workshop/canvases").join(&meta.canvas_id).exists());
-        assert!(svc.get_canvas(&meta.canvas_id).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn managed_data_audit_rejects_invalid_canvas_ids_without_rewriting_the_file() {
-        let (svc, dir) = service().await;
-        let canvas = svc.create_canvas(None).await.unwrap();
-        let path = dir
-            .path()
-            .join("workshop/canvases")
-            .join(&canvas.canvas_id)
-            .join("canvas.json");
-        let corrupt = br#"{"schema":1,"nodes":[{"id":"node_legacy"}],"edges":[]}"#;
-        tokio::fs::write(&path, corrupt).await.unwrap();
-
-        let error = svc.audit_managed_data_on_boot().await.unwrap_err();
-        assert!(error.to_string().contains("invalid durable IDs"));
-        assert_eq!(tokio::fs::read(&path).await.unwrap(), corrupt);
-    }
-
-    #[tokio::test]
-    async fn save_doc_rejects_oversize_and_unknown_canvas() {
-        let (svc, _dir) = service().await;
-        assert!(
-            svc.save_doc(
-                "0190f5fe-7c00-7a00-8000-000000000099",
-                &serde_json::json!({})
-            )
-            .await
-            .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn save_doc_enforces_generator_provider_logical_references() {
-        let (svc, _dir, _db) = service_with_database_and_lifecycle(None).await;
-        let canvas = svc.create_canvas(Some("provider contract".into())).await.unwrap();
-        let missing_provider_id = "0190f5fe-7c00-7a00-8000-000000000085";
-        let base = serde_json::json!({
-            "schema": 1,
+    fn document_with_one_text_node(project_id: &str, label: &str) -> CreativeProjectDocument {
+        serde_json::from_value(serde_json::json!({
+            "schema": CREATIVE_STUDIO_SCHEMA,
+            "projectId": project_id,
+            "viewport": { "x": 0, "y": 0, "zoom": 1 },
+            "background": "dots",
             "nodes": [{
-                "id": WorkshopNodeId::new().into_string(),
-                "kind": "generator",
+                "id": "node-a",
+                "type": "text",
+                "position": { "x": 10, "y": 20 },
+                "size": { "width": 320, "height": 180 },
+                "groupId": null,
+                "zIndex": 1,
+                "locked": false,
                 "data": {
-                    "providerId": missing_provider_id,
-                    "model": "image-model"
+                    "text": label,
+                    "format": "plain",
+                    "fontSize": 16,
+                    "textAlign": "left"
                 }
             }],
-            "edges": []
-        });
+            "connections": [],
+            "chatSessions": [],
+            "activeChatId": null,
+            "panels": {
+                "left": { "open": true, "width": 320, "activeView": "canvas" },
+                "right": { "open": true, "width": 360, "activeView": "assistant" },
+                "bottom": { "open": false, "height": 240, "activeView": "timeline" }
+            },
+            "pendingTaskIds": []
+        }))
+        .unwrap()
+    }
 
-        let error = svc.save_doc(&canvas.canvas_id, &base).await.unwrap_err();
-        assert!(
-            matches!(
-                error,
-                AppError::Conflict(ref message)
-                    if message.contains("references missing provider")
-            ),
-            "missing logical parent must be rejected; got {error:?}"
+    #[test]
+    fn creative_archive_file_guard_removes_uncommitted_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let rolled_back = dir.path().join("rolled-back.bin");
+        std::fs::write(&rolled_back, b"asset").unwrap();
+        {
+            let mut guard = CreativeArchiveFileRollback::new();
+            guard.track(rolled_back.clone());
+        }
+        assert!(!rolled_back.exists());
+
+        let committed = dir.path().join("committed.bin");
+        std::fs::write(&committed, b"asset").unwrap();
+        {
+            let mut guard = CreativeArchiveFileRollback::new();
+            guard.track(committed.clone());
+            guard.commit();
+        }
+        assert!(committed.exists());
+    }
+
+    #[tokio::test]
+    async fn creative_project_crud_uses_revision_cas() {
+        let (svc, _dir) = service().await;
+        assert!(svc.list_creative_projects().await.unwrap().is_empty());
+
+        let created = svc
+            .create_creative_project(Some("  新项目  ".into()))
+            .await
+            .unwrap();
+        assert_eq!(created.title, "新项目");
+        assert_eq!(created.revision, "1");
+        assert_eq!(created.node_count, 0);
+        assert_eq!(created.connection_count, 0);
+        assert!(CreativeStudioProjectId::parse(&created.project_id).is_ok());
+
+        let detail = svc.get_creative_project(&created.project_id).await.unwrap();
+        assert_eq!(detail.document.schema, CREATIVE_STUDIO_SCHEMA);
+        assert_eq!(detail.document.project_id, created.project_id);
+
+        let renamed = svc
+            .rename_creative_project(&created.project_id, "  重命名  ")
+            .await
+            .unwrap();
+        assert_eq!(renamed.title, "重命名");
+        assert_eq!(renamed.revision, "1", "rename must not invalidate autosave");
+
+        let mut document = document_with_one_text_node(&created.project_id, "first");
+        document.nodes.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "node-b",
+                "type": "image",
+                "position": { "x": 400, "y": 20 },
+                "size": { "width": 320, "height": 180 },
+                "groupId": null,
+                "zIndex": 2,
+                "locked": false,
+                "data": {
+                    "assetId": null,
+                    "caption": "",
+                    "alt": "",
+                    "fit": "cover",
+                    "naturalSize": null
+                }
+            }))
+            .unwrap(),
+        );
+        document
+            .connections
+            .push(crate::creative_studio::CreativeConnection {
+                id: "connection-a".into(),
+                source_node_id: "node-a".into(),
+                target_node_id: "node-b".into(),
+                source_handle: None,
+                target_handle: None,
+            });
+        let saved = svc
+            .save_creative_project(&created.project_id, "1", &document)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, "2");
+        assert_eq!(saved.node_count, 2);
+        assert_eq!(saved.connection_count, 1);
+
+        let saved_detail = svc.get_creative_project(&created.project_id).await.unwrap();
+        assert_eq!(
+            saved_detail.project.node_count as usize,
+            saved_detail.document.nodes.len()
+        );
+        assert_eq!(
+            saved_detail.project.connection_count as usize,
+            saved_detail.document.connections.len()
         );
 
-        let mut noncanonical = base.clone();
-        noncanonical["nodes"][0]["data"]["providerId"] =
-            serde_json::json!(format!("provider_{missing_provider_id}"));
-        let mut missing_model = base.clone();
-        missing_model["nodes"][0]["data"]
-            .as_object_mut()
-            .unwrap()
-            .remove("model");
-        let mut missing_provider = base;
-        missing_provider["nodes"][0]["data"]
-            .as_object_mut()
-            .unwrap()
-            .remove("providerId");
+        let stale = svc
+            .save_creative_project(&created.project_id, "1", &document)
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, AppError::RevisionConflict(_)));
 
-        for (case, invalid) in [
-            ("non-canonical provider", noncanonical),
-            ("provider without model", missing_model),
-            ("model without provider", missing_provider),
-        ] {
-            let error = svc.save_doc(&canvas.canvas_id, &invalid).await.unwrap_err();
-            assert!(
-                matches!(error, AppError::BadRequest(_)),
-                "{case} must be rejected as an invalid fixed pair; got {error:?}"
-            );
-        }
+        svc.delete_creative_project(&created.project_id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            svc.get_creative_project(&created.project_id).await,
+            Err(AppError::NotFound(_))
+        ));
+    }
 
+    #[tokio::test]
+    async fn project_create_only_locks_provider_lifecycle_for_agent_kickoff() {
+        let barrier = Arc::new(ProviderLifecycleBarrier::new());
+        let (svc, _dir, db) =
+            service_with_database_and_lifecycle(Some(barrier.clone())).await;
+        let owner_id = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
+        let provider_id = ProviderId::new().into_string();
+        insert_provider(&db, &provider_id).await;
+        insert_provider_model(&db, &provider_id, "chat-model").await;
+        insert_provider_model_capability(&db, &provider_id, "chat-model", "chat").await;
+
+        let write_guard = barrier.write().await;
+        let plain = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            svc.create_creative_project(Some("plain".into())),
+        )
+        .await
+        .expect("plain creation must not wait for Provider lifecycle")
+        .unwrap();
+        assert_eq!(plain.revision, "1");
+
+        let service = svc.clone();
+        let mut kickoff = tokio::spawn(async move {
+            service
+                .create_creative_project_for_owner(
+                    &owner_id,
+                    Some("kickoff".into()),
+                    Some(CreativeProjectAgentKickoff {
+                        prompt: "plan".into(),
+                        provider_id,
+                        model: "chat-model".into(),
+                    }),
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut kickoff)
+                .await
+                .is_err(),
+            "kickoff creation must wait while Provider deletion owns the lifecycle write guard"
+        );
+        drop(write_guard);
+
+        let created = kickoff.await.unwrap().unwrap();
+        assert_eq!(created.revision, "1");
+        let detail = svc.get_creative_project(&created.project_id).await.unwrap();
+        assert!(detail.document.chat_sessions[0].pending_turn.is_some());
+    }
+
+    #[tokio::test]
+    async fn creative_agent_ops_share_project_revision_cas() {
+        let (svc, _dir) = service().await;
+        let created = svc.create_creative_project(Some("Agent CAS".into())).await.unwrap();
+        let applied = svc
+            .apply_creative_agent_ops(
+                &created.project_id,
+                "1",
+                vec![crate::creative_agent_ops::CreativeAgentOp::AddNode {
+                    node_type: crate::creative_studio::CreativeNodeType::Text,
+                    x: 10.0,
+                    y: 20.0,
+                    width: None,
+                    height: None,
+                    group_id: None,
+                    data: serde_json::json!({
+                        "text": "Agent-created",
+                        "format": "plain",
+                        "fontSize": 16,
+                        "textAlign": "left"
+                    }),
+                }],
+                "conversation:test",
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied.project.revision, "2");
+        assert_eq!(applied.project.node_count, 1);
+        assert_eq!(applied.ops.len(), 1);
+
+        let stale = svc
+            .apply_creative_agent_ops(
+                &created.project_id,
+                "1",
+                vec![crate::creative_agent_ops::CreativeAgentOp::DeleteNode {
+                    node_id: match &applied.ops[0] {
+                        crate::creative_agent_ops::CreativeAgentOpResult::NodeAdded { node_id } => {
+                            node_id.clone()
+                        }
+                        other => panic!("unexpected result {other:?}"),
+                    },
+                }],
+                "conversation:test",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, AppError::RevisionConflict(_)));
+        let current = svc.get_creative_project(&created.project_id).await.unwrap();
+        assert_eq!(current.project.revision, "2");
+        assert_eq!(current.document.nodes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn creative_agent_proposal_replays_across_revision_and_rejects_message_mismatch() {
+        let (svc, _dir, db) = service_with_database_and_lifecycle(None).await;
+        let owner_id = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
+        let created = svc
+            .create_creative_project(Some("Agent proposal receipt".into()))
+            .await
+            .unwrap();
+        let session_id = nomifun_common::generate_id();
+        let user_message_id = MessageId::new().into_string();
+        let assistant_message_id = MessageId::new().into_string();
+        let provider_id = ProviderId::new().into_string();
+        let mut document = svc
+            .get_creative_project(&created.project_id)
+            .await
+            .unwrap()
+            .document;
+        document
+            .chat_sessions
+            .push(crate::creative_studio::CreativeChatSession {
+                id: session_id.clone(),
+                title: "Agent".into(),
+                message_ids: vec![user_message_id, assistant_message_id.clone()],
+                model: Some(crate::creative_studio::CreativeChatModel {
+                    provider_id,
+                    model: "chat-model".into(),
+                }),
+                pending_turn: None,
+                created_at: 1,
+                updated_at: 1,
+            });
+        document.active_chat_id = Some(session_id.clone());
+        let saved = svc
+            .save_creative_project(&created.project_id, "1", &document)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, "2");
+
+        let conversation_id = ConversationId::new().into_string();
+        nomifun_db::sqlx::query(
+            "INSERT INTO conversations \
+                (conversation_id, user_id, name, type, extra, status, source, created_at, updated_at) \
+             VALUES (?, ?, 'Creative Studio Agent', 'nomi', '{}', 'finished', 'nomifun', 1, 1)",
+        )
+        .bind(&conversation_id)
+        .bind(&owner_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        nomifun_db::sqlx::query(
+            "INSERT INTO creative_studio_agent_sessions \
+                (owner_id, project_id, session_id, conversation_id, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 1, 1)",
+        )
+        .bind(&owner_id)
+        .bind(&created.project_id)
+        .bind(&session_id)
+        .bind(&conversation_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let assistant_text = format!(
+            "```json\n{}\n```",
+            serde_json::json!({
+                "kind": CREATIVE_CANVAS_AGENT_ARTIFACT_KIND,
+                "summary": "Add durable text",
+                "ops": [{
+                    "type": "add_node",
+                    "node_type": "text",
+                    "x": 10.0,
+                    "y": 20.0,
+                    "data": {
+                        "text": "durable",
+                        "format": "plain",
+                        "fontSize": 16,
+                        "textAlign": "left"
+                    }
+                }]
+            })
+        );
+        let assistant_content_json =
+            serde_json::json!({ "content": assistant_text }).to_string();
+        nomifun_db::sqlx::query(
+            "INSERT INTO messages \
+                (message_id, conversation_id, msg_id, type, content, position, status, hidden, created_at) \
+             VALUES (?, ?, ?, 'text', ?, 'left', 'finish', 0, 2)",
+        )
+        .bind(&assistant_message_id)
+        .bind(&conversation_id)
+        .bind(&assistant_message_id)
+        .bind(&assistant_content_json)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let ops = vec![crate::creative_agent_ops::CreativeAgentOp::AddNode {
+            node_type: crate::creative_studio::CreativeNodeType::Text,
+            x: 10.0,
+            y: 20.0,
+            width: None,
+            height: None,
+            group_id: None,
+            data: serde_json::json!({
+                "text": "durable",
+                "format": "plain",
+                "fontSize": 16,
+                "textAlign": "left"
+            }),
+        }];
+        let first = svc
+            .apply_creative_agent_proposal(
+                &owner_id,
+                &created.project_id,
+                &assistant_message_id,
+                "2",
+                ops.clone(),
+                "test",
+            )
+            .await
+            .unwrap();
+        assert!(!first.replayed);
+        assert_eq!(first.applied_revision, "3");
+        assert_eq!(first.project.node_count, 1);
+
+        let replay = svc
+            .apply_creative_agent_proposal(
+                &owner_id,
+                &created.project_id,
+                &assistant_message_id,
+                "1",
+                ops,
+                "test",
+            )
+            .await
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.applied_revision, "3");
+        assert_eq!(replay.project.revision, "3");
+        assert_eq!(replay.ops, first.ops);
+
+        let mismatch = svc
+            .apply_creative_agent_proposal(
+                &owner_id,
+                &created.project_id,
+                &assistant_message_id,
+                "3",
+                vec![crate::creative_agent_ops::CreativeAgentOp::MoveNode {
+                    node_id: match &first.ops[0] {
+                        crate::creative_agent_ops::CreativeAgentOpResult::NodeAdded { node_id } => {
+                            node_id.clone()
+                        }
+                        other => panic!("unexpected result {other:?}"),
+                    },
+                    x: 30.0,
+                    y: 40.0,
+                }],
+                "test",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(mismatch, AppError::Conflict(message) if message.contains("artifact does not match")));
+
+        let unknown_message_id = MessageId::new().into_string();
+        let unknown_message = svc
+            .apply_creative_agent_proposal(
+                &owner_id,
+                &created.project_id,
+                &unknown_message_id,
+                "3",
+                vec![crate::creative_agent_ops::CreativeAgentOp::MoveNode {
+                    node_id: match &first.ops[0] {
+                        crate::creative_agent_ops::CreativeAgentOpResult::NodeAdded { node_id } => {
+                            node_id.clone()
+                        }
+                        other => panic!("unexpected result {other:?}"),
+                    },
+                    x: 30.0,
+                    y: 40.0,
+                }],
+                "test",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(unknown_message, AppError::BadRequest(message) if message.contains("not a completed visible assistant")));
+        let current = svc.get_creative_project(&created.project_id).await.unwrap();
+        assert_eq!(current.project.revision, "3");
+        assert_eq!(current.document.nodes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn project_asset_references_block_deletion_until_project_is_removed() {
+        let (svc, _dir) = service().await;
+        let asset = svc
+            .upload_asset(NewAssetUpload {
+                file_name: "reference.png".into(),
+                content_type: Some("image/png".into()),
+                bytes: png_1x1(),
+                title: None,
+                collection: None,
+                tags: None,
+                in_library: Some(false),
+            })
+            .await
+            .unwrap();
+        let project = svc
+            .create_creative_project(Some("asset owner".into()))
+            .await
+            .unwrap();
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(
+            serde_json::from_value(serde_json::json!({
+                "id": CreativeStudioNodeId::new().into_string(),
+                "type": "image",
+                "position": { "x": 0, "y": 0 },
+                "size": { "width": 320, "height": 240 },
+                "groupId": null,
+                "zIndex": 0,
+                "locked": false,
+                "data": {
+                    "assetId": asset.asset_id,
+                    "caption": "",
+                    "alt": "",
+                    "fit": "cover",
+                    "naturalSize": { "width": 1, "height": 1 }
+                }
+            }))
+            .unwrap(),
+        );
+        svc.save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            svc.delete_asset(&asset.asset_id).await,
+            Err(AppError::Conflict(message)) if message.contains("Creative Studio project")
+        ));
+        svc.delete_creative_project(&project.project_id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            svc.serve_file(&asset.asset_id, false).await,
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn project_delete_surfaces_live_task_conflict_and_keeps_terminal_tombstone() {
+        let (service, _dir, db) = service_with_database_and_lifecycle(None).await;
+        let project = service
+            .create_creative_project(Some("live task owner".into()))
+            .await
+            .unwrap();
+        let provider_id = ProviderId::new().into_string();
+        insert_provider(&db, &provider_id).await;
+        let task_id = nomifun_common::CreationTaskId::new().into_string();
+        nomifun_db::sqlx::query(
+            "INSERT INTO creation_tasks \
+             (creation_task_id, project_id, workbench_kind, provider_id, model, capability, params, \
+              input_bindings, status, submitted_at, request_fingerprint) \
+             VALUES (?, ?, 'video', ?, 'model', 't2v', '{}', '[]', 'queued', 1, '{}')",
+        )
+        .bind(&task_id)
+        .bind(&project.project_id)
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        assert!(matches!(
+            service.delete_creative_project(&project.project_id).await,
+            Err(AppError::Conflict(message)) if message.contains("live creation task")
+        ));
+
+        nomifun_db::sqlx::query(
+            "UPDATE creation_tasks SET status = 'failed', finished_at = 2, deleted_at = 3 \
+             WHERE creation_task_id = ?",
+        )
+        .bind(&task_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        service
+            .delete_creative_project(&project.project_id)
+            .await
+            .unwrap();
+        let retained: i64 = nomifun_db::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM creation_tasks WHERE creation_task_id = ? AND deleted_at = 3",
+        )
+        .bind(&task_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(retained, 1);
+    }
+
+    #[tokio::test]
+    async fn creative_project_archive_round_trip_copies_assets_and_remaps_graph() {
+        let (svc, _dir) = service().await;
+        let image_bytes = png_1x1();
+        let image = svc
+            .ingest_asset_bytes(
+                image_bytes.clone(),
+                "image/png",
+                "归档图片",
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        let text = svc
+            .create_text_asset(NewTextAsset {
+                title: "归档文本".into(),
+                text_content: "portable prompt".into(),
+                collection: Some("归档".into()),
+                tags: Some(vec!["prompt".into()]),
+                in_library: Some(false),
+                origin: None,
+            })
+            .await
+            .unwrap();
+        let project = svc
+            .create_creative_project(Some("可移植项目".into()))
+            .await
+            .unwrap();
+        let document: CreativeProjectDocument = serde_json::from_value(serde_json::json!({
+            "schema": CREATIVE_STUDIO_SCHEMA,
+            "projectId": project.project_id,
+            "viewport": { "x": 0, "y": 0, "zoom": 1 },
+            "background": "lines",
+            "nodes": [
+                {
+                    "id": "image-node",
+                    "type": "image",
+                    "position": { "x": 0, "y": 0 },
+                    "size": { "width": 320, "height": 180 },
+                    "groupId": null,
+                    "zIndex": 1,
+                    "locked": false,
+                    "data": {
+                        "assetId": image.asset_id,
+                        "caption": "",
+                        "alt": "asset",
+                        "fit": "contain",
+                        "naturalSize": null
+                    }
+                },
+                {
+                    "id": "config-node",
+                    "type": "config",
+                    "position": { "x": 400, "y": 0 },
+                    "size": { "width": 320, "height": 180 },
+                    "groupId": null,
+                    "zIndex": 2,
+                    "locked": false,
+                    "data": {
+                        "task": "image_generation",
+                        "capability": "text-to-image",
+                        "providerId": null,
+                        "model": null,
+                        "prompt": "portable",
+                        "negativePrompt": "",
+                        "parameters": {},
+                        "inputAssetIds": [text.asset_id],
+                        "taskId": null,
+                        "resultAssetIds": [],
+                        "status": "idle",
+                        "errorMessage": null
+                    }
+                }
+            ],
+            "connections": [{
+                "id": "edge-a",
+                "sourceNodeId": "image-node",
+                "targetNodeId": "config-node",
+                "sourceHandle": null,
+                "targetHandle": null
+            }],
+            "chatSessions": [],
+            "activeChatId": null,
+            "panels": {
+                "left": { "open": true, "width": 320, "activeView": "canvas" },
+                "right": { "open": true, "width": 360, "activeView": "assistant" },
+                "bottom": { "open": false, "height": 240, "activeView": "history" }
+            },
+            "pendingTaskIds": []
+        }))
+        .unwrap();
+        svc.save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+
+        let exported = svc
+            .export_creative_project_archive(&project.project_id)
+            .await
+            .unwrap();
+        assert_eq!(exported.mime, CREATIVE_STUDIO_ARCHIVE_MIME);
+        assert!(exported.file_name.ends_with(".nomifun-canvas.zip"));
+        let imported = svc
+            .import_creative_project_archive(exported.bytes)
+            .await
+            .unwrap();
+        assert_ne!(imported.project_id, project.project_id);
+        assert_eq!(imported.title, "可移植项目");
+        assert_eq!(imported.revision, "1");
+
+        let imported_detail = svc
+            .get_creative_project(&imported.project_id)
+            .await
+            .unwrap();
+        assert_ne!(imported_detail.document.nodes[0].id, "image-node");
+        assert_ne!(imported_detail.document.connections[0].id, "edge-a");
         assert_eq!(
-            svc.get_canvas(&canvas.canvas_id).await.unwrap().doc,
-            default_doc_value(),
-            "rejected logical references must not replace the persisted document"
+            imported_detail.document.connections[0].source_node_id,
+            imported_detail.document.nodes[0].id
+        );
+        let crate::creative_studio::CreativeNodeData::Image(imported_image) =
+            &imported_detail.document.nodes[0].data
+        else {
+            panic!("expected imported image node")
+        };
+        let imported_image_id = imported_image.asset_id.as_deref().unwrap();
+        assert_ne!(imported_image_id, image.asset_id);
+        assert_eq!(
+            svc.read_asset_bytes(imported_image_id).await.unwrap().0,
+            image_bytes
+        );
+        let crate::creative_studio::CreativeNodeData::Config(imported_config) =
+            &imported_detail.document.nodes[1].data
+        else {
+            panic!("expected imported config node")
+        };
+        assert_ne!(imported_config.input_asset_ids[0], text.asset_id);
+        assert_eq!(
+            svc.read_asset_bytes(&imported_config.input_asset_ids[0])
+                .await
+                .unwrap()
+                .0,
+            b"portable prompt"
         );
     }
 
     #[tokio::test]
-    async fn provider_cleanup_clears_only_the_target_generator_pair_and_is_idempotent() {
+    async fn director_archive_is_self_contained_across_fresh_data_roots() {
+        let (source, _source_dir) = service().await;
+        let project = source
+            .create_creative_project(Some("Portable Director".into()))
+            .await
+            .unwrap();
+        let panorama = source
+            .ingest_asset_bytes(png_1x1(), "image/png", "Director panorama", false, None)
+            .await
+            .unwrap();
+        let capture = source
+            .ingest_asset_bytes(png_1x1(), "image/png", "Unsent capture", false, None)
+            .await
+            .unwrap();
+        let sidecar = source
+            .create_text_asset(NewTextAsset {
+                title: "Director scene".into(),
+                text_content: director_sidecar_text(
+                    &project.project_id,
+                    &panorama.asset_id,
+                    &capture.asset_id,
+                ),
+                collection: None,
+                tags: Some(vec!["nomifun-director-v1".into()]),
+                in_library: Some(false),
+                origin: None,
+            })
+            .await
+            .unwrap();
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "director-node",
+                "type": "director",
+                "position": { "x": 0, "y": 0 },
+                "size": { "width": 640, "height": 360 },
+                "groupId": null,
+                "zIndex": 1,
+                "locked": false,
+                "data": {
+                    "sceneId": sidecar.asset_id,
+                    "cameraId": "camera-1",
+                    "timelineMs": 0,
+                    "durationMs": 5000
+                }
+            }))
+            .unwrap(),
+        );
+        source
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            source.delete_asset(&panorama.asset_id).await,
+            Err(AppError::Conflict(message)) if message.contains("Creative Studio project")
+        ));
+        source.audit_managed_data_on_boot().await.unwrap();
+        let first_archive = source
+            .export_creative_project_archive(&project.project_id)
+            .await
+            .unwrap();
+
+        let (target, _target_dir) = service().await;
+        let imported = target
+            .import_creative_project_archive(first_archive.bytes)
+            .await
+            .unwrap();
+        let imported_detail = target
+            .get_creative_project(&imported.project_id)
+            .await
+            .unwrap();
+        let CreativeNodeData::Director(imported_director) =
+            &imported_detail.document.nodes[0].data
+        else {
+            panic!("expected imported Director node")
+        };
+        let imported_sidecar_id = imported_director.scene_id.as_deref().unwrap();
+        assert_ne!(imported_sidecar_id, sidecar.asset_id);
+        let imported_sidecar = target
+            .read_asset_bytes(imported_sidecar_id)
+            .await
+            .unwrap()
+            .0;
+        let imported_nested =
+            director_sidecar_asset_ids(&imported_sidecar, &imported.project_id).unwrap();
+        assert_eq!(imported_nested.len(), 2);
+        assert!(!imported_nested.contains(&panorama.asset_id));
+        assert!(!imported_nested.contains(&capture.asset_id));
+        for asset_id in &imported_nested {
+            assert_eq!(target.read_asset_bytes(asset_id).await.unwrap().0, png_1x1());
+        }
+        target.audit_managed_data_on_boot().await.unwrap();
+        let second_archive = target
+            .export_creative_project_archive(&imported.project_id)
+            .await
+            .unwrap();
+
+        let (third, _third_dir) = service().await;
+        let imported_again = third
+            .import_creative_project_archive(second_archive.bytes)
+            .await
+            .unwrap();
+        let third_detail = third
+            .get_creative_project(&imported_again.project_id)
+            .await
+            .unwrap();
+        let CreativeNodeData::Director(third_director) = &third_detail.document.nodes[0].data
+        else {
+            panic!("expected twice-imported Director node")
+        };
+        let third_sidecar_id = third_director.scene_id.as_deref().unwrap();
+        let third_sidecar = third.read_asset_bytes(third_sidecar_id).await.unwrap().0;
+        let third_nested =
+            director_sidecar_asset_ids(&third_sidecar, &imported_again.project_id).unwrap();
+        assert_eq!(third_nested.len(), 2);
+        for asset_id in &third_nested {
+            third.read_asset_bytes(asset_id).await.unwrap();
+        }
+        third.audit_managed_data_on_boot().await.unwrap();
+
+        let imported_owned_assets = imported_nested
+            .iter()
+            .cloned()
+            .chain(std::iter::once(imported_sidecar_id.to_owned()))
+            .collect::<Vec<_>>();
+        target
+            .delete_creative_project(&imported.project_id)
+            .await
+            .unwrap();
+        for asset_id in imported_owned_assets {
+            assert!(matches!(
+                target.read_asset_bytes(&asset_id).await,
+                Err(AppError::NotFound(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn creative_project_save_rejects_wrong_contract_and_oversize() {
+        let (svc, _dir) = service().await;
+        let created = svc.create_creative_project(None).await.unwrap();
+        assert_eq!(created.title, "未命名画布");
+
+        let mut wrong_schema = document_with_one_text_node(&created.project_id, "bad");
+        wrong_schema.schema = "1".into();
+        assert!(matches!(
+            svc.save_creative_project(&created.project_id, "1", &wrong_schema)
+                .await,
+            Err(AppError::BadRequest(_))
+        ));
+
+        let mut wrong_project = document_with_one_text_node(&created.project_id, "bad");
+        wrong_project.project_id = CreativeStudioProjectId::new().into_string();
+        assert!(matches!(
+            svc.save_creative_project(&created.project_id, "1", &wrong_project)
+                .await,
+            Err(AppError::BadRequest(_))
+        ));
+
+        let mut oversize = document_with_one_text_node(&created.project_id, "large");
+        let crate::creative_studio::CreativeNodeData::Text(text) = &mut oversize.nodes[0].data
+        else {
+            panic!("fixture must contain a text node");
+        };
+        text.text = "x".repeat(MAX_CREATIVE_PROJECT_DOCUMENT_BYTES);
+        assert!(matches!(
+            svc.save_creative_project(&created.project_id, "1", &oversize)
+                .await,
+            Err(AppError::BadRequest(_))
+        ));
+        assert_eq!(
+            svc.get_creative_project(&created.project_id)
+                .await
+                .unwrap()
+                .project
+                .revision,
+            "1"
+        );
+    }
+
+    #[tokio::test]
+    async fn creative_project_concurrent_save_allows_exactly_one_winner() {
+        let (svc, _dir) = service().await;
+        let created = svc.create_creative_project(None).await.unwrap();
+        let first = document_with_one_text_node(&created.project_id, "first");
+        let second = document_with_one_text_node(&created.project_id, "second");
+        let (left, right) = tokio::join!(
+            svc.save_creative_project(&created.project_id, "1", &first),
+            svc.save_creative_project(&created.project_id, "1", &second),
+        );
+        let results = [left, right];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(AppError::RevisionConflict(_))))
+                .count(),
+            1
+        );
+        assert_eq!(
+            svc.get_creative_project(&created.project_id)
+                .await
+                .unwrap()
+                .project
+                .revision,
+            "2"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_data_audit_still_rejects_missing_canonical_project_assets() {
+        let (svc, _dir) = service().await;
+        let project = svc.create_creative_project(None).await.unwrap();
+        let missing_asset_id = WorkshopAssetId::new().into_string();
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "missing-image",
+                "type": "image",
+                "position": { "x": 0, "y": 0 },
+                "size": { "width": 320, "height": 240 },
+                "groupId": null,
+                "zIndex": 1,
+                "locked": false,
+                "data": {
+                    "assetId": missing_asset_id,
+                    "caption": "",
+                    "alt": "",
+                    "fit": "contain",
+                    "naturalSize": null
+                }
+            }))
+            .unwrap(),
+        );
+        svc.save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+
+        let error = svc.audit_managed_data_on_boot().await.unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::Internal(ref message)
+                if message.contains("creative studio project references missing asset")
+                    && message.contains(&missing_asset_id)
+        ));
+    }
+
+    #[tokio::test]
+    async fn canonical_save_requires_one_existing_provider_model_pair() {
+        let barrier = Arc::new(ProviderLifecycleBarrier::new());
+        let (svc, _dir, db) =
+            service_with_database_and_lifecycle(Some(barrier)).await;
+        let project = svc.create_creative_project(None).await.unwrap();
+        let missing_provider_id = "0190f5fe-7c00-7a00-8000-000000000081";
+        let existing_provider_id = "0190f5fe-7c00-7a00-8000-000000000082";
+        insert_provider(&db, existing_provider_id).await;
+
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(creative_config_node(
+            "missing-provider",
+            Some(missing_provider_id),
+            Some("image-model"),
+        ));
+        let missing_provider = svc
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            missing_provider,
+            AppError::Conflict(ref message)
+                if message.contains("missing provider-model")
+                    && message.contains(missing_provider_id)
+        ));
+
+        document.nodes[0] = creative_config_node(
+            "missing-model",
+            Some(existing_provider_id),
+            Some("unknown-model"),
+        );
+        let missing_model = svc
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            missing_model,
+            AppError::Conflict(ref message)
+                if message.contains("missing provider-model")
+                    && message.contains("unknown-model")
+        ));
+
+        document.nodes[0] = creative_config_node(
+            "partial-pair",
+            Some(existing_provider_id),
+            None,
+        );
+        assert!(matches!(
+            svc.save_creative_project(&project.project_id, "1", &document)
+                .await,
+            Err(AppError::BadRequest(message)) if message.contains("must be set together")
+        ));
+
+        insert_provider_model(&db, existing_provider_id, "image-model").await;
+        document.nodes[0] = creative_config_node(
+            "valid-pair",
+            Some(existing_provider_id),
+            Some("image-model"),
+        );
+        let saved = svc
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, "2");
+    }
+
+    #[tokio::test]
+    async fn canonical_save_validates_image_composer_provider_model_pair() {
+        let barrier = Arc::new(ProviderLifecycleBarrier::new());
+        let (svc, _dir, db) = service_with_database_and_lifecycle(Some(barrier)).await;
+        let project = svc.create_creative_project(None).await.unwrap();
+        let provider_id = "0190f5fe-7c00-7a00-8000-000000000083";
+        insert_provider(&db, provider_id).await;
+
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(creative_image_node(
+            "image-composer",
+            Some(provider_id),
+            Some("missing-model"),
+        ));
+        let missing_model = svc
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            missing_model,
+            AppError::Conflict(ref message)
+                if message.contains("image node image-composer composer")
+                    && message.contains("missing-model")
+        ));
+
+        insert_provider_model(&db, provider_id, "image-model").await;
+        document.nodes[0] = creative_image_node(
+            "image-composer",
+            Some(provider_id),
+            Some("image-model"),
+        );
+        let saved = svc
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, "2");
+    }
+
+    #[tokio::test]
+    async fn canonical_save_validates_video_composer_provider_model_pair() {
+        let barrier = Arc::new(ProviderLifecycleBarrier::new());
+        let (svc, _dir, db) = service_with_database_and_lifecycle(Some(barrier)).await;
+        let project = svc.create_creative_project(None).await.unwrap();
+        let provider_id = "0190f5fe-7c00-7a00-8000-000000000084";
+        insert_provider(&db, provider_id).await;
+
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(creative_video_node(
+            "video-composer",
+            Some(provider_id),
+            Some("missing-video-model"),
+        ));
+        let missing_model = svc
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            missing_model,
+            AppError::Conflict(ref message)
+                if message.contains("video node video-composer composer")
+                    && message.contains("missing-video-model")
+        ));
+
+        insert_provider_model(&db, provider_id, "video-model").await;
+        document.nodes[0] = creative_video_node(
+            "video-composer",
+            Some(provider_id),
+            Some("video-model"),
+        );
+        let saved = svc
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, "2");
+    }
+
+    #[tokio::test]
+    async fn canonical_save_validates_audio_composer_provider_model_pair() {
+        let barrier = Arc::new(ProviderLifecycleBarrier::new());
+        let (svc, _dir, db) = service_with_database_and_lifecycle(Some(barrier)).await;
+        let project = svc.create_creative_project(None).await.unwrap();
+        let provider_id = "0190f5fe-7c00-7a00-8000-000000000085";
+        insert_provider(&db, provider_id).await;
+
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(creative_audio_node(
+            "audio-composer",
+            Some(provider_id),
+            Some("missing-audio-model"),
+        ));
+        let missing_model = svc
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            missing_model,
+            AppError::Conflict(ref message)
+                if message.contains("audio node audio-composer composer")
+                    && message.contains("missing-audio-model")
+        ));
+
+        insert_provider_model(&db, provider_id, "audio-model").await;
+        document.nodes[0] = creative_audio_node(
+            "audio-composer",
+            Some(provider_id),
+            Some("audio-model"),
+        );
+        let saved = svc
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, "2");
+    }
+
+    #[tokio::test]
+    async fn provider_cleanup_cas_clears_only_target_canonical_pairs_and_is_idempotent() {
         let barrier = Arc::new(ProviderLifecycleBarrier::new());
         let (svc, _dir, db) =
             service_with_database_and_lifecycle(Some(barrier.clone())).await;
@@ -1311,164 +4511,597 @@ mod tests {
         let other_provider_id = "0190f5fe-7c00-7a00-8000-000000000087";
         insert_provider(&db, target_provider_id).await;
         insert_provider(&db, other_provider_id).await;
-        let canvas = svc.create_canvas(Some("provider cleanup".into())).await.unwrap();
-        let doc = serde_json::json!({
-            "schema": 1,
-            "nodes": [
-                {
-                    "id": WorkshopNodeId::new().into_string(),
-                    "kind": "generator",
-                    "data": {
-                        "providerId": target_provider_id,
-                        "model": "delete-me",
-                        "prompt": "keep prompt"
-                    }
-                },
-                {
-                    "id": WorkshopNodeId::new().into_string(),
-                    "kind": "generator",
-                    "data": {
-                        "providerId": other_provider_id,
-                        "model": "keep-me"
-                    }
-                }
-            ],
-            "edges": []
-        });
-        svc.save_doc(&canvas.canvas_id, &doc).await.unwrap();
+        insert_provider_model(&db, target_provider_id, "delete-me").await;
+        insert_provider_model(&db, other_provider_id, "keep-me").await;
+        insert_provider_model_capability(
+            &db,
+            target_provider_id,
+            "delete-me",
+            "image_generation",
+        )
+        .await;
+        insert_provider_model_capability(
+            &db,
+            other_provider_id,
+            "keep-me",
+            "image_generation",
+        )
+        .await;
+        insert_provider_model_capability(&db, target_provider_id, "delete-me", "chat").await;
+        insert_provider_model_capability(&db, other_provider_id, "keep-me", "chat").await;
+        let project = svc.create_creative_project(Some("provider cleanup".into())).await.unwrap();
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(creative_config_node(
+            "target-config",
+            Some(target_provider_id),
+            Some("delete-me"),
+        ));
+        document.nodes.push(creative_config_node(
+            "surviving-config",
+            Some(other_provider_id),
+            Some("keep-me"),
+        ));
+        document.nodes.push(creative_image_node(
+            "target-image",
+            Some(target_provider_id),
+            Some("delete-me"),
+        ));
+        document.nodes.push(creative_image_node(
+            "surviving-image",
+            Some(other_provider_id),
+            Some("keep-me"),
+        ));
+        document.nodes.push(creative_video_node(
+            "target-video",
+            Some(target_provider_id),
+            Some("delete-me"),
+        ));
+        document.nodes.push(creative_video_node(
+            "surviving-video",
+            Some(other_provider_id),
+            Some("keep-me"),
+        ));
+        document.nodes.push(creative_audio_node(
+            "target-audio",
+            Some(target_provider_id),
+            Some("delete-me"),
+        ));
+        document.nodes.push(creative_audio_node(
+            "surviving-audio",
+            Some(other_provider_id),
+            Some("keep-me"),
+        ));
+        svc.save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+
+        let mut target_workflow = workflow_definition();
+        if let CreativeWorkflowStep::GenerateImages { generation, .. } =
+            &mut target_workflow.steps[1]
+        {
+            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+                provider_id: target_provider_id.into(),
+                model: "delete-me".into(),
+                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+            });
+        }
+        let target_workflow = svc
+            .create_creative_workflow(target_workflow)
+            .await
+            .unwrap();
+        let mut surviving_workflow = workflow_definition();
+        if let CreativeWorkflowStep::GenerateImages { generation, .. } =
+            &mut surviving_workflow.steps[1]
+        {
+            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+                provider_id: other_provider_id.into(),
+                model: "keep-me".into(),
+                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+            });
+        }
+        let surviving_workflow = svc
+            .create_creative_workflow(surviving_workflow)
+            .await
+            .unwrap();
+        let target_planning_workflow = svc
+            .create_creative_workflow(series_workflow_definition(
+                target_provider_id,
+                "delete-me",
+            ))
+            .await
+            .unwrap();
+        let surviving_planning_workflow = svc
+            .create_creative_workflow(series_workflow_definition(
+                other_provider_id,
+                "keep-me",
+            ))
+            .await
+            .unwrap();
 
         let _write_guard = barrier.write().await;
         svc.clear_provider_references_under_lifecycle_write_guard(target_provider_id)
             .await
             .unwrap();
+        let cleaned_once = svc
+            .get_creative_workflow(&target_workflow.id)
+            .await
+            .unwrap();
+        assert_eq!(cleaned_once.revision, 2);
+        assert_eq!(cleaned_once.image_model_bindings().count(), 0);
+        let cleaned_planning = svc
+            .get_creative_workflow(&target_planning_workflow.id)
+            .await
+            .unwrap();
+        assert_eq!(cleaned_planning.revision, 2);
+        assert_eq!(cleaned_planning.text_model_bindings().count(), 0);
         svc.clear_provider_references_under_lifecycle_write_guard(target_provider_id)
             .await
             .unwrap();
 
-        let cleaned = svc.get_canvas(&canvas.canvas_id).await.unwrap().doc;
-        assert!(cleaned["nodes"][0]["data"].get("providerId").is_none());
-        assert!(cleaned["nodes"][0]["data"].get("model").is_none());
-        assert_eq!(cleaned["nodes"][0]["data"]["prompt"], "keep prompt");
-        assert_eq!(
-            cleaned["nodes"][1]["data"]["providerId"],
-            serde_json::json!(other_provider_id)
-        );
-        assert_eq!(cleaned["nodes"][1]["data"]["model"], "keep-me");
+        let cleaned = svc.get_creative_project(&project.project_id).await.unwrap();
+        assert_eq!(cleaned.project.revision, "3");
+        let CreativeNodeData::Config(target) = &cleaned.document.nodes[0].data else {
+            panic!("expected target config node")
+        };
+        assert_eq!(target.provider_id, None);
+        assert_eq!(target.model, None);
+        let CreativeNodeData::Config(surviving) = &cleaned.document.nodes[1].data else {
+            panic!("expected surviving config node")
+        };
+        assert_eq!(surviving.provider_id.as_deref(), Some(other_provider_id));
+        assert_eq!(surviving.model.as_deref(), Some("keep-me"));
+        let CreativeNodeData::Image(target_image) = &cleaned.document.nodes[2].data else {
+            panic!("expected target image node")
+        };
+        let target_composer = target_image.composer.as_ref().unwrap();
+        assert_eq!(target_composer.model, None);
+        assert_eq!(target_composer.prompt, "draft");
+        assert_eq!(target_composer.aspect_ratio, "1:1");
+        assert_eq!(target_composer.count, 1);
+        let CreativeNodeData::Image(surviving_image) = &cleaned.document.nodes[3].data else {
+            panic!("expected surviving image node")
+        };
+        let surviving_image_model = surviving_image
+            .composer
+            .as_ref()
+            .and_then(|composer| composer.model.as_ref())
+            .expect("unrelated image composer model must survive provider cleanup");
+        assert_eq!(surviving_image_model.provider_id, other_provider_id);
+        assert_eq!(surviving_image_model.model, "keep-me");
+        let CreativeNodeData::Video(target_video) = &cleaned.document.nodes[4].data else {
+            panic!("expected target video node")
+        };
+        assert_eq!(target_video.composer.as_ref().unwrap().model, None);
+        let CreativeNodeData::Video(surviving_video) = &cleaned.document.nodes[5].data else {
+            panic!("expected surviving video node")
+        };
+        let surviving_video_model = surviving_video
+            .composer
+            .as_ref()
+            .and_then(|composer| composer.model.as_ref())
+            .expect("unrelated video composer model must survive provider cleanup");
+        assert_eq!(surviving_video_model.provider_id, other_provider_id);
+        assert_eq!(surviving_video_model.model, "keep-me");
+        let CreativeNodeData::Audio(target_audio) = &cleaned.document.nodes[6].data else {
+            panic!("expected target audio node")
+        };
+        let target_audio_composer = target_audio.composer.as_ref().unwrap();
+        assert_eq!(target_audio_composer.model, None);
+        assert_eq!(target_audio_composer.prompt, "literal narration");
+        assert_eq!(target_audio_composer.voice, "alloy");
+        assert_eq!(target_audio_composer.format, "mp3");
+        let CreativeNodeData::Audio(surviving_audio) = &cleaned.document.nodes[7].data else {
+            panic!("expected surviving audio node")
+        };
+        let surviving_audio_model = surviving_audio
+            .composer
+            .as_ref()
+            .and_then(|composer| composer.model.as_ref())
+            .expect("unrelated audio composer model must survive provider cleanup");
+        assert_eq!(surviving_audio_model.provider_id, other_provider_id);
+        assert_eq!(surviving_audio_model.model, "keep-me");
+
+        let cleaned_twice = svc
+            .get_creative_workflow(&target_workflow.id)
+            .await
+            .unwrap();
+        assert_eq!(cleaned_twice.revision, 2);
+        assert_eq!(cleaned_twice.image_model_bindings().count(), 0);
+        let surviving_workflow = svc
+            .get_creative_workflow(&surviving_workflow.id)
+            .await
+            .unwrap();
+        assert_eq!(surviving_workflow.revision, 1);
+        let surviving_binding = surviving_workflow
+            .image_model_bindings()
+            .next()
+            .expect("unrelated workflow binding must survive provider cleanup");
+        assert_eq!(surviving_binding.provider_id, other_provider_id);
+        assert_eq!(surviving_binding.model, "keep-me");
+        let surviving_planning_workflow = svc
+            .get_creative_workflow(&surviving_planning_workflow.id)
+            .await
+            .unwrap();
+        assert_eq!(surviving_planning_workflow.revision, 1);
+        let surviving_planning_binding = surviving_planning_workflow
+            .text_model_bindings()
+            .next()
+            .expect("unrelated workflow planning binding must survive provider cleanup");
+        assert_eq!(surviving_planning_binding.provider_id, other_provider_id);
+        assert_eq!(surviving_planning_binding.model, "keep-me");
     }
 
     #[tokio::test]
-    async fn provider_lifecycle_write_guard_blocks_workshop_doc_writes() {
+    async fn exact_model_cleanup_builds_one_validated_plan_and_preserves_history_and_siblings() {
         let barrier = Arc::new(ProviderLifecycleBarrier::new());
         let (svc, _dir, db) =
             service_with_database_and_lifecycle(Some(barrier.clone())).await;
-        let provider_id = "0190f5fe-7c00-7a00-8000-000000000088";
+        let provider_id = "0190f5fe-7c00-7a00-8000-00000000008a";
         insert_provider(&db, provider_id).await;
-        let canvas = svc.create_canvas(Some("barrier".into())).await.unwrap();
-        let doc = serde_json::json!({
-            "schema": 1,
-            "nodes": [{
-                "id": WorkshopNodeId::new().into_string(),
-                "kind": "generator",
-                "data": {"providerId": provider_id, "model": "image-model"}
-            }],
-            "edges": []
+        for model in ["delete-me", "keep-same-provider"] {
+            insert_provider_model(&db, provider_id, model).await;
+            insert_provider_model_capability(&db, provider_id, model, "image_generation")
+                .await;
+            insert_provider_model_capability(&db, provider_id, model, "chat").await;
+        }
+
+        let project = svc
+            .create_creative_project(Some("exact model cleanup".into()))
+            .await
+            .unwrap();
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(creative_config_node(
+            "target-config",
+            Some(provider_id),
+            Some("delete-me"),
+        ));
+        document.nodes.push(creative_config_node(
+            "sibling-config",
+            Some(provider_id),
+            Some("keep-same-provider"),
+        ));
+        document.nodes.push(creative_image_node(
+            "target-image",
+            Some(provider_id),
+            Some("delete-me"),
+        ));
+        document.nodes.push(creative_video_node(
+            "target-video",
+            Some(provider_id),
+            Some("delete-me"),
+        ));
+        document.nodes.push(creative_audio_node(
+            "target-audio",
+            Some(provider_id),
+            Some("delete-me"),
+        ));
+        let empty_chat_id = nomifun_common::generate_id();
+        let completed_chat_id = nomifun_common::generate_id();
+        document.chat_sessions.push(crate::creative_studio::CreativeChatSession {
+            id: empty_chat_id.clone(),
+            title: "empty draft".into(),
+            message_ids: Vec::new(),
+            model: Some(crate::creative_studio::CreativeChatModel {
+                provider_id: provider_id.into(),
+                model: "delete-me".into(),
+            }),
+            pending_turn: None,
+            created_at: 1,
+            updated_at: 1,
         });
+        document.chat_sessions.push(crate::creative_studio::CreativeChatSession {
+            id: completed_chat_id.clone(),
+            title: "completed history".into(),
+            message_ids: vec![
+                nomifun_common::generate_id(),
+                nomifun_common::generate_id(),
+            ],
+            model: Some(crate::creative_studio::CreativeChatModel {
+                provider_id: provider_id.into(),
+                model: "delete-me".into(),
+            }),
+            pending_turn: None,
+            created_at: 1,
+            updated_at: 1,
+        });
+        svc.save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+
+        let mut target_workflow = workflow_definition();
+        if let CreativeWorkflowStep::GenerateImages { generation, .. } =
+            &mut target_workflow.steps[1]
+        {
+            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+                provider_id: provider_id.into(),
+                model: "delete-me".into(),
+                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+            });
+        }
+        let target_workflow = svc
+            .create_creative_workflow(target_workflow)
+            .await
+            .unwrap();
+        let mut sibling_workflow = workflow_definition();
+        if let CreativeWorkflowStep::GenerateImages { generation, .. } =
+            &mut sibling_workflow.steps[1]
+        {
+            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+                provider_id: provider_id.into(),
+                model: "keep-same-provider".into(),
+                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+            });
+        }
+        let sibling_workflow = svc
+            .create_creative_workflow(sibling_workflow)
+            .await
+            .unwrap();
+        let planning_workflow = svc
+            .create_creative_workflow(series_workflow_definition(provider_id, "delete-me"))
+            .await
+            .unwrap();
+
+        let _write_guard = barrier.write().await;
+        let cleanup = svc
+            .plan_provider_model_cleanup_under_lifecycle_write_guard(provider_id, "delete-me")
+            .await
+            .unwrap();
+
+        assert_eq!(cleanup.projects.len(), 1);
+        let project_patch = &cleanup.projects[0];
+        assert_eq!(project_patch.project_id, project.project_id);
+        assert_eq!(project_patch.expected_revision, 2);
+        let replacement: CreativeProjectDocument =
+            serde_json::from_str(&project_patch.document_json).unwrap();
+        let CreativeNodeData::Config(target_config) = &replacement.nodes[0].data else {
+            panic!("expected target config")
+        };
+        assert_eq!(target_config.provider_id, None);
+        assert_eq!(target_config.model, None);
+        let CreativeNodeData::Config(sibling_config) = &replacement.nodes[1].data else {
+            panic!("expected sibling config")
+        };
+        assert_eq!(sibling_config.provider_id.as_deref(), Some(provider_id));
+        assert_eq!(sibling_config.model.as_deref(), Some("keep-same-provider"));
+        for node in &replacement.nodes[2..=4] {
+            let model = match &node.data {
+                CreativeNodeData::Image(image) => image
+                    .composer
+                    .as_ref()
+                    .and_then(|composer| composer.model.as_ref()),
+                CreativeNodeData::Video(video) => video
+                    .composer
+                    .as_ref()
+                    .and_then(|composer| composer.model.as_ref()),
+                CreativeNodeData::Audio(audio) => audio
+                    .composer
+                    .as_ref()
+                    .and_then(|composer| composer.model.as_ref()),
+                _ => panic!("expected a composer node"),
+            };
+            assert_eq!(model, None, "exact composer selection must be cleared");
+        }
+        let empty_chat = replacement
+            .chat_sessions
+            .iter()
+            .find(|chat| chat.id == empty_chat_id)
+            .unwrap();
+        assert_eq!(empty_chat.model, None);
+        let completed_chat = replacement
+            .chat_sessions
+            .iter()
+            .find(|chat| chat.id == completed_chat_id)
+            .unwrap();
+        assert_eq!(completed_chat.model.as_ref().unwrap().model, "delete-me");
+
+        assert_eq!(cleanup.workflows.len(), 2);
+        let target_patch = cleanup
+            .workflows
+            .iter()
+            .find(|patch| patch.workflow_id == target_workflow.id)
+            .expect("target image workflow must be planned");
+        assert_eq!(target_patch.expected_revision, 1);
+        assert_eq!(target_patch.replacement.revision, 2);
+        assert_eq!(
+            parse_workflow_row(&target_patch.replacement)
+                .unwrap()
+                .image_model_bindings()
+                .count(),
+            0
+        );
+        let planning_patch = cleanup
+            .workflows
+            .iter()
+            .find(|patch| patch.workflow_id == planning_workflow.id)
+            .expect("target planning workflow must be planned");
+        assert_eq!(
+            parse_workflow_row(&planning_patch.replacement)
+                .unwrap()
+                .text_model_bindings()
+                .count(),
+            0
+        );
+        assert!(
+            cleanup
+                .workflows
+                .iter()
+                .all(|patch| patch.workflow_id != sibling_workflow.id)
+        );
+
+        let unchanged_project = svc.get_creative_project(&project.project_id).await.unwrap();
+        assert_eq!(unchanged_project.project.revision, "2");
+        assert_eq!(
+            svc.get_creative_workflow(&target_workflow.id)
+                .await
+                .unwrap()
+                .revision,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_model_cleanup_rejects_pending_canvas_or_agent_usage_without_writes() {
+        let barrier = Arc::new(ProviderLifecycleBarrier::new());
+        let (svc, _dir, db) =
+            service_with_database_and_lifecycle(Some(barrier.clone())).await;
+        let provider_id = "0190f5fe-7c00-7a00-8000-00000000008b";
+        insert_provider(&db, provider_id).await;
+        insert_provider_model(&db, provider_id, "delete-me").await;
+
+        let canvas_project = svc
+            .create_creative_project(Some("live canvas".into()))
+            .await
+            .unwrap();
+        let mut canvas_document =
+            CreativeProjectDocument::empty(canvas_project.project_id.clone());
+        let task_id = nomifun_common::generate_id();
+        let mut config = creative_config_node(
+            "live-config",
+            Some(provider_id),
+            Some("delete-me"),
+        );
+        let CreativeNodeData::Config(config_data) = &mut config.data else {
+            unreachable!()
+        };
+        config_data.status = CreativeGenerationStatus::Queued;
+        config_data.task_id = Some(task_id.clone());
+        canvas_document.nodes.push(config);
+        canvas_document.pending_task_ids.push(task_id);
+        svc.save_creative_project(&canvas_project.project_id, "1", &canvas_document)
+            .await
+            .unwrap();
+
+        let write_guard = barrier.write().await;
+        let canvas_error = svc
+            .plan_provider_model_cleanup_under_lifecycle_write_guard(provider_id, "delete-me")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            canvas_error,
+            AppError::Conflict(ref message) if message.contains("config node live-config")
+        ));
+        drop(write_guard);
+        assert_eq!(
+            svc.get_creative_project(&canvas_project.project_id)
+                .await
+                .unwrap()
+                .project
+                .revision,
+            "2"
+        );
+
+        svc.delete_creative_project(&canvas_project.project_id)
+            .await
+            .unwrap();
+        let agent_project = svc
+            .create_creative_project(Some("pending Agent".into()))
+            .await
+            .unwrap();
+        let mut agent_document =
+            CreativeProjectDocument::empty(agent_project.project_id.clone());
+        let chat_id = nomifun_common::generate_id();
+        agent_document.chat_sessions.push(crate::creative_studio::CreativeChatSession {
+            id: chat_id.clone(),
+            title: "pending".into(),
+            message_ids: Vec::new(),
+            model: Some(crate::creative_studio::CreativeChatModel {
+                provider_id: provider_id.into(),
+                model: "delete-me".into(),
+            }),
+            pending_turn: Some(crate::creative_studio::CreativeChatPendingTurn {
+                idempotency_key: nomifun_common::generate_id(),
+                prompt: "continue".into(),
+                model_input: Some("continue".into()),
+                skill_ids: vec!["creative-studio-canvas".into()],
+                created_at: 1,
+            }),
+            created_at: 1,
+            updated_at: 1,
+        });
+        agent_document.active_chat_id = Some(chat_id.clone());
+        svc.save_creative_project(&agent_project.project_id, "1", &agent_document)
+            .await
+            .unwrap();
+
+        let _write_guard = barrier.write().await;
+        let agent_error = svc
+            .plan_provider_model_cleanup_under_lifecycle_write_guard(provider_id, "delete-me")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            agent_error,
+            AppError::Conflict(ref message)
+                if message.contains("Agent session") && message.contains(&chat_id)
+        ));
+        assert_eq!(
+            svc.get_creative_project(&agent_project.project_id)
+                .await
+                .unwrap()
+                .project
+                .revision,
+            "2"
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_save_cannot_resurrect_provider_during_deletion() {
+        let barrier = Arc::new(ProviderLifecycleBarrier::new());
+        let (svc, _dir, db) =
+            service_with_database_and_lifecycle(Some(barrier.clone())).await;
+        let provider_id = "0190f5fe-7c00-7a00-8000-000000000089";
+        insert_provider(&db, provider_id).await;
+        insert_provider_model(&db, provider_id, "image-model").await;
+        let project = svc.create_creative_project(Some("delete race".into())).await.unwrap();
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(creative_config_node(
+            "config-node",
+            Some(provider_id),
+            Some("image-model"),
+        ));
+        svc.save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
 
         let write_guard = barrier.write().await;
         let service = svc.clone();
-        let canvas_id = canvas.canvas_id.clone();
-        let mut save = tokio::spawn(async move { service.save_doc(&canvas_id, &doc).await });
+        let project_id = project.project_id.clone();
+        let blocked_document = document.clone();
+        let mut save = tokio::spawn(async move {
+            service
+                .save_creative_project(&project_id, "2", &blocked_document)
+                .await
+        });
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), &mut save)
                 .await
                 .is_err(),
-            "a workshop write must wait while Provider deletion holds the lifecycle write guard"
+            "canonical save must wait while Provider deletion owns the lifecycle write guard"
         );
+
+        svc.clear_provider_references_under_lifecycle_write_guard(provider_id)
+            .await
+            .unwrap();
+        SqliteProviderRepository::new(db.pool().clone())
+            .delete(provider_id)
+            .await
+            .unwrap();
         drop(write_guard);
-        save.await.unwrap().unwrap();
-    }
 
-    #[tokio::test]
-    async fn canvas_doc_save_enforces_canonical_ids_and_deep_references() {
-        let (svc, _dir) = service().await;
-        let canvas = svc.create_canvas(Some("identity contract".into())).await.unwrap();
-        let group_id = WorkshopNodeId::new().into_string();
-        let member_id = WorkshopNodeId::new().into_string();
-        let edge_id = WorkshopEdgeId::new().into_string();
-        let valid = serde_json::json!({
-            "schema": 1,
-            "nodes": [
-                {"id": group_id, "kind": "group", "data": {}},
-                {
-                    "id": member_id,
-                    "kind": "generator",
-                    "groupId": group_id,
-                    "data": {"mentions": [format!("node:{group_id}")]}
-                }
-            ],
-            "edges": [{"id": edge_id, "from": group_id, "to": member_id}]
-        });
-        svc.save_doc(&canvas.canvas_id, &valid).await.unwrap();
-
-        let mut non_v7_node_id = valid.clone();
-        non_v7_node_id["nodes"][0]["id"] =
-            serde_json::json!("550e8400-e29b-41d4-a716-446655440000");
-        let mut duplicate_node = valid.clone();
-        let duplicated_id = duplicate_node["nodes"][0]["id"].clone();
-        duplicate_node["nodes"][1]["id"] = duplicated_id;
-        let mut missing_group = valid.clone();
-        missing_group["nodes"][1]["groupId"] =
-            serde_json::json!(WorkshopNodeId::new().into_string());
-        let mut legacy_mention = valid.clone();
-        legacy_mention["nodes"][1]["data"]["mentions"] = serde_json::json!(["node:legacy-node"]);
-        let mut non_v7_edge_id = valid.clone();
-        non_v7_edge_id["edges"][0]["id"] =
-            serde_json::json!("550e8400-e29b-41d4-a716-446655440001");
-        let mut missing_endpoint = valid.clone();
-        missing_endpoint["edges"][0]["to"] =
-            serde_json::json!(WorkshopNodeId::new().into_string());
-
-        for (case, invalid) in [
-            ("non-v7 node id", non_v7_node_id),
-            ("duplicate node id", duplicate_node),
-            ("missing group", missing_group),
-            ("legacy mention", legacy_mention),
-            ("non-v7 edge id", non_v7_edge_id),
-            ("missing endpoint", missing_endpoint),
-        ] {
-            let error = svc
-                .save_doc(&canvas.canvas_id, &invalid)
-                .await
-                .unwrap_err();
-            assert!(matches!(error, AppError::BadRequest(_)), "{case}: {error}");
-        }
-
-        // A rejected write must not replace the last valid document.
-        assert_eq!(svc.get_canvas(&canvas.canvas_id).await.unwrap().doc, valid);
-    }
-
-    #[tokio::test]
-    async fn canvas_doc_read_fails_closed_when_disk_ids_are_not_canonical() {
-        let (svc, dir) = service().await;
-        let canvas = svc.create_canvas(Some("corrupt identity".into())).await.unwrap();
-        let path = dir
-            .path()
-            .join("workshop/canvases")
-            .join(&canvas.canvas_id)
-            .join("canvas.json");
-        tokio::fs::write(
-            path,
-            br#"{"schema":1,"nodes":[{"id":"legacy-node"}],"edges":[]}"#,
-        )
-        .await
-        .unwrap();
-
-        let Err(error) = svc.get_canvas(&canvas.canvas_id).await else {
-            panic!("corrupt managed canvas must not be served");
-        };
+        let error = save.await.unwrap().unwrap_err();
         assert!(
-            matches!(error, AppError::Internal(message) if message.contains("invalid durable IDs"))
+            matches!(
+                error,
+                AppError::Conflict(ref message) if message.contains("missing provider-model")
+            ),
+            "save resumed with an unexpected error after Provider deletion: {error:?}"
         );
+        let cleaned = svc.get_creative_project(&project.project_id).await.unwrap();
+        assert_eq!(cleaned.project.revision, "3");
+        let CreativeNodeData::Config(config) = &cleaned.document.nodes[0].data else {
+            panic!("expected config node")
+        };
+        assert_eq!(config.provider_id, None);
+        assert_eq!(config.model, None);
     }
 
     #[tokio::test]
@@ -1490,7 +5123,10 @@ mod tests {
         assert_eq!(asset.width, Some(1));
         assert_eq!(asset.height, Some(1));
         assert!(asset.in_library);
-        assert_eq!(asset.url, format!("/api/workshop/files/{}", asset.asset_id));
+        assert_eq!(
+            asset.url,
+            format!("/api/creative-studio/files/{}", asset.asset_id)
+        );
 
         // serve returns the bytes + mime
         let served = svc.serve_file(&asset.asset_id, false).await.unwrap();
@@ -1529,6 +5165,7 @@ mod tests {
                 collection: None,
                 tags: None,
                 in_library: Some(false),
+                origin: None,
             })
             .await
             .unwrap();
@@ -1564,6 +5201,50 @@ mod tests {
         assert_eq!(String::from_utf8(served.bytes).unwrap(), a.text_content.clone().unwrap());
         svc.delete_asset(&a.asset_id).await.unwrap();
         assert!(svc.serve_file(&a.asset_id, false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn text_asset_prompt_catalog_origin_is_bounded_and_roundtrips() {
+        let (svc, _dir) = service().await;
+        let asset = svc
+            .create_text_asset(NewTextAsset {
+                title: "有来源的提示词".into(),
+                text_content: "Create a paper poster".into(),
+                collection: Some("提示词".into()),
+                tags: Some(vec!["poster".into()]),
+                in_library: Some(true),
+                origin: Some(PromptCatalogAssetOrigin {
+                    prompt_catalog_id: "awesome-gpt-image-001".into(),
+                    source_url: "https://github.com/ZeroLu/awesome-gpt-image".into(),
+                    license: "MIT".into(),
+                    license_url:
+                        "https://github.com/ZeroLu/awesome-gpt-image/blob/main/LICENSE".into(),
+                }),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            asset.origin.as_ref().unwrap()["prompt_catalog_id"],
+            "awesome-gpt-image-001"
+        );
+
+        let error = svc
+            .create_text_asset(NewTextAsset {
+                title: "不安全来源".into(),
+                text_content: "prompt".into(),
+                collection: None,
+                tags: None,
+                in_library: Some(true),
+                origin: Some(PromptCatalogAssetOrigin {
+                    prompt_catalog_id: "prompt-1".into(),
+                    source_url: "http://example.test/source".into(),
+                    license: "MIT".into(),
+                    license_url: "https://example.test/license".into(),
+                }),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::BadRequest(_)));
     }
 
     /// A real, decodable PNG (unlike the header-only `png_1x1`).
@@ -1631,114 +5312,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn canvas_thumbnail_set_and_served() {
-        let (svc, _dir) = service().await;
-        let canvas = svc.create_canvas(Some("画布".into())).await.unwrap();
-        assert!(canvas.thumbnail_url.is_none());
-        let asset = upload_png(&svc, true).await;
-
-        let meta = svc.patch_canvas(&canvas.canvas_id, None, Some(asset.asset_id.clone())).await.unwrap();
-        assert_eq!(meta.thumbnail_url.as_deref(), Some(&*format!("/api/workshop/canvas-thumbs/{}", canvas.canvas_id)));
-        let served = svc.serve_canvas_thumbnail(&canvas.canvas_id).await.unwrap();
-        assert_eq!(served.mime, "image/jpeg");
-        assert_eq!(&served.bytes[0..2], &[0xFF, 0xD8]);
-
-        // a text asset cannot be a thumbnail source
-        let text = svc
-            .create_text_asset(NewTextAsset {
-                title: "t".into(),
-                text_content: "x".into(),
-                collection: None,
-                tags: None,
-                in_library: Some(true),
-            })
-            .await
-            .unwrap();
-        assert!(svc.set_canvas_thumbnail(&canvas.canvas_id, &text.asset_id).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn delete_canvas_gcs_internal_asset_unless_shared() {
-        let (svc, _dir) = service().await;
-        // Asset referenced by two canvases; internal (in_library=0).
-        let asset = upload_png(&svc, false).await;
-        let node_id = WorkshopNodeId::new().into_string();
-        let doc = serde_json::json!({
-            "schema": 1, "nodes": [{ "id": node_id, "kind": "image", "data": { "assetId": asset.asset_id } }], "edges": []
-        });
-        let c1 = svc.create_canvas(Some("c1".into())).await.unwrap();
-        let c2 = svc.create_canvas(Some("c2".into())).await.unwrap();
-        svc.save_doc(&c1.canvas_id, &doc).await.unwrap();
-        svc.save_doc(&c2.canvas_id, &doc).await.unwrap();
-
-        // Deleting c1 keeps the asset (c2 still references it).
-        svc.delete_canvas(&c1.canvas_id).await.unwrap();
-        assert!(svc.serve_file(&asset.asset_id, false).await.is_ok());
-
-        // Deleting c2 (the last referencer) GCs the internal asset + its file.
-        svc.delete_canvas(&c2.canvas_id).await.unwrap();
-        assert!(svc.serve_file(&asset.asset_id, false).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn delete_canvas_keeps_library_asset() {
-        let (svc, _dir) = service().await;
-        let asset = upload_png(&svc, true).await; // in_library=1
-        let node_id = WorkshopNodeId::new().into_string();
-        let doc = serde_json::json!({
-            "schema": 1, "nodes": [{ "id": node_id, "kind": "image", "data": { "assetId": asset.asset_id } }], "edges": []
-        });
-        let c = svc.create_canvas(Some("c".into())).await.unwrap();
-        svc.save_doc(&c.canvas_id, &doc).await.unwrap();
-        svc.delete_canvas(&c.canvas_id).await.unwrap();
-        // Library assets are never GC'd on canvas delete.
-        assert!(svc.serve_file(&asset.asset_id, false).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn delete_canvas_grace_protects_recent_internal_asset() {
-        // A large grace: an internal asset referenced only by the deleted canvas
-        // is NOT reaped while still recent (another open canvas may reference it
-        // but not have autosaved yet); a later full GC reclaims it once aged.
-        let (svc, _dir) = service_with_gc_grace(GC_GRACE_MS).await;
-        let asset = upload_png(&svc, false).await; // canvas-internal
-        let node_id = WorkshopNodeId::new().into_string();
-        let doc = serde_json::json!({
-            "schema": 1, "nodes": [{ "id": node_id, "kind": "image", "data": { "assetId": asset.asset_id } }], "edges": []
-        });
-        let c = svc.create_canvas(Some("c".into())).await.unwrap();
-        svc.save_doc(&c.canvas_id, &doc).await.unwrap();
-        svc.delete_canvas(&c.canvas_id).await.unwrap();
-        assert!(svc.serve_file(&asset.asset_id, false).await.is_ok(), "recent internal asset survives delete_canvas grace");
-    }
-
-    #[tokio::test]
-    async fn mark_canvas_open_routes_agent_ops_to_queue() {
-        use crate::agent_ops::{AddNodeSpec, AgentOp, OpDisposition};
-        let (svc, _dir) = service().await;
-        let canvas = svc.create_canvas(Some("c".into())).await.unwrap();
-
-        // Simulate the editor's REST doc-load registering the canvas as open.
-        svc.mark_canvas_open(&canvas.canvas_id);
-
-        // An agent add_node now QUEUES (frontend authority) instead of writing
-        // straight to canvas.json — closing the cold-open clobber window.
-        let applied = svc
-            .apply_agent_ops(
-                &canvas.canvas_id,
-                vec![AgentOp::AddNode {
-                    node: AddNodeSpec { kind: "image".into(), x: None, y: None, w: None, h: None, data: None },
-                }],
-                "test",
-            )
-            .await
-            .unwrap();
-        assert_eq!(applied[0].disposition, OpDisposition::Queued);
-        // The doc was NOT touched.
-        assert_eq!(svc.get_canvas(&canvas.canvas_id).await.unwrap().meta.node_count, 0);
-    }
-
-    #[tokio::test]
     async fn list_assets_ungrouped_filters_serverside() {
         let (svc, _dir) = service().await;
         // Two ungrouped text assets (no collection) + one in a named collection.
@@ -1748,6 +5321,7 @@ mod tests {
             collection: None,
             tags: None,
             in_library: Some(true),
+            origin: None,
         })
         .await
         .unwrap();
@@ -1758,6 +5332,7 @@ mod tests {
             collection: Some("   ".into()),
             tags: None,
             in_library: Some(true),
+            origin: None,
         })
         .await
         .unwrap();
@@ -1767,6 +5342,7 @@ mod tests {
             collection: Some("角色".into()),
             tags: None,
             in_library: Some(true),
+            origin: None,
         })
         .await
         .unwrap();
@@ -1793,117 +5369,4 @@ mod tests {
         assert_eq!(grouped.items[0].collection.as_deref(), Some("角色"));
     }
 
-    #[tokio::test]
-    async fn agent_ops_direct_apply_to_closed_canvas() {
-        use crate::agent_ops::{AddNodeSpec, AgentOp, OpDisposition};
-        let (svc, _dir) = service().await;
-        let canvas = svc.create_canvas(Some("c".into())).await.unwrap();
-
-        // No frontend has polled → canvas is CLOSED → add_node applies to the doc.
-        let ops = vec![
-            AgentOp::AddNode {
-                node: AddNodeSpec {
-                    kind: "generator".into(),
-                    x: None,
-                    y: None,
-                    w: None,
-                    h: None,
-                    data: Some(serde_json::json!({ "prompt": "a wolf" })),
-                },
-            },
-        ];
-        let applied = svc.apply_agent_ops(&canvas.canvas_id, ops, "test").await.unwrap();
-        assert_eq!(applied.len(), 1);
-        assert_eq!(applied[0].disposition, OpDisposition::Applied);
-        let node_id = applied[0].node_id.clone().unwrap();
-
-        // The node is persisted in canvas.json and node_count synced.
-        let read = svc.get_canvas(&canvas.canvas_id).await.unwrap();
-        assert_eq!(read.meta.node_count, 1);
-        assert_eq!(read.doc["nodes"][0]["id"], serde_json::json!(node_id));
-        assert_eq!(read.doc["nodes"][0]["data"]["prompt"], "a wolf");
-
-        // A connect to that node also applies directly.
-        let connect = vec![AgentOp::AddNode {
-            node: AddNodeSpec { kind: "image".into(), x: None, y: None, w: None, h: None, data: None },
-        }];
-        let more = svc.apply_agent_ops(&canvas.canvas_id, connect, "test").await.unwrap();
-        let img_id = more[0].node_id.clone().unwrap();
-        let edge = svc
-            .apply_agent_ops(
-                &canvas.canvas_id,
-                vec![AgentOp::Connect { from_node_id: node_id, to_node_id: img_id }],
-                "test",
-            )
-            .await
-            .unwrap();
-        assert_eq!(edge[0].disposition, OpDisposition::Applied);
-        let read2 = svc.get_canvas(&canvas.canvas_id).await.unwrap();
-        assert_eq!(read2.doc["edges"].as_array().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn agent_ops_queue_when_open_and_ack_removes() {
-        use crate::agent_ops::{AddNodeSpec, AgentOp, OpDisposition};
-        let (svc, _dir) = service().await;
-        let canvas = svc.create_canvas(Some("c".into())).await.unwrap();
-
-        // A poll marks the canvas OPEN → even add_node is queued (frontend owns writes).
-        assert!(svc.take_pending_ops(&canvas.canvas_id).await.unwrap().is_empty());
-        let applied = svc
-            .apply_agent_ops(
-                &canvas.canvas_id,
-                vec![AgentOp::AddNode {
-                    node: AddNodeSpec { kind: "image".into(), x: None, y: None, w: None, h: None, data: None },
-                }],
-                "test",
-            )
-            .await
-            .unwrap();
-        assert_eq!(applied[0].disposition, OpDisposition::Queued);
-        // The doc was NOT touched (frontend authority preserved).
-        assert_eq!(svc.get_canvas(&canvas.canvas_id).await.unwrap().meta.node_count, 0);
-
-        // The op is pullable and stays until acked.
-        let pending = svc.take_pending_ops(&canvas.canvas_id).await.unwrap();
-        assert_eq!(pending.len(), 1);
-        svc.ack_agent_ops(&canvas.canvas_id, &[pending[0].op_id.clone()]);
-        assert!(svc.take_pending_ops(&canvas.canvas_id).await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn agent_ops_data_mutations_always_queue_and_bad_ops_rejected() {
-        use crate::agent_ops::{AgentOp, OpDisposition};
-        let (svc, _dir) = service().await;
-        let canvas = svc.create_canvas(Some("c".into())).await.unwrap();
-
-        // delete_node is a data-mutating op → queued even on a closed canvas.
-        let applied = svc
-            .apply_agent_ops(
-                &canvas.canvas_id,
-                vec![AgentOp::DeleteNode { node_id: WorkshopNodeId::new().into_string() }],
-                "test",
-            )
-            .await
-            .unwrap();
-        assert_eq!(applied[0].disposition, OpDisposition::Queued);
-
-        // An invalid op fails the whole batch (BadRequest).
-        let node_id = WorkshopNodeId::new().into_string();
-        let bad = svc
-            .apply_agent_ops(
-                &canvas.canvas_id,
-                vec![AgentOp::Connect { from_node_id: node_id.clone(), to_node_id: node_id }],
-                "test",
-            )
-            .await;
-        assert!(matches!(bad, Err(AppError::BadRequest(_))));
-
-        // Unknown canvas → NotFound.
-        assert!(
-            svc.take_pending_ops("0190f5fe-7c00-7a00-8000-000000000099")
-                .await
-                .is_err()
-        );
-    }
 }

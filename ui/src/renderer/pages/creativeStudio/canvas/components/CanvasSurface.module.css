@@ -1,0 +1,248 @@
+.surface {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  contain: layout paint style;
+  isolation: isolate;
+  background: var(--creative-canvas-surface-background, var(--color-bg-1));
+  color: var(--color-text-1);
+  user-select: none;
+  touch-action: none;
+}
+
+.surface[data-canvas-tool='pan'] {
+  cursor: grab;
+}
+
+.surface[data-canvas-panning='true'] {
+  cursor: grabbing;
+}
+
+.surface:focus-visible {
+  outline: 2px solid rgba(var(--primary-6), 0.55);
+  outline-offset: -2px;
+}
+
+.grid,
+.world,
+.edgeLayer,
+.nodeLayer,
+.worldOverlay,
+.screenOverlay,
+.chrome {
+  position: absolute;
+  inset: 0;
+}
+
+.grid {
+  z-index: 0;
+  pointer-events: none;
+  background-position: var(--creative-canvas-grid-x) var(--creative-canvas-grid-y);
+  background-size: var(--creative-canvas-grid-size) var(--creative-canvas-grid-size);
+  opacity: 0.58;
+}
+
+.grid_dots {
+  background-image: radial-gradient(
+    circle,
+    var(--creative-canvas-grid-dot, color-mix(in srgb, var(--color-text-3) 44%, transparent)) 1px,
+    transparent 1.25px
+  );
+}
+
+.grid_lines {
+  background-image:
+    linear-gradient(var(--creative-canvas-grid-line, color-mix(in srgb, var(--color-border-2) 62%, transparent)) 1px, transparent 1px),
+    linear-gradient(90deg, var(--creative-canvas-grid-line, color-mix(in srgb, var(--color-border-2) 62%, transparent)) 1px, transparent 1px);
+}
+
+.grid_blank {
+  background-image: none;
+}
+
+.world {
+  z-index: 1;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.edgeLayer,
+.nodeLayer,
+.worldOverlay {
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+}
+
+.edgeLayer {
+  z-index: 0;
+}
+
+.nodeLayer {
+  z-index: 1;
+}
+
+.worldOverlay {
+  z-index: 2;
+}
+
+.selection {
+  position: absolute;
+  z-index: 3;
+  box-sizing: border-box;
+  border: calc(1.25px * var(--creative-canvas-inverse-zoom)) dashed var(--creative-canvas-selection-stroke, rgb(var(--primary-6)));
+  border-radius: calc(3px * var(--creative-canvas-inverse-zoom));
+  background: var(--creative-canvas-selection-fill, rgba(var(--primary-6), 0.1));
+  box-shadow: 0 0 0 calc(1px * var(--creative-canvas-inverse-zoom)) color-mix(in srgb, var(--creative-canvas-selection-stroke, rgb(var(--primary-6))) 12%, transparent);
+  pointer-events: none;
+}
+
+.screenOverlay {
+  z-index: 8;
+  pointer-events: none;
+}
+
+.chrome {
+  z-index: 20;
+  pointer-events: none;
+}
+
+.dock,
+.zoomDock,
+.miniMapDock {
+  position: absolute;
+  max-width: calc(100% - 32px);
+  pointer-events: auto;
+}
+
+.topDock {
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.leftDock {
+  top: 50%;
+  left: 16px;
+  max-height: calc(100% - 176px);
+  transform: translateY(-50%);
+}
+
+.rightDock {
+  top: 16px;
+  right: 16px;
+  max-height: calc(100% - 112px);
+}
+
+.bottomDock {
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.zoomDock {
+  bottom: 18px;
+  left: 16px;
+}
+
+.miniMapDock {
+  right: 16px;
+  bottom: 72px;
+}
+
+@media (max-width: 1280px) {
+  .topDock,
+  .bottomDock {
+    max-width: calc(100% - 280px);
+  }
+
+  .leftDock,
+  .rightDock {
+    max-width: min(300px, 30vw);
+  }
+}
+
+@media (max-width: 1024px) {
+  .topDock {
+    top: 12px;
+  }
+
+  .leftDock,
+  .rightDock {
+    max-width: min(268px, 34vw);
+  }
+
+  .bottomDock {
+    bottom: 14px;
+    max-width: calc(100% - 236px);
+  }
+
+  .zoomDock {
+    bottom: 14px;
+  }
+
+  .miniMapDock {
+    bottom: 68px;
+  }
+}
+
+@media (max-width: 640px) {
+  .dock,
+  .zoomDock,
+  .miniMapDock {
+    max-width: calc(100% - 20px);
+  }
+
+  .topDock {
+    top: 10px;
+    left: 10px;
+    right: 10px;
+    max-width: none;
+    transform: none;
+  }
+
+  .leftDock {
+    top: 62px;
+    left: 10px;
+    max-width: min(220px, calc(100% - 20px));
+    max-height: calc(100% - 176px);
+    transform: none;
+  }
+
+  .rightDock {
+    top: 62px;
+    right: 10px;
+    max-width: min(220px, calc(100% - 20px));
+    max-height: calc(100% - 176px);
+  }
+
+  .bottomDock {
+    right: 10px;
+    bottom: 60px;
+    left: 10px;
+    max-width: none;
+    transform: none;
+  }
+
+  .zoomDock {
+    bottom: 10px;
+    left: 10px;
+  }
+
+  .miniMapDock {
+    right: 10px;
+    bottom: 112px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .world {
+    will-change: auto;
+  }
+}
