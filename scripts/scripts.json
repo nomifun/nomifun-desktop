@@ -9,6 +9,18 @@
     { "id": "maint", "title": "维护 / 工具" }
   ],
   "scripts": {
+    "check:windows-installer": {
+      "group": "check",
+      "desc": "校验 Windows NSIS 程序/数据目录分离、锁定模板、第三方归属与安全卸载合同"
+    },
+    "check:creative-studio-retirement": {
+      "group": "check",
+      "desc": "扫描 tracked 源码，阻止旧创意工坊页面、路由、API、翻译与 Gateway 标记回流"
+    },
+    "check:creative-studio-retirement:dist": {
+      "group": "check",
+      "desc": "在 UI production build 后扫描 ui/dist，阻止旧创意工坊标记进入发布产物"
+    },
     "check:process-runtime-boundary": {
       "group": "check",
       "desc": "Enforce the supervised process runtime boundary and exact hand-off allowlist."
@@ -45,7 +57,7 @@
     "test:desktop":  { "group": "test",  "desc": "运行桌面壳测试，不监听或打包 ui/dist 资源" },
     "test:browser":  { "group": "test",  "desc": "运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/nomi-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些）" },
     "test:ui":       { "group": "test",  "desc": "运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx）" },
-    "check":         { "group": "check", "desc": "聚合静态检查：typecheck + i18n + 主题契约 + 图标导入 + 死 CSS 工具类 + 进程运行时边界 + Agent 词汇边界 + 脚本登记" },
+    "check":         { "group": "check", "desc": "聚合静态检查：typecheck + i18n + 主题/图标/dead-CSS + Windows 安装器 + 创意工坊退役 + 进程/浏览器边界 + Agent 词汇 + 脚本登记" },
     "typecheck":     { "group": "check", "desc": "前端 TypeScript 类型检查（tsc --noEmit）" },
     "check:i18n":    { "group": "check", "desc": "校验 i18n 类型与 locale 键是否一致" },
     "check:theme":   { "group": "check", "desc": "校验预设 CSS 主题契约" },
