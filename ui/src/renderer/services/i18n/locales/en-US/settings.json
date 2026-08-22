@@ -524,6 +524,7 @@
   "addAnotherModelTask": "Add another task",
   "modelTasksAllAdded": "All tasks have been added",
   "modelTasksEmpty": "This model has no configured tasks.",
+  "removeConfiguredModelTaskConfirm": "Removing “{{tasks}}” also discards the protocol and URLs configured for it. Continue?",
   "removeModelTask": "Remove task",
   "removeModelTaskConfirm": "Remove {{task}} and its advanced configuration?",
   "completeCapabilityConfiguration": "Complete the protocol and connection settings for every supported task.",

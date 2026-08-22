@@ -8,7 +8,7 @@ import { MODEL_TASK_ORDER, MODEL_TRAIT_ORDER } from '@/common/modelCapabilities'
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
 import { ttsSupportsProviderParamVoice, ttsVoiceOptionsFor } from '@/renderer/components/model/ttsVoiceOptions';
-import { AutoComplete, Button, Checkbox, Input, Popconfirm, Select, Tag, Tooltip } from '@arco-design/web-react';
+import { AutoComplete, Button, Checkbox, Input, Modal, Popconfirm, Select, Tag, Tooltip } from '@arco-design/web-react';
 import { DeleteFour, Down, Refresh, Right } from '@icon-park/react';
 import React, { useEffect, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -32,6 +32,7 @@ import {
   CAPABILITY_ENDPOINT_FIELDS,
   addCapabilityTask,
   applyCatalogSuggestionForTask,
+  capabilityHasConfiguration,
   capabilityValidationMessageKey,
   catalogSuggestionsForTask,
   changeCapabilityProtocol,
@@ -458,6 +459,59 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
     }));
   };
 
+  /**
+   * Apply a multi-select edit as add/remove against the declared set.
+   *
+   * Additions are free. A removal deletes that task's whole capability — its
+   * protocol, endpoints, traits and limits go with it — so a tag's "×" must not
+   * be a one-click way to lose configured work when the card's delete button
+   * asks for confirmation. Untouched drafts are removed without friction;
+   * configured ones ask first.
+   */
+  const changeTaskSelection = (next: readonly ModelTask[]) => {
+    const chosen = MODEL_TASK_ORDER.filter((task) => next.includes(task));
+    const added = chosen.filter((task) => !selectedTasks.includes(task));
+    const removed = selectedTasks.filter((task) => !chosen.includes(task));
+
+    const applyAdditions = () => {
+      if (added.length === 0) return;
+      onChange((current) => ({
+        ...current,
+        capabilities: added.reduce(
+          (capabilities, task) => addCapabilityTask(capabilities, task),
+          current.capabilities
+        ),
+      }));
+    };
+
+    const configured = removed.filter((task) => {
+      const capability = value.capabilities.find((candidate) => candidate.task === task);
+      return capability !== undefined && capabilityHasConfiguration(capability);
+    });
+
+    if (configured.length === 0) {
+      applyAdditions();
+      removed.forEach(removeTask);
+      return;
+    }
+
+    const names = configured
+      .map((task) => t(`settings.modelTask.${task}`, { defaultValue: task }))
+      .join('、');
+    Modal.confirm({
+      title: t('settings.removeModelTask', { defaultValue: '移除任务' }),
+      content: t('settings.removeConfiguredModelTaskConfirm', {
+        defaultValue: `移除“${names}”会同时丢弃它已配置的协议与地址，确定继续？`,
+        tasks: names,
+      }),
+      okButtonProps: { status: 'danger' },
+      onOk: () => {
+        applyAdditions();
+        removed.forEach(removeTask);
+      },
+    });
+  };
+
   return (
     <div className='flex flex-col gap-16px' data-model-definition-editor>
       <section className='space-y-10px' aria-labelledby={taskSectionId} data-model-task-section>
@@ -481,36 +535,30 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
           </div>
         )}
 
+        {/*
+          A multi-select whose value IS the declared task set, so the chosen
+          tasks are visible inside the control itself. It replaced a
+          fire-and-reset single-select that showed nothing after a pick.
+
+          Every task stays listed rather than being filtered out once chosen —
+          that is what lets the selected ones render as tags in the field. This
+          reverses a prohibition the spec used to carry; see
+          `docs/specs/2026-08-11-provider-modality-official-matrix.zh.md` §2.2.
+          The concern behind it — declaring tasks nobody configured — is
+          unchanged: each tag still produces its own capability card that must be
+          configured before the model saves.
+        */}
         <Select
-          // Remounted on every change to the declared set. This Select is a
-          // fire-and-reset action, not a field: `value={undefined}` makes Arco
-          // fall back to its own internal state, which would keep displaying the
-          // task just picked — except that task is immediately filtered out of
-          // `availableTasks`, so it renders as blank and reads as "my choice was
-          // discarded". The key forces a clean placeholder instead.
-          key={`model-task-picker-${selectedTasks.join('|')}`}
-          value={undefined}
-          disabled={availableTasks.length === 0}
-          options={availableTasks.map((task) => ({
+          mode='multiple'
+          value={selectedTasks}
+          options={MODEL_TASK_ORDER.map((task) => ({
             value: task,
             label: t(`settings.modelTask.${task}`, { defaultValue: task }),
           }))}
-          placeholder={
-            availableTasks.length === 0
-              ? t('settings.modelTasksAllAdded', {
-                  defaultValue: '所有任务均已添加',
-                })
-              : value.capabilities.length === 0
-                ? t('settings.selectModelTask', {
-                    defaultValue: '选择该模型支持的任务',
-                  })
-                : t('settings.addAnotherModelTask', {
-                    defaultValue: '添加其他任务',
-                  })
-          }
-          onChange={(task) => {
-            if (typeof task === 'string') addTask(task as ModelTask);
-          }}
+          placeholder={t('settings.selectModelTask', {
+            defaultValue: '选择该模型支持的任务',
+          })}
+          onChange={(next) => changeTaskSelection(Array.isArray(next) ? (next as ModelTask[]) : [])}
           triggerProps={{ getPopupContainer: () => document.body }}
           aria-label={t('settings.modelSupportedTasks', { defaultValue: '支持的任务' })}
           data-model-task-picker
@@ -531,28 +579,10 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
           Popconfirm.
         */}
         {value.capabilities.length > 0 && (
-          <div
-            className='flex flex-wrap items-center gap-6px rounded-8px bg-fill-1 px-10px py-8px'
-            data-declared-tasks
-          >
-            <span className='text-12px font-500 text-t-secondary'>
-              {t('settings.modelDeclaredTasks', { defaultValue: '已添加' })}
-            </span>
-            {value.capabilities.map((capability) => (
-              <Tag
-                key={capability.task}
-                size='small'
-                color='arcoblue'
-                data-declared-task={capability.task}
-              >
-                {t(`settings.modelTask.${capability.task}`, { defaultValue: capability.task })}
-              </Tag>
-            ))}
-            <span className='text-11px text-t-tertiary'>
-              {t('settings.modelDeclaredTasksHint', {
-                defaultValue: '可在下方逐项配置或移除',
-              })}
-            </span>
+          <div className='text-11px leading-4 text-t-tertiary' data-declared-tasks>
+            {t('settings.modelDeclaredTasksHint', {
+              defaultValue: '可在下方逐项配置或移除',
+            })}
           </div>
         )}
       </section>

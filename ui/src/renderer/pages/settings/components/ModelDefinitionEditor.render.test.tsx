@@ -246,34 +246,21 @@ describe('unified model definition editor rendering and interactions', () => {
     );
   });
 
-  test('shows the declared task next to the picker and unlocks the model input', () => {
-    // Regression: after picking a task the picker resets to its placeholder, so
-    // if nothing restates the declared set the form looks like it discarded the
-    // choice — and the user never reaches the model field, so saving is blocked
-    // on `model_required` with only a generic toast to explain it.
+  test('shows the declared task inside the picker and unlocks the model input', () => {
+    // Regression: the task control used to reset to its placeholder after each
+    // pick, so the form looked like it had discarded the choice and the user
+    // never reached the model field — leaving save blocked on `model_required`.
+    // The declared set is now the control's own value, rendered as tags in it.
     const html = render({ model: '', capabilities: [emptyCapabilityDraft('chat')] });
 
+    expect(html.includes('data-model-task-picker')).toBe(true);
+    // Arco renders a multi-select's value as tags inside the field.
+    expect(html.includes('对话')).toBe(true);
     expect(html.includes('data-declared-tasks')).toBe(true);
-    expect(html.includes('data-declared-task="chat"')).toBe(true);
-    // Loud enough to be noticed: an explicit lead-in and a primary-coloured tag,
-    // not a bare grey chip under a Select.
-    expect(html.includes('已添加')).toBe(true);
-    const marker = html.indexOf('data-declared-tasks');
-    // The window spans the container's class attribute (rendered before the data
-    // attribute) and the tags that follow it.
-    const declaredRow = html.slice(Math.max(0, marker - 300), marker + 400);
-    expect(declaredRow.includes('arcoblue')).toBe(true);
-    expect(declaredRow.includes('bg-fill-1')).toBe(true);
-    // The declared task is stated inside the task section, before the model input.
-    expect(html.indexOf('data-declared-task="chat"')).toBeLessThan(
-      html.indexOf('data-unified-model-input')
-    );
     // One task is enough to unlock the model field; the placeholder must no
     // longer be the "pick a task first" prompt.
     expect(html.includes('请先在上方选择任务')).toBe(false);
     expect(html.includes('搜索目录模型，或直接输入官网模型 ID')).toBe(true);
-    // ...and the picker keeps offering the remaining eight tasks.
-    expect(html.includes('data-model-task-picker')).toBe(true);
   });
 
   test('puts the supported-task picker before one unified catalog and free-text model input', () => {
