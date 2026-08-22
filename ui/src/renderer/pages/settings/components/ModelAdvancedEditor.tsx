@@ -57,7 +57,6 @@ const ModelAdvancedEditor: React.FC<{
     preset,
     tasks: selectedTasks,
     baseUrlHint: providerBaseUrl,
-    modelHint: definition.model,
   });
   const connectionState = useProviderConnections(providerId, open);
   const validation = useMemo(
