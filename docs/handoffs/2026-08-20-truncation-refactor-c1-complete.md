@@ -20,7 +20,7 @@ C1 开始前 HEAD：`4b2fec1d`（其父提交 `00dee682` 已完成 A1/A2）
 
 ### 1. Capability 与数据库成为唯一桌面事实源
 
-- 新增 migration `046_provider_model_output_limit.sql`（合并 Creative Studio 036–045 后的顺延编号）：
+- 新增 migration `036_provider_model_output_limit.sql`；该编号已进入主线并落库，Creative Studio 序列随后顺延为 037–046：
   - `provider_model_capabilities.output_limit INTEGER CHECK (output_limit IS NULL OR output_limit > 0)`；
   - 既有 `anthropic.messages` / `bedrock.anthropic_messages` chat 行回填 `8192`，保持升级前 wire 行为；
   - OpenAI-compatible / Gemini 保持 `NULL`，表示真正省略 wire 字段；

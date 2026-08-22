@@ -126,7 +126,7 @@ pub struct CreationTaskRow {
     /// JSON parameter snapshot.
     pub params: String,
     /// Canonical ordered `{asset_id,kind,role}` array. `None` is reserved for a
-    /// pre-043 row whose complete bindings could not be proven during migration.
+    /// pre-044 row whose complete bindings could not be proven during migration.
     pub input_bindings: Option<String>,
     /// `queued|running|succeeded|failed|canceled`.
     pub status: String,

@@ -1,7 +1,8 @@
 use nomifun_db::{
     ChannelInboundClaim, IChannelRepository, IConversationRepository,
-    SqliteChannelRepository, SqliteConversationRepository, init_database,
-    init_database_memory, init_database_memory_with_owner,
+    MigrationLineageStatus, SqliteChannelRepository, SqliteConversationRepository,
+    init_database, init_database_memory, init_database_memory_with_owner,
+    inspect_supported_migration_lineage,
 };
 use sqlx::Row;
 
@@ -94,6 +95,85 @@ fn migration_file_versions_are_unique() {
         "migration versions must be unique; duplicates: {}",
         duplicates.join("; ")
     );
+}
+
+#[tokio::test]
+async fn published_provider_output_limit_lineage_upgrades_in_place() {
+    const PUBLISHED_MIGRATION_36_CHECKSUM: &str =
+        "fffb7c3e3a5cd841e571dd48d8155ed409170b4d725ee37c20ff0f942c0f3927fc1a5284e03894c1e0c9d5c74c36d736";
+
+    let directory = tempfile::tempdir().unwrap();
+    let published_migrations = directory.path().join("published-migrations");
+    std::fs::create_dir(&published_migrations).unwrap();
+    let migrations_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    for entry in std::fs::read_dir(&migrations_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("sql") {
+            continue;
+        }
+        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap();
+        let version: i64 = file_name
+            .split_once('_')
+            .and_then(|(version, _)| version.parse().ok())
+            .unwrap();
+        if version <= 36 {
+            std::fs::copy(&path, published_migrations.join(file_name)).unwrap();
+        }
+    }
+
+    let path = directory.path().join("published-v36.db");
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+    let published_migrator = sqlx::migrate::Migrator::new(published_migrations)
+        .await
+        .unwrap();
+    published_migrator.run(&pool).await.unwrap();
+
+    let (description, checksum): (String, Vec<u8>) = sqlx::query_as(
+        "SELECT description, checksum FROM _sqlx_migrations WHERE version = 36",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(description, "provider model output limit");
+    assert_eq!(hex::encode(checksum), PUBLISHED_MIGRATION_36_CHECKSUM);
+    assert_eq!(
+        inspect_supported_migration_lineage(&pool).await.unwrap(),
+        MigrationLineageStatus::UpgradeRequired
+    );
+    pool.close().await;
+
+    let upgraded = init_database(&path).await.unwrap();
+    assert_eq!(
+        inspect_supported_migration_lineage(upgraded.pool())
+            .await
+            .unwrap(),
+        MigrationLineageStatus::Current
+    );
+    let latest: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+        .fetch_one(upgraded.pool())
+        .await
+        .unwrap();
+    assert_eq!(latest, 46);
+    let creative_studio_tables: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema \
+         WHERE type = 'table' AND name IN (\
+             'creative_studio_projects', \
+             'creative_studio_agent_proposal_receipts'\
+         )",
+    )
+    .fetch_one(upgraded.pool())
+    .await
+    .unwrap();
+    assert_eq!(creative_studio_tables, 2);
+    upgraded.close().await;
 }
 
 async fn owner_id(pool: &sqlx::SqlitePool) -> String {

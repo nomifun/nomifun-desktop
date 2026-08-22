@@ -1,4 +1,4 @@
-//! Migration 042 removes the discarded file-backed canvas index while
+//! Migration 043 removes the discarded file-backed canvas index while
 //! preserving asset rows and canonicalising their provenance.
 
 use sqlx::migrate::{Migrate, Migrator};
@@ -31,7 +31,7 @@ async fn migrate_to(pool: &sqlx::SqlitePool, max_version: i64) {
 }
 
 async fn seed_retired_canvas_data(pool: &sqlx::SqlitePool) {
-    migrate_to(pool, 41).await;
+    migrate_to(pool, 42).await;
     sqlx::query(
         "INSERT INTO workshop_canvases \
             (canvas_id, title, node_count, created_at, updated_at) \
@@ -85,7 +85,7 @@ async fn migration_drops_canvas_index_and_preserves_assets_without_legacy_owners
         .unwrap();
     seed_retired_canvas_data(&pool).await;
 
-    migrate_to(&pool, 42).await;
+    migrate_to(&pool, 43).await;
 
     let canvas_table_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'workshop_canvases'",
@@ -121,7 +121,7 @@ async fn migration_rejects_retired_canvas_provenance_and_accepts_canonical_proje
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    migrate_to(&pool, 42).await;
+    migrate_to(&pool, 43).await;
 
     let retired = sqlx::query(
         "INSERT INTO workshop_assets \
@@ -132,7 +132,7 @@ async fn migration_rejects_retired_canvas_provenance_and_accepts_canonical_proje
     .bind(serde_json::json!({"canvas_id": CANVAS_ID, "node_id": NODE_ID}).to_string())
     .execute(&pool)
     .await;
-    assert!(retired.is_err(), "canvas_id must be rejected after migration 042");
+    assert!(retired.is_err(), "canvas_id must be rejected after migration 043");
 
     sqlx::query(
         "INSERT INTO creative_studio_projects \

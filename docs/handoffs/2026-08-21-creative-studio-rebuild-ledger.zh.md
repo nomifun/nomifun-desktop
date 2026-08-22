@@ -66,16 +66,16 @@
 - 单选空音频节点现在展开固定浅 stone 朗读 Composer，只走精确 `speech_synthesis` / `tts`、零输入和单任务。朗读正文、精确 Provider/model、Voice ID 与 MP3/WAV 草稿由 audio node canonical `data.composer` 持有；本地 source 身份只存在强类型 `audio-node-compose` operation，Provider 参数没有 canvas/node/asset 元数据。成功任务必须恰好返回一个真实 audio asset，并原位填充同一个节点 ID；失败、取消、响应丢失重试、恢复、authoritative 404 与 pending-last 均复用统一任务合同。
 - 音频可选字段按八个现有 adapter 的 exact protocol profile 显示：未知协议降级为 prompt-only，Deepgram 正文上限 2000，要求 Voice ID 的协议会在本地阻止空音色提交；format 只允许 artifact gate 已支持的 MP3/WAV。Voice ID 只在同一 Provider 且同一协议内保留，跨 Provider/协议、失效模型或单模型自动接管都会清空并要求重新确认。首批明确不发送 speed、instructions、参考音频、VoiceClone、AAC 或 PCM。
 - 真实浏览器完成音频唯一 marker、Undo、Redo、完整 reload 和提示词库入口；1440×900、1024×768、390×844 的 Composer 均完整可操作。空节点不再显示无意义的 `0:00 – ∞`；浅/深主题切换前后面板背景与文字计算色完全一致。最终用 UI 删除 QA 音频节点、恢复画布面板并重载回原 3 节点；最后新页面会话 Console 0 error / 0 warning。参考项目仍在 3000 打开并复核音频入口；没有调用付费 Provider、没有上传本地文件。
-- migration 043 新增第三种 canonical task owner：`standalone_workbench { projectId, workbenchKind }`，其中 kind 仅允许 image/video/audio，并与 canvas node、workflow step 三分支严格互斥。Creation 会校验 workbench kind 与 capability 媒体族匹配；owner、Provider、模型、capability、params 和有序 inputs 全部参与同一幂等一致性比较，旧 key 不能换 owner、换输入或换顺序。
+- migration 044 新增第三种 canonical task owner：`standalone_workbench { projectId, workbenchKind }`，其中 kind 仅允许 image/video/audio，并与 canvas node、workflow step 三分支严格互斥。Creation 会校验 workbench kind 与 capability 媒体族匹配；owner、Provider、模型、capability、params 和有序 inputs 全部参与同一幂等一致性比较，旧 key 不能换 owner、换输入或换顺序。
 - 每个新任务显式持久并返回有序 `{ assetId, kind, role }` 输入快照；`kind` 只允许 image/video/audio/text，worker 会用真实 MIME 再校验声明。迁移旧任务只有在 fingerprint 含完整有序 inputs、每个 asset 仍存在且 kind 可证明时才恢复；否则响应为 `inputs:null`，前端将其视为“不可原参数重试”，绝不伪装成 `[]`。新零输入任务始终返回 `inputs:[]`，create 响应若不精确回显输入快照会失败关闭。
-- 输入与结果资产进入 DB logical-reference registry；新 standalone 产物 origin 使用 `project_id + workbench_kind + creation_task_id`，并在写入时与真实任务 owner 逐字段比对。043 的旧输入解析、insert/update input trigger 与 asset-origin owner trigger 均使用 NULL-safe SQLite 判断，缺字段、显式 null、重复键、未知字段或混合 owner 都不能通过三值逻辑绕过。
+- 输入与结果资产进入 DB logical-reference registry；新 standalone 产物 origin 使用 `project_id + workbench_kind + creation_task_id`，并在写入时与真实任务 owner 逐字段比对。044 的旧输入解析、insert/update input trigger 与 asset-origin owner trigger 均使用 NULL-safe SQLite 判断，缺字段、显式 null、重复键、未知字段或混合 owner 都不能通过三值逻辑绕过。
 - `GET /api/creative-studio/tasks` 已提供严格 owner-scoped 历史分页：必填 canonical project/kind，默认 30、上限 100，按 `submitted_at DESC, creation_task_id DESC` 使用二列 keyset，只有存在下一页时返回最后可见任务的 cursor。未知/重复 query、非法 UUID/kind/limit/cursor、owner 或 capability 逃逸均失败关闭；返回成功资产仍经过现有 artifact audit。
 - 前端 history client 会验证精确字段、owner、排序、页长、请求 cursor 窗口与返回 cursor 锚点；history model 将同一任务的持久/live 状态合并但不拆分多结果，不允许陈旧 live 降级 durable 终态，也不允许把其他任务资产挂入输出。冲突终态失败关闭，只有 failed/canceled 且 `inputs` 可证明的任务允许精确重试。
 - 独立图片/视频产品 POST 已整体切到精确 `standalone_workbench` owner，并删除 config-node pending/history 双写。首屏加载 30 条、cursor 追加旧页；`active_only=true` 会分页到尽头并与 visible-only active 取并集后再挂载 runtime。终态直接使用 durable list，queued/running 继续权威轮询；瞬时恢复错误可在页内“重试任务同步”，取消在 controller 尚未持有 entry 时也会回退到精确 task reference。
 - 生图多输出保持一任务一卡片和有序图片集合；“载入”只回填 composer，“重试”从原 owner/provider/model/task/capability/params/有序 inputs 生成新幂等键并保留旧记录。素材按每个 ID 精确读取，快速载入 A/B 使用 generation fence，旧请求不能覆盖新表单。`inputs:null` 或模型已删除的冷历史不显示重试。
 - 没有原子任务退役合同前，独立历史不显示选择/删除，也不再删结果资产后用 React `hiddenIds` 假装删除。旧 `canvas_node` 任务仍是画布任务，不猜测迁入 standalone scope。视频批量继续固定为 1；页面只声称当前真实支持的一张图片参考。
 - 独立工作台使用与画布一致的固定浅 stone token，不跟随应用主题。SafeResizeObserver 在 `disconnect()` 时会取消被延后一帧的回调，避免 reload 期间 Arco Select 卸载后访问空 popup ref。
-- migration 044 新增独立历史 `deleted_at` tombstone 和严格批量 `POST /api/creative-studio/tasks/retire`：只允许同一精确 standalone owner 的 1-100 个 terminal task，live/missing/错 owner/重复或损坏产物会整批失败；`COALESCE` 保留首次时间戳。普通/active list 隐藏 tombstone，direct GET、幂等回放、boot audit 继续保留并返回 `deleted_at`。
+- migration 045 新增独立历史 `deleted_at` tombstone 和严格批量 `POST /api/creative-studio/tasks/retire`：只允许同一精确 standalone owner 的 1-100 个 terminal task，live/missing/错 owner/重复或损坏产物会整批失败；`COALESCE` 保留首次时间戳。普通/active list 隐藏 tombstone，direct GET、幂等回放、boot audit 继续保留并返回 `deleted_at`。
 - 任务 input/result 资产均改为 Restrict，repository 与 DB DELETE trigger 双层阻止绕过；不再剪短 succeeded `result_asset_ids`。项目存在 queued/running task 时删除返回 conflict，terminal/tombstone history 与生成资产继续 KeepHistory。该提交只建立后端与严格前端 adapter/presentation 能力，产品路由尚未恢复移除按钮。
 - 图片/视频历史现在只为 terminal 卡显示单条/批量选择与“移除”，live 卡仍只有取消。固定 stone 确认框明确说明任务审计、输入和结果资产继续保留；成功响应后先 dismiss terminal runtime entry、再从第一页 reload。响应丢失可在同一对话框安全重试，409 不产生局部隐藏。
 - 单独删除一个 Provider model 现在必须经过 app 层协调器：Workshop 只生成精确 `{ providerId, model }` 的项目/工作流清理计划，`SqliteProviderModelRepository` 在一个 writer transaction 内复核 active creation task 与 nonterminal Workflow snapshot、对全部 project/workflow 做 revision CAS、删除 exact capability/model 并只递增一次 Provider `config_revision`。任一 stale/missing/hard binding 都整笔回滚；旧 repository delete 旁路已移除，System 构造器也必须显式注入协调器。
@@ -167,11 +167,11 @@
 
 `8e5f83cf` 的提交前检查：
 
-- `cargo test -p nomifun-db --lib`：387 passed；`id_schema_contract`：22 passed；043 owner/input migration：5 passed。覆盖三 owner 分支、旧输入可证明恢复/不可证明 NULL、input trigger 缺失/null/重复键、asset origin insert/update 与幂等输入顺序。
+- `cargo test -p nomifun-db --lib`：387 passed；`id_schema_contract`：22 passed；044 owner/input migration：5 passed。覆盖三 owner 分支、旧输入可证明恢复/不可证明 NULL、input trigger 缺失/null/重复键、asset origin insert/update 与幂等输入顺序。
 - `cargo test -p nomifun-creation --lib`：65 passed；`cargo test -p nomifun-gateway --lib`：142 passed；standalone DTO、kind/capability、input kind/MIME、origin 与 Gateway kind 证明通过。
 - `cargo check -p nomifun-app --lib`、Rust 定向 fmt、`bun run typecheck`、图标/主题/dead-css、UI production build、`git diff --cached --check`：通过；仅有仓库既存未使用代码与 Vite chunk 提示。
 - Creative Studio 广域 UI 测试运行得到 604 passed / 3 failed；本切片的 WIRING 断言已修正并定向复跑通过，剩余 2 项是未改动的 Director capture 几何旧期望（期望 x=900/y=2160，当前 canonical 结果 x=920/y=2320），不作为本数据合同提交的伪阻断，也未篡改测试掩盖。
-- 隔离 8788 在原 QA 数据根真实应用 043 后正常启动；提交 `image` owner + `t2v` 的错误媒体族请求返回 400，随后同 task ID GET 为 404，证明门禁发生在 Provider/任务落库前。现有画布重载仍为原 3 节点，Console 0 error / 0 warning；未调用付费 Provider。
+- 隔离 8788 在原 QA 数据根真实应用 044 后正常启动；提交 `image` owner + `t2v` 的错误媒体族请求返回 400，随后同 task ID GET 为 404，证明门禁发生在 Provider/任务落库前。现有画布重载仍为原 3 节点，Console 0 error / 0 warning；未调用付费 Provider。
 
 `1dd4b9e9` 的提交前检查：
 
@@ -191,7 +191,7 @@
 `53093740` 的提交前检查：
 
 - `cargo test -p nomifun-creation --lib`：69 passed；retire service/route、direct tombstone wire、list/active 隐藏、产物审计和重复请求均通过。
-- DB retire 原子性/混合 tombstone/错 owner/live/缺失、044 migration CHECK/旧行 NULL/禁止状态复活、input/result asset Restrict/DELETE trigger、project live-task 删除门禁与 terminal KeepHistory 定向门禁通过；Workshop service 与 `cargo check -p nomifun-app --lib` 通过。
+- DB retire 原子性/混合 tombstone/错 owner/live/缺失、045 migration CHECK/旧行 NULL/禁止状态复活、input/result asset Restrict/DELETE trigger、project live-task 删除门禁与 terminal KeepHistory 定向门禁通过；Workshop service 与 `cargo check -p nomifun-app --lib` 通过。
 - 严格前端 task/history client、tombstone parser、retire ordered echo、runtime terminal dismiss 和 terminal-only presentation 已通过定向测试；产品路由仍保持删除控件隐藏，不提前调用新命令。
 
 `3b8a1b03` 的提交前检查：
@@ -229,7 +229,7 @@
 
 - Canvas proposal/Agent session/Editor/ProductRoute 定向前端：69 passed / 486 assertions；`bun run typecheck`、图标、主题、dead-css、`git diff --cached --check` 通过。UI production build 通过 7688 modules，只保留既存 NomiChat dynamic/static import 与大 chunk 提示。
 - Rust strict artifact parser：12 passed；SQLite proposal exactly-once/content-fence：2 passed；HTTP route：4 passed；fingerprint 与 service replay 各 1 passed；ID schema、backup restore、session applied-receipt projection 各 1 passed；Conversation session：3 passed。`cargo check -p nomifun-app --lib` 与定向 Rust fmt 通过，只保留未改模块既存 warning。
-- 隔离 8788 真实应用 migration 045。真实 1280×720 页面先显示“应用到画布”，点击后新增 1 个文本节点并显示“已应用”；完整 reload 仍从 receipt 恢复已应用。相同请求重放返回 200/`replayed:true`/原 node ID，revision 3 与 nodeCount 1 不变；不同 payload 返回 409。新鲜 reload 时间窗 Console 0 error / 0 warning。
+- 隔离 8788 真实应用 migration 046。真实 1280×720 页面先显示“应用到画布”，点击后新增 1 个文本节点并显示“已应用”；完整 reload 仍从 receipt 恢复已应用。相同请求重放返回 200/`replayed:true`/原 node ID，revision 3 与 nodeCount 1 不变；不同 payload 返回 409。新鲜 reload 时间窗 Console 0 error / 0 warning。
 - 临时 project、receipt、session binding、Conversation、messages 均按精确 ID 清理为 0；原 QA 画布仍为 revision 52、3 节点/0 连接、无 Chat session、右栏关闭。参考项目保持在 3000，目标保持在 5174/8788；未调用模型或生成媒体。
 
 `67f3d2f8` 的提交前检查：
@@ -241,7 +241,7 @@
 
 `cd85b21e` + `c7987a7f` 的 Workflow MVP 交付门：
 
-- `e14d1887` 已把远程 `main` 的模型/会话稳定性迭代合入当前分支；Provider 输出上限 migration 与 Creative Studio 既有 036–045 序列消歧为 046。全新数据库完整应用 001–046、migration 唯一性、Provider repository 23/23 与 `cargo check -p nomifun-app` 均通过。
+- `e14d1887` 已把远程 `main` 的模型/会话稳定性迭代合入当前分支；最终编号保留已发布并落库的 Provider 输出上限 migration 036，Creative Studio 序列顺延为 037–046。全新数据库完整应用 001–046、migration 唯一性、Provider repository 23/23 与 `cargo check -p nomifun-app` 均通过。
 - `nomi-providers --lib` 在合并后为 196/196；receiver cancellation 6/6、bounded drain 2/2、one-shot 7/7、Provider error 5/5 以及协议合同均通过。Workshop 全量 111/111，owner-only Workflow route、exact enabled Chat、单轮上限、timeout cancellation、严格响应大小与无 Conversation/Skill/MCP/产品持久化均有门禁。
 - Workflow/Model/Focus 定向 UI：81 passed / 387 assertions；真实 Select 子进程交互在仓库根 cwd 与 `--cwd ui` 两种命令均通过且 stderr 为空。`bun run typecheck`、`check:theme`、`check:icons`、`check:dead-css`、`git diff --check` 均通过。
 - UI production build 通过 7698 modules；仅保留仓库既存 NomiChat dynamic/static import 与大 chunk 提示。真实 UI 的 Generate → strict Preview → Apply → Editor → 手动 Save → reload → 精确删除、三视口、数据清理和 fresh Console 证据见本节 UI 证据。
