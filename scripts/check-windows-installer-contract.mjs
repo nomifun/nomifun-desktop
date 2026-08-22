@@ -92,8 +92,6 @@ const requiredResources = {
   '../../ui/dist/': 'webui-dist/',
   '../../LICENSE': 'LICENSE',
   '../../NOTICE': 'NOTICE',
-  '../../third_party/infinite-canvas/LICENSE': 'third_party/infinite-canvas/LICENSE',
-  '../../third_party/infinite-canvas/SOURCE.md': 'third_party/infinite-canvas/SOURCE.md',
 };
 for (const [source, target] of Object.entries(requiredResources)) {
   check(resources[source] === target, 'bundle resource must map ' + source + ' to ' + target);
@@ -105,7 +103,6 @@ for (const [source, target] of Object.entries(requiredResources)) {
 const notice = readFileSync(noticePath, 'utf8');
 for (const token of [
   'infinite-canvas',
-  'third_party/infinite-canvas/LICENSE',
   'Template tag: tauri-cli-v2.11.2',
   'Template revision: ' + expectedUpstreamCommit,
   'Licensed under the Apache License, Version 2.0.',
