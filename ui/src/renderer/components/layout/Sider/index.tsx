@@ -16,7 +16,7 @@ import { useBrowserOverview } from '@renderer/pages/browser/useBrowserInventory'
 import { parseSessionRoute } from '@renderer/utils/routes/sessionRoute';
 import {
   CREATIVE_STUDIO_ASSETS_PATH,
-  CREATIVE_STUDIO_ROOT_PATH,
+  CREATIVE_STUDIO_PROJECTS_PATH,
   WORKBENCH_HOME_PATH,
   isCreativeStudioPath,
 } from '@renderer/pages/creativeStudio/app/routes';
@@ -123,7 +123,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleKnowledgeClick = () => navTo('/knowledge');
   const handleAssetLibraryClick = () => navTo(CREATIVE_STUDIO_ASSETS_PATH);
   const handleNomiClick = () => navTo('/nomi');
-  const handleCreativeStudioClick = () => navTo(CREATIVE_STUDIO_ROOT_PATH);
+  const handleCreativeStudioClick = () => navTo(CREATIVE_STUDIO_PROJECTS_PATH);
   const handleMiniAppsClick = () => navTo('/mini-apps');
   const handleCustomerServiceClick = () => navTo('/customer-service');
   const handlePresetClick = () => navTo('/presets');

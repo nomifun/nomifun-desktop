@@ -4,7 +4,10 @@ import AppLoader from '@renderer/components/layout/AppLoader';
 import ProtectedAppRuntime from '@renderer/components/layout/ProtectedAppRuntime';
 import RouteErrorBoundary from '@renderer/components/layout/RouteErrorBoundary';
 import { useAuth } from '@renderer/hooks/context/AuthContext';
-import { CREATIVE_STUDIO_ROOT_PATH } from '@renderer/pages/creativeStudio/app/routes';
+import {
+  CREATIVE_STUDIO_PROJECTS_PATH,
+  CREATIVE_STUDIO_ROOT_PATH,
+} from '@renderer/pages/creativeStudio/app/routes';
 const Conversation = React.lazy(() => import('@renderer/pages/conversation'));
 const Guid = React.lazy(() => import('@renderer/pages/guid'));
 const PresetSettings = React.lazy(() => import('@renderer/pages/settings/PresetSettings'));
@@ -34,9 +37,6 @@ const KnowledgeListPage = React.lazy(() => import('@renderer/pages/knowledge/Kno
 const KnowledgeDetailPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeDetailPage'));
 const CreativeStudioFocusShell = React.lazy(
   () => import('@renderer/pages/creativeStudio/app/CreativeStudioFocusShell')
-);
-const CreativeStudioHomePage = React.lazy(
-  () => import('@renderer/pages/creativeStudio/app/CreativeStudioHomePage')
 );
 const CreativeStudioProjectsRoute = React.lazy(
   () => import('@renderer/pages/creativeStudio/projects/CreativeStudioProjectsRoute')
@@ -165,7 +165,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route index element={<Navigate to='/guid' replace />} />
             {/* Creative Studio reuses the application titlebar and swaps the primary rail like Settings. */}
             <Route path={CREATIVE_STUDIO_ROOT_PATH} element={withRouteFallback(CreativeStudioFocusShell)}>
-              <Route index element={withRouteFallback(CreativeStudioHomePage)} />
+              <Route index element={<Navigate to={CREATIVE_STUDIO_PROJECTS_PATH} replace />} />
               <Route path='projects' element={withRouteFallback(CreativeStudioProjectsRoute)} />
               <Route path='canvas/:projectId' element={withRouteFallback(CreativeStudioCanvasRoute)} />
               <Route path='director/:projectId' element={withRouteFallback(CreativeStudioDirectorRoute)} />
