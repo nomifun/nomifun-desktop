@@ -54,10 +54,17 @@ import {
   DEFAULT_CREATIVE_STUDIO_PLANNING_SKILL_IDS,
   isCreativeStudioPlanningSkillId,
 } from './planningSkills';
+import type { CreativeCanvasAgentOp } from './artifacts';
+import {
+  projectCreativeCanvasAgentProposals,
+  type CreativeCanvasProposalOverride,
+} from './proposalProjection';
 
 export interface CreativeCanvasAgentPanelHandle {
   /** Stop an active exclusive turn and wait for its durable settlement before route exit. */
   prepareToLeave(): Promise<boolean>;
+  /** Re-read durable history and proposal receipts after an external reload. */
+  refreshAuthority(): void;
 }
 
 export interface CreativeCanvasAgentPanelProps {
@@ -70,6 +77,10 @@ export interface CreativeCanvasAgentPanelProps {
   onPersist(
     sessions: readonly CreativeChatSessionReference[],
     activeSessionId: string | null
+  ): Promise<void>;
+  onApplyCanvasOps(
+    assistantMessageId: string,
+    ops: readonly CreativeCanvasAgentOp[]
   ): Promise<void>;
   onCollapse(): void;
   onOpenModelSettings?(): void;
@@ -139,6 +150,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
   const currentRunRef = useRef<Promise<void> | null>(null);
   const sendOperationRef = useRef<Promise<boolean> | null>(null);
   const documentMutationRef = useRef<Promise<void> | null>(null);
+  const proposalApplyRef = useRef<Promise<void> | null>(null);
   const leaveEpochRef = useRef(0);
   const durableHistoryRef = useRef<readonly CreativeStudioAgentMessage[]>([]);
 
@@ -156,6 +168,15 @@ const CreativeCanvasAgentPanel = React.forwardRef<
   const [selectedSkillIds, setSelectedSkillIds] = useState<readonly string[]>([
     ...DEFAULT_CREATIVE_STUDIO_PLANNING_SKILL_IDS,
   ]);
+  const [proposalOverrides, setProposalOverrides] = useState<
+    Readonly<Record<string, CreativeCanvasProposalOverride>>
+  >({});
+  const [appliedProposalMessageIds, setAppliedProposalMessageIds] = useState<
+    readonly string[]
+  >([]);
+  const isApplyingProposal = Object.values(proposalOverrides).some(
+    (override) => override.state === 'applying'
+  );
 
   const resolver = useMemo(
     () =>
@@ -207,6 +228,13 @@ const CreativeCanvasAgentPanel = React.forwardRef<
         })),
     [excludedContextNodeIds, props.planningContext?.nodes]
   );
+  const proposalProjection = useMemo(() => {
+    return projectCreativeCanvasAgentProposals(
+      messages,
+      proposalOverrides,
+      appliedProposalMessageIds
+    );
+  }, [appliedProposalMessageIds, messages, proposalOverrides]);
 
   useEffect(() => {
     setExcludedContextNodeIds([]);
@@ -441,6 +469,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
     }
     if (!activeSession) {
       durableHistoryRef.current = [];
+      setAppliedProposalMessageIds([]);
       setMessages([]);
       setSelectedModel(null);
       setLoadState('ready');
@@ -451,6 +480,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
     setSelectedModel(activeModel);
     if (!activeSession.model) {
       durableHistoryRef.current = [];
+      setAppliedProposalMessageIds([]);
       setMessages([]);
       setLoadState('ready');
       setPanelError(undefined);
@@ -459,6 +489,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
 
     setLoadState('loading');
     setPanelError(undefined);
+    setAppliedProposalMessageIds([]);
     void (async () => {
       try {
         const resolution = await resolver({
@@ -470,6 +501,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
         });
         if (abort.signal.aborted || epoch !== loadEpochRef.current) return;
         const authority = classifyCreativeCanvasAgentHistory(activeSession, resolution.history);
+        setAppliedProposalMessageIds([...resolution.appliedProposalMessageIds]);
         if (authority === 'completed-pending-turn') {
           const completed = creativeCanvasAgentSessionWithAuthoritativeHistory(
             activeSession,
@@ -504,7 +536,12 @@ const CreativeCanvasAgentPanel = React.forwardRef<
   }, [activeSignature, loadRequest, now, persistSession, props.hydrated, props.projectId, resolver, runPersistedTurn]);
 
   const handleNewSession = useCallback(() => {
-    if (isRunning) return;
+    if (
+      isRunning ||
+      proposalApplyRef.current ||
+      sendOperationRef.current ||
+      documentMutationRef.current
+    ) return;
     void (async () => {
       try {
         const session = createCreativeCanvasAgentSession(createId(), now());
@@ -522,7 +559,13 @@ const CreativeCanvasAgentPanel = React.forwardRef<
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
-      if (isRunning || sessionId === documentRef.current.activeSessionId) {
+      if (
+        isRunning ||
+        proposalApplyRef.current ||
+        sendOperationRef.current ||
+        documentMutationRef.current ||
+        sessionId === documentRef.current.activeSessionId
+      ) {
         setView('chat');
         return;
       }
@@ -535,7 +578,12 @@ const CreativeCanvasAgentPanel = React.forwardRef<
 
   const handleSend = useCallback(
     (input: CreativeStudioAgentSendInput) => {
-      if (isRunning || sendOperationRef.current) return;
+      if (
+        isRunning ||
+        proposalApplyRef.current ||
+        sendOperationRef.current ||
+        documentMutationRef.current
+      ) return;
       const planningContext = props.planningContext;
       if (
         !planningContext ||
@@ -606,7 +654,13 @@ const CreativeCanvasAgentPanel = React.forwardRef<
     const current = documentRef.current.sessions.find(
       (session) => session.id === documentRef.current.activeSessionId
     );
-    if (!current?.pendingTurn || isRunning) return;
+    if (
+      !current?.pendingTurn ||
+      isRunning ||
+      proposalApplyRef.current ||
+      sendOperationRef.current ||
+      documentMutationRef.current
+    ) return;
     void runPersistedTurn(current, durableHistoryRef.current);
   }, [isRunning, runPersistedTurn]);
 
@@ -615,24 +669,83 @@ const CreativeCanvasAgentPanel = React.forwardRef<
     controller.stop();
   }, [controller]);
 
+  const handleApplyProposal = useCallback(
+    (messageId: string) => {
+      const artifact = proposalProjection.artifacts.get(messageId);
+      if (
+        !artifact ||
+        proposalOverrides[messageId] ||
+        isRunning ||
+        proposalApplyRef.current ||
+        sendOperationRef.current ||
+        documentMutationRef.current
+      ) {
+        return;
+      }
+      setProposalOverrides((current) => ({
+        ...current,
+        [messageId]: { state: 'applying' },
+      }));
+      const operation = (async () => {
+        try {
+          await props.onApplyCanvasOps(messageId, artifact.ops);
+          if (!mountedRef.current) return;
+          setProposalOverrides((current) => ({
+            ...current,
+            [messageId]: { state: 'applied' },
+          }));
+          setAppliedProposalMessageIds((current) =>
+            current.includes(messageId) ? current : [...current, messageId]
+          );
+        } catch {
+          if (!mountedRef.current) return;
+          setProposalOverrides((current) => ({
+            ...current,
+            [messageId]: {
+              state: 'failed',
+              errorMessage: '应用结果未确认；请检查页面提示并复核远端画布。',
+            },
+          }));
+        }
+      })();
+      proposalApplyRef.current = operation;
+      void operation.finally(() => {
+        if (proposalApplyRef.current === operation) {
+          proposalApplyRef.current = null;
+        }
+      });
+    },
+    [isRunning, proposalOverrides, proposalProjection.artifacts, props.onApplyCanvasOps]
+  );
+
   useImperativeHandle(
     ref,
     () => ({
+      refreshAuthority() {
+        loadEpochRef.current += 1;
+        setLoadState('loading');
+        setLoadRequest((current) => current + 1);
+      },
       async prepareToLeave() {
         leaveEpochRef.current += 1;
         if (controller.isRunning) controller.stop();
         const admittedSend = sendOperationRef.current;
         const documentMutation = documentMutationRef.current;
-        const [sendSettled, mutationSettled] = await Promise.all([
+        const proposalApply = proposalApplyRef.current;
+        const [sendSettled, mutationSettled, proposalSettled] = await Promise.all([
           admittedSend ?? Promise.resolve(true),
           documentMutation?.then(
+            () => true,
+            () => false
+          ) ?? Promise.resolve(true),
+          proposalApply?.then(
             () => true,
             () => false
           ) ?? Promise.resolve(true),
         ]);
         if (controller.isRunning) controller.stop();
         await currentRunRef.current;
-        return sendSettled && mutationSettled && !controller.isRunning;
+        return sendSettled && mutationSettled && proposalSettled && !controller.isRunning;
       },
     }),
     [controller]
@@ -657,6 +770,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       sessions={sessionSummaries(documentState.sessions)}
       activeSessionId={documentState.activeSessionId}
       messages={messages}
+      proposals={proposalProjection.proposals}
       draft={draft}
       model={model}
       contextItems={contextItems}
@@ -665,7 +779,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       modelLocked={lockedModel !== null}
       isRunning={isRunning}
       errorMessage={panelError}
-      disabled={props.disabled}
+      disabled={props.disabled || isApplyingProposal}
       onViewChange={setView}
       onNewSession={handleNewSession}
       onSelectSession={handleSelectSession}
@@ -689,6 +803,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
           return current.length >= 3 ? current : [...current, skillId];
         });
       }}
+      onApplyProposal={handleApplyProposal}
       onSend={handleSend}
       onStop={handleStop}
       onCollapse={props.onCollapse}

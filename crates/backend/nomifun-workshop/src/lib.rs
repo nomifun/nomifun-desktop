@@ -9,6 +9,7 @@ mod prompt_catalog;
 mod thumbnail;
 
 mod archive;
+mod canvas_agent_artifact;
 pub mod creative_agent_ops;
 pub mod creative_studio;
 pub mod routes;

@@ -89,9 +89,46 @@ IDs, then the real Conversation transport sends `modelInput` and copies those
 IDs to `inject_skills`. The visible user message and session title continue to
 use the original prompt. Recovery reads only the durable pending snapshot, so a
 later selection change cannot alter an admitted turn. No direct Provider/API-key
-path or automatic model invocation was added. Strict assistant artifact parsing,
-manual preview and the “应用到画布” call into the Agent ops gateway remain the
-next explicit product gate.
+path or automatic model invocation was added.
+
+Completed assistant messages now expose a canvas proposal only when their final
+and unique lowercase-`json` fence is the closed
+`nomifun.creative-studio.canvas-ops/v1` artifact. A lexical pass rejects duplicate
+decoded JSON keys before ordinary parsing can silently choose the last value;
+both frontend and backend reject artifact JSON above 256 KiB before materializing
+its value graph.
+The first allowlist contains add-text, update-text, move, resize, connect and
+disconnect only; media nodes, delete, client-owned IDs, config runtime fields,
+unknown keys and loose/non-final JSON never receive an apply button. Invalid
+target artifacts render a disabled error card rather than falling back to prose
+extraction.
+
+“应用到画布” is a deliberate user action. The product first flushes the Editor,
+enters a visible product-wide mutation lock, reads its current authoritative
+revision, then posts the assistant message ID with the exact ordered operations.
+The server independently reloads that owner-bound, completed assistant message,
+re-parses its unique final artifact with the same duplicate-key and operation
+allowlist rules, and requires its canonical operations to equal the HTTP body.
+The transaction rechecks the raw persisted message content to fence a concurrent
+edit. It then fingerprints the canonical operation array and commits the project
+CAS plus a result receipt in one SQLite transaction. A later deliberate replay
+of the same assistant message returns the first minted node/connection IDs and
+its original applied revision without changing the graph again; reusing that
+message ID for a different payload is a conflict. Gateway tool calls retain
+their separate revision-CAS contract and do not impersonate this user-approved
+proposal identity.
+
+The HTTP port verifies project identity, result-to-op correspondence, bounded
+i64 revisions, and either a first `revision = expected + 1` commit or an explicit
+receipt replay whose current project revision has not regressed. It never
+automatically retries a response-loss mutation. Both success and failure paths
+attempt a guarded authoritative reload without allowing a reload failure to hide
+the original outcome. If that read is unavailable, the product remains locked
+behind an explicit “重新载入远端” action instead of enabling a stale Editor.
+Session recovery returns the receipt-backed assistant IDs, so a remount projects
+committed cards directly as “已应用”. While the request and reload settle, Editor
+commands, panel mutations, new generation/recovery work and a second proposal
+are excluded; route exit waits for the same operation.
 
 The source geometry is canonical for views that currently have no resize handle:
 the left library is 280px and opening Agent normalizes the right panel to 390px.

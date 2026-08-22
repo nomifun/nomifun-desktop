@@ -26,10 +26,12 @@ describe('CreativeCanvasEditor composition contract', () => {
       'projectDocumentFromCanvasState',
       'renderNode',
       'renderEdge',
+      'data-editor-disabled',
     ]) {
       expect(editorSource.includes(token)).toBe(true);
     }
     expect(editorSource.includes('CreativeNodeView')).toBe(false);
+    expect(editorStyles.includes(".editor[data-editor-disabled='true']")).toBe(true);
   });
 
   test('exposes canonical command/background control plus conflict-safe persistence', () => {
@@ -56,6 +58,7 @@ describe('CreativeCanvasEditor composition contract', () => {
       'saveController.queue(projectDocumentFromCanvasState(nextBase, stateRef.current))',
       'flush: () => saveController.flush()',
       'reloadRemote',
+      "throw new Error('Creative canvas is read-only')",
       'showSaveState',
       "saveSnapshot.status === 'conflict'",
       '放弃本地更改并重新载入',

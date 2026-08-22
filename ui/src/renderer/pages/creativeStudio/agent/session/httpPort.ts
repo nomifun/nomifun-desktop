@@ -8,7 +8,9 @@ import { httpPost } from "@/common/adapter/httpBridge";
 import {
   CANONICAL_UUID_V7,
   parseConversationId,
+  parseMessageId,
   parseProviderId,
+  type MessageId,
 } from "@/common/types/ids";
 
 import { serializeCreativeStudioAgentHistory } from "../adapters";
@@ -106,6 +108,35 @@ const parseHistory = (
   });
 };
 
+const parseAppliedProposalMessageIds = (
+  value: unknown,
+  history: readonly CreativeStudioAgentMessage[],
+): readonly MessageId[] => {
+  if (!Array.isArray(value)) {
+    throw new CreativeStudioAgentSessionResolutionError(
+      "PORT_CONTRACT_VIOLATION",
+      "Creative Studio applied proposal IDs must be an array",
+    );
+  }
+  const assistantIds = new Set(
+    history
+      .filter((message) => message.role === "assistant")
+      .map((message) => message.id),
+  );
+  const seen = new Set<string>();
+  return value.map((item, index) => {
+    const id = string(item, `applied_proposal_message_ids[${index}]`);
+    if (!CANONICAL_UUID_V7.test(id) || seen.has(id) || !assistantIds.has(id)) {
+      throw new CreativeStudioAgentSessionResolutionError(
+        "PORT_CONTRACT_VIOLATION",
+        "Applied proposal IDs must be unique completed assistant messages from this history",
+      );
+    }
+    seen.add(id);
+    return parseMessageId(id);
+  });
+};
+
 const validateBoundaryId = (value: string, label: string): void => {
   if (!CANONICAL_UUID_V7.test(value)) {
     throw new CreativeStudioAgentSessionResolutionError(
@@ -154,7 +185,7 @@ export function createNomiCreativeStudioAgentSessionHttpPort(
       );
       exactKeys(
         response,
-        ["binding", "history", "created"],
+        ["binding", "history", "applied_proposal_message_ids", "created"],
         "Creative Studio session response",
       );
       const binding = record(
@@ -189,6 +220,10 @@ export function createNomiCreativeStudioAgentSessionHttpPort(
         );
       }
       const history = parseHistory(response.history);
+      const appliedProposalMessageIds = parseAppliedProposalMessageIds(
+        response.applied_proposal_message_ids,
+        history,
+      );
       const historyKey = string(binding.history_key, "binding.history_key");
       const ownership = string(binding.ownership, "binding.ownership");
       const boundProjectId = string(binding.project_id, "binding.project_id");
@@ -227,6 +262,7 @@ export function createNomiCreativeStudioAgentSessionHttpPort(
           historyKey,
         },
         history,
+        appliedProposalMessageIds,
         created: response.created,
       };
     },

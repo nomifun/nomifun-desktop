@@ -52,6 +52,7 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
                 type='button'
                 className={styles.historyItem}
                 data-active={session.id === props.activeSessionId}
+                disabled={props.disabled === true || props.isRunning}
                 onClick={() => props.onSelectSession(session.id)}
               >
                 <span className={styles.historyTitle}>{session.title}</span>
@@ -86,7 +87,10 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
     return (
       <CreativeStudioAgentMessages
         messages={props.messages}
+        proposals={props.proposals}
+        proposalApplyDisabled={props.isRunning || props.disabled === true}
         onRetryMessage={props.onRetryMessage}
+        onApplyProposal={props.onApplyProposal}
       />
     );
   };
@@ -123,6 +127,7 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
               disabled={
                 props.activeSessionId === null ||
                 props.isRunning ||
+                props.disabled === true ||
                 props.loadState !== 'ready'
               }
               aria-label='新对话'

@@ -3,11 +3,14 @@ use serde_json::Value;
 
 use crate::error::DbError;
 use crate::models::{
-    CreativeStudioProjectRow, CreativeStudioWorkflowRow, CreativeStudioWorkflowRunRow,
-    WorkshopAssetRow,
+    CreativeStudioAgentProposalReceiptRow, CreativeStudioProjectRow, CreativeStudioWorkflowRow,
+    CreativeStudioWorkflowRunRow, WorkshopAssetRow,
 };
 use crate::repository::IWorkshopRepository;
-use crate::repository::workshop::{AssetSort, ListAssetsParams, UpdateAssetParams};
+use crate::repository::workshop::{
+    ApplyCreativeAgentProposalParams, AssetSort, CreativeAgentProposalCommit, ListAssetsParams,
+    UpdateAssetParams,
+};
 
 /// SQLite-backed implementation of [`IWorkshopRepository`].
 #[derive(Clone, Debug)]
@@ -420,6 +423,410 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         )))
     }
 
+    async fn get_creative_agent_proposal_receipt(
+        &self,
+        owner_id: &str,
+        project_id: &str,
+        assistant_message_id: &str,
+    ) -> Result<Option<CreativeStudioAgentProposalReceiptRow>, DbError> {
+        nomifun_common::UserId::parse(owner_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal owner_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        nomifun_common::CreativeStudioProjectId::parse(project_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal project_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        nomifun_common::MessageId::parse(assistant_message_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal assistant_message_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        Ok(sqlx::query_as::<_, CreativeStudioAgentProposalReceiptRow>(
+            "SELECT receipt.* \
+             FROM creative_studio_agent_proposal_receipts receipt \
+             WHERE receipt.project_id = ? AND receipt.assistant_message_id = ? \
+               AND EXISTS ( \
+                   SELECT 1 \
+                   FROM creative_studio_projects project \
+                   CROSS JOIN json_each(project.document_json, '$.chatSessions') session \
+                   CROSS JOIN json_each(session.value, '$.messageIds') message \
+                   JOIN creative_studio_agent_sessions binding \
+                     ON binding.project_id = project.project_id \
+                    AND binding.session_id = json_extract(session.value, '$.id') \
+                    AND binding.owner_id = ? \
+                   JOIN installation_identity identity \
+                     ON identity.singleton_key = 'installation' \
+                    AND identity.owner_user_id = binding.owner_id \
+                   JOIN messages persisted \
+                     ON persisted.conversation_id = binding.conversation_id \
+                    AND persisted.message_id = receipt.assistant_message_id \
+                   WHERE project.project_id = receipt.project_id \
+                     AND CAST(message.key AS INTEGER) % 2 = 1 \
+                     AND CAST(message.value AS TEXT) = receipt.assistant_message_id \
+                     AND persisted.position = 'left' \
+                     AND persisted.status = 'finish' \
+                     AND persisted.hidden = 0 \
+                     AND persisted.type = 'text' \
+               )",
+        )
+        .bind(project_id)
+        .bind(assistant_message_id)
+        .bind(owner_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    async fn is_creative_studio_owner(&self, owner_id: &str) -> Result<bool, DbError> {
+        nomifun_common::UserId::parse(owner_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio owner_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS( \
+                 SELECT 1 FROM installation_identity \
+                 WHERE singleton_key = 'installation' AND owner_user_id = ? \
+             )",
+        )
+        .bind(owner_id)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    async fn get_creative_agent_proposal_message_content(
+        &self,
+        owner_id: &str,
+        project_id: &str,
+        assistant_message_id: &str,
+    ) -> Result<Option<String>, DbError> {
+        nomifun_common::UserId::parse(owner_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal owner_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        nomifun_common::CreativeStudioProjectId::parse(project_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal project_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        nomifun_common::MessageId::parse(assistant_message_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal assistant_message_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        let contents = sqlx::query_scalar::<_, String>(
+            "SELECT persisted.content \
+             FROM creative_studio_projects project \
+             CROSS JOIN json_each(project.document_json, '$.chatSessions') session \
+             CROSS JOIN json_each(session.value, '$.messageIds') message \
+             JOIN creative_studio_agent_sessions binding \
+               ON binding.project_id = project.project_id \
+              AND binding.session_id = json_extract(session.value, '$.id') \
+              AND binding.owner_id = ? \
+             JOIN installation_identity identity \
+               ON identity.singleton_key = 'installation' \
+              AND identity.owner_user_id = binding.owner_id \
+             JOIN messages persisted \
+               ON persisted.conversation_id = binding.conversation_id \
+              AND persisted.message_id = CAST(message.value AS TEXT) \
+             WHERE project.project_id = ? \
+               AND CAST(message.key AS INTEGER) % 2 = 1 \
+               AND CAST(message.value AS TEXT) = ? \
+               AND persisted.position = 'left' \
+               AND persisted.status = 'finish' \
+               AND persisted.hidden = 0 \
+               AND persisted.type = 'text'",
+        )
+        .bind(owner_id)
+        .bind(project_id)
+        .bind(assistant_message_id)
+        .fetch_all(&self.pool)
+        .await?;
+        match contents.as_slice() {
+            [] => Ok(None),
+            [content] => Ok(Some(content.clone())),
+            _ => Err(DbError::Conflict(format!(
+                "assistantMessageId '{assistant_message_id}' is ambiguous across project chat sessions"
+            ))),
+        }
+    }
+
+    async fn apply_creative_agent_proposal(
+        &self,
+        params: ApplyCreativeAgentProposalParams<'_>,
+    ) -> Result<CreativeAgentProposalCommit, DbError> {
+        nomifun_common::UserId::parse(params.owner_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal owner_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        nomifun_common::CreativeStudioProjectId::parse(params.project_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal project_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        nomifun_common::MessageId::parse(params.assistant_message_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "creative studio proposal assistant_message_id is not a canonical UUIDv7: {error}"
+            ))
+        })?;
+        if params.expected_revision < 1 {
+            return Err(DbError::Conflict(
+                "creative studio proposal expected revision must be positive".to_owned(),
+            ));
+        }
+        let applied_revision = params.expected_revision.checked_add(1).ok_or_else(|| {
+            DbError::Conflict("creative studio proposal revision overflow".to_owned())
+        })?;
+        if params.node_count < 0 || params.connection_count < 0 {
+            return Err(DbError::Conflict(
+                "creative studio proposal graph counts must be non-negative".to_owned(),
+            ));
+        }
+        if params.ops_fingerprint.len() != 64
+            || params
+                .ops_fingerprint
+                .bytes()
+                .any(|byte| !byte.is_ascii_hexdigit() || byte.is_ascii_uppercase())
+        {
+            return Err(DbError::Conflict(
+                "creative studio proposal fingerprint must be lowercase SHA-256 hex".to_owned(),
+            ));
+        }
+        for (label, json) in [
+            ("ops_json", params.ops_json),
+            ("results_json", params.results_json),
+        ] {
+            let value: Value = serde_json::from_str(json).map_err(|error| {
+                DbError::Conflict(format!(
+                    "creative studio proposal {label} is invalid JSON: {error}"
+                ))
+            })?;
+            if !value.is_array() {
+                return Err(DbError::Conflict(format!(
+                    "creative studio proposal {label} must be a JSON array"
+                )));
+            }
+        }
+
+        let mut tx = self.pool.begin().await?;
+        // This reversible proof-carrying sentinel write is deliberately the
+        // first statement. It takes SQLite's global writer position before any
+        // read snapshot, so concurrent proposals (including cross-project
+        // reuse of the same assistant UUID) serialize before inspecting the
+        // receipt table. First application overwrites the sentinel with `now`;
+        // replay restores the original timestamp before commit; every error
+        // rolls it back with the transaction.
+        let locked_updated_at = sqlx::query_scalar::<_, i64>(
+            "UPDATE creative_studio_projects \
+             SET updated_at = updated_at + 1 \
+             WHERE project_id = ? \
+               AND EXISTS ( \
+                 SELECT 1 \
+                 FROM creative_studio_projects project \
+                 CROSS JOIN json_each(project.document_json, '$.chatSessions') session \
+                 CROSS JOIN json_each(session.value, '$.messageIds') message \
+                 JOIN creative_studio_agent_sessions binding \
+                   ON binding.project_id = project.project_id \
+                  AND binding.session_id = json_extract(session.value, '$.id') \
+                 JOIN installation_identity identity \
+                   ON identity.singleton_key = 'installation' \
+                  AND identity.owner_user_id = binding.owner_id \
+                 JOIN messages persisted \
+                   ON persisted.conversation_id = binding.conversation_id \
+                  AND persisted.message_id = CAST(message.value AS TEXT) \
+                 WHERE project.project_id = ? \
+                   AND binding.owner_id = ? \
+                   AND CAST(message.key AS INTEGER) % 2 = 1 \
+                   AND CAST(message.value AS TEXT) = ? \
+                   AND persisted.content = ? \
+                   AND persisted.position = 'left' \
+                   AND persisted.status = 'finish' \
+                   AND persisted.hidden = 0 \
+                   AND persisted.type = 'text' \
+             ) \
+             RETURNING updated_at",
+        )
+        .bind(params.project_id)
+        .bind(params.project_id)
+        .bind(params.owner_id)
+        .bind(params.assistant_message_id)
+        .bind(params.assistant_message_content_json)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(locked_updated_at) = locked_updated_at else {
+            let project_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM creative_studio_projects WHERE project_id = ?)",
+            )
+            .bind(params.project_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !project_exists {
+                return Err(DbError::NotFound(format!(
+                    "creative studio project '{}' not found",
+                    params.project_id
+                )));
+            }
+            let owner_matches: bool = sqlx::query_scalar(
+                "SELECT EXISTS( \
+                     SELECT 1 FROM installation_identity \
+                     WHERE singleton_key = 'installation' AND owner_user_id = ? \
+                 )",
+            )
+            .bind(params.owner_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !owner_matches {
+                return Err(DbError::Conflict(
+                    "Creative Studio proposal requires the installation owner".to_owned(),
+                ));
+            }
+            let current_content = sqlx::query_scalar::<_, String>(
+                "SELECT persisted.content \
+                 FROM creative_studio_projects project \
+                 CROSS JOIN json_each(project.document_json, '$.chatSessions') session \
+                 CROSS JOIN json_each(session.value, '$.messageIds') message \
+                 JOIN creative_studio_agent_sessions binding \
+                   ON binding.project_id = project.project_id \
+                  AND binding.session_id = json_extract(session.value, '$.id') \
+                  AND binding.owner_id = ? \
+                 JOIN messages persisted \
+                   ON persisted.conversation_id = binding.conversation_id \
+                  AND persisted.message_id = CAST(message.value AS TEXT) \
+                 WHERE project.project_id = ? \
+                   AND CAST(message.key AS INTEGER) % 2 = 1 \
+                   AND CAST(message.value AS TEXT) = ? \
+                   AND persisted.position = 'left' \
+                   AND persisted.status = 'finish' \
+                   AND persisted.hidden = 0 \
+                   AND persisted.type = 'text' \
+                 LIMIT 1",
+            )
+            .bind(params.owner_id)
+            .bind(params.project_id)
+            .bind(params.assistant_message_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if current_content.as_deref().is_some_and(|content| {
+                content != params.assistant_message_content_json
+            }) {
+                return Err(DbError::Conflict(format!(
+                    "creative studio assistant proposal '{}' source content changed during application",
+                    params.assistant_message_id
+                )));
+            }
+            return Err(DbError::Conflict(format!(
+                "assistantMessageId '{}' is not a completed visible assistant message in a bound Creative Studio session",
+                params.assistant_message_id
+            )));
+        };
+
+        let receipt = sqlx::query_as::<_, CreativeStudioAgentProposalReceiptRow>(
+            "SELECT * FROM creative_studio_agent_proposal_receipts \
+             WHERE assistant_message_id = ?",
+        )
+        .bind(params.assistant_message_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(receipt) = receipt {
+            if receipt.project_id != params.project_id {
+                return Err(DbError::Conflict(format!(
+                    "creative studio assistant proposal '{}' is already owned by another project",
+                    params.assistant_message_id
+                )));
+            }
+            if receipt.ops_fingerprint != params.ops_fingerprint
+                || receipt.ops_json != params.ops_json
+            {
+                return Err(DbError::Conflict(format!(
+                    "creative studio assistant proposal '{}' payload mismatch",
+                    params.assistant_message_id
+                )));
+            }
+            sqlx::query(
+                "UPDATE creative_studio_projects SET updated_at = ? WHERE project_id = ?",
+            )
+            .bind(locked_updated_at - 1)
+            .bind(params.project_id)
+            .execute(&mut *tx)
+            .await?;
+            let project = sqlx::query_as::<_, CreativeStudioProjectRow>(
+                "SELECT * FROM creative_studio_projects WHERE project_id = ?",
+            )
+            .bind(params.project_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| {
+                DbError::NotFound(format!(
+                    "creative studio project '{}' not found",
+                    params.project_id
+                ))
+            })?;
+            tx.commit().await?;
+            return Ok(CreativeAgentProposalCommit {
+                project,
+                receipt,
+                replayed: true,
+            });
+        }
+
+        let project = sqlx::query_as::<_, CreativeStudioProjectRow>(
+            "UPDATE creative_studio_projects \
+             SET document_json = ?, node_count = ?, connection_count = ?, \
+                 revision = revision + 1, updated_at = ? \
+             WHERE project_id = ? AND revision = ? RETURNING *",
+        )
+        .bind(params.document_json)
+        .bind(params.node_count)
+        .bind(params.connection_count)
+        .bind(params.now)
+        .bind(params.project_id)
+        .bind(params.expected_revision)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(project) = project else {
+            // Dropping the transaction rolls the proof lock back without a
+            // receipt, so a corrected revision can claim this assistant ID.
+            return Err(DbError::Conflict(format!(
+                "creative studio project '{}' revision conflict",
+                params.project_id
+            )));
+        };
+        sqlx::query(
+            "INSERT INTO creative_studio_agent_proposal_receipts \
+                (project_id, assistant_message_id, ops_fingerprint, ops_json, results_json, \
+                 applied_revision, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(params.project_id)
+        .bind(params.assistant_message_id)
+        .bind(params.ops_fingerprint)
+        .bind(params.ops_json)
+        .bind(params.results_json)
+        .bind(applied_revision)
+        .bind(params.now)
+        .execute(&mut *tx)
+        .await?;
+        let receipt = sqlx::query_as::<_, CreativeStudioAgentProposalReceiptRow>(
+            "SELECT * FROM creative_studio_agent_proposal_receipts \
+             WHERE project_id = ? AND assistant_message_id = ?",
+        )
+        .bind(params.project_id)
+        .bind(params.assistant_message_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(CreativeAgentProposalCommit {
+            project,
+            receipt,
+            replayed: false,
+        })
+    }
+
     async fn import_creative_project_with_assets(
         &self,
         project: &CreativeStudioProjectRow,
@@ -523,6 +930,12 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                 "creative studio project '{project_id}' has live creation task '{task_id}'"
             )));
         }
+        sqlx::query(
+            "DELETE FROM creative_studio_agent_proposal_receipts WHERE project_id = ?",
+        )
+        .bind(project_id)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query("DELETE FROM creative_studio_projects WHERE project_id = ?")
             .bind(project_id)
             .execute(&mut *tx)
@@ -1198,6 +1611,76 @@ mod tests {
         (repo, db)
     }
 
+    async fn seed_agent_proposal_project(
+        repo: &SqliteWorkshopRepository,
+        db: &crate::Database,
+        project_id: &str,
+        assistant_message_ids: &[&str],
+    ) -> (String, Vec<String>) {
+        let owner_id = crate::installation_owner_id(db.pool()).await.unwrap();
+        let session_id = nomifun_common::generate_id();
+        let conversation_id = nomifun_common::ConversationId::new().into_string();
+        let mut message_ids = Vec::with_capacity(assistant_message_ids.len() * 2);
+        for assistant_message_id in assistant_message_ids {
+            message_ids.push(nomifun_common::MessageId::new().into_string());
+            message_ids.push((*assistant_message_id).to_owned());
+        }
+        let initial_doc = serde_json::json!({
+            "schema": "nomifun.creative-studio/v1",
+            "projectId": project_id,
+            "nodes": [],
+            "chatSessions": [{
+                "id": session_id,
+                "messageIds": message_ids
+            }]
+        })
+        .to_string();
+        repo.create_creative_project(project_id, "Agent proposal", &initial_doc, 100)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO conversations \
+                (conversation_id, user_id, name, type, extra, status, source, created_at, updated_at) \
+             VALUES (?, ?, 'Creative Studio Agent', 'nomi', '{}', 'finished', 'nomifun', 1, 1)",
+        )
+        .bind(&conversation_id)
+        .bind(&owner_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO creative_studio_agent_sessions \
+                (owner_id, project_id, session_id, conversation_id, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 1, 1)",
+        )
+        .bind(&owner_id)
+        .bind(project_id)
+        .bind(&session_id)
+        .bind(&conversation_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let artifact_text = "```json\n{\"kind\":\"nomifun.creative-studio.canvas-ops/v1\",\"summary\":\"Add durable text\",\"ops\":[{\"type\":\"add_node\",\"node_type\":\"text\",\"x\":0,\"y\":0,\"data\":{\"text\":\"durable\",\"format\":\"plain\",\"fontSize\":16,\"textAlign\":\"left\"}}]}\n```";
+        let mut assistant_contents = Vec::with_capacity(assistant_message_ids.len());
+        for assistant_message_id in assistant_message_ids {
+            let content_json = serde_json::json!({ "content": artifact_text }).to_string();
+            sqlx::query(
+                "INSERT INTO messages \
+                    (message_id, conversation_id, msg_id, type, content, position, status, hidden, created_at) \
+                 VALUES (?, ?, ?, 'text', ?, 'left', 'finish', 0, 1)",
+            )
+            .bind(assistant_message_id)
+            .bind(&conversation_id)
+            .bind(assistant_message_id)
+            .bind(&content_json)
+            .execute(db.pool())
+            .await
+            .unwrap();
+            assistant_contents.push(content_json);
+        }
+        (initial_doc, assistant_contents)
+    }
+
     fn sample_asset(id: i64, asset_id: &str, kind: &str, title: &str) -> WorkshopAssetRow {
         WorkshopAssetRow {
             id,
@@ -1275,6 +1758,227 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn creative_agent_proposal_receipt_replays_and_rolls_back_failed_cas() {
+        const ASSISTANT_A: &str = "0190f5fe-7c00-7a00-8abc-000000000181";
+        const ASSISTANT_B: &str = "0190f5fe-7c00-7a00-8abc-000000000182";
+        const ASSISTANT_C: &str = "0190f5fe-7c00-7a00-8abc-000000000184";
+        let (repo, db) = repo().await;
+        let owner_id = crate::installation_owner_id(db.pool()).await.unwrap();
+        let (initial, assistant_contents) = seed_agent_proposal_project(
+            &repo,
+            &db,
+            CREATIVE_PROJECT_A,
+            &[ASSISTANT_A, ASSISTANT_B, ASSISTANT_C],
+        )
+        .await;
+        let mut changed: Value = serde_json::from_str(&initial).unwrap();
+        changed["nodes"] = serde_json::json!([{}]);
+        let changed_doc = changed.to_string();
+        let first = repo
+            .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                owner_id: &owner_id,
+                project_id: CREATIVE_PROJECT_A,
+                assistant_message_id: ASSISTANT_A,
+                assistant_message_content_json: &assistant_contents[0],
+                ops_fingerprint: &"a".repeat(64),
+                ops_json: r#"[{"type":"add_node"}]"#,
+                results_json: r#"[{"type":"node_added","node_id":"winner"}]"#,
+                expected_revision: 1,
+                document_json: &changed_doc,
+                node_count: 1,
+                connection_count: 0,
+                now: 200,
+            })
+            .await
+            .unwrap();
+        assert!(!first.replayed);
+        assert_eq!(first.project.revision, 2);
+        assert_eq!(first.receipt.applied_revision, 2);
+
+        let replay = repo
+            .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                owner_id: &owner_id,
+                project_id: CREATIVE_PROJECT_A,
+                assistant_message_id: ASSISTANT_A,
+                assistant_message_content_json: &assistant_contents[0],
+                ops_fingerprint: &"a".repeat(64),
+                ops_json: r#"[{"type":"add_node"}]"#,
+                results_json: r#"[{"type":"node_added","node_id":"loser"}]"#,
+                expected_revision: 999,
+                document_json: &changed_doc,
+                node_count: 99,
+                connection_count: 0,
+                now: 300,
+            })
+            .await
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.project.revision, 2);
+        assert_eq!(replay.project.updated_at, first.project.updated_at);
+        assert_eq!(replay.receipt.results_json, first.receipt.results_json);
+
+        let mismatch = repo
+            .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                owner_id: &owner_id,
+                project_id: CREATIVE_PROJECT_A,
+                assistant_message_id: ASSISTANT_A,
+                assistant_message_content_json: &assistant_contents[0],
+                ops_fingerprint: &"b".repeat(64),
+                ops_json: r#"[{"type":"move_node"}]"#,
+                results_json: "[]",
+                expected_revision: 2,
+                document_json: &changed_doc,
+                node_count: 1,
+                connection_count: 0,
+                now: 400,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(mismatch, DbError::Conflict(message) if message.contains("payload mismatch")));
+
+        sqlx::query("UPDATE messages SET content = ? WHERE message_id = ?")
+            .bind(r#"{"content":"changed after provenance read"}"#)
+            .bind(ASSISTANT_B)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let source_race = repo
+            .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                owner_id: &owner_id,
+                project_id: CREATIVE_PROJECT_A,
+                assistant_message_id: ASSISTANT_B,
+                assistant_message_content_json: &assistant_contents[1],
+                ops_fingerprint: &"c".repeat(64),
+                ops_json: r#"[{"type":"add_node"}]"#,
+                results_json: r#"[{"type":"node_added","node_id":"never"}]"#,
+                expected_revision: 2,
+                document_json: &changed_doc,
+                node_count: 2,
+                connection_count: 0,
+                now: 450,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(source_race, DbError::Conflict(message) if message.contains("source content changed")));
+        assert!(repo
+            .get_creative_agent_proposal_receipt(&owner_id, CREATIVE_PROJECT_A, ASSISTANT_B)
+            .await
+            .unwrap()
+            .is_none());
+
+        let stale = repo
+            .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                owner_id: &owner_id,
+                project_id: CREATIVE_PROJECT_A,
+                assistant_message_id: ASSISTANT_C,
+                assistant_message_content_json: &assistant_contents[2],
+                ops_fingerprint: &"d".repeat(64),
+                ops_json: r#"[{"type":"add_node"}]"#,
+                results_json: r#"[{"type":"node_added","node_id":"never"}]"#,
+                expected_revision: 1,
+                document_json: &changed_doc,
+                node_count: 2,
+                connection_count: 0,
+                now: 500,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, DbError::Conflict(message) if message.contains("revision conflict")));
+        assert!(repo
+            .get_creative_agent_proposal_receipt(&owner_id, CREATIVE_PROJECT_A, ASSISTANT_C)
+            .await
+            .unwrap()
+            .is_none());
+        let current = repo
+            .get_creative_project(CREATIVE_PROJECT_A)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.revision, 2);
+        assert_eq!(current.node_count, 1);
+        repo.delete_creative_project(CREATIVE_PROJECT_A)
+            .await
+            .unwrap();
+        let remaining_receipts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM creative_studio_agent_proposal_receipts WHERE project_id = ?",
+        )
+        .bind(CREATIVE_PROJECT_A)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(remaining_receipts, 0, "project deletion must cascade receipts");
+    }
+
+    #[tokio::test]
+    async fn concurrent_creative_agent_proposal_claims_execute_once() {
+        const ASSISTANT: &str = "0190f5fe-7c00-7a00-8abc-000000000183";
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::init_database(&dir.path().join("proposal-concurrency.db"))
+            .await
+            .unwrap();
+        let repo = SqliteWorkshopRepository::new(db.pool().clone());
+        let owner_id = crate::installation_owner_id(db.pool()).await.unwrap();
+        let (initial, assistant_contents) =
+            seed_agent_proposal_project(&repo, &db, CREATIVE_PROJECT_A, &[ASSISTANT]).await;
+        let mut winner: Value = serde_json::from_str(&initial).unwrap();
+        winner["nodes"] = serde_json::json!([{"candidate": "a"}]);
+        let winner_doc = winner.to_string();
+        let mut loser: Value = serde_json::from_str(&initial).unwrap();
+        loser["nodes"] = serde_json::json!([{"candidate": "b"}]);
+        let loser_doc = loser.to_string();
+        let repo_a = repo.clone();
+        let repo_b = repo.clone();
+        let call_a = async {
+            repo_a
+                .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                    owner_id: &owner_id,
+                    project_id: CREATIVE_PROJECT_A,
+                    assistant_message_id: ASSISTANT,
+                    assistant_message_content_json: &assistant_contents[0],
+                    ops_fingerprint: &"d".repeat(64),
+                    ops_json: r#"[{"type":"add_node"}]"#,
+                    results_json: r#"[{"type":"node_added","node_id":"a"}]"#,
+                    expected_revision: 1,
+                    document_json: &winner_doc,
+                    node_count: 1,
+                    connection_count: 0,
+                    now: 200,
+                })
+                .await
+        };
+        let call_b = async {
+            repo_b
+                .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                    owner_id: &owner_id,
+                    project_id: CREATIVE_PROJECT_A,
+                    assistant_message_id: ASSISTANT,
+                    assistant_message_content_json: &assistant_contents[0],
+                    ops_fingerprint: &"d".repeat(64),
+                    ops_json: r#"[{"type":"add_node"}]"#,
+                    results_json: r#"[{"type":"node_added","node_id":"b"}]"#,
+                    expected_revision: 1,
+                    document_json: &loser_doc,
+                    node_count: 1,
+                    connection_count: 0,
+                    now: 201,
+                })
+                .await
+        };
+        let (a, b) = tokio::join!(call_a, call_b);
+        let a = a.unwrap();
+        let b = b.unwrap();
+        assert_ne!(a.replayed, b.replayed);
+        assert_eq!(a.receipt.results_json, b.receipt.results_json);
+        let current = repo
+            .get_creative_project(CREATIVE_PROJECT_A)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.revision, 2);
+        assert_eq!(current.node_count, 1);
     }
 
     #[tokio::test]

@@ -1295,6 +1295,35 @@ impl IConversationRepository for SqliteConversationRepository {
         .bind(&params.session_id)
         .fetch_all(&mut *tx)
         .await?;
+        let applied_proposal_message_ids = sqlx::query_scalar::<_, String>(
+            "SELECT receipt.assistant_message_id \
+             FROM creative_studio_agent_proposal_receipts receipt \
+             JOIN creative_studio_projects project \
+               ON project.project_id = receipt.project_id \
+             CROSS JOIN json_each(project.document_json, '$.chatSessions') session \
+             CROSS JOIN json_each(session.value, '$.messageIds') message \
+             JOIN creative_studio_agent_sessions binding \
+               ON binding.project_id = project.project_id \
+              AND binding.session_id = json_extract(session.value, '$.id') \
+              AND binding.owner_id = ? \
+             JOIN messages persisted \
+               ON persisted.conversation_id = binding.conversation_id \
+              AND persisted.message_id = receipt.assistant_message_id \
+             WHERE receipt.project_id = ? \
+               AND json_extract(session.value, '$.id') = ? \
+               AND CAST(message.key AS INTEGER) % 2 = 1 \
+               AND CAST(message.value AS TEXT) = receipt.assistant_message_id \
+               AND persisted.position = 'left' \
+               AND persisted.status = 'finish' \
+               AND persisted.hidden = 0 \
+               AND persisted.type = 'text' \
+             ORDER BY CAST(message.key AS INTEGER) ASC",
+        )
+        .bind(&params.owner_id)
+        .bind(&params.project_id)
+        .bind(&params.session_id)
+        .fetch_all(&mut *tx)
+        .await?;
 
         tx.commit().await?;
         Ok(ResolvedCreativeStudioAgentSession {
@@ -1302,6 +1331,7 @@ impl IConversationRepository for SqliteConversationRepository {
             conversation,
             messages,
             project_message_ids,
+            applied_proposal_message_ids,
             created,
         })
     }
@@ -8511,6 +8541,7 @@ mod tests {
         assert_ne!(first.created, second.created);
         assert_eq!(first.conversation.user_id, TEST_INSTALLATION_OWNER);
         assert_eq!(first.project_message_ids, Vec::<String>::new());
+        assert_eq!(first.applied_proposal_message_ids, Vec::<String>::new());
         assert_eq!(first.messages.len(), 0);
 
         let ordinary_list = repo
@@ -8549,6 +8580,75 @@ mod tests {
         .unwrap();
         assert_eq!(binding_count, 1);
         assert_eq!(conversation_count, 1);
+    }
+
+    #[tokio::test]
+    async fn creative_studio_agent_resolve_projects_applied_receipts_for_its_session() {
+        let (repo, db) = setup().await;
+        let project_id = nomifun_common::CreativeStudioProjectId::new().into_string();
+        let session_id = ConversationId::new().into_string();
+        insert_creative_project_session(db.pool(), &project_id, &session_id).await;
+        let params = creative_session_params(
+            TEST_INSTALLATION_OWNER,
+            &project_id,
+            &session_id,
+            ConversationId::new().into_string(),
+        );
+        let first = repo
+            .resolve_or_create_creative_studio_agent_session(&params)
+            .await
+            .unwrap();
+
+        let mut user = sample_message(first.binding.conversation_id.clone());
+        user.position = Some("right".to_owned());
+        let mut assistant = sample_message(first.binding.conversation_id.clone());
+        assistant.position = Some("left".to_owned());
+        assistant.created_at = user.created_at + 1;
+        repo.insert_message(&user).await.unwrap();
+        repo.insert_message(&assistant).await.unwrap();
+
+        let message_ids = serde_json::to_string(&vec![
+            user.message_id.clone(),
+            assistant.message_id.clone(),
+        ])
+        .unwrap();
+        sqlx::query(
+            "UPDATE creative_studio_projects \
+             SET document_json = json_set( \
+                     document_json, '$.chatSessions[0].messageIds', json(?) \
+                 ), revision = 2 \
+             WHERE project_id = ?",
+        )
+        .bind(message_ids)
+        .bind(&project_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO creative_studio_agent_proposal_receipts \
+                (project_id, assistant_message_id, ops_fingerprint, ops_json, results_json, \
+                 applied_revision, created_at) \
+             VALUES (?, ?, ?, '[]', '[]', 2, 1)",
+        )
+        .bind(&project_id)
+        .bind(&assistant.message_id)
+        .bind("a".repeat(64))
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let restored = repo
+            .resolve_or_create_creative_studio_agent_session(&params)
+            .await
+            .unwrap();
+        assert_eq!(
+            restored.project_message_ids,
+            vec![user.message_id, assistant.message_id.clone()]
+        );
+        assert_eq!(
+            restored.applied_proposal_message_ids,
+            vec![assistant.message_id]
+        );
     }
 
     #[tokio::test]

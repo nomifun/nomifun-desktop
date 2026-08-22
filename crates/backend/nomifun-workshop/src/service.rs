@@ -8,15 +8,17 @@ use std::sync::Arc;
 
 use nomifun_common::{
     AppError, CreativeStudioProjectId, CreativeStudioWorkflowId, CreativeStudioWorkflowRunId,
-    ProviderId, SharedProviderLifecycleBarrier, WorkshopAssetId, now_ms,
+    MessageId, ProviderId, SharedProviderLifecycleBarrier, UserId, WorkshopAssetId, now_ms,
 };
 use nomifun_db::{
-    AssetSort, CreativeStudioProjectRow, CreativeStudioWorkflowRunRow, DbError,
-    IWorkshopRepository, ListAssetsParams, ProviderModelCleanupPlan,
+    ApplyCreativeAgentProposalParams, AssetSort, CreativeStudioProjectRow,
+    CreativeStudioWorkflowRunRow, DbError, IWorkshopRepository, ListAssetsParams,
+    ProviderModelCleanupPlan,
     ProviderModelProjectCleanup, ProviderModelWorkflowCleanup, UpdateAssetParams,
     WorkshopAssetRow,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::archive::{
     CREATIVE_STUDIO_ARCHIVE_MIME, CreativeArchiveAssetSnapshot,
@@ -24,6 +26,9 @@ use crate::archive::{
     director_sidecar_asset_ids, parse_creative_project_archive,
     remap_creative_archive_for_import,
     sanitized_archive_origin,
+};
+use crate::canvas_agent_artifact::{
+    CREATIVE_CANVAS_AGENT_ARTIFACT_KIND, parse_creative_canvas_agent_artifact,
 };
 use crate::creative_studio::{
     CreativeGenerationStatus, CreativeNodeData, CreativeProjectDocument, CreativeProjectSummary,
@@ -51,6 +56,17 @@ pub struct CreativeProjectWithDocument {
 pub struct CreativeAgentApplyResult {
     pub project: CreativeProjectSummary,
     pub ops: Vec<CreativeAgentOpResult>,
+}
+
+/// One durable Canvas Agent assistant proposal application. Replays return the
+/// original ordered operation results and applied revision without mutating
+/// the current project again.
+#[derive(Debug)]
+pub struct CreativeAgentProposalApplyResult {
+    pub project: CreativeProjectSummary,
+    pub ops: Vec<CreativeAgentOpResult>,
+    pub replayed: bool,
+    pub applied_revision: String,
 }
 
 /// A completed, bounded Creative Studio v1 project archive.
@@ -557,6 +573,207 @@ impl WorkshopService {
         Ok(CreativeAgentApplyResult {
             project,
             ops: results,
+        })
+    }
+
+    /// Apply one completed assistant proposal exactly once. The assistant
+    /// message UUID is the idempotency key and must still occupy an assistant
+    /// position in a completed project chat pair. `expected_revision` is a CAS
+    /// fence only; it is intentionally excluded from the payload fingerprint
+    /// so response-loss replay survives later project revisions.
+    pub async fn apply_creative_agent_proposal(
+        &self,
+        owner_id: &str,
+        project_id: &str,
+        assistant_message_id: &str,
+        expected_revision: &str,
+        ops: Vec<CreativeAgentOp>,
+        source: &str,
+    ) -> Result<CreativeAgentProposalApplyResult, AppError> {
+        UserId::parse(owner_id).map_err(|error| {
+            AppError::Forbidden(format!(
+                "Creative Studio proposal owner is not canonical: {error}"
+            ))
+        })?;
+        if !self.repo.is_creative_studio_owner(owner_id).await? {
+            return Err(AppError::Forbidden(
+                "Creative Studio proposals are restricted to the installation owner".to_owned(),
+            ));
+        }
+        validate_creative_project_id(project_id)?;
+        MessageId::parse(assistant_message_id).map_err(|error| {
+            AppError::BadRequest(format!(
+                "assistantMessageId must be a canonical MessageId UUIDv7: {error}"
+            ))
+        })?;
+        let expected_revision = parse_creative_project_revision(expected_revision)?;
+        let ops_json = serde_json::to_string(&ops).map_err(|error| {
+            AppError::BadRequest(format!(
+                "Creative Studio operations could not be serialized: {error}"
+            ))
+        })?;
+        let assistant_message_content_json = self
+            .repo
+            .get_creative_agent_proposal_message_content(
+                owner_id,
+                project_id,
+                assistant_message_id,
+            )
+            .await?
+            .ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "assistantMessageId '{assistant_message_id}' is not a completed visible assistant message in this owner-bound project session"
+                ))
+            })?;
+        let assistant_text = persisted_creative_agent_message_text(
+            project_id,
+            assistant_message_id,
+            &assistant_message_content_json,
+        )?;
+        let artifact = parse_creative_canvas_agent_artifact(&assistant_text)
+            .map_err(|error| {
+                AppError::BadRequest(format!(
+                    "assistantMessageId '{assistant_message_id}' has an invalid Canvas operations artifact: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "assistantMessageId '{assistant_message_id}' does not contain a final {} artifact",
+                    CREATIVE_CANVAS_AGENT_ARTIFACT_KIND
+                ))
+            })?;
+        if artifact.kind != CREATIVE_CANVAS_AGENT_ARTIFACT_KIND || artifact.summary.is_empty() {
+            return Err(AppError::Internal(
+                "validated Canvas operations artifact lost its kind or summary invariant"
+                    .to_owned(),
+            ));
+        }
+        let artifact_ops_json = serde_json::to_string(&artifact.ops).map_err(|error| {
+            AppError::Internal(format!(
+                "validated Canvas operations artifact could not be serialized: {error}"
+            ))
+        })?;
+        if artifact_ops_json != ops_json {
+            return Err(AppError::Conflict(format!(
+                "creative studio assistant proposal '{assistant_message_id}' artifact does not match requested operations"
+            )));
+        }
+        let ops_fingerprint = creative_agent_ops_fingerprint(&ops_json)?;
+
+        // Consult the durable receipt before evaluating a candidate mutation.
+        // This is what makes a replay independent of the request's now-stale
+        // expected revision and avoids minting throwaway node IDs in the
+        // ordinary response-loss path.
+        let receipt = self
+            .repo
+            .get_creative_agent_proposal_receipt(
+                owner_id,
+                project_id,
+                assistant_message_id,
+            )
+            .await?;
+        let current = self.get_creative_project(project_id).await?;
+        validate_completed_assistant_message(&current.document, assistant_message_id)?;
+        if let Some(receipt) = receipt {
+            if receipt.ops_fingerprint != ops_fingerprint || receipt.ops_json != ops_json {
+                return Err(AppError::Conflict(format!(
+                    "creative studio assistant proposal '{assistant_message_id}' payload mismatch"
+                )));
+            }
+            let current_document_json = serialize_creative_project_document(&current.document)?;
+            let committed = self
+                .repo
+                .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                    owner_id,
+                    project_id,
+                    assistant_message_id,
+                    assistant_message_content_json: &assistant_message_content_json,
+                    ops_fingerprint: &ops_fingerprint,
+                    ops_json: &ops_json,
+                    results_json: &receipt.results_json,
+                    expected_revision,
+                    document_json: &current_document_json,
+                    node_count: current.project.node_count,
+                    connection_count: current.project.connection_count,
+                    now: now_ms(),
+                })
+                .await
+                .map_err(map_creative_agent_proposal_db_error)?;
+            let committed_results = parse_stored_creative_agent_results(
+                project_id,
+                assistant_message_id,
+                &committed.receipt.results_json,
+            )?;
+            return Ok(CreativeAgentProposalApplyResult {
+                project: committed.project.into(),
+                ops: committed_results,
+                replayed: committed.replayed,
+                applied_revision: committed.receipt.applied_revision.to_string(),
+            });
+        }
+
+        if current.project.revision != expected_revision.to_string() {
+            return Err(AppError::RevisionConflict(format!(
+                "creative studio project {project_id} revision is {}, expected {expected_revision}",
+                current.project.revision
+            )));
+        }
+        let (document, results) = crate::creative_agent_ops::apply_creative_agent_ops(
+            &current.document,
+            artifact.ops,
+        )
+        .map_err(|error| AppError::BadRequest(format!("invalid Creative Studio operations: {error}")))?;
+        let document_json = serialize_creative_project_document(&document)?;
+        let results_json = serde_json::to_string(&results).map_err(|error| {
+            AppError::Internal(format!(
+                "Creative Studio operation results could not be serialized: {error}"
+            ))
+        })?;
+        let node_count = i64::try_from(document.nodes.len())
+            .map_err(|_| AppError::BadRequest("creative project has too many nodes".into()))?;
+        let connection_count = i64::try_from(document.connections.len()).map_err(|_| {
+            AppError::BadRequest("creative project has too many connections".into())
+        })?;
+        let _provider_guard = self.provider_read_guard().await;
+        self.validate_creative_provider_models(&document).await?;
+        let committed = self
+            .repo
+            .apply_creative_agent_proposal(ApplyCreativeAgentProposalParams {
+                owner_id,
+                project_id,
+                assistant_message_id,
+                assistant_message_content_json: &assistant_message_content_json,
+                ops_fingerprint: &ops_fingerprint,
+                ops_json: &ops_json,
+                results_json: &results_json,
+                expected_revision,
+                document_json: &document_json,
+                node_count,
+                connection_count,
+                now: now_ms(),
+            })
+            .await
+            .map_err(map_creative_agent_proposal_db_error)?;
+        let committed_results = parse_stored_creative_agent_results(
+            project_id,
+            assistant_message_id,
+            &committed.receipt.results_json,
+        )?;
+        tracing::info!(
+            project_id,
+            assistant_message_id,
+            source,
+            revision = committed.project.revision,
+            applied_revision = committed.receipt.applied_revision,
+            replayed = committed.replayed,
+            ops = committed_results.len(),
+            "Creative Studio Agent proposal committed"
+        );
+        Ok(CreativeAgentProposalApplyResult {
+            project: committed.project.into(),
+            ops: committed_results,
+            replayed: committed.replayed,
+            applied_revision: committed.receipt.applied_revision.to_string(),
         })
     }
 
@@ -2069,6 +2286,87 @@ fn parse_creative_project_revision(revision: &str) -> Result<i64, AppError> {
     Ok(parsed)
 }
 
+fn validate_completed_assistant_message(
+    document: &CreativeProjectDocument,
+    assistant_message_id: &str,
+) -> Result<(), AppError> {
+    let occurrences = document
+        .chat_sessions
+        .iter()
+        .flat_map(|session| session.message_ids.iter().enumerate())
+        .filter(|(index, message_id)| *index % 2 == 1 && *message_id == assistant_message_id)
+        .count();
+    match occurrences {
+        1 => Ok(()),
+        0 => Err(AppError::BadRequest(format!(
+            "assistantMessageId '{assistant_message_id}' is not a completed assistant message in this project"
+        ))),
+        _ => Err(AppError::Conflict(format!(
+            "assistantMessageId '{assistant_message_id}' is ambiguous across project chat sessions"
+        ))),
+    }
+}
+
+fn persisted_creative_agent_message_text(
+    project_id: &str,
+    assistant_message_id: &str,
+    content_json: &str,
+) -> Result<String, AppError> {
+    let content: Value = serde_json::from_str(content_json).map_err(|error| {
+        AppError::Internal(format!(
+            "persisted Creative Studio assistant message {project_id}/{assistant_message_id} has invalid content JSON: {error}"
+        ))
+    })?;
+    content
+        .as_object()
+        .and_then(|object| object.get("content"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            AppError::Internal(format!(
+                "persisted Creative Studio assistant message {project_id}/{assistant_message_id} has no text content"
+            ))
+        })
+}
+
+fn map_creative_agent_proposal_db_error(error: DbError) -> AppError {
+    match error {
+        DbError::Conflict(message) if message.contains("revision conflict") => {
+            AppError::RevisionConflict(message)
+        }
+        DbError::Conflict(message)
+            if message.contains("not a completed visible assistant message") =>
+        {
+            AppError::BadRequest(message)
+        }
+        DbError::Conflict(message) => AppError::Conflict(message),
+        other => other.into(),
+    }
+}
+
+fn creative_agent_ops_fingerprint(ops_json: &str) -> Result<String, AppError> {
+    let ops_len = u64::try_from(ops_json.len())
+        .map_err(|_| AppError::BadRequest("Creative Studio operations are too large".to_owned()))?;
+    let mut fingerprint = Sha256::new();
+    fingerprint.update(CREATIVE_CANVAS_AGENT_ARTIFACT_KIND.as_bytes());
+    fingerprint.update([0]);
+    fingerprint.update(ops_len.to_be_bytes());
+    fingerprint.update(ops_json.as_bytes());
+    Ok(hex::encode(fingerprint.finalize()))
+}
+
+fn parse_stored_creative_agent_results(
+    project_id: &str,
+    assistant_message_id: &str,
+    results_json: &str,
+) -> Result<Vec<CreativeAgentOpResult>, AppError> {
+    serde_json::from_str(results_json).map_err(|error| {
+        AppError::Internal(format!(
+            "managed Creative Studio proposal receipt {project_id}/{assistant_message_id} has invalid results JSON: {error}"
+        ))
+    })
+}
+
 fn parse_creative_workflow_revision(revision: &str) -> Result<i64, AppError> {
     let parsed = revision.parse::<i64>().map_err(|_| {
         AppError::BadRequest("expectedRevision must be a positive decimal integer".into())
@@ -2214,7 +2512,9 @@ mod tests {
         CreativeWorkflowInputValue, CreativeWorkflowRunCreateRequest,
         CreativeWorkflowRunStatus,
     };
-    use nomifun_common::{CreativeStudioNodeId, ProviderLifecycleBarrier};
+    use nomifun_common::{
+        ConversationId, CreativeStudioNodeId, MessageId, ProviderLifecycleBarrier,
+    };
     use nomifun_db::{IProviderRepository, SqliteProviderRepository, SqliteWorkshopRepository};
 
     async fn service() -> (Arc<WorkshopService>, tempfile::TempDir) {
@@ -2259,6 +2559,18 @@ mod tests {
         .execute(db.pool())
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn creative_agent_ops_fingerprint_is_artifact_kind_and_length_scoped() {
+        assert_eq!(
+            creative_agent_ops_fingerprint("[]").unwrap(),
+            "b9ebe725aaa9c6dd48b19e40c2a23f2fc599ae691e724e1874d9f0d9b69ccaf1"
+        );
+        assert_ne!(
+            creative_agent_ops_fingerprint("[]").unwrap(),
+            hex::encode(Sha256::digest(b"[]"))
+        );
     }
 
     fn workflow_definition() -> CreativeWorkflowDefinitionV1 {
@@ -3105,6 +3417,195 @@ mod tests {
         assert!(matches!(stale, AppError::RevisionConflict(_)));
         let current = svc.get_creative_project(&created.project_id).await.unwrap();
         assert_eq!(current.project.revision, "2");
+        assert_eq!(current.document.nodes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn creative_agent_proposal_replays_across_revision_and_rejects_message_mismatch() {
+        let (svc, _dir, db) = service_with_database_and_lifecycle(None).await;
+        let owner_id = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
+        let created = svc
+            .create_creative_project(Some("Agent proposal receipt".into()))
+            .await
+            .unwrap();
+        let session_id = nomifun_common::generate_id();
+        let user_message_id = MessageId::new().into_string();
+        let assistant_message_id = MessageId::new().into_string();
+        let provider_id = ProviderId::new().into_string();
+        let mut document = svc
+            .get_creative_project(&created.project_id)
+            .await
+            .unwrap()
+            .document;
+        document
+            .chat_sessions
+            .push(crate::creative_studio::CreativeChatSession {
+                id: session_id.clone(),
+                title: "Agent".into(),
+                message_ids: vec![user_message_id, assistant_message_id.clone()],
+                model: Some(crate::creative_studio::CreativeChatModel {
+                    provider_id,
+                    model: "chat-model".into(),
+                }),
+                pending_turn: None,
+                created_at: 1,
+                updated_at: 1,
+            });
+        document.active_chat_id = Some(session_id.clone());
+        let saved = svc
+            .save_creative_project(&created.project_id, "1", &document)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, "2");
+
+        let conversation_id = ConversationId::new().into_string();
+        nomifun_db::sqlx::query(
+            "INSERT INTO conversations \
+                (conversation_id, user_id, name, type, extra, status, source, created_at, updated_at) \
+             VALUES (?, ?, 'Creative Studio Agent', 'nomi', '{}', 'finished', 'nomifun', 1, 1)",
+        )
+        .bind(&conversation_id)
+        .bind(&owner_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        nomifun_db::sqlx::query(
+            "INSERT INTO creative_studio_agent_sessions \
+                (owner_id, project_id, session_id, conversation_id, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 1, 1)",
+        )
+        .bind(&owner_id)
+        .bind(&created.project_id)
+        .bind(&session_id)
+        .bind(&conversation_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let assistant_text = format!(
+            "```json\n{}\n```",
+            serde_json::json!({
+                "kind": CREATIVE_CANVAS_AGENT_ARTIFACT_KIND,
+                "summary": "Add durable text",
+                "ops": [{
+                    "type": "add_node",
+                    "node_type": "text",
+                    "x": 10.0,
+                    "y": 20.0,
+                    "data": {
+                        "text": "durable",
+                        "format": "plain",
+                        "fontSize": 16,
+                        "textAlign": "left"
+                    }
+                }]
+            })
+        );
+        let assistant_content_json =
+            serde_json::json!({ "content": assistant_text }).to_string();
+        nomifun_db::sqlx::query(
+            "INSERT INTO messages \
+                (message_id, conversation_id, msg_id, type, content, position, status, hidden, created_at) \
+             VALUES (?, ?, ?, 'text', ?, 'left', 'finish', 0, 2)",
+        )
+        .bind(&assistant_message_id)
+        .bind(&conversation_id)
+        .bind(&assistant_message_id)
+        .bind(&assistant_content_json)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let ops = vec![crate::creative_agent_ops::CreativeAgentOp::AddNode {
+            node_type: crate::creative_studio::CreativeNodeType::Text,
+            x: 10.0,
+            y: 20.0,
+            width: None,
+            height: None,
+            group_id: None,
+            data: serde_json::json!({
+                "text": "durable",
+                "format": "plain",
+                "fontSize": 16,
+                "textAlign": "left"
+            }),
+        }];
+        let first = svc
+            .apply_creative_agent_proposal(
+                &owner_id,
+                &created.project_id,
+                &assistant_message_id,
+                "2",
+                ops.clone(),
+                "test",
+            )
+            .await
+            .unwrap();
+        assert!(!first.replayed);
+        assert_eq!(first.applied_revision, "3");
+        assert_eq!(first.project.node_count, 1);
+
+        let replay = svc
+            .apply_creative_agent_proposal(
+                &owner_id,
+                &created.project_id,
+                &assistant_message_id,
+                "1",
+                ops,
+                "test",
+            )
+            .await
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.applied_revision, "3");
+        assert_eq!(replay.project.revision, "3");
+        assert_eq!(replay.ops, first.ops);
+
+        let mismatch = svc
+            .apply_creative_agent_proposal(
+                &owner_id,
+                &created.project_id,
+                &assistant_message_id,
+                "3",
+                vec![crate::creative_agent_ops::CreativeAgentOp::MoveNode {
+                    node_id: match &first.ops[0] {
+                        crate::creative_agent_ops::CreativeAgentOpResult::NodeAdded { node_id } => {
+                            node_id.clone()
+                        }
+                        other => panic!("unexpected result {other:?}"),
+                    },
+                    x: 30.0,
+                    y: 40.0,
+                }],
+                "test",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(mismatch, AppError::Conflict(message) if message.contains("artifact does not match")));
+
+        let unknown_message_id = MessageId::new().into_string();
+        let unknown_message = svc
+            .apply_creative_agent_proposal(
+                &owner_id,
+                &created.project_id,
+                &unknown_message_id,
+                "3",
+                vec![crate::creative_agent_ops::CreativeAgentOp::MoveNode {
+                    node_id: match &first.ops[0] {
+                        crate::creative_agent_ops::CreativeAgentOpResult::NodeAdded { node_id } => {
+                            node_id.clone()
+                        }
+                        other => panic!("unexpected result {other:?}"),
+                    },
+                    x: 30.0,
+                    y: 40.0,
+                }],
+                "test",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(unknown_message, AppError::BadRequest(message) if message.contains("not a completed visible assistant")));
+        let current = svc.get_creative_project(&created.project_id).await.unwrap();
+        assert_eq!(current.project.revision, "3");
         assert_eq!(current.document.nodes.len(), 1);
     }
 

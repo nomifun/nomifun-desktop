@@ -211,6 +211,7 @@ class FakeTransport implements NomiCreativeStudioAgentTransport {
 
 interface ResolverOverrides {
   binding?: Partial<NomiCreativeStudioAgentSessionBinding>;
+  appliedProposalMessageIds?: NomiCreativeStudioAgentSessionResolution['appliedProposalMessageIds'];
   history?:
     | readonly CreativeStudioAgentMessage[]
     | ((call: number, input: NomiCreativeStudioAgentSessionResolutionInput) => readonly CreativeStudioAgentMessage[]);
@@ -237,6 +238,7 @@ const matchingResolver = (overrides: ResolverOverrides = {}): NomiCreativeStudio
         ...overrides.binding,
       },
       history: authoritativeHistory,
+      appliedProposalMessageIds: overrides.appliedProposalMessageIds ?? [],
       created: overrides.created ?? false,
     };
   };

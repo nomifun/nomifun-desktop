@@ -15544,9 +15544,6 @@ impl nomifun_db::IProviderModelRepository for StubProviderModelRepo {
     ) -> Result<nomifun_db::ProviderModelRow, DbError> {
         unimplemented!("not used in failover tests")
     }
-    async fn delete(&self, _provider_id: &str, _model: &str) -> Result<bool, DbError> {
-        unimplemented!("not used in failover tests")
-    }
 }
 
 /// Task capabilities are a separate authority from model identity. The stub

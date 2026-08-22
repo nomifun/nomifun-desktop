@@ -146,4 +146,7 @@ pub use terminal::{
 };
 pub use user::IUserRepository;
 pub use webhook::IWebhookRepository;
-pub use workshop::{AssetSort, IWorkshopRepository, ListAssetsParams, UpdateAssetParams};
+pub use workshop::{
+    ApplyCreativeAgentProposalParams, AssetSort, CreativeAgentProposalCommit,
+    IWorkshopRepository, ListAssetsParams, UpdateAssetParams,
+};

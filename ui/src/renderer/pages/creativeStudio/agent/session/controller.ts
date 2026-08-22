@@ -93,6 +93,21 @@ const assertResolution = (
       'Session persistence returned non-durable Agent history'
     );
   }
+  const assistantIds = new Set(
+    history
+      .filter((message) => message.role === 'assistant')
+      .map((message) => message.id)
+  );
+  if (
+    new Set(resolution.appliedProposalMessageIds).size !==
+      resolution.appliedProposalMessageIds.length ||
+    resolution.appliedProposalMessageIds.some((messageId) => !assistantIds.has(messageId))
+  ) {
+    throw new CreativeStudioAgentSessionResolutionError(
+      'PORT_CONTRACT_VIOLATION',
+      'Applied proposals must be unique completed assistant messages from this history'
+    );
+  }
   const canonicalHistoryKey = serializeCreativeStudioAgentHistory(history);
   if (binding.historyKey !== canonicalHistoryKey) {
     throw new CreativeStudioAgentSessionResolutionError(

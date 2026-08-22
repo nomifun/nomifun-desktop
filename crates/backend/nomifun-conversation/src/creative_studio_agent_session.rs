@@ -71,6 +71,7 @@ pub struct CreativeStudioAgentSessionBindingResponse {
 pub struct ResolveCreativeStudioAgentSessionResponse {
     pub binding: CreativeStudioAgentSessionBindingResponse,
     pub history: Vec<CreativeStudioAgentHistoryMessage>,
+    pub applied_proposal_message_ids: Vec<String>,
     pub created: bool,
 }
 
@@ -457,6 +458,7 @@ impl ConversationService {
                 history_key,
             },
             history,
+            applied_proposal_message_ids: resolved.applied_proposal_message_ids,
             created,
         })
     }

@@ -45,6 +45,7 @@ const baseProps = (
     },
   ],
   selectedSkillIds: ['creative-studio-canvas'],
+  proposals: [],
   isRunning: false,
   onViewChange: noop,
   onNewSession: noop,
@@ -53,6 +54,7 @@ const baseProps = (
   onModelChange: noop,
   onRemoveContextItem: noop,
   onToggleSkill: noop,
+  onApplyProposal: noop,
   onSend: noop,
   onStop: noop,
   onCollapse: noop,
@@ -166,6 +168,47 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     expect(html.includes('画布规划')).toBe(true);
     expect(html.includes('aria-pressed="true"')).toBe(true);
     expect(html.includes('整理布局')).toBe(true);
+  });
+
+  test('renders manual proposal approval and fail-closed artifact states', () => {
+    const messages = [
+      {
+        id: 'assistant-proposal',
+        role: 'assistant' as const,
+        status: 'complete' as const,
+        text: '已整理提案',
+      },
+    ];
+    const ready = renderPanel({
+      messages,
+      proposals: [
+        {
+          messageId: 'assistant-proposal',
+          summary: '整理主标题与参考图',
+          opCount: 3,
+          state: 'ready',
+        },
+      ],
+    });
+    const invalid = renderPanel({
+      messages,
+      proposals: [
+        {
+          messageId: 'assistant-proposal',
+          summary: 'Agent 返回的画布提案格式无效',
+          opCount: 0,
+          state: 'invalid',
+          errorMessage: '该提案不能应用。',
+        },
+      ],
+    });
+    expect(ready.includes('data-agent-proposal-state="ready"')).toBe(true);
+    expect(ready.includes('整理主标题与参考图')).toBe(true);
+    expect(ready.includes('3 项画布操作 · 需人工确认')).toBe(true);
+    expect(ready.includes('应用到画布')).toBe(true);
+    expect(invalid.includes('data-agent-proposal-state="invalid"')).toBe(true);
+    expect(invalid.includes('该提案不能应用。')).toBe(true);
+    expect(invalid.includes('disabled=""')).toBe(true);
   });
 });
 

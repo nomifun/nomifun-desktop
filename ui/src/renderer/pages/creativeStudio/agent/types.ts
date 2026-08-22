@@ -76,6 +76,21 @@ export interface CreativeStudioAgentSkillOption {
   description: string;
 }
 
+export type CreativeStudioAgentProposalState =
+  | 'ready'
+  | 'applying'
+  | 'applied'
+  | 'failed'
+  | 'invalid';
+
+export interface CreativeStudioAgentProposal {
+  messageId: string;
+  summary: string;
+  opCount: number;
+  state: CreativeStudioAgentProposalState;
+  errorMessage?: string;
+}
+
 /**
  * Controlled panel contract. Conversation persistence, streaming and canvas
  * actions stay with the caller; this surface only presents explicit state and
@@ -92,6 +107,7 @@ export interface CreativeStudioAgentPanelProps {
   contextItems: readonly CreativeStudioAgentContextItem[];
   skillOptions: readonly CreativeStudioAgentSkillOption[];
   selectedSkillIds: readonly string[];
+  proposals: readonly CreativeStudioAgentProposal[];
   /** A dedicated NomiFun conversation cannot change model after its first turn. */
   modelLocked?: boolean;
   isRunning: boolean;
@@ -104,6 +120,7 @@ export interface CreativeStudioAgentPanelProps {
   onModelChange(model: CreativeModelSelectionRef): void;
   onRemoveContextItem(itemId: string): void;
   onToggleSkill(skillId: string): void;
+  onApplyProposal(messageId: string): void;
   onSend(input: CreativeStudioAgentSendInput): void;
   onStop(): void;
   onCollapse(): void;

@@ -56,6 +56,17 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('buildCreativeCanvasAgentContext')).toBe(true);
     expect(source.includes('selectedNodeIds: canvasState.selection.nodeIds')).toBe(true);
     expect(source.includes('planningContext={agentPlanningContext}')).toBe(true);
+    expect(source.includes('creativeCanvasAgentOpsPort.apply')).toBe(true);
+    expect(source.includes('agentOpsApplyRef.current')).toBe(true);
+    expect(source.includes('flushSync(() => setAgentOpsApplyBusy(true))')).toBe(true);
+    expect(source.includes('disabled={productDisabled}')).toBe(true);
+    expect(source.includes('agentOpsBlockedByCanvasMutation')).toBe(true);
+    expect(source.includes('agentOpsReloadRequired')).toBe(true);
+    expect(source.includes('agentOpsReloadRequiredRef.current')).toBe(true);
+    expect(source.match(/agentOpsReloadRequiredRef\.current/g)?.length ?? 0).toBeGreaterThan(4);
+    expect(source.includes('agentPanelRef.current?.refreshAuthority()')).toBe(true);
+    expect(source.includes('editor.getSaveState().revision')).toBe(true);
+    expect(source.includes('onApplyCanvasOps={handleApplyCanvasAgentOps}')).toBe(true);
     expect(
       source.includes('onAgentSessionsChange={handleAgentSessionsChange}')
     ).toBe(true);
@@ -186,6 +197,9 @@ describe('Creative Canvas product route composition', () => {
     expect(wiring.includes('CREATIVE_STUDIO_PROJECTS_PATH')).toBe(true);
     expect(wiring.includes('image_edit` / `i2i')).toBe(true);
     expect(wiring.includes('authoritative 404')).toBe(true);
+    expect(wiring.includes('nomifun.creative-studio.canvas-ops/v1')).toBe(true);
+    expect(wiring.includes('应用到画布')).toBe(true);
+    expect(wiring.includes('automatically retries a response-loss mutation')).toBe(true);
   });
 
   test('keeps the focused reference palette independent from the app theme', () => {

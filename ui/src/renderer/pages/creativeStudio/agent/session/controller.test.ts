@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from 'vitest';
 
-import { parseConversationId, parseProviderId } from '@/common/types/ids';
+import { parseConversationId, parseMessageId, parseProviderId } from '@/common/types/ids';
 import { serializeCreativeStudioAgentHistory } from '../adapters';
 import type {
   NomiCreativeStudioAgentSessionBinding,
@@ -29,9 +29,11 @@ const conversationB = parseConversationId('0190f5fe-7c00-7a00-8000-000000000502'
 const pendingKey = '0190f5fe-7c00-7a00-8000-000000000503';
 const replacementPendingKey = '0190f5fe-7c00-7a00-8000-000000000504';
 const model = { providerId, model: 'nomi-chat' } as const;
+const userMessageId = '0190f5fe-7c00-7a00-8000-000000000505';
+const assistantMessageId = '0190f5fe-7c00-7a00-8000-000000000506';
 const history: readonly CreativeStudioAgentMessage[] = [
-  { id: 'message-1', role: 'user', status: 'complete', text: '制作一张海报' },
-  { id: 'message-2', role: 'assistant', status: 'complete', text: '我先整理画布。' },
+  { id: userMessageId, role: 'user', status: 'complete', text: '制作一张海报' },
+  { id: assistantMessageId, role: 'assistant', status: 'complete', text: '我先整理画布。' },
 ];
 
 const input = (
@@ -73,6 +75,7 @@ const resolution = (
       ...overrides.binding,
     },
     history: authoritativeHistory,
+    appliedProposalMessageIds: overrides.appliedProposalMessageIds ?? [],
     created: overrides.created ?? false,
   };
 };
@@ -256,6 +259,24 @@ describe('CreativeStudioAgentSessionController', () => {
       async resolveOrCreateExclusive(request) {
         return resolution(request, conversationA, {
           binding: { ...binding(request), historyKey: 'stale' },
+        });
+      },
+    };
+
+    const failure = await new CreativeStudioAgentSessionController(port)
+      .resolve(input())
+      .catch((error: unknown) => error);
+    expect(failure instanceof CreativeStudioAgentSessionResolutionError).toBe(true);
+    expect((failure as CreativeStudioAgentSessionResolutionError).code).toBe(
+      'PORT_CONTRACT_VIOLATION'
+    );
+  });
+
+  test('rejects applied proposal receipts outside the authoritative assistant history', async () => {
+    const port: CreativeStudioAgentSessionPersistencePort = {
+      async resolveOrCreateExclusive(request) {
+        return resolution(request, conversationA, {
+          appliedProposalMessageIds: [parseMessageId(userMessageId)],
         });
       },
     };
