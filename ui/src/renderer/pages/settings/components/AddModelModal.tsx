@@ -6,13 +6,17 @@
 
 import { ipcBridge } from '@/common';
 import type { IProvider } from '@/common/config/storage';
+import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import ModalHOC from '@/renderer/utils/ui/ModalHOC';
 import NomiModal from '@/renderer/components/base/NomiModal';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import useModeModeList from '@renderer/hooks/agent/useModeModeList';
-import ModelDefinitionEditor, { type ModelCatalogSuggestion } from './ModelDefinitionEditor';
+import ModelDefinitionEditor, {
+  type ModelCatalogSuggestion,
+  type ModelDefinitionEditorHandle,
+} from './ModelDefinitionEditor';
 import {
   capabilityInputsFromDefinition,
   describeValidationErrors,
@@ -22,6 +26,7 @@ import {
 } from './providerModelAdvanced';
 import useModelProtocolManifests from './useModelProtocolManifests';
 import { useProviderConnections } from './useProviderConnections';
+import ModelCallConfigModalFooter from './ModelCallConfigModalFooter';
 
 const EMPTY_DEFINITION: ModelDefinitionDraft = { model: '', capabilities: [] };
 
@@ -31,6 +36,8 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
     const [message, messageHolder] = useArcoMessage();
     const [definition, setDefinition] = useState<ModelDefinitionDraft>(EMPTY_DEFINITION);
     const [saving, setSaving] = useState(false);
+    const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
+    const modelEditorRef = useRef<ModelDefinitionEditorHandle>(null);
     const tasks = useMemo(
       () => definition.capabilities.map((capability) => capability.task),
       [definition.capabilities]
@@ -88,6 +95,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
       if (modalProps.visible) {
         setDefinition(EMPTY_DEFINITION);
         setSaving(false);
+        setFocusedCallConfigTask(undefined);
       }
     }, [data?.id, modalProps.visible]);
 
@@ -142,13 +150,36 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
           visible={modalProps.visible}
           onCancel={modalCtrl.close}
           unmountOnExit
-          header={{ title: t('settings.addModel'), showClose: true }}
-          style={{ width: 760, maxWidth: '94vw', maxHeight: '92vh' }}
+          header={{
+            title: focusedCallConfigTask
+              ? `${t(`settings.modelTask.${focusedCallConfigTask}`, {
+                  defaultValue: focusedCallConfigTask,
+                })} · ${t('settings.modelAdvanced.callConfigurationTitle', {
+                  defaultValue: '调用配置',
+                })}`
+              : t('settings.addModel'),
+            showClose: true,
+          }}
+          footer={
+            focusedCallConfigTask ? (
+              <ModelCallConfigModalFooter
+                task={focusedCallConfigTask}
+                onCancel={() => modelEditorRef.current?.cancelCallConfig()}
+                onApply={() => modelEditorRef.current?.applyCallConfig()}
+              />
+            ) : undefined
+          }
+          style={{
+            width: focusedCallConfigTask ? 840 : 760,
+            maxWidth: '94vw',
+            maxHeight: focusedCallConfigTask ? '96vh' : '92vh',
+          }}
           contentStyle={{
             background: 'var(--dialog-fill-0)',
             borderRadius: 16,
             padding: '20px 24px',
             overflow: 'auto',
+            maxHeight: focusedCallConfigTask ? 'calc(96vh - 72px)' : undefined,
           }}
           onOk={handleConfirm}
           confirmLoading={saving}
@@ -156,12 +187,14 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
           cancelText={t('common.cancel')}
           okButtonProps={{ disabled: !validation.valid }}
         >
-          <div className='pt-16px'>
+          <div className={focusedCallConfigTask ? 'pt-4px' : 'pt-16px'}>
             <ModelDefinitionEditor
+              ref={modelEditorRef}
               value={definition}
               onChange={setDefinition}
               providerBaseUrl={data?.base_url ?? ''}
               providerAuthScheme={data?.auth_scheme ?? ''}
+              providerLabel={data?.name ?? data?.platform ?? ''}
               manifests={manifests.manifests}
               manifestLoadingTasks={manifests.loadingTasks}
               manifestErrorTasks={manifests.errorTasks}
@@ -178,6 +211,8 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
                     : undefined
               }
               onRefreshCatalog={() => void modelListState.mutate()}
+              onCallConfigFocusChange={setFocusedCallConfigTask}
+              callConfigFooterPlacement='modal'
               connections={connectionState.connections}
               onCreateConnection={async (connection) => {
                 if (!data) throw new Error('provider is required');

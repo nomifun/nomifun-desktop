@@ -21,8 +21,24 @@ describe('task capability context window control', () => {
 
   test('all create and edit surfaces reuse the same capability editor', () => {
     for (const relative of ['./AddPlatformModal.tsx', './AddModelModal.tsx', './ModelAdvancedEditor.tsx']) {
-      expect(readSource(relative).includes('<ModelDefinitionEditor')).toBe(true);
+      const source = readSource(relative);
+      expect(source.includes('<ModelDefinitionEditor')).toBe(true);
+      expect(source.includes("callConfigFooterPlacement='modal'")).toBe(true);
+      expect(source.includes('onCallConfigFocusChange=')).toBe(true);
     }
+  });
+
+  test('keeps call-configuration choices goal driven and task scoped', () => {
+    const editorSource = readSource('./ModelDefinitionEditor.tsx');
+
+    for (const intent of ['connection', 'limits', 'protocol', 'diagnostics', 'recommended']) {
+      expect(editorSource.includes(`data-call-config-intent='${intent}'`) || editorSource.includes(`key: '${intent}'`)).toBe(
+        true
+      );
+    }
+    expect(editorSource.includes('cancelCallConfig')).toBe(true);
+    expect(editorSource.includes('applyCallConfig')).toBe(true);
+    expect(editorSource.includes('data-call-config-context')).toBe(true);
   });
 
   test('serializes context as part of each full capability save', () => {

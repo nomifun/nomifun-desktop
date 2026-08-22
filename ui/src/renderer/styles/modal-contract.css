@@ -8,6 +8,9 @@
   --nomi-modal-inline-padding: 14px;
   --nomi-modal-block-padding: 8px;
   --nomi-modal-control-bg: color-mix(in srgb, var(--dialog-fill-0) 94%, var(--color-fill-2));
+  --nomi-modal-disabled-border: var(--color-border-3);
+  --nomi-modal-error-border: var(--danger, #f53f3f);
+  --nomi-modal-warning-border: var(--warning, #ff7d00);
 }
 
 .arco-modal {
@@ -190,6 +193,44 @@
     .arco-input-number-warning
   ):not(.arco-input-number-focused):hover {
   border-color: var(--color-border-4) !important;
+}
+
+/* Arco intentionally makes several non-idle control borders transparent.
+ * That works on a strongly tinted field surface, but modal controls deliberately
+ * sit close to the dialog background. Preserve the state semantics while keeping
+ * every text-entry boundary visible — especially disabled AutoComplete wrappers
+ * and validation TextAreas. */
+.arco-modal .arco-input-disabled,
+.arco-modal .arco-input-inner-wrapper-disabled,
+.arco-modal .arco-textarea-disabled,
+.arco-modal .arco-select-disabled .arco-select-view,
+.arco-modal .arco-cascader-disabled .arco-cascader-view,
+.arco-modal .arco-tree-select-disabled .arco-tree-select-view,
+.arco-modal .arco-picker-disabled,
+.arco-modal .arco-input-number-disabled {
+  border-color: var(--nomi-modal-disabled-border) !important;
+}
+
+.arco-modal .arco-input-error,
+.arco-modal .arco-input-inner-wrapper-error,
+.arco-modal .arco-textarea-error,
+.arco-modal .arco-select-error .arco-select-view,
+.arco-modal .arco-cascader-error .arco-cascader-view,
+.arco-modal .arco-tree-select-error .arco-tree-select-view,
+.arco-modal .arco-picker-error,
+.arco-modal .arco-input-number-error {
+  border-color: var(--nomi-modal-error-border) !important;
+}
+
+.arco-modal .arco-input-warning,
+.arco-modal .arco-input-inner-wrapper-warning,
+.arco-modal .arco-textarea-warning,
+.arco-modal .arco-select-warning .arco-select-view,
+.arco-modal .arco-cascader-warning .arco-cascader-view,
+.arco-modal .arco-tree-select-warning .arco-tree-select-view,
+.arco-modal .arco-picker-warning,
+.arco-modal .arco-input-number-warning {
+  border-color: var(--nomi-modal-warning-border) !important;
 }
 
 /* Compact confirm dialogs without changing their confirm/cancel behavior. */

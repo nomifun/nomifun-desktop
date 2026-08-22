@@ -1092,6 +1092,7 @@ const ModelModalContent: React.FC = () => {
                                 {/* One editor owns modality, protocol, transport and provider params. */}
                                 <ModelAdvancedEditor
                                   providerId={platform.id}
+                                  providerName={platform.name}
                                   preset={platform.platform}
                                   providerBaseUrl={platform.base_url}
                                   providerAuthScheme={platform.auth_scheme}

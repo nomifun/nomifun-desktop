@@ -262,7 +262,7 @@ describe('unified model definition editor rendering and interactions', () => {
     // The sentence, not just "待处理 1 项".
     expect(html.includes('data-capability-error-list="chat"')).toBe(true);
     expect(html.includes('data-capability-error="protocol_required"')).toBe(true);
-    expect(html.includes('请在高级配置里选择「调用协议」')).toBe(true);
+    expect(html.includes('请在调用配置里选择「兼容特殊调用方式」，再设置调用协议')).toBe(true);
     // Outside the collapsed details, so a collapsed card still explains itself.
     expect(html.indexOf('data-capability-error-list="chat"')).toBeLessThan(
       html.indexOf('data-capability-details="chat"')
@@ -343,7 +343,9 @@ describe('unified model definition editor rendering and interactions', () => {
 
     expect(html.includes('data-token-limits')).toBe(true);
     expect(html.includes('上下文窗口')).toBe(true);
-    expect(html.includes('最大输出 tokens')).toBe(true);
+    expect(html.includes('最大输出（tokens）')).toBe(true);
+    expect(html.includes('data-output-limit-input')).toBe(true);
+    expect(html.includes('未设置最大输出，将使用供应商默认值。')).toBe(true);
   });
 
   test('only exposes catalog models compatible with the selected primary type', () => {
@@ -396,8 +398,33 @@ describe('unified model definition editor rendering and interactions', () => {
         .length
     ).toBe(2);
     expect(html.includes('data-capability-summary="chat"')).toBe(true);
-    expect(html.includes('高级配置')).toBe(true);
+    expect(html.includes('查看调用配置')).toBe(true);
     expect(html.includes('默认配置已就绪')).toBe(true);
+  });
+
+  test('starts call configuration with a goal chooser instead of a flat full form', () => {
+    const html = render({
+      model: 'step-ready',
+      capabilities: [
+        {
+          ...emptyCapabilityDraft('chat'),
+          transportSource: 'persisted' as const,
+          protocol: 'stepfun.chat',
+        },
+      ],
+    });
+
+    expect(html.includes('data-call-config-intents="chat"')).toBe(true);
+    expect(html.includes('data-call-config-intent="connection"')).toBe(true);
+    expect(html.includes('data-call-config-intent="limits"')).toBe(true);
+    expect(html.includes('data-call-config-intent="protocol"')).toBe(true);
+    expect(html.includes('data-call-config-intent="diagnostics"')).toBe(true);
+    expect(html.includes('data-call-config-intent="recommended"')).toBe(true);
+    expect(html.includes('你想调整什么？')).toBe(true);
+    expect(html.includes('保持推荐配置，不做调整')).toBe(true);
+    expect(html.includes('data-call-config-branch="recommended"')).toBe(true);
+    expect(html.includes('data-call-config-branch="limits"')).toBe(true);
+    expect(html.includes('data-call-config-branch="diagnostics"')).toBe(true);
   });
 
   test('opens only the first capability with an actionable validation error', () => {
