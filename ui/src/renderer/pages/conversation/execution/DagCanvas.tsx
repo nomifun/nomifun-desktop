@@ -9,6 +9,7 @@ import {
   ReactFlow,
   type Edge,
   type ReactFlowInstance,
+  useUpdateNodeInternals,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -21,7 +22,11 @@ import type {
 } from '@/common/types/agentExecution/agentExecutionTypes';
 import { latestAttemptForStep } from '@/common/types/agentExecution/agentExecutionTypes';
 import type { ExecutionId, ExecutionStepId } from '@/common/types/ids';
-import { resolveExecutionCanvasFocusStepId, summarizeExecutionText } from './executionCanvasPresentation';
+import {
+  resolveExecutionCanvasFocusStepId,
+  resolveExecutionCanvasRelationState,
+  summarizeExecutionText,
+} from './executionCanvasPresentation';
 import { buildExecutionDagEdges } from './executionDagEdges';
 import { collectExecutionDagFocus, layoutExecutionDag } from './layoutExecutionDag';
 import { participantLogo, participantShortLabel } from './participantLabel';
@@ -33,6 +38,27 @@ const NODE_TYPES = { step: StepNode } as const;
 const FIT_VIEW_OPTIONS = { padding: 0.18, maxZoom: 1.35 } as const;
 const NODE_WIDTH = 184;
 const NODE_HEIGHT = 76;
+
+const NodeInternalsRefresher: React.FC<{ nodeIds: string[] }> = ({ nodeIds }) => {
+  const updateNodeInternals = useUpdateNodeInternals();
+  const layoutKey = nodeIds.join('|');
+
+  React.useLayoutEffect(() => {
+    if (nodeIds.length === 0) return;
+    updateNodeInternals(nodeIds);
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      updateNodeInternals(nodeIds);
+      secondFrame = requestAnimationFrame(() => updateNodeInternals(nodeIds));
+    });
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      if (secondFrame) cancelAnimationFrame(secondFrame);
+    };
+  }, [layoutKey, nodeIds, updateNodeInternals]);
+
+  return null;
+};
 
 const VERDICT_RE = /^VERDICT:\s+(PASS|FAIL)\s+\((\d+)\/(\d+)/;
 const WINNER_RE = /^WINNER:\s+(?:candidate\s+(\d+)|none)/;
@@ -178,10 +204,12 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ executionId, detail, loading, ref
 
   const activeStepIds = useMemo(() => new Set(activeSteps.map((step) => step.step_id)), [activeSteps]);
   const focusStepId = resolveExecutionCanvasFocusStepId(activeStepIds, hoveredStepId, activeStepId);
+  const hasTransientFocus = hoveredStepId != null && activeStepIds.has(hoveredStepId);
   const focusedPath = useMemo(
     () => (focusStepId ? collectExecutionDagFocus(focusStepId, activeDependencies) : null),
     [activeDependencies, focusStepId],
   );
+  const activeNodeIds = useMemo(() => activeSteps.map((step) => String(step.step_id)), [activeSteps]);
 
   const nodes = useMemo<StepFlowNode[]>(() => {
     const steps = activeSteps;
@@ -197,13 +225,12 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ executionId, detail, loading, ref
       const rawOutputSummary = attempt?.output_summary ?? undefined;
       const outputSummary = summarizeExecutionText(rawOutputSummary);
       const relations = relationByStepId.get(step.step_id) ?? { upstream: [], downstream: [] };
-      const relationState = !focusedPath
-        ? 'idle'
-        : step.step_id === focusStepId
-          ? 'focus'
-          : focusedPath.stepIds.has(step.step_id)
-            ? 'related'
-            : 'muted';
+      const relationState = resolveExecutionCanvasRelationState(
+        focusedPath != null,
+        step.step_id === focusStepId,
+        focusedPath?.stepIds.has(step.step_id) ?? false,
+        hasTransientFocus,
+      );
 
       return {
         id: step.step_id,
@@ -212,7 +239,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ executionId, detail, loading, ref
         // React Flow disables pointer events when selection, dragging and its
         // own node callbacks are all off. The compact card owns click/hover
         // interactions itself, so keep the wrapper interactive explicitly.
-        style: { pointerEvents: 'all' },
+        style: { pointerEvents: 'all', zIndex: 4 },
         position:
           step.graph_x != null && step.graph_y != null
             ? { x: step.graph_x, y: step.graph_y }
@@ -317,6 +344,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ executionId, detail, loading, ref
     participantById,
     focusedPath,
     focusStepId,
+    hasTransientFocus,
     refetch,
     relationByStepId,
     t,
@@ -381,6 +409,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ executionId, detail, loading, ref
             edgesFocusable={false}
             elementsSelectable={false}
           >
+            <NodeInternalsRefresher nodeIds={activeNodeIds} />
             <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} color={theme === 'dark' ? '#333333' : '#d1d5e5'} />
             <Controls showFitView={false} showInteractive={false} />
             <Panel position='top-right' className='nomi-dag-toolbar'>

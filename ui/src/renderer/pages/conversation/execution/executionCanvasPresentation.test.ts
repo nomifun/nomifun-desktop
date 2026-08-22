@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { parseExecutionStepId } from '@/common/types/ids';
-import { resolveExecutionCanvasFocusStepId, summarizeExecutionText } from './executionCanvasPresentation';
+import {
+  resolveExecutionCanvasFocusStepId,
+  resolveExecutionCanvasRelationState,
+  summarizeExecutionText,
+} from './executionCanvasPresentation';
 
 describe('execution canvas summaries', () => {
   test('removes markdown and tool markup while preserving meaningful prose', () => {
@@ -25,5 +29,12 @@ describe('execution canvas summaries', () => {
     const alsoSuperseded = parseExecutionStepId('0190f5fe-7c00-7a00-8000-000000000003');
     expect(resolveExecutionCanvasFocusStepId(new Set([current]), superseded, current)).toBe(current);
     expect(resolveExecutionCanvasFocusStepId(new Set([current]), superseded, alsoSuperseded)).toBeNull();
+  });
+
+  test('only mutes unrelated nodes during transient hover inspection', () => {
+    expect(resolveExecutionCanvasRelationState(true, false, false, false)).toBe('idle');
+    expect(resolveExecutionCanvasRelationState(true, false, false, true)).toBe('muted');
+    expect(resolveExecutionCanvasRelationState(true, true, false, true)).toBe('focus');
+    expect(resolveExecutionCanvasRelationState(true, false, true, true)).toBe('related');
   });
 });
