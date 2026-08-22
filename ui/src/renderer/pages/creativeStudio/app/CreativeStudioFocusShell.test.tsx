@@ -15,7 +15,6 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ThemeProvider } from '@renderer/hooks/context/ThemeContext';
 import zhCreativeStudio from '@renderer/services/i18n/locales/zh-CN/creativeStudio.json';
 import CreativeStudioFocusShell from './CreativeStudioFocusShell';
-import CreativeStudioHomePage from './CreativeStudioHomePage';
 import { CREATIVE_STUDIO_ROOT_PATH, CREATIVE_STUDIO_VIDEO_PATH } from './routes';
 
 const testI18n = createInstance();
@@ -33,7 +32,7 @@ const renderFocusShell = (path = CREATIVE_STUDIO_ROOT_PATH) =>
         <MemoryRouter initialEntries={[path]}>
           <Routes>
             <Route path={CREATIVE_STUDIO_ROOT_PATH} element={<CreativeStudioFocusShell />}>
-              <Route index element={<CreativeStudioHomePage />} />
+              <Route index element={<div data-test-route='home'>home route</div>} />
               <Route path='video' element={<div data-test-route='video'>video route</div>} />
             </Route>
           </Routes>
@@ -57,7 +56,7 @@ describe('Creative Studio focus shell', () => {
 
     expect(html.includes('data-creative-studio-focus-shell="true"')).toBe(true);
     expect(html.includes('data-creative-studio-top-bar="true"')).toBe(true);
-    expect(html.includes('data-creative-studio-section="projects"')).toBe(true);
+    expect(html.includes('data-creative-studio-section="home"')).toBe(true);
     expect(html.includes('id="creative-studio-portal-root"')).toBe(true);
     expect(html.includes('返回工作台')).toBe(true);
     expect(html.includes('aria-label="深色"')).toBe(true);
@@ -69,12 +68,10 @@ describe('Creative Studio focus shell', () => {
     expect(html.includes('data-creative-studio-navigation="audio"')).toBe(false);
   });
 
-  test('keeps the index empty until the project list is wired', () => {
+  test('renders the dedicated home route at the product index', () => {
     const html = renderFocusShell();
 
-    expect(html.includes('data-creative-studio-home')).toBe(false);
-    expect(html.includes('把灵感铺展成一张无限画布')).toBe(false);
-    expect(html.includes('creativeStudio.home')).toBe(false);
+    expect(html.includes('data-test-route="home"')).toBe(true);
   });
 
   test('marks a deep-linked workbench destination active', () => {

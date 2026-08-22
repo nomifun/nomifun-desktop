@@ -30,6 +30,7 @@ import {
   CREATIVE_STUDIO_IMAGE_PATH,
   CREATIVE_STUDIO_PROJECTS_PATH,
   CREATIVE_STUDIO_PROMPTS_PATH,
+  CREATIVE_STUDIO_ROOT_PATH,
   CREATIVE_STUDIO_VIDEO_PATH,
   creativeStudioSectionForPath,
   type CreativeStudioSection,
@@ -45,7 +46,7 @@ export interface CreativeStudioTopBarProps {
 }
 
 interface NavigationItem {
-  section: Exclude<CreativeStudioSection, 'canvas' | 'director' | 'audio'>;
+  section: Exclude<CreativeStudioSection, 'home' | 'canvas' | 'director' | 'audio'>;
   path: string;
   label: string;
   icon: React.ReactNode;
@@ -122,13 +123,13 @@ const CreativeStudioTopBar: React.FC<CreativeStudioTopBarProps> = ({
     >
       <div className={styles.inner} data-tauri-drag-region>
         <Link
-          to={CREATIVE_STUDIO_PROJECTS_PATH}
+          to={CREATIVE_STUDIO_ROOT_PATH}
           className={styles.brand}
           aria-label={title}
           data-creative-studio-brand
           onClick={(event) => {
             event.preventDefault();
-            onNavigate(CREATIVE_STUDIO_PROJECTS_PATH);
+            onNavigate(CREATIVE_STUDIO_ROOT_PATH);
           }}
         >
           <FolderOpen theme='outline' size={20} fill='currentColor' strokeWidth={3} />

@@ -11,6 +11,9 @@ const router = readFileSync(new URL('../../../components/layout/Router.tsx', imp
 
 describe('Creative Studio product route integration', () => {
   test('mounts every implemented product inside the focused shell', () => {
+    expect(router.includes('CreativeStudioHomePage')).toBe(true);
+    expect(router.includes('<Route index element={withRouteFallback(CreativeStudioHomePage)} />')).toBe(true);
+    expect(router.includes("path='projects' element={withRouteFallback(CreativeStudioProjectsRoute)}")).toBe(true);
     expect(router.includes("path='canvas/:projectId'")).toBe(true);
     expect(router.includes("path='director/:projectId'")).toBe(true);
     expect(router.includes("path='image'")).toBe(true);

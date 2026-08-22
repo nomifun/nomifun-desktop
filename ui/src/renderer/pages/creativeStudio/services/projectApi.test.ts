@@ -15,6 +15,7 @@ import {
 } from './projectApi';
 
 const PROJECT_ID = '0198f8bb-8424-7b3d-8f17-bc6a1676f112';
+const PROVIDER_ID = '0198f8bb-8424-7b3d-8f17-bc6a1676f118';
 const summary = {
   projectId: PROJECT_ID,
   title: 'Untitled canvas',
@@ -40,7 +41,13 @@ describe('Creative Studio project API client', () => {
     const api = createCreativeStudioProjectApi(request);
 
     await api.listProjects();
-    await api.createProject({ title: 'Untitled canvas' });
+    await api.createProject({
+      title: 'Untitled canvas',
+      agentKickoff: {
+        prompt: 'Plan a launch poster',
+        model: { providerId: PROVIDER_ID, model: 'gpt-5' },
+      },
+    });
     await api.getProject(PROJECT_ID);
     await api.renameProject(PROJECT_ID, { title: 'Renamed' });
     await api.saveProject(PROJECT_ID, {
@@ -54,7 +61,13 @@ describe('Creative Studio project API client', () => {
       {
         method: 'POST',
         path: '/api/creative-studio/projects',
-        body: { title: 'Untitled canvas' },
+        body: {
+          title: 'Untitled canvas',
+          agentKickoff: {
+            prompt: 'Plan a launch poster',
+            model: { providerId: PROVIDER_ID, model: 'gpt-5' },
+          },
+        },
       },
       { method: 'GET', path: `/api/creative-studio/projects/${PROJECT_ID}` },
       {

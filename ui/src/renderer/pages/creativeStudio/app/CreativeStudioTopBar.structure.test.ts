@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 
 const topBarSource = readFileSync(new URL('./CreativeStudioTopBar.tsx', import.meta.url), 'utf8');
 const topBarStyles = readFileSync(new URL('./CreativeStudioTopBar.module.css', import.meta.url), 'utf8');
@@ -49,14 +49,14 @@ describe('Creative Studio application navigation structure', () => {
 
   test('routes every product-shell exit through the shared product CAS leave gate', () => {
     expect(topBarSource.includes('onNavigate: (path: string) => void')).toBe(true);
-    expect(topBarSource.includes('onNavigate(CREATIVE_STUDIO_PROJECTS_PATH)')).toBe(true);
+    expect(topBarSource.includes('onNavigate(CREATIVE_STUDIO_ROOT_PATH)')).toBe(true);
     expect(topBarSource.includes('onNavigate(item.path)')).toBe(true);
   });
 
-  test('uses a zero-content index instead of a fabricated landing page', () => {
-    expect(homeSource.includes('const CreativeStudioHomePage: React.FC = () => null')).toBe(true);
-    expect(homeSource.includes('CreativeStudioRouteRedirect')).toBe(true);
-    expect(homeSource.includes('CreativeStudioHomePage.module.css')).toBe(false);
-    expect(existsSync(new URL('./CreativeStudioHomePage.module.css', import.meta.url))).toBe(false);
+  test('keeps brand navigation and project-library navigation distinct', () => {
+    expect(topBarSource.includes('to={CREATIVE_STUDIO_ROOT_PATH}')).toBe(true);
+    expect(topBarSource.includes('path: CREATIVE_STUDIO_PROJECTS_PATH')).toBe(true);
+    expect(homeSource.includes('data-creative-studio-home')).toBe(true);
+    expect(homeSource.includes('CreativeStudioHomePage.module.css')).toBe(true);
   });
 });

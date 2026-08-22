@@ -43,6 +43,10 @@ describe('Creative Project repository', () => {
     const calls: unknown[] = [];
     const repository = createCreativeProjectRepository(
       apiStub({
+        createProject: async (request) => {
+          calls.push({ request });
+          return project;
+        },
         saveProject: async (projectId, request) => {
           calls.push({ projectId, request });
           return { ...project, revision: '2' };
@@ -50,11 +54,25 @@ describe('Creative Project repository', () => {
       })
     );
     const document = createEmptyCreativeProjectDocument(PROJECT_ID);
+    const kickoff = {
+      title: 'Project',
+      agentKickoff: {
+        prompt: 'Design a launch poster',
+        model: {
+          providerId: '0198f8bb-8424-7b3d-8f17-bc6a1676f118',
+          model: 'gpt-5',
+        },
+      },
+    };
 
     expect(await repository.list()).toEqual([project]);
+    expect(await repository.create(kickoff)).toEqual(project);
     expect(await repository.load(PROJECT_ID)).toEqual({ project, document });
     expect(await repository.save(PROJECT_ID, '1', document)).toMatchObject({ revision: '2' });
-    expect(calls).toEqual([{ projectId: PROJECT_ID, request: { expectedRevision: '1', document } }]);
+    expect(calls).toEqual([
+      { request: kickoff },
+      { projectId: PROJECT_ID, request: { expectedRevision: '1', document } },
+    ]);
   });
 
   test('maps stale saves and missing projects to distinct stable errors', async () => {

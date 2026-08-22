@@ -31,7 +31,8 @@ use crate::canvas_agent_artifact::{
     CREATIVE_CANVAS_AGENT_ARTIFACT_KIND, parse_creative_canvas_agent_artifact,
 };
 use crate::creative_studio::{
-    CreativeGenerationStatus, CreativeNodeData, CreativeProjectDocument, CreativeProjectSummary,
+    CreativeChatModel, CreativeChatPendingTurn, CreativeChatSession, CreativeGenerationStatus,
+    CreativeNodeData, CreativeProjectDocument, CreativeProjectSummary,
     MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
 };
 #[cfg(test)]
@@ -49,6 +50,16 @@ use crate::{MAX_ASSET_BYTES, WORKSHOP_REL_DIR, fsio, imagemeta, thumbnail};
 pub struct CreativeProjectWithDocument {
     pub project: CreativeProjectSummary,
     pub document: CreativeProjectDocument,
+}
+
+/// Minimal, owner-authored Agent kickoff persisted inside revision 1 of a new
+/// project. Skills and canvas context are deliberately server-owned so the
+/// launch endpoint cannot grow a second conversation-composition contract.
+#[derive(Debug)]
+pub struct CreativeProjectAgentKickoff {
+    pub prompt: String,
+    pub provider_id: String,
+    pub model: String,
 }
 
 /// One CAS-committed Agent graph mutation batch.
@@ -208,6 +219,9 @@ pub struct AssetPatch {
 
 const DEFAULT_CREATIVE_PROJECT_TITLE: &str = "未命名画布";
 const MAX_CREATIVE_PROJECT_TITLE_CHARS: usize = 1_000;
+const MAX_CREATIVE_AGENT_KICKOFF_PROMPT_CHARS: usize = 65_536;
+const MAX_CREATIVE_AGENT_MODEL_CHARS: usize = 512;
+const CREATIVE_CANVAS_SKILL_ID: &str = "creative-studio-canvas";
 
 pub struct WorkshopService {
     repo: Arc<dyn IWorkshopRepository>,
@@ -451,16 +465,97 @@ impl WorkshopService {
         &self,
         title: Option<String>,
     ) -> Result<CreativeProjectSummary, AppError> {
+        self.create_creative_project_inner(title, None).await
+    }
+
+    /// Create one private Creative Studio project for the installation owner.
+    /// When a kickoff is present, its model and exact Chat capability are
+    /// validated before the single revision-1 project insert.
+    pub async fn create_creative_project_for_owner(
+        &self,
+        owner_id: &str,
+        title: Option<String>,
+        agent_kickoff: Option<CreativeProjectAgentKickoff>,
+    ) -> Result<CreativeProjectSummary, AppError> {
+        UserId::parse(owner_id).map_err(|error| {
+            AppError::Forbidden(format!(
+                "Creative Studio project owner is not canonical: {error}"
+            ))
+        })?;
+        if !self.repo.is_creative_studio_owner(owner_id).await? {
+            return Err(AppError::Forbidden(
+                "Creative Studio projects are restricted to the installation owner".to_owned(),
+            ));
+        }
+        self.create_creative_project_inner(title, agent_kickoff)
+            .await
+    }
+
+    async fn create_creative_project_inner(
+        &self,
+        title: Option<String>,
+        agent_kickoff: Option<CreativeProjectAgentKickoff>,
+    ) -> Result<CreativeProjectSummary, AppError> {
         let project_id = CreativeStudioProjectId::new().into_string();
         let title = normalize_creative_project_title(title.as_deref(), true)?;
-        let document = CreativeProjectDocument::empty(project_id.clone());
+        let _provider_guard = if agent_kickoff.is_some() {
+            self.provider_read_guard().await
+        } else {
+            None
+        };
+        let agent_kickoff = match agent_kickoff {
+            Some(kickoff) => {
+                let kickoff = normalize_creative_project_agent_kickoff(kickoff)?;
+                if !self
+                    .repo
+                    .provider_model_supports_task(
+                        &kickoff.provider_id,
+                        &kickoff.model,
+                        "chat",
+                    )
+                    .await?
+                {
+                    return Err(AppError::Conflict(format!(
+                        "Creative Studio Agent kickoff requires an enabled exact Chat capability for '{}/{}'",
+                        kickoff.provider_id, kickoff.model
+                    )));
+                }
+                Some(kickoff)
+            }
+            None => None,
+        };
+        let now = now_ms();
+        let mut document = CreativeProjectDocument::empty(project_id.clone());
+        if let Some(kickoff) = agent_kickoff {
+            let session_id = nomifun_common::generate_id();
+            document.chat_sessions.push(CreativeChatSession {
+                id: session_id.clone(),
+                title: "Agent".to_owned(),
+                message_ids: Vec::new(),
+                model: Some(CreativeChatModel {
+                    provider_id: kickoff.provider_id,
+                    model: kickoff.model,
+                }),
+                pending_turn: Some(CreativeChatPendingTurn {
+                    idempotency_key: MessageId::new().into_string(),
+                    prompt: kickoff.prompt.clone(),
+                    model_input: Some(kickoff.prompt),
+                    skill_ids: vec![CREATIVE_CANVAS_SKILL_ID.to_owned()],
+                    created_at: now,
+                }),
+                created_at: now,
+                updated_at: now,
+            });
+            document.active_chat_id = Some(session_id);
+            document.panels.right.open = true;
+        }
         document
             .validate_for_project(&project_id)
             .map_err(|error| AppError::Internal(format!("invalid default creative project: {error}")))?;
         let document_json = serialize_creative_project_document(&document)?;
         let row = self
             .repo
-            .create_creative_project(&project_id, &title, &document_json, now_ms())
+            .create_creative_project(&project_id, &title, &document_json, now)
             .await?;
         Ok(row.into())
     }
@@ -2267,6 +2362,40 @@ fn normalize_creative_project_title(
     Ok(title.to_owned())
 }
 
+fn normalize_creative_project_agent_kickoff(
+    kickoff: CreativeProjectAgentKickoff,
+) -> Result<CreativeProjectAgentKickoff, AppError> {
+    let prompt = kickoff.prompt.trim();
+    if prompt.is_empty() {
+        return Err(AppError::BadRequest(
+            "agentKickoff.prompt must not be empty".into(),
+        ));
+    }
+    if prompt.encode_utf16().count() > MAX_CREATIVE_AGENT_KICKOFF_PROMPT_CHARS {
+        return Err(AppError::BadRequest(format!(
+            "agentKickoff.prompt is too long (max {MAX_CREATIVE_AGENT_KICKOFF_PROMPT_CHARS} UTF-16 code units)"
+        )));
+    }
+    ProviderId::parse(&kickoff.provider_id).map_err(|error| {
+        AppError::BadRequest(format!(
+            "agentKickoff.model.providerId must be a canonical Provider UUIDv7: {error}"
+        ))
+    })?;
+    if kickoff.model.is_empty()
+        || kickoff.model.trim() != kickoff.model
+        || kickoff.model.encode_utf16().count() > MAX_CREATIVE_AGENT_MODEL_CHARS
+    {
+        return Err(AppError::BadRequest(format!(
+            "agentKickoff.model.model must be a non-empty trimmed string no longer than {MAX_CREATIVE_AGENT_MODEL_CHARS} UTF-16 code units"
+        )));
+    }
+    Ok(CreativeProjectAgentKickoff {
+        prompt: prompt.to_owned(),
+        provider_id: kickoff.provider_id,
+        model: kickoff.model,
+    })
+}
+
 fn parse_creative_project_revision(revision: &str) -> Result<i64, AppError> {
     if revision.is_empty() || revision.starts_with('0') || !revision.bytes().all(|b| b.is_ascii_digit()) {
         return Err(AppError::BadRequest(
@@ -3366,6 +3495,55 @@ mod tests {
             svc.get_creative_project(&created.project_id).await,
             Err(AppError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn project_create_only_locks_provider_lifecycle_for_agent_kickoff() {
+        let barrier = Arc::new(ProviderLifecycleBarrier::new());
+        let (svc, _dir, db) =
+            service_with_database_and_lifecycle(Some(barrier.clone())).await;
+        let owner_id = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
+        let provider_id = ProviderId::new().into_string();
+        insert_provider(&db, &provider_id).await;
+        insert_provider_model(&db, &provider_id, "chat-model").await;
+        insert_provider_model_capability(&db, &provider_id, "chat-model", "chat").await;
+
+        let write_guard = barrier.write().await;
+        let plain = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            svc.create_creative_project(Some("plain".into())),
+        )
+        .await
+        .expect("plain creation must not wait for Provider lifecycle")
+        .unwrap();
+        assert_eq!(plain.revision, "1");
+
+        let service = svc.clone();
+        let mut kickoff = tokio::spawn(async move {
+            service
+                .create_creative_project_for_owner(
+                    &owner_id,
+                    Some("kickoff".into()),
+                    Some(CreativeProjectAgentKickoff {
+                        prompt: "plan".into(),
+                        provider_id,
+                        model: "chat-model".into(),
+                    }),
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut kickoff)
+                .await
+                .is_err(),
+            "kickoff creation must wait while Provider deletion owns the lifecycle write guard"
+        );
+        drop(write_guard);
+
+        let created = kickoff.await.unwrap().unwrap();
+        assert_eq!(created.revision, "1");
+        let detail = svc.get_creative_project(&created.project_id).await.unwrap();
+        assert!(detail.document.chat_sessions[0].pending_turn.is_some());
     }
 
     #[tokio::test]

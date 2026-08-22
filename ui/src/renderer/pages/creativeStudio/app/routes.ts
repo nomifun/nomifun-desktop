@@ -5,7 +5,7 @@
  */
 
 export const CREATIVE_STUDIO_ROOT_PATH = '/workshop';
-export const CREATIVE_STUDIO_PROJECTS_PATH = CREATIVE_STUDIO_ROOT_PATH;
+export const CREATIVE_STUDIO_PROJECTS_PATH = `${CREATIVE_STUDIO_ROOT_PATH}/projects`;
 export const CREATIVE_STUDIO_CANVAS_PROJECT_PATTERN = '/workshop/canvas/:projectId';
 export const CREATIVE_STUDIO_DIRECTOR_PROJECT_PATTERN = '/workshop/director/:projectId';
 export const CREATIVE_STUDIO_IMAGE_PATH = '/workshop/image';
@@ -17,6 +17,7 @@ export const CREATIVE_STUDIO_WORKFLOWS_PATH = '/workshop/workflows';
 export const WORKBENCH_HOME_PATH = '/guid';
 
 export type CreativeStudioSection =
+  | 'home'
   | 'projects'
   | 'canvas'
   | 'director'
@@ -86,6 +87,7 @@ export const matchCreativeStudioDirectorProjectPath = (
 /** Exact section matching keeps `/workshop-other` outside the product shell. */
 export const creativeStudioSectionForPath = (path: string): CreativeStudioSection | null => {
   const pathname = normalizePathname(path);
+  if (pathname === CREATIVE_STUDIO_ROOT_PATH) return 'home';
   if (pathname === CREATIVE_STUDIO_PROJECTS_PATH) return 'projects';
   if (matchCreativeStudioCanvasProjectPath(pathname)) return 'canvas';
   if (matchCreativeStudioDirectorProjectPath(pathname)) return 'director';
