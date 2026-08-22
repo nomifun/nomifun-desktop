@@ -10,7 +10,6 @@ export const CREATIVE_STUDIO_CANVAS_PROJECT_PATTERN = '/workshop/canvas/:project
 export const CREATIVE_STUDIO_DIRECTOR_PROJECT_PATTERN = '/workshop/director/:projectId';
 export const CREATIVE_STUDIO_IMAGE_PATH = '/workshop/image';
 export const CREATIVE_STUDIO_VIDEO_PATH = '/workshop/video';
-export const CREATIVE_STUDIO_AUDIO_PATH = '/workshop/audio';
 export const CREATIVE_STUDIO_PROMPTS_PATH = '/workshop/prompts';
 export const CREATIVE_STUDIO_ASSETS_PATH = '/workshop/assets';
 export const CREATIVE_STUDIO_WORKFLOWS_PATH = '/workshop/workflows';
@@ -23,7 +22,6 @@ export type CreativeStudioSection =
   | 'director'
   | 'image'
   | 'video'
-  | 'audio'
   | 'prompts'
   | 'assets'
   | 'workflows';
@@ -93,7 +91,6 @@ export const creativeStudioSectionForPath = (path: string): CreativeStudioSectio
   if (matchCreativeStudioDirectorProjectPath(pathname)) return 'director';
   if (pathname === CREATIVE_STUDIO_IMAGE_PATH) return 'image';
   if (pathname === CREATIVE_STUDIO_VIDEO_PATH) return 'video';
-  if (pathname === CREATIVE_STUDIO_AUDIO_PATH) return 'audio';
   if (pathname === CREATIVE_STUDIO_PROMPTS_PATH) return 'prompts';
   if (pathname === CREATIVE_STUDIO_ASSETS_PATH) return 'assets';
   if (pathname === CREATIVE_STUDIO_WORKFLOWS_PATH) return 'workflows';
