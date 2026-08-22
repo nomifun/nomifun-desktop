@@ -468,30 +468,6 @@
   gap: 12px;
 }
 
-.visibilitySwitch {
-  display: inline-flex;
-  padding: 2px;
-  border-radius: 6px;
-  background: var(--color-fill-2);
-}
-
-.visibilitySwitch button {
-  height: 28px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--color-text-3);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.visibilitySwitch button[data-active='true'] {
-  background: var(--color-bg-1);
-  color: var(--color-text-1);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 9%);
-}
-
 .twoColumns,
 .variableValueGrid,
 .infoGrid {

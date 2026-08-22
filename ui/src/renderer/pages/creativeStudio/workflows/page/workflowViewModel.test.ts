@@ -6,11 +6,13 @@
 
 import { describe, expect, test } from 'bun:test';
 import { validateWorkflowDefinition } from '../domain';
+import { createWorkflowFixture } from '../domain/testFixtures';
 import {
   createBlankWorkflow,
   duplicateWorkflow,
   parseWorkflowTemplateText,
   switchWorkflowMode,
+  withPrivateWorkflowVisibility,
   workflowTemplateText,
 } from './workflowViewModel';
 
@@ -49,5 +51,18 @@ describe('workflow page view model', () => {
       multi.templates.map((template) => template.id)
     );
     expect(copy.steps.map((step) => step.id)).not.toEqual(multi.steps.map((step) => step.id));
+  });
+
+  test('normalizes legacy and copied workflows to private without mutating the source', () => {
+    const legacyPublic = createWorkflowFixture();
+    legacyPublic.metadata.visibility = 'public';
+
+    const normalized = withPrivateWorkflowVisibility(legacyPublic);
+    const copy = duplicateWorkflow(legacyPublic);
+
+    expect(normalized.metadata.visibility).toBe('private');
+    expect(copy.metadata.visibility).toBe('private');
+    expect(legacyPublic.metadata.visibility).toBe('public');
+    expect(normalized.metadata).not.toBe(legacyPublic.metadata);
   });
 });

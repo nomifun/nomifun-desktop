@@ -19,6 +19,7 @@ const css = readFileSync(
 describe('Creative Workflow workspace page', () => {
   test('renders the source list hierarchy with real canonical workflow data', () => {
     const workflow = createWorkflowFixture();
+    workflow.metadata.visibility = 'public';
     const html = renderToStaticMarkup(
       <CreativeWorkflowWorkspacePage
         autoLoad={false}
@@ -34,6 +35,8 @@ describe('Creative Workflow workspace page', () => {
     expect(html.includes(`data-workflow-id="${workflow.id}"`)).toBe(true);
     expect(html.includes(workflow.metadata.name)).toBe(true);
     expect(html.includes('运行')).toBe(true);
+    expect(html.includes('公开')).toBe(false);
+    expect(html.includes('个人')).toBe(false);
   });
 
   test('keeps the focused workflow surface on a fixed light stone palette', () => {
