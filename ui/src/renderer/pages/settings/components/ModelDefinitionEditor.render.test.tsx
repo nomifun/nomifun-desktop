@@ -221,6 +221,31 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('data-effective-base-url="https://override.example.com/v1"')).toBe(true);
   });
 
+  test('names the missing config above the fold instead of only counting it', () => {
+    const definition: ModelDefinitionDraft = {
+      model: 'gpt-4o',
+      capabilities: [emptyCapabilityDraft('chat')],
+    };
+    // A new-api-shaped manifest: protocols are selectable but nothing is
+    // recommended, so the blank protocol is a settled error rather than a
+    // transient "preparing defaults" state.
+    const gatewayManifests: ModelProtocolManifestMap = {
+      chat: { ...manifest('chat'), recommendation: null },
+    };
+    const html = render(definition, gatewayManifests, 'bearer', [
+      { task: 'chat', code: 'protocol_required' },
+    ]);
+
+    // The sentence, not just "待处理 1 项".
+    expect(html.includes('data-capability-error-list="chat"')).toBe(true);
+    expect(html.includes('data-capability-error="protocol_required"')).toBe(true);
+    expect(html.includes('请在高级配置里选择「调用协议」')).toBe(true);
+    // Outside the collapsed details, so a collapsed card still explains itself.
+    expect(html.indexOf('data-capability-error-list="chat"')).toBeLessThan(
+      html.indexOf('data-capability-details="chat"')
+    );
+  });
+
   test('shows the declared task next to the picker and unlocks the model input', () => {
     // Regression: after picking a task the picker resets to its placeholder, so
     // if nothing restates the declared set the form looks like it discarded the
