@@ -46,13 +46,13 @@ export interface CreativeStudioTopBarProps {
 }
 
 interface NavigationItem {
-  section: Exclude<CreativeStudioSection, 'home' | 'canvas' | 'director' | 'audio'>;
+  section: Exclude<CreativeStudioSection, 'home' | 'canvas' | 'director'>;
   path: string;
   label: string;
   icon: React.ReactNode;
 }
 
-/** Source product navigation; audio remains a route, but is not a source top-level destination. */
+/** Source product navigation for every standalone Creative Studio destination. */
 const CreativeStudioTopBar: React.FC<CreativeStudioTopBarProps> = ({
   title,
   backLabel,

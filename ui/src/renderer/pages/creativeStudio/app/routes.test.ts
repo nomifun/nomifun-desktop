@@ -8,7 +8,6 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   CREATIVE_STUDIO_ASSETS_PATH,
-  CREATIVE_STUDIO_AUDIO_PATH,
   CREATIVE_STUDIO_CANVAS_PROJECT_PATTERN,
   CREATIVE_STUDIO_DIRECTOR_PROJECT_PATTERN,
   CREATIVE_STUDIO_IMAGE_PATH,
@@ -33,7 +32,6 @@ describe('Creative Studio routes', () => {
     expect(CREATIVE_STUDIO_DIRECTOR_PROJECT_PATTERN).toBe('/workshop/director/:projectId');
     expect(CREATIVE_STUDIO_IMAGE_PATH).toBe('/workshop/image');
     expect(CREATIVE_STUDIO_VIDEO_PATH).toBe('/workshop/video');
-    expect(CREATIVE_STUDIO_AUDIO_PATH).toBe('/workshop/audio');
     expect(CREATIVE_STUDIO_PROMPTS_PATH).toBe('/workshop/prompts');
     expect(CREATIVE_STUDIO_ASSETS_PATH).toBe('/workshop/assets');
     expect(CREATIVE_STUDIO_WORKFLOWS_PATH).toBe('/workshop/workflows');
@@ -81,13 +79,14 @@ describe('Creative Studio routes', () => {
     expect(creativeStudioSectionForPath('/workshop/director/project-1')).toBe('director');
     expect(creativeStudioSectionForPath('/workshop/image?draft=1')).toBe('image');
     expect(creativeStudioSectionForPath('/workshop/video/')).toBe('video');
-    expect(creativeStudioSectionForPath('/workshop/audio')).toBe('audio');
     expect(creativeStudioSectionForPath('/workshop/prompts')).toBe('prompts');
     expect(creativeStudioSectionForPath('/workshop/assets#recent')).toBe('assets');
     expect(creativeStudioSectionForPath('/workshop/workflows?category=all')).toBe('workflows');
     expect(creativeStudioSectionForPath('/workshop-other')).toBe(null);
+    expect(creativeStudioSectionForPath('/workshop/audio')).toBe(null);
     expect(creativeStudioSectionForPath('/workshop/image/draft')).toBe(null);
     expect(isCreativeStudioPath('/workshop/video')).toBe(true);
+    expect(isCreativeStudioPath('/workshop/audio')).toBe(false);
     expect(isCreativeStudioPath('/workshop-other')).toBe(false);
   });
 });
