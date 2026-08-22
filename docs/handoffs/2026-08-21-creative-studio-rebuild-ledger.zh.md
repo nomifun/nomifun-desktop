@@ -2,9 +2,9 @@
 
 > 用途：在长任务发生上下文压缩或人员切换时，从可验证提交继续，而不是重新审计整仓。
 > 分支：`codex/infinite-canvas-rebuild`
-> 最后功能锚点：`c7987a7f`（`fix(creative-studio): keep workflow model popup interactive`）；最小 Workflow AI 主体为 `cd85b21e`。
+> 最后交付锚点：`29199d62`（`docs(creative-studio): refresh production screenshots`）；最后功能锚点为 `a6db9d04`，最小 Workflow AI 主体为 `cd85b21e`。
 > 参考产品锚点：`ef7303d`
-> 2026-08-22 Workflow MVP 交付门已闭合：owner-only one-shot、Provider 取消、strict preview、Apply 到既有编辑器、用户手动 Save、reload 恢复与精确清理均已验证；未调用真实付费 Provider。下一阶段只推进 P11 上线门。
+> 2026-08-22 P11 源码与未签名内部 QA 包交付门已闭合：Workflow MVP、旧入口退役、Web/真实 Tauri 慢环、三视口、production bundle、Windows x64 NSIS 打包与能力文档均已有证据；未调用真实付费 Provider。公开发行仍需新版本、签名和一次性 Windows 环境安装/升级/卸载门。
 
 ## 1. 续接协议
 
@@ -33,6 +33,7 @@
 | Workflow AI MVP | 简单需求 + exact Chat → bounded one-shot → strict draft 预览 → Apply 既有编辑器 → 用户手动 Save；不创建 Conversation、附件、公开模板，不自动保存或运行 | `cd85b21e`、`c7987a7f` |
 | P9 | Director v1 domain、Three.js runtime、CAS sidecar、时间轴、截图回填、sidecar 全资产闭包与归档重映射 | `1ccbd013`、`d3a609f6`、`7b7712c0`、`dfa3c0b3`、`f25825f1`、`c12b8db` |
 | P10 | 旧 Workshop UI、翻译、后端路由、旧画布存储与旧任务归属退出运行链 | `63c99d4f`…`7867fe3f` |
+| P11 | 退役源码/HTTP/dist 门、Gateway `creative_studio` profile、Workflow private-only、双语能力文档与当前产品截图、安全 NSIS 程序/数据根分离、最终 Web/Tauri/package 交付证据 | `a74b50b5`…`29199d62` |
 
 主体采用 React/Vite + Rust 原生集成，没有 Next.js、Go sidecar、iframe 或第二套模型配置。模型调用只走 NomiFun 的 provider/model/capability 解析和任务体系。
 
@@ -258,6 +259,19 @@
 - `bun run typecheck`、`bun run check:icons`、`bun run check:theme`、`bun run check:dead-css`、`git diff --check`：通过。
 - UI production build：通过；仅保留仓库既存的动态/静态重复导入与大 chunk 提示。
 
+`29199d62` 冻结点的 P11 交付门：
+
+- 退役与运行合同已闭合：`/workshop/audio`、旧 `/assets`、旧 `/workshop/:id`、`/api/workshop/*`、`/api/creation/tasks*` 和 `nomi_workshop_*` 不再进入产品运行链。真实 App Router 的 13 组历史 Method + URI 均返回空体 404，前后数据库不变；完整 `content_e2e_suite` 为 130/130。源码门与最终 dist 门均通过。
+- 六个 canonical Gateway 工具统一使用 `creative_studio` domain，只允许 owner 的 `desktop` / `admin` profile；`work` / `lite` 与 non-owner 继续拒绝。`nomifun-api-types --lib` 560/560、`nomifun-gateway --lib` 143/143、Gateway stdio 15/15 均通过。
+- Workflow 首发界面已固定 private-only，不展示尚不存在的公开模板能力；AI 仍严格限定为简单需求 + exact Chat → bounded one-shot → strict preview → Apply → 用户手动 Save。Workflow/Model/Focus 定向 UI 最终为 108/108、560 assertions；Workflow 全目录为 67/67、327 assertions。未调用真实 Provider。
+- 完整 `bun run check`、UI production build（7698 modules）、`cargo check -p nomifun-app`、Workshop 111/111、Provider 196/196、bounded drain 2/2、one-shot 7/7、Provider error 5/5、migration 和定向 DB 门均通过。构建只保留既存 dynamic/static import、大 chunk 与未使用代码提示。
+- production Web 使用全新数据根验证 `/workshop` 产品树、项目创建、文本节点、reload 恢复、Director 深链、返回与精确清理；1280×720、1024×768、390×844 均无横向溢出。旧深链都返回 `/guid`，fresh Console 为 0 error / 0 warning。
+- 真实 Tauri 窗口验证侧栏入口、Focus Shell、Projects、Image、Video、Prompts、Assets、Canvas、Workflow、AI 禁用态、private-only 编辑器、手动 CAS 保存、完整刷新、持久恢复、返回工作台和原生窗口按钮。关闭按钮按产品合同隐藏到托盘并保持进程；自动化无法操作任务栏托盘，因此“托盘退出”未伪报通过，开发进程最后由其 PTY `Ctrl+C` 收口。
+- Windows x64 完整 package 在冻结 HEAD `29199d6208d16d6ad676ac12854bd82a71321034` 成功。程序 `target/x86_64-pc-windows-msvc/release/nomifun-desktop.exe` 为 203,402,752 bytes，SHA-256 `CBACE82E93457DB40B2D65120901F31632FF9196ABAF8E3C30C81F9ED99197F3`，版本 0.6.4，未签名。canonical 与 `dist/desktop` setup 均为 60,033,206 bytes，SHA-256 `D7E3D6CDC4FC84450510CC721E08400A900D14B533B6828375622CAAC2798FB9`，逐字节一致且未签名。
+- NSIS 使用锁定的 Tauri CLI 2.11.2 受控模板：current-user 程序根为 `%LOCALAPPDATA%\Programs\NomiFun`，不会与 `%LOCALAPPDATA%\NomiFun` 稳定数据根重叠；卸载器保留真实用户数据。source 与 rendered installer contract 均通过。最终 build manifest 为 schema 1、app 0.6.4、API contract 20、frontend build id `abecfcd0-7904-48b3-986b-95009d6a2b31`。
+- 双语 Creative Studio 能力指南、架构/API/ID 文档、README 与 production 截图已刷新；`NOTICE` 与 `third_party/infinite-canvas/` 已记录参考项目 revision、来源和完整 MIT 许可证。英文 Focus Shell 已本地化，但画布/编辑器主体仍有较多简体中文，文档未把它包装成完整英文体验。
+- 当前账户没有运行 setup，也没有修改正式用户数据。两个已清空产品数据的隔离 Web 临时根 `nomifun-p11-web-cd185d87-73305df076454fdf8068653ccd3789ee`、`nomifun-p11-web-cd185d87-142fbd7421764bdda841723eae25d625` 因安全策略保留在 `%TEMP%`；真实 Tauri 隔离根 `nomifun-p11-tauri-29199d62-10c60bb4942c4332b01e8b9a1b16d867` 和一个 PID 41664 的 Vite 5173 子进程仍存在。后者已失去正常监督通道，本轮不以 `taskkill /F` 暴力清理。
+
 ## 4. 仍需明确保留的限制
 
 - Standalone 工作台必须显式选择真实项目；不会借用或偷偷创建最近项目。
@@ -275,11 +289,15 @@
 - 真实付费 provider 端到端冒烟尚未执行，需要可用凭证和单独的成本授权。
 - `data.composer` 是协调发布的 v1 可选扩展：当前前后端均向后读取缺字段文档，但 `ef26f4cb` 之前带 `deny_unknown_fields` 的旧二进制不能读取新字段，不能把新数据库回退给旧程序。
 - 单模型删除已原子覆盖 Creative Studio exact-pair 当前选择与运行中硬绑定，但非 Creative Studio 的 Conversation 主模型、Companion/customer-service、Agent Execution/template、Cron 等仍只有 Provider 级 usage/清理合同，尚未统一成 exact-model scanner。本提交不宣称这些外部模块的单模型引用已自动迁移或清除。
+- Workflow 当前是 private-only。历史数据库中的 `public` 枚举不会被批量改写；用户下一次从当前 UI 保存或复制时才规范化为 `private`。公开模板、发现、共享、附件、复杂 Conversation、自动保存和自动运行均不属于首发能力。
+- Windows 产物是已核验的未签名内部 QA 包，不是已公开发布版本。现有 `v0.6.4` 已对应旧 release；公开发布必须 bump 新版本，重建 updater `.sig` / `latest.json` / release notes，并配置 Authenticode，不能覆盖或复用旧 tag。
+- 当前账户未运行安装器。安装、启动、deep link、同版本重装/升级、托盘正常退出、卸载和注册表/快捷方式/文件残留必须在 Windows Sandbox、一次性用户或 VM 完成；干净机器首次 WebView2 下载路径也尚未验证。
+- 英文 Focus Shell 已具备，但大量画布与编辑器文案仍为简体中文。若英文市场是本次公开发行硬条件，需要单独完成 Creative Studio 内容本地化与截图复验。
 
-## 5. 下一步实施优先级
+## 5. 后续实施优先级
 
-1. P11 上线门：Web 与真实 Tauri 慢环、1280×720 / 1024×768 / 390×844 最终回归、UI production build、Windows 桌面打包与安装产物核验。
-2. 退役门禁与最终能力文档：证明旧“创意工坊”运行入口、路由、持久化与构建产物不再被产品调用，明确已上线能力、首发限制、数据/模型合同、恢复与清理方式。
-3. 高级媒体后置：视频多任务/首尾帧/高级引用、音频上传/时长/VoiceClone、Director/全景与完整视频输出只在主路径可上线后再补 typed 后端能力。真实付费 Provider 冒烟仍需单独成本授权。
+1. 公开发行门：确定新版本号，在一次性 Windows 环境完成 install → launch → Creative Studio/deep link → tray Quit → upgrade/reinstall → uninstall → residue audit，再完成 Authenticode、updater 签名/清单与 release notes。没有这些证据时只能分发为内部 QA 包。
+2. 可选英文发行门：若目标市场要求完整英文体验，补齐画布、编辑器、Composer 和 Workflow 主体本地化，再重拍并复验 1280×720、1024×768、390×844。
+3. 高级媒体后置：视频多任务/首尾帧/高级引用、音频上传/时长/VoiceClone、Director/全景与完整视频输出只在首发运行稳定后再补 typed 后端能力。真实付费 Provider 冒烟仍需单独成本授权。
 
-不要因为主体代码与 Workflow MVP 已存在就跳过 P11。最小 Workflow 主链已经闭合，后续不得在上线门内顺手扩建复杂会话、附件、公开模板、自动保存或自动运行；先把 Web/Tauri、桌面产物、旧入口退役和能力文档做成可交付证据。
+P11 已把新 Creative Studio 收敛到可以替换旧“创意工坊”的源码与内部 QA 交付状态。后续不得借公开发行门顺手扩建复杂会话、附件、公开模板、自动保存或自动运行；优先完成签名、隔离安装生命周期和版本发布证据。
