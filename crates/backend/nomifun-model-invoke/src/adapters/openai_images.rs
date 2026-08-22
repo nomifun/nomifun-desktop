@@ -8,8 +8,9 @@
 //!   optional `mask` + prompt/n/size).
 //!
 //! Both are synchronous — [`TaskOutcome::Done`] carries the artifacts inline.
-//! `response_format=b64_json` is requested; the parser also tolerates providers
-//! that return a `url` instead (the caller fetches it).
+//! `response_format=b64_json` is requested from every model that accepts it (see
+//! [`rejects_response_format`]); the parser also tolerates providers that return
+//! a `url` instead (the caller fetches it).
 
 use std::time::Duration;
 
@@ -34,6 +35,26 @@ use super::{json_request_body, scalar_request_fields};
 
 /// Generous per-call ceiling: image generation is often multi-second.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Does this model reject `response_format` outright?
+///
+/// OpenAI's GPT image family always returns base64 and refuses the parameter
+/// with `400 unknown_parameter`, so sending it made every generation on those
+/// models fail — including the health probe, which reuses
+/// [`submit_generations`] and therefore reported the model permanently
+/// unhealthy. `dall-e-*` is the opposite: it defaults to a URL and needs the
+/// parameter to return b64.
+///
+/// This is an explicit opt-out for the one family that breaks, NOT a blanket
+/// removal: `openai.images` also serves OpenAI-*compatible* gateways
+/// (SiliconFlow and friends) that expect `response_format`, and dropping it for
+/// everyone would regress them.
+///
+/// Aggregators prefix ids (`openai/gpt-image-1`), so match on the last segment.
+fn rejects_response_format(model: &str) -> bool {
+    let leaf = model.rsplit('/').next().unwrap_or(model).to_ascii_lowercase();
+    leaf.starts_with("gpt-image") || leaf.starts_with("chatgpt-image")
+}
 
 /// OpenAI-compatible sync `/images/{generations,edits}` protocol.
 pub struct OpenAiImagesAdapter;
@@ -71,8 +92,10 @@ async fn submit_generations(
         "model": call.model,
         "prompt": req.prompt,
         "n": req.count,
-        "response_format": "b64_json",
     });
+    if !rejects_response_format(&call.model) {
+        body["response_format"] = Value::String("b64_json".to_owned());
+    }
     if let Some(size) = &req.size {
         body["size"] = Value::String(size.clone());
     }
@@ -346,6 +369,46 @@ mod tests {
         InputAsset { id: None, role: role.into(), bytes: bytes.to_vec(), mime: mime.into() }
     }
 
+    #[test]
+    fn only_the_gpt_image_family_rejects_response_format() {
+        for model in ["gpt-image-1", "gpt-image-2", "GPT-Image-1-mini", "openai/gpt-image-1", "chatgpt-image-latest"] {
+            assert!(rejects_response_format(model), "{model} must not be sent response_format");
+        }
+        // dall-e needs it to return b64 instead of a URL, and the OpenAI-compatible
+        // gateways on this adapter expect it too.
+        for model in ["dall-e-2", "dall-e-3", "Kwai-Kolors/Kolors", "stabilityai/sd3", "flux-pro"] {
+            assert!(!rejects_response_format(model), "{model} still needs response_format");
+        }
+    }
+
+    #[tokio::test]
+    async fn image_contract_omits_response_format_for_gpt_image_models() {
+        // Regression: the adapter hardcoded `response_format: "b64_json"`, which
+        // the GPT image family answers with 400 `unknown_parameter`. That made
+        // every generation on OpenAI's current image models fail on the default
+        // configuration, and — because the health probe shares this path — pinned
+        // them to "unhealthy" in settings with no way for a user to override it.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"b64_json": "aGk="}]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let call = generation_call(&server.uri(), "gpt-image-1", gen_request(Some("1024x1024"), None));
+        OpenAiImagesAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert!(
+            body.get("response_format").is_none(),
+            "gpt-image rejects response_format; body was {body}"
+        );
+        assert_eq!(body["model"], "gpt-image-1");
+        assert_eq!(body["size"], "1024x1024");
+    }
+
     #[tokio::test]
     async fn image_contract_openai_posts_seed_and_decodes_b64_without_invented_mime() {
         let server = MockServer::start().await;
@@ -353,7 +416,7 @@ mod tests {
             .and(path("/v1/images/generations"))
             .and(header("authorization", "Bearer sk-test"))
             .and(body_partial_json(json!({
-                "model": "gpt-image-1",
+                "model": "dall-e-2",
                 "prompt": "a fox",
                 "n": 2,
                 "response_format": "b64_json",
@@ -369,7 +432,7 @@ mod tests {
         let mut request = gen_request(Some("512x512"), Some("high"));
         let TaskRequest::ImageGeneration(image_request) = &mut request else { unreachable!() };
         image_request.extra = json!({"seed": 42});
-        let call = generation_call(&server.uri(), "gpt-image-1", request);
+        let call = generation_call(&server.uri(), "dall-e-2", request);
         let out = OpenAiImagesAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
         assert_eq!(assets.len(), 1);
