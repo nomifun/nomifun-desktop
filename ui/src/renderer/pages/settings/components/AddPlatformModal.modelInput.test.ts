@@ -38,7 +38,13 @@ describe('AddPlatformModal unified model input flow', () => {
       editorSource.indexOf('data-model-task-section'),
       editorSource.indexOf('{value.capabilities.map')
     );
-    expect(taskPickerSource.includes("mode='multiple'")).toBe(false);
+    // The task control is a multi-select so the declared tasks are visible in
+    // the field itself. Removal must stay protected: a tag's "×" deletes the
+    // whole capability, so a configured one has to be confirmed first.
+    expect(taskPickerSource.includes("mode='multiple'")).toBe(true);
+    expect(taskPickerSource.includes('value={selectedTasks}')).toBe(true);
+    expect(editorSource.includes('capabilityHasConfiguration')).toBe(true);
+    expect(editorSource.includes('removeConfiguredModelTaskConfirm')).toBe(true);
     expect(editorSource.includes('modelTask.registered')).toBe(false);
     expect(editorSource.includes('data-remove-model-task={capability.task}')).toBe(true);
   });
@@ -54,14 +60,14 @@ describe('AddPlatformModal unified model input flow', () => {
     expect(editorSource.includes('data-primary-model-task-section')).toBe(false);
     expect(editorSource.includes('changePrimaryModelTask')).toBe(false);
     expect(editorSource.includes("t('settings.modelType'")).toBe(false);
-    // The one task control must not be gated on the model id: it now comes
-    // first, so gating it there would deadlock the form.
+    // The one task control must not be gated on the model id: it comes first,
+    // so gating it there would deadlock the form.
     const taskPicker = editorSource.slice(
       editorSource.indexOf('data-model-task-section'),
       editorSource.indexOf('data-model-task-picker')
     );
-    expect(taskPicker.includes('disabled={availableTasks.length === 0}')).toBe(true);
     expect(taskPicker.includes('!value.model.trim()')).toBe(false);
+    expect(taskPicker.includes('disabled=')).toBe(false);
   });
 
   test('gets operational defaults only from the backend preset manifest', () => {

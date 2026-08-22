@@ -110,6 +110,40 @@ export interface CapabilityValidationResult {
   errors: Array<{ task?: ModelTask; code: CapabilityValidationError }>;
 }
 
+/**
+ * The i18n key naming what a validation code actually asks the user to do.
+ *
+ * Every code used to be invisible: the capability card rendered a bare count
+ * ("待处理 1 项"), the offending control showed only a red border, and the save
+ * toast named no field. A `new-api` provider legitimately requires an explicit
+ * per-model protocol, so a fully-filled form reported "incomplete" with nothing
+ * to act on and the model could not be created at all.
+ */
+export const capabilityValidationMessageKey = (code: CapabilityValidationError): string =>
+  `settings.capabilityError.${code}`;
+
+/**
+ * One sentence naming every blocker, task-scoped codes prefixed by their task.
+ *
+ * Takes a translate callback so this module stays free of the i18n runtime and
+ * remains unit-testable. Returns `''` when there is nothing to report, letting
+ * the caller keep its generic fallback for that case.
+ */
+export const describeValidationErrors = (
+  errors: CapabilityValidationResult['errors'],
+  translate: (key: string, fallback: string) => string
+): string =>
+  [
+    ...new Set(
+      errors.map((error) => {
+        const message = translate(capabilityValidationMessageKey(error.code), error.code);
+        return error.task
+          ? `${translate(`settings.modelTask.${error.task}`, error.task)} · ${message}`
+          : message;
+      })
+    ),
+  ].join(' · ');
+
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -186,6 +220,31 @@ export const removeCapabilityTask = (
   capabilities: readonly ModelCapabilityDraft[],
   task: ModelTask
 ): ModelCapabilityDraft[] => capabilities.filter((capability) => capability.task !== task);
+
+/**
+ * Would removing this task throw away work the user cannot get back?
+ *
+ * A task's capability IS its configuration, so removing the task deletes its
+ * protocol, endpoints, traits and limits with it. That is fine for a draft the
+ * user just added and never touched — nagging there would be noise — but not for
+ * one they configured, or one loaded from the server.
+ *
+ * `'recommendation'` transport deliberately does not count: it was filled in
+ * automatically the moment the task was added, so it is not the user's work.
+ */
+export const capabilityHasConfiguration = (capability: ModelCapabilityDraft): boolean =>
+  capability.transportSource === 'user' ||
+  capability.transportSource === 'persisted' ||
+  capability.traits.length > 0 ||
+  capability.contextLimit !== undefined ||
+  capability.outputLimit !== undefined ||
+  capability.allowCrossOriginCredentials ||
+  Boolean(capability.baseUrlOverride.trim()) ||
+  Boolean(capability.endpoint.trim()) ||
+  Boolean(capability.pollEndpoint.trim()) ||
+  Boolean(capability.contentEndpoint.trim()) ||
+  Boolean(capability.realtimeEndpoint.trim()) ||
+  Boolean(capability.providerParamsJson.trim());
 
 const CATALOG_TRAITS_BY_TASK: Readonly<Record<ModelTask, readonly ModelTrait[]>> = {
   chat: [

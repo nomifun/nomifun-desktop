@@ -221,34 +221,69 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('data-effective-base-url="https://override.example.com/v1"')).toBe(true);
   });
 
-  test('shows the declared task next to the picker and unlocks the model input', () => {
-    // Regression: after picking a task the picker resets to its placeholder, so
-    // if nothing restates the declared set the form looks like it discarded the
-    // choice — and the user never reaches the model field, so saving is blocked
-    // on `model_required` with only a generic toast to explain it.
+  test('nests the transport chain in the order it resolves', () => {
+    const definition: ModelDefinitionDraft = {
+      model: 'step-ready',
+      capabilities: [
+        { ...emptyCapabilityDraft('chat'), transportSource: 'persisted' as const, protocol: 'stepfun.chat' },
+      ],
+    };
+    const html = render(definition);
+
+    // One container for the whole chain...
+    expect(html.includes('data-transport-group="chat"')).toBe(true);
+    // ...and the connection profile that OWNS the URL comes before it, with the
+    // override and the endpoints nested under it. This used to render inverted.
+    const profileAt = html.indexOf('连接档案');
+    const baseUrlAt = html.indexOf('data-transport-level="base-url"');
+    const endpointsAt = html.indexOf('data-transport-level="endpoints"');
+    expect(profileAt).toBeGreaterThan(-1);
+    expect(profileAt).toBeLessThan(baseUrlAt);
+    expect(baseUrlAt).toBeLessThan(endpointsAt);
+    // Token ceilings are a separate concern, after the transport chain.
+    expect(endpointsAt).toBeLessThan(html.indexOf('data-token-limits'));
+  });
+
+  test('names the missing config above the fold instead of only counting it', () => {
+    const definition: ModelDefinitionDraft = {
+      model: 'gpt-4o',
+      capabilities: [emptyCapabilityDraft('chat')],
+    };
+    // A new-api-shaped manifest: protocols are selectable but nothing is
+    // recommended, so the blank protocol is a settled error rather than a
+    // transient "preparing defaults" state.
+    const gatewayManifests: ModelProtocolManifestMap = {
+      chat: { ...manifest('chat'), recommendation: null },
+    };
+    const html = render(definition, gatewayManifests, 'bearer', [
+      { task: 'chat', code: 'protocol_required' },
+    ]);
+
+    // The sentence, not just "待处理 1 项".
+    expect(html.includes('data-capability-error-list="chat"')).toBe(true);
+    expect(html.includes('data-capability-error="protocol_required"')).toBe(true);
+    expect(html.includes('请在高级配置里选择「调用协议」')).toBe(true);
+    // Outside the collapsed details, so a collapsed card still explains itself.
+    expect(html.indexOf('data-capability-error-list="chat"')).toBeLessThan(
+      html.indexOf('data-capability-details="chat"')
+    );
+  });
+
+  test('shows the declared task inside the picker and unlocks the model input', () => {
+    // Regression: the task control used to reset to its placeholder after each
+    // pick, so the form looked like it had discarded the choice and the user
+    // never reached the model field — leaving save blocked on `model_required`.
+    // The declared set is now the control's own value, rendered as tags in it.
     const html = render({ model: '', capabilities: [emptyCapabilityDraft('chat')] });
 
+    expect(html.includes('data-model-task-picker')).toBe(true);
+    // Arco renders a multi-select's value as tags inside the field.
+    expect(html.includes('对话')).toBe(true);
     expect(html.includes('data-declared-tasks')).toBe(true);
-    expect(html.includes('data-declared-task="chat"')).toBe(true);
-    // Loud enough to be noticed: an explicit lead-in and a primary-coloured tag,
-    // not a bare grey chip under a Select.
-    expect(html.includes('已添加')).toBe(true);
-    const marker = html.indexOf('data-declared-tasks');
-    // The window spans the container's class attribute (rendered before the data
-    // attribute) and the tags that follow it.
-    const declaredRow = html.slice(Math.max(0, marker - 300), marker + 400);
-    expect(declaredRow.includes('arcoblue')).toBe(true);
-    expect(declaredRow.includes('bg-fill-1')).toBe(true);
-    // The declared task is stated inside the task section, before the model input.
-    expect(html.indexOf('data-declared-task="chat"')).toBeLessThan(
-      html.indexOf('data-unified-model-input')
-    );
     // One task is enough to unlock the model field; the placeholder must no
     // longer be the "pick a task first" prompt.
     expect(html.includes('请先在上方选择任务')).toBe(false);
     expect(html.includes('搜索目录模型，或直接输入官网模型 ID')).toBe(true);
-    // ...and the picker keeps offering the remaining eight tasks.
-    expect(html.includes('data-model-task-picker')).toBe(true);
   });
 
   test('puts the supported-task picker before one unified catalog and free-text model input', () => {
