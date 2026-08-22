@@ -221,6 +221,29 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('data-effective-base-url="https://override.example.com/v1"')).toBe(true);
   });
 
+  test('nests the transport chain in the order it resolves', () => {
+    const definition: ModelDefinitionDraft = {
+      model: 'step-ready',
+      capabilities: [
+        { ...emptyCapabilityDraft('chat'), transportSource: 'persisted' as const, protocol: 'stepfun.chat' },
+      ],
+    };
+    const html = render(definition);
+
+    // One container for the whole chain...
+    expect(html.includes('data-transport-group="chat"')).toBe(true);
+    // ...and the connection profile that OWNS the URL comes before it, with the
+    // override and the endpoints nested under it. This used to render inverted.
+    const profileAt = html.indexOf('连接档案');
+    const baseUrlAt = html.indexOf('data-transport-level="base-url"');
+    const endpointsAt = html.indexOf('data-transport-level="endpoints"');
+    expect(profileAt).toBeGreaterThan(-1);
+    expect(profileAt).toBeLessThan(baseUrlAt);
+    expect(baseUrlAt).toBeLessThan(endpointsAt);
+    // Token ceilings are a separate concern, after the transport chain.
+    expect(endpointsAt).toBeLessThan(html.indexOf('data-token-limits'));
+  });
+
   test('names the missing config above the fold instead of only counting it', () => {
     const definition: ModelDefinitionDraft = {
       model: 'gpt-4o',

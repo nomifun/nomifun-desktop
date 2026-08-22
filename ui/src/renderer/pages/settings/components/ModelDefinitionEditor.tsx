@@ -1018,154 +1018,189 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
               )}
             </div>
 
-            {!sdkTransport && (
+            {/*
+              One container for the whole transport chain, nested in the order
+              the code actually resolves it (`effectiveBaseUrl`): the connection
+              profile owns the URL, auth scheme and credentials; a per-task Base
+              URL override replaces only the URL half of that profile; endpoints
+              are relative paths joined onto whichever URL won. It used to render
+              level 2 before level 1, which is why the relationship read as
+              arbitrary.
+            */}
+            <div
+              className='space-y-10px rounded-8px border border-solid border-[var(--color-border-2)] p-12px'
+              data-transport-group={capability.task}
+            >
+              <div className='text-12px font-500 text-t-secondary'>
+                {t('settings.modelAdvanced.transportGroup', { defaultValue: '连接与地址' })}
+              </div>
+
               <div className='space-y-6px'>
                 <div className='text-12px text-t-secondary'>
-                  {t('settings.modelAdvanced.baseUrl', { defaultValue: 'Base URL' })}
+                  {t('settings.modelAdvanced.connectionRole', { defaultValue: '连接档案' })}
                 </div>
-                <Checkbox
-                  checked={Boolean(capability.baseUrlOverride)}
-                  data-base-url-override-toggle={capability.task}
-                  onChange={(checked) =>
+                <div className='text-11px leading-4 text-t-tertiary'>
+                  {t('settings.modelAdvanced.connectionRoleHint', {
+                    defaultValue: '决定这次请求用哪套地址、鉴权方式和凭据。',
+                  })}
+                </div>
+                <Select
+                  value={selectedRole}
+                  status={!selectedRoleExists ? 'error' : undefined}
+                  options={[
+                    ...availableRoles.map((role) => ({ label: role, value: role })),
+                    ...(!selectedRoleExists ? [{ label: `${selectedRole} · 需创建`, value: selectedRole }] : []),
+                  ]}
+                  onChange={(connectionRole) =>
                     updateCapability(capability.task, {
-                      // Promotion is explicit and user-initiated. Seeding the
-                      // inherited value into `value` instead would let a single
-                      // keystroke freeze a copy of the provider's Base URL that
-                      // then wins at request time forever.
-                      baseUrlOverride: checked ? actualBaseUrl : '',
+                      connectionRole: typeof connectionRole === 'string' ? connectionRole : 'default',
                     })
                   }
-                >
-                  <span className='text-12px'>
-                    {t('settings.modelAdvanced.baseUrlOverrideToggle', {
-                      defaultValue: '为该模态单独指定 Base URL',
-                    })}
-                  </span>
-                </Checkbox>
-                <div className='flex items-center gap-8px'>
-                  <Input
-                    value={capability.baseUrlOverride}
-                    placeholder={actualBaseUrl}
-                    disabled={!capability.baseUrlOverride}
-                    status={!actualBaseUrl ? 'error' : undefined}
-                    onChange={(baseUrlOverride) => updateCapability(capability.task, { baseUrlOverride })}
-                    data-effective-base-url={actualBaseUrl}
-                  />
+                  triggerProps={{ getPopupContainer: () => document.body }}
+                />
+                {onCreateConnection && (
                   <Button
                     size='mini'
-                    disabled={!capability.baseUrlOverride}
-                    onClick={() => updateCapability(capability.task, { baseUrlOverride: '' })}
+                    type='outline'
+                    data-create-named-connection={capability.task}
+                    onClick={() =>
+                      setCustomConnectionTask((current) =>
+                        current === capability.task ? undefined : capability.task
+                      )
+                    }
                   >
-                    {t('settings.restoreProviderDefault', { defaultValue: '恢复默认' })}
+                    {t('settings.connections.createNamed', {
+                      defaultValue: '新建命名连接',
+                    })}
                   </Button>
-                </div>
-                <div className='text-11px text-t-tertiary'>
-                  {capability.baseUrlOverride
-                    ? t('settings.modelAdvanced.baseUrlOverridden', { defaultValue: '当前为任务级覆盖值。' })
-                    : t('settings.modelAdvanced.baseUrlInherited', {
-                        defaultValue: '继承供应商地址；勾选上方选项才会写入任务级覆盖。',
-                      })}
-                </div>
-                {rootShape && (
-                  <div className='text-11px text-t-tertiary' data-root-shape={rootShape}>
-                    {rootShape === 'versioned_root'
-                      ? t('settings.modelAdvanced.rootShapeVersioned', {
-                          defaultValue: '该协议要求 Base URL 自带版本段（如 …/v1），请求路径不带版本。',
-                        })
-                      : t('settings.modelAdvanced.rootShapeOrigin', {
-                          defaultValue: '该协议的请求路径自带版本段，Base URL 请填到域名根（不要带 /v1）。',
-                        })}
-                  </div>
                 )}
-                {rootShape && actualBaseUrl.trim() && !rootMatchesShape(actualBaseUrl, rootShape) && (
-                  <div className='text-11px text-warning-6' role='alert' data-root-shape-mismatch={rootShape}>
-                    {rootShape === 'versioned_root'
-                      ? t('settings.modelAdvanced.rootShapeMismatchVersioned', {
-                          defaultValue: '当前 Base URL 没有版本段，多数供应商需要以 /v1 结尾。',
-                        })
-                      : t('settings.modelAdvanced.rootShapeMismatchOrigin', {
-                          defaultValue: '当前 Base URL 含版本段，而该协议的路径也会带版本；重复的版本段会被自动去重。',
-                        })}
+                {customConnectionTask === capability.task && onCreateConnection && (
+                  <InlineConnectionEditor
+                    key={`${capability.task}:custom-connection`}
+                    baseUrl={providerBaseUrl}
+                    authScheme={providerAuthScheme || manifest?.default_auth_scheme || 'bearer'}
+                    authSchemes={(manifest?.auth_schemes ?? []).map((scheme) => scheme.scheme)}
+                    requiresCredentials
+                    onSave={async (connection) => {
+                      await onCreateConnection(connection);
+                      updateCapability(capability.task, {
+                        connectionRole: connection.role,
+                        baseUrlOverride: '',
+                        allowCrossOriginCredentials: false,
+                      });
+                      setCustomConnectionTask(undefined);
+                    }}
+                  />
+                )}
+                {!selectedRoleExists && selectedRole !== 'default' && recommendedConnection && onCreateConnection && (
+                  <InlineConnectionEditor
+                    key={`${capability.task}:${selectedRole}`}
+                    role={selectedRole}
+                    roleReadOnly
+                    label={recommendedConnection.connection_label ?? undefined}
+                    baseUrl={recommendedConnection.base_url}
+                    authScheme={recommendedConnection.auth_scheme}
+                    authSchemes={(manifest?.auth_schemes ?? []).map((scheme) => scheme.scheme)}
+                    requiresCredentials={recommendedConnection.requires_credentials}
+                    onSave={onCreateConnection}
+                  />
+                )}
+                {!selectedRoleExists && selectedRole !== 'default' && (!recommendedConnection || !onCreateConnection) && (
+                  <div className='text-11px text-danger-6' role='alert'>
+                    {t('settings.connections.missingRole', {
+                      defaultValue: '该协议需要尚未配置的连接角色；创建连接后才能保存模型。',
+                    })}
                   </div>
                 )}
               </div>
-            )}
 
-            <div className='space-y-6px'>
-              <div className='text-12px text-t-secondary'>
-                {t('settings.modelAdvanced.connectionRole', { defaultValue: '连接角色' })}
-              </div>
-              <Select
-                value={selectedRole}
-                status={!selectedRoleExists ? 'error' : undefined}
-                options={[
-                  ...availableRoles.map((role) => ({ label: role, value: role })),
-                  ...(!selectedRoleExists ? [{ label: `${selectedRole} · 需创建`, value: selectedRole }] : []),
-                ]}
-                onChange={(connectionRole) =>
-                  updateCapability(capability.task, {
-                    connectionRole: typeof connectionRole === 'string' ? connectionRole : 'default',
-                  })
-                }
-                triggerProps={{ getPopupContainer: () => document.body }}
-              />
-              {onCreateConnection && (
-                <Button
-                  size='mini'
-                  type='outline'
-                  data-create-named-connection={capability.task}
-                  onClick={() =>
-                    setCustomConnectionTask((current) =>
-                      current === capability.task ? undefined : capability.task
-                    )
-                  }
+              {!sdkTransport && (
+                <div
+                  className='space-y-6px border-0 border-l border-solid border-[var(--color-border-2)] pl-12px'
+                  data-transport-level='base-url'
                 >
-                  {t('settings.connections.createNamed', {
-                    defaultValue: '新建命名连接',
-                  })}
-                </Button>
-              )}
-              {customConnectionTask === capability.task && onCreateConnection && (
-                <InlineConnectionEditor
-                  key={`${capability.task}:custom-connection`}
-                  baseUrl={providerBaseUrl}
-                  authScheme={providerAuthScheme || manifest?.default_auth_scheme || 'bearer'}
-                  authSchemes={(manifest?.auth_schemes ?? []).map((scheme) => scheme.scheme)}
-                  requiresCredentials
-                  onSave={async (connection) => {
-                    await onCreateConnection(connection);
-                    updateCapability(capability.task, {
-                      connectionRole: connection.role,
-                      baseUrlOverride: '',
-                      allowCrossOriginCredentials: false,
-                    });
-                    setCustomConnectionTask(undefined);
-                  }}
-                />
-              )}
-              {!selectedRoleExists && selectedRole !== 'default' && recommendedConnection && onCreateConnection && (
-                <InlineConnectionEditor
-                  key={`${capability.task}:${selectedRole}`}
-                  role={selectedRole}
-                  roleReadOnly
-                  label={recommendedConnection.connection_label ?? undefined}
-                  baseUrl={recommendedConnection.base_url}
-                  authScheme={recommendedConnection.auth_scheme}
-                  authSchemes={(manifest?.auth_schemes ?? []).map((scheme) => scheme.scheme)}
-                  requiresCredentials={recommendedConnection.requires_credentials}
-                  onSave={onCreateConnection}
-                />
-              )}
-              {!selectedRoleExists && selectedRole !== 'default' && (!recommendedConnection || !onCreateConnection) && (
-                <div className='text-11px text-danger-6' role='alert'>
-                  {t('settings.connections.missingRole', {
-                    defaultValue: '该协议需要尚未配置的连接角色；创建连接后才能保存模型。',
-                  })}
+                  <div className='text-12px text-t-secondary'>
+                    {t('settings.modelAdvanced.baseUrl', { defaultValue: 'Base URL' })}
+                  </div>
+                  <Checkbox
+                    checked={Boolean(capability.baseUrlOverride)}
+                    data-base-url-override-toggle={capability.task}
+                    onChange={(checked) =>
+                      updateCapability(capability.task, {
+                        // Promotion is explicit and user-initiated. Seeding the
+                        // inherited value into `value` instead would let a single
+                        // keystroke freeze a copy of the provider's Base URL that
+                        // then wins at request time forever.
+                        baseUrlOverride: checked ? actualBaseUrl : '',
+                      })
+                    }
+                  >
+                    <span className='text-12px'>
+                      {t('settings.modelAdvanced.baseUrlOverrideToggle', {
+                        defaultValue: '为该模态单独指定 Base URL',
+                      })}
+                    </span>
+                  </Checkbox>
+                  <div className='flex items-center gap-8px'>
+                    <Input
+                      value={capability.baseUrlOverride}
+                      placeholder={actualBaseUrl}
+                      disabled={!capability.baseUrlOverride}
+                      status={!actualBaseUrl ? 'error' : undefined}
+                      onChange={(baseUrlOverride) => updateCapability(capability.task, { baseUrlOverride })}
+                      data-effective-base-url={actualBaseUrl}
+                    />
+                    <Button
+                      size='mini'
+                      disabled={!capability.baseUrlOverride}
+                      onClick={() => updateCapability(capability.task, { baseUrlOverride: '' })}
+                    >
+                      {t('settings.restoreProviderDefault', { defaultValue: '恢复默认' })}
+                    </Button>
+                  </div>
+                  <div className='text-11px text-t-tertiary'>
+                    {capability.baseUrlOverride
+                      ? t('settings.modelAdvanced.baseUrlOverridden', { defaultValue: '当前为任务级覆盖值。' })
+                      : t('settings.modelAdvanced.baseUrlInherited', {
+                          defaultValue: '继承上方连接档案的地址；勾选后才会写入任务级覆盖。',
+                        })}
+                  </div>
+                  {rootShape && (
+                    <div className='text-11px text-t-tertiary' data-root-shape={rootShape}>
+                      {rootShape === 'versioned_root'
+                        ? t('settings.modelAdvanced.rootShapeVersioned', {
+                            defaultValue: '该协议要求 Base URL 自带版本段（如 …/v1），请求路径不带版本。',
+                          })
+                        : t('settings.modelAdvanced.rootShapeOrigin', {
+                            defaultValue: '该协议的请求路径自带版本段，Base URL 请填到域名根（不要带 /v1）。',
+                          })}
+                    </div>
+                  )}
+                  {rootShape && actualBaseUrl.trim() && !rootMatchesShape(actualBaseUrl, rootShape) && (
+                    <div className='text-11px text-warning-6' role='alert' data-root-shape-mismatch={rootShape}>
+                      {rootShape === 'versioned_root'
+                        ? t('settings.modelAdvanced.rootShapeMismatchVersioned', {
+                            defaultValue: '当前 Base URL 没有版本段，多数供应商需要以 /v1 结尾。',
+                          })
+                        : t('settings.modelAdvanced.rootShapeMismatchOrigin', {
+                            defaultValue: '当前 Base URL 含版本段，而该协议的路径也会带版本；重复的版本段会被自动去重。',
+                          })}
+                    </div>
+                  )}
                 </div>
               )}
-            </div>
 
-            {[...endpointFields].map((field) => {
+            {endpointFields.size > 0 && (
+              <div
+                className='space-y-10px border-0 border-l border-solid border-[var(--color-border-2)] pl-12px'
+                data-transport-level='endpoints'
+              >
+                <div className='text-11px leading-4 text-t-tertiary'>
+                  {t('settings.modelAdvanced.endpointsHint', {
+                    defaultValue: '相对路径，拼在上方生效的 Base URL 之后。',
+                  })}
+                </div>
+                {[...endpointFields].map((field) => {
               const endpointDescriptor: CapabilityEndpointDescriptor =
                 endpointDescriptors.find((endpoint) => endpoint.field === field) ?? {
                   task: capability.task,
@@ -1233,6 +1268,31 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
                 </div>
               );
             })}
+              </div>
+            )}
+
+            {crossOrigin && (
+              <div className='rounded-8px bg-warning-1 p-10px space-y-6px' data-cross-origin-consent>
+                <Checkbox
+                  checked={capability.allowCrossOriginCredentials}
+                  onChange={(allowCrossOriginCredentials) =>
+                    updateCapability(capability.task, { allowCrossOriginCredentials })
+                  }
+                >
+                  {t('settings.modelAdvanced.allowCrossOriginCredentials', {
+                    defaultValue: '我确认允许向该跨域地址发送供应商凭据',
+                  })}
+                </Checkbox>
+                {!capability.allowCrossOriginCredentials && (
+                  <div className='text-11px text-danger-6' role='alert'>
+                    {t('settings.modelAdvanced.crossOriginConsentRequired', {
+                      defaultValue: '覆盖地址与供应商域名不同，必须明确确认后才能保存。',
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+            </div>
 
             {/*
               One heading for both ceilings, because they are NOT two spellings
@@ -1280,28 +1340,6 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
                 )}
               </div>
             </div>
-
-            {crossOrigin && (
-              <div className='rounded-8px bg-warning-1 p-10px space-y-6px'>
-                <Checkbox
-                  checked={capability.allowCrossOriginCredentials}
-                  onChange={(allowCrossOriginCredentials) =>
-                    updateCapability(capability.task, { allowCrossOriginCredentials })
-                  }
-                >
-                  {t('settings.modelAdvanced.allowCrossOriginCredentials', {
-                    defaultValue: '我确认允许向该跨域地址发送供应商凭据',
-                  })}
-                </Checkbox>
-                {!capability.allowCrossOriginCredentials && (
-                  <div className='text-11px text-danger-6' role='alert'>
-                    {t('settings.modelAdvanced.crossOriginConsentRequired', {
-                      defaultValue: '覆盖地址与供应商域名不同，必须明确确认后才能保存。',
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
 
             {capability.task === 'speech_synthesis' &&
               ttsSupportsProviderParamVoice(capability.protocol) && (
