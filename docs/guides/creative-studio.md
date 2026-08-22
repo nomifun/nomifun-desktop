@@ -191,6 +191,8 @@ unavailable.
 - Provider protocols differ. Controls appear only when their exact typed
   protocol profile supports them; unknown protocols use the smaller safe
   subset.
+- The focused-shell navigation follows the application locale, but much of the
+  launch canvas and editor body copy remains Simplified Chinese.
 - A configured model is not evidence that its remote provider is reachable or
   that a paid request was executed. Keep provider billing and data policies in
   mind before generating.
