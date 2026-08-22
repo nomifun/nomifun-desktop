@@ -1,5 +1,7 @@
 # Creative Studio Workflow MVP 优雅暂停交接
 
+> 本文已被 `2026-08-22-creative-studio-workflow-mvp-second-pause-handoff.zh.md` 更新；继续实施时以后者为当前状态。
+
 > 暂停时间：2026-08-22（Asia/Shanghai）
 > 工作目录：`C:\Users\MINISFORUM\code\nomifun\nomifun-desktop`
 > 分支：`codex/infinite-canvas-rebuild`

@@ -4,7 +4,7 @@
 > 分支：`codex/infinite-canvas-rebuild`
 > 最后功能锚点：`67f3d2f8`（`feat(creative-studio): add minimal agent kickoff home`）
 > 参考产品锚点：`ef7303d`
-> 2026-08-22 Workflow MVP 优雅暂停点：见 `docs/handoffs/2026-08-22-creative-studio-workflow-mvp-pause-handoff.zh.md`。当前有未提交的有效 WIP；后端 one-shot 端点尚未实现，不能视为可交付。
+> 2026-08-22 Workflow MVP 最新优雅暂停点：见 `docs/handoffs/2026-08-22-creative-studio-workflow-mvp-second-pause-handoff.zh.md`。当前有未提交的有效 WIP；后端 one-shot 与取消链已完成，但真实 UI 模型选择主链尚未闭合，不能视为可交付。
 
 ## 1. 续接协议
 
