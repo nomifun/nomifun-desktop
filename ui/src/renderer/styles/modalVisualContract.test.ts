@@ -93,6 +93,27 @@ describe('Global modal visual contract', () => {
     expect(contractCss.includes('.arco-textarea')).toBe(true);
   });
 
+  test('keeps disabled and validation-state text controls visibly outlined', () => {
+    const stateContract = contractCss.slice(
+      contractCss.indexOf('Arco intentionally makes several non-idle control borders transparent'),
+      contractCss.indexOf('Compact confirm dialogs')
+    );
+
+    expect(stateContract.includes('.arco-input-inner-wrapper-disabled')).toBe(true);
+    expect(stateContract.includes('.arco-textarea-disabled')).toBe(true);
+    expect(stateContract.includes('.arco-input-inner-wrapper-error')).toBe(true);
+    expect(stateContract.includes('.arco-textarea-error')).toBe(true);
+    expect(stateContract.includes('.arco-input-inner-wrapper-warning')).toBe(true);
+    expect(stateContract.includes('.arco-textarea-warning')).toBe(true);
+    expect(contractCss.includes('--nomi-modal-disabled-border: var(--color-border-3)')).toBe(true);
+    expect(contractCss.includes('--nomi-modal-error-border: var(--danger, #f53f3f)')).toBe(true);
+    expect(contractCss.includes('--nomi-modal-warning-border: var(--warning, #ff7d00)')).toBe(true);
+    expect(stateContract.includes('var(--nomi-modal-disabled-border) !important')).toBe(true);
+    expect(stateContract.includes('var(--nomi-modal-error-border) !important')).toBe(true);
+    expect(stateContract.includes('var(--nomi-modal-warning-border) !important')).toBe(true);
+    expect(stateContract.includes('rgba(0, 0, 0, 0)')).toBe(false);
+  });
+
   test('also tightens custom NomiModal and the text-asset form shown in the reference', () => {
     expect(nomiModalSource.includes('pb-6px')).toBe(true);
     expect(nomiModalSource.includes('text-14px font-600 leading-20px')).toBe(true);

@@ -9,11 +9,11 @@ import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
 import { ttsSupportsProviderParamVoice, ttsVoiceOptionsFor } from '@/renderer/components/model/ttsVoiceOptions';
 import { AutoComplete, Button, Checkbox, Input, Modal, Popconfirm, Select, Tag, Tooltip } from '@arco-design/web-react';
-import { DeleteFour, Down, Refresh, Right } from '@icon-park/react';
+import { CheckOne, Code, DeleteFour, Down, Left, LinkOne, Refresh, Right, Search, Shield } from '@icon-park/react';
 import React, { useEffect, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ContextLimitSelect } from './ContextLimitSelect';
-import { OutputLimitInput } from './OutputLimitInput';
+import { formatOutputLimit, OutputLimitInput } from './OutputLimitInput';
 import {
   compactCapabilityUrlSummary,
   createCapabilityDisclosureState,
@@ -56,6 +56,7 @@ import {
   withProviderParamChainRounds,
   type CapabilityEndpointDescriptor,
   type CapabilityEndpointField,
+  type CapabilityValidationError,
   type CapabilityValidationResult,
   type ModelCapabilityDraft,
   type ModelCapabilityDraftPatch,
@@ -79,6 +80,7 @@ export interface ModelDefinitionEditorProps {
   onChange: React.Dispatch<React.SetStateAction<ModelDefinitionDraft>>;
   providerBaseUrl: string;
   providerAuthScheme: string;
+  providerLabel?: string;
   manifests: ModelProtocolManifestMap;
   manifestLoadingTasks?: readonly ModelTask[];
   manifestErrorTasks?: readonly ModelTask[];
@@ -92,7 +94,52 @@ export interface ModelDefinitionEditorProps {
   onRefreshCatalog?: () => void;
   connections?: readonly ProviderConnectionDescriptor[];
   onCreateConnection?: (connection: ProviderConnectionInput) => Promise<void>;
+  onCallConfigFocusChange?: (task?: ModelTask) => void;
+  callConfigFooterPlacement?: 'internal' | 'modal';
 }
+
+export interface ModelDefinitionEditorHandle {
+  cancelCallConfig: () => void;
+  applyCallConfig: () => void;
+}
+
+type CallConfigIntent = 'connection' | 'limits' | 'protocol' | 'diagnostics' | 'recommended';
+
+const callConfigIntentForError = (code: CapabilityValidationError): CallConfigIntent => {
+  switch (code) {
+    case 'connection_role_required':
+    case 'connection_missing':
+      return 'connection';
+    case 'output_ceiling_required':
+      return 'limits';
+    case 'protocol_required':
+    case 'protocol_not_registered':
+    case 'auth_scheme_incompatible':
+    case 'base_url_required':
+    case 'cross_origin_consent_required':
+    case 'invalid_provider_params':
+      return 'protocol';
+    default:
+      return 'diagnostics';
+  }
+};
+
+const cloneCapabilityDraft = (capability: ModelCapabilityDraft): ModelCapabilityDraft => ({
+  ...capability,
+  traits: [...capability.traits],
+});
+
+const sameCapabilityDraft = (
+  left: ModelCapabilityDraft | undefined,
+  right: ModelCapabilityDraft
+): boolean => left !== undefined && JSON.stringify(left) === JSON.stringify(right);
+
+const compactTokenCount = (value: number | undefined, fallback: string): string => {
+  if (value === undefined) return fallback;
+  if (value >= 1_000_000 && value % 1_000_000 === 0) return `${value / 1_000_000}M`;
+  if (value >= 1_000 && value % 1_000 === 0) return `${value / 1_000}k`;
+  return new Intl.NumberFormat().format(value);
+};
 
 const EMPTY_CONNECTION_CREDENTIALS: ConnectionCredentialsDraft = {
   apiKeysText: '',
@@ -311,11 +358,12 @@ const sameCapabilities = (
  * Catalog data is advisory. New models choose one primary type before selecting
  * or typing a model ID; existing multi-task models keep their full capability set.
  */
-const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
+const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, ModelDefinitionEditorProps>(({
   value,
   onChange,
   providerBaseUrl,
   providerAuthScheme,
+  providerLabel,
   manifests,
   manifestLoadingTasks = [],
   manifestErrorTasks = [],
@@ -329,7 +377,9 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
   onRefreshCatalog,
   connections = [],
   onCreateConnection,
-}) => {
+  onCallConfigFocusChange,
+  callConfigFooterPlacement = 'internal',
+}, ref) => {
   const { t } = useTranslation();
   const modelInputId = useId();
   const taskSectionId = useId();
@@ -389,6 +439,19 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
   const [disclosureState, setDisclosureState] = useState(() =>
     createCapabilityDisclosureState(selectedTasks, settledValidationErrors)
   );
+  const [callConfigIntentByTask, setCallConfigIntentByTask] = useState<
+    Partial<Record<ModelTask, CallConfigIntent>>
+  >({});
+  const [callConfigBaselineByTask, setCallConfigBaselineByTask] = useState<
+    Partial<Record<ModelTask, ModelCapabilityDraft>>
+  >({});
+  const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
+  const [customContextByTask, setCustomContextByTask] = useState<
+    Partial<Record<ModelTask, boolean>>
+  >({});
+  const [editingOutputLimitByTask, setEditingOutputLimitByTask] = useState<
+    Partial<Record<ModelTask, boolean>>
+  >({});
 
   useEffect(() => {
     if (recommendationPending) {
@@ -413,6 +476,18 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
     );
   }, [selectedTasks, settledValidationErrors]);
 
+  useEffect(() => {
+    const nextIntents: Partial<Record<ModelTask, CallConfigIntent>> = {};
+    for (const error of settledValidationErrors) {
+      if (error.task && nextIntents[error.task] === undefined) {
+        nextIntents[error.task] = callConfigIntentForError(error.code);
+      }
+    }
+    if (Object.keys(nextIntents).length > 0) {
+      setCallConfigIntentByTask((current) => ({ ...current, ...nextIntents }));
+    }
+  }, [settledValidationErrors]);
+
   const duplicateModel = isDuplicateModelId(value.model, existingModelIds);
   // Only a fault once a task exists: before that the field is disabled on
   // purpose and an empty value is simply the next step, not an error.
@@ -426,6 +501,64 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
       ),
     }));
   };
+
+  const toggleCallConfig = (task: ModelTask) => {
+    const expanded = disclosureState.expandedTasks.has(task);
+    if (expanded && focusedCallConfigTask === task) {
+      finishCallConfig(task, false);
+      return;
+    }
+    if (!expanded) {
+      const capability = value.capabilities.find((candidate) => candidate.task === task);
+      if (capability) {
+        setCallConfigBaselineByTask((current) =>
+          current[task] ? current : { ...current, [task]: cloneCapabilityDraft(capability) }
+        );
+      }
+      setCallConfigIntentByTask((current) => ({
+        ...current,
+        [task]: current[task] ?? 'recommended',
+      }));
+      setFocusedCallConfigTask(task);
+      onCallConfigFocusChange?.(task);
+    }
+    setDisclosureState((current) => toggleCapabilityDisclosure(current, task));
+  };
+
+  const finishCallConfig = (task: ModelTask, restoreBaseline: boolean) => {
+    const baseline = callConfigBaselineByTask[task];
+    if (restoreBaseline && baseline) {
+      onChange((current) => ({
+        ...current,
+        capabilities: current.capabilities.map((capability) =>
+          capability.task === task ? cloneCapabilityDraft(baseline) : capability
+        ),
+      }));
+    }
+    setCallConfigBaselineByTask((current) => {
+      const next = { ...current };
+      delete next[task];
+      return next;
+    });
+    setDisclosureState((current) =>
+      current.expandedTasks.has(task) ? toggleCapabilityDisclosure(current, task) : current
+    );
+    setFocusedCallConfigTask(undefined);
+    onCallConfigFocusChange?.(undefined);
+  };
+
+  React.useImperativeHandle(
+    ref,
+    () => ({
+      cancelCallConfig: () => {
+        if (focusedCallConfigTask) finishCallConfig(focusedCallConfigTask, true);
+      },
+      applyCallConfig: () => {
+        if (focusedCallConfigTask) finishCallConfig(focusedCallConfigTask, false);
+      },
+    }),
+    [focusedCallConfigTask, callConfigBaselineByTask]
+  );
 
   const selectCatalogSuggestion = (profile: ModelCatalogSuggestion) => {
     onChange((current) => {
@@ -514,7 +647,12 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
 
   return (
     <div className='flex flex-col gap-16px' data-model-definition-editor>
-      <section className='space-y-10px' aria-labelledby={taskSectionId} data-model-task-section>
+      <section
+        hidden={focusedCallConfigTask !== undefined}
+        className='space-y-10px'
+        aria-labelledby={taskSectionId}
+        data-model-task-section
+      >
         <div className='space-y-4px'>
           <div id={taskSectionId} className='text-13px font-500 text-t-secondary'>
             {t('settings.modelSupportedTasks', { defaultValue: '支持的任务' })}
@@ -588,7 +726,11 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
       </section>
 
       {!modelReadOnly ? (
-        <div className='space-y-8px' data-filtered-catalog-count={filteredCatalogSuggestions.length}>
+        <div
+          hidden={focusedCallConfigTask !== undefined}
+          className='space-y-8px'
+          data-filtered-catalog-count={filteredCatalogSuggestions.length}
+        >
           <div className='flex items-center justify-between gap-8px'>
             <label htmlFor={modelInputId} className='text-13px font-500 text-t-secondary'>
               {t('settings.modelSelection', { defaultValue: '模型' })}
@@ -689,7 +831,7 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
           )}
         </div>
       ) : (
-        <div className='space-y-8px'>
+        <div hidden={focusedCallConfigTask !== undefined} className='space-y-8px'>
           <label htmlFor={modelInputId} className='text-13px font-500 text-t-secondary'>
             {t('settings.modelId', { defaultValue: '模型 ID' })}
           </label>
@@ -698,7 +840,12 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
       )}
 
       <div className='space-y-10px' data-capability-card-list>
-        {value.capabilities.map((capability) => {
+        {value.capabilities
+          .filter(
+            (capability) =>
+              focusedCallConfigTask === undefined || capability.task === focusedCallConfigTask
+          )
+          .map((capability) => {
         const loading = manifestLoadingTasks.includes(capability.task);
         const manifest = loading ? undefined : manifests[capability.task];
         const loadFailed = manifestErrorTasks.includes(capability.task);
@@ -791,27 +938,132 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
           ? t('settings.modelAdvanced.sdkTransport', { defaultValue: 'SDK 连接（无需 Base URL）' })
           : compactCapabilityUrlSummary(actualBaseUrl) ||
             t('settings.modelAdvanced.baseUrlPending', { defaultValue: '待配置 Base URL' });
+        const callConfigIntent = callConfigIntentByTask[capability.task] ?? 'recommended';
+        const callConfigBaseline = callConfigBaselineByTask[capability.task];
+        const callConfigChanged =
+          callConfigBaseline !== undefined && !sameCapabilityDraft(callConfigBaseline, capability);
+        const contextLimitSummary = compactTokenCount(
+          capability.contextLimit,
+          t('settings.modelAdvanced.contextDefaultCompact', { defaultValue: '200k' })
+        );
+        const outputLimitSummary = compactTokenCount(
+          capability.outputLimit,
+          t('settings.modelAdvanced.outputProviderDefaultCompact', {
+            defaultValue: '由供应商决定',
+          })
+        );
+        const customContextOpen =
+          Boolean(customContextByTask[capability.task]) ||
+          (capability.contextLimit !== undefined &&
+            capability.contextLimit !== 128_000 &&
+            capability.contextLimit !== 200_000);
+        const outputLimitEditorOpen =
+          Boolean(editingOutputLimitByTask[capability.task]) || outputLimitMissing;
+        const primaryEndpointField = [...endpointFields][0];
+        const primaryEndpointDescriptor: CapabilityEndpointDescriptor | undefined = primaryEndpointField
+          ? endpointDescriptors.find((endpoint) => endpoint.field === primaryEndpointField) ?? {
+              task: capability.task,
+              field: primaryEndpointField,
+              purpose: 'submit' as const,
+              method: null,
+              default_value: '',
+              root_shape: 'versioned_root' as const,
+              allowed_placeholders: [],
+              required_placeholders: [],
+              editable: true,
+            }
+          : undefined;
+        const actualRequestUrl =
+          primaryEndpointDescriptor && !sdkTransport
+            ? resolvedCapabilityUrl(
+                capability,
+                primaryEndpointDescriptor,
+                manifest,
+                providerBaseUrl,
+                connections
+              )
+            : '';
+        const callConfigIntents: Array<{
+          key: CallConfigIntent;
+          title: string;
+          description: string;
+          meta?: string;
+          icon: React.ReactNode;
+        }> = [
+          {
+            key: 'connection',
+            title: t('settings.modelAdvanced.intentConnection', {
+              defaultValue: '使用另一套连接',
+            }),
+            description: t('settings.modelAdvanced.intentConnectionHint', {
+              defaultValue: '选择当前供应商下已有的连接档案',
+            }),
+            meta: t('settings.modelAdvanced.ownerProvider', { defaultValue: '供应商级' }),
+            icon: <LinkOne theme='outline' size='18' />,
+          },
+          {
+            key: 'limits',
+            title: t('settings.modelAdvanced.intentLimits', {
+              defaultValue: '调整模型限制',
+            }),
+            description: t('settings.modelAdvanced.intentLimitsHint', {
+              defaultValue: '设置上下文窗口或最大输出',
+            }),
+            meta: t('settings.modelAdvanced.ownerTask', { defaultValue: '当前任务' }),
+            icon: <Shield theme='outline' size='18' />,
+          },
+          {
+            key: 'protocol',
+            title: t('settings.modelAdvanced.intentProtocol', {
+              defaultValue: '兼容特殊调用方式',
+            }),
+            description: t('settings.modelAdvanced.intentProtocolHint', {
+              defaultValue: '更改协议、Base URL 或 Endpoint',
+            }),
+            meta: t('settings.modelAdvanced.intentProfessional', { defaultValue: '专业' }),
+            icon: <Code theme='outline' size='18' />,
+          },
+          {
+            key: 'diagnostics',
+            title: t('settings.modelAdvanced.intentDiagnostics', {
+              defaultValue: '排查请求问题',
+            }),
+            description: t('settings.modelAdvanced.intentDiagnosticsHint', {
+              defaultValue: '查看实际请求、鉴权兼容性与错误定位',
+            }),
+            meta: t('settings.modelAdvanced.intentDiagnostic', { defaultValue: '诊断' }),
+            icon: <Search theme='outline' size='18' />,
+          },
+        ];
 
         return (
           <section
             key={capability.task}
-            className={`overflow-hidden rounded-8px border border-solid ${
-              hasValidationError ? 'border-danger-4' : 'border-[var(--color-border-2)]'
-            }`}
+            className={
+              focusedCallConfigTask === capability.task
+                ? 'overflow-hidden'
+                : `overflow-hidden rounded-8px border border-solid ${
+                    hasValidationError ? 'border-danger-4' : 'border-[var(--color-border-2)]'
+                  }`
+            }
             data-capability-card={capability.task}
             data-capability-has-error={hasValidationError}
             data-capability-expanded={expanded}
           >
-            <div className='flex items-stretch' data-capability-card-header={capability.task}>
+            <div
+              className='flex items-stretch'
+              style={
+                focusedCallConfigTask === capability.task ? { display: 'none' } : undefined
+              }
+              data-capability-card-header={capability.task}
+            >
               <button
                 type='button'
                 className='min-w-0 flex-1 border-0 bg-transparent px-14px py-12px text-left hover:bg-fill-1 focus-visible:outline-none focus-visible:shadow-[inset_0_0_0_2px_rgba(var(--primary-6),0.48)]'
                 aria-expanded={expanded}
                 aria-controls={detailsId}
                 data-capability-disclosure={capability.task}
-                onClick={() =>
-                  setDisclosureState((current) => toggleCapabilityDisclosure(current, capability.task))
-                }
+                onClick={() => toggleCallConfig(capability.task)}
               >
                 <div className='flex min-w-0 flex-wrap items-start justify-between gap-10px'>
                   <div className='min-w-0 flex-1'>
@@ -841,7 +1093,9 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
                   <span className='ml-auto flex shrink-0 items-center gap-6px whitespace-nowrap text-12px text-primary-6'>
                     {expanded
                       ? t('settings.modelAdvanced.collapseConfiguration', { defaultValue: '收起配置' })
-                      : t('settings.modelAdvanced.advancedConfiguration', { defaultValue: '高级配置' })}
+                      : t('settings.modelAdvanced.viewCallConfiguration', {
+                          defaultValue: '查看调用配置',
+                        })}
                     {expanded ? <Down theme='outline' size='14' /> : <Right theme='outline' size='14' />}
                   </span>
                 </div>
@@ -902,6 +1156,7 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
               already has a working default.
             */}
             <div
+              hidden={focusedCallConfigTask !== undefined}
               className='space-y-6px border-0 border-t border-solid border-[var(--color-border-2)] px-14px py-12px'
               data-capability-traits={capability.task}
             >
@@ -927,11 +1182,263 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
             <div
               id={detailsId}
               hidden={!expanded}
-              className='space-y-12px border-0 border-t border-solid border-[var(--color-border-2)] p-14px'
+              className={
+                focusedCallConfigTask === capability.task
+                  ? 'space-y-12px'
+                  : 'space-y-12px border-0 border-t border-solid border-[var(--color-border-2)] p-14px'
+              }
               data-capability-details={capability.task}
             >
 
-            <div className='space-y-6px'>
+            <div
+              className='flex min-w-0 flex-wrap items-center gap-x-8px gap-y-2px text-11px text-t-secondary'
+              data-call-config-context={capability.task}
+            >
+              {focusedCallConfigTask === capability.task && (
+                <button
+                  type='button'
+                  className='mr-2px inline-flex size-26px shrink-0 items-center justify-center rounded-7px border-0 bg-transparent text-t-secondary hover:bg-fill-2 hover:text-t-primary'
+                  aria-label={t('settings.modelAdvanced.backToModel', {
+                    defaultValue: '返回模型',
+                  })}
+                  onClick={() => finishCallConfig(capability.task, false)}
+                >
+                  <Left theme='outline' size='14' />
+                </button>
+              )}
+              {providerLabel && <span className='font-500 text-t-primary'>{providerLabel}</span>}
+              {providerLabel && <span aria-hidden='true'>/</span>}
+              <span>{value.model}</span>
+              <span aria-hidden='true'>/</span>
+              <span>
+                {t(`settings.modelTask.${capability.task}`, {
+                  defaultValue: capability.task,
+                })}
+              </span>
+            </div>
+
+            <div
+              className={`flex items-start gap-10px rounded-10px px-12px py-8px ${
+                hasValidationError ? 'bg-danger-1 text-danger-7' : 'bg-success-1 text-success-7'
+              }`}
+              data-call-config-summary={capability.task}
+            >
+              <CheckOne theme='outline' size='18' className='mt-1px shrink-0' />
+              <div className='min-w-0 flex-1'>
+                <div className='text-13px font-600 leading-18px'>
+                  {hasValidationError
+                    ? t('settings.modelAdvanced.callConfigNeedsAttention', {
+                        defaultValue: '当前配置需要处理',
+                      })
+                    : t('settings.modelAdvanced.callConfigReady', {
+                        defaultValue: '当前推荐配置可直接使用',
+                      })}
+                </div>
+                <div className='mt-2px flex min-w-0 flex-wrap gap-x-6px gap-y-2px text-11px text-t-secondary'>
+                  <span>{protocolSummary}</span>
+                  <span aria-hidden='true'>·</span>
+                  <span>{selectedRole}</span>
+                  <span aria-hidden='true'>·</span>
+                  <span>{contextLimitSummary}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className='space-y-4px'>
+              <div className='text-16px font-600 leading-22px text-t-primary'>
+                {t('settings.modelAdvanced.intentQuestion', { defaultValue: '你想调整什么？' })}
+              </div>
+              <div className='text-12px leading-18px text-t-secondary'>
+                {t('settings.modelAdvanced.intentQuestionHint', {
+                  defaultValue: '选择你的目标，只展示相关设置。',
+                })}
+              </div>
+            </div>
+
+            <div className='space-y-4px' data-call-config-intents={capability.task}>
+              {callConfigIntents.map((intent) => {
+                const selected = callConfigIntent === intent.key;
+                return (
+                  <button
+                    key={intent.key}
+                    type='button'
+                    aria-pressed={selected}
+                    className={`flex w-full items-center gap-10px rounded-10px border border-solid px-12px py-7px text-left transition-colors focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_rgba(var(--primary-6),0.22)] ${
+                      selected
+                        ? 'border-primary-5 bg-primary-1'
+                        : 'border-[var(--color-border-2)] bg-transparent hover:bg-fill-1'
+                    }`}
+                    data-call-config-intent={intent.key}
+                    onClick={() =>
+                      setCallConfigIntentByTask((current) => ({
+                        ...current,
+                        [capability.task]: intent.key,
+                      }))
+                    }
+                  >
+                    <span
+                      aria-hidden='true'
+                      className={`size-18px shrink-0 rounded-full border border-solid ${
+                        selected ? 'border-primary-6 bg-primary-6 shadow-[inset_0_0_0_4px_white]' : 'border-[var(--color-border-3)]'
+                      }`}
+                    />
+                    <span className={selected ? 'text-primary-6' : 'text-t-secondary'}>{intent.icon}</span>
+                    <span className='min-w-0 flex-1'>
+                      <span className='block text-13px font-600 leading-18px text-t-primary'>
+                        {intent.title}
+                      </span>
+                      <span className='mt-1px block text-11px leading-15px text-t-secondary'>
+                        {intent.description}
+                      </span>
+                    </span>
+                    {intent.meta && (
+                      <span
+                        className={`shrink-0 text-11px ${
+                          selected ? 'text-primary-6' : 'text-t-tertiary'
+                        }`}
+                      >
+                        {intent.meta}
+                      </span>
+                    )}
+                    <Right theme='outline' size='14' className='shrink-0 text-t-tertiary' />
+                  </button>
+                );
+              })}
+
+              <button
+                type='button'
+                aria-pressed={callConfigIntent === 'recommended'}
+                className={`flex w-full items-center gap-10px rounded-10px border border-solid px-12px py-7px text-left transition-colors ${
+                  callConfigIntent === 'recommended'
+                    ? 'border-primary-5 bg-primary-1'
+                    : 'border-[var(--color-border-2)] bg-transparent hover:bg-fill-1'
+                }`}
+                data-call-config-intent='recommended'
+                onClick={() =>
+                  setCallConfigIntentByTask((current) => ({
+                    ...current,
+                    [capability.task]: 'recommended',
+                  }))
+                }
+              >
+                <span
+                  aria-hidden='true'
+                  className={`size-18px shrink-0 rounded-full border border-solid ${
+                    callConfigIntent === 'recommended'
+                      ? 'border-primary-6 bg-primary-6 shadow-[inset_0_0_0_4px_white]'
+                      : 'border-[var(--color-border-3)]'
+                  }`}
+                />
+                <span className='text-12px text-t-secondary'>
+                  {t('settings.modelAdvanced.intentRecommended', {
+                    defaultValue: '保持推荐配置，不做调整',
+                  })}
+                </span>
+              </button>
+            </div>
+
+            <div
+              hidden={callConfigIntent !== 'recommended'}
+              className='rounded-10px border border-solid border-[var(--color-border-2)] bg-fill-1 px-14px py-12px'
+              data-call-config-branch='recommended'
+            >
+              <div className='text-12px font-600 text-t-primary'>
+                {t('settings.modelAdvanced.recommendedBranchTitle', {
+                  defaultValue: '无需修改即可保存',
+                })}
+              </div>
+              <div className='mt-4px text-11px leading-17px text-t-secondary'>
+                {t('settings.modelAdvanced.recommendedBranchHint', {
+                  defaultValue: '协议、连接与请求路径继续跟随供应商推荐；当前任务不新增调用覆写。',
+                })}
+              </div>
+            </div>
+
+            <div
+              hidden={callConfigIntent !== 'diagnostics'}
+              className='space-y-10px rounded-10px border border-solid border-[var(--color-border-2)] p-14px'
+              data-call-config-branch='diagnostics'
+            >
+              <div>
+                <div className='text-13px font-600 text-t-primary'>
+                  {t('settings.modelAdvanced.diagnosticsTitle', { defaultValue: '请求诊断' })}
+                </div>
+                <div className='mt-3px text-11px leading-17px text-t-secondary'>
+                  {t('settings.modelAdvanced.diagnosticsHint', {
+                    defaultValue: '先查看系统解析出的请求；需要修改时再进入对应目标。',
+                  })}
+                </div>
+              </div>
+              <div className='divide-y divide-[var(--color-border-2)] rounded-8px border border-solid border-[var(--color-border-2)]'>
+                <div className='grid grid-cols-[116px_minmax(0,1fr)] gap-10px px-12px py-9px text-12px'>
+                  <span className='text-t-tertiary'>
+                    {t('settings.modelAdvanced.protocol', { defaultValue: '调用协议' })}
+                  </span>
+                  <span className='text-t-primary'>{protocolSummary}</span>
+                </div>
+                <div className='grid grid-cols-[116px_minmax(0,1fr)] gap-10px px-12px py-9px text-12px'>
+                  <span className='text-t-tertiary'>
+                    {t('settings.modelAdvanced.connectionRole', { defaultValue: '连接档案' })}
+                  </span>
+                  <span className='text-t-primary'>{selectedRole}</span>
+                </div>
+                <div className='grid grid-cols-[116px_minmax(0,1fr)] gap-10px px-12px py-9px text-12px'>
+                  <span className='text-t-tertiary'>
+                    {t('settings.modelAdvanced.resolvedUrl', { defaultValue: '实际请求地址' })}
+                  </span>
+                  <span className='break-all text-t-primary'>
+                    {actualRequestUrl || baseUrlSummary}
+                  </span>
+                </div>
+                <div className='grid grid-cols-[116px_minmax(0,1fr)] gap-10px px-12px py-9px text-12px'>
+                  <span className='text-t-tertiary'>
+                    {t('settings.authScheme', { defaultValue: '鉴权方式' })}
+                  </span>
+                  <span className={authSchemeCompatible ? 'text-t-primary' : 'text-danger-6'}>
+                    {selectedAuthScheme || t('common.unknown', { defaultValue: '未知' })}
+                  </span>
+                </div>
+              </div>
+              {taskValidationErrors.length > 0 && (
+                <div className='space-y-4px rounded-8px bg-danger-1 p-10px' role='alert'>
+                  {taskValidationErrors.map((error) => (
+                    <div key={error.code} className='text-11px leading-16px text-danger-6'>
+                      {t(capabilityValidationMessageKey(error.code), { defaultValue: error.code })}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className='flex flex-wrap gap-8px'>
+                <Button
+                  size='small'
+                  onClick={() =>
+                    setCallConfigIntentByTask((current) => ({
+                      ...current,
+                      [capability.task]: 'connection',
+                    }))
+                  }
+                >
+                  {t('settings.modelAdvanced.intentConnection', {
+                    defaultValue: '使用另一套连接',
+                  })}
+                </Button>
+                <Button
+                  size='small'
+                  onClick={() =>
+                    setCallConfigIntentByTask((current) => ({
+                      ...current,
+                      [capability.task]: 'protocol',
+                    }))
+                  }
+                >
+                  {t('settings.modelAdvanced.intentProtocol', {
+                    defaultValue: '兼容特殊调用方式',
+                  })}
+                </Button>
+              </div>
+            </div>
+
+            <div hidden={callConfigIntent !== 'protocol'} className='space-y-6px' data-call-config-branch='protocol'>
               <div className='text-12px text-t-secondary'>
                 {t('settings.modelAdvanced.protocol', { defaultValue: '调用协议' })}
               </div>
@@ -1028,20 +1535,33 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
               arbitrary.
             */}
             <div
+              hidden={callConfigIntent !== 'connection' && callConfigIntent !== 'protocol'}
               className='space-y-10px rounded-8px border border-solid border-[var(--color-border-2)] p-12px'
               data-transport-group={capability.task}
+              data-call-config-branch={callConfigIntent}
             >
               <div className='text-12px font-500 text-t-secondary'>
-                {t('settings.modelAdvanced.transportGroup', { defaultValue: '连接与地址' })}
+                {callConfigIntent === 'connection'
+                  ? t('settings.modelAdvanced.connectionBranchTitle', {
+                      defaultValue: '供应商连接',
+                    })
+                  : t('settings.modelAdvanced.protocolBranchTitle', {
+                      defaultValue: '协议、地址与 Endpoint',
+                    })}
               </div>
 
-              <div className='space-y-6px'>
+              <div hidden={callConfigIntent !== 'connection'} className='space-y-6px'>
                 <div className='text-12px text-t-secondary'>
                   {t('settings.modelAdvanced.connectionRole', { defaultValue: '连接档案' })}
                 </div>
                 <div className='text-11px leading-4 text-t-tertiary'>
                   {t('settings.modelAdvanced.connectionRoleHint', {
                     defaultValue: '决定这次请求用哪套地址、鉴权方式和凭据。',
+                  })}
+                </div>
+                <div className='rounded-8px bg-fill-1 px-10px py-8px text-11px leading-16px text-t-secondary'>
+                  {t('settings.modelAdvanced.connectionOwnershipHint', {
+                    defaultValue: '连接档案归当前供应商管理；这里只为当前任务选择引用。',
                   })}
                 </div>
                 <Select
@@ -1069,8 +1589,8 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
                       )
                     }
                   >
-                    {t('settings.connections.createNamed', {
-                      defaultValue: '新建命名连接',
+                    {t('settings.modelAdvanced.createProviderConnection', {
+                      defaultValue: '添加供应商连接档案',
                     })}
                   </Button>
                 )}
@@ -1116,6 +1636,7 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
 
               {!sdkTransport && (
                 <div
+                  hidden={callConfigIntent !== 'protocol'}
                   className='space-y-6px border-0 border-l border-solid border-[var(--color-border-2)] pl-12px'
                   data-transport-level='base-url'
                 >
@@ -1192,6 +1713,7 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
 
             {endpointFields.size > 0 && (
               <div
+                hidden={callConfigIntent !== 'protocol'}
                 className='space-y-10px border-0 border-l border-solid border-[var(--color-border-2)] pl-12px'
                 data-transport-level='endpoints'
               >
@@ -1272,7 +1794,11 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
             )}
 
             {crossOrigin && (
-              <div className='rounded-8px bg-warning-1 p-10px space-y-6px' data-cross-origin-consent>
+              <div
+                hidden={callConfigIntent !== 'protocol'}
+                className='rounded-8px bg-warning-1 p-10px space-y-6px'
+                data-cross-origin-consent
+              >
                 <Checkbox
                   checked={capability.allowCrossOriginCredentials}
                   onChange={(allowCrossOriginCredentials) =>
@@ -1302,35 +1828,126 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
               max_tokens (its "default" is whatever the provider picks) and is
               mandatory for the Anthropic-family protocols.
             */}
-            <div className='space-y-8px' data-token-limits>
+            <div
+              hidden={callConfigIntent !== 'limits'}
+              className='space-y-10px rounded-10px border border-solid border-[var(--color-border-2)] p-12px'
+              data-token-limits
+              data-call-config-branch='limits'
+            >
               <div className='text-12px font-500 text-t-secondary'>
-                {t('settings.modelAdvanced.tokenLimits', { defaultValue: 'Token 上限' })}
+                {t('settings.modelAdvanced.modelLimitsTitle', { defaultValue: '模型限制' })}
               </div>
 
-              <div className='space-y-6px'>
-                <div className='text-12px text-t-secondary'>
-                  {t('settings.contextLimit', { defaultValue: '上下文窗口（tokens）' })}
+              <div className='space-y-8px'>
+                <div className='flex flex-wrap items-center justify-between gap-10px'>
+                  <div className='text-12px text-t-secondary'>
+                    {t('settings.contextLimit', { defaultValue: '上下文窗口（tokens）' })}
+                  </div>
+                  <div
+                    className='inline-flex overflow-hidden rounded-8px border border-solid border-[var(--color-border-2)] bg-fill-1'
+                    role='group'
+                    aria-label={t('settings.contextLimit', {
+                      defaultValue: '上下文窗口（tokens）',
+                    })}
+                  >
+                    {[
+                      { label: '128k', value: 128_000 },
+                      { label: '200k', value: undefined },
+                    ].map((option) => {
+                      const selected =
+                        option.value === undefined
+                          ? capability.contextLimit === undefined || capability.contextLimit === 200_000
+                          : capability.contextLimit === option.value;
+                      return (
+                        <button
+                          key={option.label}
+                          type='button'
+                          aria-pressed={selected && !customContextOpen}
+                          className={`min-w-72px border-0 border-r border-solid border-[var(--color-border-2)] px-14px py-6px text-12px last:border-r-0 ${
+                            selected && !customContextOpen
+                              ? 'bg-primary-1 text-primary-6'
+                              : 'bg-transparent text-t-secondary hover:bg-fill-2'
+                          }`}
+                          onClick={() => {
+                            setCustomContextByTask((current) => ({
+                              ...current,
+                              [capability.task]: false,
+                            }));
+                            updateCapability(capability.task, {
+                              contextLimit: option.value,
+                            });
+                          }}
+                        >
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                    <button
+                      type='button'
+                      aria-pressed={customContextOpen}
+                      className={`min-w-76px border-0 px-14px py-6px text-12px ${
+                        customContextOpen
+                          ? 'bg-primary-1 text-primary-6'
+                          : 'bg-transparent text-t-secondary hover:bg-fill-2'
+                      }`}
+                      onClick={() =>
+                        setCustomContextByTask((current) => ({
+                          ...current,
+                          [capability.task]: true,
+                        }))
+                      }
+                    >
+                      {t('settings.outputLimitCustomOption', { defaultValue: '自定义' })}
+                    </button>
+                  </div>
                 </div>
-                <ContextLimitSelect
-                  value={capability.contextLimit}
-                  onChange={(contextLimit) => updateCapability(capability.task, { contextLimit })}
-                />
+                <div hidden={!customContextOpen}>
+                  <ContextLimitSelect
+                    value={capability.contextLimit}
+                    onChange={(contextLimit) =>
+                      updateCapability(capability.task, { contextLimit })
+                    }
+                  />
+                </div>
                 <div className='text-11px leading-4 text-t-tertiary'>
-                  {t('settings.contextLimitHint', {
-                    defaultValue:
-                      '留空按默认 200k 估算。模型真实窗口更小时请填写：否则自动压缩不会及时触发，供应商会直接拒绝该轮请求。',
+                  {t('settings.modelAdvanced.contextLimitCompactHint', {
+                    defaultValue: '留空按推荐 200k 估算；模型真实窗口更小时再调整。',
                   })}
                 </div>
               </div>
 
-              <div className='space-y-6px'>
-                <div className='text-12px text-t-secondary'>
-                  {t('settings.outputLimit', { defaultValue: 'Max output tokens' })}
+              <div className='space-y-8px'>
+                <div className='flex items-center justify-between gap-10px rounded-8px bg-fill-1 px-10px py-8px'>
+                  <span className='text-12px text-t-secondary'>
+                    {t('settings.outputLimit', { defaultValue: '最大输出（tokens）' })}
+                  </span>
+                  <span className='ml-auto text-12px text-t-primary'>{outputLimitSummary}</span>
+                  <Button
+                    size='mini'
+                    type='text'
+                    onClick={() =>
+                      setEditingOutputLimitByTask((current) => ({
+                        ...current,
+                        [capability.task]: !outputLimitEditorOpen,
+                      }))
+                    }
+                  >
+                    {capability.outputLimit === undefined
+                      ? t('settings.modelAdvanced.setOutputLimit', {
+                          defaultValue: '设置上限',
+                        })
+                      : t('common.edit', { defaultValue: '更改' })}
+                  </Button>
                 </div>
-                <OutputLimitInput
-                  value={capability.outputLimit}
-                  onChange={(outputLimit) => updateCapability(capability.task, { outputLimit })}
-                />
+                <div hidden={!outputLimitEditorOpen}>
+                  <OutputLimitInput
+                    value={capability.outputLimit}
+                    onChange={(outputLimit) =>
+                      updateCapability(capability.task, { outputLimit })
+                    }
+                    compact
+                  />
+                </div>
                 {outputLimitMissing && (
                   <div className='text-11px text-danger-6' role='alert' data-output-limit-required>
                     {t('settings.outputLimitRequired', {
@@ -1339,8 +1956,32 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
                   </div>
                 )}
               </div>
+              <div className='flex items-center justify-between gap-10px border-0 border-t border-solid border-[var(--color-border-2)] pt-10px'>
+                <span className='text-11px leading-16px text-t-secondary'>
+                  {t('settings.modelAdvanced.taskOnlyHint', {
+                    model: value.model,
+                    task: t(`settings.modelTask.${capability.task}`, {
+                      defaultValue: capability.task,
+                    }),
+                    defaultValue: '只保存到当前模型任务，不影响其他任务。',
+                  })}
+                </span>
+                <Button
+                  size='mini'
+                  type='text'
+                  onClick={() =>
+                    updateCapability(capability.task, {
+                      contextLimit: undefined,
+                      outputLimit: undefined,
+                    })
+                  }
+                >
+                  {t('settings.restoreProtocolDefault', { defaultValue: '恢复推荐值' })}
+                </Button>
+              </div>
             </div>
 
+            <div hidden={callConfigIntent !== 'protocol'} className='space-y-12px'>
             {capability.task === 'speech_synthesis' &&
               ttsSupportsProviderParamVoice(capability.protocol) && (
               <div className='space-y-6px'>
@@ -1447,12 +2088,48 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
               </div>
             </div>
             </div>
+
+            {callConfigBaseline && callConfigFooterPlacement === 'internal' && (
+              <div className='flex flex-wrap items-center justify-between gap-10px border-0 border-t border-solid border-[var(--color-border-2)] pt-12px' data-call-config-footer={capability.task}>
+                <span className='text-11px text-t-secondary' aria-live='polite'>
+                  {callConfigChanged
+                    ? t('settings.modelAdvanced.pendingDraftChange', {
+                        defaultValue: '更改尚未保存到模型。',
+                      })
+                    : t('settings.modelAdvanced.noDraftChange', {
+                        defaultValue: '尚未更改',
+                      })}
+                </span>
+                <div className='flex gap-8px'>
+                  <Button size='small' onClick={() => finishCallConfig(capability.task, true)}>
+                    {t('settings.modelAdvanced.cancelAdjustment', {
+                      defaultValue: '取消调整',
+                    })}
+                  </Button>
+                  <Button
+                    type='primary'
+                    size='small'
+                    onClick={() => finishCallConfig(capability.task, false)}
+                  >
+                    {t('settings.modelAdvanced.applyToTask', {
+                      task: t(`settings.modelTask.${capability.task}`, {
+                        defaultValue: capability.task,
+                      }),
+                      defaultValue: '应用到当前任务',
+                    })}
+                  </Button>
+                </div>
+              </div>
+            )}
+            </div>
           </section>
         );
       })}
       </div>
     </div>
   );
-};
+});
+
+ModelDefinitionEditor.displayName = 'ModelDefinitionEditor';
 
 export default ModelDefinitionEditor;

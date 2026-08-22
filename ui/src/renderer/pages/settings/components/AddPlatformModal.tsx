@@ -6,6 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { IProvider } from '@/common/config/storage';
+import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import { parseProviderId } from '@/common/types/ids';
 import { uuidv7 } from '@/common/utils';
 import NomiModal from '@/renderer/components/base/NomiModal';
@@ -20,9 +21,12 @@ import ModalHOC from '@/renderer/utils/ui/ModalHOC';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { AutoComplete, Form, Input, Select } from '@arco-design/web-react';
 import { LinkCloud } from '@icon-park/react';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import ModelDefinitionEditor, { type ModelCatalogSuggestion } from './ModelDefinitionEditor';
+import ModelDefinitionEditor, {
+  type ModelCatalogSuggestion,
+  type ModelDefinitionEditorHandle,
+} from './ModelDefinitionEditor';
 import {
   capabilityInputsFromDefinition,
   describeValidationErrors,
@@ -39,6 +43,7 @@ import {
 } from './providerCredentialsForm';
 import { buildAuthSchemeOptions } from './providerConnectionForm';
 import useModelProtocolManifests from './useModelProtocolManifests';
+import ModelCallConfigModalFooter from './ModelCallConfigModalFooter';
 
 const EMPTY_DEFINITION: ModelDefinitionDraft = { model: '', capabilities: [] };
 
@@ -75,9 +80,12 @@ const AddPlatformModal = ModalHOC<{
   const [baseUrlDirty, setBaseUrlDirty] = useState(false);
   const [authSchemeDirty, setAuthSchemeDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
+  const modelEditorRef = useRef<ModelDefinitionEditorHandle>(null);
 
   const preset = Form.useWatch('platform', form) as string | undefined;
   const baseUrl = (Form.useWatch('base_url', form) as string | undefined) ?? '';
+  const providerName = (Form.useWatch('name', form) as string | undefined) ?? '';
   const apiKey = (Form.useWatch('api_key', form) as string | undefined) ?? '';
   const authScheme = (Form.useWatch('auth_scheme', form) as string | undefined) ?? '';
   const bedrockAuthMethod = Form.useWatch('bedrockAuthMethod', form);
@@ -204,6 +212,7 @@ const AddPlatformModal = ModalHOC<{
     setBaseUrlDirty(Boolean(deepLinkData?.base_url));
     setAuthSchemeDirty(false);
     setSaving(false);
+    setFocusedCallConfigTask(undefined);
     const requestedPreset = deepLinkData?.platform;
     const matchedPreset = requestedPreset
       ? MODEL_PLATFORMS.find(
@@ -349,15 +358,36 @@ const AddPlatformModal = ModalHOC<{
       onCancel={modalCtrl.close}
       unmountOnExit
       header={{
-        title: t('settings.addProvider', { defaultValue: '添加供应商' }),
+        title: focusedCallConfigTask
+          ? `${t(`settings.modelTask.${focusedCallConfigTask}`, {
+              defaultValue: focusedCallConfigTask,
+            })} · ${t('settings.modelAdvanced.callConfigurationTitle', {
+              defaultValue: '调用配置',
+            })}`
+          : t('settings.addProvider', { defaultValue: '添加供应商' }),
         showClose: true,
       }}
-      style={{ width: 820, maxWidth: '95vw', maxHeight: '94vh', borderRadius: 16 }}
+      footer={
+        focusedCallConfigTask ? (
+          <ModelCallConfigModalFooter
+            task={focusedCallConfigTask}
+            onCancel={() => modelEditorRef.current?.cancelCallConfig()}
+            onApply={() => modelEditorRef.current?.applyCallConfig()}
+          />
+        ) : undefined
+      }
+      style={{
+        width: focusedCallConfigTask ? 840 : 820,
+        maxWidth: '95vw',
+        maxHeight: focusedCallConfigTask ? '96vh' : '94vh',
+        borderRadius: 16,
+      }}
       contentStyle={{
         background: 'var(--dialog-fill-0)',
         borderRadius: 16,
         padding: '20px 24px 16px',
         overflow: 'auto',
+        maxHeight: focusedCallConfigTask ? 'calc(96vh - 72px)' : undefined,
       }}
       onOk={() => void submit()}
       confirmLoading={saving}
@@ -367,7 +397,11 @@ const AddPlatformModal = ModalHOC<{
     >
       {messageContext}
       <div className='pt-4px pb-12px flex flex-col gap-18px'>
-        <Form form={form} layout='vertical' className='[&_.arco-form-item]:mb-12px'>
+        <Form
+          form={form}
+          layout='vertical'
+          className={`${focusedCallConfigTask ? 'hidden ' : ''}[&_.arco-form-item]:mb-12px`}
+        >
           <Form.Item label={t('settings.modelPlatform')} field='platform' required rules={[{ required: true }]}>
             <Select
               showSearch
@@ -517,10 +551,12 @@ const AddPlatformModal = ModalHOC<{
         </Form>
 
         <ModelDefinitionEditor
+          ref={modelEditorRef}
           value={definition}
           onChange={setDefinition}
           providerBaseUrl={baseUrl}
           providerAuthScheme={authScheme}
+          providerLabel={providerName || selectedPlatform?.name || preset || ''}
           manifests={manifestState.manifests}
           manifestLoadingTasks={manifestState.loadingTasks}
           manifestErrorTasks={manifestState.errorTasks}
@@ -535,6 +571,8 @@ const AddPlatformModal = ModalHOC<{
                 : undefined
           }
           onRefreshCatalog={() => void modelListState.mutate()}
+          onCallConfigFocusChange={setFocusedCallConfigTask}
+          callConfigFooterPlacement='modal'
           connections={pendingConnections}
           onCreateConnection={addPendingConnection}
         />

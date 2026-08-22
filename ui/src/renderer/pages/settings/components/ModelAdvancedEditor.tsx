@@ -4,15 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Tooltip } from '@arco-design/web-react';
 import { SettingTwo } from '@icon-park/react';
 import type { ProviderId } from '@/common/types/ids';
+import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import type { ProviderModelCapabilityResponse } from '@/common/types/provider/providerModel';
 import { ipcBridge } from '@/common';
 import NomiModal from '@/renderer/components/base/NomiModal';
-import ModelDefinitionEditor from './ModelDefinitionEditor';
+import ModelDefinitionEditor, { type ModelDefinitionEditorHandle } from './ModelDefinitionEditor';
 import {
   capabilityDraftFromResponse,
   capabilityInputsFromDefinition,
@@ -22,6 +23,7 @@ import {
 } from './providerModelAdvanced';
 import useModelProtocolManifests from './useModelProtocolManifests';
 import { useProviderConnections } from './useProviderConnections';
+import ModelCallConfigModalFooter from './ModelCallConfigModalFooter';
 
 export interface ModelAdvancedPatch {
   capabilities: ProviderModelCapabilityInput[];
@@ -30,16 +32,19 @@ export interface ModelAdvancedPatch {
 /** Existing-model editor backed by the same full capability form as both add flows. */
 const ModelAdvancedEditor: React.FC<{
   providerId: ProviderId;
+  providerName: string;
   preset: string;
   providerBaseUrl: string;
   providerAuthScheme: string;
   model: string;
   capabilities: ProviderModelCapabilityResponse[];
   onSave: (patch: ModelAdvancedPatch) => Promise<void>;
-}> = ({ providerId, preset, providerBaseUrl, providerAuthScheme, model, capabilities, onSave }) => {
+}> = ({ providerId, providerName, preset, providerBaseUrl, providerAuthScheme, model, capabilities, onSave }) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
+  const modelEditorRef = useRef<ModelDefinitionEditorHandle>(null);
   const [definition, setDefinition] = useState<ModelDefinitionDraft>(() => ({
     model,
     capabilities: capabilities.map(capabilityDraftFromResponse),
@@ -86,6 +91,7 @@ const ModelAdvancedEditor: React.FC<{
 
   const handleOpen = () => {
     resetDraft();
+    setFocusedCallConfigTask(undefined);
     setOpen(true);
   };
 
@@ -113,16 +119,37 @@ const ModelAdvancedEditor: React.FC<{
         unmountOnExit
         maskClosable={!saving}
         escToExit={!saving}
-        header={{ title: t('settings.editModelCapabilities'), showClose: true }}
-        style={{ width: 760, maxWidth: '94vw', maxHeight: '92vh' }}
+        header={{
+          title: focusedCallConfigTask
+            ? `${t(`settings.modelTask.${focusedCallConfigTask}`, {
+                defaultValue: focusedCallConfigTask,
+              })} · ${t('settings.modelAdvanced.callConfigurationTitle', {
+                defaultValue: '调用配置',
+              })}`
+            : t('settings.editModelCapabilities'),
+          showClose: true,
+        }}
+        style={{
+          width: focusedCallConfigTask ? 840 : 760,
+          maxWidth: '94vw',
+          maxHeight: focusedCallConfigTask ? '96vh' : '92vh',
+        }}
         contentStyle={{
           background: 'var(--dialog-fill-0)',
           borderRadius: 16,
           padding: '20px 24px',
           overflow: 'auto',
-          maxHeight: 'calc(92vh - 160px)',
+          maxHeight: focusedCallConfigTask
+            ? 'calc(96vh - 72px)'
+            : 'calc(92vh - 160px)',
         }}
-        footer={
+        footer={focusedCallConfigTask ? (
+          <ModelCallConfigModalFooter
+            task={focusedCallConfigTask}
+            onCancel={() => modelEditorRef.current?.cancelCallConfig()}
+            onApply={() => modelEditorRef.current?.applyCallConfig()}
+          />
+        ) :
           <div className='flex justify-end gap-10px mt-10px'>
             <Button
               disabled={saving}
@@ -147,10 +174,12 @@ const ModelAdvancedEditor: React.FC<{
       >
         <div className='pt-16px'>
           <ModelDefinitionEditor
+            ref={modelEditorRef}
             value={definition}
             onChange={setDefinition}
             providerBaseUrl={providerBaseUrl}
             providerAuthScheme={providerAuthScheme}
+            providerLabel={providerName}
             manifests={manifests.manifests}
             manifestLoadingTasks={manifests.loadingTasks}
             manifestErrorTasks={manifests.errorTasks}
@@ -162,6 +191,8 @@ const ModelAdvancedEditor: React.FC<{
               await ipcBridge.providerConnection.save.invoke({ provider_id: providerId, connection });
               await connectionState.mutate();
             }}
+            onCallConfigFocusChange={setFocusedCallConfigTask}
+            callConfigFooterPlacement='modal'
           />
         </div>
       </NomiModal>
@@ -170,6 +201,9 @@ const ModelAdvancedEditor: React.FC<{
           size='mini'
           className='model-provider-action-btn !w-24px !h-24px !min-w-24px shrink-0 text-t-secondary hover:text-t-primary'
           icon={<SettingTwo theme='outline' size='14' />}
+          aria-label={t('settings.editModelCapabilities', {
+            defaultValue: '编辑模型调用配置',
+          })}
           onClick={handleOpen}
         />
       </Tooltip>
