@@ -175,6 +175,7 @@ pub(crate) async fn fetch_deepgram_catalog(
                     name: item.name.filter(|name| !name.trim().is_empty()),
                     tasks: vec![task],
                     traits: Vec::new(),
+                    context_limit: None,
                 });
             }
         }
@@ -223,6 +224,7 @@ async fn fetch_xai(
                     name: None,
                     tasks: vec![task],
                     traits: Vec::new(),
+                    context_limit: item.context_length,
                 });
             }
         }
@@ -236,12 +238,14 @@ async fn fetch_xai(
         name: Some("xAI Text-to-Speech service".into()),
         tasks: vec![ModelTask::SpeechSynthesis],
         traits: Vec::new(),
+        context_limit: None,
     });
     models.push(ModelInfo {
         id: "xai-stt".into(),
         name: Some("xAI Speech-to-Text service".into()),
         tasks: vec![ModelTask::SpeechRecognition],
         traits: Vec::new(),
+        context_limit: None,
     });
     Ok(models)
 }
@@ -264,6 +268,11 @@ struct OpenAiModelsResponse {
 #[derive(Deserialize)]
 struct OpenAiModel {
     id: String,
+    /// OpenRouter and several China-based OpenAI-compatible gateways declare the
+    /// model's input window here. Plain OpenAI does not send it, so it stays
+    /// `None` rather than being guessed from the model id.
+    #[serde(default, deserialize_with = "deserialize_declared_token_limit")]
+    context_length: Option<i64>,
 }
 
 /// Fetch models from an OpenAI-compatible `/models` endpoint.
@@ -307,6 +316,7 @@ pub(super) async fn fetch_openai_compatible_with_auth(
             name: None,
             tasks: Vec::new(),
             traits: Vec::new(),
+            context_limit: m.context_length,
         })
         .collect())
 }
@@ -353,6 +363,8 @@ async fn fetch_anthropic(
     let body: AnthropicModelsResponse = resp.json().await.map_err(|_| {
         AppError::BadGateway("Anthropic models response was not valid JSON".into())
     })?;
+    // `/v1/models` reports only identity and display metadata; Anthropic does
+    // not publish the context window there, so nothing is carried.
     Ok(body
         .data
         .into_iter()
@@ -361,6 +373,7 @@ async fn fetch_anthropic(
             name: None,
             tasks: Vec::new(),
             traits: Vec::new(),
+            context_limit: None,
         })
         .collect())
 }
@@ -377,6 +390,15 @@ struct GeminiModelsResponse {
 #[derive(Deserialize)]
 struct GeminiModel {
     name: String,
+    /// `/v1beta/models` already reports the input window Nomi otherwise makes
+    /// the user retype. Optional because non-generative entries (embedding,
+    /// retrieval) omit it.
+    #[serde(
+        default,
+        rename = "inputTokenLimit",
+        deserialize_with = "deserialize_declared_token_limit"
+    )]
+    input_token_limit: Option<i64>,
 }
 
 async fn fetch_gemini(
@@ -415,6 +437,7 @@ async fn fetch_gemini(
                 name: None,
                 tasks: Vec::new(),
                 traits: Vec::new(),
+                context_limit: m.input_token_limit,
             }
         })
         .collect())
@@ -452,6 +475,7 @@ async fn fetch_bedrock(config: &FetchConfig) -> Result<Vec<ModelInfo>, AppError>
                 model.provider_name(),
             ),
             traits: Vec::new(),
+            context_limit: None,
         })
         .collect::<Vec<_>>();
 
@@ -482,6 +506,7 @@ async fn fetch_bedrock(config: &FetchConfig) -> Result<Vec<ModelInfo>, AppError>
                     name: Some(profile.inference_profile_name().to_owned()),
                     tasks,
                     traits: Vec::new(),
+                    context_limit: None,
                 },
             );
         }
@@ -520,6 +545,11 @@ fn upsert_bedrock_model(models: &mut Vec<ModelInfo>, candidate: ModelInfo) {
         }
         if existing.name.is_none() {
             existing.name = candidate.name;
+        }
+        // Symmetric with the fields above so a merge can never be the place a
+        // provider-declared window gets dropped.
+        if existing.context_limit.is_none() {
+            existing.context_limit = candidate.context_limit;
         }
     } else {
         models.push(candidate);
@@ -837,6 +867,40 @@ async fn fetch_dashscope_coding(
 }
 
 // ---------------------------------------------------------------------------
+// Provider-declared context windows
+// ---------------------------------------------------------------------------
+
+/// Read an advisory token limit out of a catalog entry without letting it break
+/// the listing.
+///
+/// Providers disagree on how the number is typed: Gemini and OpenRouter send a
+/// JSON integer, some OpenAI-compatible gateways send a float or a decimal
+/// string, and a few send `null` or `0` for models they do not describe. Model
+/// discovery must not start failing with "response was not valid JSON" because
+/// of a field that is only a convenience, so anything unusable degrades to
+/// `None`. Non-positive values are dropped too: `resolve_context_window` already
+/// treats `0` as unset, and offering it to the UI would prefill a window that
+/// cannot be honored.
+fn deserialize_declared_token_limit<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.as_ref().and_then(declared_token_limit))
+}
+
+fn declared_token_limit(value: &serde_json::Value) -> Option<i64> {
+    let limit = match value {
+        serde_json::Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|number| number as i64))?,
+        serde_json::Value::String(text) => text.trim().parse::<i64>().ok()?,
+        _ => return None,
+    };
+    (limit > 0).then_some(limit)
+}
+
+// ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
@@ -847,6 +911,7 @@ fn fallback_models(ids: &[&str]) -> Vec<ModelInfo> {
             name: None,
             tasks: Vec::new(),
             traits: Vec::new(),
+            context_limit: None,
         })
         .collect()
 }
@@ -934,6 +999,99 @@ mod tests {
             models.into_iter().map(|model| model.id).collect::<Vec<_>>(),
             ["gemini-3.1-pro", "gemini-3.1-flash"]
         );
+    }
+
+    #[tokio::test]
+    async fn gemini_carries_the_declared_input_token_limit() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1beta/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    {
+                        "name": "models/gemini-3.1-pro",
+                        "inputTokenLimit": 1_048_576,
+                        "outputTokenLimit": 65_536,
+                        "supportedGenerationMethods": ["generateContent"]
+                    },
+                    // Embedding-style entries omit the window entirely.
+                    {"name": "models/text-embedding-005"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let models = fetch_gemini(&no_proxy_client(), &server.uri(), "gemini-key")
+            .await
+            .unwrap();
+        assert_eq!(models[0].id, "gemini-3.1-pro");
+        assert_eq!(models[0].context_limit, Some(1_048_576));
+        assert_eq!(models[1].context_limit, None);
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_catalog_carries_context_length_when_the_gateway_sends_it() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {"id": "openrouter/gateway-model", "context_length": 131_072},
+                    // A gateway that types the same field loosely must not fail
+                    // the whole listing.
+                    {"id": "decimal-string-gateway", "context_length": "32768"},
+                    {"id": "float-gateway", "context_length": 65_536.0},
+                    // Unusable or absent values stay absent; nothing is guessed.
+                    {"id": "zero-gateway", "context_length": 0},
+                    {"id": "null-gateway", "context_length": serde_json::Value::Null},
+                    {"id": "prose-gateway", "context_length": "unknown"},
+                    {"id": "plain-openai-model"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let models = fetch_openai_compatible(&no_proxy_client(), &server.uri(), "key")
+            .await
+            .unwrap();
+        let limits = models
+            .iter()
+            .map(|model| (model.id.as_str(), model.context_limit))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            limits,
+            [
+                ("openrouter/gateway-model", Some(131_072)),
+                ("decimal-string-gateway", Some(32_768)),
+                ("float-gateway", Some(65_536)),
+                ("zero-gateway", None),
+                ("null-gateway", None),
+                ("prose-gateway", None),
+                ("plain-openai-model", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn declared_token_limit_accepts_only_usable_positive_numbers() {
+        use serde_json::json;
+
+        assert_eq!(declared_token_limit(&json!(200_000)), Some(200_000));
+        assert_eq!(declared_token_limit(&json!(200_000.7)), Some(200_000));
+        assert_eq!(declared_token_limit(&json!(" 32768 ")), Some(32_768));
+        for unusable in [
+            json!(0),
+            json!(-1),
+            json!("0"),
+            json!("128k"),
+            json!(""),
+            json!(serde_json::Value::Null),
+            json!(true),
+            json!({"tokens": 4096}),
+            json!([4096]),
+        ] {
+            assert_eq!(declared_token_limit(&unusable), None, "{unusable}");
+        }
     }
 
     #[tokio::test]
@@ -1374,6 +1532,7 @@ mod tests {
                 name: None,
                 tasks: Vec::new(),
                 traits: Vec::new(),
+                context_limit: None,
             }
         );
     }

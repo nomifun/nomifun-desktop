@@ -110,11 +110,11 @@ const IMAGE_GENERATION_INCLUDE: &[&str] = &[
     "diffusion",
     "stabilityai",
 ];
-/// Model-name substrings that imply VIDEO generation. Kept in sync with the FE
-/// `CAPABILITY_PATTERNS.video_generation`. Deliberately specific (e.g. `wan2`/
-/// `wanx` rather than a bare `wan`) to avoid false positives on chat models.
+/// Model-name substrings that imply VIDEO generation. Deliberately specific
+/// (e.g. `wan2`/`wanx` rather than a bare `wan`) to avoid false positives on
+/// chat models. `sora` is deliberately absent: OpenAI shuts that API down
+/// permanently on 2026-09-24 and there is no preset route for it any more.
 const VIDEO_GENERATION_INCLUDE: &[&str] = &[
-    "sora",
     "veo",
     "kling",
     "seedance",
@@ -228,7 +228,6 @@ mod tests {
     fn video_generation_models_infer_video_capability() {
         use crate::ModelTask;
         for m in [
-            "sora-2",
             "veo-3",
             "kling-v2",
             "seedance-1.0-pro",

@@ -3,8 +3,9 @@ use std::path::Path;
 use ts_rs::{Config, TS};
 
 use nomifun_api_types::{
-    AuthSchemeDescriptor, CapabilityHealth, CloneProviderRequest, EndpointRootShape, HealthStatus,
-    KnowledgeEmbeddingConfig, KnowledgeRerankConfig, KnowledgeRetrievalConfig,
+    AuthSchemeDescriptor, CapabilityHealth, CloneProviderRequest, EndpointRootShape,
+    FetchModelsResponse, HealthStatus,
+    KnowledgeEmbeddingConfig, KnowledgeRerankConfig, KnowledgeRetrievalConfig, ModelInfo,
     ModelProtocolManifestResponse, ModelTask, ModelTrait, PlatformPresetDescriptor,
     ProtocolDefaultConnection, ProtocolDescriptor, ProtocolEndpointDescriptor,
     ProtocolEndpointPurpose, ProtocolExecutorKind, ProtocolRecommendation, ProtocolScope,
@@ -76,6 +77,8 @@ fn export_provider_domain_bindings() {
     export_binding_if_changed::<ProviderModelResponse>("ProviderModelResponse.ts");
     export_binding_if_changed::<SaveProviderModelRequest>("SaveProviderModelRequest.ts");
     export_binding_if_changed::<ProviderModelKeyRequest>("ProviderModelKeyRequest.ts");
+    export_binding_if_changed::<ModelInfo>("ModelInfo.ts");
+    export_binding_if_changed::<FetchModelsResponse>("FetchModelsResponse.ts");
     export_binding_if_changed::<ProviderConnectionInput>("ProviderConnectionInput.ts");
     export_binding_if_changed::<SaveProviderConnectionRequest>("SaveProviderConnectionRequest.ts");
     export_binding_if_changed::<ProviderConnectionResponse>("ProviderConnectionResponse.ts");
@@ -155,6 +158,34 @@ fn generated_shapes_mirror_single_source_wire_contract() {
     assert!(response.contains("capabilities: Array<ProviderModelCapabilityResponse>"));
     assert!(!response.contains("protocol?:"));
     assert!(!response.contains("tasks:"));
+
+    // The catalog carries the provider's own declared window under the same
+    // name the capability persists it as, so the UI can prefill one from the
+    // other without a translation table. Optional in both types.
+    let catalog_model = ModelInfo::export_to_string(&cfg).unwrap();
+    assert!(
+        catalog_model.contains("context_limit?: number,"),
+        "got: {catalog_model}"
+    );
+    // `tasks`/`traits` are omitted when empty and `name` is always sent, so the
+    // optionality of each field must keep mirroring its serde attributes.
+    assert!(
+        catalog_model.contains("tasks?: Array<ModelTask>,"),
+        "got: {catalog_model}"
+    );
+    assert!(
+        catalog_model.contains("name: string | null,"),
+        "got: {catalog_model}"
+    );
+    let catalog = FetchModelsResponse::export_to_string(&cfg).unwrap();
+    assert!(
+        catalog.contains("models: Array<ModelInfo>,"),
+        "got: {catalog}"
+    );
+    assert!(
+        catalog.contains("fixed_base_url?: string,"),
+        "got: {catalog}"
+    );
 
     let connection = ProviderConnectionResponse::export_to_string(&cfg).unwrap();
     assert!(!connection.contains("is_full_url"));
