@@ -1,4 +1,4 @@
-//! Task-owner migrations: 040 introduces the tagged union; 041 retires the
+//! Task-owner migrations: 041 introduces the tagged union; 042 retires the
 //! historical Workshop/global branch without rewriting canonical task history.
 
 use sqlx::migrate::{Migrate, Migrator};
@@ -33,8 +33,8 @@ async fn migrate_to(pool: &sqlx::SqlitePool, max_version: i64) {
     }
 }
 
-async fn seed_pre_040(pool: &sqlx::SqlitePool) {
-    migrate_to(pool, 39).await;
+async fn seed_pre_041(pool: &sqlx::SqlitePool) {
+    migrate_to(pool, 40).await;
     sqlx::query(
         "INSERT INTO providers \
             (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, \
@@ -105,9 +105,9 @@ async fn migration_preserves_legacy_and_canvas_tasks_without_making_them_workflo
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    seed_pre_040(&pool).await;
+    seed_pre_041(&pool).await;
 
-    migrate_to(&pool, 40).await;
+    migrate_to(&pool, 41).await;
 
     let legacy: (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>) =
         sqlx::query_as(
@@ -150,8 +150,8 @@ async fn migration_adds_the_strict_workflow_owner_shape() {
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    seed_pre_040(&pool).await;
-    migrate_to(&pool, 40).await;
+    seed_pre_041(&pool).await;
+    migrate_to(&pool, 41).await;
 
     let invalid = sqlx::query(
         "INSERT INTO creation_tasks \
@@ -169,15 +169,15 @@ async fn migration_adds_the_strict_workflow_owner_shape() {
 }
 
 #[tokio::test]
-async fn migration_041_drops_legacy_rows_and_canvas_ownership_column() {
+async fn migration_042_drops_legacy_rows_and_canvas_ownership_column() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    seed_pre_040(&pool).await;
+    seed_pre_041(&pool).await;
 
-    migrate_to(&pool, 41).await;
+    migrate_to(&pool, 42).await;
 
     let legacy_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM creation_tasks WHERE creation_task_id = ?",
@@ -186,7 +186,7 @@ async fn migration_041_drops_legacy_rows_and_canvas_ownership_column() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(legacy_count, 0, "retired unowned tasks must not survive 041");
+    assert_eq!(legacy_count, 0, "retired unowned tasks must not survive 042");
 
     let canonical: (String, String, String) = sqlx::query_as(
         "SELECT project_id, node_id, request_fingerprint \
@@ -218,18 +218,18 @@ async fn migration_041_drops_legacy_rows_and_canvas_ownership_column() {
     .bind(PROVIDER_ID)
     .execute(&pool)
     .await;
-    assert!(unowned.is_err(), "041 must reject ownerless task writes");
+    assert!(unowned.is_err(), "042 must reject ownerless task writes");
 }
 
 #[tokio::test]
-async fn migration_043_recovers_only_provable_ordered_input_bindings() {
+async fn migration_044_recovers_only_provable_ordered_input_bindings() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    seed_pre_040(&pool).await;
-    migrate_to(&pool, 42).await;
+    seed_pre_041(&pool).await;
+    migrate_to(&pool, 43).await;
 
     for (asset_id, kind) in [(INPUT_IMAGE_ID, "image"), (INPUT_VIDEO_ID, "video")] {
         sqlx::query(
@@ -296,7 +296,7 @@ async fn migration_043_recovers_only_provable_ordered_input_bindings() {
     .await
     .unwrap();
 
-    migrate_to(&pool, 43).await;
+    migrate_to(&pool, 44).await;
 
     let recovered: String = sqlx::query_scalar(
         "SELECT input_bindings FROM creation_tasks WHERE creation_task_id = ?",
@@ -334,14 +334,14 @@ async fn migration_043_recovers_only_provable_ordered_input_bindings() {
 }
 
 #[tokio::test]
-async fn migration_043_enforces_exact_standalone_owner_and_input_shape() {
+async fn migration_044_enforces_exact_standalone_owner_and_input_shape() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    seed_pre_040(&pool).await;
-    migrate_to(&pool, 43).await;
+    seed_pre_041(&pool).await;
+    migrate_to(&pool, 44).await;
 
     let standalone_id = "0190f5fe-7c00-7a00-8abc-00000000000d";
     sqlx::query(
@@ -445,14 +445,14 @@ async fn migration_043_enforces_exact_standalone_owner_and_input_shape() {
 }
 
 #[tokio::test]
-async fn migration_044_allows_only_terminal_standalone_tombstones() {
+async fn migration_045_allows_only_terminal_standalone_tombstones() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    seed_pre_040(&pool).await;
-    migrate_to(&pool, 43).await;
+    seed_pre_041(&pool).await;
+    migrate_to(&pool, 44).await;
 
     let terminal_id = "0190f5fe-7c00-7a00-8abc-000000000020";
     let live_id = "0190f5fe-7c00-7a00-8abc-000000000021";
@@ -482,7 +482,7 @@ async fn migration_044_allows_only_terminal_standalone_tombstones() {
     .await
     .unwrap();
 
-    migrate_to(&pool, 44).await;
+    migrate_to(&pool, 45).await;
     let preexisting_tombstones: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM creation_tasks WHERE deleted_at IS NOT NULL")
             .fetch_one(&pool)
@@ -490,7 +490,7 @@ async fn migration_044_allows_only_terminal_standalone_tombstones() {
             .unwrap();
     assert_eq!(
         preexisting_tombstones, 0,
-        "044 must not infer tombstones for existing task history"
+        "045 must not infer tombstones for existing task history"
     );
     sqlx::query("UPDATE creation_tasks SET deleted_at = 12 WHERE creation_task_id = ?")
         .bind(terminal_id)
@@ -509,7 +509,7 @@ async fn migration_044_allows_only_terminal_standalone_tombstones() {
                 .execute(&pool)
                 .await
                 .is_err(),
-            "044 must reject {label} tombstone"
+            "045 must reject {label} tombstone"
         );
     }
     for live_status in ["queued", "running"] {

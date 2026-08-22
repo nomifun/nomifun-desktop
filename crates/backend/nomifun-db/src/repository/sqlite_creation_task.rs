@@ -514,7 +514,7 @@ struct CanonicalInputBinding {
 
 fn canonicalize_input_bindings(raw: Option<&str>) -> Result<Option<String>, DbError> {
     let Some(raw) = raw else {
-        // Only migration 043 may produce NULL, to identify legacy rows whose
+        // Only migration 044 may produce NULL, to identify legacy rows whose
         // complete input order/kind could not be proven.
         return Ok(None);
     };

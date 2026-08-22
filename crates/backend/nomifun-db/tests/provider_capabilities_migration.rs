@@ -391,7 +391,7 @@ async fn migration_32_materializes_explicit_default_auth_schemes() {
 }
 
 #[tokio::test]
-async fn migration_46_declares_output_limits_and_removes_legacy_body_ceilings() {
+async fn migration_36_declares_output_limits_and_removes_legacy_body_ceilings() {
     const OPENAI: &str = "0190f5fe-7c00-7a00-8abc-012345678920";
     const ANTHROPIC: &str = "0190f5fe-7c00-7a00-8abc-012345678921";
     const BEDROCK: &str = "0190f5fe-7c00-7a00-8abc-012345678922";
@@ -432,7 +432,7 @@ async fn migration_46_declares_output_limits_and_removes_legacy_body_ceilings() 
         .await;
     }
 
-    apply_through(&mut connection, 46).await;
+    apply_through(&mut connection, 36).await;
 
     for (provider_id, expected_protocol, expected_limit) in [
         (OPENAI, "openai.chat_text", None),
