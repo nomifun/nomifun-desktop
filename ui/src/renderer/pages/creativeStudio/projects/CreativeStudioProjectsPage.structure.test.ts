@@ -13,12 +13,12 @@ const adapterSource = readFileSync(new URL('./projectServiceAdapter.ts', import.
 const css = readFileSync(new URL('./CreativeStudioProjectsPage.module.css', import.meta.url), 'utf8');
 
 describe('Creative Studio project center product contract', () => {
-  test('locks the frozen 1440/1280/1024 card-grid measurements', () => {
+  test('keeps the compact 1440/1280/1024 card-grid measurements', () => {
     expect(css.includes('max-width: 1152px')).toBe(true);
     expect(css.includes('grid-template-columns: repeat(3, minmax(0, 1fr))')).toBe(true);
-    expect(css.includes('gap: 20px')).toBe(true);
-    expect(css.includes('min-height: 176px')).toBe(true);
-    expect(css.includes('border-radius: 18px')).toBe(true);
+    expect(/\.grid\s*\{[\s\S]*?gap:\s*16px;/.test(css)).toBe(true);
+    expect(css.includes('min-height: 144px')).toBe(true);
+    expect(css.includes('border-radius: 16px')).toBe(true);
     expect(css.includes('@media (max-width: 1279px)')).toBe(true);
     expect(css.includes('grid-template-columns: repeat(2, minmax(0, 1fr))')).toBe(true);
     expect(css.includes('@media (max-width: 639px)')).toBe(true);
@@ -26,6 +26,18 @@ describe('Creative Studio project center product contract', () => {
     expect(css.includes('min-height: 360px')).toBe(true);
     expect(css.includes('border-top: 1px solid')).toBe(true);
     expect(css.includes('border-bottom: 1px solid')).toBe(true);
+  });
+
+  test('keeps the page heading and card contents compact and center-aligned', () => {
+    expect(pageSource.includes('styles.eyebrow')).toBe(false);
+    expect(/\.container\s*\{[\s\S]*?padding:\s*16px 24px 28px;[\s\S]*?gap:\s*16px;/.test(css)).toBe(true);
+    expect(/\.header\s*\{[\s\S]*?padding-bottom:\s*12px;/.test(css)).toBe(true);
+    expect(/\.title\s*\{[\s\S]*?font-size:\s*24px;[\s\S]*?line-height:\s*30px;/.test(css)).toBe(true);
+    expect(/\.cardCheckbox\s*\{[\s\S]*?margin-top:\s*3px;/.test(css)).toBe(true);
+    expect(/\.cardTitle\s*\{[\s\S]*?font-size:\s*16px;[\s\S]*?line-height:\s*22px;/.test(css)).toBe(true);
+    expect(/\.cardStats\s*\{[\s\S]*?margin-top:\s*4px;[\s\S]*?font-size:\s*13px;/.test(css)).toBe(true);
+    expect(/\.cardFooter\s*\{[\s\S]*?margin-top:\s*20px;[\s\S]*?align-items:\s*center;/.test(css)).toBe(true);
+    expect(/\.cardTimestamp\s*\{(?![\s\S]*?margin-bottom)/.test(css)).toBe(true);
   });
 
   test('keeps creation, archive IO, inline rename, and destructive confirmation explicit', () => {

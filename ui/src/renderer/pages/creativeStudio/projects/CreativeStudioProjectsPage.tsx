@@ -202,7 +202,6 @@ const CreativeStudioProjectsPage: React.FC<CreativeStudioProjectsPageProps> = ({
       <div className={styles.container}>
         <header className={styles.header}>
           <div className={styles.heading}>
-            <p className={styles.eyebrow}>{copy.libraryLabel}</p>
             <h1 className={styles.title}>{copy.title}</h1>
           </div>
           <div className={styles.headerActions}>

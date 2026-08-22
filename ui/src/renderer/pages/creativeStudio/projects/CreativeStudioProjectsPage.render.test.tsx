@@ -37,7 +37,7 @@ describe('Creative Studio project center presentation', () => {
     expect(html.includes('data-creative-studio-projects="true"')).toBe(true);
     expect(html.includes('data-projects-state="ready"')).toBe(true);
     expect(html.includes('data-projects-grid="true"')).toBe(true);
-    expect(html.includes('画布库')).toBe(true);
+    expect(html.includes('画布库')).toBe(false);
     expect(html.includes('无限画布')).toBe(true);
     expect(html.includes('新建画布')).toBe(true);
     expect(html.includes('导入画布')).toBe(true);
