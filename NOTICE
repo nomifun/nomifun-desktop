@@ -15,8 +15,7 @@ applicable:
   Copyright iOfficeAI
   Licensed under the Apache License, Version 2.0.
 
-This product's Creative Studio rebuild references and, where authorized,
-incorporates source material from:
+The UI interaction of the creative studio for this product is referenced from :
 
   infinite-canvas
   https://github.com/tigerowo/infinite-canvas
@@ -24,10 +23,6 @@ incorporates source material from:
   Copyright (c) 2026 tigerowo
   Root license at the reference revision: MIT License.
 
-The complete MIT notice is preserved in
-third_party/infinite-canvas/LICENSE. The source and authorization audit is
-recorded in docs/specs/2026-08-20-infinite-canvas-product-rebuild.zh.md; this
-attribution does not replace that audit or make a broader provenance claim.
 
 The Windows installer template is derived from:
 

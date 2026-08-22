@@ -269,7 +269,7 @@
 - 真实 Tauri 窗口验证侧栏入口、Focus Shell、Projects、Image、Video、Prompts、Assets、Canvas、Workflow、AI 禁用态、private-only 编辑器、手动 CAS 保存、完整刷新、持久恢复、返回工作台和原生窗口按钮。关闭按钮按产品合同隐藏到托盘并保持进程；自动化无法操作任务栏托盘，因此“托盘退出”未伪报通过，开发进程最后由其 PTY `Ctrl+C` 收口。
 - Windows x64 完整 package 在冻结 HEAD `29199d6208d16d6ad676ac12854bd82a71321034` 成功。程序 `target/x86_64-pc-windows-msvc/release/nomifun-desktop.exe` 为 203,402,752 bytes，SHA-256 `CBACE82E93457DB40B2D65120901F31632FF9196ABAF8E3C30C81F9ED99197F3`，版本 0.6.4，未签名。canonical 与 `dist/desktop` setup 均为 60,033,206 bytes，SHA-256 `D7E3D6CDC4FC84450510CC721E08400A900D14B533B6828375622CAAC2798FB9`，逐字节一致且未签名。
 - NSIS 使用锁定的 Tauri CLI 2.11.2 受控模板：current-user 程序根为 `%LOCALAPPDATA%\Programs\NomiFun`，不会与 `%LOCALAPPDATA%\NomiFun` 稳定数据根重叠；卸载器保留真实用户数据。source 与 rendered installer contract 均通过。最终 build manifest 为 schema 1、app 0.6.4、API contract 20、frontend build id `abecfcd0-7904-48b3-986b-95009d6a2b31`。
-- 双语 Creative Studio 能力指南、架构/API/ID 文档、README 与 production 截图已刷新；`NOTICE` 与 `third_party/infinite-canvas/` 已记录参考项目 revision、来源和完整 MIT 许可证。英文 Focus Shell 已本地化，但画布/编辑器主体仍有较多简体中文，文档未把它包装成完整英文体验。
+- 双语 Creative Studio 能力指南、架构/API/ID 文档、README 与 production 截图已刷新；`NOTICE` 保留 infinite-canvas 的上游名称、URL、版权与 MIT 根许可证说明，不再随包携带已删除的 `third_party/infinite-canvas/` 副本和阶段性审计规格。英文 Focus Shell 已本地化，但画布/编辑器主体仍有较多简体中文，文档未把它包装成完整英文体验。
 - 当前账户没有运行 setup，也没有修改正式用户数据。两个已清空产品数据的隔离 Web 临时根 `nomifun-p11-web-cd185d87-73305df076454fdf8068653ccd3789ee`、`nomifun-p11-web-cd185d87-142fbd7421764bdda841723eae25d625` 因安全策略保留在 `%TEMP%`；真实 Tauri 隔离根为 `nomifun-p11-tauri-29199d62-10c60bb4942c4332b01e8b9a1b16d867`。冻结时遗留的 PID 41664 / Vite 5173 没有被 `taskkill /F` 暴力清理，主线推送前的后续实时检查已确认 5173 自行释放。
 
 `ac3a5e9a` 的远程 main 整合门：

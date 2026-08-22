@@ -21,9 +21,7 @@
     "resources": {
       "../../ui/dist/": "webui-dist/",
       "../../LICENSE": "LICENSE",
-      "../../NOTICE": "NOTICE",
-      "../../third_party/infinite-canvas/LICENSE": "third_party/infinite-canvas/LICENSE",
-      "../../third_party/infinite-canvas/SOURCE.md": "third_party/infinite-canvas/SOURCE.md"
+      "../../NOTICE": "NOTICE"
     },
     "icon": [
       "icons/32x32.png",
