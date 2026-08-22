@@ -2,7 +2,7 @@
 
 > 用途：在长任务发生上下文压缩或人员切换时，从可验证提交继续，而不是重新审计整仓。
 > 分支：`codex/infinite-canvas-rebuild`
-> 最后功能锚点：`4afae7af`（`feat(creative-studio): connect canvas planning context`）
+> 最后功能锚点：`6ccc7a24`（`feat(creative-studio): apply durable canvas proposals`）
 > 参考产品锚点：`ef7303d`
 
 ## 1. 续接协议
@@ -28,7 +28,7 @@
 | P5 | Canonical 资产 API/库、文本/图像/视频/音频节点、素材选择与结果回填 | `57128727`、`e05b18a8`、`04f805a3`、`444db764` |
 | P6 | NomiFun 精确任务模型目录、幂等任务、canonical owner、取消/恢复、pending 引用持久化；画布视频/音频 owner、提交响应不明状态确认与 authoritative 404 orphan 清理；真实 `standalone_workbench` owner、完整有序输入快照、owner-scoped keyset/active 历史与安全退役合同；单模型删除的 Creative Studio exact-pair 原子清理与硬绑定门禁 | `46545c21`、`b27d70d5`、`d5179e77`、`9897cc44`、`60982e38`、`9fffd526`、`8e5f83cf`、`1dd4b9e9`、`9990921c`、`53093740`、`a394b1e6` |
 | P7 | 生图/视频工作台、owner-scoped 持久终态历史、live 恢复/取消/载入/精确重试、terminal-only 安全移除、工作流定义/运行中心、提示词与素材中心 | `2283ee74`、`1414846e`、`ebd17f3a`…`aad21d9d`、`7e45f8ad`、`9990921c`、`3b8a1b03` |
-| P8 | 持久化画布 Agent、原子操作、裁剪/切分/遮罩编辑与真实任务回填；owner-only Agent canvas-op HTTP 网关、服务端审计来源、CAS/UUIDv7/删除确认门禁；durable exact `modelInput`/`skillIds`、有界 selection context/planning envelope、正规 NomiFun Skill chip 与 Conversation `inject_skills` | `e5368474`…`00f407c6`、`cac4bca8`…`bc01849e`、`bc879581`、`af300a40`、`4afae7af` |
+| P8 | 持久化画布 Agent、原子操作、裁剪/切分/遮罩编辑与真实任务回填；owner-only Agent canvas-op HTTP 网关、durable exact `modelInput`/`skillIds`、有界 planning context、正规 Skill/Conversation transport；前后端严格 canvas-ops artifact、人工预览应用、assistant-message provenance、原子 receipt exactly-once、编辑锁与刷新恢复 | `e5368474`…`00f407c6`、`cac4bca8`…`bc01849e`、`bc879581`、`af300a40`、`4afae7af`、`6ccc7a24` |
 | P9 | Director v1 domain、Three.js runtime、CAS sidecar、时间轴、截图回填、sidecar 全资产闭包与归档重映射 | `1ccbd013`、`d3a609f6`、`7b7712c0`、`dfa3c0b3`、`f25825f1`、`c12b8db` |
 | P10 | 旧 Workshop UI、翻译、后端路由、旧画布存储与旧任务归属退出运行链 | `63c99d4f`…`7867fe3f` |
 
@@ -78,12 +78,12 @@
 - 单独删除一个 Provider model 现在必须经过 app 层协调器：Workshop 只生成精确 `{ providerId, model }` 的项目/工作流清理计划，`SqliteProviderModelRepository` 在一个 writer transaction 内复核 active creation task 与 nonterminal Workflow snapshot、对全部 project/workflow 做 revision CAS、删除 exact capability/model 并只递增一次 Provider `config_revision`。任一 stale/missing/hard binding 都整笔回滚；旧 repository delete 旁路已移除，System 构造器也必须显式注入协调器。
 - 只清除 config、图片/视频/音频 composer、Workflow generator/planner 和无消息空 Agent session 的当前选择；同 Provider 其他模型、completed Agent session、terminal task、asset origin 与 terminal Workflow snapshot 保留为历史。live config、pending Agent turn、queued/running task 或 nonterminal Workflow run 返回冲突。新 creation task 在同一写事务内证明 Provider/model 均 enabled 且具有 exact task capability；既有幂等历史回放仍在 live-parent 门禁前返回。
 - 图片/视频独立工作台在目录刷新后会清空已消失的 exact 选择，不自动替换成同 Provider 的其他模型。真实 API 创建临时 Provider、两个模型与双 config 项目后删除目标模型，项目 revision 2→3、目标选择清空且 prompt 保留、sibling 模型/选择保留；临时项目与 Provider 最终精确清理为 0。稳定后端下图片/视频完整 reload 均 Console 0 error / 0 warning，固定 stone token 为 `#f4f2ed / #292524 / 87,83,78`；未调用付费 Provider。
-- `POST /api/creative-studio/projects/{projectId}/agent-ops` 已把既有 `CreativeAgentOp` 原子批处理暴露为 owner-only HTTP 网关。Wrapper 只接受 `{ expectedRevision, ops }`，审计 source 固定由服务端写入 `creative-studio-agent`；nested op 继续复用 canonical snake_case domain wire，不复制 DTO。响应只包含 CAS 后 project summary 与有序 op results；stale、unknown field、空/非法批次、config runtime 字段篡改均零写入，节点/连线 ID 由服务端签发 UUIDv7。
-- Agent route 首批显式拒绝 `delete_node`，删除仍只能走画布人工确认入口；domain/service 的受控内部删除能力不受影响。真实 API 已验证 add 200/revision 2、stale 409/`REVISION_CONFLICT`、delete 400 且零写入、move 200/revision 3，并精确清理临时项目为 0。现有画布刷新仍为 3 节点/0 连接、返回项目可用、Console 0 error / 0 warning。前端严格 artifact 预览/“应用到画布”按钮尚未接线，不能把网关存在描述成 Agent 已会自动改画布。
+- `POST /api/creative-studio/projects/{projectId}/agent-ops` 现在只接受 `{ assistantMessageId, expectedRevision, ops }`。服务端重新读取 owner/project/session-bound 的完成 assistant 消息，严格解析唯一 final `nomifun.creative-studio.canvas-ops/v1` artifact，并要求 canonical ops 与 HTTP body 完全一致；SQLite 事务再次比对原始 message content，再原子提交 project CAS 与 receipt。相同消息/相同 payload 跨 revision 重放返回首次签发的结果 ID，不重复改图；不同 payload 冲突。Gateway 的通用 CAS 工具不冒充这条人工批准语义。
+- 前后端 parser 均拒绝额外/非 final fence、decoded duplicate key、unknown field、delete/media/config/runtime 操作、非有限数、尺寸小于 1、非法 UUID/字符串与 256 KiB 以上 JSON；前端还拒绝 Rust 无法表示的孤立 UTF-16 surrogate。路由继续显式拒绝 `delete_node`，删除只能走人工确认入口。
 - Agent pending turn 新增 durable `modelInput` 与有序 `skillIds`：旧文档缺字段时前端规范化为 `modelInput=prompt` / `skillIds=[]`，新写入始终带完整字段；刷新/响应丢失恢复必须重放同一模型输入与技能快照。模型输入上限 262144 UTF-16 units；Skill 最多 8 个，1-128 ASCII `[A-Za-z0-9._-]`、唯一且保持顺序。标题仍只来自用户 prompt，不会泄漏 planning envelope。
 - 纯 context builder 以 document 顺序稳定输出 selected 节点→一跳连线/分组/operation 引用，最多 32 节点与 64 连接；文本/提示词最多 2000 Unicode characters，data/blob 媒体载荷被剥离，不包含 resolved URL 或 opaque Provider parameters。v1 planning envelope 固定声明只允许 canvas-ops artifact、必须人工批准并禁止 delete/media-generation。
 - Canvas Agent Composer 现在显示可移除 context chips，并由用户明确选择 1-3 个正规 NomiFun Skill：画布规划、整理布局、工作流设计；不会再按 prompt 正则伪推断能力。发送前把当前 chip ID、bounded envelope 与 skill 顺序一起持久化；Nomi transport 只发送 `modelInput`，把 skills 复制到 `inject_skills`，展示 prompt 只用于标题/聊天。replay/recovery 继续使用同一 envelope、skill list 与 idempotency key。
-- 三个 Skill 已进入 packaged builtin corpus 与本地化 metadata，并由安全合同限制为人工审阅提案：canvas 禁止 `delete_node`/媒体生成，organize 只整理现有结构，workflow 在 strict draft parser 接入前只给规划文本。隔离后端启动真实刷新 Skill fingerprint，`GET /api/skills` 3/3 返回 builtin。严格 artifact preview/“应用到画布”仍未接线，不能宣称 Agent 已能自动改图。
+- 三个 Skill 已进入 packaged builtin corpus 与本地化 metadata，并由安全合同限制为人工审阅提案：canvas 禁止 `delete_node`/媒体生成，organize 只整理现有结构，workflow 在 strict draft parser 接入前只给规划文本。Canvas assistant 完成消息现在会显示严格提案卡；只有用户点击“应用到画布”才进入产品级独占锁、提交 receipt/CAS 并权威 reload。reload 不可用时画布保持锁定并提供显式恢复；session resolve 用 receipt-backed message ID 在 remount 后直接恢复“已应用”。
 
 `dd18dc6f` 的提交前检查：
 
@@ -218,6 +218,13 @@
 - 真实 1280×720 画布选择节点并打开 Agent：context chip、3 个 Skill、移除/toggle、390px 右栏均通过且无横向 overflow，Console 0 error / 0 warning；最终通过 UI 收起并核对项目仍为 3 节点/0 连接、`right.open=false`、pending Agent turn=0。浏览器 viewport override 本轮未生效到 390px，未伪报移动端实测。
 - 完整 `bun run build` 通过 Vite 7685 modules、Rust release、Tauri 与 NSIS，生成 `nomifun-desktop.exe` 和 `NomiFun_0.6.4_x64-setup.exe`；只保留仓库既存 chunk/unused warning。未调用模型或产生 Provider 成本。
 
+`6ccc7a24` 的提交前检查：
+
+- Canvas proposal/Agent session/Editor/ProductRoute 定向前端：69 passed / 486 assertions；`bun run typecheck`、图标、主题、dead-css、`git diff --cached --check` 通过。UI production build 通过 7688 modules，只保留既存 NomiChat dynamic/static import 与大 chunk 提示。
+- Rust strict artifact parser：12 passed；SQLite proposal exactly-once/content-fence：2 passed；HTTP route：4 passed；fingerprint 与 service replay 各 1 passed；ID schema、backup restore、session applied-receipt projection 各 1 passed；Conversation session：3 passed。`cargo check -p nomifun-app --lib` 与定向 Rust fmt 通过，只保留未改模块既存 warning。
+- 隔离 8788 真实应用 migration 045。真实 1280×720 页面先显示“应用到画布”，点击后新增 1 个文本节点并显示“已应用”；完整 reload 仍从 receipt 恢复已应用。相同请求重放返回 200/`replayed:true`/原 node ID，revision 3 与 nodeCount 1 不变；不同 payload 返回 409。新鲜 reload 时间窗 Console 0 error / 0 warning。
+- 临时 project、receipt、session binding、Conversation、messages 均按精确 ID 清理为 0；原 QA 画布仍为 revision 52、3 节点/0 连接、无 Chat session、右栏关闭。参考项目保持在 3000，目标保持在 5174/8788；未调用模型或生成媒体。
+
 `7e45f8ad` 的提交前检查：
 
 - `cargo test -p nomifun-workshop`：70 passed。
@@ -251,8 +258,9 @@
 
 ## 5. 下一步单线程优先级
 
-1. 规划型 Agent：在已完成的 context/Skill transport 与安全 ops 网关上接严格 canvas-ops artifact 解析、预览和人工“应用到画布”；随后补首页 Agent 启动画布与 Workflow AI draft→预览→编辑器→人工保存。首批不触发高级媒体生成。
-2. 高级媒体：视频多任务/首尾帧/高级引用、音频上传/时长/VoiceClone、Director/全景与完整视频输出均须先补 typed 后端能力。
-3. P11：1280×720、1024×768、390×844、Tauri 慢环、真实 provider 冒烟、UI build/桌面打包和最终能力文档。
+1. 最小首页创作闭环：只做需求输入、一个 exact Chat 模型、原子创建画布与单一当前 pending Agent turn，成功后进入画布自动继续；首批不做附件、复杂会话历史/分支或多会话编排。
+2. 最小 Workflow AI 闭环：简单需求 + exact Chat 模型 → strict draft 预览 → 应用编辑器 → 用户手动保存；首批不做参考附件、公开模板或复杂一次性会话产品。
+3. P11 上线门：1280×720、1024×768、390×844、Tauri 慢环、UI build/桌面打包和最终能力文档。真实付费 provider 冒烟仍需单独成本授权。
+4. 高级媒体后置：视频多任务/首尾帧/高级引用、音频上传/时长/VoiceClone、Director/全景与完整视频输出只在主路径可上线后再补 typed 后端能力。
 
-不要因为主体代码已存在就跳过这些门禁；standalone owner/history/recovery/安全移除、Creative Studio exact-model 删除、Agent ops 网关、durable planning input/context 与 Canvas context/Skill transport 已完成，下一功能提交从 strict artifact 预览/人工应用开始。
+不要因为主体代码已存在就跳过上线门禁；strict artifact/人工应用已完成。按 2026-08-22 最新范围，后续会话与创作功能优先简单可用，不提前建设复杂会话、附件或编排体系。
