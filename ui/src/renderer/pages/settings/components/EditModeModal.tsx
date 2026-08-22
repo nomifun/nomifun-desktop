@@ -19,6 +19,8 @@ import {
   buildProviderCredentials,
   type BedrockAuthMethod,
 } from './providerCredentialsForm';
+import { buildAuthSchemeOptions } from './providerConnectionForm';
+import { buildAuthSchemeEditPatch } from './providerEditForm';
 import useModelProtocolManifests from './useModelProtocolManifests';
 
 const AWS_REGIONS = [
@@ -43,7 +45,8 @@ const ProviderLogo: React.FC<{ logo: string | null; name: string; size?: number 
     <LinkCloud theme='outline' size={size} className='text-t-secondary flex shrink-0' />
   );
 
-export type EditProviderPatch = Pick<IProvider, 'id' | 'name' | 'base_url' | 'auth_scheme'> & {
+export type EditProviderPatch = Pick<IProvider, 'id' | 'name' | 'base_url'> &
+  Partial<Pick<IProvider, 'auth_scheme'>> & {
   /** Write-only. Omitted means keep the existing encrypted payload. */
   credentials?: ProviderCredentials;
   bedrock_config?: IProvider['bedrock_config'];
@@ -55,6 +58,8 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
     const [form] = Form.useForm();
     const [message, messageContext] = useArcoMessage();
     const [saving, setSaving] = useState(false);
+    const [authSchemeDirty, setAuthSchemeDirty] = useState(false);
+    const authScheme = (Form.useWatch('auth_scheme', form) as string | undefined) ?? '';
     const bedrockAuthMethod = Form.useWatch('bedrockAuthMethod', form) as
       | BedrockAuthMethod
       | undefined;
@@ -69,7 +74,14 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
       baseUrlHint: data?.base_url,
     });
     const providerManifest = manifestState.manifests.chat;
-    const authSchemeOptions = providerManifest?.auth_schemes.map((item) => item.scheme) ?? [];
+    const authSchemeOptions = useMemo(
+      () =>
+        buildAuthSchemeOptions(
+          providerManifest?.auth_schemes.map((item) => item.scheme) ?? [],
+          authScheme
+        ),
+      [authScheme, providerManifest?.auth_schemes]
+    );
     const providerLogo = useMemo(
       () => getProviderLogo({ name: data?.name, platform: data?.platform }),
       [data?.name, data?.platform]
@@ -78,6 +90,7 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
     useEffect(() => {
       if (!data || !modalProps.visible) return;
       form.resetFields();
+      setAuthSchemeDirty(false);
       form.setFieldsValue({
         name: data.name,
         base_url: data.base_url,
@@ -92,16 +105,6 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
         bedrockProfile: data.bedrock_config?.profile || '',
       });
     }, [data, form, modalProps.visible]);
-
-    useEffect(() => {
-      if (
-        modalProps.visible &&
-        !form.getFieldValue('auth_scheme') &&
-        providerManifest?.default_auth_scheme
-      ) {
-        form.setFieldValue('auth_scheme', providerManifest.default_auth_scheme);
-      }
-    }, [form, modalProps.visible, providerManifest?.default_auth_scheme]);
 
     const showCredentialError = (error: string) => {
       if (error === 'api_keys_required') {
@@ -135,7 +138,11 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
           id: data.id,
           name: String(values.name).trim(),
           base_url: String(values.base_url ?? '').trim(),
-          auth_scheme: String(values.auth_scheme).trim(),
+          ...buildAuthSchemeEditPatch(
+            data.auth_scheme,
+            String(values.auth_scheme),
+            authSchemeDirty
+          ),
           ...(credentialBuild.credentials === undefined
             ? {}
             : { credentials: credentialBuild.credentials }),
@@ -219,7 +226,9 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
               <AutoComplete
                 data={authSchemeOptions.map((scheme) => ({ value: scheme, name: scheme }))}
                 loading={manifestState.loadingTasks.includes('chat')}
+                filterOption={false}
                 placeholder='bearer / header_key:x-api-key'
+                onChange={() => setAuthSchemeDirty(true)}
                 triggerProps={{ getPopupContainer: () => document.body }}
               />
             </Form.Item>

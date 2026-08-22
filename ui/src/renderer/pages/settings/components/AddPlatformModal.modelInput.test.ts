@@ -77,6 +77,8 @@ describe('AddPlatformModal unified model input flow', () => {
     expect(addSource.includes('providerManifest.platform_default_base_url')).toBe(true);
     expect(addSource.includes('providerManifest.default_auth_scheme')).toBe(true);
     expect(addSource.includes('providerManifest?.auth_schemes')).toBe(true);
+    expect(addSource.includes('buildAuthSchemeOptions(')).toBe(true);
+    expect(addSource.includes('filterOption={false}')).toBe(true);
     expect(addSource.includes('manifestState.loadingTasks.length > 0')).toBe(true);
     expect(
       editorSource.includes('const manifest = loading ? undefined : manifests[capability.task]')

@@ -22,10 +22,50 @@ export const isValidConnectionRole = (role: string): boolean =>
 export const AUTH_SCHEME_PRESETS = [
   'bearer',
   'token',
+  'header_key:x-api-key',
   'header_key:x-goog-api-key',
   'header_key:xi-api-key',
+  'query_key:key',
+  'query_key:api_key',
   'volc_voice',
 ] as const;
+
+const PARAMETERIZED_AUTH_SCHEME_EXAMPLES: Readonly<Record<string, readonly string[]>> = {
+  'header_key:<name>': [
+    'header_key:x-api-key',
+    'header_key:x-goog-api-key',
+    'header_key:xi-api-key',
+  ],
+  'query_key:<param>': ['query_key:key', 'query_key:api_key'],
+};
+
+/**
+ * Build resilient provider-auth suggestions.
+ *
+ * The backend manifest is authoritative, but it is loaded asynchronously and
+ * may be unavailable while editing an already persisted provider. Parameterized
+ * manifest entries are templates, not valid values by themselves, so expose
+ * concrete common examples and keep the exact stored/user-entered scheme at
+ * the front of the list.
+ */
+export const buildAuthSchemeOptions = (
+  manifestSchemes: readonly string[],
+  currentScheme?: string
+): string[] => {
+  const expand = (scheme: string): readonly string[] =>
+    PARAMETERIZED_AUTH_SCHEME_EXAMPLES[scheme.trim()] ?? [scheme.trim()];
+  return [
+    currentScheme?.trim(),
+    ...manifestSchemes.flatMap(expand),
+    ...AUTH_SCHEME_PRESETS,
+    // Bedrock is valid only for the provider's default connection, so it is
+    // deliberately a provider-form fallback rather than a named-connection preset.
+    'bedrock',
+  ].filter(
+    (scheme, index, values): scheme is string =>
+      Boolean(scheme) && values.indexOf(scheme) === index
+  );
+};
 
 export type CredentialsKind = 'api_keys' | 'volc_voice' | 'custom';
 
