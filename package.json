@@ -29,12 +29,13 @@
     "test:desktop": "bun scripts/test-rust.mjs desktop",
     "test:browser": "bun scripts/test-rust.mjs browser",
     "test:ui": "bun test --cwd ui",
-    "check": "bun run typecheck && bun run check:i18n && bun run check:theme && bun run check:icons && bun run check:dead-css && bun run check:creative-studio-retirement && bun run check:process-runtime-boundary && bun run check:browser-platform-boundary && bun run check:agent-vocabulary && bun run help --check",
+    "check": "bun run typecheck && bun run check:i18n && bun run check:theme && bun run check:icons && bun run check:dead-css && bun run check:windows-installer && bun run check:creative-studio-retirement && bun run check:process-runtime-boundary && bun run check:browser-platform-boundary && bun run check:agent-vocabulary && bun run help --check",
     "typecheck": "bun run --filter=./ui typecheck",
     "check:i18n": "bun scripts/generate-i18n-types.mjs --self-test && bun scripts/generate-i18n-types.mjs --check",
     "check:theme": "bun scripts/check-theme-contract.mjs",
     "check:icons": "bun scripts/check-icon-imports.mjs",
     "check:dead-css": "bun scripts/check-dead-css-utilities.mjs",
+    "check:windows-installer": "bun scripts/check-windows-installer-contract.mjs",
     "check:creative-studio-retirement": "bun scripts/check-creative-studio-retirement.mjs",
     "check:creative-studio-retirement:dist": "bun scripts/check-creative-studio-retirement.mjs --dist",
     "check:process-runtime-boundary": "bun scripts/check-process-runtime-boundary.mjs",
@@ -47,7 +48,7 @@
     "help": "bun scripts/help.mjs"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.1.0",
+    "@tauri-apps/cli": "2.11.2",
     "concurrently": "^9.2.1"
   }
 }
