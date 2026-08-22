@@ -112,11 +112,14 @@ CREATE TABLE conversations (
 v3 中的稳定实体包括用户、会话、消息、终端会话、Provider、Requirement、
 Agent Execution 及模板、Agent Execution
 Participant/Step/Attempt/Template Participant、知识库、附件、
-用户 Preset、Workshop 画布/资产，以及 Channel Plugin/User/Session。
-这些实体分别使用具名业务字段；其中 Requirement 使用 `requirement_id`，
-并另有只供人类展示的 `display_no`，Agent Execution 和 Channel 子实体使用
-`participant_id`、`step_id`、`attempt_id`、`template_participant_id`、
-`channel_plugin_id`、`channel_user_id`、`channel_session_id`。
+用户 Preset、创意工坊项目/Workflow/Workflow run/Agent session/素材/
+creation task，以及 Channel Plugin/User/Session。创意工坊分别使用
+`project_id`、`workflow_id`、`workflow_run_id`、`session_id`、`asset_id` 和
+`creation_task_id`；项目文档内嵌的图节点与连接也携带 canonical UUIDv7
+身份。Requirement 使用 `requirement_id`，并另有只供人类展示的
+`display_no`；Agent Execution 和 Channel 子实体使用 `participant_id`、
+`step_id`、`attempt_id`、`template_participant_id`、`channel_plugin_id`、
+`channel_user_id` 和 `channel_session_id`。
 受管 Companion side-store 中可被 API、文件或其他记录再次定位的 Memory、
 Session Window、Collected Event、Skill 与 Skill Pattern 同样使用
 各自具名的 UUIDv7 newtype；只在当前调用结果中存在的临时 learning / evolution

@@ -1,6 +1,6 @@
 # Current Technical Status
 
-Updated: 2026-08-01.
+Updated: 2026-08-22.
 
 This file is a compact current-state snapshot. Historical P0-P5 migration notes
 were removed from the active status because they described the 2026-06-08
@@ -41,8 +41,12 @@ The current frontend route map lives in
 - `/nomi` and `/companion`
 - `/customer-service` and `/customer-service/:cs_agent_id`
 - `/knowledge` and `/knowledge/:id`
-- `/assets`
-- `/workshop` and `/workshop/:id`
+- Creative Studio focused shell: `/workshop`, `/workshop/projects`, project
+  editors at `/workshop/canvas/:projectId` and `/workshop/director/:projectId`,
+  workbenches at `/workshop/image` and `/workshop/video`, plus
+  `/workshop/prompts`, `/workshop/assets`, and `/workshop/workflows`.
+  `/workshop/audio` is retired; see
+  [`docs/guides/creative-studio.md`](docs/guides/creative-studio.md).
 - `/settings/system` and `/settings/execution-engines`, plus system
   sub-sections routed through the system settings page
 - `/settings/ssh-hosts` — the SSH remote-host book (instance owner only)
