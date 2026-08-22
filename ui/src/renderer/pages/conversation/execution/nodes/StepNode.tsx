@@ -366,7 +366,7 @@ function StepNodeImpl({ data, selected }: NodeProps<StepFlowNode>) {
         onMouseLeave={() => setRelationFocus(false)}
         style={{ '--dag-i': data.enterIndex ?? 0 } as React.CSSProperties}
       >
-        <Handle type='target' position={Position.Top} isConnectable={false} />
+        <Handle id='step-input' type='target' position={Position.Top} isConnectable={false} />
         <button
           type='button'
           aria-label={`${data.title} · ${data.statusLabel} · ${data.quickLookLabels.upstream} ${data.upstreamLabels.length} · ${data.quickLookLabels.downstream} ${data.downstreamLabels.length}`}
@@ -416,7 +416,7 @@ function StepNodeImpl({ data, selected }: NodeProps<StepFlowNode>) {
             </span>
           </span>
         </button>
-        <Handle type='source' position={Position.Bottom} isConnectable={false} />
+        <Handle id='step-output' type='source' position={Position.Bottom} isConnectable={false} />
       </div>
     </Popover>
   );
