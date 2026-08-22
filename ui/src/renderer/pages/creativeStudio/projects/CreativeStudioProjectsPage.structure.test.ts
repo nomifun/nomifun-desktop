@@ -36,8 +36,17 @@ describe('Creative Studio project center product contract', () => {
     expect(/\.cardCheckbox\s*\{[\s\S]*?margin-top:\s*3px;/.test(css)).toBe(true);
     expect(/\.cardTitle\s*\{[\s\S]*?font-size:\s*16px;[\s\S]*?line-height:\s*22px;/.test(css)).toBe(true);
     expect(/\.cardStats\s*\{[\s\S]*?margin-top:\s*4px;[\s\S]*?font-size:\s*13px;/.test(css)).toBe(true);
-    expect(/\.cardFooter\s*\{[\s\S]*?margin-top:\s*20px;[\s\S]*?align-items:\s*center;/.test(css)).toBe(true);
+    expect(/\.cardFooter\s*\{[\s\S]*?margin-top:\s*16px;[\s\S]*?padding-top:\s*10px;[\s\S]*?align-items:\s*center;/.test(css)).toBe(true);
     expect(/\.cardTimestamp\s*\{(?![\s\S]*?margin-bottom)/.test(css)).toBe(true);
+  });
+
+  test('uses theme-aware elevated card surfaces instead of a hardcoded warm fill', () => {
+    expect(css.includes('#f1eee8')).toBe(false);
+    expect(css.includes('#ebe6dc')).toBe(false);
+    expect(/\.card\s*\{[\s\S]*?border:\s*1px solid[\s\S]*?color-mix\([\s\S]*?box-shadow:/.test(css)).toBe(true);
+    expect(/\.card:hover\s*\{[\s\S]*?transform:\s*translateY\(-2px\);[\s\S]*?box-shadow:/.test(css)).toBe(true);
+    expect(/\.cardFooter\s*\{[\s\S]*?border-top:\s*1px solid color-mix/.test(css)).toBe(true);
+    expect(css.includes(":global([data-theme='dark']) .card")).toBe(true);
   });
 
   test('keeps creation, archive IO, inline rename, and destructive confirmation explicit', () => {

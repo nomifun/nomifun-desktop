@@ -69,6 +69,25 @@ describe('standalone prompt-library source-parity appearance', () => {
     expect(html.includes('aria-pressed="true"')).toBe(true);
     expect(html.includes('按标题查询，按 Enter 搜索')).toBe(true);
     expect(html.includes('已经到底了')).toBe(true);
+    expect(html.split('data-facet-chips-expanded="false"').length - 1).toBe(2);
+  });
+
+  test('collapses facet chips to two rows and reveals a measured overflow toggle', () => {
+    const source = readFileSync(
+      new URL('./StandalonePromptLibraryPage.tsx', import.meta.url),
+      'utf8'
+    );
+    const css = readFileSync(
+      new URL('./StandalonePromptLibraryPage.module.css', import.meta.url),
+      'utf8'
+    );
+
+    expect(source.includes("expanded ? '收起' : '查看更多'")).toBe(true);
+    expect(source.includes('chips.scrollHeight > collapsedHeight + 1')).toBe(true);
+    expect(source.includes('new ResizeObserver(measureOverflow)')).toBe(true);
+    expect(source.includes('aria-expanded={expanded}')).toBe(true);
+    expect(css.includes('--facet-chips-collapsed-height: 54px')).toBe(true);
+    expect(/\.chipsCollapsed\s*\{[\s\S]*?max-height:[\s\S]*?overflow:\s*hidden;/.test(css)).toBe(true);
   });
 
   test('renders a bounded first page instead of mounting the full catalog at once', () => {

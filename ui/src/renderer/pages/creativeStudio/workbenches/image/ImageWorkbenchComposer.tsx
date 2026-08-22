@@ -14,7 +14,6 @@ import {
   Loading,
   MagicWand,
   Pic,
-  SettingTwo,
   Time,
   Upload,
 } from '@icon-park/react';
@@ -549,7 +548,6 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
         <section className={styles.composerSection}>
           <div className={styles.sectionHeader}>
             <span>提示词</span>
-            <SettingTwo aria-hidden='true' />
           </div>
           <div className={styles.sectionBody}>
             <ComposerActions
