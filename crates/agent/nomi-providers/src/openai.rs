@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -24,6 +25,11 @@ pub struct OpenAIProvider {
     base_url: String,
     compat: ProviderCompat,
     sanitize_tool_schemas: AtomicBool,
+    /// The output-ceiling field name this endpoint told us to use instead of
+    /// the configured one, remembered so only the first turn of a session pays
+    /// the rejected request. See
+    /// [`ProviderError::suggested_output_ceiling_key`].
+    learned_output_ceiling_key: OnceLock<&'static str>,
 }
 
 impl OpenAIProvider {
@@ -34,11 +40,26 @@ impl OpenAIProvider {
             base_url: base_url.to_string(),
             compat,
             sanitize_tool_schemas: AtomicBool::new(false),
+            learned_output_ceiling_key: OnceLock::new(),
         }
     }
 
     fn should_sanitize_tool_schemas(&self) -> bool {
         self.compat.sanitize_schema() || self.sanitize_tool_schemas.load(Ordering::Acquire)
+    }
+
+    /// The request field that carries the output ceiling.
+    ///
+    /// A saved `max_tokens_field` capability override stays authoritative; the
+    /// only thing that can displace it is the endpoint's own rejection naming a
+    /// different canonical field.
+    fn output_ceiling_key(&self) -> &str {
+        self.learned_output_ceiling_key.get().copied().unwrap_or_else(|| {
+            self.compat
+                .max_tokens_field
+                .as_deref()
+                .unwrap_or("max_tokens")
+        })
     }
 
     fn build_headers(api_key: &str) -> Result<HeaderMap, ProviderError> {
@@ -251,18 +272,31 @@ impl OpenAIProvider {
             .collect()
     }
 
+    /// Test-only shorthand for the body `stream` builds on its first attempt,
+    /// i.e. before any output-ceiling renegotiation. `stream` composes the same
+    /// two calls so this cannot drift from the production default.
+    #[cfg(test)]
     fn build_request_body(
         &self,
         request: &LlmRequest,
         sanitize_tool_schemas: bool,
         include_stream_usage: bool,
     ) -> Value {
-        let max_tokens_field = self
-            .compat
-            .max_tokens_field
-            .as_deref()
-            .unwrap_or("max_tokens");
+        self.build_request_body_with_ceiling_key(
+            request,
+            sanitize_tool_schemas,
+            include_stream_usage,
+            self.output_ceiling_key(),
+        )
+    }
 
+    fn build_request_body_with_ceiling_key(
+        &self,
+        request: &LlmRequest,
+        sanitize_tool_schemas: bool,
+        include_stream_usage: bool,
+        max_tokens_field: &str,
+    ) -> Value {
         let mut body = json!({
             "model": request.model,
             "messages": Self::build_messages(
@@ -819,16 +853,19 @@ impl LlmProvider for OpenAIProvider {
         let mut sanitize_tool_schemas = self.should_sanitize_tool_schemas();
         let mut include_stream_usage = true;
         let mut learned_schema_fallback = false;
+        let mut ceiling_key = self.output_ceiling_key();
+        let mut learned_ceiling_key: Option<&'static str> = None;
 
-        // Negotiate the two optional OpenAI extensions independently. A
-        // gateway can reject both stream usage metadata and rich tool schemas;
-        // a bounded loop lets us remove each incompatible extension once
-        // without retrying unrelated 4xx responses.
+        // Negotiate the optional/renameable request fields independently. A
+        // gateway can reject stream usage metadata, rich tool schemas and the
+        // output-ceiling field name; a bounded loop lets us settle each one at
+        // most once without retrying unrelated 4xx responses.
         let (response, headers, body) = loop {
-            let body = self.build_request_body(
+            let body = self.build_request_body_with_ceiling_key(
                 request,
                 sanitize_tool_schemas,
                 include_stream_usage,
+                ceiling_key,
             );
             tracing::debug!(target: "nomi_providers", body = %serde_json::to_string_pretty(&body).unwrap_or_default(), "outgoing request");
 
@@ -848,6 +885,28 @@ impl LlmProvider for OpenAIProvider {
                         "provider rejected stream usage metadata; retrying without stream_options"
                     );
                     include_stream_usage = false;
+                }
+                // Only reachable while the ceiling is actually on the wire, and
+                // at most once per requested field: the rejection must name a
+                // DIFFERENT canonical field than the one just sent, and each
+                // rename moves `ceiling_key` to that field.
+                Err(error)
+                    if request.max_tokens.is_some()
+                        && learned_ceiling_key.is_none()
+                        && error.suggested_output_ceiling_key(ceiling_key).is_some() =>
+                {
+                    let replacement = error
+                        .suggested_output_ceiling_key(ceiling_key)
+                        .expect("guard matched a suggested output-ceiling field");
+                    tracing::warn!(
+                        target: "nomi_providers",
+                        provider = "openai",
+                        rejected = ceiling_key,
+                        replacement,
+                        "provider rejected the output-ceiling field; retrying with the field it named"
+                    );
+                    ceiling_key = replacement;
+                    learned_ceiling_key = Some(replacement);
                 }
                 Err(error)
                     if !request.tools.is_empty()
@@ -871,6 +930,9 @@ impl LlmProvider for OpenAIProvider {
         };
         if learned_schema_fallback {
             self.sanitize_tool_schemas.store(true, Ordering::Release);
+        }
+        if let Some(replacement) = learned_ceiling_key {
+            let _ = self.learned_output_ceiling_key.set(replacement);
         }
 
         let (tx, rx) = mpsc::channel(64);

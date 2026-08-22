@@ -58,6 +58,25 @@ const CANONICAL_OUTPUT_CEILING_KEYS: &[&str] = &[
     "max_output_tokens",
 ];
 
+/// Whether an already-lowercased provider error body reads as "I do not accept
+/// this request parameter" rather than as some other 4xx. Shared so every
+/// optional-parameter renegotiation recognises the same gateway vocabulary.
+fn names_a_rejected_parameter(lower: &str) -> bool {
+    [
+        "unsupported",
+        "not supported",
+        "unknown",
+        "unrecognized",
+        "not permitted",
+        "not allowed",
+        "extra_forbidden",
+        "extra inputs",
+        "invalid parameter",
+    ]
+    .iter()
+    .any(|signal| lower.contains(signal))
+}
+
 /// Merge provider-native body extensions first, then recursively overlay the
 /// serializer's typed protocol body. Every known output-ceiling escape hatch
 /// is stripped before the merge: the typed request field is the only authority,
@@ -249,20 +268,59 @@ impl ProviderError {
         let lower = message.to_ascii_lowercase();
         let names_usage_extension =
             lower.contains("stream_options") || lower.contains("include_usage");
-        let rejects_parameter = [
-            "unsupported",
-            "not supported",
-            "unknown",
-            "unrecognized",
-            "not permitted",
-            "not allowed",
-            "extra_forbidden",
-            "extra inputs",
-            "invalid parameter",
-        ]
-        .iter()
-        .any(|signal| lower.contains(signal));
-        names_usage_extension && rejects_parameter
+        names_usage_extension && names_a_rejected_parameter(&lower)
+    }
+
+    /// The canonical output-ceiling field this rejection tells us to use
+    /// instead of `current_key`, if it names one.
+    ///
+    /// Genuine OpenAI still accepts the deprecated `max_tokens` on
+    /// `/chat/completions` for non-reasoning models, but its reasoning families
+    /// (o-series, gpt-5) reject it outright rather than ignoring it:
+    ///
+    /// ```text
+    /// {"error":{"message":"Unsupported parameter: 'max_tokens' is not supported
+    ///  with this model. Use 'max_completion_tokens' instead.",
+    ///  "type":"invalid_request_error","param":"max_tokens",
+    ///  "code":"unsupported_parameter"}}
+    /// ```
+    ///
+    /// Renaming the field by default is NOT an option: `openai.chat_text` also
+    /// serves ~30 OpenAI-*compatible* platforms, many of which accept only
+    /// `max_tokens` and would silently drop an unrecognized
+    /// `max_completion_tokens`, leaving the response unbounded. Nothing in this
+    /// crate can tell those platforms apart either — `Config` carries a
+    /// `ProviderType`, never the platform id. So the ceiling key is renegotiated
+    /// only when the endpoint itself names the replacement, which no
+    /// `max_tokens`-only gateway ever does.
+    ///
+    /// The replacement is looked up in [`CANONICAL_OUTPUT_CEILING_KEYS`] rather
+    /// than parsed out of the message, so an upstream error body can never
+    /// dictate an arbitrary request field name.
+    pub(crate) fn suggested_output_ceiling_key(
+        &self,
+        current_key: &str,
+    ) -> Option<&'static str> {
+        let ProviderError::Api {
+            status: 400 | 404 | 422,
+            message,
+        } = self
+        else {
+            return None;
+        };
+        let lower = message.to_ascii_lowercase();
+        if !lower.contains(&current_key.to_ascii_lowercase())
+            || !names_a_rejected_parameter(&lower)
+        {
+            return None;
+        }
+        CANONICAL_OUTPUT_CEILING_KEYS
+            .iter()
+            .copied()
+            .find(|candidate| {
+                !candidate.eq_ignore_ascii_case(current_key)
+                    && lower.contains(&candidate.to_ascii_lowercase())
+            })
     }
 }
 
@@ -1106,6 +1164,92 @@ mod retryable_tests {
         ] {
             assert!(!error.is_stream_usage_options_incompatible());
         }
+    }
+
+    /// OpenAI's reasoning families reject the deprecated chat `max_tokens`
+    /// outright and name their replacement, which is the only signal this crate
+    /// has: it never learns which of the ~30 `openai.chat_text` platforms it is
+    /// talking to.
+    #[test]
+    fn the_openai_reasoning_rejection_names_the_replacement_ceiling_field() {
+        let error = ProviderError::Api {
+            status: 400,
+            message: r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"max_tokens","code":"unsupported_parameter"}}"#.into(),
+        };
+        assert_eq!(
+            error.suggested_output_ceiling_key("max_tokens"),
+            Some("max_completion_tokens")
+        );
+    }
+
+    /// The load-bearing negative case. A gateway that accepts only `max_tokens`
+    /// must never be talked out of it, or its output would run unbounded behind
+    /// a field it silently ignores.
+    #[test]
+    fn output_ceiling_renegotiation_needs_the_endpoint_to_name_a_canonical_field() {
+        for message in [
+            // Rejects the ceiling but proposes nothing.
+            "unsupported parameter: max_tokens",
+            // Rejects an unrelated parameter.
+            "unknown parameter: temperature",
+            // Names a replacement but is not a parameter rejection at all.
+            "max_tokens exceeds the model's max_completion_tokens capacity",
+            // An error body must not be able to dictate a request field name.
+            "unsupported parameter: 'max_tokens'. Use 'evil_field' instead.",
+        ] {
+            let error = ProviderError::Api {
+                status: 400,
+                message: message.into(),
+            };
+            assert_eq!(
+                error.suggested_output_ceiling_key("max_tokens"),
+                None,
+                "must not renegotiate on: {message}"
+            );
+        }
+
+        // Never a server error, never a transport error, and never a no-op
+        // rename back onto the field that was just rejected.
+        for error in [
+            ProviderError::Api {
+                status: 500,
+                message: "unsupported parameter: max_tokens, use max_completion_tokens".into(),
+            },
+            ProviderError::Connection(
+                "unsupported parameter: max_tokens, use max_completion_tokens".into(),
+            ),
+        ] {
+            assert_eq!(error.suggested_output_ceiling_key("max_tokens"), None);
+        }
+        let self_suggesting = ProviderError::Api {
+            status: 400,
+            message: "unsupported parameter: max_completion_tokens".into(),
+        };
+        assert_eq!(
+            self_suggesting.suggested_output_ceiling_key("max_completion_tokens"),
+            None
+        );
+    }
+
+    /// A saved `max_tokens_field` override still participates: a gateway that
+    /// rejects a custom name and asks for a canonical one is honoured, while one
+    /// that merely rejects the custom name is not second-guessed.
+    #[test]
+    fn a_custom_ceiling_field_is_renegotiated_only_when_a_canonical_one_is_named() {
+        let named = ProviderError::Api {
+            status: 422,
+            message: "unknown parameter tokenBudget; use max_output_tokens".into(),
+        };
+        assert_eq!(
+            named.suggested_output_ceiling_key("tokenBudget"),
+            Some("max_output_tokens")
+        );
+
+        let unnamed = ProviderError::Api {
+            status: 422,
+            message: "unknown parameter tokenBudget".into(),
+        };
+        assert_eq!(unnamed.suggested_output_ceiling_key("tokenBudget"), None);
     }
 
     #[test]
