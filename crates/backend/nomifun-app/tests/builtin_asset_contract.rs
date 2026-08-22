@@ -114,6 +114,87 @@ fn creative_studio_planning_skills_are_safe_self_contained_proposals() {
     let workflow = read_to_string(root.join("creative-studio-workflow/SKILL.md"));
     assert!(workflow.contains("Do not save, run"));
     assert!(workflow.contains("Do not disguise arbitrary JSON"));
+    assert!(workflow.contains("nomifun.creative-studio.workflow-draft/v1"));
+    assert!(workflow.contains("exactly one lowercase `json` fenced block"));
+    assert!(workflow.contains("the user must explicitly apply the draft and save it"));
+
+    let system = nomifun_workshop::workflow_draft::WORKFLOW_DRAFT_SYSTEM_PROMPT;
+    assert_eq!(
+        system.matches("```json\n").count(),
+        1,
+        "Workflow draft system prompt must contain one canonical json opening fence"
+    );
+    assert_eq!(
+        system.matches("```").count(),
+        2,
+        "Workflow draft system prompt example must have one and only one fence pair"
+    );
+    let (_, fenced_tail) = system
+        .split_once("```json\n")
+        .expect("Workflow draft system prompt json opening fence");
+    let (example_json, _) = fenced_tail
+        .split_once("\n```")
+        .expect("Workflow draft system prompt json closing fence");
+    let example: Value = serde_json::from_str(example_json)
+        .expect("Workflow draft system prompt example must be valid JSON");
+    let top_keys = example
+        .as_object()
+        .expect("Workflow draft example top-level object")
+        .keys()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    assert_eq!(top_keys, HashSet::from(["kind", "summary", "draft"]));
+    let draft = example["draft"]
+        .as_object()
+        .expect("Workflow draft example draft object");
+    let draft_keys = draft.keys().map(String::as_str).collect::<HashSet<_>>();
+    assert_eq!(
+        draft_keys,
+        HashSet::from(["mode", "name", "description", "category", "promptTemplate"])
+    );
+    assert_eq!(example["kind"], "nomifun.creative-studio.workflow-draft/v1");
+    assert_eq!(draft["mode"], "single-image");
+    let runtime_template = draft["promptTemplate"]
+        .as_str()
+        .expect("runtime example promptTemplate string");
+    assert!(
+        runtime_template.contains("{{product_name}}")
+            || runtime_template.contains("{{selling_points}}"),
+        "runtime single-image example must contain an allowed placeholder"
+    );
+
+    let (_, skill_example_tail) = workflow
+        .split_once("```text\n")
+        .expect("packaged Workflow Skill example opening fence");
+    let (skill_example_json, _) = skill_example_tail
+        .split_once("\n```")
+        .expect("packaged Workflow Skill example closing fence");
+    let skill_example: Value = serde_json::from_str(skill_example_json)
+        .expect("packaged Workflow Skill example must be valid JSON");
+    let skill_template = skill_example["draft"]["promptTemplate"]
+        .as_str()
+        .expect("packaged Workflow Skill example promptTemplate string");
+    assert!(
+        skill_template.contains("{{product_name}}")
+            || skill_template.contains("{{selling_points}}"),
+        "packaged single-image example must contain an allowed placeholder"
+    );
+
+    for shared_contract in [
+        "nomifun.creative-studio.workflow-draft/v1",
+        "single-image",
+        "multi-image-series",
+        "{{product_name}}",
+        "{{selling_points}}",
+        "{{topic}}",
+        "{{style}}",
+        "{{platform}}",
+    ] {
+        assert!(
+            workflow.contains(shared_contract) && system.contains(shared_contract),
+            "packaged Workflow Skill and runtime system prompt drifted at {shared_contract}"
+        );
+    }
 }
 
 #[test]

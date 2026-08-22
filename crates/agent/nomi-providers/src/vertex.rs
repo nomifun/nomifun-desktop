@@ -315,12 +315,18 @@ impl LlmProvider for VertexProvider {
 
         // Vertex uses standard SSE (same as Anthropic)
         tokio::spawn(async move {
-            let outcome = anthropic_shared::process_sse_stream_redacted(
-                response,
+            let Some(outcome) = crate::retry::until_receiver_closed(
                 &tx,
-                &stream_redactor,
+                anthropic_shared::process_sse_stream_redacted(
+                    response,
+                    &tx,
+                    &stream_redactor,
+                ),
             )
-            .await;
+            .await
+            else {
+                return;
+            };
             crate::retry::finish_stream_with_retry(
                 outcome,
                 &tx,

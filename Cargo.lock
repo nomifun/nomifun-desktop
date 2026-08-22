@@ -6910,6 +6910,7 @@ dependencies = [
 name = "nomifun-workshop"
 version = "0.6.4"
 dependencies = [
+ "async-trait",
  "axum",
  "hex",
  "image",

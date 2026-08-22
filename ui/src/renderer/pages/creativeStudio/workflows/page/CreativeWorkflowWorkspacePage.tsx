@@ -17,6 +17,8 @@ import {
 } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
+import type { CreativeModelCatalogSnapshot } from '../../models';
+import type { WorkflowDraftPort } from '../agent';
 import {
   cloneWorkflowDefinition,
   validateWorkflowDefinition,
@@ -28,6 +30,7 @@ import {
   type CreativeWorkflowRepository,
 } from '../services';
 import styles from './CreativeWorkflowWorkspacePage.module.css';
+import WorkflowAgentDraftModal from './WorkflowAgentDraftModal';
 import WorkflowEditorModal from './WorkflowEditorModal';
 import WorkflowRunModal, {
   type CreativeWorkflowRunnerPort,
@@ -51,7 +54,8 @@ export interface CreativeWorkflowWorkspacePageProps {
   runCenter?: CreativeWorkflowRunCenterPort;
   initialWorkflows?: readonly WorkflowDefinitionV1[];
   autoLoad?: boolean;
-  onCreateWithAgent?: () => void;
+  agentDraftPort?: WorkflowDraftPort;
+  agentModelCatalog?: CreativeModelCatalogSnapshot;
   onOpenModelSettings?: () => void;
   onPickAssets?: (
     variable: WorkflowVariable,
@@ -176,7 +180,8 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
   runCenter,
   initialWorkflows = [],
   autoLoad = true,
-  onCreateWithAgent,
+  agentDraftPort,
+  agentModelCatalog,
   onOpenModelSettings,
   onPickAssets,
   onPickReferenceAssets,
@@ -192,6 +197,7 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
   const [running, setRunning] = useState<WorkflowDefinitionV1 | null>(null);
   const [deleting, setDeleting] = useState<WorkflowDefinitionV1 | null>(null);
   const [action, setAction] = useState<WorkflowAction>(null);
+  const [agentDraftOpen, setAgentDraftOpen] = useState(false);
 
   const load = useCallback(async () => {
     setPageState('loading');
@@ -312,6 +318,7 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
   };
 
   const disabled = pageState !== 'ready' || action !== null;
+  const agentDraftAvailable = Boolean(agentDraftPort && agentModelCatalog);
 
   return (
     <main
@@ -350,9 +357,9 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
             />
             <Button
               icon={<Robot theme='outline' size={15} fill='currentColor' />}
-              disabled={disabled || !onCreateWithAgent}
-              title={onCreateWithAgent ? undefined : 'AI 创建网关正在接入'}
-              onClick={onCreateWithAgent}
+              disabled={disabled || !agentDraftAvailable}
+              title={agentDraftAvailable ? undefined : 'AI 草稿服务暂不可用'}
+              onClick={() => setAgentDraftOpen(true)}
             >
               AI 创建
             </Button>
@@ -424,6 +431,20 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
         {runCenter ? <WorkflowRunCenter port={runCenter} /> : null}
       </div>
 
+      {agentDraftPort && agentModelCatalog ? (
+        <WorkflowAgentDraftModal
+          visible={agentDraftOpen}
+          catalog={agentModelCatalog}
+          port={agentDraftPort}
+          onApply={(workflow) => {
+            setEditing(workflow);
+            setEditingIsNew(true);
+            setAgentDraftOpen(false);
+          }}
+          onClose={() => setAgentDraftOpen(false)}
+          onOpenModelSettings={onOpenModelSettings}
+        />
+      ) : null}
       <WorkflowEditorModal
         workflow={editing}
         isNew={editingIsNew}
@@ -449,6 +470,7 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
       <Modal
         visible={deleting !== null}
         title='删除工作流'
+        className={styles.confirmModal}
         okText='删除'
         cancelText='取消'
         okButtonProps={{ status: 'danger' }}

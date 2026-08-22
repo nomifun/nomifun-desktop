@@ -16,6 +16,7 @@ pub mod routes;
 pub mod service;
 pub mod state;
 pub mod workflow;
+pub mod workflow_draft;
 pub mod workflow_run;
 
 pub use creative_agent_ops::{
@@ -29,6 +30,11 @@ pub use creative_studio::{
 pub use dto::WorkshopAsset;
 pub use prompt_catalog::{CreativePromptCatalogItem, CreativePromptCatalogPage};
 pub use workflow::{CreativeWorkflowDefinitionV1, MAX_WORKFLOW_DEFINITION_BYTES};
+pub use workflow_draft::{
+    WorkflowDraftRunRequest, WorkflowDraftRunner, MAX_WORKFLOW_DRAFT_JSON_BYTES,
+    MAX_WORKFLOW_DRAFT_RESPONSE_BYTES, WORKFLOW_DRAFT_MAX_TOKENS,
+    WORKFLOW_DRAFT_TIMEOUT_SECS,
+};
 pub use workflow_run::{
     CreativeWorkflowRunAggregateV1, CreativeWorkflowRunCreateRequest, CreativeWorkflowRunStatus,
     MAX_WORKFLOW_RUN_AGGREGATE_BYTES,

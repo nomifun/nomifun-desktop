@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 nomifun-common.workspace = true
 nomifun-api-types.workspace = true
 nomifun-auth.workspace = true

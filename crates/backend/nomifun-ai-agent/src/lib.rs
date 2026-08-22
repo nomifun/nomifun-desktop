@@ -52,8 +52,8 @@ pub use runtime_handle::{
     AgentRuntimeControl, AgentRuntimeHandle, SystemResourceNoticeDelivery,
 };
 pub use factory::provider_config::{
-    one_shot_completion, resolve_provider_config, streaming_completion,
-    streaming_completion_text_or_reasoning, user_message, DeltaKind,
+    one_shot_completion, one_shot_completion_bounded, resolve_provider_config,
+    streaming_completion, streaming_completion_text_or_reasoning, user_message, DeltaKind,
 };
 pub use one_shot::{OneShotDeps, OneShotTool, OneShotTurnRequest, one_shot_handler, run_one_shot_turn};
 pub use factory::{

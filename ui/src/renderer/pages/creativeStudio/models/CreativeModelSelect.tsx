@@ -37,6 +37,7 @@ export interface CreativeModelSelectProps {
   copy?: Partial<CreativeModelSelectCopy>;
   onOpenModelSettings?: () => void;
   className?: string;
+  getPopupContainer?: () => HTMLElement;
 }
 
 const DEFAULT_COPY: CreativeModelSelectCopy = {
@@ -96,6 +97,7 @@ const CreativeModelSelect: React.FC<CreativeModelSelectProps> = ({
   copy: copyOverride,
   onOpenModelSettings,
   className,
+  getPopupContainer,
 }) => {
   const providerLabel = useModelSelectorProviderLabel();
   const copy = { ...DEFAULT_COPY, ...copyOverride };
@@ -137,6 +139,7 @@ const CreativeModelSelect: React.FC<CreativeModelSelectProps> = ({
         placeholder={copy.placeholder}
         value={value ? optionKey(value) : undefined}
         aria-label={label ?? copy.label}
+        getPopupContainer={getPopupContainer}
         onChange={(key: string) => {
           const next = optionByKey.get(key);
           if (next) onChange(next);
