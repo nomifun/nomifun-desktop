@@ -32,6 +32,7 @@ import {
   CAPABILITY_ENDPOINT_FIELDS,
   addCapabilityTask,
   applyCatalogSuggestionForTask,
+  capabilityValidationMessageKey,
   catalogSuggestionsForTask,
   changeCapabilityProtocol,
   effectiveBaseUrl,
@@ -835,6 +836,33 @@ const ModelDefinitionEditor: React.FC<ModelDefinitionEditorProps> = ({
                 </Popconfirm>
               </div>
             </div>
+
+            {/*
+              What is actually missing, in words, outside the disclosure.
+              The card used to state only a count ("待处理 1 项") while the
+              offending control showed a bare red border, so a `new-api`
+              provider — which legitimately requires an explicit protocol per
+              model — reported "incomplete" with nothing to act on. Rendered
+              above the fold because a collapsed card must still say why it
+              blocks the save.
+            */}
+            {hasValidationError && (
+              <div
+                className='space-y-4px border-0 border-t border-solid border-[var(--color-border-2)] bg-danger-1 px-14px py-10px'
+                role='alert'
+                data-capability-error-list={capability.task}
+              >
+                {taskValidationErrors.map((error) => (
+                  <div
+                    key={error.code}
+                    className='text-11px leading-4 text-danger-6'
+                    data-capability-error={error.code}
+                  >
+                    {t(capabilityValidationMessageKey(error.code), { defaultValue: error.code })}
+                  </div>
+                ))}
+              </div>
+            )}
 
             {/*
               Traits stay visible without expanding the card: they describe what

@@ -110,6 +110,40 @@ export interface CapabilityValidationResult {
   errors: Array<{ task?: ModelTask; code: CapabilityValidationError }>;
 }
 
+/**
+ * The i18n key naming what a validation code actually asks the user to do.
+ *
+ * Every code used to be invisible: the capability card rendered a bare count
+ * ("待处理 1 项"), the offending control showed only a red border, and the save
+ * toast named no field. A `new-api` provider legitimately requires an explicit
+ * per-model protocol, so a fully-filled form reported "incomplete" with nothing
+ * to act on and the model could not be created at all.
+ */
+export const capabilityValidationMessageKey = (code: CapabilityValidationError): string =>
+  `settings.capabilityError.${code}`;
+
+/**
+ * One sentence naming every blocker, task-scoped codes prefixed by their task.
+ *
+ * Takes a translate callback so this module stays free of the i18n runtime and
+ * remains unit-testable. Returns `''` when there is nothing to report, letting
+ * the caller keep its generic fallback for that case.
+ */
+export const describeValidationErrors = (
+  errors: CapabilityValidationResult['errors'],
+  translate: (key: string, fallback: string) => string
+): string =>
+  [
+    ...new Set(
+      errors.map((error) => {
+        const message = translate(capabilityValidationMessageKey(error.code), error.code);
+        return error.task
+          ? `${translate(`settings.modelTask.${error.task}`, error.task)} · ${message}`
+          : message;
+      })
+    ),
+  ].join(' · ');
+
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 

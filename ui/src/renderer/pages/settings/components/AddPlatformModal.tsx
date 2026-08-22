@@ -25,6 +25,7 @@ import { useTranslation } from 'react-i18next';
 import ModelDefinitionEditor, { type ModelCatalogSuggestion } from './ModelDefinitionEditor';
 import {
   capabilityInputsFromDefinition,
+  describeValidationErrors,
   emptyCapabilityDraft,
   normalizeModelId,
   validateModelDefinition,
@@ -270,10 +271,15 @@ const AddPlatformModal = ModalHOC<{
 
   const submit = async () => {
     if (!validation.valid) {
+      // Name the blockers rather than restating that something is unfinished.
+      const detail = describeValidationErrors(validation.errors, (key, fallback) =>
+        t(key, { defaultValue: fallback })
+      );
       message.warning(
-        t('settings.completeCapabilityConfiguration', {
-          defaultValue: '请完成每个已选模态的协议、地址和连接配置。',
-        })
+        detail ||
+          t('settings.completeCapabilityConfiguration', {
+            defaultValue: '请完成每个已选模态的协议、地址和连接配置。',
+          })
       );
       return;
     }
