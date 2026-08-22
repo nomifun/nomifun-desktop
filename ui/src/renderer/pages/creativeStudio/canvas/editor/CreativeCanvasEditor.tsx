@@ -157,6 +157,8 @@ export interface CreativeCanvasEditorHandle {
 export interface CreativeCanvasEditorProps {
   projectId: string;
   tool: CanvasInteractionTool;
+  /** Freeze every local mutation while an external CAS writer owns the project. */
+  disabled?: boolean;
   renderNode(context: CreativeCanvasNodeRenderContext): React.ReactNode;
   renderEdge(context: CreativeCanvasEdgeRenderContext): React.ReactNode;
   repository?: CreativeProjectRepository;
@@ -256,6 +258,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
     {
       projectId,
       tool,
+      disabled = false,
       renderNode,
       renderEdge,
       repository,
@@ -385,6 +388,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
     const applyCommand = useCallback(
       (command: CanvasCommand): CanvasState => {
         const current = stateRef.current;
+        if (disabled) return current;
         const guard = pendingTaskCommandGuard(current, command, pendingTaskIdsRef.current);
         if (!guard.allowed) {
           onPendingTaskCommandBlocked?.(guard.orphanedTaskIds);
@@ -403,11 +407,12 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         }
         return next;
       },
-      [onPendingTaskCommandBlocked, saveController]
+      [disabled, onPendingTaskCommandBlocked, saveController]
     );
 
     const applyInteractionResolution = useCallback(
       (resolution: CanvasInteractionResolution) => {
+        if (disabled) return;
         if (!resolution.handled) return;
         for (const command of resolution.commands) applyCommand(command);
         if (onIntegrationIntent && resolution.intents.length > 0) {
@@ -418,11 +423,12 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
           })();
         }
       },
-      [applyCommand, onIntegrationIntent]
+      [applyCommand, disabled, onIntegrationIntent]
     );
 
     const setBackground = useCallback(
       (nextBackground: CreativeCanvasBackground) => {
+        if (disabled) return;
         const currentBase = baseDocumentRef.current;
         if (!currentBase || currentBase.background === nextBackground) return;
 
@@ -434,11 +440,12 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         setBackgroundState(nextBackground);
         saveController.queue(projectDocumentFromCanvasState(nextBase, stateRef.current));
       },
-      [saveController]
+      [disabled, saveController]
     );
 
     const setPanels = useCallback(
       (nextPanels: CreativeStudioPanelState) => {
+        if (disabled) return;
         const currentBase = baseDocumentRef.current;
         if (!currentBase || creativeStudioPanelStateEqual(currentBase.panels, nextPanels)) {
           return;
@@ -452,11 +459,12 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         baseDocumentRef.current = nextDocument;
         saveController.queue(nextDocument);
       },
-      [saveController]
+      [disabled, saveController]
     );
 
     const setCanonicalPendingTaskIds = useCallback(
       (requestedTaskIds: readonly string[]) => {
+        if (disabled) throw new Error('Creative canvas is read-only');
         const currentBase = baseDocumentRef.current;
         if (!currentBase) throw new Error('Creative canvas document is not hydrated');
         const nextTaskIds = canonicalCreativePendingTaskIds(requestedTaskIds);
@@ -477,7 +485,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         setPendingTaskIdsState(nextTaskIds);
         saveController.queue(nextDocument);
       },
-      [saveController]
+      [disabled, saveController]
     );
 
     const addPendingTask = useCallback(
@@ -513,6 +521,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         requestedSessions: readonly CreativeChatSessionReference[],
         requestedActiveSessionId: string | null
       ) => {
+        if (disabled) throw new Error('Creative canvas is read-only');
         const currentBase = baseDocumentRef.current;
         if (!currentBase) throw new Error('Creative canvas document is not hydrated');
         const nextDocument = projectDocumentWithAgentSessions(
@@ -532,7 +541,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
           throw result.error;
         }
       },
-      [saveController]
+      [disabled, saveController]
     );
 
     useEffect(() => onStateChange?.(state), [onStateChange, state]);
@@ -605,6 +614,12 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       const surface = surfaceRef.current;
       if (surface?.hasPointerCapture(pointerId)) surface.releasePointerCapture(pointerId);
     }, []);
+
+    useEffect(() => {
+      if (!disabled) return;
+      setInteraction({ type: 'gesture/end' });
+      surfaceRef.current?.blur();
+    }, [disabled, setInteraction]);
 
     const beginNodePointer = useCallback(
       (node: CreativeCanvasNode, event: React.PointerEvent<HTMLElement>) => {
@@ -1208,8 +1223,10 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         tool={tool}
         isPanning={interaction.isPanning}
         ariaLabel={ariaLabel}
-        tabIndex={0}
+        tabIndex={disabled ? -1 : 0}
+        aria-disabled={disabled}
         data-creative-canvas-editor
+        data-editor-disabled={disabled || undefined}
         data-editor-save-state={saveSnapshot.status}
         data-connection-dragging={interaction.gesture?.kind === 'connection' || undefined}
         nodeLayer={nodeLayer}
@@ -1250,6 +1267,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
                 onResetView: resetView,
                 onFitView: fitView,
                 onToggleMiniMap,
+                disabled,
               }
             : false
         }

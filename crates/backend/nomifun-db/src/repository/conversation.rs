@@ -29,6 +29,8 @@ pub struct ResolvedCreativeStudioAgentSession {
     pub conversation: ConversationRow,
     pub messages: Vec<MessageRow>,
     pub project_message_ids: Vec<String>,
+    /// Receipt-backed assistant proposals belonging to this exact project session.
+    pub applied_proposal_message_ids: Vec<String>,
     pub created: bool,
 }
 

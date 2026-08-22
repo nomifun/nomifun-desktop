@@ -16,6 +16,21 @@ pub struct CreativeStudioProjectRow {
     pub updated_at: TimestampMs,
 }
 
+/// Durable exactly-once receipt for one completed Canvas Agent assistant
+/// proposal. The operation/result JSON is server-canonical and the applied
+/// revision identifies the project snapshot created by the first execution.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CreativeStudioAgentProposalReceiptRow {
+    pub id: i64,
+    pub project_id: String,
+    pub assistant_message_id: String,
+    pub ops_fingerprint: String,
+    pub ops_json: String,
+    pub results_json: String,
+    pub applied_revision: i64,
+    pub created_at: TimestampMs,
+}
+
 /// Row mapping for a canonical Creative Studio workflow definition.
 ///
 /// The JSON body is validated by `nomifun-workshop`; indexed metadata is kept

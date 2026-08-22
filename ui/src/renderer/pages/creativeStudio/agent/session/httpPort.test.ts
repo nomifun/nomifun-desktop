@@ -55,6 +55,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
             history_key: serializeCreativeStudioAgentHistory(history),
           },
           history,
+          applied_proposal_message_ids: [priorAssistantMessageId],
           created: false,
         };
       },
@@ -72,6 +73,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
       pending_turn_idempotency_key: null,
     });
     expect(binding.binding.conversationId).toBe(conversationId);
+    expect(binding.appliedProposalMessageIds).toEqual([priorAssistantMessageId]);
   });
 
   test("rejects a malformed backend conversation identity", async () => {
@@ -87,6 +89,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
             history_key: serializeCreativeStudioAgentHistory(history),
           },
           history,
+          applied_proposal_message_ids: [],
           created: false,
         };
       },
@@ -132,6 +135,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
             history_key: serializeCreativeStudioAgentHistory(recoveredHistory),
           },
           history: recoveredHistory,
+          applied_proposal_message_ids: [],
           created: false,
         };
       },
@@ -143,6 +147,39 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
       ).resolveOrCreateExclusive(pendingRequest);
 
     expect(resolution.history).toEqual(recoveredHistory);
+  });
+
+  test("rejects an applied receipt that is not a unique assistant history message", async () => {
+    for (const appliedIds of [
+      [userMessageId],
+      [priorAssistantMessageId, priorAssistantMessageId],
+      ["0190f5fe-7c00-7a00-8000-000000000799"],
+    ]) {
+      const transport: CreativeStudioAgentSessionHttpTransport = {
+        async resolve() {
+          return {
+            binding: {
+              ownership: "creative-studio-exclusive",
+              project_id: projectId,
+              session_id: sessionId,
+              conversation_id: conversationId,
+              model: { provider_id: providerId, model: "nomi-chat" },
+              history_key: serializeCreativeStudioAgentHistory(history),
+            },
+            history,
+            applied_proposal_message_ids: appliedIds,
+            created: false,
+          };
+        },
+      };
+      const failure = await createNomiCreativeStudioAgentSessionHttpPort(transport)
+        .resolveOrCreateExclusive(request)
+        .catch((error: unknown) => error);
+      expect(failure instanceof CreativeStudioAgentSessionResolutionError).toBe(true);
+      expect((failure as CreativeStudioAgentSessionResolutionError).code).toBe(
+        "PORT_CONTRACT_VIOLATION",
+      );
+    }
   });
 
   test("rejects non-UUID project/session input before transport", async () => {
@@ -180,6 +217,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
             history_key: serializeCreativeStudioAgentHistory(history),
           },
           history,
+          applied_proposal_message_ids: [],
           created: false,
           legacy_alias: true,
         };

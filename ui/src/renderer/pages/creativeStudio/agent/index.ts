@@ -26,6 +26,8 @@ export type {
   CreativeStudioAgentMessage,
   CreativeStudioAgentPanelLoadState,
   CreativeStudioAgentPanelProps,
+  CreativeStudioAgentProposal,
+  CreativeStudioAgentProposalState,
   CreativeStudioAgentRunningMessage,
   CreativeStudioAgentSendInput,
   CreativeStudioAgentSessionSummary,

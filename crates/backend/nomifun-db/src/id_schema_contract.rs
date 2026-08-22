@@ -71,6 +71,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "conversation_mcp_servers",
     "conversations",
     "creation_tasks",
+    "creative_studio_agent_proposal_receipts",
     "creative_studio_agent_sessions",
     "creative_studio_projects",
     "creative_studio_workflow_runs",
@@ -710,6 +711,8 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
         .with_aggregate_scope("parent.workflow_id = child.workflow_id"),
     text_ref!("creation_tasks", "provider_id" => "providers", "provider_id", false, "idx_creation_tasks_provider_id", Restrict),
     text_ref!("creative_studio_workflow_runs", "workflow_id" => "creative_studio_workflows", "workflow_id", false, "idx_creative_workflow_runs_workflow_id", KeepHistory),
+    text_ref!("creative_studio_agent_proposal_receipts", "project_id" => "creative_studio_projects", "project_id", false, "idx_creative_agent_proposal_receipts_project", Cascade),
+    text_ref!("creative_studio_agent_proposal_receipts", "assistant_message_id" => "messages", "message_id", false, "idx_creative_agent_proposal_receipts_assistant_message", Restrict),
     text_ref!("creative_studio_agent_sessions", "owner_id" => "users", "user_id", false, "idx_creative_agent_sessions_owner", Restrict),
     text_ref!("creative_studio_agent_sessions", "project_id" => "creative_studio_projects", "project_id", false, "idx_creative_agent_sessions_project", Restrict),
     text_ref!("creative_studio_agent_sessions", "conversation_id" => "conversations", "conversation_id", false, "idx_creative_agent_sessions_conversation", Restrict)
@@ -998,6 +1001,20 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
     validate_no_row_id_columns(pool).await?;
 
     validate_business_id_registry(pool).await?;
+    require_column(
+        pool,
+        "creative_studio_agent_proposal_receipts",
+        "assistant_message_id",
+        "TEXT",
+        true,
+    )
+    .await?;
+    require_single_column_unique_index(
+        pool,
+        "creative_studio_agent_proposal_receipts",
+        "assistant_message_id",
+    )
+    .await?;
     require_column(pool, "conversations", "admission_epoch", "INTEGER", true).await?;
     require_column(
         pool,

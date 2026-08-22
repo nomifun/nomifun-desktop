@@ -30,7 +30,9 @@ use nomifun_common::{AppError, WorkshopAssetId};
 
 use crate::MAX_ASSET_BYTES;
 use crate::archive::MAX_CREATIVE_ARCHIVE_COMPRESSED_BYTES;
-use crate::creative_agent_ops::{CreativeAgentOp, CreativeAgentOpResult};
+use crate::creative_agent_ops::{
+    CreativeAgentOp, CreativeAgentOpResult, MAX_CREATIVE_AGENT_OPS_PER_CALL,
+};
 use crate::creative_studio::{CreativeProjectDocument, CreativeProjectSummary};
 use crate::dto::WorkshopAsset;
 use crate::prompt_catalog::CreativePromptCatalogPage;
@@ -290,6 +292,7 @@ const CREATIVE_STUDIO_AGENT_SOURCE: &str = "creative-studio-agent";
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreativeAgentOpsRequest {
+    assistant_message_id: String,
     expected_revision: String,
     ops: Vec<CreativeAgentOp>,
 }
@@ -299,15 +302,22 @@ struct CreativeAgentOpsRequest {
 struct CreativeAgentOpsResponse {
     project: CreativeProjectSummary,
     ops: Vec<CreativeAgentOpResult>,
+    replayed: bool,
+    applied_revision: String,
 }
 
 async fn apply_creative_agent_ops(
     State(state): State<WorkshopRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(project_id): Path<String>,
     body: Result<Json<CreativeAgentOpsRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<CreativeAgentOpsResponse>>, AppError> {
     let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    if request.ops.is_empty() || request.ops.len() > MAX_CREATIVE_AGENT_OPS_PER_CALL {
+        return Err(AppError::BadRequest(format!(
+            "Creative Studio Agent operations must contain 1 to {MAX_CREATIVE_AGENT_OPS_PER_CALL} entries"
+        )));
+    }
     if request
         .ops
         .iter()
@@ -320,8 +330,10 @@ async fn apply_creative_agent_ops(
     }
     let applied = state
         .service
-        .apply_creative_agent_ops(
+        .apply_creative_agent_proposal(
+            user.id.as_str(),
             &project_id,
+            &request.assistant_message_id,
             &request.expected_revision,
             request.ops,
             CREATIVE_STUDIO_AGENT_SOURCE,
@@ -330,6 +342,8 @@ async fn apply_creative_agent_ops(
     Ok(Json(ApiResponse::ok(CreativeAgentOpsResponse {
         project: applied.project,
         ops: applied.ops,
+        replayed: applied.replayed,
+        applied_revision: applied.applied_revision,
     })))
 }
 
@@ -906,7 +920,7 @@ async fn serve_file(
 mod tests {
     use std::sync::Arc;
 
-    use nomifun_common::{CreativeStudioNodeId, UserId};
+    use nomifun_common::{CreativeStudioNodeId, MessageId, ProviderId, UserId};
     use nomifun_db::{IWorkshopRepository, SqliteWorkshopRepository};
     use serde_json::Value;
     use tower::ServiceExt;
@@ -935,8 +949,11 @@ mod tests {
             Arc::new(SqliteWorkshopRepository::new(database.pool().clone()));
         let data_dir = tempfile::tempdir().unwrap();
         let service = WorkshopService::start(data_dir.path(), repo);
+        let owner_id = nomifun_db::installation_owner_id(database.pool())
+            .await
+            .unwrap();
         let user = CurrentUser {
-            id: UserId::new(),
+            id: UserId::parse(owner_id).unwrap(),
             username: "owner".into(),
         };
         (WorkshopRouterState::new(service), user, data_dir, database)
@@ -1070,25 +1087,150 @@ mod tests {
         .unwrap()
     }
 
+    async fn seed_bound_completed_agent_messages(
+        database: &nomifun_db::Database,
+        project_id: &str,
+        assistant_texts: &[String],
+    ) -> Vec<String> {
+        let owner_id = nomifun_db::installation_owner_id(database.pool())
+            .await
+            .unwrap();
+        let session_id = nomifun_common::generate_id();
+        let conversation_id = nomifun_common::ConversationId::new().into_string();
+        let provider_id = ProviderId::new().into_string();
+        let mut message_ids = Vec::with_capacity(assistant_texts.len() * 2);
+        let mut assistant_ids = Vec::with_capacity(assistant_texts.len());
+        for _ in assistant_texts {
+            message_ids.push(MessageId::new().into_string());
+            let assistant_id = MessageId::new().into_string();
+            message_ids.push(assistant_id.clone());
+            assistant_ids.push(assistant_id);
+        }
+        let document_json: String = nomifun_db::sqlx::query_scalar(
+            "SELECT document_json FROM creative_studio_projects WHERE project_id = ?",
+        )
+        .bind(project_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        let mut document: Value = serde_json::from_str(&document_json).unwrap();
+        document["chatSessions"] = serde_json::json!([{
+            "id": session_id,
+            "title": "Agent",
+            "messageIds": message_ids,
+            "model": { "providerId": provider_id, "model": "chat-model" },
+            "pendingTurn": null,
+            "createdAt": 1,
+            "updatedAt": 1
+        }]);
+        document["activeChatId"] = Value::String(session_id.clone());
+        nomifun_db::sqlx::query(
+            "UPDATE creative_studio_projects SET document_json = ? WHERE project_id = ?",
+        )
+        .bind(document.to_string())
+        .bind(project_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        nomifun_db::sqlx::query(
+            "INSERT INTO conversations \
+                (conversation_id, user_id, name, type, extra, model, status, source, created_at, updated_at) \
+             VALUES (?, ?, 'Creative Studio Agent', 'nomi', '{}', ?, 'finished', 'nomifun', 1, 1)",
+        )
+        .bind(&conversation_id)
+        .bind(&owner_id)
+        .bind(serde_json::json!({
+            "provider_id": provider_id,
+            "model": "chat-model",
+            "use_model": "chat-model"
+        }).to_string())
+        .execute(database.pool())
+        .await
+        .unwrap();
+        nomifun_db::sqlx::query(
+            "INSERT INTO creative_studio_agent_sessions \
+                (owner_id, project_id, session_id, conversation_id, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 1, 1)",
+        )
+        .bind(&owner_id)
+        .bind(project_id)
+        .bind(&session_id)
+        .bind(&conversation_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        for (index, message_id) in message_ids.iter().enumerate() {
+            let (position, content) = if index % 2 == 0 {
+                ("right", serde_json::json!({ "content": "request" }))
+            } else {
+                (
+                    "left",
+                    serde_json::json!({
+                        "content": assistant_texts[index / 2],
+                        "turn_id": MessageId::new().into_string()
+                    }),
+                )
+            };
+            nomifun_db::sqlx::query(
+                "INSERT INTO messages \
+                    (message_id, conversation_id, msg_id, type, content, position, status, hidden, created_at) \
+                 VALUES (?, ?, ?, 'text', ?, ?, 'finish', 0, ?)",
+            )
+            .bind(message_id)
+            .bind(&conversation_id)
+            .bind(message_id)
+            .bind(content.to_string())
+            .bind(position)
+            .bind(i64::try_from(index + 1).unwrap())
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+        assistant_ids
+    }
+
+    fn canvas_artifact_text(ops: Value) -> String {
+        format!(
+            "```json\n{}\n```",
+            serde_json::json!({
+                "kind": "nomifun.creative-studio.canvas-ops/v1",
+                "summary": "Apply safe canvas changes",
+                "ops": ops
+            })
+        )
+    }
+
     #[tokio::test]
     async fn creative_agent_ops_route_commits_one_cas_batch_and_mints_ids() {
-        let (state, user, _data_dir) = test_state().await;
+        let (state, user, _data_dir, database) = test_state_with_database().await;
         let project = state
             .service
             .create_creative_project(Some("Agent route".into()))
             .await
             .unwrap();
+        let seed_ops = serde_json::json!([
+            add_text_op("first", 10.0, 20.0),
+            add_text_op("second", 400.0, 20.0)
+        ]);
+        let applied_ops = serde_json::json!([add_text_op("server minted", 800.0, 20.0)]);
+        let assistant_ids = seed_bound_completed_agent_messages(
+            &database,
+            &project.project_id,
+            &[
+                canvas_artifact_text(seed_ops.clone()),
+                canvas_artifact_text(applied_ops.clone()),
+            ],
+        )
+        .await;
         let app = workshop_routes(state.clone()).layer(Extension(user));
 
         let seed = post_agent_ops(
             &app,
             &project.project_id,
             serde_json::json!({
+                "assistantMessageId": assistant_ids[0],
                 "expectedRevision": "1",
-                "ops": [
-                    add_text_op("first", 10.0, 20.0),
-                    add_text_op("second", 400.0, 20.0)
-                ]
+                "ops": seed_ops
             }),
         )
         .await;
@@ -1110,36 +1252,24 @@ mod tests {
             &app,
             &project.project_id,
             serde_json::json!({
+                "assistantMessageId": assistant_ids[1],
                 "expectedRevision": "2",
-                "ops": [
-                    add_text_op("server minted", 800.0, 20.0),
-                    {
-                        "type": "move_node",
-                        "node_id": first_id,
-                        "x": 120.0,
-                        "y": 140.0
-                    },
-                    {
-                        "type": "connect",
-                        "source_node_id": first_id,
-                        "target_node_id": second_id
-                    }
-                ]
+                "ops": applied_ops.clone()
             }),
         )
         .await;
         assert_eq!(applied.status(), StatusCode::OK);
         let applied = response_json(applied).await;
         let data = applied["data"].as_object().unwrap();
-        assert_eq!(data.len(), 2);
+        assert_eq!(data.len(), 4);
         assert!(data.contains_key("project"));
         assert!(data.contains_key("ops"));
+        assert_eq!(data["replayed"], false);
+        assert_eq!(data["appliedRevision"], "3");
         assert_eq!(data["project"]["revision"], "3");
         assert_eq!(data["project"]["nodeCount"], 3);
-        assert_eq!(data["project"]["connectionCount"], 1);
+        assert_eq!(data["project"]["connectionCount"], 0);
         assert_eq!(data["ops"][0]["type"], "node_added");
-        assert_eq!(data["ops"][1]["type"], "node_moved");
-        assert_eq!(data["ops"][2]["type"], "nodes_connected");
         let minted_id = data["ops"][0]["node_id"].as_str().unwrap();
         CreativeStudioNodeId::parse(minted_id).unwrap();
         assert_ne!(minted_id, first_id);
@@ -1152,34 +1282,79 @@ mod tests {
             .unwrap();
         assert_eq!(detail.project.revision, "3");
         assert_eq!(detail.document.nodes.len(), 3);
-        assert_eq!(detail.document.connections.len(), 1);
-        let moved = detail
-            .document
-            .nodes
-            .iter()
-            .find(|node| node.id == first_id)
-            .unwrap();
-        assert_eq!(moved.position.x, 120.0);
-        assert_eq!(moved.position.y, 140.0);
+        assert!(detail.document.connections.is_empty());
         assert!(detail.document.nodes.iter().any(|node| node.id == minted_id));
+
+        // Simulate a lost HTTP response: even a now-stale revision replays the
+        // original receipt and never re-runs the add/connect operations.
+        let replay = post_agent_ops(
+            &app,
+            &project.project_id,
+            serde_json::json!({
+                "assistantMessageId": assistant_ids[1],
+                "expectedRevision": "1",
+                "ops": applied_ops.clone()
+            }),
+        )
+        .await;
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay = response_json(replay).await;
+        assert_eq!(replay["data"]["replayed"], true);
+        assert_eq!(replay["data"]["appliedRevision"], "3");
+        assert_eq!(replay["data"]["project"]["revision"], "3");
+        assert_eq!(replay["data"]["project"]["nodeCount"], 3);
+        assert_eq!(replay["data"]["ops"][0]["node_id"], minted_id);
+
+        let mismatch = post_agent_ops(
+            &app,
+            &project.project_id,
+            serde_json::json!({
+                "assistantMessageId": assistant_ids[1],
+                "expectedRevision": "3",
+                "ops": [add_text_op("different payload", 0.0, 0.0)]
+            }),
+        )
+        .await;
+        assert_eq!(mismatch.status(), StatusCode::CONFLICT);
+        let mismatch = response_json(mismatch).await;
+        assert_eq!(mismatch["code"], "CONFLICT");
+        let final_detail = state
+            .service
+            .get_creative_project(&project.project_id)
+            .await
+            .unwrap();
+        assert_eq!(final_detail.project.revision, "3");
+        assert_eq!(final_detail.document.nodes.len(), 3);
     }
 
     #[tokio::test]
     async fn creative_agent_ops_route_reports_stale_revision_without_writing() {
-        let (state, user, _data_dir) = test_state().await;
+        let (state, user, _data_dir, database) = test_state_with_database().await;
         let project = state
             .service
             .create_creative_project(Some("Agent stale CAS".into()))
             .await
             .unwrap();
+        let first_ops = serde_json::json!([add_text_op("committed", 0.0, 0.0)]);
+        let stale_ops = serde_json::json!([add_text_op("must not persist", 20.0, 20.0)]);
+        let assistant_ids = seed_bound_completed_agent_messages(
+            &database,
+            &project.project_id,
+            &[
+                canvas_artifact_text(first_ops.clone()),
+                canvas_artifact_text(stale_ops.clone()),
+            ],
+        )
+        .await;
         let app = workshop_routes(state.clone()).layer(Extension(user));
 
         let first = post_agent_ops(
             &app,
             &project.project_id,
             serde_json::json!({
+                "assistantMessageId": assistant_ids[0],
                 "expectedRevision": "1",
-                "ops": [add_text_op("committed", 0.0, 0.0)]
+                "ops": first_ops
             }),
         )
         .await;
@@ -1194,8 +1369,9 @@ mod tests {
             &app,
             &project.project_id,
             serde_json::json!({
+                "assistantMessageId": assistant_ids[1],
                 "expectedRevision": "1",
-                "ops": [add_text_op("must not persist", 20.0, 20.0)]
+                "ops": stale_ops
             }),
         )
         .await;
@@ -1213,31 +1389,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn creative_agent_ops_route_rejects_non_owner_without_writing() {
+        let (state, _owner, _data_dir, database) = test_state_with_database().await;
+        let project = state
+            .service
+            .create_creative_project(Some("Agent owner boundary".into()))
+            .await
+            .unwrap();
+        let rejected_ops = serde_json::json!([add_text_op("must not persist", 0.0, 0.0)]);
+        let assistant_ids = seed_bound_completed_agent_messages(
+            &database,
+            &project.project_id,
+            &[canvas_artifact_text(rejected_ops.clone())],
+        )
+        .await;
+        let app = workshop_routes(state.clone()).layer(Extension(CurrentUser {
+            id: UserId::new(),
+            username: "not-owner".into(),
+        }));
+        let rejected = post_agent_ops(
+            &app,
+            &project.project_id,
+            serde_json::json!({
+                "assistantMessageId": assistant_ids[0],
+                "expectedRevision": "1",
+                "ops": rejected_ops
+            }),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        let rejected = response_json(rejected).await;
+        assert_eq!(rejected["code"], "FORBIDDEN");
+        let current = state
+            .service
+            .get_creative_project(&project.project_id)
+            .await
+            .unwrap();
+        assert_eq!(current.project.revision, "1");
+        assert!(current.document.nodes.is_empty());
+        let receipt_count: i64 = nomifun_db::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM creative_studio_agent_proposal_receipts",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(receipt_count, 0);
+    }
+
+    #[tokio::test]
     async fn creative_agent_ops_route_rejects_extra_fields_destructive_ops_and_invalid_batches_atomically()
     {
-        let (state, user, _data_dir) = test_state().await;
+        let (state, user, _data_dir, database) = test_state_with_database().await;
         let project = state
             .service
             .create_creative_project(Some("Agent strict input".into()))
             .await
             .unwrap();
-        let app = workshop_routes(state.clone()).layer(Extension(user));
-
-        let seed = post_agent_ops(
-            &app,
+        let seeded = state
+            .service
+            .apply_creative_agent_ops(
+                &project.project_id,
+                "1",
+                vec![serde_json::from_value(add_idle_config_op()).unwrap()],
+                "test-fixture",
+            )
+            .await
+            .unwrap();
+        let config_id = match &seeded.ops[0] {
+            CreativeAgentOpResult::NodeAdded { node_id } => node_id.clone(),
+            other => panic!("unexpected seed result {other:?}"),
+        };
+        let safe_move = serde_json::json!([{
+            "type": "move_node",
+            "node_id": config_id,
+            "x": 10.0,
+            "y": 20.0
+        }]);
+        let media_ops = serde_json::json!([{
+            "type": "add_node",
+            "node_type": "image",
+            "x": 0.0,
+            "y": 0.0,
+            "data": { "assetId": null, "caption": "", "alt": "", "fit": "cover", "naturalSize": null }
+        }]);
+        let config_ops = serde_json::json!([add_idle_config_op()]);
+        let runtime_ops = serde_json::json!([{
+            "type": "update_node_data",
+            "node_id": config_id,
+            "patch": {
+                "taskId": CreativeStudioNodeId::new().into_string(),
+                "status": "running"
+            }
+        }]);
+        let duplicate_artifact = format!(
+            "```json\n{{\"kind\":\"nomifun.creative-studio.canvas-ops/v1\",\"summary\":\"first\",\"\\u0073ummary\":\"second\",\"ops\":{}}}\n```",
+            safe_move
+        );
+        let assistant_ids = seed_bound_completed_agent_messages(
+            &database,
             &project.project_id,
-            serde_json::json!({
-                "expectedRevision": "1",
-                "ops": [add_idle_config_op()]
-            }),
+            &[
+                canvas_artifact_text(safe_move.clone()),
+                "proposal".to_owned(),
+                duplicate_artifact,
+                canvas_artifact_text(media_ops.clone()),
+                canvas_artifact_text(config_ops.clone()),
+                canvas_artifact_text(runtime_ops.clone()),
+                canvas_artifact_text(safe_move.clone()),
+            ],
         )
         .await;
-        assert_eq!(seed.status(), StatusCode::OK);
-        let seed = response_json(seed).await;
-        let config_id = seed["data"]["ops"][0]["node_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        let app = workshop_routes(state.clone()).layer(Extension(user));
         let before = state
             .service
             .get_creative_project(&project.project_id)
@@ -1247,14 +1509,21 @@ mod tests {
         let rejected_bodies = [
             serde_json::json!({
                 "expectedRevision": "2",
-                "ops": [add_text_op("client source rejected", 0.0, 0.0)],
+                "ops": [add_text_op("missing assistant identity", 0.0, 0.0)]
+            }),
+            serde_json::json!({
+                "assistantMessageId": assistant_ids[1],
+                "expectedRevision": "2",
+                "ops": safe_move.clone(),
                 "source": "client-controlled"
             }),
             serde_json::json!({
+                "assistantMessageId": assistant_ids[1],
                 "expectedRevision": "2",
                 "ops": []
             }),
             serde_json::json!({
+                "assistantMessageId": assistant_ids[1],
                 "expectedRevision": "2",
                 "ops": [{
                     "type": "delete_node",
@@ -1262,18 +1531,29 @@ mod tests {
                 }]
             }),
             serde_json::json!({
+                "assistantMessageId": assistant_ids[1],
                 "expectedRevision": "2",
-                "ops": [
-                    add_text_op("rolled back", 0.0, 0.0),
-                    {
-                        "type": "update_node_data",
-                        "node_id": config_id,
-                        "patch": {
-                            "taskId": CreativeStudioNodeId::new().into_string(),
-                            "status": "running"
-                        }
-                    }
-                ]
+                "ops": safe_move.clone()
+            }),
+            serde_json::json!({
+                "assistantMessageId": assistant_ids[2],
+                "expectedRevision": "2",
+                "ops": safe_move.clone()
+            }),
+            serde_json::json!({
+                "assistantMessageId": assistant_ids[3],
+                "expectedRevision": "2",
+                "ops": media_ops
+            }),
+            serde_json::json!({
+                "assistantMessageId": assistant_ids[4],
+                "expectedRevision": "2",
+                "ops": config_ops
+            }),
+            serde_json::json!({
+                "assistantMessageId": assistant_ids[5],
+                "expectedRevision": "2",
+                "ops": runtime_ops
             }),
         ];
 
@@ -1288,6 +1568,37 @@ mod tests {
             assert_eq!(after.project, before.project);
             assert_eq!(after.document, before.document);
         }
+
+        let mismatch = post_agent_ops(
+            &app,
+            &project.project_id,
+            serde_json::json!({
+                "assistantMessageId": assistant_ids[6],
+                "expectedRevision": "2",
+                "ops": [{
+                    "type": "move_node",
+                    "node_id": config_id,
+                    "x": 11.0,
+                    "y": 20.0
+                }]
+            }),
+        )
+        .await;
+        assert_eq!(mismatch.status(), StatusCode::CONFLICT);
+        let after = state
+            .service
+            .get_creative_project(&project.project_id)
+            .await
+            .unwrap();
+        assert_eq!(after.project, before.project);
+        assert_eq!(after.document, before.document);
+        let receipt_count: i64 = nomifun_db::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM creative_studio_agent_proposal_receipts",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(receipt_count, 0);
     }
 
     #[tokio::test]

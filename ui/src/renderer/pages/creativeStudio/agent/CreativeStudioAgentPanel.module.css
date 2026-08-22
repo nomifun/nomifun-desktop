@@ -266,6 +266,63 @@
   color: var(--color-text-3) !important;
 }
 
+.proposalCard {
+  display: grid;
+  width: min(300px, 100%);
+  gap: 9px;
+  padding: 11px;
+  border: 1px solid color-mix(in srgb, rgb(var(--primary-6)) 32%, var(--color-border-2));
+  border-radius: 13px;
+  background: color-mix(in srgb, rgb(var(--primary-6)) 6%, var(--color-bg-2));
+}
+
+.proposalHeading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 8px;
+  color: rgb(var(--primary-6));
+}
+
+.proposalHeading > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.proposalHeading strong {
+  overflow-wrap: anywhere;
+  color: var(--color-text-1);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.proposalHeading span {
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.proposalCard[data-agent-proposal-state='applied'] {
+  border-color: color-mix(in srgb, rgb(var(--success-6)) 36%, var(--color-border-2));
+  background: color-mix(in srgb, rgb(var(--success-6)) 7%, var(--color-bg-2));
+}
+
+.proposalCard[data-agent-proposal-state='applied'] .proposalHeading {
+  color: rgb(var(--success-6));
+}
+
+.proposalCard[data-agent-proposal-state='failed'],
+.proposalCard[data-agent-proposal-state='invalid'] {
+  border-color: color-mix(in srgb, rgb(var(--danger-6)) 32%, var(--color-border-2));
+}
+
+.proposalError {
+  margin: 0;
+  color: rgb(var(--danger-6));
+  font-size: 11px;
+  line-height: 1.55;
+}
+
 .composerShell {
   flex: 0 0 auto;
   padding: 0 8px 8px;

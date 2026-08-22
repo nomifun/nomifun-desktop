@@ -1,8 +1,39 @@
 use crate::error::DbError;
 use crate::models::{
-    CreativeStudioProjectRow, CreativeStudioWorkflowRow, CreativeStudioWorkflowRunRow,
-    WorkshopAssetRow,
+    CreativeStudioAgentProposalReceiptRow, CreativeStudioProjectRow, CreativeStudioWorkflowRow,
+    CreativeStudioWorkflowRunRow, WorkshopAssetRow,
 };
+
+/// Canonical candidate passed to the atomic proposal receipt + project CAS.
+/// `expected_revision` is deliberately not part of the persisted payload
+/// identity: a response-loss replay remains valid after the project advances.
+#[derive(Debug)]
+pub struct ApplyCreativeAgentProposalParams<'a> {
+    pub owner_id: &'a str,
+    pub project_id: &'a str,
+    pub assistant_message_id: &'a str,
+    /// Exact raw `messages.content` JSON read before artifact parsing. The
+    /// atomic proof rechecks byte equality to fence concurrent message edits.
+    pub assistant_message_content_json: &'a str,
+    pub ops_fingerprint: &'a str,
+    pub ops_json: &'a str,
+    pub results_json: &'a str,
+    pub expected_revision: i64,
+    pub document_json: &'a str,
+    pub node_count: i64,
+    pub connection_count: i64,
+    pub now: i64,
+}
+
+/// Result of the atomic repository operation. On replay, `project` is the
+/// current authoritative row while `receipt.applied_revision` remains the
+/// revision created by the first execution.
+#[derive(Debug)]
+pub struct CreativeAgentProposalCommit {
+    pub project: CreativeStudioProjectRow,
+    pub receipt: CreativeStudioAgentProposalReceiptRow,
+    pub replayed: bool,
+}
 
 /// Data access for canonical Creative Studio projects, workflows, runs, and
 /// the shared asset library.
@@ -81,6 +112,56 @@ pub trait IWorkshopRepository: Send + Sync {
         connection_count: i64,
         now: i64,
     ) -> Result<CreativeStudioProjectRow, DbError>;
+
+    /// Read an existing durable Canvas Agent proposal receipt.
+    async fn get_creative_agent_proposal_receipt(
+        &self,
+        owner_id: &str,
+        project_id: &str,
+        assistant_message_id: &str,
+    ) -> Result<Option<CreativeStudioAgentProposalReceiptRow>, DbError> {
+        let _ = (owner_id, project_id, assistant_message_id);
+        Err(DbError::Init(
+            "creative studio Agent proposal receipts are unavailable in this repository".into(),
+        ))
+    }
+
+    /// Read the exact persisted `messages.content` JSON for a completed,
+    /// visible assistant message in the owner-bound project chat session.
+    async fn get_creative_agent_proposal_message_content(
+        &self,
+        owner_id: &str,
+        project_id: &str,
+        assistant_message_id: &str,
+    ) -> Result<Option<String>, DbError> {
+        let _ = (owner_id, project_id, assistant_message_id);
+        Err(DbError::Init(
+            "creative studio Agent proposal provenance is unavailable in this repository".into(),
+        ))
+    }
+
+    /// Whether this canonical user is the installation owner authorized to
+    /// operate the private Creative Studio surface.
+    async fn is_creative_studio_owner(&self, owner_id: &str) -> Result<bool, DbError> {
+        let _ = owner_id;
+        Err(DbError::Init(
+            "creative studio owner validation is unavailable in this repository".into(),
+        ))
+    }
+
+    /// Atomically claim one assistant proposal, compare-and-swap the project,
+    /// and publish its durable result receipt. A concurrent identical claim
+    /// replays the winner; reusing the assistant ID for different canonical
+    /// operations is a conflict.
+    async fn apply_creative_agent_proposal(
+        &self,
+        params: ApplyCreativeAgentProposalParams<'_>,
+    ) -> Result<CreativeAgentProposalCommit, DbError> {
+        let _ = params;
+        Err(DbError::Init(
+            "creative studio Agent proposal receipts are unavailable in this repository".into(),
+        ))
+    }
 
     /// Insert a freshly remapped canonical project and all of its imported
     /// assets in one SQLite transaction. Callers stage binary files before

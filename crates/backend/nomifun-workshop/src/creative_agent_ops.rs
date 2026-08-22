@@ -55,8 +55,8 @@ pub enum CreativeAgentOp {
     },
     Disconnect { connection_id: String },
 }
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CreativeAgentOpResult {
     NodeAdded { node_id: String },
     NodeUpdated { node_id: String },

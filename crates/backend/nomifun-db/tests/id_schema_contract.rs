@@ -168,6 +168,7 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "conversation_mcp_servers",
     "conversations",
     "creation_tasks",
+    "creative_studio_agent_proposal_receipts",
     "creative_studio_agent_sessions",
     "creative_studio_projects",
     "creative_studio_workflow_runs",

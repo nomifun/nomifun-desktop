@@ -39,6 +39,8 @@ export interface NomiCreativeStudioAgentSessionBinding {
 export interface NomiCreativeStudioAgentSessionResolution {
   binding: NomiCreativeStudioAgentSessionBinding;
   history: readonly CreativeStudioAgentMessage[];
+  /** Durable assistant proposals already committed to the canonical project. */
+  appliedProposalMessageIds: readonly MessageId[];
   created: boolean;
 }
 

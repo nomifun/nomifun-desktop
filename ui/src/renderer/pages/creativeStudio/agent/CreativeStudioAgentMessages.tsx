@@ -4,27 +4,37 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Error, Loading, Refresh, Robot } from '@icon-park/react';
+import { CheckOne, Error, Loading, MagicWand, Refresh, Robot } from '@icon-park/react';
 import { Button } from '@arco-design/web-react';
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-import type { CreativeStudioAgentMessage } from './types';
+import type {
+  CreativeStudioAgentMessage,
+  CreativeStudioAgentProposal,
+} from './types';
 import styles from './CreativeStudioAgentPanel.module.css';
 
 interface CreativeStudioAgentMessagesProps {
   messages: readonly CreativeStudioAgentMessage[];
+  proposals: readonly CreativeStudioAgentProposal[];
+  proposalApplyDisabled: boolean;
   onRetryMessage?(messageId: string): void;
+  onApplyProposal(messageId: string): void;
 }
 
 const CreativeStudioAgentMessages: React.FC<CreativeStudioAgentMessagesProps> = ({
   messages,
+  proposals,
+  proposalApplyDisabled,
   onRetryMessage,
+  onApplyProposal,
 }) => (
   <div className={styles.messageList} aria-live='polite'>
     {messages.map((message) => {
       const isAssistant = message.role === 'assistant';
+      const proposal = proposals.find((candidate) => candidate.messageId === message.id);
       return (
         <article
           key={message.id}
@@ -69,6 +79,45 @@ const CreativeStudioAgentMessages: React.FC<CreativeStudioAgentMessagesProps> = 
               已停止
             </div>
           )}
+
+          {proposal ? (
+            <section
+              className={styles.proposalCard}
+              data-agent-proposal-state={proposal.state}
+              aria-label='画布操作提案'
+              role={proposal.state === 'failed' || proposal.state === 'invalid' ? 'alert' : 'group'}
+            >
+              <div className={styles.proposalHeading}>
+                {proposal.state === 'applied' ? (
+                  <CheckOne theme='filled' size='16' />
+                ) : (
+                  <MagicWand theme='outline' size='16' />
+                )}
+                <div>
+                  <strong>{proposal.summary}</strong>
+                  <span>{proposal.opCount} 项画布操作 · 需人工确认</span>
+                </div>
+              </div>
+              {proposal.errorMessage ? (
+                <p className={styles.proposalError}>{proposal.errorMessage}</p>
+              ) : null}
+              <Button
+                size='small'
+                type={proposal.state === 'ready' ? 'primary' : 'secondary'}
+                loading={proposal.state === 'applying'}
+                disabled={proposal.state !== 'ready' || proposalApplyDisabled}
+                onClick={() => onApplyProposal(proposal.messageId)}
+              >
+                {proposal.state === 'ready'
+                  ? '应用到画布'
+                  : proposal.state === 'applying'
+                    ? '正在应用'
+                    : proposal.state === 'applied'
+                      ? '已应用'
+                      : '不可应用'}
+              </Button>
+            </section>
+          ) : null}
 
           {isAssistant && message.status !== 'running' && onRetryMessage && (
             <Button

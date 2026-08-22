@@ -22,6 +22,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
+import { flushSync } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams } from 'react-router-dom';
 
@@ -131,6 +132,8 @@ import CreativeCanvasAgentPanel, {
   type CreativeCanvasAgentPanelHandle,
 } from './agent/CreativeCanvasAgentPanel';
 import { buildCreativeCanvasAgentContext } from './agent/context';
+import type { CreativeCanvasAgentOp } from './agent/artifacts';
+import { creativeCanvasAgentOpsPort } from './agent/opsPort';
 import CreativeCanvasConnectionEdge from './CreativeCanvasConnectionEdge';
 import CreativeCanvasAudioComposer from './CreativeCanvasAudioComposer';
 import CreativeCanvasImageComposer from './CreativeCanvasImageComposer';
@@ -419,16 +422,17 @@ const SaveRecoveryAction: React.FC<{
   save: CanvasCasSaveSnapshot;
   busy: boolean;
   notice: string | null;
+  requiresAuthoritativeReload: boolean;
   onReload(): void;
   onRetry(): void;
-}> = ({ save, busy, notice, onReload, onRetry }) => (
+}> = ({ save, busy, notice, requiresAuthoritativeReload, onReload, onRetry }) => (
   <>
     {notice ? (
       <span className={styles.notice} role="status" title={notice}>
         {notice}
       </span>
     ) : null}
-    {save.status === 'conflict' ? (
+    {save.status === 'conflict' || requiresAuthoritativeReload ? (
       <button
         type="button"
         className={styles.recoveryButton}
@@ -557,6 +561,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const videoTaskRuntimeRef = useRef<CanvasVideoTaskRuntimeBridgeHandle>(null);
   const audioTaskRuntimeRef = useRef<CanvasAudioTaskRuntimeBridgeHandle>(null);
   const agentPanelRef = useRef<CreativeCanvasAgentPanelHandle>(null);
+  const agentOpsApplyRef = useRef<Promise<void> | null>(null);
+  const agentOpsReloadRequiredRef = useRef(false);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const imageNodeUploadInputRef = useRef<HTMLInputElement>(null);
   const imageNodeUploadTargetRef = useRef<string | null>(null);
@@ -668,6 +674,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
     useState<string | null>(null);
   const [agentDocumentState, setAgentDocumentState] =
     useState<AgentDocumentState | null>(null);
+  const [agentOpsApplyBusy, setAgentOpsApplyBusy] = useState(false);
+  const [agentOpsReloadRequired, setAgentOpsReloadRequired] = useState(false);
+  const setAgentOpsReloadFence = useCallback((required: boolean) => {
+    agentOpsReloadRequiredRef.current = required;
+    setAgentOpsReloadRequired(required);
+  }, []);
   const [workflows, setWorkflows] = useState<WorkflowDefinitionV1[]>([]);
   const [workflowLoading, setWorkflowLoading] = useState(false);
   const [workflowError, setWorkflowError] = useState<string | null>(null);
@@ -676,6 +688,27 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [workflowInsertingRunId, setWorkflowInsertingRunId] = useState<
     string | null
   >(null);
+  const agentOpsBlockedByCanvasMutation =
+    recoveryBusy ||
+    assetImportBusy ||
+    imageCropBusy ||
+    imageSplitBusy ||
+    imageMaskBusy ||
+    imageTaskRuntimeActionBusy ||
+    imageComposeBusy ||
+    videoTaskRuntimeActionBusy ||
+    videoComposeBusy ||
+    audioTaskRuntimeActionBusy ||
+    audioComposeBusy ||
+    workflowInsertingRunId !== null ||
+    [imageTaskRuntime, videoTaskRuntime, audioTaskRuntime].some(
+      (runtime) =>
+        runtime.submittingCount > 0 ||
+        runtime.recoveringCount > 0 ||
+        runtime.entries.some(
+          (entry) => entry.task.status === 'queued' || entry.task.status === 'running'
+        )
+    );
 
   const loadWorkflows = useCallback(async () => {
     const request = ++workflowRequestRef.current;
@@ -772,6 +805,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
     hydratedBackgroundRef.current = null;
     setCanvasState(null);
     setSave(INITIAL_SAVE);
+    agentOpsReloadRequiredRef.current = false;
+    setAgentOpsReloadRequired(false);
+    setAgentOpsApplyBusy(false);
     setNotice(null);
     setContextMenu(null);
     setCreateNodeMenu(null);
@@ -1096,14 +1132,39 @@ const CreativeCanvasProductRoute: React.FC = () => {
       setNotice('图片工具仍在处理，请等待完成后再离开。');
       return false;
     }
+    if (agentOpsReloadRequiredRef.current) {
+      setNotice('必须先重新载入 Agent 提案提交后的远端画布。');
+      return false;
+    }
+    const agentOpsApply = agentOpsApplyRef.current;
+    if (agentOpsApply) {
+      try {
+        await agentOpsApply;
+      } catch {
+        setNotice('Agent 提案的应用结果尚未确认，请复核远端画布后再离开。');
+        return false;
+      }
+    }
+    if (agentOpsReloadRequiredRef.current) {
+      setNotice('必须先重新载入 Agent 提案提交后的远端画布。');
+      return false;
+    }
     if (!((await agentPanelRef.current?.prepareToLeave()) ?? true))
       return false;
+    if (agentOpsReloadRequiredRef.current) {
+      setNotice('必须先重新载入 Agent 提案提交后的远端画布。');
+      return false;
+    }
     const editor = editorRef.current;
     if (!editor) return true;
     const result = await editor.flush();
     const canLeave = canLeaveCreativeCanvasAfterFlush(result);
     if (!canLeave) {
       setNotice(creativeCanvasBlockedLeaveMessage(result) ?? '画布尚未安全保存。');
+    }
+    if (agentOpsReloadRequiredRef.current) {
+      setNotice('必须先重新载入 Agent 提案提交后的远端画布。');
+      return false;
     }
     return canLeave;
   }, []);
@@ -1118,6 +1179,91 @@ const CreativeCanvasProductRoute: React.FC = () => {
       await editor.persistAgentSessions(sessions, activeSessionId);
     },
     []
+  );
+
+  const handleApplyCanvasAgentOps = useCallback(
+    async (
+      assistantMessageId: string,
+      ops: readonly CreativeCanvasAgentOp[]
+    ) => {
+      if (agentOpsApplyRef.current) {
+        throw new Error('已有 Agent 提案正在应用。');
+      }
+      if (
+        agentOpsBlockedByCanvasMutation ||
+        assetImportBusyRef.current ||
+        imageToolBusyRef.current
+      ) {
+        throw new Error('画布仍有创作或恢复任务，请等待完成后再应用 Agent 提案。');
+      }
+      const editor = editorRef.current;
+      if (!editor) throw new Error('画布尚未载入，无法应用 Agent 提案。');
+      flushSync(() => setAgentOpsApplyBusy(true));
+      setNotice(`正在应用 Agent 提案的 ${ops.length} 项画布操作…`);
+      const operation = (async () => {
+        const reloadRemoteSafely = async (): Promise<boolean> => {
+          try {
+            return await editor.reloadRemote();
+          } catch {
+            return false;
+          }
+        };
+        const flush = await editor.flush();
+        if (!canLeaveCreativeCanvasAfterFlush(flush)) {
+          setNotice(
+            creativeCanvasBlockedLeaveMessage(flush) ?? '画布尚未安全保存。'
+          );
+          throw new Error(
+            creativeCanvasBlockedLeaveMessage(flush) ?? '画布尚未安全保存。'
+          );
+        }
+        const expectedRevision = editor.getSaveState().revision;
+        if (expectedRevision === null) {
+          throw new Error('画布缺少可验证的远端 revision。');
+        }
+        let replayed = false;
+        try {
+          const applied = await creativeCanvasAgentOpsPort.apply({
+            projectId,
+            assistantMessageId,
+            expectedRevision,
+            ops,
+          });
+          replayed = applied.replayed;
+        } catch (error) {
+          const reloaded = await reloadRemoteSafely();
+          setAgentOpsReloadFence(!reloaded);
+          if (reloaded) agentPanelRef.current?.refreshAuthority();
+          setNotice(
+            reloaded
+              ? 'Agent 提案的应用结果未确认；已重新载入远端画布，请复核。'
+              : 'Agent 提案应用失败，远端画布也暂时无法重新载入。'
+          );
+          throw error;
+        }
+        if (!(await reloadRemoteSafely())) {
+          setAgentOpsReloadFence(true);
+          setNotice('Agent 提案已提交，但远端画布暂时无法重新载入。');
+          return;
+        }
+        setAgentOpsReloadFence(false);
+        setNotice(
+          replayed
+            ? `已确认该 Agent 提案此前应用的 ${ops.length} 项画布操作。`
+            : `已应用 Agent 提案的 ${ops.length} 项画布操作。`
+        );
+      })();
+      agentOpsApplyRef.current = operation;
+      try {
+        await operation;
+      } finally {
+        if (agentOpsApplyRef.current === operation) {
+          agentOpsApplyRef.current = null;
+        }
+        setAgentOpsApplyBusy(false);
+      }
+    },
+    [agentOpsBlockedByCanvasMutation, projectId, setAgentOpsReloadFence]
   );
 
   const handleAgentSessionsChange = useCallback(
@@ -3320,11 +3466,17 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setRecoveryBusy(true);
     try {
       const reloaded = await editorRef.current.reloadRemote();
+      if (reloaded) {
+        setAgentOpsReloadFence(false);
+        agentPanelRef.current?.refreshAuthority();
+      }
       setNotice(reloaded ? '已重新载入远端版本。' : '远端版本暂时不可用。');
+    } catch {
+      setNotice('远端版本暂时不可用。');
     } finally {
       setRecoveryBusy(false);
     }
-  }, [recoveryBusy]);
+  }, [recoveryBusy, setAgentOpsReloadFence]);
 
   const handleRetrySave = useCallback(async () => {
     if (!editorRef.current || recoveryBusy) return;
@@ -3513,7 +3665,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
       selectedNodeIds: canvasState.selection.nodeIds,
     });
   }, [canvasState, project.detail, save.revision]);
-  const productDisabled = save.revision === null;
+  const productDisabled =
+    save.revision === null ||
+    recoveryBusy ||
+    agentOpsApplyBusy ||
+    agentOpsReloadRequired;
   const imageTaskRuntimeBlocksNew =
     imageTaskRuntime.submittingCount > 0 ||
     imageTaskRuntime.recoveringCount > 0 ||
@@ -3653,6 +3809,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 ref={editorRef}
                 projectId={projectId}
                 tool={tool}
+                disabled={productDisabled}
                 showSaveState={false}
                 isMiniMapOpen={miniMapOpen}
                 onToggleMiniMap={() => setMiniMapOpen((open) => !open)}
@@ -4207,6 +4364,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 save={save}
                 busy={recoveryBusy}
                 notice={notice}
+                requiresAuthoritativeReload={agentOpsReloadRequired}
                 onReload={() => void handleReloadRemote()}
                 onRetry={() => void handleRetrySave()}
               />
@@ -4299,6 +4457,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 planningContext={agentPlanningContext}
                 disabled={productDisabled}
                 onPersist={handlePersistAgentSessions}
+                onApplyCanvasOps={handleApplyCanvasAgentOps}
                 onCollapse={() => handleRightViewChange(null)}
                 onOpenModelSettings={() => void handleOpenModelSettings()}
               />

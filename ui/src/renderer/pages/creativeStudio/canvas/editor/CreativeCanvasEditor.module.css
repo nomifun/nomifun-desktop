@@ -4,6 +4,11 @@
   height: 100%;
 }
 
+.editor[data-editor-disabled='true'] {
+  cursor: progress;
+  pointer-events: none;
+}
+
 .nodePlacement {
   position: absolute;
   box-sizing: border-box;

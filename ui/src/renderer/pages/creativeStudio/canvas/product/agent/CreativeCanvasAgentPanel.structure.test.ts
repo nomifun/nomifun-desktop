@@ -11,6 +11,10 @@ const source = readFileSync(
   new URL('./CreativeCanvasAgentPanel.tsx', import.meta.url),
   'utf8'
 );
+const proposalSource = readFileSync(
+  new URL('./proposalProjection.ts', import.meta.url),
+  'utf8'
+);
 
 describe('Creative Canvas Agent product integration', () => {
   test('uses the owner-only resolver, real Nomi transport, and canonical CAS callbacks', () => {
@@ -25,6 +29,13 @@ describe('Creative Canvas Agent product integration', () => {
       'serializeCreativeCanvasAgentModelInput',
       'selectCreativeCanvasAgentContextNodes',
       'CREATIVE_STUDIO_PLANNING_SKILLS',
+      'projectCreativeCanvasAgentProposals',
+      'proposalProjection.artifacts',
+      'proposalApplyRef.current',
+      'resolution.appliedProposalMessageIds',
+      'refreshAuthority()',
+      'props.onApplyCanvasOps(messageId, artifact.ops)',
+      'onApplyProposal={handleApplyProposal}',
       "event.type === 'history-reconciled'",
       'creativeCanvasAgentSessionWithAuthoritativeHistory',
       'creativeCanvasAgentSessionWithoutPendingTurn',
@@ -44,7 +55,10 @@ describe('Creative Canvas Agent product integration', () => {
     expect(source.includes('admittedSend ?? Promise.resolve(true)')).toBe(true);
     expect(source.includes('controller.stop()')).toBe(true);
     expect(source.includes('await currentRunRef.current')).toBe(true);
+    expect(source.includes('proposalApply?.then(')).toBe(true);
     expect(source.includes('input.skillIds.length > 3')).toBe(true);
     expect(source.includes('input.contextNodeIds')).toBe(true);
+    expect(proposalSource.includes("state: 'invalid'")).toBe(true);
+    expect(source.includes("state: 'failed'")).toBe(true);
   });
 });
