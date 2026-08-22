@@ -25,6 +25,23 @@ const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_CHECK_PROMPT: &str = "Reply with exactly OK.";
 const HEALTH_CHECK_MSG_ID: &str = "provider-health-check";
 
+/// Output budget for the chat probe.
+///
+/// This used to be 16, which is plenty for a model that answers "OK" directly
+/// and never enough for a reasoning model: those spend their first output tokens
+/// on a thinking preamble and only then emit `content`. StepFun
+/// `step-3.7-flash` at 16 tokens returns `content: ""` with
+/// `finish_reason: "length"` and the whole budget in `reasoning_content`, so the
+/// probe declared a perfectly healthy provider unreachable. At 256 the same
+/// request returns `OK`/`stop`.
+///
+/// Sized so a normal reasoning preamble finishes and the probe observes real
+/// text. It is deliberately not unbounded: the ceiling still caps a runaway
+/// model, and [`probe_terminal_failure`] no longer treats hitting it as a
+/// failure, so a model that thinks for longer than this is still reported
+/// healthy.
+const PROBE_OUTPUT_CEILING: u32 = 2048;
+
 pub struct ProviderHealthCheckService {
     data_dir: PathBuf,
     /// Unified invoke layer: non-chat modality probes ride
@@ -158,7 +175,7 @@ impl ProviderHealthCheckService {
                 "You are a provider health probe. Reply with exactly OK and do not use tools."
                     .into(),
             ),
-            output_ceiling: Some(16),
+            output_ceiling: Some(PROBE_OUTPUT_CEILING),
             max_turns: Some(1),
             context_limit: fields.context_limit.map(|value| value as u64),
             compat_overrides: fields.compat_overrides,
@@ -368,10 +385,14 @@ fn probe_terminal_failure(result: &AgentResult) -> Option<String> {
 
     match result.stop_reason {
         StopReason::EndTurn => None,
-        StopReason::MaxTokens => Some(
-            "ProviderError: provider health probe reached its output limit (output_truncated)"
-                .to_owned(),
-        ),
+        // Reaching our own ceiling is not a provider fault. A reasoning model
+        // spends its first output tokens on a thinking preamble and emits
+        // `content` only afterwards, so any ceiling we pick is a budget we
+        // imposed, not a health signal — and the truncated round already proved
+        // that auth, routing, protocol and streaming all work. Treating this as
+        // a failure made every reasoning model report "connection failed" while
+        // curl against the same key and model returned 200.
+        StopReason::MaxTokens => None,
         StopReason::MaxTurns => Some(
             "ProviderError: provider health probe exhausted its request budget (turn_requests_exhausted)"
                 .to_owned(),
@@ -688,6 +709,28 @@ mod tests {
     }
 
     #[test]
+    fn a_reasoning_model_that_spends_the_ceiling_on_thinking_is_still_healthy() {
+        // Regression: StepFun step-3.7-flash (and every other reasoning model)
+        // returns `content: ""` with `finish_reason: "length"` when the output
+        // ceiling only covers the thinking preamble. That round still proved the
+        // key, URL, protocol and stream are all good, so it must not be reported
+        // as a connectivity failure.
+        let mut truncated = probe_result(StopReason::MaxTokens);
+        truncated.text.clear();
+        assert!(
+            probe_terminal_failure(&truncated).is_none(),
+            "hitting our own output ceiling is a budget we chose, not a provider fault"
+        );
+
+        // A ceiling large enough for a normal reasoning preamble, so the probe
+        // usually observes real text rather than relying on the rule above.
+        assert!(
+            PROBE_OUTPUT_CEILING >= 512,
+            "a 16-token ceiling is what broke every reasoning model"
+        );
+    }
+
+    #[test]
     fn chat_probe_is_healthy_only_for_clean_end_turn() {
         assert!(probe_terminal_failure(&probe_result(StopReason::EndTurn)).is_none());
 
@@ -698,7 +741,6 @@ mod tests {
         assert!(failure.contains("empty_final_text"));
 
         for (stop_reason, code) in [
-            (StopReason::MaxTokens, "output_truncated"),
             (StopReason::MaxTurns, "turn_requests_exhausted"),
             (StopReason::Refusal, "model_refused"),
             (StopReason::ToolUse, "protocol_error"),

@@ -18,6 +18,12 @@ export interface FetchedModelOption {
   value: string;
   tasks: ModelTask[];
   traits: ModelTrait[];
+  /**
+   * Context window the provider's own catalog declared. Absent when it declared
+   * none — the app then falls back to its 200k assumption, so a real value here
+   * is the only thing that calibrates compaction correctly.
+   */
+  contextLimit?: number;
 }
 
 export interface UseModeModelListOptions {
@@ -97,6 +103,10 @@ const useModeModeList = (options: UseModeModelListOptions) => {
           value: model.id,
           tasks: model.tasks ?? [],
           traits: model.traits ?? [],
+          // Only present when the provider's own catalog declares a window.
+          ...(model.context_limit && model.context_limit > 0
+            ? { contextLimit: model.context_limit }
+            : {}),
         }));
         if (options.platform.includes('gemini')) {
           models = sortGeminiModels(models);

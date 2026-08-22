@@ -75,6 +75,8 @@ export interface CatalogCapabilitySuggestion {
   model: string;
   tasks: ModelTask[];
   traits: ModelTrait[];
+  /** Context window the provider's catalog declares, when it declares one. */
+  contextLimit?: number;
 }
 
 export type ProviderModelCapabilityInput = CanonicalProviderModelCapabilityInput;
@@ -217,35 +219,52 @@ export const catalogSuggestionsForTask = <T extends { tasks: readonly ModelTask[
 ): T[] => (task ? suggestions.filter((suggestion) => suggestion.tasks.includes(task)) : []);
 
 /**
- * A catalog choice fills only the type the user selected first. Other catalog
- * tasks remain available through the explicit "add another task" flow.
+ * Adopt a catalog entry's model id, enriching only the task it was chosen for.
+ *
+ * Non-destructive by contract. This used to return a single fresh capability,
+ * which silently discarded every other declared task, plus that task's own
+ * protocol/endpoint work, the moment a user clicked a suggestion. The catalog is
+ * advisory, so it may never overwrite configuration the user already entered.
+ *
+ * Traits and the context window are the fields it owns, and only when the entry
+ * actually declares this task: an entry that says nothing about the task says
+ * nothing about its capabilities either. A window the user already chose wins —
+ * they may be correcting the provider, which is the whole point of the field.
  */
 export const applyCatalogSuggestionForTask = (
-  _definition: ModelDefinitionDraft,
+  definition: ModelDefinitionDraft,
   suggestion: CatalogCapabilitySuggestion,
   task: ModelTask
-): ModelDefinitionDraft => ({
-  model: suggestion.model,
-  capabilities: [
-    {
-      ...emptyCapabilityDraft(task),
-      traits: suggestion.tasks.includes(task)
-        ? MODEL_TRAIT_ORDER.filter(
-            (trait) => suggestion.traits.includes(trait) && CATALOG_TRAITS_BY_TASK[task].includes(trait)
-          )
-        : [],
-    },
-  ],
-});
-
-/** Switching an existing primary type starts a clean task draft without leaking transport overrides. */
-export const changePrimaryModelTask = (
-  definition: ModelDefinitionDraft,
-  task: ModelTask
-): ModelDefinitionDraft => ({
-  model: definition.capabilities.length === 0 ? definition.model : '',
-  capabilities: [emptyCapabilityDraft(task)],
-});
+): ModelDefinitionDraft => {
+  const declaresTask = suggestion.tasks.includes(task);
+  const traits = declaresTask
+    ? MODEL_TRAIT_ORDER.filter(
+        (trait) => suggestion.traits.includes(trait) && CATALOG_TRAITS_BY_TASK[task].includes(trait)
+      )
+    : [];
+  const declaredWindow =
+    declaresTask && suggestion.contextLimit && suggestion.contextLimit > 0
+      ? suggestion.contextLimit
+      : undefined;
+  const known = definition.capabilities.some((capability) => capability.task === task);
+  return {
+    model: suggestion.model,
+    capabilities: known
+      ? definition.capabilities.map((capability) =>
+          capability.task === task && declaresTask
+            ? {
+                ...capability,
+                traits,
+                contextLimit: capability.contextLimit ?? declaredWindow,
+              }
+            : capability
+        )
+      : [
+          ...definition.capabilities,
+          { ...emptyCapabilityDraft(task), traits, contextLimit: declaredWindow },
+        ],
+  };
+};
 
 /**
  * Apply backend recommendations only to blank or recommendation-owned

@@ -1891,7 +1891,7 @@ mod tests {
             (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
         });
         assert_eq!(
-            hash, 9_446_312_405_170_401_367,
+            hash, 335_427_579_411_274_270,
             "recommendation URL snapshot changed:\n{snapshot}"
         );
     }

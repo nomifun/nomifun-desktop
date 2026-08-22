@@ -221,7 +221,8 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('data-effective-base-url="https://override.example.com/v1"')).toBe(true);
   });
 
-  test('puts the model type before one unified catalog and free-text model input', () => {    const html = render({ model: '', capabilities: [] }, manifests, 'bearer', [], {
+  test('puts the supported-task picker before one unified catalog and free-text model input', () => {
+    const html = render({ model: '', capabilities: [] }, manifests, 'bearer', [], {
       catalogSuggestions: [
         {
           value: 'chat-model',
@@ -238,12 +239,46 @@ describe('unified model definition editor rendering and interactions', () => {
       ],
     });
 
-    expect(html.indexOf('data-primary-model-task-picker')).toBeLessThan(
+    // The task picker must exist with zero capabilities: it is the only control
+    // that can create the first one, so gating it would deadlock the form.
+    expect(html.includes('data-model-task-picker')).toBe(true);
+    expect(html.indexOf('data-model-task-picker')).toBeLessThan(
       html.indexOf('data-unified-model-input')
     );
     expect(html.includes('data-model-catalog-picker')).toBe(false);
+    expect(html.includes('data-primary-model-task-picker')).toBe(false);
     expect(html.includes('disabled=""')).toBe(true);
-    expect(html.includes('请先选择模型类型')).toBe(true);
+    expect(html.includes('请先在上方选择任务')).toBe(true);
+  });
+
+  test('keeps traits answerable without expanding a capability card', () => {
+    const html = render({
+      model: 'step-ready',
+      capabilities: [
+        { ...emptyCapabilityDraft('chat'), transportSource: 'persisted' as const, protocol: 'stepfun.chat' },
+      ],
+    });
+
+    // Traits describe what the model can do — the same kind of question as the
+    // task itself. They must sit outside the collapsed transport details.
+    expect(html.includes('data-capability-traits="chat"')).toBe(true);
+    expect(html.indexOf('data-capability-traits="chat"')).toBeLessThan(
+      html.indexOf('data-capability-details="chat"')
+    );
+    expect(html.includes('data-capability-expanded="false"')).toBe(true);
+  });
+
+  test('groups both token ceilings under one heading', () => {
+    const html = render({
+      model: 'step-ready',
+      capabilities: [
+        { ...emptyCapabilityDraft('chat'), transportSource: 'persisted' as const, protocol: 'stepfun.chat' },
+      ],
+    });
+
+    expect(html.includes('data-token-limits')).toBe(true);
+    expect(html.includes('上下文窗口')).toBe(true);
+    expect(html.includes('最大输出 tokens')).toBe(true);
   });
 
   test('only exposes catalog models compatible with the selected primary type', () => {

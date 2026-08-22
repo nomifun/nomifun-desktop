@@ -52,6 +52,88 @@ use crate::types::{NomiResolvedConfig, SendMessageData};
 
 use super::image_attachments::{ImageAttachmentError, load_image_blocks};
 
+/// Process-level memory of which `(provider, model)` pairs have already been
+/// reported as running on an assumed context window.
+///
+/// `apply_provider_token_budget` runs on every runtime build, and a runtime is
+/// rebuilt whenever the registry has to recreate one for a turn — so an
+/// unannotated capability would repeat the same diagnostic indefinitely. Keying
+/// on provider + model keeps a second, differently-sized model on the same
+/// provider reportable while collapsing the repeats for one session.
+///
+/// This mirrors [`nomifun_common::VisionUnsupportedRegistry`]: a plain
+/// `std::sync::Mutex<HashSet<_>>` behind a `OnceLock`, with `new()` for tests.
+/// It deliberately owns no reference to `Mutex<AgentEngine>` and is only ever
+/// locked for a single `HashSet::insert` — never across an await and never while
+/// an engine lock is being acquired — so it cannot participate in the engine
+/// mutex's non-reentrant ordering.
+#[derive(Default)]
+struct AssumedContextWindowLog {
+    reported: std::sync::Mutex<HashSet<String>>,
+}
+
+impl AssumedContextWindowLog {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// True the first time this `(provider, model)` pair is seen, false
+    /// afterwards. A poisoned lock reports `true`: a repeated diagnostic is
+    /// strictly better than a silenced one, which is the bug being fixed.
+    fn claim(&self, provider: &str, model: &str) -> bool {
+        self.reported
+            .lock()
+            .map(|mut reported| reported.insert(format!("{provider}\u{1f}{model}")))
+            .unwrap_or(true)
+    }
+
+    fn global() -> &'static Self {
+        static GLOBAL: std::sync::OnceLock<AssumedContextWindowLog> = std::sync::OnceLock::new();
+        GLOBAL.get_or_init(AssumedContextWindowLog::new)
+    }
+}
+
+/// Whether a capability's `context_limit` leaves the engine running on the
+/// resolved default window instead of the model's real one.
+///
+/// This is deliberately the same predicate as
+/// `nomi_config::compact::resolve_context_window`, which also treats an explicit
+/// `0` as unset. Anything that silently falls back must be reported.
+fn assumes_default_context_window(context_limit: Option<u64>) -> bool {
+    !matches!(context_limit, Some(limit) if limit > 0)
+}
+
+/// Report — once per provider+model — that the engine is compacting against an
+/// assumed window rather than a declared one.
+///
+/// Without this line the failure mode is invisible: autocompact and the
+/// emergency `ContextTooLong` guard are both calibrated to
+/// `assumed_context_window`, so a model whose real window is smaller is rejected
+/// by the provider with a non-retryable error before either can fire.
+///
+/// Returns whether a line was emitted, so the dedupe is observable in tests.
+fn report_assumed_context_window(
+    log: &AssumedContextWindowLog,
+    context_limit: Option<u64>,
+    provider: &str,
+    model: &str,
+    assumed_context_window: usize,
+) -> bool {
+    if !assumes_default_context_window(context_limit) || !log.claim(provider, model) {
+        return false;
+    }
+    tracing::warn!(
+        provider,
+        model,
+        assumed_context_window,
+        "chat capability declares no context window; compacting against the assumed default. \
+         Autocompact and the emergency context guard are calibrated to this value, so a model \
+         with a smaller real window is rejected by the provider instead of compacted. Set \
+         Context limit on this model's chat capability in Settings -> Models."
+    );
+    true
+}
+
 fn apply_provider_token_budget(
     config: &mut Config,
     context_limit: Option<u64>,
@@ -59,6 +141,13 @@ fn apply_provider_token_budget(
 ) -> Result<(), AppError> {
     config.compact.context_window = nomi_config::compact::resolve_context_window(
         context_limit,
+        config.compact.context_window,
+    );
+    report_assumed_context_window(
+        AssumedContextWindowLog::global(),
+        context_limit,
+        &config.provider_label,
+        &config.model,
         config.compact.context_window,
     );
     // The capability is authoritative on the desktop path. In particular,
@@ -4863,6 +4952,114 @@ mod tests {
             .expect_err("Anthropic requires an explicit output ceiling");
 
         assert!(error.to_string().contains("Max output tokens"));
+    }
+
+    #[derive(Clone)]
+    struct CapturedLogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs(run: impl FnOnce()) -> String {
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer_output = Arc::clone(&output);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(move || CapturedLogWriter(Arc::clone(&writer_output)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+
+        let bytes = output
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        String::from_utf8(bytes).expect("test tracing output is UTF-8")
+    }
+
+    #[test]
+    fn an_undeclared_context_window_is_reported_once_per_provider_model() {
+        // A dedicated instance rather than the process singleton: the shared
+        // `global()` set is consumed by every other test that builds a manager
+        // from a capability without a context limit, which would make an
+        // order-dependent assertion here.
+        let log = AssumedContextWindowLog::new();
+
+        // (a) The silent fallback is now visible, with the identity and the
+        // window that will actually be used.
+        let logs = capture_logs(|| {
+            assert!(report_assumed_context_window(
+                &log,
+                None,
+                "Local vLLM",
+                "qwen3-32b",
+                200_000,
+            ));
+        });
+        assert!(logs.contains("WARN"), "got: {logs}");
+        assert!(logs.contains("Local vLLM"), "got: {logs}");
+        assert!(logs.contains("qwen3-32b"), "got: {logs}");
+        assert!(logs.contains("assumed_context_window=200000"), "got: {logs}");
+        assert!(logs.contains("Context limit"), "got: {logs}");
+
+        // (b) The same pair on a later turn/runtime rebuild stays quiet.
+        let repeats = capture_logs(|| {
+            for _ in 0..5 {
+                assert!(!report_assumed_context_window(
+                    &log,
+                    None,
+                    "Local vLLM",
+                    "qwen3-32b",
+                    200_000,
+                ));
+            }
+        });
+        assert!(repeats.is_empty(), "got: {repeats}");
+
+        // A second, differently sized model behind the same provider is still
+        // its own diagnostic, and so is the same model id on another provider.
+        for (provider, model) in [("Local vLLM", "qwen3-4b"), ("Other gateway", "qwen3-32b")] {
+            let logs = capture_logs(|| {
+                assert!(report_assumed_context_window(
+                    &log, None, provider, model, 200_000,
+                ));
+            });
+            assert!(logs.contains(model), "got: {logs}");
+        }
+    }
+
+    #[test]
+    fn a_declared_context_window_is_never_reported_as_assumed() {
+        let log = AssumedContextWindowLog::new();
+        let logs = capture_logs(|| {
+            assert!(!report_assumed_context_window(
+                &log,
+                Some(32_768),
+                "Local vLLM",
+                "qwen3-32b",
+                32_768,
+            ));
+        });
+        assert!(logs.is_empty(), "got: {logs}");
+
+        // The predicate matches `resolve_context_window`, which also treats an
+        // explicit zero as unset — that path falls back just as silently.
+        assert!(assumes_default_context_window(None));
+        assert!(assumes_default_context_window(Some(0)));
+        assert!(!assumes_default_context_window(Some(1)));
+        assert!(!assumes_default_context_window(Some(200_000)));
     }
 
     fn make_agent_with_provider(provider: Arc<dyn LlmProvider>) -> NomiAgentManager {
