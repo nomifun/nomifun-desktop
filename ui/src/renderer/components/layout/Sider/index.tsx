@@ -22,6 +22,10 @@ import {
 } from '@renderer/pages/creativeStudio/app/routes';
 import { requestCreativeStudioBeforeLeave } from '@renderer/pages/creativeStudio/app/beforeLeave';
 import {
+  readCreativeStudioResumeLocation,
+  rememberCreativeStudioResumeLocation,
+} from '@renderer/pages/creativeStudio/app/resumeLocation';
+import {
   SiderAssetLibraryEntry,
   SiderBrowserEntry,
   SiderCreativeStudioEntry,
@@ -82,6 +86,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const isSettings = pathname.startsWith('/settings');
   const isCreativeStudio = isCreativeStudioPath(pathname);
   const lastNonSettingsPathRef = useRef('/guid');
+  const lastCreativeStudioPathRef = useRef(readCreativeStudioResumeLocation());
   // Logout is a WebUI-only affordance: the bundled desktop shell (Electron or
   // Tauri) is single-user with no auth, so there is nothing to log out of.
   const showLogout = !isDesktopShell() && status === 'authenticated';
@@ -91,6 +96,12 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
       lastNonSettingsPathRef.current = `${pathname}${search}${hash}`;
     }
   }, [pathname, search, hash]);
+
+  useEffect(() => {
+    if (!isCreativeStudio) return;
+    const currentPath = `${pathname}${search}${hash}`;
+    lastCreativeStudioPathRef.current = rememberCreativeStudioResumeLocation(currentPath);
+  }, [hash, isCreativeStudio, pathname, search]);
 
   const navTo = useCallback(
     (target: string, replace = false) => {
@@ -123,7 +134,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleKnowledgeClick = () => navTo('/knowledge');
   const handleAssetLibraryClick = () => navTo(CREATIVE_STUDIO_ASSETS_PATH);
   const handleNomiClick = () => navTo('/nomi');
-  const handleCreativeStudioClick = () => navTo(CREATIVE_STUDIO_ROOT_PATH);
+  const handleCreativeStudioClick = () => navTo(lastCreativeStudioPathRef.current);
   const handleMiniAppsClick = () => navTo('/mini-apps');
   const handleCustomerServiceClick = () => navTo('/customer-service');
   const handlePresetClick = () => navTo('/presets');

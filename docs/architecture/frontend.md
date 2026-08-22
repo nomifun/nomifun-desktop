@@ -85,8 +85,15 @@ redirects. Do not document them as primary navigation.
 
 Creative Studio reuses the normal app titlebar and swaps the primary rail to a
 Settings-style product navigation surface, with **Back to Workbench** pinned at
-the bottom. Its route constants and exact-match rules live in
+the bottom. During an app session, the main rail entry resumes the last complete
+Creative Studio location that passes the product's exact route matcher; invalid
+or unknown stored locations fall back to `/workshop`. Its route constants and exact-match rules live in
 [`pages/creativeStudio/app/routes.ts`](../../ui/src/renderer/pages/creativeStudio/app/routes.ts).
+
+The `projects/projectId` names in the current route map are compatibility-era
+implementation details. The approved target domain has Canvases only, while
+Image and Video Workbenches remain independent from every Canvas; see the
+2026-08-23 Canvas-domain redesign spec.
 `/workshop/audio` is retired; audio creation is available through canvas audio
 nodes, not a standalone route.
 

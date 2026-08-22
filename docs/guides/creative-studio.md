@@ -8,14 +8,23 @@ model catalog; it does not maintain a second model configuration system.
 
 > Simplified Chinese: [creative-studio.zh.md](creative-studio.zh.md)
 
+> **Transitional domain note (2026-08-23):** the approved product direction
+> removes Project from Creative Studio. Canvases, Image Workbench, and Video
+> Workbench are independent products. References below to `project/projectId`
+> and project-scoped standalone workbenches describe the current compatibility
+> implementation, not the target contract. See the linked Chinese redesign spec.
+
 ## Open the product
 
 Open **Creative Studio** from the application sidebar. The page reuses
 NomiFun's default titlebar controls for the sidebar, history, and system window.
 Like Settings, the primary rail switches to Creative Studio navigation and can
-be collapsed to recover working space. **Back to Workbench** stays pinned to the
-bottom of that rail and returns to `/guid` after any pending canvas or Director
-save has been resolved.
+be collapsed to recover working space. The primary Creative Studio entry resumes
+the last valid product location in the current app session, including its full
+query string and in-page hash. Use the **Creative Studio** home item in the
+product rail when you intentionally want a fresh
+starting point. **Back to Workbench** stays pinned to the bottom of that rail and
+returns to `/guid` after any pending canvas or Director save has been resolved.
 
 The active route surface is:
 
