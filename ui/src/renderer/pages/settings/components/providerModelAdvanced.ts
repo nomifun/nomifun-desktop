@@ -221,6 +221,31 @@ export const removeCapabilityTask = (
   task: ModelTask
 ): ModelCapabilityDraft[] => capabilities.filter((capability) => capability.task !== task);
 
+/**
+ * Would removing this task throw away work the user cannot get back?
+ *
+ * A task's capability IS its configuration, so removing the task deletes its
+ * protocol, endpoints, traits and limits with it. That is fine for a draft the
+ * user just added and never touched — nagging there would be noise — but not for
+ * one they configured, or one loaded from the server.
+ *
+ * `'recommendation'` transport deliberately does not count: it was filled in
+ * automatically the moment the task was added, so it is not the user's work.
+ */
+export const capabilityHasConfiguration = (capability: ModelCapabilityDraft): boolean =>
+  capability.transportSource === 'user' ||
+  capability.transportSource === 'persisted' ||
+  capability.traits.length > 0 ||
+  capability.contextLimit !== undefined ||
+  capability.outputLimit !== undefined ||
+  capability.allowCrossOriginCredentials ||
+  Boolean(capability.baseUrlOverride.trim()) ||
+  Boolean(capability.endpoint.trim()) ||
+  Boolean(capability.pollEndpoint.trim()) ||
+  Boolean(capability.contentEndpoint.trim()) ||
+  Boolean(capability.realtimeEndpoint.trim()) ||
+  Boolean(capability.providerParamsJson.trim());
+
 const CATALOG_TRAITS_BY_TASK: Readonly<Record<ModelTask, readonly ModelTrait[]>> = {
   chat: [
     'vision_input',

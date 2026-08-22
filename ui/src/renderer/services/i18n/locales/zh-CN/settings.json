@@ -524,6 +524,7 @@
   "addAnotherModelTask": "添加其他任务",
   "modelTasksAllAdded": "所有任务均已添加",
   "modelTasksEmpty": "该模型尚未配置任何任务。",
+  "removeConfiguredModelTaskConfirm": "移除“{{tasks}}”会同时丢弃它已配置的协议与地址，确定继续？",
   "removeModelTask": "移除任务",
   "removeModelTaskConfirm": "移除“{{task}}”及其高级配置？",
   "completeCapabilityConfiguration": "请完整配置每个支持任务的协议和连接。",

@@ -4329,6 +4329,7 @@ export type I18nKey =
   | 'settings.qqbot.pluginEnabled'
   | 'settings.qqbot.tokensDesc'
   | 'settings.quickScan'
+  | 'settings.removeConfiguredModelTaskConfirm'
   | 'settings.removeCustomSkillConfirm'
   | 'settings.removeCustomSkillNote'
   | 'settings.removeCustomSkillTitle'
