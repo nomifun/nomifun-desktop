@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import {
+  buildAuthSchemeOptions,
   buildConnectionCredentials,
   credentialsKindForScheme,
   isValidConnectionRole,
@@ -54,6 +55,28 @@ describe('credentials kind per scheme', () => {
   test('volc_voice and unknown schemes get their own forms', () => {
     expect(credentialsKindForScheme('volc_voice')).toBe('volc_voice');
     expect(credentialsKindForScheme('my_custom')).toBe('custom');
+  });
+});
+
+describe('provider auth-scheme suggestions', () => {
+  test('remain useful before the manifest loads and keep the stored scheme', () => {
+    const options = buildAuthSchemeOptions([], 'header_key:x-company-key');
+    expect(options[0]).toBe('header_key:x-company-key');
+    expect(options.includes('bearer')).toBe(true);
+    expect(options.includes('token')).toBe(true);
+    expect(options.includes('header_key:x-api-key')).toBe(true);
+    expect(options.includes('query_key:key')).toBe(true);
+    expect(options.includes('volc_voice')).toBe(true);
+    expect(options.includes('bedrock')).toBe(true);
+  });
+
+  test('turns parameterized manifest templates into valid concrete examples', () => {
+    const options = buildAuthSchemeOptions(['bearer', 'header_key:<name>', 'query_key:<param>']);
+    expect(options.includes('header_key:<name>')).toBe(false);
+    expect(options.includes('query_key:<param>')).toBe(false);
+    expect(options.includes('header_key:x-goog-api-key')).toBe(true);
+    expect(options.includes('query_key:api_key')).toBe(true);
+    expect(new Set(options).size).toBe(options.length);
   });
 });
 

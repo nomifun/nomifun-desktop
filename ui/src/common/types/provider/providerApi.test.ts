@@ -52,12 +52,12 @@ const modelResponse = (): ProviderModelResponse => ({
   updated_at: 1,
 });
 
-const response = (provider_id: string): ProviderResponse => ({
+const response = (provider_id: string, auth_scheme = 'bearer'): ProviderResponse => ({
   provider_id,
   platform: 'openai',
   name: 'OpenAI',
   base_url: 'https://api.openai.com',
-  auth_scheme: 'bearer',
+  auth_scheme,
   has_credentials: true,
   models: [modelResponse()],
   enabled: true,
@@ -98,6 +98,17 @@ describe('provider wire contract', () => {
       'platform',
       'sort_order',
     ]);
+  });
+
+  test('round-trips a persisted non-bearer auth scheme without inferring a default', () => {
+    const provider = fromProviderResponse(response(PROVIDER_ID, 'header_key:x-api-key'));
+    expect(provider.auth_scheme).toBe('header_key:x-api-key');
+    expect(toUpdateProviderRequest({ name: 'Metadata only' })).toEqual({
+      name: 'Metadata only',
+    });
+    expect(toUpdateProviderRequest({ auth_scheme: provider.auth_scheme })).toEqual({
+      auth_scheme: 'header_key:x-api-key',
+    });
   });
 
   test('rejects non-canonical provider ids at the wire boundary', () => {

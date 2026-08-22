@@ -322,6 +322,51 @@ async fn update_keeps_platform_identity_and_updates_connection_defaults() {
 }
 
 #[tokio::test]
+async fn non_bearer_auth_survives_create_list_and_metadata_only_update() {
+    let db = init_database_memory().await.unwrap();
+    let mut body = create_body("Gemini auth persistence");
+    body["platform"] = json!("gemini");
+    body["base_url"] = json!("https://generativelanguage.googleapis.com");
+    body["auth_scheme"] = json!("header_key:x-goog-api-key");
+    body["initial_model"]["model"] = json!("gemini-contract");
+    body["initial_model"]["capabilities"][0]["protocol"] = json!("gemini.generate_text");
+    body["initial_model"]["capabilities"][0]["endpoint"] =
+        json!("/v1beta/models/{model}:streamGenerateContent?alt=sse");
+
+    let created = system_routes(build_state(&db))
+        .oneshot(request("POST", "/api/providers", Some(body)))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created = body_json(created).await;
+    let provider_id = created["data"]["provider_id"].as_str().unwrap();
+    assert_eq!(created["data"]["auth_scheme"], "header_key:x-goog-api-key");
+
+    let updated = system_routes(build_state(&db))
+        .oneshot(request(
+            "PUT",
+            &format!("/api/providers/{provider_id}"),
+            Some(json!({"name": "Gemini renamed"})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(updated).await["data"]["auth_scheme"],
+        "header_key:x-goog-api-key"
+    );
+
+    let listed = system_routes(build_state(&db))
+        .oneshot(request("GET", "/api/providers", None))
+        .await
+        .unwrap();
+    assert_eq!(
+        body_json(listed).await["data"][0]["auth_scheme"],
+        "header_key:x-goog-api-key"
+    );
+}
+
+#[tokio::test]
 async fn invocation_changes_clear_default_capability_health_but_metadata_edits_do_not() {
     let db = init_database_memory().await.unwrap();
     let created = system_routes(build_state(&db))

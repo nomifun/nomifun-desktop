@@ -37,6 +37,7 @@ import {
   buildProviderCredentials,
   type BedrockAuthMethod,
 } from './providerCredentialsForm';
+import { buildAuthSchemeOptions } from './providerConnectionForm';
 import useModelProtocolManifests from './useModelProtocolManifests';
 
 const EMPTY_DEFINITION: ModelDefinitionDraft = { model: '', capabilities: [] };
@@ -333,7 +334,14 @@ const AddPlatformModal = ModalHOC<{
     }
   };
 
-  const authSchemeOptions = providerManifest?.auth_schemes.map((item) => item.scheme) ?? [];
+  const authSchemeOptions = useMemo(
+    () =>
+      buildAuthSchemeOptions(
+        providerManifest?.auth_schemes.map((item) => item.scheme) ?? [],
+        authScheme
+      ),
+    [authScheme, providerManifest?.auth_schemes]
+  );
 
   return (
     <NomiModal
@@ -419,6 +427,7 @@ const AddPlatformModal = ModalHOC<{
             <AutoComplete
               data={authSchemeOptions.map((scheme) => ({ value: scheme, name: scheme }))}
               loading={manifestState.loadingTasks.includes('chat')}
+              filterOption={false}
               placeholder='bearer / token / header_key:x-api-key'
               onChange={() => setAuthSchemeDirty(true)}
               triggerProps={{ getPopupContainer: () => document.body }}
