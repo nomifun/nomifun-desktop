@@ -2,7 +2,7 @@
 
 > 用途：在长任务发生上下文压缩或人员切换时，从可验证提交继续，而不是重新审计整仓。
 > 分支：`codex/infinite-canvas-rebuild`
-> 最后交付锚点：`29199d62`（`docs(creative-studio): refresh production screenshots`）；最后功能锚点为 `a6db9d04`，最小 Workflow AI 主体为 `cd85b21e`。
+> 最后主线整合锚点：`ac3a5e9a`（合入 `origin/main` 的 `3af42d04` / v0.6.5）；Creative Studio 最后交付锚点为 `29199d62`，最后功能锚点为 `a6db9d04`，最小 Workflow AI 主体为 `cd85b21e`。
 > 参考产品锚点：`ef7303d`
 > 2026-08-22 P11 源码与未签名内部 QA 包交付门已闭合：Workflow MVP、旧入口退役、Web/真实 Tauri 慢环、三视口、production bundle、Windows x64 NSIS 打包与能力文档均已有证据；未调用真实付费 Provider。公开发行仍需新版本、签名和一次性 Windows 环境安装/升级/卸载门。
 
@@ -270,7 +270,13 @@
 - Windows x64 完整 package 在冻结 HEAD `29199d6208d16d6ad676ac12854bd82a71321034` 成功。程序 `target/x86_64-pc-windows-msvc/release/nomifun-desktop.exe` 为 203,402,752 bytes，SHA-256 `CBACE82E93457DB40B2D65120901F31632FF9196ABAF8E3C30C81F9ED99197F3`，版本 0.6.4，未签名。canonical 与 `dist/desktop` setup 均为 60,033,206 bytes，SHA-256 `D7E3D6CDC4FC84450510CC721E08400A900D14B533B6828375622CAAC2798FB9`，逐字节一致且未签名。
 - NSIS 使用锁定的 Tauri CLI 2.11.2 受控模板：current-user 程序根为 `%LOCALAPPDATA%\Programs\NomiFun`，不会与 `%LOCALAPPDATA%\NomiFun` 稳定数据根重叠；卸载器保留真实用户数据。source 与 rendered installer contract 均通过。最终 build manifest 为 schema 1、app 0.6.4、API contract 20、frontend build id `abecfcd0-7904-48b3-986b-95009d6a2b31`。
 - 双语 Creative Studio 能力指南、架构/API/ID 文档、README 与 production 截图已刷新；`NOTICE` 与 `third_party/infinite-canvas/` 已记录参考项目 revision、来源和完整 MIT 许可证。英文 Focus Shell 已本地化，但画布/编辑器主体仍有较多简体中文，文档未把它包装成完整英文体验。
-- 当前账户没有运行 setup，也没有修改正式用户数据。两个已清空产品数据的隔离 Web 临时根 `nomifun-p11-web-cd185d87-73305df076454fdf8068653ccd3789ee`、`nomifun-p11-web-cd185d87-142fbd7421764bdda841723eae25d625` 因安全策略保留在 `%TEMP%`；真实 Tauri 隔离根 `nomifun-p11-tauri-29199d62-10c60bb4942c4332b01e8b9a1b16d867` 和一个 PID 41664 的 Vite 5173 子进程仍存在。后者已失去正常监督通道，本轮不以 `taskkill /F` 暴力清理。
+- 当前账户没有运行 setup，也没有修改正式用户数据。两个已清空产品数据的隔离 Web 临时根 `nomifun-p11-web-cd185d87-73305df076454fdf8068653ccd3789ee`、`nomifun-p11-web-cd185d87-142fbd7421764bdda841723eae25d625` 因安全策略保留在 `%TEMP%`；真实 Tauri 隔离根为 `nomifun-p11-tauri-29199d62-10c60bb4942c4332b01e8b9a1b16d867`。冻结时遗留的 PID 41664 / Vite 5173 没有被 `taskkill /F` 暴力清理，主线推送前的后续实时检查已确认 5173 自行释放。
+
+`ac3a5e9a` 的远程 main 整合门：
+
+- 获取并合入 `origin/main=3af42d04063a56fa64bf2ee62ccc116c6255ccff`，包含 v0.6.5 和模型设置能力声明/高级配置改进。根 package、UI 和 Rust workspace 版本统一为 0.6.5；Tauri CLI 仍精确锁定 2.11.2，`bun install --frozen-lockfile` 无改动。
+- 完整 `bun run check`、设置模型编辑 + CreativeModelSelect + Focus Shell + Workflow 定向 UI 157/157（736 assertions）、`cargo check -p nomifun-app` 和 production UI build（7698 modules）通过；最终 dist 退役门通过，0.6.5 build manifest 为 schema 1、API contract 20。
+- 上述合并未重新执行完整 Windows package。既有 0.6.4 setup 仅是冻结 HEAD `29199d62` 的历史内部 QA 证据，不代表 `ac3a5e9a` 之后的 0.6.5 组合源码；不得把它作为当前 main 的发布包。
 
 ## 4. 仍需明确保留的限制
 
@@ -290,7 +296,7 @@
 - `data.composer` 是协调发布的 v1 可选扩展：当前前后端均向后读取缺字段文档，但 `ef26f4cb` 之前带 `deny_unknown_fields` 的旧二进制不能读取新字段，不能把新数据库回退给旧程序。
 - 单模型删除已原子覆盖 Creative Studio exact-pair 当前选择与运行中硬绑定，但非 Creative Studio 的 Conversation 主模型、Companion/customer-service、Agent Execution/template、Cron 等仍只有 Provider 级 usage/清理合同，尚未统一成 exact-model scanner。本提交不宣称这些外部模块的单模型引用已自动迁移或清除。
 - Workflow 当前是 private-only。历史数据库中的 `public` 枚举不会被批量改写；用户下一次从当前 UI 保存或复制时才规范化为 `private`。公开模板、发现、共享、附件、复杂 Conversation、自动保存和自动运行均不属于首发能力。
-- Windows 产物是已核验的未签名内部 QA 包，不是已公开发布版本。现有 `v0.6.4` 已对应旧 release；公开发布必须 bump 新版本，重建 updater `.sig` / `latest.json` / release notes，并配置 Authenticode，不能覆盖或复用旧 tag。
+- Windows 0.6.4 产物是冻结点已核验的未签名内部 QA 包，不是当前合并源码或公开发布版本。远程 `v0.6.5` 也已经发布并在本次整合中进入源码；Creative Studio 公开发布必须使用高于 0.6.5 的新版本，重建 updater `.sig` / `latest.json` / release notes，并配置 Authenticode，不能覆盖或复用旧 tag。
 - 当前账户未运行安装器。安装、启动、deep link、同版本重装/升级、托盘正常退出、卸载和注册表/快捷方式/文件残留必须在 Windows Sandbox、一次性用户或 VM 完成；干净机器首次 WebView2 下载路径也尚未验证。
 - 英文 Focus Shell 已具备，但大量画布与编辑器文案仍为简体中文。若英文市场是本次公开发行硬条件，需要单独完成 Creative Studio 内容本地化与截图复验。
 
