@@ -2,7 +2,7 @@
 
 use nomifun_common::{
     AppError, CreationTaskId, CreativeStudioCanvasId, CreativeStudioNodeId,
-    CreativeStudioWorkflowId, CreativeStudioWorkflowRunId, CreativeStudioWorkflowStepId,
+    CreativeStudioTemplateId, CreativeStudioTemplateRunId, CreativeStudioTemplateStepId,
     ProviderId, TimestampMs, WorkshopAssetId,
 };
 use nomifun_db::CreationTaskRow;
@@ -20,9 +20,9 @@ pub struct CreationTask {
     pub creation_task_id: String,
     pub canvas_id: Option<String>,
     pub workbench_kind: Option<String>,
-    pub workflow_id: Option<String>,
-    pub workflow_run_id: Option<String>,
-    pub workflow_step_id: Option<String>,
+    pub template_id: Option<String>,
+    pub template_run_id: Option<String>,
+    pub template_step_id: Option<String>,
     pub node_id: Option<String>,
     pub provider_id: String,
     pub model: String,
@@ -49,17 +49,17 @@ impl TryFrom<CreationTaskRow> for CreationTask {
             CreativeStudioCanvasId::parse(id)
                 .map_err(|error| corrupt_id("creation_tasks.canvas_id", error))?;
         }
-        if let Some(id) = row.workflow_id.as_deref() {
-            CreativeStudioWorkflowId::parse(id)
-                .map_err(|error| corrupt_id("creation_tasks.workflow_id", error))?;
+        if let Some(id) = row.template_id.as_deref() {
+            CreativeStudioTemplateId::parse(id)
+                .map_err(|error| corrupt_id("creation_tasks.template_id", error))?;
         }
-        if let Some(id) = row.workflow_run_id.as_deref() {
-            CreativeStudioWorkflowRunId::parse(id)
-                .map_err(|error| corrupt_id("creation_tasks.workflow_run_id", error))?;
+        if let Some(id) = row.template_run_id.as_deref() {
+            CreativeStudioTemplateRunId::parse(id)
+                .map_err(|error| corrupt_id("creation_tasks.template_run_id", error))?;
         }
-        if let Some(id) = row.workflow_step_id.as_deref() {
-            CreativeStudioWorkflowStepId::parse(id)
-                .map_err(|error| corrupt_id("creation_tasks.workflow_step_id", error))?;
+        if let Some(id) = row.template_step_id.as_deref() {
+            CreativeStudioTemplateStepId::parse(id)
+                .map_err(|error| corrupt_id("creation_tasks.template_step_id", error))?;
         }
         if let Some(id) = row.node_id.as_deref() {
             CreativeStudioNodeId::parse(id)
@@ -100,9 +100,9 @@ impl TryFrom<CreationTaskRow> for CreationTask {
         match (
             row.project_id.as_ref(),
             row.workbench_kind.as_deref(),
-            row.workflow_id.as_ref(),
-            row.workflow_run_id.as_ref(),
-            row.workflow_step_id.as_ref(),
+            row.template_id.as_ref(),
+            row.template_run_id.as_ref(),
+            row.template_step_id.as_ref(),
             row.node_id.as_ref(),
         ) {
             (Some(_), None, None, None, None, Some(_))
@@ -128,12 +128,12 @@ impl TryFrom<CreationTaskRow> for CreationTask {
 
         Ok(Self {
             creation_task_id: row.creation_task_id,
-            // Repository storage remains on the legacy project_id column.
+            // The repository stores the canvas owner in its project_id column.
             canvas_id: row.project_id,
             workbench_kind: row.workbench_kind,
-            workflow_id: row.workflow_id,
-            workflow_run_id: row.workflow_run_id,
-            workflow_step_id: row.workflow_step_id,
+            template_id: row.template_id,
+            template_run_id: row.template_run_id,
+            template_step_id: row.template_step_id,
             node_id: row.node_id,
             provider_id: row.provider_id,
             model: row.model,
@@ -163,10 +163,10 @@ pub enum CreativeCreationTaskOwner {
     StandaloneWorkbench {
         workbench_kind: String,
     },
-    WorkflowStep {
-        workflow_id: String,
-        workflow_run_id: String,
-        workflow_step_id: String,
+    TemplateStep {
+        template_id: String,
+        template_run_id: String,
+        template_step_id: String,
     },
 }
 
@@ -226,9 +226,9 @@ impl TryFrom<CreationTask> for CreativeCreationTask {
         let owner = match (
             task.canvas_id,
             task.workbench_kind,
-            task.workflow_id,
-            task.workflow_run_id,
-            task.workflow_step_id,
+            task.template_id,
+            task.template_run_id,
+            task.template_step_id,
             task.node_id,
         ) {
             (Some(canvas_id), None, None, None, None, Some(node_id)) => {
@@ -242,11 +242,11 @@ impl TryFrom<CreationTask> for CreativeCreationTask {
                     workbench_kind,
                 }
             }
-            (None, None, Some(workflow_id), Some(workflow_run_id), Some(workflow_step_id), None) => {
-                CreativeCreationTaskOwner::WorkflowStep {
-                    workflow_id,
-                    workflow_run_id,
-                    workflow_step_id,
+            (None, None, Some(template_id), Some(template_run_id), Some(template_step_id), None) => {
+                CreativeCreationTaskOwner::TemplateStep {
+                    template_id,
+                    template_run_id,
+                    template_step_id,
                 }
             }
             _ => {
@@ -295,9 +295,9 @@ mod tests {
             creation_task_id: creation_task_id.clone(),
             project_id: Some(canvas_id.clone()),
             workbench_kind: None,
-            workflow_id: None,
-            workflow_run_id: None,
-            workflow_step_id: None,
+            template_id: None,
+            template_run_id: None,
+            template_step_id: None,
             node_id: Some(node_id),
             provider_id,
             model: "m".into(),
@@ -341,9 +341,9 @@ mod tests {
             creation_task_id: generate_id(),
             project_id: None,
             workbench_kind: Some("video".into()),
-            workflow_id: None,
-            workflow_run_id: None,
-            workflow_step_id: None,
+            template_id: None,
+            template_run_id: None,
+            template_step_id: None,
             node_id: None,
             provider_id: ProviderId::new().into_string(),
             model: "video-model".into(),
@@ -391,9 +391,9 @@ mod tests {
             creation_task_id: generate_id(),
             project_id: Some(CreativeStudioCanvasId::new().into_string()),
             workbench_kind: None,
-            workflow_id: None,
-            workflow_run_id: None,
-            workflow_step_id: None,
+            template_id: None,
+            template_run_id: None,
+            template_step_id: None,
             node_id: Some(CreativeStudioNodeId::new().into_string()),
             provider_id: ProviderId::new().into_string(),
             model: "m".into(),
@@ -430,9 +430,9 @@ mod tests {
                 creation_task_id: creation_task_id.into(),
                 project_id: Some(CreativeStudioCanvasId::new().into_string()),
                 workbench_kind: None,
-                workflow_id: None,
-                workflow_run_id: None,
-                workflow_step_id: None,
+                template_id: None,
+                template_run_id: None,
+                template_step_id: None,
                 node_id: Some(CreativeStudioNodeId::new().into_string()),
                 provider_id: ProviderId::new().into_string(),
                 model: "m".into(),

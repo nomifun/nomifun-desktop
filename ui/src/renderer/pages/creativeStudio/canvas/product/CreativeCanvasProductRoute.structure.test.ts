@@ -89,10 +89,10 @@ describe('Creative Canvas product route composition', () => {
       true
     );
     expect(source.includes('<CreativeCanvasAssistantUnwiredPanel')).toBe(false);
-    expect(source.includes('<CreativeCanvasWorkflowPanel')).toBe(true);
-    expect(source.includes('<CreativeCanvasWorkflowUnwiredPanel')).toBe(false);
-    expect(source.includes('<WorkflowRunModal')).toBe(true);
-    expect(source.includes('workflowAssetPicker.pick')).toBe(true);
+    expect(source.includes('<CreativeCanvasTemplatePanel')).toBe(true);
+    expect(source.includes('<CreativeCanvasTemplateUnwiredPanel')).toBe(false);
+    expect(source.includes('<TemplateRunModal')).toBe(true);
+    expect(source.includes('templateAssetPicker.pick')).toBe(true);
     expect(source.includes('creativeAssetClient.get(assetId)')).toBe(true);
     expect(source.includes('copyText(selection.prompt)')).toBe(true);
     expect(source.includes('onCopy={handleCopyPrompt}')).toBe(true);

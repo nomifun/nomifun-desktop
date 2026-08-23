@@ -31,15 +31,15 @@ pub struct CreativeStudioAgentProposalReceiptRow {
     pub created_at: TimestampMs,
 }
 
-/// Row mapping for a canonical Creative Studio workflow definition.
+/// Row mapping for a canonical Creative Studio template definition.
 ///
 /// The JSON body is validated by `nomifun-workshop`; indexed metadata is kept
 /// beside it for deterministic list/search views without accepting a second
 /// source of truth.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct CreativeStudioWorkflowRow {
+pub struct CreativeStudioTemplateRow {
     pub id: i64,
-    pub workflow_id: String,
+    pub template_id: String,
     pub revision: i64,
     pub name: String,
     pub description: String,
@@ -50,17 +50,17 @@ pub struct CreativeStudioWorkflowRow {
     pub updated_at: TimestampMs,
 }
 
-/// Row mapping for one durable canonical Creative Studio workflow run.
+/// Row mapping for one durable canonical Creative Studio template run.
 ///
 /// `aggregate_json` is a closed v1 contract validated by `nomifun-workshop`;
-/// the duplicated workflow/status fields provide indexed ownership and
+/// the duplicated template/status fields provide indexed ownership and
 /// recovery queries without creating a second source of truth.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct CreativeStudioWorkflowRunRow {
+pub struct CreativeStudioTemplateRunRow {
     pub id: i64,
-    pub workflow_run_id: String,
-    pub workflow_id: String,
-    pub workflow_revision: i64,
+    pub template_run_id: String,
+    pub template_id: String,
+    pub template_revision: i64,
     pub revision: i64,
     pub status: String,
     pub step_ids_json: String,
@@ -96,7 +96,7 @@ pub struct WorkshopAssetRow {
     /// `1` = appears in the asset library; `0` = project-internal material.
     pub in_library: bool,
     /// Canonical provenance object. Durable ownership is either
-    /// `{project_id,node_id}` or `{workflow_id,workflow_run_id,workflow_step_id}`.
+    /// `{project_id,node_id}` or `{template_id,template_run_id,template_step_id}`.
     pub origin: Option<String>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
@@ -111,13 +111,13 @@ pub struct WorkshopAssetRow {
 pub struct CreationTaskRow {
     pub creation_task_id: String,
     /// Canonical project owner. A node or standalone workbench discriminator
-    /// completes the branch; both are mutually exclusive with workflow ownership.
+    /// completes the branch; both are mutually exclusive with template ownership.
     pub project_id: Option<String>,
     pub workbench_kind: Option<String>,
-    /// Canonical workflow-step owner. All three workflow columns are present together.
-    pub workflow_id: Option<String>,
-    pub workflow_run_id: Option<String>,
-    pub workflow_step_id: Option<String>,
+    /// Canonical template-step owner. All three template columns are present together.
+    pub template_id: Option<String>,
+    pub template_run_id: Option<String>,
+    pub template_step_id: Option<String>,
     pub node_id: Option<String>,
     pub provider_id: String,
     pub model: String,

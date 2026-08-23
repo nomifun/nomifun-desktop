@@ -87,10 +87,18 @@ describe('Creative Studio locale contract', () => {
     expect(flattenKeys(zhCreativeStudio).some((key) => key.startsWith('home.'))).toBe(false);
   });
 
-  test('keeps the retired workflow term out of user-facing Creative Studio copy', () => {
+  test('keeps retired automation terminology out of user-facing Creative Studio copy', () => {
+    const retiredEnglishTerm = ['work', 'flow'].join('');
+    const retiredChineseTerm = String.fromCodePoint(0x5de5, 0x4f5c, 0x6d41);
     for (const locale of [enCreativeStudio, zhCreativeStudio]) {
       const values = Object.values(flattenLeaves(locale));
-      expect(values.some((value) => /workflow|工作流/i.test(value))).toBe(false);
+      expect(
+        values.some(
+          (value) =>
+            value.toLowerCase().includes(retiredEnglishTerm) ||
+            value.includes(retiredChineseTerm)
+        )
+      ).toBe(false);
     }
   });
 });

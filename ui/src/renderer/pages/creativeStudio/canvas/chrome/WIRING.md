@@ -27,7 +27,7 @@ the panel slots:
       canvas: <CanvasOutline />,
       assets: <CreativeAssetLibrary {...assetProps} />,
       prompts: <PromptLibrarySurface {...promptProps} />,
-      workflows: <WorkflowLibrary />,
+      templates: <TemplateLibrary />,
     },
     right: {
       assistant: <CreativeStudioAgentPanel {...agentProps} />,

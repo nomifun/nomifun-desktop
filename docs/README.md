@@ -18,7 +18,7 @@ the current architecture or contributor standards.
 | Install or run locally | [getting-started/installation.md](getting-started/installation.md) |
 | Try the app quickly | [getting-started/quick-start.md](getting-started/quick-start.md) |
 | Connect providers, local models, and configure failover | [guides/model-routing.md](guides/model-routing.md) |
-| Create with the infinite canvas, workbenches, assets, and workflows | [guides/creative-studio.md](guides/creative-studio.md) |
+| Create with the infinite canvas, workbenches, assets, and templates | [guides/creative-studio.md](guides/creative-studio.md) |
 | Connect a XiaoZhi ESP32 robot | [guides/xiaozhi-robot.md](guides/xiaozhi-robot.md) |
 | Understand the current architecture | [architecture/overview.md](architecture/overview.md) |
 | Build or package the project | [contributing/building-and-packaging.md](contributing/building-and-packaging.md) |

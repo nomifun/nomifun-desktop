@@ -72,15 +72,15 @@ import {
   type PreparedCreativeWorkbenchRun,
 } from '../../workbenches/runtime';
 import type {
-  WorkflowDefinitionV1,
-  WorkflowRunAggregateV1,
-} from '../../workflows/domain';
+  CreativeTemplateDefinitionV1,
+  CreativeTemplateRunAggregateV1,
+} from '../../templates/domain';
 import {
-  WorkflowRunModal,
-  type CreativeWorkflowRunnerPort,
-} from '../../workflows/page';
-import { useCreativeWorkflowRuntime } from '../../workflows/runtime';
-import { creativeWorkflowRepository } from '../../workflows/services';
+  TemplateRunModal,
+  type CreativeTemplateRunnerPort,
+} from '../../templates/page';
+import { useCreativeTemplateRuntime } from '../../templates/runtime';
+import { creativeTemplateRepository } from '../../templates/services';
 import { CreativeCanvasChrome } from '../chrome';
 import type { CanvasInteractionTool } from '../components';
 import {
@@ -150,7 +150,7 @@ import {
   CreativeCanvasUnavailablePanel,
 } from './CreativeCanvasPanels';
 import CreativeCanvasTimelinePanel from './CreativeCanvasTimelinePanel';
-import CreativeCanvasWorkflowPanel from './CreativeCanvasWorkflowPanel';
+import CreativeCanvasTemplatePanel from './CreativeCanvasTemplatePanel';
 import {
   CreativeCanvasProductAssetLibrary,
   CreativeCanvasProductPromptLibrary,
@@ -618,8 +618,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const locale = i18n.resolvedLanguage ?? i18n.language ?? 'zh-CN';
   const project = useCreativeProject(projectId || null);
   const modelCatalog = useNomiCreativeModelCatalog();
-  const workflowRuntime = useCreativeWorkflowRuntime();
-  const workflowAssetPicker = useCreativeAssetPickerDialog();
+  const templateRuntime = useCreativeTemplateRuntime();
+  const templateAssetPicker = useCreativeAssetPickerDialog();
 
   const editorRef = useRef<CreativeCanvasEditorHandle>(null);
   const imageTaskRuntimeRef = useRef<CanvasImageTaskRuntimeBridgeHandle>(null);
@@ -647,7 +647,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const imageToolBusyRef = useRef(false);
   const imageToolAbortRef = useRef<AbortController | null>(null);
   const activeProjectIdRef = useRef(projectId);
-  const workflowRequestRef = useRef(0);
+  const templateRequestRef = useRef(0);
 
   const [canvasState, setCanvasState] = useState<CanvasState | null>(null);
   const [save, setSave] = useState<CanvasCasSaveSnapshot>(INITIAL_SAVE);
@@ -743,12 +743,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
     agentOpsReloadRequiredRef.current = required;
     setAgentOpsReloadRequired(required);
   }, []);
-  const [workflows, setWorkflows] = useState<WorkflowDefinitionV1[]>([]);
-  const [workflowLoading, setWorkflowLoading] = useState(false);
-  const [workflowError, setWorkflowError] = useState<string | null>(null);
-  const [workflowToRun, setWorkflowToRun] =
-    useState<WorkflowDefinitionV1 | null>(null);
-  const [workflowInsertingRunId, setWorkflowInsertingRunId] = useState<
+  const [templates, setTemplates] = useState<CreativeTemplateDefinitionV1[]>([]);
+  const [templateLoading, setTemplateLoading] = useState(false);
+  const [templateError, setTemplateError] = useState<string | null>(null);
+  const [templateToRun, setTemplateToRun] =
+    useState<CreativeTemplateDefinitionV1 | null>(null);
+  const [templateInsertingRunId, setTemplateInsertingRunId] = useState<
     string | null
   >(null);
   const agentOpsBlockedByCanvasMutation =
@@ -763,7 +763,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     videoComposeBusy ||
     audioTaskRuntimeActionBusy ||
     audioComposeBusy ||
-    workflowInsertingRunId !== null ||
+    templateInsertingRunId !== null ||
     [imageTaskRuntime, videoTaskRuntime, audioTaskRuntime].some(
       (runtime) =>
         runtime.submittingCount > 0 ||
@@ -773,32 +773,32 @@ const CreativeCanvasProductRoute: React.FC = () => {
         )
     );
 
-  const loadWorkflows = useCallback(async () => {
-    const request = ++workflowRequestRef.current;
-    setWorkflowLoading(true);
-    setWorkflowError(null);
+  const loadTemplates = useCallback(async () => {
+    const request = ++templateRequestRef.current;
+    setTemplateLoading(true);
+    setTemplateError(null);
     try {
-      const loaded = await creativeWorkflowRepository.list();
-      if (request !== workflowRequestRef.current) return;
-      setWorkflows(
+      const loaded = await creativeTemplateRepository.list();
+      if (request !== templateRequestRef.current) return;
+      setTemplates(
         [...loaded].sort(
           (left, right) => right.metadata.updatedAt - left.metadata.updatedAt
         )
       );
     } catch (error) {
-      if (request !== workflowRequestRef.current) return;
-      setWorkflowError(error instanceof Error ? error.message : String(error));
+      if (request !== templateRequestRef.current) return;
+      setTemplateError(error instanceof Error ? error.message : String(error));
     } finally {
-      if (request === workflowRequestRef.current) setWorkflowLoading(false);
+      if (request === templateRequestRef.current) setTemplateLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void loadWorkflows();
+    void loadTemplates();
     return () => {
-      workflowRequestRef.current += 1;
+      templateRequestRef.current += 1;
     };
-  }, [loadWorkflows]);
+  }, [loadTemplates]);
 
   const assetQuery = useMemo(
     () => ({
@@ -1429,17 +1429,17 @@ const CreativeCanvasProductRoute: React.FC = () => {
     if (await flushBeforeLeave()) navigate('/models?section=models');
   }, [flushBeforeLeave, navigate]);
 
-  const handleOpenWorkflowCenter = useCallback(async () => {
+  const handleOpenTemplateCenter = useCallback(async () => {
     if (await flushBeforeLeave()) navigate(CREATIVE_STUDIO_TEMPLATES_PATH);
   }, [flushBeforeLeave, navigate]);
 
-  const workflowRunner = useMemo<CreativeWorkflowRunnerPort>(
+  const templateRunner = useMemo<CreativeTemplateRunnerPort>(
     () => ({
       async start(input) {
-        await workflowRuntime.controller.start(input);
+        await templateRuntime.controller.start(input);
       },
     }),
-    [workflowRuntime.controller]
+    [templateRuntime.controller]
   );
 
   const dismissInteractionOverlays = useCallback(() => {
@@ -4104,13 +4104,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [prepareCenteredInsertion]
   );
 
-  const handleInsertWorkflowResults = useCallback(
-    async (run: WorkflowRunAggregateV1) => {
-      if (workflowInsertingRunId || run.record.resultAssetIds.length === 0)
+  const handleInsertTemplateResults = useCallback(
+    async (run: CreativeTemplateRunAggregateV1) => {
+      if (templateInsertingRunId || run.record.resultAssetIds.length === 0)
         return;
-      setWorkflowInsertingRunId(run.request.id);
+      setTemplateInsertingRunId(run.request.id);
         setNotice(
-          t('creativeStudio.canvas.notices.resolvingWorkflowResults', {
+          t('creativeStudio.canvas.notices.resolvingTemplateResults', {
             defaultValue: '正在解析模板的真实结果素材…',
           })
         );
@@ -4128,10 +4128,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
       } catch (error) {
         setNotice(error instanceof Error ? error.message : String(error));
       } finally {
-        setWorkflowInsertingRunId(null);
+        setTemplateInsertingRunId(null);
       }
     },
-    [assets, handleInsertAssets, workflowInsertingRunId]
+    [assets, handleInsertAssets, templateInsertingRunId]
   );
 
   const handleCopyPrompt = useCallback((selection: PromptLibrarySelection) => {
@@ -4984,21 +4984,21 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 onCopy={handleCopyPrompt}
               />
             ),
-            workflows: (
-              <CreativeCanvasWorkflowPanel
-                workflows={workflows}
-                runtime={workflowRuntime.snapshot}
-                loading={workflowLoading}
-                error={workflowError}
+            templates: (
+              <CreativeCanvasTemplatePanel
+                templates={templates}
+                runtime={templateRuntime.snapshot}
+                loading={templateLoading}
+                error={templateError}
                 disabled={productDisabled}
-                insertingRunId={workflowInsertingRunId}
+                insertingRunId={templateInsertingRunId}
                 onRetry={() => {
-                  void loadWorkflows();
-                  void workflowRuntime.controller.load().catch(() => undefined);
+                  void loadTemplates();
+                  void templateRuntime.controller.load().catch(() => undefined);
                 }}
-                onRun={setWorkflowToRun}
-                onInsertResults={(run) => void handleInsertWorkflowResults(run)}
-                onOpenCenter={() => void handleOpenWorkflowCenter()}
+                onRun={setTemplateToRun}
+                onInsertResults={(run) => void handleInsertTemplateResults(run)}
+                onOpenCenter={() => void handleOpenTemplateCenter()}
               />
             ),
           },
@@ -5082,32 +5082,32 @@ const CreativeCanvasProductRoute: React.FC = () => {
           onNotice={setNotice}
         />
       ) : null}
-      <WorkflowRunModal
-        workflow={workflowToRun}
-        runner={workflowRunner}
-        onClose={() => setWorkflowToRun(null)}
+      <TemplateRunModal
+        template={templateToRun}
+        runner={templateRunner}
+        onClose={() => setTemplateToRun(null)}
         onPickAssets={(variable, selectedAssetIds) =>
-          workflowAssetPicker.pick({
+          templateAssetPicker.pick({
             acceptedKinds: ['image'],
             initialSelectedIds: selectedAssetIds,
             selectionLimit:
               variable.type === 'image-series' ? variable.maxItems : 1,
             title:
               variable.type === 'image-series'
-                ? t('creativeStudio.canvas.workflows.pickVariableImages', {
+                ? t('creativeStudio.canvas.templates.pickVariableImages', {
                     defaultValue: '选择变量图片',
                   })
-                : t('creativeStudio.canvas.workflows.pickVariableReference', {
+                : t('creativeStudio.canvas.templates.pickVariableReference', {
                     defaultValue: '选择变量参考图',
                   }),
           })
         }
         onPickReferenceAssets={(selectedAssetIds) =>
-          workflowAssetPicker.pick({
+          templateAssetPicker.pick({
             acceptedKinds: ['image'],
             initialSelectedIds: selectedAssetIds,
             selectionLimit: 100,
-            title: t('creativeStudio.canvas.workflows.pickReferences', {
+            title: t('creativeStudio.canvas.templates.pickReferences', {
               defaultValue: '选择模板参考图',
             }),
           })
@@ -5117,7 +5117,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
             files.map((file) =>
               creativeAssetClient.upload(file, {
                 title: file.name,
-                tags: ['workflow-reference'],
+                tags: ['template-reference'],
                 inLibrary: true,
               })
             )
@@ -5130,7 +5130,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           ];
         }}
       />
-      {workflowAssetPicker.dialog}
+      {templateAssetPicker.dialog}
       <CreativeImageCropDialog
         visible={pendingImageCrop !== null}
         asset={pendingImageCrop?.asset ?? null}

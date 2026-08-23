@@ -3,8 +3,8 @@ use serde_json::Value;
 
 use crate::error::DbError;
 use crate::models::{
-    CreativeStudioAgentProposalReceiptRow, CreativeStudioProjectRow, CreativeStudioWorkflowRow,
-    CreativeStudioWorkflowRunRow, WorkshopAssetRow,
+    CreativeStudioAgentProposalReceiptRow, CreativeStudioProjectRow, CreativeStudioTemplateRow,
+    CreativeStudioTemplateRunRow, WorkshopAssetRow,
 };
 use crate::repository::IWorkshopRepository;
 use crate::repository::workshop::{
@@ -41,9 +41,9 @@ struct OriginReferences {
     canvas_id: Option<String>,
     node_id: Option<String>,
     workbench_kind: Option<String>,
-    workflow_id: Option<String>,
-    workflow_run_id: Option<String>,
-    workflow_step_id: Option<String>,
+    template_id: Option<String>,
+    template_run_id: Option<String>,
+    template_step_id: Option<String>,
     creation_task_id: Option<String>,
 }
 
@@ -85,9 +85,9 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
             canvas_id: None,
             node_id: None,
             workbench_kind: None,
-            workflow_id: None,
-            workflow_run_id: None,
-            workflow_step_id: None,
+            template_id: None,
+            template_run_id: None,
+            template_step_id: None,
             creation_task_id: None,
         });
     };
@@ -104,9 +104,9 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
         "creationTaskId",
         "projectId",
         "workbenchKind",
-        "workflowId",
-        "workflowRunId",
-        "workflowStepId",
+        "templateId",
+        "templateRunId",
+        "templateStepId",
     ] {
         if object.contains_key(retired_key) {
             return Err(DbError::Conflict(format!(
@@ -146,26 +146,26 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
             ));
         }
     };
-    let workflow_id = optional_origin_id(object, "workflow_id")?;
-    let workflow_run_id = optional_origin_id(object, "workflow_run_id")?;
-    let workflow_step_id = optional_origin_id(object, "workflow_step_id")?;
+    let template_id = optional_origin_id(object, "template_id")?;
+    let template_run_id = optional_origin_id(object, "template_run_id")?;
+    let template_step_id = optional_origin_id(object, "template_step_id")?;
     let creation_task_id = optional_origin_id(object, "creation_task_id")?;
     let canvas_owner = node_id.is_some()
         && workbench_kind.is_none()
         && (canonical_canvas_id.is_some() || legacy_canvas_id.is_some());
     let standalone_owner =
         canonical_canvas_id.is_none() && node_id.is_none() && workbench_kind.is_some();
-    let workflow_owner_count = [
-        workflow_id.is_some(),
-        workflow_run_id.is_some(),
-        workflow_step_id.is_some(),
+    let template_owner_count = [
+        template_id.is_some(),
+        template_run_id.is_some(),
+        template_step_id.is_some(),
     ]
     .into_iter()
     .filter(|present| *present)
     .count();
-    if workflow_owner_count != 0 && workflow_owner_count != 3 {
+    if template_owner_count != 0 && template_owner_count != 3 {
         return Err(DbError::Conflict(
-            "workshop asset workflow origin requires workflow_id, workflow_run_id, and workflow_step_id"
+            "workshop asset template origin requires template_id, template_run_id, and template_step_id"
                 .into(),
         ));
     }
@@ -179,9 +179,9 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
                 .into(),
         ));
     }
-    if any_owner && workflow_owner_count != 0 {
+    if any_owner && template_owner_count != 0 {
         return Err(DbError::Conflict(
-            "workshop asset origin cannot combine Canvas or standalone ownership with workflow-step ownership"
+            "workshop asset origin cannot combine Canvas or standalone ownership with template-step ownership"
                 .into(),
         ));
     }
@@ -194,9 +194,9 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
         },
         node_id,
         workbench_kind,
-        workflow_id,
-        workflow_run_id,
-        workflow_step_id,
+        template_id,
+        template_run_id,
+        template_step_id,
         creation_task_id,
     })
 }
@@ -224,25 +224,25 @@ fn validate_asset_rows(rows: &[WorkshopAssetRow]) -> Result<(), DbError> {
     Ok(())
 }
 
-fn validate_creative_workflow_run_row_ids(
-    row: &CreativeStudioWorkflowRunRow,
+fn validate_creative_template_run_row_ids(
+    row: &CreativeStudioTemplateRunRow,
 ) -> Result<(), DbError> {
-    nomifun_common::CreativeStudioWorkflowRunId::parse(&row.workflow_run_id).map_err(|error| {
+    nomifun_common::CreativeStudioTemplateRunId::parse(&row.template_run_id).map_err(|error| {
         DbError::Conflict(format!(
-            "creative studio workflow_run_id {:?} is not a canonical UUIDv7: {error}",
-            row.workflow_run_id
+            "creative studio template_run_id {:?} is not a canonical UUIDv7: {error}",
+            row.template_run_id
         ))
     })?;
-    nomifun_common::CreativeStudioWorkflowId::parse(&row.workflow_id).map_err(|error| {
+    nomifun_common::CreativeStudioTemplateId::parse(&row.template_id).map_err(|error| {
         DbError::Conflict(format!(
-            "creative studio workflow_id {:?} is not a canonical UUIDv7: {error}",
-            row.workflow_id
+            "creative studio template_id {:?} is not a canonical UUIDv7: {error}",
+            row.template_id
         ))
     })?;
     Ok(())
 }
 
-fn workflow_run_json_references_asset(
+fn template_run_json_references_asset(
     aggregate_json: &str,
     asset_id: &str,
 ) -> Result<bool, DbError> {
@@ -265,7 +265,7 @@ fn workflow_run_json_references_asset(
 
     let aggregate: Value = serde_json::from_str(aggregate_json).map_err(|error| {
         DbError::Conflict(format!(
-            "stored creative studio workflow run has invalid aggregate JSON: {error}"
+            "stored creative studio template run has invalid aggregate JSON: {error}"
         ))
     })?;
     Ok(contains(&aggregate, asset_id))
@@ -874,7 +874,7 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
             let references = origin_references(asset.origin.as_deref())?;
             if references.provider_id.is_some()
                 || references.canvas_id.is_some()
-                || references.workflow_id.is_some()
+                || references.template_id.is_some()
                 || references.creation_task_id.is_some()
             {
                 return Err(DbError::Conflict(format!(
@@ -947,9 +947,9 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
              WHERE project_id = ? \
                AND node_id IS NOT NULL \
                AND workbench_kind IS NULL \
-               AND workflow_id IS NULL \
-               AND workflow_run_id IS NULL \
-               AND workflow_step_id IS NULL \
+               AND template_id IS NULL \
+               AND template_run_id IS NULL \
+               AND template_step_id IS NULL \
                AND status IN ('queued', 'running') \
              ORDER BY submitted_at ASC, creation_task_id ASC LIMIT 1",
         )
@@ -975,20 +975,20 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         Ok(())
     }
 
-    // ---- canonical Creative Studio workflows ----
+    // ---- canonical Creative Studio templates ----
 
-    async fn list_creative_workflows(&self) -> Result<Vec<CreativeStudioWorkflowRow>, DbError> {
-        let rows = sqlx::query_as::<_, CreativeStudioWorkflowRow>(
-            "SELECT * FROM creative_studio_workflows ORDER BY updated_at DESC, id DESC",
+    async fn list_creative_templates(&self) -> Result<Vec<CreativeStudioTemplateRow>, DbError> {
+        let rows = sqlx::query_as::<_, CreativeStudioTemplateRow>(
+            "SELECT * FROM creative_studio_templates ORDER BY updated_at DESC, id DESC",
         )
         .fetch_all(&self.pool)
         .await?;
         for row in &rows {
-            nomifun_common::CreativeStudioWorkflowId::parse(&row.workflow_id).map_err(
+            nomifun_common::CreativeStudioTemplateId::parse(&row.template_id).map_err(
                 |error| {
                     DbError::Conflict(format!(
-                        "creative studio workflow_id {:?} is not a canonical UUIDv7: {error}",
-                        row.workflow_id
+                        "creative studio template_id {:?} is not a canonical UUIDv7: {error}",
+                        row.template_id
                     ))
                 },
             )?;
@@ -996,22 +996,22 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         Ok(rows)
     }
 
-    async fn get_creative_workflow(
+    async fn get_creative_template(
         &self,
-        workflow_id: &str,
-    ) -> Result<Option<CreativeStudioWorkflowRow>, DbError> {
-        let row = sqlx::query_as::<_, CreativeStudioWorkflowRow>(
-            "SELECT * FROM creative_studio_workflows WHERE workflow_id = ?",
+        template_id: &str,
+    ) -> Result<Option<CreativeStudioTemplateRow>, DbError> {
+        let row = sqlx::query_as::<_, CreativeStudioTemplateRow>(
+            "SELECT * FROM creative_studio_templates WHERE template_id = ?",
         )
-        .bind(workflow_id)
+        .bind(template_id)
         .fetch_optional(&self.pool)
         .await?;
         if let Some(row) = &row {
-            nomifun_common::CreativeStudioWorkflowId::parse(&row.workflow_id).map_err(
+            nomifun_common::CreativeStudioTemplateId::parse(&row.template_id).map_err(
                 |error| {
                     DbError::Conflict(format!(
-                        "creative studio workflow_id {:?} is not a canonical UUIDv7: {error}",
-                        row.workflow_id
+                        "creative studio template_id {:?} is not a canonical UUIDv7: {error}",
+                        row.template_id
                     ))
                 },
             )?;
@@ -1019,27 +1019,27 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         Ok(row)
     }
 
-    async fn create_creative_workflow(
+    async fn create_creative_template(
         &self,
-        row: &CreativeStudioWorkflowRow,
-    ) -> Result<CreativeStudioWorkflowRow, DbError> {
-        nomifun_common::CreativeStudioWorkflowId::parse(&row.workflow_id).map_err(|error| {
+        row: &CreativeStudioTemplateRow,
+    ) -> Result<CreativeStudioTemplateRow, DbError> {
+        nomifun_common::CreativeStudioTemplateId::parse(&row.template_id).map_err(|error| {
             DbError::Conflict(format!(
-                "creative studio workflow_id {:?} is not a canonical UUIDv7: {error}",
-                row.workflow_id
+                "creative studio template_id {:?} is not a canonical UUIDv7: {error}",
+                row.template_id
             ))
         })?;
         if row.revision != 1 {
             return Err(DbError::Conflict(
-                "a creative studio workflow must start at revision 1".into(),
+                "a creative studio template must start at revision 1".into(),
             ));
         }
-        Ok(sqlx::query_as::<_, CreativeStudioWorkflowRow>(
-            "INSERT INTO creative_studio_workflows \
-                (workflow_id, revision, name, description, category, visibility, definition_json, created_at, updated_at) \
+        Ok(sqlx::query_as::<_, CreativeStudioTemplateRow>(
+            "INSERT INTO creative_studio_templates \
+                (template_id, revision, name, description, category, visibility, definition_json, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
         )
-        .bind(&row.workflow_id)
+        .bind(&row.template_id)
         .bind(row.revision)
         .bind(&row.name)
         .bind(&row.description)
@@ -1052,23 +1052,23 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         .await?)
     }
 
-    async fn save_creative_workflow(
+    async fn save_creative_template(
         &self,
-        workflow_id: &str,
+        template_id: &str,
         expected_revision: i64,
-        row: &CreativeStudioWorkflowRow,
-    ) -> Result<CreativeStudioWorkflowRow, DbError> {
-        if row.workflow_id != workflow_id || row.revision != expected_revision + 1 {
+        row: &CreativeStudioTemplateRow,
+    ) -> Result<CreativeStudioTemplateRow, DbError> {
+        if row.template_id != template_id || row.revision != expected_revision + 1 {
             return Err(DbError::Conflict(
-                "creative studio workflow replacement must preserve its ID and increment revision once"
+                "creative studio template replacement must preserve its ID and increment revision once"
                     .into(),
             ));
         }
-        let saved = sqlx::query_as::<_, CreativeStudioWorkflowRow>(
-            "UPDATE creative_studio_workflows \
+        let saved = sqlx::query_as::<_, CreativeStudioTemplateRow>(
+            "UPDATE creative_studio_templates \
              SET revision = ?, name = ?, description = ?, category = ?, visibility = ?, \
                  definition_json = ?, updated_at = ? \
-             WHERE workflow_id = ? AND revision = ? RETURNING *",
+             WHERE template_id = ? AND revision = ? RETURNING *",
         )
         .bind(row.revision)
         .bind(&row.name)
@@ -1077,105 +1077,105 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         .bind(&row.visibility)
         .bind(&row.definition_json)
         .bind(row.updated_at)
-        .bind(workflow_id)
+        .bind(template_id)
         .bind(expected_revision)
         .fetch_optional(&self.pool)
         .await?;
         if let Some(saved) = saved {
             return Ok(saved);
         }
-        if self.get_creative_workflow(workflow_id).await?.is_none() {
+        if self.get_creative_template(template_id).await?.is_none() {
             return Err(DbError::NotFound(format!(
-                "creative studio workflow '{workflow_id}' not found"
+                "creative studio template '{template_id}' not found"
             )));
         }
         Err(DbError::Conflict(format!(
-            "creative studio workflow '{workflow_id}' revision conflict"
+            "creative studio template '{template_id}' revision conflict"
         )))
     }
 
-    async fn delete_creative_workflow(&self, workflow_id: &str) -> Result<(), DbError> {
-        let result = sqlx::query("DELETE FROM creative_studio_workflows WHERE workflow_id = ?")
-            .bind(workflow_id)
+    async fn delete_creative_template(&self, template_id: &str) -> Result<(), DbError> {
+        let result = sqlx::query("DELETE FROM creative_studio_templates WHERE template_id = ?")
+            .bind(template_id)
             .execute(&self.pool)
             .await?;
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound(format!(
-                "creative studio workflow '{workflow_id}' not found"
+                "creative studio template '{template_id}' not found"
             )));
         }
         Ok(())
     }
 
-    // ---- canonical Creative Studio workflow runs ----
+    // ---- canonical Creative Studio template runs ----
 
-    async fn list_creative_workflow_runs(
+    async fn list_creative_template_runs(
         &self,
-        workflow_id: Option<&str>,
-    ) -> Result<Vec<CreativeStudioWorkflowRunRow>, DbError> {
-        let rows = if let Some(workflow_id) = workflow_id {
-            nomifun_common::CreativeStudioWorkflowId::parse(workflow_id).map_err(|error| {
+        template_id: Option<&str>,
+    ) -> Result<Vec<CreativeStudioTemplateRunRow>, DbError> {
+        let rows = if let Some(template_id) = template_id {
+            nomifun_common::CreativeStudioTemplateId::parse(template_id).map_err(|error| {
                 DbError::Conflict(format!(
-                    "creative studio workflow_id {workflow_id:?} is not a canonical UUIDv7: {error}"
+                    "creative studio template_id {template_id:?} is not a canonical UUIDv7: {error}"
                 ))
             })?;
-            sqlx::query_as::<_, CreativeStudioWorkflowRunRow>(
-                "SELECT * FROM creative_studio_workflow_runs \
-                 WHERE workflow_id = ? ORDER BY updated_at DESC, id DESC",
+            sqlx::query_as::<_, CreativeStudioTemplateRunRow>(
+                "SELECT * FROM creative_studio_template_runs \
+                 WHERE template_id = ? ORDER BY updated_at DESC, id DESC",
             )
-            .bind(workflow_id)
+            .bind(template_id)
             .fetch_all(&self.pool)
             .await?
         } else {
-            sqlx::query_as::<_, CreativeStudioWorkflowRunRow>(
-                "SELECT * FROM creative_studio_workflow_runs ORDER BY updated_at DESC, id DESC",
+            sqlx::query_as::<_, CreativeStudioTemplateRunRow>(
+                "SELECT * FROM creative_studio_template_runs ORDER BY updated_at DESC, id DESC",
             )
             .fetch_all(&self.pool)
             .await?
         };
         for row in &rows {
-            validate_creative_workflow_run_row_ids(row)?;
+            validate_creative_template_run_row_ids(row)?;
         }
         Ok(rows)
     }
 
-    async fn get_creative_workflow_run(
+    async fn get_creative_template_run(
         &self,
-        workflow_run_id: &str,
-    ) -> Result<Option<CreativeStudioWorkflowRunRow>, DbError> {
-        nomifun_common::CreativeStudioWorkflowRunId::parse(workflow_run_id).map_err(|error| {
+        template_run_id: &str,
+    ) -> Result<Option<CreativeStudioTemplateRunRow>, DbError> {
+        nomifun_common::CreativeStudioTemplateRunId::parse(template_run_id).map_err(|error| {
             DbError::Conflict(format!(
-                "creative studio workflow_run_id {workflow_run_id:?} is not a canonical UUIDv7: {error}"
+                "creative studio template_run_id {template_run_id:?} is not a canonical UUIDv7: {error}"
             ))
         })?;
-        let row = sqlx::query_as::<_, CreativeStudioWorkflowRunRow>(
-            "SELECT * FROM creative_studio_workflow_runs WHERE workflow_run_id = ?",
+        let row = sqlx::query_as::<_, CreativeStudioTemplateRunRow>(
+            "SELECT * FROM creative_studio_template_runs WHERE template_run_id = ?",
         )
-        .bind(workflow_run_id)
+        .bind(template_run_id)
         .fetch_optional(&self.pool)
         .await?;
         if let Some(row) = row.as_ref() {
-            validate_creative_workflow_run_row_ids(row)?;
+            validate_creative_template_run_row_ids(row)?;
         }
         Ok(row)
     }
 
-    async fn create_creative_workflow_run(
+    async fn create_creative_template_run(
         &self,
-        row: &CreativeStudioWorkflowRunRow,
+        row: &CreativeStudioTemplateRunRow,
         referenced_asset_ids: &[String],
-    ) -> Result<CreativeStudioWorkflowRunRow, DbError> {
-        validate_creative_workflow_run_row_ids(row)?;
+    ) -> Result<CreativeStudioTemplateRunRow, DbError> {
+        validate_creative_template_run_row_ids(row)?;
         if row.revision != 1 {
             return Err(DbError::Conflict(
-                "a creative studio workflow run must start at revision 1".into(),
+                "a creative studio template run must start at revision 1".into(),
             ));
         }
         let mut tx = self.pool.begin().await?;
         for asset_id in referenced_asset_ids {
             nomifun_common::WorkshopAssetId::parse(asset_id).map_err(|error| {
                 DbError::Conflict(format!(
-                    "creative studio workflow run asset_id {asset_id:?} is not a canonical UUIDv7: {error}"
+                    "creative studio template run asset_id {asset_id:?} is not a canonical UUIDv7: {error}"
                 ))
             })?;
             let locked = sqlx::query(
@@ -1187,20 +1187,20 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
             .await?;
             if locked.rows_affected() == 0 {
                 return Err(DbError::Conflict(format!(
-                    "creative studio workflow run reference '{asset_id}' is missing or is not an image"
+                    "creative studio template run reference '{asset_id}' is missing or is not an image"
                 )));
             }
         }
         sqlx::query(
-            "INSERT INTO creative_studio_workflow_runs \
-                (workflow_run_id, workflow_id, workflow_revision, revision, status, \
+            "INSERT INTO creative_studio_template_runs \
+                (template_run_id, template_id, template_revision, revision, status, \
                  step_ids_json, aggregate_json, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(workflow_run_id) DO NOTHING",
+             ON CONFLICT(template_run_id) DO NOTHING",
         )
-        .bind(&row.workflow_run_id)
-        .bind(&row.workflow_id)
-        .bind(row.workflow_revision)
+        .bind(&row.template_run_id)
+        .bind(&row.template_id)
+        .bind(row.template_revision)
         .bind(row.revision)
         .bind(&row.status)
         .bind(&row.step_ids_json)
@@ -1209,47 +1209,47 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         .bind(row.updated_at)
         .execute(&mut *tx)
         .await?;
-        let persisted = sqlx::query_as::<_, CreativeStudioWorkflowRunRow>(
-            "SELECT * FROM creative_studio_workflow_runs WHERE workflow_run_id = ?",
+        let persisted = sqlx::query_as::<_, CreativeStudioTemplateRunRow>(
+            "SELECT * FROM creative_studio_template_runs WHERE template_run_id = ?",
         )
-        .bind(&row.workflow_run_id)
+        .bind(&row.template_run_id)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| {
             DbError::Init(format!(
-                "creative studio workflow run {} vanished after idempotent insert",
-                row.workflow_run_id
+                "creative studio template run {} vanished after idempotent insert",
+                row.template_run_id
             ))
         })?;
-        validate_creative_workflow_run_row_ids(&persisted)?;
+        validate_creative_template_run_row_ids(&persisted)?;
         tx.commit().await?;
         Ok(persisted)
     }
 
-    async fn save_creative_workflow_run(
+    async fn save_creative_template_run(
         &self,
-        workflow_run_id: &str,
+        template_run_id: &str,
         expected_revision: i64,
-        row: &CreativeStudioWorkflowRunRow,
-    ) -> Result<CreativeStudioWorkflowRunRow, DbError> {
-        validate_creative_workflow_run_row_ids(row)?;
-        if row.workflow_run_id != workflow_run_id || row.revision != expected_revision + 1 {
+        row: &CreativeStudioTemplateRunRow,
+    ) -> Result<CreativeStudioTemplateRunRow, DbError> {
+        validate_creative_template_run_row_ids(row)?;
+        if row.template_run_id != template_run_id || row.revision != expected_revision + 1 {
             return Err(DbError::Conflict(
-                "creative studio workflow run replacement must preserve its ID and increment revision once"
+                "creative studio template run replacement must preserve its ID and increment revision once"
                     .into(),
             ));
         }
-        let saved = sqlx::query_as::<_, CreativeStudioWorkflowRunRow>(
-            "UPDATE creative_studio_workflow_runs \
+        let saved = sqlx::query_as::<_, CreativeStudioTemplateRunRow>(
+            "UPDATE creative_studio_template_runs \
              SET revision = ?, status = ?, step_ids_json = ?, aggregate_json = ?, updated_at = ? \
-             WHERE workflow_run_id = ? AND revision = ? RETURNING *",
+             WHERE template_run_id = ? AND revision = ? RETURNING *",
         )
         .bind(row.revision)
         .bind(&row.status)
         .bind(&row.step_ids_json)
         .bind(&row.aggregate_json)
         .bind(row.updated_at)
-        .bind(workflow_run_id)
+        .bind(template_run_id)
         .bind(expected_revision)
         .fetch_optional(&self.pool)
         .await?;
@@ -1257,16 +1257,16 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
             return Ok(saved);
         }
         if self
-            .get_creative_workflow_run(workflow_run_id)
+            .get_creative_template_run(template_run_id)
             .await?
             .is_none()
         {
             return Err(DbError::NotFound(format!(
-                "creative studio workflow run '{workflow_run_id}' not found"
+                "creative studio template run '{template_run_id}' not found"
             )));
         }
         Err(DbError::Conflict(format!(
-            "creative studio workflow run '{workflow_run_id}' revision conflict"
+            "creative studio template run '{template_run_id}' revision conflict"
         )))
     }
 
@@ -1309,31 +1309,31 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                 )));
             }
         }
-        if let (Some(workflow_id), Some(workflow_run_id)) =
-            (&references.workflow_id, &references.workflow_run_id)
+        if let (Some(template_id), Some(template_run_id)) =
+            (&references.template_id, &references.template_run_id)
         {
-            let workflow = sqlx::query(
-                "UPDATE creative_studio_workflows SET updated_at = updated_at WHERE workflow_id = ?",
+            let template = sqlx::query(
+                "UPDATE creative_studio_templates SET updated_at = updated_at WHERE template_id = ?",
             )
-            .bind(workflow_id)
+            .bind(template_id)
             .execute(&mut *tx)
             .await?;
-            if workflow.rows_affected() == 0 {
+            if template.rows_affected() == 0 {
                 return Err(DbError::Conflict(format!(
-                    "workshop asset origin references missing creative studio workflow '{workflow_id}'"
+                    "workshop asset origin references missing creative studio template '{template_id}'"
                 )));
             }
             let run = sqlx::query(
-                "UPDATE creative_studio_workflow_runs SET updated_at = updated_at \
-                 WHERE workflow_run_id = ? AND workflow_id = ?",
+                "UPDATE creative_studio_template_runs SET updated_at = updated_at \
+                 WHERE template_run_id = ? AND template_id = ?",
             )
-            .bind(workflow_run_id)
-            .bind(workflow_id)
+            .bind(template_run_id)
+            .bind(template_id)
             .execute(&mut *tx)
             .await?;
             if run.rows_affected() == 0 {
                 return Err(DbError::Conflict(format!(
-                    "workshop asset origin references missing workflow run '{workflow_run_id}' for workflow '{workflow_id}'"
+                    "workshop asset origin references missing template run '{template_run_id}' for template '{template_id}'"
                 )));
             }
         }
@@ -1350,7 +1350,7 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                 ),
             >(
                 "UPDATE creation_tasks SET status = status WHERE creation_task_id = ? \
-                 RETURNING project_id, node_id, workbench_kind, workflow_id, workflow_run_id, workflow_step_id",
+                 RETURNING project_id, node_id, workbench_kind, template_id, template_run_id, template_step_id",
             )
             .bind(&creation_task_id)
             .fetch_optional(&mut *tx)
@@ -1364,9 +1364,9 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                 references.canvas_id.as_deref(),
                 references.node_id.as_deref(),
                 references.workbench_kind.as_deref(),
-                references.workflow_id.as_deref(),
-                references.workflow_run_id.as_deref(),
-                references.workflow_step_id.as_deref(),
+                references.template_id.as_deref(),
+                references.template_run_id.as_deref(),
+                references.template_step_id.as_deref(),
             );
             let actual = (
                 task.0.as_deref(),
@@ -1384,9 +1384,9 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
             let owner_matches = if standalone_task {
                 references.workbench_kind.as_deref() == task.2.as_deref()
                     && references.node_id.is_none()
-                    && references.workflow_id.is_none()
-                    && references.workflow_run_id.is_none()
-                    && references.workflow_step_id.is_none()
+                    && references.template_id.is_none()
+                    && references.template_run_id.is_none()
+                    && references.template_step_id.is_none()
             } else {
                 expected == actual
             };
@@ -1576,15 +1576,15 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         if locked.rows_affected() == 0 {
             return Err(DbError::NotFound(format!("workshop asset '{id}' not found")));
         }
-        let workflow_runs: Vec<(String, String)> = sqlx::query_as(
-            "SELECT workflow_run_id, aggregate_json FROM creative_studio_workflow_runs",
+        let template_runs: Vec<(String, String)> = sqlx::query_as(
+            "SELECT template_run_id, aggregate_json FROM creative_studio_template_runs",
         )
         .fetch_all(&mut *tx)
         .await?;
-        for (workflow_run_id, aggregate_json) in workflow_runs {
-            if workflow_run_json_references_asset(&aggregate_json, id)? {
+        for (template_run_id, aggregate_json) in template_runs {
+            if template_run_json_references_asset(&aggregate_json, id)? {
                 return Err(DbError::Conflict(format!(
-                    "workshop asset '{id}' is referenced by creative studio workflow run '{workflow_run_id}'"
+                    "workshop asset '{id}' is referenced by creative studio template run '{template_run_id}'"
                 )));
             }
         }
@@ -1653,9 +1653,9 @@ mod tests {
     const ASSET_C2: &str = "0190f5fe-7c00-7a00-8abc-000000000162";
     const ASSET_C3: &str = "0190f5fe-7c00-7a00-8abc-000000000163";
     const CREATIVE_PROJECT_A: &str = "0190f5fe-7c00-7a00-8abc-000000000171";
-    const CREATIVE_WORKFLOW_A: &str = "0190f5fe-7c00-7a00-8abc-000000000172";
-    const CREATIVE_WORKFLOW_RUN_A: &str = "0190f5fe-7c00-7a00-8abc-000000000173";
-    const CREATIVE_WORKFLOW_STEP_A: &str = "0190f5fe-7c00-7a00-8abc-000000000174";
+    const CREATIVE_TEMPLATE_A: &str = "0190f5fe-7c00-7a00-8abc-000000000172";
+    const CREATIVE_TEMPLATE_RUN_A: &str = "0190f5fe-7c00-7a00-8abc-000000000173";
+    const CREATIVE_TEMPLATE_STEP_A: &str = "0190f5fe-7c00-7a00-8abc-000000000174";
 
     async fn repo() -> (SqliteWorkshopRepository, crate::Database) {
         let db = init_database_memory().await.unwrap();
@@ -2034,15 +2034,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creative_workflow_crud_and_revision_compare_and_swap() {
+    async fn creative_template_crud_and_revision_compare_and_swap() {
         let (repo, _db) = repo().await;
         let definition = format!(
-            r#"{{"id":"{CREATIVE_WORKFLOW_A}","revision":1,"metadata":{{"name":"海报","description":"","category":"电商","visibility":"private","tags":[],"createdAt":100,"updatedAt":100}},"output":{{"kind":"single-image"}},"variables":[],"templates":[],"steps":[]}}"#
+            r#"{{"id":"{CREATIVE_TEMPLATE_A}","revision":1,"metadata":{{"name":"海报","description":"","category":"电商","visibility":"private","tags":[],"createdAt":100,"updatedAt":100}},"output":{{"kind":"single-image"}},"variables":[],"templates":[],"steps":[]}}"#
         );
         let created = repo
-            .create_creative_workflow(&CreativeStudioWorkflowRow {
+            .create_creative_template(&CreativeStudioTemplateRow {
                 id: 0,
-                workflow_id: CREATIVE_WORKFLOW_A.into(),
+                template_id: CREATIVE_TEMPLATE_A.into(),
                 revision: 1,
                 name: "海报".into(),
                 description: String::new(),
@@ -2056,84 +2056,84 @@ mod tests {
             .unwrap();
         assert_eq!(created.revision, 1);
 
-        let changed = CreativeStudioWorkflowRow {
+        let changed = CreativeStudioTemplateRow {
             id: created.id,
-            workflow_id: CREATIVE_WORKFLOW_A.into(),
+            template_id: CREATIVE_TEMPLATE_A.into(),
             revision: 2,
             name: "海报 2".into(),
             description: "更新".into(),
             category: "营销".into(),
             visibility: "public".into(),
             definition_json: format!(
-                r#"{{"id":"{CREATIVE_WORKFLOW_A}","revision":2,"metadata":{{"name":"海报 2"}}}}"#
+                r#"{{"id":"{CREATIVE_TEMPLATE_A}","revision":2,"metadata":{{"name":"海报 2"}}}}"#
             ),
             created_at: 100,
             updated_at: 200,
         };
         let saved = repo
-            .save_creative_workflow(CREATIVE_WORKFLOW_A, 1, &changed)
+            .save_creative_template(CREATIVE_TEMPLATE_A, 1, &changed)
             .await
             .unwrap();
         assert_eq!(saved.revision, 2);
         assert_eq!(saved.name, "海报 2");
 
         let stale = repo
-            .save_creative_workflow(CREATIVE_WORKFLOW_A, 1, &changed)
+            .save_creative_template(CREATIVE_TEMPLATE_A, 1, &changed)
             .await
             .unwrap_err();
         assert!(matches!(stale, DbError::Conflict(_)));
-        assert_eq!(repo.list_creative_workflows().await.unwrap().len(), 1);
+        assert_eq!(repo.list_creative_templates().await.unwrap().len(), 1);
 
-        repo.delete_creative_workflow(CREATIVE_WORKFLOW_A)
+        repo.delete_creative_template(CREATIVE_TEMPLATE_A)
             .await
             .unwrap();
         assert!(repo
-            .get_creative_workflow(CREATIVE_WORKFLOW_A)
+            .get_creative_template(CREATIVE_TEMPLATE_A)
             .await
             .unwrap()
             .is_none());
     }
 
     #[tokio::test]
-    async fn creative_workflow_run_crud_filter_and_revision_compare_and_swap() {
+    async fn creative_template_run_crud_filter_and_revision_compare_and_swap() {
         let (repo, _db) = repo().await;
         let aggregate = |revision: i64, status: &str| {
             serde_json::json!({
-                "kind": "nomifun.creative-studio.workflow-run",
+                "kind": "nomifun.creative-studio.template-run",
                 "version": 1,
                 "revision": revision,
-                "workflowSnapshot": {
-                    "id": CREATIVE_WORKFLOW_A,
+                "templateSnapshot": {
+                    "id": CREATIVE_TEMPLATE_A,
                     "revision": 3
                 },
                 "request": {
-                    "id": CREATIVE_WORKFLOW_RUN_A,
-                    "workflowId": CREATIVE_WORKFLOW_A,
-                    "workflowRevision": 3,
+                    "id": CREATIVE_TEMPLATE_RUN_A,
+                    "templateId": CREATIVE_TEMPLATE_A,
+                    "templateRevision": 3,
                     "referenceAssetIds": [ASSET_1]
                 },
                 "record": {
-                    "requestId": CREATIVE_WORKFLOW_RUN_A,
-                    "workflowId": CREATIVE_WORKFLOW_A,
+                    "requestId": CREATIVE_TEMPLATE_RUN_A,
+                    "templateId": CREATIVE_TEMPLATE_A,
                     "status": status
                 }
             })
             .to_string()
         };
-        let requested_row = CreativeStudioWorkflowRunRow {
+        let requested_row = CreativeStudioTemplateRunRow {
             id: 0,
-            workflow_run_id: CREATIVE_WORKFLOW_RUN_A.into(),
-            workflow_id: CREATIVE_WORKFLOW_A.into(),
-            workflow_revision: 3,
+            template_run_id: CREATIVE_TEMPLATE_RUN_A.into(),
+            template_id: CREATIVE_TEMPLATE_A.into(),
+            template_revision: 3,
             revision: 1,
             status: "requested".into(),
-            step_ids_json: serde_json::to_string(&[CREATIVE_WORKFLOW_STEP_A]).unwrap(),
+            step_ids_json: serde_json::to_string(&[CREATIVE_TEMPLATE_STEP_A]).unwrap(),
             aggregate_json: aggregate(1, "requested"),
             created_at: 100,
             updated_at: 100,
         };
         let missing_asset = repo
-            .create_creative_workflow_run(&requested_row, &[ASSET_1.into()])
+            .create_creative_template_run(&requested_row, &[ASSET_1.into()])
             .await
             .unwrap_err();
         assert!(matches!(missing_asset, DbError::Conflict(_)));
@@ -2141,23 +2141,23 @@ mod tests {
             .await
             .unwrap();
         let created = repo
-            .create_creative_workflow_run(&requested_row, &[ASSET_1.into()])
+            .create_creative_template_run(&requested_row, &[ASSET_1.into()])
             .await
             .unwrap();
         assert_eq!(created.revision, 1);
         assert!(matches!(
             repo.delete_asset(ASSET_1).await,
-            Err(DbError::Conflict(message)) if message.contains(CREATIVE_WORKFLOW_RUN_A)
+            Err(DbError::Conflict(message)) if message.contains(CREATIVE_TEMPLATE_RUN_A)
         ));
         assert_eq!(
-            repo.list_creative_workflow_runs(Some(CREATIVE_WORKFLOW_A))
+            repo.list_creative_template_runs(Some(CREATIVE_TEMPLATE_A))
                 .await
                 .unwrap()
                 .len(),
             1
         );
 
-        let replacement = CreativeStudioWorkflowRunRow {
+        let replacement = CreativeStudioTemplateRunRow {
             revision: 2,
             status: "queued".into(),
             aggregate_json: aggregate(2, "queued"),
@@ -2165,23 +2165,23 @@ mod tests {
             ..created
         };
         let saved = repo
-            .save_creative_workflow_run(CREATIVE_WORKFLOW_RUN_A, 1, &replacement)
+            .save_creative_template_run(CREATIVE_TEMPLATE_RUN_A, 1, &replacement)
             .await
             .unwrap();
         assert_eq!(saved.revision, 2);
         assert_eq!(saved.status, "queued");
 
         let stale = repo
-            .save_creative_workflow_run(CREATIVE_WORKFLOW_RUN_A, 1, &replacement)
+            .save_creative_template_run(CREATIVE_TEMPLATE_RUN_A, 1, &replacement)
             .await
             .unwrap_err();
         assert!(matches!(stale, DbError::Conflict(_)));
         let missing = repo
-            .save_creative_workflow_run(
+            .save_creative_template_run(
                 "0190f5fe-7c00-7a00-8abc-000000000175",
                 1,
-                &CreativeStudioWorkflowRunRow {
-                    workflow_run_id: "0190f5fe-7c00-7a00-8abc-000000000175".into(),
+                &CreativeStudioTemplateRunRow {
+                    template_run_id: "0190f5fe-7c00-7a00-8abc-000000000175".into(),
                     ..replacement
                 },
             )

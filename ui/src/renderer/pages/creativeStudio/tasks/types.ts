@@ -48,10 +48,10 @@ export type CreativeTaskOwner =
       workbenchKind: CreativeStandaloneWorkbenchKind;
     }
   | {
-      kind: 'workflow_step';
-      workflowId: string;
-      workflowRunId: string;
-      workflowStepId: string;
+      kind: 'template_step';
+      templateId: string;
+      templateRunId: string;
+      templateStepId: string;
     };
 
 export interface CreativeTaskIdentity {
@@ -240,10 +240,10 @@ export function sameCreativeTaskOwner(
     return left.workbenchKind === right.workbenchKind;
   }
   return (
-    left.kind === 'workflow_step' &&
-    right.kind === 'workflow_step' &&
-    left.workflowId === right.workflowId &&
-    left.workflowRunId === right.workflowRunId &&
-    left.workflowStepId === right.workflowStepId
+    left.kind === 'template_step' &&
+    right.kind === 'template_step' &&
+    left.templateId === right.templateId &&
+    left.templateRunId === right.templateRunId &&
+    left.templateStepId === right.templateStepId
   );
 }

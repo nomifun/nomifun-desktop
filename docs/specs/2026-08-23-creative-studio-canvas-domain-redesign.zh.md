@@ -33,7 +33,7 @@ Canvas Agent session 与 pending task IDs。它本质上就是一张持久画布
 ```text
 CanvasNode          = project_id + node_id
 StandaloneWorkbench = project_id + workbench_kind
-WorkflowStep        = workflow_id + workflow_run_id + workflow_step_id
+TemplateStep        = template_id + template_run_id + template_step_id
 ```
 
 第二个分支导致所谓“独立工作台”必须绑定一张实际为画布的 project 行，并产生这些问题：
@@ -59,8 +59,8 @@ StandaloneWorkbenchTaskOwner
   workbenchKind
   installation-owner authentication scope
 
-WorkflowStepTaskOwner
-  workflowId + workflowRunId + workflowStepId
+TemplateStepTaskOwner
+  templateId + templateRunId + templateStepId
 ```
 
 ### 3.1 页面边界
@@ -72,7 +72,7 @@ WorkflowStepTaskOwner
 - `/workshop/video`：独立视频工作台，无画布参数。
 - `/workshop/prompts`：全局提示词。
 - `/workshop/assets`：全局素材。
-- `/workshop/workflows`：全局 Workflow 定义与运行。
+- `/workshop/templates`：全局模板定义与运行。
 
 旧 `/workshop/projects` 只保留兼容重定向，不能继续作为产品真相。
 
@@ -98,11 +98,11 @@ CanvasNode:
   project_id not null, node_id not null, workbench_kind null
 
 StandaloneWorkbench:
-  workbench_kind not null, node/workflow fields null
+  workbench_kind not null, node/template fields null
   project_id may remain only as legacy inert provenance
 
-WorkflowStep:
-  workflow ids not null, project/node/workbench fields null
+TemplateStep:
+  template ids not null, project/node/workbench fields null
 ```
 
 新 standalone 任务写 `project_id = NULL`。旧 standalone 行可以保留历史 `project_id`，

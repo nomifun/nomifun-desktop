@@ -98,7 +98,7 @@ pub use provider::IProviderRepository;
 pub use provider_connection::IProviderConnectionRepository;
 pub use provider_model::{
     CoordinatedProviderModelDelete, IProviderModelRepository, ProviderModelCleanupPlan,
-    ProviderModelProjectCleanup, ProviderModelWorkflowCleanup,
+    ProviderModelProjectCleanup, ProviderModelTemplateCleanup,
 };
 pub use provider_model_capability::IProviderModelCapabilityRepository;
 pub use preset::{IPresetRepository, IPresetStateRepository, IPresetTagRepository};

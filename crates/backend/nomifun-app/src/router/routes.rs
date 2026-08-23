@@ -857,7 +857,7 @@ pub fn create_router_with_all_state(
         &instance_owner_state,
     );
 
-    // Creative Studio project/asset/workflow routes plus generation task routes
+    // Creative Studio project/asset/template routes plus generation task routes
     // — owner-only management surfaces behind auth middleware. The read-only
     // `/api/creative-studio/files/{id}` asset channel is split into
     // `workshop_public_routes` below because browser media elements cannot send

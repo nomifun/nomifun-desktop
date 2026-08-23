@@ -36,8 +36,8 @@ CAS save, conflict, and reload behavior. Background changes use the same CAS
 port. The right-side Agent uses the owner-only Creative Studio session resolver,
 the real NomiFun Conversation REST/WebSocket transport, and Editor-owned CAS for
 session references and response-loss fences. Route exit first stops and settles
-an active exclusive Agent turn, then flushes the Editor. The left workflow panel
-uses the canonical workflow repository and durable run controller, opens the
+an active exclusive Agent turn, then flushes the Editor. The left template panel
+uses the canonical template repository and durable run controller, opens the
 same typed runner and real asset picker as the standalone center, and resolves
 successful result IDs through the authenticated asset-detail endpoint before
 inserting canonical nodes. The bottom timeline now projects the Canvas's one
@@ -89,7 +89,7 @@ deletion or media generation.
 The Canvas Agent composer now consumes that contract. Current context nodes are
 shown as removable chips; the user explicitly selects one to three packaged
 NomiFun Skills (`creative-studio-canvas`, `creative-studio-organize`, and
-`creative-studio-workflow`) instead of triggering prompt-regex pseudo-skills.
+`creative-studio-template`) instead of triggering prompt-regex pseudo-skills.
 Submission builds the bounded envelope once, persists it with the ordered Skill
 IDs, then the real Conversation transport sends `modelInput` and copies those
 IDs to `inject_skills`. The visible user message and session title continue to

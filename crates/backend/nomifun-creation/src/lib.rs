@@ -1,5 +1,5 @@
 //! `nomifun-creation` — the provider-agnostic media generation engine behind
-//! Creative Studio canvas nodes and workflow steps.
+//! Creative Studio canvas nodes and template steps.
 //!
 //! The engine is **provider-agnostic**: model execution is delegated to the
 //! unified invocation layer (`nomifun-model-invoke`), while text nodes use the

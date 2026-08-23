@@ -7,7 +7,6 @@ import { useAuth } from '@renderer/hooks/context/AuthContext';
 import {
   CREATIVE_STUDIO_CANVASES_PATH,
   CREATIVE_STUDIO_ROOT_PATH,
-  CREATIVE_STUDIO_TEMPLATES_PATH,
 } from '@renderer/pages/creativeStudio/app/routes';
 const Conversation = React.lazy(() => import('@renderer/pages/conversation'));
 const Guid = React.lazy(() => import('@renderer/pages/guid'));
@@ -64,8 +63,8 @@ const CreativeStudioVideoWorkbenchRoute = React.lazy(() =>
 const CreativeStudioDirectorRoute = React.lazy(
   () => import('@renderer/pages/creativeStudio/canvases/CreativeCanvasDirectorRoute')
 );
-const CreativeStudioWorkflowRoute = React.lazy(
-  () => import('@renderer/pages/creativeStudio/workflows/page/CreativeWorkflowRoute')
+const CreativeStudioTemplateRoute = React.lazy(
+  () => import('@renderer/pages/creativeStudio/templates/page/CreativeTemplateRoute')
 );
 const MiniAppsListPage = React.lazy(() => import('@renderer/pages/miniApps'));
 const MiniAppRunnerPage = React.lazy(() => import('@renderer/pages/miniApps/RunnerPage'));
@@ -136,16 +135,6 @@ const CreativeStudioCanvasesRedirect: React.FC = () => {
   );
 };
 
-const LegacyCreativeStudioWorkflowsRedirect: React.FC = () => {
-  const { search, hash } = useLocation();
-  return (
-    <Navigate
-      to={`${CREATIVE_STUDIO_TEMPLATES_PATH}${search}${hash}`}
-      replace
-    />
-  );
-};
-
 // Legacy `/requirements/:id/edit` deep links → open the workspace with the
 // requirement pre-selected in edit mode (the new shell hosts editing in a
 // drawer, not a standalone form page).
@@ -197,8 +186,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
               <Route path='video' element={withRouteFallback(CreativeStudioVideoWorkbenchRoute)} />
               <Route path='prompts' element={withRouteFallback(CreativeStudioPromptsRoute)} />
               <Route path='assets' element={withRouteFallback(CreativeStudioAssetsRoute)} />
-              <Route path='templates' element={withRouteFallback(CreativeStudioWorkflowRoute)} />
-              <Route path='workflows' element={<LegacyCreativeStudioWorkflowsRedirect />} />
+              <Route path='templates' element={withRouteFallback(CreativeStudioTemplateRoute)} />
             </Route>
             {/* Models, presets, skills, and MCP are independent top-level capabilities. */}
             <Route path='/models' element={withRouteFallback(ModelHubPage)} />

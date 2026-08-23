@@ -122,7 +122,7 @@ pub struct RetireStandaloneWorkbenchTasksParams<'a> {
 }
 
 /// Strict canonical Creative Studio task owner. No field is shared between
-/// the two branches, so callers cannot accidentally reinterpret a workflow
+/// the two branches, so callers cannot accidentally reinterpret a template
 /// step as a canvas node.
 #[derive(Debug, Clone, Copy)]
 pub enum CreativeTaskOwnerRef<'a> {
@@ -133,10 +133,10 @@ pub enum CreativeTaskOwnerRef<'a> {
     StandaloneWorkbench {
         workbench_kind: &'a str,
     },
-    WorkflowStep {
-        workflow_id: &'a str,
-        workflow_run_id: &'a str,
-        workflow_step_id: &'a str,
+    TemplateStep {
+        template_id: &'a str,
+        template_run_id: &'a str,
+        template_step_id: &'a str,
     },
 }
 

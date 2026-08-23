@@ -1,7 +1,7 @@
 use crate::error::DbError;
 use crate::models::{
-    CreativeStudioAgentProposalReceiptRow, CreativeStudioProjectRow, CreativeStudioWorkflowRow,
-    CreativeStudioWorkflowRunRow, WorkshopAssetRow,
+    CreativeStudioAgentProposalReceiptRow, CreativeStudioProjectRow, CreativeStudioTemplateRow,
+    CreativeStudioTemplateRunRow, WorkshopAssetRow,
 };
 
 /// Canonical candidate passed to the atomic proposal receipt + project CAS.
@@ -35,7 +35,7 @@ pub struct CreativeAgentProposalCommit {
     pub replayed: bool,
 }
 
-/// Data access for canonical Creative Studio projects, workflows, runs, and
+/// Data access for canonical Creative Studio projects, templates, runs, and
 /// the shared asset library.
 ///
 /// Project bodies live atomically in `creative_studio_projects`. Asset binaries
@@ -57,7 +57,7 @@ pub trait IWorkshopRepository: Send + Sync {
         model: &str,
     ) -> Result<bool, DbError>;
 
-    /// Check one enabled Provider/model/task capability. Workflow definitions
+    /// Check one enabled Provider/model/task capability. Template definitions
     /// persist exact NomiFun task bindings rather than inferring modality from
     /// a model name.
     async fn provider_model_supports_task(
@@ -177,107 +177,107 @@ pub trait IWorkshopRepository: Send + Sync {
     /// they have their own library lifecycle and may be shared by projects.
     async fn delete_creative_project(&self, project_id: &str) -> Result<(), DbError>;
 
-    // ---- canonical Creative Studio workflows ----
+    // ---- canonical Creative Studio templates ----
 
-    /// Every workflow definition, newest-updated first.
-    async fn list_creative_workflows(&self) -> Result<Vec<CreativeStudioWorkflowRow>, DbError> {
+    /// Every template definition, newest-updated first.
+    async fn list_creative_templates(&self) -> Result<Vec<CreativeStudioTemplateRow>, DbError> {
         Err(DbError::Init(
-            "creative studio workflow persistence is unavailable in this repository".into(),
+            "creative studio template persistence is unavailable in this repository".into(),
         ))
     }
 
-    /// One workflow definition by business ID, or `None`.
-    async fn get_creative_workflow(
+    /// One template definition by business ID, or `None`.
+    async fn get_creative_template(
         &self,
-        workflow_id: &str,
-    ) -> Result<Option<CreativeStudioWorkflowRow>, DbError> {
-        let _ = workflow_id;
+        template_id: &str,
+    ) -> Result<Option<CreativeStudioTemplateRow>, DbError> {
+        let _ = template_id;
         Err(DbError::Init(
-            "creative studio workflow persistence is unavailable in this repository".into(),
+            "creative studio template persistence is unavailable in this repository".into(),
         ))
     }
 
-    /// Insert revision one of a closed workflow definition.
-    async fn create_creative_workflow(
+    /// Insert revision one of a closed template definition.
+    async fn create_creative_template(
         &self,
-        row: &CreativeStudioWorkflowRow,
-    ) -> Result<CreativeStudioWorkflowRow, DbError> {
+        row: &CreativeStudioTemplateRow,
+    ) -> Result<CreativeStudioTemplateRow, DbError> {
         let _ = row;
         Err(DbError::Init(
-            "creative studio workflow persistence is unavailable in this repository".into(),
+            "creative studio template persistence is unavailable in this repository".into(),
         ))
     }
 
     /// Compare-and-swap the definition. The replacement row must carry
     /// `expected_revision + 1`.
-    async fn save_creative_workflow(
+    async fn save_creative_template(
         &self,
-        workflow_id: &str,
+        template_id: &str,
         expected_revision: i64,
-        row: &CreativeStudioWorkflowRow,
-    ) -> Result<CreativeStudioWorkflowRow, DbError> {
-        let _ = (workflow_id, expected_revision, row);
+        row: &CreativeStudioTemplateRow,
+    ) -> Result<CreativeStudioTemplateRow, DbError> {
+        let _ = (template_id, expected_revision, row);
         Err(DbError::Init(
-            "creative studio workflow persistence is unavailable in this repository".into(),
+            "creative studio template persistence is unavailable in this repository".into(),
         ))
     }
 
-    /// Hard-delete one workflow definition.
-    async fn delete_creative_workflow(&self, workflow_id: &str) -> Result<(), DbError> {
-        let _ = workflow_id;
+    /// Hard-delete one template definition.
+    async fn delete_creative_template(&self, template_id: &str) -> Result<(), DbError> {
+        let _ = template_id;
         Err(DbError::Init(
-            "creative studio workflow persistence is unavailable in this repository".into(),
+            "creative studio template persistence is unavailable in this repository".into(),
         ))
     }
 
-    // ---- canonical Creative Studio workflow runs ----
+    // ---- canonical Creative Studio template runs ----
 
-    /// Durable runs, newest-updated first. When `workflow_id` is present the
+    /// Durable runs, newest-updated first. When `template_id` is present the
     /// result is restricted to that exact pinned definition family.
-    async fn list_creative_workflow_runs(
+    async fn list_creative_template_runs(
         &self,
-        workflow_id: Option<&str>,
-    ) -> Result<Vec<CreativeStudioWorkflowRunRow>, DbError> {
-        let _ = workflow_id;
+        template_id: Option<&str>,
+    ) -> Result<Vec<CreativeStudioTemplateRunRow>, DbError> {
+        let _ = template_id;
         Err(DbError::Init(
-            "creative studio workflow run persistence is unavailable in this repository".into(),
+            "creative studio template run persistence is unavailable in this repository".into(),
         ))
     }
 
-    /// One durable workflow run by business ID, or `None`.
-    async fn get_creative_workflow_run(
+    /// One durable template run by business ID, or `None`.
+    async fn get_creative_template_run(
         &self,
-        workflow_run_id: &str,
-    ) -> Result<Option<CreativeStudioWorkflowRunRow>, DbError> {
-        let _ = workflow_run_id;
+        template_run_id: &str,
+    ) -> Result<Option<CreativeStudioTemplateRunRow>, DbError> {
+        let _ = template_run_id;
         Err(DbError::Init(
-            "creative studio workflow run persistence is unavailable in this repository".into(),
+            "creative studio template run persistence is unavailable in this repository".into(),
         ))
     }
 
-    /// Insert revision one of a closed workflow-run aggregate.
-    async fn create_creative_workflow_run(
+    /// Insert revision one of a closed template-run aggregate.
+    async fn create_creative_template_run(
         &self,
-        row: &CreativeStudioWorkflowRunRow,
+        row: &CreativeStudioTemplateRunRow,
         referenced_asset_ids: &[String],
-    ) -> Result<CreativeStudioWorkflowRunRow, DbError> {
+    ) -> Result<CreativeStudioTemplateRunRow, DbError> {
         let _ = (row, referenced_asset_ids);
         Err(DbError::Init(
-            "creative studio workflow run persistence is unavailable in this repository".into(),
+            "creative studio template run persistence is unavailable in this repository".into(),
         ))
     }
 
-    /// Compare-and-swap a workflow-run aggregate. The replacement must carry
+    /// Compare-and-swap a template-run aggregate. The replacement must carry
     /// the same identity and `expected_revision + 1`.
-    async fn save_creative_workflow_run(
+    async fn save_creative_template_run(
         &self,
-        workflow_run_id: &str,
+        template_run_id: &str,
         expected_revision: i64,
-        row: &CreativeStudioWorkflowRunRow,
-    ) -> Result<CreativeStudioWorkflowRunRow, DbError> {
-        let _ = (workflow_run_id, expected_revision, row);
+        row: &CreativeStudioTemplateRunRow,
+    ) -> Result<CreativeStudioTemplateRunRow, DbError> {
+        let _ = (template_run_id, expected_revision, row);
         Err(DbError::Init(
-            "creative studio workflow run persistence is unavailable in this repository".into(),
+            "creative studio template run persistence is unavailable in this repository".into(),
         ))
     }
 

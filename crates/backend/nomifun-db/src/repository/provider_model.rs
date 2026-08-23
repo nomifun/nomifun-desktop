@@ -1,5 +1,5 @@
 use crate::error::DbError;
-use crate::models::{CreativeStudioWorkflowRow, NewProviderModel, ProviderModelRow};
+use crate::models::{CreativeStudioTemplateRow, NewProviderModel, ProviderModelRow};
 
 /// One compare-and-swap replacement for a canonical Creative Studio project
 /// whose mutable document referenced the model being deleted.
@@ -13,13 +13,13 @@ pub struct ProviderModelProjectCleanup {
     pub updated_at: i64,
 }
 
-/// One compare-and-swap replacement for a canonical Creative Studio workflow
+/// One compare-and-swap replacement for a canonical Creative Studio template
 /// whose mutable definition referenced the model being deleted.
 #[derive(Debug, Clone)]
-pub struct ProviderModelWorkflowCleanup {
-    pub workflow_id: String,
+pub struct ProviderModelTemplateCleanup {
+    pub template_id: String,
     pub expected_revision: i64,
-    pub replacement: CreativeStudioWorkflowRow,
+    pub replacement: CreativeStudioTemplateRow,
 }
 
 /// All mutable Creative Studio references that must be removed together with
@@ -27,7 +27,7 @@ pub struct ProviderModelWorkflowCleanup {
 #[derive(Debug, Clone, Default)]
 pub struct ProviderModelCleanupPlan {
     pub projects: Vec<ProviderModelProjectCleanup>,
-    pub workflows: Vec<ProviderModelWorkflowCleanup>,
+    pub templates: Vec<ProviderModelTemplateCleanup>,
 }
 
 /// Strongly typed authority for deleting one model and its precomputed

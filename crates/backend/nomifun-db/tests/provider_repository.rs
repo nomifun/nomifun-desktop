@@ -1,11 +1,11 @@
 use nomifun_db::models::ConversationRow;
 use nomifun_db::{
     CoordinatedProviderModelDelete, CreateProviderParams, CreateTerminalParams,
-    CreativeStudioWorkflowRow, DbError, IConversationRepository,
+    CreativeStudioTemplateRow, DbError, IConversationRepository,
     IProviderConnectionRepository, IProviderModelCapabilityRepository,
     IProviderModelRepository, IProviderRepository, ITerminalRepository, NewProviderModel,
     NewProviderModelCapability, ProviderModelCleanupPlan, ProviderModelProjectCleanup,
-    ProviderModelWorkflowCleanup, SqliteConversationRepository,
+    ProviderModelTemplateCleanup, SqliteConversationRepository,
     SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
     SqliteProviderModelRepository, SqliteProviderRepository, SqliteTerminalRepository,
     UpdateProviderParams, UpsertProviderConnectionParams, init_database_memory,
@@ -1256,46 +1256,46 @@ fn model_cleanup_project_patch(
     }
 }
 
-async fn seed_model_cleanup_workflow(
+async fn seed_model_cleanup_template(
     db: &nomifun_db::Database,
     marker: &str,
-) -> CreativeStudioWorkflowRow {
-    let workflow_id = nomifun_common::CreativeStudioWorkflowId::new().into_string();
+) -> CreativeStudioTemplateRow {
+    let template_id = nomifun_common::CreativeStudioTemplateId::new().into_string();
     let definition_json = serde_json::json!({
-        "id": workflow_id,
+        "id": template_id,
         "revision": 1,
         "marker": marker
     })
     .to_string();
-    sqlx::query_as::<_, CreativeStudioWorkflowRow>(
-        "INSERT INTO creative_studio_workflows \
-            (workflow_id, revision, name, description, category, visibility, definition_json, \
+    sqlx::query_as::<_, CreativeStudioTemplateRow>(
+        "INSERT INTO creative_studio_templates \
+            (template_id, revision, name, description, category, visibility, definition_json, \
              created_at, updated_at) \
          VALUES (?, 1, 'Model cleanup', '', '', 'private', ?, 100, 100) RETURNING *",
     )
-    .bind(&workflow_id)
+    .bind(&template_id)
     .bind(&definition_json)
     .fetch_one(db.pool())
     .await
     .unwrap()
 }
 
-fn model_cleanup_workflow_patch(
-    row: &CreativeStudioWorkflowRow,
+fn model_cleanup_template_patch(
+    row: &CreativeStudioTemplateRow,
     expected_revision: i64,
     marker: &str,
-) -> ProviderModelWorkflowCleanup {
+) -> ProviderModelTemplateCleanup {
     let mut replacement = row.clone();
     replacement.revision = expected_revision + 1;
     replacement.updated_at = 200;
     replacement.definition_json = serde_json::json!({
-        "id": row.workflow_id,
+        "id": row.template_id,
         "revision": replacement.revision,
         "marker": marker
     })
     .to_string();
-    ProviderModelWorkflowCleanup {
-        workflow_id: row.workflow_id.clone(),
+    ProviderModelTemplateCleanup {
+        template_id: row.template_id.clone(),
         expected_revision,
         replacement,
     }
@@ -1324,14 +1324,14 @@ async fn seed_live_model_creation_task(
     .unwrap();
 }
 
-async fn seed_model_workflow_run(
+async fn seed_model_template_run(
     db: &nomifun_db::Database,
-    workflow: &CreativeStudioWorkflowRow,
+    template: &CreativeStudioTemplateRow,
     step_kind: &str,
     status: &str,
 ) {
-    let workflow_run_id = nomifun_common::CreativeStudioWorkflowRunId::new().into_string();
-    let workflow_step_id = nomifun_common::CreativeStudioWorkflowStepId::new().into_string();
+    let template_run_id = nomifun_common::CreativeStudioTemplateRunId::new().into_string();
+    let template_step_id = nomifun_common::CreativeStudioTemplateStepId::new().into_string();
     let step = match step_kind {
         "generate-images" => serde_json::json!({
             "kind": "generate-images",
@@ -1345,40 +1345,40 @@ async fn seed_model_workflow_run(
                 "model": { "providerId": PROVIDER_ID, "model": "delete-me" }
             }
         }),
-        other => panic!("unsupported workflow fixture step {other}"),
+        other => panic!("unsupported template fixture step {other}"),
     };
     let aggregate_json = serde_json::json!({
-        "kind": "nomifun.creative-studio.workflow-run",
+        "kind": "nomifun.creative-studio.template-run",
         "version": 1,
         "revision": 1,
-        "workflowSnapshot": {
-            "id": workflow.workflow_id,
-            "revision": workflow.revision,
+        "templateSnapshot": {
+            "id": template.template_id,
+            "revision": template.revision,
             "steps": [step]
         },
         "request": {
-            "id": workflow_run_id,
-            "workflowId": workflow.workflow_id,
-            "workflowRevision": workflow.revision
+            "id": template_run_id,
+            "templateId": template.template_id,
+            "templateRevision": template.revision
         },
         "record": {
-            "requestId": workflow_run_id,
-            "workflowId": workflow.workflow_id,
+            "requestId": template_run_id,
+            "templateId": template.template_id,
             "status": status
         }
     })
     .to_string();
     sqlx::query(
-        "INSERT INTO creative_studio_workflow_runs \
-            (workflow_run_id, workflow_id, workflow_revision, revision, status, step_ids_json, \
+        "INSERT INTO creative_studio_template_runs \
+            (template_run_id, template_id, template_revision, revision, status, step_ids_json, \
              aggregate_json, created_at, updated_at) \
          VALUES (?, ?, ?, 1, ?, ?, ?, 100, 100)",
     )
-    .bind(&workflow_run_id)
-    .bind(&workflow.workflow_id)
-    .bind(workflow.revision)
+    .bind(&template_run_id)
+    .bind(&template.template_id)
+    .bind(template.revision)
     .bind(status)
-    .bind(serde_json::to_string(&[workflow_step_id]).unwrap())
+    .bind(serde_json::to_string(&[template_step_id]).unwrap())
     .bind(aggregate_json)
     .execute(db.pool())
     .await
@@ -1390,8 +1390,8 @@ async fn coordinated_model_delete_applies_all_cleanup_and_preserves_sibling_mode
     let db = init_database_memory().await.unwrap();
     let expected_config_revision = seed_model_delete_provider(&db, true).await;
     let (project_id, _) = seed_model_cleanup_project(&db, "delete-me").await;
-    let workflow = seed_model_cleanup_workflow(&db, "delete-me").await;
-    seed_model_workflow_run(&db, &workflow, "generate-images", "succeeded").await;
+    let template = seed_model_cleanup_template(&db, "delete-me").await;
+    seed_model_template_run(&db, &template, "generate-images", "succeeded").await;
     let models = SqliteProviderModelRepository::new(db.pool().clone());
 
     let deleted = models
@@ -1401,7 +1401,7 @@ async fn coordinated_model_delete_applies_all_cleanup_and_preserves_sibling_mode
             expected_config_revision,
             cleanup: ProviderModelCleanupPlan {
                 projects: vec![model_cleanup_project_patch(&project_id, 1, "cleared")],
-                workflows: vec![model_cleanup_workflow_patch(&workflow, 1, "cleared")],
+                templates: vec![model_cleanup_template_patch(&template, 1, "cleared")],
             },
         })
         .await
@@ -1433,15 +1433,15 @@ async fn coordinated_model_delete_applies_all_cleanup_and_preserves_sibling_mode
     .unwrap();
     assert_eq!(project.0, 2);
     assert_eq!(serde_json::from_str::<serde_json::Value>(&project.1).unwrap()["nodes"][0]["marker"], "cleared");
-    let workflow_after: (i64, String) = sqlx::query_as(
-        "SELECT revision, definition_json FROM creative_studio_workflows WHERE workflow_id = ?",
+    let template_after: (i64, String) = sqlx::query_as(
+        "SELECT revision, definition_json FROM creative_studio_templates WHERE template_id = ?",
     )
-    .bind(&workflow.workflow_id)
+    .bind(&template.template_id)
     .fetch_one(db.pool())
     .await
     .unwrap();
-    assert_eq!(workflow_after.0, 2);
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&workflow_after.1).unwrap()["marker"], "cleared");
+    assert_eq!(template_after.0, 2);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&template_after.1).unwrap()["marker"], "cleared");
     assert_eq!(
         SqliteProviderRepository::new(db.pool().clone())
             .find_by_id(PROVIDER_ID)
@@ -1467,7 +1467,7 @@ async fn coordinated_model_delete_rejects_live_creation_task_without_writes() {
             expected_config_revision: 0,
             cleanup: ProviderModelCleanupPlan {
                 projects: vec![model_cleanup_project_patch(&project_id, 1, "must-not-write")],
-                workflows: vec![],
+                templates: vec![],
             },
         })
         .await
@@ -1486,12 +1486,12 @@ async fn coordinated_model_delete_rejects_live_creation_task_without_writes() {
 }
 
 #[tokio::test]
-async fn coordinated_model_delete_rejects_each_live_workflow_snapshot_binding() {
+async fn coordinated_model_delete_rejects_each_live_template_snapshot_binding() {
     for step_kind in ["generate-images", "draft-prompts"] {
         let db = init_database_memory().await.unwrap();
         seed_model_delete_provider(&db, false).await;
-        let workflow = seed_model_cleanup_workflow(&db, "original").await;
-        seed_model_workflow_run(&db, &workflow, step_kind, "queued").await;
+        let template = seed_model_cleanup_template(&db, "original").await;
+        seed_model_template_run(&db, &template, step_kind, "queued").await;
         let models = SqliteProviderModelRepository::new(db.pool().clone());
         let error = models
             .delete_coordinated(&CoordinatedProviderModelDelete {
@@ -1500,8 +1500,8 @@ async fn coordinated_model_delete_rejects_each_live_workflow_snapshot_binding() 
                 expected_config_revision: 0,
                 cleanup: ProviderModelCleanupPlan {
                     projects: vec![],
-                    workflows: vec![model_cleanup_workflow_patch(
-                        &workflow,
+                    templates: vec![model_cleanup_template_patch(
+                        &template,
                         1,
                         "must-not-write",
                     )],
@@ -1509,12 +1509,12 @@ async fn coordinated_model_delete_rejects_each_live_workflow_snapshot_binding() 
             })
             .await
             .unwrap_err();
-        assert!(matches!(error, DbError::Conflict(message) if message.contains("nonterminal workflow run")));
+        assert!(matches!(error, DbError::Conflict(message) if message.contains("nonterminal template run")));
         assert!(models.get(PROVIDER_ID, "delete-me").await.unwrap().is_some());
         let revision: i64 = sqlx::query_scalar(
-            "SELECT revision FROM creative_studio_workflows WHERE workflow_id = ?",
+            "SELECT revision FROM creative_studio_templates WHERE template_id = ?",
         )
-        .bind(&workflow.workflow_id)
+        .bind(&template.template_id)
         .fetch_one(db.pool())
         .await
         .unwrap();
@@ -1549,7 +1549,7 @@ async fn stale_project_cleanup_rolls_back_earlier_project_patch_and_model_delete
                     model_cleanup_project_patch(&first_id, 1, "first-cleaned"),
                     model_cleanup_project_patch(&stale_id, 1, "stale-cleaned"),
                 ],
-                workflows: vec![],
+                templates: vec![],
             },
         })
         .await
@@ -1568,23 +1568,23 @@ async fn stale_project_cleanup_rolls_back_earlier_project_patch_and_model_delete
 }
 
 #[tokio::test]
-async fn stale_workflow_cleanup_rolls_back_project_patch_and_model_delete() {
+async fn stale_template_cleanup_rolls_back_project_patch_and_model_delete() {
     let db = init_database_memory().await.unwrap();
     seed_model_delete_provider(&db, false).await;
     let (project_id, project_original) = seed_model_cleanup_project(&db, "original").await;
-    let workflow = seed_model_cleanup_workflow(&db, "original").await;
+    let template = seed_model_cleanup_template(&db, "original").await;
     let stale_definition = serde_json::json!({
-        "id": workflow.workflow_id,
+        "id": template.template_id,
         "revision": 2,
         "marker": "newer-writer"
     })
     .to_string();
     sqlx::query(
-        "UPDATE creative_studio_workflows SET revision = 2, definition_json = ?, updated_at = 150 \
-         WHERE workflow_id = ?",
+        "UPDATE creative_studio_templates SET revision = 2, definition_json = ?, updated_at = 150 \
+         WHERE template_id = ?",
     )
     .bind(stale_definition)
-    .bind(&workflow.workflow_id)
+    .bind(&template.template_id)
     .execute(db.pool())
     .await
     .unwrap();
@@ -1596,12 +1596,12 @@ async fn stale_workflow_cleanup_rolls_back_project_patch_and_model_delete() {
             expected_config_revision: 0,
             cleanup: ProviderModelCleanupPlan {
                 projects: vec![model_cleanup_project_patch(&project_id, 1, "cleaned")],
-                workflows: vec![model_cleanup_workflow_patch(&workflow, 1, "cleaned")],
+                templates: vec![model_cleanup_template_patch(&template, 1, "cleaned")],
             },
         })
         .await
         .unwrap_err();
-    assert!(matches!(error, DbError::Conflict(message) if message.contains("workflow")));
+    assert!(matches!(error, DbError::Conflict(message) if message.contains("template")));
     let project_after: (i64, String) = sqlx::query_as(
         "SELECT revision, document_json FROM creative_studio_projects WHERE project_id = ?",
     )
@@ -1632,7 +1632,7 @@ async fn missing_model_returns_false_without_applying_cleanup() {
                         1,
                         "must-not-write",
                     )],
-                    workflows: vec![],
+                    templates: vec![],
                 },
             })
             .await

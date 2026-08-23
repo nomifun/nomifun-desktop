@@ -61,7 +61,7 @@ pub use id::{
     CompanionMemoryId, CompanionSessionWindowId, CompanionSkillId, CompanionSkillPatternId,
     ConversationArtifactId, ConversationId, CreationTaskId, CreativeStudioConnectionId,
     CreativeStudioCanvasId, CreativeStudioNodeId, CreativeStudioProjectId,
-    CreativeStudioWorkflowId, CreativeStudioWorkflowRunId, CreativeStudioWorkflowStepId,
+    CreativeStudioTemplateId, CreativeStudioTemplateRunId, CreativeStudioTemplateStepId,
     CronJobId, CronJobRunId,
     CsAgentId, CsNoteId,
     EntityId, FigureId,

@@ -205,11 +205,11 @@ impl IProviderModelRepository for SqliteProviderModelRepository {
             )));
         }
 
-        let live_workflow_run: Option<String> = sqlx::query_scalar(
-            "SELECT workflow_run_id FROM creative_studio_workflow_runs AS run \
+        let live_template_run: Option<String> = sqlx::query_scalar(
+            "SELECT template_run_id FROM creative_studio_template_runs AS run \
              WHERE run.status IN ('requested', 'awaiting-review', 'queued', 'running') \
                AND EXISTS (\
-                   SELECT 1 FROM json_each(run.aggregate_json, '$.workflowSnapshot.steps') AS step \
+                   SELECT 1 FROM json_each(run.aggregate_json, '$.templateSnapshot.steps') AS step \
                    WHERE (\
                        json_extract(step.value, '$.kind') = 'generate-images' \
                        AND json_extract(step.value, '$.generation.model.providerId') = ?1 \
@@ -220,15 +220,15 @@ impl IProviderModelRepository for SqliteProviderModelRepository {
                        AND json_extract(step.value, '$.planning.model.model') = ?2\
                    )\
                ) \
-             ORDER BY run.updated_at ASC, run.workflow_run_id ASC LIMIT 1",
+             ORDER BY run.updated_at ASC, run.template_run_id ASC LIMIT 1",
         )
         .bind(provider_id.as_str())
         .bind(&plan.model)
         .fetch_optional(&mut *transaction)
         .await?;
-        if let Some(workflow_run_id) = live_workflow_run {
+        if let Some(template_run_id) = live_template_run {
             return Err(DbError::Conflict(format!(
-                "provider model '{}/{}' is pinned by nonterminal workflow run '{workflow_run_id}'",
+                "provider model '{}/{}' is pinned by nonterminal template run '{template_run_id}'",
                 provider_id, plan.model
             )));
         }
@@ -256,21 +256,21 @@ impl IProviderModelRepository for SqliteProviderModelRepository {
             }
         }
 
-        for cleanup in &plan.cleanup.workflows {
+        for cleanup in &plan.cleanup.templates {
             let replacement = &cleanup.replacement;
-            if replacement.workflow_id != cleanup.workflow_id
+            if replacement.template_id != cleanup.template_id
                 || replacement.revision != cleanup.expected_revision + 1
             {
                 return Err(DbError::Conflict(format!(
-                    "creative studio workflow '{}' cleanup replacement must preserve its ID and increment revision once",
-                    cleanup.workflow_id
+                    "creative studio template '{}' cleanup replacement must preserve its ID and increment revision once",
+                    cleanup.template_id
                 )));
             }
             let updated = sqlx::query(
-                "UPDATE creative_studio_workflows \
+                "UPDATE creative_studio_templates \
                  SET revision = ?, name = ?, description = ?, category = ?, visibility = ?, \
                      definition_json = ?, updated_at = ? \
-                 WHERE workflow_id = ? AND revision = ?",
+                 WHERE template_id = ? AND revision = ?",
             )
             .bind(replacement.revision)
             .bind(&replacement.name)
@@ -279,14 +279,14 @@ impl IProviderModelRepository for SqliteProviderModelRepository {
             .bind(&replacement.visibility)
             .bind(&replacement.definition_json)
             .bind(replacement.updated_at)
-            .bind(&cleanup.workflow_id)
+            .bind(&cleanup.template_id)
             .bind(cleanup.expected_revision)
             .execute(&mut *transaction)
             .await?;
             if updated.rows_affected() != 1 {
                 return Err(DbError::Conflict(format!(
-                    "creative studio workflow '{}' changed during provider model cleanup; expected revision {}",
-                    cleanup.workflow_id, cleanup.expected_revision
+                    "creative studio template '{}' changed during provider model cleanup; expected revision {}",
+                    cleanup.template_id, cleanup.expected_revision
                 )));
             }
         }

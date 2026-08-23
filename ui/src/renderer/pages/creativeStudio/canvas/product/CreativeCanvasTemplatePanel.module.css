@@ -1,0 +1,302 @@
+.panel {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  flex-direction: column;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+
+.panel,
+.panel * {
+  box-sizing: border-box;
+}
+
+.header,
+.searchRow,
+.cardHeading,
+.runRow,
+.actions,
+.runStatus,
+.error {
+  display: flex;
+  align-items: center;
+}
+
+.header {
+  min-height: 62px;
+  flex: 0 0 auto;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 12px 10px 14px;
+  border-bottom: 1px solid var(--color-border-2);
+}
+
+.header h2,
+.header p,
+.description {
+  margin: 0;
+}
+
+.header h2 {
+  color: var(--color-text-1);
+  font-size: 13px;
+  font-weight: 680;
+}
+
+.header p {
+  margin-top: 2px;
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.iconButton,
+.error button,
+.state button,
+.actions button {
+  appearance: none;
+  border: 0;
+  font: inherit;
+  outline: none;
+}
+
+.iconButton {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  place-items: center;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-3);
+  cursor: pointer;
+}
+
+.iconButton:hover:not(:disabled) {
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
+}
+
+.iconButton:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.searchRow {
+  gap: 6px;
+  padding: 10px 9px 8px 11px;
+}
+
+.searchRow input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 7px;
+  outline: none;
+  background: var(--color-fill-1);
+  color: var(--color-text-1);
+  font-size: 12px;
+}
+
+.searchRow input:focus {
+  border-color: rgb(var(--primary-5));
+  box-shadow: 0 0 0 2px rgba(var(--primary-6), 0.08);
+}
+
+.list {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 0 8px 12px;
+  scrollbar-width: thin;
+}
+
+.card {
+  padding: 10px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 10px;
+  background: var(--color-bg-1);
+}
+
+.card + .card {
+  margin-top: 7px;
+}
+
+.cardHeading {
+  min-width: 0;
+  gap: 8px;
+}
+
+.templateIcon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  place-items: center;
+  border-radius: 8px;
+  background: rgba(var(--primary-6), 0.1);
+  color: rgb(var(--primary-6));
+}
+
+.identity {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.identity strong,
+.identity span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.identity strong {
+  color: var(--color-text-1);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.identity span,
+.description,
+.runRow {
+  color: var(--color-text-3);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.description {
+  display: -webkit-box;
+  margin-top: 7px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.runRow {
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--color-border-1);
+}
+
+.runStatus {
+  gap: 4px;
+  color: var(--color-text-2);
+}
+
+.runStatus[data-status='succeeded'] {
+  color: rgb(var(--success-6));
+}
+
+.runStatus[data-status='failed'],
+.runStatus[data-status='cancelled'] {
+  color: rgb(var(--danger-6));
+}
+
+.actions {
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.actions button,
+.error button,
+.state button {
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.actions button {
+  display: inline-flex;
+  min-width: 0;
+  height: 28px;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 7px;
+  background: var(--color-fill-2);
+  color: var(--color-text-2);
+  font-size: 11px;
+}
+
+.actions button:first-child {
+  background: rgb(var(--primary-6));
+  color: var(--button-primary-text, #fff);
+}
+
+.actions button:hover:not(:disabled) {
+  filter: brightness(0.97);
+}
+
+.actions button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.state {
+  display: flex;
+  min-height: 220px;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 7px;
+  padding: 22px 16px;
+  color: var(--color-text-3);
+  font-size: 11px;
+  text-align: center;
+}
+
+.state strong {
+  color: var(--color-text-2);
+  font-size: 12px;
+}
+
+.state button,
+.error button {
+  padding: 5px 9px;
+  background: rgba(var(--primary-6), 0.1);
+  color: rgb(var(--primary-6));
+  font-size: 11px;
+}
+
+.error {
+  margin: 0 9px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 9px;
+  border-radius: 8px;
+  background: rgba(var(--danger-6), 0.08);
+  color: rgb(var(--danger-6));
+  font-size: 11px;
+}
+
+.error span {
+  min-width: 0;
+  flex: 1 1 120px;
+  overflow-wrap: anywhere;
+}
+
+.spinning {
+  animation: template-spin 900ms linear infinite;
+}
+
+@keyframes template-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinning {
+    animation: none;
+  }
+}

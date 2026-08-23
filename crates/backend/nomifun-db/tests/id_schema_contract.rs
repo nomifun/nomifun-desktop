@@ -71,8 +71,8 @@ const UNCONDITIONAL_UUIDV7_BUSINESS_IDS: &[(&str, &str)] = &[
     ("webhooks", "webhook_id"),
     ("creation_tasks", "creation_task_id"),
     ("creative_studio_agent_sessions", "session_id"),
-    ("creative_studio_workflow_runs", "workflow_run_id"),
-    ("creative_studio_workflows", "workflow_id"),
+    ("creative_studio_template_runs", "template_run_id"),
+    ("creative_studio_templates", "template_id"),
     ("conversation_artifacts", "conversation_artifact_id"),
     ("idmm_action_reservations", "reservation_id"),
     ("idmm_interventions", "intervention_id"),
@@ -171,8 +171,8 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "creative_studio_agent_proposal_receipts",
     "creative_studio_agent_sessions",
     "creative_studio_projects",
-    "creative_studio_workflow_runs",
-    "creative_studio_workflows",
+    "creative_studio_template_runs",
+    "creative_studio_templates",
     "cron_job_runs",
     "cron_jobs",
     "cron_run_reservations",
@@ -1193,23 +1193,23 @@ async fn remaining_uuid_logical_links_and_json_registry_enforce_text_values() {
         "origin updates must enforce the same tagged owner contract"
     );
 
-    let workflow_id = nomifun_common::generate_id();
-    let workflow_run_id = nomifun_common::generate_id();
-    let workflow_step_id = nomifun_common::generate_id();
+    let template_id = nomifun_common::generate_id();
+    let template_run_id = nomifun_common::generate_id();
+    let template_step_id = nomifun_common::generate_id();
     sqlx::query(
         "INSERT INTO workshop_assets \
          (asset_id, kind, title, origin, created_at, updated_at) \
-         VALUES (?, 'image', 'workflow owner origin', ?, 1, 1)",
+         VALUES (?, 'image', 'template owner origin', ?, 1, 1)",
     )
     .bind(nomifun_common::generate_id())
     .bind(serde_json::json!({
-        "workflow_id": workflow_id,
-        "workflow_run_id": workflow_run_id,
-        "workflow_step_id": workflow_step_id
+        "template_id": template_id,
+        "template_run_id": template_run_id,
+        "template_step_id": template_step_id
     }).to_string())
     .execute(pool)
     .await
-    .expect("canonical workflow-step asset owner");
+    .expect("canonical template-step asset owner");
 
     for (label, invalid_origin) in [
         (
@@ -1217,10 +1217,10 @@ async fn remaining_uuid_logical_links_and_json_registry_enforce_text_values() {
             serde_json::json!({"project_id": nomifun_common::generate_id()}),
         ),
         (
-            "partial workflow owner",
+            "partial template owner",
             serde_json::json!({
-                "workflow_id": nomifun_common::generate_id(),
-                "workflow_run_id": nomifun_common::generate_id()
+                "template_id": nomifun_common::generate_id(),
+                "template_run_id": nomifun_common::generate_id()
             }),
         ),
         (
@@ -1228,25 +1228,25 @@ async fn remaining_uuid_logical_links_and_json_registry_enforce_text_values() {
             serde_json::json!({
                 "project_id": nomifun_common::generate_id(),
                 "node_id": nomifun_common::generate_id(),
-                "workflow_id": nomifun_common::generate_id(),
-                "workflow_run_id": nomifun_common::generate_id(),
-                "workflow_step_id": nomifun_common::generate_id()
+                "template_id": nomifun_common::generate_id(),
+                "template_run_id": nomifun_common::generate_id(),
+                "template_step_id": nomifun_common::generate_id()
             }),
         ),
         (
-            "non-v7 workflow step",
+            "non-v7 template step",
             serde_json::json!({
-                "workflow_id": nomifun_common::generate_id(),
-                "workflow_run_id": nomifun_common::generate_id(),
-                "workflow_step_id": "550e8400-e29b-41d4-a716-446655440000"
+                "template_id": nomifun_common::generate_id(),
+                "template_run_id": nomifun_common::generate_id(),
+                "template_step_id": "550e8400-e29b-41d4-a716-446655440000"
             }),
         ),
         (
-            "retired camel-case workflow owner",
+            "retired camel-case template owner",
             serde_json::json!({
-                "workflowId": nomifun_common::generate_id(),
-                "workflowRunId": nomifun_common::generate_id(),
-                "workflowStepId": nomifun_common::generate_id()
+                "templateId": nomifun_common::generate_id(),
+                "templateRunId": nomifun_common::generate_id(),
+                "templateStepId": nomifun_common::generate_id()
             }),
         ),
     ] {

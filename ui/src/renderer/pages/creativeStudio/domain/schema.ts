@@ -262,7 +262,7 @@ export interface CreativeChatSessionReference {
   updatedAt: number;
 }
 
-export type CreativeLeftPanelView = 'canvas' | 'assets' | 'prompts' | 'workflows';
+export type CreativeLeftPanelView = 'canvas' | 'assets' | 'prompts' | 'templates';
 export type CreativeRightPanelView = 'assistant' | 'properties';
 export type CreativeBottomPanelView = 'timeline' | 'history';
 

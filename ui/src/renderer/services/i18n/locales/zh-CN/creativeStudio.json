@@ -78,7 +78,7 @@
         "description": "调整现有节点的位置、尺寸与连接关系。",
         "label": "整理布局"
       },
-      "workflow": {
+      "template": {
         "description": "把创作目标整理成可人工确认的模板草案。",
         "label": "模板设计"
       }
@@ -913,7 +913,7 @@
       "remoteReloaded": "已重新载入远端版本。",
       "remoteUnavailable": "远端版本暂时不可用。",
       "resolveDirectorConflict": "画布存在多个导演节点。请只保留一个，再进入 3D 导演台。",
-      "resolvingWorkflowResults": "正在解析模板的真实结果素材…",
+      "resolvingTemplateResults": "正在解析模板的真实结果素材…",
       "saveCompleted": "保存已完成。",
       "splitRecovered": "上传响应中断后已找回切图素材，创建并保存 {{count}} 个图片子节点。",
       "splitSucceeded": "已切分真实原图，创建并保存 {{count}} 个图片子节点及连线。",
@@ -947,7 +947,7 @@
         "assets": "素材",
         "canvas": "画布",
         "prompts": "提示词",
-        "workflows": "模板"
+        "templates": "模板"
       },
       "right": {
         "assistant": "创作助手",
@@ -1112,8 +1112,8 @@
       "agentDescription": "当前没有可验证的画布专属会话绑定，因此不会发送消息或复用主聊天会话。",
       "agentDetail": "需要接入 canvas/session resolver、真实消息历史和独占会话所有权后才能启用。",
       "agentTitle": "创作 Agent 尚未连接",
-      "workflowsDescription": "当前画布文档没有模板数据源，本面板不会显示示例模板或虚构运行状态。",
-      "workflowsTitle": "模板尚未连接"
+      "templatesDescription": "当前画布文档没有模板数据源，本面板不会显示示例模板或虚构运行状态。",
+      "templatesTitle": "模板尚未连接"
     },
     "untitled": "无限画布",
     "upload": {
@@ -1163,7 +1163,7 @@
       "unsupportedMessage": "当前节点不支持直接生成视频。请选择空视频节点，或为它添加一张图片参考。",
       "unsupportedMode": "当前节点不支持视频生成"
     },
-    "workflows": {
+    "templates": {
       "activeSummary": " · {{count}} 个进行中",
       "empty": "暂无模板",
       "emptyDescription": "可前往模板工作台创建和配置模板。",
@@ -1904,7 +1904,7 @@
       "succeeded": "成功"
     }
   },
-  "workflows": {
+  "templates": {
     "errors": {
       "generic": "模板操作失败，请重试。"
     },

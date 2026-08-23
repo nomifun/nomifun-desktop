@@ -374,16 +374,16 @@ define_entity_id!(
     CreativeStudioConnectionId
 );
 define_entity_id!(
-    /// Globally unique canonical Creative Studio workflow identifier.
-    CreativeStudioWorkflowId
+    /// Globally unique canonical Creative Studio template identifier.
+    CreativeStudioTemplateId
 );
 define_entity_id!(
-    /// Globally unique canonical Creative Studio workflow-run identifier.
-    CreativeStudioWorkflowRunId
+    /// Globally unique canonical Creative Studio template-run identifier.
+    CreativeStudioTemplateRunId
 );
 define_entity_id!(
-    /// Globally unique step identifier inside a canonical workflow definition.
-    CreativeStudioWorkflowStepId
+    /// Globally unique step identifier inside a canonical template definition.
+    CreativeStudioTemplateStepId
 );
 define_entity_id!(
     /// Globally unique customer-service agent (客服员工) identifier.

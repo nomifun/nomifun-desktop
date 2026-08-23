@@ -13,13 +13,11 @@ import {
   CREATIVE_STUDIO_DIRECTOR_PATTERN,
   CREATIVE_STUDIO_IMAGE_PATH,
   CREATIVE_STUDIO_LEGACY_PROJECTS_PATH,
-  CREATIVE_STUDIO_LEGACY_WORKFLOWS_PATH,
   CREATIVE_STUDIO_PROMPTS_PATH,
   CREATIVE_STUDIO_PROJECTS_PATH,
   CREATIVE_STUDIO_ROOT_PATH,
   CREATIVE_STUDIO_TEMPLATES_PATH,
   CREATIVE_STUDIO_VIDEO_PATH,
-  CREATIVE_STUDIO_WORKFLOWS_PATH,
   creativeStudioCanvasPath,
   creativeStudioCanvasProjectPath,
   creativeStudioDirectorPath,
@@ -31,7 +29,7 @@ import {
 } from './routes';
 
 describe('Creative Studio routes', () => {
-  test('publishes Canvas-first canonical deep links and a legacy library redirect path', () => {
+  test('publishes Canvas-first canonical deep links', () => {
     expect(CREATIVE_STUDIO_ROOT_PATH).toBe('/workshop');
     expect(CREATIVE_STUDIO_CANVASES_PATH).toBe('/workshop/canvases');
     expect(CREATIVE_STUDIO_LEGACY_PROJECTS_PATH).toBe('/workshop/projects');
@@ -46,8 +44,6 @@ describe('Creative Studio routes', () => {
     expect(CREATIVE_STUDIO_PROMPTS_PATH).toBe('/workshop/prompts');
     expect(CREATIVE_STUDIO_ASSETS_PATH).toBe('/workshop/assets');
     expect(CREATIVE_STUDIO_TEMPLATES_PATH).toBe('/workshop/templates');
-    expect(CREATIVE_STUDIO_WORKFLOWS_PATH).toBe(CREATIVE_STUDIO_TEMPLATES_PATH);
-    expect(CREATIVE_STUDIO_LEGACY_WORKFLOWS_PATH).toBe('/workshop/workflows');
   });
 
   test('builds and matches encoded current-Canvas Director links', () => {
@@ -106,7 +102,6 @@ describe('Creative Studio routes', () => {
     expect(creativeStudioSectionForPath('/workshop/prompts')).toBe('prompts');
     expect(creativeStudioSectionForPath('/workshop/assets#recent')).toBe('assets');
     expect(creativeStudioSectionForPath('/workshop/templates?category=all')).toBe('templates');
-    expect(creativeStudioSectionForPath('/workshop/workflows?category=all')).toBe('templates');
     expect(creativeStudioSectionForPath('/workshop-other')).toBe(null);
     expect(creativeStudioSectionForPath('/workshop/audio')).toBe(null);
     expect(creativeStudioSectionForPath('/workshop/image/draft')).toBe(null);

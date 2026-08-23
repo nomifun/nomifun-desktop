@@ -74,8 +74,8 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "creative_studio_agent_proposal_receipts",
     "creative_studio_agent_sessions",
     "creative_studio_projects",
-    "creative_studio_workflow_runs",
-    "creative_studio_workflows",
+    "creative_studio_template_runs",
+    "creative_studio_templates",
     "cron_job_runs",
     "cron_run_reservations",
     "cron_jobs",
@@ -151,8 +151,8 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("creation_tasks", "creation_task_id"),
     ("creative_studio_agent_sessions", "session_id"),
     ("creative_studio_projects", "project_id"),
-    ("creative_studio_workflow_runs", "workflow_run_id"),
-    ("creative_studio_workflows", "workflow_id"),
+    ("creative_studio_template_runs", "template_run_id"),
+    ("creative_studio_templates", "template_id"),
     ("cron_job_runs", "cron_job_run_id"),
     ("cron_run_reservations", "cron_job_run_id"),
     ("cron_jobs", "cron_job_id"),
@@ -184,7 +184,7 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
 /// relational entity row in SQLite.
 const UUIDV7_MANAGED_VALUE_COLUMNS: &[(&str, &str)] = &[
     ("creation_tasks", "node_id"),
-    ("creation_tasks", "workflow_step_id"),
+    ("creation_tasks", "template_step_id"),
 ];
 
 /// `_id` columns that are identities, operation tokens, platform handles, or
@@ -231,11 +231,11 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("creation_tasks", "creation_task_id"),
     ("creation_tasks", "node_id"),
     ("creation_tasks", "remote_task_id"),
-    ("creation_tasks", "workflow_step_id"),
+    ("creation_tasks", "template_step_id"),
     ("creative_studio_agent_sessions", "session_id"),
     ("creative_studio_projects", "project_id"),
-    ("creative_studio_workflow_runs", "workflow_run_id"),
-    ("creative_studio_workflows", "workflow_id"),
+    ("creative_studio_template_runs", "template_run_id"),
+    ("creative_studio_templates", "template_id"),
     ("cs_agents", "cs_agent_id"),
     ("cs_dialogues", "cs_dialogue_id"),
     ("cs_dialogues", "chat_id"),
@@ -706,11 +706,11 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     // Canonical Creative Studio task history survives project deletion, while
     // creation itself still locks and validates a live project row.
     text_ref!("creation_tasks", "project_id" => "creative_studio_projects", "project_id", true, "idx_creation_tasks_project_id", KeepHistory),
-    text_ref!("creation_tasks", "workflow_id" => "creative_studio_workflows", "workflow_id", true, "idx_creation_tasks_workflow_id", KeepHistory),
-    text_ref!("creation_tasks", "workflow_run_id" => "creative_studio_workflow_runs", "workflow_run_id", true, "idx_creation_tasks_workflow_run_id", KeepHistory)
-        .with_aggregate_scope("parent.workflow_id = child.workflow_id"),
+    text_ref!("creation_tasks", "template_id" => "creative_studio_templates", "template_id", true, "idx_creation_tasks_template_id", KeepHistory),
+    text_ref!("creation_tasks", "template_run_id" => "creative_studio_template_runs", "template_run_id", true, "idx_creation_tasks_template_run_id", KeepHistory)
+        .with_aggregate_scope("parent.template_id = child.template_id"),
     text_ref!("creation_tasks", "provider_id" => "providers", "provider_id", false, "idx_creation_tasks_provider_id", Restrict),
-    text_ref!("creative_studio_workflow_runs", "workflow_id" => "creative_studio_workflows", "workflow_id", false, "idx_creative_workflow_runs_workflow_id", KeepHistory),
+    text_ref!("creative_studio_template_runs", "template_id" => "creative_studio_templates", "template_id", false, "idx_creative_template_runs_template_id", KeepHistory),
     text_ref!("creative_studio_agent_proposal_receipts", "project_id" => "creative_studio_projects", "project_id", false, "idx_creative_agent_proposal_receipts_project", Cascade),
     text_ref!("creative_studio_agent_proposal_receipts", "assistant_message_id" => "messages", "message_id", false, "idx_creative_agent_proposal_receipts_assistant_message", Restrict),
     text_ref!("creative_studio_agent_sessions", "owner_id" => "users", "user_id", false, "idx_creative_agent_sessions_owner", Restrict),
@@ -873,19 +873,19 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
         "creative_studio_projects", "project_id", "idx_workshop_assets_origin_project_id", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
-        "workshop_assets", "origin", "$.workflow_id",
-        "SELECT json_extract(origin, '$.workflow_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
-        "creative_studio_workflows", "workflow_id", "idx_workshop_assets_origin_workflow_id", KeepHistory, AllowMissingHistoricalParent
+        "workshop_assets", "origin", "$.template_id",
+        "SELECT json_extract(origin, '$.template_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
+        "creative_studio_templates", "template_id", "idx_workshop_assets_origin_template_id", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
-        "workshop_assets", "origin", "$.workflow_run_id",
-        "SELECT json_extract(origin, '$.workflow_run_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
-        "creative_studio_workflow_runs", "workflow_run_id", "idx_workshop_assets_origin_workflow_run_id", KeepHistory, AllowMissingHistoricalParent
+        "workshop_assets", "origin", "$.template_run_id",
+        "SELECT json_extract(origin, '$.template_run_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
+        "creative_studio_template_runs", "template_run_id", "idx_workshop_assets_origin_template_run_id", KeepHistory, AllowMissingHistoricalParent
     ),
     json_external_ref!(
-        "workshop_assets", "origin", "$.workflow_step_id",
-        "SELECT json_extract(origin, '$.workflow_step_id') AS value FROM workshop_assets WHERE origin IS NOT NULL",
-        "idx_workshop_assets_origin_workflow_step_id", KeepHistory
+        "workshop_assets", "origin", "$.template_step_id",
+        "SELECT json_extract(origin, '$.template_step_id') AS value FROM workshop_assets WHERE origin IS NOT NULL",
+        "idx_workshop_assets_origin_template_step_id", KeepHistory
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.creation_task_id",
@@ -1762,10 +1762,10 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN CANVAS IDENTIFIER')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN LEGACY CANVAS COMPATIBILITY IDENTIFIER')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKBENCH_KIND')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_ID')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_RUN_ID')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_STEP_ID')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET CANVAS/STANDALONE/WORKFLOW OWNER BRANCH')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_RUN_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_STEP_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET CANVAS/STANDALONE/TEMPLATE OWNER BRANCH')",
             ],
         ),
         (
@@ -1776,10 +1776,10 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN CANVAS IDENTIFIER')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN LEGACY CANVAS COMPATIBILITY IDENTIFIER')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKBENCH_KIND')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_ID')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_RUN_ID')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_STEP_ID')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET CANVAS/STANDALONE/WORKFLOW OWNER BRANCH')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_RUN_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_STEP_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET CANVAS/STANDALONE/TEMPLATE OWNER BRANCH')",
             ],
         ),
     ];
@@ -1997,9 +1997,9 @@ async fn require_workshop_asset_origin_id_contract(
     for retired_key in [
         "PROJECTID",
         "WORKBENCHKIND",
-        "WORKFLOWID",
-        "WORKFLOWRUNID",
-        "WORKFLOWSTEPID",
+        "TEMPLATEID",
+        "TEMPLATERUNID",
+        "TEMPLATESTEPID",
     ] {
         let fragment = format!("JSON_TYPE(NEW.ORIGIN, '$.{retired_key}') IS NOT NULL");
         if !normalized.contains(&fragment) {
@@ -2035,9 +2035,9 @@ async fn require_workshop_asset_origin_id_contract(
     }
     for key in [
         "PROJECT_ID",
-        "WORKFLOW_ID",
-        "WORKFLOW_RUN_ID",
-        "WORKFLOW_STEP_ID",
+        "TEMPLATE_ID",
+        "TEMPLATE_RUN_ID",
+        "TEMPLATE_STEP_ID",
     ] {
         let contract_name = if key == "PROJECT_ID" {
             "legacy Canvas compatibility identifier (PROJECT_ID)"
@@ -2091,9 +2091,9 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
             "creationTaskId",
             "projectId",
             "workbenchKind",
-            "workflowId",
-            "workflowRunId",
-            "workflowStepId",
+            "templateId",
+            "templateRunId",
+            "templateStepId",
         ] {
             if object.contains_key(retired_key) {
                 return Err(DbError::Init(format!(
@@ -2107,9 +2107,9 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
             "node_id",
             "creation_task_id",
             "project_id",
-            "workflow_id",
-            "workflow_run_id",
-            "workflow_step_id",
+            "template_id",
+            "template_run_id",
+            "template_step_id",
         ] {
             let Some(value) = object.get(key) else {
                 continue;
@@ -2144,7 +2144,7 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
                 )));
             }
         }
-        let has_workflow = ["workflow_id", "workflow_run_id", "workflow_step_id"]
+        let has_template = ["template_id", "template_run_id", "template_step_id"]
             .iter()
             .any(|key| object.contains_key(*key));
         if has_canvas && has_legacy_canvas {
@@ -2155,14 +2155,14 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
         let canvas_owner = (has_canvas || has_legacy_canvas) && has_node && !has_workbench;
         let standalone_owner = !has_canvas && !has_node && has_workbench;
         if (has_canvas || has_legacy_canvas || has_node || has_workbench)
-            && (!canvas_owner && !standalone_owner || has_workflow)
+            && (!canvas_owner && !standalone_owner || has_template)
         {
             return Err(DbError::Init(format!(
                 "v3 workshop asset {asset_id} origin has an invalid Canvas or standalone owner branch"
             )));
         }
-        if has_workflow
-            && (!["workflow_id", "workflow_run_id", "workflow_step_id"]
+        if has_template
+            && (!["template_id", "template_run_id", "template_step_id"]
                 .iter()
                 .all(|key| object.contains_key(*key))
                 || object.contains_key("canvas_id")
@@ -2171,7 +2171,7 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
                 || object.contains_key("workbench_kind"))
         {
             return Err(DbError::Init(format!(
-                "v3 workshop asset {asset_id} origin has an invalid workflow-step owner branch"
+                "v3 workshop asset {asset_id} origin has an invalid template-step owner branch"
             )));
         }
     }
