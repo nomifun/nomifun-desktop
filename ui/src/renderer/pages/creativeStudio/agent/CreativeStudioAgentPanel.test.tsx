@@ -101,6 +101,16 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     expect(failed.includes('本地会话服务不可用')).toBe(true);
   });
 
+  test('surfaces ready-state send and persistence failures', () => {
+    const html = renderPanel({
+      errorMessage: 'Agent 会话保存失败',
+    });
+
+    expect(html.includes('data-agent-panel-error="true"')).toBe(true);
+    expect(html.includes('role="alert"')).toBe(true);
+    expect(html.includes('Agent 会话保存失败')).toBe(true);
+  });
+
   test('renders supplied message, running, stopped and failed states without fake replies', () => {
     const html = renderPanel({
       messages: [

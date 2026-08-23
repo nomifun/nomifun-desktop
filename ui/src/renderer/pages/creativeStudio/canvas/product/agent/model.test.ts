@@ -83,6 +83,27 @@ describe('Creative Canvas Agent document model', () => {
     expect(differentModelError?.message.includes('immutable')).toBe(true);
   });
 
+  test('strips selector presentation metadata before persisting the model identity', () => {
+    const selectorModel = {
+      ...model,
+      providerName: 'Display-only provider',
+      platform: 'custom',
+      task: 'chat',
+      traits: [],
+      protocol: 'openai.chat_text',
+    };
+    const pending = creativeCanvasAgentSessionWithPendingTurn({
+      session: createCreativeCanvasAgentSession(sessionId, 10),
+      model: selectorModel,
+      idempotencyKey,
+      prompt: '制作一个分镜',
+      now: 20,
+    });
+
+    expect(pending.model).toEqual(model);
+    expect(Object.keys(pending.model ?? {})).toEqual(['providerId', 'model']);
+  });
+
   test('copies exact planning input while deriving the title only from the user prompt', () => {
     const skillIds = ['canvas.inspect', 'asset-search_v2'];
     const pending = creativeCanvasAgentSessionWithPendingTurn({

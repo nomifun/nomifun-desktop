@@ -153,6 +153,13 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
 
       <section className={styles.body}>{renderBody()}</section>
 
+      {props.loadState === 'ready' && props.errorMessage ? (
+        <div className={styles.inlineError} data-agent-panel-error role='alert'>
+          <Error theme='outline' size='15' />
+          <span>{props.errorMessage}</span>
+        </div>
+      ) : null}
+
       {props.view === 'chat' && (
         <CreativeStudioAgentComposer
           draft={props.draft}
