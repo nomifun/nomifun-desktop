@@ -1726,9 +1726,11 @@ mod tests {
     }
 
     #[test]
-    fn custom_has_all_configurable_task_protocols_but_no_default() {
+    fn custom_has_all_configurable_task_protocols_and_generic_default() {
         let view = protocol_manifest_for("custom", Chat);
-        assert!(view.recommendation.is_none());
+        let recommendation = view.recommendation.expect("custom Chat recommendation");
+        assert_eq!(recommendation.protocol_id, "openai.chat_text");
+        assert!(recommendation.default_base_url.is_none());
         assert_eq!(
             view.protocols.iter().map(|value| value.protocol_id.as_str()).collect::<Vec<_>>(),
             vec![
@@ -1858,6 +1860,16 @@ mod tests {
                         ));
                         continue;
                     }
+                    let Some(_) = recommendation.default_base_url.as_deref() else {
+                        assert!(
+                            view.requires_user_input
+                                && matches!(view.platform.as_str(), "custom" | "new-api"),
+                            "{} {:?} recommended a network protocol without a URL",
+                            preset.preset,
+                            task
+                        );
+                        continue;
+                    };
                     for endpoint in &descriptor.endpoints {
                         let url = joined_recommendation_url(&view, endpoint);
                         for duplicated in [

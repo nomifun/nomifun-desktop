@@ -914,8 +914,13 @@ mod tests {
         };
         assert_eq!(data["fontSize"].as_u64(), Some(32));
         assert_eq!(
-            serde_json::to_string(data).unwrap(),
-            r##"{"fontSize":32,"format":"markdown","text":"# 标题","textAlign":"center"}"##
+            serde_json::to_value(data).unwrap(),
+            json!({
+                "fontSize": 32,
+                "format": "markdown",
+                "text": "# 标题",
+                "textAlign": "center"
+            })
         );
 
         let signed_zero = fence(&artifact(json!([{
