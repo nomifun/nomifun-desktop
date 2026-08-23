@@ -13,6 +13,8 @@ const ownership = readFileSync(new URL('./ownership.ts', import.meta.url), 'utf8
 const shared = readFileSync(new URL('./shared.tsx', import.meta.url), 'utf8');
 const wiring = readFileSync(new URL('./WIRING.md', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./StandaloneWorkbenchProduct.module.css', import.meta.url), 'utf8');
+const imageCss = readFileSync(new URL('../image/ImageWorkbench.module.css', import.meta.url), 'utf8');
+const videoCss = readFileSync(new URL('../video/VideoWorkbench.module.css', import.meta.url), 'utf8');
 const draftStorage = readFileSync(new URL('../drafts/storage.ts', import.meta.url), 'utf8');
 const draftHydration = readFileSync(new URL('../drafts/hydration.ts', import.meta.url), 'utf8');
 
@@ -66,11 +68,17 @@ describe('standalone workbench product wiring', () => {
     expect(wiring.includes('Retirement never deletes media')).toBe(true);
   });
 
-  test('keeps the focused creation palette independent from the app theme', () => {
-    expect(css.includes('--color-bg-1: #f4f2ed')).toBe(true);
-    expect(css.includes('--color-text-1: #292524')).toBe(true);
-    expect(css.includes('--primary-6: 87, 83, 78')).toBe(true);
-    expect(css.includes("[data-theme='dark']")).toBe(false);
+  test('keeps both workbenches aligned with the active app theme', () => {
+    expect(/--color-bg-1\s*:/.test(css)).toBe(false);
+    expect(/--color-text-1\s*:/.test(css)).toBe(false);
+    expect(/--primary-6\s*:/.test(css)).toBe(false);
+    expect(css.includes('background: var(--color-bg-1)')).toBe(true);
+    expect(css.includes('color: var(--color-text-1)')).toBe(true);
+    expect(css.includes('color-scheme: inherit')).toBe(true);
+    expect(imageCss.includes(":global([data-theme='dark']) .bottomComposer")).toBe(true);
+    expect(imageCss.includes('white 54%')).toBe(false);
+    expect(videoCss.includes(":global([data-theme='dark']) .bottomComposerSurface")).toBe(true);
+    expect(videoCss.includes('background: #171717')).toBe(false);
   });
 
   test('keeps recovery retryable and fences stale task-load hydration', () => {

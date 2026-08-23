@@ -69,19 +69,6 @@
   border-radius: 6px;
 }
 
-.headerActions :global(.arco-btn:not(.arco-btn-primary)) {
-  border-color: #d9d9d9;
-  color: rgb(0 0 0 / 88%);
-  background: #fff;
-}
-
-.headerActions :global(.arco-btn-primary),
-.emptyPanel :global(.arco-btn-primary) {
-  border-color: transparent;
-  color: #fff;
-  background: #171717;
-}
-
 .grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -100,11 +87,14 @@
   border: 1px solid var(--color-border-2, var(--border-light));
   border-color: color-mix(in srgb, var(--color-border-2, var(--border-light)) 72%, transparent);
   border-radius: 16px;
-  background: var(--color-bg-2, #fff);
-  background: color-mix(in srgb, var(--color-bg-2, #fff) 88%, var(--color-bg-1, #f7f7f8));
+  background: color-mix(
+    in srgb,
+    var(--color-bg-2, var(--bg-1)) 88%,
+    var(--color-bg-1, var(--bg-base))
+  );
   box-shadow:
-    0 1px 2px rgb(0 0 0 / 3%),
-    0 8px 24px rgb(0 0 0 / 4%);
+    0 1px 2px color-mix(in srgb, #000 3%, transparent),
+    0 8px 24px color-mix(in srgb, #000 4%, transparent);
   cursor: pointer;
   transition:
     transform 160ms ease,
@@ -116,26 +106,26 @@
 .card:hover {
   transform: translateY(-2px);
   border-color: color-mix(in srgb, rgb(var(--primary-6)) 22%, var(--color-border-2, var(--border-light)));
-  background: var(--color-bg-2, #fff);
+  background: var(--color-bg-2, var(--bg-1));
   box-shadow:
-    0 3px 8px rgb(0 0 0 / 5%),
-    0 14px 32px rgb(0 0 0 / 7%);
+    0 3px 8px color-mix(in srgb, #000 5%, transparent),
+    0 14px 32px color-mix(in srgb, #000 7%, transparent);
 }
 
 :global([data-theme='dark']) .card {
-  border-color: color-mix(in srgb, var(--color-border-2, #4e4e4e) 76%, transparent);
-  background: color-mix(in srgb, var(--color-bg-2, #232323) 94%, #fff 6%);
+  border-color: color-mix(in srgb, var(--color-border-2) 76%, transparent);
+  background: color-mix(in srgb, var(--color-bg-2) 94%, var(--color-text-1));
   box-shadow:
-    0 1px 2px rgb(0 0 0 / 20%),
-    0 8px 24px rgb(0 0 0 / 16%);
+    0 1px 2px color-mix(in srgb, #000 20%, transparent),
+    0 8px 24px color-mix(in srgb, #000 16%, transparent);
 }
 
 :global([data-theme='dark']) .card:hover {
-  border-color: color-mix(in srgb, rgb(var(--primary-6)) 34%, var(--color-border-2, #4e4e4e));
-  background: color-mix(in srgb, var(--color-bg-2, #232323) 90%, #fff 10%);
+  border-color: color-mix(in srgb, rgb(var(--primary-6)) 34%, var(--color-border-2));
+  background: color-mix(in srgb, var(--color-bg-2) 90%, var(--color-text-1));
   box-shadow:
-    0 3px 8px rgb(0 0 0 / 28%),
-    0 14px 32px rgb(0 0 0 / 24%);
+    0 3px 8px color-mix(in srgb, #000 28%, transparent),
+    0 14px 32px color-mix(in srgb, #000 24%, transparent);
 }
 
 .card:focus-visible {
@@ -143,7 +133,7 @@
   border-color: color-mix(in srgb, rgb(var(--primary-6)) 48%, var(--color-border-2, var(--border-light)));
   box-shadow:
     0 0 0 3px color-mix(in srgb, rgb(var(--primary-6)) 16%, transparent),
-    0 8px 24px rgb(0 0 0 / 5%);
+    0 8px 24px color-mix(in srgb, #000 5%, transparent);
 }
 
 .cardTop {
@@ -237,18 +227,6 @@
 
 .cardActions :global(.arco-btn:active:not(.arco-btn-disabled)) {
   transform: scale(0.94);
-}
-
-:global([data-theme='dark']) .headerActions :global(.arco-btn:not(.arco-btn-primary)) {
-  border-color: #424242;
-  color: rgb(255 255 255 / 85%);
-  background: #141414;
-}
-
-:global([data-theme='dark']) .headerActions :global(button.arco-btn.arco-btn-primary),
-:global([data-theme='dark']) .emptyPanel :global(button.arco-btn.arco-btn-primary) {
-  --button-primary-text: #171717;
-  background: #d8d8d8;
 }
 
 .statePanel,
