@@ -80,6 +80,8 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     for (const token of [
       '--creative-canvas-right-panel-width',
       '.rightResizeHandle',
+      '.rightPanel > .panelBody > *',
+      'width: 100%',
       'grid-column: 2',
       'overflow-x: auto',
       'position: absolute',
