@@ -94,6 +94,10 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('<WorkflowRunModal')).toBe(true);
     expect(source.includes('workflowAssetPicker.pick')).toBe(true);
     expect(source.includes('creativeAssetClient.get(assetId)')).toBe(true);
+    expect(source.includes('copyText(selection.prompt)')).toBe(true);
+    expect(source.includes('onCopy={handleCopyPrompt}')).toBe(true);
+    expect(source.includes('promptInsertTargetNodeId')).toBe(false);
+    expect(source.includes('creativeTextNodeFromPrompt')).toBe(false);
     expect(source.includes('<CreativeCanvasTimelinePanel')).toBe(true);
     expect(source.includes('<CreativeCanvasTimelineUnwiredPanel')).toBe(false);
     expect(source.includes("onAddDirector={() => addNode('director')}")).toBe(
@@ -191,7 +195,7 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('withCanvasImageComposeDraft(node, update(current))')).toBe(true);
     expect(source.includes('mergeKey: `image-composer:${nodeId}`')).toBe(true);
     expect(source.includes('imageComposeDrafts')).toBe(false);
-    expect(source.includes("if (state && target?.type === 'image')")).toBe(true);
+    expect(source.includes("if (state && target?.type === 'image')")).toBe(false);
     expect(source.includes('target.data.assetId)')).toBe(false);
     expect(
       editorStyle.includes('[data-canvas-video-composer]')

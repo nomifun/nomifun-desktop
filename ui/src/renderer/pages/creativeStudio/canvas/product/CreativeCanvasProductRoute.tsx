@@ -5,6 +5,7 @@
  */
 
 import { uuidv7 } from '@/common/utils/uuidv7';
+import { copyText } from '@/renderer/utils/ui/clipboard';
 import {
   CloseOne,
   Delete,
@@ -207,7 +208,6 @@ import {
   CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
   creativeCanvasProductInsertionViewport,
   creativeNodeFromAsset,
-  creativeTextNodeFromPrompt,
 } from './nodeFactory';
 import {
   canLeaveCreativeCanvasAfterFlush,
@@ -672,8 +672,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
     useState<CanvasAudioComposeIssue | null>(null);
   const [audioComposeSubmission, setAudioComposeSubmission] =
     useState<PendingCanvasAudioComposeSubmission | null>(null);
-  const [promptInsertTargetNodeId, setPromptInsertTargetNodeId] =
-    useState<string | null>(null);
   const [agentDocumentState, setAgentDocumentState] =
     useState<AgentDocumentState | null>(null);
   const [agentOpsApplyBusy, setAgentOpsApplyBusy] = useState(false);
@@ -849,7 +847,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setAudioComposeBusy(false);
     setAudioComposeIssue(null);
     setAudioComposeSubmission(null);
-    setPromptInsertTargetNodeId(null);
     setAgentDocumentState(null);
     assetImportBusyRef.current = false;
     imageToolBusyRef.current = false;
@@ -1037,13 +1034,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
     []
   );
 
-  const openComposePromptLibrary = useCallback(
-    (nodeId: string) => {
-      setPromptInsertTargetNodeId(nodeId);
-      handleLeftViewChange('prompts');
-    },
-    [handleLeftViewChange]
-  );
+  const openPromptLibrary = useCallback(() => {
+    handleLeftViewChange('prompts');
+  }, [handleLeftViewChange]);
 
   const prepareCenteredInsertion = useCallback(() => {
     const editor = editorRef.current;
@@ -3584,72 +3577,16 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [assets, handleInsertAssets, workflowInsertingRunId]
   );
 
-  const handleInsertPrompt = useCallback(
-    (selection: PromptLibrarySelection) => {
-      if (promptInsertTargetNodeId) {
-        const state = editorRef.current?.getState();
-        const target = state?.document.nodes.find(
-          (node) =>
-            node.id === promptInsertTargetNodeId &&
-            (node.type === 'image' ||
-              node.type === 'video' ||
-              node.type === 'audio')
-        );
-        if (state && target?.type === 'image') {
-          updateImageComposeDraft(target.id, (current) => ({
-            ...current,
-            prompt: selection.prompt,
-          }));
-          setPromptInsertTargetNodeId(null);
-          setSelectedPromptId(selection.id);
-          setNotice(`已将“${selection.title}”填入图片创作提示词。`);
-          return;
-        }
-        if (state && target?.type === 'video') {
-          updateVideoComposeDraft(target.id, (current) => ({
-            ...current,
-            prompt: selection.prompt,
-          }));
-          setPromptInsertTargetNodeId(null);
-          setSelectedPromptId(selection.id);
-          setNotice(`已将“${selection.title}”填入视频创作提示词。`);
-          return;
-        }
-        if (state && target?.type === 'audio') {
-          updateAudioComposeDraft(target.id, (current) => ({
-            ...current,
-            prompt: selection.prompt,
-          }));
-          setPromptInsertTargetNodeId(null);
-          setSelectedPromptId(selection.id);
-          setNotice(`已将“${selection.title}”填入音频朗读文本。`);
-          return;
-        }
-        setPromptInsertTargetNodeId(null);
-      }
-      const insertion = prepareCenteredInsertion();
-      if (!insertion) return;
-      const { editor, state, viewportSize } = insertion;
-      editor.dispatch(
-        canvasCommands.addNode(
-          creativeTextNodeFromPrompt(
-            selection,
-            state,
-            viewportSize
-          )
-        )
-      );
-      setSelectedPromptId(selection.id);
-      setNotice(`已将“${selection.title}”插入为文本节点。`);
-    },
-    [
-      prepareCenteredInsertion,
-      promptInsertTargetNodeId,
-      updateAudioComposeDraft,
-      updateImageComposeDraft,
-      updateVideoComposeDraft,
-    ]
-  );
+  const handleCopyPrompt = useCallback((selection: PromptLibrarySelection) => {
+    void copyText(selection.prompt)
+      .then(() => {
+        setSelectedPromptId(selection.id);
+        setNotice(`已复制“${selection.title}”的提示词到剪贴板。`);
+      })
+      .catch(() => {
+        setNotice('提示词复制失败，请检查剪贴板权限。');
+      });
+  }, []);
 
   const selection = useMemo(
     () => creativeCanvasProductSelectionCapabilities(canvasState),
@@ -3943,7 +3880,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                               }))
                             }
                             onOpenPromptLibrary={() =>
-                              openComposePromptLibrary(node.id)
+                              openPromptLibrary()
                             }
                             onModelChange={(model) =>
                               updateVideoComposeDraft(node.id, (current) => ({
@@ -4075,7 +4012,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                               }))
                             }
                             onOpenPromptLibrary={() =>
-                              openComposePromptLibrary(node.id)
+                              openPromptLibrary()
                             }
                             onModelChange={(model) => {
                               const nextModel = model
@@ -4230,7 +4167,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                             )
                           }
                           onOpenPromptLibrary={() =>
-                            openComposePromptLibrary(node.id)
+                            openPromptLibrary()
                           }
                           onModelChange={(model: ImageWorkbenchModelIdentity | null) =>
                             updateImageComposeDraft(
@@ -4427,7 +4364,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 enabled={!productDisabled}
                 selectedId={selectedPromptId}
                 onSelect={setSelectedPromptId}
-                onInsert={handleInsertPrompt}
+                onCopy={handleCopyPrompt}
               />
             ),
             workflows: (
