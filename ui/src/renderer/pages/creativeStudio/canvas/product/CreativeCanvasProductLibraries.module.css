@@ -241,7 +241,7 @@
 
 .insertButton {
   background: rgb(var(--primary-6));
-  color: #fff;
+  color: var(--button-primary-text, #fff);
 }
 
 .assetHeader button:disabled,

@@ -14,72 +14,45 @@
 
 .root {
   /*
-   * The canvas is a focused creation surface, not an extension of the app
-   * theme. Keep the reference product's quiet stone palette stable while the
-   * surrounding NomiFun shell remains free to follow the user's theme.
+   * Canvas-specific roles remain local, but every role derives from the live
+   * application palette so the editor follows light/dark and custom themes.
    */
-  --color-bg-1: #f4f2ed;
-  --color-bg-2: #fbfaf7;
-  --color-bg-3: #eeeae4;
-  --color-bg-4: #dedbd2;
-  --color-bg-5: #ffffff;
-  --color-fill-1: rgba(68, 64, 60, 0.04);
-  --color-fill-2: rgba(68, 64, 60, 0.08);
-  --color-fill-3: rgba(68, 64, 60, 0.12);
-  --color-fill-4: rgba(68, 64, 60, 0.18);
-  --color-text-1: #292524;
-  --color-text-2: #57534e;
-  --color-text-3: #8a8479;
-  --color-text-4: #b7b1a7;
-  --color-border-1: #ece9e2;
-  --color-border-2: #dedbd2;
-  --color-border-3: #d6d3ca;
-  --color-border-4: #a8a29e;
-  --primary-1: 250, 250, 249;
-  --primary-2: 245, 245, 244;
-  --primary-3: 231, 229, 228;
-  --primary-4: 214, 211, 209;
-  --primary-5: 120, 113, 108;
-  --primary-6: 87, 83, 78;
-  --primary-7: 68, 64, 60;
-  --danger-1: 255, 236, 232;
-  --danger-2: 253, 205, 197;
-  --danger-3: 251, 172, 163;
-  --danger-4: 249, 137, 129;
-  --danger-5: 247, 101, 96;
-  --danger-6: 245, 63, 63;
-  --danger-7: 203, 39, 45;
-  --success-1: 232, 255, 234;
-  --success-2: 175, 240, 181;
-  --success-3: 123, 225, 136;
-  --success-4: 76, 210, 99;
-  --success-5: 35, 195, 67;
-  --success-6: 0, 180, 42;
-  --success-7: 0, 154, 41;
-  --warning-1: 255, 247, 232;
-  --warning-2: 255, 228, 186;
-  --warning-3: 255, 207, 139;
-  --warning-4: 255, 182, 93;
-  --warning-5: 255, 154, 46;
-  --warning-6: 255, 125, 0;
-  --warning-7: 210, 95, 0;
-  --color-danger-light-4: rgb(249, 137, 129);
-  --creative-canvas-surface-background: #f4f2ed;
-  --creative-canvas-grid-dot: rgba(68, 64, 60, 0.28);
-  --creative-canvas-grid-line: rgba(68, 64, 60, 0.12);
-  --creative-canvas-selection-stroke: #1c1917;
-  --creative-canvas-selection-fill: rgba(28, 25, 23, 0.06);
-  --creative-canvas-edge-default: #78716c;
-  --creative-canvas-edge-active: #1c1917;
-  --creative-canvas-node-fill: #e7e5df;
-  --creative-canvas-node-panel: #fbfaf7;
-  --creative-canvas-node-stroke: #d6d3ca;
-  --creative-canvas-node-label: #57534e;
-  --creative-canvas-node-placeholder: #8a8479;
+  --creative-canvas-surface-background: var(--color-bg-1);
+  --creative-canvas-grid-dot: color-mix(in srgb, var(--color-text-3) 32%, transparent);
+  --creative-canvas-grid-line: color-mix(in srgb, var(--color-border-2) 58%, transparent);
+  --creative-canvas-selection-stroke: rgb(var(--primary-6));
+  --creative-canvas-selection-fill: rgba(var(--primary-6), 0.08);
+  --creative-canvas-edge-default: var(--color-text-3);
+  --creative-canvas-edge-active: rgb(var(--primary-6));
+  --creative-canvas-node-fill: color-mix(
+    in srgb,
+    var(--color-bg-2) 88%,
+    var(--color-fill-3)
+  );
+  --creative-canvas-node-panel: var(--color-bg-2);
+  --creative-canvas-node-stroke: var(--color-border-3);
+  --creative-canvas-node-label: var(--color-text-2);
+  --creative-canvas-node-placeholder: var(--color-text-3);
   position: relative;
   overflow: hidden;
   background: var(--creative-canvas-surface-background);
+  color: var(--color-text-1);
+  color-scheme: inherit;
+}
+
+:global([data-theme='light']) .root {
   color-scheme: light;
+}
+
+:global([data-theme='dark']) .root {
+  color-scheme: dark;
+  --creative-canvas-grid-dot: color-mix(in srgb, var(--color-text-3) 44%, transparent);
+  --creative-canvas-grid-line: color-mix(in srgb, var(--color-border-3) 68%, transparent);
+  --creative-canvas-node-fill: color-mix(
+    in srgb,
+    var(--color-bg-2) 84%,
+    var(--color-fill-3)
+  );
 }
 
 .root :global([data-creative-canvas-chrome]) {

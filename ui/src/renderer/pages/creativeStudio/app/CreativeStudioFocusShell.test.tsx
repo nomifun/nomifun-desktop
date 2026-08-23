@@ -30,19 +30,19 @@ const renderFocusShell = (path = CREATIVE_STUDIO_CANVASES_PATH) =>
   );
 
 describe('Creative Studio route shell', () => {
-  test('keeps product overlays on the fixed focused palette', () => {
+  test('keeps product overlays on the active application theme', () => {
     const css = readFileSync(
       new URL('./CreativeStudioFocusShell.module.css', import.meta.url),
       'utf8'
     );
 
     expect(css.includes('.portalRoot')).toBe(true);
-    expect(css.includes('--color-bg-1: #f4f2ed')).toBe(true);
-    expect(css.includes('--color-bg-popup: #fbfaf7')).toBe(true);
-    expect(css.includes('--dialog-fill-0: #f4f2ed')).toBe(true);
-    expect(css.includes('--nomi-modal-control-bg: #ffffff')).toBe(true);
-    expect(css.includes('--primary-6: 87, 83, 78')).toBe(true);
-    expect(css.includes('color-scheme: light')).toBe(true);
+    expect(css.includes('--color-bg-1: #f4f2ed')).toBe(false);
+    expect(css.includes('--color-bg-popup: #fbfaf7')).toBe(false);
+    expect(css.includes('--primary-6: 87, 83, 78')).toBe(false);
+    expect(css.includes(":global([data-theme='light']) .shell")).toBe(true);
+    expect(css.includes(":global([data-theme='dark']) .shell")).toBe(true);
+    expect(css.includes('color-scheme: inherit')).toBe(true);
   });
 
   test('renders the product outlet without a duplicate titlebar', () => {
