@@ -532,3 +532,199 @@ async fn migration_045_allows_only_terminal_standalone_tombstones() {
     .unwrap();
     assert_eq!(index_count, 1);
 }
+
+#[tokio::test]
+async fn migration_047_makes_standalone_installation_owned_without_rewriting_history() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    seed_pre_041(&pool).await;
+    migrate_to(&pool, 46).await;
+
+    let old_standalone_id = "0190f5fe-7c00-7a00-8abc-000000000030";
+    let old_fingerprint = serde_json::json!({
+        "owner": {
+            "kind": "standalone_workbench",
+            "project_id": PROJECT_ID,
+            "workbench_kind": "image"
+        },
+        "inputs": []
+    })
+    .to_string();
+    sqlx::query(
+        "INSERT INTO creation_tasks \
+            (creation_task_id, project_id, workbench_kind, provider_id, model, capability, \
+             params, input_bindings, status, submitted_at, request_fingerprint) \
+         VALUES (?, ?, 'image', ?, 'legacy-image', 't2i', '{}', '[]', 'failed', 10, ?)",
+    )
+    .bind(old_standalone_id)
+    .bind(PROJECT_ID)
+    .bind(PROVIDER_ID)
+    .bind(&old_fingerprint)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    migrate_to(&pool, 47).await;
+
+    let preserved: (Option<String>, String) = sqlx::query_as(
+        "SELECT project_id, request_fingerprint \
+         FROM creation_tasks WHERE creation_task_id = ?",
+    )
+    .bind(old_standalone_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(preserved.0.as_deref(), Some(PROJECT_ID));
+    assert_eq!(preserved.1, old_fingerprint, "047 must copy raw fingerprint bytes");
+
+    let new_standalone_id = "0190f5fe-7c00-7a00-8abc-000000000031";
+    sqlx::query(
+        "INSERT INTO creation_tasks \
+            (creation_task_id, project_id, workbench_kind, provider_id, model, capability, \
+             params, input_bindings, status, submitted_at, request_fingerprint) \
+         VALUES (?, NULL, 'image', ?, 'new-image', 't2i', '{}', '[]', 'queued', 20, ?)",
+    )
+    .bind(new_standalone_id)
+    .bind(PROVIDER_ID)
+    .bind(r#"{"owner":{"kind":"standalone_workbench","workbench_kind":"image"},"inputs":[]}"#)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let new_project_id: Option<String> = sqlx::query_scalar(
+        "SELECT project_id FROM creation_tasks WHERE creation_task_id = ?",
+    )
+    .bind(new_standalone_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(new_project_id.is_none());
+
+    let mixed_owner = sqlx::query(
+        "INSERT INTO creation_tasks \
+            (creation_task_id, project_id, workbench_kind, node_id, provider_id, model, capability, \
+             params, input_bindings, status, submitted_at, request_fingerprint) \
+         VALUES (?, NULL, 'image', ?, ?, 'mixed', 't2i', '{}', '[]', 'queued', 30, '{}')",
+    )
+    .bind("0190f5fe-7c00-7a00-8abc-000000000032")
+    .bind(NODE_ID)
+    .bind(PROVIDER_ID)
+    .execute(&pool)
+    .await;
+    assert!(mixed_owner.is_err(), "standalone and CanvasNode fields must stay exclusive");
+
+    let index_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema \
+         WHERE type = 'index' AND name = 'idx_creation_tasks_workbench_owner_deleted_page'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let normalized = index_sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(normalized.contains(
+        "ON creation_tasks( workbench_kind, deleted_at, submitted_at DESC, creation_task_id DESC )"
+    ));
+
+    for (asset_id, origin) in [
+        (
+            "0190f5fe-7c00-7a00-8abc-000000000033",
+            serde_json::json!({"workbench_kind": "image"}),
+        ),
+        (
+            "0190f5fe-7c00-7a00-8abc-000000000034",
+            serde_json::json!({
+                "project_id": PROJECT_ID,
+                "workbench_kind": "image"
+            }),
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO workshop_assets \
+                (asset_id, kind, title, tags, in_library, origin, created_at, updated_at) \
+             VALUES (?, 'image', 'standalone origin', '[]', 1, ?, 1, 1)",
+        )
+        .bind(asset_id)
+        .bind(origin.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    for (asset_id, origin) in [
+        (
+            "0190f5fe-7c00-7a00-8abc-000000000035",
+            serde_json::json!({
+                "canvas_id": PROJECT_ID,
+                "node_id": NODE_ID
+            }),
+        ),
+        (
+            "0190f5fe-7c00-7a00-8abc-000000000036",
+            serde_json::json!({
+                "project_id": PROJECT_ID,
+                "node_id": NODE_ID
+            }),
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO workshop_assets \
+                (asset_id, kind, title, tags, in_library, origin, created_at, updated_at) \
+             VALUES (?, 'image', 'Canvas origin', '[]', 1, ?, 1, 1)",
+        )
+        .bind(asset_id)
+        .bind(origin.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    for (label, origin) in [
+        (
+            "canonical and legacy Canvas identifiers",
+            serde_json::json!({
+                "canvas_id": PROJECT_ID,
+                "project_id": PROJECT_ID,
+                "node_id": NODE_ID
+            }),
+        ),
+        (
+            "standalone with Canvas identifier",
+            serde_json::json!({
+                "canvas_id": PROJECT_ID,
+                "workbench_kind": "image"
+            }),
+        ),
+    ] {
+        let result = sqlx::query(
+            "INSERT INTO workshop_assets \
+                (asset_id, kind, title, tags, in_library, origin, created_at, updated_at) \
+             VALUES (?, 'image', ?, '[]', 1, ?, 1, 1)",
+        )
+        .bind(nomifun_common::generate_id())
+        .bind(label)
+        .bind(origin.to_string())
+        .execute(&pool)
+        .await;
+        assert!(result.is_err(), "{label} must be rejected");
+    }
+
+    for (index_name, json_path) in [
+        ("idx_workshop_assets_origin_canvas_id", "$.canvas_id"),
+        ("idx_workshop_assets_origin_project_id", "$.project_id"),
+    ] {
+        let index_sql: String = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?",
+        )
+        .bind(index_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            index_sql.contains(json_path),
+            "{index_name} must index {json_path}"
+        );
+    }
+}

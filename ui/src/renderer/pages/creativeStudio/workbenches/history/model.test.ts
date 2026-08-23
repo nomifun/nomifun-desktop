@@ -23,10 +23,7 @@ import {
   type StandaloneWorkbenchHistoryScope,
 } from './model';
 
-const PROJECT_ID = testUuid(500);
-const OTHER_PROJECT_ID = testUuid(501);
 const scope: StandaloneWorkbenchHistoryScope = {
-  projectId: PROJECT_ID,
   workbenchKind: 'image',
 };
 
@@ -38,7 +35,6 @@ const task = (
   taskId: testUuid(index),
   owner: {
     kind: 'standalone_workbench',
-    projectId: PROJECT_ID,
     workbenchKind: 'image',
   },
   providerId: testUuid(520),
@@ -272,19 +268,11 @@ describe('standalone workbench history model', () => {
     ).toBe(unresolved);
   });
 
-  test('rejects every cross-owner or cross-workbench task without partial output', () => {
+  test('accepts legacy project provenance but rejects cross-workbench task owners', () => {
     const valid = task(514, 400);
-    const foreignProject = task(515, 399, {
-      owner: {
-        kind: 'standalone_workbench',
-        projectId: OTHER_PROJECT_ID,
-        workbenchKind: 'image',
-      },
-    });
     const foreignKind = task(516, 398, {
       owner: {
         kind: 'standalone_workbench',
-        projectId: PROJECT_ID,
         workbenchKind: 'video',
       },
       task: 'video_generation',
@@ -293,13 +281,22 @@ describe('standalone workbench history model', () => {
     const canvasOwned = task(517, 397, {
       owner: {
         kind: 'canvas_node',
-        projectId: PROJECT_ID,
+        canvasId: testUuid(500),
         nodeId: testUuid(518),
       },
     });
     const retired = task(518, 396, { deletedAt: 500 });
 
-    for (const candidate of [foreignProject, foreignKind, canvasOwned, retired]) {
+    const legacyProject = task(515, 399);
+    expect(
+      mergeStandaloneWorkbenchHistory({
+        scope,
+        durableTasks: [valid, legacyProject],
+        runtime: runtime([]),
+      })
+    ).toHaveLength(2);
+    const candidates = [foreignKind, canvasOwned, retired];
+    for (const candidate of candidates) {
       const error = captureError(() =>
         mergeStandaloneWorkbenchHistory({
           scope,
@@ -314,6 +311,7 @@ describe('standalone workbench history model', () => {
     }
 
     expect(isExactStandaloneWorkbenchHistoryTask(valid, scope)).toBe(true);
+    expect(isExactStandaloneWorkbenchHistoryTask(legacyProject, scope)).toBe(true);
     expect(isExactStandaloneWorkbenchHistoryTask(foreignKind, scope)).toBe(false);
   });
 
@@ -352,8 +350,7 @@ describe('standalone workbench history model', () => {
     const wrongRetry = retryInput(value);
     wrongRetry.owner = {
       kind: 'standalone_workbench',
-      projectId: OTHER_PROJECT_ID,
-      workbenchKind: 'image',
+      workbenchKind: 'video',
     };
     const retryError = captureError(() =>
       mergeStandaloneWorkbenchHistory({

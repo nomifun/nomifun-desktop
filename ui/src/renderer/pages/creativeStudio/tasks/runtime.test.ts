@@ -37,7 +37,7 @@ const ASSET_ID = '0190f5fe-7c00-7a00-8000-000000000016';
 
 const CANVAS_OWNER = {
   kind: 'canvas_node',
-  projectId: PROJECT_ID,
+  canvasId: PROJECT_ID,
   nodeId: NODE_ID,
 } as const;
 const identity: CreativeTaskIdentity = {

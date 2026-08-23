@@ -60,12 +60,30 @@ function mapOrigin(value: unknown): CreativeAssetOrigin | null {
     throw new TypeError('Invalid creative asset origin');
   }
   const origin = value as Record<string, unknown>;
+  const workbenchKind =
+    origin.workbench_kind === 'image' ||
+    origin.workbench_kind === 'video' ||
+    origin.workbench_kind === 'audio'
+      ? origin.workbench_kind
+      : undefined;
+  const canonicalCanvasId = optionalString(origin.canvas_id);
+  const legacyCanvasId = workbenchKind
+    ? undefined
+    : optionalString(origin.project_id);
+  if (
+    canonicalCanvasId &&
+    legacyCanvasId &&
+    canonicalCanvasId !== legacyCanvasId
+  ) {
+    throw new TypeError('Invalid creative asset Canvas origin');
+  }
   return {
     prompt: optionalString(origin.prompt),
     model: optionalString(origin.model),
     providerId: optionalString(origin.provider_id),
     params: optionalRecord(origin.params),
-    projectId: optionalString(origin.project_id),
+    workbenchKind,
+    canvasId: canonicalCanvasId ?? legacyCanvasId,
     nodeId: optionalString(origin.node_id),
     generationTaskId: optionalString(origin.creation_task_id),
     promptCatalogId: optionalString(origin.prompt_catalog_id),

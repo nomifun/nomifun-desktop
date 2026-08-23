@@ -32,7 +32,7 @@ const abortError = (): Error => {
 
 const assertInput = (input: NomiCreativeStudioAgentSessionResolutionInput): void => {
   if (
-    !nonBlank(input.projectId) ||
+    !nonBlank(input.canvasId) ||
     !nonBlank(input.sessionId) ||
     !nonBlank(input.model.providerId) ||
     !nonBlank(input.model.model) ||
@@ -41,7 +41,7 @@ const assertInput = (input: NomiCreativeStudioAgentSessionResolutionInput): void
   ) {
     throw new CreativeStudioAgentSessionResolutionError(
       'INVALID_INPUT',
-      'Creative Studio Agent project, session, provider and model identifiers must be non-empty'
+      'Creative Studio Agent Canvas, session, provider and model identifiers must be non-empty'
     );
   }
 };
@@ -57,10 +57,10 @@ const assertResolution = (
       'Session persistence returned a conversation without exclusive Creative Studio ownership'
     );
   }
-  if (binding.projectId !== input.projectId || binding.sessionId !== input.sessionId) {
+  if (binding.canvasId !== input.canvasId || binding.sessionId !== input.sessionId) {
     throw new CreativeStudioAgentSessionResolutionError(
       'PORT_CONTRACT_VIOLATION',
-      'Session persistence returned a binding for a different Creative Studio project or session'
+      'Session persistence returned a binding for a different Creative Studio Canvas or session'
     );
   }
   if (!nonBlank(binding.conversationId)) {
@@ -139,7 +139,7 @@ const waitForCaller = <T>(operation: Promise<T>, signal: AbortSignal): Promise<T
 
 const operationKey = (request: CreativeStudioAgentSessionPersistenceRequest): string =>
   JSON.stringify([
-    request.projectId,
+    request.canvasId,
     request.sessionId,
     request.model.providerId,
     request.model.model,
@@ -148,7 +148,7 @@ const operationKey = (request: CreativeStudioAgentSessionPersistenceRequest): st
 
 /**
  * Coordinates durable resolution without becoming a second persistence store.
- * Only simultaneous requests for the same project/session are coalesced; a
+ * Only simultaneous requests for the same Canvas/session are coalesced; a
  * remount or a new controller always asks the injected durable port again.
  */
 export class CreativeStudioAgentSessionController {
@@ -166,7 +166,7 @@ export class CreativeStudioAgentSessionController {
     if (input.signal.aborted) throw abortError();
 
     const request: CreativeStudioAgentSessionPersistenceRequest = {
-      projectId: input.projectId,
+      canvasId: input.canvasId,
       sessionId: input.sessionId,
       model: { ...input.model },
       pendingTurnIdempotencyKey: input.pendingTurnIdempotencyKey,

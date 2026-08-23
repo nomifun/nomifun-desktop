@@ -4,13 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Button, Checkbox, Input } from '@arco-design/web-react';
-import { Check, Close, Delete, Download, EditTwo } from '@icon-park/react';
 import React from 'react';
 
+import CreativeStudioCanvasCard from '../canvases/CreativeStudioCanvasCard';
+import { legacyProjectCopyToCanvasCopy } from './copy';
 import type { CreativeStudioProjectsCopy } from './copy';
-import { formatProjectTimestamp } from './projectList';
-import styles from './CreativeStudioProjectsPage.module.css';
 import type { CreativeStudioProjectSummary } from './types';
 
 interface CreativeStudioProjectCardProps {
@@ -24,7 +22,10 @@ interface CreativeStudioProjectCardProps {
   exportDisabled?: boolean;
   archiveUnavailableMessage?: string;
   onOpen: (project: CreativeStudioProjectSummary) => void;
-  onToggleSelected: (project: CreativeStudioProjectSummary, selected: boolean) => void;
+  onToggleSelected: (
+    project: CreativeStudioProjectSummary,
+    selected: boolean
+  ) => void;
   onStartRename: (project: CreativeStudioProjectSummary) => void;
   onEditingTitleChange: (title: string) => void;
   onSaveRename: () => void;
@@ -33,147 +34,43 @@ interface CreativeStudioProjectCardProps {
   onDelete: (project: CreativeStudioProjectSummary) => void;
 }
 
-const CreativeStudioProjectCard: React.FC<CreativeStudioProjectCardProps> = ({
+/** @deprecated Compatibility adapter over CreativeStudioCanvasCard. */
+const CreativeStudioProjectCard: React.FC<
+  CreativeStudioProjectCardProps
+> = ({
   project,
   copy,
-  language,
-  selected,
-  editing,
-  editingTitle,
-  disabled = false,
-  exportDisabled = false,
-  archiveUnavailableMessage,
   onOpen,
   onToggleSelected,
   onStartRename,
-  onEditingTitleChange,
-  onSaveRename,
-  onCancelRename,
   onExport,
   onDelete,
+  ...props
 }) => {
-  const open = () => {
-    if (!editing && !disabled) onOpen(project);
+  const canvas = {
+    canvasId: project.id,
+    title: project.title,
+    revision: '0',
+    nodeCount: project.nodeCount,
+    connectionCount: project.connectionCount,
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt,
   };
-  const saveDisabled = disabled || editingTitle.trim().length === 0;
+  const canvasCopy = legacyProjectCopyToCanvasCopy(copy);
 
   return (
-    <article
-      className={styles.card}
-      role='button'
-      tabIndex={disabled || editing ? -1 : 0}
-      aria-label={`${copy.openProject}: ${project.title}`}
-      data-project-id={project.id}
-      data-project-selected={selected ? 'true' : 'false'}
-      onClick={open}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          open();
-        }
-      }}
-    >
-      <div className={styles.cardTop}>
-        <Checkbox
-          className={styles.cardCheckbox}
-          checked={selected}
-          disabled={disabled}
-          aria-label={copy.selectProject(project.title)}
-          onClick={(event) => event.stopPropagation()}
-          onChange={(checked) => onToggleSelected(project, checked)}
-        />
-
-        <div className={styles.cardIdentity}>
-          {editing ? (
-            <Input
-              autoFocus
-              value={editingTitle}
-              maxLength={80}
-              aria-label={copy.renamePlaceholder}
-              placeholder={copy.renamePlaceholder}
-              onClick={(event) => event.stopPropagation()}
-              onChange={onEditingTitleChange}
-              onPressEnter={() => {
-                if (!saveDisabled) onSaveRename();
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Escape') onCancelRename();
-              }}
-            />
-          ) : (
-            <>
-              <h2 className={styles.cardTitle}>{project.title}</h2>
-              <p className={styles.cardStats}>{copy.projectStats(project.nodeCount, project.connectionCount)}</p>
-            </>
-          )}
-        </div>
-      </div>
-
-      <div className={styles.cardFooter}>
-        <p className={styles.cardTimestamp}>
-          {copy.updatedAt(formatProjectTimestamp(project.updatedAt, language))}
-        </p>
-        <div className={styles.cardActions} onClick={(event) => event.stopPropagation()}>
-          {editing ? (
-            <>
-              <Button
-                type='text'
-                size='small'
-                shape='circle'
-                icon={<Check theme='outline' size={16} fill='currentColor' />}
-                aria-label={copy.saveRename}
-                title={copy.saveRename}
-                disabled={saveDisabled}
-                onClick={onSaveRename}
-              />
-              <Button
-                type='text'
-                size='small'
-                shape='circle'
-                icon={<Close theme='outline' size={16} fill='currentColor' />}
-                aria-label={copy.cancelRename}
-                title={copy.cancelRename}
-                disabled={disabled}
-                onClick={onCancelRename}
-              />
-            </>
-          ) : (
-            <>
-              <Button
-                type='text'
-                size='small'
-                shape='circle'
-                icon={<Download theme='outline' size={16} fill='currentColor' />}
-                aria-label={`${copy.exportProject}: ${project.title}`}
-                title={exportDisabled ? archiveUnavailableMessage : copy.exportProject}
-                disabled={disabled || exportDisabled}
-                onClick={() => onExport(project)}
-              />
-              <Button
-                type='text'
-                size='small'
-                shape='circle'
-                icon={<EditTwo theme='outline' size={16} fill='currentColor' />}
-                aria-label={`${copy.renameProject}: ${project.title}`}
-                title={copy.renameProject}
-                disabled={disabled}
-                onClick={() => onStartRename(project)}
-              />
-              <Button
-                type='text'
-                size='small'
-                shape='circle'
-                icon={<Delete theme='outline' size={16} fill='currentColor' />}
-                aria-label={`${copy.deleteProject}: ${project.title}`}
-                title={copy.deleteProject}
-                disabled={disabled}
-                onClick={() => onDelete(project)}
-              />
-            </>
-          )}
-        </div>
-      </div>
-    </article>
+    <CreativeStudioCanvasCard
+      {...props}
+      canvas={canvas}
+      copy={canvasCopy}
+      onOpen={() => onOpen(project)}
+      onToggleSelected={(_canvas, selected) =>
+        onToggleSelected(project, selected)
+      }
+      onStartRename={() => onStartRename(project)}
+      onExport={() => onExport(project)}
+      onDelete={() => onDelete(project)}
+    />
   );
 };
 

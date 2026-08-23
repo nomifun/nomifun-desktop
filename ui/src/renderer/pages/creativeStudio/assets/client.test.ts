@@ -28,7 +28,7 @@ function assetDto(overrides: Partial<WorkshopAssetDto> = {}): WorkshopAssetDto {
     text_content: null,
     origin: {
       provider_id: '0190f5fe-7c00-7a00-8000-000000000002',
-      project_id: '0190f5fe-7c00-7a00-8000-000000000003',
+      canvas_id: '0190f5fe-7c00-7a00-8000-000000000003',
       node_id: '0190f5fe-7c00-7a00-8000-000000000004',
       creation_task_id: '0190f5fe-7c00-7a00-8000-000000000005',
     },
@@ -67,7 +67,8 @@ describe('CreativeAssetClient', () => {
       model: undefined,
       providerId: '0190f5fe-7c00-7a00-8000-000000000002',
       params: undefined,
-      projectId: '0190f5fe-7c00-7a00-8000-000000000003',
+      workbenchKind: undefined,
+      canvasId: '0190f5fe-7c00-7a00-8000-000000000003',
       nodeId: '0190f5fe-7c00-7a00-8000-000000000004',
       generationTaskId: '0190f5fe-7c00-7a00-8000-000000000005',
       promptCatalogId: undefined,
@@ -75,6 +76,21 @@ describe('CreativeAssetClient', () => {
       license: undefined,
       licenseUrl: undefined,
     });
+  });
+
+  test('keeps legacy standalone project provenance inert', () => {
+    const asset = mapWorkshopAsset(
+      assetDto({
+        origin: {
+          workbench_kind: 'image',
+          project_id: '0190f5fe-7c00-7a00-8000-000000000003',
+          creation_task_id: '0190f5fe-7c00-7a00-8000-000000000005',
+        },
+      })
+    );
+
+    expect(asset.origin?.workbenchKind).toBe('image');
+    expect(asset.origin?.canvasId).toBeUndefined();
   });
 
   test('keeps ungrouped and named collection mutually exclusive on the wire', () => {

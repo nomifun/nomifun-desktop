@@ -454,8 +454,8 @@ mod tests {
     fn registry_capability_count_floor() {
         let n = Registry::global().len();
         assert!(
-            n >= 127,
-            "capability count fell to {n} (floor 127) — a caps_* module may have lost its \
+            n >= 129,
+            "capability count fell to {n} (floor 129) — a caps_* module may have lost its \
              register() call in Registry::build(), or a domain was removed. If intentional, lower the floor."
         );
     }
@@ -585,6 +585,14 @@ mod tests {
         assert_eq!(scope("nomi_create_terminal"), AccessScope::InstanceOwner);
         assert_eq!(scope("nomi_terminal_get"), AccessScope::InstanceOwner);
         assert_eq!(scope("nomi_fs_read_file"), AccessScope::InstanceOwner);
+        for name in [
+            "nomi_creative_studio_list_canvases",
+            "nomi_creative_studio_get_canvas",
+            "nomi_creative_studio_list_projects",
+            "nomi_creative_studio_get_project",
+        ] {
+            assert_eq!(scope(name), AccessScope::InstanceOwner, "{name}");
+        }
     }
 
     #[test]
@@ -601,12 +609,21 @@ mod tests {
         assert!(!names.contains(&"nomi_system_get_settings"));
         assert!(!names.contains(&"nomi_requirement_list"));
         assert!(!names.contains(&"nomi_knowledge_list_bases"));
+        assert!(!names.contains(&"nomi_creative_studio_list_canvases"));
+        assert!(!names.contains(&"nomi_creative_studio_get_canvas"));
         assert!(!names.contains(&"nomi_creative_studio_list_projects"));
+        assert!(!names.contains(&"nomi_creative_studio_get_project"));
         assert!(!reg.tool_visible_for_caller(
             Surface::Desktop,
             None,
             false,
             "nomi_system_get_settings"
+        ));
+        assert!(!reg.tool_visible_for_caller(
+            Surface::Desktop,
+            None,
+            false,
+            "nomi_creative_studio_list_canvases"
         ));
         assert!(!reg.tool_visible_for_caller(
             Surface::Desktop,
@@ -663,16 +680,25 @@ mod tests {
         ] {
             let domains = GatewayMcpConfig::domains_for_profile(profile)
                 .expect("curated profiles must use an explicit domain allow-list");
-            assert_eq!(
-                registry.tool_visible_for_caller(
-                    Surface::Desktop,
-                    Some(domains),
-                    true,
-                    "nomi_creative_studio_generate"
-                ),
-                allowed,
-                "profile {profile} registry visibility drifted"
-            );
+            for name in [
+                "nomi_creative_studio_list_canvases",
+                "nomi_creative_studio_get_canvas",
+                "nomi_creative_studio_apply_ops",
+                "nomi_creative_studio_generate",
+                "nomi_creative_studio_list_projects",
+                "nomi_creative_studio_get_project",
+            ] {
+                assert_eq!(
+                    registry.tool_visible_for_caller(
+                        Surface::Desktop,
+                        Some(domains),
+                        true,
+                        name
+                    ),
+                    allowed,
+                    "profile {profile} registry visibility drifted for {name}"
+                );
+            }
         }
     }
 

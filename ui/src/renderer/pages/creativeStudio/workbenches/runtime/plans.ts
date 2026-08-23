@@ -51,7 +51,8 @@ export function isPreparedCreativeWorkbenchRun(
 
 interface WorkbenchPlanBase {
   catalog: CreativeModelCatalogSnapshot;
-  projectId: string;
+  /** Canvas-only storage identity. Standalone workbenches must omit it. */
+  canvasId?: string;
   nodeId?: string;
   owner?: CreativeTaskOwner;
   model: CreativeWorkbenchModelSelection | null;
@@ -73,27 +74,49 @@ function workbenchTaskOwner(
   if (input.owner) {
     if (
       input.owner.kind === "standalone_workbench" &&
-      input.owner.projectId === input.projectId &&
       input.owner.workbenchKind === expectedKind
     ) {
+      if (input.canvasId) {
+        throw new CreativeWorkbenchRuntimeError(
+          "invalid_parameters",
+          "Standalone workbench plans must not carry a canvasId",
+          "canvasId",
+        );
+      }
+      return { ...input.owner };
+    }
+    if (input.owner.kind === "canvas_node" && !input.nodeId) {
       return { ...input.owner };
     }
     throw new CreativeWorkbenchRuntimeError(
       "invalid_parameters",
-      `Workbench plan owner must be an exact ${expectedKind} standalone owner for this project`,
+      `Workbench plan owner must be an exact ${expectedKind} standalone owner or a CanvasNode owner`,
       "owner",
     );
   }
   if (!input.nodeId) {
+    if (input.canvasId) {
+      throw new CreativeWorkbenchRuntimeError(
+        "invalid_parameters",
+        "Standalone workbench plans must not carry a canvasId",
+        "canvasId",
+      );
+    }
+    return {
+      kind: "standalone_workbench",
+      workbenchKind: expectedKind,
+    };
+  }
+  if (!input.canvasId) {
     throw new CreativeWorkbenchRuntimeError(
       "invalid_parameters",
-      "Canvas workbench plan requires a nodeId",
-      "nodeId",
+      "Canvas workbench plans require a canvasId",
+      "canvasId",
     );
   }
   return {
     kind: "canvas_node",
-    projectId: input.projectId,
+    canvasId: input.canvasId,
     nodeId: input.nodeId,
   };
 }

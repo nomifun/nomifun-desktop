@@ -184,7 +184,7 @@ describe('canvas video composer product model', () => {
     expect(prepared.plan.input).toMatchObject({
       owner: {
         kind: 'canvas_node',
-        projectId: document.projectId,
+        canvasId: document.projectId,
         nodeId: prepared.configNode.id,
       },
       providerId: PROVIDER_ID,
@@ -446,7 +446,7 @@ describe('canvas video composer product model', () => {
           taskId: prepared.plan.input.idempotencyKey,
           owner: {
             kind: 'canvas_node',
-            projectId: document.projectId,
+            canvasId: document.projectId,
             nodeId: prepared.configNode.id,
           },
           providerId: PROVIDER_ID,

@@ -9,8 +9,8 @@ import { CANONICAL_UUID_V7 } from '@/common/types/ids';
 
 import {
   CreativeStudioContractError,
-  parseCreativeProjectSummary,
-  type CreativeProjectSummary,
+  parseCreativeCanvasSummary,
+  type CreativeCanvasSummary,
 } from '../../../domain';
 import {
   parseCreativeCanvasAgentOps,
@@ -26,14 +26,14 @@ export type CreativeCanvasAgentOpResult =
   | { type: 'nodes_disconnected'; connection_id: string };
 
 export interface CreativeCanvasAgentOpsApplyInput {
-  projectId: string;
+  canvasId: string;
   assistantMessageId: string;
   expectedRevision: string;
   ops: readonly CreativeCanvasAgentOp[];
 }
 
 export interface CreativeCanvasAgentOpsApplyResult {
-  project: CreativeProjectSummary;
+  canvas: CreativeCanvasSummary;
   ops: CreativeCanvasAgentOpResult[];
   replayed: boolean;
   appliedRevision: string;
@@ -196,35 +196,35 @@ const assertResultMatchesOp = (
 
 const parseApplyResponse = (
   value: unknown,
-  projectId: string,
+  canvasId: string,
   expectedRevision: string,
   submittedOps: readonly CreativeCanvasAgentOp[]
 ): CreativeCanvasAgentOpsApplyResult => {
   const record = asRecord(value, '$');
-  exactKeys(record, ['project', 'ops', 'replayed', 'appliedRevision'], '$');
-  const project = parseCreativeProjectSummary(record.project);
-  if (project.projectId !== projectId) {
+  exactKeys(record, ['canvas', 'ops', 'replayed', 'appliedRevision'], '$');
+  const canvas = parseCreativeCanvasSummary(record.canvas);
+  if (canvas.canvasId !== canvasId) {
     throw new CreativeStudioContractError(
-      'PROJECT_MISMATCH',
-      '$.project.projectId',
-      JSON.stringify(projectId)
+      'CANVAS_MISMATCH',
+      '$.canvas.canvasId',
+      JSON.stringify(canvasId)
     );
   }
-  const projectRevisionWire = asI64Revision(project.revision, '$.project.revision');
+  const canvasRevisionWire = asI64Revision(canvas.revision, '$.canvas.revision');
   const replayed = asBoolean(record.replayed, '$.replayed');
   const appliedRevisionWire = asI64Revision(
     record.appliedRevision,
     '$.appliedRevision'
   );
-  const projectRevision = BigInt(projectRevisionWire);
+  const canvasRevision = BigInt(canvasRevisionWire);
   const appliedRevision = BigInt(appliedRevisionWire);
   if (!replayed) {
     const expectedNext = BigInt(expectedRevision) + 1n;
-    if (appliedRevision !== expectedNext || projectRevision !== appliedRevision) {
+    if (appliedRevision !== expectedNext || canvasRevision !== appliedRevision) {
       fail('$.appliedRevision', `first-apply revision ${expectedNext}`);
     }
-  } else if (projectRevision < appliedRevision) {
-    fail('$.project.revision', `revision >= replayed apply ${appliedRevision}`);
+  } else if (canvasRevision < appliedRevision) {
+    fail('$.canvas.revision', `revision >= replayed apply ${appliedRevision}`);
   }
   const wireOps: unknown[] = Array.isArray(record.ops)
     ? record.ops
@@ -237,7 +237,7 @@ const parseApplyResponse = (
     assertResultMatchesOp(submittedOps[index]!, result, `$.ops[${index}]`)
   );
   return {
-    project,
+    canvas,
     ops: results,
     replayed,
     appliedRevision: appliedRevisionWire,
@@ -256,7 +256,7 @@ export function createCreativeCanvasAgentOpsPort(
 ): CreativeCanvasAgentOpsPort {
   return {
     async apply(input) {
-      const projectId = assertInputUuidV7(input.projectId, '$.projectId');
+      const canvasId = assertInputUuidV7(input.canvasId, '$.canvasId');
       const assistantMessageId = assertInputUuidV7(
         input.assistantMessageId,
         '$.assistantMessageId'
@@ -265,10 +265,10 @@ export function createCreativeCanvasAgentOpsPort(
       const ops = parseCreativeCanvasAgentOps(input.ops, 'INVALID_REQUEST');
       const response = await request(
         'POST',
-        `/api/creative-studio/projects/${encodeURIComponent(projectId)}/agent-ops`,
+        `/api/creative-studio/canvases/${encodeURIComponent(canvasId)}/agent-ops`,
         { assistantMessageId, expectedRevision, ops }
       );
-      return parseApplyResponse(response, projectId, expectedRevision, ops);
+      return parseApplyResponse(response, canvasId, expectedRevision, ops);
     },
   };
 }

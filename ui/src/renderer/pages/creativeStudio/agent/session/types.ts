@@ -12,7 +12,7 @@ import type {
 /**
  * Immutable request passed to the durable backend boundary. The port must
  * atomically resolve or create exactly one exclusive Nomi conversation for
- * `(owner, projectId, sessionId)` and return the persisted binding.
+ * `(owner, canvasId, sessionId)` and return the persisted binding.
  *
  * Cancellation is deliberately absent here. React StrictMode may abort one
  * caller while its replacement is already waiting for the same durable

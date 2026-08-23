@@ -13,6 +13,8 @@ const ownership = readFileSync(new URL('./ownership.ts', import.meta.url), 'utf8
 const shared = readFileSync(new URL('./shared.tsx', import.meta.url), 'utf8');
 const wiring = readFileSync(new URL('./WIRING.md', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./StandaloneWorkbenchProduct.module.css', import.meta.url), 'utf8');
+const draftStorage = readFileSync(new URL('../drafts/storage.ts', import.meta.url), 'utf8');
+const draftHydration = readFileSync(new URL('../drafts/hydration.ts', import.meta.url), 'utf8');
 
 describe('standalone workbench product wiring', () => {
   test('exports prop-free product routes composed from the source-parity views', () => {
@@ -22,27 +24,30 @@ describe('standalone workbench product wiring', () => {
     expect(video.includes('<VideoWorkbench {...props} />')).toBe(true);
   });
 
-  test('fails closed without scope and wires owner-scoped history recovery', () => {
-    expect(ownership.includes("if (values.length === 0) return { state: 'missing'")).toBe(true);
-    expect(image.includes("owner: standaloneWorkbenchOwner(projectId, 'image')")).toBe(true);
-    expect(video.includes("owner: standaloneWorkbenchOwner(projectId, 'video')")).toBe(true);
+  test('keeps standalone routes usable without Canvas scope or disabled fallback', () => {
+    expect(ownership.includes('projectId')).toBe(false);
+    expect(image.includes("owner: standaloneWorkbenchOwner('image')")).toBe(true);
+    expect(video.includes("owner: standaloneWorkbenchOwner('video')")).toBe(true);
     expect(image.includes('useStandaloneWorkbenchHistory')).toBe(true);
     expect(video.includes('standaloneHistoryResumeRequests')).toBe(true);
+    expect(image.includes('useStandaloneWorkbenchScope')).toBe(false);
+    expect(video.includes('useStandaloneWorkbenchScope')).toBe(false);
+    expect(image.includes('UnownedImageWorkbench')).toBe(false);
+    expect(video.includes('UnownedVideoWorkbench')).toBe(false);
     expect(image.includes('useStandalonePersistence')).toBe(false);
     expect(video.includes('ensureStandaloneWorkbenchNode')).toBe(false);
-    expect(shared.includes('navigate(CREATIVE_STUDIO_PROJECTS_PATH)')).toBe(true);
-    expect(shared.includes("navigate('/workshop/projects')")).toBe(false);
-    expect(wiring.includes('never borrows or creates a recent project implicitly')).toBe(true);
+    expect(shared.includes('CREATIVE_STUDIO_PROJECTS_PATH')).toBe(false);
+    expect(wiring.includes('never borrows or creates a recent project implicitly')).toBe(false);
   });
 
   test('documents the durable owner foundation and coordinated route blocker', () => {
     expect(video.includes('STANDALONE_VIDEO_MAX_CONCURRENT_TASKS')).toBe(true);
     expect(
-      wiring.includes('standalone_workbench { projectId, workbenchKind }')
+      wiring.includes('standalone_workbench { workbenchKind }')
     ).toBe(true);
     expect(wiring.includes('{ assetId, kind, role }')).toBe(true);
     expect(wiring.includes('inputs: null')).toBe(true);
-    expect(wiring.includes('owner-scoped list/recovery')).toBe(true);
+    expect(wiring.includes('workbench-kind scope')).toBe(true);
   });
 
   test('does not disguise asset deletion or hidden React ids as task-history deletion', () => {
@@ -78,8 +83,24 @@ describe('standalone workbench product wiring', () => {
   });
 
   test('clears exact standalone selections when their catalog model disappears', () => {
-    expect(image.includes('exactWorkbenchModelOptions(catalog, modelTask).some')).toBe(true);
-    expect(video.includes("exactWorkbenchModelOptions(catalog, 'video_generation').some")).toBe(true);
+    expect(image.includes('isExactWorkbenchDraftModelAvailable')).toBe(true);
+    expect(video.includes('isExactWorkbenchDraftModelAvailable')).toBe(true);
     expect(video.includes('if (!stillAvailable) setModel(null)')).toBe(true);
+    expect(draftHydration.includes('option.providerId === model.providerId')).toBe(true);
+    expect(draftHydration.includes('option.model === model.model')).toBe(true);
+  });
+
+  test('restores versioned session drafts by workbench kind without persisting UI transients', () => {
+    expect(image.includes("readStandaloneWorkbenchDraft('image')")).toBe(true);
+    expect(video.includes("readStandaloneWorkbenchDraft('video')")).toBe(true);
+    expect(image.includes('writeStandaloneWorkbenchDraft')).toBe(true);
+    expect(video.includes('writeStandaloneWorkbenchDraft')).toBe(true);
+    expect(image.includes("hydrateStandaloneWorkbenchDraftReferences(\n      'image'")).toBe(true);
+    expect(video.includes("hydrateStandaloneWorkbenchDraftReferences(\n      'video'")).toBe(true);
+    expect(draftStorage.includes('window.sessionStorage')).toBe(true);
+    expect(draftStorage.includes('projectId')).toBe(false);
+    expect(draftStorage.includes('canvasId')).toBe(false);
+    expect(wiring.includes('full asset')).toBe(true);
+    expect(wiring.includes('objects are deliberately excluded')).toBe(true);
   });
 });

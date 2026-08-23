@@ -16,7 +16,7 @@ import type { CreativeModelSelectionRef } from '../../models';
 import type { CreativeStudioAgentMessage } from '../types';
 
 export interface NomiCreativeStudioAgentSessionResolutionInput {
-  projectId: string;
+  canvasId: string;
   sessionId: string;
   model: CreativeModelSelectionRef;
   pendingTurnIdempotencyKey: string | null;
@@ -29,7 +29,7 @@ export interface NomiCreativeStudioAgentSessionResolutionInput {
  */
 export interface NomiCreativeStudioAgentSessionBinding {
   ownership: 'creative-studio-exclusive';
-  projectId: string;
+  canvasId: string;
   sessionId: string;
   conversationId: ConversationId;
   model: CreativeModelSelectionRef;
@@ -39,7 +39,7 @@ export interface NomiCreativeStudioAgentSessionBinding {
 export interface NomiCreativeStudioAgentSessionResolution {
   binding: NomiCreativeStudioAgentSessionBinding;
   history: readonly CreativeStudioAgentMessage[];
-  /** Durable assistant proposals already committed to the canonical project. */
+  /** Durable assistant proposals already committed to the canonical Canvas. */
   appliedProposalMessageIds: readonly MessageId[];
   created: boolean;
 }

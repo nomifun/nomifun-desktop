@@ -25,7 +25,7 @@ const noop = () => undefined;
 const baseProps = (
   overrides: Partial<CreativeCanvasChromeProps> = {}
 ): CreativeCanvasChromeProps => ({
-  projectTitle: '品牌概念画布',
+  canvasTitle: '品牌概念画布',
   saveStatus: 'saved',
   tool: 'select',
   background: 'dots',
@@ -45,7 +45,7 @@ const baseProps = (
     right: { assistant: <div>ASSISTANT PANEL</div> },
     bottom: { history: <div>HISTORY PANEL</div> },
   },
-  onBackToProjects: noop,
+  onBackToCanvases: noop,
   onToolChange: noop,
   onAddNode: noop,
   onBackgroundChange: noop,
@@ -64,14 +64,14 @@ const renderChrome = (overrides: Partial<CreativeCanvasChromeProps> = {}) =>
   renderToStaticMarkup(<CreativeCanvasChrome {...baseProps(overrides)} />);
 
 describe('CreativeCanvasChrome source-shaped layout', () => {
-  test('renders project toolbar, real canvas column, panels, and controlled tool actions', () => {
+  test('renders the canvas toolbar, real canvas column, panels, and controlled tool actions', () => {
     const html = renderChrome();
 
     expect(html.includes('data-creative-canvas-chrome="true"')).toBe(true);
     expect(html.includes('data-canvas-chrome-stage="true"')).toBe(true);
     expect(html.includes('品牌概念画布')).toBe(true);
     expect(html.includes('已保存')).toBe(true);
-    expect(html.includes('返回项目')).toBe(true);
+    expect(html.includes('返回画布库')).toBe(true);
     expect(html.includes('CANVAS SLOT')).toBe(true);
     expect(html.includes('CANVAS PANEL')).toBe(true);
     expect(html.includes('ASSISTANT PANEL')).toBe(true);

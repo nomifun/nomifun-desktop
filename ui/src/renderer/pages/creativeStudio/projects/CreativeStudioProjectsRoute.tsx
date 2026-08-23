@@ -4,23 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React from 'react';
+import { Navigate, useLocation } from 'react-router-dom';
 
-import { creativeStudioCanvasProjectPath } from '../app/routes';
-import CreativeStudioProjectsPage from './CreativeStudioProjectsPage';
-import type { CreativeStudioProjectSummary } from './types';
+import { CREATIVE_STUDIO_CANVASES_PATH } from '../app/routes';
 
+/** @deprecated `/workshop/projects` is a redirect, never a product surface. */
 const CreativeStudioProjectsRoute: React.FC = () => {
-  const navigate = useNavigate();
-  const openProject = useCallback(
-    (project: CreativeStudioProjectSummary) => {
-      navigate(creativeStudioCanvasProjectPath(project.id));
-    },
-    [navigate]
+  const { search, hash } = useLocation();
+  return (
+    <Navigate
+      to={`${CREATIVE_STUDIO_CANVASES_PATH}${search}${hash}`}
+      replace
+    />
   );
-
-  return <CreativeStudioProjectsPage onOpenProject={openProject} />;
 };
 
 export default CreativeStudioProjectsRoute;

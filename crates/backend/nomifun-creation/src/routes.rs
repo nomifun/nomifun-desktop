@@ -61,11 +61,10 @@ fn default_role() -> String {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum CreativeTaskOwnerRequest {
     CanvasNode {
-        project_id: String,
+        canvas_id: String,
         node_id: String,
     },
     StandaloneWorkbench {
-        project_id: String,
         workbench_kind: StandaloneWorkbenchKind,
     },
     WorkflowStep {
@@ -79,17 +78,15 @@ impl From<CreativeTaskOwnerRequest> for CreativeTaskOwner {
     fn from(owner: CreativeTaskOwnerRequest) -> Self {
         match owner {
             CreativeTaskOwnerRequest::CanvasNode {
-                project_id,
+                canvas_id,
                 node_id,
             } => Self::CanvasNode {
-                project_id,
+                canvas_id,
                 node_id,
             },
             CreativeTaskOwnerRequest::StandaloneWorkbench {
-                project_id,
                 workbench_kind,
             } => Self::StandaloneWorkbench {
-                project_id,
                 workbench_kind,
             },
             CreativeTaskOwnerRequest::WorkflowStep {
@@ -121,7 +118,6 @@ struct CreateCreativeTaskRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ListStandaloneWorkbenchTasksQuery {
-    project_id: String,
     workbench_kind: StandaloneWorkbenchKind,
     limit: Option<usize>,
     cursor: Option<String>,
@@ -131,7 +127,6 @@ struct ListStandaloneWorkbenchTasksQuery {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RetireStandaloneWorkbenchTasksRequest {
-    project_id: String,
     workbench_kind: StandaloneWorkbenchKind,
     task_ids: Vec<String>,
 }
@@ -197,7 +192,6 @@ async fn list_standalone_workbench_tasks(
     let page = state
         .service
         .list_standalone_workbench_tasks(
-            &query.project_id,
             query.workbench_kind,
             query.active_only.unwrap_or(false),
             query.limit,
@@ -219,7 +213,6 @@ async fn retire_standalone_workbench_tasks(
     let retired_task_ids = state
         .service
         .retire_standalone_workbench_tasks(
-            &request.project_id,
             request.workbench_kind,
             &request.task_ids,
         )
@@ -255,6 +248,22 @@ mod tests {
 
     #[test]
     fn creative_task_request_accepts_only_the_tagged_owner_contract() {
+        let canvas = serde_json::from_value::<CreateCreativeTaskRequest>(json!({
+            "owner": {
+                "kind": "canvas_node",
+                "canvas_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                "node_id": "0190f5fe-7c00-7a00-8000-000000000002"
+            },
+            "provider_id": "0190f5fe-7c00-7a00-8000-000000000004",
+            "model": "image-model-v1",
+            "capability": "t2i"
+        }))
+        .unwrap();
+        assert!(matches!(
+            canvas.owner,
+            CreativeTaskOwnerRequest::CanvasNode { .. }
+        ));
+
         let parsed = serde_json::from_value::<CreateCreativeTaskRequest>(json!({
             "owner": {
                 "kind": "workflow_step",
@@ -277,7 +286,6 @@ mod tests {
         let standalone = serde_json::from_value::<CreateCreativeTaskRequest>(json!({
             "owner": {
                 "kind": "standalone_workbench",
-                "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
                 "workbench_kind": "video"
             },
             "provider_id": "0190f5fe-7c00-7a00-8000-000000000004",
@@ -301,7 +309,7 @@ mod tests {
 
         for invalid in [
             json!({
-                "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                "canvas_id": "0190f5fe-7c00-7a00-8000-000000000001",
                 "node_id": "0190f5fe-7c00-7a00-8000-000000000002",
                 "provider_id": "0190f5fe-7c00-7a00-8000-000000000004",
                 "model": "image-model-v1",
@@ -360,22 +368,21 @@ mod tests {
 
     #[test]
     fn standalone_list_query_is_exact_and_rejects_unknown_or_duplicate_fields() {
-        let uri = "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=video&limit=30&cursor=1%3A0190f5fe-7c00-7a00-8000-000000000002&active_only=true"
+        let uri = "/api/creative-studio/tasks?workbench_kind=video&limit=30&cursor=1%3A0190f5fe-7c00-7a00-8000-000000000002&active_only=true"
             .parse()
             .unwrap();
         let Query(query) = Query::<ListStandaloneWorkbenchTasksQuery>::try_from_uri(&uri).unwrap();
-        assert_eq!(query.project_id, "0190f5fe-7c00-7a00-8000-000000000001");
         assert_eq!(query.workbench_kind, StandaloneWorkbenchKind::Video);
         assert_eq!(query.limit, Some(30));
         assert_eq!(query.active_only, Some(true));
         assert!(query.cursor.as_deref().unwrap().starts_with("1:"));
 
         for invalid in [
-            "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=video&unknown=1",
-            "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&project_id=0190f5fe-7c00-7a00-8000-000000000002&workbench_kind=video",
-            "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=canvas",
-            "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=video&active_only=yes",
-            "/api/creative-studio/tasks?project_id=0190f5fe-7c00-7a00-8000-000000000001&workbench_kind=video&active_only=true&active_only=false",
+            "/api/creative-studio/tasks?workbench_kind=video&unknown=1",
+            "/api/creative-studio/tasks?workbench_kind=video&workbench_kind=image",
+            "/api/creative-studio/tasks?workbench_kind=canvas",
+            "/api/creative-studio/tasks?workbench_kind=video&active_only=yes",
+            "/api/creative-studio/tasks?workbench_kind=video&active_only=true&active_only=false",
         ] {
             let uri = invalid.parse().unwrap();
             assert!(
@@ -388,7 +395,6 @@ mod tests {
     #[test]
     fn standalone_retire_body_is_flat_exact_and_typed() {
         let request = serde_json::from_value::<RetireStandaloneWorkbenchTasksRequest>(json!({
-            "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
             "workbench_kind": "image",
             "task_ids": ["0190f5fe-7c00-7a00-8000-000000000002"]
         }))
@@ -397,13 +403,11 @@ mod tests {
         assert_eq!(request.task_ids.len(), 1);
         for invalid in [
             json!({
-                "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
                 "workbench_kind": "image",
                 "task_ids": [],
                 "owner": {"kind": "standalone_workbench"}
             }),
             json!({
-                "project_id": "0190f5fe-7c00-7a00-8000-000000000001",
                 "workbench_kind": "canvas",
                 "task_ids": []
             }),
@@ -416,7 +420,7 @@ mod tests {
     fn creative_task_surface_rejects_invalid_owner_rows() {
         let invalid = CreationTask {
             creation_task_id: "0190f5fe-7c00-7a00-8000-000000000001".into(),
-            project_id: None,
+            canvas_id: None,
             workbench_kind: None,
             workflow_id: None,
             workflow_run_id: None,

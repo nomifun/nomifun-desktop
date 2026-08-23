@@ -16,7 +16,7 @@ import {
   type CreativeStudioAgentSessionPersistenceRequest,
 } from ".";
 
-const projectId = "0190f5fe-7c00-7a00-8000-000000000701";
+const canvasId = "0190f5fe-7c00-7a00-8000-000000000701";
 const sessionId = "0190f5fe-7c00-7a00-8000-000000000702";
 const providerId = parseProviderId("0190f5fe-7c00-7a00-8000-000000000703");
 const conversationId = "0190f5fe-7c00-7a00-8000-000000000704";
@@ -33,7 +33,7 @@ const history: readonly CreativeStudioAgentMessage[] = [
   },
 ];
 const request: CreativeStudioAgentSessionPersistenceRequest = {
-  projectId,
+  canvasId,
   sessionId,
   model: { providerId, model: "nomi-chat" },
   pendingTurnIdempotencyKey: null,
@@ -48,7 +48,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
         return {
           binding: {
             ownership: "creative-studio-exclusive",
-            project_id: projectId,
+            canvas_id: canvasId,
             session_id: sessionId,
             conversation_id: conversationId,
             model: { provider_id: providerId, model: "nomi-chat" },
@@ -67,7 +67,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
       ).resolveOrCreateExclusive(request);
 
     expect(wire).toEqual({
-      project_id: projectId,
+      canvas_id: canvasId,
       session_id: sessionId,
       model: { provider_id: providerId, model: "nomi-chat" },
       pending_turn_idempotency_key: null,
@@ -82,7 +82,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
         return {
           binding: {
             ownership: "creative-studio-exclusive",
-            project_id: projectId,
+            canvas_id: canvasId,
             session_id: sessionId,
             conversation_id: "not-a-conversation",
             model: { provider_id: providerId, model: "nomi-chat" },
@@ -128,7 +128,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
         return {
           binding: {
             ownership: "creative-studio-exclusive",
-            project_id: projectId,
+            canvas_id: canvasId,
             session_id: sessionId,
             conversation_id: conversationId,
             model: { provider_id: providerId, model: "nomi-chat" },
@@ -160,7 +160,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
           return {
             binding: {
               ownership: "creative-studio-exclusive",
-              project_id: projectId,
+              canvas_id: canvasId,
               session_id: sessionId,
               conversation_id: conversationId,
               model: { provider_id: providerId, model: "nomi-chat" },
@@ -182,7 +182,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
     }
   });
 
-  test("rejects non-UUID project/session input before transport", async () => {
+  test("rejects non-UUID Canvas/session input before transport", async () => {
     let calls = 0;
     const transport: CreativeStudioAgentSessionHttpTransport = {
       async resolve() {
@@ -191,7 +191,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
       },
     };
     const error = await createNomiCreativeStudioAgentSessionHttpPort(transport)
-      .resolveOrCreateExclusive({ ...request, projectId: "project-a" })
+      .resolveOrCreateExclusive({ ...request, canvasId: "canvas-a" })
       .catch((failure: unknown) => failure);
     expect(error instanceof CreativeStudioAgentSessionResolutionError).toBe(
       true,
@@ -210,7 +210,7 @@ describe("Nomi Creative Studio Agent session HTTP port", () => {
         return {
           binding: {
             ownership: "creative-studio-exclusive",
-            project_id: projectId,
+            canvas_id: canvasId,
             session_id: sessionId,
             conversation_id: conversationId,
             model: { provider_id: providerId, model: "nomi-chat" },

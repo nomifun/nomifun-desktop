@@ -15,14 +15,13 @@ import {
   type StandaloneTaskHistoryReader,
 } from './loader';
 
-const PROJECT_ID = testUuid(801);
 const task = (
   index: number,
   submittedAt: number,
   status: CreativeTask['status']
 ): CreativeTask => ({
   taskId: testUuid(index),
-  owner: { kind: 'standalone_workbench', projectId: PROJECT_ID, workbenchKind: 'image' },
+  owner: { kind: 'standalone_workbench', workbenchKind: 'image' },
   providerId: testUuid(850),
   model: 'image-v1',
   task: 'image_generation',
@@ -63,7 +62,6 @@ describe('standalone history loader', () => {
       },
     };
     const result = await loadStandaloneWorkbenchHistoryBootstrap(reader, {
-      projectId: PROJECT_ID,
       workbenchKind: 'image',
     });
     expect(result.tasks).toEqual([visibleActive, visibleOnlyActive, terminal]);

@@ -32,7 +32,7 @@ const WORKFLOW_STEP_ID = '0190f5fe-7c00-7a00-8000-000000000009';
 const identity: CreativeTaskIdentity = {
   owner: {
     kind: 'canvas_node',
-    projectId: PROJECT_ID,
+    canvasId: PROJECT_ID,
     nodeId: NODE_ID,
   },
   providerId: PROVIDER_ID,
@@ -50,7 +50,7 @@ function wireTask(
     creation_task_id: TASK_ID,
     owner: {
       kind: 'canvas_node',
-      project_id: PROJECT_ID,
+      canvas_id: PROJECT_ID,
       node_id: NODE_ID,
     },
     provider_id: PROVIDER_ID,
@@ -110,7 +110,7 @@ describe('CreativeTaskClient', () => {
         body: {
           owner: {
             kind: 'canvas_node',
-            project_id: PROJECT_ID,
+            canvas_id: PROJECT_ID,
             node_id: NODE_ID,
           },
           provider_id: PROVIDER_ID,
@@ -183,7 +183,6 @@ describe('CreativeTaskClient', () => {
   test('round-trips the exact standalone workbench owner without a config node', async () => {
     const owner = {
       kind: 'standalone_workbench' as const,
-      projectId: PROJECT_ID,
       workbenchKind: 'image' as const,
     };
     let body: unknown;
@@ -194,7 +193,6 @@ describe('CreativeTaskClient', () => {
           creation_task_id: key,
           owner: {
             kind: 'standalone_workbench',
-            project_id: PROJECT_ID,
             workbench_kind: 'image',
           },
         });
@@ -208,7 +206,6 @@ describe('CreativeTaskClient', () => {
     expect(body).toEqual({
       owner: {
         kind: 'standalone_workbench',
-        project_id: PROJECT_ID,
         workbench_kind: 'image',
       },
       provider_id: PROVIDER_ID,
@@ -223,7 +220,6 @@ describe('CreativeTaskClient', () => {
   test('does not resurrect a retired exact replay through create', async () => {
     const owner = {
       kind: 'standalone_workbench' as const,
-      projectId: PROJECT_ID,
       workbenchKind: 'image' as const,
     };
     const client = new CreativeTaskClient({
@@ -232,7 +228,6 @@ describe('CreativeTaskClient', () => {
           creation_task_id: key,
           owner: {
             kind: 'standalone_workbench',
-            project_id: PROJECT_ID,
             workbench_kind: 'image',
           },
           deleted_at: 200,
@@ -290,7 +285,7 @@ describe('CreativeTaskClient', () => {
         wireTask('running', {
           owner: {
             kind: 'canvas_node',
-            project_id: '0190f5fe-7c00-7a00-8000-000000000099',
+            canvas_id: '0190f5fe-7c00-7a00-8000-000000000099',
             node_id: NODE_ID,
           },
         }),
@@ -302,6 +297,26 @@ describe('CreativeTaskClient', () => {
     const identityError = await caught(client.cancel(reference));
     expect((ownershipError as CreativeTaskContractError).code).toBe('ownership_mismatch');
     expect((identityError as CreativeTaskContractError).code).toBe('identity_mismatch');
+  });
+
+  test('rejects the legacy project_id canvas owner wire shape', () => {
+    const error = caught(
+      Promise.resolve().then(() =>
+        mapCreationTaskWire(
+          wireTask('running', {
+            owner: {
+              kind: 'canvas_node',
+              project_id: PROJECT_ID,
+              node_id: NODE_ID,
+            },
+          })
+        )
+      )
+    );
+    return error.then((value) => {
+      expect(value instanceof CreativeTaskContractError).toBe(true);
+      expect((value as CreativeTaskContractError).field).toBe('owner.project_id');
+    });
   });
 
   test('rejects a create response that does not echo the submission idempotency key', async () => {
@@ -388,7 +403,6 @@ describe('CreativeTaskClient', () => {
   test('accepts tombstones only for terminal standalone history tasks', () => {
     const owner = {
       kind: 'standalone_workbench',
-      project_id: PROJECT_ID,
       workbench_kind: 'image',
     };
     expect(

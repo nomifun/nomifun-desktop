@@ -11,12 +11,11 @@ import { testUuid } from '../../canvas/core/testFixtures';
 import type { CreativeTask } from '../../tasks';
 import { hydrateStandaloneTaskReferences } from './references';
 
-const PROJECT_ID = testUuid(820);
 const IMAGE_ID = testUuid(821);
 const MASK_ID = testUuid(822);
 const baseTask: CreativeTask = {
   taskId: testUuid(823),
-  owner: { kind: 'standalone_workbench', projectId: PROJECT_ID, workbenchKind: 'image' },
+  owner: { kind: 'standalone_workbench', workbenchKind: 'image' },
   providerId: testUuid(824),
   model: 'image-v1',
   task: 'image_edit',

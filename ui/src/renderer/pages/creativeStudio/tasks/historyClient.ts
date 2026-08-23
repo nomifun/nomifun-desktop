@@ -90,13 +90,6 @@ const normalizeQuery = (
 ): Required<Omit<CreativeStandaloneTaskHistoryQuery, 'cursor'>> & {
   cursor: StandaloneTaskHistoryCursor | null;
 } => {
-  if (typeof input.projectId !== 'string' || !CANONICAL_UUID_V7.test(input.projectId)) {
-    throw new CreativeTaskContractError(
-      'invalid_request',
-      'Invalid standalone task history projectId',
-      'projectId'
-    );
-  }
   if (!WORKBENCH_KINDS.has(input.workbenchKind)) {
     throw new CreativeTaskContractError(
       'invalid_request',
@@ -121,7 +114,6 @@ const normalizeQuery = (
     );
   }
   return {
-    projectId: input.projectId,
     workbenchKind: input.workbenchKind,
     limit,
     activeOnly,
@@ -138,7 +130,6 @@ const assertOwned = (
 ): void => {
   if (
     !isStandaloneWorkbenchTaskOwner(task.owner) ||
-    task.owner.projectId !== query.projectId ||
     task.owner.workbenchKind !== query.workbenchKind ||
     task.deletedAt !== null
   ) {
@@ -181,7 +172,6 @@ export class CreativeTaskHistoryClient {
   ): Promise<CreativeStandaloneTaskHistoryPage> {
     const query = normalizeQuery(input);
     const params = new URLSearchParams({
-      project_id: query.projectId,
       workbench_kind: query.workbenchKind,
       limit: String(query.limit),
     });
@@ -283,7 +273,6 @@ export class CreativeTaskHistoryClient {
     signal?: AbortSignal
   ): Promise<CreativeStandaloneTaskRetireResult> {
     const query = normalizeQuery({
-      projectId: input.projectId,
       workbenchKind: input.workbenchKind,
       limit: 1,
     });
@@ -325,7 +314,6 @@ export class CreativeTaskHistoryClient {
     const wire = record(
       await this.api.retireStandalone(
         {
-          project_id: query.projectId,
           workbench_kind: query.workbenchKind,
           task_ids: taskIds,
         },

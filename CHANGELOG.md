@@ -5,14 +5,26 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
-- **Creative Studio replaces the legacy Creative Workshop.** The rebuilt focused
-  product includes project and asset management, a revision-safe infinite
-  canvas, canonical text/image/video/audio creation flows, prompt and workflow
-  centers, Director v1, strict human-reviewed AI apply flows, and NomiFun's exact
-  provider/model/task routing. Legacy Workshop UI, routes and persistence have
-  been retired; the initial Workflow assistant remains deliberately private and
-  one-shot, with preview, manual Apply and manual Save instead of automatic or
-  public execution.
+- **Creative Studio is Canvas-first and has no Project product object.** The
+  canonical routes are `/workshop/canvases`,
+  `/workshop/canvas/:canvasId`, and `/workshop/director/:canvasId`; the old
+  `/workshop/projects` route is a deprecated compatibility redirect. The
+  canonical HTTP resource is `/api/creative-studio/canvases`, while the old
+  `/api/creative-studio/projects` routes remain deprecated aliases.
+- **Image and Video Workbenches are independent.** They have no Canvas selector
+  or prerequisite and remain usable with zero Canvases. New standalone tasks
+  use `StandaloneWorkbench { workbenchKind }`; history and retire use only
+  `workbench_kind`. Legacy standalone `project_id` is inert provenance and is
+  not used for owner equality, history, retirement, asset origin, or Canvas
+  deletion. Versioned per-workbench session drafts preserve prompt, exact model,
+  controlled parameters, reference asset IDs, and layout without a Canvas key.
+- **Canvas compatibility and external surfaces are explicit.** The new Gateway
+  capabilities are `nomi_creative_studio_list_canvases` and
+  `nomi_creative_studio_get_canvas`; old project-named capabilities remain
+  deprecated aliases. Canvas exports use an archive v2 writer and retain a v1
+  reader. The UI/API contract version is 21. These notes describe the code and
+  wire contract; they do not imply real-provider, desktop-host, signing, or
+  release verification.
 
 ## v0.6.5 - 2026-08-22
 

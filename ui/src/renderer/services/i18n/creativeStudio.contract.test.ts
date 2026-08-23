@@ -21,9 +21,9 @@ const flattenKeys = (tree: LocaleTree, prefix = ''): string[] =>
 const expectedKeys = [
   'focus.backToWorkbench',
   'navigation.assets',
+  'navigation.canvases',
   'navigation.image',
   'navigation.label',
-  'navigation.projects',
   'navigation.prompts',
   'navigation.video',
   'title',
@@ -59,7 +59,7 @@ describe('Creative Studio locale contract', () => {
       focus: { backToWorkbench: '返回工作台' },
       navigation: {
         label: '创意工坊',
-        projects: '我的画布',
+        canvases: '我的画布',
         image: '生图工作台',
         video: '视频创作台',
         prompts: '提示词库',
@@ -71,7 +71,7 @@ describe('Creative Studio locale contract', () => {
       focus: { backToWorkbench: 'Back to workbench' },
       navigation: {
         label: 'Creative Studio',
-        projects: 'My canvases',
+        canvases: 'My canvases',
         image: 'Image studio',
         video: 'Video studio',
         prompts: 'Prompt library',

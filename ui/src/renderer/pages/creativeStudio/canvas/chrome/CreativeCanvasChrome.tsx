@@ -289,14 +289,14 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
           type='button'
           className={styles.backButton}
           disabled={props.disabled}
-          onClick={props.onBackToProjects}
+          onClick={props.onBackToCanvases}
         >
           <ArrowLeft {...iconProps} />
-          <span className={styles.backLabel}>返回项目</span>
+          <span className={styles.backLabel}>返回画布库</span>
         </button>
 
         <div className={styles.projectIdentity}>
-          <h1 title={props.projectTitle}>{props.projectTitle}</h1>
+          <h1 title={props.canvasTitle}>{props.canvasTitle}</h1>
           <div
             className={styles.saveState}
             data-save-status={props.saveStatus}

@@ -224,22 +224,21 @@ function requireExactKeys(
 function parseOwner(value: unknown): CreativeTaskOwner {
   const owner = requireRecord(value, 'owner');
   if (owner.kind === 'canvas_node') {
-    requireExactKeys(owner, ['kind', 'project_id', 'node_id'], 'owner');
+    requireExactKeys(owner, ['kind', 'canvas_id', 'node_id'], 'owner');
     return {
       kind: 'canvas_node',
-      projectId: parseCreativeOwnerId(owner.project_id, 'owner.project_id'),
+      canvasId: parseCreativeOwnerId(owner.canvas_id, 'owner.canvas_id'),
       nodeId: String(parseCreativeStudioNodeId(owner.node_id)),
     };
   }
   if (owner.kind === 'standalone_workbench') {
     requireExactKeys(
       owner,
-      ['kind', 'project_id', 'workbench_kind'],
+      ['kind', 'workbench_kind'],
       'owner'
     );
     return {
       kind: 'standalone_workbench',
-      projectId: parseCreativeOwnerId(owner.project_id, 'owner.project_id'),
       workbenchKind: parseStandaloneWorkbenchKind(
         owner.workbench_kind,
         'owner.workbench_kind'
@@ -545,18 +544,13 @@ function normalizeOwner(owner: CreativeTaskOwner): CreativeTaskOwner {
   if (owner.kind === 'canvas_node') {
     return {
       kind: 'canvas_node',
-      projectId: parseCreativeOwnerId(owner.projectId, 'owner.projectId', 'invalid_request'),
+      canvasId: parseCreativeOwnerId(owner.canvasId, 'owner.canvasId', 'invalid_request'),
       nodeId: String(parseCreativeStudioNodeId(owner.nodeId)),
     };
   }
   if (owner.kind === 'standalone_workbench') {
     return {
       kind: 'standalone_workbench',
-      projectId: parseCreativeOwnerId(
-        owner.projectId,
-        'owner.projectId',
-        'invalid_request'
-      ),
       workbenchKind: parseStandaloneWorkbenchKind(
         owner.workbenchKind,
         'owner.workbenchKind',
@@ -603,14 +597,13 @@ function ownerWire(owner: CreativeTaskOwner): Record<string, string> {
   if (owner.kind === 'canvas_node') {
     return {
       kind: owner.kind,
-      project_id: owner.projectId,
+      canvas_id: owner.canvasId,
       node_id: owner.nodeId,
     };
   }
   if (owner.kind === 'standalone_workbench') {
     return {
       kind: owner.kind,
-      project_id: owner.projectId,
       workbench_kind: owner.workbenchKind,
     };
   }

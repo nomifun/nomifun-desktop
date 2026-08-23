@@ -15,13 +15,12 @@ import {
   standaloneHistoryRuntimeSnapshot,
 } from './presentation';
 
-const PROJECT_ID = testUuid(810);
 const ASSET_A = testUuid(811);
 const ASSET_B = testUuid(812);
-const scope = { projectId: PROJECT_ID, workbenchKind: 'image' as const };
+const scope = { workbenchKind: 'image' as const };
 const task = (status: CreativeTask['status']): CreativeTask => ({
   taskId: testUuid(813),
-  owner: { kind: 'standalone_workbench', projectId: PROJECT_ID, workbenchKind: 'image' },
+  owner: { kind: 'standalone_workbench', workbenchKind: 'image' },
   providerId: testUuid(814),
   model: 'image-v1',
   task: 'image_generation',

@@ -26,6 +26,25 @@ import {
 
 const DIRECTOR_SCENE_PAGE_SIZE = 100;
 
+function directorSceneImportMessage(message: string): string {
+  switch (message) {
+    case "Not a NomiFun director project":
+      return "不是有效的 NomiFun Director 场景文档";
+    case "Only director project version 1 is supported":
+      return "仅支持当前 Director 场景文档版本";
+    case "Director project JSON exceeds the v1 size limit":
+      return "Director 场景文档超过大小限制";
+    case "Director project is not valid JSON":
+      return "Director 场景文档不是有效 JSON";
+    case "Director project validation failed":
+      return "Director 场景文档校验失败";
+    default:
+      return message
+        .replaceAll("Director project", "Director 场景文档")
+        .replaceAll("director project", "Director 场景文档");
+  }
+}
+
 export type DirectorProjectLoadErrorCode =
   | "multiple-directors"
   | "missing-scene-asset"
@@ -112,7 +131,7 @@ function assertNodeProjection(
   ) {
     throw new DirectorProjectLoadError(
       "projection-mismatch",
-      "导演节点与其场景资产的机位或时间轴投影不一致。请重新载入或修复项目数据。",
+      "导演节点与其场景资产的机位或时间轴投影不一致。请重新载入或修复画布数据。",
     );
   }
 }
@@ -131,7 +150,7 @@ export async function loadDirectorProjectBaseline(
   if (nodes.length > 1) {
     throw new DirectorProjectLoadError(
       "multiple-directors",
-      "当前项目包含多个导演节点，无法在没有明确节点路由的情况下选择场景。",
+      "当前画布包含多个导演节点，无法在没有明确节点路由的情况下选择场景。",
     );
   }
 
@@ -178,13 +197,13 @@ export async function loadDirectorProjectBaseline(
   if (!imported.ok) {
     throw new DirectorProjectLoadError(
       "invalid-scene-asset",
-      `导演场景文档无效：${imported.error.path} ${imported.error.message}`,
+      `导演场景文档无效：${imported.error.path} ${directorSceneImportMessage(imported.error.message)}`,
     );
   }
   if (imported.state.projectId !== detail.project.projectId) {
     throw new DirectorProjectLoadError(
       "project-mismatch",
-      "导演场景资产属于另一个 Creative Studio 项目。",
+      "导演场景资产属于另一张 Creative Studio 画布。",
     );
   }
   assertNodeProjection(node, imported.state);

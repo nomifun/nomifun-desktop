@@ -100,7 +100,7 @@ const ConflictingDirectorTimeline: React.FC<
       </span>
       <div>
         <h2>检测到多个导演节点</h2>
-        <p>一个项目只能绑定一个导演场景。请检查并删除多余节点后再打开导演台。</p>
+          <p>一张画布只能绑定一个导演场景。请检查并删除多余节点后再打开导演台。</p>
       </div>
     </div>
     <div className={styles.conflictNodes} aria-label='冲突的导演节点'>

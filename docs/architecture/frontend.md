@@ -69,10 +69,10 @@ The source of truth is
 | `/requirements`, `/requirements/extensions`, `/requirements/sources` | Requirements Platform, AutoWork, notification/source extensions. |
 | `/nomi` | Companion configuration. |
 | `/knowledge`, `/knowledge/:id` | Knowledge base list/detail. |
-| `/workshop` | Creative Studio project kickoff home inside the shared app layout. |
-| `/workshop/projects` | Creative Studio project center. |
-| `/workshop/canvas/:projectId`, `/workshop/director/:projectId` | Project-bound infinite canvas and bounded 3D Director. |
-| `/workshop/image`, `/workshop/video` | Project-owned standalone generation workbenches. |
+| `/workshop` | Creative Studio home inside the shared app layout. |
+| `/workshop/canvases` | Canonical Canvas library. |
+| `/workshop/canvas/:canvasId`, `/workshop/director/:canvasId` | Canvas infinite editor and bounded 3D Director. |
+| `/workshop/image`, `/workshop/video` | Independent Image and Video Workbenches; both work with zero Canvases. |
 | `/workshop/prompts`, `/workshop/assets`, `/workshop/workflows` | Prompt, asset, and private-workflow libraries. |
 | `/mini-apps` | Mini-app library — the published single-file web tools, as a card grid. |
 | `/mini-apps/:id` | Mini-app runner — a single column: the PUBLISHED snapshot in a sandboxed iframe served straight from the backend, plus a toolbar (publish / 「继续迭代」 / refresh / open in browser / rename / delete). No conversation UI is mounted here; 「继续迭代」 provisions the working copy and navigates to an ordinary `/conversation/:id`, so the `pages/conversation/**` module graph never enters this route. |
@@ -90,10 +90,20 @@ Creative Studio location that passes the product's exact route matcher; invalid
 or unknown stored locations fall back to `/workshop`. Its route constants and exact-match rules live in
 [`pages/creativeStudio/app/routes.ts`](../../ui/src/renderer/pages/creativeStudio/app/routes.ts).
 
-The `projects/projectId` names in the current route map are compatibility-era
-implementation details. The approved target domain has Canvases only, while
-Image and Video Workbenches remain independent from every Canvas; see the
-2026-08-23 Canvas-domain redesign spec.
+`/workshop/projects` is a deprecated compatibility redirect to
+`/workshop/canvases`, not a product surface. Creative Studio has Canvases only:
+the canonical HTTP resource is `/api/creative-studio/canvases`, while
+`/api/creative-studio/projects` is a deprecated alias. Image and Video
+Workbenches have no Canvas selector or parent-load gate. Their task owner,
+history, and retirement scope is only `workbenchKind`; legacy standalone
+`project_id` values are inert provenance. The Gateway's current Canvas
+capabilities are `nomi_creative_studio_list_canvases` and
+`nomi_creative_studio_get_canvas`; old project-named capabilities are deprecated
+aliases. The UI/API contract version is 21.
+
+Canvas exports use an archive v2 writer and retain an archive v1 reader. Image
+and Video restore versioned per-workbench session drafts from browser session
+storage; draft keys contain neither `projectId` nor `canvasId`.
 `/workshop/audio` is retired; audio creation is available through canvas audio
 nodes, not a standalone route.
 

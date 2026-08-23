@@ -1,9 +1,9 @@
-# Creative canvas editor wiring
+# Creative Canvas editor wiring
 
-`CreativeCanvasEditor` is the route-ready controller boundary for a canonical
-creative-studio project. It loads through `useCreativeProject`, owns the canvas
-reducer and pointer/keyboard interactions, and saves the full canonical document
-through revision compare-and-swap (CAS).
+`CreativeCanvasEditor` is the route-ready controller boundary for one canonical
+Creative Studio Canvas. It loads by `canvasId`, owns the Canvas reducer and
+pointer/keyboard interactions, and saves the complete Canvas document through
+revision compare-and-swap (CAS).
 
 ## Route composition
 
@@ -15,30 +15,30 @@ const editorRef = useRef<CreativeCanvasEditorHandle>(null);
 
 <CreativeCanvasEditor
   ref={editorRef}
-  projectId={projectId}
+  canvasId={canvasId}
   tool={tool}
   renderNode={(context) => <ProductNodeView {...context} />}
   renderEdge={(context) => <ProductConnectionView {...context} />}
-  leftPanel={(context) => <ProjectNavigator state={context.state} />}
+  leftPanel={(context) => <CanvasNavigator state={context.state} />}
   rightPanel={(context) => <Inspector state={context.state} />}
 />
 ```
 
-Product chrome sends every canvas mutation through the same reducer and CAS
+Product chrome sends every Canvas mutation through the same reducer and CAS
 boundary with `editorRef.current?.dispatch(command)`. Background changes use
 `editorRef.current?.setBackground('dots' | 'lines' | 'blank')`; the editor
-updates the canonical base document and queues the complete document through
+updates the canonical Canvas document and queues the complete document through
 the same save controller. Product routes must not synthesize keyboard events or
-maintain a second canvas store.
+maintain a second Canvas store.
 
 Panel chrome uses `setPanels(nextPanels)`, and inspector edits dispatch the
 complete discriminated node returned by `canvasCommands.updateNode(...)`.
 Both paths merge with the latest reducer-owned nodes and viewport before they
 queue the same full-document CAS save.
 
-`renderNode` receives the canonical node, its selected state, `onActivate`, and
+`renderNode` receives the canonical Canvas node, its selected state, `onActivate`, and
 pointer props for the product's chosen drag handle. `renderEdge` receives the
-canonical connection plus its resolved source and target nodes. Top, left,
+canonical connection plus its resolved source and target Canvas nodes. Top, left,
 right, bottom, screen-overlay, and minimap slots can be static nodes or functions
 of the current editor context.
 
@@ -73,12 +73,12 @@ controller.
 Node creation palettes, handles for creating connections, media preview and
 asset resolution, model selection/execution, task progress, Agent transport, and inspector
 forms remain route/product responsibilities. They should dispatch canonical
-core commands or update the canonical project document; no legacy workshop
+core commands or update the canonical Canvas document; no legacy workshop
 schema adapter belongs in the editor.
 
 ## Agent session references
 
-Conversation contents remain owned by NomiFun, while the project document keeps
+Conversation contents remain owned by NomiFun, while the Canvas document keeps
 only validated session/model/message references and one durable pending-turn
 fence. Product code must call and await
 `persistAgentSessions(sessions, activeSessionId)` before submitting a turn and
@@ -88,8 +88,13 @@ flushes immediately, and rejects on CAS or transport failure.
 
 `onAgentSessionsChange` publishes hydration and local durable mutations;
 `getAgentSessions()` and `getActiveAgentSessionId()` expose the same snapshot to
-imperative transport adapters. No Agent adapter may write project state outside
+imperative transport adapters. No Agent adapter may write Canvas state outside
 this Editor/CAS boundary.
+
+Every owner-bearing task or Agent reference is scoped by the canonical
+`CanvasNode { canvasId, nodeId }` identity. HTTP owner fields use
+`canvas_id`/`node_id`; a node ID without its Canvas ID is not an acceptable
+owner.
 
 ## Pending task recovery feed
 
@@ -124,5 +129,13 @@ onRecoveryFailure: async (reference) => {
 ```
 
 The Editor layer does not mount a workbench runtime. The canvas product uses
-this seam for its one project-scoped image runtime; other products must wire
+this seam for its one Canvas-scoped image runtime; other products must wire
 their own runtime explicitly rather than assuming recovery is automatic.
+
+## Compatibility only
+
+The coordinated `nomifun.creative-studio/v1` reader may still encounter an
+internal `projectId` in the historical document shape. Legacy project-document
+and repository adapters may translate that shape at the migration boundary,
+but the Editor contract above remains Canvas/canvasId-based and must not expose
+those names as product terminology.

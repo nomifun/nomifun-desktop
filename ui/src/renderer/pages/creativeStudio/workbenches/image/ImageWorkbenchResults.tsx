@@ -231,7 +231,7 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
         <div className={styles.emptyResults} data-image-result-state='empty'>
           <span className={styles.emptyIcon}>{historyLoading ? <Loading size={38} className={styles.spin} /> : historyError ? <Error size={38} /> : <Pic size={38} />}</span>
           <strong>{historyLoading ? '正在恢复生成历史' : historyError ? '生成历史加载失败' : '还没有生成图片'}</strong>
-          <p>{historyLoading ? '正在读取当前项目的真实任务与结果。' : historyError ?? '在创作台输入提示词并选择模型，生成结果会出现在这里。'}</p>
+          <p>{historyLoading ? '正在读取当前工作台的真实任务与结果。' : historyError ?? '在创作台输入提示词并选择模型，生成结果会出现在这里。'}</p>
         </div>
       ) : (
         <div className={styles.resultGrid}>

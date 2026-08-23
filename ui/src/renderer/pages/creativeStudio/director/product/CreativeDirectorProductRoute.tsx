@@ -202,8 +202,10 @@ const saveLabel = (save: DirectorCasSaveSnapshot): string => {
 
 /** No-props route composition for the canonical Creative Studio Director. */
 const CreativeDirectorProductRoute: React.FC = () => {
-  const { projectId: routeProjectId } = useParams<{ projectId: string }>();
-  const projectId = routeProjectId?.trim() ?? "";
+  const { canvasId: routeCanvasId } = useParams<{ canvasId: string }>();
+  const canvasId = routeCanvasId?.trim() ?? "";
+  // Legacy local adapter: the migrated Director internals still use projectId.
+  const projectId = canvasId;
   const navigate = useNavigate();
   const runtimeRef = useRef<DirectorRuntimeHandle>(null);
   const panoramaInputRef = useRef<HTMLInputElement>(null);
@@ -282,7 +284,7 @@ const CreativeDirectorProductRoute: React.FC = () => {
     if (!projectId) {
       setLoad({
         status: "error",
-        error: new TypeError("缺少 Creative Studio 项目 ID。"),
+        error: new TypeError("缺少 Creative Studio 画布 ID。"),
       });
       return;
     }
@@ -697,7 +699,7 @@ const CreativeDirectorProductRoute: React.FC = () => {
           return;
         }
         const baseline = controller.getBaseline();
-        if (!baseline) throw new Error("导演项目尚未完成载入。");
+        if (!baseline) throw new Error("导演画布尚未完成载入。");
         const transfers = await Promise.all(
           captures.map(async (capture) => ({
             captureId: capture.id,
@@ -722,13 +724,13 @@ const CreativeDirectorProductRoute: React.FC = () => {
             setNotice("所选截图已在画布中，没有创建重复节点。");
             break;
           case "confirmed-after-response-loss":
-            setNotice("发送响应曾中断，但已从权威项目确认截图位于画布中。");
+            setNotice("发送响应曾中断，但已从权威画布确认截图已插入。");
             break;
           case "conflict":
             setNotice("画布已被其他操作更新，已载入远端版本；请重试发送。");
             break;
           case "failed":
-            setNotice(`发送失败，已重新载入权威项目：${outcome.error.message}`);
+            setNotice(`发送失败，已重新载入权威画布：${outcome.error.message}`);
             break;
         }
       } catch (cause) {
@@ -768,7 +770,7 @@ const CreativeDirectorProductRoute: React.FC = () => {
       <main className={styles.routeState} data-creative-director-product-route>
         <Spin dot size={8} />
         <h1>正在载入 3D 导演台</h1>
-        <p>正在校验 canonical 项目、场景资产和真实素材引用。</p>
+        <p>正在校验 canonical 画布、场景资产和真实素材引用。</p>
       </main>
     );
   }
@@ -864,7 +866,7 @@ const CreativeDirectorProductRoute: React.FC = () => {
     <main
       className={styles.root}
       data-creative-director-product-route
-      data-project-id={projectId}
+      data-canvas-id={canvasId}
     >
       <input
         ref={panoramaInputRef}

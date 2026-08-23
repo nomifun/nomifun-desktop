@@ -50,8 +50,8 @@ export interface CreativeCanvasAgentContextConnection {
 export interface CreativeCanvasAgentContextSnapshot {
   kind: typeof CREATIVE_CANVAS_AGENT_CONTEXT_KIND;
   version: typeof CREATIVE_CANVAS_AGENT_CONTEXT_VERSION;
-  projectId: string;
-  projectRevision: string;
+  canvasId: string;
+  canvasRevision: string;
   selectedNodeIds: string[];
   nodes: CreativeCanvasAgentContextNode[];
   connections: CreativeCanvasAgentContextConnection[];
@@ -257,7 +257,7 @@ const contextConnection = (
 
 export function buildCreativeCanvasAgentContext(input: {
   document: CreativeProjectDocument;
-  projectRevision: string;
+  canvasRevision: string;
   selectedNodeIds: readonly string[];
 }): CreativeCanvasAgentContextSnapshot {
   const nodeIndex = new Map(input.document.nodes.map((node, index) => [node.id, index]));
@@ -282,8 +282,8 @@ export function buildCreativeCanvasAgentContext(input: {
   return {
     kind: CREATIVE_CANVAS_AGENT_CONTEXT_KIND,
     version: CREATIVE_CANVAS_AGENT_CONTEXT_VERSION,
-    projectId: input.document.projectId,
-    projectRevision: input.projectRevision,
+    canvasId: input.document.projectId,
+    canvasRevision: input.canvasRevision,
     selectedNodeIds: selected.filter((id) => included.has(id)),
     nodes,
     connections: relevantConnections

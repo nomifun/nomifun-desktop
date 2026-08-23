@@ -93,7 +93,7 @@ const taskFor = (
   status: CreativeTask['status']
 ): CreativeTask => ({
   taskId: config.data.taskId as string,
-  owner: { kind: 'canvas_node', projectId, nodeId: config.id },
+  owner: { kind: 'canvas_node', canvasId: projectId, nodeId: config.id },
   providerId: config.data.providerId as string,
   model: config.data.model as string,
   task: 'image_edit',
@@ -147,7 +147,7 @@ describe('canvas image mask edit product model', () => {
     expect(prepared.plan.input).toMatchObject({
       owner: {
         kind: 'canvas_node',
-        projectId: document.projectId,
+        canvasId: document.projectId,
         nodeId: prepared.configNode.id,
       },
       providerId: PROVIDER_ID,

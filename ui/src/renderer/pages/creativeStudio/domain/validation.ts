@@ -49,6 +49,7 @@ export type CreativeStudioContractErrorCode =
   | 'INVALID_RESPONSE'
   | 'INVALID_DOCUMENT'
   | 'SCHEMA_MISMATCH'
+  | 'CANVAS_MISMATCH'
   | 'PROJECT_MISMATCH';
 
 /** A deterministic runtime-contract error safe for UI branching and tests. */

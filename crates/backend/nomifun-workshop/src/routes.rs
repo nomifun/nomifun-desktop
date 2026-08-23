@@ -18,7 +18,7 @@ use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Extension, Json, Multipart, Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
@@ -33,7 +33,9 @@ use crate::archive::MAX_CREATIVE_ARCHIVE_COMPRESSED_BYTES;
 use crate::creative_agent_ops::{
     CreativeAgentOp, CreativeAgentOpResult, MAX_CREATIVE_AGENT_OPS_PER_CALL,
 };
-use crate::creative_studio::{CreativeProjectDocument, CreativeProjectSummary};
+use crate::creative_studio::{
+    CreativeCanvasDocument, CreativeCanvasSummary, CreativeProjectDocument, CreativeProjectSummary,
+};
 use crate::dto::WorkshopAsset;
 use crate::prompt_catalog::CreativePromptCatalogPage;
 use crate::service::{
@@ -61,6 +63,10 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         .route(
             "/api/creative-studio/projects/import",
             post(import_creative_project_archive),
+        )
+        .route(
+            "/api/creative-studio/canvases/import",
+            post(import_creative_canvas_archive),
         )
         .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(
@@ -98,7 +104,7 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         ))
         .with_state(state.clone());
 
-    Router::new()
+    let legacy_project_alias_router = Router::new()
         .route(
             "/api/creative-studio/projects",
             get(list_creative_projects).post(create_creative_project),
@@ -120,6 +126,46 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         .route(
             "/api/creative-studio/projects/{project_id}/archive",
             get(export_creative_project_archive),
+        )
+        .layer(axum::middleware::map_response(
+            |mut response: Response| async move {
+                response.headers_mut().insert(
+                    header::HeaderName::from_static("deprecation"),
+                    HeaderValue::from_static("true"),
+                );
+                response.headers_mut().insert(
+                    header::LINK,
+                    HeaderValue::from_static(
+                        "</api/creative-studio/canvases>; rel=\"successor-version\"",
+                    ),
+                );
+                response
+            },
+        ))
+        .with_state(state.clone());
+
+    Router::new()
+        .route(
+            "/api/creative-studio/canvases",
+            get(list_creative_canvases).post(create_creative_canvas),
+        )
+        .route(
+            "/api/creative-studio/canvases/{canvas_id}",
+            get(get_creative_canvas)
+                .patch(rename_creative_canvas)
+                .delete(delete_creative_canvas),
+        )
+        .route(
+            "/api/creative-studio/canvases/{canvas_id}/document",
+            axum::routing::put(save_creative_canvas),
+        )
+        .route(
+            "/api/creative-studio/canvases/{canvas_id}/agent-ops",
+            post(apply_creative_canvas_agent_ops),
+        )
+        .route(
+            "/api/creative-studio/canvases/{canvas_id}/archive",
+            get(export_creative_canvas_archive),
         )
         .route(
             "/api/creative-studio/prompts",
@@ -162,6 +208,7 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
             post(rename_collection),
         )
         .with_state(state)
+        .merge(legacy_project_alias_router)
         .merge(workflow_write_router)
         .merge(workflow_run_write_router)
         .merge(archive_import_router)
@@ -188,6 +235,169 @@ pub fn workshop_public_routes(state: WorkshopRouterState) -> Router {
 /// content-immutable capability URLs, but `private` keeps shared proxies from
 /// caching a user's media.
 const SERVE_CACHE_CONTROL: &str = "private, max-age=3600";
+
+// ── canonical Creative Studio Canvases ─────────────────────────────────────
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreativeCanvasListResponse {
+    canvases: Vec<CreativeCanvasSummary>,
+}
+
+async fn list_creative_canvases(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<CreativeCanvasListResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(CreativeCanvasListResponse {
+        canvases: state.service.list_creative_canvases().await?,
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateCreativeCanvasRequest {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    agent_kickoff: Option<CreateCreativeCanvasAgentKickoff>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateCreativeCanvasAgentKickoff {
+    prompt: String,
+    model: CreateCreativeCanvasAgentModel,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateCreativeCanvasAgentModel {
+    provider_id: String,
+    model: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreativeCanvasResponse {
+    canvas: CreativeCanvasSummary,
+}
+
+async fn create_creative_canvas(
+    State(state): State<WorkshopRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    body: Result<Json<CreateCreativeCanvasRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, AppError> {
+    let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let agent_kickoff = req.agent_kickoff.map(|kickoff| CreativeProjectAgentKickoff {
+        prompt: kickoff.prompt,
+        provider_id: kickoff.model.provider_id,
+        model: kickoff.model.model,
+    });
+    let canvas = state
+        .service
+        .create_creative_canvas_for_owner(user.id.as_str(), req.title, agent_kickoff)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::ok(CreativeCanvasResponse { canvas })),
+    ))
+}
+
+async fn get_creative_canvas(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(canvas_id): Path<String>,
+) -> Result<Json<ApiResponse<crate::creative_studio::CreativeCanvasDetail>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state.service.get_creative_canvas(&canvas_id).await?,
+    )))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RenameCreativeCanvasRequest {
+    title: String,
+}
+
+async fn rename_creative_canvas(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(canvas_id): Path<String>,
+    body: Result<Json<RenameCreativeCanvasRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CreativeCanvasResponse>>, AppError> {
+    let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let canvas = state
+        .service
+        .rename_creative_canvas(&canvas_id, &req.title)
+        .await?;
+    Ok(Json(ApiResponse::ok(CreativeCanvasResponse { canvas })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SaveCreativeCanvasRequest {
+    expected_revision: String,
+    document: CreativeCanvasDocument,
+}
+
+async fn save_creative_canvas(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(canvas_id): Path<String>,
+    body: Result<Json<SaveCreativeCanvasRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CreativeCanvasResponse>>, AppError> {
+    let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let canvas = state
+        .service
+        .save_creative_canvas(&canvas_id, &req.expected_revision, &req.document)
+        .await?;
+    Ok(Json(ApiResponse::ok(CreativeCanvasResponse { canvas })))
+}
+
+async fn apply_creative_canvas_agent_ops(
+    State(state): State<WorkshopRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(canvas_id): Path<String>,
+    body: Result<Json<CreativeAgentOpsRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CreativeCanvasAgentOpsResponse>>, AppError> {
+    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    validate_creative_agent_ops(&request.ops)?;
+    let applied = state
+        .service
+        .apply_creative_canvas_agent_proposal(
+            user.id.as_str(),
+            &canvas_id,
+            &request.assistant_message_id,
+            &request.expected_revision,
+            request.ops,
+            CREATIVE_STUDIO_AGENT_SOURCE,
+        )
+        .await?;
+    Ok(Json(ApiResponse::ok(CreativeCanvasAgentOpsResponse {
+        canvas: applied.canvas,
+        ops: applied.ops,
+        replayed: applied.replayed,
+        applied_revision: applied.applied_revision,
+    })))
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreativeCanvasAgentOpsResponse {
+    canvas: CreativeCanvasSummary,
+    ops: Vec<CreativeAgentOpResult>,
+    replayed: bool,
+    applied_revision: String,
+}
+
+async fn delete_creative_canvas(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(canvas_id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    state.service.delete_creative_canvas(&canvas_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
 
 // ── canonical Creative Studio projects ─────────────────────────────────────
 
@@ -336,20 +546,13 @@ struct CreativeAgentOpsResponse {
     applied_revision: String,
 }
 
-async fn apply_creative_agent_ops(
-    State(state): State<WorkshopRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    Path(project_id): Path<String>,
-    body: Result<Json<CreativeAgentOpsRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<CreativeAgentOpsResponse>>, AppError> {
-    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
-    if request.ops.is_empty() || request.ops.len() > MAX_CREATIVE_AGENT_OPS_PER_CALL {
+fn validate_creative_agent_ops(ops: &[CreativeAgentOp]) -> Result<(), AppError> {
+    if ops.is_empty() || ops.len() > MAX_CREATIVE_AGENT_OPS_PER_CALL {
         return Err(AppError::BadRequest(format!(
             "Creative Studio Agent operations must contain 1 to {MAX_CREATIVE_AGENT_OPS_PER_CALL} entries"
         )));
     }
-    if request
-        .ops
+    if ops
         .iter()
         .any(|op| matches!(op, CreativeAgentOp::DeleteNode { .. }))
     {
@@ -358,6 +561,17 @@ async fn apply_creative_agent_ops(
                 .to_owned(),
         ));
     }
+    Ok(())
+}
+
+async fn apply_creative_agent_ops(
+    State(state): State<WorkshopRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(project_id): Path<String>,
+    body: Result<Json<CreativeAgentOpsRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CreativeAgentOpsResponse>>, AppError> {
+    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    validate_creative_agent_ops(&request.ops)?;
     let applied = state
         .service
         .apply_creative_agent_proposal(
@@ -686,6 +900,44 @@ async fn import_creative_project_archive(
     Ok((
         StatusCode::CREATED,
         Json(ApiResponse::ok(CreativeProjectResponse { project })),
+    ))
+}
+
+async fn export_creative_canvas_archive(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(canvas_id): Path<String>,
+) -> Result<Response, AppError> {
+    let archive = state
+        .service
+        .export_creative_canvas_archive(&canvas_id)
+        .await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, archive.mime.to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", archive.file_name),
+            ),
+            (header::CACHE_CONTROL, "no-store".to_owned()),
+        ],
+        Body::from(archive.bytes),
+    )
+        .into_response())
+}
+
+async fn import_creative_canvas_archive(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    bytes: Bytes,
+) -> Result<impl IntoResponse, AppError> {
+    let canvas = state
+        .service
+        .import_creative_canvas_archive(bytes.to_vec())
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::ok(CreativeCanvasResponse { canvas })),
     ))
 }
 
@@ -2367,6 +2619,220 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(gone, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn canonical_canvas_routes_use_canvas_wire_and_keep_project_alias() {
+        let (state, user, _data_dir) = test_state().await;
+        let app = workshop_routes(state.clone()).layer(Extension(user));
+
+        let created = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/creative-studio/canvases")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"title":"Canonical Canvas"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created_json = response_json(created).await;
+        let canvas_id = created_json["data"]["canvas"]["canvasId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(created_json["data"]["canvas"]["projectId"].is_null());
+        assert!(created_json["data"].get("project").is_none());
+
+        let listed = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/creative-studio/canvases")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed_json = response_json(listed).await;
+        assert_eq!(listed_json["data"]["canvases"].as_array().unwrap().len(), 1);
+        assert!(listed_json["data"].get("projects").is_none());
+
+        let detail = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/creative-studio/canvases/{canvas_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail.status(), StatusCode::OK);
+        let detail_json = response_json(detail).await;
+        assert_eq!(detail_json["data"]["canvas"]["canvasId"], canvas_id);
+        assert_eq!(detail_json["data"]["document"]["canvasId"], canvas_id);
+        assert!(detail_json["data"]["document"]["projectId"].is_null());
+
+        let save_body = serde_json::json!({
+            "expectedRevision": "1",
+            "document": detail_json["data"]["document"],
+        });
+        let saved = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/api/creative-studio/canvases/{canvas_id}/document"
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
+        let saved_json = response_json(saved).await;
+        assert_eq!(saved_json["data"]["canvas"]["revision"], "2");
+
+        let legacy_document = serde_json::json!({
+            "expectedRevision": "2",
+            "document": {
+                "schema": "nomifun.creative-studio/v1",
+                "projectId": canvas_id,
+                "viewport": { "x": 0, "y": 0, "zoom": 1 },
+                "background": "lines",
+                "nodes": [],
+                "connections": [],
+                "chatSessions": [],
+                "activeChatId": null,
+                "panels": {
+                    "left": { "open": true, "width": 280, "activeView": "canvas" },
+                    "right": { "open": false, "width": 360, "activeView": "assistant" },
+                    "bottom": { "open": false, "height": 240, "activeView": "history" }
+                },
+                "pendingTaskIds": []
+            }
+        });
+        let rejected_legacy_wire = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/api/creative-studio/canvases/{canvas_id}/document"
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&legacy_document).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected_legacy_wire.status(), StatusCode::BAD_REQUEST);
+
+        let renamed = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/creative-studio/canvases/{canvas_id}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"title":"Renamed Canvas"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(renamed.status(), StatusCode::OK);
+        let renamed_json = response_json(renamed).await;
+        assert_eq!(renamed_json["data"]["canvas"]["title"], "Renamed Canvas");
+
+        let empty_ops = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/creative-studio/canvases/{canvas_id}/agent-ops"
+                    ))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"assistantMessageId":"0190f5fe-7c00-7a00-8abc-000000000301","expectedRevision":"2","ops":[]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty_ops.status(), StatusCode::BAD_REQUEST);
+
+        let exported = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!(
+                        "/api/creative-studio/canvases/{canvas_id}/archive"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exported.status(), StatusCode::OK);
+        let archive_bytes = axum::body::to_bytes(
+            exported.into_body(),
+            MAX_CREATIVE_ARCHIVE_COMPRESSED_BYTES,
+        )
+        .await
+        .unwrap();
+
+        let imported = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/creative-studio/canvases/import")
+                    .body(Body::from(archive_bytes))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(imported.status(), StatusCode::CREATED);
+        let imported_json = response_json(imported).await;
+        assert!(imported_json["data"]["canvas"]["canvasId"].is_string());
+        assert!(imported_json["data"].get("project").is_none());
+
+        let legacy_list = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/creative-studio/projects")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(legacy_list.status(), StatusCode::OK);
+        assert_eq!(
+            legacy_list
+                .headers()
+                .get("deprecation")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+        assert_eq!(
+            legacy_list
+                .headers()
+                .get(header::LINK)
+                .and_then(|value| value.to_str().ok()),
+            Some("</api/creative-studio/canvases>; rel=\"successor-version\"")
+        );
+        let legacy_json = response_json(legacy_list).await;
+        assert_eq!(legacy_json["data"]["projects"].as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]

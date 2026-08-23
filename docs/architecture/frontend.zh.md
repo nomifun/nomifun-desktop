@@ -111,20 +111,30 @@ export function getBaseUrl(): string {
 固定在底部。应用会话内还会保存最后一个经过 exact-match 验证的创意工坊完整地址；
 再次从主侧栏进入时恢复该地址，非法、未知或越界记录回退 `/workshop`。其子路由如下：
 
-> 下面的 `projects/projectId` 是当前兼容实现。已确认的目标模型只有 Canvas，独立
-> Image/Video Workbench 不绑定 Canvas；迁移方案见 2026-08-23 Canvas 领域重构规格。
-
 | 路由 | 用户界面 |
 | --- | --- |
-| `/workshop` | 创意工坊首页与项目 kickoff。 |
-| `/workshop/projects` | 项目中心。 |
-| `/workshop/canvas/:projectId`、`/workshop/director/:projectId` | 项目内无限画布与受限 3D 导演台。 |
-| `/workshop/image`、`/workshop/video` | 归属于项目的独立生成工作台。 |
+| `/workshop` | 创意工坊首页。 |
+| `/workshop/canvases` | canonical Canvas 库。 |
+| `/workshop/canvas/:canvasId`、`/workshop/director/:canvasId` | Canvas 无限画布与受限 3D 导演台。 |
+| `/workshop/image`、`/workshop/video` | 独立 Image/Video Workbench；零 Canvas 时也可用。 |
 | `/workshop/prompts`、`/workshop/assets`、`/workshop/workflows` | 提示词、素材与私有 Workflow 库。 |
 
 路由常量与 exact-match 规则在
 [`pages/creativeStudio/app/routes.ts`](../../ui/src/renderer/pages/creativeStudio/app/routes.ts)。
-`/workshop/audio` 已退役；音频创作通过画布音频节点提供，不再设独立路由。
+`/workshop/projects` 是 deprecated 兼容重定向，目标为 `/workshop/canvases`，不是
+产品页面。创意工坊没有 Project 领域：规范 HTTP 资源是
+`/api/creative-studio/canvases`，旧 `/api/creative-studio/projects` 仅作为 deprecated
+alias 保留。Image/Video Workbench 没有 Canvas 选择器或父级加载门槛；任务 owner、
+历史与退役只使用 `workbenchKind`，旧 standalone `project_id` 只是 inert provenance。
+Gateway 当前的 Canvas capability 是 `nomi_creative_studio_list_canvases` 和
+`nomi_creative_studio_get_canvas`，旧项目命名 capability 是 deprecated alias。
+UI/API contract version 为 21。
+
+Canvas 导出使用 archive v2 writer，并继续保留 archive v1 reader。Image/Video 按工作台
+从浏览器 session storage 恢复版本化 session 草稿，草稿 key 不含 `projectId` 或
+`canvasId`。
+
+`/workshop/audio` 已退役；音频创作通过 Canvas 音频节点提供，不再设独立路由。
 
 页面通过 `React.lazy` 加载，使用 `<AppLoader>` 作为 fallback，使初始包保持精简。
 

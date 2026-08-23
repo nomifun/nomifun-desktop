@@ -26,7 +26,7 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
 
   test('emits actions without persistence, API, model, or fake-asset logic', () => {
     for (const callback of [
-      'onBackToProjects',
+      'onBackToCanvases',
       'onToolChange',
       'onAddNode',
       'onBackgroundChange',

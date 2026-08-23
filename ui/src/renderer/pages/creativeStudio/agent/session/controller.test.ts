@@ -40,7 +40,7 @@ const input = (
   overrides: Partial<NomiCreativeStudioAgentSessionResolutionInput> = {}
 ): NomiCreativeStudioAgentSessionResolutionInput => {
   return {
-    projectId: 'project-a',
+    canvasId: 'canvas-a',
     sessionId: 'session-a',
     model,
     signal: new AbortController().signal,
@@ -55,7 +55,7 @@ const binding = (
   authoritativeHistory: readonly CreativeStudioAgentMessage[] = history
 ): NomiCreativeStudioAgentSessionBinding => ({
   ownership: 'creative-studio-exclusive',
-  projectId: request.projectId,
+  canvasId: request.canvasId,
   sessionId: request.sessionId,
   conversationId,
   model: request.model,
@@ -101,7 +101,7 @@ class DeferredPort implements CreativeStudioAgentSessionPersistencePort {
 }
 
 describe('CreativeStudioAgentSessionController', () => {
-  test('coalesces concurrent resolution for one project session', async () => {
+  test('coalesces concurrent resolution for one Canvas session', async () => {
     const port = new DeferredPort();
     const controller = new CreativeStudioAgentSessionController(port);
 
@@ -142,7 +142,7 @@ describe('CreativeStudioAgentSessionController', () => {
     const port: CreativeStudioAgentSessionPersistencePort = {
       async resolveOrCreateExclusive(request) {
         calls += 1;
-        const key = `${request.projectId}/${request.sessionId}`;
+        const key = `${request.canvasId}/${request.sessionId}`;
         const restored = persisted.get(key) ?? binding(request);
         persisted.set(key, restored);
         return resolution(request, restored.conversationId, { binding: restored });
@@ -156,14 +156,14 @@ describe('CreativeStudioAgentSessionController', () => {
     expect(restored).toEqual(first);
   });
 
-  test('does not coalesce sessions from different projects', async () => {
+  test('does not coalesce sessions from different Canvases', async () => {
     const calls: CreativeStudioAgentSessionPersistenceRequest[] = [];
     const port: CreativeStudioAgentSessionPersistencePort = {
       async resolveOrCreateExclusive(request) {
         calls.push(request);
         return resolution(
           request,
-          request.projectId === 'project-a' ? conversationA : conversationB
+          request.canvasId === 'canvas-a' ? conversationA : conversationB
         );
       },
     };
@@ -171,10 +171,10 @@ describe('CreativeStudioAgentSessionController', () => {
 
     const [first, second] = await Promise.all([
       controller.resolve(input()),
-      controller.resolve(input({ projectId: 'project-b' })),
+      controller.resolve(input({ canvasId: 'canvas-b' })),
     ]);
 
-    expect(calls.map((request) => request.projectId).sort()).toEqual(['project-a', 'project-b']);
+    expect(calls.map((request) => request.canvasId).sort()).toEqual(['canvas-a', 'canvas-b']);
     expect(first.binding.conversationId).toBe(conversationA);
     expect(second.binding.conversationId).toBe(conversationB);
   });
@@ -200,11 +200,11 @@ describe('CreativeStudioAgentSessionController', () => {
     ]);
   });
 
-  test('rejects a cross-project binding returned by the persistence port', async () => {
+  test('rejects a cross-Canvas binding returned by the persistence port', async () => {
     const port: CreativeStudioAgentSessionPersistencePort = {
       async resolveOrCreateExclusive(request) {
         return resolution(request, conversationA, {
-          binding: { ...binding(request), projectId: 'project-b' },
+          binding: { ...binding(request), canvasId: 'canvas-b' },
         });
       },
     };

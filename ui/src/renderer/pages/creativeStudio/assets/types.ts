@@ -18,7 +18,8 @@ export interface CreativeAssetOrigin {
   model?: string;
   providerId?: string;
   params?: Record<string, unknown>;
-  projectId?: string;
+  workbenchKind?: 'image' | 'video' | 'audio';
+  canvasId?: string;
   nodeId?: string;
   generationTaskId?: string;
   promptCatalogId?: string;

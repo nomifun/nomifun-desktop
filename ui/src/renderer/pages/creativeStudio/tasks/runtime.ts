@@ -280,7 +280,7 @@ export function pendingCreativeTaskReferences(
       taskId,
       owner: {
         kind: 'canvas_node',
-        projectId: document.projectId,
+        canvasId: document.projectId,
         nodeId: owner.id,
       },
       providerId: data.providerId,

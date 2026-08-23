@@ -42,10 +42,9 @@ export type CreativeTaskInputKind = 'image' | 'video' | 'audio' | 'text';
 export type CreativeStandaloneWorkbenchKind = 'image' | 'video' | 'audio';
 
 export type CreativeTaskOwner =
-  | { kind: 'canvas_node'; projectId: string; nodeId: string }
+  | { kind: 'canvas_node'; canvasId: string; nodeId: string }
   | {
       kind: 'standalone_workbench';
-      projectId: string;
       workbenchKind: CreativeStandaloneWorkbenchKind;
     }
   | {
@@ -118,7 +117,6 @@ export interface CreativeTaskOutput {
 }
 
 export interface CreativeStandaloneTaskHistoryQuery {
-  projectId: string;
   workbenchKind: CreativeStandaloneWorkbenchKind;
   limit?: number;
   cursor?: string | null;
@@ -132,7 +130,6 @@ export interface CreativeStandaloneTaskHistoryPage {
 }
 
 export interface CreativeStandaloneTaskRetireInput {
-  projectId: string;
   workbenchKind: CreativeStandaloneWorkbenchKind;
   taskIds: readonly string[];
 }
@@ -234,16 +231,13 @@ export function sameCreativeTaskOwner(
 ): boolean {
   if (left.kind !== right.kind) return false;
   if (left.kind === 'canvas_node' && right.kind === 'canvas_node') {
-    return left.projectId === right.projectId && left.nodeId === right.nodeId;
+    return left.canvasId === right.canvasId && left.nodeId === right.nodeId;
   }
   if (
     left.kind === 'standalone_workbench' &&
     right.kind === 'standalone_workbench'
   ) {
-    return (
-      left.projectId === right.projectId &&
-      left.workbenchKind === right.workbenchKind
-    );
+    return left.workbenchKind === right.workbenchKind;
   }
   return (
     left.kind === 'workflow_step' &&

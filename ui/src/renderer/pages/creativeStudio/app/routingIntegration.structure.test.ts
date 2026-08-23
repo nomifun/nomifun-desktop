@@ -20,9 +20,11 @@ describe('Creative Studio product route integration', () => {
     expect(creativeStudioAt).toBeGreaterThan(layoutAt);
     expect(router.includes('CreativeStudioHomePage')).toBe(true);
     expect(router.includes('<Route index element={withRouteFallback(CreativeStudioHomePage)} />')).toBe(true);
-    expect(router.includes("path='projects' element={withRouteFallback(CreativeStudioProjectsRoute)}")).toBe(true);
-    expect(router.includes("path='canvas/:projectId'")).toBe(true);
-    expect(router.includes("path='director/:projectId'")).toBe(true);
+    expect(router.includes("path='canvases' element={withRouteFallback(CreativeStudioCanvasesRoute)}")).toBe(true);
+    expect(router.includes("path='projects' element={<LegacyCreativeStudioProjectsRedirect />}")).toBe(true);
+    expect(router.includes('to={`${CREATIVE_STUDIO_CANVASES_PATH}${search}${hash}`}')).toBe(true);
+    expect(router.includes("path='canvas/:canvasId'")).toBe(true);
+    expect(router.includes("path='director/:canvasId'")).toBe(true);
     expect(router.includes("path='image'")).toBe(true);
     expect(router.includes("path='video'")).toBe(true);
     expect(router.includes('CreativeStudioImageWorkbenchRoute')).toBe(true);

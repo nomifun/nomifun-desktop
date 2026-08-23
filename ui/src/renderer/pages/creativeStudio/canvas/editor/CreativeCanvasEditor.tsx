@@ -114,7 +114,7 @@ export interface CreativeCanvasEditorContext {
   state: CanvasState;
   save: CanvasCasSaveSnapshot;
   tool: CanvasInteractionTool;
-  /** Authoritative task ids persisted in the canonical project document. */
+  /** Authoritative task ids persisted in the canonical Canvas document. */
   pendingTaskIds: readonly string[];
   /** Canonical NomiFun Agent session references persisted with the project. */
   agentSessions: readonly CreativeChatSessionReference[];

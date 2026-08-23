@@ -17,7 +17,9 @@ import {
   type CreativeProjectRepository,
 } from './projectRepository';
 
-export const CREATIVE_PROJECTS_SWR_KEY = 'creative-studio/projects/v1';
+/** @deprecated Legacy cache isolated from canonical Canvas-shaped values. */
+export const CREATIVE_PROJECTS_SWR_KEY =
+  'creative-studio/legacy-project-adapter/v1';
 
 export const creativeProjectDetailKey = (projectId: string): readonly [string, string] => [
   'creative-studio/project/v1',
@@ -57,7 +59,7 @@ export interface CreativeProjectsState {
   remove(projectId: string): Promise<void>;
 }
 
-/** Project-hub query and mutations backed by one authoritative repository. */
+/** @deprecated Legacy hook for canvas/editor modules not migrated yet. */
 export function useCreativeProjects(
   repository: CreativeProjectRepository = creativeProjectRepository
 ): CreativeProjectsState {
@@ -119,7 +121,7 @@ export interface CreativeProjectState {
   remove(): Promise<void>;
 }
 
-/** Detail query with CAS save. A falsy id disables all network activity. */
+/** @deprecated Legacy hook for canvas/editor modules not migrated yet. */
 export function useCreativeProject(
   projectId: string | null | undefined,
   repository: CreativeProjectRepository = creativeProjectRepository
@@ -132,7 +134,7 @@ export function useCreativeProject(
 
   const save = useCallback(
     async (expectedRevision: string, document: CreativeProjectDocument) => {
-      if (!projectId) throw new TypeError('Creative Studio project id is required');
+      if (!projectId) throw new TypeError('Creative Studio canvas id is required');
       const project = await repository.save(projectId, expectedRevision, document);
       await mutate({ project, document }, { revalidate: false });
       return project;
@@ -142,7 +144,7 @@ export function useCreativeProject(
 
   const rename = useCallback(
     async (title: string) => {
-      if (!projectId) throw new TypeError('Creative Studio project id is required');
+      if (!projectId) throw new TypeError('Creative Studio canvas id is required');
       const project = await repository.rename(projectId, title);
       await mutate((current) => (current ? { ...current, project } : current), { revalidate: false });
       return project;
@@ -151,7 +153,7 @@ export function useCreativeProject(
   );
 
   const remove = useCallback(async () => {
-    if (!projectId) throw new TypeError('Creative Studio project id is required');
+    if (!projectId) throw new TypeError('Creative Studio canvas id is required');
     await repository.remove(projectId);
     await mutate(undefined, { revalidate: false });
   }, [mutate, projectId, repository]);

@@ -38,7 +38,7 @@ const apiStub = (overrides: Partial<CreativeStudioProjectApi> = {}): CreativeStu
   ...overrides,
 });
 
-describe('Creative Project repository', () => {
+describe('legacy Creative Studio repository adapter', () => {
   test('presents the narrow product persistence port', async () => {
     const calls: unknown[] = [];
     const repository = createCreativeProjectRepository(
@@ -78,7 +78,7 @@ describe('Creative Project repository', () => {
   test('maps stale saves and missing projects to distinct stable errors', async () => {
     const conflict = new BackendHttpError({
       method: 'PUT',
-      path: `/api/creative-studio/projects/${PROJECT_ID}/document`,
+      path: `/api/creative-studio/canvases/${PROJECT_ID}/document`,
       status: 409,
       body: { code: 'REVISION_CONFLICT', error: 'Project revision is stale' },
     });
@@ -102,7 +102,7 @@ describe('Creative Project repository', () => {
           Promise.reject(
             new BackendHttpError({
               method: 'PUT',
-              path: `/api/creative-studio/projects/${PROJECT_ID}/document`,
+              path: `/api/creative-studio/canvases/${PROJECT_ID}/document`,
               status: 409,
               body: { code: 'CONFLICT', error: 'Provider model no longer exists' },
             })
@@ -130,7 +130,7 @@ describe('Creative Project repository', () => {
           Promise.reject(
             new BackendHttpError({
               method: 'GET',
-              path: `/api/creative-studio/projects/${PROJECT_ID}`,
+              path: `/api/creative-studio/canvases/${PROJECT_ID}`,
               status: 404,
               body: { code: 'NOT_FOUND', error: 'Project not found' },
             })
@@ -146,7 +146,7 @@ describe('Creative Project repository', () => {
   });
 });
 
-describe('Creative Project hook cache helpers', () => {
+describe('legacy hook cache helpers', () => {
   test('sorts newest first and upserts by authoritative project id', () => {
     const older = { ...project, projectId: '0198f8bb-8424-7b3d-8f17-bc6a1676f113', updatedAt: 100 };
     expect(sortCreativeProjectSummaries([older, project]).map((item) => item.projectId)).toEqual([

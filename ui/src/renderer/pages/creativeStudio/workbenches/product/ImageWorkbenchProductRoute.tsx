@@ -14,7 +14,6 @@ import {
   useCreativeAssets,
   type CreativeAsset,
 } from '../../assets';
-import type { CreativeProjectDetail } from '../../domain';
 import { useNomiCreativeModelCatalog } from '../../models';
 import {
   creativeTaskClient,
@@ -22,6 +21,15 @@ import {
   type CreativeTask,
 } from '../../tasks';
 import { creativeTaskHistoryClient } from '../../tasks/historyClient';
+import {
+  createDefaultImageWorkbenchDraft,
+  createImageWorkbenchDraft,
+  hydrateStandaloneWorkbenchDraftReferences,
+  imageWorkbenchSettingsFromDraft,
+  isExactWorkbenchDraftModelAvailable,
+  readStandaloneWorkbenchDraft,
+  writeStandaloneWorkbenchDraft,
+} from '../drafts';
 import {
   ImageWorkbench,
   type ImageWorkbenchAspectRatioOption,
@@ -40,7 +48,6 @@ import {
 import {
   createImageWorkbenchRuntimeProps,
   exactWorkbenchModelOptions,
-  imageWorkbenchModelOptions,
   imageWorkbenchReferencesFromAssets,
   prepareStandaloneHistoryRetry,
   useImageWorkbenchRuntime,
@@ -50,71 +57,10 @@ import {
   StandaloneWorkbenchPage,
   StandaloneHistoryGate,
   StandaloneHistoryRetireDialog,
-  useStandaloneWorkbenchScope,
 } from './shared';
 import styles from './StandaloneWorkbenchProduct.module.css';
 
-const EMPTY_SETTINGS: ImageWorkbenchSettings = {
-  model: null,
-  interfaceMode: 'images',
-  quality: 'auto',
-  width: 1024,
-  height: 1024,
-  aspectRatio: '1:1',
-  count: 1,
-};
-
 const ownerScopedPendingNoop = async (): Promise<void> => undefined;
-
-const UnownedImageWorkbench: React.FC<{
-  historyLoading?: boolean;
-  historyError?: string;
-}> = ({
-  historyLoading,
-  historyError,
-}) => {
-  const catalog = useNomiCreativeModelCatalog();
-  const [prompt, setPrompt] = useState('');
-  const [layout, setLayout] = useState<ImageWorkbenchLayout>('side');
-  const [settings, setSettings] = useState(EMPTY_SETTINGS);
-  return (
-    <ImageWorkbench
-      layout={layout}
-      prompt={prompt}
-      references={[]}
-      settings={settings}
-      modelOptions={imageWorkbenchModelOptions(catalog, 'image_generation')}
-      results={[]}
-      selectedResultIds={[]}
-      task={{ state: 'idle', pendingCount: 0 }}
-      disabled
-      historyLoading={historyLoading}
-      historyError={historyError}
-      onLayoutChange={setLayout}
-      onPromptChange={setPrompt}
-      onRemoveReference={() => undefined}
-      onModelChange={(model) => setSettings((value) => ({ ...value, model }))}
-      onInterfaceModeChange={(interfaceMode) =>
-        setSettings((value) => ({ ...value, interfaceMode }))
-      }
-      onQualityChange={(quality) => setSettings((value) => ({ ...value, quality }))}
-      onDimensionsChange={(dimensions) =>
-        setSettings((value) => ({ ...value, ...dimensions }))
-      }
-      onAspectRatioChange={(option) =>
-        setSettings((value) => ({
-          ...value,
-          aspectRatio: option.value,
-          width: option.width,
-          height: option.height,
-        }))
-      }
-      onCountChange={(count) => setSettings((value) => ({ ...value, count }))}
-      onGenerate={() => undefined}
-      onResultSelectionChange={() => undefined}
-    />
-  );
-};
 
 const imageSettingsFromTask = (task: CreativeTask): ImageWorkbenchSettings => {
   if (task.task !== 'image_generation' && task.task !== 'image_edit') {
@@ -149,17 +95,26 @@ const imageSettingsFromTask = (task: CreativeTask): ImageWorkbenchSettings => {
 };
 
 const OwnedImageWorkbenchReady: React.FC<{
-  detail: CreativeProjectDetail;
   history: StandaloneWorkbenchHistoryState;
-}> = ({ detail, history }) => {
+}> = ({ history }) => {
   const navigate = useNavigate();
   const catalog = useNomiCreativeModelCatalog();
   const assets = useCreativeAssets({ pageSize: 200, query: { sort: 'updated_desc' } });
-  const [layout, setLayout] = useState<ImageWorkbenchLayout>('side');
-  const [prompt, setPrompt] = useState('');
-  const [settings, setSettings] = useState<ImageWorkbenchSettings>(EMPTY_SETTINGS);
-  const [referenceIds, setReferenceIds] = useState<string[]>([]);
+  const [initialDraft] = useState(
+    () => readStandaloneWorkbenchDraft('image') ?? createDefaultImageWorkbenchDraft()
+  );
+  const [layout, setLayout] = useState<ImageWorkbenchLayout>(initialDraft.layout);
+  const [prompt, setPrompt] = useState(initialDraft.prompt);
+  const [settings, setSettings] = useState<ImageWorkbenchSettings>(() =>
+    imageWorkbenchSettingsFromDraft(initialDraft)
+  );
+  const [referenceIds, setReferenceIds] = useState<string[]>([
+    ...initialDraft.referenceAssetIds,
+  ]);
   const [hydratedReferences, setHydratedReferences] = useState<CreativeAsset[]>([]);
+  const [draftReferencesRestoring, setDraftReferencesRestoring] = useState(
+    initialDraft.referenceAssetIds.length > 0
+  );
   const [selectedResultIds, setSelectedResultIds] = useState<string[]>([]);
   const [retireTaskIds, setRetireTaskIds] = useState<string[]>([]);
   const [retiredTaskIds, setRetiredTaskIds] = useState<string[]>([]);
@@ -168,11 +123,7 @@ const OwnedImageWorkbenchReady: React.FC<{
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const loadGenerationRef = useRef(0);
-  const projectId = detail.project.projectId;
-  const historyScope = useMemo(
-    () => ({ projectId, workbenchKind: 'image' as const }),
-    [projectId]
-  );
+  const historyScope = useMemo(() => ({ workbenchKind: 'image' as const }), []);
   const durableTasks = useMemo(
     () =>
       combineStandaloneHistoryTasks(history.tasks, history.activeTasks).filter(
@@ -196,7 +147,7 @@ const OwnedImageWorkbenchReady: React.FC<{
     [history.reload]
   );
   const runtime = useImageWorkbenchRuntime({
-    scopeKey: `${projectId}:standalone-image`,
+    scopeKey: 'standalone-image',
     tasks: creativeTaskClient,
     assets: creativeAssetClient,
     initialResumeRequests,
@@ -220,13 +171,68 @@ const OwnedImageWorkbenchReady: React.FC<{
   const modelTask = referenceIds.length ? 'image_edit' : 'image_generation';
 
   useEffect(() => {
-    if (!settings.model || catalog.status !== 'ready') return;
-    const stillAvailable = exactWorkbenchModelOptions(catalog, modelTask).some(
-      (option) =>
-        option.providerId === settings.model?.providerId && option.model === settings.model.model
+    const restoredReferenceIds = initialDraft.referenceAssetIds;
+    if (restoredReferenceIds.length === 0) return;
+    const restoredReferenceSet = new Set(restoredReferenceIds);
+    let canceled = false;
+    void hydrateStandaloneWorkbenchDraftReferences(
+      'image',
+      restoredReferenceIds,
+      creativeAssetClient
+    )
+      .then((hydrated) => {
+        if (canceled) return;
+        const retained = new Set(hydrated.retainedReferenceAssetIds);
+        setHydratedReferences((current) => {
+          const next = new Map(current.map((asset) => [asset.id, asset]));
+          for (const assetId of restoredReferenceSet) next.delete(assetId);
+          for (const asset of hydrated.assets) next.set(asset.id, asset);
+          return [...next.values()];
+        });
+        setReferenceIds((current) =>
+          current.filter(
+            (assetId) => !restoredReferenceSet.has(assetId) || retained.has(assetId)
+          )
+        );
+        setDraftReferencesRestoring(false);
+      })
+      .catch(() => {
+        if (canceled) return;
+        setReferenceIds((current) =>
+          current.filter((assetId) => !restoredReferenceSet.has(assetId))
+        );
+        setDraftReferencesRestoring(false);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [initialDraft.referenceAssetIds]);
+
+  useEffect(() => {
+    writeStandaloneWorkbenchDraft(
+      createImageWorkbenchDraft({
+        layout,
+        prompt,
+        settings,
+        referenceAssetIds: referenceIds,
+      })
+    );
+  }, [layout, prompt, referenceIds, settings]);
+
+  useEffect(() => {
+    if (
+      draftReferencesRestoring ||
+      !settings.model ||
+      catalog.status !== 'ready'
+    ) {
+      return;
+    }
+    const stillAvailable = isExactWorkbenchDraftModelAvailable(
+      settings.model,
+      exactWorkbenchModelOptions(catalog, modelTask)
     );
     if (!stillAvailable) setSettings((value) => ({ ...value, model: null }));
-  }, [catalog, modelTask, settings.model]);
+  }, [catalog, draftReferencesRestoring, modelTask, settings.model]);
 
   useEffect(
     () => () => {
@@ -246,6 +252,10 @@ const OwnedImageWorkbenchReady: React.FC<{
 
   const generate = async (): Promise<void> => {
     setError(null);
+    if (draftReferencesRestoring) {
+      setError('参考素材草稿仍在恢复，未发起生成。');
+      return;
+    }
     if (!settings.model || catalog.status !== 'ready') {
       setError('没有可用且明确选择的真实模型，未发起生成。');
       return;
@@ -257,8 +267,7 @@ const OwnedImageWorkbenchReady: React.FC<{
     try {
       await runtime.generate({
         catalog,
-        projectId,
-        owner: standaloneWorkbenchOwner(projectId, 'image'),
+        owner: standaloneWorkbenchOwner('image'),
         model: settings.model,
         references: {
           assets: references,
@@ -358,7 +367,6 @@ const OwnedImageWorkbenchReady: React.FC<{
     setRetireError(null);
     try {
       const result = await creativeTaskHistoryClient.retireStandalone({
-        projectId,
         workbenchKind: 'image',
         taskIds: retireTaskIds,
       });
@@ -417,7 +425,8 @@ const OwnedImageWorkbenchReady: React.FC<{
     runtime: presentationRuntime,
     catalog,
     task: modelTask,
-    disabled: catalog.status !== 'ready' || history.refreshing,
+    disabled:
+      draftReferencesRestoring || catalog.status !== 'ready' || history.refreshing,
     onGenerate: generate,
     onRetryTask: retryTask,
     onActionError: (reason) => setError(reason instanceof Error ? reason.message : String(reason)),
@@ -512,11 +521,8 @@ const OwnedImageWorkbenchReady: React.FC<{
   );
 };
 
-const OwnedImageWorkbench: React.FC<{ detail: CreativeProjectDetail }> = ({ detail }) => {
-  const historyScope = useMemo(
-    () => ({ projectId: detail.project.projectId, workbenchKind: 'image' as const }),
-    [detail.project.projectId]
-  );
+const OwnedImageWorkbench: React.FC = () => {
+  const historyScope = useMemo(() => ({ workbenchKind: 'image' as const }), []);
   const history = useStandaloneWorkbenchHistory(historyScope);
   if (history.status !== 'ready') {
     return (
@@ -527,19 +533,14 @@ const OwnedImageWorkbench: React.FC<{ detail: CreativeProjectDetail }> = ({ deta
       />
     );
   }
-  return <OwnedImageWorkbenchReady detail={detail} history={history} />;
+  return <OwnedImageWorkbenchReady history={history} />;
 };
 
 /** Router-ready, prop-free standalone image product. */
 const ImageWorkbenchProductRoute: React.FC = () => {
-  const scope = useStandaloneWorkbenchScope();
   return (
-    <StandaloneWorkbenchPage scope={scope} error={null}>
-      {scope.state === 'ready' && scope.detail ? (
-        <OwnedImageWorkbench key={scope.detail.project.projectId} detail={scope.detail} />
-      ) : (
-        <UnownedImageWorkbench />
-      )}
+    <StandaloneWorkbenchPage error={null}>
+      <OwnedImageWorkbench />
     </StandaloneWorkbenchPage>
   );
 };

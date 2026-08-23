@@ -28,13 +28,12 @@ describe('Creative Studio resume location', () => {
   test('keeps exact current routes with their search and hash intact', () => {
     for (const path of [
       '/workshop',
+      '/workshop/canvases',
       '/workshop/projects',
       `/workshop/canvas/${PROJECT_ID}`,
       `/workshop/director/${PROJECT_ID}#timeline`,
-      // Legacy standalone projectId is preserved by this checkpoint only.
-      // Phase 1 of the Canvas-domain redesign removes it from canonical URLs.
-      `/workshop/image?projectId=${PROJECT_ID}&panel=history#result-2`,
-      `/workshop/video?projectId=${PROJECT_ID}`,
+      '/workshop/image?panel=history#result-2',
+      '/workshop/video',
       '/workshop/prompts?query=portrait',
       '/workshop/assets?page=3',
       '/workshop/workflows#runs',
@@ -59,7 +58,7 @@ describe('Creative Studio resume location', () => {
 
   test('round-trips through session-scoped storage and tolerates unavailable storage', () => {
     const storage = memoryStorage();
-    const path = `/workshop/image?projectId=${PROJECT_ID}`;
+    const path = '/workshop/image?panel=history';
 
     expect(readCreativeStudioResumeLocation(storage)).toBe('/workshop');
     expect(rememberCreativeStudioResumeLocation(path, storage)).toBe(path);

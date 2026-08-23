@@ -13,7 +13,6 @@ import {
 import { HttpCreationTaskApi } from './client';
 import { CreativeTaskContractError } from './types';
 
-const PROJECT_ID = '0190f5fe-7c00-7a00-8000-000000000031';
 const PROVIDER_ID = '0190f5fe-7c00-7a00-8000-000000000032';
 const TASK_A = '0190f5fe-7c00-7a00-8000-000000000033';
 const TASK_B = '0190f5fe-7c00-7a00-8000-000000000034';
@@ -22,7 +21,6 @@ const task = (taskId: string, submittedAt: number) => ({
   creation_task_id: taskId,
   owner: {
     kind: 'standalone_workbench',
-    project_id: PROJECT_ID,
     workbench_kind: 'image',
   },
   provider_id: PROVIDER_ID,
@@ -61,12 +59,11 @@ describe('CreativeTaskHistoryClient', () => {
       },
     };
     const page = await new CreativeTaskHistoryClient(api).listStandalone({
-      projectId: PROJECT_ID,
       workbenchKind: 'image',
       limit: 2,
     });
     expect(requested).toBe(
-      `project_id=${PROJECT_ID}&workbench_kind=image&limit=2`
+      'workbench_kind=image&limit=2'
     );
     expect(page.items.map((item) => item.taskId)).toEqual([TASK_B, TASK_A]);
     expect(page.nextCursor).toBe(`10:${TASK_A}`);
@@ -80,7 +77,6 @@ describe('CreativeTaskHistoryClient', () => {
             ...task(TASK_A, 10),
             owner: {
               kind: 'standalone_workbench',
-              project_id: PROJECT_ID,
               workbench_kind: 'video',
             },
           },
@@ -97,7 +93,7 @@ describe('CreativeTaskHistoryClient', () => {
       try {
         await new CreativeTaskHistoryClient({
           listStandalone: async () => value,
-        }).listStandalone({ projectId: PROJECT_ID, workbenchKind: 'image' });
+        }).listStandalone({ workbenchKind: 'image' });
       } catch (reason) {
         error = reason;
       }
@@ -115,19 +111,15 @@ describe('CreativeTaskHistoryClient', () => {
           items: [task(TASK_B, 20), task(TASK_A, 10)],
           next_cursor: null,
         },
-        input: { projectId: PROJECT_ID, workbenchKind: 'image', limit: 1 },
+        input: { workbenchKind: 'image', limit: 1 },
       },
       {
         value: { items: [task(TASK_A, 10)], next_cursor: `9:${TASK_A}` },
-        input: { projectId: PROJECT_ID, workbenchKind: 'image', limit: 1 },
+        input: { workbenchKind: 'image', limit: 1 },
       },
       {
         value: { items: [task(TASK_B, 10)], next_cursor: null },
-        input: {
-          projectId: PROJECT_ID,
-          workbenchKind: 'image',
-          cursor: `10:${TASK_B}`,
-        },
+        input: { workbenchKind: 'image', cursor: `10:${TASK_B}` },
       },
     ];
     for (const { value, input } of cases) {
@@ -148,7 +140,6 @@ describe('CreativeTaskHistoryClient', () => {
         next_cursor: null,
       }),
     }).listStandalone({
-      projectId: PROJECT_ID,
       workbenchKind: 'image',
       cursor: `20:${TASK_B}`,
     });
@@ -170,13 +161,13 @@ describe('CreativeTaskHistoryClient', () => {
       }) as typeof fetch,
     });
     const page = await new CreativeTaskHistoryClient(http).listStandalone(
-      { projectId: PROJECT_ID, workbenchKind: 'image' },
+      { workbenchKind: 'image' },
       signal
     );
     expect(page.items).toEqual([]);
     expect(calls).toEqual([
       {
-        url: `http://127.0.0.1:8788/api/creative-studio/tasks?project_id=${PROJECT_ID}&workbench_kind=image&limit=30`,
+        url: 'http://127.0.0.1:8788/api/creative-studio/tasks?workbench_kind=image&limit=30',
         signal,
       },
     ]);
@@ -191,13 +182,12 @@ describe('CreativeTaskHistoryClient', () => {
       },
     });
     const page = await client.listStandalone({
-      projectId: PROJECT_ID,
       workbenchKind: 'image',
       limit: 100,
       activeOnly: true,
     });
     expect(requested).toBe(
-      `project_id=${PROJECT_ID}&workbench_kind=image&limit=100&active_only=true`
+      'workbench_kind=image&limit=100&active_only=true'
     );
     expect(page.items[0]?.status).toBe('queued');
 
@@ -206,7 +196,6 @@ describe('CreativeTaskHistoryClient', () => {
       await new CreativeTaskHistoryClient({
         listStandalone: async () => ({ items: [task(TASK_A, 10)], next_cursor: null }),
       }).listStandalone({
-        projectId: PROJECT_ID,
         workbenchKind: 'image',
         activeOnly: true,
       });
@@ -225,12 +214,10 @@ describe('CreativeTaskHistoryClient', () => {
         return { retired_task_ids: [TASK_B, TASK_A] };
       },
     }).retireStandalone({
-      projectId: PROJECT_ID,
       workbenchKind: 'image',
       taskIds: [TASK_B, TASK_A],
     });
     expect(body).toEqual({
-      project_id: PROJECT_ID,
       workbench_kind: 'image',
       task_ids: [TASK_B, TASK_A],
     });
@@ -247,7 +234,6 @@ describe('CreativeTaskHistoryClient', () => {
           listStandalone: async () => ({ items: [], next_cursor: null }),
           retireStandalone: async () => value,
         }).retireStandalone({
-          projectId: PROJECT_ID,
           workbenchKind: 'image',
           taskIds: [TASK_B, TASK_A],
         });
@@ -278,7 +264,7 @@ describe('CreativeTaskHistoryClient', () => {
       }) as typeof fetch,
     });
     await new CreativeTaskHistoryClient(http).retireStandalone(
-      { projectId: PROJECT_ID, workbenchKind: 'image', taskIds: [TASK_A] },
+      { workbenchKind: 'image', taskIds: [TASK_A] },
       signal
     );
     expect(calls).toEqual([
@@ -286,7 +272,6 @@ describe('CreativeTaskHistoryClient', () => {
         url: 'http://127.0.0.1:8788/api/creative-studio/tasks/retire',
         method: 'POST',
         body: JSON.stringify({
-          project_id: PROJECT_ID,
           workbench_kind: 'image',
           task_ids: [TASK_A],
         }),
@@ -308,7 +293,6 @@ describe('CreativeTaskHistoryClient', () => {
       let error: unknown = null;
       try {
         await client.retireStandalone({
-          projectId: PROJECT_ID,
           workbenchKind: 'image',
           taskIds,
         });

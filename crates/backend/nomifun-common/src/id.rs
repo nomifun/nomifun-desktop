@@ -350,15 +350,27 @@ define_entity_id!(
     CompanionEvolutionFeedbackId
 );
 define_entity_id!(
-    /// Globally unique canonical Creative Studio project identifier.
+    /// Globally unique Creative Studio canvas identifier.
+    ///
+    /// This is the current product-facing identity. It deliberately uses the
+    /// same canonical UUIDv7 wire representation as the legacy project ID so
+    /// existing persisted canvas rows remain addressable without translation.
+    CreativeStudioCanvasId
+);
+define_entity_id!(
+    /// Legacy Creative Studio project/storage identifier.
+    ///
+    /// New product-facing APIs should use [`CreativeStudioCanvasId`]. This type
+    /// remains for compatibility with the existing persistence and service
+    /// layers while the internal schema is migrated independently.
     CreativeStudioProjectId
 );
 define_entity_id!(
-    /// Globally unique node identifier inside a canonical Creative Studio project.
+    /// Globally unique node identifier inside a Creative Studio canvas.
     CreativeStudioNodeId
 );
 define_entity_id!(
-    /// Globally unique connection identifier inside a canonical Creative Studio project.
+    /// Globally unique connection identifier inside a Creative Studio canvas.
     CreativeStudioConnectionId
 );
 define_entity_id!(
@@ -487,5 +499,16 @@ mod tests {
         )
         .is_err());
         assert!(serde_json::from_str::<ConversationId>("42").is_err());
+    }
+
+    #[test]
+    fn canvas_id_is_wire_compatible_with_legacy_project_id() {
+        let value = generate_id();
+        let canvas_id = CreativeStudioCanvasId::parse(value.clone()).unwrap();
+        let legacy_project_id = CreativeStudioProjectId::parse(value.clone()).unwrap();
+
+        assert_eq!(canvas_id.as_str(), value);
+        assert_eq!(legacy_project_id.as_str(), value);
+        assert_eq!(serde_json::to_string(&canvas_id).unwrap(), format!("\"{value}\""));
     }
 }

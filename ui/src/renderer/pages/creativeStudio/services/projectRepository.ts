@@ -30,7 +30,10 @@ export type CreativeProjectRepositoryErrorKind =
   | 'server'
   | 'unknown';
 
-/** Product-facing error vocabulary independent of the HTTP implementation. */
+/**
+ * @deprecated Legacy error vocabulary retained for canvas/editor modules that
+ * still use the historical in-process shape.
+ */
 export class CreativeProjectRepositoryError extends Error {
   readonly kind: CreativeProjectRepositoryErrorKind;
   readonly status: number | null;
@@ -144,4 +147,5 @@ export function createCreativeProjectRepository(
   };
 }
 
+/** @deprecated Use creativeCanvasRepository. */
 export const creativeProjectRepository = createCreativeProjectRepository();

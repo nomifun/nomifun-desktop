@@ -1,7 +1,7 @@
 //! Canonical Creative Studio creation-task DTOs. Wire fields remain snake_case.
 
 use nomifun_common::{
-    AppError, CreationTaskId, CreativeStudioNodeId, CreativeStudioProjectId,
+    AppError, CreationTaskId, CreativeStudioCanvasId, CreativeStudioNodeId,
     CreativeStudioWorkflowId, CreativeStudioWorkflowRunId, CreativeStudioWorkflowStepId,
     ProviderId, TimestampMs, WorkshopAssetId,
 };
@@ -18,7 +18,7 @@ use nomifun_common::generate_id;
 #[derive(Debug, Clone, Serialize)]
 pub struct CreationTask {
     pub creation_task_id: String,
-    pub project_id: Option<String>,
+    pub canvas_id: Option<String>,
     pub workbench_kind: Option<String>,
     pub workflow_id: Option<String>,
     pub workflow_run_id: Option<String>,
@@ -46,8 +46,8 @@ impl TryFrom<CreationTaskRow> for CreationTask {
         CreationTaskId::parse(&row.creation_task_id)
             .map_err(|error| corrupt_id("creation_tasks.creation_task_id", error))?;
         if let Some(id) = row.project_id.as_deref() {
-            CreativeStudioProjectId::parse(id)
-                .map_err(|error| corrupt_id("creation_tasks.project_id", error))?;
+            CreativeStudioCanvasId::parse(id)
+                .map_err(|error| corrupt_id("creation_tasks.canvas_id", error))?;
         }
         if let Some(id) = row.workflow_id.as_deref() {
             CreativeStudioWorkflowId::parse(id)
@@ -106,7 +106,7 @@ impl TryFrom<CreationTaskRow> for CreationTask {
             row.node_id.as_ref(),
         ) {
             (Some(_), None, None, None, None, Some(_))
-            | (Some(_), Some("image" | "video" | "audio"), None, None, None, None)
+            | (_, Some("image" | "video" | "audio"), None, None, None, None)
             | (None, None, Some(_), Some(_), Some(_), None) => {}
             _ => {
                 return Err(AppError::Internal(format!(
@@ -128,7 +128,8 @@ impl TryFrom<CreationTaskRow> for CreationTask {
 
         Ok(Self {
             creation_task_id: row.creation_task_id,
-            project_id: row.project_id,
+            // Repository storage remains on the legacy project_id column.
+            canvas_id: row.project_id,
             workbench_kind: row.workbench_kind,
             workflow_id: row.workflow_id,
             workflow_run_id: row.workflow_run_id,
@@ -156,11 +157,10 @@ impl TryFrom<CreationTaskRow> for CreationTask {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CreativeCreationTaskOwner {
     CanvasNode {
-        project_id: String,
+        canvas_id: String,
         node_id: String,
     },
     StandaloneWorkbench {
-        project_id: String,
         workbench_kind: String,
     },
     WorkflowStep {
@@ -224,22 +224,21 @@ impl TryFrom<CreationTask> for CreativeCreationTask {
 
     fn try_from(task: CreationTask) -> Result<Self, Self::Error> {
         let owner = match (
-            task.project_id,
+            task.canvas_id,
             task.workbench_kind,
             task.workflow_id,
             task.workflow_run_id,
             task.workflow_step_id,
             task.node_id,
         ) {
-            (Some(project_id), None, None, None, None, Some(node_id)) => {
+            (Some(canvas_id), None, None, None, None, Some(node_id)) => {
                 CreativeCreationTaskOwner::CanvasNode {
-                    project_id,
+                    canvas_id,
                     node_id,
                 }
             }
-            (Some(project_id), Some(workbench_kind), None, None, None, None) => {
+            (_, Some(workbench_kind), None, None, None, None) => {
                 CreativeCreationTaskOwner::StandaloneWorkbench {
-                    project_id,
                     workbench_kind,
                 }
             }
@@ -288,13 +287,13 @@ mod tests {
     #[test]
     fn task_dto_parses_json_columns() {
         let creation_task_id = generate_id();
-        let project_id = CreativeStudioProjectId::new().into_string();
+        let canvas_id = CreativeStudioCanvasId::new().into_string();
         let node_id = CreativeStudioNodeId::new().into_string();
         let provider_id = ProviderId::new().into_string();
         let asset_id = WorkshopAssetId::new().into_string();
         let row = CreationTaskRow {
             creation_task_id: creation_task_id.clone(),
-            project_id: Some(project_id),
+            project_id: Some(canvas_id.clone()),
             workbench_kind: None,
             workflow_id: None,
             workflow_run_id: None,
@@ -318,22 +317,29 @@ mod tests {
         let dto = CreationTask::try_from(row).unwrap();
         assert_eq!(dto.params["prompt"], "cat");
         assert_eq!(dto.creation_task_id, creation_task_id);
+        assert_eq!(dto.canvas_id.as_deref(), Some(canvas_id.as_str()));
         assert_eq!(dto.error.as_ref().unwrap()["kind"], "adapter_unavailable");
         assert_eq!(dto.result_asset_ids, vec![asset_id]);
         assert_eq!(dto.finished_at, Some(2));
 
         let wire = serde_json::to_value(&dto).unwrap();
         assert_eq!(wire["creation_task_id"], dto.creation_task_id.as_str());
+        assert_eq!(wire["canvas_id"], canvas_id);
+        assert!(wire.get("project_id").is_none());
         assert!(wire.get("task_id").is_none());
+
+        let canonical = serde_json::to_value(CreativeCreationTask::try_from(dto).unwrap()).unwrap();
+        assert_eq!(canonical["owner"]["kind"], "canvas_node");
+        assert_eq!(canonical["owner"]["canvas_id"], canvas_id);
+        assert!(canonical["owner"].get("project_id").is_none());
     }
 
     #[test]
     fn standalone_owner_and_ordered_inputs_round_trip_without_guessing() {
-        let project_id = CreativeStudioProjectId::new().into_string();
         let input_asset_id = WorkshopAssetId::new().into_string();
         let row = CreationTaskRow {
             creation_task_id: generate_id(),
-            project_id: Some(project_id.clone()),
+            project_id: None,
             workbench_kind: Some("video".into()),
             workflow_id: None,
             workflow_run_id: None,
@@ -370,7 +376,7 @@ mod tests {
         .unwrap();
         let wire = serde_json::to_value(page).unwrap();
         assert_eq!(wire["items"][0]["owner"]["kind"], "standalone_workbench");
-        assert_eq!(wire["items"][0]["owner"]["project_id"], project_id);
+        assert!(wire["items"][0]["owner"].get("project_id").is_none());
         assert_eq!(wire["items"][0]["owner"]["workbench_kind"], "video");
         assert_eq!(wire["items"][0]["inputs"][0]["asset_id"], input_asset_id);
         assert_eq!(wire["items"][0]["inputs"][0]["kind"], "image");
@@ -383,7 +389,7 @@ mod tests {
     fn succeeded_without_artifacts_fails_closed() {
         let row = CreationTaskRow {
             creation_task_id: generate_id(),
-            project_id: Some(CreativeStudioProjectId::new().into_string()),
+            project_id: Some(CreativeStudioCanvasId::new().into_string()),
             workbench_kind: None,
             workflow_id: None,
             workflow_run_id: None,
@@ -422,7 +428,7 @@ mod tests {
         ] {
             let row = CreationTaskRow {
                 creation_task_id: creation_task_id.into(),
-                project_id: Some(CreativeStudioProjectId::new().into_string()),
+                project_id: Some(CreativeStudioCanvasId::new().into_string()),
                 workbench_kind: None,
                 workflow_id: None,
                 workflow_run_id: None,

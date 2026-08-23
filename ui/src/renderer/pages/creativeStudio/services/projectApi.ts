@@ -4,31 +4,34 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { httpRequest } from '@/common/adapter/httpBridge';
 import {
-  CreativeStudioContractError,
-  parseCreateCreativeProjectRequest,
-  parseCreativeProjectDetailResponse,
-  parseCreativeProjectListResponse,
-  parseCreativeProjectResponse,
-  parseRenameCreativeProjectRequest,
-  parseSaveCreativeProjectRequest,
+  creativeCanvasDetailToLegacyProject,
+  creativeCanvasSummaryToLegacyProject,
+  legacyProjectDocumentToCreativeCanvas,
   type CreateCreativeProjectRequest,
   type CreativeProjectDetail,
-  type CreativeProjectResponse,
   type CreativeProjectSummary,
   type RenameCreativeProjectRequest,
   type SaveCreativeProjectRequest,
 } from '../domain';
+import {
+  CREATIVE_STUDIO_CANVASES_ENDPOINT,
+  createCreativeStudioCanvasApi,
+  creativeStudioCanvasApi,
+  type CreativeStudioCanvasApi,
+  type CreativeStudioHttpRequest,
+} from './canvasApi';
 
-export const CREATIVE_STUDIO_PROJECTS_ENDPOINT = '/api/creative-studio/projects';
+/**
+ * @deprecated Historical export retained for canvas/editor modules that have
+ * not migrated their in-process names. It intentionally targets `/canvases`.
+ */
+export const CREATIVE_STUDIO_PROJECTS_ENDPOINT =
+  CREATIVE_STUDIO_CANVASES_ENDPOINT;
 
-export type CreativeStudioHttpRequest = (
-  method: string,
-  path: string,
-  body?: unknown
-) => Promise<unknown>;
+export type { CreativeStudioHttpRequest };
 
+/** @deprecated Use CreativeStudioCanvasApi. */
 export interface CreativeStudioProjectApi {
   listProjects(): Promise<CreativeProjectSummary[]>;
   createProject(request?: CreateCreativeProjectRequest): Promise<CreativeProjectSummary>;
@@ -44,72 +47,52 @@ export interface CreativeStudioProjectApi {
   ): Promise<CreativeProjectSummary>;
 }
 
-const defaultRequest: CreativeStudioHttpRequest = (method, path, body) =>
-  httpRequest<unknown>(method, path, body);
-
-const projectPath = (projectId: string): string =>
-  `${CREATIVE_STUDIO_PROJECTS_ENDPOINT}/${encodeURIComponent(projectId)}`;
-
-const projectFromResponse = (value: unknown): CreativeProjectSummary =>
-  parseCreativeProjectResponse(value).project;
-
-const assertResponseProjectId = (actual: string, expected: string): void => {
-  if (actual !== expected) {
-    throw new CreativeStudioContractError(
-      'PROJECT_MISMATCH',
-      '$.project.projectId',
-      JSON.stringify(expected)
-    );
-  }
-};
-
 /**
- * Build a validated API client over NomiFun's shared HTTP bridge. Injection is
- * intentional: repository tests can exercise every wire path without mocking
- * global fetch, auth, or CSRF behavior.
+ * @deprecated Legacy in-process shape adapter over the canonical Canvas API.
+ * Passing an HTTP request remains supported for focused compatibility tests.
  */
 export function createCreativeStudioProjectApi(
-  request: CreativeStudioHttpRequest = defaultRequest
+  input: CreativeStudioCanvasApi | CreativeStudioHttpRequest =
+    creativeStudioCanvasApi
 ): CreativeStudioProjectApi {
+  const api =
+    typeof input === 'function' ? createCreativeStudioCanvasApi(input) : input;
+
   return {
     async listProjects() {
-      const response = await request('GET', CREATIVE_STUDIO_PROJECTS_ENDPOINT);
-      return parseCreativeProjectListResponse(response).projects;
+      return (await api.listCanvases()).map(creativeCanvasSummaryToLegacyProject);
     },
 
-    async createProject(input = {}) {
-      const body = parseCreateCreativeProjectRequest(input);
-      return projectFromResponse(await request('POST', CREATIVE_STUDIO_PROJECTS_ENDPOINT, body));
+    async createProject(request = {}) {
+      return creativeCanvasSummaryToLegacyProject(
+        await api.createCanvas(request)
+      );
     },
 
     async getProject(projectId) {
-      const response = await request('GET', projectPath(projectId));
-      const detail = parseCreativeProjectDetailResponse(response);
-      // The document parser enforces document -> summary identity; this final
-      // check enforces URL -> summary identity as well.
-      assertResponseProjectId(detail.project.projectId, projectId);
-      return detail;
+      return creativeCanvasDetailToLegacyProject(
+        await api.getCanvas(projectId)
+      );
     },
 
-    async renameProject(projectId, input) {
-      const body = parseRenameCreativeProjectRequest(input);
-      const project = projectFromResponse(await request('PATCH', projectPath(projectId), body));
-      assertResponseProjectId(project.projectId, projectId);
-      return project;
+    async renameProject(projectId, request) {
+      return creativeCanvasSummaryToLegacyProject(
+        await api.renameCanvas(projectId, request)
+      );
     },
 
-    async deleteProject(projectId) {
-      await request('DELETE', projectPath(projectId));
-    },
+    deleteProject: (projectId) => api.deleteCanvas(projectId),
 
-    async saveProject(projectId, input) {
-      const body = parseSaveCreativeProjectRequest(input, projectId);
-      const response = (await request('PUT', `${projectPath(projectId)}/document`, body)) as CreativeProjectResponse;
-      const project = projectFromResponse(response);
-      assertResponseProjectId(project.projectId, projectId);
-      return project;
+    async saveProject(projectId, request) {
+      return creativeCanvasSummaryToLegacyProject(
+        await api.saveCanvas(projectId, {
+          expectedRevision: request.expectedRevision,
+          document: legacyProjectDocumentToCreativeCanvas(request.document),
+        })
+      );
     },
   };
 }
 
+/** @deprecated Use creativeStudioCanvasApi. */
 export const creativeStudioProjectApi = createCreativeStudioProjectApi();
