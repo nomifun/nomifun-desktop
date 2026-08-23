@@ -1,5 +1,6 @@
 {
   "scheduledTasks": "Scheduled Tasks",
+   "siderTitle": "Schedule",
   "taskCount": "{{count}} task(s)",
   "schedule": "Schedule",
   "nextRun": "Next run",

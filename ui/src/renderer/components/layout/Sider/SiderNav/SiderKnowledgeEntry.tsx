@@ -30,7 +30,7 @@ const SiderKnowledgeEntry: React.FC<SiderKnowledgeEntryProps> = ({
 
   if (collapsed) {
     return (
-      <Tooltip {...siderTooltipProps} content={t('knowledge.title')} position='right'>
+      <Tooltip {...siderTooltipProps} content={t('knowledge.siderTitle')} position='right'>
         <div
           className={classNames(
             'w-full h-28px flex items-center justify-center cursor-pointer transition-colors rd-8px text-t-primary',
@@ -47,7 +47,7 @@ const SiderKnowledgeEntry: React.FC<SiderKnowledgeEntryProps> = ({
   }
 
   return (
-    <Tooltip {...siderTooltipProps} content={t('knowledge.title')} position='right'>
+    <Tooltip {...siderTooltipProps} content={t('knowledge.siderTitle')} position='right'>
       <div
         className={classNames(
           'box-border group h-28px w-full flex items-center justify-start gap-8px pl-10px pr-8px rd-0.5rem cursor-pointer shrink-0 transition-all text-t-primary',
@@ -66,7 +66,7 @@ const SiderKnowledgeEntry: React.FC<SiderKnowledgeEntryProps> = ({
           />
         </span>
         <span className='collapsed-hidden text-14px font-[500] leading-24px'>
-          {t('knowledge.title')}
+          {t('knowledge.siderTitle')}
         </span>
       </div>
     </Tooltip>
