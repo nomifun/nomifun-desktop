@@ -22,7 +22,6 @@ export const CREATIVE_STUDIO_WORKFLOWS_PATH = '/workshop/workflows';
 export const WORKBENCH_HOME_PATH = '/guid';
 
 export type CreativeStudioSection =
-  | 'home'
   | 'canvases'
   | 'canvas'
   | 'director'
@@ -98,7 +97,7 @@ export const creativeStudioSectionForPath = (
   path: string
 ): CreativeStudioSection | null => {
   const pathname = normalizePathname(path);
-  if (pathname === CREATIVE_STUDIO_ROOT_PATH) return 'home';
+  if (pathname === CREATIVE_STUDIO_ROOT_PATH) return 'canvases';
   if (
     pathname === CREATIVE_STUDIO_CANVASES_PATH ||
     pathname === CREATIVE_STUDIO_LEGACY_PROJECTS_PATH

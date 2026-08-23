@@ -68,7 +68,7 @@ Canvases. The canonical Canvas HTTP API is
 deprecated alias. Gateway Canvas capabilities are
 `nomi_creative_studio_list_canvases` and
 `nomi_creative_studio_get_canvas`, with the old project-named capabilities
-retained only as deprecated aliases. The UI/API contract version is 21.
+retained only as deprecated aliases. The UI/API contract version is 22.
 
 Creative Studio writes version-2 Canvas archives while retaining a version-1
 reader. Image and Video preserve versioned per-workbench session drafts in

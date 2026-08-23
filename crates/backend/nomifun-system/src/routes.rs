@@ -65,6 +65,7 @@ pub struct SystemRouterState {
 /// - `PUT  /api/providers/:provider_id`      — update a provider
 /// - `DELETE /api/providers/:provider_id`    — delete a provider
 /// - `POST /api/providers/:provider_id/clone` — clone a provider (models + connections)
+/// - `GET  /api/providers/:provider_id/api-keys` — read plaintext API keys for editing
 /// - `GET  /api/providers/:provider_id/connections` — list connection profiles
 /// - `PUT  /api/providers/:provider_id/connections` — upsert a connection profile
 /// - `DELETE /api/providers/:provider_id/connections/:role` — delete a connection profile
@@ -114,6 +115,10 @@ pub fn system_routes(state: SystemRouterState) -> Router {
         .route(
             "/api/providers/{provider_id}/clone",
             post(clone_provider),
+        )
+        .route(
+            "/api/providers/{provider_id}/api-keys",
+            get(get_provider_api_keys),
         )
         .route(
             "/api/providers/{provider_id}/connections",
@@ -321,6 +326,14 @@ async fn update_provider(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let provider = state.provider_service.update(&provider_id, req).await?;
     Ok(Json(ApiResponse::ok(provider)))
+}
+
+async fn get_provider_api_keys(
+    State(state): State<SystemRouterState>,
+    Path(provider_id): Path<String>,
+) -> Result<Json<ApiResponse<Vec<String>>>, AppError> {
+    let api_keys = state.provider_service.api_keys(&provider_id).await?;
+    Ok(Json(ApiResponse::ok(api_keys)))
 }
 
 async fn delete_provider(

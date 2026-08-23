@@ -62,9 +62,15 @@ const serializeResumeLocation = (
 export function normalizeCreativeStudioResumeLocation(value: unknown): string {
   const parsed = parseResumeLocation(value);
   if (!parsed || !isCreativeStudioPath(parsed.pathname)) {
-    return CREATIVE_STUDIO_ROOT_PATH;
+    return CREATIVE_STUDIO_CANVASES_PATH;
   }
-  return serializeResumeLocation(parsed);
+  const pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+  return serializeResumeLocation(
+    parsed,
+    pathname === CREATIVE_STUDIO_ROOT_PATH
+      ? CREATIVE_STUDIO_CANVASES_PATH
+      : pathname
+  );
 }
 
 /**
@@ -90,7 +96,8 @@ export function normalizeCreativeStudioCanvasesResumeLocation(
   const pathname = parsed.pathname.replace(/\/+$/, '') || '/';
   return serializeResumeLocation(
     parsed,
-    pathname === CREATIVE_STUDIO_LEGACY_PROJECTS_PATH
+    pathname === CREATIVE_STUDIO_ROOT_PATH ||
+      pathname === CREATIVE_STUDIO_LEGACY_PROJECTS_PATH
       ? CREATIVE_STUDIO_CANVASES_PATH
       : pathname
   );
@@ -99,13 +106,13 @@ export function normalizeCreativeStudioCanvasesResumeLocation(
 export function readCreativeStudioResumeLocation(
   storage: ResumeStorage | null = browserSessionStorage()
 ): string {
-  if (!storage) return CREATIVE_STUDIO_ROOT_PATH;
+  if (!storage) return CREATIVE_STUDIO_CANVASES_PATH;
   try {
     return normalizeCreativeStudioResumeLocation(
       storage.getItem(CREATIVE_STUDIO_RESUME_LOCATION_KEY)
     );
   } catch {
-    return CREATIVE_STUDIO_ROOT_PATH;
+    return CREATIVE_STUDIO_CANVASES_PATH;
   }
 }
 

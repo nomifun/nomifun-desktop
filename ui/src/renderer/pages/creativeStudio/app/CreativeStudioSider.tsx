@@ -8,7 +8,6 @@ import { Tooltip } from '@arco-design/web-react';
 import {
   AddPicture,
   FileText,
-  FolderOpen,
   FullScreen,
   ImageFiles,
   VideoTwo,
@@ -26,7 +25,6 @@ import {
   CREATIVE_STUDIO_CANVASES_PATH,
   CREATIVE_STUDIO_IMAGE_PATH,
   CREATIVE_STUDIO_PROMPTS_PATH,
-  CREATIVE_STUDIO_ROOT_PATH,
   CREATIVE_STUDIO_VIDEO_PATH,
   creativeStudioSectionForPath,
   type CreativeStudioSection,
@@ -74,12 +72,6 @@ const CreativeStudioSider: React.FC<CreativeStudioSiderProps> = ({
 
   const navigation = useMemo<NavigationItem[]>(
     () => [
-      {
-        section: 'home',
-        path: CREATIVE_STUDIO_ROOT_PATH,
-        label: t('creativeStudio.title'),
-        icon: <FolderOpen />,
-      },
       {
         section: 'canvases',
         path: safeCanvasesResumePath,

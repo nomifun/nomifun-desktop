@@ -14,9 +14,8 @@ const settingsSource = readFileSync(
 );
 
 describe('Creative Studio sidebar navigation', () => {
-  test('keeps the former top-level destinations in sidebar order with a home entry', () => {
+  test('keeps the product destinations in sidebar order without a duplicate home entry', () => {
     const orderedRoutes = [
-      'path: CREATIVE_STUDIO_ROOT_PATH',
       'path: safeCanvasesResumePath',
       'path: CREATIVE_STUDIO_IMAGE_PATH',
       'path: CREATIVE_STUDIO_VIDEO_PATH',
@@ -27,6 +26,9 @@ describe('Creative Studio sidebar navigation', () => {
 
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions.every((position, index) => index === 0 || position > positions[index - 1])).toBe(true);
+    expect(source.includes('CREATIVE_STUDIO_ROOT_PATH')).toBe(false);
+    expect(source.includes("section: 'home'")).toBe(false);
+    expect(source.includes('<FolderOpen')).toBe(false);
     expect(source.includes('CREATIVE_STUDIO_AUDIO_PATH')).toBe(false);
   });
 

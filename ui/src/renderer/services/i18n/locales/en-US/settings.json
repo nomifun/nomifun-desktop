@@ -596,6 +596,7 @@
   "multiApiKeyTip": "💡 Use a comma (,) between multiple API Keys; the system will auto-rotate",
   "multiApiKeyEditTip": "Supports multiple API Keys separated by a comma (,); the system will auto-rotate",
   "apiKeyPlaceholder": "Enter API Key(s); use a comma (,) between multiple keys",
+  "apiKeyLoadFailed": "Failed to load the saved API Key(s). Retry or enter a new value.",
   "editApiKey": "Edit API Keys",
   "testKey": "Test Key",
   "multiKeyTip": "Multiple keys separated by a comma (,)",

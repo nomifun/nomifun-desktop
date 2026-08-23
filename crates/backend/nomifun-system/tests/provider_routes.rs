@@ -89,6 +89,7 @@ async fn empty_list_and_aggregate_create_projection() {
     let created = body_json(created).await;
     let provider = &created["data"];
     ProviderId::parse(provider["provider_id"].as_str().unwrap()).unwrap();
+    let provider_id = provider["provider_id"].as_str().unwrap().to_owned();
     assert_eq!(provider["has_credentials"], true);
     assert!(provider.get("credentials").is_none());
     assert!(provider.get("api_key").is_none());
@@ -96,6 +97,17 @@ async fn empty_list_and_aggregate_create_projection() {
     assert_eq!(provider["models"].as_array().unwrap().len(), 1);
     assert_eq!(provider["models"][0]["model"], "gpt-test");
     assert_eq!(provider["models"][0]["capabilities"][0]["task"], "chat");
+
+    let api_keys = system_routes(build_state(&db))
+        .oneshot(request(
+            "GET",
+            &format!("/api/providers/{provider_id}/api-keys"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(api_keys.status(), StatusCode::OK);
+    assert_eq!(body_json(api_keys).await["data"], json!(["sk-primary"]));
 
     let listed = system_routes(build_state(&db))
         .oneshot(request("GET", "/api/providers", None))

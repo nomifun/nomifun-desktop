@@ -37,6 +37,10 @@ describe('Creative Studio primary navigation', () => {
     expect(siderSource.includes('isCreativeStudioPath(pathname)')).toBe(true);
     expect(siderSource.includes('<SiderCreativeStudioEntry')).toBe(true);
     expect(siderSource.includes('<CreativeStudioSider')).toBe(true);
+    expect(creativeSiderSource.includes('CREATIVE_STUDIO_ROOT_PATH')).toBe(false);
+    expect(creativeSiderSource.includes("section: 'home'")).toBe(false);
+    expect(routerSource.includes('CreativeStudioHomePage')).toBe(false);
+    expect(routerSource.includes('<Route index element={<CreativeStudioCanvasesRedirect />} />')).toBe(true);
   });
 
   test('removes the beta workshop entry instead of keeping parallel navigation', () => {

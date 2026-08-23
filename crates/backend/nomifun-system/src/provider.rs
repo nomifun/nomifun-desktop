@@ -85,6 +85,26 @@ impl ProviderService {
             .collect()
     }
 
+    /// Return the plaintext API keys used by an editable provider.
+    ///
+    /// Provider list/create/update responses remain secret-free. The model
+    /// management editor calls this explicit authenticated endpoint only when
+    /// the user opens a provider for editing.
+    pub async fn api_keys(&self, provider_id: &str) -> Result<Vec<String>, AppError> {
+        validate_provider_id(Some(provider_id))?;
+        let provider = self
+            .repo
+            .find_by_id(provider_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Provider {provider_id} not found")))?;
+        if is_managed_provider_platform(&provider.platform) {
+            return Err(managed_mutation_error());
+        }
+        let credentials =
+            decrypt_credentials(&provider.credentials_encrypted, &self.encryption_key)?;
+        api_keys_from_credentials(&credentials)
+    }
+
     /// The sole public create path: provider, first model/capabilities, and all
     /// named connections are validated before one repository transaction.
     pub async fn create(
@@ -579,6 +599,33 @@ fn validate_sort_order(sort_order: Option<i64>) -> Result<(), AppError> {
     Ok(())
 }
 
+fn api_keys_from_credentials(credentials: &serde_json::Value) -> Result<Vec<String>, AppError> {
+    let Some(value) = credentials.get("api_keys") else {
+        return Ok(Vec::new());
+    };
+    let values = value.as_array().ok_or_else(|| {
+        AppError::Internal(
+            "stored provider credentials field \"api_keys\" is not an array".into(),
+        )
+    })?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    AppError::Internal(format!(
+                        "stored provider credentials field \"api_keys\" entry {index} is not a non-empty string"
+                    ))
+                })
+        })
+        .collect()
+}
+
 fn reject_managed_platform(platform: &str) -> Result<(), AppError> {
     if is_managed_provider_platform(platform.trim()) {
         return Err(managed_mutation_error());
@@ -721,6 +768,25 @@ mod tests {
                 "https://bedrock-runtime.us-east-1.amazonaws.com"
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn api_key_projection_returns_effective_plaintext_values() {
+        assert_eq!(
+            api_keys_from_credentials(&serde_json::json!({
+                "api_keys": [" sk-one ", "sk-two"]
+            }))
+            .unwrap(),
+            vec!["sk-one", "sk-two"]
+        );
+        assert!(
+            api_keys_from_credentials(&serde_json::json!({}))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            api_keys_from_credentials(&serde_json::json!({"api_keys": [""]})).is_err()
         );
     }
 
