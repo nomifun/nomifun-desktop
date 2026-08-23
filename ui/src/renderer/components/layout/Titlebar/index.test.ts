@@ -27,6 +27,16 @@ describe('Titlebar instant icon tooltips', () => {
     );
   });
 
+  test('places the readable language selector after the left navigation actions', () => {
+    const languageIndex = titlebarSource.indexOf('<TitlebarLanguageMenu');
+    const sessionToggleIndex = titlebarSource.indexOf('tooltip: sessionToggleTooltip');
+
+    expect(languageIndex).toBeGreaterThan(sessionToggleIndex);
+    expect(languageMenuSource.includes('app-titlebar__language-button')).toBe(true);
+    expect(languageMenuSource.includes('app-titlebar__language-name')).toBe(true);
+    expect(languageMenuSource.includes('Translate')).toBe(false);
+  });
+
   test('keeps shared history and quick-create navigation behind Creative Studio save gates', () => {
     expect(titlebarSource.includes('requestCreativeStudioBeforeLeave')).toBe(true);
     expect(titlebarSource.includes('navigateAfterCreativeStudioFlush')).toBe(true);
