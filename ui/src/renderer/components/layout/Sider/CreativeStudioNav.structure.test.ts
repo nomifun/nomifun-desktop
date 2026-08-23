@@ -11,6 +11,9 @@ const readSource = (url: URL) => readFileSync(url, 'utf8');
 const siderSource = readSource(new URL('./index.tsx', import.meta.url));
 const navBarrelSource = readSource(new URL('./SiderNav/index.ts', import.meta.url));
 const entrySource = readSource(new URL('./SiderNav/SiderCreativeStudioEntry.tsx', import.meta.url));
+const assetEntrySource = readSource(
+  new URL('./SiderNav/SiderAssetLibraryEntry.tsx', import.meta.url)
+);
 const creativeSiderSource = readSource(
   new URL('../../../pages/creativeStudio/app/CreativeStudioSider.tsx', import.meta.url)
 );
@@ -63,6 +66,16 @@ describe('Creative Studio primary navigation', () => {
     expect(routerSource.includes("import('@renderer/pages/assets')")).toBe(false);
     expect(routerSource.includes("path='/assets'")).toBe(false);
     expect(existsSync(legacyAssetPageUrl)).toBe(false);
+  });
+
+  test('uses one canonical My Assets label for both entry points', () => {
+    expect(
+      creativeSiderSource.includes("t('creativeStudio.navigation.assets')")
+    ).toBe(true);
+    expect(
+      assetEntrySource.includes("t('creativeStudio.navigation.assets')")
+    ).toBe(true);
+    expect(assetEntrySource.includes('assetLibrary.title')).toBe(false);
   });
 
   test('switches to Settings-style product navigation with the workbench return pinned below it', () => {
