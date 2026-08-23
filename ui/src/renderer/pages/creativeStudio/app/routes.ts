@@ -18,7 +18,11 @@ export const CREATIVE_STUDIO_IMAGE_PATH = '/workshop/image';
 export const CREATIVE_STUDIO_VIDEO_PATH = '/workshop/video';
 export const CREATIVE_STUDIO_PROMPTS_PATH = '/workshop/prompts';
 export const CREATIVE_STUDIO_ASSETS_PATH = '/workshop/assets';
-export const CREATIVE_STUDIO_WORKFLOWS_PATH = '/workshop/workflows';
+export const CREATIVE_STUDIO_TEMPLATES_PATH = '/workshop/templates';
+/** @deprecated Redirect-only compatibility path. */
+export const CREATIVE_STUDIO_LEGACY_WORKFLOWS_PATH = '/workshop/workflows';
+/** @deprecated Use CREATIVE_STUDIO_TEMPLATES_PATH. */
+export const CREATIVE_STUDIO_WORKFLOWS_PATH = CREATIVE_STUDIO_TEMPLATES_PATH;
 export const WORKBENCH_HOME_PATH = '/guid';
 
 export type CreativeStudioSection =
@@ -29,7 +33,7 @@ export type CreativeStudioSection =
   | 'video'
   | 'prompts'
   | 'assets'
-  | 'workflows';
+  | 'templates';
 
 export interface CreativeStudioCanvasRouteMatch {
   canvasId: string;
@@ -110,7 +114,12 @@ export const creativeStudioSectionForPath = (
   if (pathname === CREATIVE_STUDIO_VIDEO_PATH) return 'video';
   if (pathname === CREATIVE_STUDIO_PROMPTS_PATH) return 'prompts';
   if (pathname === CREATIVE_STUDIO_ASSETS_PATH) return 'assets';
-  if (pathname === CREATIVE_STUDIO_WORKFLOWS_PATH) return 'workflows';
+  if (
+    pathname === CREATIVE_STUDIO_TEMPLATES_PATH ||
+    pathname === CREATIVE_STUDIO_LEGACY_WORKFLOWS_PATH
+  ) {
+    return 'templates';
+  }
   return null;
 };
 

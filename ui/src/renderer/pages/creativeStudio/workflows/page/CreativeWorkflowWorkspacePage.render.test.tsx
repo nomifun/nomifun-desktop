@@ -28,10 +28,11 @@ describe('Creative Workflow workspace page', () => {
     );
 
     expect(html.includes('data-creative-workflow-workspace="true"')).toBe(true);
-    expect(html.includes('创作工作流')).toBe(true);
+    expect(html.includes('模板工作台')).toBe(true);
     expect(html.includes('AI 创建')).toBe(true);
-    expect(html.includes('新建多图')).toBe(true);
-    expect(html.includes('新建工作流')).toBe(true);
+    expect(html.includes('新建多图模板')).toBe(true);
+    expect(html.includes('新建模板')).toBe(true);
+    expect(html.includes('创作工作流')).toBe(false);
     expect(html.includes(`data-workflow-id="${workflow.id}"`)).toBe(true);
     expect(html.includes(workflow.metadata.name)).toBe(true);
     expect(html.includes('运行')).toBe(true);

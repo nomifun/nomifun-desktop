@@ -123,14 +123,14 @@ const CreativeCanvasWorkflowPanel: React.FC<CreativeCanvasWorkflowPanelProps> = 
     <section
       className={classNames(styles.panel, className)}
       data-canvas-product-panel='workflows'
-      aria-label='画布工作流'
+      aria-label='画布模板'
     >
       <header className={styles.header}>
         <div>
-          <h2>工作流</h2>
-          <p>{workflows.length} 个流程{activeCount > 0 ? ` · ${activeCount} 个进行中` : ''}</p>
+          <h2>模板</h2>
+          <p>{workflows.length} 个模板{activeCount > 0 ? ` · ${activeCount} 个进行中` : ''}</p>
         </div>
-        <button type='button' className={styles.iconButton} aria-label='打开工作流中心' onClick={onOpenCenter}>
+        <button type='button' className={styles.iconButton} aria-label='打开模板工作台' onClick={onOpenCenter}>
           <Right {...iconProps} />
         </button>
       </header>
@@ -139,14 +139,14 @@ const CreativeCanvasWorkflowPanel: React.FC<CreativeCanvasWorkflowPanelProps> = 
         <input
           type='search'
           value={search}
-          placeholder='搜索工作流'
-          aria-label='搜索工作流'
+          placeholder='搜索模板'
+          aria-label='搜索模板'
           onChange={(event) => setSearch(event.currentTarget.value)}
         />
         <button
           type='button'
           className={styles.iconButton}
-          aria-label='刷新工作流'
+          aria-label='刷新模板'
           disabled={loading}
           onClick={onRetry}
         >
@@ -163,17 +163,17 @@ const CreativeCanvasWorkflowPanel: React.FC<CreativeCanvasWorkflowPanelProps> = 
       ) : loading && workflows.length === 0 ? (
         <div className={styles.state} role='status'>
           <Loading className={styles.spinning} {...iconProps} />
-          正在载入工作流…
+          正在载入模板…
         </div>
       ) : filtered.length === 0 ? (
         <div className={styles.state} role='status'>
           <Workbench {...iconProps} />
-          <strong>{workflows.length === 0 ? '暂无工作流' : '没有匹配的工作流'}</strong>
-          <span>可前往工作流中心创建和配置真实流程。</span>
-          <button type='button' onClick={onOpenCenter}>打开工作流中心</button>
+          <strong>{workflows.length === 0 ? '暂无模板' : '没有匹配的模板'}</strong>
+          <span>可前往模板工作台创建和配置模板。</span>
+          <button type='button' onClick={onOpenCenter}>打开模板工作台</button>
         </div>
       ) : (
-        <div className={styles.list} role='list' aria-label='可运行工作流'>
+        <div className={styles.list} role='list' aria-label='可运行模板'>
           {filtered.map((workflow) => {
             const run = runsByWorkflow.get(workflow.id) ?? null;
             const active = run ? ACTIVE_STATUSES.has(run.record.status) : false;

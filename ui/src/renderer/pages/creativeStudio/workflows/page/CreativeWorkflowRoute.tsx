@@ -57,7 +57,7 @@ const CreativeWorkflowRoute: React.FC = () => {
           acceptedKinds: ['image'],
           initialSelectedIds: selectedAssetIds,
           selectionLimit: 100,
-          title: '选择工作流参考图',
+          title: '选择模板参考图',
         })}
         onUploadReferenceImages={async (files, selectedAssetIds) => {
           const assets = await Promise.all(

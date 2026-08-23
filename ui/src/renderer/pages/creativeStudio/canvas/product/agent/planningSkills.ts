@@ -17,8 +17,8 @@ export const CREATIVE_STUDIO_PLANNING_SKILLS = [
   },
   {
     id: 'creative-studio-workflow',
-    label: '工作流设计',
-    description: '把创作目标整理成可人工确认的工作流草案。',
+    label: '模板设计',
+    description: '把创作目标整理成可人工确认的模板草案。',
   },
 ] as const;
 

@@ -181,7 +181,7 @@ memory, tools, permissions, and execution runtime:
 |---|---|
 | **Multi-Agent execution cluster** | Plans dependency-aware work, delegates steps to specialized Agents, schedules parallel execution, and exposes live state, transcripts, approvals, retry, and recovery. |
 | **Agent Mini Apps** | Turns a normal Agent conversation into a previewable and publishable local web tool, with an editable working copy and a durable published snapshot. |
-| **Creative Studio** | Provides a persistent Canvas, independent Image and Video Workbenches, exact-model media tasks, reusable assets, private workflows, and a bounded 3D Director. |
+| **Creative Studio** | Provides a persistent Canvas, independent Image and Video Workbenches, exact-model media tasks, reusable assets, a private Template Studio, and a bounded 3D Director. |
 | **Task-aware multi-model control plane** | Manages extensible providers and models for chat, realtime, speech, vision, media generation, embedding, and reranking, with per-task routing and fallback. |
 | **NomiFun Free Models** | Ships a managed provider that can be enabled, refreshed, health-checked, and used without first creating your own provider entry. |
 | **Phone, robot, and open access** | Pairs Mobile directly with Desktop, binds a Xiaozhi robot to a companion, and exposes governed capabilities through WebUI, REST, MCP, IM channels, and NomiRelay. |
@@ -225,7 +225,7 @@ Agents, data, models, and governed tools.
 > Guide: [`docs/guides/creative-studio.md`](docs/guides/creative-studio.md)
 
 Creative Studio combines a persistent Canvas, independent Image and Video
-Workbenches, prompt and asset libraries, private workflows, and a bounded 3D
+Workbenches, prompt and asset libraries, a private Template Studio, and a bounded 3D
 Director. It has no Project product object: Canvas is Canvas, while Image and
 Video remain usable with zero Canvases. A Canvas persists eight node kinds:
 text, image, video, audio, panorama, config, director, and group; generation is
@@ -240,7 +240,7 @@ and a version-2 Canvas ZIP carries the referenced asset and Director-sidecar
 closure while the reader remains compatible with version 1. Standalone task
 ownership and history use only `workbenchKind`; Image and Video preserve
 versioned session drafts without a Canvas binding. The UI/API contract is 22.
-The minimal Workflow AI previews a strict one-shot draft, then waits for the
+The minimal Template AI previews a strict one-shot draft, then waits for the
 user to Apply it to the editor and explicitly Save; it does not create a public
 template, complex conversation, or automatic run.
 

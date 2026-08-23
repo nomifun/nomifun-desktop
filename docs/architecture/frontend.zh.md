@@ -119,7 +119,7 @@ export function getBaseUrl(): string {
 | `/workshop/canvases` | canonical Canvas 库。 |
 | `/workshop/canvas/:canvasId`、`/workshop/director/:canvasId` | Canvas 无限画布与受限 3D 导演台。 |
 | `/workshop/image`、`/workshop/video` | 独立 Image/Video Workbench；零 Canvas 时也可用。 |
-| `/workshop/prompts`、`/workshop/assets`、`/workshop/workflows` | 提示词、素材与私有 Workflow 库。 |
+| `/workshop/prompts`、`/workshop/assets`、`/workshop/templates` | 提示词库、素材库与私有模板工作台。 |
 
 路由常量与 exact-match 规则在
 [`pages/creativeStudio/app/routes.ts`](../../ui/src/renderer/pages/creativeStudio/app/routes.ts)。

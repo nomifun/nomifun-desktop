@@ -55,7 +55,7 @@ describe('Workflow Run Center', () => {
     );
 
     expect(html.includes('data-workflow-run-center="true"')).toBe(true);
-    expect(html.includes('工作流任务')).toBe(true);
+    expect(html.includes('模板任务')).toBe(true);
     expect(html.includes('等待恢复')).toBe(true);
     expect(html.includes('继续')).toBe(true);
     expect(html.includes('已完成')).toBe(true);

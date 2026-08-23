@@ -149,7 +149,7 @@ describe('Creative Canvas product presentation panels', () => {
     expect(html.includes('data-unavailable-kind="assistant"')).toBe(true);
     expect(html.includes('画布专属会话绑定')).toBe(true);
     expect(html.includes('data-unavailable-kind="workflows"')).toBe(true);
-    expect(html.includes('不会显示示例流程')).toBe(true);
+    expect(html.includes('不会显示示例模板')).toBe(true);
     expect(html.includes('<textarea')).toBe(false);
   });
 

@@ -110,9 +110,9 @@ const run = async (): Promise<void> => {
       </I18nextProvider>
     );
 
-    const dialog = await screen.findByRole('dialog', { name: 'AI 创建工作流' });
+    const dialog = await screen.findByRole('dialog', { name: 'AI 创建模板' });
     const modal = within(dialog);
-    fireEvent.change(modal.getByRole('textbox', { name: '工作流需求' }), {
+    fireEvent.change(modal.getByRole('textbox', { name: '模板需求' }), {
       target: { value: 'Create a product hero workflow' },
     });
     fireEvent.click(modal.getByRole('combobox', { name: '对话模型' }));
@@ -128,7 +128,7 @@ const run = async (): Promise<void> => {
       assert.equal(selector?.getAttribute('data-selection-state'), 'resolved');
       assert.match(selector?.textContent ?? '', /qa-workflow-chat/);
       assert.equal(
-        (modal.getByRole('button', { name: '生成工作流草稿' }) as HTMLButtonElement)
+        (modal.getByRole('button', { name: '生成模板草稿' }) as HTMLButtonElement)
           .disabled,
         false
       );

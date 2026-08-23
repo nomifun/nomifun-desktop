@@ -117,7 +117,7 @@ const WorkflowRunReviewModal: React.FC<{
       }}
     >
       <p className={styles.reviewHint}>
-        规划结果已经持久化。确认每张图的标题和提示词后，任务会按工作流并发上限继续执行。
+        规划结果已经持久化。确认每张图的标题和提示词后，任务会按模板并发上限继续执行。
       </p>
       <div className={styles.reviewList}>
         {drafts.map((draft, index) => (
@@ -175,7 +175,7 @@ const WorkflowRunCenter: React.FC<WorkflowRunCenterProps> = ({ port }) => {
       await action();
       if (success) Message.success(success);
     } catch (error) {
-      Message.error(errorMessage(error, '工作流操作失败'));
+      Message.error(errorMessage(error, '模板操作失败'));
     } finally {
       setActingId(null);
     }
@@ -191,7 +191,7 @@ const WorkflowRunCenter: React.FC<WorkflowRunCenterProps> = ({ port }) => {
             size={16}
             fill='currentColor'
           />
-          <h2>工作流任务</h2>
+          <h2>模板任务</h2>
           <span className={styles.chip}>{runs.length} 个</span>
           {activeCount > 0 ? <span className={styles.runActiveChip}>{activeCount} 运行中</span> : null}
           {reviewCount > 0 ? <span className={styles.runReviewChip}>{reviewCount} 待审核</span> : null}
@@ -287,7 +287,7 @@ const WorkflowRunCenter: React.FC<WorkflowRunCenterProps> = ({ port }) => {
                     onClick={() => void act(
                       run.request.id,
                       () => port.cancel(run.request.id),
-                      '工作流已取消'
+                      '模板任务已取消'
                     )}
                   >
                     取消

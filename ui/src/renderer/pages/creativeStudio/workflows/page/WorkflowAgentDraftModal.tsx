@@ -43,7 +43,7 @@ export async function generateWorkflowAgentDraft(input: {
   port: WorkflowDraftPort;
 }): Promise<GeneratedWorkflowAgentDraft> {
   const prompt = input.prompt.trim();
-  if (!prompt) throw new Error('请先描述要沉淀的工作流。');
+  if (!prompt) throw new Error('请先描述要沉淀的模板。');
   if (input.catalog.status !== 'ready') throw new Error('模型目录尚未就绪。');
   const exactModel = findCreativeModelOption(
     buildCreativeModelGroups(input.catalog.providers, CHAT_FILTER),
@@ -58,7 +58,7 @@ export async function generateWorkflowAgentDraft(input: {
   });
   const artifact = parseCreativeWorkflowDraftArtifact(result.text);
   if (!artifact) {
-    throw new Error('Agent 未返回可应用的 Workflow 草稿。');
+    throw new Error('Agent 未返回可应用的模板草稿。');
   }
   return {
     artifact,
@@ -70,7 +70,7 @@ export async function generateWorkflowAgentDraft(input: {
 export const WorkflowAgentDraftPreview: React.FC<{
   draft: GeneratedWorkflowAgentDraft | null;
 }> = ({ draft }) => (
-  <section className={styles.preview} aria-label='Workflow 草稿预览'>
+  <section className={styles.preview} aria-label='模板草稿预览'>
     <div className={styles.previewHeading}>
       <MagicWand theme='outline' size={17} fill='currentColor' />
       <strong>草稿预览</strong>
@@ -107,7 +107,7 @@ export interface WorkflowAgentDraftModalProps {
 const errorText = (error: unknown): string =>
   error instanceof Error && error.message.trim()
     ? error.message
-    : 'Workflow 草稿生成失败，请稍后重试。';
+    : '模板草稿生成失败，请稍后重试。';
 
 const WorkflowAgentDraftModal: React.FC<WorkflowAgentDraftModalProps> = ({
   visible,
@@ -179,7 +179,7 @@ const WorkflowAgentDraftModal: React.FC<WorkflowAgentDraftModalProps> = ({
   return (
     <Modal
       visible={visible}
-      title='AI 创建工作流'
+      title='AI 创建模板'
       className={styles.modal}
       style={{ width: 880, maxWidth: 'calc(100vw - 32px)' }}
       footer={null}
@@ -197,15 +197,15 @@ const WorkflowAgentDraftModal: React.FC<WorkflowAgentDraftModalProps> = ({
         className={styles.layout}
         data-workflow-agent-draft-modal
       >
-        <section className={styles.form} aria-label='Workflow 草稿需求'>
+        <section className={styles.form} aria-label='模板草稿需求'>
           <label>
-            <span>工作流需求</span>
+            <span>模板需求</span>
             <Input.TextArea
               value={prompt}
               maxLength={20_000}
               autoSize={{ minRows: 7, maxRows: 12 }}
               disabled={generating}
-              placeholder='例如：创建一个电商主图工作流，固定商业摄影风格，只替换产品名称和卖点。'
+              placeholder='例如：创建一个电商主图模板，固定商业摄影风格，只替换产品名称和卖点。'
               onChange={(value) => {
                 setPrompt(value);
                 setDraft(null);
@@ -248,7 +248,7 @@ const WorkflowAgentDraftModal: React.FC<WorkflowAgentDraftModalProps> = ({
             icon={generating ? undefined : <MagicWand theme='outline' size={15} />}
             onClick={() => void generate()}
           >
-            {generating ? '正在生成草稿…' : '生成工作流草稿'}
+            {generating ? '正在生成草稿…' : '生成模板草稿'}
           </Button>
         </section>
 

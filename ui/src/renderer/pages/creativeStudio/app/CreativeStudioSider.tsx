@@ -10,6 +10,7 @@ import {
   FileText,
   FullScreen,
   ImageFiles,
+  PageTemplate,
   VideoTwo,
 } from '@icon-park/react';
 import classNames from 'classnames';
@@ -25,6 +26,7 @@ import {
   CREATIVE_STUDIO_CANVASES_PATH,
   CREATIVE_STUDIO_IMAGE_PATH,
   CREATIVE_STUDIO_PROMPTS_PATH,
+  CREATIVE_STUDIO_TEMPLATES_PATH,
   CREATIVE_STUDIO_VIDEO_PATH,
   creativeStudioSectionForPath,
   type CreativeStudioSection,
@@ -47,7 +49,7 @@ interface NavigationIconProps {
 }
 
 interface NavigationItem {
-  section: Exclude<CreativeStudioSection, 'canvas' | 'director' | 'workflows'>;
+  section: Exclude<CreativeStudioSection, 'canvas' | 'director'>;
   path: string;
   label: string;
   icon: React.ReactElement<NavigationIconProps>;
@@ -89,6 +91,12 @@ const CreativeStudioSider: React.FC<CreativeStudioSiderProps> = ({
         path: CREATIVE_STUDIO_VIDEO_PATH,
         label: t('creativeStudio.navigation.video'),
         icon: <VideoTwo />,
+      },
+      {
+        section: 'templates',
+        path: CREATIVE_STUDIO_TEMPLATES_PATH,
+        label: t('creativeStudio.navigation.templates'),
+        icon: <PageTemplate />,
       },
       {
         section: 'prompts',
