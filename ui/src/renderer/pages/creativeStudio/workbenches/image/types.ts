@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ReactNode } from 'react';
+
 export type ImageWorkbenchLayout = 'side' | 'bottom';
 export type ImageWorkbenchInterfaceMode = 'images' | 'responses';
 export type ImageWorkbenchQuality = 'auto' | 'high' | 'medium' | 'low';
@@ -121,6 +123,8 @@ export interface ImageWorkbenchProps {
   references: readonly ImageWorkbenchReference[];
   settings: ImageWorkbenchSettings;
   modelOptions: readonly ImageWorkbenchModelOption[];
+  /** Optional catalog-owned selector with explicit loading/error/empty states. */
+  modelSlot?: ReactNode;
   results: readonly ImageWorkbenchResult[];
   selectedResultIds: readonly string[];
   task: ImageWorkbenchTaskSummary;
@@ -183,7 +187,7 @@ export const IMAGE_WORKBENCH_QUALITY_OPTIONS: readonly {
 ];
 
 export function imageWorkbenchModelKey(model: ImageWorkbenchModelIdentity): string {
-  return `${model.providerId}\u0000${model.model}`;
+  return JSON.stringify([model.providerId, model.model]);
 }
 
 export function parseImageWorkbenchModelKey(

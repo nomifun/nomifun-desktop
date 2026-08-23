@@ -1,21 +1,27 @@
 .modal {
-  background: #fff;
+  --picker-surface: var(--dialog-fill-0);
+  --picker-body-surface: var(--color-bg-1, var(--bg-1));
+  --picker-border: var(--color-border-2, var(--border-base));
+  --picker-divider: color-mix(in srgb, var(--picker-border) 72%, transparent);
+  background: var(--picker-surface);
 }
 
 .modal :global(.arco-modal-content) {
   overflow: hidden;
   padding: 0;
-  border: 1px solid var(--color-border-2);
+  border: 1px solid var(--picker-border);
   border-radius: 14px;
-  background: #fff;
-  box-shadow: 0 24px 70px rgb(0 0 0 / 18%);
+  background: var(--picker-surface);
+  box-shadow:
+    0 24px 70px rgb(0 0 0 / 24%),
+    0 0 0 1px color-mix(in srgb, var(--picker-surface) 70%, transparent);
 }
 
 .modal :global(.arco-modal-header) {
   height: auto;
   padding: 8px 14px;
-  border-bottom: 1px solid var(--color-border-1);
-  background: #fff;
+  border-bottom: 1px solid var(--picker-border);
+  background: var(--picker-surface);
 }
 
 .modal :global(.arco-modal-title) {
@@ -28,10 +34,16 @@
   color: var(--color-text-3);
 }
 
+.modal :global(.arco-modal-close-icon):hover,
+.modal :global(.arco-modal-close-icon):focus-visible {
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
+}
+
 .modal :global(.arco-modal-footer) {
   padding: 10px 16px;
-  border-top: 1px solid var(--color-border-1);
-  background: #fff;
+  border-top: 1px solid var(--picker-border);
+  background: var(--picker-surface);
 }
 
 .title {
@@ -54,6 +66,7 @@
   background: color-mix(in srgb, rgb(var(--primary-6)) 11%, transparent);
   color: rgb(var(--primary-6));
   font-size: 14px;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, rgb(var(--primary-6)) 18%, transparent);
 }
 
 .pickerBody {
@@ -61,7 +74,7 @@
   min-height: 300px;
   height: min(50vh, 430px);
   flex-direction: column;
-  background: #fff;
+  background: var(--picker-body-surface);
 }
 
 .spin,
@@ -79,8 +92,10 @@
 .treeViewport {
   height: 100%;
   overflow: auto;
-  padding: 4px 0 8px;
+  padding: 6px 0 10px;
   outline: none;
+  background: var(--picker-body-surface);
+  scrollbar-color: var(--color-border-3) transparent;
 }
 
 .treeRow {
@@ -92,12 +107,14 @@
   padding-top: 4px;
   padding-right: 14px;
   padding-bottom: 4px;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-border-1) 72%, transparent);
+  border-bottom: 1px solid var(--picker-divider);
   color: var(--color-text-1);
   cursor: pointer;
   outline: none;
+  user-select: none;
   transition:
     background-color 140ms ease,
+    box-shadow 140ms ease,
     color 140ms ease;
 }
 
@@ -107,11 +124,15 @@
 }
 
 .treeRow:focus-visible {
-  box-shadow: inset 3px 0 rgb(var(--primary-6));
+  box-shadow:
+    inset 3px 0 rgb(var(--primary-6)),
+    inset 0 0 0 1px color-mix(in srgb, rgb(var(--primary-6)) 20%, transparent);
 }
 
 .rootRow {
   min-height: 40px;
+  border-bottom-color: color-mix(in srgb, rgb(var(--primary-6)) 18%, var(--picker-divider));
+  background: color-mix(in srgb, rgb(var(--primary-6)) 5%, var(--picker-body-surface));
   font-size: inherit;
   font-weight: 500;
 }
@@ -119,8 +140,12 @@
 .selectedRow,
 .selectedRow:hover,
 .selectedRow:focus-visible {
-  background: color-mix(in srgb, rgb(var(--primary-6)) 11%, var(--color-bg-1));
-  color: rgb(var(--primary-6));
+  background: color-mix(in srgb, rgb(var(--primary-6)) 13%, var(--picker-body-surface));
+  color: var(--color-text-1);
+  font-weight: 550;
+  box-shadow:
+    inset 3px 0 rgb(var(--primary-6)),
+    inset 0 0 0 1px color-mix(in srgb, rgb(var(--primary-6)) 16%, transparent);
 }
 
 .chevronButton,
@@ -143,6 +168,12 @@
 .inlineAction:hover {
   background: var(--color-fill-2);
   color: var(--color-text-1);
+}
+
+.chevronButton:focus-visible,
+.inlineAction:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, rgb(var(--primary-6)) 22%, transparent);
 }
 
 .chevronPlaceholder {
@@ -190,7 +221,8 @@
 
 .newFolderRow {
   cursor: default;
-  background: color-mix(in srgb, rgb(var(--primary-6)) 6%, var(--color-bg-1));
+  background: color-mix(in srgb, rgb(var(--primary-6)) 7%, var(--picker-body-surface));
+  box-shadow: inset 3px 0 color-mix(in srgb, rgb(var(--primary-6)) 72%, transparent);
 }
 
 .newFolderRowError {
@@ -206,6 +238,15 @@
 
 .newFolderInputWrap :global(.arco-input-wrapper) {
   border-radius: 8px;
+  background: color-mix(in srgb, var(--picker-body-surface) 76%, var(--color-fill-2)) !important;
+}
+
+.newFolderInputWrap :global(.arco-input) {
+  color: var(--color-text-1);
+}
+
+.newFolderInputWrap :global(.arco-input::placeholder) {
+  color: var(--color-text-3);
 }
 
 .inlineError {
@@ -277,8 +318,8 @@
   align-items: center;
   gap: 7px;
   padding: 6px 14px;
-  border-top: 1px solid var(--color-border-1);
-  background: #fff;
+  border-top: 1px solid var(--picker-border);
+  background: color-mix(in srgb, var(--picker-surface) 94%, var(--color-fill-2));
   color: var(--color-text-3);
   font-size: 12px;
 }
@@ -317,7 +358,7 @@
   padding: 0 10px;
   border-radius: 8px;
   color: rgb(var(--primary-6));
-  font-weight: 550;
+  font-weight: 500;
 }
 
 .newFolderButton:not(:disabled):hover {
@@ -331,11 +372,31 @@
   gap: 8px;
 }
 
-.cancelButton,
+.cancelButton {
+  min-width: 82px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-3);
+  background: var(--color-fill-1);
+  color: var(--color-text-2);
+}
+
+.cancelButton:hover,
+.cancelButton:focus-visible {
+  border-color: var(--color-border-4);
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
+}
+
 .confirmButton {
   min-width: 82px;
   height: 32px;
   border-radius: 8px;
+  box-shadow: 0 4px 12px color-mix(in srgb, rgb(var(--primary-6)) 22%, transparent);
+}
+
+.confirmButton:disabled {
+  box-shadow: none;
 }
 
 @media (max-width: 600px) {
