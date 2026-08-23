@@ -6902,6 +6902,10 @@ mod tests {
         let subscriber = std::sync::Arc::new(CapturedEvents::default());
 
         tracing::subscriber::with_default(subscriber.clone(), || {
+            // The warning callsite may have been registered by another test
+            // before this thread installed its capture subscriber. Rebuild
+            // interest so this assertion does not depend on test order.
+            tracing::callsite::rebuild_interest_cache();
             let report = recover_owned_profiles_with(
                 &root,
                 ProfileRecoveryMode::DeleteEphemeralProfile,
