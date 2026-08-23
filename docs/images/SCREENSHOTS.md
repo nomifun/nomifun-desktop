@@ -1,9 +1,11 @@
 # Screenshot Manifest
 
 This file tracks the user-facing screenshots used by the Desktop documentation.
-On 2026-08-15, the complete active set was freshly captured from the current
-`nomifun-desktop` checkout. The two Creative Studio README captures were
-replaced again on 2026-08-23 from the production SPA and an isolated data root.
+On 2026-08-23, every English screenshot shown on the root README was refreshed
+from the current `nomifun-desktop` checkout after the English sidebar labels
+were shortened and re-laid out. The English home aliases used by Getting
+Started and Portal were refreshed in the same pass. The Creative Studio README
+captures were also replaced from the production SPA and an isolated data root.
 These are real running-app captures, not mockups or copies of the retired
 product UI. Do not restore retired screenshots.
 
@@ -86,14 +88,19 @@ the guide uses text instead of an obsolete visual.
 ## README and product gallery set
 
 - `readme/en/` and `readme/zh/` contain current workspace, models, companions,
-  skills, and Creative Studio captures. The Creative Studio images show the
+  skills, and Creative Studio captures. The English workspace, models,
+  companions, and skills images were recaptured on 2026-08-23 with the current
+  short-label sidebar. The Creative Studio images show the
   canonical Canvas editor with `返回画布库`, four real persisted nodes, and no
   Project product navigation. The English image is intentionally unedited: its
   focused shell follows English while the Canvas editor body still exposes the
   documented Simplified-Chinese limitation.
 - `getting-started/en/` and `getting-started/zh/` contain current home captures.
-- Portal copies must be synchronized and hash-checked separately before a
-  Portal publication; this manifest does not claim that synchronization.
+- Portal English home aliases (`current-home-en.png`, `gs-01-introduction-hero.png`,
+  and `gs-05-quickstart-guid.png`) are synchronized from the same refreshed
+  product capture, with the Portal's 1296×841 presentation size.
+- The Desktop English home aliases use the same capture at 1280×720 so the
+  README and getting-started pages render consistently.
 - `desktop-01-main-window.png` shows the current application content. It does
   not claim to document platform-specific native titlebar chrome.
 

@@ -17,6 +17,7 @@ the current architecture or contributor standards.
 | Understand what NomiFun is | [getting-started/introduction.md](getting-started/introduction.md) |
 | Install or run locally | [getting-started/installation.md](getting-started/installation.md) |
 | Try the app quickly | [getting-started/quick-start.md](getting-started/quick-start.md) |
+| Connect providers, local models, and configure failover | [guides/model-routing.md](guides/model-routing.md) |
 | Create with the infinite canvas, workbenches, assets, and workflows | [guides/creative-studio.md](guides/creative-studio.md) |
 | Connect a XiaoZhi ESP32 robot | [guides/xiaozhi-robot.md](guides/xiaozhi-robot.md) |
 | Understand the current architecture | [architecture/overview.md](architecture/overview.md) |
@@ -43,8 +44,8 @@ docs/
 └── images/               screenshot manifest and referenced images
 ```
 
-Current top-level user surfaces include conversations, terminals, model
-management, Creative Studio, presets, MCP, open capabilities,
+Current top-level user surfaces include conversations, terminals, extensible
+model management, Creative Studio, presets, MCP, open capabilities,
 requirements/AutoWork, scheduled tasks, companions, knowledge, and
 feature-gated computer/browser automation. The frontend source of truth is
 `ui/src/renderer/components/layout/Router.tsx`.
