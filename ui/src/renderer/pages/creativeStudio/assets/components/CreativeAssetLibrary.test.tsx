@@ -5,15 +5,25 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import i18next from 'i18next';
 import { readFileSync } from 'node:fs';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { I18nextProvider, initReactI18next } from 'react-i18next';
 
 import type { CreativeAsset } from '../types';
 import CreativeAssetLibrary, { submitCreativeAssetLibrarySearch } from './CreativeAssetLibrary';
 import CreativeAssetUploadQueue from './CreativeAssetUploadQueue';
-import { DEFAULT_CREATIVE_ASSET_LIBRARY_LABELS } from './types';
+import { createCreativeAssetLibraryLabels } from './types';
 import type { CreativeAssetLibraryState } from './types';
+
+const testI18n = i18next.createInstance();
+await testI18n.use(initReactI18next).init({
+  lng: 'zh-CN',
+  fallbackLng: 'zh-CN',
+  resources: { 'zh-CN': { translation: {} } },
+});
+const testLabels = createCreativeAssetLibraryLabels(testI18n.t.bind(testI18n));
 
 const asset = (id: string, kind: CreativeAsset['kind']): CreativeAsset => ({
   id,
@@ -52,30 +62,32 @@ const state = (overrides: Partial<CreativeAssetLibraryState> = {}): CreativeAsse
 
 const renderLibrary = (overrides: Partial<React.ComponentProps<typeof CreativeAssetLibrary>> = {}) =>
   renderToStaticMarkup(
-    <CreativeAssetLibrary
-      state={state()}
-      search=''
-      kind='all'
-      scope='library'
-      view='grid'
-      selectedIds={new Set(['asset-0', 'asset-1'])}
-      onSearchChange={() => undefined}
-      onKindChange={() => undefined}
-      onScopeChange={() => undefined}
-      onViewChange={() => undefined}
-      onSelectionChange={() => undefined}
-      onUploadFiles={() => undefined}
-      onCreateText={() => undefined}
-      onOpenAsset={() => undefined}
-      onEditAsset={() => undefined}
-      onDownloadAsset={() => undefined}
-      onRemoveAsset={() => undefined}
-      onSetSelectedLibrary={() => undefined}
-      onInsertSelected={() => undefined}
-      onDownloadSelected={() => undefined}
-      onRemoveSelected={() => undefined}
-      {...overrides}
-    />
+    <I18nextProvider i18n={testI18n}>
+      <CreativeAssetLibrary
+        state={state()}
+        search=''
+        kind='all'
+        scope='library'
+        view='grid'
+        selectedIds={new Set(['asset-0', 'asset-1'])}
+        onSearchChange={() => undefined}
+        onKindChange={() => undefined}
+        onScopeChange={() => undefined}
+        onViewChange={() => undefined}
+        onSelectionChange={() => undefined}
+        onUploadFiles={() => undefined}
+        onCreateText={() => undefined}
+        onOpenAsset={() => undefined}
+        onEditAsset={() => undefined}
+        onDownloadAsset={() => undefined}
+        onRemoveAsset={() => undefined}
+        onSetSelectedLibrary={() => undefined}
+        onInsertSelected={() => undefined}
+        onDownloadSelected={() => undefined}
+        onRemoveSelected={() => undefined}
+        {...overrides}
+      />
+    </I18nextProvider>
   );
 
 describe('CreativeAssetLibrary', () => {
@@ -128,36 +140,38 @@ describe('CreativeAssetLibrary', () => {
     expect(error.includes('backend unavailable')).toBe(true);
 
     const empty = renderLibrary({ state: state({ assets: [], total: 0 }), selectedIds: new Set() });
-    expect(empty.includes(DEFAULT_CREATIVE_ASSET_LIBRARY_LABELS.emptyTitle)).toBe(true);
+    expect(empty.includes(testLabels.emptyTitle)).toBe(true);
 
     const canvasEmpty = renderLibrary({
       state: state({ assets: [], total: 0 }),
       scope: 'canvas',
       selectedIds: new Set(),
     });
-    expect(canvasEmpty.includes(DEFAULT_CREATIVE_ASSET_LIBRARY_LABELS.canvasEmptyTitle)).toBe(true);
+    expect(canvasEmpty.includes(testLabels.canvasEmptyTitle)).toBe(true);
 
     const filtered = renderLibrary({
       state: state({ assets: [], total: 0 }),
       search: 'missing',
       selectedIds: new Set(),
     });
-    expect(filtered.includes(DEFAULT_CREATIVE_ASSET_LIBRARY_LABELS.filteredEmptyTitle)).toBe(true);
+    expect(filtered.includes(testLabels.filteredEmptyTitle)).toBe(true);
   });
 
   test('renders typed upload progress, completion and failure records', () => {
     const html = renderToStaticMarkup(
-      <CreativeAssetUploadQueue
-        labels={DEFAULT_CREATIVE_ASSET_LIBRARY_LABELS}
-        items={[
-          { id: 'a', fileName: 'upload.png', percent: 42, status: 'uploading' },
-          { id: 'b', fileName: 'complete.mp4', percent: 100, status: 'completed' },
-          { id: 'c', fileName: 'failed.png', percent: 17, status: 'error', error: 'too large' },
-        ]}
-        onCancel={() => undefined}
-        onRetry={() => undefined}
-        onDismiss={() => undefined}
-      />
+      <I18nextProvider i18n={testI18n}>
+        <CreativeAssetUploadQueue
+          labels={testLabels}
+          items={[
+            { id: 'a', fileName: 'upload.png', percent: 42, status: 'uploading' },
+            { id: 'b', fileName: 'complete.mp4', percent: 100, status: 'completed' },
+            { id: 'c', fileName: 'failed.png', percent: 17, status: 'error', error: 'too large' },
+          ]}
+          onCancel={() => undefined}
+          onRetry={() => undefined}
+          onDismiss={() => undefined}
+        />
+      </I18nextProvider>
     );
 
     expect(html.includes('data-asset-upload-queue="true"')).toBe(true);

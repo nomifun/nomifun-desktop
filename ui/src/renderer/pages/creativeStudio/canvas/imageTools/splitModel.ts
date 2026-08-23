@@ -8,6 +8,7 @@ import type {
   CreativeImageCropPixels,
   CreativeImageDimensions,
 } from "./cropModel";
+import { translateCreativeImageTool } from "./imageToolI18n";
 
 export const CREATIVE_IMAGE_SPLIT_MAX_GRID = 12;
 export const CREATIVE_IMAGE_SPLIT_MIN_GAP = 0.01;
@@ -158,7 +159,12 @@ const pixelBoundaries = (
   label: string,
 ): number[] => {
   if (!Number.isInteger(size) || size <= 0) {
-    throw new Error(`${label}必须是正整数。`);
+    throw new Error(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.positiveInteger",
+        { label },
+      ),
+    );
   }
   const boundaries = [
     0,
@@ -167,7 +173,12 @@ const pixelBoundaries = (
   ];
   for (let index = 1; index < boundaries.length; index += 1) {
     if (boundaries[index] <= boundaries[index - 1]) {
-      throw new Error(`${label}不足以按当前分割线生成非空切片。`);
+      throw new Error(
+        translateCreativeImageTool(
+          "creativeStudio.canvas.imageTools.errors.sliceDimensionTooSmall",
+          { label },
+        ),
+      );
     }
   }
   return boundaries;
@@ -181,12 +192,16 @@ export function creativeImageSplitPieces(
   const horizontal = pixelBoundaries(
     Math.round(dimensions.height),
     params.horizontalLines,
-    "图片高度",
+    translateCreativeImageTool(
+      "creativeStudio.canvas.imageTools.dimensions.imageHeight",
+    ),
   );
   const vertical = pixelBoundaries(
     Math.round(dimensions.width),
     params.verticalLines,
-    "图片宽度",
+    translateCreativeImageTool(
+      "creativeStudio.canvas.imageTools.dimensions.imageWidth",
+    ),
   );
   const pieces: CreativeImageSplitPiece[] = [];
   for (let row = 0; row < horizontal.length - 1; row += 1) {

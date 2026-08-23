@@ -10,6 +10,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { CreativeCanvasConnection, CreativeCanvasNode } from '../../domain/schema';
+import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
 import CanvasEdgeLayer from './CanvasEdgeLayer';
 import CanvasMiniMap from './CanvasMiniMap';
 import {
@@ -89,14 +90,16 @@ describe('Creative Studio canonical graph views', () => {
       targetNodeId: 'missing-node',
     };
     const html = renderToStaticMarkup(
-      <CanvasEdgeLayer
-        nodes={[sourceNode, targetNode]}
-        connections={[connection, missing]}
-        stateByConnectionId={{
-          [connection.id]: { selected: true, upstream: true, error: true, highlighted: true },
-        }}
-        onSelectConnection={() => undefined}
-      />
+      withCanvasTestI18n(
+        <CanvasEdgeLayer
+          nodes={[sourceNode, targetNode]}
+          connections={[connection, missing]}
+          stateByConnectionId={{
+            [connection.id]: { selected: true, upstream: true, error: true, highlighted: true },
+          }}
+          onSelectConnection={() => undefined}
+        />
+      )
     );
 
     expect(html.includes('data-canvas-edge-layer="true"')).toBe(true);
@@ -135,13 +138,15 @@ describe('Creative Studio canonical graph views', () => {
 
   test('renders real minimap node and viewport geometry without media placeholders', () => {
     const html = renderToStaticMarkup(
-      <CanvasMiniMap
-        nodes={[sourceNode, targetNode]}
-        viewport={{ x: 0, y: 0, zoom: 1 }}
-        viewportSize={{ width: 1024, height: 768 }}
-        selectedNodeIds={new Set([targetNode.id])}
-        onNavigate={() => undefined}
-      />
+      withCanvasTestI18n(
+        <CanvasMiniMap
+          nodes={[sourceNode, targetNode]}
+          viewport={{ x: 0, y: 0, zoom: 1 }}
+          viewportSize={{ width: 1024, height: 768 }}
+          selectedNodeIds={new Set([targetNode.id])}
+          onNavigate={() => undefined}
+        />
+      )
     );
 
     expect(html.includes('data-canvas-minimap-renderer="true"')).toBe(true);

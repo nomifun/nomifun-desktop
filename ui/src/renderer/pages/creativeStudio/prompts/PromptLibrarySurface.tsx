@@ -7,6 +7,7 @@
 import { Copy, FileText, FolderOpen, Refresh, Search } from '@icon-park/react';
 import classNames from 'classnames';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import {
   filterPromptLibraryItems,
@@ -37,12 +38,35 @@ const StateView: React.FC<{
   onReset?: () => void;
   onRetry?: () => void;
 }> = ({ kind, detail, onReset, onRetry }) => {
-  const copy = {
-    empty: ['还没有可用的提示词', '可用的 NomiFun 预设和文本素材会显示在这里。'],
-    filtered: ['没有匹配的提示词', '尝试减少标签或更换关键词。'],
-    error: ['提示词加载失败', detail || '请稍后重试。'],
+  const { t } = useTranslation();
+  const stateCopy = {
+    empty: [
+      t('creativeStudio.prompts.emptyTitle', {
+        defaultValue: 'No prompts available yet',
+      }),
+      t('creativeStudio.prompts.emptyDescription', {
+        defaultValue: 'NomiFun presets and text assets will appear here.',
+      }),
+    ],
+    filtered: [
+      t('creativeStudio.prompts.filteredTitle', {
+        defaultValue: 'No matching prompts',
+      }),
+      t('creativeStudio.prompts.filteredDescription', {
+        defaultValue: 'Try fewer tags or a different keyword.',
+      }),
+    ],
+    error: [
+      t('creativeStudio.prompts.errorTitle', {
+        defaultValue: 'Prompt loading failed',
+      }),
+      detail ||
+        t('creativeStudio.prompts.errorFallback', {
+          defaultValue: 'Try again later.',
+        }),
+    ],
   } as const;
-  const [title, description] = copy[kind];
+  const [title, description] = stateCopy[kind];
   return (
     <div className={styles.state} data-prompt-library-state={kind} role={kind === 'error' ? 'alert' : 'status'}>
       <div>
@@ -53,13 +77,15 @@ const StateView: React.FC<{
         <p className={styles.stateDescription}>{description}</p>
         {kind === 'filtered' && onReset ? (
           <button type='button' className={styles.resetButton} onClick={onReset}>
-            清除筛选
+            {t('creativeStudio.prompts.clearFilters', {
+              defaultValue: 'Clear filters',
+            })}
           </button>
         ) : null}
         {kind === 'error' && onRetry ? (
           <button type='button' className={styles.resetButton} onClick={onRetry}>
             <Refresh theme='outline' size={13} fill='currentColor' />
-            重新加载
+            {t('creativeStudio.prompts.reload', { defaultValue: 'Reload' })}
           </button>
         ) : null}
       </div>
@@ -72,60 +98,85 @@ const PromptCard: React.FC<{
   selected: boolean;
   onSelect: () => void;
   onCopy?: () => void;
-}> = ({ item, selected, onSelect, onCopy }) => (
-  <article
-    className={classNames(styles.card, selected && styles.selected)}
-    data-prompt-library-item={item.id}
-    role='listitem'
-  >
-    <button
-      type='button'
-      className={styles.cardBody}
-      aria-pressed={selected}
-      aria-label={`选择提示词：${item.title}`}
-      onClick={onSelect}
+}> = ({ item, selected, onSelect, onCopy }) => {
+  const { t } = useTranslation();
+
+  return (
+    <article
+      className={classNames(styles.card, selected && styles.selected)}
+      data-prompt-library-item={item.id}
+      role='listitem'
     >
-      <div className={styles.cardHeading}>
-        <span className={styles.cardIcon} aria-hidden='true'>
-          <FileText theme='outline' size={15} fill='currentColor' />
-        </span>
-        <h3 className={styles.cardTitle}>{item.title}</h3>
-        <span className={styles.category}>{item.category ?? '未分类'}</span>
-      </div>
-      {item.description ? <p className={styles.cardDescription}>{item.description}</p> : null}
-      <p className={styles.promptPreview}>{item.prompt}</p>
-      {item.tags.length > 0 ? (
-        <div className={styles.tagList} aria-label='标签'>
-          {item.tags.slice(0, 4).map((tag) => (
-            <span key={tag} className={styles.tag}>
-              {tag}
-            </span>
-          ))}
-          {item.tags.length > 4 ? <span className={styles.tag}>+{item.tags.length - 4}</span> : null}
+      <button
+        type='button'
+        className={styles.cardBody}
+        aria-pressed={selected}
+        aria-label={t('creativeStudio.prompts.selectPrompt', {
+          defaultValue: 'Select prompt: {{title}}',
+          title: item.title,
+        })}
+        onClick={onSelect}
+      >
+        <div className={styles.cardHeading}>
+          <span className={styles.cardIcon} aria-hidden='true'>
+            <FileText theme='outline' size={15} fill='currentColor' />
+          </span>
+          <h3 className={styles.cardTitle}>{item.title}</h3>
+          <span className={styles.category}>
+            {item.category ??
+              t('creativeStudio.prompts.uncategorized', {
+                defaultValue: 'Uncategorized',
+              })}
+          </span>
         </div>
-      ) : null}
-    </button>
-    <footer className={styles.cardFooter}>
-      <span>
-        {item.knowledgeBaseIds.length > 0
-          ? `关联 ${item.knowledgeBaseIds.length} 个知识库`
-          : '复制后可灵活使用'}
-      </span>
-      {onCopy ? (
-        <button
-          type='button'
-          className={styles.copyButton}
-          aria-label={`复制提示词：${item.title}`}
-          data-prompt-library-action='copy'
-          onClick={onCopy}
-        >
-          <Copy theme='outline' size={13} fill='currentColor' />
-          复制
-        </button>
-      ) : null}
-    </footer>
-  </article>
-);
+        {item.description ? <p className={styles.cardDescription}>{item.description}</p> : null}
+        <p className={styles.promptPreview}>{item.prompt}</p>
+        {item.tags.length > 0 ? (
+          <div
+            className={styles.tagList}
+            aria-label={t('creativeStudio.prompts.tagsLabel', {
+              defaultValue: 'Tags',
+            })}
+          >
+            {item.tags.slice(0, 4).map((tag) => (
+              <span key={tag} className={styles.tag}>
+                {tag}
+              </span>
+            ))}
+            {item.tags.length > 4 ? <span className={styles.tag}>+{item.tags.length - 4}</span> : null}
+          </div>
+        ) : null}
+      </button>
+      <footer className={styles.cardFooter}>
+        <span>
+          {item.knowledgeBaseIds.length > 0
+            ? t('creativeStudio.prompts.relatedKnowledgeBases', {
+                defaultValue: '{{count}} linked knowledge bases',
+                count: item.knowledgeBaseIds.length,
+              })
+            : t('creativeStudio.prompts.copyForReuse', {
+                defaultValue: 'Copy for flexible reuse',
+              })}
+        </span>
+        {onCopy ? (
+          <button
+            type='button'
+            className={styles.copyButton}
+            aria-label={t('creativeStudio.prompts.copyPrompt', {
+              defaultValue: 'Copy prompt: {{title}}',
+              title: item.title,
+            })}
+            data-prompt-library-action='copy'
+            onClick={onCopy}
+          >
+            <Copy theme='outline' size={13} fill='currentColor' />
+            {t('creativeStudio.prompts.copy', { defaultValue: 'Copy' })}
+          </button>
+        ) : null}
+      </footer>
+    </article>
+  );
+};
 
 export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
   variant,
@@ -134,13 +185,14 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
   refreshing = false,
   error = null,
   invalidCount = 0,
-  title = variant === 'page' ? '提示词库' : '提示词',
-  description = variant === 'page' ? '搜索并复制适合当前创作的提示词。' : '从已有内容中快速复制',
+  title,
+  description,
   selectedId,
   onRetry,
   onSelect,
   onCopy,
 }) => {
+  const { t } = useTranslation();
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<string | null | undefined>(undefined);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
@@ -152,6 +204,24 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
   );
   const effectiveSelectedId = selectedId === undefined ? localSelectedId : selectedId;
   const hasFilters = Boolean(query.trim() || category !== undefined || selectedTags.length > 0);
+  const resolvedTitle =
+    title ??
+    (variant === 'page'
+      ? t('creativeStudio.prompts.pageTitle', {
+          defaultValue: 'Prompt library',
+        })
+      : t('creativeStudio.prompts.sidebarTitle', {
+          defaultValue: 'Prompts',
+        }));
+  const resolvedDescription =
+    description ??
+    (variant === 'page'
+      ? t('creativeStudio.prompts.pageDescription', {
+          defaultValue: 'Search and copy prompts for your current creative work.',
+        })
+      : t('creativeStudio.prompts.sidebarDescription', {
+          defaultValue: 'Quickly copy from existing content',
+        }));
 
   useEffect(() => {
     setCategory((current) => {
@@ -195,14 +265,16 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
       <div className={styles.inner}>
         <header className={styles.header}>
           <div>
-            <h2 className={styles.title}>{title}</h2>
-            <p className={styles.description}>{description}</p>
+            <h2 className={styles.title}>{resolvedTitle}</h2>
+            <p className={styles.description}>{resolvedDescription}</p>
           </div>
           {onRetry ? (
             <button
               type='button'
               className={styles.refreshButton}
-              aria-label='刷新提示词'
+              aria-label={t('creativeStudio.prompts.refresh', {
+                defaultValue: 'Refresh prompts',
+              })}
               disabled={refreshing}
               onClick={onRetry}
             >
@@ -222,14 +294,20 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
             <input
               type='search'
               value={query}
-              aria-label='搜索提示词'
-              placeholder='搜索标题、内容或标签'
+              aria-label={t('creativeStudio.prompts.search', {
+                defaultValue: 'Search prompts',
+              })}
+              placeholder={t('creativeStudio.prompts.searchPlaceholder', {
+                defaultValue: 'Search titles, content, or tags',
+              })}
               onChange={(event) => setQuery(event.target.value)}
             />
           </label>
 
           <div className={styles.facetRow}>
-            <span className={styles.facetLabel}>分类</span>
+            <span className={styles.facetLabel}>
+              {t('creativeStudio.prompts.category', { defaultValue: 'Category' })}
+            </span>
             <div className={styles.chips}>
               <button
                 type='button'
@@ -237,7 +315,7 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
                 aria-pressed={category === undefined}
                 onClick={() => setCategory(undefined)}
               >
-                全部
+                {t('creativeStudio.prompts.all', { defaultValue: 'All' })}
               </button>
               {facets.categories.map((item) => (
                 <button
@@ -257,7 +335,9 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
                   aria-pressed={category === null}
                   onClick={() => setCategory(null)}
                 >
-                  未分类
+                  {t('creativeStudio.prompts.uncategorized', {
+                    defaultValue: 'Uncategorized',
+                  })}
                 </button>
               ) : null}
             </div>
@@ -265,7 +345,9 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
 
           {facets.tags.length > 0 ? (
             <div className={styles.facetRow}>
-              <span className={styles.facetLabel}>标签</span>
+              <span className={styles.facetLabel}>
+                {t('creativeStudio.prompts.tags', { defaultValue: 'Tags' })}
+              </span>
               <div className={styles.chips}>
                 <button
                   type='button'
@@ -273,7 +355,7 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
                   aria-pressed={selectedTags.length === 0}
                   onClick={() => setSelectedTags([])}
                 >
-                  全部
+                  {t('creativeStudio.prompts.all', { defaultValue: 'All' })}
                 </button>
                 {facets.tags.map((tag) => {
                   const active = selectedTags.includes(tag);
@@ -302,17 +384,30 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
 
         {invalidCount > 0 ? (
           <div className={styles.warning} role='status'>
-            已忽略 {invalidCount} 条不符合数据契约的记录。
+            {t('creativeStudio.prompts.ignoredRecords', {
+              defaultValue:
+                '{{count}} records were ignored because they did not match the data contract.',
+              count: invalidCount,
+            })}
           </div>
         ) : null}
         {error && items.length > 0 ? (
           <div className={styles.warning} role='alert'>
-            刷新失败，当前仍显示上一次成功加载的内容。
+            {t('creativeStudio.prompts.refreshFailedStale', {
+              defaultValue: 'Refresh failed; showing the last successfully loaded content.',
+            })}
           </div>
         ) : null}
 
         {loading && items.length === 0 ? (
-          <div className={styles.skeletonGrid} data-prompt-library-state='loading' role='status' aria-label='正在加载提示词'>
+          <div
+            className={styles.skeletonGrid}
+            data-prompt-library-state='loading'
+            role='status'
+            aria-label={t('creativeStudio.prompts.loading', {
+              defaultValue: 'Loading prompts',
+            })}
+          >
             {[0, 1, 2, 3].map((item) => (
               <div key={item} className={styles.skeleton} />
             ))}
@@ -327,9 +422,24 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
           <>
             <div className={styles.statusLine} aria-live='polite'>
               <span>
-                {hasFilters ? `${filteredItems.length} / ${items.length}` : `${items.length}`} 条提示词
+                {hasFilters
+                  ? t('creativeStudio.prompts.filteredCount', {
+                      defaultValue: '{{filtered}} / {{total}} prompts',
+                      filtered: filteredItems.length,
+                      total: items.length,
+                    })
+                  : t('creativeStudio.prompts.totalCount', {
+                      defaultValue: '{{count}} prompts',
+                      count: items.length,
+                    })}
               </span>
-              {refreshing ? <span>正在刷新…</span> : null}
+              {refreshing ? (
+                <span>
+                  {t('creativeStudio.prompts.refreshing', {
+                    defaultValue: 'Refreshing…',
+                  })}
+                </span>
+              ) : null}
             </div>
             <div className={styles.grid} role='list'>
               {filteredItems.map((item) => (

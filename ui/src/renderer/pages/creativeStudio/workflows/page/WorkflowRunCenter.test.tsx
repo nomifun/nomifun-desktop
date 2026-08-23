@@ -5,11 +5,21 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { createInstance } from 'i18next';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { I18nextProvider, initReactI18next } from 'react-i18next';
 
 import { cloneWorkflowRunAggregate } from '../domain';
 import { IDS, createWorkflowRunFixture } from '../domain/testFixtures';
 import WorkflowRunCenter from './WorkflowRunCenter';
+
+const testI18n = createInstance();
+testI18n.use(initReactI18next).init({
+  lng: 'en-US',
+  fallbackLng: 'en-US',
+  resources: { 'en-US': { translation: {} } },
+  interpolation: { escapeValue: false },
+});
 
 describe('Workflow Run Center', () => {
   test('renders durable status, progress, recovery actions, and real result URLs', () => {
@@ -31,35 +41,37 @@ describe('Workflow Run Center', () => {
     paused.record.completedAt = null;
 
     const html = renderToStaticMarkup(
-      <WorkflowRunCenter
-        port={{
-          snapshot: {
-            loading: false,
-            loadError: null,
-            runs: [paused, succeeded],
-            activities: {
-              [IDS.idempotency]: {
-                state: 'paused',
-                taskStatuses: { [IDS.task]: 'running' },
-                error: 'network offline',
+      <I18nextProvider i18n={testI18n}>
+        <WorkflowRunCenter
+          port={{
+            snapshot: {
+              loading: false,
+              loadError: null,
+              runs: [paused, succeeded],
+              activities: {
+                [IDS.idempotency]: {
+                  state: 'paused',
+                  taskStatuses: { [IDS.task]: 'running' },
+                  error: 'network offline',
+                },
               },
             },
-          },
-          assetUrl: (assetId) => `/api/creative-studio/files/${assetId}`,
-          resume: async () => undefined,
-          cancel: async () => undefined,
-          review: async () => undefined,
-          retry: async () => undefined,
-        }}
-      />
+            assetUrl: (assetId) => `/api/creative-studio/files/${assetId}`,
+            resume: async () => undefined,
+            cancel: async () => undefined,
+            review: async () => undefined,
+            retry: async () => undefined,
+          }}
+        />
+      </I18nextProvider>
     );
 
     expect(html.includes('data-workflow-run-center="true"')).toBe(true);
-    expect(html.includes('模板任务')).toBe(true);
-    expect(html.includes('等待恢复')).toBe(true);
-    expect(html.includes('继续')).toBe(true);
-    expect(html.includes('已完成')).toBe(true);
+    expect(html.includes('Template runs')).toBe(true);
+    expect(html.includes('Waiting to resume')).toBe(true);
+    expect(html.includes('Resume')).toBe(true);
+    expect(html.includes('Completed')).toBe(true);
     expect(html.includes(`/api/creative-studio/files/${IDS.asset}`)).toBe(true);
-    expect(html.includes('刷新或重启后会继续恢复')).toBe(true);
+    expect(html.includes('refresh or restart')).toBe(true);
   });
 });

@@ -7,6 +7,7 @@
 import { ArrowUp, CloseSmall, Robot, Square } from '@icon-park/react';
 import { Button, Input, Popover } from '@arco-design/web-react';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import {
   NomiCreativeModelSelect,
@@ -60,6 +61,7 @@ const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = 
   onStop,
   onOpenModelSettings,
 }) => {
+  const { t } = useTranslation();
   const canSend =
     !disabled &&
     !isRunning &&
@@ -85,10 +87,16 @@ const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = 
         value={model}
         onChange={onModelChange}
         disabled={disabled || isRunning || modelLocked}
-        label='对话模型'
+        label={t('creativeStudio.agent.modelLabel', {
+          defaultValue: 'Conversation model',
+        })}
         copy={{
-          placeholder: '选择 Agent 对话模型',
-          noCompatibleModel: '没有支持 chat 任务的已启用模型。',
+          placeholder: t('creativeStudio.agent.modelPlaceholder', {
+            defaultValue: 'Choose an Agent conversation model',
+          }),
+          noCompatibleModel: t('creativeStudio.agent.noCompatibleModel', {
+            defaultValue: 'No enabled model supports the chat task.',
+          }),
         }}
         onOpenModelSettings={onOpenModelSettings}
       />
@@ -104,19 +112,30 @@ const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = 
       <div className={styles.composerCard}>
         {contextItems.length > 0 ? (
           <div className={styles.planningField} data-agent-context-items>
-            <span className={styles.planningLabel}>画布上下文</span>
+            <span className={styles.planningLabel}>
+              {t('creativeStudio.agent.contextLabel', {
+                defaultValue: 'Canvas context',
+              })}
+            </span>
             <div className={styles.contextChips}>
               {contextItems.map((item) => (
                 <span
                   key={item.id}
                   className={styles.contextChip}
                   data-selected={item.selected || undefined}
-                  title={`${item.type} · ${item.id}`}
+                  title={t('creativeStudio.agent.contextItemTitle', {
+                    defaultValue: '{{type}} · {{id}}',
+                    type: item.type,
+                    id: item.id,
+                  })}
                 >
                   <span>{item.label}</span>
                   <button
                     type='button'
-                    aria-label={`移除上下文：${item.label}`}
+                    aria-label={t('creativeStudio.agent.removeContext', {
+                      defaultValue: 'Remove context: {{label}}',
+                      label: item.label,
+                    })}
                     disabled={disabled || isRunning}
                     onClick={() => onRemoveContextItem(item.id)}
                   >
@@ -128,7 +147,11 @@ const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = 
           </div>
         ) : null}
         <div className={styles.planningField} data-agent-skill-options>
-          <span className={styles.planningLabel}>创作技能</span>
+          <span className={styles.planningLabel}>
+            {t('creativeStudio.agent.skillsLabel', {
+              defaultValue: 'Creative skills',
+            })}
+          </span>
           <div className={styles.skillChips}>
             {skillOptions.map((skill) => {
               const active = selectedSkillIds.includes(skill.id);
@@ -154,7 +177,9 @@ const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = 
           value={draft}
           disabled={disabled}
           autoSize={{ minRows: 3, maxRows: 7 }}
-          placeholder='描述创作目标，或继续讨论当前方案'
+          placeholder={t('creativeStudio.agent.promptPlaceholder', {
+            defaultValue: 'Describe a creative goal or continue the current discussion',
+          })}
           onChange={onDraftChange}
           onKeyDown={(event) => {
             if (
@@ -186,13 +211,23 @@ const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = 
               disabled={disabled || modelLocked}
               title={
                 modelLocked
-                  ? `会话模型已锁定：${model?.model ?? ''}`
+                  ? t('creativeStudio.agent.modelLocked', {
+                      defaultValue: 'Conversation model locked: {{model}}',
+                      model: model?.model ?? '',
+                    })
                   : model
                     ? `${model.providerId} / ${model.model}`
-                    : '选择对话模型'
+                    : t('creativeStudio.agent.selectConversationModel', {
+                        defaultValue: 'Choose a conversation model',
+                      })
               }
             >
-              <span className={styles.modelTriggerLabel}>{model?.model ?? '选择模型'}</span>
+              <span className={styles.modelTriggerLabel}>
+                {model?.model ??
+                  t('creativeStudio.agent.selectModel', {
+                    defaultValue: 'Choose model',
+                  })}
+              </span>
             </Button>
           </Popover>
           <Button
@@ -201,7 +236,11 @@ const CreativeStudioAgentComposer: React.FC<CreativeStudioAgentComposerProps> = 
             shape='circle'
             size='large'
             disabled={isRunning ? disabled : !canSend}
-            aria-label={isRunning ? '停止 Agent' : '发送给 Agent'}
+            aria-label={
+              isRunning
+                ? t('creativeStudio.agent.stop', { defaultValue: 'Stop Agent' })
+                : t('creativeStudio.agent.send', { defaultValue: 'Send to Agent' })
+            }
             icon={
               isRunning ? (
                 <Square theme='filled' size='15' />

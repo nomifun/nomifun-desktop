@@ -8,10 +8,20 @@ import '../../../../../test/setup-dom.ts';
 
 import { cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
+import { createInstance } from 'i18next';
 import React from 'react';
+import { I18nextProvider, initReactI18next } from 'react-i18next';
 
 import { PromptLibrarySurface } from './PromptLibrarySurface';
 import type { PromptLibraryItem, PromptLibrarySelection } from './types';
+
+const testI18n = createInstance();
+await testI18n.use(initReactI18next).init({
+  lng: 'en-US',
+  fallbackLng: 'en-US',
+  resources: { 'en-US': { translation: {} } },
+  interpolation: { escapeValue: false },
+});
 
 const ITEM: PromptLibraryItem = {
   id: 'prompt-copy',
@@ -39,11 +49,13 @@ describe('PromptLibrarySurface copy interaction', () => {
   test('passes the complete prompt selection to the copy action', () => {
     const copied: PromptLibrarySelection[] = [];
     const { container } = render(
-      <PromptLibrarySurface
-        variant='sidebar'
-        items={[ITEM]}
-        onCopy={(selection) => copied.push(selection)}
-      />
+      <I18nextProvider i18n={testI18n}>
+        <PromptLibrarySurface
+          variant='sidebar'
+          items={[ITEM]}
+          onCopy={(selection) => copied.push(selection)}
+        />
+      </I18nextProvider>
     );
 
     const copyButton = container.querySelector<HTMLButtonElement>(

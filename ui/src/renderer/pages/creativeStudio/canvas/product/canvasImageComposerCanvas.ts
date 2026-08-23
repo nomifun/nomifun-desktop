@@ -39,6 +39,7 @@ import {
   createCreativeCanvasProductNode,
   CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
 } from './nodeFactory';
+import { creativeStudioProductText } from './i18n';
 
 export const CREATIVE_IMAGE_COMPOSE_OPERATION = 'image-node-compose';
 
@@ -199,7 +200,12 @@ export function isCanvasImageComposeConfig(
 export function canvasImageComposeSourceNodeId(node: ConfigNode): string {
   const value = node.data.operation?.sourceNodeId;
   if (typeof value !== 'string' || !value.trim()) {
-    throw new Error('图片创作配置缺少 sourceNodeId。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.image.missingSourceNodeId',
+        '图片创作配置缺少 sourceNodeId。'
+      )
+    );
   }
   return value;
 }
@@ -261,7 +267,12 @@ export function prepareCanvasImageCompose(input: {
     (sourceAssetId !== null &&
       (input.sourceAsset?.kind !== 'image' || input.sourceAsset.id !== sourceAssetId))
   ) {
-    throw new Error('图片创作源节点与真实图片素材不一致。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.image.sourceAssetMismatch',
+        '图片创作源节点与真实图片素材不一致。'
+      )
+    );
   }
 
   const configPosition = nextCanvasImageTaskPosition(
@@ -339,7 +350,13 @@ export function prepareCanvasImageCompose(input: {
     connection
   );
   if (!validation.ok) {
-    throw new Error(`无法连接图片创作配置节点：${validation.code}。`);
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.image.connectConfigFailed',
+        '无法连接图片创作配置节点：{{code}}。',
+        { code: validation.code }
+      )
+    );
   }
   return { configNode, connection, plan };
 }
@@ -365,14 +382,24 @@ export function canvasImageComposeConfigForReference(
     !isCanvasNodeTaskOwner(reference.owner) ||
     reference.owner.canvasId !== document.projectId
   ) {
-      throw new Error('图片创作任务不属于当前画布。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.image.wrongCanvas',
+          '图片创作任务不属于当前画布。'
+        )
+      );
   }
   const owner = reference.owner;
   const node = document.nodes.find(
     (candidate) => candidate.id === owner.nodeId
   );
   if (!isCanvasImageComposeConfig(node)) {
-    throw new Error('图片创作任务缺少 canonical 配置节点。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.image.missingConfig',
+        '图片创作任务缺少 canonical 配置节点。'
+      )
+    );
   }
   if (
     node.data.taskId !== reference.taskId ||
@@ -381,7 +408,12 @@ export function canvasImageComposeConfigForReference(
     node.data.task !== reference.task ||
     node.data.capability !== reference.capability
   ) {
-    throw new Error('图片创作任务与配置节点身份不一致。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.image.identityMismatch',
+        '图片创作任务与配置节点身份不一致。'
+      )
+    );
   }
   return node;
 }
@@ -419,9 +451,16 @@ export function reconcileCanvasImageComposeConfig(
       status: task.status,
       errorMessage:
         task.status === 'failed'
-          ? (task.error?.message ?? '图片创作失败。')
+          ? (task.error?.message ??
+            creativeStudioProductText(
+              'creativeStudio.canvas.errors.image.failed',
+              '图片创作失败。'
+            ))
           : task.status === 'canceled'
-            ? '图片创作已取消。'
+            ? creativeStudioProductText(
+                'creativeStudio.canvas.errors.image.cancelled',
+                '图片创作已取消。'
+              )
             : null,
     },
   };

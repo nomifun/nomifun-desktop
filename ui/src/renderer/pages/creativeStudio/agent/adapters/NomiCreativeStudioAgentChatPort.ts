@@ -5,6 +5,7 @@
  */
 
 import { extractResponseTextChunk, toDisplayText } from '@/common/chat/displayText';
+import i18n from 'i18next';
 import type {
   IConversationTurnCompletedEvent,
   IConversationTurnStartedEvent,
@@ -102,6 +103,11 @@ const sameModel = (
   right: NomiCreativeStudioAgentSessionBinding['model']
 ): boolean => left.providerId === right.providerId && left.model === right.model;
 
+const activityCopy = (key: string, defaultValue: string): string => {
+  if (!i18n.isInitialized) return defaultValue;
+  return i18n.t(key, { defaultValue }) || defaultValue;
+};
+
 const validatePlanningEnvelope = (
   request: CreativeStudioAgentTurnRequest
 ): { modelInput: string; skillIds: readonly string[] } => {
@@ -179,13 +185,34 @@ const activityFromResponse = (event: IResponseMessage): string | null => {
       const record = event.data as Record<string, unknown>;
       const subject = toDisplayText(record.subject).trim();
       const description = toDisplayText(record.description).trim();
-      return [subject, description].filter(Boolean).join(' · ') || 'Agent 正在思考';
+      return (
+        [subject, description].filter(Boolean).join(' · ') ||
+        activityCopy('creativeStudio.agent.activity.thinking', 'Agent is thinking')
+      );
     }
-    return toDisplayText(event.data).trim() || 'Agent 正在思考';
+    return (
+      toDisplayText(event.data).trim() ||
+      activityCopy('creativeStudio.agent.activity.thinking', 'Agent is thinking')
+    );
   }
-  if (event.type === 'start') return 'Agent 已开始执行';
-  if (event.type === 'permission') return 'Agent 正在等待确认';
-  if (event.type === 'finish') return 'Agent 正在完成本轮任务';
+  if (event.type === 'start') {
+    return activityCopy(
+      'creativeStudio.agent.activity.started',
+      'Agent has started'
+    );
+  }
+  if (event.type === 'permission') {
+    return activityCopy(
+      'creativeStudio.agent.activity.waitingConfirmation',
+      'Agent is waiting for confirmation'
+    );
+  }
+  if (event.type === 'finish') {
+    return activityCopy(
+      'creativeStudio.agent.activity.completing',
+      'Agent is completing this task'
+    );
+  }
   if (event.type === 'tool_group') {
     const tools = Array.isArray(event.data) ? event.data : [];
     const active = tools.find(
@@ -199,10 +226,16 @@ const activityFromResponse = (event: IResponseMessage): string | null => {
       return (
         toDisplayText(active.description).trim() ||
         toDisplayText(active.name).trim() ||
-        'Agent 正在执行工具'
+        activityCopy(
+          'creativeStudio.agent.activity.executingTool',
+          'Agent is executing a tool'
+        )
       );
     }
-    return 'Agent 正在处理工具结果';
+    return activityCopy(
+      'creativeStudio.agent.activity.processingToolResult',
+      'Agent is processing tool results'
+    );
   }
   return null;
 };
@@ -276,7 +309,9 @@ const waitForReceiptOrAbort = <T>(
 const errorText = (event: IResponseMessage): string =>
   extractResponseTextChunk(event.data).trim() ||
   toDisplayText(event.data).trim() ||
-  'NomiFun Agent returned an error event without details';
+  i18n.t('creativeStudio.agent.errorWithoutDetails', {
+    defaultValue: 'NomiFun Agent returned an error event without details',
+  });
 
 async function stopAfterAbort(
   transport: NomiCreativeStudioAgentTransport,
@@ -537,7 +572,10 @@ export function createNomiCreativeStudioAgentChatPort(
               activeTurnId = snapshot.activeTurnId;
               yield {
                 type: 'activity',
-                label: '连接同步中，Agent 已开始执行',
+                label: activityCopy(
+                  'creativeStudio.agent.activity.connectionSyncing',
+                  'Synchronizing connection; Agent has started'
+                ),
               };
               continue;
             }
@@ -564,7 +602,13 @@ export function createNomiCreativeStudioAgentChatPort(
               (!activeTurnId || snapshot.activeTurnId === activeTurnId)
             ) {
               activeTurnId = snapshot.activeTurnId;
-              yield { type: 'activity', label: '连接已恢复，Agent 仍在运行' };
+              yield {
+                type: 'activity',
+                label: activityCopy(
+                  'creativeStudio.agent.activity.connectionRestored',
+                  'Connection restored; Agent is still running'
+                ),
+              };
               continue;
             }
             if (snapshot.authority === 'idle' && activeTurnId) {
@@ -586,7 +630,10 @@ export function createNomiCreativeStudioAgentChatPort(
                 label:
                   runtimeEvent.value.detail.trim() ||
                   runtimeEvent.value.phase ||
-                  'Agent 已开始执行',
+                  activityCopy(
+                    'creativeStudio.agent.activity.started',
+                    'Agent has started'
+                  ),
               };
             }
             continue;

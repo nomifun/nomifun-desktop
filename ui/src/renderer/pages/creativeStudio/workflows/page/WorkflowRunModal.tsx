@@ -7,6 +7,8 @@
 import { Button, Input, InputNumber, Message, Modal, Select, Switch } from '@arco-design/web-react';
 import { Copy, Play } from '@icon-park/react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 
 import {
   renderWorkflowTemplate,
@@ -17,6 +19,10 @@ import {
 } from '../domain';
 import styles from './CreativeWorkflowWorkspacePage.module.css';
 import { draftPromptsStep, generationStep } from './workflowViewModel';
+import {
+  formatWorkflowValidationError,
+  workflowFallbackError,
+} from '../workflowI18n';
 
 export interface CreativeWorkflowRunRequest {
   workflow: WorkflowDefinitionV1;
@@ -86,12 +92,13 @@ const WorkflowInputControl: React.FC<{
   variable: WorkflowVariable;
   input: WorkflowInputValue;
   disabled: boolean;
+  t: TFunction;
   onChange: (input: WorkflowInputValue) => void;
   onPickAssets?: (
     variable: WorkflowVariable,
     selectedAssetIds: readonly string[]
   ) => Promise<string[] | null>;
-}> = ({ variable, input, disabled, onChange, onPickAssets }) => {
+}> = ({ variable, input, disabled, t, onChange, onPickAssets }) => {
   if (
     (variable.type === 'text' || variable.type === 'multiline-text') &&
     (input.type === 'text' || input.type === 'multiline-text')
@@ -135,7 +142,15 @@ const WorkflowInputControl: React.FC<{
     return (
       <Select
         value={input.value || undefined}
-        placeholder={variable.options.length > 0 ? '请选择' : '未配置选项'}
+        placeholder={
+          variable.options.length > 0
+            ? t('creativeStudio.workflows.runModal.choicePlaceholder', {
+                defaultValue: 'Select an option',
+              })
+            : t('creativeStudio.workflows.runModal.choiceEmpty', {
+                defaultValue: 'No options configured',
+              })
+        }
         options={variable.options.map((option) => ({ value: option, label: option }))}
         disabled={disabled || variable.options.length === 0}
         onChange={(value) => onChange({ ...input, value })}
@@ -145,22 +160,44 @@ const WorkflowInputControl: React.FC<{
   if (variable.type === 'image' && input.type === 'image') {
     return (
       <div className={styles.referencePlaceholder}>
-        <p>{input.assetId ? `已选择素材 ${input.assetId}` : '未选择参考图'}</p>
+        <p>
+          {input.assetId
+            ? t('creativeStudio.workflows.runModal.selectedAsset', {
+                assetId: input.assetId,
+                defaultValue: 'Selected asset {{assetId}}',
+              })
+            : t('creativeStudio.workflows.runModal.noReference', {
+                defaultValue: 'No reference image selected',
+              })}
+        </p>
         <Button
           size='small'
           disabled={disabled || !onPickAssets}
-          title={onPickAssets ? undefined : '素材选择器尚未连接'}
+          title={
+            onPickAssets
+              ? undefined
+              : t('creativeStudio.workflows.runModal.assetPickerUnavailable', {
+                  defaultValue: 'Asset picker is not connected',
+                })
+          }
           onClick={() =>
             void onPickAssets?.(variable, input.assetId ? [input.assetId] : [])
               .then((assetIds) => {
                 if (assetIds) onChange({ ...input, assetId: assetIds[0] ?? null });
               })
               .catch((error) => Message.error(
-                error instanceof Error ? error.message : '素材选择器打开失败'
+                workflowFallbackError(
+                  error,
+                  t,
+                  'creativeStudio.workflows.runModal.assetPickerOpenFailed',
+                  'Failed to open asset picker'
+                )
               ))
           }
         >
-          从我的素材选择
+          {t('creativeStudio.workflows.runModal.selectFromAssets', {
+            defaultValue: 'Select from My assets',
+          })}
         </Button>
       </div>
     );
@@ -168,27 +205,55 @@ const WorkflowInputControl: React.FC<{
   if (variable.type === 'image-series' && input.type === 'image-series') {
     return (
       <div className={styles.referencePlaceholder}>
-        <p>{input.assetIds.length > 0 ? `已选择 ${input.assetIds.length} 张图片` : '未选择参考图'}</p>
+        <p>
+          {input.assetIds.length > 0
+            ? t('creativeStudio.workflows.runModal.selectedImages', {
+                count: input.assetIds.length,
+                defaultValue: '{{count}} images selected',
+              })
+            : t('creativeStudio.workflows.runModal.noReference', {
+                defaultValue: 'No reference image selected',
+              })}
+        </p>
         <Button
           size='small'
           disabled={disabled || !onPickAssets}
-          title={onPickAssets ? undefined : '素材选择器尚未连接'}
+          title={
+            onPickAssets
+              ? undefined
+              : t('creativeStudio.workflows.runModal.assetPickerUnavailable', {
+                  defaultValue: 'Asset picker is not connected',
+                })
+          }
           onClick={() =>
             void onPickAssets?.(variable, input.assetIds)
               .then((assetIds) => {
                 if (assetIds) onChange({ ...input, assetIds });
               })
               .catch((error) => Message.error(
-                error instanceof Error ? error.message : '素材选择器打开失败'
+                workflowFallbackError(
+                  error,
+                  t,
+                  'creativeStudio.workflows.runModal.assetPickerOpenFailed',
+                  'Failed to open asset picker'
+                )
               ))
           }
         >
-          从我的素材选择
+          {t('creativeStudio.workflows.runModal.selectFromAssets', {
+            defaultValue: 'Select from My assets',
+          })}
         </Button>
       </div>
     );
   }
-  return <div className={styles.referencePlaceholder}>变量契约不匹配，请重新打开模板。</div>;
+  return (
+    <div className={styles.referencePlaceholder}>
+      {t('creativeStudio.workflows.runModal.contractMismatch', {
+        defaultValue: 'Variable contract mismatch. Reopen the template.',
+      })}
+    </div>
+  );
 };
 
 const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
@@ -199,6 +264,7 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
   onPickReferenceAssets,
   onUploadReferenceImages,
 }) => {
+  const { t } = useTranslation();
   const [inputs, setInputs] = useState<WorkflowInputValue[]>([]);
   const [referenceAssetIds, setReferenceAssetIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -215,11 +281,11 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
       workflow
         ? validateWorkflowInputsForDefinition(workflow, inputs)
         : ({
-            ok: false,
-            error: {
-              code: 'invalid-value',
-              path: '$.workflow',
-              message: 'workflow is unavailable',
+              ok: false,
+              error: {
+                code: 'invalid-value',
+                path: '$.workflow',
+                message: 'workflow is unavailable',
             },
           } as const),
     [inputs, workflow]
@@ -276,10 +342,21 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
         inputs,
         referenceAssetIds,
       });
-      Message.success('模板任务已提交');
+      Message.success(
+        t('creativeStudio.workflows.runModal.submitted', {
+          defaultValue: 'Template run submitted',
+        })
+      );
       onClose();
     } catch (error) {
-      Message.error(error instanceof Error ? error.message : '模板任务提交失败');
+      Message.error(
+        workflowFallbackError(
+          error,
+          t,
+          'creativeStudio.workflows.runModal.submitFailed',
+          'Failed to submit template run'
+        )
+      );
     } finally {
       setSubmitting(false);
     }
@@ -290,7 +367,12 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
       visible
       alignCenter={false}
       className={styles.runModal}
-      title={workflow.metadata.name || '运行模板'}
+      title={
+        workflow.metadata.name ||
+        t('creativeStudio.workflows.runModal.titleFallback', {
+          defaultValue: 'Run template',
+        })
+      }
       footer={null}
       autoFocus={false}
       unmountOnExit
@@ -302,7 +384,11 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
       <div className={styles.runGrid} data-workflow-runner>
         <div className={styles.runColumn}>
           <section className={styles.runSection}>
-            <h3>变量输入</h3>
+            <h3>
+              {t('creativeStudio.workflows.runModal.inputs', {
+                defaultValue: 'Variable inputs',
+              })}
+            </h3>
             <div className={styles.inputList}>
               {workflow.variables.map((variable) => {
                 const input = inputs.find((candidate) => candidate.variableId === variable.id);
@@ -317,6 +403,7 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
                       variable={variable}
                       input={input}
                       disabled={submitting}
+                      t={t}
                       onChange={(replacement) =>
                         setInputs((current) => replaceInput(current, replacement))
                       }
@@ -330,31 +417,56 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
 
           <section className={styles.runSection}>
             <div className={styles.sectionHeadingRow}>
-              <h3>参考图</h3>
+              <h3>
+                {t('creativeStudio.workflows.runModal.references', {
+                  defaultValue: 'Reference images',
+                })}
+              </h3>
               <div className={styles.referenceActions}>
                 <Button
                   size='small'
                   disabled={submitting || !onPickReferenceAssets}
-                  title={onPickReferenceAssets ? undefined : '素材选择器尚未连接'}
+                  title={
+                    onPickReferenceAssets
+                      ? undefined
+                      : t('creativeStudio.workflows.runModal.assetPickerUnavailable', {
+                          defaultValue: 'Asset picker is not connected',
+                        })
+                  }
                   onClick={() =>
                     void onPickReferenceAssets?.(referenceAssetIds)
                       .then((assetIds) => {
                         if (assetIds) setReferenceAssetIds(assetIds);
                       })
                       .catch((error) => Message.error(
-                        error instanceof Error ? error.message : '素材选择器打开失败'
+                        workflowFallbackError(
+                          error,
+                          t,
+                          'creativeStudio.workflows.runModal.assetPickerOpenFailed',
+                          'Failed to open asset picker'
+                        )
                       ))
                   }
                 >
-                  我的素材
+                  {t('creativeStudio.workflows.runModal.myAssets', {
+                    defaultValue: 'My assets',
+                  })}
                 </Button>
                 <Button
                   size='small'
                   disabled={submitting || !onUploadReferenceImages}
-                  title={onUploadReferenceImages ? undefined : '图片上传网关尚未连接'}
+                  title={
+                    onUploadReferenceImages
+                      ? undefined
+                      : t('creativeStudio.workflows.runModal.uploadGatewayUnavailable', {
+                          defaultValue: 'Image upload gateway is not connected',
+                        })
+                  }
                   onClick={() => referenceInputRef.current?.click()}
                 >
-                  上传
+                  {t('creativeStudio.workflows.runModal.upload', {
+                    defaultValue: 'Upload',
+                  })}
                 </Button>
               </div>
             </div>
@@ -371,32 +483,51 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
                 void onUploadReferenceImages(files, referenceAssetIds)
                   .then(setReferenceAssetIds)
                   .catch((error) => Message.error(
-                    error instanceof Error ? error.message : '参考图上传失败'
+                    workflowFallbackError(
+                      error,
+                      t,
+                      'creativeStudio.workflows.runModal.uploadFailed',
+                      'Failed to upload reference images'
+                    )
                   ));
               }}
             />
             <div className={styles.referencePlaceholder}>
               {referenceAssetIds.length > 0
-                ? `已添加 ${referenceAssetIds.length} 张参考图`
-                : '未添加参考图'}
+                ? t('creativeStudio.workflows.runModal.addedReferences', {
+                    count: referenceAssetIds.length,
+                    defaultValue: '{{count}} reference images added',
+                  })
+                : t('creativeStudio.workflows.runModal.noAddedReferences', {
+                    defaultValue: 'No reference images added',
+                  })}
             </div>
           </section>
 
           {!runner ? (
             <div className={styles.runnerUnavailable} role='status'>
-              运行网关正在接入 NomiFun 任务系统；当前不会伪造生成结果。
+              {t('creativeStudio.workflows.runModal.gatewayUnavailable', {
+                defaultValue:
+                  'The run gateway is connecting to the NomiFun task system. No generated results are simulated yet.',
+              })}
             </div>
           ) : !model ? (
             <div className={styles.runnerUnavailable} role='status'>
-              请先编辑模板并选择支持当前任务的已启用模型。
+              {t('creativeStudio.workflows.runModal.modelRequired', {
+                defaultValue:
+                  'Edit the template and select an enabled model that supports this task first.',
+              })}
             </div>
           ) : requiresPlanningModel && !planningModel ? (
             <div className={styles.runnerUnavailable} role='status'>
-              请先为多图提示词规划选择一个已启用的对话模型。
+              {t('creativeStudio.workflows.runModal.planningModelRequired', {
+                defaultValue:
+                  'Select an enabled chat model for multi-image prompt planning first.',
+              })}
             </div>
           ) : !validation.ok ? (
             <div className={styles.runnerUnavailable} role='status'>
-              {validation.error.message}
+              {formatWorkflowValidationError(validation.error, t)}
             </div>
           ) : null}
 
@@ -409,50 +540,86 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
             icon={<Play theme='outline' size={16} fill='currentColor' />}
             onClick={() => void submit()}
           >
-            {workflow.output.kind === 'multi-image-series' ? '生成提示词' : '启动任务'}
+            {workflow.output.kind === 'multi-image-series'
+              ? t('creativeStudio.workflows.runModal.generatePrompts', {
+                  defaultValue: 'Generate prompts',
+                })
+              : t('creativeStudio.workflows.runModal.startTask', {
+                  defaultValue: 'Start task',
+                })}
           </Button>
         </div>
 
         <div className={styles.runColumn}>
           <section className={styles.runSection}>
             <div className={styles.sectionHeadingRow}>
-              <h3>生成提示词预览</h3>
+              <h3>
+                {t('creativeStudio.workflows.runModal.promptPreview', {
+                  defaultValue: 'Generated prompt preview',
+                })}
+              </h3>
               <Button
                 size='small'
                 icon={<Copy theme='outline' size={14} fill='currentColor' />}
                 disabled={!promptPreview}
                 onClick={() => promptPreview && void navigator.clipboard.writeText(promptPreview)}
               >
-                复制
+                {t('creativeStudio.workflows.runModal.copy', { defaultValue: 'Copy' })}
               </Button>
             </div>
             <div className={styles.promptResult}>
-              {promptPreview || '填写变量后会在这里预览最终提示词'}
+              {promptPreview ||
+                t('creativeStudio.workflows.runModal.promptPlaceholder', {
+                  defaultValue: 'Fill in the variables to preview the final prompt here',
+                })}
             </div>
           </section>
 
           <div className={styles.infoGrid}>
             <div className={styles.infoPill}>
-              <p>模型</p>
-              <strong>{model?.model ?? '未选择'}</strong>
+              <p>{t('creativeStudio.workflows.runModal.model', { defaultValue: 'Model' })}</p>
+              <strong>
+                {model?.model ??
+                  t('creativeStudio.workflows.runModal.notSelected', {
+                    defaultValue: 'Not selected',
+                  })}
+              </strong>
             </div>
             <div className={styles.infoPill}>
-              <p>任务</p>
-              <strong>{model?.task === 'image_edit' ? '图像编辑' : '图片生成'}</strong>
+              <p>{t('creativeStudio.workflows.runModal.task', { defaultValue: 'Task' })}</p>
+              <strong>
+                {model?.task === 'image_edit'
+                  ? t('creativeStudio.workflows.runModal.imageEdit', {
+                      defaultValue: 'Image editing',
+                    })
+                  : t('creativeStudio.workflows.runModal.imageGeneration', {
+                      defaultValue: 'Image generation',
+                    })}
+              </strong>
             </div>
             <div className={styles.infoPill}>
-              <p>尺寸</p>
+              <p>{t('creativeStudio.workflows.runModal.size', { defaultValue: 'Size' })}</p>
               <strong>
                 {generate.generation.width} × {generate.generation.height}
               </strong>
             </div>
             <div className={styles.infoPill}>
-              <p>{workflow.output.kind === 'multi-image-series' ? '草稿数量' : '数量'}</p>
+              <p>
+                {workflow.output.kind === 'multi-image-series'
+                  ? t('creativeStudio.workflows.runModal.draftCount', {
+                      defaultValue: 'Drafts',
+                    })
+                  : t('creativeStudio.workflows.runModal.count', {
+                      defaultValue: 'Quantity',
+                    })}
+              </p>
               <strong>
                 {workflow.output.kind === 'multi-image-series'
                   ? workflow.output.targetCount
                   : generate.generation.imagesPerPrompt}{' '}
-                张
+                {t('creativeStudio.workflows.runModal.imagesUnit', {
+                  defaultValue: 'images',
+                })}
               </strong>
             </div>
           </div>

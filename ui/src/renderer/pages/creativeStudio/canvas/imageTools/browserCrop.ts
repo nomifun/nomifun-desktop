@@ -10,6 +10,7 @@ import {
   type CreativeImageCropPixels,
   type CreativeImageCropRect,
 } from "./cropModel";
+import { translateCreativeImageTool } from "./imageToolI18n";
 
 export interface DecodedCreativeImage {
   width: number;
@@ -65,7 +66,10 @@ export const creativeImageExtensionForMime = (mimeType: string): string => {
 };
 
 export const creativeImageSafeFileStem = (title: string): string =>
-  (title.trim() || "image")
+  (title.trim() ||
+    translateCreativeImageTool(
+      "creativeStudio.canvas.imageTools.fileNames.untitledImage",
+    ))
     .replace(/[<>:"/\\|?*\u0000-\u001f]/gu, "-")
     .replace(/\s+/gu, " ")
     .slice(0, 80);
@@ -73,13 +77,22 @@ export const creativeImageSafeFileStem = (title: string): string =>
 export const creativeImageCanvasToBlob = (
   canvas: HTMLCanvasElement,
   mimeType: string,
-  failureMessage = "浏览器未能编码裁剪后的图片。",
+  failureMessage?: string,
 ): Promise<Blob> =>
   new Promise((resolve, reject) => {
     canvas.toBlob(
       (blob) => {
         if (blob) resolve(blob);
-        else reject(new Error(failureMessage));
+        else {
+          reject(
+            new Error(
+              failureMessage ??
+                translateCreativeImageTool(
+                  "creativeStudio.canvas.imageTools.errors.encodeCropFailed",
+                ),
+            ),
+          );
+        }
       },
       mimeType,
       mimeType === "image/png" ? undefined : 0.92,
@@ -94,7 +107,12 @@ export const browserCreativeImageCropCodec: CreativeImageCropCodec = {
       ...(signal ? { signal } : {}),
     });
     if (!response.ok) {
-      throw new Error(`读取原图失败（HTTP ${response.status}）。`);
+      throw new Error(
+        translateCreativeImageTool(
+          "creativeStudio.canvas.imageTools.errors.loadSourceFailed",
+          { status: response.status },
+        ),
+      );
     }
     return response.blob();
   },
@@ -116,7 +134,13 @@ export const browserCreativeImageCropCodec: CreativeImageCropCodec = {
     const context = canvas.getContext("2d", {
       alpha: mimeType !== "image/jpeg",
     });
-    if (!context) throw new Error("浏览器无法创建图片裁剪画布。");
+    if (!context) {
+      throw new Error(
+        translateCreativeImageTool(
+          "creativeStudio.canvas.imageTools.errors.createCropCanvasFailed",
+        ),
+      );
+    }
     context.drawImage(
       image.source,
       crop.x,
@@ -141,7 +165,11 @@ export async function cropCreativeImageAsset(
   input: CropCreativeImageAssetInput,
 ): Promise<CroppedCreativeImageFile> {
   if (input.asset.kind !== "image") {
-    throw new Error("只有真实图片素材可以裁剪。");
+    throw new Error(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.imageRequiredForCrop",
+      ),
+    );
   }
   input.signal?.throwIfAborted();
   const codec = input.codec ?? browserCreativeImageCropCodec;
@@ -154,7 +182,13 @@ export async function cropCreativeImageAsset(
     const mimeType = creativeImageOutputMimeType(input.asset);
     const output = await codec.encode(decoded, pixels, mimeType);
     input.signal?.throwIfAborted();
-    const name = `${creativeImageSafeFileStem(input.asset.title)}-crop.${creativeImageExtensionForMime(mimeType)}`;
+    const name = translateCreativeImageTool(
+      "creativeStudio.canvas.imageTools.fileNames.crop",
+      {
+        stem: creativeImageSafeFileStem(input.asset.title),
+        extension: creativeImageExtensionForMime(mimeType),
+      },
+    );
     return {
       file: new File([output], name, { type: mimeType }),
       width: pixels.width,

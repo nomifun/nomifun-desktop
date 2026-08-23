@@ -5,6 +5,7 @@
  */
 
 import type { CreativeCanvasNode, CreativeSize } from "../../domain";
+import { translateCreativeImageTool } from "./imageToolI18n";
 
 const DERIVED_IMAGE_GAP = 80;
 const DERIVED_IMAGE_ROW_GAP = 40;
@@ -44,5 +45,9 @@ export function nextDerivedImagePosition(
       return position;
     }
   }
-  throw new Error("无法为裁剪结果找到安全的画布位置。");
+  throw new Error(
+    translateCreativeImageTool(
+      "creativeStudio.canvas.imageTools.errors.cropPlacementFailed",
+    ),
+  );
 }

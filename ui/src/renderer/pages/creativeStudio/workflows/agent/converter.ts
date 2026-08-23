@@ -11,6 +11,10 @@ import {
   type WorkflowDefinitionV1,
   type WorkflowTemplateSegment,
 } from '../domain';
+import {
+  createWorkflowTranslationCopy,
+  type WorkflowTranslationCopy,
+} from '../workflowI18n';
 import { createBlankWorkflow } from '../page/workflowViewModel';
 
 import type { CreativeWorkflowDraftArtifact } from './artifacts';
@@ -82,9 +86,10 @@ const parsePromptTemplate = (
  */
 export function convertCreativeWorkflowDraft(
   artifact: CreativeWorkflowDraftArtifact,
-  exactChatModel: CreativeModelSelectionRef
+  exactChatModel: CreativeModelSelectionRef,
+  copy: WorkflowTranslationCopy = createWorkflowTranslationCopy()
 ): WorkflowDefinitionV1 {
-  const workflow = createBlankWorkflow(artifact.draft.mode);
+  const workflow = createBlankWorkflow(artifact.draft.mode, copy);
   workflow.metadata = {
     name: artifact.draft.name,
     description: artifact.draft.description,

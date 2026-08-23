@@ -8,6 +8,7 @@ import { describe, expect, test } from 'bun:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
+import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
 import CreativeCanvasChrome, {
   CreativeCanvasBackgroundMenu,
   CreativeCanvasNodeMenu,
@@ -61,7 +62,9 @@ const baseProps = (
 });
 
 const renderChrome = (overrides: Partial<CreativeCanvasChromeProps> = {}) =>
-  renderToStaticMarkup(<CreativeCanvasChrome {...baseProps(overrides)} />);
+  renderToStaticMarkup(
+    withCanvasTestI18n(<CreativeCanvasChrome {...baseProps(overrides)} />)
+  );
 
 describe('CreativeCanvasChrome source-shaped layout', () => {
   test('renders the canvas toolbar, real canvas column, panels, and controlled tool actions', () => {
@@ -70,21 +73,39 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
     expect(html.includes('data-creative-canvas-chrome="true"')).toBe(true);
     expect(html.includes('data-canvas-chrome-stage="true"')).toBe(true);
     expect(html.includes('品牌概念画布')).toBe(true);
-    expect(html.includes('已保存')).toBe(true);
-    expect(html.includes('返回画布库')).toBe(true);
+    expect(
+      html.includes('creativeStudio.canvas.save.status.saved')
+    ).toBe(true);
+    expect(
+      html.includes('creativeStudio.canvas.chrome.backToLibrary')
+    ).toBe(true);
     expect(html.includes('CANVAS SLOT')).toBe(true);
     expect(html.includes('CANVAS PANEL')).toBe(true);
     expect(html.includes('ASSISTANT PANEL')).toBe(true);
     expect(html.includes('HISTORY PANEL')).toBe(true);
-    expect(html.includes('aria-label="选择工具"')).toBe(true);
-    expect(html.includes('aria-label="平移工具"')).toBe(true);
-    expect(html.includes('aria-label="撤销"')).toBe(true);
-    expect(html.includes('aria-label="重做"')).toBe(true);
-    expect(html.includes('aria-label="适应内容"')).toBe(true);
-    expect(html.includes('aria-label="打开小地图"')).toBe(true);
+    expect(
+      html.includes('aria-label="creativeStudio.canvas.actions.selectTool"')
+    ).toBe(true);
+    expect(
+      html.includes('aria-label="creativeStudio.canvas.actions.panTool"')
+    ).toBe(true);
+    expect(
+      html.includes('aria-label="creativeStudio.canvas.actions.undo"')
+    ).toBe(true);
+    expect(
+      html.includes('aria-label="creativeStudio.canvas.actions.redo"')
+    ).toBe(true);
+    expect(
+      html.includes('aria-label="creativeStudio.canvas.actions.fitView"')
+    ).toBe(true);
+    expect(
+      html.includes('aria-label="creativeStudio.canvas.actions.openMiniMap"')
+    ).toBe(true);
     expect(html.includes('aria-pressed="true"')).toBe(true);
     expect(html.includes('data-right-panel-header')).toBe(false);
-    expect(html.includes('添加节点')).toBe(false);
+    expect(
+      html.includes('creativeStudio.canvas.chrome.addNode')
+    ).toBe(false);
     expect(CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS).toEqual([
       'text',
       'image',
@@ -95,17 +116,19 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
       'config',
     ]);
     for (const label of [
-      '文本',
-      '图片',
-      '视频',
-      '音频',
-      '全景图',
-      '导演台',
-      '生成配置',
+      'creativeStudio.canvas.nodeKinds.text',
+      'creativeStudio.canvas.nodeKinds.image',
+      'creativeStudio.canvas.nodeKinds.video',
+      'creativeStudio.canvas.nodeKinds.audio',
+      'creativeStudio.canvas.nodeKinds.panorama',
+      'creativeStudio.canvas.nodeKinds.director',
+      'creativeStudio.canvas.nodeKinds.config',
     ]) {
       expect(html.includes(`aria-label="${label}"`)).toBe(true);
     }
-    expect(html.includes('aria-label="分组"')).toBe(false);
+    expect(
+      html.includes('aria-label="creativeStudio.canvas.nodeKinds.group"')
+    ).toBe(false);
   });
 
   test('keeps a header for properties while the Agent owns its source header', () => {
@@ -125,14 +148,14 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
     const html = renderChrome({ compact: true });
 
     for (const label of [
-      '画布',
-      '资产',
-      '提示词',
-      '模板',
-      '创作助手',
-      '属性',
-      '历史',
-      '时间线',
+      'creativeStudio.canvas.panels.left.canvas',
+      'creativeStudio.canvas.panels.left.assets',
+      'creativeStudio.canvas.panels.left.prompts',
+      'creativeStudio.canvas.panels.left.workflows',
+      'creativeStudio.canvas.panels.right.assistant',
+      'creativeStudio.canvas.panels.right.properties',
+      'creativeStudio.canvas.panels.bottom.history',
+      'creativeStudio.canvas.panels.bottom.timeline',
     ]) {
       expect(html.includes(label)).toBe(true);
     }
@@ -159,7 +182,9 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
 
 describe('CreativeCanvasChrome controlled menus', () => {
   test('offers exactly the eight canonical node kinds', () => {
-    const html = renderToStaticMarkup(<CreativeCanvasNodeMenu onSelect={noop} />);
+    const html = renderToStaticMarkup(
+      withCanvasTestI18n(<CreativeCanvasNodeMenu onSelect={noop} />)
+    );
 
     expect(CREATIVE_CANVAS_CHROME_NODE_KINDS).toHaveLength(8);
     expect((html.match(/data-node-kind=/g) ?? []).length).toBe(8);
@@ -170,7 +195,9 @@ describe('CreativeCanvasChrome controlled menus', () => {
 
   test('offers only dots, lines, and blank background modes', () => {
     const html = renderToStaticMarkup(
-      <CreativeCanvasBackgroundMenu value='lines' onChange={noop} />
+      withCanvasTestI18n(
+        <CreativeCanvasBackgroundMenu value='lines' onChange={noop} />
+      )
     );
 
     expect(CREATIVE_CANVAS_CHROME_BACKGROUNDS).toEqual(['dots', 'lines', 'blank']);

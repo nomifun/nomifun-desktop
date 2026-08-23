@@ -15,6 +15,7 @@ import type {
 import type { CanvasCasFlushResult, CanvasCasSaveSnapshot } from '../editor';
 import type { CreativeNodeAssetPresentation } from '../nodes';
 import type { CanvasState } from '../core';
+import { creativeStudioProductText } from './i18n';
 
 export interface CreativeCanvasProductSelectionCapabilities {
   hasSelection: boolean;
@@ -116,14 +117,25 @@ export function canLeaveCreativeCanvasAfterFlush(
   return result.status === 'noop' || result.status === 'saved';
 }
 
-export const CREATIVE_CANVAS_REVISION_CONFLICT_MESSAGE =
-  '远端画布已更新，本地更改未覆盖。';
+export const creativeCanvasRevisionConflictMessage = (): string =>
+  creativeStudioProductText(
+    'creativeStudio.canvas.save.revisionConflict',
+    '远端画布已更新，本地更改未覆盖。'
+  );
 
 export function creativeCanvasSaveDisplayMessage(
   save: CanvasCasSaveSnapshot
 ): string | undefined {
-  if (save.status === 'conflict') return CREATIVE_CANVAS_REVISION_CONFLICT_MESSAGE;
-  if (save.status === 'error') return save.error?.message ?? '画布保存失败。';
+  if (save.status === 'conflict') return creativeCanvasRevisionConflictMessage();
+  if (save.status === 'error') {
+    return (
+      save.error?.message ??
+      creativeStudioProductText(
+        'creativeStudio.canvas.save.failed',
+        '画布保存失败。'
+      )
+    );
+  }
   return undefined;
 }
 
@@ -131,7 +143,12 @@ export function creativeCanvasBlockedLeaveMessage(
   result: CanvasCasFlushResult
 ): string | undefined {
   if (result.status === 'conflict') {
-    return `${CREATIVE_CANVAS_REVISION_CONFLICT_MESSAGE}请先重新载入远端版本。`;
+    const conflict = creativeCanvasRevisionConflictMessage();
+    return creativeStudioProductText(
+      'creativeStudio.canvas.save.reloadRequired',
+      '{{conflict}}请先重新载入远端版本。',
+      { conflict }
+    );
   }
   if (result.status === 'error') return result.error.message;
   return undefined;

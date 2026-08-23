@@ -61,7 +61,7 @@ describe('CreativeCanvasEditor composition contract', () => {
       "throw new Error('Creative canvas is read-only')",
       'showSaveState',
       "saveSnapshot.status === 'conflict'",
-      '放弃本地更改并重新载入',
+      'creativeStudio.canvas.save.reloadRemote',
     ]) {
       expect(editorSource.includes(token)).toBe(true);
     }

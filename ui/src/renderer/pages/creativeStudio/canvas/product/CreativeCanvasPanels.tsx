@@ -22,7 +22,9 @@ import {
   Workbench,
 } from '@icon-park/react';
 import classNames from 'classnames';
+import type { TFunction } from 'i18next';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { CreativeCanvasNode, CreativeCanvasNodeKind } from '../../domain';
 import type { CanvasState } from '../core';
@@ -36,7 +38,18 @@ const iconProps = {
   strokeWidth: 2.5,
 };
 
-const NODE_KIND_LABELS: Record<CreativeCanvasNodeKind, string> = {
+const NODE_KIND_LABEL_KEYS: Record<CreativeCanvasNodeKind, string> = {
+  text: 'creativeStudio.canvas.nodeKinds.text',
+  image: 'creativeStudio.canvas.nodeKinds.image',
+  panorama: 'creativeStudio.canvas.nodeKinds.panorama',
+  video: 'creativeStudio.canvas.nodeKinds.video',
+  audio: 'creativeStudio.canvas.nodeKinds.audio',
+  config: 'creativeStudio.canvas.nodeKinds.config',
+  director: 'creativeStudio.canvas.nodeKinds.director',
+  group: 'creativeStudio.canvas.nodeKinds.group',
+};
+
+const NODE_KIND_LABEL_FALLBACKS: Record<CreativeCanvasNodeKind, string> = {
   text: '文本',
   image: '图片',
   panorama: '全景图',
@@ -46,6 +59,19 @@ const NODE_KIND_LABELS: Record<CreativeCanvasNodeKind, string> = {
   director: '导演台',
   group: '分组',
 };
+
+const fallbackTranslate = (
+  key: string,
+  options?: { defaultValue?: unknown }
+): string => String(options?.defaultValue ?? key);
+
+const nodeKindLabel = (
+  kind: CreativeCanvasNodeKind,
+  t: TFunction = fallbackTranslate as TFunction
+): string =>
+  t(NODE_KIND_LABEL_KEYS[kind], {
+    defaultValue: NODE_KIND_LABEL_FALLBACKS[kind],
+  });
 
 function nodeKindIcon(kind: CreativeCanvasNodeKind): React.ReactNode {
   switch (kind) {
@@ -75,24 +101,45 @@ const compactText = (value: string, maxLength = 54): string => {
 };
 
 /** A label projected only from persisted node data; it never invents generated content. */
-export function creativeCanvasNodeDisplayName(node: CreativeCanvasNode): string {
+export function creativeCanvasNodeDisplayName(
+  node: CreativeCanvasNode,
+  t: TFunction = fallbackTranslate as TFunction
+): string {
   switch (node.type) {
     case 'text':
-      return compactText(node.data.text) || '空文本';
+      return (
+        compactText(node.data.text) ||
+        t('creativeStudio.canvas.nodes.emptyText', {
+          defaultValue: '空文本',
+        })
+      );
     case 'image':
-      return compactText(node.data.caption || node.data.alt) || '图片';
+      return compactText(node.data.caption || node.data.alt) || nodeKindLabel('image', t);
     case 'panorama':
-      return node.data.assetId ? '已连接全景素材' : '全景图';
+      return node.data.assetId
+        ? t('creativeStudio.canvas.nodes.connectedPanorama', {
+            defaultValue: '已连接全景素材',
+          })
+        : nodeKindLabel('panorama', t);
     case 'video':
-      return node.data.assetId ? '已连接视频素材' : '视频';
+      return node.data.assetId
+        ? t('creativeStudio.canvas.nodes.connectedVideo', {
+            defaultValue: '已连接视频素材',
+          })
+        : nodeKindLabel('video', t);
     case 'audio':
-      return compactText(node.data.title) || '音频';
+      return compactText(node.data.title) || nodeKindLabel('audio', t);
     case 'config':
-      return compactText(node.data.prompt) || '生成配置';
+      return compactText(node.data.prompt) || nodeKindLabel('config', t);
     case 'director':
-      return compactText(node.data.sceneId ?? '') || '导演台';
+      return compactText(node.data.sceneId ?? '') || nodeKindLabel('director', t);
     case 'group':
-      return compactText(node.data.title) || '未命名分组';
+      return (
+        compactText(node.data.title) ||
+        t('creativeStudio.canvas.nodes.unnamedGroup', {
+          defaultValue: '未命名分组',
+        })
+      );
   }
 }
 
@@ -118,6 +165,7 @@ export const CreativeCanvasOutlinePanel: React.FC<CreativeCanvasOutlinePanelProp
   onClearSelection,
   className,
 }) => {
+  const { t } = useTranslation();
   const selected = new Set(state.selection.nodeIds);
   const nodes = sortOutlineNodes(state.document.nodes);
 
@@ -125,26 +173,48 @@ export const CreativeCanvasOutlinePanel: React.FC<CreativeCanvasOutlinePanelProp
     <section
       className={classNames(styles.panel, className)}
       data-canvas-product-panel='outline'
-      aria-label='画布结构'
+      aria-label={t('creativeStudio.canvas.outline.label', {
+        defaultValue: '画布结构',
+      })}
     >
       <header className={styles.panelHeader}>
         <div>
-          <h2>画布结构</h2>
+          <h2>
+            {t('creativeStudio.canvas.outline.title', {
+              defaultValue: '画布结构',
+            })}
+          </h2>
           <p>
-            {nodes.length} 个节点 · {state.document.connections.length} 条连接
+            {t('creativeStudio.canvas.outline.summary', {
+              nodeCount: nodes.length,
+              connectionCount: state.document.connections.length,
+              defaultValue: `${nodes.length} 个节点 · ${state.document.connections.length} 条连接`,
+            })}
           </p>
         </div>
         {selected.size > 0 && onClearSelection ? (
           <button type='button' className={styles.textButton} onClick={onClearSelection}>
-            清除选择
+            {t('creativeStudio.canvas.outline.clearSelection', {
+              defaultValue: '清除选择',
+            })}
           </button>
         ) : null}
       </header>
 
       {nodes.length === 0 ? (
-        <p className={styles.outlineEmpty} role='status'>画布暂无节点</p>
+        <p className={styles.outlineEmpty} role='status'>
+          {t('creativeStudio.canvas.outline.empty', {
+            defaultValue: '画布暂无节点',
+          })}
+        </p>
       ) : (
-        <div className={styles.outlineList} role='list' aria-label='画布节点'>
+        <div
+          className={styles.outlineList}
+          role='list'
+          aria-label={t('creativeStudio.canvas.outline.nodesLabel', {
+            defaultValue: '画布节点',
+          })}
+        >
           {nodes.map((node) => {
             const isSelected = selected.has(node.id);
             return (
@@ -168,14 +238,26 @@ export const CreativeCanvasOutlinePanel: React.FC<CreativeCanvasOutlinePanelProp
                   {nodeKindIcon(node.type)}
                 </span>
                 <span className={styles.outlineIdentity}>
-                  <strong>{creativeCanvasNodeDisplayName(node)}</strong>
+                  <strong>{creativeCanvasNodeDisplayName(node, t)}</strong>
                   <span>
-                    {NODE_KIND_LABELS[node.type]}
-                    {node.groupId ? ' · 已分组' : ''}
+                    {nodeKindLabel(node.type, t)}
+                    {node.groupId
+                      ? t('creativeStudio.canvas.outline.groupedSuffix', {
+                          defaultValue: ' · 已分组',
+                        })
+                      : ''}
                   </span>
                 </span>
                 {node.locked ? (
-                  <span className={styles.lockIcon} title='节点已锁定' aria-label='节点已锁定'>
+                  <span
+                    className={styles.lockIcon}
+                    title={t('creativeStudio.canvas.nodes.locked', {
+                      defaultValue: '节点已锁定',
+                    })}
+                    aria-label={t('creativeStudio.canvas.nodes.locked', {
+                      defaultValue: '节点已锁定',
+                    })}
+                  >
                     <Lock {...iconProps} />
                   </span>
                 ) : null}
@@ -200,98 +282,394 @@ const PropertyRow: React.FC<PropertyRowProps> = ({ label, value }) => (
   </div>
 );
 
-const optionalValue = (value: string | null | undefined): string => value?.trim() || '未设置';
-const booleanValue = (value: boolean): string => (value ? '是' : '否');
-const milliseconds = (value: number | null): string => (value === null ? '未设置' : `${value} ms`);
+const optionalValue = (
+  value: string | null | undefined,
+  t: TFunction
+): string =>
+  value?.trim() ||
+  t('creativeStudio.canvas.values.unset', {
+    defaultValue: '未设置',
+  });
+const booleanValue = (value: boolean, t: TFunction): string =>
+  value
+    ? t('creativeStudio.canvas.values.yes', { defaultValue: '是' })
+    : t('creativeStudio.canvas.values.no', { defaultValue: '否' });
+const milliseconds = (value: number | null, t: TFunction): string =>
+  value === null
+    ? t('creativeStudio.canvas.values.unset', { defaultValue: '未设置' })
+    : t('creativeStudio.canvas.values.milliseconds', {
+        value,
+        defaultValue: '{{value}} ms',
+      });
+const textFormatValue = (
+  value: 'plain' | 'markdown',
+  t: TFunction
+): string =>
+  value === 'markdown'
+    ? t('creativeStudio.canvas.editor.markdown', { defaultValue: 'Markdown' })
+    : t('creativeStudio.canvas.editor.plainText', { defaultValue: '纯文本' });
+const textAlignmentValue = (
+  value: 'left' | 'center' | 'right',
+  t: TFunction
+): string => {
+  if (value === 'center') {
+    return t('creativeStudio.canvas.editor.alignCenter', {
+      defaultValue: '居中',
+    });
+  }
+  if (value === 'right') {
+    return t('creativeStudio.canvas.editor.alignRight', {
+      defaultValue: '右对齐',
+    });
+  }
+  return t('creativeStudio.canvas.editor.alignLeft', {
+    defaultValue: '左对齐',
+  });
+};
+const imageFitValue = (value: 'contain' | 'cover', t: TFunction): string =>
+  value === 'cover'
+    ? t('creativeStudio.canvas.editor.fitCover', {
+        defaultValue: '填满裁切',
+      })
+    : t('creativeStudio.canvas.editor.fitContain', {
+        defaultValue: '完整显示',
+      });
+const generationStatusValue = (
+  value: 'idle' | 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled',
+  t: TFunction
+): string =>
+  t(`creativeStudio.canvas.nodes.status.${value}`, {
+    defaultValue: value,
+  });
 
 const NodeDataProperties: React.FC<{ node: CreativeCanvasNode; memberCount: number }> = ({
   node,
   memberCount,
 }) => {
+  const { t } = useTranslation();
   switch (node.type) {
     case 'text':
       return (
         <>
-          <PropertyRow label='内容' value={node.data.text || '空文本'} />
-          <PropertyRow label='格式' value={node.data.format} />
-          <PropertyRow label='字号' value={`${node.data.fontSize}px`} />
-          <PropertyRow label='对齐' value={node.data.textAlign} />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.content', {
+              defaultValue: '内容',
+            })}
+            value={
+              node.data.text ||
+              t('creativeStudio.canvas.nodes.emptyText', {
+                defaultValue: '空文本',
+              })
+            }
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.format', {
+              defaultValue: '格式',
+            })}
+            value={textFormatValue(node.data.format, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.fontSize', {
+              defaultValue: '字号',
+            })}
+            value={`${node.data.fontSize}px`}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.alignment', {
+              defaultValue: '对齐',
+            })}
+            value={textAlignmentValue(node.data.textAlign, t)}
+          />
         </>
       );
     case 'image':
       return (
         <>
-          <PropertyRow label='素材 ID' value={optionalValue(node.data.assetId)} />
-          <PropertyRow label='说明' value={optionalValue(node.data.caption)} />
-          <PropertyRow label='替代文本' value={optionalValue(node.data.alt)} />
-          <PropertyRow label='适配' value={node.data.fit} />
           <PropertyRow
-            label='原始尺寸'
-            value={node.data.naturalSize ? `${node.data.naturalSize.width} × ${node.data.naturalSize.height}` : '未解析'}
+            label={t('creativeStudio.canvas.properties.assetId', {
+              defaultValue: '素材 ID',
+            })}
+            value={optionalValue(node.data.assetId, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.caption', {
+              defaultValue: '说明',
+            })}
+            value={optionalValue(node.data.caption, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.altText', {
+              defaultValue: '替代文本',
+            })}
+            value={optionalValue(node.data.alt, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.fit', {
+              defaultValue: '适配',
+            })}
+            value={imageFitValue(node.data.fit, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.naturalSize', {
+              defaultValue: '原始尺寸',
+            })}
+            value={
+              node.data.naturalSize
+                ? `${node.data.naturalSize.width} × ${node.data.naturalSize.height}`
+                : t('creativeStudio.canvas.values.unresolved', {
+                    defaultValue: '未解析',
+                  })
+            }
           />
         </>
       );
     case 'panorama':
       return (
         <>
-          <PropertyRow label='素材 ID' value={optionalValue(node.data.assetId)} />
-          <PropertyRow label='投影' value={node.data.projection} />
-          <PropertyRow label='视角' value={`yaw ${node.data.yaw}° · pitch ${node.data.pitch}°`} />
-          <PropertyRow label='视野' value={`${node.data.fieldOfView}°`} />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.assetId', {
+              defaultValue: '素材 ID',
+            })}
+            value={optionalValue(node.data.assetId, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.projection', {
+              defaultValue: '投影',
+            })}
+            value={t('creativeStudio.canvas.editor.projectionEquirectangular', {
+              defaultValue: '等距柱状投影',
+            })}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.viewAngle', {
+              defaultValue: '视角',
+            })}
+            value={t('creativeStudio.canvas.nodes.panorama.orientation', {
+              yaw: node.data.yaw,
+              pitch: node.data.pitch,
+              defaultValue: '偏航 {{yaw}}° · 俯仰 {{pitch}}°',
+            })}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.fieldOfView', {
+              defaultValue: '视野',
+            })}
+            value={`${node.data.fieldOfView}°`}
+          />
         </>
       );
     case 'video':
       return (
         <>
-          <PropertyRow label='素材 ID' value={optionalValue(node.data.assetId)} />
-          <PropertyRow label='封面素材' value={optionalValue(node.data.posterAssetId)} />
-          <PropertyRow label='自动播放' value={booleanValue(node.data.autoplay)} />
-          <PropertyRow label='循环' value={booleanValue(node.data.loop)} />
-          <PropertyRow label='静音' value={booleanValue(node.data.muted)} />
-          <PropertyRow label='裁剪' value={`${milliseconds(node.data.trimStartMs)} – ${milliseconds(node.data.trimEndMs)}`} />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.assetId', {
+              defaultValue: '素材 ID',
+            })}
+            value={optionalValue(node.data.assetId, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.posterAsset', {
+              defaultValue: '封面素材',
+            })}
+            value={optionalValue(node.data.posterAssetId, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.autoplay', {
+              defaultValue: '自动播放',
+            })}
+            value={booleanValue(node.data.autoplay, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.loop', {
+              defaultValue: '循环',
+            })}
+            value={booleanValue(node.data.loop, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.muted', {
+              defaultValue: '静音',
+            })}
+            value={booleanValue(node.data.muted, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.trim', {
+              defaultValue: '裁剪',
+            })}
+            value={`${milliseconds(node.data.trimStartMs, t)} – ${milliseconds(
+              node.data.trimEndMs,
+              t
+            )}`}
+          />
         </>
       );
     case 'audio':
       return (
         <>
-          <PropertyRow label='素材 ID' value={optionalValue(node.data.assetId)} />
-          <PropertyRow label='标题' value={optionalValue(node.data.title)} />
-          <PropertyRow label='音量' value={`${Math.round(node.data.volume * 100)}%`} />
-          <PropertyRow label='循环' value={booleanValue(node.data.loop)} />
-          <PropertyRow label='裁剪' value={`${milliseconds(node.data.trimStartMs)} – ${milliseconds(node.data.trimEndMs)}`} />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.assetId', {
+              defaultValue: '素材 ID',
+            })}
+            value={optionalValue(node.data.assetId, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.title', {
+              defaultValue: '标题',
+            })}
+            value={optionalValue(node.data.title, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.volume', {
+              defaultValue: '音量',
+            })}
+            value={`${Math.round(node.data.volume * 100)}%`}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.loop', {
+              defaultValue: '循环',
+            })}
+            value={booleanValue(node.data.loop, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.trim', {
+              defaultValue: '裁剪',
+            })}
+            value={`${milliseconds(node.data.trimStartMs, t)} – ${milliseconds(
+              node.data.trimEndMs,
+              t
+            )}`}
+          />
         </>
       );
     case 'config':
       return (
         <>
-          <PropertyRow label='任务' value={node.data.task} />
-          <PropertyRow label='能力' value={node.data.capability} />
-          <PropertyRow label='提供商' value={optionalValue(node.data.providerId)} />
-          <PropertyRow label='模型' value={optionalValue(node.data.model)} />
-          <PropertyRow label='状态' value={node.data.status} />
-          <PropertyRow label='提示词' value={optionalValue(node.data.prompt)} />
-          <PropertyRow label='负面提示词' value={optionalValue(node.data.negativePrompt)} />
-          <PropertyRow label='输入素材' value={`${node.data.inputAssetIds.length} 项`} />
-          <PropertyRow label='结果素材' value={`${node.data.resultAssetIds.length} 项`} />
-          <PropertyRow label='任务 ID' value={optionalValue(node.data.taskId)} />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.task', {
+              defaultValue: '任务',
+            })}
+            value={node.data.task}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.capability', {
+              defaultValue: '能力',
+            })}
+            value={node.data.capability}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.provider', {
+              defaultValue: '提供商',
+            })}
+            value={optionalValue(node.data.providerId, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.model', {
+              defaultValue: '模型',
+            })}
+            value={optionalValue(node.data.model, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.status', {
+              defaultValue: '状态',
+            })}
+            value={generationStatusValue(node.data.status, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.prompt', {
+              defaultValue: '提示词',
+            })}
+            value={optionalValue(node.data.prompt, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.negativePrompt', {
+              defaultValue: '负面提示词',
+            })}
+            value={optionalValue(node.data.negativePrompt, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.inputAssets', {
+              defaultValue: '输入素材',
+            })}
+            value={t('creativeStudio.canvas.values.itemCount', {
+              count: node.data.inputAssetIds.length,
+              defaultValue: '{{count}} 项',
+            })}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.resultAssets', {
+              defaultValue: '结果素材',
+            })}
+            value={t('creativeStudio.canvas.values.itemCount', {
+              count: node.data.resultAssetIds.length,
+              defaultValue: '{{count}} 项',
+            })}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.taskId', {
+              defaultValue: '任务 ID',
+            })}
+            value={optionalValue(node.data.taskId, t)}
+          />
         </>
       );
     case 'director':
       return (
         <>
-          <PropertyRow label='场景 ID' value={optionalValue(node.data.sceneId)} />
-          <PropertyRow label='机位 ID' value={optionalValue(node.data.cameraId)} />
-          <PropertyRow label='当前时间' value={milliseconds(node.data.timelineMs)} />
-          <PropertyRow label='时长' value={milliseconds(node.data.durationMs)} />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.sceneId', {
+              defaultValue: '场景 ID',
+            })}
+            value={optionalValue(node.data.sceneId, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.cameraId', {
+              defaultValue: '机位 ID',
+            })}
+            value={optionalValue(node.data.cameraId, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.currentTime', {
+              defaultValue: '当前时间',
+            })}
+            value={milliseconds(node.data.timelineMs, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.duration', {
+              defaultValue: '时长',
+            })}
+            value={milliseconds(node.data.durationMs, t)}
+          />
         </>
       );
     case 'group':
       return (
         <>
-          <PropertyRow label='标题' value={optionalValue(node.data.title)} />
-          <PropertyRow label='颜色' value={optionalValue(node.data.color)} />
-          <PropertyRow label='已折叠' value={booleanValue(node.data.collapsed)} />
-          <PropertyRow label='成员' value={`${memberCount} 个节点`} />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.title', {
+              defaultValue: '标题',
+            })}
+            value={optionalValue(node.data.title, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.color', {
+              defaultValue: '颜色',
+            })}
+            value={optionalValue(node.data.color, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.collapsed', {
+              defaultValue: '已折叠',
+            })}
+            value={booleanValue(node.data.collapsed, t)}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.members', {
+              defaultValue: '成员',
+            })}
+            value={t('creativeStudio.canvas.values.nodeCount', {
+              count: memberCount,
+              defaultValue: '{{count}} 个节点',
+            })}
+          />
         </>
       );
   }
@@ -322,11 +700,16 @@ const finiteNumber = (
 ): number => (Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback);
 
 const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
+  const { t } = useTranslation();
   switch (node.type) {
     case 'text':
       return (
         <>
-          <PropertyEditorField label='内容'>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.properties.content', {
+              defaultValue: '内容',
+            })}
+          >
             <textarea
               value={node.data.text}
               rows={5}
@@ -338,7 +721,11 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
               }
             />
           </PropertyEditorField>
-          <PropertyEditorField label='格式'>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.properties.format', {
+              defaultValue: '格式',
+            })}
+          >
             <select
               value={node.data.format}
               onChange={(event) =>
@@ -354,11 +741,23 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
                 )
               }
             >
-              <option value='plain'>纯文本</option>
-              <option value='markdown'>Markdown</option>
+              <option value='plain'>
+                {t('creativeStudio.canvas.editor.plainText', {
+                  defaultValue: '纯文本',
+                })}
+              </option>
+              <option value='markdown'>
+                {t('creativeStudio.canvas.editor.markdown', {
+                  defaultValue: 'Markdown',
+                })}
+              </option>
             </select>
           </PropertyEditorField>
-          <PropertyEditorField label='字号'>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.properties.fontSize', {
+              defaultValue: '字号',
+            })}
+          >
             <input
               type='number'
               min={8}
@@ -383,7 +782,11 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
               }
             />
           </PropertyEditorField>
-          <PropertyEditorField label='对齐'>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.properties.alignment', {
+              defaultValue: '对齐',
+            })}
+          >
             <select
               value={node.data.textAlign}
               onChange={(event) =>
@@ -399,9 +802,21 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
                 )
               }
             >
-              <option value='left'>左对齐</option>
-              <option value='center'>居中</option>
-              <option value='right'>右对齐</option>
+              <option value='left'>
+                {t('creativeStudio.canvas.editor.alignLeft', {
+                  defaultValue: '左对齐',
+                })}
+              </option>
+              <option value='center'>
+                {t('creativeStudio.canvas.editor.alignCenter', {
+                  defaultValue: '居中',
+                })}
+              </option>
+              <option value='right'>
+                {t('creativeStudio.canvas.editor.alignRight', {
+                  defaultValue: '右对齐',
+                })}
+              </option>
             </select>
           </PropertyEditorField>
         </>
@@ -409,7 +824,11 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
     case 'image':
       return (
         <>
-          <PropertyEditorField label='说明'>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.properties.caption', {
+              defaultValue: '说明',
+            })}
+          >
             <textarea
               value={node.data.caption}
               rows={3}
@@ -421,7 +840,11 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
               }
             />
           </PropertyEditorField>
-          <PropertyEditorField label='替代文本'>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.properties.altText', {
+              defaultValue: '替代文本',
+            })}
+          >
             <input
               value={node.data.alt}
               onChange={(event) =>
@@ -432,7 +855,11 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
               }
             />
           </PropertyEditorField>
-          <PropertyEditorField label='适配方式'>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.editor.fitMode', {
+              defaultValue: '适配方式',
+            })}
+          >
             <select
               value={node.data.fit}
               onChange={(event) =>
@@ -448,8 +875,16 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
                 )
               }
             >
-              <option value='contain'>完整显示</option>
-              <option value='cover'>填满裁切</option>
+              <option value='contain'>
+                {t('creativeStudio.canvas.editor.fitContain', {
+                  defaultValue: '完整显示',
+                })}
+              </option>
+              <option value='cover'>
+                {t('creativeStudio.canvas.editor.fitCover', {
+                  defaultValue: '填满裁切',
+                })}
+              </option>
             </select>
           </PropertyEditorField>
         </>
@@ -458,9 +893,30 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
       return (
         <>
           {([
-            ['水平视角', 'yaw', -360, 360],
-            ['垂直视角', 'pitch', -90, 90],
-            ['视野', 'fieldOfView', 10, 150],
+            [
+              t('creativeStudio.canvas.editor.horizontalAngle', {
+                defaultValue: '水平视角',
+              }),
+              'yaw',
+              -360,
+              360,
+            ],
+            [
+              t('creativeStudio.canvas.editor.verticalAngle', {
+                defaultValue: '垂直视角',
+              }),
+              'pitch',
+              -90,
+              90,
+            ],
+            [
+              t('creativeStudio.canvas.properties.fieldOfView', {
+                defaultValue: '视野',
+              }),
+              'fieldOfView',
+              10,
+              150,
+            ],
           ] as const).map(([label, field, min, max]) => (
             <PropertyEditorField key={field} label={label}>
               <input
@@ -494,9 +950,24 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
       return (
         <>
           {([
-            ['自动播放', 'autoplay'],
-            ['循环播放', 'loop'],
-            ['静音', 'muted'],
+            [
+              t('creativeStudio.canvas.properties.autoplay', {
+                defaultValue: '自动播放',
+              }),
+              'autoplay',
+            ],
+            [
+              t('creativeStudio.canvas.editor.loopPlayback', {
+                defaultValue: '循环播放',
+              }),
+              'loop',
+            ],
+            [
+              t('creativeStudio.canvas.properties.muted', {
+                defaultValue: '静音',
+              }),
+              'muted',
+            ],
           ] as const).map(([label, field]) => (
             <PropertyEditorField key={field} label={label}>
               <input
@@ -516,7 +987,11 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
     case 'audio':
       return (
         <>
-          <PropertyEditorField label='标题'>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.properties.title', {
+              defaultValue: '标题',
+            })}
+          >
             <input
               value={node.data.title}
               onChange={(event) =>
@@ -527,7 +1002,11 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
               }
             />
           </PropertyEditorField>
-          <PropertyEditorField label='循环播放'>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.editor.loopPlayback', {
+              defaultValue: '循环播放',
+            })}
+          >
             <input
               type='checkbox'
               checked={node.data.loop}
@@ -539,7 +1018,12 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
               }
             />
           </PropertyEditorField>
-          <PropertyEditorField label={`音量 ${Math.round(node.data.volume * 100)}%`}>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.editor.volumePercent', {
+              percent: Math.round(node.data.volume * 100),
+              defaultValue: '音量 {{percent}}%',
+            })}
+          >
             <input
               type='range'
               min={0}
@@ -570,7 +1054,11 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
     case 'config':
       return (
         <>
-          <PropertyEditorField label='提示词'>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.properties.prompt', {
+              defaultValue: '提示词',
+            })}
+          >
             <textarea
               value={node.data.prompt}
               rows={5}
@@ -582,7 +1070,11 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
               }
             />
           </PropertyEditorField>
-          <PropertyEditorField label='负面提示词'>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.properties.negativePrompt', {
+              defaultValue: '负面提示词',
+            })}
+          >
             <textarea
               value={node.data.negativePrompt}
               rows={3}
@@ -602,7 +1094,11 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
     case 'director':
       return (
         <>
-          <PropertyEditorField label='当前时间 (ms)'>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.editor.currentTimeMs', {
+              defaultValue: '当前时间 (ms)',
+            })}
+          >
             <input
               type='number'
               min={0}
@@ -627,7 +1123,11 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
               }
             />
           </PropertyEditorField>
-          <PropertyEditorField label='时长 (ms)'>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.editor.durationMs', {
+              defaultValue: '时长 (ms)',
+            })}
+          >
             <input
               type='number'
               min={0}
@@ -657,7 +1157,11 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
     case 'group':
       return (
         <>
-          <PropertyEditorField label='标题'>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.properties.title', {
+              defaultValue: '标题',
+            })}
+          >
             <input
               value={node.data.title}
               onChange={(event) =>
@@ -668,10 +1172,16 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
               }
             />
           </PropertyEditorField>
-          <PropertyEditorField label='颜色'>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.properties.color', {
+              defaultValue: '颜色',
+            })}
+          >
             <input
               value={node.data.color ?? ''}
-              placeholder='未设置'
+              placeholder={t('creativeStudio.canvas.values.unset', {
+                defaultValue: '未设置',
+              })}
               onChange={(event) =>
                 onUpdate(
                   {
@@ -683,7 +1193,11 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
               }
             />
           </PropertyEditorField>
-          <PropertyEditorField label='折叠'>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.editor.collapse', {
+              defaultValue: '折叠',
+            })}
+          >
             <input
               type='checkbox'
               checked={node.data.collapsed}
@@ -714,6 +1228,7 @@ export const CreativeCanvasPropertiesPanel: React.FC<CreativeCanvasPropertiesPan
   onUpdateNode,
   className,
 }) => {
+  const { t } = useTranslation();
   const selectedIds = new Set(state.selection.nodeIds);
   const selectedNodes = state.document.nodes.filter((node) => selectedIds.has(node.id));
 
@@ -721,19 +1236,48 @@ export const CreativeCanvasPropertiesPanel: React.FC<CreativeCanvasPropertiesPan
     <section
       className={classNames(styles.panel, className)}
       data-canvas-product-panel='properties'
-      aria-label='节点属性'
+      aria-label={t('creativeStudio.canvas.properties.label', {
+        defaultValue: '节点属性',
+      })}
     >
       <header className={styles.panelHeader}>
         <div>
-          <h2>属性</h2>
-          <p>{selectedNodes.length > 0 ? `已选择 ${selectedNodes.length} 个节点` : '选择节点后查看详情'}</p>
+          <h2>
+            {t('creativeStudio.canvas.properties.title', {
+              defaultValue: '属性',
+            })}
+          </h2>
+          <p>
+            {selectedNodes.length > 0
+              ? t('creativeStudio.canvas.properties.selectedCount', {
+                  count: selectedNodes.length,
+                  defaultValue: `已选择 ${selectedNodes.length} 个节点`,
+                })
+              : t('creativeStudio.canvas.properties.selectHint', {
+                  defaultValue: '选择节点后查看详情',
+                })}
+          </p>
         </div>
       </header>
 
       {selectedNodes.length === 0 ? (
-        <PanelEmpty icon={<Info {...iconProps} />} title='未选择节点' description='属性面板只展示当前画布中的真实节点数据。' />
+        <PanelEmpty
+          icon={<Info {...iconProps} />}
+          title={t('creativeStudio.canvas.properties.emptyTitle', {
+            defaultValue: '未选择节点',
+          })}
+          description={t('creativeStudio.canvas.properties.emptyDescription', {
+            defaultValue: '属性面板只展示当前画布中的真实节点数据。',
+          })}
+        />
       ) : selectedNodes.length > 1 ? (
-        <div className={styles.selectionList} role='list' aria-label='已选择节点'>
+        <div
+          className={styles.selectionList}
+          role='list'
+          aria-label={t('creativeStudio.canvas.properties.selectedNodesLabel', {
+            defaultValue: '已选择节点',
+          })}
+        >
           {selectedNodes.map((node) => (
             <button
               key={node.id}
@@ -743,8 +1287,8 @@ export const CreativeCanvasPropertiesPanel: React.FC<CreativeCanvasPropertiesPan
             >
               <span className={styles.nodeIcon}>{nodeKindIcon(node.type)}</span>
               <span>
-                <strong>{creativeCanvasNodeDisplayName(node)}</strong>
-                <small>{NODE_KIND_LABELS[node.type]}</small>
+                <strong>{creativeCanvasNodeDisplayName(node, t)}</strong>
+                <small>{nodeKindLabel(node.type, t)}</small>
               </span>
             </button>
           ))}
@@ -758,23 +1302,66 @@ export const CreativeCanvasPropertiesPanel: React.FC<CreativeCanvasPropertiesPan
               <div className={styles.inspectorIdentity}>
                 <span className={styles.nodeIcon}>{nodeKindIcon(node.type)}</span>
                 <div>
-                  <strong>{creativeCanvasNodeDisplayName(node)}</strong>
-                  <span>{NODE_KIND_LABELS[node.type]}</span>
+                  <strong>{creativeCanvasNodeDisplayName(node, t)}</strong>
+                  <span>{nodeKindLabel(node.type, t)}</span>
                 </div>
               </div>
               <dl className={styles.propertyList}>
-                <PropertyRow label='节点 ID' value={node.id} />
-                <PropertyRow label='位置' value={`${node.position.x}, ${node.position.y}`} />
-                <PropertyRow label='尺寸' value={`${node.size.width} × ${node.size.height}`} />
-                <PropertyRow label='层级' value={node.zIndex} />
-                <PropertyRow label='分组 ID' value={optionalValue(node.groupId)} />
-                <PropertyRow label='锁定' value={booleanValue(node.locked)} />
+                <PropertyRow
+                  label={t('creativeStudio.canvas.properties.nodeId', {
+                    defaultValue: '节点 ID',
+                  })}
+                  value={node.id}
+                />
+                <PropertyRow
+                  label={t('creativeStudio.canvas.properties.position', {
+                    defaultValue: '位置',
+                  })}
+                  value={`${node.position.x}, ${node.position.y}`}
+                />
+                <PropertyRow
+                  label={t('creativeStudio.canvas.properties.size', {
+                    defaultValue: '尺寸',
+                  })}
+                  value={`${node.size.width} × ${node.size.height}`}
+                />
+                <PropertyRow
+                  label={t('creativeStudio.canvas.properties.layer', {
+                    defaultValue: '层级',
+                  })}
+                  value={node.zIndex}
+                />
+                <PropertyRow
+                  label={t('creativeStudio.canvas.properties.groupId', {
+                    defaultValue: '分组 ID',
+                  })}
+                  value={optionalValue(node.groupId, t)}
+                />
+                <PropertyRow
+                  label={t('creativeStudio.canvas.properties.locked', {
+                    defaultValue: '锁定',
+                  })}
+                  value={booleanValue(node.locked, t)}
+                />
                 <NodeDataProperties node={node} memberCount={memberCount} />
               </dl>
               {onUpdateNode ? (
-                <div className={styles.editorForm} aria-label='编辑节点属性'>
-                  <h3>编辑</h3>
-                  <PropertyEditorField label='锁定节点'>
+                <div
+                  className={styles.editorForm}
+                  aria-label={t('creativeStudio.canvas.properties.editLabel', {
+                    defaultValue: '编辑节点属性',
+                  })}
+                >
+                  <h3>
+                    {t('creativeStudio.canvas.properties.editTitle', {
+                      defaultValue: '编辑',
+                    })}
+                  </h3>
+                  <PropertyEditorField
+                    label={t('creativeStudio.canvas.properties.lockNode', {
+                      defaultValue: '锁定节点',
+                    })}
+                  >
                     <input
                       type='checkbox'
                       checked={node.locked}
@@ -789,7 +1376,11 @@ export const CreativeCanvasPropertiesPanel: React.FC<CreativeCanvasPropertiesPan
                   <NodeDataEditor node={node} onUpdate={onUpdateNode} />
                 </div>
               ) : (
-                <p className={styles.readOnlyNote}>当前属性面板未连接 canonical 更新命令。</p>
+                <p className={styles.readOnlyNote}>
+                  {t('creativeStudio.canvas.properties.readOnlyNote', {
+                    defaultValue: '当前属性面板未连接 canonical 更新命令。',
+                  })}
+                </p>
               )}
             </div>
           );
@@ -812,41 +1403,79 @@ export const CreativeCanvasHistoryPanel: React.FC<CreativeCanvasHistoryPanelProp
   onUndo,
   onRedo,
   className,
-}) => (
-  <section
-    className={classNames(styles.panel, styles.historyPanel, className)}
-    data-canvas-product-panel='history'
-    aria-label='编辑历史'
-  >
-    <header className={styles.panelHeader}>
-      <div>
-        <h2>编辑历史</h2>
-        <p>当前会话的 reducer 快照</p>
+}) => {
+  const { t } = useTranslation();
+  return (
+    <section
+      className={classNames(styles.panel, styles.historyPanel, className)}
+      data-canvas-product-panel='history'
+      aria-label={t('creativeStudio.canvas.history.label', {
+        defaultValue: '编辑历史',
+      })}
+    >
+      <header className={styles.panelHeader}>
+        <div>
+          <h2>
+            {t('creativeStudio.canvas.history.title', {
+              defaultValue: '编辑历史',
+            })}
+          </h2>
+          <p>
+            {t('creativeStudio.canvas.history.subtitle', {
+              defaultValue: '当前会话的 reducer 快照',
+            })}
+          </p>
+        </div>
+      </header>
+      <div className={styles.historySummary}>
+        <div>
+          <span>
+            {t('creativeStudio.canvas.history.undoable', {
+              defaultValue: '可撤销',
+            })}
+          </span>
+          <strong>{state.history.past.length}</strong>
+        </div>
+        <div>
+          <span>
+            {t('creativeStudio.canvas.history.redoable', {
+              defaultValue: '可重做',
+            })}
+          </span>
+          <strong>{state.history.future.length}</strong>
+        </div>
+        <div className={styles.historyActions}>
+          <button
+            type='button'
+            disabled={state.history.past.length === 0}
+            onClick={onUndo}
+          >
+            <Undo {...iconProps} />
+            {t('creativeStudio.canvas.history.undo', {
+              defaultValue: '撤销',
+            })}
+          </button>
+          <button
+            type='button'
+            disabled={state.history.future.length === 0}
+            onClick={onRedo}
+          >
+            <Redo {...iconProps} />
+            {t('creativeStudio.canvas.history.redo', {
+              defaultValue: '重做',
+            })}
+          </button>
+        </div>
       </div>
-    </header>
-    <div className={styles.historySummary}>
-      <div>
-        <span>可撤销</span>
-        <strong>{state.history.past.length}</strong>
-      </div>
-      <div>
-        <span>可重做</span>
-        <strong>{state.history.future.length}</strong>
-      </div>
-      <div className={styles.historyActions}>
-        <button type='button' disabled={state.history.past.length === 0} onClick={onUndo}>
-          <Undo {...iconProps} />
-          撤销
-        </button>
-        <button type='button' disabled={state.history.future.length === 0} onClick={onRedo}>
-          <Redo {...iconProps} />
-          重做
-        </button>
-      </div>
-    </div>
-    <p className={styles.historyDisclosure}>核心只保存文档快照，没有操作名称和时间戳；本面板不会臆造历史记录。</p>
-  </section>
-);
+      <p className={styles.historyDisclosure}>
+        {t('creativeStudio.canvas.history.disclosure', {
+          defaultValue:
+            '核心只保存文档快照，没有操作名称和时间戳；本面板不会臆造历史记录。',
+        })}
+      </p>
+    </section>
+  );
+};
 
 export type CreativeCanvasUnavailableKind = 'assistant' | 'workflows' | 'generic';
 
@@ -889,26 +1518,48 @@ export const CreativeCanvasUnavailablePanel: React.FC<CreativeCanvasUnavailableP
 
 export const CreativeCanvasAssistantUnwiredPanel: React.FC<{ className?: string }> = ({
   className,
-}) => (
-  <CreativeCanvasUnavailablePanel
-    kind='assistant'
-    className={className}
-    title='创作 Agent 尚未连接'
-    description='当前没有可验证的画布专属会话绑定，因此不会发送消息或复用主聊天会话。'
-    detail='需要接入 canvas/session resolver、真实消息历史和独占会话所有权后才能启用。'
-  />
-);
+}) => {
+  const { t } = useTranslation();
+  return (
+    <CreativeCanvasUnavailablePanel
+      kind='assistant'
+      className={className}
+      title={t('creativeStudio.canvas.unavailable.agentTitle', {
+        defaultValue: '创作 Agent 尚未连接',
+      })}
+      description={t('creativeStudio.canvas.unavailable.agentDescription', {
+        defaultValue:
+          '当前没有可验证的画布专属会话绑定，因此不会发送消息或复用主聊天会话。',
+      })}
+      detail={t('creativeStudio.canvas.unavailable.agentDetail', {
+        defaultValue:
+          '需要接入 canvas/session resolver、真实消息历史和独占会话所有权后才能启用。',
+      })}
+    />
+  );
+};
 
 export const CreativeCanvasWorkflowUnwiredPanel: React.FC<{ className?: string }> = ({
   className,
-}) => (
-  <CreativeCanvasUnavailablePanel
-    kind='workflows'
-    className={className}
-    title='模板尚未连接'
-    description='当前画布文档没有模板数据源，本面板不会显示示例模板或虚构运行状态。'
-  />
-);
+}) => {
+  const { t } = useTranslation();
+  return (
+    <CreativeCanvasUnavailablePanel
+      kind='workflows'
+      className={className}
+      title={t('creativeStudio.canvas.unavailable.workflowsTitle', {
+        defaultValue: '模板尚未连接',
+      })}
+      description={t(
+        'creativeStudio.canvas.unavailable.workflowsDescription',
+        {
+          defaultValue:
+            '当前画布文档没有模板数据源，本面板不会显示示例模板或虚构运行状态。',
+        }
+      )}
+    />
+  );
+};
 
 interface PanelEmptyProps {
   icon: React.ReactNode;

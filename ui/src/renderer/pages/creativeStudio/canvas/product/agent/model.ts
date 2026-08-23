@@ -5,6 +5,7 @@
  */
 
 import { parseProviderId } from '@/common/types/ids';
+import { getI18n } from 'react-i18next';
 
 import type {
   CreativeChatModelReference,
@@ -14,6 +15,11 @@ import type { CreativeModelSelectionRef } from '../../../models';
 import type { CreativeStudioAgentMessage } from '../../../agent';
 
 export type CreativeCanvasAgentHistoryAuthority = 'current' | 'completed-pending-turn';
+
+const translatedNewConversationTitle = (): string =>
+  getI18n()?.t('creativeStudio.agent.newConversation', {
+    defaultValue: '新对话',
+  }) ?? '新对话';
 
 const sameModel = (
   left: CreativeChatModelReference,
@@ -72,11 +78,12 @@ export function creativeCanvasAgentModelSelection(
 
 export function createCreativeCanvasAgentSession(
   id: string,
-  now: number
+  now: number,
+  title = translatedNewConversationTitle()
 ): CreativeChatSessionReference {
   return {
     id,
-    title: '新对话',
+    title,
     messageIds: [],
     model: null,
     pendingTurn: null,
@@ -92,6 +99,7 @@ export function creativeCanvasAgentSessionWithPendingTurn(input: {
   prompt: string;
   modelInput?: string;
   skillIds?: readonly string[];
+  initialTitle?: string;
   now: number;
 }): CreativeChatSessionReference {
   const prompt = input.prompt.trim();
@@ -113,7 +121,9 @@ export function creativeCanvasAgentSessionWithPendingTurn(input: {
     throw new Error('Creative Studio Agent session model is immutable after its first turn');
   }
   const title =
-    input.session.messageIds.length === 0 && input.session.title === '新对话'
+    input.session.messageIds.length === 0 &&
+    input.session.title ===
+      (input.initialTitle ?? translatedNewConversationTitle())
       ? prompt.slice(0, 28)
       : input.session.title;
   return {

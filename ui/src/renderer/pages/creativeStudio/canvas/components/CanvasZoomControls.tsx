@@ -6,6 +6,7 @@
 
 import { Compass, FullScreen, ZoomIn, ZoomOut } from '@icon-park/react';
 import React, { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import styles from './CanvasZoomControls.module.css';
 
@@ -32,16 +33,6 @@ export interface CanvasZoomControlsProps {
   onToggleMiniMap?: () => void;
 }
 
-const DEFAULT_LABELS: CanvasZoomControlLabels = {
-  zoomOut: '缩小画布',
-  zoomIn: '放大画布',
-  zoomSlider: '画布缩放',
-  resetView: '重置视图',
-  fitView: '适应内容',
-  openMiniMap: '打开小地图',
-  closeMiniMap: '关闭小地图',
-};
-
 const DEFAULT_MIN_ZOOM = 0.05;
 const DEFAULT_MAX_ZOOM = 4;
 const ZOOM_FACTOR = 1.2;
@@ -64,7 +55,17 @@ const CanvasZoomControls: React.FC<CanvasZoomControlsProps> = ({
   onFitView,
   onToggleMiniMap,
 }) => {
-  const controlLabels = { ...DEFAULT_LABELS, ...labels };
+  const { t } = useTranslation();
+  const controlLabels: CanvasZoomControlLabels = {
+    zoomOut: t('creativeStudio.canvas.zoom.zoomOut'),
+    zoomIn: t('creativeStudio.canvas.zoom.zoomIn'),
+    zoomSlider: t('creativeStudio.canvas.zoom.slider'),
+    resetView: t('creativeStudio.canvas.zoom.resetView'),
+    fitView: t('creativeStudio.canvas.actions.fitView'),
+    openMiniMap: t('creativeStudio.canvas.actions.openMiniMap'),
+    closeMiniMap: t('creativeStudio.canvas.actions.closeMiniMap'),
+    ...labels,
+  };
   const safeMinZoom = Math.max(0.001, Math.min(minZoom, maxZoom));
   const safeMaxZoom = Math.max(safeMinZoom, maxZoom);
   const safeZoom = Number.isFinite(zoom) ? clamp(zoom, safeMinZoom, safeMaxZoom) : 1;
@@ -118,7 +119,10 @@ const CanvasZoomControls: React.FC<CanvasZoomControlsProps> = ({
         type='button'
         className={styles.percentageButton}
         title={controlLabels.resetView}
-        aria-label={`${controlLabels.resetView}，当前 ${percentage}`}
+        aria-label={t('creativeStudio.canvas.zoom.resetViewCurrent', {
+          action: controlLabels.resetView,
+          percentage,
+        })}
         disabled={disabled || !onResetView}
         onClick={onResetView}
       >

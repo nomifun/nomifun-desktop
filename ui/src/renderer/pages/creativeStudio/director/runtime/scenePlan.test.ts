@@ -23,7 +23,12 @@ import {
 
 describe('Director runtime frame plan', () => {
   test('evaluates the canonical timeline and selects only an existing active camera', () => {
-    const state = createDirectorState({ projectId: 'project-1', name: 'Project', durationSeconds: 4 });
+    const state = createDirectorState({
+      projectId: 'project-1',
+      name: 'Project',
+      sceneName: 'Scene',
+      durationSeconds: 4,
+    });
     state.cameras.push(createDirectorCamera({ id: 'camera-1', name: 'Camera', focalLengthMm: 50 }));
     state.characters.push(
       createDirectorCharacter({ id: 'character-1', name: 'Character', assetId: 'asset-character' })

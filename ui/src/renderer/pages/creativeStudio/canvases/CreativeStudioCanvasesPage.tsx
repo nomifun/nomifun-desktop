@@ -61,11 +61,11 @@ const CreativeStudioCanvasesPage: React.FC<
   initialSelectedIds = [],
   autoLoad = true,
 }) => {
-  const { i18n } = useTranslation();
+  const { t, i18n } = useTranslation();
   const language = i18n.resolvedLanguage || i18n.language;
   const copy = useMemo(
-    () => resolveCreativeStudioCanvasesCopy(language, copyOverrides),
-    [copyOverrides, language]
+    () => resolveCreativeStudioCanvasesCopy(t, copyOverrides),
+    [copyOverrides, t]
   );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const initial = initialSnapshot ?? {
@@ -96,11 +96,18 @@ const CreativeStudioCanvasesPage: React.FC<
         setLoadState('ready');
       } catch (error) {
         if (signal?.aborted) return;
-        setLoadError(canvasErrorMessage(error));
+        setLoadError(
+          canvasErrorMessage(
+            error,
+            t('creativeStudio.canvases.unknownError', {
+              defaultValue: 'Unknown error',
+            })
+          )
+        );
         setLoadState('error');
       }
     },
-    [service]
+    [service, t]
   );
 
   useEffect(() => {

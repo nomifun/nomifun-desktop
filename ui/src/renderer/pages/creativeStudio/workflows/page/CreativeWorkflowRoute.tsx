@@ -5,6 +5,7 @@
  */
 
 import React, { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
 import {
@@ -18,6 +19,7 @@ import CreativeWorkflowWorkspacePage from './CreativeWorkflowWorkspacePage';
 import type { CreativeWorkflowRunnerPort } from './WorkflowRunModal';
 
 const CreativeWorkflowRoute: React.FC = () => {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const { controller, snapshot } = useCreativeWorkflowRuntime();
   const assetPicker = useCreativeAssetPickerDialog();
@@ -51,13 +53,25 @@ const CreativeWorkflowRoute: React.FC = () => {
           acceptedKinds: ['image'],
           initialSelectedIds: selectedAssetIds,
           selectionLimit: variable.type === 'image-series' ? variable.maxItems : 1,
-          title: variable.type === 'image-series' ? '选择变量图片' : '选择变量参考图',
+          title: t(
+            variable.type === 'image-series'
+              ? 'creativeStudio.workflows.picker.variableImages'
+              : 'creativeStudio.workflows.picker.variableImage',
+            {
+              defaultValue:
+                variable.type === 'image-series'
+                  ? 'Select variable images'
+                  : 'Select variable reference image',
+            }
+          ),
         })}
         onPickReferenceAssets={(selectedAssetIds) => assetPicker.pick({
           acceptedKinds: ['image'],
           initialSelectedIds: selectedAssetIds,
           selectionLimit: 100,
-          title: '选择模板参考图',
+          title: t('creativeStudio.workflows.picker.templateReference', {
+            defaultValue: 'Select template reference images',
+          }),
         })}
         onUploadReferenceImages={async (files, selectedAssetIds) => {
           const assets = await Promise.all(

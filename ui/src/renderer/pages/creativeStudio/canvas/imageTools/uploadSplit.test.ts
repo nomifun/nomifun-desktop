@@ -8,6 +8,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { CreativeAsset, CreativeAssetPort } from "../../assets";
 import type { SplitCreativeImageFile } from "./browserSplit";
+import { translateCreativeImageTool } from "./imageToolI18n";
 import { uploadCreativeImageSplit } from "./uploadSplit";
 
 const SOURCE: CreativeAsset = {
@@ -193,6 +194,11 @@ describe("creative image split upload", () => {
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);
     }
-    expect(failure).toBe("second failed；1 个已上传切片清理失败。");
+    expect(failure).toBe(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.splitCleanupFailedWithCause",
+        { message: "second failed", count: 1 },
+      ),
+    );
   });
 });

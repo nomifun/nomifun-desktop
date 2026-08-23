@@ -12,6 +12,7 @@ import type {
 import { CREATIVE_ASSET_MANUAL_UPLOAD_LIMIT_BYTES } from '../../assets/page/model';
 import type { CreativeCanvasNode, CreativeSize } from '../../domain';
 import { clearCanvasImageComposeDraftModel } from './canvasImageComposerCanvas';
+import { creativeStudioProductText } from './i18n';
 
 type ImageNode = Extract<CreativeCanvasNode, { type: 'image' }>;
 
@@ -38,7 +39,12 @@ const operationTag = (operationId: string): string =>
 
 const requireImageAsset = (asset: CreativeAsset): CreativeAsset => {
   if (asset.kind !== 'image' || !asset.id.trim()) {
-    throw new Error('上传结果不是有效的真实图片素材。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.upload.invalidImageAsset',
+        '上传结果不是有效的真实图片素材。'
+      )
+    );
   }
   return asset;
 };
@@ -47,10 +53,20 @@ export async function uploadCanvasImageNodeAsset(
   input: UploadCanvasImageNodeAssetInput
 ): Promise<UploadCanvasImageNodeAssetResult> {
   if (!input.file.type.trim().toLocaleLowerCase().startsWith('image/')) {
-    throw new Error('该节点只接受真实图片文件。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.upload.imageOnly',
+        '该节点只接受真实图片文件。'
+      )
+    );
   }
   if (input.file.size > CREATIVE_ASSET_MANUAL_UPLOAD_LIMIT_BYTES) {
-    throw new Error('单个图片不能超过 64 MB。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.upload.fileTooLarge',
+        '单个图片不能超过 64 MB。'
+      )
+    );
   }
   const tag = operationTag(input.operationId);
   try {
@@ -118,10 +134,20 @@ export function fillEmptyCanvasImageNodeFromAsset(
   asset: CreativeAsset
 ): ImageNode {
   if (node.data.assetId !== null) {
-    throw new Error('图片节点已关联素材，未覆盖现有内容。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.upload.nodeAlreadyHasAsset',
+        '图片节点已关联素材，未覆盖现有内容。'
+      )
+    );
   }
   if (asset.kind !== 'image' || !asset.id.trim()) {
-    throw new Error('上传结果不是有效的真实图片素材。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.upload.invalidImageAsset',
+        '上传结果不是有效的真实图片素材。'
+      )
+    );
   }
   const naturalSize =
     positive(asset.width) && positive(asset.height)

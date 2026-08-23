@@ -6,9 +6,10 @@
 
 import { Button, Checkbox, Input, InputTag, Modal } from '@arco-design/web-react';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { CreateTextAssetLabels, CreativeTextAssetFormValue } from './types';
-import { DEFAULT_CREATE_TEXT_ASSET_LABELS } from './types';
+import { createTextAssetLabels } from './types';
 import styles from './CreativeAssetLibrary.module.css';
 
 export interface CreateCreativeTextAssetModalProps {
@@ -32,7 +33,8 @@ const CreateCreativeTextAssetModal: React.FC<CreateCreativeTextAssetModalProps> 
   onCancel,
   onSubmit,
 }) => {
-  const labels = { ...DEFAULT_CREATE_TEXT_ASSET_LABELS, ...labelOverrides };
+  const { t } = useTranslation();
+  const labels = { ...createTextAssetLabels(t), ...labelOverrides };
   const valid = value.title.trim().length > 0 && value.textContent.trim().length > 0;
   const patch = (next: Partial<CreativeTextAssetFormValue>) => onChange({ ...value, ...next });
 

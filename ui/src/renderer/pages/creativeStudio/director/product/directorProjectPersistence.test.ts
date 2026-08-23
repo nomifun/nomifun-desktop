@@ -128,7 +128,11 @@ function repository(
 describe("Director project persistence", () => {
   test("opens an empty real Director state without inventing a sidecar or node", async () => {
     const assets = new FakeAssets();
-    const baseline = await loadDirectorProjectBaseline(detail(), assets);
+    const baseline = await loadDirectorProjectBaseline(
+      detail(),
+      assets,
+      "场景",
+    );
 
     expect(baseline.directorNodeId).toBeNull();
     expect(baseline.sceneAssetId).toBeNull();
@@ -139,7 +143,11 @@ describe("Director project persistence", () => {
 
   test("stores v1 scene JSON in a real text asset and advances the root pointer by CAS", async () => {
     const assets = new FakeAssets();
-    const baseline = await loadDirectorProjectBaseline(detail(), assets);
+    const baseline = await loadDirectorProjectBaseline(
+      detail(),
+      assets,
+      "场景",
+    );
     const camera = createDirectorCamera({ id: "camera-1", name: "主机位" });
     const state = directorReducer(
       baseline.state,
@@ -161,6 +169,7 @@ describe("Director project persistence", () => {
       state,
       repository: repo,
       assets,
+      sceneAssetTitle: "导演项目 · 3D导演场景",
     });
 
     expect(savedRevision).toBe("1");
@@ -179,6 +188,7 @@ describe("Director project persistence", () => {
     const state = createDirectorState({
       projectId: PROJECT_ID,
       name: "导演项目",
+      sceneName: "场景",
     });
     const camera = createDirectorCamera({ id: "camera-1", name: "主机位" });
     const withCamera = directorReducer(
@@ -205,7 +215,11 @@ describe("Director project persistence", () => {
       },
     });
 
-    const baseline = await loadDirectorProjectBaseline(project, assets);
+    const baseline = await loadDirectorProjectBaseline(
+      project,
+      assets,
+      "场景",
+    );
     expect(baseline.state.activeCameraId).toBe(camera.id);
 
     const node = project.document.nodes[0];
@@ -213,7 +227,7 @@ describe("Director project persistence", () => {
     node.data.timelineMs = 1_000;
     let projectionError: unknown;
     try {
-      await loadDirectorProjectBaseline(project, assets);
+      await loadDirectorProjectBaseline(project, assets, "场景");
     } catch (error) {
       projectionError = error;
     }
@@ -245,7 +259,7 @@ describe("Director project persistence", () => {
 
     let caught: unknown;
     try {
-      await loadDirectorProjectBaseline(canvas, assets);
+      await loadDirectorProjectBaseline(canvas, assets, "场景");
     } catch (error) {
       caught = error;
     }
@@ -271,7 +285,7 @@ describe("Director project persistence", () => {
 
     let ambiguityError: unknown;
     try {
-      await loadDirectorProjectBaseline(project, assets);
+      await loadDirectorProjectBaseline(project, assets, "场景");
     } catch (error) {
       ambiguityError = error;
     }

@@ -20,6 +20,7 @@ import {
   canvasAudioComposeSourceNodeId,
   reconcileCanvasAudioComposeConfig,
 } from './canvasAudioComposerCanvas';
+import { creativeStudioProductText } from './i18n';
 
 export type CanvasAudioComposerEditorPort = Pick<
   CreativeCanvasEditorHandle,
@@ -55,7 +56,12 @@ export function reconcileCanvasAudioComposeTask(input: {
   task: CreativeTask;
 }): void {
   if (isTerminalCreativeTaskStatus(input.task.status)) {
-    throw new Error('音频创作终态必须通过 settlement 写入画布。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.audio.terminalSettlementRequired',
+        '音频创作终态必须通过 settlement 写入画布。'
+      )
+    );
   }
   const config = canvasAudioComposeConfigFromTask(
     taskDocument(input.editor, input.projectId),
@@ -81,7 +87,12 @@ export async function settleCanvasAudioComposeTask(input: {
   onAsset?: (asset: CreativeAsset) => void;
 }): Promise<void> {
   if (!isTerminalCreativeTaskStatus(input.task.status)) {
-    throw new Error('拒绝将非终态音频创作任务移出 pending 列表。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.audio.nonTerminalRemovalRejected',
+        '拒绝将非终态音频创作任务移出 pending 列表。'
+      )
+    );
   }
   const initialConfig = canvasAudioComposeConfigFromTask(
     taskDocument(input.editor, input.projectId),
@@ -95,13 +106,28 @@ export async function settleCanvasAudioComposeTask(input: {
 
   if (input.task.status === 'succeeded') {
     if (input.task.resultAssetIds.length !== 1) {
-      throw new Error('音频创作任务必须恰好返回一个真实音频素材。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.audio.singleResultRequired',
+          '音频创作任务必须恰好返回一个真实音频素材。'
+        )
+      );
     }
     if (initialConfig.data.inputAssetIds.length !== 0) {
-      throw new Error('当前 TTS 音频创作不允许输入素材。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.audio.inputAssetsUnsupported',
+          '当前 TTS 音频创作不允许输入素材。'
+        )
+      );
     }
     if (canvasAudioComposeSourceAssetId(initialConfig) !== null) {
-      throw new Error('当前音频创作只允许空音频节点承接 TTS 结果。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.audio.resultRequiresEmptyNode',
+          '当前音频创作只允许空音频节点承接 TTS 结果。'
+        )
+      );
     }
 
     const resultAssetId = input.task.resultAssetIds[0];
@@ -113,18 +139,33 @@ export async function settleCanvasAudioComposeTask(input: {
           node.id === sourceNodeId && node.type === 'audio'
       );
     if (!sourceBeforeAsset) {
-      throw new Error('音频创作源节点在结果写入前被移除。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.audio.sourceRemoved',
+          '音频创作源节点在结果写入前被移除。'
+        )
+      );
     }
     if (
       sourceBeforeAsset.data.assetId !== null &&
       sourceBeforeAsset.data.assetId !== resultAssetId
     ) {
-      throw new Error('空音频节点在任务完成前已关联其他素材，已停止覆盖。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.audio.sourceOccupied',
+          '空音频节点在任务完成前已关联其他素材，已停止覆盖。'
+        )
+      );
     }
 
     const asset = await input.assets.get(resultAssetId);
     if (asset.id !== resultAssetId || asset.kind !== 'audio') {
-      throw new Error('音频创作结果未解析为对应的真实音频素材。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.audio.resultResolutionFailed',
+          '音频创作结果未解析为对应的真实音频素材。'
+        )
+      );
     }
     input.onAsset?.(asset);
 
@@ -135,10 +176,20 @@ export async function settleCanvasAudioComposeTask(input: {
           node.id === sourceNodeId && node.type === 'audio'
       );
     if (!source) {
-      throw new Error('音频创作源节点在结果写入前被移除。');
+        throw new Error(
+          creativeStudioProductText(
+            'creativeStudio.canvas.errors.audio.sourceRemoved',
+            '音频创作源节点在结果写入前被移除。'
+          )
+        );
     }
     if (source.data.assetId !== null && source.data.assetId !== asset.id) {
-      throw new Error('空音频节点在任务完成前已关联其他素材，已停止覆盖。');
+        throw new Error(
+          creativeStudioProductText(
+            'creativeStudio.canvas.errors.audio.sourceOccupied',
+            '空音频节点在任务完成前已关联其他素材，已停止覆盖。'
+          )
+        );
     }
     if (source.data.assetId !== asset.id || source.data.title !== asset.title) {
       input.editor.dispatch(
@@ -182,7 +233,10 @@ export async function orphanCanvasAudioComposeTask(input: {
         ...config.data,
         status: 'failed',
         resultAssetIds: [],
-        errorMessage: '服务器未找到该任务；已确认清理恢复标记。',
+        errorMessage: creativeStudioProductText(
+          'creativeStudio.canvas.errors.taskMissingRecoveryCleared',
+          '服务器未找到该任务；已确认清理恢复标记。'
+        ),
       },
     })
   );

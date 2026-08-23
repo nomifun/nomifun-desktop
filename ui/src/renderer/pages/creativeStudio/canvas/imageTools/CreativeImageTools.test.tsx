@@ -11,6 +11,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import type { CreativeAsset } from "../../assets";
 import type { CreativeModelCatalogSnapshot } from "../../models";
+import { withCanvasTestI18n } from "../components/canvasI18nTestUtils";
 import CreativeCanvasImageToolbar from "./CreativeCanvasImageToolbar";
 import { CreativeImageCropDialogContent } from "./CreativeImageCropDialog";
 import { CreativeImageMaskEditDialogContent } from "./CreativeImageMaskEditDialog";
@@ -45,10 +46,17 @@ const imageToolsCss = readFileSync(
   new URL("./CreativeImageTools.module.css", import.meta.url),
   "utf8",
 );
+const maskDialogSource = readFileSync(
+  new URL("./CreativeImageMaskEditDialog.tsx", import.meta.url),
+  "utf8",
+);
+
+const renderCanvas = (content: React.ReactNode) =>
+  renderToStaticMarkup(withCanvasTestI18n(content));
 
 describe("creative image tool surfaces", () => {
   test("shows only real implemented node actions when selected", () => {
-    const html = renderToStaticMarkup(
+    const html = renderCanvas(
       <CreativeCanvasImageToolbar
         nodeId="image-node"
         visible
@@ -64,19 +72,49 @@ describe("creative image tool surfaces", () => {
         <article>image</article>
       </CreativeCanvasImageToolbar>,
     );
-    expect(html.includes('aria-label="图片工具"')).toBe(true);
-    expect(html.includes("查看节点信息")).toBe(true);
-    expect(html.includes("移除节点")).toBe(true);
-    expect(html.includes("裁剪并生成新节点")).toBe(true);
-    expect(html.includes("下载图片")).toBe(true);
-    expect(html.includes("切分并生成图片子节点")).toBe(true);
-    expect(html.includes("对图片进行局部修改")).toBe(true);
-    expect(html.includes("局部编辑")).toBe(true);
+    expect(
+      html.includes(
+        'aria-label="creativeStudio.canvas.imageTools.toolbar.label"',
+      ),
+    ).toBe(true);
+    expect(
+      html.includes(
+        "creativeStudio.canvas.imageTools.toolbar.infoLabel",
+      ),
+    ).toBe(true);
+    expect(
+      html.includes(
+        "creativeStudio.canvas.imageTools.toolbar.deleteLabel",
+      ),
+    ).toBe(true);
+    expect(
+      html.includes(
+        "creativeStudio.canvas.imageTools.toolbar.cropLabel",
+      ),
+    ).toBe(true);
+    expect(
+      html.includes(
+        "creativeStudio.canvas.imageTools.toolbar.downloadLabel",
+      ),
+    ).toBe(true);
+    expect(
+      html.includes(
+        "creativeStudio.canvas.imageTools.toolbar.splitLabel",
+      ),
+    ).toBe(true);
+    expect(
+      html.includes(
+        "creativeStudio.canvas.imageTools.toolbar.maskEditLabel",
+      ),
+    ).toBe(true);
+    expect(
+      html.includes("creativeStudio.canvas.imageTools.toolbar.maskEdit"),
+    ).toBe(true);
     expect(html.includes("AI 超分")).toBe(false);
   });
 
   test("shows the source information, delete, and upload actions for an empty image", () => {
-    const html = renderToStaticMarkup(
+    const html = renderCanvas(
       <CreativeCanvasImageToolbar
         nodeId="empty-image-node"
         visible
@@ -92,11 +130,31 @@ describe("creative image tool surfaces", () => {
         <article>empty image</article>
       </CreativeCanvasImageToolbar>,
     );
-    expect(html.includes("查看节点信息")).toBe(true);
-    expect(html.includes("移除节点")).toBe(true);
-    expect(html.includes("上传图片")).toBe(true);
-    expect(html.includes("下载图片")).toBe(false);
-    expect(html.includes("裁剪并生成新节点")).toBe(false);
+    expect(
+      html.includes(
+        "creativeStudio.canvas.imageTools.toolbar.infoLabel",
+      ),
+    ).toBe(true);
+    expect(
+      html.includes(
+        "creativeStudio.canvas.imageTools.toolbar.deleteLabel",
+      ),
+    ).toBe(true);
+    expect(
+      html.includes(
+        "creativeStudio.canvas.imageTools.toolbar.uploadLabel",
+      ),
+    ).toBe(true);
+    expect(
+      html.includes(
+        "creativeStudio.canvas.imageTools.toolbar.downloadLabel",
+      ),
+    ).toBe(false);
+    expect(
+      html.includes(
+        "creativeStudio.canvas.imageTools.toolbar.cropLabel",
+      ),
+    ).toBe(false);
   });
 
   test("keeps the node toolbar focused and viewport-safe", () => {
@@ -107,7 +165,7 @@ describe("creative image tool surfaces", () => {
   });
 
   test("renders the source mask editor geometry, controls, and exact task picker", () => {
-    const html = renderToStaticMarkup(
+    const html = renderCanvas(
       <CreativeImageMaskEditDialogContent
         visible
         asset={ASSET}
@@ -119,18 +177,28 @@ describe("creative image tool surfaces", () => {
       />,
     );
     expect(html.includes("data-creative-image-mask-edit-dialog")).toBe(true);
-    expect(html.includes("局部遮罩编辑")).toBe(true);
+    expect(
+      html.includes("creativeStudio.canvas.imageTools.mask.heading"),
+    ).toBe(true);
     expect(html.includes("1920 × 1080px")).toBe(true);
-    expect(html.includes("画笔")).toBe(true);
-    expect(html.includes("擦除")).toBe(true);
+    expect(
+      html.includes("creativeStudio.canvas.imageTools.mask.paint"),
+    ).toBe(true);
+    expect(
+      html.includes("creativeStudio.canvas.imageTools.mask.erase"),
+    ).toBe(true);
     expect(html.includes("100px")).toBe(true);
-    expect(html.includes("修改要求")).toBe(true);
-    expect(html.includes("AI 修改")).toBe(true);
-    expect(html.includes("image_edit")).toBe(true);
+    expect(
+      html.includes("creativeStudio.canvas.imageTools.mask.promptLabel"),
+    ).toBe(true);
+    expect(
+      html.includes("creativeStudio.canvas.imageTools.mask.submit"),
+    ).toBe(true);
+    expect(maskDialogSource.includes('task: "image_edit"')).toBe(true);
   });
 
   test("locks the mask draft while preserving explicit safe retry and abandon actions", () => {
-    const html = renderToStaticMarkup(
+    const html = renderCanvas(
       <CreativeImageMaskEditDialogContent
         visible
         retryLocked
@@ -143,13 +211,17 @@ describe("creative image tool surfaces", () => {
         onConfirm={() => undefined}
       />,
     );
-    expect(html.includes("安全重试")).toBe(true);
-    expect(html.includes("放弃本次")).toBe(true);
+    expect(
+      html.includes("creativeStudio.canvas.imageTools.mask.safeRetry"),
+    ).toBe(true);
+    expect(
+      html.includes("creativeStudio.canvas.imageTools.mask.abandon"),
+    ).toBe(true);
     expect((html.match(/disabled=""/g)?.length ?? 0) >= 5).toBe(true);
   });
 
   test("renders the source crop controls, exact dimensions, and all handles", () => {
-    const html = renderToStaticMarkup(
+    const html = renderCanvas(
       <CreativeImageCropDialogContent
         visible
         asset={ASSET}
@@ -158,16 +230,31 @@ describe("creative image tool surfaces", () => {
       />,
     );
     expect(html.includes("data-creative-image-crop-dialog")).toBe(true);
-    expect(html.includes("裁剪尺寸 1459 × 821")).toBe(true);
-    expect(html.includes("原图 1920 × 1080")).toBe(true);
-    expect(html.includes("确认裁剪")).toBe(true);
-    expect(html.split("调整裁剪框：").length - 1).toBe(8);
-    expect(html.includes("自由比例")).toBe(true);
+    expect(
+      html.includes(
+        "creativeStudio.canvas.imageTools.crop.metrics.size 1459 × 821",
+      ),
+    ).toBe(true);
+    expect(
+      html.includes(
+        "creativeStudio.canvas.imageTools.crop.metrics.original 1920 × 1080",
+      ),
+    ).toBe(true);
+    expect(
+      html.includes("creativeStudio.canvas.imageTools.crop.confirm"),
+    ).toBe(true);
+    expect(
+      html.split("creativeStudio.canvas.imageTools.crop.resizeBox").length -
+        1,
+    ).toBe(8);
+    expect(
+      html.includes("creativeStudio.canvas.imageTools.crop.aspectFree"),
+    ).toBe(true);
     expect(html.includes("16:9")).toBe(true);
   });
 
   test("renders a real draggable 2 by 2 split with source dimensions", () => {
-    const html = renderToStaticMarkup(
+    const html = renderCanvas(
       <CreativeImageSplitDialogContent
         visible
         asset={ASSET}
@@ -176,12 +263,18 @@ describe("creative image tool surfaces", () => {
       />,
     );
     expect(html.includes("data-creative-image-split-dialog")).toBe(true);
-    expect(html.includes("生成 4 个图片子节点")).toBe(true);
+    expect(
+      html.includes("creativeStudio.canvas.imageTools.split.summary 4"),
+    ).toBe(true);
     expect(html.includes("1920 × 1080")).toBe(true);
     expect(html.includes("960 × 540")).toBe(true);
     expect(html.includes('data-split-axis="horizontal"')).toBe(true);
     expect(html.includes('data-split-axis="vertical"')).toBe(true);
-    expect(html.includes("删除线")).toBe(true);
-    expect(html.includes("生成子节点")).toBe(true);
+    expect(
+      html.includes("creativeStudio.canvas.imageTools.split.deleteLine"),
+    ).toBe(true);
+    expect(
+      html.includes("creativeStudio.canvas.imageTools.split.generate"),
+    ).toBe(true);
   });
 });

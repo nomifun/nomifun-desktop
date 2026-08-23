@@ -77,7 +77,12 @@ describe('director keyframe interpolation', () => {
 
 describe('director evaluated frames', () => {
   test('applies tracks to a detached frame without mutating project state', () => {
-    let state = createDirectorState({ projectId: 'project-1', name: 'Project', durationSeconds: 4 });
+    let state = createDirectorState({
+      projectId: 'project-1',
+      name: 'Project',
+      sceneName: 'Scene',
+      durationSeconds: 4,
+    });
     state = directorReducer(
       state,
       directorCommands.addEntity(createDirectorCamera({ id: 'camera-1', name: 'Camera' }))

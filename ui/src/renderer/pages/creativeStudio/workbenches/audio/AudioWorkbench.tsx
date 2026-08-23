@@ -23,6 +23,7 @@ import {
 } from '@icon-park/react';
 import { Button, Input, InputNumber, Progress, Select, Slider, Tag, Tooltip } from '@arco-design/web-react';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import styles from './AudioWorkbench.module.css';
 import {
@@ -40,21 +41,42 @@ import {
   type AudioWorkbenchTaskState,
 } from './types';
 
-const TASK_LABELS: Record<AudioWorkbenchTaskState, string> = {
-  idle: '等待生成',
-  queued: '排队中',
-  running: '生成中',
-  succeeded: '生成完成',
-  failed: '生成失败',
-  canceled: '已取消',
+const taskLabel = (
+  t: ReturnType<typeof useTranslation>['t'],
+  state: AudioWorkbenchTaskState
+): string => {
+  switch (state) {
+    case 'idle':
+      return t('creativeStudio.audio.task.idle', { defaultValue: '等待生成' });
+    case 'queued':
+      return t('creativeStudio.audio.task.queued', { defaultValue: '排队中' });
+    case 'running':
+      return t('creativeStudio.audio.task.running', { defaultValue: '生成中' });
+    case 'succeeded':
+      return t('creativeStudio.audio.task.succeeded', { defaultValue: '生成完成' });
+    case 'failed':
+      return t('creativeStudio.audio.task.failed', { defaultValue: '生成失败' });
+    case 'canceled':
+      return t('creativeStudio.audio.task.canceled', { defaultValue: '已取消' });
+  }
 };
 
-const RESULT_LABELS: Record<Exclude<AudioWorkbenchTaskState, 'idle'>, string> = {
-  queued: '排队中',
-  running: '生成中',
-  succeeded: '已完成',
-  failed: '失败',
-  canceled: '已取消',
+const resultLabel = (
+  t: ReturnType<typeof useTranslation>['t'],
+  state: Exclude<AudioWorkbenchTaskState, 'idle'>
+): string => {
+  switch (state) {
+    case 'queued':
+      return t('creativeStudio.audio.result.queued', { defaultValue: '排队中' });
+    case 'running':
+      return t('creativeStudio.audio.result.running', { defaultValue: '生成中' });
+    case 'succeeded':
+      return t('creativeStudio.audio.result.succeeded', { defaultValue: '已完成' });
+    case 'failed':
+      return t('creativeStudio.audio.result.failed', { defaultValue: '失败' });
+    case 'canceled':
+      return t('creativeStudio.audio.result.canceled', { defaultValue: '已取消' });
+  }
 };
 
 const clampPercent = (value: number | undefined): number | undefined =>
@@ -93,6 +115,7 @@ const statusIcon = (state: Exclude<AudioWorkbenchTaskState, 'idle'>) => {
 const StatusPanel: React.FC<
   Pick<AudioWorkbenchProps, 'task' | 'onCancel' | 'onRetry'> & { disabled: boolean }
 > = ({ task, onCancel, onRetry, disabled }) => {
+  const { t } = useTranslation();
   if (task.state === 'idle') return null;
   const progress = clampPercent(task.progress);
   const canCancel = (task.state === 'queued' || task.state === 'running') && onCancel;
@@ -110,17 +133,17 @@ const StatusPanel: React.FC<
           {statusIcon(task.state)}
         </span>
         <div>
-          <strong>{TASK_LABELS[task.state]}</strong>
+          <strong>{taskLabel(t, task.state)}</strong>
           {task.message ? <p>{task.message}</p> : null}
         </div>
         {canCancel ? (
           <Button size='small' type='text' disabled={disabled} onClick={onCancel}>
-            取消任务
+            {t('creativeStudio.audio.actions.cancelTask', { defaultValue: '取消任务' })}
           </Button>
         ) : null}
         {canRetry ? (
           <Button size='small' icon={<Refresh />} disabled={disabled} onClick={onRetry}>
-            重新生成
+            {t('creativeStudio.audio.actions.regenerate', { defaultValue: '重新生成' })}
           </Button>
         ) : null}
       </div>
@@ -141,73 +164,101 @@ const ReferenceList: React.FC<
     AudioWorkbenchProps,
     'references' | 'referenceRequired' | 'onChooseReferences' | 'onRemoveReference'
   > & { disabled: boolean; supported: boolean }
-> = ({ references, referenceRequired, onChooseReferences, onRemoveReference, disabled, supported }) => (
-  <section className={styles.composerSection} data-audio-reference-section data-supported={supported}>
-    <header className={styles.sectionHeader}>
-      <div>
-        <span>参考音频</span>
-        {referenceRequired ? <small>必需</small> : <small>可选</small>}
+> = ({ references, referenceRequired, onChooseReferences, onRemoveReference, disabled, supported }) => {
+  const { t } = useTranslation();
+  return (
+    <section className={styles.composerSection} data-audio-reference-section data-supported={supported}>
+      <header className={styles.sectionHeader}>
+        <div>
+          <span>{t('creativeStudio.audio.references.title', { defaultValue: '参考音频' })}</span>
+          {referenceRequired ? (
+            <small>{t('creativeStudio.audio.references.required', { defaultValue: '必需' })}</small>
+          ) : (
+            <small>{t('creativeStudio.audio.references.optional', { defaultValue: '可选' })}</small>
+          )}
+        </div>
+        <Tag>{references.length}</Tag>
+      </header>
+      <div className={styles.sectionBody}>
+        <Button
+          size='small'
+          icon={<FolderOpen />}
+          disabled={disabled || !supported || !onChooseReferences}
+          onClick={onChooseReferences}
+        >
+          {t('creativeStudio.audio.references.choose', { defaultValue: '从画布或素材库选择' })}
+        </Button>
+        {!supported ? (
+          <p className={styles.fieldHint}>
+            {t('creativeStudio.audio.references.unsupported', {
+              defaultValue: '当前模型未声明参考音频能力。',
+            })}
+          </p>
+        ) : null}
+        {references.length === 0 ? (
+          <div className={styles.referenceEmpty} data-audio-references='empty'>
+            <Voice theme='outline' size={23} fill='currentColor' />
+            <span>
+              {referenceRequired
+                ? t('creativeStudio.audio.references.requiredEmpty', {
+                    defaultValue: '请选择一段真实参考音频',
+                  })
+                : t('creativeStudio.audio.references.empty', { defaultValue: '没有参考音频' })}
+            </span>
+          </div>
+        ) : (
+          <div className={styles.referenceList} data-audio-references='ready'>
+            {references.map((reference) => {
+              const metadata = [
+                reference.mimeType,
+                formatDuration(reference.durationMs),
+                formatBytes(reference.sizeBytes),
+              ].filter(Boolean);
+              return (
+                <div key={reference.assetId} className={styles.referenceItem}>
+                  <span className={styles.referenceIcon} aria-hidden='true'>
+                    <Voice theme='outline' size={16} fill='currentColor' />
+                  </span>
+                  <span className={styles.referenceIdentity}>
+                    <strong title={reference.name}>{reference.name}</strong>
+                    {metadata.length ? <small>{metadata.join(' · ')}</small> : null}
+                  </span>
+                  <Tooltip
+                    content={t('creativeStudio.audio.references.remove', {
+                      defaultValue: '移除 {{name}}',
+                      name: reference.name,
+                    })}
+                  >
+                    <Button
+                      type='text'
+                      size='mini'
+                      shape='circle'
+                      icon={<Delete />}
+                      aria-label={t('creativeStudio.audio.references.removeAria', {
+                        defaultValue: '移除参考音频 {{name}}',
+                        name: reference.name,
+                      })}
+                      disabled={disabled}
+                      onClick={() => onRemoveReference(reference.assetId)}
+                    />
+                  </Tooltip>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
-      <Tag>{references.length}</Tag>
-    </header>
-    <div className={styles.sectionBody}>
-      <Button
-        size='small'
-        icon={<FolderOpen />}
-        disabled={disabled || !supported || !onChooseReferences}
-        onClick={onChooseReferences}
-      >
-        从画布或素材库选择
-      </Button>
-      {!supported ? <p className={styles.fieldHint}>当前模型未声明参考音频能力。</p> : null}
-      {references.length === 0 ? (
-        <div className={styles.referenceEmpty} data-audio-references='empty'>
-          <Voice theme='outline' size={23} fill='currentColor' />
-          <span>{referenceRequired ? '请选择一段真实参考音频' : '没有参考音频'}</span>
-        </div>
-      ) : (
-        <div className={styles.referenceList} data-audio-references='ready'>
-          {references.map((reference) => {
-            const metadata = [
-              reference.mimeType,
-              formatDuration(reference.durationMs),
-              formatBytes(reference.sizeBytes),
-            ].filter(Boolean);
-            return (
-              <div key={reference.assetId} className={styles.referenceItem}>
-                <span className={styles.referenceIcon} aria-hidden='true'>
-                  <Voice theme='outline' size={16} fill='currentColor' />
-                </span>
-                <span className={styles.referenceIdentity}>
-                  <strong title={reference.name}>{reference.name}</strong>
-                  {metadata.length ? <small>{metadata.join(' · ')}</small> : null}
-                </span>
-                <Tooltip content={`移除 ${reference.name}`}>
-                  <Button
-                    type='text'
-                    size='mini'
-                    shape='circle'
-                    icon={<Delete />}
-                    aria-label={`移除参考音频 ${reference.name}`}
-                    disabled={disabled}
-                    onClick={() => onRemoveReference(reference.assetId)}
-                  />
-                </Tooltip>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  </section>
-);
+    </section>
+  );
+};
 
 const ResultStatus: React.FC<{ result: AudioWorkbenchResult }> = ({ result }) => {
+  const { t } = useTranslation();
   const progress = result.status === 'running' ? clampPercent(result.progress) : undefined;
   const label =
     result.status === 'queued' || result.status === 'running'
-      ? result.statusLabel || RESULT_LABELS[result.status]
-      : RESULT_LABELS[result.status];
+      ? result.statusLabel || resultLabel(t, result.status)
+      : resultLabel(t, result.status);
   const color =
     result.status === 'succeeded'
       ? 'green'
@@ -234,37 +285,45 @@ const SucceededActions: React.FC<{
   onPlaybackChange: AudioWorkbenchProps['onPlaybackChange'];
   onDownloadResult: AudioWorkbenchProps['onDownloadResult'];
   onInsertResult: AudioWorkbenchProps['onInsertResult'];
-}> = ({ result, playing, disabled, onPlaybackChange, onDownloadResult, onInsertResult }) => (
-  <div className={styles.resultActions}>
-    <Button
-      size='small'
-      icon={playing ? <Pause /> : <Play />}
-      aria-pressed={playing}
-      disabled={disabled}
-      onClick={() => onPlaybackChange(result, !playing)}
-    >
-      {playing ? '暂停' : '播放'}
-    </Button>
-    <Tooltip content='下载音频'>
+}> = ({ result, playing, disabled, onPlaybackChange, onDownloadResult, onInsertResult }) => {
+  const { t } = useTranslation();
+  return (
+    <div className={styles.resultActions}>
       <Button
         size='small'
-        icon={<Download />}
-        aria-label={`下载 ${result.title}`}
+        icon={playing ? <Pause /> : <Play />}
+        aria-pressed={playing}
         disabled={disabled}
-        onClick={() => onDownloadResult(result)}
-      />
-    </Tooltip>
-    <Button
-      size='small'
-      type='primary'
-      icon={<Plus />}
-      disabled={disabled}
-      onClick={() => onInsertResult(result)}
-    >
-      插入画布
-    </Button>
-  </div>
-);
+        onClick={() => onPlaybackChange(result, !playing)}
+      >
+        {playing
+          ? t('creativeStudio.audio.actions.pause', { defaultValue: '暂停' })
+          : t('creativeStudio.audio.actions.play', { defaultValue: '播放' })}
+      </Button>
+      <Tooltip content={t('creativeStudio.audio.actions.downloadAudio', { defaultValue: '下载音频' })}>
+        <Button
+          size='small'
+          icon={<Download />}
+          aria-label={t('creativeStudio.audio.actions.downloadResult', {
+            defaultValue: '下载 {{title}}',
+            title: result.title,
+          })}
+          disabled={disabled}
+          onClick={() => onDownloadResult(result)}
+        />
+      </Tooltip>
+      <Button
+        size='small'
+        type='primary'
+        icon={<Plus />}
+        disabled={disabled}
+        onClick={() => onInsertResult(result)}
+      >
+        {t('creativeStudio.audio.actions.insertCanvas', { defaultValue: '插入画布' })}
+      </Button>
+    </div>
+  );
+};
 
 const ResultCard: React.FC<{
   result: AudioWorkbenchResult;
@@ -283,6 +342,7 @@ const ResultCard: React.FC<{
   onInsertResult,
   onRetryResult,
 }) => {
+  const { t } = useTranslation();
   const metadata = [result.modelLabel, result.formatLabel, result.createdAtLabel].filter(
     (item): item is string => Boolean(item)
   );
@@ -341,10 +401,14 @@ const ResultCard: React.FC<{
               disabled={disabled}
               onClick={() => onRetryResult(result as AudioWorkbenchFailedResult | AudioWorkbenchCanceledResult)}
             >
-              重试此结果
+              {t('creativeStudio.audio.actions.retryResult', { defaultValue: '重试此结果' })}
             </Button>
           ) : result.status === 'queued' || result.status === 'running' ? (
-            <span className={styles.waitingLabel}>任务完成后可播放、下载或插入画布</span>
+            <span className={styles.waitingLabel}>
+              {t('creativeStudio.audio.result.waitingActions', {
+                defaultValue: '任务完成后可播放、下载或插入画布',
+              })}
+            </span>
           ) : null}
         </div>
       </div>
@@ -377,6 +441,7 @@ const AudioWorkbench: React.FC<AudioWorkbenchProps> = ({
   onInsertResult,
   onRetryResult,
 }) => {
+  const { t } = useTranslation();
   const support = { ...DEFAULT_AUDIO_WORKBENCH_FIELD_SUPPORT, ...fieldSupport };
   const busy = isAudioWorkbenchBusy(task.state);
   const controlsDisabled = disabled || busy;
@@ -401,9 +466,15 @@ const AudioWorkbench: React.FC<AudioWorkbenchProps> = ({
       <aside className={styles.composer} data-audio-workbench-composer>
         <header className={styles.composerHeader}>
           <div>
-            <span className={styles.eyebrow}>AUDIO STUDIO</span>
-            <h1>音频工作台</h1>
-            <p>把文字、语气与真实参考素材交给已配置的语音模型。</p>
+            <span className={styles.eyebrow}>
+              {t('creativeStudio.audio.header.eyebrow', { defaultValue: 'AUDIO STUDIO' })}
+            </span>
+            <h1>{t('creativeStudio.audio.header.title', { defaultValue: '音频工作台' })}</h1>
+            <p>
+              {t('creativeStudio.audio.header.description', {
+                defaultValue: '把文字、语气与真实参考素材交给已配置的语音模型。',
+              })}
+            </p>
           </div>
           <span className={styles.headerIcon} aria-hidden='true'>
             <Voice theme='outline' size={22} fill='currentColor' />
@@ -413,7 +484,7 @@ const AudioWorkbench: React.FC<AudioWorkbenchProps> = ({
         <div className={styles.composerScroll}>
           <section className={styles.composerSection}>
             <header className={styles.sectionHeader}>
-              <span>朗读文本</span>
+              <span>{t('creativeStudio.audio.fields.text', { defaultValue: '朗读文本' })}</span>
               <span className={textLength > maxTextLength ? styles.charCountError : styles.charCount}>
                 {textLength} / {maxTextLength}
               </span>
@@ -423,25 +494,34 @@ const AudioWorkbench: React.FC<AudioWorkbenchProps> = ({
                 value={value.text}
                 rows={7}
                 maxLength={maxTextLength + 1}
-                placeholder='输入需要合成的旁白、对白或播报文本…'
+                placeholder={t('creativeStudio.audio.fields.textPlaceholder', {
+                  defaultValue: '输入需要合成的旁白、对白或播报文本…',
+                })}
                 disabled={controlsDisabled}
                 onChange={(text) => update({ text })}
                 onPressEnter={(event) => {
                   if ((event.ctrlKey || event.metaKey) && canGenerate) onGenerate(value);
                 }}
               />
-              <p className={styles.fieldHint}>Ctrl / ⌘ + Enter 提交；当前 NomiFun `/api/tts` 上限为 4096 字符。</p>
+              <p className={styles.fieldHint}>
+                {t('creativeStudio.audio.fields.textShortcut', {
+                  defaultValue:
+                    'Ctrl / ⌘ + Enter 提交；当前 NomiFun `/api/tts` 上限为 4096 字符。',
+                })}
+              </p>
             </div>
           </section>
 
           <section className={styles.composerSection}>
             <header className={styles.sectionHeader}>
-              <span>模型与声音</span>
+              <span>
+                {t('creativeStudio.audio.fields.modelAndVoice', { defaultValue: '模型与声音' })}
+              </span>
               <SettingTwo aria-hidden='true' />
             </header>
             <div className={styles.sectionBody}>
               <label className={styles.field}>
-                <span>语音模型</span>
+                <span>{t('creativeStudio.audio.fields.model', { defaultValue: '语音模型' })}</span>
                 <div
                   className={styles.modelSlot}
                   data-audio-model-slot
@@ -453,34 +533,42 @@ const AudioWorkbench: React.FC<AudioWorkbenchProps> = ({
               </label>
 
               <label className={styles.field}>
-                <span>音色</span>
+                <span>{t('creativeStudio.audio.fields.voice', { defaultValue: '音色' })}</span>
                 <Select
                   value={value.voice || undefined}
                   options={resolvedVoiceOptions}
-                  placeholder='使用模型默认音色或输入 voice ID'
+                  placeholder={t('creativeStudio.audio.fields.voicePlaceholder', {
+                    defaultValue: '使用模型默认音色或输入 voice ID',
+                  })}
                   allowCreate
                   allowClear
                   showSearch
                   disabled={controlsDisabled || !support.voice}
                   onChange={(voice) => update({ voice: typeof voice === 'string' ? voice : '' })}
                 />
-                <small>voice 保持自由文本，避免把供应商音色 ID 锁死在前端。</small>
+                <small>
+                  {t('creativeStudio.audio.fields.voiceHint', {
+                    defaultValue: 'voice 保持自由文本，避免把供应商音色 ID 锁死在前端。',
+                  })}
+                </small>
               </label>
 
               <div className={styles.twoColumnFields}>
                 <label className={styles.field}>
-                  <span>输出格式</span>
+                  <span>{t('creativeStudio.audio.fields.format', { defaultValue: '输出格式' })}</span>
                   <Select
                     value={value.format || undefined}
                     options={resolvedFormatOptions}
-                    placeholder='模型默认'
+                    placeholder={t('creativeStudio.audio.fields.modelDefault', {
+                      defaultValue: '模型默认',
+                    })}
                     allowClear
                     disabled={controlsDisabled || !support.format}
                     onChange={(format) => update({ format: typeof format === 'string' ? format : '' })}
                   />
                 </label>
                 <label className={styles.field}>
-                  <span>语速</span>
+                  <span>{t('creativeStudio.audio.fields.speed', { defaultValue: '语速' })}</span>
                   <div className={styles.speedControl}>
                     <Slider
                       min={speedRange.min}
@@ -503,20 +591,36 @@ const AudioWorkbench: React.FC<AudioWorkbenchProps> = ({
                     />
                     <span>×</span>
                   </div>
-                  {!support.speed ? <small>当前模型协议未声明语速参数。</small> : null}
+                  {!support.speed ? (
+                    <small>
+                      {t('creativeStudio.audio.fields.speedUnsupported', {
+                        defaultValue: '当前模型协议未声明语速参数。',
+                      })}
+                    </small>
+                  ) : null}
                 </label>
               </div>
 
               <label className={styles.field}>
-                <span>声音指令</span>
+                <span>
+                  {t('creativeStudio.audio.fields.instructions', { defaultValue: '声音指令' })}
+                </span>
                 <Input.TextArea
                   value={value.instructions}
                   rows={3}
-                  placeholder='例如：自然、温暖、语速轻快，结尾略微上扬。'
+                  placeholder={t('creativeStudio.audio.fields.instructionsPlaceholder', {
+                    defaultValue: '例如：自然、温暖、语速轻快，结尾略微上扬。',
+                  })}
                   disabled={controlsDisabled || !support.instructions}
                   onChange={(instructions) => update({ instructions })}
                 />
-                {!support.instructions ? <small>当前模型协议未声明声音指令能力。</small> : null}
+                {!support.instructions ? (
+                  <small>
+                    {t('creativeStudio.audio.fields.instructionsUnsupported', {
+                      defaultValue: '当前模型协议未声明声音指令能力。',
+                    })}
+                  </small>
+                ) : null}
               </label>
             </div>
           </section>
@@ -536,16 +640,28 @@ const AudioWorkbench: React.FC<AudioWorkbenchProps> = ({
           {!canGenerate && !busy ? (
             <p className={styles.generateHint}>
               {!value.model
-                ? '请选择 speech_synthesis 模型'
+                ? t('creativeStudio.audio.validation.modelRequired', {
+                    defaultValue: '请选择 speech_synthesis 模型',
+                  })
                 : !value.text.trim()
-                  ? '请先填写朗读文本'
+                  ? t('creativeStudio.audio.validation.textRequired', {
+                      defaultValue: '请先填写朗读文本',
+                    })
                   : textLength > maxTextLength
-                    ? '朗读文本超过长度限制'
+                    ? t('creativeStudio.audio.validation.textTooLong', {
+                        defaultValue: '朗读文本超过长度限制',
+                      })
                     : referenceRequired && !support.references
-                      ? '当前模型不支持必需的参考音频'
+                      ? t('creativeStudio.audio.validation.referenceUnsupported', {
+                          defaultValue: '当前模型不支持必需的参考音频',
+                        })
                       : referenceRequired && references.length === 0
-                      ? '当前模式需要参考音频'
-                      : '当前配置暂不可提交'}
+                      ? t('creativeStudio.audio.validation.referenceRequired', {
+                          defaultValue: '当前模式需要参考音频',
+                        })
+                      : t('creativeStudio.audio.validation.unavailable', {
+                          defaultValue: '当前配置暂不可提交',
+                        })}
             </p>
           ) : null}
           <Button
@@ -556,7 +672,11 @@ const AudioWorkbench: React.FC<AudioWorkbenchProps> = ({
             disabled={!canGenerate}
             onClick={() => onGenerate(value)}
           >
-            {task.state === 'queued' ? '等待模型' : task.state === 'running' ? '正在生成' : '生成音频'}
+            {task.state === 'queued'
+              ? t('creativeStudio.audio.generate.waiting', { defaultValue: '等待模型' })
+              : task.state === 'running'
+                ? t('creativeStudio.audio.generate.running', { defaultValue: '正在生成' })
+                : t('creativeStudio.audio.generate.submit', { defaultValue: '生成音频' })}
           </Button>
         </footer>
       </aside>
@@ -565,10 +685,14 @@ const AudioWorkbench: React.FC<AudioWorkbenchProps> = ({
         <header className={styles.resultsHeader}>
           <div>
             <History theme='outline' size={18} fill='currentColor' />
-            <h2>音频结果</h2>
+            <h2>{t('creativeStudio.audio.results.title', { defaultValue: '音频结果' })}</h2>
             <Tag>{results.length}</Tag>
           </div>
-          <p>结果由外部任务与资产服务提供；这里不创建临时音频。</p>
+          <p>
+            {t('creativeStudio.audio.results.description', {
+              defaultValue: '结果由外部任务与资产服务提供；这里不创建临时音频。',
+            })}
+          </p>
         </header>
 
         {results.length === 0 ? (
@@ -576,8 +700,14 @@ const AudioWorkbench: React.FC<AudioWorkbenchProps> = ({
             <span className={styles.emptyIcon} aria-hidden='true'>
               <Voice theme='outline' size={34} fill='currentColor' />
             </span>
-            <strong>还没有音频结果</strong>
-            <p>填写文本并选择语音模型，真实生成结果会显示在这里。</p>
+            <strong>
+              {t('creativeStudio.audio.results.emptyTitle', { defaultValue: '还没有音频结果' })}
+            </strong>
+            <p>
+              {t('creativeStudio.audio.results.emptyDescription', {
+                defaultValue: '填写文本并选择语音模型，真实生成结果会显示在这里。',
+              })}
+            </p>
           </div>
         ) : (
           <div className={styles.resultList} data-audio-results='ready'>

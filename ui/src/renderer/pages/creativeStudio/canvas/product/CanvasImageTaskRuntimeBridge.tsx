@@ -11,6 +11,8 @@ import React, {
   useImperativeHandle,
   useRef,
 } from 'react';
+import type { TFunction } from 'i18next';
+import { useTranslation } from 'react-i18next';
 
 import { creativeAssetClient, type CreativeAsset } from '../../assets';
 import type { CreativeProjectDocument, CreativeSize } from '../../domain';
@@ -76,20 +78,32 @@ export interface CanvasImageTaskRuntimeBridgeProps {
 type CanvasImageTaskKind = 'compose' | 'mask-edit';
 
 const requiredEditor = (
-  ref: React.RefObject<CreativeCanvasEditorHandle | null>
+  ref: React.RefObject<CreativeCanvasEditorHandle | null>,
+  t: TFunction
 ): CreativeCanvasEditorHandle => {
   const editor = ref.current;
-  if (!editor) throw new Error('画布尚未载入，无法同步图片任务。');
+  if (!editor) {
+    throw new Error(
+      t('creativeStudio.canvas.runtime.image.editorUnavailable', {
+        defaultValue: '画布尚未载入，无法同步图片任务。',
+      })
+    );
+  }
   return editor;
 };
 
 const taskKindForReference = (
   editor: CreativeCanvasEditorHandle,
   projectId: string,
-  reference: CreativeTaskReference
+  reference: CreativeTaskReference,
+  t: TFunction
 ): CanvasImageTaskKind => {
   if (reference.owner.kind !== 'canvas_node' || reference.owner.canvasId !== projectId) {
-    throw new Error('图片任务不属于当前画布。');
+    throw new Error(
+      t('creativeStudio.canvas.runtime.image.wrongCanvas', {
+        defaultValue: '图片任务不属于当前画布。',
+      })
+    );
   }
   const owner = reference.owner;
   const node = editor.getState().document.nodes.find(
@@ -109,7 +123,11 @@ const taskKindForReference = (
     );
     return 'mask-edit';
   }
-  throw new Error('图片任务缺少受支持的 canonical 配置节点。');
+  throw new Error(
+    t('creativeStudio.canvas.runtime.image.missingConfig', {
+      defaultValue: '图片任务缺少受支持的 canonical 配置节点。',
+    })
+  );
 };
 
 const referenceFromTask = (task: CreativeTask): CreativeTaskReference => ({
@@ -129,6 +147,7 @@ const CanvasImageTaskRuntimeBridge = forwardRef<
   CanvasImageTaskRuntimeBridgeHandle,
   CanvasImageTaskRuntimeBridgeProps
 >((props, ref) => {
+  const { t } = useTranslation();
   const latest = useRef(props);
   latest.current = props;
   const initialResumeRequestsRef = useRef([
@@ -141,8 +160,13 @@ const CanvasImageTaskRuntimeBridge = forwardRef<
     async (reference: CreativeTaskReference, signal: AbortSignal) => {
       signal.throwIfAborted();
       const current = latest.current;
-      const editor = requiredEditor(current.editorRef);
-      const kind = taskKindForReference(editor, current.projectId, reference);
+      const editor = requiredEditor(current.editorRef, t);
+      const kind = taskKindForReference(
+        editor,
+        current.projectId,
+        reference,
+        t
+      );
       if (kind === 'compose') {
         await persistCanvasImageComposePendingTask({
           editor,
@@ -158,18 +182,19 @@ const CanvasImageTaskRuntimeBridge = forwardRef<
       }
       signal.throwIfAborted();
     },
-    []
+    [t]
   );
 
   const onSettledTask = useCallback(
     async (task: CreativeTask, signal: AbortSignal) => {
       signal.throwIfAborted();
       const current = latest.current;
-      const editor = requiredEditor(current.editorRef);
+      const editor = requiredEditor(current.editorRef, t);
       const kind = taskKindForReference(
         editor,
         current.projectId,
-        referenceFromTask(task)
+        referenceFromTask(task),
+        t
       );
       if (kind === 'compose') {
         await settleCanvasImageComposeTask({
@@ -194,18 +219,32 @@ const CanvasImageTaskRuntimeBridge = forwardRef<
       current.onNotice(
         kind === 'compose'
           ? task.status === 'succeeded'
-            ? '图片创作已完成，真实结果及连线已保存到画布。'
+            ? t('creativeStudio.canvas.runtime.image.composeSucceeded', {
+                defaultValue: '图片创作已完成，真实结果及连线已保存到画布。',
+              })
             : task.status === 'failed'
-              ? (task.error?.message ?? '图片创作失败，配置节点已保留。')
-              : '图片创作已取消，配置节点已保留。'
+              ? (task.error?.message ??
+                t('creativeStudio.canvas.runtime.image.composeFailed', {
+                  defaultValue: '图片创作失败，配置节点已保留。',
+                }))
+              : t('creativeStudio.canvas.runtime.image.composeCancelled', {
+                  defaultValue: '图片创作已取消，配置节点已保留。',
+                })
           : task.status === 'succeeded'
-            ? '局部编辑已完成，真实结果图片及连线已保存到画布。'
+            ? t('creativeStudio.canvas.runtime.image.maskSucceeded', {
+                defaultValue: '局部编辑已完成，真实结果图片及连线已保存到画布。',
+              })
             : task.status === 'failed'
-              ? (task.error?.message ?? '局部编辑失败，配置节点已保留。')
-              : '局部编辑已取消，配置节点已保留。'
+              ? (task.error?.message ??
+                t('creativeStudio.canvas.runtime.image.maskFailed', {
+                  defaultValue: '局部编辑失败，配置节点已保留。',
+                }))
+              : t('creativeStudio.canvas.runtime.image.maskCancelled', {
+                  defaultValue: '局部编辑已取消，配置节点已保留。',
+                })
       );
     },
-    []
+    [t]
   );
 
   const onRecoveryFailure = useCallback(
@@ -217,8 +256,13 @@ const CanvasImageTaskRuntimeBridge = forwardRef<
       if (!isCanvasImageMaskEditTaskNotFound(error)) return false;
       signal.throwIfAborted();
       const current = latest.current;
-      const editor = requiredEditor(current.editorRef);
-      const kind = taskKindForReference(editor, current.projectId, reference);
+      const editor = requiredEditor(current.editorRef, t);
+      const kind = taskKindForReference(
+        editor,
+        current.projectId,
+        reference,
+        t
+      );
       if (kind === 'compose') {
         await orphanCanvasImageComposeTask({
           editor,
@@ -234,12 +278,18 @@ const CanvasImageTaskRuntimeBridge = forwardRef<
       }
       current.onNotice(
         kind === 'compose'
-          ? '服务器未找到遗留的图片创作任务，已只清理该任务的恢复标记。'
-          : '服务器未找到遗留的局部编辑任务，已只清理该任务的恢复标记。'
+          ? t('creativeStudio.canvas.runtime.image.composeOrphaned', {
+              defaultValue:
+                '服务器未找到遗留的图片创作任务，已只清理该任务的恢复标记。',
+            })
+          : t('creativeStudio.canvas.runtime.image.maskOrphaned', {
+              defaultValue:
+                '服务器未找到遗留的局部编辑任务，已只清理该任务的恢复标记。',
+            })
       );
       return true;
     },
-    []
+    [t]
   );
 
   const runtime = useCreativeWorkbenchRuntime({
@@ -268,14 +318,15 @@ const CanvasImageTaskRuntimeBridge = forwardRef<
 
   useEffect(() => {
     const current = latest.current;
-    const editor = requiredEditor(current.editorRef);
+    const editor = requiredEditor(current.editorRef, t);
     for (const entry of runtime.entries) {
       if (entry.task.status !== 'queued' && entry.task.status !== 'running') continue;
       try {
         const kind = taskKindForReference(
           editor,
           current.projectId,
-          referenceFromTask(entry.task)
+          referenceFromTask(entry.task),
+          t
         );
         if (kind === 'compose') {
           reconcileCanvasImageComposeTask({
@@ -294,7 +345,7 @@ const CanvasImageTaskRuntimeBridge = forwardRef<
         current.onNotice(error instanceof Error ? error.message : String(error));
       }
     }
-  }, [runtime.entries]);
+  }, [runtime.entries, t]);
 
   useImperativeHandle(
     ref,

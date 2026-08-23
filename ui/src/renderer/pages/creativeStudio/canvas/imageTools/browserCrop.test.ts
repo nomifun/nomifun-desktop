@@ -11,6 +11,7 @@ import {
   cropCreativeImageAsset,
   type CreativeImageCropCodec,
 } from "./browserCrop";
+import { translateCreativeImageTool } from "./imageToolI18n";
 
 const ASSET: CreativeAsset = {
   id: "018f7a3c-1234-7abc-8abc-1234567890ab",
@@ -68,7 +69,12 @@ describe("browser creative image crop adapter", () => {
     ]);
     expect(encodedCrop).toEqual({ x: 480, y: 270, width: 960, height: 540 });
     expect(result.file instanceof File).toBe(true);
-    expect(result.file.name).toBe("Director - Capture-crop.jpg");
+    expect(result.file.name).toBe(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.fileNames.crop",
+        { stem: "Director - Capture", extension: "jpg" },
+      ),
+    );
     expect(result.width).toBe(960);
     expect(result.height).toBe(540);
   });
@@ -130,7 +136,9 @@ describe("browser creative image crop adapter", () => {
       failure = error;
     }
     expect(failure instanceof Error ? failure.message : "").toBe(
-      "只有真实图片素材可以裁剪。",
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.imageRequiredForCrop",
+      ),
     );
     expect(loaded).toBe(false);
   });

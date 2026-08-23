@@ -5,7 +5,8 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
+import { extname } from 'node:path';
 
 import enCreativeStudio from './locales/en-US/creativeStudio.json';
 import zhCreativeStudio from './locales/zh-CN/creativeStudio.json';
@@ -18,7 +19,12 @@ const flattenKeys = (tree: LocaleTree, prefix = ''): string[] =>
     return typeof value === 'string' ? [path] : flattenKeys(value, path);
   });
 
-const expectedKeys = [
+const flattenLeaves = (tree: LocaleTree): string[] =>
+  Object.values(tree).flatMap((value) =>
+    typeof value === 'string' ? [value] : flattenLeaves(value)
+  );
+
+const CORE_KEYS = [
   'focus.backToWorkbench',
   'navigation.assets',
   'navigation.canvases',
@@ -27,17 +33,30 @@ const expectedKeys = [
   'navigation.prompts',
   'navigation.templates',
   'navigation.video',
+  'siderTitle',
   'title',
-];
+] as const;
+
+const productionSourcesIn = (directory: URL): URL[] =>
+  readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const entryUrl = new URL(`${entry.name}${entry.isDirectory() ? '/' : ''}`, directory);
+    if (entry.isDirectory()) return productionSourcesIn(entryUrl);
+    if (!['.ts', '.tsx'].includes(extname(entry.name))) return [];
+    if (entry.name.includes('.test.') || entry.name.includes('.structure.')) return [];
+    return [entryUrl];
+  });
 
 const referencedCreativeStudioKeys = (): string[] => {
   const sources = [
-    new URL('../../components/layout/Sider/SiderNav/SiderCreativeStudioEntry.tsx', import.meta.url),
-    new URL('../../components/layout/Sider/index.tsx', import.meta.url),
-    new URL('../../pages/creativeStudio/app/CreativeStudioSider.tsx', import.meta.url),
+    ...productionSourcesIn(new URL('../../pages/creativeStudio/', import.meta.url)),
+    ...[
+      '../../components/layout/Sider/SiderNav/SiderCreativeStudioEntry.tsx',
+      '../../components/layout/Sider/SiderNav/SiderAssetLibraryEntry.tsx',
+      '../../components/layout/Sider/index.tsx',
+    ].map((path) => new URL(path, import.meta.url)),
   ].map((url) => readFileSync(url, 'utf8'));
   const matches = sources.flatMap((source) =>
-    [...source.matchAll(/t\(['"]creativeStudio\.([A-Za-z0-9_.-]+)['"]/g)].map(
+    [...source.matchAll(/['"]creativeStudio\.([A-Za-z0-9_.-]+)['"]/g)].map(
       (match) => match[1]
     )
   );
@@ -45,42 +64,33 @@ const referencedCreativeStudioKeys = (): string[] => {
 };
 
 describe('Creative Studio locale contract', () => {
-  test('keeps Chinese and English on the same product navigation surface', () => {
-    expect(flattenKeys(zhCreativeStudio).sort()).toEqual(expectedKeys);
-    expect(flattenKeys(enCreativeStudio).sort()).toEqual(expectedKeys);
+  test('keeps Chinese and English on the same complete product surface', () => {
+    expect(flattenKeys(zhCreativeStudio).sort()).toEqual(
+      flattenKeys(enCreativeStudio).sort()
+    );
   });
 
   test('covers every currently referenced Creative Studio translation key', () => {
-    expect(referencedCreativeStudioKeys()).toEqual(expectedKeys);
+    const localeKeys = new Set(flattenKeys(enCreativeStudio));
+    expect(
+      referencedCreativeStudioKeys().filter((key) => !localeKeys.has(key))
+    ).toEqual([]);
   });
 
   test('ships real navigation and workbench-return copy without the retired home pitch', () => {
-    expect(zhCreativeStudio).toEqual({
-      title: '创意工坊',
-      focus: { backToWorkbench: '返回工作台' },
-      navigation: {
-        label: '创意工坊',
-        canvases: '我的画布',
-        image: '生图工作台',
-        video: '视频创作台',
-        prompts: '提示词库',
-        assets: '我的素材',
-        templates: '模板工作台',
-      },
-    });
-    expect(enCreativeStudio).toEqual({
-      title: 'Creative Studio',
-      focus: { backToWorkbench: 'Back to workbench' },
-      navigation: {
-        label: 'Creative Studio',
-        canvases: 'My canvases',
-        image: 'Image studio',
-        video: 'Video studio',
-        prompts: 'Prompt library',
-        assets: 'My assets',
-        templates: 'Template studio',
-      },
-    });
+    expect(zhCreativeStudio.title).toBe('创意工坊');
+    expect(zhCreativeStudio.focus.backToWorkbench).toBe('返回工作台');
+    expect(enCreativeStudio.title).toBe('Creative Studio');
+    expect(enCreativeStudio.focus.backToWorkbench).toBe('Back to workbench');
+    const localeKeys = new Set(flattenKeys(enCreativeStudio));
+    expect(CORE_KEYS.filter((key) => !localeKeys.has(key))).toEqual([]);
     expect(flattenKeys(zhCreativeStudio).some((key) => key.startsWith('home.'))).toBe(false);
+  });
+
+  test('keeps the retired workflow term out of user-facing Creative Studio copy', () => {
+    for (const locale of [enCreativeStudio, zhCreativeStudio]) {
+      const values = Object.values(flattenLeaves(locale));
+      expect(values.some((value) => /workflow|工作流/i.test(value))).toBe(false);
+    }
   });
 });

@@ -22,6 +22,7 @@ import {
   clearCanvasVideoComposeDraftModel,
   reconcileCanvasVideoComposeConfig,
 } from './canvasVideoComposerCanvas';
+import { creativeStudioProductText } from './i18n';
 import { creativeNodeFromAsset } from './nodeFactory';
 
 export type CanvasVideoComposerEditorPort = Pick<
@@ -58,7 +59,12 @@ export function reconcileCanvasVideoComposeTask(input: {
   task: CreativeTask;
 }): void {
   if (isTerminalCreativeTaskStatus(input.task.status)) {
-    throw new Error('视频创作终态必须通过 settlement 写入画布。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.video.terminalSettlementRequired',
+        '视频创作终态必须通过 settlement 写入画布。'
+      )
+    );
   }
   const config = canvasVideoComposeConfigFromTask(
     taskDocument(input.editor, input.projectId),
@@ -84,7 +90,12 @@ export async function settleCanvasVideoComposeTask(input: {
   onAsset?: (asset: CreativeAsset) => void;
 }): Promise<void> {
   if (!isTerminalCreativeTaskStatus(input.task.status)) {
-    throw new Error('拒绝将非终态视频创作任务移出 pending 列表。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.video.nonTerminalRemovalRejected',
+        '拒绝将非终态视频创作任务移出 pending 列表。'
+      )
+    );
   }
   const initialConfig = canvasVideoComposeConfigFromTask(
     taskDocument(input.editor, input.projectId),
@@ -98,17 +109,37 @@ export async function settleCanvasVideoComposeTask(input: {
 
   if (input.task.status === 'succeeded') {
     if (input.task.resultAssetIds.length === 0) {
-      throw new Error('视频创作任务成功但没有返回真实视频素材。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.video.missingResult',
+          '视频创作任务成功但没有返回真实视频素材。'
+        )
+      );
     }
     const resultIds = [...new Set(input.task.resultAssetIds)];
     if (resultIds.length !== input.task.resultAssetIds.length) {
-      throw new Error('视频创作任务返回了重复的结果素材。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.video.duplicateResults',
+          '视频创作任务返回了重复的结果素材。'
+        )
+      );
     }
     if (resultIds.some((assetId) => initialConfig.data.inputAssetIds.includes(assetId))) {
-      throw new Error('视频创作结果错误地复用了输入素材，已停止写入画布。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.video.reusedInputAsset',
+          '视频创作结果错误地复用了输入素材，已停止写入画布。'
+        )
+      );
     }
     if (canvasVideoComposeSourceAssetId(initialConfig) !== null) {
-      throw new Error('当前视频创作只允许空视频节点承接 t2v/i2v 结果。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.video.resultRequiresEmptyNode',
+          '当前视频创作只允许空视频节点承接 t2v/i2v 结果。'
+        )
+      );
     }
 
     const sourceNodeId = canvasVideoComposeSourceNodeId(initialConfig);
@@ -119,20 +150,35 @@ export async function settleCanvasVideoComposeTask(input: {
           node.id === sourceNodeId && node.type === 'video'
       );
     if (!sourceBeforeAssets) {
-      throw new Error('视频创作源节点在结果写入前被移除。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.video.sourceRemoved',
+          '视频创作源节点在结果写入前被移除。'
+        )
+      );
     }
     if (
       sourceBeforeAssets.data.assetId !== null &&
       sourceBeforeAssets.data.assetId !== resultIds[0]
     ) {
-      throw new Error('空视频节点在任务完成前已关联其他素材，已停止覆盖。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.video.sourceOccupied',
+          '空视频节点在任务完成前已关联其他素材，已停止覆盖。'
+        )
+      );
     }
 
     const resultAssets = await Promise.all(resultIds.map((assetId) => input.assets.get(assetId)));
     if (
       resultAssets.some((asset, index) => asset.id !== resultIds[index] || asset.kind !== 'video')
     ) {
-      throw new Error('视频创作结果未解析为对应的真实视频素材。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.video.resultResolutionFailed',
+          '视频创作结果未解析为对应的真实视频素材。'
+        )
+      );
     }
 
     const resultNodeIds: string[] = [];
@@ -146,13 +192,23 @@ export async function settleCanvasVideoComposeTask(input: {
           node.id === sourceNodeId && node.type === 'video'
       );
       if (!source) {
-        throw new Error('视频创作源节点在结果写入前被移除。');
+        throw new Error(
+          creativeStudioProductText(
+            'creativeStudio.canvas.errors.video.sourceRemoved',
+            '视频创作源节点在结果写入前被移除。'
+          )
+        );
       }
 
       let resultNode: Extract<CreativeCanvasNode, { type: 'video' }> | undefined;
       if (index === 0) {
         if (source.data.assetId !== null && source.data.assetId !== asset.id) {
-          throw new Error('空视频节点在任务完成前已关联其他素材，已停止覆盖。');
+          throw new Error(
+            creativeStudioProductText(
+              'creativeStudio.canvas.errors.video.sourceOccupied',
+              '空视频节点在任务完成前已关联其他素材，已停止覆盖。'
+            )
+          );
         }
         const reconciledSource = clearCanvasVideoComposeDraftModel({
           ...source,
@@ -174,13 +230,23 @@ export async function settleCanvasVideoComposeTask(input: {
               node.id === initialConfig.id && node.type === 'config'
           );
           if (!config) {
-            throw new Error('视频创作配置节点在结果写入前被移除。');
+            throw new Error(
+              creativeStudioProductText(
+                'creativeStudio.canvas.errors.video.configRemoved',
+                '视频创作配置节点在结果写入前被移除。'
+              )
+            );
           }
           const created = creativeNodeFromAsset(asset, state, input.viewportSize, {
             position: canvasVideoComposeResultPosition(state.document.nodes, config),
           });
           if (created.type !== 'video') {
-            throw new Error('视频创作结果未能构造成视频节点。');
+            throw new Error(
+              creativeStudioProductText(
+                'creativeStudio.canvas.errors.video.nodeConstructionFailed',
+                '视频创作结果未能构造成视频节点。'
+              )
+            );
           }
           resultNode = created;
           input.editor.dispatch(canvasCommands.addNode(resultNode, { at, mergeKey }));
@@ -200,7 +266,13 @@ export async function settleCanvasVideoComposeTask(input: {
           };
           const validation = validateCanvasConnection(state.document, connection);
           if (!validation.ok) {
-            throw new Error(`无法连接视频创作结果：${validation.code}。`);
+            throw new Error(
+              creativeStudioProductText(
+                'creativeStudio.canvas.errors.video.connectResultFailed',
+                '无法连接视频创作结果：{{code}}。',
+                { code: validation.code }
+              )
+            );
           }
           input.editor.dispatch(
             canvasCommands.connect(initialConfig.id, resultNode.id, {
@@ -238,7 +310,10 @@ export async function orphanCanvasVideoComposeTask(input: {
         ...config.data,
         status: 'failed',
         resultAssetIds: [],
-        errorMessage: '服务器未找到该任务；已确认清理恢复标记。',
+        errorMessage: creativeStudioProductText(
+          'creativeStudio.canvas.errors.taskMissingRecoveryCleared',
+          '服务器未找到该任务；已确认清理恢复标记。'
+        ),
       },
     })
   );

@@ -5,11 +5,21 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { createInstance } from 'i18next';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { I18nextProvider, initReactI18next } from 'react-i18next';
 
 import { PromptLibrarySurface } from './PromptLibrarySurface';
 import type { PromptLibraryItem } from './types';
+
+const testI18n = createInstance();
+await testI18n.use(initReactI18next).init({
+  lng: 'en-US',
+  fallbackLng: 'en-US',
+  resources: { 'en-US': { translation: {} } },
+  interpolation: { escapeValue: false },
+});
 
 const ITEM: PromptLibraryItem = {
   id: 'prompt-one',
@@ -31,7 +41,9 @@ const ITEM: PromptLibraryItem = {
 
 const render = (props: Partial<React.ComponentProps<typeof PromptLibrarySurface>> = {}) =>
   renderToStaticMarkup(
-    <PromptLibrarySurface variant='page' items={[ITEM]} {...props} />
+    <I18nextProvider i18n={testI18n}>
+      <PromptLibrarySurface variant='page' items={[ITEM]} {...props} />
+    </I18nextProvider>
   );
 
 describe('PromptLibrarySurface', () => {
@@ -42,11 +54,11 @@ describe('PromptLibrarySurface', () => {
     expect(html.includes('场景拆解')).toBe(true);
     expect(html.includes('视觉创作')).toBe(true);
     expect(html.includes('构图')).toBe(true);
-    expect(html.includes('复制提示词：场景拆解')).toBe(true);
+    expect(html.includes('Copy prompt: 场景拆解')).toBe(true);
     expect(html.includes('data-prompt-library-action="copy"')).toBe(true);
-    expect(html.includes('>复制</button>')).toBe(true);
-    expect(html.includes('插入提示词')).toBe(false);
-    expect(html.includes('关联 1 个知识库')).toBe(true);
+    expect(html.includes('>Copy</button>')).toBe(true);
+    expect(html.includes('Insert prompt')).toBe(false);
+    expect(html.includes('1 linked knowledge bases')).toBe(true);
   });
 
   test('renders compact sidebar chrome from the same controlled data', () => {
@@ -63,12 +75,16 @@ describe('PromptLibrarySurface', () => {
     const error = render({ items: [], error: new Error('服务暂不可用'), onRetry: () => undefined });
     expect(error.includes('data-prompt-library-state="error"')).toBe(true);
     expect(error.includes('服务暂不可用')).toBe(true);
-    expect(error.includes('重新加载')).toBe(true);
+    expect(error.includes('Reload')).toBe(true);
   });
 
   test('reports rejected records without rendering their content', () => {
     const html = render({ invalidCount: 2 });
-    expect(html.includes('已忽略 2 条不符合数据契约的记录')).toBe(true);
+    expect(
+      html.includes(
+        '2 records were ignored because they did not match the data contract.'
+      )
+    ).toBe(true);
     expect(html.includes('external prompt marketplace')).toBe(false);
   });
 });

@@ -11,6 +11,7 @@ import React, {
   useLayoutEffect,
   useRef,
 } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { DirectorState } from '../domain';
 import styles from './DirectorRuntimeViewport.module.css';
@@ -48,11 +49,12 @@ export const DirectorRuntimeViewport = forwardRef<
     maxPixelRatio,
     showAxes,
     className,
-    ariaLabel = 'Three.js 3D导演视口',
+    ariaLabel,
     onError,
   },
   ref
 ) {
+  const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
   const runtimeRef = useRef<ThreeDirectorRuntime | null>(null);
   const resolverRef = useRef(resolveAssetUrl);
@@ -127,7 +129,12 @@ export const DirectorRuntimeViewport = forwardRef<
       ref={containerRef}
       className={classNames(styles.viewport, className)}
       role='application'
-      aria-label={ariaLabel}
+      aria-label={
+        ariaLabel ??
+        t('creativeStudio.director.runtime.viewportLabel', {
+          defaultValue: 'Three.js 3D导演视口',
+        })
+      }
       tabIndex={0}
       data-director-runtime-viewport
     />

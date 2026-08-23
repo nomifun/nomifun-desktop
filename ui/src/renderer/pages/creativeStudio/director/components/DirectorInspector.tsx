@@ -22,6 +22,7 @@ import {
   Tooltip,
 } from '@arco-design/web-react';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import styles from './DirectorWorkbenchShell.module.css';
 import type {
@@ -74,61 +75,76 @@ const RangeField: React.FC<{
   step: number;
   disabled: boolean;
   onChange(value: number): void;
-}> = ({ label, value, min, max, step, disabled, onChange }) => (
-  <div className={styles.inspectorField}>
-    <span className={styles.inspectorFieldLabel}>{label}</span>
-    <div className={styles.rangeRow}>
-      <Slider
-        aria-label={`${label}滑杆`}
-        value={value}
-        min={min}
-        max={max}
-        step={step}
-        disabled={disabled}
-        onChange={(next) => {
-          if (typeof next === 'number') onChange(next);
-        }}
-      />
-      <InputNumber
-        aria-label={label}
-        value={value}
-        min={min}
-        max={max}
-        step={step}
-        precision={2}
-        disabled={disabled}
-        onChange={(next) => onChange(numericValue(next, value))}
-      />
+}> = ({ label, value, min, max, step, disabled, onChange }) => {
+  const { t } = useTranslation();
+  return (
+    <div className={styles.inspectorField}>
+      <span className={styles.inspectorFieldLabel}>{label}</span>
+      <div className={styles.rangeRow}>
+        <Slider
+          aria-label={t('creativeStudio.director.inspector.a11y.slider', {
+            defaultValue: '{{label}}滑杆',
+            label,
+          })}
+          value={value}
+          min={min}
+          max={max}
+          step={step}
+          disabled={disabled}
+          onChange={(next) => {
+            if (typeof next === 'number') onChange(next);
+          }}
+        />
+        <InputNumber
+          aria-label={label}
+          value={value}
+          min={min}
+          max={max}
+          step={step}
+          precision={2}
+          disabled={disabled}
+          onChange={(next) => onChange(numericValue(next, value))}
+        />
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 const ColorField: React.FC<{
   label: string;
   value: string;
   disabled: boolean;
   onChange(value: string): void;
-}> = ({ label, value, disabled, onChange }) => (
-  <label className={styles.inspectorField}>
-    <span className={styles.inspectorFieldLabel}>{label}</span>
-    <span className={styles.colorRow}>
-      <input
-        className={styles.colorSwatch}
-        aria-label={`${label}取色器`}
-        type='color'
-        value={value}
-        disabled={disabled}
-        onChange={(event) => onChange(event.currentTarget.value)}
-      />
-      <Input
-        aria-label={`${label} HEX`}
-        value={value}
-        disabled={disabled}
-        onChange={onChange}
-      />
-    </span>
-  </label>
-);
+}> = ({ label, value, disabled, onChange }) => {
+  const { t } = useTranslation();
+  return (
+    <label className={styles.inspectorField}>
+      <span className={styles.inspectorFieldLabel}>{label}</span>
+      <span className={styles.colorRow}>
+        <input
+          className={styles.colorSwatch}
+          aria-label={t('creativeStudio.director.inspector.a11y.colorPicker', {
+            defaultValue: '{{label}}取色器',
+            label,
+          })}
+          type='color'
+          value={value}
+          disabled={disabled}
+          onChange={(event) => onChange(event.currentTarget.value)}
+        />
+        <Input
+          aria-label={t('creativeStudio.director.inspector.a11y.hexInput', {
+            defaultValue: '{{label}} HEX',
+            label,
+          })}
+          value={value}
+          disabled={disabled}
+          onChange={onChange}
+        />
+      </span>
+    </label>
+  );
+};
 
 const InspectorFrame: React.FC<{
   title: string;
@@ -136,20 +152,26 @@ const InspectorFrame: React.FC<{
   children: React.ReactNode;
   tabs?: React.ReactNode;
   footer?: React.ReactNode;
-}> = ({ title, kind, children, tabs, footer }) => (
-  <aside
-    className={styles.inspector}
-    aria-label={`${title}右侧属性面板`}
-    data-director-inspector={kind}
-  >
-    <header className={styles.inspectorHeader}>
-      <h2>{title}</h2>
-    </header>
-    {tabs}
-    <div className={styles.inspectorScroll}>{children}</div>
-    {footer}
-  </aside>
-);
+}> = ({ title, kind, children, tabs, footer }) => {
+  const { t } = useTranslation();
+  return (
+    <aside
+      className={styles.inspector}
+      aria-label={t('creativeStudio.director.inspector.a11y.panel', {
+        defaultValue: '{{title}}右侧属性面板',
+        title,
+      })}
+      data-director-inspector={kind}
+    >
+      <header className={styles.inspectorHeader}>
+        <h2>{title}</h2>
+      </header>
+      {tabs}
+      <div className={styles.inspectorScroll}>{children}</div>
+      {footer}
+    </aside>
+  );
+};
 
 type InspectorProps = Pick<
   DirectorWorkbenchShellProps,
@@ -180,13 +202,21 @@ const EnvironmentInspector: React.FC<
   onChoosePanorama,
   onRemovePanorama,
 }) => {
+  const { t } = useTranslation();
   const update = (patch: Partial<DirectorEnvironmentInspectorValue>) =>
     onInspectorChange({ ...value, ...patch });
 
   return (
-    <InspectorFrame title='3D场景' kind='environment'>
+    <InspectorFrame
+      title={t('creativeStudio.director.inspector.environment.title', {
+        defaultValue: '3D场景',
+      })}
+      kind='environment'
+    >
       <RangeField
-        label='场景缩放'
+        label={t('creativeStudio.director.inspector.environment.sceneScale', {
+          defaultValue: '场景缩放',
+        })}
         value={value.sceneScale}
         min={0.1}
         max={5}
@@ -195,29 +225,48 @@ const EnvironmentInspector: React.FC<
         onChange={(sceneScale) => update({ sceneScale })}
       />
       <VectorEditor
-        label='场景平移'
+        label={t('creativeStudio.director.inspector.environment.position', {
+          defaultValue: '场景平移',
+        })}
         value={value.position}
         disabled={disabled}
         onChange={(position) => update({ position })}
       />
       <VectorEditor
-        label='场景旋转'
+        label={t('creativeStudio.director.inspector.environment.rotation', {
+          defaultValue: '场景旋转',
+        })}
         value={value.rotation}
         disabled={disabled}
         onChange={(rotation) => update({ rotation })}
       />
 
       <section className={styles.inspectorSection}>
-        <h3>全景背景</h3>
+        <h3>
+          {t('creativeStudio.director.inspector.environment.panoramaBackground', {
+            defaultValue: '全景背景',
+          })}
+        </h3>
         {value.panorama ? (
           <article className={styles.panoramaCard}>
-            <img src={value.panorama.thumbnailUrl} alt={`${value.panorama.name} 全景图缩略图`} />
+            <img
+              src={value.panorama.thumbnailUrl}
+              alt={t('creativeStudio.director.inspector.a11y.panoramaThumbnail', {
+                defaultValue: '{{name}} 全景图缩略图',
+                name: value.panorama.name,
+              })}
+            />
             <span>{value.panorama.name}</span>
             <Button
               type='text'
               shape='circle'
               size='mini'
-              aria-label='删除全景图'
+              aria-label={t(
+                'creativeStudio.director.inspector.environment.removePanorama',
+                {
+                  defaultValue: '删除全景图',
+                }
+              )}
               icon={<Delete />}
               disabled={disabled || !onRemovePanorama}
               onClick={onRemovePanorama}
@@ -230,21 +279,31 @@ const EnvironmentInspector: React.FC<
             disabled={disabled || !onChoosePanorama}
             onClick={onChoosePanorama}
           >
-            未连接全景图
+            {t('creativeStudio.director.inspector.environment.noPanorama', {
+              defaultValue: '未连接全景图',
+            })}
           </Button>
         )}
       </section>
 
       <ColorField
-        label='天空颜色'
+        label={t('creativeStudio.director.inspector.environment.skyColor', {
+          defaultValue: '天空颜色',
+        })}
         value={value.skyColor}
         disabled={disabled}
         onChange={(skyColor) => update({ skyColor })}
       />
       <section className={styles.inspectorSection}>
-        <h3>全景球</h3>
+        <h3>
+          {t('creativeStudio.director.inspector.environment.panoramaSphere', {
+            defaultValue: '全景球',
+          })}
+        </h3>
         <RangeField
-          label='水平旋转'
+          label={t('creativeStudio.director.inspector.environment.panoramaYaw', {
+            defaultValue: '水平旋转',
+          })}
           value={value.panoramaYaw}
           min={-180}
           max={180}
@@ -253,7 +312,9 @@ const EnvironmentInspector: React.FC<
           onChange={(panoramaYaw) => update({ panoramaYaw })}
         />
         <RangeField
-          label='球形半径'
+          label={t('creativeStudio.director.inspector.environment.panoramaRadius', {
+            defaultValue: '球形半径',
+          })}
           value={value.panoramaRadius}
           min={10}
           max={200}
@@ -264,13 +325,37 @@ const EnvironmentInspector: React.FC<
       </section>
 
       <section className={styles.inspectorSection}>
-        <h3>开关项</h3>
+        <h3>
+          {t('creativeStudio.director.inspector.environment.toggles.title', {
+            defaultValue: '开关项',
+          })}
+        </h3>
         <div className={styles.toggleGrid}>
           {[
-            ['角色标签', 'showLabels'],
-            ['网格吸附', 'snapToGrid'],
-            ['地面', 'showGround'],
-            ['网格显示', 'showGrid'],
+            [
+              t('creativeStudio.director.inspector.environment.toggles.labels', {
+                defaultValue: '角色标签',
+              }),
+              'showLabels',
+            ],
+            [
+              t('creativeStudio.director.inspector.environment.toggles.snapToGrid', {
+                defaultValue: '网格吸附',
+              }),
+              'snapToGrid',
+            ],
+            [
+              t('creativeStudio.director.inspector.environment.toggles.ground', {
+                defaultValue: '地面',
+              }),
+              'showGround',
+            ],
+            [
+              t('creativeStudio.director.inspector.environment.toggles.grid', {
+                defaultValue: '网格显示',
+              }),
+              'showGrid',
+            ],
           ].map(([label, key]) => {
             const typedKey = key as 'showLabels' | 'snapToGrid' | 'showGround' | 'showGrid';
             return (
@@ -288,7 +373,9 @@ const EnvironmentInspector: React.FC<
       </section>
 
       <RangeField
-        label='地面高度'
+        label={t('creativeStudio.director.inspector.environment.groundHeight', {
+          defaultValue: '地面高度',
+        })}
         value={value.groundHeight}
         min={-10}
         max={10}
@@ -297,7 +384,9 @@ const EnvironmentInspector: React.FC<
         onChange={(groundHeight) => update({ groundHeight })}
       />
       <RangeField
-        label='地面透明度'
+        label={t('creativeStudio.director.inspector.environment.groundOpacity', {
+          defaultValue: '地面透明度',
+        })}
         value={value.groundOpacity}
         min={0}
         max={1}
@@ -323,11 +412,18 @@ const CameraInspector: React.FC<
   onCaptureClearAll,
   onCaptureSendAll,
 }) => {
+  const { t } = useTranslation();
   const update = (patch: Partial<DirectorCameraInspectorValue>) =>
     onInspectorChange({ ...value, ...patch });
   const capturesOpen = value.tab === 'captures';
   const tabs = (
-    <div className={styles.inspectorTabs} role='tablist' aria-label='机位面板标签'>
+    <div
+      className={styles.inspectorTabs}
+      role='tablist'
+      aria-label={t('creativeStudio.director.inspector.camera.tabs', {
+        defaultValue: '机位面板标签',
+      })}
+    >
       {(['properties', 'captures'] as const).map((tab) => (
         <button
           key={tab}
@@ -337,7 +433,13 @@ const CameraInspector: React.FC<
           disabled={disabled}
           onClick={() => update({ tab })}
         >
-          {tab === 'properties' ? '属性' : '截图'}
+          {tab === 'properties'
+            ? t('creativeStudio.director.inspector.camera.propertiesTab', {
+                defaultValue: '属性',
+              })
+            : t('creativeStudio.director.inspector.camera.capturesTab', {
+                defaultValue: '截图',
+              })}
         </button>
       ))}
     </div>
@@ -349,20 +451,31 @@ const CameraInspector: React.FC<
         disabled={disabled || value.captures.length === 0 || !onCaptureClearAll}
         onClick={onCaptureClearAll}
       >
-        清空全部
+        {t('creativeStudio.director.inspector.camera.clearAll', {
+          defaultValue: '清空全部',
+        })}
       </Button>
       <Button
         type='primary'
         disabled={disabled || value.captures.length === 0 || !onCaptureSendAll}
         onClick={onCaptureSendAll}
       >
-        发送到画布
+        {t('creativeStudio.director.inspector.camera.sendAll', {
+          defaultValue: '发送到画布',
+        })}
       </Button>
     </footer>
   ) : undefined;
 
   return (
-    <InspectorFrame title='机位' kind='camera' tabs={tabs} footer={footer}>
+    <InspectorFrame
+      title={t('creativeStudio.director.inspector.camera.title', {
+        defaultValue: '机位',
+      })}
+      kind='camera'
+      tabs={tabs}
+      footer={footer}
+    >
       {capturesOpen ? (
         <section className={styles.captureSection} data-director-capture-list>
           <Button
@@ -372,49 +485,104 @@ const CameraInspector: React.FC<
             disabled={disabled || !onCameraCapture}
             onClick={onCameraCapture}
           >
-            当前机位截图
+            {t('creativeStudio.director.inspector.camera.captureCurrent', {
+              defaultValue: '当前机位截图',
+            })}
           </Button>
           {value.captures.length === 0 ? (
             <div className={styles.captureEmpty} role='status'>
               <Camera aria-hidden='true' size={22} strokeWidth={1.7} />
-              <span>暂无摄像机截图</span>
-              <small>从当前机位生成真实预览后会显示在这里。</small>
+              <span>
+                {t('creativeStudio.director.inspector.camera.empty', {
+                  defaultValue: '暂无摄像机截图',
+                })}
+              </span>
+              <small>
+                {t('creativeStudio.director.inspector.camera.emptyHint', {
+                  defaultValue: '从当前机位生成真实预览后会显示在这里。',
+                })}
+              </small>
             </div>
           ) : (
             <div className={styles.captureGrid}>
               {value.captures.map((capture) => (
                 <article key={capture.id} className={styles.captureCard}>
-                  <img src={capture.thumbnailUrl} alt={`${capture.name} 缩略图`} />
+                  <img
+                    src={capture.thumbnailUrl}
+                    alt={t('creativeStudio.director.inspector.a11y.thumbnail', {
+                      defaultValue: '{{name}} 缩略图',
+                      name: capture.name,
+                    })}
+                  />
                   <strong title={capture.name}>{capture.name}</strong>
                   <div className={styles.captureActions}>
-                    <Tooltip content='查看截图'>
+                    <Tooltip
+                      content={t(
+                        'creativeStudio.director.inspector.camera.viewCapture',
+                        {
+                          defaultValue: '查看截图',
+                        }
+                      )}
+                    >
                       <Button
                         type='text'
                         size='mini'
                         shape='circle'
-                        aria-label={`查看截图 ${capture.name}`}
+                        aria-label={t(
+                          'creativeStudio.director.inspector.camera.viewCaptureNamed',
+                          {
+                            defaultValue: '查看截图 {{name}}',
+                            name: capture.name,
+                          }
+                        )}
                         icon={<PreviewOpen />}
                         disabled={disabled || !onCaptureView}
                         onClick={() => onCaptureView?.(capture)}
                       />
                     </Tooltip>
-                    <Tooltip content='发送到画布'>
+                    <Tooltip
+                      content={t(
+                        'creativeStudio.director.inspector.camera.sendCapture',
+                        {
+                          defaultValue: '发送到画布',
+                        }
+                      )}
+                    >
                       <Button
                         type='text'
                         size='mini'
                         shape='circle'
-                        aria-label={`发送到画布 ${capture.name}`}
+                        aria-label={t(
+                          'creativeStudio.director.inspector.camera.sendCaptureNamed',
+                          {
+                            defaultValue: '发送到画布 {{name}}',
+                            name: capture.name,
+                          }
+                        )}
                         icon={<Send />}
                         disabled={disabled || !onCaptureSendToCanvas}
                         onClick={() => onCaptureSendToCanvas?.(capture)}
                       />
                     </Tooltip>
-                    <Tooltip content='删除截图'>
+                    <Tooltip
+                      content={t(
+                        'creativeStudio.director.inspector.camera.deleteCapture',
+                        {
+                          defaultValue: '删除截图',
+                        }
+                      )}
+                    >
                       <Button
                         type='text'
                         size='mini'
                         shape='circle'
-                        aria-label={`删除截图 ${capture.name}`}
+                        aria-label={t(
+                          'creativeStudio.director.inspector.camera.deleteCaptureNamed',
+                          {
+                            defaultValue: '删除截图 {{name}}',
+                            name: capture.name,
+                          }
+                        )}
                         icon={<Delete />}
                         disabled={disabled || !onCaptureDelete}
                         onClick={() => onCaptureDelete?.(capture.id)}
@@ -429,7 +597,11 @@ const CameraInspector: React.FC<
       ) : (
         <>
           <label className={styles.inspectorField}>
-            <span className={styles.inspectorFieldLabel}>机位名称</span>
+            <span className={styles.inspectorFieldLabel}>
+              {t('creativeStudio.director.inspector.camera.name', {
+                defaultValue: '机位名称',
+              })}
+            </span>
             <Input
               value={value.name}
               disabled={disabled}
@@ -438,24 +610,34 @@ const CameraInspector: React.FC<
           </label>
           {value.targetLabel ? (
             <label className={styles.inspectorField}>
-              <span className={styles.inspectorFieldLabel}>注视目标</span>
+              <span className={styles.inspectorFieldLabel}>
+                {t('creativeStudio.director.inspector.camera.target', {
+                  defaultValue: '注视目标',
+                })}
+              </span>
               <Input value={value.targetLabel} readOnly />
             </label>
           ) : null}
           <VectorEditor
-            label='机位位置'
+            label={t('creativeStudio.director.inspector.camera.position', {
+              defaultValue: '机位位置',
+            })}
             value={value.position}
             disabled={disabled}
             onChange={(position) => update({ position })}
           />
           <VectorEditor
-            label='机位旋转'
+            label={t('creativeStudio.director.inspector.camera.rotation', {
+              defaultValue: '机位旋转',
+            })}
             value={value.rotation}
             disabled={disabled}
             onChange={(rotation) => update({ rotation })}
           />
           <RangeField
-            label='机位 FOV'
+            label={t('creativeStudio.director.inspector.camera.fov', {
+              defaultValue: '机位 FOV',
+            })}
             value={value.fov}
             min={10}
             max={120}
@@ -479,17 +661,31 @@ const CharacterInspector: React.FC<
   onInspectorChange,
   onPosePresetSelect,
 }) => {
+  const { t } = useTranslation();
   const update = (patch: Partial<DirectorCharacterInspectorValue>) =>
     onInspectorChange({ ...value, ...patch });
 
   return (
-    <InspectorFrame title='角色' kind='character'>
+    <InspectorFrame
+      title={t('creativeStudio.director.inspector.character.title', {
+        defaultValue: '角色',
+      })}
+      kind='character'
+    >
       <label className={styles.inspectorField}>
-        <span className={styles.inspectorFieldLabel}>角色名称</span>
+        <span className={styles.inspectorFieldLabel}>
+          {t('creativeStudio.director.inspector.character.name', {
+            defaultValue: '角色名称',
+          })}
+        </span>
         <Input value={value.name} disabled={disabled} onChange={(name) => update({ name })} />
       </label>
       <label className={styles.inspectorField}>
-        <span className={styles.inspectorFieldLabel}>角色体型</span>
+        <span className={styles.inspectorFieldLabel}>
+          {t('creativeStudio.director.inspector.character.bodyType', {
+            defaultValue: '角色体型',
+          })}
+        </span>
         <Select
           value={value.bodyType}
           options={[...bodyTypeOptions]}
@@ -500,19 +696,25 @@ const CharacterInspector: React.FC<
         />
       </label>
       <VectorEditor
-        label='角色位置'
+        label={t('creativeStudio.director.inspector.character.position', {
+          defaultValue: '角色位置',
+        })}
         value={value.position}
         disabled={disabled}
         onChange={(position) => update({ position })}
       />
       <VectorEditor
-        label='角色旋转'
+        label={t('creativeStudio.director.inspector.character.rotation', {
+          defaultValue: '角色旋转',
+        })}
         value={value.rotation}
         disabled={disabled}
         onChange={(rotation) => update({ rotation })}
       />
       <RangeField
-        label='统一缩放'
+        label={t('creativeStudio.director.inspector.character.scale', {
+          defaultValue: '统一缩放',
+        })}
         value={value.scale}
         min={0.1}
         max={5}
@@ -521,14 +723,26 @@ const CharacterInspector: React.FC<
         onChange={(scale) => update({ scale })}
       />
       <ColorField
-        label='角色颜色'
+        label={t('creativeStudio.director.inspector.character.color', {
+          defaultValue: '角色颜色',
+        })}
         value={value.color}
         disabled={disabled}
         onChange={(color) => update({ color })}
       />
       <section className={styles.inspectorSection}>
-        <h3>姿势预设</h3>
-        <div className={styles.posePresetGrid} role='listbox' aria-label='姿势预设'>
+        <h3>
+          {t('creativeStudio.director.inspector.character.posePresets', {
+            defaultValue: '姿势预设',
+          })}
+        </h3>
+        <div
+          className={styles.posePresetGrid}
+          role='listbox'
+          aria-label={t('creativeStudio.director.inspector.character.posePresets', {
+            defaultValue: '姿势预设',
+          })}
+        >
           {posePresetOptions.map((option) => (
             <Button
               key={option.value}
@@ -548,47 +762,74 @@ const CharacterInspector: React.FC<
 const ObjectInspector: React.FC<
   Omit<InspectorProps, 'inspector'> & { value: DirectorObjectInspectorValue }
 > = ({ value, disabled = false, onInspectorChange, onReimportObjectModel }) => {
+  const { t } = useTranslation();
   const update = (patch: Partial<DirectorObjectInspectorValue>) =>
     onInspectorChange({ ...value, ...patch });
 
   return (
-    <InspectorFrame title='物体' kind='object'>
+    <InspectorFrame
+      title={t('creativeStudio.director.inspector.object.title', {
+        defaultValue: '物体',
+      })}
+      kind='object'
+    >
       <label className={styles.inspectorField}>
-        <span className={styles.inspectorFieldLabel}>模型名称</span>
+        <span className={styles.inspectorFieldLabel}>
+          {t('creativeStudio.director.inspector.object.name', {
+            defaultValue: '模型名称',
+          })}
+        </span>
         <Input value={value.name} disabled={disabled} onChange={(name) => update({ name })} />
       </label>
       {value.modelLabel ? (
         <label className={styles.inspectorField}>
-          <span className={styles.inspectorFieldLabel}>模型来源</span>
+          <span className={styles.inspectorFieldLabel}>
+            {t('creativeStudio.director.inspector.object.source', {
+              defaultValue: '模型来源',
+            })}
+          </span>
           <Input value={value.modelLabel} readOnly />
         </label>
       ) : null}
       {value.localAssetMissing ? (
         <section className={styles.missingModel} role='alert'>
-          <p>模型文件只保存在原导入设备，重新导入后会继承当前模型数据。</p>
+          <p>
+            {t('creativeStudio.director.inspector.object.missingAsset', {
+              defaultValue:
+                '模型文件只保存在原导入设备，重新导入后会继承当前模型数据。',
+            })}
+          </p>
           <Button
             icon={<Upload />}
             disabled={disabled || !onReimportObjectModel}
             onClick={onReimportObjectModel}
           >
-            重新导入模型
+            {t('creativeStudio.director.inspector.object.reimport', {
+              defaultValue: '重新导入模型',
+            })}
           </Button>
         </section>
       ) : null}
       <VectorEditor
-        label='模型位置'
+        label={t('creativeStudio.director.inspector.object.position', {
+          defaultValue: '模型位置',
+        })}
         value={value.position}
         disabled={disabled}
         onChange={(position) => update({ position })}
       />
       <VectorEditor
-        label='模型旋转'
+        label={t('creativeStudio.director.inspector.object.rotation', {
+          defaultValue: '模型旋转',
+        })}
         value={value.rotation}
         disabled={disabled}
         onChange={(rotation) => update({ rotation })}
       />
       <RangeField
-        label='统一缩放'
+        label={t('creativeStudio.director.inspector.object.scale', {
+          defaultValue: '统一缩放',
+        })}
         value={value.scale}
         min={0.1}
         max={5}
@@ -597,7 +838,9 @@ const ObjectInspector: React.FC<
         onChange={(scale) => update({ scale })}
       />
       <ColorField
-        label='模型颜色'
+        label={t('creativeStudio.director.inspector.object.color', {
+          defaultValue: '模型颜色',
+        })}
         value={value.color}
         disabled={disabled}
         onChange={(color) => update({ color })}

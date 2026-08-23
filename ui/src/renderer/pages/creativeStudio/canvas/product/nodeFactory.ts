@@ -20,6 +20,7 @@ import {
   type CanvasState,
   type CanvasViewport,
 } from '../core';
+import { creativeStudioProductText } from './i18n';
 
 export const CREATIVE_CANVAS_PRODUCT_NODE_SIZES = {
   text: { width: 340, height: 240 },
@@ -99,7 +100,7 @@ const DEFAULT_NODE_DATA: CreativeCanvasNodeDataByKind = {
     durationMs: 0,
   },
   group: {
-    title: '节点组',
+    title: '',
     color: null,
     collapsed: false,
   },
@@ -204,7 +205,17 @@ export function creativeCanvasProductNodePosition(
 
 const defaultDataFor = <K extends CreativeCanvasNodeKind>(
   kind: K
-): CreativeCanvasNodeDataByKind[K] => structuredClone(DEFAULT_NODE_DATA[kind]);
+): CreativeCanvasNodeDataByKind[K] => {
+  const data = structuredClone(DEFAULT_NODE_DATA[kind]);
+  if (kind === 'group') {
+    (data as CreativeCanvasNodeDataByKind['group']).title =
+      creativeStudioProductText(
+        'creativeStudio.canvas.nodes.defaultGroupTitle',
+        '节点组'
+      );
+  }
+  return data;
+};
 
 const createNodeWithData = <K extends CreativeCanvasNodeKind>(
   kind: K,

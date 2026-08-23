@@ -15,6 +15,7 @@ import {
   Voice,
 } from '@icon-park/react';
 import React, { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import {
   creativeAssetClient,
@@ -43,7 +44,18 @@ export interface CreativeCanvasProductAssetLibraryProps {
   onInsert(assets: readonly CreativeAsset[]): void;
 }
 
-const ASSET_KIND_LABELS: Record<CreativeCanvasAssetKindFilter, string> = {
+const ASSET_KIND_LABEL_KEYS: Record<
+  CreativeCanvasAssetKindFilter,
+  string
+> = {
+  all: 'creativeStudio.canvas.assets.kind.all',
+  image: 'creativeStudio.canvas.assets.kind.image',
+  video: 'creativeStudio.canvas.assets.kind.video',
+  audio: 'creativeStudio.canvas.assets.kind.audio',
+  text: 'creativeStudio.canvas.assets.kind.text',
+};
+
+const assetKindFallbacks: Record<CreativeCanvasAssetKindFilter, string> = {
   all: '全部类型',
   image: '图片',
   video: '视频',
@@ -90,21 +102,41 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
   onToggleAsset,
   onInsert,
 }) => {
+  const { t } = useTranslation();
+  const assetKindLabel = (value: CreativeCanvasAssetKindFilter): string =>
+    t(ASSET_KIND_LABEL_KEYS[value], { defaultValue: assetKindFallbacks[value] });
   const selectedAssets = useMemo(
     () => state.assets.filter((asset) => selectedIds.has(asset.id)),
     [selectedIds, state.assets]
   );
 
   return (
-    <section className={styles.assetPanel} aria-label='NomiFun 素材库' data-product-asset-library>
+    <section
+      className={styles.assetPanel}
+      aria-label={t('creativeStudio.canvas.assets.libraryLabel', {
+        defaultValue: 'NomiFun 素材库',
+      })}
+      data-product-asset-library
+    >
       <header className={styles.assetHeader}>
         <div>
-          <strong>素材库</strong>
-          <span>{state.total} 项真实素材</span>
+          <strong>
+            {t('creativeStudio.canvas.assets.libraryTitle', {
+              defaultValue: '素材库',
+            })}
+          </strong>
+          <span>
+            {t('creativeStudio.canvas.assets.totalCount', {
+              count: state.total,
+              defaultValue: `${state.total} 项真实素材`,
+            })}
+          </span>
         </div>
         <button
           type='button'
-          aria-label='刷新素材库'
+          aria-label={t('creativeStudio.canvas.assets.refresh', {
+            defaultValue: '刷新素材库',
+          })}
           disabled={disabled || state.loading}
           onClick={() => void state.reload()}
         >
@@ -115,17 +147,27 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
       <div className={styles.filters}>
         <label className={styles.searchField}>
           <Search {...iconProps} />
-          <span className={styles.srOnly}>搜索素材</span>
+          <span className={styles.srOnly}>
+            {t('creativeStudio.canvas.assets.searchLabel', {
+              defaultValue: '搜索素材',
+            })}
+          </span>
           <input
             type='search'
             value={search}
-            placeholder='搜索真实素材'
+            placeholder={t('creativeStudio.canvas.assets.searchPlaceholder', {
+              defaultValue: '搜索真实素材',
+            })}
             disabled={disabled}
             onChange={(event) => onSearchChange(event.target.value)}
           />
         </label>
         <label className={styles.kindField}>
-          <span className={styles.srOnly}>素材类型</span>
+          <span className={styles.srOnly}>
+            {t('creativeStudio.canvas.assets.kindLabel', {
+              defaultValue: '素材类型',
+            })}
+          </span>
           <select
             value={kind}
             disabled={disabled}
@@ -133,13 +175,13 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
               onKindChange(event.target.value as CreativeCanvasAssetKindFilter)
             }
           >
-            {(Object.keys(ASSET_KIND_LABELS) as CreativeCanvasAssetKindFilter[]).map(
-              (value) => (
+            {(
+              Object.keys(ASSET_KIND_LABEL_KEYS) as CreativeCanvasAssetKindFilter[]
+            ).map((value) => (
                 <option key={value} value={value}>
-                  {ASSET_KIND_LABELS[value]}
+                  {assetKindLabel(value)}
                 </option>
-              )
-            )}
+              ))}
           </select>
         </label>
       </div>
@@ -148,20 +190,38 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
         {state.loading ? (
           <div className={styles.state} role='status' data-state='loading'>
             <Loading className={styles.spin} {...iconProps} />
-            <span>正在读取素材库…</span>
+            <span>
+              {t('creativeStudio.canvas.assets.loading', {
+                defaultValue: '正在读取素材库…',
+              })}
+            </span>
           </div>
         ) : state.error ? (
           <div className={styles.state} role='alert' data-state='error'>
-            <strong>素材库加载失败</strong>
+            <strong>
+              {t('creativeStudio.canvas.assets.loadFailed', {
+                defaultValue: '素材库加载失败',
+              })}
+            </strong>
             <span>{state.error.message}</span>
             <button type='button' onClick={() => void state.reload()}>
-              重新加载
+              {t('creativeStudio.canvas.assets.reload', {
+                defaultValue: '重新加载',
+              })}
             </button>
           </div>
         ) : state.assets.length === 0 ? (
           <div className={styles.state} role='status' data-state='empty'>
-            <strong>没有匹配的素材</strong>
-            <span>这里只显示后端素材库返回的真实记录。</span>
+            <strong>
+              {t('creativeStudio.canvas.assets.noMatches', {
+                defaultValue: '没有匹配的素材',
+              })}
+            </strong>
+            <span>
+              {t('creativeStudio.canvas.assets.realRecordsOnly', {
+                defaultValue: '这里只显示后端素材库返回的真实记录。',
+              })}
+            </span>
           </div>
         ) : (
           <div className={styles.assetGrid} role='list'>
@@ -183,7 +243,7 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
                   </span>
                   <span className={styles.assetCopy}>
                     <strong>{asset.title}</strong>
-                    <span>{ASSET_KIND_LABELS[asset.kind]}</span>
+                    <span>{assetKindLabel(asset.kind)}</span>
                   </span>
                 </button>
               );
@@ -201,10 +261,16 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
             onClick={() => void state.loadMore()}
           >
             {state.loadingMore ? <Loading className={styles.spin} {...iconProps} /> : null}
-            加载更多
+            {t('creativeStudio.canvas.assets.loadMore', {
+              defaultValue: '加载更多',
+            })}
           </button>
         ) : (
-          <span className={styles.endLabel}>已载入当前查询的全部素材</span>
+          <span className={styles.endLabel}>
+            {t('creativeStudio.canvas.assets.allLoaded', {
+              defaultValue: '已载入当前查询的全部素材',
+            })}
+          </span>
         )}
         <button
           type='button'
@@ -213,7 +279,10 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
           onClick={() => onInsert(selectedAssets)}
         >
           <Plus {...iconProps} />
-          插入 {selectedAssets.length || ''}
+          {t('creativeStudio.canvas.assets.insert', {
+            count: selectedAssets.length,
+            defaultValue: '插入 {{count}}',
+          })}
         </button>
       </footer>
     </section>
@@ -231,6 +300,7 @@ export interface CreativeCanvasProductPromptLibraryProps {
 export const CreativeCanvasProductPromptLibrary: React.FC<
   CreativeCanvasProductPromptLibraryProps
 > = ({ locale, enabled = true, selectedId, onSelect, onCopy }) => {
+  const { t } = useTranslation();
   const port = useMemo(
     () => createNomiPromptLibraryPort({ locale, assets: creativeAssetClient }),
     [locale]
@@ -241,8 +311,12 @@ export const CreativeCanvasProductPromptLibrary: React.FC<
       <PromptLibrarySidebar
         port={port}
         enabled={enabled}
-        title='提示词库'
-        description='来自 NomiFun 预设与文本素材'
+        title={t('creativeStudio.canvas.promptLibrary', {
+          defaultValue: '提示词库',
+        })}
+        description={t('creativeStudio.canvas.promptLibraryDescription', {
+          defaultValue: '来自 NomiFun 预设与文本素材',
+        })}
         selectedId={selectedId}
         onSelect={(item) => onSelect?.(item.id)}
         onCopy={onCopy}

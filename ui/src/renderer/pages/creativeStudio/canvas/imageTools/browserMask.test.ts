@@ -12,6 +12,7 @@ import {
   type CreativeImageMaskCodec,
   type CreativeImageMaskSelection,
 } from "./browserMask";
+import { translateCreativeImageTool } from "./imageToolI18n";
 
 const ASSET: CreativeAsset = {
   id: "018f7a3c-1234-7abc-8abc-1234567890ab",
@@ -77,7 +78,12 @@ describe("browser creative image mask adapter", () => {
     ]);
     expect(receivedSelection).toBe(mask);
     expect(result.file instanceof File).toBe(true);
-    expect(result.file.name).toBe("Director - Capture-mask-edit-reference.png");
+    expect(result.file.name).toBe(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.fileNames.maskReference",
+        { stem: "Director - Capture" },
+      ),
+    );
     expect(result.width).toBe(1_920);
     expect(result.height).toBe(1_080);
     expect(result.mimeType).toBe("image/png");
@@ -112,7 +118,9 @@ describe("browser creative image mask adapter", () => {
       failure = error;
     }
     expect(failure instanceof Error ? failure.message : "").toBe(
-      "局部编辑遮罩尺寸与原图不一致，请重新打开编辑器。",
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.maskSizeMismatch",
+      ),
     );
     expect(encoded).toBe(false);
     expect(closed).toBe(true);
@@ -143,7 +151,9 @@ describe("browser creative image mask adapter", () => {
       failure = error;
     }
     expect(failure instanceof Error ? failure.message : "").toBe(
-      "只有真实图片素材可以进行局部编辑。",
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.imageRequiredForMask",
+      ),
     );
     expect(loaded).toBe(false);
   });

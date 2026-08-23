@@ -6,6 +6,7 @@
 
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
 import {
@@ -59,6 +60,7 @@ import {
 } from '../runtime';
 import { standaloneWorkbenchOwner } from './ownership';
 import {
+  creativeWorkbenchErrorMessage,
   StandaloneWorkbenchPage,
   StandaloneHistoryGate,
   StandaloneHistoryRetireDialog,
@@ -66,26 +68,6 @@ import {
 import styles from './StandaloneWorkbenchProduct.module.css';
 
 const ownerScopedPendingNoop = async (): Promise<void> => undefined;
-
-const IMAGE_GENERATION_MODEL_COPY = {
-  placeholder: '选择生图模型',
-  loading: '正在加载生图模型…',
-  noCompatibleModel: '没有已启用且具备“图像生成”能力的模型。',
-  disabled: '生成任务进行中，暂不可切换模型。',
-  error: '生图模型目录加载失败。',
-  unavailable: '已选生图模型当前不可用，请重新选择。',
-  configureModels: '配置生图模型',
-};
-
-const IMAGE_EDIT_MODEL_COPY = {
-  placeholder: '选择图片编辑模型',
-  loading: '正在加载图片编辑模型…',
-  noCompatibleModel: '没有已启用且具备“图片编辑”能力的模型。',
-  disabled: '生成任务进行中，暂不可切换模型。',
-  error: '图片编辑模型目录加载失败。',
-  unavailable: '已选图片编辑模型当前不可用，请重新选择。',
-  configureModels: '配置图片编辑模型',
-};
 
 const creativeModelSelection = (
   model: ImageWorkbenchModelIdentity | null
@@ -100,6 +82,7 @@ const creativeModelSelection = (
 const OwnedImageWorkbenchReady: React.FC<{
   history: StandaloneWorkbenchHistoryState;
 }> = ({ history }) => {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const catalog = useNomiCreativeModelCatalog();
   const assets = useCreativeAssets({ pageSize: 200, query: { sort: 'updated_desc' } });
@@ -125,6 +108,10 @@ const OwnedImageWorkbenchReady: React.FC<{
   const [retireError, setRetireError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const formatError = useCallback(
+    (reason: unknown) => creativeWorkbenchErrorMessage(reason, t),
+    [t]
+  );
   const historyScope = useMemo(() => ({ workbenchKind: 'image' as const }), []);
   const durableTasks = useMemo(
     () =>
@@ -156,7 +143,7 @@ const OwnedImageWorkbenchReady: React.FC<{
     onPendingTask: ownerScopedPendingNoop,
     onSettledTask,
     onRecoveryFailure,
-    onRuntimeError: (reason) => setError(reason instanceof Error ? reason.message : String(reason)),
+    onRuntimeError: (reason) => setError(formatError(reason)),
   });
   const presentationRuntime = useMemo(
     () => standaloneHistoryRuntimeSnapshot(historyScope, durableTasks, runtime, creativeAssetClient),
@@ -301,33 +288,61 @@ const OwnedImageWorkbenchReady: React.FC<{
   const taskById = useCallback(
     (taskId: string): CreativeTask => {
       const task = presentationRuntime.entries.find((entry) => entry.task.taskId === taskId)?.task;
-      if (!task) throw new Error(`找不到任务 ${taskId}。`);
+      if (!task) {
+        throw new Error(
+          t('creativeStudio.product.errors.taskNotFound', {
+            defaultValue: '找不到任务 {{taskId}}。',
+            taskId,
+          })
+        );
+      }
       return task;
     },
-    [presentationRuntime.entries]
+    [presentationRuntime.entries, t]
   );
 
   const generate = async (): Promise<void> => {
     setError(null);
     if (draftReferencesRestoring) {
-      setError('参考素材草稿仍在恢复，未发起生成。');
+      setError(
+        t('creativeStudio.product.errors.referencesRestoring', {
+          defaultValue: '参考素材草稿仍在恢复，未发起生成。',
+        })
+      );
       return;
     }
     if (!settings.model || catalog.status !== 'ready') {
-      setError('没有可用且明确选择的真实模型，未发起生成。');
+      setError(
+        t('creativeStudio.product.image.errors.modelRequired', {
+          defaultValue: '没有可用且明确选择的真实模型，未发起生成。',
+        })
+      );
       return;
     }
     if (references.length !== referenceIds.length) {
-      setError('存在无法读取的图片参考，未把 I2I 请求降级成 T2I。');
+      setError(
+        t('creativeStudio.product.image.errors.unreadableReference', {
+          defaultValue: '存在无法读取的图片参考，未把 I2I 请求降级成 T2I。',
+        })
+      );
       return;
     }
     if (settings.count > sizePolicy.maxCount) {
       setSettings((value) => ({ ...value, count: sizePolicy.maxCount }));
-      setError(`当前模型最多支持生成 ${sizePolicy.maxCount} 张图片。`);
+      setError(
+        t('creativeStudio.product.image.errors.maxCount', {
+          defaultValue: '当前模型最多支持生成 {{imageCount}} 张图片。',
+          imageCount: sizePolicy.maxCount,
+        })
+      );
       return;
     }
     if (!sizePolicy.allowCustomDimensions && !selectedSizeOption) {
-      setError('当前模型不支持该尺寸，请重新选择尺寸。');
+      setError(
+        t('creativeStudio.product.image.errors.unsupportedSize', {
+          defaultValue: '当前模型不支持该尺寸，请重新选择尺寸。',
+        })
+      );
       return;
     }
     try {
@@ -356,7 +371,7 @@ const OwnedImageWorkbenchReady: React.FC<{
         count: settings.count,
       });
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(formatError(reason));
     }
   };
 
@@ -369,7 +384,7 @@ const OwnedImageWorkbenchReady: React.FC<{
         prepareStandaloneHistoryRetry({ catalog, task, references: retryReferences })
       );
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(formatError(reason));
     }
   };
 
@@ -383,7 +398,7 @@ const OwnedImageWorkbenchReady: React.FC<{
         await creativeTaskClient.cancel(creativeTaskReference(task));
         await history.reload();
       } catch (reason) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(formatError(reason));
       }
     }
   };
@@ -394,17 +409,25 @@ const OwnedImageWorkbenchReady: React.FC<{
     const unique = [...new Set(taskIds)];
     try {
       if (unique.length === 0 || unique.length > 100) {
-        throw new Error('每次必须选择 1-100 条终态历史。');
+        throw new Error(
+          t('creativeStudio.product.history.invalidSelection', {
+            defaultValue: '每次必须选择 1-100 条终态历史。',
+          })
+        );
       }
       for (const taskId of unique) {
         const task = taskById(taskId);
         if (task.status === 'queued' || task.status === 'running') {
-          throw new Error('运行中的任务必须先取消，不能直接从历史移除。');
+          throw new Error(
+            t('creativeStudio.product.history.runningTask', {
+              defaultValue: '运行中的任务必须先取消，不能直接从历史移除。',
+            })
+          );
         }
       }
       setRetireTaskIds(unique);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(formatError(reason));
     }
   };
 
@@ -424,7 +447,7 @@ const OwnedImageWorkbenchReady: React.FC<{
       setRetireTaskIds([]);
       await history.reload();
     } catch (reason) {
-      setRetireError(reason instanceof Error ? reason.message : String(reason));
+      setRetireError(formatError(reason));
     } finally {
       setRetiring(false);
     }
@@ -487,7 +510,7 @@ const OwnedImageWorkbenchReady: React.FC<{
       draftReferencesRestoring || catalog.status !== 'ready' || history.refreshing,
     onGenerate: generate,
     onRetryTask: retryTask,
-    onActionError: (reason) => setError(reason instanceof Error ? reason.message : String(reason)),
+    onActionError: (reason) => setError(formatError(reason)),
   });
   const modelSlot = (
     <CreativeModelSelect
@@ -501,8 +524,56 @@ const OwnedImageWorkbenchReady: React.FC<{
         }))
       }
       disabled={props.disabled}
-      label='模型'
-      copy={modelTask === 'image_edit' ? IMAGE_EDIT_MODEL_COPY : IMAGE_GENERATION_MODEL_COPY}
+      label={t('creativeStudio.product.model.label', { defaultValue: '模型' })}
+      copy={
+        modelTask === 'image_edit'
+          ? {
+              placeholder: t('creativeStudio.product.image.editModel.placeholder', {
+                defaultValue: '选择图片编辑模型',
+              }),
+              loading: t('creativeStudio.product.image.editModel.loading', {
+                defaultValue: '正在加载图片编辑模型…',
+              }),
+              noCompatibleModel: t('creativeStudio.product.image.editModel.empty', {
+                defaultValue: '没有已启用且具备“图片编辑”能力的模型。',
+              }),
+              disabled: t('creativeStudio.product.image.model.disabled', {
+                defaultValue: '生成任务进行中，暂不可切换模型。',
+              }),
+              error: t('creativeStudio.product.image.editModel.error', {
+                defaultValue: '图片编辑模型目录加载失败。',
+              }),
+              unavailable: t('creativeStudio.product.image.editModel.unavailable', {
+                defaultValue: '已选图片编辑模型当前不可用，请重新选择。',
+              }),
+              configureModels: t('creativeStudio.product.image.editModel.configure', {
+                defaultValue: '配置图片编辑模型',
+              }),
+            }
+          : {
+              placeholder: t('creativeStudio.product.image.generationModel.placeholder', {
+                defaultValue: '选择生图模型',
+              }),
+              loading: t('creativeStudio.product.image.generationModel.loading', {
+                defaultValue: '正在加载生图模型…',
+              }),
+              noCompatibleModel: t('creativeStudio.product.image.generationModel.empty', {
+                defaultValue: '没有已启用且具备“图像生成”能力的模型。',
+              }),
+              disabled: t('creativeStudio.product.image.model.disabled', {
+                defaultValue: '生成任务进行中，暂不可切换模型。',
+              }),
+              error: t('creativeStudio.product.image.generationModel.error', {
+                defaultValue: '生图模型目录加载失败。',
+              }),
+              unavailable: t('creativeStudio.product.image.generationModel.unavailable', {
+                defaultValue: '已选生图模型当前不可用，请重新选择。',
+              }),
+              configureModels: t('creativeStudio.product.image.generationModel.configure', {
+                defaultValue: '配置生图模型',
+              }),
+            }
+      }
       onOpenModelSettings={() =>
         void navigate(`/models?section=${modelTask === 'image_edit' ? 'image-edit' : 'image'}`)
       }
@@ -513,36 +584,44 @@ const OwnedImageWorkbenchReady: React.FC<{
     <>
       {history.error || error ? (
         <div className={styles.runtimeNotice} role='alert'>
-          {history.error?.message ?? error}
+          {history.error ? formatError(history.error) : error}
         </div>
       ) : null}
       {presentationRuntime.submissionFailures.map((failure) => (
         <div className={styles.runtimeNotice} role='status' key={failure.order}>
-          <span>任务提交结果尚未确认，可使用原幂等请求安全重试。</span>
+          <span>
+            {t('creativeStudio.product.submission.uncertain', {
+              defaultValue: '任务提交结果尚未确认，可使用原幂等请求安全重试。',
+            })}
+          </span>
           <button
             type='button'
             onClick={() => {
               void runtime.retrySubmission(failure.order).catch((reason) =>
-                setError(reason instanceof Error ? reason.message : String(reason))
+                setError(formatError(reason))
               );
             }}
           >
-            确认任务状态
+            {t('creativeStudio.product.submission.confirmStatus', {
+              defaultValue: '确认任务状态',
+            })}
           </button>
         </div>
       ))}
       {presentationRuntime.requestError && history.activeTasks.length > 0 ? (
         <div className={styles.runtimeNotice} role='status'>
-          <span>{presentationRuntime.requestError.message}</span>
+          <span>{formatError(presentationRuntime.requestError)}</span>
           <button
             type='button'
             onClick={() => {
               void runtime.resume(initialResumeRequests).catch((reason) =>
-                setError(reason instanceof Error ? reason.message : String(reason))
+                setError(formatError(reason))
               );
             }}
           >
-            重试任务同步
+            {t('creativeStudio.product.submission.retrySync', {
+              defaultValue: '重试任务同步',
+            })}
           </button>
         </div>
       ) : null}
@@ -579,7 +658,7 @@ const OwnedImageWorkbenchReady: React.FC<{
                 ...new Set([...ids, ...uploaded.map((asset) => asset.id)]),
               ])
             )
-            .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+            .catch((reason) => setError(formatError(reason)));
         }}
         onCancel={() => setPickerOpen(false)}
       />
@@ -599,12 +678,13 @@ const OwnedImageWorkbenchReady: React.FC<{
 };
 
 const OwnedImageWorkbench: React.FC = () => {
+  const { t } = useTranslation();
   const historyScope = useMemo(() => ({ workbenchKind: 'image' as const }), []);
   const history = useStandaloneWorkbenchHistory(historyScope);
   if (history.status !== 'ready') {
     return (
       <StandaloneHistoryGate
-        label='生图'
+        label={t('creativeStudio.product.image.historyLabel', { defaultValue: '生图' })}
         error={history.error}
         onRetry={() => void history.reload()}
       />

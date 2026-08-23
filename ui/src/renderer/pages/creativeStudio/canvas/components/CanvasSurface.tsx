@@ -6,6 +6,7 @@
 
 import classNames from 'classnames';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import CanvasMiniMapFrame from './CanvasMiniMapFrame';
 import CanvasZoomControls, { type CanvasZoomControlsProps } from './CanvasZoomControls';
@@ -84,7 +85,7 @@ const CanvasSurface = React.forwardRef<HTMLDivElement, CanvasSurfaceProps>(
       tool = 'select',
       isPanning = false,
       gridStep = 48,
-      ariaLabel = '无限画布',
+      ariaLabel,
       edgeLayer,
       nodeLayer,
       worldOverlay,
@@ -104,6 +105,7 @@ const CanvasSurface = React.forwardRef<HTMLDivElement, CanvasSurfaceProps>(
     },
     ref
   ) => {
+    const { t } = useTranslation();
     const safeZoom = Math.max(0.001, finiteOr(viewport.zoom, 1));
     const safeX = finiteOr(viewport.x, 0);
     const safeY = finiteOr(viewport.y, 0);
@@ -128,7 +130,7 @@ const CanvasSurface = React.forwardRef<HTMLDivElement, CanvasSurfaceProps>(
         className={classNames(styles.surface, className)}
         style={{ ...style, ...gridStyle }}
         role='region'
-        aria-label={ariaLabel}
+        aria-label={ariaLabel ?? t('creativeStudio.canvas.surface.label')}
         data-canvas-surface
         data-canvas-background={backgroundMode}
         data-canvas-tool={tool}

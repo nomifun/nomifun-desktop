@@ -5,6 +5,7 @@
  */
 
 import type { CreativeCanvasNode, CreativeSize } from '../../domain';
+import { creativeStudioProductText } from './i18n';
 
 const overlaps = (
   node: CreativeCanvasNode,
@@ -36,5 +37,10 @@ export function nextCanvasImageTaskPosition(
     const position = { x: origin.x, y: origin.y + row * stride };
     if (!nodes.some((node) => overlaps(node, position, size))) return position;
   }
-  throw new Error('无法为图片任务节点找到安全的画布位置。');
+  throw new Error(
+    creativeStudioProductText(
+      'creativeStudio.canvas.tasks.noSafePosition',
+      '无法为图片任务节点找到安全的画布位置。'
+    )
+  );
 }

@@ -5,8 +5,45 @@
  */
 
 import React, { useEffect, useRef } from 'react';
+import type { TFunction } from 'i18next';
+import { useTranslation } from 'react-i18next';
 
+import {
+  CreativeWorkbenchRuntimeError,
+  type CreativeWorkbenchRuntimeErrorCode,
+} from '../runtime';
 import styles from './StandaloneWorkbenchProduct.module.css';
+
+const WORKBENCH_ERROR_KEYS: Record<
+  CreativeWorkbenchRuntimeErrorCode,
+  string
+> = {
+  catalog_loading: 'creativeStudio.product.errors.catalogLoading',
+  catalog_error: 'creativeStudio.product.errors.catalogError',
+  model_required: 'creativeStudio.product.errors.modelRequired',
+  model_not_compatible: 'creativeStudio.product.errors.modelNotCompatible',
+  task_capability_mismatch: 'creativeStudio.product.errors.modelNotCompatible',
+  invalid_parameters: 'creativeStudio.product.errors.invalidParameters',
+  reference_not_owned: 'creativeStudio.product.errors.referenceInvalid',
+  reference_kind_mismatch: 'creativeStudio.product.errors.referenceInvalid',
+  reference_contract_mismatch: 'creativeStudio.product.errors.referenceInvalid',
+  busy: 'creativeStudio.product.errors.busy',
+  task_not_found: 'creativeStudio.product.errors.taskUnavailable',
+  task_not_retryable: 'creativeStudio.product.errors.retryUnavailable',
+  disposed: 'creativeStudio.product.errors.disposed',
+  presentation_state_unsupported:
+    'creativeStudio.product.errors.unsupportedState',
+};
+
+export function creativeWorkbenchErrorMessage(
+  reason: unknown,
+  t: TFunction
+): string {
+  if (reason instanceof CreativeWorkbenchRuntimeError) {
+    return t(WORKBENCH_ERROR_KEYS[reason.code]);
+  }
+  return t('creativeStudio.product.errors.operationFailed');
+}
 
 export const StandaloneWorkbenchPage: React.FC<{
   error: string | null;
@@ -26,17 +63,36 @@ export const StandaloneHistoryGate: React.FC<{
   label: string;
   error: Error | null;
   onRetry(): void;
-}> = ({ label, error, onRetry }) => (
-  <section className={styles.historyGate} role={error ? 'alert' : 'status'}>
-    <strong>{error ? `${label}历史加载失败` : `正在恢复${label}历史`}</strong>
-    <p>{error?.message ?? '正在读取独立工作台的任务与结果，请稍候。'}</p>
-    {error ? (
-      <button type='button' onClick={onRetry}>
-        重试
-      </button>
-    ) : null}
-  </section>
-);
+}> = ({ label, error, onRetry }) => {
+  const { t } = useTranslation();
+  return (
+    <section className={styles.historyGate} role={error ? 'alert' : 'status'}>
+      <strong>
+        {error
+          ? t('creativeStudio.product.history.loadFailed', {
+              defaultValue: '{{label}}历史加载失败',
+              label,
+            })
+          : t('creativeStudio.product.history.restoring', {
+              defaultValue: '正在恢复{{label}}历史',
+              label,
+            })}
+      </strong>
+      <p>
+        {error
+          ? creativeWorkbenchErrorMessage(error, t)
+          : t('creativeStudio.product.history.loadingDescription', {
+              defaultValue: '正在读取独立工作台的任务与结果，请稍候。',
+            })}
+      </p>
+      {error ? (
+        <button type='button' onClick={onRetry}>
+          {t('creativeStudio.product.history.retry', { defaultValue: '重试' })}
+        </button>
+      ) : null}
+    </section>
+  );
+};
 
 export const StandaloneHistoryRetireDialog: React.FC<{
   open: boolean;
@@ -46,6 +102,7 @@ export const StandaloneHistoryRetireDialog: React.FC<{
   onCancel(): void;
   onConfirm(): void;
 }> = ({ open, count, busy, error, onCancel, onConfirm }) => {
+  const { t } = useTranslation();
   const dialogRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     if (open) dialogRef.current?.focus();
@@ -69,9 +126,21 @@ export const StandaloneHistoryRetireDialog: React.FC<{
           if (event.key === 'Escape' && !busy) onCancel();
         }}
       >
-        <h2 id='standalone-retire-title'>从历史移除{count > 1 ? ` ${count} 条` : '这条记录'}？</h2>
+        <h2 id='standalone-retire-title'>
+          {count > 1
+            ? t('creativeStudio.product.history.retireManyTitle', {
+                defaultValue: '从历史移除 {{recordCount}} 条？',
+                recordCount: count,
+              })
+            : t('creativeStudio.product.history.retireOneTitle', {
+                defaultValue: '从历史移除这条记录？',
+              })}
+        </h2>
         <p>
-          任务审计、输入素材和生成结果会继续安全保留；这里只让所选记录不再出现在当前工作台历史中。
+          {t('creativeStudio.product.history.retireDescription', {
+            defaultValue:
+              '任务审计、输入素材和生成结果会继续安全保留；这里只让所选记录不再出现在当前工作台历史中。',
+          })}
         </p>
         {error ? (
           <p className={styles.retireError} role='alert'>
@@ -80,10 +149,12 @@ export const StandaloneHistoryRetireDialog: React.FC<{
         ) : null}
         <div className={styles.retireActions}>
           <button type='button' disabled={busy} onClick={onCancel}>
-            取消
+            {t('creativeStudio.product.history.cancel', { defaultValue: '取消' })}
           </button>
           <button type='button' data-danger disabled={busy} onClick={onConfirm}>
-            {busy ? '正在移除…' : '从历史移除'}
+            {busy
+              ? t('creativeStudio.product.history.retiring', { defaultValue: '正在移除…' })
+              : t('creativeStudio.product.history.retire', { defaultValue: '从历史移除' })}
           </button>
         </div>
       </section>

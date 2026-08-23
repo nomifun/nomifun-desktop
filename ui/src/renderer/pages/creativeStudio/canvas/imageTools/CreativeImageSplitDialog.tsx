@@ -7,6 +7,7 @@
 import { Button, Modal, Progress } from "@arco-design/web-react";
 import { CheckOne, Delete, DividingLine, Refresh } from "@icon-park/react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { CreativeAsset } from "../../assets";
 import type { CreativeImageDimensions } from "./cropModel";
@@ -66,12 +67,10 @@ const axisLines = (
 ): readonly number[] =>
   axis === "horizontal" ? params.horizontalLines : params.verticalLines;
 
-const lineLabel = (
-  axis: CreativeImageSplitAxis,
-  index: number,
-  value: number,
-): string =>
-  `${axis === "horizontal" ? "水平" : "垂直"}分割线 ${index + 1}，${Math.round(value * 100)}%`;
+const AXIS_LABEL_KEYS: Record<CreativeImageSplitAxis, string> = {
+  horizontal: "creativeStudio.canvas.imageTools.split.axes.horizontal",
+  vertical: "creativeStudio.canvas.imageTools.split.axes.vertical",
+};
 
 export const CreativeImageSplitDialogContent: React.FC<
   CreativeImageSplitDialogProps
@@ -83,6 +82,7 @@ export const CreativeImageSplitDialogContent: React.FC<
   error = null,
   onConfirm,
 }) => {
+  const { t } = useTranslation();
   const dialogRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const pointerRef = useRef<SplitPointerSession | null>(null);
@@ -239,10 +239,17 @@ export const CreativeImageSplitDialogContent: React.FC<
       tabIndex={-1}
     >
       <p className={styles.splitSubtitle}>
-        生成 {total} 个图片子节点，并按原图网格排列到画布右侧
+        {t("creativeStudio.canvas.imageTools.split.summary", {
+          count: total,
+        })}
       </p>
       <div className={styles.splitWorkspace}>
-        <section className={styles.splitPreviewPane} aria-label="切图预览">
+        <section
+          className={styles.splitPreviewPane}
+          aria-label={t(
+            "creativeStudio.canvas.imageTools.split.previewLabel",
+          )}
+        >
           {asset ? (
             <div className={styles.splitPreviewWell}>
               <div
@@ -260,7 +267,10 @@ export const CreativeImageSplitDialogContent: React.FC<
                 {!imageFailed ? (
                   <img
                     src={asset.originalUrl}
-                    alt={`${asset.title} 切图预览`}
+                    alt={t(
+                      "creativeStudio.canvas.imageTools.split.previewAlt",
+                      { title: asset.title },
+                    )}
                     draggable={false}
                     onLoad={(event) => {
                       const image = event.currentTarget;
@@ -275,7 +285,7 @@ export const CreativeImageSplitDialogContent: React.FC<
                   />
                 ) : (
                   <div className={styles.cropImageError} role="alert">
-                    无法载入原图，切图操作已停止。
+                    {t("creativeStudio.canvas.imageTools.split.loadFailed")}
                   </div>
                 )}
                 {dimensions && !imageFailed
@@ -296,7 +306,14 @@ export const CreativeImageSplitDialogContent: React.FC<
                                 ? { top: `${value * 100}%` }
                                 : { left: `${value * 100}%` }
                             }
-                            aria-label={lineLabel(axis, index, value)}
+                            aria-label={t(
+                              "creativeStudio.canvas.imageTools.split.lineLabel",
+                              {
+                                axis: t(AXIS_LABEL_KEYS[axis]),
+                                index: index + 1,
+                                percentage: Math.round(value * 100),
+                              },
+                            )}
                             disabled={busy}
                             onPointerDown={(event) =>
                               beginPointer({ axis, index }, event)
@@ -313,7 +330,9 @@ export const CreativeImageSplitDialogContent: React.FC<
             </div>
           ) : null}
           <div className={styles.splitOriginalSize} aria-live="polite">
-            <span>原图</span>
+            <span>
+              {t("creativeStudio.canvas.imageTools.split.original")}
+            </span>
             <strong>
               {dimensions
                 ? `${dimensions.width} × ${dimensions.height} px`
@@ -322,11 +341,18 @@ export const CreativeImageSplitDialogContent: React.FC<
           </div>
         </section>
 
-        <aside className={styles.splitControlPane} aria-label="切图设置">
+        <aside
+          className={styles.splitControlPane}
+          aria-label={t(
+            "creativeStudio.canvas.imageTools.split.settings",
+          )}
+        >
           <section className={styles.splitControlSection}>
             <div className={styles.splitCountGrid}>
               <label>
-                <span>行数</span>
+                <span>
+                  {t("creativeStudio.canvas.imageTools.split.rows")}
+                </span>
                 <input
                   type="number"
                   min={1}
@@ -339,7 +365,9 @@ export const CreativeImageSplitDialogContent: React.FC<
                 />
               </label>
               <label>
-                <span>列数</span>
+                <span>
+                  {t("creativeStudio.canvas.imageTools.split.columns")}
+                </span>
                 <input
                   type="number"
                   min={1}
@@ -360,19 +388,25 @@ export const CreativeImageSplitDialogContent: React.FC<
                 size="small"
                 icon={<DividingLine theme="outline" size={14} />}
                 disabled={busy || rows >= CREATIVE_IMAGE_SPLIT_MAX_GRID}
-                aria-label="添加水平分割线"
+                aria-label={t(
+                  "creativeStudio.canvas.imageTools.split.addHorizontalLabel",
+                )}
                 onClick={() => addLine("horizontal")}
               >
-                横向线
+                {t(
+                  "creativeStudio.canvas.imageTools.split.addHorizontal",
+                )}
               </Button>
               <Button
                 size="small"
                 icon={<DividingLine theme="outline" size={14} />}
                 disabled={busy || columns >= CREATIVE_IMAGE_SPLIT_MAX_GRID}
-                aria-label="添加垂直分割线"
+                aria-label={t(
+                  "creativeStudio.canvas.imageTools.split.addVerticalLabel",
+                )}
                 onClick={() => addLine("vertical")}
               >
-                纵向线
+                {t("creativeStudio.canvas.imageTools.split.addVertical")}
               </Button>
               <Button
                 size="small"
@@ -381,7 +415,7 @@ export const CreativeImageSplitDialogContent: React.FC<
                 disabled={busy || activeLine === null}
                 onClick={removeActiveLine}
               >
-                删除线
+                {t("creativeStudio.canvas.imageTools.split.deleteLine")}
               </Button>
               <Button
                 size="small"
@@ -389,15 +423,23 @@ export const CreativeImageSplitDialogContent: React.FC<
                 disabled={busy}
                 onClick={resetLines}
               >
-                重置线
+                {t("creativeStudio.canvas.imageTools.split.resetLines")}
               </Button>
             </div>
           </section>
 
           <section className={styles.splitSummary} aria-live="polite">
-            <span>切片数量</span>
-            <strong>{total} 个</strong>
-            <span>平均约</span>
+            <span>
+              {t("creativeStudio.canvas.imageTools.split.pieceCountLabel")}
+            </span>
+            <strong>
+              {t("creativeStudio.canvas.imageTools.split.pieceCount", {
+                count: total,
+              })}
+            </strong>
+            <span>
+              {t("creativeStudio.canvas.imageTools.split.averageSize")}
+            </span>
             <strong>
               {averageSize
                 ? `${averageSize.width} × ${averageSize.height}`
@@ -412,7 +454,7 @@ export const CreativeImageSplitDialogContent: React.FC<
             disabled={!asset || !dimensions || imageFailed}
             onClick={() => onConfirm(params)}
           >
-            生成子节点
+            {t("creativeStudio.canvas.imageTools.split.generate")}
           </Button>
         </aside>
       </div>
@@ -421,7 +463,9 @@ export const CreativeImageSplitDialogContent: React.FC<
         <Progress
           percent={Math.round(Math.min(100, Math.max(0, progress)))}
           size="small"
-          aria-label="切图结果上传进度"
+          aria-label={t(
+            "creativeStudio.canvas.imageTools.split.uploadProgress",
+          )}
         />
       ) : null}
       {error ? (
@@ -435,25 +479,30 @@ export const CreativeImageSplitDialogContent: React.FC<
 
 const CreativeImageSplitDialog: React.FC<CreativeImageSplitDialogProps> = (
   props,
-) => (
-  <Modal
-    title="切分图片"
-    visible={props.visible}
-    className={`${styles.cropModal} ${styles.splitModal}`}
-    style={{ width: 780, maxWidth: "calc(100vw - 32px)" }}
-    footer={null}
-    autoFocus={false}
-    maskClosable={!props.busy}
-    escToExit={!props.busy}
-    closable={!props.busy}
-    unmountOnExit
-    getPopupContainer={() =>
-      document.getElementById("creative-studio-portal-root") ?? document.body
-    }
-    onCancel={props.onClose}
-  >
-    <CreativeImageSplitDialogContent {...props} />
-  </Modal>
-);
+) => {
+  const { t } = useTranslation();
+
+  return (
+    <Modal
+      title={t("creativeStudio.canvas.imageTools.split.title")}
+      visible={props.visible}
+      className={`${styles.cropModal} ${styles.splitModal}`}
+      style={{ width: 780, maxWidth: "calc(100vw - 32px)" }}
+      footer={null}
+      autoFocus={false}
+      maskClosable={!props.busy}
+      escToExit={!props.busy}
+      closable={!props.busy}
+      unmountOnExit
+      getPopupContainer={() =>
+        document.getElementById("creative-studio-portal-root") ??
+        document.body
+      }
+      onCancel={props.onClose}
+    >
+      <CreativeImageSplitDialogContent {...props} />
+    </Modal>
+  );
+};
 
 export default CreativeImageSplitDialog;

@@ -16,6 +16,8 @@ import {
   Robot,
 } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 
 import type { CreativeModelCatalogSnapshot } from '../../models';
 import type { WorkflowDraftPort } from '../agent';
@@ -45,9 +47,16 @@ import {
   workflowOutputLabel,
   workflowPromptPreview,
 } from './workflowViewModel';
+import {
+  createWorkflowTranslationCopy,
+  formatWorkflowValidationError,
+  workflowFallbackError,
+  type WorkflowTranslationCopy,
+} from '../workflowI18n';
 
 type PageState = 'loading' | 'ready' | 'error';
 type WorkflowAction = 'save' | 'copy' | 'delete' | null;
+const UNCATEGORIZED_CATEGORY = '__uncategorized__';
 
 export interface CreativeWorkflowWorkspacePageProps {
   repository?: CreativeWorkflowRepository;
@@ -82,27 +91,27 @@ const upsertWorkflow = (
   workflow: WorkflowDefinitionV1
 ) => newestFirst([workflow, ...workflows.filter((candidate) => candidate.id !== workflow.id)]);
 
-const formatDate = (timestamp: number): string => {
+const formatDate = (timestamp: number, locale: string, justNow: string): string => {
   const date = new Date(timestamp);
-  if (!Number.isFinite(timestamp) || Number.isNaN(date.getTime()) || timestamp === 0) return '刚刚';
-  return new Intl.DateTimeFormat('zh-CN', {
+  if (!Number.isFinite(timestamp) || Number.isNaN(date.getTime()) || timestamp === 0) return justNow;
+  return new Intl.DateTimeFormat(locale, {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
   }).format(date);
 };
 
-const errorMessage = (error: unknown, fallback: string) =>
-  error instanceof Error && error.message.trim() ? error.message : fallback;
-
 const WorkflowCard: React.FC<{
   workflow: WorkflowDefinitionV1;
   disabled: boolean;
+  copy: WorkflowTranslationCopy;
+  t: TFunction;
+  locale: string;
   onRun: () => void;
   onEdit: () => void;
   onCopy: () => void;
   onDelete: () => void;
-}> = ({ workflow, disabled, onRun, onEdit, onCopy, onDelete }) => (
+}> = ({ workflow, disabled, copy, t, locale, onRun, onEdit, onCopy, onDelete }) => (
   <article className={styles.card} data-workflow-id={workflow.id}>
     <div className={styles.cardAccent} aria-hidden='true' />
     <div className={styles.cardBody}>
@@ -110,14 +119,24 @@ const WorkflowCard: React.FC<{
         <div className={styles.cardIdentity}>
           <h2 className={styles.cardTitle}>{workflow.metadata.name}</h2>
           <div className={styles.chips}>
-            <span className={styles.chip}>{workflow.metadata.category || '未分类'}</span>
+            <span className={styles.chip}>
+              {workflow.metadata.category ||
+                t('creativeStudio.workflows.workspace.categoryFallback', {
+                  defaultValue: 'Uncategorized',
+                })}
+            </span>
             <span
               className={styles.chip}
               data-tone={workflow.output.kind === 'multi-image-series' ? 'purple' : undefined}
             >
-              {workflowOutputLabel(workflow.output)}
+              {workflowOutputLabel(workflow.output, copy)}
             </span>
-            <span className={styles.chip}>{workflow.variables.length} 个变量</span>
+            <span className={styles.chip}>
+              {t('creativeStudio.workflows.workspace.variableCount', {
+                count: workflow.variables.length,
+                defaultValue: '{{count}} variables',
+              })}
+            </span>
           </div>
         </div>
         <Button
@@ -127,18 +146,35 @@ const WorkflowCard: React.FC<{
           icon={<Play theme='outline' size={14} fill='currentColor' />}
           onClick={onRun}
         >
-          运行
+          {t('creativeStudio.workflows.workspace.run', { defaultValue: 'Run' })}
         </Button>
       </div>
-      <p className={styles.cardDescription}>{workflow.metadata.description || '暂无描述'}</p>
-      <div className={styles.promptPreview}>{workflowPromptPreview(workflow)}</div>
+      <p className={styles.cardDescription}>
+        {workflow.metadata.description ||
+          t('creativeStudio.workflows.workspace.noDescription', {
+            defaultValue: 'No description',
+          })}
+      </p>
+      <div className={styles.promptPreview}>{workflowPromptPreview(workflow, copy)}</div>
       <footer className={styles.cardFooter}>
-        <p className={styles.cardDate}>更新于 {formatDate(workflow.metadata.updatedAt)}</p>
+        <p className={styles.cardDate}>
+          {t('creativeStudio.workflows.workspace.updatedAt', {
+            date: formatDate(
+              workflow.metadata.updatedAt,
+              locale,
+              t('creativeStudio.workflows.workspace.justNow', { defaultValue: 'Just now' })
+            ),
+            defaultValue: 'Updated {{date}}',
+          })}
+        </p>
         <div className={styles.cardActions}>
           <button
             type='button'
             className={styles.iconButton}
-            aria-label={`编辑 ${workflow.metadata.name}`}
+            aria-label={t('creativeStudio.workflows.workspace.edit', {
+              name: workflow.metadata.name,
+              defaultValue: 'Edit {{name}}',
+            })}
             disabled={disabled}
             onClick={onEdit}
           >
@@ -147,7 +183,10 @@ const WorkflowCard: React.FC<{
           <button
             type='button'
             className={styles.iconButton}
-            aria-label={`复制 ${workflow.metadata.name}`}
+            aria-label={t('creativeStudio.workflows.workspace.duplicate', {
+              name: workflow.metadata.name,
+              defaultValue: 'Duplicate {{name}}',
+            })}
             disabled={disabled}
             onClick={onCopy}
           >
@@ -157,7 +196,10 @@ const WorkflowCard: React.FC<{
             type='button'
             className={styles.iconButton}
             data-danger='true'
-            aria-label={`删除 ${workflow.metadata.name}`}
+            aria-label={t('creativeStudio.workflows.workspace.delete', {
+              name: workflow.metadata.name,
+              defaultValue: 'Delete {{name}}',
+            })}
             disabled={disabled}
             onClick={onDelete}
           >
@@ -182,6 +224,9 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
   onPickReferenceAssets,
   onUploadReferenceImages,
 }) => {
+  const { t, i18n } = useTranslation();
+  const locale = i18n.resolvedLanguage ?? i18n.language;
+  const copy = useMemo(() => createWorkflowTranslationCopy(t), [t]);
   const [pageState, setPageState] = useState<PageState>(autoLoad ? 'loading' : 'ready');
   const [loadError, setLoadError] = useState('');
   const [workflows, setWorkflows] = useState(() => newestFirst(initialWorkflows));
@@ -202,10 +247,17 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
       setWorkflows(newestFirst(loaded));
       setPageState('ready');
     } catch (error) {
-      setLoadError(errorMessage(error, '模板加载失败'));
+      setLoadError(
+        workflowFallbackError(
+          error,
+          t,
+          'creativeStudio.workflows.workspace.loadError',
+          'Failed to load templates'
+        )
+      );
       setPageState('error');
     }
-  }, [repository]);
+  }, [repository, t]);
 
   useEffect(() => {
     if (!autoLoad) return;
@@ -221,25 +273,42 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
       })
       .catch((error: unknown) => {
         if (!active) return;
-        setLoadError(errorMessage(error, '模板加载失败'));
+        setLoadError(
+          workflowFallbackError(
+            error,
+            t,
+            'creativeStudio.workflows.workspace.loadError',
+            'Failed to load templates'
+          )
+        );
         setPageState('error');
       });
     return () => {
       active = false;
     };
-  }, [autoLoad, repository]);
+  }, [autoLoad, repository, t]);
 
+  const uncategorized = t('creativeStudio.workflows.workspace.categoryFallback', {
+    defaultValue: 'Uncategorized',
+  });
   const categories = useMemo(
     () =>
-      [...new Set(workflows.map((workflow) => workflow.metadata.category || '未分类'))].sort(
-        (left, right) => left.localeCompare(right, 'zh-CN')
-      ),
-    [workflows]
+      [...new Set(
+        workflows.map((workflow) => workflow.metadata.category || UNCATEGORIZED_CATEGORY)
+      )].sort((left, right) => {
+        const leftLabel = left === UNCATEGORIZED_CATEGORY ? uncategorized : left;
+        const rightLabel = right === UNCATEGORIZED_CATEGORY ? uncategorized : right;
+        return leftLabel.localeCompare(rightLabel, locale);
+      }),
+    [locale, uncategorized, workflows]
   );
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     return workflows.filter((workflow) => {
-      if (category !== 'all' && (workflow.metadata.category || '未分类') !== category) {
+      if (
+        category !== 'all' &&
+        (workflow.metadata.category || UNCATEGORIZED_CATEGORY) !== category
+      ) {
         return false;
       }
       if (!needle) return true;
@@ -250,10 +319,10 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
         ...workflow.metadata.tags,
       ].some((value) => value.toLocaleLowerCase().includes(needle));
     });
-  }, [category, query, workflows]);
+  }, [category, query, uncategorized, workflows]);
 
   const beginCreate = (mode: 'single-image' | 'multi-image-series') => {
-    setEditing(withPrivateWorkflowVisibility(createBlankWorkflow(mode)));
+    setEditing(withPrivateWorkflowVisibility(createBlankWorkflow(mode, copy)));
     setEditingIsNew(true);
   };
 
@@ -262,7 +331,7 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
     const privateEditing = withPrivateWorkflowVisibility(editing);
     const validation = validateWorkflowDefinition(privateEditing);
     if (!validation.ok) {
-      Message.error(`${validation.error.path}: ${validation.error.message}`);
+      Message.error(formatWorkflowValidationError(validation.error, t));
       return;
     }
     setAction('save');
@@ -276,9 +345,25 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
       setWorkflows((current) => upsertWorkflow(current, saved));
       setEditing(null);
       setEditingIsNew(false);
-      Message.success(editingIsNew ? '模板已创建' : '模板已保存');
+      Message.success(
+        t(
+          editingIsNew
+            ? 'creativeStudio.workflows.workspace.createSuccess'
+            : 'creativeStudio.workflows.workspace.saveSuccess',
+          {
+            defaultValue: editingIsNew ? 'Template created' : 'Template saved',
+          }
+        )
+      );
     } catch (error) {
-      Message.error(errorMessage(error, '模板保存失败'));
+      Message.error(
+        workflowFallbackError(
+          error,
+          t,
+          'creativeStudio.workflows.workspace.saveError',
+          'Failed to save template'
+        )
+      );
     } finally {
       setAction(null);
     }
@@ -289,12 +374,23 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
     setAction('copy');
     try {
       const created = await repository.create(
-        withPrivateWorkflowVisibility(duplicateWorkflow(workflow))
+        withPrivateWorkflowVisibility(duplicateWorkflow(workflow, copy))
       );
       setWorkflows((current) => upsertWorkflow(current, created));
-      Message.success('模板副本已创建');
+      Message.success(
+        t('creativeStudio.workflows.workspace.copySuccess', {
+          defaultValue: 'Template copy created',
+        })
+      );
     } catch (error) {
-      Message.error(errorMessage(error, '模板复制失败'));
+      Message.error(
+        workflowFallbackError(
+          error,
+          t,
+          'creativeStudio.workflows.workspace.copyError',
+          'Failed to copy template'
+        )
+      );
     } finally {
       setAction(null);
     }
@@ -307,9 +403,20 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
       await repository.remove(deleting.id);
       setWorkflows((current) => current.filter((workflow) => workflow.id !== deleting.id));
       setDeleting(null);
-      Message.success('模板已删除');
+      Message.success(
+        t('creativeStudio.workflows.workspace.deleteSuccess', {
+          defaultValue: 'Template deleted',
+        })
+      );
     } catch (error) {
-      Message.error(errorMessage(error, '模板删除失败'));
+      Message.error(
+        workflowFallbackError(
+          error,
+          t,
+          'creativeStudio.workflows.workspace.deleteError',
+          'Failed to delete template'
+        )
+      );
     } finally {
       setAction(null);
     }
@@ -327,20 +434,37 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
     >
       <div className={styles.inner}>
         <section className={styles.headerCard}>
-          <div className={styles.headerIdentity}>
-            <div className={styles.titleRow}>
-              <MagicWand theme='outline' size={20} fill='currentColor' />
-              <h1>模板工作台</h1>
-            </div>
-            <p>把固定提示词、变量和模型配置沉淀成可复用模板，每次只填写变量即可批量生成。</p>
+            <div className={styles.headerIdentity}>
+              <div className={styles.titleRow}>
+                <MagicWand theme='outline' size={20} fill='currentColor' />
+                <h1>
+                  {t('creativeStudio.workflows.workspace.title', {
+                    defaultValue: 'Template Studio',
+                  })}
+                </h1>
+              </div>
+            <p>
+              {t('creativeStudio.workflows.workspace.description', {
+                defaultValue:
+                  'Turn fixed prompts, variables, and model settings into reusable templates. Fill in the variables each time to generate in batches.',
+              })}
+            </p>
           </div>
           <div className={styles.headerActions}>
             <Select
               className={styles.categorySelect}
               value={category}
               options={[
-                { value: 'all', label: '全部分类' },
-                ...categories.map((item) => ({ value: item, label: item })),
+                {
+                  value: 'all',
+                  label: t('creativeStudio.workflows.workspace.allCategories', {
+                    defaultValue: 'All categories',
+                  }),
+                },
+                ...categories.map((item) => ({
+                  value: item,
+                  label: item === UNCATEGORIZED_CATEGORY ? uncategorized : item,
+                })),
               ]}
               disabled={pageState !== 'ready'}
               onChange={setCategory}
@@ -349,24 +473,36 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
               className={styles.search}
               allowClear
               value={query}
-              placeholder='搜索名称、分类、描述'
+              placeholder={t('creativeStudio.workflows.workspace.searchPlaceholder', {
+                defaultValue: 'Search names, categories, and descriptions',
+              })}
               disabled={pageState !== 'ready'}
               onChange={setQuery}
             />
             <Button
               icon={<Robot theme='outline' size={15} fill='currentColor' />}
               disabled={disabled || !agentDraftAvailable}
-              title={agentDraftAvailable ? undefined : 'AI 草稿服务暂不可用'}
+              title={
+                agentDraftAvailable
+                  ? undefined
+                  : t('creativeStudio.workflows.workspace.aiUnavailable', {
+                      defaultValue: 'AI draft service is unavailable',
+                    })
+              }
               onClick={() => setAgentDraftOpen(true)}
             >
-              AI 创建
+              {t('creativeStudio.workflows.workspace.aiCreate', {
+                defaultValue: 'Create with AI',
+              })}
             </Button>
             <Button
               icon={<Pic theme='outline' size={15} fill='currentColor' />}
               disabled={disabled}
               onClick={() => beginCreate('multi-image-series')}
             >
-              新建多图模板
+              {t('creativeStudio.workflows.workspace.newMulti', {
+                defaultValue: 'New multi-image template',
+              })}
             </Button>
             <Button
               type='primary'
@@ -374,28 +510,53 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
               disabled={disabled}
               onClick={() => beginCreate('single-image')}
             >
-              新建模板
+              {t('creativeStudio.workflows.workspace.newSingle', {
+                defaultValue: 'New template',
+              })}
             </Button>
           </div>
         </section>
 
         {pageState === 'loading' ? (
           <div className={styles.statePanel}>
-            <Spin tip='正在加载模板…' />
+            <Spin
+              tip={t('creativeStudio.workflows.workspace.loading', {
+                defaultValue: 'Loading templates…',
+              })}
+            />
           </div>
         ) : pageState === 'error' ? (
           <div className={styles.errorState} role='alert'>
-            <h2>模板加载失败</h2>
+            <h2>
+              {t('creativeStudio.workflows.workspace.loadFailed', {
+                defaultValue: 'Failed to load templates',
+              })}
+            </h2>
             <p>{loadError}</p>
-            <Button onClick={() => void load()}>重试</Button>
+            <Button onClick={() => void load()}>
+              {t('creativeStudio.workflows.workspace.retry', { defaultValue: 'Retry' })}
+            </Button>
           </div>
         ) : filtered.length === 0 ? (
           <div className={styles.emptyState}>
-            <h2>{workflows.length === 0 ? '暂无模板' : '没有匹配的模板'}</h2>
+            <h2>
+              {workflows.length === 0
+                ? t('creativeStudio.workflows.workspace.noTemplates', {
+                    defaultValue: 'No templates yet',
+                  })
+                : t('creativeStudio.workflows.workspace.noMatches', {
+                    defaultValue: 'No matching templates',
+                  })}
+            </h2>
             <p>
               {workflows.length === 0
-                ? '创建一个模板，把常用提示词、变量和模型配置沉淀下来。'
-                : '调整分类或搜索条件后重试。'}
+                ? t('creativeStudio.workflows.workspace.emptyDescription', {
+                    defaultValue:
+                      'Create a template to save frequently used prompts, variables, and model settings.',
+                  })
+                : t('creativeStudio.workflows.workspace.noMatchesDescription', {
+                    defaultValue: 'Adjust the category or search filters and try again.',
+                  })}
             </p>
             {workflows.length === 0 ? (
               <Button
@@ -403,17 +564,27 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
                 icon={<Plus theme='outline' size={15} fill='currentColor' />}
                 onClick={() => beginCreate('single-image')}
               >
-                新建模板
+                {t('creativeStudio.workflows.workspace.newSingle', {
+                  defaultValue: 'New template',
+                })}
               </Button>
             ) : null}
           </div>
         ) : (
-          <section className={styles.grid} aria-label='模板列表'>
+          <section
+            className={styles.grid}
+            aria-label={t('creativeStudio.workflows.workspace.listLabel', {
+              defaultValue: 'Template list',
+            })}
+          >
             {filtered.map((workflow) => (
               <WorkflowCard
                 key={workflow.id}
                 workflow={workflow}
                 disabled={action !== null}
+                copy={copy}
+                t={t}
+                locale={locale}
                 onRun={() => setRunning(cloneWorkflowDefinition(workflow))}
                 onEdit={() => {
                   setEditing(
@@ -469,10 +640,16 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
       />
       <Modal
         visible={deleting !== null}
-        title='删除模板'
+        title={t('creativeStudio.workflows.workspace.deleteTitle', {
+          defaultValue: 'Delete template',
+        })}
         className={styles.confirmModal}
-        okText='删除'
-        cancelText='取消'
+        okText={t('creativeStudio.workflows.workspace.deleteAction', {
+          defaultValue: 'Delete',
+        })}
+        cancelText={t('creativeStudio.workflows.workspace.cancel', {
+          defaultValue: 'Cancel',
+        })}
         okButtonProps={{ status: 'danger' }}
         confirmLoading={action === 'delete'}
         autoFocus={false}
@@ -483,7 +660,10 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
         onCancel={() => action !== 'delete' && setDeleting(null)}
         onOk={() => void deleteWorkflow()}
       >
-        确定删除“{deleting?.metadata.name}”吗？此操作不可撤销。
+        {t('creativeStudio.workflows.workspace.deleteConfirm', {
+          name: deleting?.metadata.name ?? '',
+          defaultValue: 'Delete “{{name}}”? This action cannot be undone.',
+        })}
       </Modal>
     </main>
   );

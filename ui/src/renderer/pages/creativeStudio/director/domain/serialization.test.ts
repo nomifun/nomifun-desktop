@@ -20,7 +20,12 @@ import type { DirectorState, DirectorVectorTrack } from './types';
 type JsonRecord = Record<string, any>;
 
 function projectState(): DirectorState {
-  let state = createDirectorState({ projectId: 'project-1', name: 'Director project', durationSeconds: 8 });
+  let state = createDirectorState({
+    projectId: 'project-1',
+    name: 'Director project',
+    sceneName: 'Scene',
+    durationSeconds: 8,
+  });
   state = directorReducer(
     state,
     directorCommands.addEntity(

@@ -9,6 +9,7 @@ import type {
   CreativePoint,
   CreativeSize,
 } from "../../domain";
+import { translateCreativeImageTool } from "./imageToolI18n";
 
 export const CREATIVE_IMAGE_SPLIT_NODE_GAP = 16;
 export const CREATIVE_IMAGE_SPLIT_ORIGIN_GAP = 96;
@@ -46,7 +47,11 @@ export function createCreativeImageSplitCanvasLayout(
     !Number.isInteger(columns) ||
     columns < 1
   ) {
-    throw new Error("切图行列数必须是正整数。");
+    throw new Error(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.splitGridPositive",
+      ),
+    );
   }
   const cellSize = {
     width: Math.max(1, source.size.width / columns),
@@ -75,7 +80,11 @@ export function createCreativeImageSplitCanvasLayout(
       return { origin, cellSize, gap, rows, columns };
     }
   }
-  throw new Error("无法为切图结果找到安全的画布网格位置。");
+  throw new Error(
+    translateCreativeImageTool(
+      "creativeStudio.canvas.imageTools.errors.splitPlacementFailed",
+    ),
+  );
 }
 
 export function creativeImageSplitNodePosition(
@@ -91,7 +100,11 @@ export function creativeImageSplitNodePosition(
     column < 0 ||
     column >= layout.columns
   ) {
-    throw new Error("切图子节点坐标超出网格范围。");
+    throw new Error(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.splitPositionOutOfRange",
+      ),
+    );
   }
   return {
     x: layout.origin.x + column * (layout.cellSize.width + layout.gap),

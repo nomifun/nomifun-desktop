@@ -24,6 +24,7 @@ import {
 } from '@icon-park/react';
 import { Button, Tooltip } from '@arco-design/web-react';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import styles from './DirectorWorkbenchShell.module.css';
 import {
@@ -98,10 +99,26 @@ const TransformButton: React.FC<{
   disabled: boolean;
   onChange(mode: DirectorTransformMode): void;
 }> = ({ mode, currentMode, disabled, onChange }) => {
+  const { t } = useTranslation();
   const config = {
-    translate: { label: '移动', icon: <MoveOne /> },
-    rotate: { label: '旋转', icon: <Rotate /> },
-    scale: { label: '缩放', icon: <Scale /> },
+    translate: {
+      label: t('creativeStudio.director.viewport.transform.translate', {
+        defaultValue: '移动',
+      }),
+      icon: <MoveOne />,
+    },
+    rotate: {
+      label: t('creativeStudio.director.viewport.transform.rotate', {
+        defaultValue: '旋转',
+      }),
+      icon: <Rotate />,
+    },
+    scale: {
+      label: t('creativeStudio.director.viewport.transform.scale', {
+        defaultValue: '缩放',
+      }),
+      icon: <Scale />,
+    },
   }[mode];
 
   return (
@@ -143,8 +160,17 @@ const DirectorViewport: React.FC<DirectorViewportProps> = ({
   onRuleOfThirdsChange,
   onPanelsCollapsedChange,
   onTimelineOpenChange,
-}) => (
-  <main className={styles.viewport} aria-label='3D视口' data-director-viewport>
+}) => {
+  const { t } = useTranslation();
+
+  return (
+  <main
+    className={styles.viewport}
+    aria-label={t('creativeStudio.director.viewport.title', {
+      defaultValue: '3D视口',
+    })}
+    data-director-viewport
+  >
     <div className={styles.viewportContent} data-director-viewport-slot>
       {viewportSlot}
     </div>
@@ -179,7 +205,9 @@ const DirectorViewport: React.FC<DirectorViewportProps> = ({
     <div
       className={styles.viewportToolbar}
       role='toolbar'
-      aria-label='3D视口快捷工具'
+      aria-label={t('creativeStudio.director.viewport.toolbar', {
+        defaultValue: '3D视口快捷工具',
+      })}
       data-timeline-open={timeline.open}
     >
       {(['translate', 'rotate', 'scale'] as const).map((mode) => (
@@ -192,70 +220,98 @@ const DirectorViewport: React.FC<DirectorViewportProps> = ({
         />
       ))}
       <ToolbarAction
-        label='添加角色'
+        label={t('creativeStudio.director.viewport.actions.addCharacter', {
+          defaultValue: '添加角色',
+        })}
         icon={<PeoplePlus />}
         disabled={disabled}
         onClick={onAddCharacter}
       />
       <ToolbarAction
-        label='导入全景图'
+        label={t('creativeStudio.director.viewport.actions.importPanorama', {
+          defaultValue: '导入全景图',
+        })}
         icon={<Picture />}
         disabled={disabled}
         onClick={onImportPanorama}
       />
       <ToolbarAction
-        label='导入本地模型'
+        label={t('creativeStudio.director.viewport.actions.importModel', {
+          defaultValue: '导入本地模型',
+        })}
         icon={<Upload />}
         disabled={disabled}
         onClick={onImportModel}
       />
       <ToolbarAction
-        label='模型库'
+        label={t('creativeStudio.director.viewport.actions.modelLibrary', {
+          defaultValue: '模型库',
+        })}
         icon={<Cube />}
         active={modelLibraryOpen}
         disabled={disabled}
         onClick={() => onModelLibraryOpenChange(!modelLibraryOpen)}
       />
       <ToolbarAction
-        label='添加机位'
+        label={t('creativeStudio.director.viewport.actions.addCamera', {
+          defaultValue: '添加机位',
+        })}
         icon={<Camera />}
         disabled={disabled}
         onClick={onAddCamera}
       />
       <ToolbarAction
-        label='选择画幅比例'
+        label={t('creativeStudio.director.viewport.actions.aspectRatio', {
+          defaultValue: '选择画幅比例',
+        })}
         icon={<ViewGridCard />}
         active={aspectPickerOpen}
         disabled={disabled}
         onClick={() => onAspectPickerOpenChange(!aspectPickerOpen)}
       />
       <ToolbarAction
-        label='当前视角截图'
+        label={t('creativeStudio.director.viewport.actions.captureCurrent', {
+          defaultValue: '当前视角截图',
+        })}
         icon={<Screenshot />}
         disabled={disabled || captureBusy}
         onClick={onCaptureViewport ? () => onCaptureViewport('current') : undefined}
       />
       <ToolbarAction
-        label='四方位截图'
+        label={t('creativeStudio.director.viewport.actions.captureFour', {
+          defaultValue: '四方位截图',
+        })}
         icon={<ImportAndExport />}
         disabled={disabled || captureBusy}
         onClick={onCaptureViewport ? () => onCaptureViewport('four') : undefined}
       />
       <ToolbarAction
-        label='十二方位截图'
+        label={t('creativeStudio.director.viewport.actions.captureTwelve', {
+          defaultValue: '十二方位截图',
+        })}
         icon={<Add />}
         disabled={disabled || captureBusy}
         onClick={onCaptureViewport ? () => onCaptureViewport('twelve') : undefined}
       />
       <ToolbarAction
-        label={panelsCollapsed ? '显示侧边栏' : '全屏视口'}
+        label={
+          panelsCollapsed
+            ? t('creativeStudio.director.viewport.actions.showSidebars', {
+                defaultValue: '显示侧边栏',
+              })
+            : t('creativeStudio.director.viewport.actions.fullscreen', {
+                defaultValue: '全屏视口',
+              })
+        }
         icon={<FullScreen />}
         active={panelsCollapsed}
         disabled={disabled}
         onClick={() => onPanelsCollapsedChange(!panelsCollapsed)}
       />
       <ToolbarAction
-        label='时间轴'
+        label={t('creativeStudio.director.viewport.actions.timeline', {
+          defaultValue: '时间轴',
+        })}
         icon={<Time />}
         active={timeline.open}
         disabled={disabled}
@@ -264,38 +320,73 @@ const DirectorViewport: React.FC<DirectorViewportProps> = ({
     </div>
 
     {modelLibraryOpen ? (
-      <section className={styles.modelLibrary} role='dialog' aria-label='模型库'>
+      <section
+        className={styles.modelLibrary}
+        role='dialog'
+        aria-label={t('creativeStudio.director.modelLibrary.title', {
+          defaultValue: '模型库',
+        })}
+      >
         <header>
-          <h2>模型库</h2>
+          <h2>
+            {t('creativeStudio.director.modelLibrary.title', {
+              defaultValue: '模型库',
+            })}
+          </h2>
           <Button
             type='text'
             shape='circle'
             size='small'
-            aria-label='关闭模型库'
+            aria-label={t('creativeStudio.director.modelLibrary.close', {
+              defaultValue: '关闭模型库',
+            })}
             icon={<Close />}
             onClick={() => onModelLibraryOpenChange(false)}
           />
         </header>
-        <div className={styles.modelLibraryTabs} role='tablist' aria-label='模型分类'>
+        <div
+          className={styles.modelLibraryTabs}
+          role='tablist'
+          aria-label={t('creativeStudio.director.modelLibrary.categories', {
+            defaultValue: '模型分类',
+          })}
+        >
           <button type='button' role='tab' aria-selected='true'>
-            我的模型
+            {t('creativeStudio.director.modelLibrary.myModels', {
+              defaultValue: '我的模型',
+            })}
           </button>
         </div>
         {modelLibraryItems.length === 0 ? (
           <div className={styles.modelLibraryEmpty} role='status'>
             <Cube aria-hidden='true' size={24} strokeWidth={1.7} />
-            <span>暂无任何模型</span>
+            <span>
+              {t('creativeStudio.director.modelLibrary.empty', {
+                defaultValue: '暂无任何模型',
+              })}
+            </span>
             <Button disabled={disabled || !onImportModel} onClick={onImportModel}>
-              本地导入
+              {t('creativeStudio.director.modelLibrary.importLocal', {
+                defaultValue: '本地导入',
+              })}
             </Button>
           </div>
         ) : (
-          <div className={styles.modelLibraryGrid} role='list' aria-label='模型列表'>
+          <div
+            className={styles.modelLibraryGrid}
+            role='list'
+            aria-label={t('creativeStudio.director.modelLibrary.list', {
+              defaultValue: '模型列表',
+            })}
+          >
             {modelLibraryItems.map((model) => (
               <article key={model.id} className={styles.modelCard}>
                 <button
                   type='button'
-                  aria-label={`添加模型 ${model.name}`}
+                  aria-label={t('creativeStudio.director.modelLibrary.addModel', {
+                    defaultValue: '添加模型 {{name}}',
+                    name: model.name,
+                  })}
                   disabled={disabled || !onModelLibraryAdd}
                   onClick={() => onModelLibraryAdd?.(model.id)}
                 >
@@ -314,7 +405,10 @@ const DirectorViewport: React.FC<DirectorViewportProps> = ({
                     shape='circle'
                     size='mini'
                     className={styles.modelDelete}
-                    aria-label={`删除模型 ${model.name}`}
+                    aria-label={t('creativeStudio.director.modelLibrary.deleteModel', {
+                      defaultValue: '删除模型 {{name}}',
+                      name: model.name,
+                    })}
                     icon={<Delete />}
                     disabled={disabled || !onModelLibraryDelete}
                     onClick={() => onModelLibraryDelete?.(model.id)}
@@ -331,7 +425,11 @@ const DirectorViewport: React.FC<DirectorViewportProps> = ({
               <span className={styles.modelThumb} aria-hidden='true'>
                 <Upload size={24} strokeWidth={1.7} />
               </span>
-              <span>本地导入</span>
+              <span>
+                {t('creativeStudio.director.modelLibrary.importLocal', {
+                  defaultValue: '本地导入',
+                })}
+              </span>
             </button>
           </div>
         )}
@@ -339,47 +437,73 @@ const DirectorViewport: React.FC<DirectorViewportProps> = ({
     ) : null}
 
     {aspectPickerOpen ? (
-      <section className={styles.aspectPicker} role='dialog' aria-label='比例'>
+      <section
+        className={styles.aspectPicker}
+        role='dialog'
+        aria-label={t('creativeStudio.director.aspect.title', {
+          defaultValue: '比例',
+        })}
+      >
         <header>
-          <h2>比例</h2>
+          <h2>
+            {t('creativeStudio.director.aspect.title', {
+              defaultValue: '比例',
+            })}
+          </h2>
           <CheckboxProxy
             checked={showRuleOfThirds}
             disabled={disabled}
             onChange={onRuleOfThirdsChange}
           />
         </header>
-        <div className={styles.aspectOptions} role='group' aria-label='画幅比例选项'>
+        <div
+          className={styles.aspectOptions}
+          role='group'
+          aria-label={t('creativeStudio.director.aspect.options', {
+            defaultValue: '画幅比例选项',
+          })}
+        >
           {DIRECTOR_ASPECT_RATIO_OPTIONS.map((option) => (
             <Button
-              key={option.value}
-              type={aspectRatio === option.value ? 'primary' : 'secondary'}
-              aria-pressed={aspectRatio === option.value}
+              key={option}
+              type={aspectRatio === option ? 'primary' : 'secondary'}
+              aria-pressed={aspectRatio === option}
               disabled={disabled}
-              onClick={() => onAspectRatioChange(option.value)}
+              onClick={() => onAspectRatioChange(option)}
             >
-              {option.label}
+              {option === 'free'
+                ? t('creativeStudio.director.aspect.free', {
+                    defaultValue: '自由',
+                  })
+                : option}
             </Button>
           ))}
         </div>
       </section>
     ) : null}
   </main>
-);
+  );
+};
 
 const CheckboxProxy: React.FC<{
   checked: boolean;
   disabled: boolean;
   onChange(value: boolean): void;
-}> = ({ checked, disabled, onChange }) => (
-  <label className={styles.thirdsToggle}>
-    <input
-      type='checkbox'
-      checked={checked}
-      disabled={disabled}
-      onChange={(event) => onChange(event.currentTarget.checked)}
-    />
-    三分线
-  </label>
-);
+}> = ({ checked, disabled, onChange }) => {
+  const { t } = useTranslation();
+  return (
+    <label className={styles.thirdsToggle}>
+      <input
+        type='checkbox'
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.currentTarget.checked)}
+      />
+      {t('creativeStudio.director.aspect.ruleOfThirds', {
+        defaultValue: '三分线',
+      })}
+    </label>
+  );
+};
 
 export default DirectorViewport;

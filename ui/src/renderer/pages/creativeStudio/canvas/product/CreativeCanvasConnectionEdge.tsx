@@ -5,6 +5,7 @@
  */
 
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type {
   CreativeCanvasConnection,
@@ -39,8 +40,16 @@ const CreativeCanvasConnectionEdge: React.FC<CreativeCanvasConnectionEdgeProps> 
   dimmed = false,
   onActivate,
   onContextMenu,
-  ariaLabel = `连接 ${source.id} 至 ${target.id}`,
+  ariaLabel,
 }) => {
+  const { t } = useTranslation();
+  const resolvedAriaLabel =
+    ariaLabel ??
+    t('creativeStudio.canvas.connection.edgeLabel', {
+      source: source.id,
+      target: target.id,
+      defaultValue: `连接 ${source.id} 至 ${target.id}`,
+    });
   const geometry = buildCanvasConnectionBezier(connection, source, target);
 
   const activate = (
@@ -54,7 +63,7 @@ const CreativeCanvasConnectionEdge: React.FC<CreativeCanvasConnectionEdgeProps> 
     <svg
       className={styles.layer}
       role='group'
-      aria-label={ariaLabel}
+      aria-label={resolvedAriaLabel}
       data-canvas-product-edge
       data-connection-id={connection.id}
       data-edge-selected={selected || undefined}
@@ -76,7 +85,7 @@ const CreativeCanvasConnectionEdge: React.FC<CreativeCanvasConnectionEdgeProps> 
         vectorEffect='non-scaling-stroke'
         role='button'
         tabIndex={0}
-        aria-label={ariaLabel}
+        aria-label={resolvedAriaLabel}
         aria-pressed={selected}
         onPointerDown={(event) => event.stopPropagation()}
         onClick={activate}

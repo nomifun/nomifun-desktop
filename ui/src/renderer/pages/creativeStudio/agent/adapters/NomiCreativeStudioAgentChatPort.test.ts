@@ -353,7 +353,7 @@ describe('NomiCreativeStudioAgentChatPort', () => {
     );
 
     expect(events).toEqual([
-      { type: 'activity', label: '连接同步中，Agent 已开始执行' },
+      { type: 'activity', label: 'Synchronizing connection; Agent has started' },
       { type: 'history-reconciled', history: recoveredHistory },
       { type: 'completed', assistantMessageId },
     ]);

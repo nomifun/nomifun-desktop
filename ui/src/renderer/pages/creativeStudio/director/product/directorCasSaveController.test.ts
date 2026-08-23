@@ -31,7 +31,11 @@ const baseline = (): DirectorProjectBaseline => ({
   document: createEmptyCreativeProjectDocument(PROJECT_ID),
   directorNodeId: null,
   sceneAssetId: null,
-  state: createDirectorState({ projectId: PROJECT_ID, name: "导演项目" }),
+  state: createDirectorState({
+    projectId: PROJECT_ID,
+    name: "导演项目",
+    sceneName: "场景",
+  }),
 });
 
 describe("DirectorCasSaveController", () => {

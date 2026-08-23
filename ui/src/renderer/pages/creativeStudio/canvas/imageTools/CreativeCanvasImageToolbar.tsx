@@ -15,6 +15,7 @@ import {
 } from "@icon-park/react";
 import React, { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 
 import styles from "./CreativeImageTools.module.css";
 
@@ -55,6 +56,7 @@ const CreativeCanvasImageToolbar: React.FC<CreativeCanvasImageToolbarProps> = ({
   onMaskEdit,
   onSplit,
 }) => {
+  const { t } = useTranslation();
   const hostRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const [overlay, setOverlay] = useState(false);
@@ -113,7 +115,7 @@ const CreativeCanvasImageToolbar: React.FC<CreativeCanvasImageToolbarProps> = ({
       ref={toolbarRef}
       className={styles.nodeToolbar}
       role="toolbar"
-      aria-label="图片工具"
+      aria-label={t("creativeStudio.canvas.imageTools.toolbar.label")}
       data-overlay={overlay || undefined}
       style={
         {
@@ -125,7 +127,9 @@ const CreativeCanvasImageToolbar: React.FC<CreativeCanvasImageToolbarProps> = ({
     >
         <button
           type="button"
-          aria-label="查看节点信息"
+          aria-label={t(
+            "creativeStudio.canvas.imageTools.toolbar.infoLabel",
+          )}
           disabled={disabled}
           onClick={(event) => {
             event.stopPropagation();
@@ -133,11 +137,15 @@ const CreativeCanvasImageToolbar: React.FC<CreativeCanvasImageToolbarProps> = ({
           }}
         >
           <Info {...iconProps} />
-          <span className={styles.toolLabel}>信息</span>
+          <span className={styles.toolLabel}>
+            {t("creativeStudio.canvas.imageTools.toolbar.info")}
+          </span>
         </button>
         <button
           type="button"
-          aria-label="移除节点"
+          aria-label={t(
+            "creativeStudio.canvas.imageTools.toolbar.deleteLabel",
+          )}
           data-danger
           disabled={disabled}
           onClick={(event) => {
@@ -146,12 +154,16 @@ const CreativeCanvasImageToolbar: React.FC<CreativeCanvasImageToolbarProps> = ({
           }}
         >
           <Delete {...iconProps} />
-          <span className={styles.toolLabel}>删除</span>
+          <span className={styles.toolLabel}>
+            {t("creativeStudio.canvas.imageTools.toolbar.delete")}
+          </span>
         </button>
         {!hasImageContent ? (
           <button
             type="button"
-            aria-label="上传图片"
+            aria-label={t(
+              "creativeStudio.canvas.imageTools.toolbar.uploadLabel",
+            )}
             disabled={disabled}
             onClick={(event) => {
               event.stopPropagation();
@@ -159,13 +171,17 @@ const CreativeCanvasImageToolbar: React.FC<CreativeCanvasImageToolbarProps> = ({
             }}
           >
             <Upload {...iconProps} />
-            <span className={styles.toolLabel}>上传图片</span>
+            <span className={styles.toolLabel}>
+              {t("creativeStudio.canvas.imageTools.toolbar.upload")}
+            </span>
           </button>
         ) : (
           <>
             <button
               type="button"
-              aria-label="下载图片"
+              aria-label={t(
+                "creativeStudio.canvas.imageTools.toolbar.downloadLabel",
+              )}
               disabled={disabled}
               onClick={(event) => {
                 event.stopPropagation();
@@ -173,11 +189,15 @@ const CreativeCanvasImageToolbar: React.FC<CreativeCanvasImageToolbarProps> = ({
               }}
             >
               <Download {...iconProps} />
-              <span className={styles.toolLabel}>下载</span>
+              <span className={styles.toolLabel}>
+                {t("creativeStudio.canvas.imageTools.toolbar.download")}
+              </span>
             </button>
             <button
               type="button"
-              aria-label="裁剪并生成新节点"
+              aria-label={t(
+                "creativeStudio.canvas.imageTools.toolbar.cropLabel",
+              )}
               disabled={disabled}
               onClick={(event) => {
                 event.stopPropagation();
@@ -185,12 +205,16 @@ const CreativeCanvasImageToolbar: React.FC<CreativeCanvasImageToolbarProps> = ({
               }}
             >
               <CuttingOne {...iconProps} />
-              <span className={styles.toolLabel}>裁剪</span>
+              <span className={styles.toolLabel}>
+                {t("creativeStudio.canvas.imageTools.toolbar.crop")}
+              </span>
             </button>
             {onMaskEdit ? (
               <button
                 type="button"
-                aria-label="对图片进行局部修改"
+                aria-label={t(
+                  "creativeStudio.canvas.imageTools.toolbar.maskEditLabel",
+                )}
                 disabled={disabled}
                 onClick={(event) => {
                   event.stopPropagation();
@@ -198,12 +222,16 @@ const CreativeCanvasImageToolbar: React.FC<CreativeCanvasImageToolbarProps> = ({
                 }}
               >
                 <MagicWand {...iconProps} />
-                <span className={styles.toolLabel}>局部编辑</span>
+                <span className={styles.toolLabel}>
+                  {t("creativeStudio.canvas.imageTools.toolbar.maskEdit")}
+                </span>
               </button>
             ) : null}
             <button
               type="button"
-              aria-label="切分并生成图片子节点"
+              aria-label={t(
+                "creativeStudio.canvas.imageTools.toolbar.splitLabel",
+              )}
               disabled={disabled}
               onClick={(event) => {
                 event.stopPropagation();
@@ -211,7 +239,9 @@ const CreativeCanvasImageToolbar: React.FC<CreativeCanvasImageToolbarProps> = ({
               }}
             >
               <GridNine {...iconProps} />
-              <span className={styles.toolLabel}>切图</span>
+              <span className={styles.toolLabel}>
+                {t("creativeStudio.canvas.imageTools.toolbar.split")}
+              </span>
             </button>
           </>
         )}

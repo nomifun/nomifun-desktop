@@ -64,7 +64,7 @@ describe('VideoWorkbench controlled boundary', () => {
     expect(results.includes('deletionEnabled')).toBe(true);
     expect(results.includes('加载更多历史')).toBe(true);
     expect(results.includes('onCancelTask(task.id)')).toBe(true);
-    expect(results.includes("if (task.status === 'queued') return '排队中'")).toBe(true);
+    expect(results.includes("'creativeStudio.video.task.queued'")).toBe(true);
     expect(results.includes("if (task.status === 'canceled') return <CanceledVisual task={task} />")).toBe(true);
   });
 

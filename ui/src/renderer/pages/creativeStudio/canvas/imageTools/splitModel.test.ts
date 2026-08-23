@@ -17,6 +17,7 @@ import {
   resetCreativeImageSplitLines,
   setCreativeImageSplitCount,
 } from "./splitModel";
+import { translateCreativeImageTool } from "./imageToolI18n";
 
 describe("creative image split model", () => {
   test("builds and clamps evenly spaced 1-12 grids", () => {
@@ -95,6 +96,15 @@ describe("creative image split model", () => {
     } catch (error) {
       message = error instanceof Error ? error.message : String(error);
     }
-    expect(message).toBe("图片宽度不足以按当前分割线生成非空切片。");
+    expect(message).toBe(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.sliceDimensionTooSmall",
+        {
+          label: translateCreativeImageTool(
+            "creativeStudio.canvas.imageTools.dimensions.imageWidth",
+          ),
+        },
+      ),
+    );
   });
 });

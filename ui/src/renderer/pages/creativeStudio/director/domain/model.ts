@@ -326,7 +326,7 @@ export function createDirectorLight(input: CreateDirectorLightInput): DirectorLi
 export interface CreateDirectorStateInput {
   projectId: string;
   name: string;
-  sceneName?: string;
+  sceneName: string;
   durationSeconds?: number;
 }
 
@@ -337,7 +337,7 @@ export function createDirectorState(input: CreateDirectorStateInput): DirectorSt
     throw new TypeError('timeline duration is invalid');
   }
   const scene: DirectorScene = {
-    name: assertName(input.sceneName ?? 'Scene', 'scene name'),
+    name: assertName(input.sceneName, 'scene name'),
     transform: cloneDirectorTransform(DIRECTOR_DEFAULT_TRANSFORM),
     environment: {
       skyColor: '#000000',

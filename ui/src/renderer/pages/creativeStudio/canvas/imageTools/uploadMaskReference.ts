@@ -9,6 +9,7 @@ import type {
   CreativeAssetPort,
   CreativeAssetUploadProgress,
 } from "../../assets";
+import { translateCreativeImageTool } from "./imageToolI18n";
 
 export interface UploadCreativeImageMaskReferenceInput {
   port: CreativeAssetPort;
@@ -32,10 +33,18 @@ const requireHiddenReference = (
   tag: string,
 ): CreativeAsset => {
   if (asset.kind !== "image") {
-    throw new Error("局部编辑参考图上传返回了非图片素材，已停止生成。");
+    throw new Error(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.maskUploadNotImage",
+      ),
+    );
   }
   if (asset.inLibrary || !asset.tags.includes(tag)) {
-    throw new Error("局部编辑参考图未按隐藏操作标签保存，已停止生成。");
+    throw new Error(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.maskReferenceNotHidden",
+      ),
+    );
   }
   return asset;
 };
@@ -48,7 +57,11 @@ export async function uploadCreativeImageMaskReference(
   input: UploadCreativeImageMaskReferenceInput,
 ): Promise<UploadCreativeImageMaskReferenceResult> {
   if (input.source.kind !== "image") {
-    throw new Error("只有真实图片素材可以上传局部编辑参考图。");
+    throw new Error(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.imageRequiredForMaskUpload",
+      ),
+    );
   }
   const tag = operationTag(input.operationId);
   const tags = [
@@ -63,7 +76,10 @@ export async function uploadCreativeImageMaskReference(
       await input.port.upload(
         input.file,
         {
-          title: `${input.source.title} · 局部编辑标记`,
+          title: translateCreativeImageTool(
+            "creativeStudio.canvas.imageTools.assetTitles.maskMarker",
+            { title: input.source.title },
+          ),
           ...(input.source.collection
             ? { collection: input.source.collection }
             : {}),
@@ -114,7 +130,11 @@ export async function removeCreativeImageMaskReference(
     tag.startsWith("canvas-mask-edit-operation:"),
   );
   if (asset.kind !== "image" || asset.inLibrary || !tagged) {
-    throw new Error("拒绝清理未验证的局部编辑参考素材。");
+    throw new Error(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.unverifiedMaskCleanup",
+      ),
+    );
   }
   await port.remove(asset.id);
 }

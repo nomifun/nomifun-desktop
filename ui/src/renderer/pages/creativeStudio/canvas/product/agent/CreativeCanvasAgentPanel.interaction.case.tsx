@@ -5,7 +5,9 @@
  */
 
 import assert from 'node:assert/strict';
+import i18next from 'i18next';
 import React, { useCallback, useState } from 'react';
+import { initReactI18next } from 'react-i18next';
 import {
   act,
   cleanup,
@@ -28,6 +30,17 @@ import type {
 import type { CreativeChatSessionReference } from '../../../domain';
 import type { CreativeCanvasAgentContextSnapshot } from './context';
 import CreativeCanvasAgentPanel from './CreativeCanvasAgentPanel';
+
+await i18next.use(initReactI18next).init({
+  lng: 'en-US',
+  fallbackLng: 'en-US',
+  resources: {
+    'en-US': {
+      translation: {},
+    },
+  },
+  interpolation: { escapeValue: false },
+});
 
 const SUCCESS_MARKER = 'creative-canvas-agent-panel-interaction:ok';
 const CANVAS_ID = '0190f5fe-7c00-7a00-8000-000000000901';
@@ -125,7 +138,7 @@ const verifyHydrationTransition = async (): Promise<void> => {
     />
   );
 
-  assert.ok(screen.getByText('正在加载会话'));
+  assert.ok(screen.getByText('Loading conversation'));
   view.rerender(
     <CreativeCanvasAgentPanel
       {...baseProps}
@@ -137,9 +150,9 @@ const verifyHydrationTransition = async (): Promise<void> => {
   );
 
   await waitFor(() => {
-    assert.equal(screen.queryByText('正在加载会话'), null);
+    assert.equal(screen.queryByText('Loading conversation'), null);
     const input = screen.getByPlaceholderText(
-      '描述创作目标，或继续讨论当前方案'
+      'Describe a creative goal or continue the current discussion'
     ) as HTMLTextAreaElement;
     assert.equal(input.disabled, false);
   });
@@ -258,14 +271,16 @@ const verifyLocalPendingTurnKeepsTranscript = async (): Promise<void> => {
 
   render(<ControlledPanel />);
   await act(flushReact);
-  assert.equal(screen.queryByText('正在加载会话'), null);
+  assert.equal(screen.queryByText('Loading conversation'), null);
   assert.equal(resolverCalls, 1);
 
   fireEvent.change(
-    screen.getByPlaceholderText('描述创作目标，或继续讨论当前方案'),
+    screen.getByPlaceholderText(
+      'Describe a creative goal or continue the current discussion'
+    ),
     { target: { value: PROMPT } }
   );
-  fireEvent.click(screen.getByRole('button', { name: '发送给 Agent' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Send to Agent' }));
   await act(async () => {
     await within(turnStarted, 'Creative Canvas Agent turn start');
   });
@@ -275,7 +290,7 @@ const verifyLocalPendingTurnKeepsTranscript = async (): Promise<void> => {
   await act(flushReact);
   await waitFor(() => {
     assert.ok(screen.getByText(PROMPT));
-    assert.equal(screen.queryByText('正在加载会话'), null);
+    assert.equal(screen.queryByText('Loading conversation'), null);
   });
   assert.equal(
     resolverCalls,

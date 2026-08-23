@@ -5,6 +5,7 @@
  */
 
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type {
   CreativeCanvasNode,
@@ -73,9 +74,10 @@ const CanvasMiniMap: React.FC<CanvasMiniMapProps> = ({
   worldPadding = 120,
   dragging = false,
   selectedNodeIds,
-  ariaLabel = '画布小地图',
+  ariaLabel,
   onNavigate,
 }) => {
+  const { t } = useTranslation();
   const projection = createCanvasMiniMapProjection(nodes, viewport, viewportSize, {
     width,
     height,
@@ -109,7 +111,7 @@ const CanvasMiniMap: React.FC<CanvasMiniMapProps> = ({
       viewBox={`0 0 ${projection.width} ${projection.height}`}
       preserveAspectRatio='none'
       role={onNavigate ? 'application' : 'img'}
-      aria-label={ariaLabel}
+      aria-label={ariaLabel ?? t('creativeStudio.canvas.minimap.label')}
       data-canvas-minimap-renderer
       data-minimap-dragging={dragging || undefined}
       onPointerDown={(event) => {

@@ -17,6 +17,7 @@ import {
 } from '@icon-park/react';
 import { Button, Input, Tooltip } from '@arco-design/web-react';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import styles from './DirectorWorkbenchShell.module.css';
 import type { DirectorSceneObject, DirectorWorkbenchShellProps } from './types';
@@ -49,6 +50,7 @@ const DirectorSceneSidebar: React.FC<DirectorSceneSidebarProps> = ({
   onSceneObjectVisibilityChange,
   onSceneObjectLockChange,
 }) => {
+  const { t } = useTranslation();
   const visibleGroups = sceneGroups
     .map((group) => ({
       ...group,
@@ -59,13 +61,23 @@ const DirectorSceneSidebar: React.FC<DirectorSceneSidebarProps> = ({
     .filter((group) => group.objects.length > 0);
 
   return (
-    <aside className={styles.sceneSidebar} aria-label='场景对象' data-director-scene-sidebar>
+    <aside
+      className={styles.sceneSidebar}
+      aria-label={t('creativeStudio.director.scene.title', {
+        defaultValue: '场景对象',
+      })}
+      data-director-scene-sidebar
+    >
       <label className={styles.searchField}>
         <Search aria-hidden='true' size={15} strokeWidth={1.8} />
         <Input
-          aria-label='搜索场景内容'
+          aria-label={t('creativeStudio.director.scene.search.label', {
+            defaultValue: '搜索场景内容',
+          })}
           value={sceneQuery}
-          placeholder='请输入搜索内容'
+          placeholder={t('creativeStudio.director.scene.search.placeholder', {
+            defaultValue: '请输入搜索内容',
+          })}
           disabled={disabled}
           onChange={onSceneQueryChange}
         />
@@ -74,10 +86,24 @@ const DirectorSceneSidebar: React.FC<DirectorSceneSidebarProps> = ({
       {visibleGroups.length === 0 ? (
         <div className={styles.sceneEmpty} role='status'>
           <Search aria-hidden='true' size={22} strokeWidth={1.7} />
-          <span>{sceneQuery.trim() ? '未搜索到内容' : '场景中还没有对象'}</span>
+          <span>
+            {sceneQuery.trim()
+              ? t('creativeStudio.director.scene.search.empty', {
+                  defaultValue: '未搜索到内容',
+                })
+              : t('creativeStudio.director.scene.empty', {
+                  defaultValue: '场景中还没有对象',
+                })}
+          </span>
         </div>
       ) : (
-        <div className={styles.sceneGroups} role='tree' aria-label='场景对象列表'>
+        <div
+          className={styles.sceneGroups}
+          role='tree'
+          aria-label={t('creativeStudio.director.scene.list.label', {
+            defaultValue: '场景对象列表',
+          })}
+        >
           {visibleGroups.map((group) => (
             <section key={group.id} className={styles.sceneGroup} role='group' aria-label={group.label}>
               <h2>{group.label}</h2>
@@ -111,13 +137,29 @@ const DirectorSceneSidebar: React.FC<DirectorSceneSidebarProps> = ({
                           <span title={object.name}>{object.name}</span>
                         </button>
 
-                        <Tooltip content={object.visible ? '在视口中隐藏' : '在视口中显示'}>
+                        <Tooltip
+                          content={
+                            object.visible
+                              ? t('creativeStudio.director.scene.object.hide', {
+                                  defaultValue: '在视口中隐藏',
+                                })
+                              : t('creativeStudio.director.scene.object.show', {
+                                  defaultValue: '在视口中显示',
+                                })
+                          }
+                        >
                           <Button
                             type='text'
                             size='mini'
                             shape='circle'
                             className={styles.objectFlag}
-                            aria-label={`${object.name} 可见性`}
+                            aria-label={t(
+                              'creativeStudio.director.scene.object.visibility',
+                              {
+                                defaultValue: '{{name}} 可见性',
+                                name: object.name,
+                              }
+                            )}
                             aria-pressed={object.visible}
                             disabled={disabled}
                             icon={object.visible ? <PreviewOpen /> : <PreviewClose />}
@@ -127,13 +169,29 @@ const DirectorSceneSidebar: React.FC<DirectorSceneSidebarProps> = ({
                           />
                         </Tooltip>
 
-                        <Tooltip content={object.locked ? '解锁对象' : '锁定对象'}>
+                        <Tooltip
+                          content={
+                            object.locked
+                              ? t('creativeStudio.director.scene.object.unlock', {
+                                  defaultValue: '解锁对象',
+                                })
+                              : t('creativeStudio.director.scene.object.lock', {
+                                  defaultValue: '锁定对象',
+                                })
+                          }
+                        >
                           <Button
                             type='text'
                             size='mini'
                             shape='circle'
                             className={styles.objectFlag}
-                            aria-label={`${object.name} 锁定`}
+                            aria-label={t(
+                              'creativeStudio.director.scene.object.lockState',
+                              {
+                                defaultValue: '{{name}} 锁定',
+                                name: object.name,
+                              }
+                            )}
                             aria-pressed={object.locked}
                             disabled={disabled}
                             icon={object.locked ? <Lock /> : <Unlock />}

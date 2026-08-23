@@ -15,6 +15,10 @@ import {
   type WorkflowTemplateSegment,
   type WorkflowVariable,
 } from '../domain';
+import {
+  createWorkflowTranslationCopy,
+  type WorkflowTranslationCopy,
+} from '../workflowI18n';
 
 export type WorkflowEditorMode = 'single-image' | 'multi-image-series';
 export type WorkflowVariableType = WorkflowVariable['type'];
@@ -27,11 +31,11 @@ const DEFAULT_GENERATION: WorkflowImageGenerationSettings = {
   imagesPerPrompt: 1,
 };
 
-const DEFAULT_PROMPT_PLANNING = {
+const defaultPromptPlanning = (copy: WorkflowTranslationCopy) => ({
   model: null,
-  instruction: '让每张图片承担不同的叙事作用，同时保持统一的主体、视觉风格与发布语境。',
+  instruction: copy.planningInstruction,
   maxTokens: 4096,
-} as const;
+});
 
 const textVariable = (
   key: string,
@@ -52,12 +56,13 @@ const textVariable = (
 
 export function createWorkflowVariable(
   type: WorkflowVariableType = 'text',
-  ordinal = 1
+  ordinal = 1,
+  copy: WorkflowTranslationCopy = createWorkflowTranslationCopy()
 ): WorkflowVariable {
   const common = {
     id: uuidv7(),
     key: `input_${ordinal}`,
-    label: `输入 ${ordinal}`,
+    label: copy.variableLabel(ordinal),
     description: '',
     required: false,
   };
@@ -84,7 +89,12 @@ export function createWorkflowVariable(
     case 'boolean':
       return { ...common, type, defaultValue: false };
     case 'choice':
-      return { ...common, type, defaultValue: null, options: ['选项一', '选项二'] };
+      return {
+        ...common,
+        type,
+        defaultValue: null,
+        options: [copy.choiceOptionOne, copy.choiceOptionTwo],
+      };
     case 'image':
       return { ...common, type, defaultAssetId: null };
     case 'image-series':
@@ -96,7 +106,8 @@ function buildSteps(
   mode: WorkflowEditorMode,
   templateId: string,
   generation: WorkflowImageGenerationSettings,
-  referenceVariableIds: string[] = []
+  referenceVariableIds: string[] = [],
+  copy: WorkflowTranslationCopy = createWorkflowTranslationCopy()
 ): WorkflowDefinitionV1['steps'] {
   const expectedTask = referenceVariableIds.length > 0 ? 'image_edit' : 'image_generation';
   const normalizedGeneration = {
@@ -113,7 +124,7 @@ function buildSteps(
       {
         id: generateId,
         kind: 'generate-images',
-        name: '生成图片',
+        name: copy.stepGenerate,
         dependsOn: [],
         enabled: true,
         promptSource: { kind: 'template', templateId },
@@ -123,7 +134,7 @@ function buildSteps(
       {
         id: historyId,
         kind: 'record-history',
-        name: '记录结果',
+        name: copy.stepRecord,
         dependsOn: [generateId],
         enabled: true,
         sourceStepIds: [generateId],
@@ -135,16 +146,16 @@ function buildSteps(
     {
       id: draftId,
       kind: 'draft-prompts',
-      name: '规划多图提示词',
+      name: copy.stepPlan,
       dependsOn: [],
       enabled: true,
       templateId,
-      planning: { ...DEFAULT_PROMPT_PLANNING },
+      planning: { ...defaultPromptPlanning(copy) },
     },
     {
       id: generateId,
       kind: 'generate-images',
-      name: '批量生成图片',
+      name: copy.stepBatchGenerate,
       dependsOn: [draftId],
       enabled: true,
       promptSource: { kind: 'prompt-drafts', stepId: draftId },
@@ -154,7 +165,7 @@ function buildSteps(
     {
       id: historyId,
       kind: 'record-history',
-      name: '记录结果',
+      name: copy.stepRecord,
       dependsOn: [generateId],
       enabled: true,
       sourceStepIds: [generateId],
@@ -162,48 +173,32 @@ function buildSteps(
   ];
 }
 
-const starterPrompt = (mode: WorkflowEditorMode, variables: WorkflowVariable[]) => {
-  if (mode === 'multi-image-series') {
-    return [
-      { kind: 'text' as const, text: '围绕 ' },
-      { kind: 'variable' as const, variableId: variables[0].id },
-      { kind: 'text' as const, text: ' 生成一组连贯配图。\n统一风格：' },
-      { kind: 'variable' as const, variableId: variables[1].id },
-      { kind: 'text' as const, text: '\n发布平台：' },
-      { kind: 'variable' as const, variableId: variables[2].id },
-    ];
-  }
-  return [
-    { kind: 'text' as const, text: '为 ' },
-    { kind: 'variable' as const, variableId: variables[0].id },
-    { kind: 'text' as const, text: ' 生成一张高端电商海报。\n核心卖点：' },
-    { kind: 'variable' as const, variableId: variables[1].id },
-  ];
-};
-
-export function createBlankWorkflow(mode: WorkflowEditorMode): WorkflowDefinitionV1 {
+export function createBlankWorkflow(
+  mode: WorkflowEditorMode,
+  copy: WorkflowTranslationCopy = createWorkflowTranslationCopy()
+): WorkflowDefinitionV1 {
   const variables =
     mode === 'multi-image-series'
       ? [
-          textVariable('topic', '主题', 'multiline-text'),
-          textVariable('style', '统一风格'),
-          textVariable('platform', '发布平台'),
+          textVariable('topic', copy.topicLabel, 'multiline-text'),
+          textVariable('style', copy.styleLabel),
+          textVariable('platform', copy.platformLabel),
         ]
       : [
-          textVariable('product_name', '产品名称'),
-          textVariable('selling_points', '产品卖点', 'multiline-text'),
+          textVariable('product_name', copy.productNameLabel),
+          textVariable('selling_points', copy.sellingPointsLabel, 'multiline-text'),
         ];
   const templateId = uuidv7();
   return {
     id: uuidv7(),
     revision: 1,
     metadata: {
-      name: mode === 'multi-image-series' ? '多图系列生成' : '未命名模板',
+      name: mode === 'multi-image-series' ? copy.multiName : copy.singleName,
       description:
         mode === 'multi-image-series'
-          ? '根据主题生成一组连贯图片提示词，审核后批量生成图片。'
+          ? copy.multiDescription
           : '',
-      category: mode === 'multi-image-series' ? '多图创作' : '',
+      category: mode === 'multi-image-series' ? copy.multiCategory : '',
       visibility: 'private',
       tags: [],
       createdAt: 0,
@@ -222,11 +217,16 @@ export function createBlankWorkflow(mode: WorkflowEditorMode): WorkflowDefinitio
     templates: [
       {
         id: templateId,
-        name: '主提示词',
-        segments: starterPrompt(mode, variables),
+        name: copy.templateName,
+        segments: parseWorkflowTemplateText(
+          mode === 'multi-image-series'
+            ? copy.multiPromptTemplate
+            : copy.singlePromptTemplate,
+          variables
+        ),
       },
     ],
-    steps: buildSteps(mode, templateId, DEFAULT_GENERATION),
+    steps: buildSteps(mode, templateId, DEFAULT_GENERATION, [], copy),
   };
 }
 
@@ -316,7 +316,8 @@ export function replaceWorkflowTemplateText(
 
 export function switchWorkflowMode(
   workflow: WorkflowDefinitionV1,
-  mode: WorkflowEditorMode
+  mode: WorkflowEditorMode,
+  copy: WorkflowTranslationCopy = createWorkflowTranslationCopy()
 ): WorkflowDefinitionV1 {
   const next = cloneWorkflowDefinition(workflow);
   const currentGeneration = generationStep(next);
@@ -333,16 +334,18 @@ export function switchWorkflowMode(
     mode,
     next.templates[0].id,
     currentGeneration.generation,
-    currentGeneration.referenceVariableIds
+    currentGeneration.referenceVariableIds,
+    copy
   );
   return next;
 }
 
 export function convertWorkflowVariable(
   variable: WorkflowVariable,
-  type: WorkflowVariableType
+  type: WorkflowVariableType,
+  copy: WorkflowTranslationCopy = createWorkflowTranslationCopy()
 ): WorkflowVariable {
-  const converted = createWorkflowVariable(type);
+  const converted = createWorkflowVariable(type, 1, copy);
   return {
     ...converted,
     id: variable.id,
@@ -419,7 +422,10 @@ export function setWorkflowReferenceVariable(
   return next;
 }
 
-export function duplicateWorkflow(workflow: WorkflowDefinitionV1): WorkflowDefinitionV1 {
+export function duplicateWorkflow(
+  workflow: WorkflowDefinitionV1,
+  copy: WorkflowTranslationCopy = createWorkflowTranslationCopy()
+): WorkflowDefinitionV1 {
   const next = cloneWorkflowDefinition(workflow);
   const variableIds = new Map(next.variables.map((variable) => [variable.id, uuidv7()]));
   const templateIds = new Map(next.templates.map((template) => [template.id, uuidv7()]));
@@ -428,7 +434,7 @@ export function duplicateWorkflow(workflow: WorkflowDefinitionV1): WorkflowDefin
   next.revision = 1;
   next.metadata = {
     ...next.metadata,
-    name: `${next.metadata.name} 副本`,
+    name: `${next.metadata.name} (${copy.duplicateSuffix})`,
     visibility: 'private',
     createdAt: 0,
     updatedAt: 0,
@@ -492,10 +498,16 @@ export function duplicateWorkflow(workflow: WorkflowDefinitionV1): WorkflowDefin
   return next;
 }
 
-export function workflowPromptPreview(workflow: WorkflowDefinitionV1): string {
-  return workflowTemplateText(workflow).trim() || '尚未填写提示词模板';
+export function workflowPromptPreview(
+  workflow: WorkflowDefinitionV1,
+  copy: WorkflowTranslationCopy = createWorkflowTranslationCopy()
+): string {
+  return workflowTemplateText(workflow).trim() || copy.emptyPrompt;
 }
 
-export function workflowOutputLabel(output: WorkflowOutputPlan): string {
-  return output.kind === 'single-image' ? '单图' : '多图';
+export function workflowOutputLabel(
+  output: WorkflowOutputPlan,
+  copy: WorkflowTranslationCopy = createWorkflowTranslationCopy()
+): string {
+  return output.kind === 'single-image' ? copy.outputSingle : copy.outputMulti;
 }

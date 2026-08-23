@@ -6,6 +6,7 @@
 
 import classNames from 'classnames';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import styles from './CanvasMiniMapFrame.module.css';
 
@@ -22,19 +23,23 @@ export interface CanvasMiniMapFrameProps extends React.HTMLAttributes<HTMLDivEle
 const CanvasMiniMapFrame: React.FC<CanvasMiniMapFrameProps> = ({
   children,
   className,
-  label = '画布小地图',
+  label,
   ...rest
-}) => (
-  <div
-    {...rest}
-    className={classNames(styles.frame, className)}
-    role='group'
-    aria-label={label}
-    data-canvas-no-zoom
-    data-canvas-minimap
-  >
-    {children}
-  </div>
-);
+}) => {
+  const { t } = useTranslation();
+
+  return (
+    <div
+      {...rest}
+      className={classNames(styles.frame, className)}
+      role='group'
+      aria-label={label ?? t('creativeStudio.canvas.minimap.label')}
+      data-canvas-no-zoom
+      data-canvas-minimap
+    >
+      {children}
+    </div>
+  );
+};
 
 export default CanvasMiniMapFrame;

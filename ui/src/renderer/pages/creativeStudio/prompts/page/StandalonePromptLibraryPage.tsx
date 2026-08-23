@@ -7,6 +7,7 @@
 import { FileText, Inbox, LoadingTwo, Refresh, Search } from '@icon-park/react';
 import classNames from 'classnames';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import {
   filterPromptLibraryItems,
@@ -24,6 +25,7 @@ const FacetChips: React.FC<{
   children: React.ReactNode;
   contentKey: string;
 }> = ({ children, contentKey }) => {
+  const { t } = useTranslation();
   const chipsRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [hasOverflow, setHasOverflow] = useState(false);
@@ -70,7 +72,9 @@ const FacetChips: React.FC<{
           aria-expanded={expanded}
           onClick={() => setExpanded((current) => !current)}
         >
-          {expanded ? '收起' : '查看更多'}
+          {expanded
+            ? t('creativeStudio.prompts.collapse', { defaultValue: 'Collapse' })
+            : t('creativeStudio.prompts.showMore', { defaultValue: 'Show more' })}
         </button>
       ) : null}
     </div>
@@ -102,59 +106,72 @@ const PromptCard: React.FC<{
   item: PromptLibraryItem;
   selected: boolean;
   onSelect?: (item: PromptLibraryItem) => void;
-}> = ({ item, selected, onSelect }) => (
-  <article
-    className={classNames(styles.card, selected && styles.cardSelected)}
-    data-prompt-library-item={item.id}
-  >
-    <button
-      type='button'
-      className={styles.cardButton}
-      aria-pressed={selected}
-      aria-label={`查看提示词：${item.title}`}
-      onClick={() => onSelect?.(item)}
+}> = ({ item, selected, onSelect }) => {
+  const { i18n, t } = useTranslation();
+  const locale = i18n.resolvedLanguage ?? i18n.language ?? 'en-US';
+
+  return (
+    <article
+      className={classNames(styles.card, selected && styles.cardSelected)}
+      data-prompt-library-item={item.id}
     >
-      {item.coverUrl ? (
-        <div className={styles.cardMedia}>
-          <img
-            src={item.coverUrl}
-            alt={item.title}
-            loading='lazy'
-            decoding='async'
-            referrerPolicy='no-referrer'
-          />
-        </div>
-      ) : (
-        <div className={styles.cardMediaFallback} aria-hidden='true'>
-          <FileText theme='outline' size={30} fill='currentColor' />
-        </div>
-      )}
-      <div className={styles.cardBody}>
-        <div className={styles.cardHeader}>
-          <h2 className={styles.cardTitle}>{item.title}</h2>
-          {item.updatedAt ? (
-            <time className={styles.cardDate} dateTime={new Date(item.updatedAt).toISOString()}>
-              {new Intl.DateTimeFormat('zh-CN', {
-                year: 'numeric',
-                month: '2-digit',
-                day: '2-digit',
-              }).format(item.updatedAt)}
-            </time>
+      <button
+        type='button'
+        className={styles.cardButton}
+        aria-pressed={selected}
+        aria-label={t('creativeStudio.prompts.viewPrompt', {
+          defaultValue: 'View prompt: {{title}}',
+          title: item.title,
+        })}
+        onClick={() => onSelect?.(item)}
+      >
+        {item.coverUrl ? (
+          <div className={styles.cardMedia}>
+            <img
+              src={item.coverUrl}
+              alt={item.title}
+              loading='lazy'
+              decoding='async'
+              referrerPolicy='no-referrer'
+            />
+          </div>
+        ) : (
+          <div className={styles.cardMediaFallback} aria-hidden='true'>
+            <FileText theme='outline' size={30} fill='currentColor' />
+          </div>
+        )}
+        <div className={styles.cardBody}>
+          <div className={styles.cardHeader}>
+            <h2 className={styles.cardTitle}>{item.title}</h2>
+            {item.updatedAt ? (
+              <time className={styles.cardDate} dateTime={new Date(item.updatedAt).toISOString()}>
+                {new Intl.DateTimeFormat(locale, {
+                  year: 'numeric',
+                  month: '2-digit',
+                  day: '2-digit',
+                }).format(item.updatedAt)}
+              </time>
+            ) : null}
+          </div>
+          {item.description ? <p className={styles.cardDescription}>{item.description}</p> : null}
+          <p className={styles.promptPreview}>{item.prompt}</p>
+          {item.tags.length > 0 ? (
+            <div
+              className={styles.cardTags}
+              aria-label={t('creativeStudio.prompts.tagsLabel', {
+                defaultValue: 'Tags',
+              })}
+            >
+              {item.tags.slice(0, 5).map((tag) => (
+                <span key={tag}>{tag}</span>
+              ))}
+            </div>
           ) : null}
         </div>
-        {item.description ? <p className={styles.cardDescription}>{item.description}</p> : null}
-        <p className={styles.promptPreview}>{item.prompt}</p>
-        {item.tags.length > 0 ? (
-          <div className={styles.cardTags} aria-label='标签'>
-            {item.tags.slice(0, 5).map((tag) => (
-              <span key={tag}>{tag}</span>
-            ))}
-          </div>
-        ) : null}
-      </div>
-    </button>
-  </article>
-);
+      </button>
+    </article>
+  );
+};
 
 export const StandalonePromptLibraryAppearance: React.FC<
   StandalonePromptLibraryAppearanceProps
@@ -165,10 +182,11 @@ export const StandalonePromptLibraryAppearance: React.FC<
   error = null,
   invalidCount = 0,
   selectedId = null,
-  title = '提示词中心',
+  title,
   onRetry,
   onSelect,
 }) => {
+  const { t } = useTranslation();
   const [queryInput, setQueryInput] = useState('');
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<string | null | undefined>(undefined);
@@ -184,6 +202,11 @@ export const StandalonePromptLibraryAppearance: React.FC<
   );
   const hasFilters = Boolean(query.trim() || category !== undefined || selectedTags.length > 0);
   const visibleItems = filteredItems.slice(0, visibleCount);
+  const resolvedTitle =
+    title ??
+    t('creativeStudio.prompts.standaloneTitle', {
+      defaultValue: 'Prompt center',
+    });
 
   useEffect(() => {
     setCategory((current) => {
@@ -231,16 +254,21 @@ export const StandalonePromptLibraryAppearance: React.FC<
     >
       <div className={styles.content}>
         <header className={styles.hero}>
-          <h1 className={styles.heroTitle}>{title}</h1>
+          <h1 className={styles.heroTitle}>{resolvedTitle}</h1>
           <p className={styles.heroSubtitle}>
-            共 {hasFilters ? filteredItems.length : items.length}{' '}
-            条提示词，按标题、标签与分类快速查找灵感。
+            {t('creativeStudio.prompts.countDescription', {
+              defaultValue:
+                '{{count}} prompts. Search by title, tags, and category for inspiration.',
+              count: hasFilters ? filteredItems.length : items.length,
+            })}
           </p>
           {onRetry ? (
             <button
               type='button'
               className={styles.refreshButton}
-              aria-label='刷新提示词'
+              aria-label={t('creativeStudio.prompts.refresh', {
+                defaultValue: 'Refresh prompts',
+              })}
               disabled={refreshing}
               onClick={onRetry}
             >
@@ -259,7 +287,9 @@ export const StandalonePromptLibraryAppearance: React.FC<
             className={styles.centerState}
             data-prompt-page-state='loading'
             role='status'
-            aria-label='正在加载提示词'
+            aria-label={t('creativeStudio.prompts.loading', {
+              defaultValue: 'Loading prompts',
+            })}
           >
             <LoadingTwo
               className={styles.spinning}
@@ -271,10 +301,14 @@ export const StandalonePromptLibraryAppearance: React.FC<
           </div>
         ) : error && items.length === 0 ? (
           <div className={styles.centerState} data-prompt-page-state='error' role='alert'>
-            <p>提示词加载失败</p>
+            <p>
+              {t('creativeStudio.prompts.errorTitle', {
+                defaultValue: 'Prompt loading failed',
+              })}
+            </p>
             {onRetry ? (
               <button type='button' className={styles.stateAction} onClick={onRetry}>
-                重新加载
+                {t('creativeStudio.prompts.reload', { defaultValue: 'Reload' })}
               </button>
             ) : null}
           </div>
@@ -286,8 +320,12 @@ export const StandalonePromptLibraryAppearance: React.FC<
                 <input
                   type='search'
                   value={queryInput}
-                  aria-label='搜索提示词'
-                  placeholder='按标题查询，按 Enter 搜索'
+                  aria-label={t('creativeStudio.prompts.search', {
+                    defaultValue: 'Search prompts',
+                  })}
+                  placeholder={t('creativeStudio.prompts.standaloneSearchPlaceholder', {
+                    defaultValue: 'Search by title, then press Enter',
+                  })}
                   onChange={(event) => setQueryInput(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter') setQuery(queryInput);
@@ -296,7 +334,9 @@ export const StandalonePromptLibraryAppearance: React.FC<
               </label>
 
               <div className={styles.facetRow}>
-                <span className={styles.facetLabel}>分类</span>
+                <span className={styles.facetLabel}>
+                  {t('creativeStudio.prompts.category', { defaultValue: 'Category' })}
+                </span>
                 <FacetChips
                   contentKey={`${facets.categories.join('\u0000')}:${facets.hasUncategorized}`}
                 >
@@ -306,7 +346,7 @@ export const StandalonePromptLibraryAppearance: React.FC<
                     aria-pressed={category === undefined}
                     onClick={() => setCategory(undefined)}
                   >
-                    全部
+                    {t('creativeStudio.prompts.all', { defaultValue: 'All' })}
                   </button>
                   {facets.categories.map((item) => (
                     <button
@@ -326,14 +366,18 @@ export const StandalonePromptLibraryAppearance: React.FC<
                       aria-pressed={category === null}
                       onClick={() => setCategory(null)}
                     >
-                      未分类
+                      {t('creativeStudio.prompts.uncategorized', {
+                        defaultValue: 'Uncategorized',
+                      })}
                     </button>
                   ) : null}
                 </FacetChips>
               </div>
 
               <div className={styles.facetRow}>
-                <span className={styles.facetLabel}>标签</span>
+                <span className={styles.facetLabel}>
+                  {t('creativeStudio.prompts.tags', { defaultValue: 'Tags' })}
+                </span>
                 <FacetChips contentKey={facets.tags.join('\u0000')}>
                   <button
                     type='button'
@@ -341,7 +385,7 @@ export const StandalonePromptLibraryAppearance: React.FC<
                     aria-pressed={selectedTags.length === 0}
                     onClick={() => setSelectedTags([])}
                   >
-                    全部
+                    {t('creativeStudio.prompts.all', { defaultValue: 'All' })}
                   </button>
                   {facets.tags.map((tag) => {
                     const active = selectedTags.includes(tag);
@@ -369,12 +413,18 @@ export const StandalonePromptLibraryAppearance: React.FC<
 
             {invalidCount > 0 ? (
               <p className={styles.notice} role='status'>
-                已忽略 {invalidCount} 条不符合数据契约的记录。
+                {t('creativeStudio.prompts.ignoredRecords', {
+                  defaultValue:
+                    '{{count}} records were ignored because they did not match the data contract.',
+                  count: invalidCount,
+                })}
               </p>
             ) : null}
             {error ? (
               <p className={styles.notice} role='alert'>
-                刷新失败，继续显示上一次加载的内容。
+                {t('creativeStudio.prompts.refreshFailedStale', {
+                  defaultValue: 'Refresh failed; showing the last loaded content.',
+                })}
               </p>
             ) : null}
 
@@ -387,7 +437,11 @@ export const StandalonePromptLibraryAppearance: React.FC<
                   strokeWidth={2}
                   aria-hidden='true'
                 />
-                <p>没有找到匹配的提示词</p>
+                <p>
+                  {t('creativeStudio.prompts.noItems', {
+                    defaultValue: 'No matching prompts found',
+                  })}
+                </p>
               </div>
             ) : (
               <>
@@ -397,9 +451,15 @@ export const StandalonePromptLibraryAppearance: React.FC<
                     data-prompt-page-state='filtered'
                     role='status'
                   >
-                    <p>没有匹配的提示词</p>
+                    <p>
+                      {t('creativeStudio.prompts.filteredTitle', {
+                        defaultValue: 'No matching prompts',
+                      })}
+                    </p>
                     <button type='button' className={styles.stateAction} onClick={clearFilters}>
-                      清除筛选
+                      {t('creativeStudio.prompts.clearFilters', {
+                        defaultValue: 'Clear filters',
+                      })}
                     </button>
                   </div>
                 ) : (
@@ -418,10 +478,16 @@ export const StandalonePromptLibraryAppearance: React.FC<
                 {filteredItems.length > 0 ? (
                   <p className={styles.loadStatus} aria-live='polite'>
                     {refreshing
-                      ? '正在刷新…'
+                      ? t('creativeStudio.prompts.refreshing', {
+                          defaultValue: 'Refreshing…',
+                        })
                       : visibleItems.length < filteredItems.length
-                        ? '继续向下滚动加载更多'
-                        : '已经到底了'}
+                        ? t('creativeStudio.prompts.loadMore', {
+                            defaultValue: 'Continue scrolling to load more',
+                          })
+                        : t('creativeStudio.prompts.endOfList', {
+                            defaultValue: 'You have reached the end',
+                          })}
                   </p>
                 ) : null}
               </>

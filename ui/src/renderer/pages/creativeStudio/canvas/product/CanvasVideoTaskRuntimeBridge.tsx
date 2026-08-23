@@ -11,6 +11,8 @@ import React, {
   useImperativeHandle,
   useRef,
 } from 'react';
+import type { TFunction } from 'i18next';
+import { useTranslation } from 'react-i18next';
 
 import { creativeAssetClient, type CreativeAsset } from '../../assets';
 import type { CreativeProjectDocument, CreativeSize } from '../../domain';
@@ -71,10 +73,17 @@ export interface CanvasVideoTaskRuntimeBridgeProps {
 }
 
 const requiredEditor = (
-  ref: React.RefObject<CreativeCanvasEditorHandle | null>
+  ref: React.RefObject<CreativeCanvasEditorHandle | null>,
+  t: TFunction
 ): CreativeCanvasEditorHandle => {
   const editor = ref.current;
-  if (!editor) throw new Error('画布尚未载入，无法同步视频任务。');
+  if (!editor) {
+    throw new Error(
+      t('creativeStudio.canvas.runtime.video.editorUnavailable', {
+        defaultValue: '画布尚未载入，无法同步视频任务。',
+      })
+    );
+  }
   return editor;
 };
 
@@ -88,6 +97,7 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
   CanvasVideoTaskRuntimeBridgeHandle,
   CanvasVideoTaskRuntimeBridgeProps
 >((props, ref) => {
+  const { t } = useTranslation();
   const latest = useRef(props);
   latest.current = props;
   const initialResumeRequestsRef = useRef(
@@ -100,13 +110,13 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
       signal.throwIfAborted();
       const current = latest.current;
       await persistCanvasVideoComposePendingTask({
-        editor: requiredEditor(current.editorRef),
+        editor: requiredEditor(current.editorRef, t),
         projectId: current.projectId,
         reference,
       });
       signal.throwIfAborted();
     },
-    []
+    [t]
   );
 
   const onSettledTask = useCallback(
@@ -114,7 +124,7 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
       signal.throwIfAborted();
       const current = latest.current;
       await settleCanvasVideoComposeTask({
-        editor: requiredEditor(current.editorRef),
+        editor: requiredEditor(current.editorRef, t),
         projectId: current.projectId,
         task,
         assets: creativeAssetClient,
@@ -124,13 +134,20 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
       signal.throwIfAborted();
       current.onNotice(
         task.status === 'succeeded'
-          ? '视频创作已完成，真实结果及连线已保存到画布。'
+          ? t('creativeStudio.canvas.runtime.video.succeeded', {
+              defaultValue: '视频创作已完成，真实结果及连线已保存到画布。',
+            })
           : task.status === 'failed'
-            ? (task.error?.message ?? '视频创作失败，配置节点已保留。')
-            : '视频创作已取消，配置节点已保留。'
+            ? (task.error?.message ??
+              t('creativeStudio.canvas.runtime.video.failed', {
+                defaultValue: '视频创作失败，配置节点已保留。',
+              }))
+            : t('creativeStudio.canvas.runtime.video.cancelled', {
+                defaultValue: '视频创作已取消，配置节点已保留。',
+              })
       );
     },
-    []
+    [t]
   );
 
   const onRecoveryFailure = useCallback(
@@ -143,16 +160,19 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
       signal.throwIfAborted();
       const current = latest.current;
       await orphanCanvasVideoComposeTask({
-        editor: requiredEditor(current.editorRef),
+        editor: requiredEditor(current.editorRef, t),
         projectId: current.projectId,
         reference,
       });
       current.onNotice(
-        '服务器未找到遗留的视频创作任务，已只清理该任务的恢复标记。'
+        t('creativeStudio.canvas.runtime.video.orphaned', {
+          defaultValue:
+            '服务器未找到遗留的视频创作任务，已只清理该任务的恢复标记。',
+        })
       );
       return true;
     },
-    []
+    [t]
   );
 
   const runtime = useCreativeWorkbenchRuntime({
@@ -183,7 +203,7 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
 
   useEffect(() => {
     const current = latest.current;
-    const editor = requiredEditor(current.editorRef);
+    const editor = requiredEditor(current.editorRef, t);
     for (const entry of runtime.entries) {
       if (entry.task.status !== 'queued' && entry.task.status !== 'running') {
         continue;
@@ -198,7 +218,7 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
         current.onNotice(error instanceof Error ? error.message : String(error));
       }
     }
-  }, [runtime.entries]);
+  }, [runtime.entries, t]);
 
   useImperativeHandle(
     ref,
@@ -222,7 +242,7 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
         canvasVideoComposeConfigForReference(
           {
             projectId: current.projectId,
-            nodes: requiredEditor(current.editorRef).getState().document.nodes,
+            nodes: requiredEditor(current.editorRef, t).getState().document.nodes,
           },
           reference
         );
@@ -233,7 +253,7 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
         canvasVideoComposeConfigForReference(
           {
             projectId: current.projectId,
-            nodes: requiredEditor(current.editorRef).getState().document.nodes,
+            nodes: requiredEditor(current.editorRef, t).getState().document.nodes,
           },
           reference
         );
@@ -247,7 +267,7 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
       },
       snapshot: () => runtime.controller.snapshot(),
     }),
-    [runtime.controller]
+    [runtime.controller, t]
   );
 
   return null;

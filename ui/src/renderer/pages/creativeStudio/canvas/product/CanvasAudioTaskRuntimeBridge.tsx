@@ -11,6 +11,8 @@ import React, {
   useImperativeHandle,
   useRef,
 } from 'react';
+import type { TFunction } from 'i18next';
+import { useTranslation } from 'react-i18next';
 
 import { creativeAssetClient, type CreativeAsset } from '../../assets';
 import type { CreativeProjectDocument } from '../../domain';
@@ -70,10 +72,17 @@ export interface CanvasAudioTaskRuntimeBridgeProps {
 }
 
 const requiredEditor = (
-  ref: React.RefObject<CreativeCanvasEditorHandle | null>
+  ref: React.RefObject<CreativeCanvasEditorHandle | null>,
+  t: TFunction
 ): CreativeCanvasEditorHandle => {
   const editor = ref.current;
-  if (!editor) throw new Error('画布尚未载入，无法同步音频任务。');
+  if (!editor) {
+    throw new Error(
+      t('creativeStudio.canvas.runtime.audio.editorUnavailable', {
+        defaultValue: '画布尚未载入，无法同步音频任务。',
+      })
+    );
+  }
   return editor;
 };
 
@@ -86,6 +95,7 @@ const CanvasAudioTaskRuntimeBridge = forwardRef<
   CanvasAudioTaskRuntimeBridgeHandle,
   CanvasAudioTaskRuntimeBridgeProps
 >((props, ref) => {
+  const { t } = useTranslation();
   const latest = useRef(props);
   latest.current = props;
   const initialResumeRequestsRef = useRef(
@@ -98,13 +108,13 @@ const CanvasAudioTaskRuntimeBridge = forwardRef<
       signal.throwIfAborted();
       const current = latest.current;
       await persistCanvasAudioComposePendingTask({
-        editor: requiredEditor(current.editorRef),
+        editor: requiredEditor(current.editorRef, t),
         projectId: current.projectId,
         reference,
       });
       signal.throwIfAborted();
     },
-    []
+    [t]
   );
 
   const onSettledTask = useCallback(
@@ -112,7 +122,7 @@ const CanvasAudioTaskRuntimeBridge = forwardRef<
       signal.throwIfAborted();
       const current = latest.current;
       await settleCanvasAudioComposeTask({
-        editor: requiredEditor(current.editorRef),
+        editor: requiredEditor(current.editorRef, t),
         projectId: current.projectId,
         task,
         assets: creativeAssetClient,
@@ -121,13 +131,20 @@ const CanvasAudioTaskRuntimeBridge = forwardRef<
       signal.throwIfAborted();
       current.onNotice(
         task.status === 'succeeded'
-          ? '音频创作已完成，真实结果已原位保存到画布。'
+          ? t('creativeStudio.canvas.runtime.audio.succeeded', {
+              defaultValue: '音频创作已完成，真实结果已原位保存到画布。',
+            })
           : task.status === 'failed'
-            ? (task.error?.message ?? '音频创作失败，配置节点已保留。')
-            : '音频创作已取消，配置节点已保留。'
+            ? (task.error?.message ??
+              t('creativeStudio.canvas.runtime.audio.failed', {
+                defaultValue: '音频创作失败，配置节点已保留。',
+              }))
+            : t('creativeStudio.canvas.runtime.audio.cancelled', {
+                defaultValue: '音频创作已取消，配置节点已保留。',
+              })
       );
     },
-    []
+    [t]
   );
 
   const onRecoveryFailure = useCallback(
@@ -140,16 +157,19 @@ const CanvasAudioTaskRuntimeBridge = forwardRef<
       signal.throwIfAborted();
       const current = latest.current;
       await orphanCanvasAudioComposeTask({
-        editor: requiredEditor(current.editorRef),
+        editor: requiredEditor(current.editorRef, t),
         projectId: current.projectId,
         reference,
       });
       current.onNotice(
-        '服务器未找到遗留的音频创作任务，已只清理该任务的恢复标记。'
+        t('creativeStudio.canvas.runtime.audio.orphaned', {
+          defaultValue:
+            '服务器未找到遗留的音频创作任务，已只清理该任务的恢复标记。',
+        })
       );
       return true;
     },
-    []
+    [t]
   );
 
   const runtime = useCreativeWorkbenchRuntime({
@@ -180,7 +200,7 @@ const CanvasAudioTaskRuntimeBridge = forwardRef<
 
   useEffect(() => {
     const current = latest.current;
-    const editor = requiredEditor(current.editorRef);
+    const editor = requiredEditor(current.editorRef, t);
     for (const entry of runtime.entries) {
       if (entry.task.status !== 'queued' && entry.task.status !== 'running') {
         continue;
@@ -195,7 +215,7 @@ const CanvasAudioTaskRuntimeBridge = forwardRef<
         current.onNotice(error instanceof Error ? error.message : String(error));
       }
     }
-  }, [runtime.entries]);
+  }, [runtime.entries, t]);
 
   useImperativeHandle(
     ref,
@@ -219,7 +239,7 @@ const CanvasAudioTaskRuntimeBridge = forwardRef<
         canvasAudioComposeConfigForReference(
           {
             projectId: current.projectId,
-            nodes: requiredEditor(current.editorRef).getState().document.nodes,
+            nodes: requiredEditor(current.editorRef, t).getState().document.nodes,
           },
           reference
         );
@@ -230,7 +250,7 @@ const CanvasAudioTaskRuntimeBridge = forwardRef<
         canvasAudioComposeConfigForReference(
           {
             projectId: current.projectId,
-            nodes: requiredEditor(current.editorRef).getState().document.nodes,
+            nodes: requiredEditor(current.editorRef, t).getState().document.nodes,
           },
           reference
         );
@@ -244,7 +264,7 @@ const CanvasAudioTaskRuntimeBridge = forwardRef<
       },
       snapshot: () => runtime.controller.snapshot(),
     }),
-    [runtime.controller]
+    [runtime.controller, t]
   );
 
   return null;

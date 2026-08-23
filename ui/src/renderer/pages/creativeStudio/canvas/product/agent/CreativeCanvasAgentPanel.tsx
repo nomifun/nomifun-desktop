@@ -13,6 +13,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import {
   CreativeStudioAgentChatController,
@@ -102,7 +103,8 @@ const copyHistory = (
 ): CreativeStudioAgentMessage[] => history.map((message) => ({ ...message }));
 
 const sessionSummaries = (
-  sessions: readonly CreativeChatSessionReference[]
+  sessions: readonly CreativeChatSessionReference[],
+  locale: string
 ): CreativeStudioAgentSessionSummary[] =>
   [...sessions]
     .sort((left, right) => right.updatedAt - left.updatedAt)
@@ -110,7 +112,7 @@ const sessionSummaries = (
       id: session.id,
       title: session.title,
       messageCount: session.messageIds.length,
-      updatedAtLabel: new Date(session.updatedAt).toLocaleString(undefined, {
+      updatedAtLabel: new Date(session.updatedAt).toLocaleString(locale, {
         month: '2-digit',
         day: '2-digit',
         hour: '2-digit',
@@ -136,6 +138,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
   CreativeCanvasAgentPanelHandle,
   CreativeCanvasAgentPanelProps
 >((props, ref) => {
+  const { t, i18n } = useTranslation();
   const createId = props.createId ?? uuidv7;
   const now = props.now ?? Date.now;
   const incomingSignature = JSON.stringify([props.activeSessionId, props.sessions]);
@@ -234,9 +237,34 @@ const CreativeCanvasAgentPanel = React.forwardRef<
     return projectCreativeCanvasAgentProposals(
       messages,
       proposalOverrides,
-      appliedProposalMessageIds
+      appliedProposalMessageIds,
+      t
     );
-  }, [appliedProposalMessageIds, messages, proposalOverrides]);
+  }, [appliedProposalMessageIds, messages, proposalOverrides, t]);
+
+  const translatedSkillOptions = useMemo(
+    () =>
+      CREATIVE_STUDIO_PLANNING_SKILLS.map((skill) => ({
+        id: skill.id,
+        label: t(skill.labelKey, {
+          defaultValue:
+            skill.id === 'creative-studio-canvas'
+              ? '画布规划'
+              : skill.id === 'creative-studio-organize'
+                ? '整理布局'
+                : '模板设计',
+        }),
+        description: t(skill.descriptionKey, {
+          defaultValue:
+            skill.id === 'creative-studio-canvas'
+              ? '理解当前选择并提出安全的文本与结构操作。'
+              : skill.id === 'creative-studio-organize'
+                ? '调整现有节点的位置、尺寸与连接关系。'
+                : '把创作目标整理成可人工确认的模板草案。',
+        }),
+      })),
+    [t]
+  );
 
   useEffect(() => {
     setExcludedContextNodeIds([]);
@@ -340,7 +368,9 @@ const CreativeCanvasAgentPanel = React.forwardRef<
         role: 'assistant',
         status: 'running',
         text: '',
-        activityLabel: '正在连接 NomiFun Agent',
+        activityLabel: t('creativeStudio.agent.connecting', {
+          defaultValue: '正在连接 NomiFun Agent',
+        }),
       };
       runningKeyRef.current = pending.idempotencyKey;
       setIsRunning(true);
@@ -441,7 +471,10 @@ const CreativeCanvasAgentPanel = React.forwardRef<
               role: 'assistant',
               status: 'failed',
               text: message.text,
-              errorMessage: `提交结果尚未确认：${outcome.error.message}`,
+              errorMessage: t('creativeStudio.agent.submitUnconfirmed', {
+                message: outcome.error.message,
+                defaultValue: '提交结果尚未确认：{{message}}',
+              }),
             }));
           }
           if (mountedRef.current) setPanelError(outcome.error.message);
@@ -465,7 +498,14 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       currentRunRef.current = operation;
       await operation;
     },
-    [controller, createId, now, persistSession, props.canvasId, replaceRunningAssistant]
+    [
+      controller,
+      createId,
+      now,
+      persistSession,
+      props.canvasId,
+      replaceRunningAssistant,
+    ]
   );
 
   useEffect(() => {
@@ -553,7 +593,11 @@ const CreativeCanvasAgentPanel = React.forwardRef<
         if (activeSession.pendingTurn) {
           if (leaveEpoch !== leaveEpochRef.current) {
             setLoadState('failed');
-            setPanelError('Agent 恢复已暂停；请重试当前会话。');
+            setPanelError(
+              t('creativeStudio.agent.recoveryPaused', {
+                defaultValue: 'Agent 恢复已暂停；请重试当前会话。',
+              })
+            );
             return;
           }
           await runPersistedTurn(activeSession, durableHistoryRef.current);
@@ -585,7 +629,13 @@ const CreativeCanvasAgentPanel = React.forwardRef<
     ) return;
     void (async () => {
       try {
-        const session = createCreativeCanvasAgentSession(createId(), now());
+        const session = createCreativeCanvasAgentSession(
+          createId(),
+          now(),
+          t('creativeStudio.agent.newConversation', {
+            defaultValue: '新对话',
+          })
+        );
         await persistSession(session);
         durableHistoryRef.current = [];
         setMessages([]);
@@ -596,7 +646,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
         setPanelError(errorMessage(error));
       }
     })();
-  }, [createId, isRunning, now, persistSession]);
+  }, [createId, isRunning, now, persistSession, t]);
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
@@ -632,7 +682,11 @@ const CreativeCanvasAgentPanel = React.forwardRef<
         input.skillIds.length > 3 ||
         input.skillIds.some((skillId) => !isCreativeStudioPlanningSkillId(skillId))
       ) {
-        setPanelError('请明确选择 1–3 个 Creative Studio 创作技能。');
+        setPanelError(
+          t('creativeStudio.agent.skillSelectionRequired', {
+            defaultValue: '请明确选择 1–3 个 Creative Studio 创作技能。',
+          })
+        );
         return;
       }
       const leaveEpoch = leaveEpochRef.current;
@@ -644,7 +698,14 @@ const CreativeCanvasAgentPanel = React.forwardRef<
           const current =
             documentRef.current.sessions.find(
               (session) => session.id === documentRef.current.activeSessionId
-            ) ?? createCreativeCanvasAgentSession(createId(), now());
+            ) ??
+            createCreativeCanvasAgentSession(
+              createId(),
+              now(),
+              t('creativeStudio.agent.newConversation', {
+                defaultValue: '新对话',
+              })
+            );
           const idempotencyKey = createId();
           const pending = creativeCanvasAgentSessionWithPendingTurn({
             session: current,
@@ -660,6 +721,9 @@ const CreativeCanvasAgentPanel = React.forwardRef<
               skillIds: input.skillIds,
             }),
             skillIds: input.skillIds,
+            initialTitle: t('creativeStudio.agent.newConversation', {
+              defaultValue: '新对话',
+            }),
             now: now(),
           });
           locallySubmittedTurnKey = idempotencyKey;
@@ -692,7 +756,15 @@ const CreativeCanvasAgentPanel = React.forwardRef<
         if (sendOperationRef.current === operation) sendOperationRef.current = null;
       });
     },
-    [createId, isRunning, now, persistSession, props.planningContext, runPersistedTurn]
+    [
+      createId,
+      isRunning,
+      now,
+      persistSession,
+      props.planningContext,
+      runPersistedTurn,
+      t,
+    ]
   );
 
   const handleRetryLoad = useCallback(() => {
@@ -754,7 +826,9 @@ const CreativeCanvasAgentPanel = React.forwardRef<
             ...current,
             [messageId]: {
               state: 'failed',
-              errorMessage: '应用结果未确认；请检查页面提示并复核远端画布。',
+              errorMessage: t('creativeStudio.agent.applyUnconfirmed', {
+                defaultValue: '应用结果未确认；请检查页面提示并复核远端画布。',
+              }),
             },
           }));
         }
@@ -766,7 +840,13 @@ const CreativeCanvasAgentPanel = React.forwardRef<
         }
       });
     },
-    [isRunning, proposalOverrides, proposalProjection.artifacts, props.onApplyCanvasOps]
+    [
+      isRunning,
+      proposalOverrides,
+      proposalProjection.artifacts,
+      props.onApplyCanvasOps,
+      t,
+    ]
   );
 
   useImperativeHandle(
@@ -818,14 +898,17 @@ const CreativeCanvasAgentPanel = React.forwardRef<
     <CreativeStudioAgentPanel
       view={view}
       loadState={loadState}
-      sessions={sessionSummaries(documentState.sessions)}
+      sessions={sessionSummaries(
+        documentState.sessions,
+        i18n.resolvedLanguage ?? i18n.language
+      )}
       activeSessionId={documentState.activeSessionId}
       messages={messages}
       proposals={proposalProjection.proposals}
       draft={draft}
       model={model}
       contextItems={contextItems}
-      skillOptions={CREATIVE_STUDIO_PLANNING_SKILLS}
+      skillOptions={translatedSkillOptions}
       selectedSkillIds={selectedSkillIds}
       modelLocked={lockedModel !== null}
       isRunning={isRunning}

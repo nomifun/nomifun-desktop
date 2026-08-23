@@ -7,6 +7,7 @@
 import type { ModelTask } from '@/common/config/storage';
 import { capabilityOf } from '@/common/utils/providerModels';
 import { buildTaskModelGroups } from '@/renderer/hooks/agent/useModelsForTask';
+import { getI18n } from 'react-i18next';
 
 import type {
   CreativeModelCatalogSnapshot,
@@ -30,7 +31,10 @@ export const creativeModelTaskFor = (filter: CreativeModelFilter): ModelTask =>
   filter.capability === 'task' ? filter.task : MODALITY_TASK[filter.capability];
 
 const fallbackProviderLabel = (provider: { name?: string; platform?: string }): string =>
-  provider.name?.trim() || provider.platform?.trim() || 'Provider';
+  provider.name?.trim() ||
+  provider.platform?.trim() ||
+  getI18n()?.t('creativeStudio.models.select.unknownProvider', { defaultValue: 'Provider' }) ||
+  'Provider';
 
 /**
  * Build one exact task pool from NomiFun's nested capability graph. Disabled
@@ -108,7 +112,15 @@ export const creativeModelSelectorState = ({
 };
 
 const asError = (value: unknown): Error =>
-  value instanceof Error ? value : new Error(typeof value === 'string' ? value : '模型目录加载失败');
+  value instanceof Error
+    ? value
+    : new Error(
+        typeof value === 'string'
+          ? value
+          : getI18n()?.t('creativeStudio.models.catalog.loadFailed', {
+              defaultValue: '模型目录加载失败',
+            }) ?? '模型目录加载失败'
+      );
 
 /** Adapt the shared provider query without introducing a second model API. */
 export const adaptCreativeModelCatalog = (
