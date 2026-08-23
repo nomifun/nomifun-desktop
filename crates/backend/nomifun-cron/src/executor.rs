@@ -3323,6 +3323,18 @@ mod tests {
             {
                 Ok(None)
             }
+
+            async fn find_creative_studio_agent_session_by_conversation(
+                &self,
+                _owner_id: &str,
+                _conversation_id: &str,
+            ) -> Result<
+                Option<nomifun_db::models::CreativeStudioAgentSessionBindingRow>,
+                nomifun_db::DbError,
+            > {
+                Ok(None)
+            }
+
             async fn create(
                 &self,
                 _row: &nomifun_db::models::ConversationRow,
@@ -4013,6 +4025,17 @@ mod tests {
             }))
         }
 
+        async fn find_creative_studio_agent_session_by_conversation(
+            &self,
+            _owner_id: &str,
+            _conversation_id: &str,
+        ) -> Result<
+            Option<nomifun_db::models::CreativeStudioAgentSessionBindingRow>,
+            nomifun_db::DbError,
+        > {
+            Ok(None)
+        }
+
         async fn create(
             &self,
             _row: &nomifun_db::models::ConversationRow,
@@ -4402,6 +4425,17 @@ mod tests {
                 .status
                 .clone();
             Ok(Some(row))
+        }
+
+        async fn find_creative_studio_agent_session_by_conversation(
+            &self,
+            _owner_id: &str,
+            _conversation_id: &str,
+        ) -> Result<
+            Option<nomifun_db::models::CreativeStudioAgentSessionBindingRow>,
+            nomifun_db::DbError,
+        > {
+            Ok(None)
         }
 
         async fn create(
