@@ -1649,6 +1649,14 @@ mod tests {
     }
 
     #[test]
+    fn retired_workflow_panel_view_is_not_part_of_the_current_document_contract() {
+        let mut value =
+            serde_json::to_value(CreativeProjectDocument::empty(PROJECT_ID.to_owned())).unwrap();
+        value["panels"]["left"]["activeView"] = Value::String("workflows".into());
+        assert!(serde_json::from_value::<CreativeProjectDocument>(value).is_err());
+    }
+
+    #[test]
     fn canvas_document_facade_uses_canvas_id_and_maps_storage_document() {
         let project = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
         let canvas = CreativeCanvasDocument::from(project.clone());
