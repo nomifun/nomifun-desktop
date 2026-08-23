@@ -5,6 +5,12 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- **Model management now shows the saved provider API Keys in plaintext.**
+  Opening an editable provider reads its keys through the authenticated
+  `GET /api/providers/:provider_id/api-keys` endpoint and fills the ordinary
+  text editor, so users can see which rotating keys are active. Provider
+  list/create/update responses remain secret-free, and credentials remain
+  encrypted at rest. The UI/API contract version is 22.
 - **Creative Studio is Canvas-first and has no Project product object.** The
   canonical routes are `/workshop/canvases`,
   `/workshop/canvas/:canvasId`, and `/workshop/director/:canvasId`; the old
@@ -22,7 +28,7 @@ notes at a high level rather than a complete historical log.
   capabilities are `nomi_creative_studio_list_canvases` and
   `nomi_creative_studio_get_canvas`; old project-named capabilities remain
   deprecated aliases. Canvas exports use an archive v2 writer and retain a v1
-  reader. The UI/API contract version is 21. These notes describe the code and
+  reader. The UI/API contract version is 22. These notes describe the code and
   wire contract; they do not imply real-provider, desktop-host, signing, or
   release verification.
 

@@ -38,9 +38,10 @@ export type ProviderCredentialsBuildResult =
     };
 
 /**
- * Map the provider credentials form to the backend's write-only typed JSON.
- * Existing secrets are never loaded into the form. In update mode, an empty
- * form preserves stored credentials only when the response says they exist.
+ * Map the provider credentials form to the backend's typed JSON.
+ * The editor may preload saved API keys through its explicit plaintext-read
+ * endpoint. In update mode, an empty form still preserves stored credentials
+ * when the provider response says they exist.
  */
 export const buildProviderCredentials = (
   draft: ProviderCredentialsDraft
@@ -97,4 +98,3 @@ export const buildBedrockConfig = (
   region: region.trim(),
   ...(authMethod === 'profile' ? { profile: profile?.trim() ?? '' } : {}),
 });
-

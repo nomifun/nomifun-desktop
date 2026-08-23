@@ -12,16 +12,17 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
 import CreativeStudioFocusShell from './CreativeStudioFocusShell';
 import {
+  CREATIVE_STUDIO_CANVASES_PATH,
   CREATIVE_STUDIO_ROOT_PATH,
   CREATIVE_STUDIO_VIDEO_PATH,
 } from './routes';
 
-const renderFocusShell = (path = CREATIVE_STUDIO_ROOT_PATH) =>
+const renderFocusShell = (path = CREATIVE_STUDIO_CANVASES_PATH) =>
   renderToStaticMarkup(
     <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path={CREATIVE_STUDIO_ROOT_PATH} element={<CreativeStudioFocusShell />}>
-          <Route index element={<div data-test-route='home'>home route</div>} />
+          <Route path='canvases' element={<div data-test-route='canvases'>canvases route</div>} />
           <Route path='video' element={<div data-test-route='video'>video route</div>} />
         </Route>
       </Routes>
@@ -49,9 +50,9 @@ describe('Creative Studio route shell', () => {
     const source = readFileSync(new URL('./CreativeStudioFocusShell.tsx', import.meta.url), 'utf8');
 
     expect(html.includes('data-creative-studio-focus-shell="true"')).toBe(true);
-    expect(html.includes('data-creative-studio-section="home"')).toBe(true);
+    expect(html.includes('data-creative-studio-section="canvases"')).toBe(true);
     expect(html.includes('id="creative-studio-portal-root"')).toBe(true);
-    expect(html.includes('data-test-route="home"')).toBe(true);
+    expect(html.includes('data-test-route="canvases"')).toBe(true);
     expect(html.includes('data-creative-studio-top-bar')).toBe(false);
     expect(source.includes('CreativeStudioTopBar')).toBe(false);
     expect(source.includes('WindowControls')).toBe(false);

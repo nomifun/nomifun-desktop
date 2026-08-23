@@ -23,4 +23,11 @@ describe('provider detail auth-scheme lifecycle', () => {
     expect(source.includes('setAuthSchemeDirty(true)')).toBe(true);
     expect(source.includes('buildAuthSchemeEditPatch(')).toBe(true);
   });
+
+  test('loads saved API keys and echoes them in the plaintext editor', () => {
+    expect(source.includes('ipcBridge.mode.getProviderApiKeys')).toBe(true);
+    expect(source.includes("form.setFieldValue('api_key', apiKeys.join(','))")).toBe(true);
+    expect(source.includes('<Input.TextArea')).toBe(true);
+    expect(source.includes('disabled={apiKeysLoading}')).toBe(true);
+  });
 });

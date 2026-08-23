@@ -38,9 +38,6 @@ const KnowledgeDetailPage = React.lazy(() => import('@renderer/pages/knowledge/K
 const CreativeStudioFocusShell = React.lazy(
   () => import('@renderer/pages/creativeStudio/app/CreativeStudioFocusShell')
 );
-const CreativeStudioHomePage = React.lazy(
-  () => import('@renderer/pages/creativeStudio/app/CreativeStudioHomePage')
-);
 const CreativeStudioCanvasesRoute = React.lazy(
   () => import('@renderer/pages/creativeStudio/canvases/CreativeStudioCanvasesRoute')
 );
@@ -128,7 +125,7 @@ const LegacyExtensionsRedirect: React.FC = () => {
   return <Navigate to={withSearch('/skills', searchParams)} replace />;
 };
 
-const LegacyCreativeStudioProjectsRedirect: React.FC = () => {
+const CreativeStudioCanvasesRedirect: React.FC = () => {
   const { search, hash } = useLocation();
   return (
     <Navigate
@@ -180,9 +177,9 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route index element={<Navigate to='/guid' replace />} />
             {/* Creative Studio reuses the application titlebar and swaps the primary rail like Settings. */}
             <Route path={CREATIVE_STUDIO_ROOT_PATH} element={withRouteFallback(CreativeStudioFocusShell)}>
-              <Route index element={withRouteFallback(CreativeStudioHomePage)} />
+              <Route index element={<CreativeStudioCanvasesRedirect />} />
               <Route path='canvases' element={withRouteFallback(CreativeStudioCanvasesRoute)} />
-              <Route path='projects' element={<LegacyCreativeStudioProjectsRedirect />} />
+              <Route path='projects' element={<CreativeStudioCanvasesRedirect />} />
               <Route path='canvas/:canvasId' element={withRouteFallback(CreativeStudioCanvasRoute)} />
               <Route path='director/:canvasId' element={withRouteFallback(CreativeStudioDirectorRoute)} />
               <Route path='image' element={withRouteFallback(CreativeStudioImageWorkbenchRoute)} />

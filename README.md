@@ -239,7 +239,7 @@ TTS. Canvas documents use revision CAS, Canvas tasks can reconcile after reload,
 and a version-2 Canvas ZIP carries the referenced asset and Director-sidecar
 closure while the reader remains compatible with version 1. Standalone task
 ownership and history use only `workbenchKind`; Image and Video preserve
-versioned session drafts without a Canvas binding. The UI/API contract is 21.
+versioned session drafts without a Canvas binding. The UI/API contract is 22.
 The minimal Workflow AI previews a strict one-shot draft, then waits for the
 user to Apply it to the editor and explicitly Save; it does not create a public
 template, complex conversation, or automatic run.

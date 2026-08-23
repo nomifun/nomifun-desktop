@@ -1371,6 +1371,10 @@ export const mode = {
     // reach the backend's deny_unknown_fields DTO.
     toUpdateProviderRequest
   ), fromProviderResponse),
+  /** Read the provider's saved API keys in plaintext for the model-management editor. */
+  getProviderApiKeys: httpGet<string[], { provider_id: ProviderId }>(
+    (p) => `/api/providers/${p.provider_id}/api-keys`
+  ),
   deleteProvider: httpDelete<void, { provider_id: ProviderId }>(
     (p) => `/api/providers/${p.provider_id}`
   ),
