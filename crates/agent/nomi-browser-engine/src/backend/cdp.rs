@@ -88,8 +88,6 @@ use crate::host::{
 };
 use crate::{EngineConfig, LaneEngineConfig, LaneId, TargetOwnership, TargetRoute};
 
-/// 拿到新 page 的 `attachedToTarget` 事件的上限（flatten auto-attach 通常 <1s）。
-const PAGE_ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Must exceed transport::DEFAULT_COMMAND_TIMEOUT (30s). An unknown-id
 /// cancellation may not use inventory absence until the create command future
 /// has reached its own terminal response/timeout.
@@ -1077,6 +1075,7 @@ impl HostTargetRouter {
         }
     }
 
+    #[cfg(test)]
     async fn register_lane(
         &self,
         lane_id: LaneId,
@@ -1100,6 +1099,7 @@ impl HostTargetRouter {
         .await
     }
 
+    #[cfg(test)]
     async fn register_lane_with_resource_scope(
         &self,
         lane_id: LaneId,
@@ -3660,6 +3660,7 @@ fn safe_download_guid_component(guid: &str) -> Option<&str> {
     }
 }
 
+#[cfg(test)]
 fn is_chromium_download_guid_name(name: &str) -> bool {
     let guid = name
         .strip_suffix(".crdownload")
@@ -5526,9 +5527,6 @@ pub struct CdpBackend {
     _process: Option<Arc<DurableProcessCleanup>>,
     /// attach 处理循环句柄——保活，让 flatten 自动附着的子 session 持续被登记。
     _attach_loop: Option<tokio::task::JoinHandle<()>>,
-    /// **tab 发现后台循环句柄**（D3）——保活。订阅新顶层 page 的 `Target.attachedToTarget`，arm 成
-    /// [`TabRecord`] 入 `tabs`（不抢焦点）。backend Drop 即连带 abort（连接随之关闭，循环也会自然退出）。
-    _tab_discovery_loop: Option<tokio::task::JoinHandle<()>>,
     /// **下载事件后台循环句柄**（E4）——保活。仅当 `setDownloadBehavior` 沙箱已挂（`download_dir`
     /// 为 `Some`）时存在。订阅 `Browser.downloadProgress`，对完成（`state=="completed"`）的下载在其
     /// `filePath` 上打 Win MOTW（`Zone.Identifier` ADS）。mac/linux 为空实现。**绝不**自动打开文件。
@@ -5605,12 +5603,8 @@ impl Drop for CdpBackend {
             runtime.abort();
         }
         // Dropping a Tokio JoinHandle detaches its task. Standalone backends
-        // own these loops, and every loop retains a Connection clone (the tab
-        // discovery loop also retains the tab registry), so they must be
+        // own these loops, and each retains a Connection clone, so they must be
         // explicitly aborted before cleanup authority is handed off.
-        if let Some(loop_handle) = self._tab_discovery_loop.take() {
-            loop_handle.abort();
-        }
         if let Some(loop_handle) = self._download_loop.take() {
             loop_handle.abort();
         }
@@ -5885,7 +5879,6 @@ impl CdpBackend {
             act_seq: std::sync::atomic::AtomicU64::new(0),
             _process: None,
             _attach_loop: None,
-            _tab_discovery_loop: None,
             _download_loop: None,
             download_dir,
             workspace_dir: config.workspace_dir,
@@ -6196,8 +6189,8 @@ impl CdpBackend {
             return Err(BrowserError::TargetCrashed);
         }
 
-        // The router or standalone discovery loop may have armed the target
-        // while `claim_target` awaited a quarantined attach.
+        // The Host router may have armed the target while `claim_target`
+        // awaited a quarantined attach.
         if let Some(handles) = self
             .tabs
             .lock()
@@ -6449,125 +6442,14 @@ async fn arm_tab(
     })
 }
 
-/// **tab 发现后台循环（D3，DESIGN §13 + 裁决⑥/不变量⑮）**：订阅 `Target.attachedToTarget`（全 session
-/// 通配），对**新顶层 page**（`type=="page"`，非主 page session，不在 `tabs`）调 [`arm_tab`] 建
-/// [`TabRecord`] 入 `tabs`——**不抢焦点、不改 active**（返「新标签已打开[last4]」让 LLM 显式 switch，
-/// browser-use 策略 / DESIGN:188）。
-///
-/// **与 OOPIF arm 循环（[`spawn_oopif_arm_loop`]）的协调防重复 arm**：本循环 [`crate::tabs::should_arm_as_page`]
-/// **只收 `type=="page"`**；OOPIF 循环只收 `type=="iframe"`。二者各自筛 type，互不重叠——同一 attach 事件
-/// 绝不被两路同时 arm。再加「不在 tabs」守卫（CDP 对同 target 多次 attach 时不重复 arm，`tabs` map 无重复 key）。
-///
-/// **不等子 session 放行**：`run_attach_loop`（全局 attach loop）已先登记子 session 并放行
-/// （runIfWaitingForDebugger）。本循环 arm 前轮询确认子 session 已登记（仿 OOPIF 循环），再物化注入管线。
-///
-/// 所有错误 best-effort：单个 tab arm 失败只 warn 不影响其它，**绝不 panic**。连接关闭（`RecvError::Closed`）
-/// → 退出循环（backend Drop 关连接即触发）。
-fn spawn_tab_discovery_loop(
-    conn: Connection,
-    main_page_session: String,
-    tabs: Arc<AsyncMutex<HashMap<String, TabRecord>>>,
-) -> tokio::task::JoinHandle<()> {
-    use chromiumoxide::cdp::browser_protocol::target::EventAttachedToTarget;
-    let mut rx = conn.subscribe(EventAttachedToTarget::IDENTIFIER, None);
-    tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(ev) => {
-                    let Ok(att) =
-                        serde_json::from_value::<EventAttachedToTarget>(ev.params.clone())
-                    else {
-                        continue;
-                    };
-                    let sid: String = att.session_id.clone().into();
-                    let ttype = att.target_info.r#type.clone();
-                    let tid: String = att.target_info.target_id.clone().into();
-
-                    // type 分流（防与 OOPIF 循环重复 arm）+ 非主 session + 不在 tabs（短临界区查后释放锁）。
-                    let already = tabs.lock().await.contains_key(&tid);
-                    let is_main = sid == main_page_session;
-                    if !crate::tabs::should_arm_as_page(&ttype, is_main, already) {
-                        continue;
-                    }
-
-                    // 等子 session 在注册表登记（run_attach_loop 的 handle_attached 负责登记 + 放行）。
-                    let deadline = tokio::time::Instant::now() + OOPIF_SESSION_REGISTER_TIMEOUT;
-                    let registry = conn.registry().clone();
-                    while !registry.has_session(&sid) {
-                        if tokio::time::Instant::now() >= deadline {
-                            break;
-                        }
-                        tokio::time::sleep(Duration::from_millis(20)).await;
-                    }
-                    if !registry.has_session(&sid) {
-                        tracing::warn!(
-                            target: "nomi_browser_engine::backend::cdp",
-                            session_id = %sid,
-                            target_id_suffix = %cdp_id_suffix(&tid),
-                            "new page child session never registered; skip arm"
-                        );
-                        continue;
-                    }
-
-                    // arm 成 TabRecord（复用 arm_tab）。失败 best-effort：warn 后继续（不影响已有 tab）。
-                    match arm_tab(&conn, &tid, &sid, None).await {
-                        Ok(record) => {
-                            // 再次确认未被并发插入（双查，避免两条 attach 事件窗口竞态重 arm）。
-                            let mut guard = tabs.lock().await;
-                            if guard.contains_key(&tid) {
-                                // 已被插入：丢弃本次 record，经共享 helper 全量 abort 其
-                                // **三个**后台循环（F52：此前漏 abort `_debug_loop`，泄漏一条
-                                // 长驻订阅 Runtime/Log/Network 事件的调试捕获任务）。
-                                abort_tab_record(&record);
-                                continue;
-                            }
-                            let target_id_suffix = cdp_id_suffix(&tid);
-                            guard.insert(tid.clone(), record);
-                            drop(guard);
-                            // **不抢焦点、不改 active**：只记日志（LLM 经 tabs/switch_tab 显式切换）。
-                            tracing::info!(
-                                target: "nomi_browser_engine::backend::cdp",
-                                target_id_suffix = %target_id_suffix,
-                                "新标签已打开[{target_id_suffix}]（未抢焦点；observe/act 仍在原标签，需显式 switch_tab）"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "nomi_browser_engine::backend::cdp",
-                                target_id_suffix = %cdp_id_suffix(&tid), error = %e,
-                                "arm discovered tab failed (non-fatal)"
-                            );
-                        }
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    })
-}
-
-
-/// 2. **再** `Target.createTarget{url:"about:blank"}` 拿 targetId；
-/// 3. 等订阅里出现 `target_info.target_id == targetId` 的 attach 事件 → 取其 sessionId。
-///
-/// flatten auto-attach（enable_auto_attach 已开）会自动 attach 新 page，故无需手动 attach。
-/// attach loop 会**同时**登记该子 session 并放行；本函数只需拿到 (targetId, sessionId)。
-///
-/// **D1**：返回 `(target_id, session_id)`——targetId 是 tabs 注册表的 key + active_target 指针
-/// （`createTarget` 回包已给 targetId，attach 事件的 `target_info.target_id` 与之一致；二者择一即可，
-/// 这里直接复用 createTarget 拿到的 `target_id`）。
+/// Keep a visible target only when the caller requested a headful Host and the
+/// platform can actually display it. Every other combination is created in the
+/// background so headless/remote Hosts never rely on window focus semantics.
 const fn page_target_should_start_in_background(
     headful: bool,
     display_available: bool,
 ) -> bool {
     !(headful && display_available)
-}
-
-fn initial_page_target_params(background: bool) -> CreateTargetParams {
-    let mut params = CreateTargetParams::new("about:blank");
-    params.background = Some(background);
-    params
 }
 
 static NEXT_PENDING_PAGE_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -6838,67 +6720,6 @@ async fn create_pending_lane_page_session(
     }
 }
 
-async fn create_page_session(
-    conn: &Connection,
-    background: bool,
-) -> Result<(String, String), BrowserError> {
-    // 1) 先订阅 attach 事件（在 createTarget 之前，避免错过）。
-    let mut attached_rx = conn.subscribe(EventAttachedToTarget::IDENTIFIER, None);
-
-    // 2) 在根 session 上建 page target（默认 browser context）。普通 Agent Lane
-    // 运行在真正的 Headless Host，仍显式要求后台 target。受信任的 external
-    // 展示入口会启动有效的 Headful Host；它的首个或最终标签恢复 target 必须前台
-    // 创建，否则 `--no-startup-window` 后 Chromium 可能只有一个后台 target，用户
-    // 看不到 Browser Use 实际工作的窗口。
-    let params = initial_page_target_params(background);
-    let result = conn
-        .send::<CreateTargetParams>(ROOT_SESSION, &params)
-        .await
-        .map_err(map_transport_err)?;
-    let target_id: String = result
-        .get("targetId")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| BrowserError::Other("createTarget response missing targetId".into()))?
-        .to_string();
-
-    // 3) 等到该 targetId 的 attach 事件，取 sessionId。
-    let deadline = tokio::time::Instant::now() + PAGE_ATTACH_TIMEOUT;
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(BrowserError::Other(format!(
-                "timed out waiting for attachedToTarget of page target {target_id}"
-            )));
-        }
-        match tokio::time::timeout(remaining, attached_rx.recv()).await {
-            Ok(Ok(ev)) => {
-                // 只认 page 类型且 targetId 匹配的 attach。
-                let parsed: Result<EventAttachedToTarget, _> =
-                    serde_json::from_value(ev.params.clone());
-                if let Ok(att) = parsed {
-                    let tid: String = att.target_info.target_id.clone().into();
-                    if tid == target_id && att.target_info.r#type == "page" {
-                        return Ok((target_id, att.session_id.into()));
-                    }
-                }
-                // 非目标事件（其它 target 的 attach）：继续等。
-            }
-            // 广播落后（lagged）→ 继续收（可能错过，但下个匹配仍能拿到；超时兜底）。
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
-            // 连接关闭。
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
-                return Err(BrowserError::SessionLost { recoverable: false });
-            }
-            // 超时。
-            Err(_elapsed) => {
-                return Err(BrowserError::Other(format!(
-                    "timed out waiting for attachedToTarget of page target {target_id}"
-                )));
-            }
-        }
-    }
-}
-
 /// OOPIF 子 session 等子 session 已登记的轮询上限（`run_attach_loop` 先登记再放行，但两路
 /// 订阅者的调度顺序非确定，故 arm 前轮询确认子 session 已在注册表）。
 const OOPIF_SESSION_REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -6911,8 +6732,8 @@ const LATE_TARGET_DRAIN_MAX_PASSES: usize = 4;
 /// **裁决⑥：只收 `type=="iframe"`，绝不收 `page`**（type 分流经 [`crate::tabs::should_arm_as_oopif`]）。
 /// 本循环订阅的是**全局** attach 事件；若放行 `type=="page"`，看到**兄弟顶层 tab**（另一 page，
 /// sid≠自己）会把它 arm 进自己的 `oopif_managers`，致 observe 活动 tab 时把兄弟整页内容当 OOPIF 子帧
-/// 拼进来（**跨标签污染**）。顶层 page 归 tab 发现循环（[`spawn_tab_discovery_loop`] /
-/// [`crate::tabs::should_arm_as_page`]）；二者各自筛 type，**严格互补、互不重叠**。
+/// 拼进来（**跨标签污染**）。顶层 page 统一由 [`HostTargetRouter`] 收编；
+/// 两条路径各自筛 type，**严格互补、互不重叠**。
 ///
 /// **现实（TODO(verify-oopif)）**：真 OOPIF 需跨源 http origin 才另起 `type=="iframe"` 子 session；
 /// `file://` srcdoc/同源 iframe 是**同进程**（不另起子 session），故离线 fixture 触发不了这条路径。
@@ -9762,7 +9583,7 @@ impl CdpBackend {
     }
 
     /// **open_link_new_tab 动作**（D3，DESIGN §13）：`Target.createTarget{url, background:true}`——
-    /// **background 不抢焦点**。新 page 的 attachedToTarget 会被 [`spawn_tab_discovery_loop`] 收编 arm
+    /// **background 不抢焦点**。新 page 经 [`HostTargetRouter`] 认领并在本动作内 arm
     /// 入 `tabs`（不改 active）。返回新 tab 的 last4（让 LLM 显式 switch）。
     ///
     /// **active 不变**：本动作只开 tab、不切换；observe/act 仍作用原 active tab，直到 LLM 显式 switch_tab。
@@ -12631,10 +12452,10 @@ mod tests {
 
     #[test]
     fn initial_page_target_params_preserve_foreground_request_on_the_cdp_wire() {
-        let foreground =
-            serde_json::to_value(initial_page_target_params(false)).expect("serialize params");
-        let background =
-            serde_json::to_value(initial_page_target_params(true)).expect("serialize params");
+        let foreground = serde_json::to_value(pending_page_target_params("about:blank", false))
+            .expect("serialize params");
+        let background = serde_json::to_value(pending_page_target_params("about:blank", true))
+            .expect("serialize params");
 
         assert_eq!(foreground["url"], "about:blank");
         assert_eq!(foreground["background"], false);
@@ -16314,7 +16135,6 @@ mod tests {
             act_seq: AtomicU64::new(0),
             _process: None,
             _attach_loop: None,
-            _tab_discovery_loop: None,
             _download_loop: None,
             download_dir: None,
             workspace_dir: None,
@@ -16336,20 +16156,14 @@ mod tests {
         let mut backend = test_backend_with_tabs(connection, &[]);
         let attach_loop = backend.conn.run_attach_loop();
         let attach_abort = attach_loop.abort_handle();
-        let discovery_loop = tokio::spawn(std::future::pending::<()>());
-        let discovery_abort = discovery_loop.abort_handle();
         let download_loop = spawn_download_loop(backend.conn.clone(), None);
         let download_abort = download_loop.abort_handle();
         backend._attach_loop = Some(attach_loop);
-        backend._tab_discovery_loop = Some(discovery_loop);
         backend._download_loop = Some(download_loop);
 
         drop(backend);
         tokio::time::timeout(Duration::from_secs(2), async {
-            while !attach_abort.is_finished()
-                || !discovery_abort.is_finished()
-                || !download_abort.is_finished()
-            {
+            while !attach_abort.is_finished() || !download_abort.is_finished() {
                 tokio::task::yield_now().await;
             }
         })

@@ -1417,6 +1417,7 @@ impl HubTaskTabAuthority {
         self.shared.max_task_tabs.load(Ordering::Acquire).max(1)
     }
 
+    #[cfg(test)]
     fn count_for(&self, task_resource_key: &str) -> usize {
         let mut state = self
             .shared
@@ -3754,25 +3755,6 @@ impl BrowserSessionHub {
             host_authority,
             armed: true,
         }
-    }
-
-    fn clear_prepared_rebind_authority(
-        &self,
-        lane_id: &BrowserLaneId,
-        host_key: &HostKey,
-        browser_epoch: u64,
-    ) {
-        self.inner
-            .prepared_rebind_authorities
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&(
-                lane_id.clone(),
-                HostCleanupAuthorityKey {
-                    host_key: host_key.clone(),
-                    browser_epoch,
-                },
-            ));
     }
 
     fn has_prepared_rebind_authority(
@@ -12882,24 +12864,6 @@ fn visibility_transition_not_applied_error(
     }))
 }
 
-fn visibility_task_failed_error(
-    scope: &'static str,
-    join_error: &tokio::task::JoinError,
-) -> BrowserPlatformError {
-    BrowserPlatformError::new(
-        BrowserErrorCode::BrowserUnavailable,
-        "The managed browser display transition terminated unexpectedly.",
-        true,
-        "Refresh browser status and retry the display-mode transition.",
-    )
-    .with_metadata(json!({
-        "visibility_transition_failed": true,
-        "scope": scope,
-        "task_cancelled": join_error.is_cancelled(),
-        "task_panicked": join_error.is_panic(),
-    }))
-}
-
 fn visibility_operation_panicked_error(scope: &'static str) -> BrowserPlatformError {
     BrowserPlatformError::new(
         BrowserErrorCode::BrowserUnavailable,
@@ -13904,21 +13868,6 @@ fn cleanup_batch_task_failed_error(
     }))
 }
 
-fn drain_task_failed_error(join_error: &tokio::task::JoinError) -> BrowserPlatformError {
-    BrowserPlatformError::new(
-        BrowserErrorCode::BrowserUnavailable,
-        "The installation-wide browser cleanup task terminated unexpectedly.",
-        true,
-        "Retry closing all managed browser resources.",
-    )
-    .with_metadata(json!({
-        "cleanup_pending": true,
-        "platform_drain_task_failed": true,
-        "task_cancelled": join_error.is_cancelled(),
-        "task_panicked": join_error.is_panic(),
-    }))
-}
-
 fn drain_operation_panicked_error() -> BrowserPlatformError {
     BrowserPlatformError::new(
         BrowserErrorCode::BrowserUnavailable,
@@ -13931,22 +13880,6 @@ fn drain_operation_panicked_error() -> BrowserPlatformError {
         "platform_drain_task_failed": true,
         "task_cancelled": false,
         "task_panicked": true,
-    }))
-}
-
-fn policy_task_failed_error(join_error: &tokio::task::JoinError) -> BrowserPlatformError {
-    BrowserPlatformError::new(
-        BrowserErrorCode::BrowserUnavailable,
-        "The browser resource-policy reconciliation task terminated unexpectedly.",
-        true,
-        "Retry the resource-policy update; retained cleanup remains fail-closed.",
-    )
-    .with_metadata(json!({
-        "cleanup_pending": true,
-        "policy_reconciliation_pending": true,
-        "policy_task_failed": true,
-        "task_cancelled": join_error.is_cancelled(),
-        "task_panicked": join_error.is_panic(),
     }))
 }
 

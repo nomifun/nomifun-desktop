@@ -71,12 +71,9 @@ pub(crate) struct CleanupBudgetToken<LaneKey, HostAuthorityKey> {
 }
 
 impl<LaneKey, HostAuthorityKey> CleanupBudgetToken<LaneKey, HostAuthorityKey> {
+    #[cfg(test)]
     pub(crate) fn id(&self) -> u64 {
         self.id
-    }
-
-    pub(crate) fn key(&self) -> &CleanupTokenKey<LaneKey, HostAuthorityKey> {
-        &self.key
     }
 }
 
@@ -98,7 +95,9 @@ pub(crate) enum CleanupBudgetError {
     /// The same exact physical key was presented with different ownership.
     /// Silently moving it would let two lifecycle paths claim one token.
     AttributionConflict,
+    #[cfg(test)]
     TokenMissing,
+    #[cfg(test)]
     StaleToken,
 }
 
@@ -106,7 +105,9 @@ impl CleanupBudgetError {
     pub(crate) fn saturation(&self) -> Option<&CleanupBudgetSaturation> {
         match self {
             Self::Saturated(saturation) => Some(saturation),
-            Self::AttributionConflict | Self::TokenMissing | Self::StaleToken => None,
+            Self::AttributionConflict => None,
+            #[cfg(test)]
+            Self::TokenMissing | Self::StaleToken => None,
         }
     }
 }
@@ -125,9 +126,11 @@ impl fmt::Display for CleanupBudgetError {
             Self::AttributionConflict => formatter.write_str(
                 "the exact browser cleanup key is already reserved by another attribution",
             ),
+            #[cfg(test)]
             Self::TokenMissing => {
                 formatter.write_str("the browser cleanup token is no longer reserved")
             }
+            #[cfg(test)]
             Self::StaleToken => formatter.write_str(
                 "the browser cleanup token is stale for the current exact reservation",
             ),
@@ -151,7 +154,9 @@ pub(crate) struct CleanupBudgetSnapshot<HostScopeKey> {
     pub(crate) tasks: HashMap<String, CleanupBudgetScopeSnapshot>,
     pub(crate) families: HashMap<String, CleanupBudgetScopeSnapshot>,
     pub(crate) hosts: HashMap<HostScopeKey, CleanupBudgetScopeSnapshot>,
+    #[cfg(test)]
     pub(crate) lane_tokens: usize,
+    #[cfg(test)]
     pub(crate) host_tokens: usize,
 }
 
@@ -230,6 +235,7 @@ where
 
     /// Reserves one exact Lane authority.  Retrying the same key with the same
     /// attribution returns the original token without consuming another unit.
+    #[cfg(test)]
     pub(crate) fn reserve_lane(
         &self,
         task_key: impl Into<String>,
@@ -261,6 +267,7 @@ where
 
     /// Reserves one exact Host authority.  `host_authority_key` can include an
     /// epoch while `host_key` remains the logical Host accounting scope.
+    #[cfg(test)]
     pub(crate) fn reserve_host(
         &self,
         task_key: impl Into<String>,
@@ -298,6 +305,7 @@ where
     /// Atomically reserves the two authorities needed by a cold Host + Lane
     /// start.  If either scope cannot accept both missing units, neither token
     /// is inserted.  Existing exact tokens are treated as idempotent retries.
+    #[cfg(test)]
     pub(crate) fn reserve_lane_and_host(
         &self,
         task_key: impl Into<String>,
@@ -354,6 +362,7 @@ where
     /// The global unit never changes.  This is the authority transfer used by
     /// Lane rebind: the exact Lane key remains stable while its Host changes.
     /// Retrying an already completed transfer is a no-op.
+    #[cfg(test)]
     pub(crate) fn reattribute(
         &self,
         token: &CleanupBudgetToken<LaneKey, HostAuthorityKey>,
@@ -369,6 +378,7 @@ where
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn reattribute_for_family(
         &self,
         token: &CleanupBudgetToken<LaneKey, HostAuthorityKey>,
@@ -439,6 +449,7 @@ where
     }
 
     /// Alias describing the lifecycle meaning of [`Self::reattribute`].
+    #[cfg(test)]
     pub(crate) fn transfer(
         &self,
         token: &CleanupBudgetToken<LaneKey, HostAuthorityKey>,
@@ -446,16 +457,6 @@ where
         new_host_key: HostScopeKey,
     ) -> Result<(), CleanupBudgetError> {
         self.reattribute(token, new_task_key, new_host_key)
-    }
-
-    pub(crate) fn transfer_for_family(
-        &self,
-        token: &CleanupBudgetToken<LaneKey, HostAuthorityKey>,
-        new_task_key: impl Into<String>,
-        new_family_key: impl Into<String>,
-        new_host_key: HostScopeKey,
-    ) -> Result<(), CleanupBudgetError> {
-        self.reattribute_for_family(token, new_task_key, new_family_key, new_host_key)
     }
 
     /// Releases an exact token after cleanup proof.  Missing and stale tokens
@@ -488,8 +489,11 @@ where
 
     pub(crate) fn snapshot(&self) -> CleanupBudgetSnapshot<HostScopeKey> {
         let state = self.state();
+        #[cfg(test)]
         let mut lane_tokens = 0;
+        #[cfg(test)]
         let mut host_tokens = 0;
+        #[cfg(test)]
         for key in state.entries.keys() {
             match key {
                 CleanupTokenKey::Lane(_) => lane_tokens += 1,
@@ -553,7 +557,9 @@ where
             tasks,
             families,
             hosts,
+            #[cfg(test)]
             lane_tokens,
+            #[cfg(test)]
             host_tokens,
         }
     }

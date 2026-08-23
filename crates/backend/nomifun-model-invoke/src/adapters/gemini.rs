@@ -19,9 +19,11 @@ use crate::adapter::ProtocolAdapter;
 use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
 use crate::transport::{
-    ImageResponseBudget, MAX_IMAGE_RESPONSE_IMAGES, encode_b64, error_from_response,
-    inline_image_response_body_limit, post_json, read_json_capped, validate_image_request_count,
+    ImageResponseBudget, encode_b64, error_from_response, inline_image_response_body_limit,
+    post_json, read_json_capped, validate_image_request_count,
 };
+#[cfg(test)]
+use crate::transport::MAX_IMAGE_RESPONSE_IMAGES;
 use crate::types::{
     InputAsset, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult,
 };
@@ -177,6 +179,7 @@ pub(crate) fn build_generate_content_body(prompt: &str, inputs: &[InputAsset]) -
 /// Parse `candidates[].content.parts[].inlineData{mimeType,data}` into image
 /// artifacts. Accepts both camelCase (`inlineData`/`mimeType`) and snake_case
 /// (`inline_data`/`mime_type`) shapes. Pure — unit tested.
+#[cfg(test)]
 pub(crate) fn parse_gemini_assets(value: &Value) -> Result<Vec<ProducedAsset>, InvokeError> {
     let mut budget = ImageResponseBudget::new(MAX_IMAGE_RESPONSE_IMAGES)?;
     parse_gemini_assets_with_budget(value, &mut budget, MAX_IMAGE_RESPONSE_IMAGES)

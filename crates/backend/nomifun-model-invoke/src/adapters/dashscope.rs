@@ -34,10 +34,11 @@ use crate::call::{ResolvedCall, resolve_endpoint};
 use crate::error::{InvokeError, InvokeErrorKind};
 use crate::manifest::expand_protocol_endpoint_template;
 use crate::transport::{
-    ImageResponseBudget, MAX_IMAGE_METADATA_RESPONSE_BYTES, MAX_IMAGE_RESPONSE_IMAGES,
-    error_from_response, get_request, read_json_capped, send_with_rotation,
-    validate_image_request_count,
+    ImageResponseBudget, MAX_IMAGE_METADATA_RESPONSE_BYTES, error_from_response, get_request,
+    read_json_capped, send_with_rotation, validate_image_request_count,
 };
+#[cfg(test)]
+use crate::transport::MAX_IMAGE_RESPONSE_IMAGES;
 use crate::types::{
     JobHandle, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult,
 };
@@ -225,6 +226,7 @@ pub(crate) enum DashScopeTaskState {
 /// `output.results[].url`; FAILED/CANCELED reports `output.message` |
 /// `output.code` | the status itself. Unknown/absent statuses keep waiting.
 /// Pure — unit tested.
+#[cfg(test)]
 pub(crate) fn parse_task_status(value: &Value) -> Result<DashScopeTaskState, InvokeError> {
     parse_task_status_limited(value, MAX_IMAGE_RESPONSE_IMAGES)
 }

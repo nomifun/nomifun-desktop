@@ -902,6 +902,7 @@ pub(crate) struct BrowserShutdownCoordinator {
 
 #[cfg(feature = "browser-use")]
 impl BrowserShutdownCoordinator {
+    #[cfg(test)]
     fn new(hub: Arc<nomifun_browser_platform::BrowserSessionHub>) -> Self {
         Self {
             hub,

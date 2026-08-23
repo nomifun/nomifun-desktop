@@ -370,6 +370,7 @@ impl ReliableEventTaskBudget {
 
     /// Direct legacy `from_launched` callers have one Host and no trusted
     /// cross-Host task identity, so they receive one non-shareable authority.
+    #[cfg(test)]
     pub(crate) fn new_opaque() -> Arc<Self> {
         Self::new_with_limits(
             RELIABLE_TASK_EVENT_CAPACITY,

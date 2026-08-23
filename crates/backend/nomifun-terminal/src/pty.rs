@@ -356,6 +356,9 @@ fn command_with_locale_precedence(
     args: Vec<String>,
     env: &HashMap<String, String>,
 ) -> CommandSpec {
+    #[cfg(not(unix))]
+    let _ = env;
+
     #[cfg(unix)]
     {
         // Process requests inherit the backend environment. Preserve the old

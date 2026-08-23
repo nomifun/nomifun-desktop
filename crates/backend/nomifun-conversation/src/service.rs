@@ -13965,62 +13965,6 @@ fn reject_retired_skill_extra_keys(extra: &serde_json::Value) -> Result<(), AppE
     }
 }
 
-/// Persist the agent's session key into `conversation.extra.sessionKey`.
-///
-/// Called after send_message completes so the session can be resumed
-/// when the user re-enters this conversation later.
-async fn persist_session_key(repo: &Arc<dyn IConversationRepository>, conversation_id: &str, session_key: &str) {
-    let Ok(conv_id) = parse_conv_id(conversation_id) else {
-        return;
-    };
-    let row = match repo.get(conv_id).await {
-        Ok(Some(r)) => r,
-        _ => return,
-    };
-
-    let mut extra: serde_json::Value =
-        match serde_json::from_str::<serde_json::Value>(&row.extra) {
-        Ok(extra) if extra.is_object() => extra,
-        Ok(_) => {
-            warn!(conversation_id, "Refusing to persist session key: conversation extra is not an object");
-            return;
-        }
-        Err(error) => {
-            warn!(
-                conversation_id,
-                error = %ErrorChain(&error),
-                "Refusing to persist session key over invalid conversation extra JSON"
-            );
-            return;
-        }
-    };
-
-    if extra.get("sessionKey").and_then(|v| v.as_str()) == Some(session_key) {
-        return;
-    }
-
-    extra["sessionKey"] = serde_json::Value::String(session_key.to_owned());
-
-    let extra_json = match serde_json::to_string(&extra) {
-        Ok(j) => j,
-        Err(e) => {
-            warn!(conversation_id, error = %ErrorChain(&e), "Failed to serialize extra for session key persist");
-            return;
-        }
-    };
-
-    let update = ConversationRowUpdate {
-        extra: Some(extra_json),
-        updated_at: Some(now_ms()),
-        ..Default::default()
-    };
-    if let Err(e) = repo.update(conv_id, &update).await {
-        warn!(conversation_id, error = %ErrorChain(&e), "Failed to persist session key");
-    } else {
-        debug!(conversation_id, "Persisted session key to conversation.extra");
-    }
-}
-
 /// Merge `patch` into `base` (top-level key overwrite).
 fn merge_json(base: &mut serde_json::Value, patch: &serde_json::Value) {
     if let (Some(base_obj), Some(patch_obj)) = (base.as_object_mut(), patch.as_object()) {

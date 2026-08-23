@@ -126,6 +126,7 @@ struct BrowserCleanupTestControl {
 #[derive(Clone)]
 struct GatewayBodyReadAdmission {
     slots: Arc<Semaphore>,
+    #[cfg(test)]
     capacity: usize,
 }
 
@@ -157,6 +158,7 @@ impl GatewayBodyReadAdmission {
         let capacity = cpu_capacity.min(memory_capacity).max(1);
         Self {
             slots: Arc::new(Semaphore::new(capacity)),
+            #[cfg(test)]
             capacity,
         }
     }

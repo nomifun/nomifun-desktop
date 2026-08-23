@@ -458,7 +458,7 @@ impl StdioTransport {
     /// Spawn a child process with the default handshake params and a private
     /// cleanup registry. Test-only convenience: production spawning goes
     /// through [`Self::spawn_with_cleanup_registry`] (see `McpManager`).
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     async fn spawn(
         command: &str,
         args: &[String],
