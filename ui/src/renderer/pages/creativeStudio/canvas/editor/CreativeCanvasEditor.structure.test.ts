@@ -56,7 +56,7 @@ describe('CreativeCanvasEditor composition contract', () => {
       'canvasSaveRequiresUnloadGuard',
       "event.returnValue = ''",
       'saveController.queue(projectDocumentFromCanvasState(nextBase, stateRef.current))',
-      'flush: () => saveController.flush()',
+      'flush: flushCanvasPersistence',
       'reloadRemote',
       "throw new Error('Creative canvas is read-only')",
       'showSaveState',
@@ -67,6 +67,24 @@ describe('CreativeCanvasEditor composition contract', () => {
     }
     expect(saveSource.includes("kind === 'revision-conflict'")).toBe(true);
     expect(saveSource.includes('expectedRevision')).toBe(true);
+  });
+
+  test('coalesces interaction persistence and memoizes graph render layers', () => {
+    for (const token of [
+      'shouldDeferPersistence',
+      'schedulePersistence',
+      'flushScheduledPersistence',
+      'INTERACTION_SAVE_IDLE_MS',
+      'const nodeLayer = useMemo',
+      'const edgeLayer = useMemo',
+    ]) {
+      expect(editorSource.includes(token)).toBe(true);
+    }
+    expect(
+      editorSource.includes(
+        'saveController.queue(projectDocumentFromCanvasState(base, next));'
+      )
+    ).toBe(true);
   });
 
   test('owns pointer, wheel, and keyboard controller wiring', () => {
