@@ -81,10 +81,11 @@ describe('standalone workbench product wiring', () => {
     expect(videoCss.includes('background: #171717')).toBe(false);
   });
 
-  test('keeps recovery retryable and fences stale task-load hydration', () => {
+  test('keeps recovery retryable and removes the unused result-card load path', () => {
     expect(image.includes('重试任务同步')).toBe(true);
     expect(video.includes('重试任务同步')).toBe(true);
-    expect(image.includes('loadGenerationRef.current !== generation')).toBe(true);
+    expect(image.includes('loadGenerationRef')).toBe(false);
+    expect(image.includes('onLoadResult')).toBe(false);
     expect(video.includes('loadGenerationRef.current !== generation')).toBe(true);
     expect(image.includes('creativeTaskClient.cancel(creativeTaskReference(task))')).toBe(true);
     expect(video.includes('creativeTaskClient.cancel(creativeTaskReference(task))')).toBe(true);

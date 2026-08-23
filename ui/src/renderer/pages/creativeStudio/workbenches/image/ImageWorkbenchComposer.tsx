@@ -43,6 +43,9 @@ interface ImageWorkbenchComposerProps {
   references: readonly ImageWorkbenchReference[];
   settings: ImageWorkbenchSettings;
   modelOptions: readonly ImageWorkbenchModelOption[];
+  aspectRatioOptions?: readonly ImageWorkbenchAspectRatioOption[];
+  dimensionsDisabled?: boolean;
+  maxCount?: number;
   modelSlot?: React.ReactNode;
   task: ImageWorkbenchTaskSummary;
   disabled?: boolean;
@@ -68,8 +71,8 @@ interface ImageWorkbenchComposerProps {
 const clampDimension = (value: number | undefined): number =>
   Math.max(1, Math.min(8192, Math.floor(value || 1)));
 
-const clampCount = (value: number | undefined): number =>
-  Math.max(1, Math.min(10, Math.floor(value || 1)));
+const clampCount = (value: number | undefined, maximum = 10): number =>
+  Math.max(1, Math.min(maximum, Math.floor(value || 1)));
 
 const LayoutSwitch: React.FC<{
   layout: ImageWorkbenchLayout;
@@ -175,6 +178,9 @@ interface SettingsFieldsProps {
   compact?: boolean;
   settings: ImageWorkbenchSettings;
   modelOptions: readonly ImageWorkbenchModelOption[];
+  aspectRatioOptions: readonly ImageWorkbenchAspectRatioOption[];
+  dimensionsDisabled: boolean;
+  maxCount: number;
   modelSlot?: React.ReactNode;
   disabled?: boolean;
   onModelChange(model: ImageWorkbenchModelIdentity | null): void;
@@ -189,6 +195,9 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
   compact,
   settings,
   modelOptions,
+  aspectRatioOptions,
+  dimensionsDisabled,
+  maxCount,
   modelSlot,
   disabled,
   onModelChange,
@@ -199,6 +208,7 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
   onCountChange,
 }) => {
   const modelValue = settings.model ? imageWorkbenchModelKey(settings.model) : undefined;
+  const dimensionsTitle = dimensionsDisabled ? '当前模型仅支持已列出的尺寸' : undefined;
   return (
     <div className={compact ? styles.compactSettings : styles.settingsStack}>
       {modelSlot ? (
@@ -250,27 +260,27 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
 
       {compact ? (
         <>
-          <label className={styles.field}>
+          <label className={styles.field} title={dimensionsTitle}>
             <span>宽度</span>
             <InputNumber
               value={settings.width ?? undefined}
               min={1}
               max={8192}
               placeholder='自动'
-              disabled={disabled || settings.width === null}
+              disabled={disabled || dimensionsDisabled || settings.width === null}
               onChange={(value) =>
                 onDimensionsChange({ width: clampDimension(value), height: settings.height })
               }
             />
           </label>
-          <label className={styles.field}>
+          <label className={styles.field} title={dimensionsTitle}>
             <span>高度</span>
             <InputNumber
               value={settings.height ?? undefined}
               min={1}
               max={8192}
               placeholder='自动'
-              disabled={disabled || settings.height === null}
+              disabled={disabled || dimensionsDisabled || settings.height === null}
               onChange={(value) =>
                 onDimensionsChange({ width: settings.width, height: clampDimension(value) })
               }
@@ -282,13 +292,13 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
               value={settings.aspectRatio}
               disabled={disabled}
               onChange={(value) => {
-                const option = DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS.find(
+                const option = aspectRatioOptions.find(
                   (candidate) => candidate.value === value
                 );
                 if (option) onAspectRatioChange(option);
               }}
             >
-              {DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS.map((option) => (
+              {aspectRatioOptions.map((option) => (
                 <Select.Option key={option.value} value={option.value} disabled={option.disabled}>
                   {option.label}
                 </Select.Option>
@@ -312,11 +322,11 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
           <label className={styles.field}>
             <span>数量</span>
             <InputNumber
-              value={settings.count}
+              value={Math.min(settings.count, maxCount)}
               min={1}
-              max={10}
+              max={maxCount}
               disabled={disabled}
-              onChange={(value) => onCountChange(clampCount(value))}
+              onChange={(value) => onCountChange(clampCount(value, maxCount))}
             />
           </label>
         </>
@@ -340,7 +350,7 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
             </div>
           </div>
 
-          <div className={styles.settingGroup}>
+          <div className={styles.settingGroup} title={dimensionsTitle}>
             <span className={styles.settingLabel}>尺寸</span>
             <div className={styles.dimensionGrid}>
               <label>
@@ -350,7 +360,7 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
                   min={1}
                   max={8192}
                   placeholder='自动'
-                  disabled={disabled || settings.width === null}
+                  disabled={disabled || dimensionsDisabled || settings.width === null}
                   onChange={(value) =>
                     onDimensionsChange({ width: clampDimension(value), height: settings.height })
                   }
@@ -364,7 +374,7 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
                   min={1}
                   max={8192}
                   placeholder='自动'
-                  disabled={disabled || settings.height === null}
+                  disabled={disabled || dimensionsDisabled || settings.height === null}
                   onChange={(value) =>
                     onDimensionsChange({ width: settings.width, height: clampDimension(value) })
                   }
@@ -376,7 +386,7 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
           <div className={styles.settingGroup}>
             <span className={styles.settingLabel}>宽高比</span>
             <div className={styles.aspectGrid}>
-              {DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS.map((option) => (
+              {aspectRatioOptions.map((option) => (
                 <button
                   key={option.value}
                   type='button'
@@ -402,26 +412,28 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
 
           <div className={styles.settingGroup}>
             <span className={styles.settingLabel}>生成张数</span>
-            <div className={styles.countGrid}>
-              {[1, 2, 3, 4].map((count) => (
-                <button
-                  key={count}
-                  type='button'
-                  className={styles.optionPill}
-                  data-selected={settings.count === count}
-                  disabled={disabled}
-                  onClick={() => onCountChange(count)}
-                >
-                  {count} 张
-                </button>
-              ))}
+            <div className={styles.countGrid} data-max-count={maxCount}>
+              {[1, 2, 3, 4]
+                .filter((count) => count <= maxCount)
+                .map((count) => (
+                  <button
+                    key={count}
+                    type='button'
+                    className={styles.optionPill}
+                    data-selected={settings.count === count}
+                    disabled={disabled}
+                    onClick={() => onCountChange(count)}
+                  >
+                    {count} 张
+                  </button>
+                ))}
               <InputNumber
-                value={settings.count}
+                value={Math.min(settings.count, maxCount)}
                 min={1}
-                max={10}
+                max={maxCount}
                 disabled={disabled}
                 aria-label='自定义生成张数'
-                onChange={(value) => onCountChange(clampCount(value))}
+                onChange={(value) => onCountChange(clampCount(value, maxCount))}
               />
             </div>
           </div>
@@ -439,6 +451,9 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
     references,
     settings,
     modelOptions,
+    aspectRatioOptions = DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS,
+    dimensionsDisabled = false,
+    maxCount = 10,
     modelSlot,
     task,
     disabled,
@@ -520,6 +535,9 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
             compact
             settings={settings}
             modelOptions={modelOptions}
+            aspectRatioOptions={aspectRatioOptions}
+            dimensionsDisabled={dimensionsDisabled}
+            maxCount={maxCount}
             modelSlot={modelSlot}
             disabled={disabled}
             onModelChange={onModelChange}
@@ -616,6 +634,9 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
             <SettingsFields
               settings={settings}
               modelOptions={modelOptions}
+              aspectRatioOptions={aspectRatioOptions}
+              dimensionsDisabled={dimensionsDisabled}
+              maxCount={maxCount}
               modelSlot={modelSlot}
               disabled={disabled}
               onModelChange={onModelChange}

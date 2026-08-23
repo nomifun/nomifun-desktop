@@ -10,6 +10,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import ImageWorkbench from './ImageWorkbench';
 import {
+  imageWorkbenchSizePolicyForModel,
   imageWorkbenchModelKey,
   nextImageWorkbenchSelection,
   parseImageWorkbenchModelKey,
@@ -148,7 +149,7 @@ describe('ImageWorkbench visual states', () => {
         id: 'result-3',
         taskId: 'task-3',
         status: 'failed',
-        errorMessage: '模型暂时不可用',
+        errorMessage: 'provider returned 400 Bad Request: {"error":{"message":"size 不支持，当前模型支持的 size..."}}',
       },
       {
         ...resultBase,
@@ -172,7 +173,10 @@ describe('ImageWorkbench visual states', () => {
     expect(html.includes('生成中')).toBe(true);
     expect(html.includes('生成失败')).toBe(true);
     expect(html.includes('已取消')).toBe(true);
-    expect(html.includes('模型暂时不可用')).toBe(true);
+    expect(html.includes('provider returned 400 Bad Request')).toBe(true);
+    expect(html.includes('复制完整报错信息')).toBe(true);
+    const css = readFileSync(new URL('./ImageWorkbench.module.css', import.meta.url), 'utf8');
+    expect(/\.failureMessage\s*\{[\s\S]*?-webkit-line-clamp:\s*2;/.test(css)).toBe(true);
     expect(html.includes('用户已取消任务')).toBe(true);
     expect(html.includes('data-provider-id="provider-a"')).toBe(true);
     expect(html.includes('data-model="image-model"')).toBe(true);
@@ -207,7 +211,17 @@ describe('ImageWorkbench visual states', () => {
     expect(html.includes('https://media.invalid/result.png')).toBe(true);
     expect(html.includes('生成的未来城市')).toBe(true);
     expect(html.includes('1536 × 1024 · 2.4 MB')).toBe(true);
+    expect(html.includes('复制提示词')).toBe(true);
     expect(html.includes('data:image')).toBe(false);
+  });
+
+  test('removes the result-card load action completely', () => {
+    const html = renderWorkbench({
+      results: [{ ...resultBase, status: 'succeeded', outputs: [] }],
+    });
+    const resultsSource = readFileSync(new URL('./ImageWorkbenchResults.tsx', import.meta.url), 'utf8');
+    expect(html.includes('载入')).toBe(false);
+    expect(resultsSource.includes('onLoadResult')).toBe(false);
   });
 
   test('keeps queued and canceled task summaries distinct from running and failed', () => {
@@ -237,6 +251,38 @@ describe('ImageWorkbench visual states', () => {
     expect(html.includes('选择结果 terminal-task')).toBe(true);
     expect(html.includes('从历史移除 terminal-task')).toBe(true);
     expect(html.includes('移除 1')).toBe(true);
+  });
+});
+
+describe('ImageWorkbench model size policies', () => {
+  test('maps StepFun display dimensions to its native height-by-width enum', () => {
+    const policy = imageWorkbenchSizePolicyForModel({
+      platform: 'stepfun',
+      protocol: 'stepfun.images',
+      model: 'step-image-edit-2',
+    });
+    expect(policy.allowCustomDimensions).toBe(false);
+    expect(policy.maxCount).toBe(1);
+    expect(policy.options.find((option) => option.value === '16:9')).toMatchObject({
+      width: 1360,
+      height: 768,
+      requestSize: '768x1360',
+    });
+    expect(policy.options.find((option) => option.value === '9:16')).toMatchObject({
+      width: 768,
+      height: 1360,
+      requestSize: '1360x768',
+    });
+  });
+
+  test('keeps custom dimensions for non-StepFun models', () => {
+    const policy = imageWorkbenchSizePolicyForModel({
+      platform: 'custom',
+      protocol: 'custom.images',
+      model: 'custom-image',
+    });
+    expect(policy.allowCustomDimensions).toBe(true);
+    expect(policy.maxCount).toBe(10);
   });
 });
 

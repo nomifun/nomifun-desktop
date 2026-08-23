@@ -31,6 +31,10 @@ use crate::types::{
 pub const ADAPTER_ID: &str = "stepfun.images";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+const STEPFUN_IMAGE_EDIT_2_SIZES: &[&str] =
+    &["1024x1024", "768x1360", "896x1184", "1360x768", "1184x896"];
+const STEPFUN_STEP_2X_LARGE_SIZES: &[&str] =
+    &["256x256", "512x512", "768x768", "1024x1024", "1280x800", "800x1280"];
 /// Adapter-local capability metadata. It may describe UI/editor policy, but it
 /// is never a provider request field and therefore must be stripped at every
 /// passthrough layer.
@@ -83,6 +87,7 @@ async fn submit_generation(
 
     let mut body = Map::new();
     merge_provider_options(&mut body, &call.model_params, &req.extra);
+    validate_effective_generation_size(call, &body, req.size.as_deref())?;
 
     // Typed task fields win over configured/request defaults. `quality` is
     // deliberately ignored: it is not part of StepFun's typed image contract,
@@ -121,16 +126,12 @@ async fn submit_edit(
     merge_provider_options(&mut options, &call.model_params, &req.extra);
     // Multipart fields cannot be overwritten by appending a duplicate field,
     // so remove provider values owned by the typed task before building it.
-    for typed_field in ["model", "prompt", "image", "mask"] {
+    for typed_field in ["model", "prompt", "image", "mask", "size"] {
         options.remove(typed_field);
     }
     if options.contains_key("n") {
         options.insert("n".into(), Value::from(req.count));
     }
-    if let Some(size) = req.size.as_deref().map(str::trim).filter(|size| !size.is_empty()) {
-        options.insert("size".into(), Value::String(size.to_owned()));
-    }
-
     let build_form = || -> Result<Form, InvokeError> {
         let part = Part::bytes(image.bytes.clone())
             .file_name(format!("image.{}", extension_for_mime(&image.mime)))
@@ -189,6 +190,54 @@ fn validate_single_output(count: u32) -> Result<(), InvokeError> {
             format!("StepFun image APIs currently support exactly one output, got count={count}"),
         ))
     }
+}
+
+fn validate_effective_generation_size(
+    call: &ResolvedCall,
+    provider_options: &Map<String, Value>,
+    typed_size: Option<&str>,
+) -> Result<(), InvokeError> {
+    let typed_size = typed_size
+        .map(str::trim)
+        .filter(|size| !size.is_empty());
+    let size = if typed_size.is_some() {
+        typed_size
+    } else {
+        let configured_size = provider_options.get("size").map(|value| {
+            value.as_str().ok_or_else(|| {
+                InvokeError::new(
+                    InvokeErrorKind::InvalidParams,
+                    "StepFun image generation size must be a string",
+                )
+            })
+        });
+        match configured_size {
+            Some(value) => Some(value?.trim()),
+            None => None,
+        }
+    };
+    let Some(size) = size else {
+        return Ok(());
+    };
+    let supported = match call.model.as_str() {
+        "step-image-edit-2" => Some(STEPFUN_IMAGE_EDIT_2_SIZES),
+        "step-2x-large" => Some(STEPFUN_STEP_2X_LARGE_SIZES),
+        _ => None,
+    };
+    if let Some(supported) = supported
+        && !supported.contains(&size)
+    {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            format!(
+                "StepFun model {} does not support size {}; supported sizes: {}",
+                call.model,
+                size,
+                supported.join(", ")
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_edit_inputs(req: &ImageEditRequest) -> Result<&crate::types::InputAsset, InvokeError> {
@@ -314,7 +363,13 @@ fn classify_body_error(error: &Value) -> InvokeError {
         InvokeErrorKind::Auth
     } else if signal.contains("content") && (signal.contains("filter") || signal.contains("policy")) {
         InvokeErrorKind::ContentPolicy
-    } else if signal.contains("invalid") || signal.contains("parameter") || signal.contains("argument") {
+    } else if signal.contains("invalid")
+        || signal.contains("parameter")
+        || signal.contains("argument")
+        || signal.contains("unsupported")
+        || signal.contains("not support")
+        || signal.contains("不支持")
+    {
         InvokeErrorKind::InvalidParams
     } else {
         InvokeErrorKind::ProviderError
@@ -337,10 +392,14 @@ mod tests {
     }
 
     fn generation(count: u32, extra: Value) -> TaskRequest {
+        generation_with_size(count, Some("1024x1024"), extra)
+    }
+
+    fn generation_with_size(count: u32, size: Option<&str>, extra: Value) -> TaskRequest {
         TaskRequest::ImageGeneration(ImageGenRequest {
             prompt: "采菊东篱下".into(),
             count,
-            size: Some("1024x1024".into()),
+            size: size.map(str::to_owned),
             // This OpenAI-only field must never reach StepFun.
             quality: Some("hd".into()),
             extra,
@@ -526,6 +585,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn known_stepfun_models_reject_unsupported_sizes_before_network() {
+        let call = generation_call(
+            "https://example.invalid/v1",
+            "stepfun",
+            "step-image-edit-2",
+            generation_with_size(1, None, json!({})),
+        );
+        let error =
+            validate_effective_generation_size(&call, &Map::new(), Some("1536x1024"))
+                .unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+        assert!(error.message.contains("768x1360"));
+
+        for size in ["1024x1024", "768x1360", "896x1184", "1360x768", "1184x896"] {
+            validate_effective_generation_size(&call, &Map::new(), Some(size))
+                .expect("documented step-image-edit-2 size should be accepted");
+        }
+    }
+
+    #[test]
+    fn typed_size_wins_over_malformed_configured_size() {
+        let call = generation_call(
+            "https://example.invalid/v1",
+            "stepfun",
+            "step-image-edit-2",
+            generation_with_size(1, Some("768x1360"), json!({})),
+        );
+        let mut provider_options = Map::new();
+        provider_options.insert("size".into(), json!(1024));
+        validate_effective_generation_size(&call, &provider_options, Some("768x1360"))
+            .expect("typed size should take precedence over malformed defaults");
+    }
+
     #[tokio::test]
     async fn resolved_task_and_typed_request_must_match() {
         let mut call = generation_call(
@@ -585,7 +678,10 @@ mod tests {
             &format!("{}/v1", server.uri()),
             "stepfun",
             "step-image-edit-2",
-            edit(vec![input("image", b"png-image", "image/png")], json!({})),
+            edit(
+                vec![input("image", b"png-image", "image/png")],
+                json!({"size": "1536x1024"}),
+            ),
         );
         call.model_params = json!({
             "endpoint": "/images/edits",
@@ -609,6 +705,7 @@ mod tests {
         ] {
             assert!(!body.contains(forbidden), "typed field was overridden: {forbidden}\n{body}");
         }
+        assert!(!body.contains("name=\"size\""), "StepFun edit must not send ineffective size");
     }
 
     #[tokio::test]

@@ -72,6 +72,35 @@ function catalog(...tasks: ModelTask[]): CreativeModelCatalogSnapshot {
   return { status: "ready", providers: [provider], error: null };
 }
 
+function stepfunImageCatalog(): CreativeModelCatalogSnapshot {
+  const provider: IProvider = {
+    id: PROVIDER_ID,
+    name: "StepFun",
+    enabled: true,
+    platform: "stepfun",
+    base_url: "https://api.stepfun.com/v1",
+    auth_scheme: "bearer",
+    has_credentials: true,
+    models: [
+      {
+        provider_id: PROVIDER_ID,
+        model: "step-image-edit-2",
+        enabled: true,
+        sort_order: 0,
+        capabilities: [
+          {
+            ...capability("image_generation"),
+            protocol: "stepfun.images",
+          },
+        ],
+        created_at: 1,
+        updated_at: 1,
+      },
+    ],
+  };
+  return { status: "ready", providers: [provider], error: null };
+}
+
 const assets: CreativeAssetPort = {
   list: async () => ({ items: [], total: 0 }),
   upload: async () => {
@@ -87,7 +116,12 @@ const assets: CreativeAssetPort = {
 function task(
   input: CreateCreativeTaskInput,
   status: CreativeTask["status"],
-  options: { assetId?: string; error?: string; taskId?: string } = {},
+  options: {
+    assetId?: string;
+    error?: string;
+    errorKind?: string;
+    taskId?: string;
+  } = {},
 ): CreativeTask {
   return {
     ...input,
@@ -96,7 +130,7 @@ function task(
     error:
       status === "failed"
         ? {
-            kind: "provider",
+            kind: options.errorKind ?? "provider",
             message: options.error ?? "provider failed",
             httpStatus: 500,
           }
@@ -616,6 +650,33 @@ describe("Creative workbench planning and presentation boundaries", () => {
     });
   });
 
+  test("does not offer a retry for deterministic image parameter failures", () => {
+    const plan = imagePlan();
+    const failed = task(plan.input, "failed", {
+      errorKind: "invalid_params",
+      error: "StepFun model step-image-edit-2 does not support size 1536x1024",
+    });
+    const snapshot: CreativeWorkbenchRuntimeSnapshot = {
+      state: "failed",
+      entries: [
+        {
+          order: 0,
+          task: failed,
+          outputs: [],
+          requestError: null,
+          retryInput: plan.input,
+          outputKind: "image",
+        },
+      ],
+      submissionFailures: [],
+      submittingCount: 0,
+      recoveringCount: 0,
+      requestError: null,
+    };
+
+    expect(mapImageWorkbenchRuntimeResults(snapshot)[0]?.retryable).toBe(false);
+  });
+
   test("rejects non-image objects instead of inventing image reference previews", () => {
     const audio: CreativeAsset = {
       id: ASSET_A,
@@ -703,6 +764,42 @@ describe("Creative workbench planning and presentation boundaries", () => {
     expect(retry.input.parameters).toEqual(plan.input.parameters);
     expect(retry.input.inputs).toEqual(plan.input.inputs);
     expect(retry.input.idempotencyKey).not.toBe(plan.input.idempotencyKey);
+  });
+
+  test("projects StepFun dimensions into the provider-native size contract", () => {
+    const base = {
+      catalog: stepfunImageCatalog(),
+      owner: standaloneOwner("image"),
+      model: {
+        providerId: PROVIDER_ID,
+        model: "step-image-edit-2",
+      },
+      references: { bindings: [], assets: [] },
+      operation: { task: "image_generation" as const, capability: "t2i" as const },
+      prompt: "A wide landscape",
+      interfaceMode: "images" as const,
+      quality: "auto" as const,
+      width: 1360,
+      height: 768,
+      aspectRatio: "16:9",
+      count: 1,
+    };
+    const plan = prepareImageWorkbenchRun(base);
+    expect(plan.input.parameters).toMatchObject({
+      width: 1360,
+      height: 768,
+      size: "768x1360",
+    });
+
+    const unsupported = captureError(() =>
+      prepareImageWorkbenchRun({
+        ...base,
+        width: 1536,
+        height: 1024,
+        aspectRatio: "3:2",
+      })
+    );
+    expect(unsupported?.message.includes("does not support the requested dimensions")).toBe(true);
   });
 
   test("keeps audio cancellation enabled for an authoritative queued task", async () => {

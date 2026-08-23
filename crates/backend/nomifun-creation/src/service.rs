@@ -132,19 +132,24 @@ fn param_count(params: &Value) -> Result<u32, CreationError> {
     Ok(parsed.unwrap_or(1))
 }
 
-/// A `WxH` size string from `params.width`/`params.height`, or an explicit
-/// `params.size` string, else `None`.
+/// Resolve the provider-native size string. An explicit `params.size` wins
+/// over display dimensions because some providers use a different ordering
+/// (for example height × width) or a strict size enumeration.
 fn param_size(params: &Value) -> Option<String> {
+    if let Some(size) = params
+        .get("size")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(size.to_string());
+    }
     let w = params.get("width").and_then(|v| v.as_u64());
     let h = params.get("height").and_then(|v| v.as_u64());
     if let (Some(w), Some(h)) = (w, h) {
         return Some(format!("{w}x{h}"));
     }
-    params
-        .get("size")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .filter(|s| !s.trim().is_empty())
+    None
 }
 
 /// A non-empty string param (`params.{key}`), trimmed-empty treated as absent.
@@ -4263,6 +4268,12 @@ mod tests {
 
         let p2 = serde_json::json!({"size": "1024x1024", "count": MAX_IMAGE_OUTPUT_COUNT});
         assert_eq!(param_size(&p2).as_deref(), Some("1024x1024"));
+        let provider_ordered = serde_json::json!({
+            "width": 1360,
+            "height": 768,
+            "size": "768x1360"
+        });
+        assert_eq!(param_size(&provider_ordered).as_deref(), Some("768x1360"));
         assert_eq!(param_count(&p2).unwrap(), MAX_IMAGE_OUTPUT_COUNT);
         assert_eq!(param_count(&serde_json::json!({})).unwrap(), 1); // default
         assert_eq!(param_count(&serde_json::json!({"n": 4})).unwrap(), 4);
