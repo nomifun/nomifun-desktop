@@ -15,6 +15,7 @@ const editorStyles = readFileSync(
   new URL('./CreativeCanvasEditor.module.css', import.meta.url),
   'utf8'
 );
+const cullingSource = readFileSync(new URL('./viewportCulling.ts', import.meta.url), 'utf8');
 const saveSource = readFileSync(new URL('./casSaveController.ts', import.meta.url), 'utf8');
 
 describe('CreativeCanvasEditor composition contract', () => {
@@ -85,6 +86,25 @@ describe('CreativeCanvasEditor composition contract', () => {
         'saveController.queue(projectDocumentFromCanvasState(base, next));'
       )
     ).toBe(true);
+  });
+
+  test('culls only mounted world layers after measuring the viewport', () => {
+    for (const token of [
+      'computeCanvasViewportCulling',
+      'ResizeObserver',
+      'surfaceSize',
+      'containerSize: surfaceSize',
+      'requiredNodeIds: gestureRequiredNodeId',
+      'const renderedNodes = useMemo',
+      'const renderedConnections = useMemo',
+      'renderedNodes.map',
+      'renderedConnections.flatMap',
+      'miniMap={resolveSlot(miniMap, context)}',
+    ]) {
+      expect(editorSource.includes(token)).toBe(true);
+    }
+    expect(cullingSource.includes('DEFAULT_CANVAS_VIEWPORT_OVERSCAN_PX')).toBe(true);
+    expect(cullingSource.includes('return allItems(nodes, connections)')).toBe(true);
   });
 
   test('owns pointer, wheel, and keyboard controller wiring', () => {
