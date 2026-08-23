@@ -219,6 +219,7 @@ import {
   withCreativeCanvasLeftPanelOpen,
   withCreativeCanvasBottomView,
   withCreativeCanvasLeftView,
+  withCreativeCanvasRightPanelWidth,
   withCreativeCanvasRightView,
 } from './productController';
 import {
@@ -1020,6 +1021,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const handleRightViewChange = useCallback(
     (view: CreativeStudioPanelState['right']['activeView'] | null) => {
       persistPanels(withCreativeCanvasRightView(panelsRef.current, view));
+    },
+    [persistPanels]
+  );
+
+  const handleRightPanelWidthChange = useCallback(
+    (width: number) => {
+      persistPanels(
+        withCreativeCanvasRightPanelWidth(panelsRef.current, width)
+      );
     },
     [persistPanels]
   );
@@ -4306,6 +4316,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         leftOpen={panels.left.open}
         leftView={panelViews.left}
         rightView={panelViews.right}
+        rightPanelWidth={panels.right.width}
         bottomView={panelViews.bottom}
         backgroundMenuOpen={backgroundMenuOpen}
         compact={compact}
@@ -4320,6 +4331,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         onLeftPanelOpenChange={handleLeftPanelOpenChange}
         onLeftViewChange={handleLeftViewChange}
         onRightViewChange={handleRightViewChange}
+        onRightPanelWidthChange={handleRightPanelWidthChange}
         onBottomViewChange={handleBottomViewChange}
         slots={{
           canvas: (

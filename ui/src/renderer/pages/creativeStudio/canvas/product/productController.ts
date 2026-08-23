@@ -31,6 +31,22 @@ export interface CreativeCanvasProductPanelViews {
 
 export const CREATIVE_CANVAS_SOURCE_LEFT_PANEL_WIDTH = 280;
 export const CREATIVE_CANVAS_SOURCE_AGENT_PANEL_WIDTH = 390;
+export const CREATIVE_CANVAS_RIGHT_PANEL_MIN_WIDTH = 320;
+export const CREATIVE_CANVAS_RIGHT_PANEL_MAX_WIDTH = 560;
+
+export function clampCreativeCanvasRightPanelWidth(width: number): number {
+  return Math.round(
+    Math.max(
+      CREATIVE_CANVAS_RIGHT_PANEL_MIN_WIDTH,
+      Math.min(
+        CREATIVE_CANVAS_RIGHT_PANEL_MAX_WIDTH,
+        Number.isFinite(width)
+          ? width
+          : CREATIVE_CANVAS_SOURCE_AGENT_PANEL_WIDTH
+      )
+    )
+  );
+}
 
 export function creativeCanvasProductPanelViews(
   panels: CreativeStudioPanelState
@@ -79,11 +95,21 @@ export function withCreativeCanvasRightView(
     right: {
       ...panels.right,
       open: view !== null,
-      width:
-        view === 'assistant'
-          ? CREATIVE_CANVAS_SOURCE_AGENT_PANEL_WIDTH
-          : panels.right.width,
+      width: clampCreativeCanvasRightPanelWidth(panels.right.width),
       activeView: view ?? panels.right.activeView,
+    },
+  };
+}
+
+export function withCreativeCanvasRightPanelWidth(
+  panels: CreativeStudioPanelState,
+  width: number
+): CreativeStudioPanelState {
+  return {
+    ...panels,
+    right: {
+      ...panels.right,
+      width: clampCreativeCanvasRightPanelWidth(width),
     },
   };
 }

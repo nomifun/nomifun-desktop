@@ -25,6 +25,10 @@ await canvasTestI18n.use(initReactI18next).init({
             chrome: {
               backgroundLabel:
                 "creativeStudio.canvas.chrome.backgroundLabel {{background}}",
+              resetRightPanelWidth:
+                "creativeStudio.canvas.chrome.resetRightPanelWidth",
+              resizeRightPanel:
+                "creativeStudio.canvas.chrome.resizeRightPanel",
             },
             editor: {
               resizeHandle:
