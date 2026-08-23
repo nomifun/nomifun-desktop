@@ -21,6 +21,8 @@ import {
 } from '@renderer/pages/creativeStudio/app/routes';
 import { requestCreativeStudioBeforeLeave } from '@renderer/pages/creativeStudio/app/beforeLeave';
 import {
+  normalizeCreativeStudioCanvasesResumeLocation,
+  readCreativeStudioCanvasesResumeLocation,
   readCreativeStudioResumeLocation,
   rememberCreativeStudioResumeLocation,
 } from '@renderer/pages/creativeStudio/app/resumeLocation';
@@ -84,23 +86,36 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const { logout, status } = useAuth();
   const isSettings = pathname.startsWith('/settings');
   const isCreativeStudio = isCreativeStudioPath(pathname);
+  const currentPath = `${pathname}${search}${hash}`;
+  const currentCanvasesResumeLocation =
+    normalizeCreativeStudioCanvasesResumeLocation(currentPath);
   const lastNonSettingsPathRef = useRef('/guid');
   const lastCreativeStudioPathRef = useRef(readCreativeStudioResumeLocation());
+  const lastCreativeStudioCanvasesPathRef = useRef(
+    readCreativeStudioCanvasesResumeLocation()
+  );
   // Logout is a WebUI-only affordance: the bundled desktop shell (Electron or
   // Tauri) is single-user with no auth, so there is nothing to log out of.
   const showLogout = !isDesktopShell() && status === 'authenticated';
 
   useEffect(() => {
-    if (!pathname.startsWith('/settings')) {
-      lastNonSettingsPathRef.current = `${pathname}${search}${hash}`;
+    if (!isSettings) {
+      lastNonSettingsPathRef.current = currentPath;
     }
-  }, [pathname, search, hash]);
+  }, [currentPath, isSettings]);
+
+  const rememberCurrentCreativeStudioPath = useCallback(() => {
+    if (!isCreativeStudio) return;
+    lastCreativeStudioPathRef.current = rememberCreativeStudioResumeLocation(currentPath);
+    if (currentCanvasesResumeLocation) {
+      lastCreativeStudioCanvasesPathRef.current =
+        currentCanvasesResumeLocation;
+    }
+  }, [currentCanvasesResumeLocation, currentPath, isCreativeStudio]);
 
   useEffect(() => {
-    if (!isCreativeStudio) return;
-    const currentPath = `${pathname}${search}${hash}`;
-    lastCreativeStudioPathRef.current = rememberCreativeStudioResumeLocation(currentPath);
-  }, [hash, isCreativeStudio, pathname, search]);
+    rememberCurrentCreativeStudioPath();
+  }, [rememberCurrentCreativeStudioPath]);
 
   const navTo = useCallback(
     (target: string, replace = false) => {
@@ -143,10 +158,13 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleModelHubClick = () => navTo('/models');
   const handleCreativeStudioNavigation = useCallback(
     async (target: string, replace = false) => {
+      // Capture the committed detail route before an async save gate can
+      // navigate to a sibling section and overwrite the product-wide resume.
+      rememberCurrentCreativeStudioPath();
       if (!(await requestCreativeStudioBeforeLeave())) return;
       navTo(target, replace);
     },
-    [navTo]
+    [navTo, rememberCurrentCreativeStudioPath]
   );
   const handleReturnToWorkbench = useCallback(() => {
     void handleCreativeStudioNavigation(WORKBENCH_HOME_PATH, true);
@@ -223,6 +241,10 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
             <CreativeStudioSider
               collapsed={collapsed}
               tooltipEnabled={tooltipEnabled}
+              canvasesResumePath={
+                currentCanvasesResumeLocation ??
+                lastCreativeStudioCanvasesPathRef.current
+              }
               onNavigate={(target) => void handleCreativeStudioNavigation(target)}
             />
           </Suspense>

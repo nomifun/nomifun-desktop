@@ -28,7 +28,6 @@
 .agentIdentity,
 .composerFooter,
 .modelTrigger,
-.activityCard,
 .messageError {
   display: flex;
   align-items: center;
@@ -239,7 +238,6 @@
   font-size: 11px;
 }
 
-.activityCard,
 .messageError {
   max-width: 270px;
   gap: 8px;
@@ -249,6 +247,11 @@
   background: var(--color-bg-2);
   color: var(--color-text-2);
   font-size: 12px;
+}
+
+.thinkingStatus {
+  max-width: 100%;
+  margin: 0;
 }
 
 .messageError {

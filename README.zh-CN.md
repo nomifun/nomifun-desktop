@@ -217,7 +217,7 @@ Canvas，Image/Video 在零 Canvas 时也可以独立使用。Canvas 持久化�
 TTS。Canvas 文档使用 revision CAS，Canvas 任务可在重载后对账；版本 2 Canvas ZIP
 携带完整引用素材与 Director sidecar 闭包，同时继续支持版本 1 reader。独立任务 owner
 与历史只使用 `workbenchKind`；Image/Video 按工作台保存版本化 session 草稿，不绑定
-Canvas。UI/API contract version 为 21。最小 Workflow AI 只预览一次严格草稿，等待用户
+Canvas。UI/API contract version 为 22。最小 Workflow AI 只预览一次严格草稿，等待用户
 应用到编辑器后再显式保存；它不会创建公开模板、复杂会话或自动运行。
 
 ### 🧠 多 Agent 执行集群 —— 规划、调度与监督

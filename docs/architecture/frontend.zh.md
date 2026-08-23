@@ -130,7 +130,7 @@ alias 保留。Image/Video Workbench 没有 Canvas 选择器或父级加载门�
 历史与退役只使用 `workbenchKind`，旧 standalone `project_id` 只是 inert provenance。
 Gateway 当前的 Canvas capability 是 `nomi_creative_studio_list_canvases` 和
 `nomi_creative_studio_get_canvas`，旧项目命名 capability 是 deprecated alias。
-UI/API contract version 为 21。
+UI/API contract version 为 22。
 
 Canvas 导出使用 archive v2 writer，并继续保留 archive v1 reader。Image/Video 按工作台
 从浏览器 session storage 恢复版本化 session 草稿，草稿 key 不含 `projectId` 或

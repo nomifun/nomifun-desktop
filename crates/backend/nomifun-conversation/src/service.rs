@@ -44,9 +44,10 @@ use nomifun_common::{
 use nomifun_db::models::{ConversationRow, MessageRow};
 use nomifun_db::{
     AgentExecutionTurnAuthority, ConversationFilters, ConversationRowUpdate,
+    ConversationTurnAdmissionState, CreativeStudioConversationTurnAuthority,
     IAgentMetadataRepository, IConversationRepository, IMcpServerRepository, MessageDayBucket,
-    ConversationTurnAdmissionState, RequirementConversationTurnAuthority, SortOrder,
-    TurnLifecycleTransition, TurnReceiptCompletion,
+    RequirementConversationTurnAuthority, SortOrder, TurnLifecycleTransition,
+    TurnReceiptCompletion,
 };
 use nomifun_realtime::UserEventSink;
 use nomifun_runtime::resolve_command_path;
@@ -6824,6 +6825,7 @@ impl ConversationService {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -6862,6 +6864,7 @@ impl ConversationService {
             runtime_build_lease,
             true,
             false,
+            None,
             None,
             None,
             None,
@@ -6915,16 +6918,17 @@ impl ConversationService {
             conversation_id,
             &operation_id,
             req,
-                runtime_registry,
-                MessageSendAuthority::OwnerInteractive,
-                None,
-                None,
-                runtime_build_lease,
-                true,
-                false,
-                None,
-                None,
-                None,
+            runtime_registry,
+            MessageSendAuthority::OwnerInteractive,
+            None,
+            None,
+            runtime_build_lease,
+            true,
+            false,
+            None,
+            Some(idempotency_key),
+            None,
+            None,
         )
         .await
     }
@@ -7108,6 +7112,7 @@ impl ConversationService {
             Some(admission),
             None,
             None,
+            None,
         )
         .await
     }
@@ -7165,6 +7170,7 @@ impl ConversationService {
             runtime_build_lease,
             true,
             true,
+            None,
             None,
             None,
             None,
@@ -7479,6 +7485,7 @@ impl ConversationService {
                 true,
                 false,
                 None,
+                None,
                 Some(runtime_preparation),
                 Some(observer_tx),
             )
@@ -7516,6 +7523,7 @@ impl ConversationService {
         promote_before_execution: bool,
         initial_delivery: bool,
         truncated_continuation: Option<TruncatedContinuationAdmission>,
+        creative_studio_pending_turn_key: Option<&str>,
         runtime_preparation: Option<BackgroundTurnRuntimePreparation>,
         runtime_observer: Option<
             oneshot::Sender<(AgentRuntimeHandle, broadcast::Receiver<AgentStreamEvent>)>,
@@ -7549,6 +7557,14 @@ impl ConversationService {
         {
             return Err(AppError::Conflict(
                 "initial auto-delivery is restricted to an owner-interactive public turn"
+                    .to_owned(),
+            ));
+        }
+        if creative_studio_pending_turn_key.is_some()
+            && send_authority != MessageSendAuthority::OwnerInteractive
+        {
+            return Err(AppError::Conflict(
+                "Creative Studio pending-turn authority is restricted to owner-interactive sends"
                     .to_owned(),
             ));
         }
@@ -7668,6 +7684,48 @@ impl ConversationService {
             return Err(self.unproven_running_generation_error(&row));
         }
         let _ = owned_row;
+        runtime_build_lease.ensure_active()?;
+        let creative_studio_authority = match self
+            .conversation_repo
+            .find_creative_studio_agent_session_by_conversation(
+                user_id,
+                conversation_key,
+            )
+            .await?
+        {
+            Some(binding) => {
+                let pending_turn_idempotency_key = creative_studio_pending_turn_key
+                    .ok_or_else(|| {
+                        AppError::Conflict(
+                            "Creative Studio Agent conversations require their exact Canvas pending-turn key"
+                                .to_owned(),
+                        )
+                    })?;
+                if initial_delivery
+                    || truncated_continuation.is_some()
+                    || execution_authority.is_some()
+                    || autowork_authority.is_some()
+                    || send_authority != MessageSendAuthority::OwnerInteractive
+                    || req.hidden
+                    || req.origin.is_some()
+                    || req.channel_platform.is_some()
+                    || !req.files.is_empty()
+                {
+                    return Err(AppError::Conflict(
+                        "Creative Studio Agent turns must use the exclusive Canvas send contract"
+                            .to_owned(),
+                    ));
+                }
+                Some(CreativeStudioConversationTurnAuthority {
+                    project_id: binding.project_id,
+                    session_id: binding.session_id,
+                    pending_turn_idempotency_key: pending_turn_idempotency_key.to_owned(),
+                    model_input: req.content.clone(),
+                    skill_ids: req.inject_skills.clone(),
+                })
+            }
+            None => None,
+        };
         runtime_build_lease.ensure_active()?;
 
         // Snapshot the persistent generation immediately before admission.
@@ -7789,6 +7847,22 @@ impl ConversationService {
                             operation_id,
                             &candidate_message_id,
                             &request_payload,
+                            expected_admission_epoch,
+                            now_ms(),
+                        )
+                        .await
+                }
+                (None, None) if creative_studio_authority.is_some() => {
+                    self.conversation_repo
+                        .claim_creative_studio_turn_delivery_receipt_and_admit_with_candidate(
+                            user_id,
+                            conversation_key,
+                            operation_id,
+                            &candidate_message_id,
+                            &request_payload,
+                            creative_studio_authority
+                                .as_ref()
+                                .expect("Creative Studio authority checked above"),
                             expected_admission_epoch,
                             now_ms(),
                         )

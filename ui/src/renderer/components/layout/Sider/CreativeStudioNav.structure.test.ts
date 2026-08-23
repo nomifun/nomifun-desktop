@@ -23,9 +23,17 @@ describe('Creative Studio primary navigation', () => {
   test('owns the former workshop slot with one canonical product route', () => {
     expect(routesSource.includes("CREATIVE_STUDIO_ROOT_PATH = '/workshop'")).toBe(true);
     expect(siderSource.includes('lastCreativeStudioPathRef')).toBe(true);
+    expect(siderSource.includes('lastCreativeStudioCanvasesPathRef')).toBe(true);
     expect(siderSource.includes('readCreativeStudioResumeLocation()')).toBe(true);
+    expect(siderSource.includes('readCreativeStudioCanvasesResumeLocation()')).toBe(true);
     expect(siderSource.includes('rememberCreativeStudioResumeLocation(currentPath)')).toBe(true);
+    expect(
+      siderSource.includes(
+        'normalizeCreativeStudioCanvasesResumeLocation(currentPath)'
+      )
+    ).toBe(true);
     expect(siderSource.includes('navTo(lastCreativeStudioPathRef.current)')).toBe(true);
+    expect(siderSource.includes('canvasesResumePath={')).toBe(true);
     expect(siderSource.includes('isCreativeStudioPath(pathname)')).toBe(true);
     expect(siderSource.includes('<SiderCreativeStudioEntry')).toBe(true);
     expect(siderSource.includes('<CreativeStudioSider')).toBe(true);

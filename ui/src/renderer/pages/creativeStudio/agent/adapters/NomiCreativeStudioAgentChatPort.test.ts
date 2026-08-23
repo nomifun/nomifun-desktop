@@ -332,6 +332,57 @@ describe('NomiCreativeStudioAgentChatPort', () => {
     expect(transport.completedListeners.size).toBe(0);
   });
 
+  test('recovers a fresh active turn when the WebSocket start event was missed', async () => {
+    const transport = new FakeTransport();
+    transport.snapshots = [
+      idleSnapshot(),
+      idleSnapshot({ authority: 'processing', activeTurnId: turnId }),
+      idleSnapshot(),
+    ];
+    const port = createNomiCreativeStudioAgentChatPort({
+      resolveSession: matchingResolver({
+        history: (call) => (call === 0 ? history : recoveredHistory),
+      }),
+      transport,
+      recoveryPollMs: 10,
+      turnStartTimeoutMs: 100,
+    });
+
+    const events = await collect(
+      port.runTurn(request(new AbortController().signal))
+    );
+
+    expect(events).toEqual([
+      { type: 'activity', label: '连接同步中，Agent 已开始执行' },
+      { type: 'history-reconciled', history: recoveredHistory },
+      { type: 'completed', assistantMessageId },
+    ]);
+    expect(transport.sendCalls).toHaveLength(1);
+  });
+
+  test('recovers a fast completed turn when all WebSocket lifecycle events were missed', async () => {
+    const transport = new FakeTransport();
+    transport.snapshots = [idleSnapshot(), idleSnapshot()];
+    const port = createNomiCreativeStudioAgentChatPort({
+      resolveSession: matchingResolver({
+        history: (call) => (call === 0 ? history : recoveredHistory),
+      }),
+      transport,
+      recoveryPollMs: 10,
+      turnStartTimeoutMs: 100,
+    });
+
+    const events = await collect(
+      port.runTurn(request(new AbortController().signal))
+    );
+
+    expect(events).toEqual([
+      { type: 'history-reconciled', history: recoveredHistory },
+      { type: 'completed', assistantMessageId },
+    ]);
+    expect(transport.sendCalls).toHaveLength(1);
+  });
+
   test('rejects invalid durable planning envelopes before touching the transport', async () => {
     const cases: Array<{
       label: string;

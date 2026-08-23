@@ -3095,6 +3095,7 @@ export type I18nKey =
   | 'settings.apiEndpoint'
   | 'settings.apiKey'
   | 'settings.apiKeyCount'
+  | 'settings.apiKeyLoadFailed'
   | 'settings.apiKeyPlaceholder'
   | 'settings.appDescription'
   | 'settings.args'

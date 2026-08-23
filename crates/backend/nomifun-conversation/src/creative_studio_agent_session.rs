@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{ConversationService, CreativeStudioAgentCreationTarget, parse_provider_with_model};
 
+const CREATIVE_STUDIO_PLANNING_TURN_KIND: &str =
+    "nomifun.creative-studio.planning-turn";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CreativeStudioAgentHistoryRole {
@@ -219,6 +222,35 @@ fn content_text(row: &MessageRow) -> Result<String, AppError> {
         })
 }
 
+fn projected_user_text(row: &MessageRow) -> Result<String, AppError> {
+    let content = content_text(row)?;
+    let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return Ok(content);
+    };
+    if envelope.get("kind").and_then(serde_json::Value::as_str)
+        != Some(CREATIVE_STUDIO_PLANNING_TURN_KIND)
+    {
+        return Ok(content);
+    }
+    if envelope.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+        return Err(AppError::Internal(format!(
+            "Creative Studio Agent user message '{}' has an unsupported planning envelope version",
+            row.message_id
+        )));
+    }
+    let prompt = envelope
+        .get("userRequest")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            AppError::Internal(format!(
+                "Creative Studio Agent user message '{}' has no visible userRequest",
+                row.message_id
+            ))
+        })?;
+    Ok(prompt.to_owned())
+}
+
 fn message_turn_id(row: &MessageRow) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(&row.content)
         .ok()
@@ -287,7 +319,7 @@ fn project_completed_history(
                     id: row.message_id.clone(),
                     role: CreativeStudioAgentHistoryRole::User,
                     status: CreativeStudioAgentHistoryStatus::Complete,
-                    text: content_text(row)?,
+                    text: projected_user_text(row)?,
                     activity_label: None,
                     error_message: None,
                 });
@@ -692,6 +724,39 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[1].id, ASSISTANT_B);
         assert_eq!(history[1].text, "已经完成");
+    }
+
+    #[test]
+    fn projection_keeps_the_visible_prompt_out_of_the_internal_planning_envelope() {
+        let planning_envelope = serde_json::json!({
+            "kind": CREATIVE_STUDIO_PLANNING_TURN_KIND,
+            "version": 1,
+            "userRequest": "请整理当前画布",
+            "selectedSkills": ["creative-studio-canvas"],
+            "canvasContext": {
+                "canvasRevision": "7",
+                "nodes": [{ "id": "private-node", "details": { "text": "内部上下文" } }]
+            },
+            "responseContract": { "mode": "plan-and-propose" }
+        })
+        .to_string();
+        let history = project_completed_history(&[
+            row(
+                USER_ID,
+                "right",
+                serde_json::json!({ "content": planning_envelope }),
+            ),
+            row(
+                ASSISTANT_B,
+                "left",
+                serde_json::json!({ "content": "已完成", "turn_id": TURN_ID }),
+            ),
+        ])
+        .unwrap();
+
+        assert_eq!(history[0].text, "请整理当前画布");
+        assert!(!serialize_history(&history).unwrap().contains("private-node"));
+        assert!(!serialize_history(&history).unwrap().contains("responseContract"));
     }
 
     #[test]
