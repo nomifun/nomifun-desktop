@@ -111,6 +111,35 @@ fn creative_studio_planning_skills_are_safe_self_contained_proposals() {
     assert!(canvas.contains("Never emit `delete_node`"));
     assert!(canvas.contains("Never start image, video, or audio generation"));
     assert!(canvas.contains("应用到画布"));
+    assert!(canvas.contains("final bytes of the response"));
+    assert!(canvas.contains("Never nest an operation"));
+    assert_eq!(
+        canvas.matches("```json\n").count(),
+        1,
+        "Canvas Agent Skill must contain one canonical json opening fence"
+    );
+    assert_eq!(
+        canvas.matches("```").count(),
+        2,
+        "Canvas Agent Skill example must have one and only one fence pair"
+    );
+    let (_, canvas_fenced_tail) = canvas
+        .split_once("```json\n")
+        .expect("Canvas Agent Skill json opening fence");
+    let (canvas_example_json, _) = canvas_fenced_tail
+        .split_once("\n```")
+        .expect("Canvas Agent Skill json closing fence");
+    let canvas_example: Value = serde_json::from_str(canvas_example_json)
+        .expect("Canvas Agent Skill example must be valid JSON");
+    assert_eq!(
+        canvas_example["kind"],
+        "nomifun.creative-studio.canvas-ops/v1"
+    );
+    assert_eq!(canvas_example["ops"][0]["type"], "add_node");
+    assert_eq!(canvas_example["ops"][0]["node_type"], "text");
+    assert_eq!(canvas_example["ops"][0]["data"]["format"], "markdown");
+    assert_eq!(canvas_example["ops"][0]["data"]["fontSize"], 16);
+    assert_eq!(canvas_example["ops"][0]["data"]["textAlign"], "left");
     let workflow = read_to_string(root.join("creative-studio-workflow/SKILL.md"));
     assert!(workflow.contains("Do not save, run"));
     assert!(workflow.contains("Do not disguise arbitrary JSON"));

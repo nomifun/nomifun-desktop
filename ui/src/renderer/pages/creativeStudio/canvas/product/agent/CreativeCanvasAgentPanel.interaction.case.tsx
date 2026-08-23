@@ -20,6 +20,7 @@ import {
   parseMessageId,
   parseProviderId,
 } from '@/common/types/ids';
+import { BackendHttpError } from '@/common/adapter/httpBridge';
 import { serializeCreativeStudioAgentHistory } from '../../../agent/adapters';
 import type {
   CreativeStudioAgentChatPort,
@@ -58,6 +59,8 @@ const RECOVERED_PENDING_KEY =
   '0190f5fe-7c00-7a00-8000-000000000912';
 const MODEL = { providerId: PROVIDER_ID, model: 'qa-creative-chat' } as const;
 const PROMPT = '整理当前画布并给出下一步方案';
+const TERMINAL_FAILURE_MESSAGE = '模型请求过于频繁，请稍后重试';
+const BACKEND_FAILURE_MESSAGE = '模型服务暂时不可用';
 
 const planningContext: CreativeCanvasAgentContextSnapshot = {
   kind: 'nomifun.creative-studio.canvas-context',
@@ -294,6 +297,158 @@ const verifyLocalPendingTurnKeepsTranscript = async (): Promise<void> => {
   cleanup();
 };
 
+const verifyTerminalFailureRendersOnce = async (): Promise<void> => {
+  const initialSession: CreativeChatSessionReference = {
+    id: SESSION_ID,
+    title: '失败展示会话',
+    messageIds: [],
+    model: MODEL,
+    pendingTurn: null,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const ids = [IDEMPOTENCY_KEY, TRANSIENT_USER_ID, TRANSIENT_ASSISTANT_ID];
+  const createId = () => {
+    const id = ids.shift();
+    if (!id) throw new Error('Terminal failure test exhausted UUIDs');
+    return id;
+  };
+  const chatPort: CreativeStudioAgentChatPort = {
+    async *runTurn() {
+      yield {
+        type: 'failed',
+        code: 'USER_LLM_PROVIDER_RATE_LIMITED',
+        message: TERMINAL_FAILURE_MESSAGE,
+        retryable: true,
+      };
+    },
+  };
+
+  const ControlledFailurePanel: React.FC = () => {
+    const [document, setDocument] = useState<{
+      sessions: readonly CreativeChatSessionReference[];
+      activeSessionId: string | null;
+    }>({
+      sessions: [initialSession],
+      activeSessionId: initialSession.id,
+    });
+    const resolveSession = useCallback(
+      async (
+        input: Parameters<
+          NonNullable<
+            React.ComponentProps<typeof CreativeCanvasAgentPanel>['resolveSession']
+          >
+        >[0]
+      ) => {
+        const history: readonly CreativeStudioAgentMessage[] = [];
+        return {
+          binding: {
+            ownership: 'creative-studio-exclusive' as const,
+            canvasId: input.canvasId,
+            sessionId: input.sessionId,
+            conversationId: CONVERSATION_ID,
+            model: input.model,
+            historyKey: serializeCreativeStudioAgentHistory(history),
+          },
+          history,
+          appliedProposalMessageIds: [],
+          created: false,
+        };
+      },
+      []
+    );
+    const persistDocument = useCallback(
+      async (
+        sessions: readonly CreativeChatSessionReference[],
+        activeSessionId: string | null
+      ) => {
+        setDocument({
+          sessions: structuredClone([...sessions]),
+          activeSessionId,
+        });
+      },
+      []
+    );
+    return (
+      <CreativeCanvasAgentPanel
+        {...baseProps}
+        createId={createId}
+        hydrated
+        sessions={document.sessions}
+        activeSessionId={document.activeSessionId}
+        resolveSession={resolveSession}
+        chatPort={chatPort}
+        onPersist={persistDocument}
+      />
+    );
+  };
+
+  const view = render(<ControlledFailurePanel />);
+  await act(flushReact);
+  fireEvent.change(
+    screen.getByPlaceholderText('描述创作目标，或继续讨论当前方案'),
+    { target: { value: PROMPT } }
+  );
+  fireEvent.click(screen.getByRole('button', { name: '发送给 Agent' }));
+
+  await waitFor(() => {
+    assert.equal(screen.getAllByText(TERMINAL_FAILURE_MESSAGE).length, 1);
+    assert.equal(
+      view.container.querySelectorAll('[data-agent-panel-error]').length,
+      0
+    );
+  });
+  const rendered = view.container.textContent ?? '';
+  assert.equal(rendered.includes('USER_LLM_PROVIDER_RATE_LIMITED'), false);
+  assert.equal(rendered.includes('"message"'), false);
+  cleanup();
+};
+
+const verifyBackendHttpErrorUsesBackendMessage = async (): Promise<void> => {
+  const initialSession: CreativeChatSessionReference = {
+    id: SESSION_ID,
+    title: '后端错误会话',
+    messageIds: [],
+    model: MODEL,
+    pendingTurn: null,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const backendError = new BackendHttpError({
+    method: 'POST',
+    path: '/api/creative-studio/canvas-agent-sessions/resolve',
+    status: 503,
+    body: {
+      success: false,
+      error: BACKEND_FAILURE_MESSAGE,
+      code: 'PROVIDER_UNAVAILABLE',
+      details: { diagnostic: 'RAW_BACKEND_DETAIL' },
+    },
+  });
+  const view = render(
+    <CreativeCanvasAgentPanel
+      {...baseProps}
+      hydrated
+      sessions={[initialSession]}
+      activeSessionId={initialSession.id}
+      resolveSession={async () => {
+        throw backendError;
+      }}
+      onPersist={async () => undefined}
+    />
+  );
+
+  await waitFor(() => {
+    assert.equal(screen.getAllByText(BACKEND_FAILURE_MESSAGE).length, 1);
+  });
+  const rendered = view.container.textContent ?? '';
+  assert.equal(rendered.includes('Backend POST'), false);
+  assert.equal(rendered.includes('PROVIDER_UNAVAILABLE'), false);
+  assert.equal(rendered.includes('RAW_BACKEND_DETAIL'), false);
+  assert.equal(rendered.includes('{"success"'), false);
+  cleanup();
+};
+
 const verifyCompletedPendingTurnRecovery = async (): Promise<void> => {
   const recoveredHistory: readonly CreativeStudioAgentMessage[] = [
     {
@@ -405,6 +560,106 @@ const verifyCompletedPendingTurnRecovery = async (): Promise<void> => {
   cleanup();
 };
 
+const verifyCompletedTurnRecoveryAfterLegacyFenceLoss = async (): Promise<void> => {
+  const recoveredHistory: readonly CreativeStudioAgentMessage[] = [
+    {
+      id: RECOVERED_USER_ID,
+      role: 'user',
+      status: 'complete',
+      text: '恢复丢失引用',
+    },
+    {
+      id: RECOVERED_ASSISTANT_ID,
+      role: 'assistant',
+      status: 'complete',
+      text: '已恢复旧版本遗漏的会话。',
+    },
+  ];
+  const unfencedSession: CreativeChatSessionReference = {
+    id: SESSION_ID,
+    title: '旧版本会话',
+    messageIds: [],
+    model: MODEL,
+    pendingTurn: null,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  let persistedSession: CreativeChatSessionReference | undefined;
+
+  const ControlledRecoveryPanel: React.FC = () => {
+    const [document, setDocument] = useState<{
+      sessions: readonly CreativeChatSessionReference[];
+      activeSessionId: string | null;
+    }>({
+      sessions: [unfencedSession],
+      activeSessionId: unfencedSession.id,
+    });
+    const resolveSession = useCallback(
+      async (
+        input: Parameters<
+          NonNullable<
+            React.ComponentProps<typeof CreativeCanvasAgentPanel>['resolveSession']
+          >
+        >[0]
+      ) => ({
+        binding: {
+          ownership: 'creative-studio-exclusive' as const,
+          canvasId: input.canvasId,
+          sessionId: input.sessionId,
+          conversationId: CONVERSATION_ID,
+          model: input.model,
+          historyKey: serializeCreativeStudioAgentHistory(recoveredHistory),
+        },
+        history: recoveredHistory,
+        appliedProposalMessageIds: [],
+        created: false,
+      }),
+      []
+    );
+    const persistDocument = useCallback(
+      async (
+        sessions: readonly CreativeChatSessionReference[],
+        activeSessionId: string | null
+      ) => {
+        persistedSession = sessions.find(
+          (session) => session.id === activeSessionId
+        );
+        setDocument({
+          sessions: structuredClone([...sessions]),
+          activeSessionId,
+        });
+      },
+      []
+    );
+    return (
+      <CreativeCanvasAgentPanel
+        {...baseProps}
+        hydrated
+        sessions={document.sessions}
+        activeSessionId={document.activeSessionId}
+        resolveSession={resolveSession}
+        chatPort={{
+          async *runTurn() {
+            throw new Error('Recovered durable history must not be submitted again');
+          },
+        }}
+        onPersist={persistDocument}
+      />
+    );
+  };
+
+  render(<ControlledRecoveryPanel />);
+  await waitFor(() => {
+    assert.ok(screen.getByText('已恢复旧版本遗漏的会话。'));
+  });
+  assert.deepEqual(persistedSession?.messageIds, [
+    RECOVERED_USER_ID,
+    RECOVERED_ASSISTANT_ID,
+  ]);
+  assert.equal(persistedSession?.pendingTurn, null);
+  cleanup();
+};
+
 const run = async (): Promise<void> => {
   const originalConsoleError = console.error;
   console.error = (...args: unknown[]) => {
@@ -420,7 +675,10 @@ const run = async (): Promise<void> => {
   try {
     await verifyHydrationTransition();
     await verifyLocalPendingTurnKeepsTranscript();
+    await verifyTerminalFailureRendersOnce();
+    await verifyBackendHttpErrorUsesBackendMessage();
     await verifyCompletedPendingTurnRecovery();
+    await verifyCompletedTurnRecoveryAfterLegacyFenceLoss();
     await flushReact();
   } finally {
     console.error = originalConsoleError;

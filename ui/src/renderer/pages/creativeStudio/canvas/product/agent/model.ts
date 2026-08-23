@@ -13,7 +13,10 @@ import type {
 import type { CreativeModelSelectionRef } from '../../../models';
 import type { CreativeStudioAgentMessage } from '../../../agent';
 
-export type CreativeCanvasAgentHistoryAuthority = 'current' | 'completed-pending-turn';
+export type CreativeCanvasAgentHistoryAuthority =
+  | 'current'
+  | 'completed-pending-turn'
+  | 'completed-unreferenced-turns';
 
 const sameModel = (
   left: CreativeChatModelReference,
@@ -155,13 +158,22 @@ export function classifyCreativeCanvasAgentHistory(
   }
   const recoveredCount = ids.length - session.messageIds.length;
   if (recoveredCount === 0) return 'current';
+  const recovered = history.slice(session.messageIds.length);
+  const recoveredIsCompletePairs =
+    recovered.length % 2 === 0 &&
+    recovered.every(
+      (message, index) =>
+        message.role === (index % 2 === 0 ? 'user' : 'assistant')
+    );
   if (
     recoveredCount === 2 &&
     session.pendingTurn &&
-    history.at(-2)?.role === 'user' &&
-    history.at(-1)?.role === 'assistant'
+    recoveredIsCompletePairs
   ) {
     return 'completed-pending-turn';
+  }
+  if (!session.pendingTurn && recoveredCount > 0 && recoveredIsCompletePairs) {
+    return 'completed-unreferenced-turns';
   }
   throw new Error('Creative Studio Agent authority returned an invalid pending-turn projection');
 }
@@ -171,8 +183,8 @@ export function creativeCanvasAgentSessionWithAuthoritativeHistory(
   history: readonly CreativeStudioAgentMessage[],
   now: number
 ): CreativeChatSessionReference {
-  if (classifyCreativeCanvasAgentHistory(session, history) !== 'completed-pending-turn') {
-    throw new Error('Creative Studio Agent completion has no new durable message pair');
+  if (classifyCreativeCanvasAgentHistory(session, history) === 'current') {
+    throw new Error('Creative Studio Agent authority has no new durable message pair');
   }
   return {
     ...session,
