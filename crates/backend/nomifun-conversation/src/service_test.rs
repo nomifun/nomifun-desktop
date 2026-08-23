@@ -15991,6 +15991,7 @@ fn test_provider(id: &str, models: &[&str]) -> (Provider, Vec<nomifun_db::Provid
             id: 0,
             provider_id: id.into(),
             model: (*model).into(),
+            display_name: None,
             enabled: true,
             sort_order: index as i64,
             description: None,

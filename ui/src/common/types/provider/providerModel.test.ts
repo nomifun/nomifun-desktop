@@ -17,6 +17,7 @@ const wire = (value: unknown) => JSON.parse(JSON.stringify(value)) as Record<str
 const response: ProviderModelResponse = {
   provider_id: PROVIDER_ID,
   model: 'step-tts-mini',
+  display_name: 'Step TTS Mini',
   enabled: true,
   sort_order: 3,
   description: 'speech model',
@@ -46,6 +47,7 @@ describe('provider model wire contract', () => {
       'capabilities',
       'created_at',
       'description',
+      'display_name',
       'enabled',
       'model',
       'provider_id',
@@ -65,6 +67,7 @@ describe('provider model wire contract', () => {
       provider_id: PROVIDER_ID,
       model: {
         model: response.model,
+        display_name: response.display_name,
         enabled: false,
         description: response.description,
         sort_order: response.sort_order,

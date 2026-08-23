@@ -5,4 +5,8 @@ import type { ProviderModelCapabilityInput } from "./ProviderModelCapabilityInpu
  * Complete provider-model input reused by aggregate provider creation and
  * the standalone full-save endpoint. It deliberately has no provider id.
  */
-export type ProviderModelInput = { model: string, enabled?: boolean, description?: string, sort_order?: number, capabilities: Array<ProviderModelCapabilityInput>, };
+export type ProviderModelInput = { model: string,
+/**
+ * Generic human-readable label; invocation always uses `model`.
+ */
+display_name?: string, enabled?: boolean, description?: string, sort_order?: number, capabilities: Array<ProviderModelCapabilityInput>, };

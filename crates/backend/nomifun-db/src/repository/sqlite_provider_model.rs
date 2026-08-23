@@ -165,6 +165,25 @@ impl IProviderModelRepository for SqliteProviderModelRepository {
         Ok(stored)
     }
 
+    async fn set_display_name(
+        &self,
+        provider_id: &str,
+        model: &str,
+        display_name: Option<&str>,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE provider_models SET display_name = ?, updated_at = ? \
+             WHERE provider_id = ? AND model = ?",
+        )
+        .bind(display_name)
+        .bind(now_ms())
+        .bind(provider_id)
+        .bind(model)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn delete_coordinated(
         &self,
         plan: &CoordinatedProviderModelDelete,

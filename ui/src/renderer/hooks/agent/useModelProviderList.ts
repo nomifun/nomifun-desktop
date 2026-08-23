@@ -1,5 +1,6 @@
 import { ipcBridge } from '@/common';
 import type { IProvider } from '@/common/config/storage';
+import { modelDisplayLabel } from '@/common/utils/modelPresentation';
 import { useCallback, useMemo } from 'react';
 import useSWR, { type SWRConfiguration } from 'swr';
 import { orderModelSelectorProviders } from './modelSelectorProviderOrdering';
@@ -10,7 +11,10 @@ export interface ModelProviderListResult {
   providers: IProvider[];
   configuredProviders: IProvider[];
   isLoading: boolean;
-  formatModelLabel: (provider: { platform?: string } | undefined, modelName?: string) => string;
+  formatModelLabel: (
+    provider: { platform?: string; models?: IProvider['models'] } | undefined,
+    modelName?: string
+  ) => string;
 }
 
 export const PROVIDERS_SWR_KEY = 'providers';
@@ -52,9 +56,13 @@ export const useModelProviderList = (): ModelProviderListResult => {
     return orderModelSelectorProviders(configuredProviders.filter((p) => p.enabled !== false));
   }, [configuredProviders]);
 
-  const formatModelLabel = useCallback((_provider: { platform?: string } | undefined, modelName?: string) => {
+  const formatModelLabel = useCallback((
+    provider: { platform?: string; models?: IProvider['models'] } | undefined,
+    modelName?: string
+  ) => {
     if (!modelName) return '';
-    return modelName;
+    const row = provider?.models?.find((candidate) => candidate.model === modelName);
+    return modelDisplayLabel(modelName, row?.display_name);
   }, []);
 
   return {
