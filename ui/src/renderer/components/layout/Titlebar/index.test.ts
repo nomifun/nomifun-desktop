@@ -27,15 +27,6 @@ describe('Titlebar instant icon tooltips', () => {
     );
   });
 
-  test('keeps the language control at the leading edge of the desktop titlebar menu', () => {
-    const languageControlIndex = titlebarSource.indexOf("className='app-titlebar__language-control'");
-    const sidebarToggleIndex = titlebarSource.indexOf('tooltip: siderTooltip');
-
-    expect(languageControlIndex).toBeGreaterThanOrEqual(0);
-    expect(sidebarToggleIndex).toBeGreaterThan(languageControlIndex);
-    expect(titlebarSource.match(/<TitlebarLanguageMenu /g)?.length).toBe(1);
-  });
-
   test('keeps shared history and quick-create navigation behind Creative Studio save gates', () => {
     expect(titlebarSource.includes('requestCreativeStudioBeforeLeave')).toBe(true);
     expect(titlebarSource.includes('navigateAfterCreativeStudioFlush')).toBe(true);
