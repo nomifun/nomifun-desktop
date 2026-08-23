@@ -3,7 +3,7 @@
 <div align="center">
 
 <a href="https://www.nomifun.com">
-  <img src="docs/images/readme/en/workspace.png" alt="Current NomiFun Desktop workspace" width="100%">
+  <img src="docs/images/readme/en/workspace.png" alt="Current NomiFun Desktop workspace with the refreshed English sidebar" width="100%">
 </a>
 
 <h3>A no-holds-barred, fully open-source, <em>local-first</em> super AI workstation.</h3>
@@ -150,7 +150,7 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
 </p>
 
 <p>
-  <img src="docs/images/readme/en/workspace.png" alt="Current NomiFun Desktop workspace" width="100%">
+  <img src="docs/images/readme/en/workspace.png" alt="Current NomiFun Desktop workspace with the refreshed English sidebar" width="100%">
   <br/><sub><b>Workspace · conversations, Agents, tasks, tools, and connected devices in one desktop</b></sub>
 </p>
 
@@ -161,11 +161,11 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/readme/en/skills.png" alt="Current NomiFun Skills Hub"><br/><sub><b>Skills Hub · reusable, governed Agent capabilities</b></sub></td>
-    <td width="50%"><img src="docs/images/readme/en/creative-workshop.png" alt="NomiFun Creative Studio"><br/><sub><b>Creative Studio · persistent canvas, workbenches, assets, and workflows</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/en/creative-workshop.png" alt="NomiFun Creative Studio"><br/><sub><b>Creative Studio · infinite canvas, workbenches, prompts, assets, and workflows</b></sub></td>
   </tr>
 </table>
 
-<sub>Refreshed from the current NomiFun Portal product screenshot collection. See <a href="docs/images/SCREENSHOTS.md">the screenshot manifest</a> for source and usage details.</sub>
+<sub>Freshly captured from the current NomiFun product build. See <a href="docs/images/SCREENSHOTS.md">the screenshot manifest</a> for source, synchronization, and usage details.</sub>
 
 </div>
 
@@ -181,8 +181,8 @@ memory, tools, permissions, and execution runtime:
 |---|---|
 | **Multi-Agent execution cluster** | Plans dependency-aware work, delegates steps to specialized Agents, schedules parallel execution, and exposes live state, transcripts, approvals, retry, and recovery. |
 | **Agent Mini Apps** | Turns a normal Agent conversation into a previewable and publishable local web tool, with an editable working copy and a durable published snapshot. |
-| **Creative Studio** | Provides a persistent Canvas, independent Image and Video Workbenches, exact-model media tasks, reusable assets, a private Template Studio, and a bounded 3D Director. |
-| **Task-aware multi-model control plane** | Manages extensible providers and models for chat, realtime, speech, vision, media generation, embedding, and reranking, with per-task routing and fallback. |
+| **Creative Studio** | Provides a persistent infinite Canvas, independent Image and Video Workbenches, prompt and asset libraries, collections/tags/search, exact-model media tasks, private Workflows/templates, and a bounded 3D Director. |
+| **Task-aware multi-model control plane** | Separates provider credentials from model records, accepts native and compatible/custom endpoints including local or self-hosted services, and routes chat, realtime, speech, vision, media generation, embedding, and reranking with per-task fallback. |
 | **NomiFun Free Models** | Ships a managed provider that can be enabled, refreshed, health-checked, and used without first creating your own provider entry. |
 | **Phone, robot, and open access** | Pairs Mobile directly with Desktop, binds a Xiaozhi robot to a companion, and exposes governed capabilities through WebUI, REST, MCP, IM channels, and NomiRelay. |
 
@@ -224,13 +224,15 @@ Agents, data, models, and governed tools.
 
 > Guide: [`docs/guides/creative-studio.md`](docs/guides/creative-studio.md)
 
-Creative Studio combines a persistent Canvas, independent Image and Video
-Workbenches, prompt and asset libraries, a private Template Studio, and a bounded 3D
-Director. It has no Project product object: Canvas is Canvas, while Image and
-Video remain usable with zero Canvases. A Canvas persists eight node kinds:
-text, image, video, audio, panorama, config, director, and group; generation is
-owned by media nodes plus auditable config nodes rather than fictional loop,
-compare, or output node types.
+Creative Studio combines a persistent infinite Canvas, independent Image and Video
+Workbenches, prompt and asset libraries, private Workflows/templates, and a bounded
+3D Director. It has no Project product object: Canvas is Canvas, while Image and
+Video remain usable with zero Canvases. The prompt library keeps reusable briefs
+close to the work, and the asset library supports text, image, video, and audio
+items with search, kinds, collections, tags, and metadata for cross-iteration reuse.
+A Canvas persists eight node kinds: text, image, video, audio, panorama, config,
+director, and group; generation is owned by media nodes plus auditable config
+nodes rather than fictional loop, compare, or output node types.
 
 Every model request uses an exact enabled NomiFun provider/model task: Chat for
 one-shot drafts and manually approved proposals, image generation/edit for
@@ -319,11 +321,18 @@ Every capability NomiFun has is exposed through a single, typed capability regis
 
 ### 🔌 Multi-model control plane — providers, capabilities, and Free Models
 
-NomiFun separates provider credentials from model capabilities. Extend the
-catalog with your own providers and assign models to chat, realtime, ASR, TTS,
-vision, image generation/editing, video generation, embedding, and reranking.
-Routing is task-aware, supports per-model context limits, and can fail over
-without pretending that every provider uses the same URL, protocol, or auth.
+NomiFun separates provider credentials from model records and capabilities. Extend the
+catalog with native providers, compatible protocols, custom base URLs, or local and
+self-hosted endpoints, then assign models to chat, realtime, ASR, TTS, vision,
+image generation/editing, video generation, embedding, and reranking. Routing is
+task-aware, supports per-model context and output limits, and can fail over without
+pretending that every provider uses the same URL, protocol, or auth.
+
+The important boundary is explicit capability, not a fixed vendor list: a model is
+usable for a task only when its configured provider and protocol declare that task.
+Creative Studio carries the exact `{ provider, model, task }` identity into every
+media operation, so a same-named model from another provider is never substituted
+silently.
 
 **NomiFun Free Models** are available through a built-in managed provider. You
 can enable it, refresh its catalog, run a health check, and activate an available

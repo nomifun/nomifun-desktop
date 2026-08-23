@@ -196,6 +196,26 @@ objects. Generation remains disabled until initial hydration finishes. A saved
 model survives only if that exact Provider/model pair still supports the
 required task; a same-named model from another Provider is never substituted.
 
+## Prompt library and reusable inputs
+
+`/workshop/prompts` is a standalone prompt-management surface. It combines:
+
+- an attributed, offline-first catalog synchronized from a fixed allow-list of
+  upstream prompt repositories;
+- enabled NomiFun presets that contain conversation instructions;
+- user-owned text assets already stored in the Creative Studio asset library.
+
+The library supports text search, exact category filters, intersected tag
+filters, detail inspection, and clipboard copy. A catalog or preset item can be
+saved explicitly as a text asset in **My Assets**; catalog provenance keeps the
+source repository and license attached. The catalog cache remains usable
+offline after a successful synchronization.
+
+The standalone route deliberately has no hidden Canvas insertion target.
+Copying or saving a prompt does not create a Canvas or start generation. Pick
+the resulting text asset from a Canvas or workbench when it belongs in a
+specific creation flow.
+
 ## Assets, persistence, and recovery
 
 Asset metadata lives in SQLite, while binary originals and thumbnails live under
