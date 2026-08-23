@@ -146,6 +146,17 @@
   transition: none !important;
 }
 
+/* Primary rail labels must stay on one line at the default 184px width.
+   Without an explicit flex minimum and nowrap, long translations wrap inside
+   the fixed-height rows and visually stack into the neighboring content. */
+.layout-sider .group > span.size-22px + span.collapsed-hidden {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Sidebar item transitions (shared by chat-history and settings-sider) */
 .chat-history__item,
 .settings-sider__item {

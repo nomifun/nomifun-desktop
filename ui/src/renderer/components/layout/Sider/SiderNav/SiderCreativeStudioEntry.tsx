@@ -28,7 +28,7 @@ const SiderCreativeStudioEntry: React.FC<SiderCreativeStudioEntryProps> = ({
   onClick,
 }) => {
   const { t } = useTranslation();
-  const label = t('creativeStudio.title');
+  const label = t('creativeStudio.siderTitle', { defaultValue: t('creativeStudio.title') });
 
   if (collapsed) {
     return (

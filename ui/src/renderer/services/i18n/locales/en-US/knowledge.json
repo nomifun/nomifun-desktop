@@ -404,5 +404,6 @@
     "deleteFolderTitle": "Delete folder?",
     "deleteFolderWarning": "Deleting “{{name}}” will remove all documents and subfolders inside it. This cannot be undone."
   },
-  "title": "Knowledge"
+  "title": "Knowledge",
+  "siderTitle": "Knowledge"
 }
