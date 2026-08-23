@@ -11,7 +11,6 @@ import type {
   CreativeTemplateDefinitionV1,
   CreativeTemplateInputValue,
   CreativeTemplateOutputPlan,
-  CreativeTemplateRunRequest,
   CreativeTemplateValidationError,
   CreativeTemplateValidationResult,
   CreativeTemplateVariable,

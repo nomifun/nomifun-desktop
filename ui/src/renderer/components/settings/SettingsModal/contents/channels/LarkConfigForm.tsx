@@ -75,7 +75,6 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
 
   const [showOptional, setShowOptional] = useState(false);
   const [testLoading, setTestLoading] = useState(false);
-  const [credentialsTested, setCredentialsTested] = useState(false);
   const [touched, setTouched] = useState({ appId: false, appSecret: false });
   const {
     pendingPairings,
@@ -100,7 +99,6 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
     }
 
     setTestLoading(true);
-    setCredentialsTested(false);
     try {
       // testPlugin returns { success, botUsername?, error? } directly
       const result = await channel.testPlugin.invoke({
@@ -113,17 +111,14 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
       });
 
       if (result.success) {
-        setCredentialsTested(true);
         Message.success(t('settings.lark.connectionSuccess', 'Connected to Lark API!'));
 
         // Auto-enable bot after successful test
         await handleAutoEnable();
       } else {
-        setCredentialsTested(false);
         Message.error(result.error || t('settings.lark.connectionFailed', 'Connection failed'));
       }
     } catch (error: any) {
-      setCredentialsTested(false);
       Message.error(error.message || t('settings.lark.connectionFailed', 'Connection failed'));
     } finally {
       setTestLoading(false);
@@ -165,11 +160,6 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
           t('settings.lark.enableFailed', 'Failed to enable Lark plugin')
       );
     }
-  };
-
-  // Reset credentials tested state when credentials change
-  const handleCredentialsChange = () => {
-    setCredentialsTested(false);
   };
 
   // Lock credentials for THIS bot row only — not the whole platform. A bot that
@@ -214,7 +204,6 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
                 value={appId}
                 onChange={(value) => {
                   setAppId(value);
-                  handleCredentialsChange();
                 }}
                 onBlur={() => setTouched((prev) => ({ ...prev, appId: true }))}
                 placeholder={pluginStatus?.hasToken ? '••••••••••••••••' : 'cli_xxxxxxxxxx'}
@@ -229,7 +218,6 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
             value={appId}
             onChange={(value) => {
               setAppId(value);
-              handleCredentialsChange();
             }}
             onBlur={() => setTouched((prev) => ({ ...prev, appId: true }))}
             placeholder={pluginStatus?.hasToken ? '••••••••••••••••' : 'cli_xxxxxxxxxx'}
@@ -272,7 +260,6 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
                 value={appSecret}
                 onChange={(value) => {
                   setAppSecret(value);
-                  handleCredentialsChange();
                 }}
                 onBlur={() => setTouched((prev) => ({ ...prev, appSecret: true }))}
                 placeholder={pluginStatus?.hasToken ? '••••••••••••••••' : 'xxxxxxxxxxxxxxxxxx'}
@@ -288,7 +275,6 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
             value={appSecret}
             onChange={(value) => {
               setAppSecret(value);
-              handleCredentialsChange();
             }}
             onBlur={() => setTouched((prev) => ({ ...prev, appSecret: true }))}
             placeholder={pluginStatus?.hasToken ? '••••••••••••••••' : 'xxxxxxxxxxxxxxxxxx'}
@@ -339,7 +325,6 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
                     value={encryptKey}
                     onChange={(value) => {
                       setEncryptKey(value);
-                      handleCredentialsChange();
                     }}
                     placeholder={t('settings.lark.optional', 'Optional')}
                     style={{ width: 240 }}
@@ -353,7 +338,6 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
                 value={encryptKey}
                 onChange={(value) => {
                   setEncryptKey(value);
-                  handleCredentialsChange();
                 }}
                 placeholder={t('settings.lark.optional', 'Optional')}
                 style={{ width: 240 }}
@@ -383,7 +367,6 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
                     value={verificationToken}
                     onChange={(value) => {
                       setVerificationToken(value);
-                      handleCredentialsChange();
                     }}
                     placeholder={t('settings.lark.optional', 'Optional')}
                     style={{ width: 240 }}
@@ -397,7 +380,6 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
                 value={verificationToken}
                 onChange={(value) => {
                   setVerificationToken(value);
-                  handleCredentialsChange();
                 }}
                 placeholder={t('settings.lark.optional', 'Optional')}
                 style={{ width: 240 }}

@@ -47,14 +47,6 @@ const thrownMessage = (run: () => unknown): string => {
   throw new Error('expected function to throw');
 };
 
-type MappedExtra =
-  | {
-      custom_workspace?: boolean;
-    }
-  | null
-  | undefined;
-const extraOf = (raw: Record<string, unknown>): MappedExtra => (fromApiConversation(raw) as { extra?: MappedExtra }).extra;
-
 describe('fromApiConversation first-class fields', () => {
   test('maps the explicit wire conversation_id to the UI id and removes the wire field', () => {
     const mapped = fromApiConversation(apiConv({ extra: {} })) as {

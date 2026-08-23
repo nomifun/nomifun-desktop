@@ -75,7 +75,6 @@ export const LARGE_TEXT_VIEWER_RENDER_LIMIT = 20_000;
  * 具有内置打开按钮的文件类型
  * File types with built-in open buttons
  */
-export const FILE_TYPES_WITH_BUILTIN_OPEN = ['word', 'ppt', 'pdf', 'excel'] as const;
 
 /**
  * 支持快照 / 历史版本的预览类型。

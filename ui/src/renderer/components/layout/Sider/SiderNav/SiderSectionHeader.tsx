@@ -5,7 +5,6 @@
  */
 
 import React from 'react';
-import classNames from 'classnames';
 
 interface SiderSectionHeaderProps {
   /** Already-translated section label (e.g. "常用"). */

@@ -35,7 +35,7 @@ import {
   type CloseTabConfirmState,
   type PreviewTab,
 } from '.';
-import { DEFAULT_SPLIT_RATIO, FILE_TYPES_WITH_BUILTIN_OPEN, MAX_SPLIT_WIDTH, MIN_SPLIT_WIDTH } from '../../constants';
+import { DEFAULT_SPLIT_RATIO, MAX_SPLIT_WIDTH, MIN_SPLIT_WIDTH } from '../../constants';
 import {
   usePreviewHistory,
   usePreviewKeyboardShortcuts,
@@ -283,8 +283,6 @@ const PreviewPanel: React.FC = () => {
   // 检查文件类型是否已有内置的打开按钮（Word、PPT、PDF、Excel 组件内部已提供）
   // Check if file type already has built-in open button
   // (Word, PPT, PDF, Excel components provide their own)
-  const hasBuiltInOpenButton = (FILE_TYPES_WITH_BUILTIN_OPEN as readonly string[]).includes(content_type);
-
   // 对所有有 file_path 的文件显示"在系统中打开"按钮（统一在工具栏显示）
   // Show "Open in System" button for all files with file_path (unified in toolbar)
   const showOpenInSystemButton = Boolean(metadata?.file_path);
@@ -696,7 +694,6 @@ const PreviewPanel: React.FC = () => {
             isEditMode={isEditMode}
             viewMode={viewMode}
             isSplitScreenEnabled={isSplitScreenEnabled}
-            file_name={metadata?.file_name || activeTab.title}
             showOpenInSystemButton={showOpenInSystemButton}
             historyTarget={historyTarget}
             snapshotSaving={snapshotSaving}
@@ -718,7 +715,6 @@ const PreviewPanel: React.FC = () => {
             renderHistoryDropdown={renderHistoryDropdown}
             onOpenInSystem={handleOpenInSystem}
             onDownload={handleDownload}
-            onClose={closePreview}
             leftExtra={toolbarExtras?.left}
             rightExtra={toolbarExtras?.right}
           />

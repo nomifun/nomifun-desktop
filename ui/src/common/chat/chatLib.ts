@@ -7,7 +7,6 @@
 import type {
   PlanUpdate,
   PersistedToolArtifact,
-  ToolCallContentItem,
 } from '@/common/types/platform/toolCallTypes';
 import type { IKnowledgeWritebackEvent, IResponseMessage, IUserMessageCreatedEvent } from '../adapter/ipcBridge';
 import {
@@ -950,21 +949,6 @@ const TOOL_ARTIFACT_KINDS = new Set<PersistedToolArtifact['kind']>([
 ]);
 const SHA256_RE = /^[a-f\d]{64}$/i;
 const URI_SCHEME_RE = /^[A-Za-z][A-Za-z\d+.-]*:/;
-const MAX_DURABLE_RESOURCE_URI_LENGTH = 8 * 1024;
-const UNSAFE_OR_TRANSIENT_RESOURCE_SCHEMES = new Set(['data:', 'blob:', 'javascript:', 'about:', 'file:']);
-
-const normalizeDurableResourceUri = (value: unknown): string | undefined => {
-  if (typeof value !== 'string') return undefined;
-  const uri = value.trim();
-  if (!uri || uri.length > MAX_DURABLE_RESOURCE_URI_LENGTH) return undefined;
-  try {
-    const parsed = new URL(uri);
-    if (UNSAFE_OR_TRANSIENT_RESOURCE_SCHEMES.has(parsed.protocol.toLowerCase())) return undefined;
-    return uri;
-  } catch {
-    return undefined;
-  }
-};
 
 /** Reject malformed or non-canonical receipt metadata before it reaches UI. */
 const normalizePersistedToolArtifact = (value: unknown): PersistedToolArtifact | undefined => {

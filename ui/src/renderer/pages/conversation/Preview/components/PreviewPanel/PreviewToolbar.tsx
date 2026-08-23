@@ -5,9 +5,7 @@
  */
 
 import type { PreviewHistoryTarget } from '@/common/types/office/preview';
-import { iconColors } from '@/renderer/styles/colors';
 import { Dropdown } from '@arco-design/web-react';
-import { Close } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { supportsPreviewHistory } from '../../constants';
@@ -75,7 +73,6 @@ interface PreviewToolbarProps {
    * 文件名
    * Filename
    */
-  file_name?: string;
 
   /**
    * 是否显示"在系统中打开"按钮
@@ -153,7 +150,6 @@ interface PreviewToolbarProps {
    * 关闭预览面板
    * Close preview panel
    */
-  onClose: () => void;
 
   /**
    * 左侧额外渲染内容
@@ -184,7 +180,6 @@ const PreviewToolbar: React.FC<PreviewToolbarProps> = ({
   isEditMode,
   viewMode,
   isSplitScreenEnabled,
-  file_name,
   showOpenInSystemButton,
   historyTarget,
   snapshotSaving,
@@ -197,7 +192,6 @@ const PreviewToolbar: React.FC<PreviewToolbarProps> = ({
   renderHistoryDropdown,
   onOpenInSystem,
   onDownload,
-  onClose,
   leftExtra,
   rightExtra,
 }) => {

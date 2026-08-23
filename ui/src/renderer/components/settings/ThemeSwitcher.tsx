@@ -6,7 +6,6 @@
 
 import { useThemeContext } from '@/renderer/hooks/context/ThemeContext';
 import { IconMoon, IconMoonFill, IconSun, IconSunFill } from '@arco-design/web-react/icon';
-import React from 'react';
 import { useTranslation } from 'react-i18next';
 
 /**

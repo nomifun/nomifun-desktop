@@ -135,32 +135,6 @@ export function normalizeToolGroup(message: IMessageToolGroup): NormalizedToolCa
 }
 
 const shellCommandTitles = new Set(['bash', 'shell', 'terminal', 'command', 'cmd', 'powershell']);
-const shellCommandFieldNames = ['command', 'cmd', 'script', 'shell', 'bash'];
-
-const pickStringField = (record: Record<string, unknown>, fields: string[]): string | undefined => {
-  for (const field of fields) {
-    const value = record[field];
-    if (typeof value === 'string' && value.trim()) return value;
-  }
-  return undefined;
-};
-
-const pickShellCommandInput = (value: unknown): string | undefined => {
-  if (!value || typeof value !== 'object') return undefined;
-  const record = value as Record<string, unknown>;
-
-  const direct = pickStringField(record, shellCommandFieldNames);
-  if (direct) return direct;
-
-  for (const fieldValue of Object.values(record)) {
-    const nested = pickShellCommandInput(fieldValue);
-    if (nested) return nested;
-  }
-
-  return undefined;
-};
-
-const hasShellCommandInput = (value: unknown): boolean => Boolean(pickShellCommandInput(value));
 
 // ===== tool_call → NormalizedToolCall =====
 

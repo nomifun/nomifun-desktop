@@ -9,7 +9,6 @@ import { describe, expect, test } from 'bun:test';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
 
 import { createEmptyCreativeProjectDocument } from '../domain/schema';
-import type { CreativeProjectDocument } from '../domain/schema';
 import type { CreativeTaskPort } from './port';
 import {
   CreativeTaskPollTimeoutError,

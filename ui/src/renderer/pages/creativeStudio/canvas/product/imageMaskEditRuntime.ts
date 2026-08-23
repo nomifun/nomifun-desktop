@@ -17,7 +17,6 @@ import {
 import type {
   CreativeWorkbenchRuntimeController,
   CreativeWorkbenchRuntimeSnapshot,
-  PreparedCreativeWorkbenchRun,
 } from '../../workbenches/runtime';
 import { canvasCommands, validateCanvasConnection } from '../core';
 import type { CreativeCanvasEditorHandle } from '../editor';

@@ -5,7 +5,7 @@
  */
 
 import { bridge } from '@/platform';
-import React, { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { SHOW_OPEN_REQUEST_EVENT } from '@/common/adapter/constant';
 import DirectorySelectionModal from '@renderer/components/settings/DirectorySelectionModal';
 

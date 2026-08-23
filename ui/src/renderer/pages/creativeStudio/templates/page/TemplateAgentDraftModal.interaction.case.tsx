@@ -6,7 +6,6 @@
 
 import assert from 'node:assert/strict';
 import { createInstance } from 'i18next';
-import React from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 

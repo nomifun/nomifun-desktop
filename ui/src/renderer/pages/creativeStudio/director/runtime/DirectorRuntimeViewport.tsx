@@ -5,7 +5,7 @@
  */
 
 import classNames from 'classnames';
-import React, {
+import {
   forwardRef,
   useImperativeHandle,
   useLayoutEffect,

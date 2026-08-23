@@ -16,13 +16,12 @@ import {
 } from '@/renderer/utils/chat/conversationExport';
 import { copyText } from '@/renderer/utils/ui/clipboard';
 import type { ArcoMessageInstance } from '@/renderer/utils/ui/useArcoMessage';
-import React, {
+import {
   useCallback,
   useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
-  type ReactNode,
 } from 'react';
 
 type ExportFlowStep = 'closed' | 'menu' | 'filename';

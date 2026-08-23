@@ -9,8 +9,6 @@ import { ipcBridge } from '@/common';
 import { useAutoScroll } from '@/renderer/hooks/chat/useAutoScroll';
 import { useTextSelection } from '@/renderer/hooks/ui/useTextSelection';
 import { useTypingAnimation } from '@/renderer/hooks/chat/useTypingAnimation';
-import { iconColors } from '@/renderer/styles/colors';
-import { Close } from '@icon-park/react';
 import 'katex/dist/katex.min.css';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -30,7 +28,6 @@ import '@/renderer/components/Markdown/MarkdownTypography.css';
 
 interface MarkdownPreviewProps {
   content: string; // Markdown 内容 / Markdown content
-  onClose?: () => void; // 关闭回调 / Close callback
   hideToolbar?: boolean; // 隐藏工具栏 / Hide toolbar
   viewMode?: 'source' | 'preview'; // 外部控制的视图模式 / External view mode
   onViewModeChange?: (mode: 'source' | 'preview') => void; // 视图模式改变回调 / View mode change callback
@@ -181,7 +178,7 @@ const rewriteExternalMediaUrls = (markdown: string): string => {
     return `https://raw.githubusercontent.com/wiki/${owner}/${repo}/${rest}`;
   });
   return rewriteWiki.replace(/<(img|a)\b[^>]*>/gi, (tag) => {
-    return tag.replace(/(src|href)\s*=\s*(["'])([^"']*)(\2)/gi, (match, attr, quote, value, closingQuote) => {
+    return tag.replace(/(src|href)\s*=\s*(["'])([^"']*)(\2)/gi, (_match, attr, quote, value, closingQuote) => {
       return `${attr}=${quote}${encodeHtmlAttribute(value)}${closingQuote}`;
     });
   });
@@ -199,7 +196,6 @@ const rewriteExternalMediaUrls = (markdown: string): string => {
 // eslint-disable-next-line max-len
 const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
   content,
-  onClose,
   hideToolbar = false,
   viewMode: externalViewMode,
   onViewModeChange,

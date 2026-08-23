@@ -98,13 +98,6 @@ class DirectorRouteLoadError extends Error {
   }
 }
 
-const INITIAL_SAVE: DirectorCasSaveSnapshot = {
-  status: "idle",
-  revision: null,
-  hasPendingChanges: false,
-  error: null,
-};
-
 const isPanorama = (asset: CreativeAsset): boolean =>
   asset.kind === "image" &&
   asset.width !== null &&

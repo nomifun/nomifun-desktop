@@ -11,7 +11,6 @@ import { AUTOWORK_STATUS_COLOR, IDMM_STATUS_COLOR } from '@/renderer/components/
 import { renderIdmmCapabilityIcon } from '@/renderer/components/capability/idmmCapabilityIcon';
 import { AlarmClock, EveryUser, Robot } from '@icon-park/react';
 import type { TFunction } from 'i18next';
-import React from 'react';
 
 /** Capability icon size inside the 34px session row (status dots beside it are 6px). */
 export const CAPABILITY_ICON_SIZE = 13;

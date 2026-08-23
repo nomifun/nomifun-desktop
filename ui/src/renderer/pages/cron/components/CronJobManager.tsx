@@ -11,7 +11,7 @@ import type { ConversationId, CronJobId } from '@/common/types/ids';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { Button, Popover, Tooltip } from '@arco-design/web-react';
 import { AlarmClock } from '@icon-park/react';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { useCronJobs } from '../useCronJobs';

@@ -7,7 +7,6 @@
 import {
   FileText,
   Group,
-  History,
   Info,
   Lock,
   Magic,

@@ -73,7 +73,7 @@ import { buildDisplayMessage, collectSelectedFiles } from '@/renderer/utils/file
 import type { AgentModeOption } from '@/renderer/utils/model/agentModes';
 import { Message, Tag } from '@arco-design/web-react';
 import { Brain, MagicHat, Shield } from '@icon-park/react';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { NomiMessageRuntime } from './useNomiMessage';
 import NomiModelSelector from './NomiModelSelector';

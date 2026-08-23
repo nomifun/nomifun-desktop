@@ -101,7 +101,6 @@ import { CanvasMiniMap, type CanvasMiniMapNavigationRequest } from '../graph';
 import {
   resolveCanvasContextAction,
   type CanvasContextAction,
-  type CanvasContextTarget,
   type CanvasIntegrationIntent,
 } from '../interactions';
 import {

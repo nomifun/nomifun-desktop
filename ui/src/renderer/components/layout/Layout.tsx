@@ -136,7 +136,6 @@ const Layout: React.FC<{
   const [viewportWidth, setViewportWidth] = useState<number>(() =>
     typeof window === 'undefined' ? 390 : window.innerWidth
   );
-  const [shouldMountUpdateModal, setShouldMountUpdateModal] = useState(false);
   const updateAvailability = useUpdateAvailability();
   const { onClick } = useDebug();
   const { contextHolder: directorySelectionContextHolder } = useDirectorySelection();

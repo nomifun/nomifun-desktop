@@ -13,7 +13,7 @@ import { CheckOne, Code, DeleteFour, Down, Left, LinkOne, Refresh, Right, Search
 import React, { useEffect, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ContextLimitSelect } from './ContextLimitSelect';
-import { formatOutputLimit, OutputLimitInput } from './OutputLimitInput';
+import { OutputLimitInput } from './OutputLimitInput';
 import {
   compactCapabilityUrlSummary,
   createCapabilityDisclosureState,
@@ -394,10 +394,6 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
     () => value.capabilities.map((capability) => capability.task),
     [value.capabilities]
   );
-  const availableTasks = useMemo(
-    () => MODEL_TASK_ORDER.filter((task) => !selectedTasks.includes(task)),
-    [selectedTasks]
-  );
   // The catalog needs exactly ONE task to filter its suggestions by. This is a
   // search scope, not a model property: it is never rendered as a value and
   // never persisted. The backend re-sorts a model's capabilities by task on
@@ -588,13 +584,6 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
           )
         : current;
     });
-  };
-
-  const addTask = (task: ModelTask) => {
-    onChange((current) => ({
-      ...current,
-      capabilities: addCapabilityTask(current.capabilities, task),
-    }));
   };
 
   const removeTask = (task: ModelTask) => {
