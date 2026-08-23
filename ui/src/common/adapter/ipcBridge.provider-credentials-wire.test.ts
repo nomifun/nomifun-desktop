@@ -29,7 +29,7 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-describe('provider write-only credentials wire contract', () => {
+describe('provider credentials wire contract', () => {
   test('create sends only typed credentials and maps a secret-free response', async () => {
     let requestBody: Record<string, unknown> | undefined;
     globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
@@ -69,6 +69,27 @@ describe('provider write-only credentials wire contract', () => {
     expect(Object.prototype.hasOwnProperty.call(requestBody, 'api_key')).toBe(false);
     expect(provider.has_credentials).toBe(true);
     expect(Object.keys(provider).includes('credentials')).toBe(false);
+  });
+
+  test('reads saved provider API keys in plaintext for the edit form', async () => {
+    let requestUrl = '';
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      requestUrl = String(input);
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: ['sk-first', 'sk-second'],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }) as typeof fetch;
+
+    const apiKeys = await mode.getProviderApiKeys.invoke({
+      provider_id: parseProviderId(PROVIDER_ID),
+    });
+
+    expect(requestUrl.endsWith(`/api/providers/${PROVIDER_ID}/api-keys`)).toBe(true);
+    expect(apiKeys).toEqual(['sk-first', 'sk-second']);
   });
 
   test('anonymous Bedrock discovery keeps secrets in credentials, not bedrock_config', async () => {

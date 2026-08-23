@@ -101,7 +101,7 @@ history, and retirement scope is only `workbenchKind`; legacy standalone
 `project_id` values are inert provenance. The Gateway's current Canvas
 capabilities are `nomi_creative_studio_list_canvases` and
 `nomi_creative_studio_get_canvas`; old project-named capabilities are deprecated
-aliases. The UI/API contract version is 21.
+aliases. The UI/API contract version is 22.
 
 Canvas exports use an archive v2 writer and retain an archive v1 reader. Image
 and Video restore versioned per-workbench session drafts from browser session
