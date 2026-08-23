@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Tooltip } from '@arco-design/web-react';
+import { Spin, Tooltip } from '@arco-design/web-react';
 import {
   AddPicture,
   FileText,
@@ -38,6 +38,9 @@ interface CreativeStudioSiderProps {
   tooltipEnabled?: boolean;
   /** Last exact route owned by the My Canvases list/editor/Director section. */
   canvasesResumePath?: string;
+  /** Destination currently waiting on the product before-leave gate. */
+  navigationPendingPath?: string | null;
+  onPreload?(path: string): void;
   onNavigate(path: string): void;
 }
 
@@ -60,6 +63,8 @@ const CreativeStudioSider: React.FC<CreativeStudioSiderProps> = ({
   collapsed = false,
   tooltipEnabled = false,
   canvasesResumePath = CREATIVE_STUDIO_CANVASES_PATH,
+  navigationPendingPath = null,
+  onPreload,
   onNavigate,
 }) => {
   const { t } = useTranslation();
@@ -124,11 +129,18 @@ const CreativeStudioSider: React.FC<CreativeStudioSiderProps> = ({
     >
       {navigation.map((item) => {
         const isSelected = item.section === activeSection;
+        const isNavigationPending = navigationPendingPath === item.path;
         return (
-          <Tooltip key={item.section} {...siderTooltipProps} content={item.label} position='right'>
+          <Tooltip
+            key={item.section}
+            {...siderTooltipProps}
+            content={isNavigationPending ? t('common.loading') : item.label}
+            position='right'
+          >
             <button
               type='button'
               data-creative-studio-navigation={item.section}
+              data-creative-studio-navigation-pending={isNavigationPending ? 'true' : undefined}
               className={classNames(
                 'settings-sider__item h-34px rd-8px border-0 bg-transparent flex items-center gap-8px group cursor-pointer relative overflow-hidden shrink-0 conversation-item [&.conversation-item+&.conversation-item]:mt-2px transition-colors',
                 collapsed ? 'w-full justify-center px-0' : 'w-full justify-start px-10px',
@@ -138,17 +150,26 @@ const CreativeStudioSider: React.FC<CreativeStudioSiderProps> = ({
                 }
               )}
               aria-current={isSelected ? 'page' : undefined}
+              aria-busy={isNavigationPending || undefined}
+              onMouseEnter={() => onPreload?.(item.path)}
+              onFocus={() => onPreload?.(item.path)}
               onClick={() => onNavigate(item.path)}
             >
               <span className='size-22px flex items-center justify-center shrink-0 line-height-0'>
-                {React.cloneElement(item.icon, {
-                  theme: 'outline',
-                  size: '16',
-                  strokeWidth: 3,
-                  className: isSelected
-                    ? 'block leading-none text-primary-6'
-                    : 'block leading-none text-t-secondary',
-                })}
+                {isNavigationPending ? (
+                  <span role='status' aria-label={t('common.loading')}>
+                    <Spin dot size={12} />
+                  </span>
+                ) : (
+                  React.cloneElement(item.icon, {
+                    theme: 'outline',
+                    size: '16',
+                    strokeWidth: 3,
+                    className: isSelected
+                      ? 'block leading-none text-primary-6'
+                      : 'block leading-none text-t-secondary',
+                  })
+                )}
               </span>
               <FlexFullContainer className='h-24px collapsed-hidden'>
                 <span

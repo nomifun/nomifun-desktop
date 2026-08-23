@@ -35,7 +35,8 @@ describe('Creative Studio primary navigation', () => {
         'normalizeCreativeStudioCanvasesResumeLocation(currentPath)'
       )
     ).toBe(true);
-    expect(siderSource.includes('navTo(lastCreativeStudioPathRef.current)')).toBe(true);
+    expect(siderSource.includes('const target = lastCreativeStudioPathRef.current;')).toBe(true);
+    expect(siderSource.includes('navTo(target);')).toBe(true);
     expect(siderSource.includes('canvasesResumePath={')).toBe(true);
     expect(siderSource.includes('isCreativeStudioPath(pathname)')).toBe(true);
     expect(siderSource.includes('<SiderCreativeStudioEntry')).toBe(true);
@@ -81,9 +82,22 @@ describe('Creative Studio primary navigation', () => {
   test('switches to Settings-style product navigation with the workbench return pinned below it', () => {
     expect(creativeSiderSource.includes('settings-sider__item')).toBe(true);
     expect(siderSource.includes('isCreativeStudio ? (')).toBe(true);
-    expect(siderSource.includes("backLabel={t('creativeStudio.focus.backToWorkbench')}")).toBe(true);
+    expect(siderSource.includes("t('creativeStudio.focus.backToWorkbench')")).toBe(true);
     expect(siderSource.includes('onSettingsClick={handleReturnToWorkbench}')).toBe(true);
     expect(siderSource.includes('handleCreativeStudioNavigation(WORKBENCH_HOME_PATH, true)')).toBe(true);
     expect(siderSource.includes('requestCreativeStudioBeforeLeave')).toBe(true);
+  });
+
+  test('warms Creative Studio lazy routes and keeps the CAS gate ahead of navigation', () => {
+    expect(routerSource.includes('export const preloadCreativeStudioRoute')).toBe(true);
+    expect(routerSource.includes('export const preloadCreativeStudioNavigationRoutes')).toBe(true);
+    expect(routerSource.includes('creativeStudioRouteLoaders')).toBe(true);
+    expect(routerSource.includes('loadCreativeStudioWorkbenches()')).toBe(true);
+    expect(siderSource.includes('preloadCreativeStudioRoute')).toBe(true);
+    expect(siderSource.includes('preloadCreativeStudioNavigationRoutes')).toBe(true);
+    expect(siderSource.includes('requestIdleCallback')).toBe(true);
+    expect(siderSource.includes('onPreload={preloadCreativeStudio}')).toBe(true);
+    expect(siderSource.includes('canLeave = await requestCreativeStudioBeforeLeave()')).toBe(true);
+    expect(siderSource.includes('navTo(pendingNavigation.target, pendingNavigation.replace)')).toBe(true);
   });
 });

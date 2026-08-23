@@ -72,4 +72,14 @@ describe('Creative Studio sidebar navigation', () => {
     expect(source.includes('data-tauri-drag-region')).toBe(false);
     expect(source.includes('toggleMaximize')).toBe(false);
   });
+
+  test('preloads hovered or focused routes and marks a gated destination as pending', () => {
+    expect(source.includes('onPreload?(path: string): void;')).toBe(true);
+    expect(source.includes('navigationPendingPath?: string | null;')).toBe(true);
+    expect(source.includes('onMouseEnter={() => onPreload?.(item.path)}')).toBe(true);
+    expect(source.includes('onFocus={() => onPreload?.(item.path)}')).toBe(true);
+    expect(source.includes('aria-busy={isNavigationPending || undefined}')).toBe(true);
+    expect(source.includes('data-creative-studio-navigation-pending')).toBe(true);
+    expect(source.includes("<Spin dot size={12} />")).toBe(true);
+  });
 });

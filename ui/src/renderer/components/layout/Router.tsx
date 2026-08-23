@@ -7,6 +7,8 @@ import { useAuth } from '@renderer/hooks/context/AuthContext';
 import {
   CREATIVE_STUDIO_CANVASES_PATH,
   CREATIVE_STUDIO_ROOT_PATH,
+  creativeStudioSectionForPath,
+  type CreativeStudioSection,
 } from '@renderer/pages/creativeStudio/app/routes';
 const Conversation = React.lazy(() => import('@renderer/pages/conversation'));
 const Guid = React.lazy(() => import('@renderer/pages/guid'));
@@ -35,37 +37,85 @@ const CustomerServiceRosterPage = React.lazy(() => import('@renderer/pages/custo
 const CustomerServiceDetailPage = React.lazy(() => import('@renderer/pages/customerService/CsAgentDetailPage'));
 const KnowledgeListPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeListPage'));
 const KnowledgeDetailPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeDetailPage'));
-const CreativeStudioFocusShell = React.lazy(
-  () => import('@renderer/pages/creativeStudio/app/CreativeStudioFocusShell')
-);
-const CreativeStudioCanvasesRoute = React.lazy(
-  () => import('@renderer/pages/creativeStudio/canvases/CreativeStudioCanvasesRoute')
-);
-const CreativeStudioPromptsRoute = React.lazy(
-  () => import('@renderer/pages/creativeStudio/prompts/page/CreativeStudioPromptsRoute')
-);
-const CreativeStudioAssetsRoute = React.lazy(
-  () => import('@renderer/pages/creativeStudio/assets/page/CreativeAssetLibraryPage')
-);
-const CreativeStudioCanvasRoute = React.lazy(
-  () => import('@renderer/pages/creativeStudio/canvases/CreativeCanvasProductRoute')
-);
-const CreativeStudioImageWorkbenchRoute = React.lazy(() =>
-  import('@renderer/pages/creativeStudio/workbenches/product').then((module) => ({
+const loadCreativeStudioFocusShell = () =>
+  import('@renderer/pages/creativeStudio/app/CreativeStudioFocusShell');
+const loadCreativeStudioCanvasesRoute = () =>
+  import('@renderer/pages/creativeStudio/canvases/CreativeStudioCanvasesRoute');
+const loadCreativeStudioPromptsRoute = () =>
+  import('@renderer/pages/creativeStudio/prompts/page/CreativeStudioPromptsRoute');
+const loadCreativeStudioAssetsRoute = () =>
+  import('@renderer/pages/creativeStudio/assets/page/CreativeAssetLibraryPage');
+const loadCreativeStudioCanvasRoute = () =>
+  import('@renderer/pages/creativeStudio/canvases/CreativeCanvasProductRoute');
+const loadCreativeStudioWorkbenches = () =>
+  import('@renderer/pages/creativeStudio/workbenches/product');
+const loadCreativeStudioImageWorkbenchRoute = () =>
+  loadCreativeStudioWorkbenches().then((module) => ({
     default: module.ImageWorkbenchProductRoute,
-  }))
-);
-const CreativeStudioVideoWorkbenchRoute = React.lazy(() =>
-  import('@renderer/pages/creativeStudio/workbenches/product').then((module) => ({
+  }));
+const loadCreativeStudioVideoWorkbenchRoute = () =>
+  loadCreativeStudioWorkbenches().then((module) => ({
     default: module.VideoWorkbenchProductRoute,
-  }))
-);
-const CreativeStudioDirectorRoute = React.lazy(
-  () => import('@renderer/pages/creativeStudio/canvases/CreativeCanvasDirectorRoute')
-);
-const CreativeStudioTemplateRoute = React.lazy(
-  () => import('@renderer/pages/creativeStudio/templates/page/CreativeTemplateRoute')
-);
+  }));
+const loadCreativeStudioDirectorRoute = () =>
+  import('@renderer/pages/creativeStudio/canvases/CreativeCanvasDirectorRoute');
+const loadCreativeStudioTemplateRoute = () =>
+  import('@renderer/pages/creativeStudio/templates/page/CreativeTemplateRoute');
+
+const creativeStudioRouteLoaders: Record<CreativeStudioSection, () => Promise<unknown>> = {
+  canvases: loadCreativeStudioCanvasesRoute,
+  canvas: loadCreativeStudioCanvasRoute,
+  director: loadCreativeStudioDirectorRoute,
+  image: loadCreativeStudioImageWorkbenchRoute,
+  video: loadCreativeStudioVideoWorkbenchRoute,
+  prompts: loadCreativeStudioPromptsRoute,
+  assets: loadCreativeStudioAssetsRoute,
+  templates: loadCreativeStudioTemplateRoute,
+};
+
+const ignoreCreativeStudioPreloadFailure = (preload: Promise<unknown>): Promise<void> =>
+  preload.then(
+    () => undefined,
+    () => undefined
+  );
+
+/**
+ * Warms the focused product shell and the exact lazy route needed for a
+ * Creative Studio destination. Preloading remains best-effort: route errors
+ * still render through the normal route error boundary when the user navigates.
+ */
+export const preloadCreativeStudioRoute = (path: string): Promise<void> => {
+  const section = creativeStudioSectionForPath(path);
+  const loader = section ? creativeStudioRouteLoaders[section] : null;
+  if (!loader) return Promise.resolve();
+
+  return ignoreCreativeStudioPreloadFailure(
+    Promise.all([loadCreativeStudioFocusShell(), loader()])
+  );
+};
+
+/** Preload the sections exposed by the Creative Studio product sidebar at idle. */
+export const preloadCreativeStudioNavigationRoutes = (): Promise<void> =>
+  ignoreCreativeStudioPreloadFailure(
+    Promise.all([
+      loadCreativeStudioFocusShell(),
+      loadCreativeStudioCanvasesRoute(),
+      loadCreativeStudioWorkbenches(),
+      loadCreativeStudioPromptsRoute(),
+      loadCreativeStudioAssetsRoute(),
+      loadCreativeStudioTemplateRoute(),
+    ])
+  );
+
+const CreativeStudioFocusShell = React.lazy(loadCreativeStudioFocusShell);
+const CreativeStudioCanvasesRoute = React.lazy(loadCreativeStudioCanvasesRoute);
+const CreativeStudioPromptsRoute = React.lazy(loadCreativeStudioPromptsRoute);
+const CreativeStudioAssetsRoute = React.lazy(loadCreativeStudioAssetsRoute);
+const CreativeStudioCanvasRoute = React.lazy(loadCreativeStudioCanvasRoute);
+const CreativeStudioImageWorkbenchRoute = React.lazy(loadCreativeStudioImageWorkbenchRoute);
+const CreativeStudioVideoWorkbenchRoute = React.lazy(loadCreativeStudioVideoWorkbenchRoute);
+const CreativeStudioDirectorRoute = React.lazy(loadCreativeStudioDirectorRoute);
+const CreativeStudioTemplateRoute = React.lazy(loadCreativeStudioTemplateRoute);
 const MiniAppsListPage = React.lazy(() => import('@renderer/pages/miniApps'));
 const MiniAppRunnerPage = React.lazy(() => import('@renderer/pages/miniApps/RunnerPage'));
 const CompanionPage = React.lazy(() => import('@renderer/pages/companion'));
