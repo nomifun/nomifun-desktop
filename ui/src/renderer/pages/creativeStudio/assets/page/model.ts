@@ -60,6 +60,20 @@ export function creativeAssetPageSlice<T>(items: readonly T[], page: number, pag
   return items.slice(start, start + normalizedPageSize);
 }
 
+export function creativeAssetPageIsLoaded(
+  loaded: number,
+  total: number,
+  page: number,
+  pageSize: number
+): boolean {
+  const normalizedLoaded = Math.max(0, Math.trunc(Number.isFinite(loaded) ? loaded : 0));
+  const normalizedTotal = Math.max(0, Math.trunc(Number.isFinite(total) ? total : 0));
+  const normalizedPage = Math.max(1, Math.trunc(Number.isFinite(page) ? page : 1));
+  const normalizedPageSize = Math.max(1, Math.trunc(Number.isFinite(pageSize) ? pageSize : 1));
+  const required = Math.min(normalizedTotal, normalizedPage * normalizedPageSize);
+  return normalizedLoaded >= required;
+}
+
 export function creativeAssetCacheIsComplete(loaded: number, total: number): boolean {
   const normalizedLoaded = Math.max(0, Math.trunc(Number.isFinite(loaded) ? loaded : 0));
   const normalizedTotal = Math.max(0, Math.trunc(Number.isFinite(total) ? total : 0));

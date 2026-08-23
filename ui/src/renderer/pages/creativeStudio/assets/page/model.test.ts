@@ -13,6 +13,7 @@ import {
   creativeAssetCacheIsComplete,
   creativeAssetDownloadName,
   creativeAssetPageCount,
+  creativeAssetPageIsLoaded,
   creativeAssetPageSlice,
   creativeAssetPageSliceFromCompleteCache,
   creativeAssetQuerySearch,
@@ -51,6 +52,14 @@ describe('creative asset library route model', () => {
     expect(creativeAssetPageCount(14, 10)).toBe(2);
     expect(creativeAssetPageSlice(items, 1, 10)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     expect(creativeAssetPageSlice(items, 2, 10)).toEqual([11, 12, 13, 14]);
+  });
+
+  test('only requires enough loaded assets to render the requested page', () => {
+    expect(creativeAssetPageIsLoaded(10, 100, 1, 10)).toBe(true);
+    expect(creativeAssetPageIsLoaded(10, 100, 2, 10)).toBe(false);
+    expect(creativeAssetPageIsLoaded(20, 100, 2, 10)).toBe(true);
+    expect(creativeAssetPageIsLoaded(14, 14, 2, 10)).toBe(true);
+    expect(creativeAssetPageIsLoaded(0, 0, 1, 10)).toBe(true);
   });
 
   test('never exposes a stale second page while reload has only restored backend page one', () => {
