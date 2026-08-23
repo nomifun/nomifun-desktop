@@ -24,17 +24,17 @@ window. Like Settings, the primary rail switches to Creative Studio
 navigation and can be collapsed to recover working space. The primary
 Creative Studio entry resumes the last valid product location in the current
 app session, including its full query string and in-page hash. Invalid,
-unknown, external, or overlong saved locations fail closed to `/workshop`.
-Use the **Creative Studio** home item in the product rail when you intentionally
-want a fresh starting point. **Back to Workbench** stays pinned to the bottom
-of that rail and returns to `/guid` after any pending Canvas or Director save
-has been resolved.
+unknown, external, or overlong saved locations fail closed to
+`/workshop/canvases`. There is no separate Creative Studio home item; prompt-led
+creation is available from the **Canvas Assistant** inside an opened Canvas.
+**Back to Workbench** stays pinned to the bottom of that rail and returns to
+`/guid` after any pending Canvas or Director save has been resolved.
 
 The canonical route surface is:
 
 | Route | Purpose |
 | --- | --- |
-| `/workshop` | Creative Studio home and entry point. |
+| `/workshop` | Compatibility entry that redirects to `/workshop/canvases`. |
 | `/workshop/canvases` | Create, rename, open, import, export, and delete Canvases. |
 | `/workshop/canvas/:canvasId` | Edit one Canvas's canonical infinite document. |
 | `/workshop/director/:canvasId` | Edit the bounded Director state attached to that Canvas. |
@@ -141,7 +141,7 @@ different task.
 
 | Operation | Required NomiFun task | Creative Studio capability |
 | --- | --- | --- |
-| Canvas Assistant and simple kickoff | `chat` | Canvas-scoped assistant turn; strict graph proposals still require manual approval. |
+| Canvas Assistant | `chat` | Canvas-scoped assistant turn; strict graph proposals still require manual approval. |
 | Workflow AI draft/planning | `chat` | One tool-less, bounded completion. |
 | Empty image target | `image_generation` | `t2i`. |
 | Image with real references, including the mask-edit path | `image_edit` | `i2i`. |

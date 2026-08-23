@@ -27,7 +27,6 @@ const memoryStorage = () => {
 describe('Creative Studio resume location', () => {
   test('keeps exact current routes with their search and hash intact', () => {
     for (const path of [
-      '/workshop',
       '/workshop/canvases',
       '/workshop/projects',
       `/workshop/canvas/${PROJECT_ID}`,
@@ -40,6 +39,10 @@ describe('Creative Studio resume location', () => {
     ]) {
       expect(normalizeCreativeStudioResumeLocation(path)).toBe(path);
     }
+    expect(normalizeCreativeStudioResumeLocation('/workshop')).toBe('/workshop/canvases');
+    expect(normalizeCreativeStudioResumeLocation('/workshop/?from=old#resume')).toBe(
+      '/workshop/canvases?from=old#resume'
+    );
   });
 
   test('fails closed for outside, unknown, absolute, and oversized locations', () => {
@@ -52,7 +55,7 @@ describe('Creative Studio resume location', () => {
       'https://evil.example/workshop',
       `/workshop/prompts?value=${'x'.repeat(4096)}`,
     ]) {
-      expect(normalizeCreativeStudioResumeLocation(path)).toBe('/workshop');
+      expect(normalizeCreativeStudioResumeLocation(path)).toBe('/workshop/canvases');
     }
   });
 
@@ -60,7 +63,7 @@ describe('Creative Studio resume location', () => {
     const storage = memoryStorage();
     const path = '/workshop/image?panel=history';
 
-    expect(readCreativeStudioResumeLocation(storage)).toBe('/workshop');
+    expect(readCreativeStudioResumeLocation(storage)).toBe('/workshop/canvases');
     expect(rememberCreativeStudioResumeLocation(path, storage)).toBe(path);
     expect(storage.values.get(CREATIVE_STUDIO_RESUME_LOCATION_KEY)).toBe(path);
     expect(readCreativeStudioResumeLocation(storage)).toBe(path);
@@ -73,7 +76,7 @@ describe('Creative Studio resume location', () => {
         throw new Error('unavailable');
       },
     };
-    expect(readCreativeStudioResumeLocation(unavailable)).toBe('/workshop');
+    expect(readCreativeStudioResumeLocation(unavailable)).toBe('/workshop/canvases');
     expect(rememberCreativeStudioResumeLocation('/workshop/prompts', unavailable)).toBe(
       '/workshop/prompts'
     );

@@ -16,7 +16,6 @@ import { useBrowserOverview } from '@renderer/pages/browser/useBrowserInventory'
 import { parseSessionRoute } from '@renderer/utils/routes/sessionRoute';
 import {
   CREATIVE_STUDIO_ASSETS_PATH,
-  CREATIVE_STUDIO_ROOT_PATH,
   WORKBENCH_HOME_PATH,
   isCreativeStudioPath,
 } from '@renderer/pages/creativeStudio/app/routes';

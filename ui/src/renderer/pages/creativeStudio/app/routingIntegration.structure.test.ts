@@ -5,9 +5,10 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 const router = readFileSync(new URL('../../../components/layout/Router.tsx', import.meta.url), 'utf8');
+const retiredHomePageUrl = new URL('./CreativeStudioHomePage.tsx', import.meta.url);
 
 describe('Creative Studio product route integration', () => {
   test('mounts every implemented product inside the shared application layout', () => {
@@ -18,10 +19,11 @@ describe('Creative Studio product route integration', () => {
 
     expect(layoutAt).toBeGreaterThan(-1);
     expect(creativeStudioAt).toBeGreaterThan(layoutAt);
-    expect(router.includes('CreativeStudioHomePage')).toBe(true);
-    expect(router.includes('<Route index element={withRouteFallback(CreativeStudioHomePage)} />')).toBe(true);
+    expect(existsSync(retiredHomePageUrl)).toBe(false);
+    expect(router.includes('CreativeStudioHomePage')).toBe(false);
+    expect(router.includes('<Route index element={<CreativeStudioCanvasesRedirect />} />')).toBe(true);
     expect(router.includes("path='canvases' element={withRouteFallback(CreativeStudioCanvasesRoute)}")).toBe(true);
-    expect(router.includes("path='projects' element={<LegacyCreativeStudioProjectsRedirect />}")).toBe(true);
+    expect(router.includes("path='projects' element={<CreativeStudioCanvasesRedirect />}")).toBe(true);
     expect(router.includes('to={`${CREATIVE_STUDIO_CANVASES_PATH}${search}${hash}`}')).toBe(true);
     expect(router.includes("path='canvas/:canvasId'")).toBe(true);
     expect(router.includes("path='director/:canvasId'")).toBe(true);
