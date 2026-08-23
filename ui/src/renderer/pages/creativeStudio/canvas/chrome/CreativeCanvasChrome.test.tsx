@@ -33,6 +33,7 @@ const baseProps = (
   canUndo: false,
   canRedo: true,
   isMiniMapOpen: false,
+  leftOpen: true,
   leftView: 'canvas',
   rightView: 'assistant',
   bottomView: 'history',
@@ -55,6 +56,7 @@ const baseProps = (
   onRedo: noop,
   onFitView: noop,
   onToggleMiniMap: noop,
+  onLeftPanelOpenChange: noop,
   onLeftViewChange: noop,
   onRightViewChange: noop,
   onBottomViewChange: noop,
@@ -102,6 +104,12 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
       html.includes('aria-label="creativeStudio.canvas.actions.openMiniMap"')
     ).toBe(true);
     expect(html.includes('aria-pressed="true"')).toBe(true);
+    expect(html.includes('data-left-open="true"')).toBe(true);
+    expect(
+      html.includes(
+        'aria-label="creativeStudio.canvas.chrome.collapseResources"'
+      )
+    ).toBe(true);
     expect(html.includes('data-right-panel-header')).toBe(false);
     expect(
       html.includes('creativeStudio.canvas.chrome.addNode')
@@ -177,6 +185,20 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
     expect(html.includes('data-bottom-view="closed"')).toBe(true);
     expect(html.includes('data-right-panel-body')).toBe(false);
     expect(html.includes('data-bottom-panel-body')).toBe(false);
+  });
+
+  test('renders floating resource bubbles while keeping the panel body mounted', () => {
+    const html = renderChrome({ leftOpen: false });
+
+    expect(html.includes('data-left-open="false"')).toBe(true);
+    expect(html.includes('data-left-panel-body="canvas"')).toBe(true);
+    expect(html.includes('aria-hidden="true"')).toBe(true);
+    expect(
+      html.includes(
+        'aria-label="creativeStudio.canvas.chrome.collapseResources"'
+      )
+    ).toBe(false);
+    expect(html.includes('aria-expanded="false"')).toBe(true);
   });
 });
 

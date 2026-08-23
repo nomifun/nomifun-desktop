@@ -217,6 +217,7 @@ import {
   creativeCanvasProductSelectionCapabilities,
   creativeCanvasSaveDisplayMessage,
   resolveCreativeNodeAssetPresentation,
+  withCreativeCanvasLeftPanelOpen,
   withCreativeCanvasBottomView,
   withCreativeCanvasLeftView,
   withCreativeCanvasRightView,
@@ -1006,6 +1007,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const handleLeftViewChange = useCallback(
     (view: CreativeStudioPanelState['left']['activeView']) => {
       persistPanels(withCreativeCanvasLeftView(panelsRef.current, view));
+    },
+    [persistPanels]
+  );
+
+  const handleLeftPanelOpenChange = useCallback(
+    (open: boolean) => {
+      persistPanels(withCreativeCanvasLeftPanelOpen(panelsRef.current, open));
     },
     [persistPanels]
   );
@@ -4215,7 +4223,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const compact = viewportSize.width < 760;
   const panelViews = creativeCanvasProductPanelViews(panels);
   const canvasLayoutStyle = {
-    '--creative-canvas-left-panel-width': `${panels.left.open ? panels.left.width : 0}px`,
     '--creative-canvas-right-panel-width': `${panels.right.width}px`,
     '--creative-canvas-bottom-panel-height': `${panels.bottom.height}px`,
   } as React.CSSProperties;
@@ -4311,6 +4318,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         canUndo={Boolean(canvasState && canUndoCanvas(canvasState))}
         canRedo={Boolean(canvasState && canRedoCanvas(canvasState))}
         isMiniMapOpen={miniMapOpen}
+        leftOpen={panels.left.open}
         leftView={panelViews.left}
         rightView={panelViews.right}
         bottomView={panelViews.bottom}
@@ -4326,6 +4334,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         onRedo={() => dispatch(canvasCommands.redo())}
         onFitView={handleFit}
         onToggleMiniMap={() => setMiniMapOpen((open) => !open)}
+        onLeftPanelOpenChange={handleLeftPanelOpenChange}
         onLeftViewChange={handleLeftViewChange}
         onRightViewChange={handleRightViewChange}
         onBottomViewChange={handleBottomViewChange}

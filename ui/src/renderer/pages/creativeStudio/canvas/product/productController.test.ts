@@ -20,6 +20,7 @@ import {
   creativeCanvasSaveDisplayMessage,
   resolveCreativeNodeAssetPresentation,
   withCreativeCanvasBottomView,
+  withCreativeCanvasLeftPanelOpen,
   withCreativeCanvasLeftView,
   withCreativeCanvasRightView,
 } from './productController';
@@ -81,8 +82,11 @@ describe('Creative Canvas product controller helpers', () => {
       right: { ...initial.right, width: 340 },
     };
     const sourceLeft = withCreativeCanvasLeftView(staleGeometry, 'canvas');
+    const collapsed = withCreativeCanvasLeftPanelOpen(sourceLeft, false);
     const assistant = withCreativeCanvasRightView(staleGeometry, 'assistant');
     expect(sourceLeft.left.width).toBe(CREATIVE_CANVAS_SOURCE_LEFT_PANEL_WIDTH);
+    expect(collapsed.left.open).toBe(false);
+    expect(collapsed.left.width).toBe(CREATIVE_CANVAS_SOURCE_LEFT_PANEL_WIDTH);
     expect(assistant.right.width).toBe(CREATIVE_CANVAS_SOURCE_AGENT_PANEL_WIDTH);
   });
 

@@ -37,6 +37,7 @@ export interface CreativeCanvasChromeProps {
   canUndo: boolean;
   canRedo: boolean;
   isMiniMapOpen: boolean;
+  leftOpen: boolean;
   leftView: CreativeCanvasLeftView;
   rightView: CreativeCanvasRightView | null;
   bottomView: CreativeCanvasBottomView | null;
@@ -54,6 +55,7 @@ export interface CreativeCanvasChromeProps {
   onRedo(): void;
   onFitView(): void;
   onToggleMiniMap(): void;
+  onLeftPanelOpenChange(open: boolean): void;
   onLeftViewChange(view: CreativeCanvasLeftView): void;
   onRightViewChange(view: CreativeCanvasRightView | null): void;
   onBottomViewChange(view: CreativeCanvasBottomView | null): void;

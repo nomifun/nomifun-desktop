@@ -75,11 +75,13 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     expect(types.includes('nodeMenuOpen')).toBe(false);
   });
 
-  test('preserves a squeezed three-column canvas and compact scrolling dock', () => {
+  test('keeps the canvas full-width while the resource rail floats above it', () => {
     for (const token of [
-      'grid-template-columns: 280px minmax(0, 1fr) 360px',
+      'grid-template-columns: 0 minmax(0, 1fr) 360px',
       'grid-column: 2',
       'overflow-x: auto',
+      'position: absolute',
+      'data-left-open',
       "data-compact='true'",
       '@media (max-width: 1180px)',
       '@media (max-width: 880px)',
