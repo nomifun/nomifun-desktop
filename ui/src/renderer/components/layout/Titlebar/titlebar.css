@@ -157,7 +157,7 @@
 }
 
 .app-titlebar__language-button:hover {
-  border-color: var(--primary);
+  border-color: rgb(var(--primary-6));
   background-color: var(--bg-hover);
 }
 
