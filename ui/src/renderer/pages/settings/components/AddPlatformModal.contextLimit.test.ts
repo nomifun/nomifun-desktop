@@ -28,10 +28,10 @@ describe('task capability context window control', () => {
     }
   });
 
-  test('keeps call-configuration choices goal driven and task scoped', () => {
+  test('keeps call-configuration tabs goal driven and task scoped', () => {
     const editorSource = readSource('./ModelDefinitionEditor.tsx');
 
-    for (const intent of ['connection', 'limits', 'protocol', 'diagnostics', 'recommended']) {
+    for (const intent of ['overview', 'connection', 'limits', 'protocol', 'diagnostics']) {
       expect(editorSource.includes(`data-call-config-intent='${intent}'`) || editorSource.includes(`key: '${intent}'`)).toBe(
         true
       );
