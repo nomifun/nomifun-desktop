@@ -5,7 +5,7 @@
  */
 
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import {
@@ -40,6 +40,7 @@ import {
   type ImageWorkbenchLayout,
   type ImageWorkbenchModelIdentity,
   type ImageWorkbenchSettings,
+  imageWorkbenchSizePolicyForModel,
 } from '../image';
 import {
   combineStandaloneHistoryTasks,
@@ -96,38 +97,6 @@ const creativeModelSelection = (
       }
     : null;
 
-const imageSettingsFromTask = (task: CreativeTask): ImageWorkbenchSettings => {
-  if (task.task !== 'image_generation' && task.task !== 'image_edit') {
-    throw new Error(`任务 ${task.taskId} 不是图片工作台任务。`);
-  }
-  const interfaceMode = task.parameters.interface_mode;
-  const quality = task.parameters.quality;
-  const aspectRatio = task.parameters.aspect;
-  const count = task.parameters.count;
-  const width = task.parameters.width;
-  const height = task.parameters.height;
-  if (
-    (interfaceMode !== 'images' && interfaceMode !== 'responses') ||
-    (quality !== 'auto' && quality !== 'high' && quality !== 'medium' && quality !== 'low') ||
-    typeof aspectRatio !== 'string' ||
-    !Number.isSafeInteger(count) ||
-    (width !== undefined && !Number.isSafeInteger(width)) ||
-    (height !== undefined && !Number.isSafeInteger(height)) ||
-    (width === undefined) !== (height === undefined)
-  ) {
-    throw new Error(`任务 ${task.taskId} 的图片参数快照不完整，无法载入。`);
-  }
-  return {
-    model: { providerId: task.providerId, model: task.model },
-    interfaceMode,
-    quality,
-    aspectRatio,
-    count: count as number,
-    width: (width as number | undefined) ?? null,
-    height: (height as number | undefined) ?? null,
-  };
-};
-
 const OwnedImageWorkbenchReady: React.FC<{
   history: StandaloneWorkbenchHistoryState;
 }> = ({ history }) => {
@@ -156,7 +125,6 @@ const OwnedImageWorkbenchReady: React.FC<{
   const [retireError, setRetireError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const loadGenerationRef = useRef(0);
   const historyScope = useMemo(() => ({ workbenchKind: 'image' as const }), []);
   const durableTasks = useMemo(
     () =>
@@ -203,6 +171,36 @@ const OwnedImageWorkbenchReady: React.FC<{
     [referenceById, referenceIds]
   );
   const modelTask = referenceIds.length ? 'image_edit' : 'image_generation';
+  const modelOptionsForTask = useMemo(
+    () => exactWorkbenchModelOptions(catalog, modelTask),
+    [catalog, modelTask]
+  );
+  const selectedModelOption = useMemo(
+    () =>
+      settings.model
+        ? modelOptionsForTask.find(
+            (option) =>
+              option.providerId === settings.model?.providerId &&
+              option.model === settings.model?.model
+          ) ?? null
+        : null,
+    [modelOptionsForTask, settings.model]
+  );
+  const sizePolicy = useMemo(
+    () => imageWorkbenchSizePolicyForModel(selectedModelOption),
+    [selectedModelOption]
+  );
+  const selectedSizeOption = useMemo(
+    () =>
+      sizePolicy.options.find(
+        (option) =>
+          !option.disabled &&
+          option.value === settings.aspectRatio &&
+          option.width === settings.width &&
+          option.height === settings.height
+      ) ?? null,
+    [settings.aspectRatio, settings.height, settings.width, sizePolicy.options]
+  );
 
   useEffect(() => {
     const restoredReferenceIds = initialDraft.referenceAssetIds;
@@ -263,17 +261,42 @@ const OwnedImageWorkbenchReady: React.FC<{
     }
     const stillAvailable = isExactWorkbenchDraftModelAvailable(
       settings.model,
-      exactWorkbenchModelOptions(catalog, modelTask)
+      modelOptionsForTask
     );
     if (!stillAvailable) setSettings((value) => ({ ...value, model: null }));
-  }, [catalog, draftReferencesRestoring, modelTask, settings.model]);
+  }, [catalog.status, draftReferencesRestoring, modelOptionsForTask, settings.model]);
 
-  useEffect(
-    () => () => {
-      loadGenerationRef.current += 1;
-    },
-    []
-  );
+  useEffect(() => {
+    if (!selectedModelOption) return;
+    const currentOption = sizePolicy.options.find(
+      (option) => option.value === settings.aspectRatio
+    );
+    const fallbackOption =
+      currentOption && !currentOption.disabled
+        ? currentOption
+        : sizePolicy.options.find((option) => !option.disabled);
+    if (!fallbackOption) return;
+    const dimensionsMatch =
+      settings.width === fallbackOption.width && settings.height === fallbackOption.height;
+    const shouldNormalizeDimensions =
+      !sizePolicy.allowCustomDimensions && !dimensionsMatch;
+    const nextCount = Math.min(settings.count, sizePolicy.maxCount);
+    if (!shouldNormalizeDimensions && nextCount === settings.count) return;
+    setSettings((value) => ({
+      ...value,
+      aspectRatio: fallbackOption.value,
+      width: shouldNormalizeDimensions ? fallbackOption.width : value.width,
+      height: shouldNormalizeDimensions ? fallbackOption.height : value.height,
+      count: nextCount,
+    }));
+  }, [
+    selectedModelOption,
+    settings.aspectRatio,
+    settings.count,
+    settings.height,
+    settings.width,
+    sizePolicy,
+  ]);
 
   const taskById = useCallback(
     (taskId: string): CreativeTask => {
@@ -298,6 +321,15 @@ const OwnedImageWorkbenchReady: React.FC<{
       setError('存在无法读取的图片参考，未把 I2I 请求降级成 T2I。');
       return;
     }
+    if (settings.count > sizePolicy.maxCount) {
+      setSettings((value) => ({ ...value, count: sizePolicy.maxCount }));
+      setError(`当前模型最多支持生成 ${sizePolicy.maxCount} 张图片。`);
+      return;
+    }
+    if (!sizePolicy.allowCustomDimensions && !selectedSizeOption) {
+      setError('当前模型不支持该尺寸，请重新选择尺寸。');
+      return;
+    }
     try {
       await runtime.generate({
         catalog,
@@ -319,6 +351,7 @@ const OwnedImageWorkbenchReady: React.FC<{
         quality: settings.quality,
         width: settings.width,
         height: settings.height,
+        size: references.length ? null : selectedSizeOption?.requestSize ?? null,
         aspectRatio: settings.aspectRatio,
         count: settings.count,
       });
@@ -352,25 +385,6 @@ const OwnedImageWorkbenchReady: React.FC<{
       } catch (reason) {
         setError(reason instanceof Error ? reason.message : String(reason));
       }
-    }
-  };
-
-  const loadTask = async (taskId: string): Promise<void> => {
-    const generation = loadGenerationRef.current + 1;
-    loadGenerationRef.current = generation;
-    setError(null);
-    try {
-      const task = taskById(taskId);
-      const nextReferences = await hydrateStandaloneTaskReferences(task, creativeAssetClient);
-      const nextSettings = imageSettingsFromTask(task);
-      if (loadGenerationRef.current !== generation) return;
-      setPrompt(typeof task.parameters.prompt === 'string' ? task.parameters.prompt : '');
-      setSettings(nextSettings);
-      setHydratedReferences([...nextReferences.assets]);
-      setReferenceIds(nextReferences.bindings.map((binding) => binding.assetId));
-    } catch (reason) {
-      if (loadGenerationRef.current !== generation) return;
-      setError(reason instanceof Error ? reason.message : String(reason));
     }
   };
 
@@ -421,6 +435,9 @@ const OwnedImageWorkbenchReady: React.FC<{
     prompt,
     references: imageWorkbenchReferencesFromAssets(references),
     settings,
+    aspectRatioOptions: sizePolicy.options,
+    dimensionsDisabled: !sizePolicy.allowCustomDimensions,
+    maxCount: sizePolicy.maxCount,
     selectedResultIds,
     onLayoutChange: setLayout,
     onPromptChange: setPrompt,
@@ -435,20 +452,27 @@ const OwnedImageWorkbenchReady: React.FC<{
       setSettings((value) => ({ ...value, interfaceMode })),
     onQualityChange: (quality: ImageWorkbenchSettings['quality']) =>
       setSettings((value) => ({ ...value, quality })),
-    onDimensionsChange: (dimensions: { width: number | null; height: number | null }) =>
-      setSettings((value) => ({ ...value, ...dimensions })),
-    onAspectRatioChange: (option: ImageWorkbenchAspectRatioOption) =>
+    onDimensionsChange: (dimensions: { width: number | null; height: number | null }) => {
+      if (!sizePolicy.allowCustomDimensions) return;
+      setSettings((value) => ({ ...value, ...dimensions }));
+    },
+    onAspectRatioChange: (option: ImageWorkbenchAspectRatioOption) => {
+      if (!sizePolicy.options.some((candidate) => candidate.value === option.value)) return;
       setSettings((value) => ({
         ...value,
         aspectRatio: option.value,
         width: option.width,
         height: option.height,
+      }));
+    },
+    onCountChange: (count: number) =>
+      setSettings((value) => ({
+        ...value,
+        count: Math.max(1, Math.min(sizePolicy.maxCount, Math.floor(count))),
       })),
-    onCountChange: (count: number) => setSettings((value) => ({ ...value, count })),
     onResultSelectionChange: setSelectedResultIds,
     onDeleteResult: (taskId: string) => requestRetirement([taskId]),
     onDeleteSelected: requestRetirement,
-    onLoadResult: (taskId: string) => void loadTask(taskId),
     onCancelTask: (taskId: string) => void cancelTask(taskId),
     historyLoadingMore: history.loadingMore,
     historyHasMore: history.nextCursor !== null,

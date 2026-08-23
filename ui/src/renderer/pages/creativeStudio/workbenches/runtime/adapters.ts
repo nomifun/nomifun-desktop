@@ -137,6 +137,17 @@ function requireSucceededOutputs(
   return entry.outputs;
 }
 
+function isDeterministicImageParameterFailure(task: CreativeTask): boolean {
+  if (task.status !== "failed") return false;
+  const message = task.error?.message ?? "";
+  return (
+    task.error?.kind === "invalid_params" ||
+    /(?:size.*(?:unsupported|not support|不支持)|(?:unsupported|not support|不支持).*size)/i.test(
+      message,
+    )
+  );
+}
+
 function requireMediaUrl(output: CreativeWorkbenchCommittedOutput): string {
   if (!output.url) {
     throw new CreativeWorkbenchRuntimeError(
@@ -289,6 +300,8 @@ export function imageWorkbenchModelOptions(
     model: option.model,
     label: option.model,
     providerLabel: option.providerName,
+    platform: option.platform,
+    protocol: option.protocol,
   }));
 }
 
@@ -316,6 +329,7 @@ export function mapImageWorkbenchRuntimeResults(
       createdAtLabel: formatters.createdAtLabel(task),
       durationLabel: formatters.durationLabel(task),
       retryable:
+        !isDeterministicImageParameterFailure(task) &&
         task.inputs !== null &&
         (!options.catalog ||
           exactWorkbenchModelOptions(options.catalog, task.task).some(

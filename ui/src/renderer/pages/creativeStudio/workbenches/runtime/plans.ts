@@ -23,6 +23,7 @@ import type {
   ImageWorkbenchInterfaceMode,
   ImageWorkbenchQuality,
 } from "../image";
+import { imageWorkbenchSizePolicyForModel } from "../image";
 import { resolveExactWorkbenchModel } from "./catalog";
 import type { CreativeWorkbenchModelSelection } from "./catalog";
 import { validateWorkbenchReferences } from "./assets";
@@ -132,6 +133,8 @@ export interface PrepareImageWorkbenchRunInput extends WorkbenchPlanBase {
   quality: ImageWorkbenchQuality;
   width: number | null;
   height: number | null;
+  /** Provider-native size string, kept separate from display dimensions. */
+  size?: string | null;
   aspectRatio: string;
   count: number;
 }
@@ -309,6 +312,17 @@ export function prepareStandaloneHistoryRetry(
       "task.status",
     );
   }
+  if (
+    task.status === "failed" &&
+    (task.task === "image_generation" || task.task === "image_edit") &&
+    task.error?.kind === "invalid_params"
+  ) {
+    throw new CreativeWorkbenchRuntimeError(
+      "task_not_retryable",
+      `Task ${task.taskId} failed because its parameters are invalid`,
+      "task.error",
+    );
+  }
   if (task.inputs === null) {
     throw new CreativeWorkbenchRuntimeError(
       "reference_contract_mismatch",
@@ -418,6 +432,48 @@ export function prepareImageWorkbenchRun(
     }
   }
 
+  const sizePolicy = imageWorkbenchSizePolicyForModel(model);
+  if (input.count > sizePolicy.maxCount) {
+    throw new CreativeWorkbenchRuntimeError(
+      "invalid_parameters",
+      `The selected image model supports at most ${sizePolicy.maxCount} output image`,
+      "count",
+    );
+  }
+  const matchingSizeOption = sizePolicy.options.find(
+    (option) =>
+      !option.disabled &&
+      option.width === input.width &&
+      option.height === input.height,
+  );
+  const isTextToImage = input.operation.capability === "t2i";
+  if (
+    isTextToImage &&
+    !sizePolicy.allowCustomDimensions &&
+    !matchingSizeOption
+  ) {
+    throw new CreativeWorkbenchRuntimeError(
+      "invalid_parameters",
+      "The selected image model does not support the requested dimensions",
+      "dimensions",
+    );
+  }
+  const explicitProviderSize = input.size?.trim();
+  if (
+    isTextToImage &&
+    explicitProviderSize &&
+    matchingSizeOption?.requestSize &&
+    explicitProviderSize !== matchingSizeOption.requestSize
+  ) {
+    throw new CreativeWorkbenchRuntimeError(
+      "invalid_parameters",
+      "Provider-native size does not match the selected dimensions",
+      "size",
+    );
+  }
+  const providerSize = isTextToImage
+    ? explicitProviderSize || matchingSizeOption?.requestSize
+    : explicitProviderSize;
   const parameters = mergeExtraParameters(
     {
       prompt: requirePrompt(input.prompt, "prompt"),
@@ -425,6 +481,7 @@ export function prepareImageWorkbenchRun(
       quality: input.quality,
       aspect: requirePrompt(input.aspectRatio, "aspectRatio"),
       count: requireInteger(input.count, "count", 1, 10),
+      ...(providerSize ? { size: providerSize } : {}),
       ...dimensions(input.width, input.height, 8_192),
     },
     input.extraParameters,
@@ -436,8 +493,8 @@ export function prepareImageWorkbenchRun(
       "count",
       "width",
       "height",
-      "n",
       "size",
+      "n",
     ],
   );
 

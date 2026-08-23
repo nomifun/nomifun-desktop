@@ -350,6 +350,10 @@
   gap: 7px;
 }
 
+.countGrid[data-max-count='1'] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .countGrid :global(.arco-input-number) {
   grid-column: span 2;
   width: 100%;
@@ -744,15 +748,57 @@
   font-size: 13px;
 }
 
-.failedVisual > span {
+.failureMessageRow {
+  display: flex;
+  width: min(300px, 100%);
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border: 1px solid color-mix(in srgb, rgb(var(--danger-6)) 64%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, rgb(var(--danger-1)) 30%, transparent);
+}
+
+.failureMessage {
   display: -webkit-box;
+  min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
-  max-width: 260px;
+  max-width: 100%;
   color: color-mix(in srgb, rgb(var(--danger-6)) 82%, var(--color-text-2));
   font-size: 11px;
   line-height: 1.55;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.failureCopy,
+.promptCopy {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--color-bg-1) 58%, transparent);
+}
+
+.failureCopy {
+  border: 1px solid color-mix(in srgb, rgb(var(--danger-6)) 24%, var(--color-border-2));
+  color: rgb(var(--danger-6));
+}
+
+.promptCopy {
+  border: 1px solid var(--color-border-2);
+  color: var(--color-text-3);
+}
+
+.failureCopy:hover,
+.promptCopy:hover {
+  background: color-mix(in srgb, rgb(var(--primary-6)) 8%, var(--color-bg-1));
+  color: rgb(var(--primary-6));
 }
 
 .canceledVisual {
@@ -796,7 +842,19 @@
   -webkit-line-clamp: 2;
 }
 
-.resultMeta > div {
+.resultPromptRow {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.resultPrompt {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.resultTags {
   display: flex;
   min-width: 0;
   flex-wrap: wrap;

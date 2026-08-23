@@ -18,6 +18,7 @@ import {
 } from '@icon-park/react';
 import { Button, Checkbox, Progress, Tag } from '@arco-design/web-react';
 import React from 'react';
+import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 import {
   nextImageWorkbenchSelection,
   type ImageWorkbenchResult,
@@ -33,7 +34,6 @@ interface ImageWorkbenchResultsProps {
   onDeleteResult?(resultId: string): void;
   onDeleteSelected?(resultIds: string[]): void;
   onRetryResult?(resultId: string): void;
-  onLoadResult?(taskId: string): void;
   onCancelTask?(taskId: string): void;
   historyLoading?: boolean;
   historyError?: string;
@@ -61,19 +61,24 @@ const taskStateLabel = (task: ImageWorkbenchTaskSummary): string | null => {
 
 const TaskMeta: React.FC<{
   result: ImageWorkbenchResult;
-  onLoadResult?(taskId: string): void;
-}> = ({ result, onLoadResult }) => (
+}> = ({ result }) => (
   <div className={styles.resultMeta}>
-    <p title={result.prompt}>{result.prompt}</p>
-    <div>
+    <div className={styles.resultPromptRow}>
+      <p className={styles.resultPrompt} title={result.prompt}>{result.prompt}</p>
+      {result.prompt ? (
+        <CopyIconButton
+          text={result.prompt}
+          tooltip='复制提示词'
+          successMessage='提示词已复制'
+          size={13}
+          className={styles.promptCopy}
+        />
+      ) : null}
+    </div>
+    <div className={styles.resultTags}>
       <Tag title={`${result.model.providerId}/${result.model.model}`}>{result.modelLabel}</Tag>
       {result.createdAtLabel ? <Tag>{result.createdAtLabel}</Tag> : null}
       {result.durationLabel ? <Tag>{result.durationLabel}</Tag> : null}
-      {onLoadResult ? (
-        <Button size='mini' onClick={() => onLoadResult(result.taskId)}>
-          载入
-        </Button>
-      ) : null}
     </div>
   </div>
 );
@@ -106,11 +111,25 @@ const ResultVisual: React.FC<{
   }
 
   if (result.status === 'failed') {
+    const copyText = result.errorDetail
+      ? `${result.errorMessage}\n${result.errorDetail}`
+      : result.errorMessage;
     return (
       <div className={styles.failedVisual}>
         <Error size={30} />
         <strong>生成失败</strong>
-        <span>{result.errorMessage}</span>
+        <div className={styles.failureMessageRow}>
+          <span className={styles.failureMessage} title={result.errorMessage}>
+            {result.errorMessage}
+          </span>
+          <CopyIconButton
+            text={copyText}
+            tooltip='复制完整报错信息'
+            successMessage='报错信息已复制'
+            size={14}
+            className={styles.failureCopy}
+          />
+        </div>
         {onRetryResult && result.retryable !== false ? (
           <Button size='small' status='danger' icon={<Refresh />} onClick={() => onRetryResult(result.id)}>
             重试
@@ -178,7 +197,6 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
   onDeleteResult,
   onDeleteSelected,
   onRetryResult,
-  onLoadResult,
   onCancelTask,
   historyLoading,
   historyError,
@@ -270,7 +288,7 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
                   onRetryResult={onRetryResult}
                   onCancelTask={onCancelTask}
                 />
-                <TaskMeta result={result} onLoadResult={onLoadResult} />
+                <TaskMeta result={result} />
               </article>
             );
           })}
