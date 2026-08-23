@@ -29,10 +29,13 @@ import {
   creativeStudioSectionForPath,
   type CreativeStudioSection,
 } from './routes';
+import { normalizeCreativeStudioCanvasesResumeLocation } from './resumeLocation';
 
 interface CreativeStudioSiderProps {
   collapsed?: boolean;
   tooltipEnabled?: boolean;
+  /** Last exact route owned by the My Canvases list/editor/Director section. */
+  canvasesResumePath?: string;
   onNavigate(path: string): void;
 }
 
@@ -54,6 +57,7 @@ interface NavigationItem {
 const CreativeStudioSider: React.FC<CreativeStudioSiderProps> = ({
   collapsed = false,
   tooltipEnabled = false,
+  canvasesResumePath = CREATIVE_STUDIO_CANVASES_PATH,
   onNavigate,
 }) => {
   const { t } = useTranslation();
@@ -61,13 +65,16 @@ const CreativeStudioSider: React.FC<CreativeStudioSiderProps> = ({
   const section = creativeStudioSectionForPath(pathname);
   const activeSection =
     section === 'canvas' || section === 'director' ? 'canvases' : section;
+  const safeCanvasesResumePath =
+    normalizeCreativeStudioCanvasesResumeLocation(canvasesResumePath) ??
+    CREATIVE_STUDIO_CANVASES_PATH;
   const siderTooltipProps = getSiderTooltipProps(tooltipEnabled);
 
   const navigation = useMemo<NavigationItem[]>(
     () => [
       {
         section: 'canvases',
-        path: CREATIVE_STUDIO_CANVASES_PATH,
+        path: safeCanvasesResumePath,
         label: t('creativeStudio.navigation.canvases'),
         icon: <FullScreen />,
       },
@@ -96,7 +103,7 @@ const CreativeStudioSider: React.FC<CreativeStudioSiderProps> = ({
         icon: <ImageFiles />,
       },
     ],
-    [t]
+    [safeCanvasesResumePath, t]
   );
 
   return (

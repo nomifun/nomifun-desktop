@@ -16,13 +16,13 @@ const settingsSource = readFileSync(
 describe('Creative Studio sidebar navigation', () => {
   test('keeps the product destinations in sidebar order without a duplicate home entry', () => {
     const orderedRoutes = [
-      'CREATIVE_STUDIO_CANVASES_PATH',
-      'CREATIVE_STUDIO_IMAGE_PATH',
-      'CREATIVE_STUDIO_VIDEO_PATH',
-      'CREATIVE_STUDIO_PROMPTS_PATH',
-      'CREATIVE_STUDIO_ASSETS_PATH',
+      'path: safeCanvasesResumePath',
+      'path: CREATIVE_STUDIO_IMAGE_PATH',
+      'path: CREATIVE_STUDIO_VIDEO_PATH',
+      'path: CREATIVE_STUDIO_PROMPTS_PATH',
+      'path: CREATIVE_STUDIO_ASSETS_PATH',
     ];
-    const positions = orderedRoutes.map((route) => source.indexOf(`path: ${route}`));
+    const positions = orderedRoutes.map((route) => source.indexOf(route));
 
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions.every((position, index) => index === 0 || position > positions[index - 1])).toBe(true);
@@ -44,6 +44,17 @@ describe('Creative Studio sidebar navigation', () => {
     }
     expect(source.includes('data-creative-studio-sider')).toBe(true);
     expect(source.includes("? 'canvases' : section")).toBe(true);
+    expect(
+      source.includes(
+        'canvasesResumePath = CREATIVE_STUDIO_CANVASES_PATH'
+      )
+    ).toBe(true);
+    expect(
+      source.includes(
+        'normalizeCreativeStudioCanvasesResumeLocation(canvasesResumePath)'
+      )
+    ).toBe(true);
+    expect(source.includes('path: safeCanvasesResumePath')).toBe(true);
     expect(source.includes("section: 'projects'")).toBe(false);
     expect(source.includes('CREATIVE_STUDIO_PROJECTS_PATH')).toBe(false);
     expect(

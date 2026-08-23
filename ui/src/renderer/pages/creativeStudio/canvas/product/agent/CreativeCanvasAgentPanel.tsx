@@ -146,6 +146,8 @@ const CreativeCanvasAgentPanel = React.forwardRef<
   const documentRef = useRef(documentState);
   const mountedRef = useRef(true);
   const loadEpochRef = useRef(0);
+  const locallySubmittedTurnKeyRef = useRef<string | null>(null);
+  const locallyManagedActiveSignaturesRef = useRef<Set<string>>(new Set());
   const runningKeyRef = useRef<string | null>(null);
   const currentRunRef = useRef<Promise<void> | null>(null);
   const sendOperationRef = useRef<Promise<boolean> | null>(null);
@@ -280,10 +282,17 @@ const CreativeCanvasAgentPanel = React.forwardRef<
 
   const persistSession = useCallback(
     async (session: CreativeChatSessionReference, activeSessionId = session.id) => {
-      await persistDocument(
-        replaceCreativeCanvasAgentSession(documentRef.current.sessions, session),
-        activeSessionId
-      );
+      const managedSignature = sessionSignature(session);
+      locallyManagedActiveSignaturesRef.current.add(managedSignature);
+      try {
+        await persistDocument(
+          replaceCreativeCanvasAgentSession(documentRef.current.sessions, session),
+          activeSessionId
+        );
+      } catch (error) {
+        locallyManagedActiveSignaturesRef.current.delete(managedSignature);
+        throw error;
+      }
     },
     [persistDocument]
   );
@@ -478,12 +487,34 @@ const CreativeCanvasAgentPanel = React.forwardRef<
     }
     const activeModel = creativeCanvasAgentModelSelection(activeSession.model);
     setSelectedModel(activeModel);
+    if (locallyManagedActiveSignaturesRef.current.delete(activeSignature)) {
+      // `persistSession` already owns both the display transition and the
+      // durable Canvas mutation. Treat the controlled prop echo as an
+      // acknowledgement, not as a request to replace the transcript from the
+      // conversation authority again.
+      setLoadState('ready');
+      setPanelError(undefined);
+      return () => abort.abort();
+    }
     if (!activeSession.model) {
       durableHistoryRef.current = [];
       setAppliedProposalMessageIds([]);
       setMessages([]);
       setLoadState('ready');
       setPanelError(undefined);
+      return () => abort.abort();
+    }
+    const activePendingKey = activeSession.pendingTurn?.idempotencyKey ?? null;
+    if (
+      runningKeyRef.current !== null ||
+      (activePendingKey !== null &&
+        locallySubmittedTurnKeyRef.current === activePendingKey)
+    ) {
+      // Local admission already owns the transient transcript. Re-resolving
+      // the just-persisted pending session here would replace those optimistic
+      // user/assistant rows with the older durable history, so later stream
+      // deltas would have no rendered assistant row to update.
+      setLoadState('ready');
       return () => abort.abort();
     }
 
@@ -503,6 +534,9 @@ const CreativeCanvasAgentPanel = React.forwardRef<
         const authority = classifyCreativeCanvasAgentHistory(activeSession, resolution.history);
         setAppliedProposalMessageIds([...resolution.appliedProposalMessageIds]);
         if (authority === 'completed-pending-turn') {
+          const reconciledHistory = copyHistory(resolution.history);
+          durableHistoryRef.current = reconciledHistory;
+          setMessages(reconciledHistory);
           const completed = creativeCanvasAgentSessionWithAuthoritativeHistory(
             activeSession,
             resolution.history,
@@ -510,8 +544,6 @@ const CreativeCanvasAgentPanel = React.forwardRef<
           );
           await persistSession(completed);
           if (abort.signal.aborted || epoch !== loadEpochRef.current) return;
-          durableHistoryRef.current = copyHistory(resolution.history);
-          setMessages(durableHistoryRef.current);
           setLoadState('ready');
           return;
         }
@@ -533,7 +565,16 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       }
     })();
     return () => abort.abort();
-  }, [activeSignature, loadRequest, now, persistSession, props.canvasId, resolver, runPersistedTurn]);
+  }, [
+    activeSignature,
+    loadRequest,
+    now,
+    persistSession,
+    props.canvasId,
+    props.hydrated,
+    resolver,
+    runPersistedTurn,
+  ]);
 
   const handleNewSession = useCallback(() => {
     if (
@@ -598,15 +639,17 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       setIsRunning(true);
       setPanelError(undefined);
       const operation = (async () => {
+        let locallySubmittedTurnKey: string | null = null;
         try {
           const current =
             documentRef.current.sessions.find(
               (session) => session.id === documentRef.current.activeSessionId
             ) ?? createCreativeCanvasAgentSession(createId(), now());
+          const idempotencyKey = createId();
           const pending = creativeCanvasAgentSessionWithPendingTurn({
             session: current,
             model: input.model,
-            idempotencyKey: createId(),
+            idempotencyKey,
             prompt: input.prompt,
             modelInput: serializeCreativeCanvasAgentModelInput({
               prompt: input.prompt,
@@ -619,6 +662,8 @@ const CreativeCanvasAgentPanel = React.forwardRef<
             skillIds: input.skillIds,
             now: now(),
           });
+          locallySubmittedTurnKey = idempotencyKey;
+          locallySubmittedTurnKeyRef.current = idempotencyKey;
           await persistSession(pending);
           if (!mountedRef.current || leaveEpoch !== leaveEpochRef.current) {
             await persistSession(
@@ -633,6 +678,12 @@ const CreativeCanvasAgentPanel = React.forwardRef<
           if (mountedRef.current) setPanelError(errorMessage(error));
           return false;
         } finally {
+          if (
+            locallySubmittedTurnKey !== null &&
+            locallySubmittedTurnKeyRef.current === locallySubmittedTurnKey
+          ) {
+            locallySubmittedTurnKeyRef.current = null;
+          }
           if (mountedRef.current && !runningKeyRef.current) setIsRunning(false);
         }
       })();

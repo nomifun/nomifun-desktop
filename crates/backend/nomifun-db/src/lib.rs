@@ -57,6 +57,7 @@ pub use repository::customer_service_search::{
 pub use repository::SqliteCustomerServiceRepository;
 pub use repository::conversation::{
     ConversationDeliveryReceiptClaim, ConversationFilters, ConversationMessageProjection,
+    CreativeStudioConversationTurnAuthority,
     ConversationTurnAdmissionState,
     ConversationRowUpdate, MessageDayBucket, MessageRowUpdate, MessageSearchRow, SortOrder,
     MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,

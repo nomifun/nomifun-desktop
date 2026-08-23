@@ -136,6 +136,8 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     });
 
     expect(html.includes('data-agent-message-status="running"')).toBe(true);
+    expect(html.includes('data-thinking-process-state="running"')).toBe(true);
+    expect(html.includes('data-thinking-process-disclosure="false"')).toBe(true);
     expect(html.includes('正在分析当前画布')).toBe(true);
     expect(html.includes('data-agent-message-status="failed"')).toBe(true);
     expect(html.includes('模型连接失败')).toBe(true);

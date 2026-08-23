@@ -5,12 +5,14 @@
  */
 
 import { describe, expect, test } from "vitest";
+import { readFileSync } from "node:fs";
 
 import { parseProviderId } from "@/common/types/ids";
 import { serializeCreativeStudioAgentHistory } from "../adapters";
 import type { CreativeStudioAgentMessage } from "../types";
 import {
   CreativeStudioAgentSessionResolutionError,
+  CREATIVE_STUDIO_AGENT_SESSION_RESOLVE_TIMEOUT_MS,
   createNomiCreativeStudioAgentSessionHttpPort,
   type CreativeStudioAgentSessionHttpTransport,
   type CreativeStudioAgentSessionPersistenceRequest,
@@ -40,6 +42,16 @@ const request: CreativeStudioAgentSessionPersistenceRequest = {
 };
 
 describe("Nomi Creative Studio Agent session HTTP port", () => {
+  test("bounds the idempotent resolve request instead of leaving the panel loading forever", () => {
+    const source = readFileSync(new URL("./httpPort.ts", import.meta.url), "utf8");
+    expect(CREATIVE_STUDIO_AGENT_SESSION_RESOLVE_TIMEOUT_MS).toBe(30_000);
+    expect(
+      source.includes(
+        "{ timeoutMs: CREATIVE_STUDIO_AGENT_SESSION_RESOLVE_TIMEOUT_MS }",
+      ),
+    ).toBe(true);
+  });
+
   test("maps the strict snake-case wire contract into a branded binding", async () => {
     let wire: unknown;
     const transport: CreativeStudioAgentSessionHttpTransport = {
