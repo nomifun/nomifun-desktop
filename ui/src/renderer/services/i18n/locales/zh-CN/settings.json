@@ -1796,6 +1796,7 @@
     "forbidden": "地址可达，但该密钥无权限（403）",
     "invalidAuthorizationHeader": "鉴权头格式不被该供应商接受",
     "notFound": "该地址不存在（404）——请检查 Base URL 与请求路径",
+    "modelUnavailable": "模型或推理接入点不可用——请核对精确 Model ID、开通状态与密钥权限",
     "nonApiResponse": "该地址返回的是网页而非 API——Base URL 很可能少了版本段",
     "insufficientQuota": "地址与密钥有效，但账户额度不足",
     "rateLimited": "地址与密钥有效，但触发了限流（429）",
