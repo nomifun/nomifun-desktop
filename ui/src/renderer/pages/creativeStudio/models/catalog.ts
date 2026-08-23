@@ -6,6 +6,7 @@
 
 import type { ModelTask } from '@/common/config/storage';
 import { capabilityOf } from '@/common/utils/providerModels';
+import { modelDisplayLabel, modelPresentationRawId } from '@/common/utils/modelPresentation';
 import { buildTaskModelGroups } from '@/renderer/hooks/agent/useModelsForTask';
 import { getI18n } from 'react-i18next';
 
@@ -67,6 +68,14 @@ export const buildCreativeModelGroups = (
         task,
         traits: capability.traits,
         protocol: capability.protocol,
+        displayName: modelDisplayLabel(
+          model,
+          provider.models.find((candidate) => candidate.model === model)?.display_name
+        ),
+        rawModelId: modelPresentationRawId(
+          model,
+          provider.models.find((candidate) => candidate.model === model)?.display_name
+        ),
       };
     });
     return {

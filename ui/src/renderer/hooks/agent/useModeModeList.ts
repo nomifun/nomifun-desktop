@@ -16,6 +16,7 @@ import useSWR from 'swr';
 export interface FetchedModelOption {
   label: string;
   value: string;
+  displayName?: string;
   tasks: ModelTask[];
   traits: ModelTrait[];
   /**
@@ -101,6 +102,7 @@ const useModeModeList = (options: UseModeModelListOptions) => {
         let models = response.models.map((model) => ({
           label: model.name || model.id,
           value: model.id,
+          ...(model.name && model.name !== model.id ? { displayName: model.name } : {}),
           tasks: model.tasks ?? [],
           traits: model.traits ?? [],
           // Only present when the provider's own catalog declares a window.

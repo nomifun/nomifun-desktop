@@ -69,6 +69,7 @@ import {
 export interface ModelCatalogSuggestion {
   value: string;
   label: string;
+  displayName?: string;
   tasks: ModelTask[];
   traits: ModelTrait[];
   /** Window the provider's own catalog declares, when it declares one. */
@@ -574,6 +575,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
             current,
             {
               model: profile.value,
+              ...(profile.displayName ? { displayName: profile.displayName } : {}),
               tasks: profile.tasks,
               traits: profile.traits,
               ...(profile.contextLimit === undefined ? {} : { contextLimit: profile.contextLimit }),
@@ -783,7 +785,9 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               const manualModel = resolveModelInputChange(model, option);
               if (manualModel !== undefined) {
                 onChange((current) =>
-                  current.model === manualModel ? current : { ...current, model: manualModel }
+                  current.model === manualModel
+                    ? current
+                    : { ...current, model: manualModel, displayName: undefined }
                 );
               }
             }}
@@ -798,6 +802,27 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
             }}
             data-unified-model-input
           />
+          <Input
+            value={value.displayName ?? ''}
+            placeholder={t('settings.modelDisplayNamePlaceholder', {
+              defaultValue: '例如：Seedance 1.5 Pro',
+            })}
+            maxLength={128}
+            onChange={(displayName) =>
+              onChange((current) => ({
+                ...current,
+                displayName,
+              }))
+            }
+            aria-label={t('settings.modelDisplayNameTitle', {
+              defaultValue: '模型显示名称',
+            })}
+          />
+          <div className='text-11px leading-4 text-t-tertiary'>
+            {t('settings.modelDisplayNameHint', {
+              defaultValue: '仅用于界面展示；实际请求仍使用原始模型 ID。',
+            })}
+          </div>
           <div
             id={`${modelInputId}-hint`}
             role={duplicateModel || missingModel ? 'alert' : 'note'}

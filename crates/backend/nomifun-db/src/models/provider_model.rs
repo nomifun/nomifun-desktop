@@ -10,6 +10,8 @@ pub struct ProviderModelRow {
     pub id: i64,
     pub provider_id: String,
     pub model: String,
+    /// Optional user-facing label; never used as the invocation id.
+    pub display_name: Option<String>,
     pub enabled: bool,
     pub sort_order: i64,
     pub description: Option<String>,

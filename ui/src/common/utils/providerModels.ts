@@ -71,6 +71,7 @@ export const toProviderModelCapabilityInput = (
 /** Convert a response row into the full-replacement save input. */
 export const toProviderModelInput = (model: ProviderModelResponse): ProviderModelInput => ({
   model: model.model,
+  display_name: model.display_name,
   enabled: model.enabled,
   description: model.description,
   sort_order: model.sort_order,

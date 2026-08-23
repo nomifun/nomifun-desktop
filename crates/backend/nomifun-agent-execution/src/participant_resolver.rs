@@ -744,6 +744,7 @@ mod tests {
             id: 1,
             provider_id: provider_id.to_owned(),
             model: model.to_owned(),
+            display_name: None,
             enabled,
             sort_order: 0,
             description: None,

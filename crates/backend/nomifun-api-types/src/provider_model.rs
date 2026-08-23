@@ -222,6 +222,10 @@ pub struct ProviderModelResponse {
     #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
     pub provider_id: String,
     pub model: String,
+    /// Optional human-readable label. Runtime invocation always uses `model`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub display_name: Option<String>,
     pub enabled: bool,
     #[ts(type = "number")]
     pub sort_order: i64,
@@ -243,6 +247,14 @@ pub struct ProviderModelResponse {
 pub struct ProviderModelInput {
     #[serde(deserialize_with = "crate::serde_util::deserialize_model_name")]
     pub model: String,
+    /// Generic human-readable label; invocation always uses `model`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_non_empty_string"
+    )]
+    #[ts(optional)]
+    pub display_name: Option<String>,
     #[serde(default = "default_true")]
     #[ts(optional = nullable)]
     pub enabled: bool,
@@ -318,10 +330,12 @@ mod tests {
 
         let request: ProviderModelInput = serde_json::from_value(json!({
             "model": "step-tts-mini",
+            "display_name": "Step TTS Mini",
             "capabilities": [capability()],
         }))
         .unwrap();
         assert!(request.enabled);
+        assert_eq!(request.display_name.as_deref(), Some("Step TTS Mini"));
         assert_eq!(request.capabilities.len(), 1);
         assert_eq!(request.capabilities[0].connection_role, "default");
         assert_eq!(
@@ -370,6 +384,14 @@ mod tests {
             serde_json::from_value::<SaveProviderModelRequest>(json!({
                 "provider_id": PROVIDER_ID,
                 "model": {"model": "model-without-capabilities"}
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ProviderModelInput>(json!({
+                "model": "step-tts-mini",
+                "display_name": "   ",
+                "capabilities": [capability()]
             }))
             .is_err()
         );
