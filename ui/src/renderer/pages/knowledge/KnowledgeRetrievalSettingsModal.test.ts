@@ -16,6 +16,17 @@ const modalStyles = readFileSync(
   new URL('./KnowledgeRetrievalSettingsModal.module.css', import.meta.url),
   'utf8'
 );
+const modalContractStyles = readFileSync(
+  new URL('../../styles/modal-contract.css', import.meta.url),
+  'utf8'
+);
+
+const declarationValue = (css: string, selector: string, property: string) => {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapedProperty = property.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const rule = css.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`, 's'))?.[1];
+  return rule?.match(new RegExp(`${escapedProperty}:\\s*([^;]+);`))?.[1].trim();
+};
 
 describe('Knowledge retrieval settings', () => {
   test('keeps embedding and rerank as independent task-specific stages', () => {
@@ -82,9 +93,35 @@ describe('Knowledge retrieval settings', () => {
     expect(modalStyles.includes('font-weight: 500')).toBe(true);
   });
 
-  test('reduces the modal header, content, and footer vertical spacing', () => {
+  test('matches the shared compact modal chrome and section spacing', () => {
+    const sharedHeaderHeight = declarationValue(
+      modalContractStyles,
+      '.arco-modal .arco-modal-header',
+      'height'
+    );
+    const sharedCloseOffset = declarationValue(
+      modalContractStyles,
+      '.arco-modal .arco-modal-close-icon',
+      'top'
+    );
+
     expect(modalSource.includes('className={styles.modal}')).toBe(true);
-    expect(modalStyles.includes('height: 40px')).toBe(true);
+    expect(sharedHeaderHeight).toBe('36px');
+    expect(sharedCloseOffset).toBe('6px');
+    expect(
+      declarationValue(
+        modalStyles,
+        '.modal :global(.arco-modal-header)',
+        'height'
+      )
+    ).toBe(sharedHeaderHeight);
+    expect(
+      declarationValue(
+        modalStyles,
+        '.modal :global(.arco-modal-close-icon)',
+        'top'
+      )
+    ).toBe(sharedCloseOffset);
     expect(modalStyles.includes('var(--nomi-modal-block-padding) var(--nomi-modal-inline-padding)')).toBe(true);
   });
 });
