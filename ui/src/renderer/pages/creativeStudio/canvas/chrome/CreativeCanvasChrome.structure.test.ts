@@ -32,8 +32,6 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
       'onBackgroundChange',
       'onUndo',
       'onRedo',
-      'onFitView',
-      'onToggleMiniMap',
       'onLeftViewChange',
       'onRightViewChange',
       'onBottomViewChange',
@@ -52,6 +50,9 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     ]) {
       expect(component.includes(forbidden)).toBe(false);
     }
+    expect(types.includes('onFitView')).toBe(false);
+    expect(types.includes('onToggleMiniMap')).toBe(false);
+    expect(types.includes('isMiniMapOpen')).toBe(false);
   });
 
   test('keeps the canonical background vocabulary without a legacy fourth mode', () => {

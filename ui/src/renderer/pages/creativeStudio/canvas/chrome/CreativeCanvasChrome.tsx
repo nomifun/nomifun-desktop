@@ -9,11 +9,9 @@ import {
   BookOpen,
   CheckOne,
   Close,
-  Compass,
   Dot,
   Error,
   FolderOpen,
-  FullScreen,
   GridFour,
   Group,
   HandDrag,
@@ -21,7 +19,6 @@ import {
   Loading,
   Magic,
   MenuFold,
-  Mouse,
   PanoramaHorizontal,
   Pic,
   Platte,
@@ -47,7 +44,9 @@ import {
   CREATIVE_CANVAS_CHROME_BACKGROUNDS,
   CREATIVE_CANVAS_CHROME_NODE_KINDS,
   CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS,
+  toggleCreativeCanvasBottomPanel,
   toggleCreativeCanvasPanel,
+  toggleCreativeCanvasTool,
   type CreativeCanvasBottomView,
   type CreativeCanvasChromeBackground,
   type CreativeCanvasChromeNodeKind,
@@ -515,22 +514,13 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
           data-canvas-no-zoom
           {...chromeEventProps}
         >
-          <div className={styles.toolGroup}>
-            <ChromeIconButton
-              label={t('creativeStudio.canvas.actions.selectTool')}
-              icon={<Mouse {...iconProps} />}
-              active={props.tool === 'select'}
-              disabled={props.disabled}
-              onClick={() => props.onToolChange('select')}
-            />
-            <ChromeIconButton
-              label={t('creativeStudio.canvas.actions.panTool')}
-              icon={<HandDrag {...iconProps} />}
-              active={props.tool === 'pan'}
-              disabled={props.disabled}
-              onClick={() => props.onToolChange('pan')}
-            />
-          </div>
+          <ChromeIconButton
+            label={t('creativeStudio.canvas.actions.panTool')}
+            icon={<HandDrag {...iconProps} />}
+            active={props.tool === 'pan'}
+            disabled={props.disabled}
+            onClick={() => props.onToolChange(toggleCreativeCanvasTool(props.tool))}
+          />
 
           <span className={styles.divider} aria-hidden='true' />
 
@@ -588,38 +578,17 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
             </span>
           </Popover>
 
-          <ChromeIconButton
-            label={t('creativeStudio.canvas.actions.fitView')}
-            icon={<FullScreen {...iconProps} />}
-            disabled={props.disabled}
-            onClick={props.onFitView}
-          />
-          <ChromeIconButton
-            label={t(
-              props.isMiniMapOpen
-                ? 'creativeStudio.canvas.actions.closeMiniMap'
-                : 'creativeStudio.canvas.actions.openMiniMap'
-            )}
-            icon={<Compass {...iconProps} />}
-            active={props.isMiniMapOpen}
-            disabled={props.disabled}
-            onClick={props.onToggleMiniMap}
-          />
-
           <span className={styles.divider} aria-hidden='true' />
 
-          {(['history', 'timeline'] as const).map((view) => (
-            <ChromeIconButton
-              key={view}
-              label={t(BOTTOM_LABEL_KEYS[view])}
-              icon={bottomIcon(view)}
-              active={props.bottomView === view}
-              disabled={props.disabled}
-              onClick={() =>
-                props.onBottomViewChange(toggleCreativeCanvasPanel(props.bottomView, view))
-              }
-            />
-          ))}
+          <ChromeIconButton
+            label={t(BOTTOM_LABEL_KEYS.history)}
+            icon={<History {...iconProps} />}
+            active={props.bottomView !== null}
+            disabled={props.disabled}
+            onClick={() =>
+              props.onBottomViewChange(toggleCreativeCanvasBottomPanel(props.bottomView))
+            }
+          />
           {props.slots?.toolbarTrailing}
         </div>
       </div>
