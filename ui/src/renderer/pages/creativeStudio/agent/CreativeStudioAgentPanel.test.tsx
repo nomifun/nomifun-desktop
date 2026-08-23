@@ -78,8 +78,19 @@ const renderPanel = (overrides: Partial<CreativeStudioAgentPanelProps> = {}) =>
     </I18nextProvider>
   );
 
+const panelCss = readFileSync(
+  new URL('./CreativeStudioAgentPanel.module.css', import.meta.url),
+  'utf8'
+);
+
 describe('CreativeStudioAgentPanel source-parity states', () => {
-  test('renders the 390px right panel, source header, empty state and composer', () => {
+  test('fills the canvas chrome column so a resized panel stays flush right', () => {
+    expect(panelCss.includes('width: 100%;')).toBe(true);
+    expect(panelCss.includes('min-width: 0;')).toBe(true);
+    expect(panelCss.includes('width: 390px;')).toBe(false);
+  });
+
+  test('renders the right panel, source header, empty state and composer', () => {
     const html = renderPanel();
 
     expect(html.includes('data-creative-studio-agent-panel="true"')).toBe(true);
