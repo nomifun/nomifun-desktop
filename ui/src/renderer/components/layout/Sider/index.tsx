@@ -4,9 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { Suspense, useCallback, useEffect, useRef } from 'react';
+import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
+import {
+  preloadCreativeStudioNavigationRoutes,
+  preloadCreativeStudioRoute,
+} from '@renderer/components/layout/Router';
 import { cleanupSiderTooltips, getSiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
 import { useAuth } from '@renderer/hooks/context/AuthContext';
 import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
@@ -47,9 +51,9 @@ import {
 import SiderFooter from './SiderFooter';
 
 const SettingsSider = React.lazy(() => import('@renderer/pages/settings/components/SettingsSider'));
-const CreativeStudioSider = React.lazy(
-  () => import('@renderer/pages/creativeStudio/app/CreativeStudioSider')
-);
+const loadCreativeStudioSider = () =>
+  import('@renderer/pages/creativeStudio/app/CreativeStudioSider');
+const CreativeStudioSider = React.lazy(loadCreativeStudioSider);
 
 interface SiderProps {
   onSessionClick?: () => void;
@@ -94,6 +98,13 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const lastCreativeStudioCanvasesPathRef = useRef(
     readCreativeStudioCanvasesResumeLocation()
   );
+  const [creativeStudioNavigationPendingPath, setCreativeStudioNavigationPendingPath] =
+    useState<string | null>(null);
+  const pendingCreativeStudioNavigationRef = useRef<{
+    target: string;
+    replace: boolean;
+  } | null>(null);
+  const creativeStudioNavigationInFlightRef = useRef(false);
   // Logout is a WebUI-only affordance: the bundled desktop shell (Electron or
   // Tauri) is single-user with no auth, so there is nothing to log out of.
   const showLogout = !isDesktopShell() && status === 'authenticated';
@@ -116,6 +127,40 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   useEffect(() => {
     rememberCurrentCreativeStudioPath();
   }, [rememberCurrentCreativeStudioPath]);
+
+  const preloadCreativeStudio = useCallback((target: string) => {
+    void loadCreativeStudioSider().catch(() => undefined);
+    void preloadCreativeStudioRoute(target);
+  }, []);
+
+  useEffect(() => {
+    if (!isCreativeStudio) return;
+
+    let cancelled = false;
+    const preloadNavigation = () => {
+      if (!cancelled) {
+        void preloadCreativeStudioNavigationRoutes();
+      }
+    };
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+
+    if (idleWindow.requestIdleCallback) {
+      const handle = idleWindow.requestIdleCallback(preloadNavigation, { timeout: 1500 });
+      return () => {
+        cancelled = true;
+        idleWindow.cancelIdleCallback?.(handle);
+      };
+    }
+
+    const timeout = window.setTimeout(preloadNavigation, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [isCreativeStudio]);
 
   const navTo = useCallback(
     (target: string, replace = false) => {
@@ -146,9 +191,16 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleScheduledClick = () => navTo('/scheduled');
   const handleRequirementsClick = () => navTo('/requirements');
   const handleKnowledgeClick = () => navTo('/knowledge');
-  const handleAssetLibraryClick = () => navTo(CREATIVE_STUDIO_ASSETS_PATH);
+  const handleAssetLibraryClick = () => {
+    preloadCreativeStudio(CREATIVE_STUDIO_ASSETS_PATH);
+    navTo(CREATIVE_STUDIO_ASSETS_PATH);
+  };
   const handleNomiClick = () => navTo('/nomi');
-  const handleCreativeStudioClick = () => navTo(lastCreativeStudioPathRef.current);
+  const handleCreativeStudioClick = () => {
+    const target = lastCreativeStudioPathRef.current;
+    preloadCreativeStudio(target);
+    navTo(target);
+  };
   const handleMiniAppsClick = () => navTo('/mini-apps');
   const handleCustomerServiceClick = () => navTo('/customer-service');
   const handlePresetClick = () => navTo('/presets');
@@ -157,17 +209,38 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleOpenCapabilitiesClick = () => navTo('/open-capabilities');
   const handleModelHubClick = () => navTo('/models');
   const handleCreativeStudioNavigation = useCallback(
-    async (target: string, replace = false) => {
+    (target: string, replace = false) => {
       // Capture the committed detail route before an async save gate can
       // navigate to a sibling section and overwrite the product-wide resume.
       rememberCurrentCreativeStudioPath();
-      if (!(await requestCreativeStudioBeforeLeave())) return;
-      navTo(target, replace);
+      preloadCreativeStudio(target);
+      pendingCreativeStudioNavigationRef.current = { target, replace };
+      setCreativeStudioNavigationPendingPath(target);
+
+      if (creativeStudioNavigationInFlightRef.current) return;
+      creativeStudioNavigationInFlightRef.current = true;
+
+      void (async () => {
+        let canLeave = false;
+        try {
+          canLeave = await requestCreativeStudioBeforeLeave();
+        } catch {
+          canLeave = false;
+        }
+
+        const pendingNavigation = pendingCreativeStudioNavigationRef.current;
+        pendingCreativeStudioNavigationRef.current = null;
+        creativeStudioNavigationInFlightRef.current = false;
+        setCreativeStudioNavigationPendingPath(null);
+
+        if (!canLeave || !pendingNavigation) return;
+        navTo(pendingNavigation.target, pendingNavigation.replace);
+      })();
     },
-    [navTo, rememberCurrentCreativeStudioPath]
+    [navTo, preloadCreativeStudio, rememberCurrentCreativeStudioPath]
   );
   const handleReturnToWorkbench = useCallback(() => {
-    void handleCreativeStudioNavigation(WORKBENCH_HOME_PATH, true);
+    handleCreativeStudioNavigation(WORKBENCH_HOME_PATH, true);
   }, [handleCreativeStudioNavigation]);
 
   const handleSettingsClick = () => {
@@ -245,7 +318,9 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
                 currentCanvasesResumeLocation ??
                 lastCreativeStudioCanvasesPathRef.current
               }
-              onNavigate={(target) => void handleCreativeStudioNavigation(target)}
+              navigationPendingPath={creativeStudioNavigationPendingPath}
+              onPreload={preloadCreativeStudio}
+              onNavigate={handleCreativeStudioNavigation}
             />
           </Suspense>
         ) : (
@@ -269,13 +344,19 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               onClick={handleNomiClick}
             />
             {/* Creative Studio (创意工坊) — swaps this rail to product navigation. */}
-            <SiderCreativeStudioEntry
-              isMobile={isMobile}
-              isActive={isCreativeStudio}
-              collapsed={collapsed}
-              siderTooltipProps={siderTooltipProps}
-              onClick={handleCreativeStudioClick}
-            />
+            <div
+              className='shrink-0'
+              onMouseEnter={() => preloadCreativeStudio(lastCreativeStudioPathRef.current)}
+              onFocusCapture={() => preloadCreativeStudio(lastCreativeStudioPathRef.current)}
+            >
+              <SiderCreativeStudioEntry
+                isMobile={isMobile}
+                isActive={isCreativeStudio}
+                collapsed={collapsed}
+                siderTooltipProps={siderTooltipProps}
+                onClick={handleCreativeStudioClick}
+              />
+            </div>
             {/* 小程序 (Mini-apps) — solidified single-file web tools, opened instantly */}
             <SiderMiniAppsEntry
               isMobile={isMobile}
@@ -295,13 +376,19 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               onClick={handleKnowledgeClick}
             />
             {/* Asset library — enter the canonical Creative Studio surface. */}
-            <SiderAssetLibraryEntry
-              isMobile={isMobile}
-              isActive={pathname === CREATIVE_STUDIO_ASSETS_PATH}
-              collapsed={collapsed}
-              siderTooltipProps={siderTooltipProps}
-              onClick={handleAssetLibraryClick}
-            />
+            <div
+              className='shrink-0'
+              onMouseEnter={() => preloadCreativeStudio(CREATIVE_STUDIO_ASSETS_PATH)}
+              onFocusCapture={() => preloadCreativeStudio(CREATIVE_STUDIO_ASSETS_PATH)}
+            >
+              <SiderAssetLibraryEntry
+                isMobile={isMobile}
+                isActive={pathname === CREATIVE_STUDIO_ASSETS_PATH}
+                collapsed={collapsed}
+                siderTooltipProps={siderTooltipProps}
+                onClick={handleAssetLibraryClick}
+              />
+            </div>
             {/* 自动化 — automation platforms */}
             <SiderSectionHeader label={t('common.siderSection.automation')} collapsed={collapsed} />
             {/* Scheduled tasks */}
@@ -367,7 +454,11 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
             collapsed={collapsed}
             siderTooltipProps={siderTooltipProps}
             onSettingsClick={handleReturnToWorkbench}
-            backLabel={t('creativeStudio.focus.backToWorkbench')}
+            backLabel={
+              creativeStudioNavigationPendingPath === WORKBENCH_HOME_PATH
+                ? t('common.loading')
+                : t('creativeStudio.focus.backToWorkbench')
+            }
           />
         ) : (
           <>

@@ -96,7 +96,8 @@ describe('protected application runtime boundary', () => {
     expect(focusShellSource.includes('<CreativeStudioTopBar')).toBe(false);
     expect(focusShellSource.includes('<Outlet />')).toBe(true);
     expect(siderSource.includes('CreativeStudioSider')).toBe(true);
-    expect(siderSource.includes("backLabel={t('creativeStudio.focus.backToWorkbench')}")).toBe(true);
+    expect(siderSource.includes("t('creativeStudio.focus.backToWorkbench')")).toBe(true);
+    expect(siderSource.includes("t('common.loading')")).toBe(true);
     expect(siderSource.includes('requestCreativeStudioBeforeLeave')).toBe(true);
   });
 
