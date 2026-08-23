@@ -22,10 +22,13 @@ const source = readFileSync(
 describe('Creative Canvas product route Agent context projection', () => {
   test('does not expose document or selection dependencies while Assistant is closed', () => {
     const initial = createInitialCanvasState();
-    const selected = canvasReducer(
-      initial,
-      canvasCommands.setSelection(['selected-node'])
-    );
+    const selected = {
+      ...initial,
+      selection: {
+        ...initial.selection,
+        nodeIds: ['selected-node'],
+      },
+    };
 
     expect(selectCreativeCanvasAgentContextInputs(initial, false)).toEqual([
       null,
@@ -74,5 +77,6 @@ describe('Creative Canvas product route Agent context projection', () => {
     expect(
       source.includes('[canvasState, project.detail, save.revision]')
     ).toBe(false);
+    expect(source.includes('...project.detail.document')).toBe(false);
   });
 });
