@@ -34,6 +34,7 @@ import {
   createInitialCanvasState,
   type CanvasCommand,
   type CanvasPoint,
+  type CanvasSize,
   type CanvasState,
 } from '../core';
 import {
@@ -86,6 +87,7 @@ import {
 } from './interactionReducer';
 import { pendingTaskCommandGuard } from './pendingTaskGuard';
 import { useCanvasCasSave } from './useCanvasCasSave';
+import { computeCanvasViewportCulling } from './viewportCulling';
 import styles from './CreativeCanvasEditor.module.css';
 
 export interface CreativeCanvasNodeRenderContext {
@@ -281,6 +283,13 @@ const RESIZE_CORNER_LABEL_KEYS: Record<CanvasResizeCorner, string> = {
   'bottom-right': 'creativeStudio.canvas.resizeCorners.bottomRight',
 };
 
+const canvasSizeEqual = (left: CanvasSize | null, right: CanvasSize | null): boolean =>
+  left === right ||
+  (left !== null &&
+    right !== null &&
+    left.width === right.width &&
+    left.height === right.height);
+
 const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, CreativeCanvasEditorProps>(
   (
     {
@@ -339,6 +348,8 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
     const loadedRevisionRef = useRef<string | null>(null);
     const hydratedSaveControllerRef = useRef<typeof saveController | null>(null);
     const surfaceRef = useRef<HTMLDivElement>(null);
+    const [surfaceElement, setSurfaceElement] = useState<HTMLDivElement | null>(null);
+    const [surfaceSize, setSurfaceSize] = useState<CanvasSize | null>(null);
     const pasteSequenceRef = useRef(0);
     const gestureSequenceRef = useRef(0);
     const persistenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -352,6 +363,40 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       interactionRef.current = canvasEditorInteractionReducer(interactionRef.current, action);
       dispatchInteraction(action);
     }, []);
+
+    const setSurface = useCallback((element: HTMLDivElement | null) => {
+      surfaceRef.current = element;
+      setSurfaceElement(element);
+    }, []);
+
+    useEffect(() => {
+      if (!surfaceElement) {
+        setSurfaceSize((current) => (current === null ? current : null));
+        return;
+      }
+
+      const measure = () => {
+        const rect = surfaceElement.getBoundingClientRect();
+        const next =
+          Number.isFinite(rect.width) &&
+          Number.isFinite(rect.height) &&
+          rect.width > 0 &&
+          rect.height > 0
+            ? { width: rect.width, height: rect.height }
+            : null;
+        setSurfaceSize((current) => (canvasSizeEqual(current, next) ? current : next));
+      };
+
+      measure();
+      if (typeof ResizeObserver === 'undefined') {
+        window.addEventListener('resize', measure);
+        return () => window.removeEventListener('resize', measure);
+      }
+
+      const observer = new ResizeObserver(measure);
+      observer.observe(surfaceElement);
+      return () => observer.disconnect();
+    }, [surfaceElement]);
 
     const cancelScheduledPersistence = useCallback(() => {
       if (persistenceTimerRef.current === null) return;
@@ -1116,14 +1161,59 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       () => new Set(state.selection.edgeIds),
       [state.selection.edgeIds]
     );
+    const gestureRequiredNodeId =
+      interaction.gesture?.kind === 'resize'
+        ? interaction.gesture.startNode.id
+        : interaction.gesture?.kind === 'connection'
+          ? interaction.gesture.fixedNodeId
+          : null;
+    const viewportCulling = useMemo(
+      () =>
+        computeCanvasViewportCulling({
+          nodes: state.document.nodes,
+          connections: state.document.connections,
+          viewport: state.viewport,
+          containerSize: surfaceSize,
+          selectedNodeIds: state.selection.nodeIds,
+          selectedEdgeIds: state.selection.edgeIds,
+          requiredNodeIds: gestureRequiredNodeId ? [gestureRequiredNodeId] : [],
+        }),
+      [
+        gestureRequiredNodeId,
+        state.document.connections,
+        state.document.nodes,
+        state.selection.edgeIds,
+        state.selection.nodeIds,
+        state.viewport,
+        surfaceSize,
+      ]
+    );
+    const renderedNodes = useMemo(
+      () =>
+        viewportCulling.renderAll
+          ? state.document.nodes
+          : state.document.nodes.filter((node) => viewportCulling.nodeIds.has(node.id)),
+      [state.document.nodes, viewportCulling]
+    );
+    const renderedConnections = useMemo(
+      () =>
+        viewportCulling.renderAll
+          ? state.document.connections
+          : state.document.connections.filter((connection) =>
+              viewportCulling.connectionIds.has(connection.id)
+            ),
+      [state.document.connections, viewportCulling]
+    );
     const graphHighlight = useMemo(
       () => deriveCanvasGraphHighlight(state.document, state.selection.nodeIds),
       [state.document, state.selection.nodeIds]
     );
     const hasGraphHighlight = graphHighlight.rootNodeIds.size > 0;
+    // Culling only affects mounted world layers. Slots receive the full state
+    // below, so minimap and outline consumers remain document-complete.
     const nodeLayer = useMemo(
       () =>
-        state.document.nodes.map((node) => {
+        renderedNodes.map((node) => {
           const onPointerDown: React.PointerEventHandler<HTMLElement> = (event) =>
             beginNodePointer(node, event);
           const highlighted = graphHighlight.nodeIds.has(node.id);
@@ -1241,14 +1331,14 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         hasGraphHighlight,
         localClientPoint,
         renderNode,
+        renderedNodes,
         selectedNodeIds,
-        state.document.nodes,
         t,
       ]
     );
     const edgeLayer = useMemo(
       () =>
-        state.document.connections.flatMap((connection) => {
+        renderedConnections.flatMap((connection) => {
           const source = nodeById.get(connection.sourceNodeId);
           const target = nodeById.get(connection.targetNodeId);
           if (!source || !target) return [];
@@ -1286,8 +1376,8 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         localClientPoint,
         nodeById,
         renderEdge,
+        renderedConnections,
         selectedEdgeIds,
-        state.document.connections,
       ]
     );
     if (loadState === 'loading') {
@@ -1391,7 +1481,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
 
     return (
       <CanvasSurface
-        ref={surfaceRef}
+        ref={setSurface}
         className={`${styles.editor} ${className ?? ''}`.trim()}
         viewport={state.viewport}
         backgroundMode={canvasSurfaceBackground(background)}
