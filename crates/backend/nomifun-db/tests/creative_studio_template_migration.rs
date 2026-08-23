@@ -1,6 +1,6 @@
-//! Migration 049 moves the live Creative Studio persistence contract from the
-//! retired workflow vocabulary to canonical template names without rewriting
-//! the published 040-047 migration lineage.
+//! Migrations 049-050 move the live Creative Studio persistence contract from
+//! the retired workflow vocabulary to canonical template names without
+//! rewriting the published 040-047 migration lineage.
 
 use sqlx::migrate::{Migrate, Migrator};
 use sqlx::sqlite::SqlitePoolOptions;
@@ -14,6 +14,11 @@ const TEMPLATE_STEP_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000804";
 const PROMPT_DRAFT_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000805";
 const CREATION_TASK_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000806";
 const ASSET_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000807";
+const PROJECT_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000808";
+const HEALTHY_PROJECT_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000809";
+const SESSION_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000810";
+const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000811";
+const ASSISTANT_MESSAGE_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000812";
 
 async fn migrate_to(pool: &sqlx::SqlitePool, max_version: i64) {
     let mut connection = pool.acquire().await.unwrap();
@@ -33,7 +38,7 @@ async fn migrate_to(pool: &sqlx::SqlitePool, max_version: i64) {
 }
 
 #[tokio::test]
-async fn migration_049_preserves_data_and_removes_the_retired_live_schema() {
+async fn migrations_049_and_050_remove_unreleased_workflow_projects() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -149,6 +154,87 @@ async fn migration_049_preserves_data_and_removes_the_retired_live_schema() {
     .await
     .unwrap();
 
+    let stale_project_document = serde_json::json!({
+        "schema": "nomifun.creative-studio/v1",
+        "projectId": PROJECT_ID,
+        "viewport": { "x": 0, "y": 0, "zoom": 1 },
+        "background": "lines",
+        "nodes": [],
+        "connections": [],
+        "chatSessions": [],
+        "activeChatId": null,
+        "panels": {
+            "left": { "open": true, "width": 280, "activeView": "workflows" },
+            "right": { "open": false, "width": 390, "activeView": "assistant" },
+            "bottom": { "open": false, "height": 240, "activeView": "history" }
+        },
+        "pendingTaskIds": []
+    });
+    sqlx::query(
+        "INSERT INTO creative_studio_projects \
+            (project_id, title, revision, node_count, connection_count, \
+             document_json, created_at, updated_at) \
+         VALUES (?, 'Stale panel view', 1, 0, 0, ?, 30, 30)",
+    )
+    .bind(PROJECT_ID)
+    .bind(stale_project_document.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let healthy_project_document = serde_json::json!({
+        "schema": "nomifun.creative-studio/v1",
+        "projectId": HEALTHY_PROJECT_ID,
+        "viewport": { "x": 0, "y": 0, "zoom": 1 },
+        "background": "lines",
+        "nodes": [],
+        "connections": [],
+        "chatSessions": [],
+        "activeChatId": null,
+        "panels": {
+            "left": { "open": true, "width": 280, "activeView": "templates" },
+            "right": { "open": false, "width": 390, "activeView": "assistant" },
+            "bottom": { "open": false, "height": 240, "activeView": "history" }
+        },
+        "pendingTaskIds": []
+    });
+    sqlx::query(
+        "INSERT INTO creative_studio_projects \
+            (project_id, title, revision, node_count, connection_count, \
+             document_json, created_at, updated_at) \
+         VALUES (?, 'Current template project', 1, 0, 0, ?, 31, 31)",
+    )
+    .bind(HEALTHY_PROJECT_ID)
+    .bind(healthy_project_document.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO creative_studio_agent_sessions \
+            (owner_id, project_id, session_id, conversation_id, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, 30, 30)",
+    )
+    .bind(PROVIDER_ID)
+    .bind(PROJECT_ID)
+    .bind(SESSION_ID)
+    .bind(CONVERSATION_ID)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO creative_studio_agent_proposal_receipts \
+            (project_id, assistant_message_id, ops_fingerprint, ops_json, results_json, \
+             applied_revision, created_at) \
+         VALUES (?, ?, ?, '[]', '[]', 2, 30)",
+    )
+    .bind(PROJECT_ID)
+    .bind(ASSISTANT_MESSAGE_ID)
+    .bind("a".repeat(64))
+    .execute(&pool)
+    .await
+    .unwrap();
+
     migrate_to(&pool, 49).await;
 
     let old_tables: i64 = sqlx::query_scalar(
@@ -241,12 +327,59 @@ async fn migration_049_preserves_data_and_removes_the_retired_live_schema() {
     .unwrap();
     assert_eq!(old_live_schema, 0);
 
+    let stale_projects: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM creative_studio_projects WHERE project_id = ?",
+    )
+    .bind(PROJECT_ID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stale_projects, 1);
+
+    migrate_to(&pool, 50).await;
+
+    let retired_projects: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM creative_studio_projects WHERE project_id = ?",
+    )
+    .bind(PROJECT_ID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(retired_projects, 0);
+
+    let surviving_projects: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM creative_studio_projects WHERE project_id = ?",
+    )
+    .bind(HEALTHY_PROJECT_ID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(surviving_projects, 1);
+
+    let retired_sessions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM creative_studio_agent_sessions WHERE project_id = ?",
+    )
+    .bind(PROJECT_ID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(retired_sessions, 0);
+
+    let retired_receipts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM creative_studio_agent_proposal_receipts WHERE project_id = ?",
+    )
+    .bind(PROJECT_ID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(retired_receipts, 0);
+
     let rejected = sqlx::query(
         "INSERT INTO workshop_assets \
             (asset_id, kind, title, tags, in_library, origin, created_at, updated_at) \
          VALUES (?, 'image', 'Rejected non-canonical owner', '[]', 1, ?, 30, 30)",
     )
-    .bind("0190f5fe-7c00-7a00-8abc-000000000808")
+    .bind("0190f5fe-7c00-7a00-8abc-000000000813")
     .bind(
         serde_json::json!({
             "templateId": TEMPLATE_ID,
