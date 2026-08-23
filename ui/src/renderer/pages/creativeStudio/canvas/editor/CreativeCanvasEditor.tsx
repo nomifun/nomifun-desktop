@@ -8,6 +8,7 @@ import React, {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useReducer,
   useRef,
   useState,
@@ -200,6 +201,20 @@ const resolveSlot = (
   context: CreativeCanvasEditorContext
 ): React.ReactNode => (typeof slot === 'function' ? slot(context) : slot);
 
+const INTERACTION_SAVE_IDLE_MS = 160;
+
+/**
+ * Pointer and wheel updates should stay on the visual path. Persisting every
+ * intermediate viewport/node position clones and serializes the whole canvas,
+ * so these commands are coalesced until the interaction is idle or flushed.
+ */
+const shouldDeferPersistence = (command: CanvasCommand): boolean =>
+  command.type === 'viewport/pan' ||
+  command.type === 'viewport/set' ||
+  command.type === 'viewport/zoom-at' ||
+  command.type === 'node/move' ||
+  command.type === 'node/update';
+
 const defaultLoading = (label: string) => (
   <div className={styles.centerState} data-creative-canvas-state='loading' role='status'>
     {label}
@@ -326,6 +341,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
     const surfaceRef = useRef<HTMLDivElement>(null);
     const pasteSequenceRef = useRef(0);
     const gestureSequenceRef = useRef(0);
+    const persistenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [interaction, dispatchInteraction] = useReducer(
       canvasEditorInteractionReducer,
       INITIAL_CANVAS_EDITOR_INTERACTION
@@ -337,8 +353,42 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       dispatchInteraction(action);
     }, []);
 
+    const cancelScheduledPersistence = useCallback(() => {
+      if (persistenceTimerRef.current === null) return;
+      clearTimeout(persistenceTimerRef.current);
+      persistenceTimerRef.current = null;
+    }, []);
+
+    const queueLatestPersistence = useCallback(() => {
+      const base = baseDocumentRef.current;
+      if (!base) return;
+      saveController.queue(projectDocumentFromCanvasState(base, stateRef.current));
+    }, [saveController]);
+
+    const schedulePersistence = useCallback(() => {
+      cancelScheduledPersistence();
+      persistenceTimerRef.current = setTimeout(() => {
+        persistenceTimerRef.current = null;
+        queueLatestPersistence();
+      }, INTERACTION_SAVE_IDLE_MS);
+    }, [cancelScheduledPersistence, queueLatestPersistence]);
+
+    const flushScheduledPersistence = useCallback(() => {
+      if (persistenceTimerRef.current === null) return;
+      cancelScheduledPersistence();
+      queueLatestPersistence();
+    }, [cancelScheduledPersistence, queueLatestPersistence]);
+
+    useEffect(
+      () => () => {
+        cancelScheduledPersistence();
+      },
+      [cancelScheduledPersistence]
+    );
+
     const hydrate = useCallback(
       (detail: CreativeProjectDetail) => {
+        cancelScheduledPersistence();
         const next = canvasStateFromProjectDocument(detail.document);
         baseDocumentRef.current = structuredClone(detail.document);
         loadedProjectIdRef.current = detail.project.projectId;
@@ -357,10 +407,11 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         pasteSequenceRef.current = 0;
         setInteraction({ type: 'gesture/end' });
       },
-      [saveController, setInteraction]
+      [cancelScheduledPersistence, saveController, setInteraction]
     );
 
     useEffect(() => {
+      cancelScheduledPersistence();
       loadedProjectIdRef.current = null;
       loadedRevisionRef.current = null;
       baseDocumentRef.current = null;
@@ -371,7 +422,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       activeAgentSessionIdRef.current = null;
       setAgentSessionsState(null);
       setActiveAgentSessionId(null);
-    }, [projectId]);
+    }, [cancelScheduledPersistence, projectId]);
 
     useEffect(() => {
       const detail = project.detail;
@@ -399,6 +450,11 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       return true;
     }, [hydrate, project, projectId]);
 
+    const flushCanvasPersistence = useCallback(async (): Promise<CanvasCasFlushResult> => {
+      flushScheduledPersistence();
+      return saveController.flush();
+    }, [flushScheduledPersistence, saveController]);
+
     const applyCommand = useCallback(
       (command: CanvasCommand): CanvasState => {
         const current = stateRef.current;
@@ -417,11 +473,22 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
           next.document !== current.document || next.viewport !== current.viewport;
         const base = baseDocumentRef.current;
         if (persistedChanged && base) {
-          saveController.queue(projectDocumentFromCanvasState(base, next));
+          if (shouldDeferPersistence(command)) {
+            schedulePersistence();
+          } else {
+            cancelScheduledPersistence();
+            saveController.queue(projectDocumentFromCanvasState(base, next));
+          }
         }
         return next;
       },
-      [disabled, onPendingTaskCommandBlocked, saveController]
+      [
+        cancelScheduledPersistence,
+        disabled,
+        onPendingTaskCommandBlocked,
+        saveController,
+        schedulePersistence,
+      ]
     );
 
     const applyInteractionResolution = useCallback(
@@ -446,6 +513,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         const currentBase = baseDocumentRef.current;
         if (!currentBase || currentBase.background === nextBackground) return;
 
+        cancelScheduledPersistence();
         const nextBase = {
           ...structuredClone(currentBase),
           background: nextBackground,
@@ -454,7 +522,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         setBackgroundState(nextBackground);
         saveController.queue(projectDocumentFromCanvasState(nextBase, stateRef.current));
       },
-      [disabled, saveController]
+      [cancelScheduledPersistence, disabled, saveController]
     );
 
     const setPanels = useCallback(
@@ -465,6 +533,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
           return;
         }
 
+        cancelScheduledPersistence();
         const nextDocument = projectDocumentWithCanvasPanels(
           currentBase,
           stateRef.current,
@@ -473,7 +542,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         baseDocumentRef.current = nextDocument;
         saveController.queue(nextDocument);
       },
-      [disabled, saveController]
+      [cancelScheduledPersistence, disabled, saveController]
     );
 
     const setCanonicalPendingTaskIds = useCallback(
@@ -489,6 +558,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
           return;
         }
 
+        cancelScheduledPersistence();
         const nextDocument = projectDocumentWithPendingTaskIds(
           currentBase,
           stateRef.current,
@@ -499,7 +569,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         setPendingTaskIdsState(nextTaskIds);
         saveController.queue(nextDocument);
       },
-      [disabled, saveController]
+      [cancelScheduledPersistence, disabled, saveController]
     );
 
     const addPendingTask = useCallback(
@@ -549,13 +619,14 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         activeAgentSessionIdRef.current = nextDocument.activeChatId;
         setAgentSessionsState(agentSessionsRef.current);
         setActiveAgentSessionId(activeAgentSessionIdRef.current);
+        cancelScheduledPersistence();
         saveController.queue(nextDocument);
         const result = await saveController.flush();
         if (result.status === 'conflict' || result.status === 'error') {
           throw result.error;
         }
       },
-      [disabled, saveController]
+      [cancelScheduledPersistence, disabled, saveController]
     );
 
     useEffect(() => onStateChange?.(state), [onStateChange, state]);
@@ -571,6 +642,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
 
     useEffect(() => {
       const beforeUnload = (event: BeforeUnloadEvent) => {
+        flushScheduledPersistence();
         if (!canvasSaveRequiresUnloadGuard(saveController.getSnapshot())) return;
         void saveController.flush();
         event.preventDefault();
@@ -578,7 +650,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       };
       window.addEventListener('beforeunload', beforeUnload);
       return () => window.removeEventListener('beforeunload', beforeUnload);
-    }, [saveController]);
+    }, [flushScheduledPersistence, saveController]);
 
     useImperativeHandle(
       ref,
@@ -589,7 +661,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         addPendingTask,
         removePendingTask,
         persistAgentSessions,
-        flush: () => saveController.flush(),
+        flush: flushCanvasPersistence,
         reloadRemote,
         getState: () => stateRef.current,
         getSaveState: () => saveController.getSnapshot(),
@@ -600,6 +672,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       [
         addPendingTask,
         applyCommand,
+        flushCanvasPersistence,
         persistAgentSessions,
         reloadRemote,
         removePendingTask,
@@ -856,12 +929,14 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         }
 
         setInteraction({ type: 'gesture/end', pointerId });
+        flushScheduledPersistence();
         releasePointer(pointerId);
       },
       [
         applyCommand,
         applyInteractionResolution,
         connectionDropTarget,
+        flushScheduledPersistence,
         localClientPoint,
         releasePointer,
         setInteraction,
@@ -1029,6 +1104,192 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       isLoading: project.isLoading,
       error: project.error,
     });
+    const nodeById = useMemo(
+      () => new Map(state.document.nodes.map((node) => [node.id, node])),
+      [state.document.nodes]
+    );
+    const selectedNodeIds = useMemo(
+      () => new Set(state.selection.nodeIds),
+      [state.selection.nodeIds]
+    );
+    const selectedEdgeIds = useMemo(
+      () => new Set(state.selection.edgeIds),
+      [state.selection.edgeIds]
+    );
+    const graphHighlight = useMemo(
+      () => deriveCanvasGraphHighlight(state.document, state.selection.nodeIds),
+      [state.document, state.selection.nodeIds]
+    );
+    const hasGraphHighlight = graphHighlight.rootNodeIds.size > 0;
+    const nodeLayer = useMemo(
+      () =>
+        state.document.nodes.map((node) => {
+          const onPointerDown: React.PointerEventHandler<HTMLElement> = (event) =>
+            beginNodePointer(node, event);
+          const highlighted = graphHighlight.nodeIds.has(node.id);
+          return (
+            <div
+              key={node.id}
+              className={styles.nodePlacement}
+              style={{
+                left: node.position.x,
+                top: node.position.y,
+                width: node.size.width,
+                height: node.size.height,
+                zIndex: node.zIndex,
+              }}
+              data-canvas-node-id={node.id}
+              data-canvas-node-kind={node.type}
+              data-selected={selectedNodeIds.has(node.id) || undefined}
+              data-highlighted={highlighted || undefined}
+              data-dimmed={hasGraphHighlight && !highlighted ? true : undefined}
+              onPointerDown={onPointerDown}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                applyInteractionResolution(
+                  openCanvasContextMenu(
+                    { kind: 'node', nodeId: node.id },
+                    localClientPoint(event.clientX, event.clientY)
+                  )
+                );
+              }}
+              onDoubleClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                applyInteractionResolution(
+                  resolveCanvasDoubleClick(
+                    stateRef.current,
+                    { kind: 'node', nodeId: node.id },
+                    localClientPoint(event.clientX, event.clientY),
+                    stateRef.current.viewport
+                  )
+                );
+              }}
+            >
+              {renderNode({
+                node,
+                selected: selectedNodeIds.has(node.id),
+                highlighted,
+                dimmed: hasGraphHighlight && !highlighted,
+                onActivate: () => applyCommand(canvasCommands.setSelection([node.id])),
+                onOpen: () =>
+                  applyInteractionResolution(
+                    resolveCanvasDoubleClick(
+                      stateRef.current,
+                      { kind: 'node', nodeId: node.id },
+                      { x: 0, y: 0 },
+                      stateRef.current.viewport
+                    )
+                  ),
+                onToggleLock: () =>
+                  applyInteractionResolution(
+                    resolveCanvasContextAction(
+                      stateRef.current,
+                      { kind: 'node', nodeId: node.id },
+                      'toggle-lock'
+                    )
+                  ),
+                dragHandleProps: { onPointerDown },
+              })}
+              {node.type !== 'group' ? (
+                <button
+                  type='button'
+                  className={`${styles.connectionHandle} ${styles.connectionHandleInput}`}
+                  aria-label={t('creativeStudio.canvas.editor.connectionInput')}
+                  data-canvas-connection-handle='target'
+                  data-canvas-handle-id='target'
+                  data-canvas-node-id={node.id}
+                  onPointerDown={(event) => beginConnectionDrag(node, 'target', event)}
+                />
+              ) : null}
+              {node.type !== 'group' && node.type !== 'director' ? (
+                <button
+                  type='button'
+                  className={`${styles.connectionHandle} ${styles.connectionHandleOutput}`}
+                  aria-label={t('creativeStudio.canvas.editor.connectionOutput')}
+                  data-canvas-connection-handle='source'
+                  data-canvas-handle-id='source'
+                  data-canvas-node-id={node.id}
+                  onPointerDown={(event) => beginConnectionDrag(node, 'source', event)}
+                />
+              ) : null}
+              {selectedNodeIds.has(node.id) && !node.locked
+                ? RESIZE_CORNERS.map((corner) => (
+                    <button
+                      key={corner}
+                      type='button'
+                      className={styles.resizeHandle}
+                      data-resize-corner={corner}
+                      aria-label={t('creativeStudio.canvas.editor.resizeHandle', {
+                        corner: t(RESIZE_CORNER_LABEL_KEYS[corner]),
+                      })}
+                      onPointerDown={(event) => beginNodeResize(node, corner, event)}
+                    />
+                  ))
+                : null}
+            </div>
+          );
+        }),
+      [
+        applyCommand,
+        applyInteractionResolution,
+        beginConnectionDrag,
+        beginNodePointer,
+        beginNodeResize,
+        graphHighlight,
+        hasGraphHighlight,
+        localClientPoint,
+        renderNode,
+        selectedNodeIds,
+        state.document.nodes,
+        t,
+      ]
+    );
+    const edgeLayer = useMemo(
+      () =>
+        state.document.connections.flatMap((connection) => {
+          const source = nodeById.get(connection.sourceNodeId);
+          const target = nodeById.get(connection.targetNodeId);
+          if (!source || !target) return [];
+          return [
+            <React.Fragment key={connection.id}>
+              {renderEdge({
+                connection,
+                source,
+                target,
+                selected: selectedEdgeIds.has(connection.id),
+                highlighted: graphHighlight.edgeIds.has(connection.id),
+                dimmed:
+                  hasGraphHighlight && !graphHighlight.edgeIds.has(connection.id),
+                onActivate: () =>
+                  applyCommand(canvasCommands.setSelection([], [connection.id])),
+                onContextMenu: (event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  applyInteractionResolution(
+                    openCanvasContextMenu(
+                      { kind: 'edge', edgeId: connection.id },
+                      localClientPoint(event.clientX, event.clientY)
+                    )
+                  );
+                },
+              })}
+            </React.Fragment>,
+          ];
+        }),
+      [
+        applyCommand,
+        applyInteractionResolution,
+        graphHighlight,
+        hasGraphHighlight,
+        localClientPoint,
+        nodeById,
+        renderEdge,
+        selectedEdgeIds,
+        state.document.connections,
+      ]
+    );
     if (loadState === 'loading') {
       return (
         <>
@@ -1072,7 +1333,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       );
     }
 
-    const flush = () => saveController.flush();
+    const flush = flushCanvasPersistence;
     const context: CreativeCanvasEditorContext = {
       state,
       save: saveSnapshot,
@@ -1084,151 +1345,6 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       flush,
       reloadRemote,
     };
-    const nodeById = new Map(state.document.nodes.map((node) => [node.id, node]));
-    const selectedNodeIds = new Set(state.selection.nodeIds);
-    const selectedEdgeIds = new Set(state.selection.edgeIds);
-    const graphHighlight = deriveCanvasGraphHighlight(
-      state.document,
-      state.selection.nodeIds
-    );
-    const hasGraphHighlight = graphHighlight.rootNodeIds.size > 0;
-    const nodeLayer = state.document.nodes.map((node) => {
-      const onPointerDown: React.PointerEventHandler<HTMLElement> = (event) =>
-        beginNodePointer(node, event);
-      const highlighted = graphHighlight.nodeIds.has(node.id);
-      return (
-        <div
-          key={node.id}
-          className={styles.nodePlacement}
-          style={{
-            left: node.position.x,
-            top: node.position.y,
-            width: node.size.width,
-            height: node.size.height,
-            zIndex: node.zIndex,
-          }}
-          data-canvas-node-id={node.id}
-          data-canvas-node-kind={node.type}
-          data-selected={selectedNodeIds.has(node.id) || undefined}
-          data-highlighted={highlighted || undefined}
-          data-dimmed={hasGraphHighlight && !highlighted ? true : undefined}
-          onPointerDown={onPointerDown}
-          onContextMenu={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            applyInteractionResolution(
-              openCanvasContextMenu(
-                { kind: 'node', nodeId: node.id },
-                localClientPoint(event.clientX, event.clientY)
-              )
-            );
-          }}
-          onDoubleClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            applyInteractionResolution(
-              resolveCanvasDoubleClick(
-                stateRef.current,
-                { kind: 'node', nodeId: node.id },
-                localClientPoint(event.clientX, event.clientY),
-                stateRef.current.viewport
-              )
-            );
-          }}
-        >
-          {renderNode({
-            node,
-            selected: selectedNodeIds.has(node.id),
-            highlighted,
-            dimmed: hasGraphHighlight && !highlighted,
-            onActivate: () => applyCommand(canvasCommands.setSelection([node.id])),
-            onOpen: () =>
-              applyInteractionResolution(
-                resolveCanvasDoubleClick(
-                  stateRef.current,
-                  { kind: 'node', nodeId: node.id },
-                  { x: 0, y: 0 },
-                  stateRef.current.viewport
-                )
-              ),
-            onToggleLock: () =>
-              applyInteractionResolution(
-                resolveCanvasContextAction(
-                  stateRef.current,
-                  { kind: 'node', nodeId: node.id },
-                  'toggle-lock'
-                )
-              ),
-            dragHandleProps: { onPointerDown },
-          })}
-          {node.type !== 'group' ? (
-            <button
-              type='button'
-              className={`${styles.connectionHandle} ${styles.connectionHandleInput}`}
-              aria-label={t('creativeStudio.canvas.editor.connectionInput')}
-              data-canvas-connection-handle='target'
-              data-canvas-handle-id='target'
-              data-canvas-node-id={node.id}
-              onPointerDown={(event) => beginConnectionDrag(node, 'target', event)}
-            />
-          ) : null}
-          {node.type !== 'group' && node.type !== 'director' ? (
-            <button
-              type='button'
-              className={`${styles.connectionHandle} ${styles.connectionHandleOutput}`}
-              aria-label={t('creativeStudio.canvas.editor.connectionOutput')}
-              data-canvas-connection-handle='source'
-              data-canvas-handle-id='source'
-              data-canvas-node-id={node.id}
-              onPointerDown={(event) => beginConnectionDrag(node, 'source', event)}
-            />
-          ) : null}
-          {selectedNodeIds.has(node.id) && !node.locked
-            ? RESIZE_CORNERS.map((corner) => (
-                <button
-                  key={corner}
-                  type='button'
-                  className={styles.resizeHandle}
-                  data-resize-corner={corner}
-                  aria-label={t('creativeStudio.canvas.editor.resizeHandle', {
-                    corner: t(RESIZE_CORNER_LABEL_KEYS[corner]),
-                  })}
-                  onPointerDown={(event) => beginNodeResize(node, corner, event)}
-                />
-              ))
-            : null}
-        </div>
-      );
-    });
-    const edgeLayer = state.document.connections.flatMap((connection) => {
-      const source = nodeById.get(connection.sourceNodeId);
-      const target = nodeById.get(connection.targetNodeId);
-      if (!source || !target) return [];
-      return [
-        <React.Fragment key={connection.id}>
-          {renderEdge({
-            connection,
-            source,
-            target,
-            selected: selectedEdgeIds.has(connection.id),
-            highlighted: graphHighlight.edgeIds.has(connection.id),
-            dimmed: hasGraphHighlight && !graphHighlight.edgeIds.has(connection.id),
-            onActivate: () => applyCommand(canvasCommands.setSelection([], [connection.id])),
-            onContextMenu: (event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              applyInteractionResolution(
-                openCanvasContextMenu(
-                  { kind: 'edge', edgeId: connection.id },
-                  localClientPoint(event.clientX, event.clientY)
-                )
-              );
-            },
-          })}
-        </React.Fragment>,
-      ];
-    });
-
     const saveChrome = !showSaveState || saveSnapshot.status === 'idle' ? null : (
       <div
         className={styles.saveState}
