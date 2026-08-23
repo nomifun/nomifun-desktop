@@ -1,5 +1,6 @@
 {
   "scheduledTasks": "定时任务",
+   "siderTitle": "定时任务",
   "taskCount": "{{count}} 个任务",
   "schedule": "调度规则",
   "nextRun": "下次执行",

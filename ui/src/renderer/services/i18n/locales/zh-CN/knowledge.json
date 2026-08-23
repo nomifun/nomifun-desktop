@@ -404,5 +404,6 @@
     "deleteFolderTitle": "确认删除目录？",
     "deleteFolderWarning": "删除目录“{{name}}”会一并清空其下所有文档和子目录，无法撤销。"
   },
-  "title": "知识库"
+  "title": "知识库",
+  "siderTitle": "知识库"
 }

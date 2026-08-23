@@ -32,7 +32,7 @@ const SiderAssetLibraryEntry: React.FC<SiderAssetLibraryEntryProps> = ({
   onClick,
 }) => {
   const { t } = useTranslation();
-  const label = t('creativeStudio.navigation.assets');
+  const label = t('assetLibrary.siderTitle', { defaultValue: t('creativeStudio.navigation.assets') });
 
   if (collapsed) {
     return (

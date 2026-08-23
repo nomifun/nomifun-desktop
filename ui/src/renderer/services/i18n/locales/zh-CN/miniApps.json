@@ -2,7 +2,8 @@
   "title": "小程序",
   "subtitle": "AI 为你生成、随开随用的网页小工具",
   "nav": {
-    "entry": "小程序"
+    "entry": "小程序",
+     "siderEntry": "小程序"
   },
   "list": {
     "searchPlaceholder": "搜索小程序",
