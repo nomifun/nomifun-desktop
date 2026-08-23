@@ -1283,7 +1283,12 @@ mod tests {
             .with_target(false)
             .with_writer(move || LogWriter(Arc::clone(&writer_output)))
             .finish();
-        tracing::subscriber::with_default(subscriber, run);
+        tracing::subscriber::with_default(subscriber, || {
+            // A callsite may have been initialized before this test installed
+            // its capture subscriber. Refresh interest before exercising logs.
+            tracing::callsite::rebuild_interest_cache();
+            run();
+        });
 
         let bytes = output
             .lock()
