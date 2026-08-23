@@ -4,7 +4,7 @@
 创作面：
 
 - **Canvas**：持久化无限画布，包含媒体节点、可审计的生成操作、可复用素材、
-  私有 Workflow 和受限 Director。
+  私有模板和受限 Director。
 - **Image Workbench**：独立的图片生成工作台。
 - **Video Workbench**：独立的视频生成工作台。
 
@@ -34,7 +34,7 @@ Canvas 内的**创作助手**提供。待 Canvas 或 Director 的保存结果处
 | `/workshop/director/:canvasId` | 编辑附属于该 Canvas 的受限 Director 状态。 |
 | `/workshop/image` | 使用独立 Image Workbench；零 Canvas 时也完整可用。 |
 | `/workshop/video` | 使用独立 Video Workbench；零 Canvas 时也完整可用。 |
-| `/workshop/prompts`、`/workshop/assets`、`/workshop/workflows` | 管理提示词、可复用素材和私有 Workflow。 |
+| `/workshop/prompts`、`/workshop/assets`、`/workshop/templates` | 管理提示词、可复用素材和模板工作台中的私有模板。 |
 
 `/workshop/projects` 是 deprecated 兼容路由，会重定向到
 `/workshop/canvases`，不是产品页面，也不是 Canvas 的第二个名称。
@@ -123,7 +123,7 @@ instance-owner capability，只对策展的 `desktop` 与 `admin` Gateway profil
 | 操作 | 要求的 NomiFun task | 创意工坊 capability |
 | --- | --- | --- |
 | Canvas 创作助手 | `chat` | Canvas-scoped Assistant turn；严格图提案仍需人工批准。 |
-| Workflow AI 草稿/规划 | `chat` | 一次不带工具的有界 completion。 |
+| 模板 AI 草稿/规划 | `chat` | 一次不带工具的有界 completion。 |
 | 空图片承接节点 | `image_generation` | `t2i`。 |
 | 带真实参考的图片（包括蒙版编辑路径） | `image_edit` | `i2i`。 |
 | 空视频承接节点 | `video_generation` | `t2v`。 |
@@ -193,12 +193,12 @@ reader 必须继续支持已发布的版本 1 `.nomifun-canvas.zip` 格式。v1 
 历史 `project/projectId` 字段；这些只是兼容 wire 数据，不会把 Project 重新引入产品。
 Conversation 消息与活跃 pending turn 位于归档之外，导入不会克隆 Conversation。
 
-归档不包含 Provider 凭据，也不会安装缺失的 Provider 或模型。全局 Workflow 与 Canvas
+归档不包含 Provider 凭据，也不会安装缺失的 Provider 或模型。全局模板与 Canvas
 没有引用的素材不会被隐式塞进 Canvas 归档。
 
-## 最小 Workflow AI
+## 最小模板 AI
 
-`/workshop/workflows` 的 **AI 创建**首发范围刻意保持简单：
+`/workshop/templates` 的 **AI 创建**首发范围刻意保持简单：
 
 1. 输入简单需求并选择一个 exact、已启用的 `chat` 模型。
 2. NomiFun 执行一次不带工具的 completion：墙钟上限 120 秒、输出上限 4,096 token、
@@ -206,15 +206,15 @@ Conversation 消息与活跃 pending turn 位于归档之外，导入不会克�
 3. 客户端只接受一个位于最终位置、结构严格的
    `nomifun.creative-studio.workflow-draft/v1` JSON artifact。草稿模式仅有
    `single-image` 与 `multi-image-series`。
-4. 先审阅预览。**应用**只会把一个私有的内存草稿打开到现有 Workflow 编辑器。
-5. 需要时继续编辑，然后点击**保存**。只有这次显式 Save 才创建 Workflow；Apply
+4. 先审阅预览。**应用**只会把一个私有的内存草稿打开到现有模板编辑器。
+5. 需要时继续编辑，然后点击**保存**。只有这次显式 Save 才创建模板；Apply
    不会持久化，也不会运行。
 
-这次 one-shot 不创建 Conversation、附件、公开模板、Skill/MCP 工具会话、Workflow
-或 Workflow run；也不会自动重试、模型故障切换、保存或执行。模型不能决定 ID、
+这次 one-shot 不创建 Conversation、附件、公开模板、Skill/MCP 工具会话、已保存模板
+或模板运行记录；也不会自动重试、模型故障切换、保存或执行。模型不能决定 ID、
 revision、时间戳、可见性、标签、媒体生成模型或素材。公开模板发布/发现与复杂
-Workflow 会话不在首发范围内。首发 UI 是 private-only：新建、编辑、复制与 AI Apply
-都会把 Workflow 规范化为 `private`，界面不提供公开可见性开关。
+模板会话不在首发范围内。首发 UI 是 private-only：新建、编辑、复制与 AI Apply
+都会把底层 Workflow 定义规范化为 `private`，界面不提供公开可见性开关。
 
 ## Director v1 子集
 
@@ -263,6 +263,6 @@ Director 是 Canvas 内的 Three.js 场景编辑器，不是完整 DCC 或视频
 
 - 产品路由：[`app/routes.ts`](../../ui/src/renderer/pages/creativeStudio/app/routes.ts)
 - Canvas 文档：[`creative_studio.rs`](../../crates/backend/nomifun-workshop/src/creative_studio.rs)
-- Canvas、素材与 Workflow 路由：[`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs)
+- Canvas、素材与模板路由：[`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs)
 - 生成任务路由：[`nomifun-creation/src/routes.rs`](../../crates/backend/nomifun-creation/src/routes.rs)
 - 模型选择：[`models/catalog.ts`](../../ui/src/renderer/pages/creativeStudio/models/catalog.ts)

@@ -40,7 +40,7 @@ import {
 } from '../../assets/page/model';
 import {
   CREATIVE_STUDIO_PROJECTS_PATH,
-  CREATIVE_STUDIO_WORKFLOWS_PATH,
+  CREATIVE_STUDIO_TEMPLATES_PATH,
   creativeStudioDirectorProjectPath,
 } from '../../app/routes';
 import {
@@ -1279,7 +1279,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, [flushBeforeLeave, navigate]);
 
   const handleOpenWorkflowCenter = useCallback(async () => {
-    if (await flushBeforeLeave()) navigate(CREATIVE_STUDIO_WORKFLOWS_PATH);
+    if (await flushBeforeLeave()) navigate(CREATIVE_STUDIO_TEMPLATES_PATH);
   }, [flushBeforeLeave, navigate]);
 
   const workflowRunner = useMemo<CreativeWorkflowRunnerPort>(
@@ -3556,7 +3556,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
       if (workflowInsertingRunId || run.record.resultAssetIds.length === 0)
         return;
       setWorkflowInsertingRunId(run.request.id);
-      setNotice('正在解析工作流的真实结果素材…');
+        setNotice('正在解析模板的真实结果素材…');
       try {
         const resolved = await Promise.all(
           run.record.resultAssetIds.map((assetId) =>
@@ -4486,7 +4486,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
             acceptedKinds: ['image'],
             initialSelectedIds: selectedAssetIds,
             selectionLimit: 100,
-            title: '选择工作流参考图',
+            title: '选择模板参考图',
           })
         }
         onUploadReferenceImages={async (files, selectedAssetIds) => {

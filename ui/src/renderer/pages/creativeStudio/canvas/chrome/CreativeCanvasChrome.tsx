@@ -76,7 +76,7 @@ const LEFT_LABELS: Record<CreativeCanvasLeftView, string> = {
   canvas: '画布',
   assets: '资产',
   prompts: '提示词',
-  workflows: '工作流',
+  workflows: '模板',
 };
 
 const RIGHT_LABELS: Record<CreativeCanvasRightView, string> = {

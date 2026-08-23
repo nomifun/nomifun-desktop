@@ -266,7 +266,7 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
     <Modal
       visible
       className={styles.editorModal}
-      title={isNew ? '新建工作流' : '编辑工作流'}
+      title={isNew ? '新建模板' : '编辑模板'}
       okText='保存'
       cancelText='取消'
       autoFocus={false}
@@ -284,7 +284,7 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
             <h3>基础信息</h3>
             <Input
               value={workflow.metadata.name}
-              placeholder='工作流名称'
+              placeholder='模板名称'
               maxLength={120}
               onChange={(name) => patchMetadata({ name })}
             />
@@ -298,8 +298,8 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
               <Select
                 value={mode}
                 options={[
-                  { value: 'single-image', label: '单图工作流' },
-                  { value: 'multi-image-series', label: '多图工作流' },
+                  { value: 'single-image', label: '单图模板' },
+                  { value: 'multi-image-series', label: '多图模板' },
                 ]}
                 onChange={(nextMode) =>
                   onChange(switchWorkflowMode(workflow, nextMode as WorkflowEditorMode))

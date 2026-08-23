@@ -111,9 +111,9 @@
     },
     {
       "name": "creative-studio-workflow",
-      "name_i18n": { "zh-CN": "工作流设计" },
+      "name_i18n": { "zh-CN": "模板设计" },
       "description_i18n": {
-        "zh-CN": "把创作目标与画布上下文整理成可审阅的工作流方案；不直接保存、运行或调用媒体模型。"
+        "zh-CN": "把创作目标与画布上下文整理成可审阅的模板方案；不直接保存、运行或调用媒体模型。"
       },
       "audience_tags": ["designer", "general"],
       "scenario_tags": ["design", "planning"]

@@ -168,7 +168,7 @@ NomiFun Desktop 已经从 Agent 聊天客户端发展为本地优先、可扩展
 |---|---|
 | **多 Agent 执行集群** | 按依赖规划任务，委派给专用 Agent，并行调度执行，同时提供实时状态、真实会话、审批、重试与恢复。 |
 | **Agent 小程序** | 把普通 Agent 会话变成可预览、可发布的本地 Web 工具，同时保留可编辑工作副本与稳定的发布快照。 |
-| **创意工坊** | 提供持久 Canvas、独立 Image/Video Workbench、exact 模型媒体任务、可复用素材、私有 Workflow 与受限 3D 导演台。 |
+| **创意工坊** | 提供持久 Canvas、独立 Image/Video Workbench、exact 模型媒体任务、可复用素材、私有模板工作台与受限 3D 导演台。 |
 | **按任务路由的多模型控制面** | 可扩展管理聊天、实时、语音、视觉、媒体生成、Embedding 与 Rerank 模型，并支持任务级路由与故障切换。 |
 | **NomiFun 免费模型** | 内置托管供应商，无需先手动新建供应商，即可启用、刷新目录、健康检查并开箱使用。 |
 | **手机、机器人与开放接入** | Mobile 直连 Desktop，小智机器人绑定伙伴，并通过 WebUI、REST、MCP、IM 渠道和 NomiRelay 安全开放能力。 |
@@ -217,7 +217,7 @@ Canvas，Image/Video 在零 Canvas 时也可以独立使用。Canvas 持久化�
 TTS。Canvas 文档使用 revision CAS，Canvas 任务可在重载后对账；版本 2 Canvas ZIP
 携带完整引用素材与 Director sidecar 闭包，同时继续支持版本 1 reader。独立任务 owner
 与历史只使用 `workbenchKind`；Image/Video 按工作台保存版本化 session 草稿，不绑定
-Canvas。UI/API contract version 为 22。最小 Workflow AI 只预览一次严格草稿，等待用户
+Canvas。UI/API contract version 为 22。最小模板 AI 只预览一次严格草稿，等待用户
 应用到编辑器后再显式保存；它不会创建公开模板、复杂会话或自动运行。
 
 ### 🧠 多 Agent 执行集群 —— 规划、调度与监督

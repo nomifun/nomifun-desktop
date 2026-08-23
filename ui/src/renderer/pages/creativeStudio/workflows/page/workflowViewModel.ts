@@ -198,7 +198,7 @@ export function createBlankWorkflow(mode: WorkflowEditorMode): WorkflowDefinitio
     id: uuidv7(),
     revision: 1,
     metadata: {
-      name: mode === 'multi-image-series' ? '多图系列生成' : '未命名工作流',
+      name: mode === 'multi-image-series' ? '多图系列生成' : '未命名模板',
       description:
         mode === 'multi-image-series'
           ? '根据主题生成一组连贯图片提示词，审核后批量生成图片。'

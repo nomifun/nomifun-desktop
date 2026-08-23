@@ -33,6 +33,8 @@ describe('Creative Studio product route integration', () => {
     expect(router.includes('CreativeStudioVideoWorkbenchRoute')).toBe(true);
     expect(router.includes('CreativeStudioDirectorRoute')).toBe(true);
     expect(router.includes('CreativeStudioWorkflowRoute')).toBe(true);
+    expect(router.includes("path='templates'")).toBe(true);
     expect(router.includes("path='workflows'")).toBe(true);
+    expect(router.includes('<LegacyCreativeStudioWorkflowsRedirect />')).toBe(true);
   });
 });

@@ -188,7 +188,7 @@ const WorkflowInputControl: React.FC<{
       </div>
     );
   }
-  return <div className={styles.referencePlaceholder}>变量契约不匹配，请重新打开工作流。</div>;
+  return <div className={styles.referencePlaceholder}>变量契约不匹配，请重新打开模板。</div>;
 };
 
 const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
@@ -276,10 +276,10 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
         inputs,
         referenceAssetIds,
       });
-      Message.success('工作流任务已提交');
+      Message.success('模板任务已提交');
       onClose();
     } catch (error) {
-      Message.error(error instanceof Error ? error.message : '工作流任务提交失败');
+      Message.error(error instanceof Error ? error.message : '模板任务提交失败');
     } finally {
       setSubmitting(false);
     }
@@ -290,7 +290,7 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
       visible
       alignCenter={false}
       className={styles.runModal}
-      title={workflow.metadata.name || '运行工作流'}
+      title={workflow.metadata.name || '运行模板'}
       footer={null}
       autoFocus={false}
       unmountOnExit
@@ -388,7 +388,7 @@ const WorkflowRunModal: React.FC<WorkflowRunModalProps> = ({
             </div>
           ) : !model ? (
             <div className={styles.runnerUnavailable} role='status'>
-              请先编辑工作流并选择支持当前任务的已启用模型。
+              请先编辑模板并选择支持当前任务的已启用模型。
             </div>
           ) : requiresPlanningModel && !planningModel ? (
             <div className={styles.runnerUnavailable} role='status'>

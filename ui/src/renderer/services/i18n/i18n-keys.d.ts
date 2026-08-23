@@ -1010,6 +1010,7 @@ export type I18nKey =
   | 'creativeStudio.navigation.image'
   | 'creativeStudio.navigation.label'
   | 'creativeStudio.navigation.prompts'
+  | 'creativeStudio.navigation.templates'
   | 'creativeStudio.navigation.video'
   | 'creativeStudio.title'
   | 'cron.actions.delete'

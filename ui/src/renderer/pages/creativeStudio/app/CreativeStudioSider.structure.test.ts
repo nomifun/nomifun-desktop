@@ -19,6 +19,7 @@ describe('Creative Studio sidebar navigation', () => {
       'path: safeCanvasesResumePath',
       'path: CREATIVE_STUDIO_IMAGE_PATH',
       'path: CREATIVE_STUDIO_VIDEO_PATH',
+      'path: CREATIVE_STUDIO_TEMPLATES_PATH',
       'path: CREATIVE_STUDIO_PROMPTS_PATH',
       'path: CREATIVE_STUDIO_ASSETS_PATH',
     ];
@@ -59,6 +60,9 @@ describe('Creative Studio sidebar navigation', () => {
     expect(source.includes('CREATIVE_STUDIO_PROJECTS_PATH')).toBe(false);
     expect(
       source.includes("t('creativeStudio.navigation.canvases')")
+    ).toBe(true);
+    expect(
+      source.includes("t('creativeStudio.navigation.templates')")
     ).toBe(true);
     expect(source.includes('creativeStudio.navigation.projects')).toBe(false);
   });

@@ -73,7 +73,7 @@ The source of truth is
 | `/workshop/canvases` | Canonical Canvas library. |
 | `/workshop/canvas/:canvasId`, `/workshop/director/:canvasId` | Canvas infinite editor and bounded 3D Director. |
 | `/workshop/image`, `/workshop/video` | Independent Image and Video Workbenches; both work with zero Canvases. |
-| `/workshop/prompts`, `/workshop/assets`, `/workshop/workflows` | Prompt, asset, and private-workflow libraries. |
+| `/workshop/prompts`, `/workshop/assets`, `/workshop/templates` | Prompt and asset libraries plus the private Template Studio. |
 | `/mini-apps` | Mini-app library — the published single-file web tools, as a card grid. |
 | `/mini-apps/:id` | Mini-app runner — a single column: the PUBLISHED snapshot in a sandboxed iframe served straight from the backend, plus a toolbar (publish / 「继续迭代」 / refresh / open in browser / rename / delete). No conversation UI is mounted here; 「继续迭代」 provisions the working copy and navigates to an ordinary `/conversation/:id`, so the `pages/conversation/**` module graph never enters this route. |
 | `/settings/system` and related settings subroutes | System settings page and sub-sections. |

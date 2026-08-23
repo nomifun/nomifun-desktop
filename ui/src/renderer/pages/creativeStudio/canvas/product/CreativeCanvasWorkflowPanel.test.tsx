@@ -42,7 +42,7 @@ describe('CreativeCanvasWorkflowPanel', () => {
     expect(html.includes('Product poster')).toBe(true);
     expect(html.includes('Marketing · 单图')).toBe(true);
     expect(html.includes('运行')).toBe(true);
-    expect(html.includes('工作流尚未连接')).toBe(false);
+    expect(html.includes('模板尚未连接')).toBe(false);
   });
 
   test('projects a persisted successful run and offers its real result for insertion', () => {
@@ -109,8 +109,9 @@ describe('CreativeCanvasWorkflowPanel', () => {
       />
     );
 
-    expect(loading.includes('正在载入工作流')).toBe(true);
+    expect(loading.includes('正在载入模板')).toBe(true);
     expect(failed.includes('repository unavailable')).toBe(true);
-    expect(empty.includes('暂无工作流')).toBe(true);
+    expect(empty.includes('暂无模板')).toBe(true);
+    expect(empty.includes('打开模板工作台')).toBe(true);
   });
 });

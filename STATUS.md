@@ -45,7 +45,8 @@ The current frontend route map lives in
   `/workshop/canvases`, Canvas editors at `/workshop/canvas/:canvasId` and
   `/workshop/director/:canvasId`, independent workbenches at `/workshop/image`
   and `/workshop/video`, plus `/workshop/prompts`, `/workshop/assets`, and
-  `/workshop/workflows`.
+  `/workshop/templates`. `/workshop/workflows` is a deprecated compatibility
+  redirect to `/workshop/templates`.
   `/workshop/projects` is a deprecated compatibility redirect to
   `/workshop/canvases`; it is not a Creative Studio product object.
   `/workshop/audio` is retired; see

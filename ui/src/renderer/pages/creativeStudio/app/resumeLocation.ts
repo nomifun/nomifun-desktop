@@ -7,7 +7,9 @@
 import {
   CREATIVE_STUDIO_CANVASES_PATH,
   CREATIVE_STUDIO_LEGACY_PROJECTS_PATH,
+  CREATIVE_STUDIO_LEGACY_WORKFLOWS_PATH,
   CREATIVE_STUDIO_ROOT_PATH,
+  CREATIVE_STUDIO_TEMPLATES_PATH,
   creativeStudioSectionForPath,
   isCreativeStudioPath,
 } from './routes';
@@ -69,7 +71,9 @@ export function normalizeCreativeStudioResumeLocation(value: unknown): string {
     parsed,
     pathname === CREATIVE_STUDIO_ROOT_PATH
       ? CREATIVE_STUDIO_CANVASES_PATH
-      : pathname
+      : pathname === CREATIVE_STUDIO_LEGACY_WORKFLOWS_PATH
+        ? CREATIVE_STUDIO_TEMPLATES_PATH
+        : pathname
   );
 }
 

@@ -4,7 +4,7 @@ Creative Studio is NomiFun Desktop's focused, local-first creation product.
 It has three independent creation surfaces:
 
 - **Canvas**: a persistent infinite canvas with media nodes, auditable
-  generation operations, reusable assets, private workflows, and a bounded
+  generation operations, reusable assets, private templates, and a bounded
   Director.
 - **Image Workbench**: a standalone image-generation workbench.
 - **Video Workbench**: a standalone video-generation workbench.
@@ -40,7 +40,7 @@ The canonical route surface is:
 | `/workshop/director/:canvasId` | Edit the bounded Director state attached to that Canvas. |
 | `/workshop/image` | Use the standalone Image Workbench. It is fully usable with zero Canvases. |
 | `/workshop/video` | Use the standalone Video Workbench. It is fully usable with zero Canvases. |
-| `/workshop/prompts`, `/workshop/assets`, `/workshop/workflows` | Manage prompts, reusable assets, and private workflows. |
+| `/workshop/prompts`, `/workshop/assets`, `/workshop/templates` | Manage prompts, reusable assets, and private templates in Template Studio. |
 
 `/workshop/projects` is a deprecated compatibility route that redirects to
 `/workshop/canvases`. It is not a product surface or a second name for a
@@ -142,7 +142,7 @@ different task.
 | Operation | Required NomiFun task | Creative Studio capability |
 | --- | --- | --- |
 | Canvas Assistant | `chat` | Canvas-scoped assistant turn; strict graph proposals still require manual approval. |
-| Workflow AI draft/planning | `chat` | One tool-less, bounded completion. |
+| Template AI draft/planning | `chat` | One tool-less, bounded completion. |
 | Empty image target | `image_generation` | `t2i`. |
 | Image with real references, including the mask-edit path | `image_edit` | `i2i`. |
 | Empty video target | `video_generation` | `t2v`. |
@@ -230,12 +230,12 @@ pending turns live outside the archive, and import does not clone a
 Conversation.
 
 Archives do not contain provider credentials or install a missing provider or
-model. Global workflows and unrelated library assets are not implicitly added
+model. Global templates and unrelated library assets are not implicitly added
 to a Canvas archive.
 
-## Minimal Workflow AI
+## Minimal Template AI
 
-**AI Create** on `/workshop/workflows` intentionally implements a small launch
+**AI Create** on `/workshop/templates` intentionally implements a small launch
 scope:
 
 1. Enter a simple requirement and select one exact enabled `chat` model.
@@ -244,18 +244,18 @@ scope:
 3. The client accepts only one strict final
    `nomifun.creative-studio.workflow-draft/v1` JSON artifact. The available
    draft modes are `single-image` and `multi-image-series`.
-4. Review the preview. **Apply** only opens the existing workflow editor with a
+4. Review the preview. **Apply** only opens the existing template editor with a
    private in-memory draft.
 5. Edit it as needed and click **Save**. Only this explicit Save creates the
-   workflow. Apply does not persist or run it.
+   asset template. Apply does not persist or run it.
 
-The one-shot request creates no Conversation, attachment, public template,
-Skill/MCP tool session, workflow, or workflow run. There is no automatic retry,
+The one-shot request creates no Conversation, attachment, published template,
+Skill/MCP tool session, saved template, or template run. There is no automatic retry,
 model failover, save, or execution. The model never chooses IDs, revisions,
 timestamps, visibility, tags, media-generation models, or assets. Public
-template publishing/discovery and complex Workflow conversations are not part
+template publishing/discovery and complex template conversations are not part
 of this launch scope. The launch UI is private-only: create, edit, copy, and AI
-Apply all normalize the workflow to `private`, and there is no
+Apply all normalize the underlying workflow definition to `private`, and there is no
 public-visibility control.
 
 ## Director v1 subset
@@ -319,6 +319,6 @@ packaging success alone.
 
 - Product routes: [`app/routes.ts`](../../ui/src/renderer/pages/creativeStudio/app/routes.ts)
 - Canvas document: [`creative_studio.rs`](../../crates/backend/nomifun-workshop/src/creative_studio.rs)
-- Canvas, asset, and workflow routes: [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs)
+- Canvas, asset, and template routes: [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs)
 - Generation task routes: [`nomifun-creation/src/routes.rs`](../../crates/backend/nomifun-creation/src/routes.rs)
 - Model selection: [`models/catalog.ts`](../../ui/src/renderer/pages/creativeStudio/models/catalog.ts)

@@ -25,6 +25,7 @@ const expectedKeys = [
   'navigation.image',
   'navigation.label',
   'navigation.prompts',
+  'navigation.templates',
   'navigation.video',
   'title',
 ];
@@ -64,6 +65,7 @@ describe('Creative Studio locale contract', () => {
         video: '视频创作台',
         prompts: '提示词库',
         assets: '我的素材',
+        templates: '模板工作台',
       },
     });
     expect(enCreativeStudio).toEqual({
@@ -76,6 +78,7 @@ describe('Creative Studio locale contract', () => {
         video: 'Video studio',
         prompts: 'Prompt library',
         assets: 'My assets',
+        templates: 'Template studio',
       },
     });
     expect(flattenKeys(zhCreativeStudio).some((key) => key.startsWith('home.'))).toBe(false);

@@ -38,11 +38,14 @@ describe('Creative Studio resume location', () => {
       '/workshop/video',
       '/workshop/prompts?query=portrait',
       '/workshop/assets?page=3',
-      '/workshop/workflows#runs',
+      '/workshop/templates#runs',
     ]) {
       expect(normalizeCreativeStudioResumeLocation(path)).toBe(path);
     }
     expect(normalizeCreativeStudioResumeLocation('/workshop')).toBe('/workshop/canvases');
+    expect(normalizeCreativeStudioResumeLocation('/workshop/workflows#runs')).toBe(
+      '/workshop/templates#runs'
+    );
     expect(normalizeCreativeStudioResumeLocation('/workshop/?from=old#resume')).toBe(
       '/workshop/canvases?from=old#resume'
     );

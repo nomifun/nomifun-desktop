@@ -905,8 +905,8 @@ export const CreativeCanvasWorkflowUnwiredPanel: React.FC<{ className?: string }
   <CreativeCanvasUnavailablePanel
     kind='workflows'
     className={className}
-    title='工作流尚未连接'
-    description='当前画布文档没有工作流数据源，本面板不会显示示例流程或虚构运行状态。'
+    title='模板尚未连接'
+    description='当前画布文档没有模板数据源，本面板不会显示示例模板或虚构运行状态。'
   />
 );
 

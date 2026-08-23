@@ -202,7 +202,7 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
       setWorkflows(newestFirst(loaded));
       setPageState('ready');
     } catch (error) {
-      setLoadError(errorMessage(error, '工作流加载失败'));
+      setLoadError(errorMessage(error, '模板加载失败'));
       setPageState('error');
     }
   }, [repository]);
@@ -221,7 +221,7 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
       })
       .catch((error: unknown) => {
         if (!active) return;
-        setLoadError(errorMessage(error, '工作流加载失败'));
+        setLoadError(errorMessage(error, '模板加载失败'));
         setPageState('error');
       });
     return () => {
@@ -276,9 +276,9 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
       setWorkflows((current) => upsertWorkflow(current, saved));
       setEditing(null);
       setEditingIsNew(false);
-      Message.success(editingIsNew ? '工作流已创建' : '工作流已保存');
+      Message.success(editingIsNew ? '模板已创建' : '模板已保存');
     } catch (error) {
-      Message.error(errorMessage(error, '工作流保存失败'));
+      Message.error(errorMessage(error, '模板保存失败'));
     } finally {
       setAction(null);
     }
@@ -292,9 +292,9 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
         withPrivateWorkflowVisibility(duplicateWorkflow(workflow))
       );
       setWorkflows((current) => upsertWorkflow(current, created));
-      Message.success('工作流副本已创建');
+      Message.success('模板副本已创建');
     } catch (error) {
-      Message.error(errorMessage(error, '工作流复制失败'));
+      Message.error(errorMessage(error, '模板复制失败'));
     } finally {
       setAction(null);
     }
@@ -307,9 +307,9 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
       await repository.remove(deleting.id);
       setWorkflows((current) => current.filter((workflow) => workflow.id !== deleting.id));
       setDeleting(null);
-      Message.success('工作流已删除');
+      Message.success('模板已删除');
     } catch (error) {
-      Message.error(errorMessage(error, '工作流删除失败'));
+      Message.error(errorMessage(error, '模板删除失败'));
     } finally {
       setAction(null);
     }
@@ -330,9 +330,9 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
           <div className={styles.headerIdentity}>
             <div className={styles.titleRow}>
               <MagicWand theme='outline' size={20} fill='currentColor' />
-              <h1>创作工作流</h1>
+              <h1>模板工作台</h1>
             </div>
-            <p>把固定提示词和参数沉淀成模板，每次只填写变量即可批量复用。</p>
+            <p>把固定提示词、变量和模型配置沉淀成可复用模板，每次只填写变量即可批量生成。</p>
           </div>
           <div className={styles.headerActions}>
             <Select
@@ -366,7 +366,7 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
               disabled={disabled}
               onClick={() => beginCreate('multi-image-series')}
             >
-              新建多图
+              新建多图模板
             </Button>
             <Button
               type='primary'
@@ -374,27 +374,27 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
               disabled={disabled}
               onClick={() => beginCreate('single-image')}
             >
-              新建工作流
+              新建模板
             </Button>
           </div>
         </section>
 
         {pageState === 'loading' ? (
           <div className={styles.statePanel}>
-            <Spin tip='正在加载工作流…' />
+            <Spin tip='正在加载模板…' />
           </div>
         ) : pageState === 'error' ? (
           <div className={styles.errorState} role='alert'>
-            <h2>工作流加载失败</h2>
+            <h2>模板加载失败</h2>
             <p>{loadError}</p>
             <Button onClick={() => void load()}>重试</Button>
           </div>
         ) : filtered.length === 0 ? (
           <div className={styles.emptyState}>
-            <h2>{workflows.length === 0 ? '暂无工作流' : '没有匹配的工作流'}</h2>
+            <h2>{workflows.length === 0 ? '暂无模板' : '没有匹配的模板'}</h2>
             <p>
               {workflows.length === 0
-                ? '创建一个工作流，把常用提示词、变量和模型配置沉淀下来。'
+                ? '创建一个模板，把常用提示词、变量和模型配置沉淀下来。'
                 : '调整分类或搜索条件后重试。'}
             </p>
             {workflows.length === 0 ? (
@@ -403,12 +403,12 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
                 icon={<Plus theme='outline' size={15} fill='currentColor' />}
                 onClick={() => beginCreate('single-image')}
               >
-                新建工作流
+                新建模板
               </Button>
             ) : null}
           </div>
         ) : (
-          <section className={styles.grid} aria-label='工作流列表'>
+          <section className={styles.grid} aria-label='模板列表'>
             {filtered.map((workflow) => (
               <WorkflowCard
                 key={workflow.id}
@@ -469,7 +469,7 @@ const CreativeWorkflowWorkspacePage: React.FC<CreativeWorkflowWorkspacePageProps
       />
       <Modal
         visible={deleting !== null}
-        title='删除工作流'
+        title='删除模板'
         className={styles.confirmModal}
         okText='删除'
         cancelText='取消'

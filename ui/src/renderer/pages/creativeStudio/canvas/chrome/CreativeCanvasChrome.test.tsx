@@ -128,7 +128,7 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
       '画布',
       '资产',
       '提示词',
-      '工作流',
+      '模板',
       '创作助手',
       '属性',
       '历史',
