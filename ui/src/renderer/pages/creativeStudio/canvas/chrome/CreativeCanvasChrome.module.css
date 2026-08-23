@@ -16,6 +16,17 @@
   grid-template-columns: 0 minmax(0, 1fr) 0;
 }
 
+.root[data-right-view='assistant'],
+.root[data-right-view='properties'] {
+  grid-template-columns:
+    0
+    minmax(0, 1fr)
+    minmax(
+      320px,
+      clamp(320px, var(--creative-canvas-right-panel-width, 390px), 560px)
+    );
+}
+
 .root,
 .root * {
   box-sizing: border-box;
@@ -202,10 +213,51 @@
 }
 
 .rightPanel {
+  position: relative;
   grid-column: 3;
   grid-row: 1 / 3;
   border-left: 1px solid var(--color-border-2);
   background: var(--color-bg-2);
+}
+
+.rightResizeHandle {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  bottom: 0;
+  left: -7px;
+  display: flex;
+  width: 14px;
+  align-items: center;
+  justify-content: center;
+  cursor: col-resize;
+  outline: none;
+  touch-action: none;
+}
+
+.rightResizeLine {
+  display: block;
+  width: 2px;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--color-border-2);
+  transition:
+    width 120ms ease,
+    background-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.rightResizeHandle:hover .rightResizeLine,
+.rightResizeHandle:focus-visible .rightResizeLine,
+.rightPanel[data-resizing='true'] .rightResizeLine {
+  width: 3px;
+  background: rgb(var(--primary-6));
+  box-shadow: 0 0 0 3px rgba(var(--primary-6), 0.1);
+}
+
+.rightResizeHandle[aria-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .leftTabs {
@@ -527,6 +579,7 @@
 .iconButton:focus-visible,
 .leftTabs button:focus-visible,
 .panelTabs button:focus-visible,
+.rightResizeHandle:focus-visible,
 .nodeMenu button:focus-visible,
 .backgroundMenu button:focus-visible {
   box-shadow: 0 0 0 3px rgba(var(--primary-6), 0.22);
@@ -669,7 +722,13 @@
 
 @media (max-width: 1180px) {
   .root {
-    grid-template-columns: 0 minmax(0, 1fr) 320px;
+    grid-template-columns:
+      0
+      minmax(0, 1fr)
+      minmax(
+        320px,
+        clamp(320px, var(--creative-canvas-right-panel-width, 390px), 560px)
+      );
   }
 
   .root[data-right-view='closed'] {
@@ -696,7 +755,13 @@
 @media (max-width: 880px) {
   .root,
   .root[data-compact='true'] {
-    grid-template-columns: 0 minmax(0, 1fr) min(300px, 36vw);
+    grid-template-columns:
+      0
+      minmax(0, 1fr)
+      minmax(
+        260px,
+        clamp(260px, var(--creative-canvas-right-panel-width, 300px), 560px)
+      );
   }
 
   .root[data-right-view='closed'],
@@ -732,7 +797,16 @@
 @media (max-width: 640px) {
   .root,
   .root[data-compact='true'] {
-    grid-template-columns: 0 minmax(0, 1fr) min(260px, 55vw);
+    grid-template-columns:
+      0
+      minmax(0, 1fr)
+      minmax(
+        240px,
+        min(
+          55vw,
+          clamp(240px, var(--creative-canvas-right-panel-width, 260px), 560px)
+        )
+      );
     grid-template-rows: 50px minmax(0, 1fr);
   }
 

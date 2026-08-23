@@ -39,6 +39,8 @@ export interface CreativeCanvasChromeProps {
   leftOpen: boolean;
   leftView: CreativeCanvasLeftView;
   rightView: CreativeCanvasRightView | null;
+  /** Current persisted width of the right panel, in CSS pixels. */
+  rightPanelWidth?: number;
   bottomView: CreativeCanvasBottomView | null;
   backgroundMenuOpen: boolean;
   compact?: boolean;
@@ -55,6 +57,8 @@ export interface CreativeCanvasChromeProps {
   onLeftPanelOpenChange(open: boolean): void;
   onLeftViewChange(view: CreativeCanvasLeftView): void;
   onRightViewChange(view: CreativeCanvasRightView | null): void;
+  /** Persist a user-adjusted right panel width, in CSS pixels. */
+  onRightPanelWidthChange?(width: number): void;
   onBottomViewChange(view: CreativeCanvasBottomView | null): void;
 }
 

@@ -1342,6 +1342,8 @@ export type I18nKey =
   | 'creativeStudio.canvas.chrome.closeBottomPanel'
   | 'creativeStudio.canvas.chrome.closeRightPanel'
   | 'creativeStudio.canvas.chrome.collapseResources'
+  | 'creativeStudio.canvas.chrome.resetRightPanelWidth'
+  | 'creativeStudio.canvas.chrome.resizeRightPanel'
   | 'creativeStudio.canvas.chrome.resourcePanel'
   | 'creativeStudio.canvas.chrome.resources'
   | 'creativeStudio.canvas.chrome.rightPanel'

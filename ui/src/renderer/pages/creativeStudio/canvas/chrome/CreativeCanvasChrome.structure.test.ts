@@ -78,7 +78,8 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
 
   test('keeps the canvas full-width while the resource rail floats above it', () => {
     for (const token of [
-      'grid-template-columns: 0 minmax(0, 1fr) 360px',
+      '--creative-canvas-right-panel-width',
+      '.rightResizeHandle',
       'grid-column: 2',
       'overflow-x: auto',
       'position: absolute',

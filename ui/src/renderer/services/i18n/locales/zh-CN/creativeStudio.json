@@ -424,9 +424,11 @@
       "closeBottomPanel": "关闭底部面板",
       "closeRightPanel": "关闭右侧面板",
       "collapseResources": "收起画布资源面板",
+      "resetRightPanelWidth": "恢复右侧面板默认宽度",
       "resourcePanel": "画布资源面板",
       "resources": "画布资源",
       "rightPanel": "右侧面板",
+      "resizeRightPanel": "调整右侧面板宽度",
       "toolbar": "画布工具栏",
       "workspaceControls": "画布工作区控件"
     },

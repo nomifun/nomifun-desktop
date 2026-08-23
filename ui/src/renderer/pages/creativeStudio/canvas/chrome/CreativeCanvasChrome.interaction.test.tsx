@@ -64,6 +64,26 @@ afterEach(() => {
 });
 
 describe('CreativeCanvasChrome floating resource rail interaction', () => {
+  test('does not mark a collapsed resource rail tab as active', () => {
+    const { getByRole } = render(
+      withCanvasTestI18n(
+        <CreativeCanvasChrome
+          {...baseProps({
+            leftOpen: false,
+            leftView: 'assets',
+          })}
+        />
+      )
+    );
+
+    for (const tab of getByRole('tablist', {
+      name: 'creativeStudio.canvas.chrome.resources',
+    }).querySelectorAll('[role="tab"]')) {
+      expect(tab.getAttribute('aria-selected')).toBe('false');
+      expect(tab.hasAttribute('data-active')).toBe(false);
+    }
+  });
+
   test('collapses from the active tab and the dedicated fold control', () => {
     const openChanges: boolean[] = [];
     const { getByRole, getByLabelText } = render(
@@ -214,5 +234,67 @@ describe('CreativeCanvasChrome toolbar interactions', () => {
       )
     ).toBeNull();
     expect(historyButton.getAttribute('aria-pressed')).toBe('false');
+  });
+});
+
+describe('CreativeCanvasChrome right panel resize interaction', () => {
+  test('adjusts the persisted width with keyboard controls', () => {
+    const widthChanges: number[] = [];
+    const { getByRole } = render(
+      withCanvasTestI18n(
+        <CreativeCanvasChrome
+          {...baseProps({
+            rightView: 'assistant',
+            rightPanelWidth: 390,
+            onRightPanelWidthChange: (width) => widthChanges.push(width),
+          })}
+        />
+      )
+    );
+
+    const separator = getByRole('separator', {
+      name: 'creativeStudio.canvas.chrome.resizeRightPanel',
+    });
+    fireEvent.keyDown(separator, { key: 'ArrowLeft' });
+    expect(widthChanges).toEqual([406]);
+
+    fireEvent.keyDown(separator, { key: 'End' });
+    expect(widthChanges).toEqual([406, 320]);
+  });
+
+  test('updates the draft during pointer drag and commits the final width', () => {
+    const widthChanges: number[] = [];
+    const { getByRole } = render(
+      withCanvasTestI18n(
+        <CreativeCanvasChrome
+          {...baseProps({
+            rightView: 'assistant',
+            rightPanelWidth: 390,
+            onRightPanelWidthChange: (width) => widthChanges.push(width),
+          })}
+        />
+      )
+    );
+
+    const separator = getByRole('separator', {
+      name: 'creativeStudio.canvas.chrome.resizeRightPanel',
+    });
+    fireEvent.pointerDown(separator, {
+      button: 0,
+      clientX: 100,
+      pointerId: 1,
+      pointerType: 'mouse',
+    });
+    fireEvent.pointerMove(window, {
+      buttons: 1,
+      clientX: 0,
+      pointerId: 1,
+    });
+    fireEvent.pointerUp(window, {
+      clientX: 0,
+      pointerId: 1,
+    });
+
+    expect(widthChanges.at(-1)).toBe(490);
   });
 });
