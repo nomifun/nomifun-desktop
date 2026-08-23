@@ -2109,18 +2109,27 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
                 continue;
             };
             let field_name = if key == "project_id" {
-                "legacy Canvas compatibility identifier (project_id)"
+                "origin.project_id (legacy Canvas compatibility identifier)"
             } else {
-                key
+                match key {
+                    "provider_id" => "origin.provider_id",
+                    "canvas_id" => "origin.canvas_id",
+                    "node_id" => "origin.node_id",
+                    "creation_task_id" => "origin.creation_task_id",
+                    "template_id" => "origin.template_id",
+                    "template_run_id" => "origin.template_run_id",
+                    "template_step_id" => "origin.template_step_id",
+                    _ => unreachable!("workshop origin key list is exhaustive"),
+                }
             };
             let value = value.as_str().ok_or_else(|| {
                 DbError::Init(format!(
-                    "v3 workshop asset {asset_id} origin {field_name} must be omitted or a canonical UUIDv7 string"
+                    "v3 workshop asset {asset_id} {field_name} must be omitted or a canonical UUIDv7 string"
                 ))
             })?;
             nomifun_common::validate_uuidv7(value).map_err(|error| {
                 DbError::Init(format!(
-                    "v3 workshop asset {asset_id} origin {field_name}={value:?} is invalid: {error}"
+                    "v3 workshop asset {asset_id} {field_name}={value:?} is invalid: {error}"
                 ))
             })?;
         }

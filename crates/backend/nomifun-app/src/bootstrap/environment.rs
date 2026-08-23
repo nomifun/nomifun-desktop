@@ -1026,12 +1026,16 @@ mod tests {
         drop(connection);
         database.close().await;
 
-        assert!(matches!(
-            probe_existing_v3_database(&path).await.unwrap(),
+        let probe = probe_existing_v3_database(&path).await.unwrap();
+        assert!(
+            matches!(
+                &probe,
             ExistingV3DatabaseProbe::Incompatible(reason)
                 if reason.contains("complete v3 ID data contract")
                     && reason.contains("origin.provider_id")
-        ));
+            ),
+            "unexpected v3 probe result: {probe:?}"
+        );
     }
 
     #[tokio::test]

@@ -999,7 +999,7 @@ mod tests {
     async fn create_test_creation_task(
         db: &nomifun_db::Database,
         creation_task_id: &str,
-    ) {
+    ) -> Value {
         let provider_id = generate_id();
         let credentials_encrypted = nomifun_common::encrypt_string(
             r#"{"api_keys":["test-only"]}"#,
@@ -1013,6 +1013,26 @@ mod tests {
         )
         .bind(&provider_id)
         .bind(&credentials_encrypted)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        nomifun_db::sqlx::query(
+            "INSERT INTO provider_models \
+             (provider_id, model, enabled, sort_order, description, created_at, updated_at) \
+             VALUES (?, 'fixture', 1, 0, NULL, 1, 1)",
+        )
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        nomifun_db::sqlx::query(
+            "INSERT INTO provider_model_capabilities \
+             (provider_id, model, task, traits, protocol, connection_role, \
+              provider_params, created_at, updated_at) \
+             VALUES (?, 'fixture', 'image_generation', '[]', 'openai.images', \
+                     'default', '{}', 1, 1)",
+        )
+        .bind(&provider_id)
         .execute(db.pool())
         .await
         .unwrap();
@@ -1062,6 +1082,12 @@ mod tests {
         )
         .await
         .unwrap();
+
+        json!({
+            "creation_task_id": creation_task_id,
+            "canvas_id": project_id,
+            "node_id": node_id,
+        })
     }
 
     #[cfg(unix)]
@@ -1307,7 +1333,7 @@ mod tests {
     async fn committed_audit_rejects_same_size_valid_payload_replacement() {
         let (bridge, dir, db) = bridge().await;
         let creation_task_id = generate_id();
-        create_test_creation_task(&db, &creation_task_id).await;
+        let origin = create_test_creation_task(&db, &creation_task_id).await;
         let original = valid_png();
         let replacement = png_with_pixel([200, 100, 50, 255]);
         assert_eq!(replacement.len(), original.len(), "fixture must exercise same-size replacement");
@@ -1316,7 +1342,7 @@ mod tests {
                 bytes: original,
                 mime: "image/png".into(),
                 in_library: true,
-                origin: json!({"creation_task_id": creation_task_id.clone()}),
+                origin,
             })
             .await
             .unwrap();
@@ -1400,20 +1426,20 @@ mod tests {
         let canceled_task = generate_id();
         let empty_success_task = generate_id();
         let missing_file_task = generate_id();
-        for task_id in [
-            &committed_task,
-            &canceled_task,
-            &empty_success_task,
-            &missing_file_task,
-        ] {
-            create_test_creation_task(&db, task_id).await;
-        }
+        let committed_origin = create_test_creation_task(&db, &committed_task).await;
+        let canceled_origin = create_test_creation_task(&db, &canceled_task).await;
+        let empty_success_origin =
+            create_test_creation_task(&db, &empty_success_task).await;
+        let missing_file_origin =
+            create_test_creation_task(&db, &missing_file_task).await;
+        let mut committed_with_prompt = committed_origin.clone();
+        committed_with_prompt["prompt"] = json!("committed");
         let committed = bridge
             .persist(PersistAsset {
                 bytes: valid_png(),
                 mime: "image/png".into(),
                 in_library: true,
-                origin: json!({"creation_task_id": committed_task, "prompt": "committed"}),
+                origin: committed_with_prompt,
             })
             .await
             .unwrap();
@@ -1422,7 +1448,7 @@ mod tests {
                 bytes: b"uncommitted retry".to_vec(),
                 mime: "text/plain".into(),
                 in_library: true,
-                origin: json!({"creation_task_id": committed_task}),
+                origin: committed_origin,
             })
             .await
             .unwrap();
@@ -1431,7 +1457,7 @@ mod tests {
                 bytes: b"canceled".to_vec(),
                 mime: "text/plain".into(),
                 in_library: true,
-                origin: json!({"creation_task_id": canceled_task}),
+                origin: canceled_origin,
             })
             .await
             .unwrap();
@@ -1440,18 +1466,18 @@ mod tests {
                 bytes: b"empty manifest".to_vec(),
                 mime: "text/plain".into(),
                 in_library: true,
-                origin: json!({"creation_task_id": empty_success_task}),
+                origin: empty_success_origin,
             })
             .await
             .unwrap();
         let orphan_task = generate_id();
-        create_test_creation_task(&db, &orphan_task).await;
+        let orphan_origin = create_test_creation_task(&db, &orphan_task).await;
         let orphan = bridge
             .persist(PersistAsset {
                 bytes: b"missing task".to_vec(),
                 mime: "text/plain".into(),
                 in_library: true,
-                origin: json!({"creation_task_id": orphan_task}),
+                origin: orphan_origin,
             })
             .await
             .unwrap();
@@ -1465,7 +1491,7 @@ mod tests {
                 bytes: valid_png(),
                 mime: "image/png".into(),
                 in_library: true,
-                origin: json!({"creation_task_id": missing_file_task}),
+                origin: missing_file_origin,
             })
             .await
             .unwrap();
