@@ -1,6 +1,6 @@
 import React, { useCallback, useMemo } from 'react';
 import { Dropdown, Menu } from '@arco-design/web-react';
-import { Check, Translate } from '@icon-park/react';
+import { Check, Down } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import InstantHoverTooltip from '@renderer/components/base/InstantHoverTooltip';
 import { changeLanguage, normalizeLanguageCode, supportedLanguages } from '@/renderer/services/i18n';
@@ -12,8 +12,6 @@ const LANGUAGE_LABELS: Record<string, string> = {
 };
 
 interface TitlebarLanguageMenuProps {
-  /** Match the sibling titlebar icon buttons. */
-  iconSize: number;
   strokeWidth?: number;
 }
 
@@ -24,7 +22,7 @@ interface TitlebarLanguageMenuProps {
  * Settings > System > Language. Both call the same `changeLanguage()` pipeline
  * (reactive switch, backend persistence, tray/cross-window sync), so they stay in lockstep.
  */
-const TitlebarLanguageMenu: React.FC<TitlebarLanguageMenuProps> = ({ iconSize, strokeWidth }) => {
+const TitlebarLanguageMenu: React.FC<TitlebarLanguageMenuProps> = ({ strokeWidth }) => {
   const { t, i18n } = useTranslation();
   const current = normalizeLanguageCode(i18n.language);
 
@@ -70,12 +68,14 @@ const TitlebarLanguageMenu: React.FC<TitlebarLanguageMenuProps> = ({ iconSize, s
   );
 
   const label = t('settings.language');
+  const currentLabel = current === 'zh-CN' ? '中文' : 'English';
 
   return (
     <InstantHoverTooltip content={label} position='bottom'>
       <Dropdown droplist={droplist} trigger='click' position='bl' getPopupContainer={() => document.body}>
-        <button type='button' className='app-titlebar__button app-titlebar__button--nav' aria-label={label}>
-          <Translate theme='outline' size={iconSize} fill='currentColor' strokeWidth={strokeWidth} />
+        <button type='button' className='app-titlebar__language-button' aria-label={label}>
+          <span className='app-titlebar__language-name'>{currentLabel}</span>
+          <Down theme='outline' size={14} fill='currentColor' strokeWidth={strokeWidth} />
         </button>
       </Dropdown>
     </InstantHoverTooltip>

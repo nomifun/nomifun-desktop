@@ -370,7 +370,6 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
         )}
         {!layout?.isMobile && (
           <>
-            <TitlebarLanguageMenu iconSize={iconSize} strokeWidth={desktopIconStroke} />
             {renderIconButton({
               tooltip: t('terminal.newConversation'),
               className: 'app-titlebar__button app-titlebar__button--nav',
@@ -397,6 +396,11 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
               <ExpandLeft theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />
             ),
           })
+        )}
+        {!layout?.isMobile && (
+          <div className='app-titlebar__language-control'>
+            <TitlebarLanguageMenu strokeWidth={desktopIconStroke} />
+          </div>
         )}
       </div>
       <div
