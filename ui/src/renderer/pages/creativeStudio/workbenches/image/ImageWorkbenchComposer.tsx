@@ -14,12 +14,12 @@ import {
   Loading,
   MagicWand,
   Pic,
-  SettingTwo,
   Time,
   Upload,
 } from '@icon-park/react';
 import { Button, Input, InputNumber, Radio, Select, Tag, Tooltip } from '@arco-design/web-react';
 import React from 'react';
+import NomiSelect from '@/renderer/components/base/NomiSelect';
 import {
   DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS,
   IMAGE_WORKBENCH_QUALITY_OPTIONS,
@@ -43,6 +43,7 @@ interface ImageWorkbenchComposerProps {
   references: readonly ImageWorkbenchReference[];
   settings: ImageWorkbenchSettings;
   modelOptions: readonly ImageWorkbenchModelOption[];
+  modelSlot?: React.ReactNode;
   task: ImageWorkbenchTaskSummary;
   disabled?: boolean;
   uploadingReferenceCount?: number;
@@ -174,6 +175,7 @@ interface SettingsFieldsProps {
   compact?: boolean;
   settings: ImageWorkbenchSettings;
   modelOptions: readonly ImageWorkbenchModelOption[];
+  modelSlot?: React.ReactNode;
   disabled?: boolean;
   onModelChange(model: ImageWorkbenchModelIdentity | null): void;
   onInterfaceModeChange(mode: ImageWorkbenchInterfaceMode): void;
@@ -187,6 +189,7 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
   compact,
   settings,
   modelOptions,
+  modelSlot,
   disabled,
   onModelChange,
   onInterfaceModeChange,
@@ -198,33 +201,38 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
   const modelValue = settings.model ? imageWorkbenchModelKey(settings.model) : undefined;
   return (
     <div className={compact ? styles.compactSettings : styles.settingsStack}>
-      <label className={styles.field}>
-        <span>模型</span>
-        <Select
-          value={modelValue}
-          placeholder='选择生图模型'
-          disabled={disabled}
-          allowClear
-          onChange={(key) =>
-            onModelChange(
-              typeof key === 'string' ? parseImageWorkbenchModelKey(key, modelOptions) : null
-            )
-          }
-        >
-          {modelOptions.map((option) => (
-            <Select.Option
-              key={imageWorkbenchModelKey(option)}
-              value={imageWorkbenchModelKey(option)}
-              disabled={option.disabled}
-            >
-              <span className={styles.modelOption}>
-                <span>{option.label}</span>
-                {option.providerLabel ? <small>{option.providerLabel}</small> : null}
-              </span>
-            </Select.Option>
-          ))}
-        </Select>
-      </label>
+      {modelSlot ? (
+        <div className={styles.modelSlot}>{modelSlot}</div>
+      ) : (
+        <label className={styles.field}>
+          <span>模型</span>
+          <NomiSelect
+            value={modelValue}
+            placeholder={modelOptions.length > 0 ? '选择生图模型' : '没有可用生图模型'}
+            disabled={disabled || modelOptions.length === 0}
+            allowClear
+            aria-label='生图模型'
+            onChange={(key) =>
+              onModelChange(
+                typeof key === 'string' ? parseImageWorkbenchModelKey(key, modelOptions) : null
+              )
+            }
+          >
+            {modelOptions.map((option) => (
+              <NomiSelect.Option
+                key={imageWorkbenchModelKey(option)}
+                value={imageWorkbenchModelKey(option)}
+                disabled={option.disabled}
+              >
+                <span className={styles.modelOption}>
+                  <span>{option.label}</span>
+                  {option.providerLabel ? <small>{option.providerLabel}</small> : null}
+                </span>
+              </NomiSelect.Option>
+            ))}
+          </NomiSelect>
+        </label>
+      )}
 
       <label className={styles.field}>
         <span>接口模式</span>
@@ -431,6 +439,7 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
     references,
     settings,
     modelOptions,
+    modelSlot,
     task,
     disabled,
     uploadingReferenceCount = 0,
@@ -511,6 +520,7 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
             compact
             settings={settings}
             modelOptions={modelOptions}
+            modelSlot={modelSlot}
             disabled={disabled}
             onModelChange={onModelChange}
             onInterfaceModeChange={onInterfaceModeChange}
@@ -549,7 +559,6 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
         <section className={styles.composerSection}>
           <div className={styles.sectionHeader}>
             <span>提示词</span>
-            <SettingTwo aria-hidden='true' />
           </div>
           <div className={styles.sectionBody}>
             <ComposerActions
@@ -607,6 +616,7 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
             <SettingsFields
               settings={settings}
               modelOptions={modelOptions}
+              modelSlot={modelSlot}
               disabled={disabled}
               onModelChange={onModelChange}
               onInterfaceModeChange={onInterfaceModeChange}

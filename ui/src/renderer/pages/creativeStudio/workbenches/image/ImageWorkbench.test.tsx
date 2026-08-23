@@ -94,8 +94,11 @@ describe('ImageWorkbench visual states', () => {
     expect(/\.composerHeader\s*\{[\s\S]*?align-items:\s*center;/.test(css)).toBe(true);
     expect(/\.composerHeader h1\s*\{[\s\S]*?font-size:\s*14px;[\s\S]*?line-height:\s*18px;/.test(css)).toBe(true);
     expect(/\.resultsTitle h2\s*\{[\s\S]*?font-size:\s*16px;[\s\S]*?line-height:\s*22px;/.test(css)).toBe(true);
+    expect(/\.layoutSwitch :global\(\.arco-btn\)\s*\{[\s\S]*?height:\s*28px;[\s\S]*?font-size:\s*12px;/.test(css)).toBe(true);
+    expect(/\.composerScroll\s*\{[\s\S]*?padding:\s*12px 16px 16px;/.test(css)).toBe(true);
     expect(/\.sectionHeader\s*\{[\s\S]*?box-sizing:\s*border-box;[\s\S]*?min-height:\s*34px;[\s\S]*?padding:\s*5px 10px;/.test(css)).toBe(true);
     expect(/\.referenceStrip\s*\{[\s\S]*?box-sizing:\s*border-box;[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*100%;/.test(css)).toBe(true);
+    expect(composerSource.includes('SettingTwo')).toBe(false);
   });
 
   test('renders the floating bottom composer with exact model and parameter controls', () => {
@@ -113,6 +116,27 @@ describe('ImageWorkbench visual states', () => {
     expect(html.includes('质量')).toBe(true);
     expect(html.includes('数量')).toBe(true);
     expect(html.includes('2 个生成中')).toBe(true);
+  });
+
+  test('renders an honest disabled state when no image model is configured', () => {
+    const html = renderWorkbench({
+      settings: { ...baseProps().settings, model: null },
+      modelOptions: [],
+    });
+
+    expect(html.includes('没有可用生图模型')).toBe(true);
+    expect(html.includes('aria-label="生图模型"')).toBe(true);
+    expect(html.includes('arco-select-view-disabled')).toBe(true);
+  });
+
+  test('renders a catalog-owned model selector instead of the fallback field', () => {
+    const html = renderWorkbench({
+      modelSlot: <div data-model-selector-state='no-compatible-model'>配置生图模型</div>,
+    });
+
+    expect(html.includes('data-model-selector-state="no-compatible-model"')).toBe(true);
+    expect(html.includes('配置生图模型')).toBe(true);
+    expect(html.includes('aria-label="生图模型"')).toBe(false);
   });
 
   test('renders queued, running, failed and canceled cards without invented media', () => {
@@ -224,6 +248,8 @@ describe('ImageWorkbench controlled contract', () => {
     ];
     const key = imageWorkbenchModelKey(options[1]);
 
+    expect(key).toBe(JSON.stringify(['provider-b', 'shared-model']));
+    expect(key.includes('\u0000')).toBe(false);
     expect(key).not.toBe(imageWorkbenchModelKey(options[0]));
     expect(parseImageWorkbenchModelKey(key, options)).toEqual({
       providerId: 'provider-b',

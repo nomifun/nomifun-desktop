@@ -270,13 +270,18 @@ pub struct ProbeCandidateResult {
 #[serde(deny_unknown_fields)]
 pub struct ProbeProviderConnectionRequest {
     /// Protocol whose endpoint template defines the path to probe. Required for
-    /// custom providers, which get no recommendation to fall back on.
+    /// custom providers because runtime probing does not guess from the
+    /// configuration-time compatibility default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub protocol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub task: Option<ModelTask>,
+    /// Optional concrete model id for protocols whose route embeds `{model}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
     /// Probe alternative roots when the configured one is unreachable.
     #[serde(default = "default_true")]
     pub probe_candidates: bool,
@@ -299,6 +304,10 @@ pub struct ProbeProviderConnectionAnonymousRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub task: Option<ModelTask>,
+    /// Optional concrete model id for protocols whose route embeds `{model}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
     #[serde(default = "default_true")]
     pub probe_candidates: bool,
 }

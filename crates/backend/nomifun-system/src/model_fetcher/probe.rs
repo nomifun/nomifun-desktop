@@ -56,6 +56,7 @@ impl ModelFetchService {
             &config,
             req.protocol.as_deref(),
             req.task.unwrap_or(ModelTask::Chat),
+            req.model.as_deref(),
             req.probe_candidates,
         )
         .await
@@ -71,6 +72,7 @@ impl ModelFetchService {
             &config,
             req.protocol.as_deref(),
             req.task.unwrap_or(ModelTask::Chat),
+            req.model.as_deref(),
             req.probe_candidates,
         )
         .await
@@ -81,6 +83,7 @@ impl ModelFetchService {
         config: &FetchConfig,
         protocol: Option<&str>,
         task: ModelTask,
+        model: Option<&str>,
         probe_candidates: bool,
     ) -> Result<ProbeProviderConnectionResponse, AppError> {
         let started = Instant::now();
@@ -107,8 +110,17 @@ impl ModelFetchService {
             })?;
 
         let client = self.http_client();
+        let model = model.map(str::trim).filter(|value| !value.is_empty()).unwrap_or(PROBE_MODEL);
         let configured = self
-            .probe_one(&client, &config.base_url, &protocol, task, &template, &config.auth)
+            .probe_one(
+                &client,
+                &config.base_url,
+                &protocol,
+                task,
+                &template,
+                model,
+                &config.auth,
+            )
             .await?;
 
         let mut candidates = Vec::new();
@@ -120,7 +132,15 @@ impl ModelFetchService {
                     continue;
                 }
                 let outcome = self
-                    .probe_one(&client, &candidate_root, &protocol, task, &template, &config.auth)
+                    .probe_one(
+                        &client,
+                        &candidate_root,
+                        &protocol,
+                        task,
+                        &template,
+                        model,
+                        &config.auth,
+                    )
                     .await?;
                 let better = outcome.reachability != ProviderReachability::Unreachable;
                 candidates.push(outcome.into());
@@ -166,6 +186,7 @@ impl ModelFetchService {
         protocol: &str,
         task: ModelTask,
         template: &str,
+        model: &str,
         auth: &AuthMaterial,
     ) -> Result<ProbeOutcome, AppError> {
         // The URL is built by the SAME function real inference uses, so a probe
@@ -176,7 +197,7 @@ impl ModelFetchService {
             auth: auth.clone(),
             extra: serde_json::Value::Null,
         };
-        let url = resolve_submit_url(&connection, protocol, task, template, PROBE_MODEL, false)
+        let url = resolve_submit_url(&connection, protocol, task, template, model, false)
             .map_err(|error| AppError::BadRequest(error.message))?;
         let redacted_url = redact_url_queries(&url);
 

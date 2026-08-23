@@ -26,6 +26,7 @@ body {
 /* Global tooltip typography contract. Every Arco Tooltip, including `mini`,
    consumes the same compact font metrics and inner spacing. */
 :root {
+  --nomi-button-radius: 8px;
   --nomi-tooltip-font-size: 12px;
   --nomi-tooltip-line-height: 16px;
   --nomi-tooltip-padding-block: 3px;
@@ -65,10 +66,22 @@ body {
 } */
 
 .arco-btn {
+  border-radius: var(--nomi-button-radius);
+
   &.arco-btn-outline {
     border-color: #86909c;
     color: #86909c;
   }
+}
+
+/* Preserve the explicit Arco shape variants while standard buttons share the
+   same rounded geometry across pages, popovers, drawers, and dialogs. */
+.arco-btn.arco-btn-shape-circle {
+  border-radius: 50%;
+}
+
+.arco-btn.arco-btn-shape-round {
+  border-radius: 999px;
 }
 
 .arco-btn-primary:not(.arco-btn-disabled):not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(

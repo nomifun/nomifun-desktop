@@ -11,6 +11,7 @@ const root = readFileSync(new URL('./VideoWorkbench.tsx', import.meta.url), 'utf
 const composer = readFileSync(new URL('./VideoWorkbenchComposer.tsx', import.meta.url), 'utf8');
 const results = readFileSync(new URL('./VideoWorkbenchResults.tsx', import.meta.url), 'utf8');
 const types = readFileSync(new URL('./types.ts', import.meta.url), 'utf8');
+const css = readFileSync(new URL('./VideoWorkbench.module.css', import.meta.url), 'utf8');
 
 describe('VideoWorkbench controlled boundary', () => {
   test('owns only presentation and switches controlled layouts', () => {
@@ -19,6 +20,17 @@ describe('VideoWorkbench controlled boundary', () => {
     expect(types.includes('onLayoutChange: (layout: VideoWorkbenchLayout) => void')).toBe(true);
     expect(types.includes('onPromptChange: (value: string) => void')).toBe(true);
     expect(types.includes('modelSlot: ReactNode')).toBe(true);
+  });
+
+  test('matches the compact image-workbench header rhythm', () => {
+    expect(/\.composerHeader\s*\{[\s\S]*?min-height:\s*64px;[\s\S]*?padding:\s*12px 14px;/.test(css)).toBe(true);
+    expect(/\.composerHeader strong\s*\{[\s\S]*?font-size:\s*14px;[\s\S]*?line-height:\s*18px;/.test(css)).toBe(true);
+    expect(/\.layoutSwitch button\s*\{[\s\S]*?height:\s*28px;[\s\S]*?font-size:\s*12px;/.test(css)).toBe(true);
+    expect(/\.sideComposerBody\s*\{[\s\S]*?padding:\s*12px 16px 16px;/.test(css)).toBe(true);
+    expect(/\.resultsHeader\s*\{[\s\S]*?margin-bottom:\s*16px;[\s\S]*?padding:\s*18px 18px 0;/.test(css)).toBe(true);
+    expect(css.includes('min-height: 62px')).toBe(false);
+    expect(/\.resultsTitle h2\s*\{[\s\S]*?font-size:\s*16px;[\s\S]*?line-height:\s*22px;/.test(css)).toBe(true);
+    expect(/\.emptyResults\s*\{[\s\S]*?margin:\s*0 18px 18px;/.test(css)).toBe(true);
   });
 
   test('contains no API, persistence, model-name heuristics or retired-workshop dependency', () => {

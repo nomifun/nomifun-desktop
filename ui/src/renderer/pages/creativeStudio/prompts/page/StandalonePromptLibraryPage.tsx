@@ -6,7 +6,7 @@
 
 import { FileText, Inbox, LoadingTwo, Refresh, Search } from '@icon-park/react';
 import classNames from 'classnames';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   filterPromptLibraryItems,
@@ -19,6 +19,63 @@ import {
 import styles from './StandalonePromptLibraryPage.module.css';
 
 const PROMPT_PAGE_SIZE = 30;
+
+const FacetChips: React.FC<{
+  children: React.ReactNode;
+  contentKey: string;
+}> = ({ children, contentKey }) => {
+  const chipsRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [hasOverflow, setHasOverflow] = useState(false);
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [contentKey]);
+
+  useEffect(() => {
+    const chips = chipsRef.current;
+    if (!chips) return undefined;
+
+    const measureOverflow = () => {
+      const collapsedHeight = Number.parseFloat(
+        window.getComputedStyle(chips).getPropertyValue('--facet-chips-collapsed-height')
+      );
+      setHasOverflow(chips.scrollHeight > collapsedHeight + 1);
+    };
+
+    measureOverflow();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', measureOverflow);
+      return () => window.removeEventListener('resize', measureOverflow);
+    }
+
+    const observer = new ResizeObserver(measureOverflow);
+    observer.observe(chips);
+    return () => observer.disconnect();
+  }, [contentKey]);
+
+  return (
+    <div className={styles.facetContent}>
+      <div
+        ref={chipsRef}
+        className={classNames(styles.chips, !expanded && styles.chipsCollapsed)}
+        data-facet-chips-expanded={expanded}
+      >
+        {children}
+      </div>
+      {hasOverflow ? (
+        <button
+          type='button'
+          className={styles.facetToggle}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded ? '收起' : '查看更多'}
+        </button>
+      ) : null}
+    </div>
+  );
+};
 
 export interface StandalonePromptLibraryAppearanceProps {
   items: readonly PromptLibraryItem[];
@@ -240,7 +297,9 @@ export const StandalonePromptLibraryAppearance: React.FC<
 
               <div className={styles.facetRow}>
                 <span className={styles.facetLabel}>分类</span>
-                <div className={styles.chips}>
+                <FacetChips
+                  contentKey={`${facets.categories.join('\u0000')}:${facets.hasUncategorized}`}
+                >
                   <button
                     type='button'
                     className={classNames(styles.chip, category === undefined && styles.chipActive)}
@@ -270,12 +329,12 @@ export const StandalonePromptLibraryAppearance: React.FC<
                       未分类
                     </button>
                   ) : null}
-                </div>
+                </FacetChips>
               </div>
 
               <div className={styles.facetRow}>
                 <span className={styles.facetLabel}>标签</span>
-                <div className={styles.chips}>
+                <FacetChips contentKey={facets.tags.join('\u0000')}>
                   <button
                     type='button'
                     className={classNames(styles.chip, selectedTags.length === 0 && styles.chipActive)}
@@ -304,7 +363,7 @@ export const StandalonePromptLibraryAppearance: React.FC<
                       </button>
                     );
                   })}
-                </div>
+                </FacetChips>
               </div>
             </div>
 

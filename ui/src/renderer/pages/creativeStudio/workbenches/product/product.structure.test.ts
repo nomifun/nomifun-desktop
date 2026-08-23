@@ -19,7 +19,7 @@ const draftHydration = readFileSync(new URL('../drafts/hydration.ts', import.met
 describe('standalone workbench product wiring', () => {
   test('exports prop-free product routes composed from the source-parity views', () => {
     expect(image.includes('const ImageWorkbenchProductRoute: React.FC = () =>')).toBe(true);
-    expect(image.includes('<ImageWorkbench {...props} />')).toBe(true);
+    expect(image.includes('<ImageWorkbench {...props} modelSlot={modelSlot} />')).toBe(true);
     expect(video.includes('const VideoWorkbenchProductRoute: React.FC = () =>')).toBe(true);
     expect(video.includes('<VideoWorkbench {...props} />')).toBe(true);
   });
@@ -102,5 +102,14 @@ describe('standalone workbench product wiring', () => {
     expect(draftStorage.includes('canvasId')).toBe(false);
     expect(wiring.includes('full asset')).toBe(true);
     expect(wiring.includes('objects are deliberately excluded')).toBe(true);
+  });
+
+  test('gives the image workbench explicit catalog states and exact model-management routes', () => {
+    expect(image.includes('<CreativeModelSelect')).toBe(true);
+    expect(image.includes("filter={{ capability: 'task', task: modelTask }}")).toBe(true);
+    expect(image.includes('IMAGE_GENERATION_MODEL_COPY')).toBe(true);
+    expect(image.includes('IMAGE_EDIT_MODEL_COPY')).toBe(true);
+    expect(image.includes("modelTask === 'image_edit' ? 'image-edit' : 'image'")).toBe(true);
+    expect(image.includes('<ImageWorkbench {...props} modelSlot={modelSlot} />')).toBe(true);
   });
 });

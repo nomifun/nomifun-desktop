@@ -6,7 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import useSWR from 'swr';
 import type { ModelProtocolManifest, ModelProtocolManifestMap } from './providerModelAdvanced';
 
@@ -17,19 +17,20 @@ interface ManifestBatch {
 }
 
 const orderedUniqueTasks = (tasks: readonly ModelTask[]): ModelTask[] => [...new Set(tasks)];
-const MODEL_HINT_DEBOUNCE_MS = 250;
+const EMPTY_TASKS: readonly ModelTask[] = [];
+const EMPTY_MANIFESTS: ModelProtocolManifestMap = {};
 
 /**
  * Fetch provider-preset × task protocol manifests from the backend registry.
- * Protocol selection stays backend-owned; the frontend only scopes and
- * debounces the optional Custom model hint.
+ * Custom and New API compatibility defaults are task-scoped and no longer wait
+ * for model-id input, so typing a model never reloads or temporarily hides the
+ * manifest.
  */
 export interface UseModelProtocolManifestsOptions {
   preset?: string;
   tasks: readonly ModelTask[];
   bootstrapTask?: ModelTask;
   baseUrlHint?: string;
-  modelHint?: string;
 }
 
 export const useModelProtocolManifests = ({
@@ -37,39 +38,14 @@ export const useModelProtocolManifests = ({
   tasks,
   bootstrapTask,
   baseUrlHint,
-  modelHint,
 }: UseModelProtocolManifestsOptions) => {
   const requestedTasks = useMemo(
     () => orderedUniqueTasks([...(bootstrapTask ? [bootstrapTask] : []), ...tasks]),
     [bootstrapTask, tasks]
   );
-  // Only the Custom preset has a model-gated compatibility recommendation.
-  // Built-in manifests stay stable while a user types a model id, and new-api
-  // keeps its existing explicit-protocol contract.
-  const customPreset = preset?.trim().toLowerCase() === 'custom';
-  const normalizedModel = customPreset ? modelHint?.trim() || undefined : undefined;
-  const [debouncedModel, setDebouncedModel] = useState<string>();
-  useEffect(() => {
-    if (!normalizedModel) {
-      setDebouncedModel((current) => (current === undefined ? current : undefined));
-      return;
-    }
-    const timeout = globalThis.setTimeout(
-      () => setDebouncedModel(normalizedModel),
-      MODEL_HINT_DEBOUNCE_MS
-    );
-    return () => globalThis.clearTimeout(timeout);
-  }, [normalizedModel]);
-  const recommendationModel = customPreset ? debouncedModel : undefined;
-  const modelHintPending = customPreset && normalizedModel !== recommendationModel;
-  const requestKey = JSON.stringify([
-    preset ?? '',
-    baseUrlHint ?? '',
-    recommendationModel ?? '',
-    requestedTasks,
-  ]);
+  const requestKey = JSON.stringify([preset ?? '', baseUrlHint ?? '', requestedTasks]);
   const swrKey =
-    preset && requestedTasks.length > 0 && !modelHintPending
+    preset && requestedTasks.length > 0
       ? ['model-protocol-manifests', requestKey]
       : null;
   const state = useSWR<ManifestBatch>(
@@ -81,7 +57,6 @@ export const useModelProtocolManifests = ({
             preset: preset!,
             task,
             ...(baseUrlHint ? { base_url: baseUrlHint } : {}),
-            ...(recommendationModel ? { model: recommendationModel } : {}),
           })
         )
       );
@@ -97,16 +72,13 @@ export const useModelProtocolManifests = ({
     { keepPreviousData: true, revalidateOnFocus: false }
   );
 
-  // `keepPreviousData` is useful when another task is added, but once the model
-  // changes it must not let model A's recommendation mutate model B's draft.
-  const current =
-    !modelHintPending && state.data?.requestKey === requestKey ? state.data : undefined;
-  const manifestPending = modelHintPending || (swrKey !== null && !current);
+  const current = state.data?.requestKey === requestKey ? state.data : undefined;
+  const manifestPending = swrKey !== null && !current;
 
   return {
-    manifests: current?.manifests ?? {},
-    errorTasks: current?.errorTasks ?? [],
-    loadingTasks: manifestPending ? requestedTasks : [],
+    manifests: current?.manifests ?? EMPTY_MANIFESTS,
+    errorTasks: current?.errorTasks ?? EMPTY_TASKS,
+    loadingTasks: manifestPending ? requestedTasks : EMPTY_TASKS,
     mutate: state.mutate,
   };
 };

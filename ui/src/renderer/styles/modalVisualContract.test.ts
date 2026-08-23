@@ -19,6 +19,10 @@ const retrievalStyles = readFileSync(
   new URL('../pages/knowledge/KnowledgeRetrievalSettingsModal.module.css', import.meta.url),
   'utf8'
 );
+const directoryPickerStyles = readFileSync(
+  new URL('../components/settings/DirectorySelectionModal.module.css', import.meta.url),
+  'utf8'
+);
 const createTaskSource = readFileSync(
   new URL('../pages/cron/ScheduledTasksPage/CreateTaskDialog.tsx', import.meta.url),
   'utf8'
@@ -129,5 +133,13 @@ describe('Global modal visual contract', () => {
     expect(retrievalStyles.includes('var(--nomi-modal-block-padding) var(--nomi-modal-inline-padding)')).toBe(true);
     expect(createTaskSource.includes("className='overflow-y-auto pb-4px max-h-[min(68vh,640px)]'")).toBe(true);
     expect(createTaskSource.includes('overflow-y-auto px-24px')).toBe(false);
+  });
+
+  test('keeps the WebUI directory picker surfaces on active theme tokens', () => {
+    expect(directoryPickerStyles.includes('--picker-surface: var(--dialog-fill-0')).toBe(true);
+    expect(directoryPickerStyles.includes('--picker-body-surface: var(--color-bg-1')).toBe(true);
+    expect(directoryPickerStyles.includes('#fff')).toBe(false);
+    expect(directoryPickerStyles.includes('background: var(--picker-body-surface)')).toBe(true);
+    expect(directoryPickerStyles.includes('background: var(--picker-surface)')).toBe(true);
   });
 });

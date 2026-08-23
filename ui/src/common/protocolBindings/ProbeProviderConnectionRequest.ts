@@ -7,9 +7,14 @@ import type { ModelTask } from "./ModelTask";
 export type ProbeProviderConnectionRequest = {
 /**
  * Protocol whose endpoint template defines the path to probe. Required for
- * custom providers, which get no recommendation to fall back on.
+ * custom providers because runtime probing does not guess from the
+ * configuration-time compatibility default.
  */
 protocol?: string, task?: ModelTask,
+/**
+ * Optional concrete model id for protocols whose route embeds `{model}`.
+ */
+model?: string,
 /**
  * Probe alternative roots when the configured one is unreachable.
  */

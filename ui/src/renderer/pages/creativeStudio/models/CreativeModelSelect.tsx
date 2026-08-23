@@ -117,6 +117,7 @@ const CreativeModelSelect: React.FC<CreativeModelSelectProps> = ({
   const rootClassName = className ? `${styles.root} ${className}` : styles.root;
 
   const status = state === 'ready' ? null : state;
+  const placeholder = state === 'ready' ? copy.placeholder : stateCopy(state, copy);
   const canConfigure =
     onOpenModelSettings !== undefined &&
     (state === 'no-provider' || state === 'no-compatible-model');
@@ -136,7 +137,7 @@ const CreativeModelSelect: React.FC<CreativeModelSelectProps> = ({
         className={styles.select}
         showSearch
         disabled={state !== 'ready'}
-        placeholder={copy.placeholder}
+        placeholder={placeholder}
         value={value ? optionKey(value) : undefined}
         aria-label={label ?? copy.label}
         getPopupContainer={getPopupContainer}

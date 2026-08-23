@@ -33,3 +33,21 @@ export function resolveExecutionCanvasFocusStepId<T>(
   if (projectedStepId != null && activeStepIds.has(projectedStepId)) return projectedStepId;
   return null;
 }
+
+export type ExecutionCanvasRelationState = 'idle' | 'focus' | 'related' | 'muted';
+
+/**
+ * A projected/selected step keeps its path accented without washing out the
+ * rest of the graph. Muting is reserved for the temporary hover inspection.
+ */
+export function resolveExecutionCanvasRelationState(
+  hasFocusedPath: boolean,
+  isFocusStep: boolean,
+  isRelatedStep: boolean,
+  hasTransientFocus: boolean,
+): ExecutionCanvasRelationState {
+  if (!hasFocusedPath) return 'idle';
+  if (isFocusStep) return 'focus';
+  if (isRelatedStep) return 'related';
+  return hasTransientFocus ? 'muted' : 'idle';
+}

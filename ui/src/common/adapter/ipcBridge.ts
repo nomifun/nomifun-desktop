@@ -1408,7 +1408,12 @@ export const mode = {
     { provider_id: ProviderId } & ProbeProviderConnectionRequest
   >(
     (p) => `/api/providers/${p.provider_id}/probe-connection`,
-    (p) => ({ protocol: p.protocol, task: p.task, probe_candidates: p.probe_candidates })
+    (p) => ({
+      protocol: p.protocol,
+      task: p.task,
+      model: p.model,
+      probe_candidates: p.probe_candidates,
+    })
   ),
   /** The same test for a proposed connection, before the provider is saved. */
   probeConnection: httpPost<ProbeProviderConnectionResponse, ProbeProviderConnectionAnonymousRequest>(

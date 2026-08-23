@@ -11,7 +11,10 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
 import CreativeStudioFocusShell from './CreativeStudioFocusShell';
-import { CREATIVE_STUDIO_ROOT_PATH, CREATIVE_STUDIO_VIDEO_PATH } from './routes';
+import {
+  CREATIVE_STUDIO_ROOT_PATH,
+  CREATIVE_STUDIO_VIDEO_PATH,
+} from './routes';
 
 const renderFocusShell = (path = CREATIVE_STUDIO_ROOT_PATH) =>
   renderToStaticMarkup(

@@ -4,4 +4,8 @@ import type { ModelTask } from "./ModelTask";
 /**
  * Request body for `POST /api/providers/probe-connection` (anonymous).
  */
-export type ProbeProviderConnectionAnonymousRequest = { platform: string, base_url: string, auth_scheme: string, credentials: unknown, protocol?: string, task?: ModelTask, probe_candidates: boolean, };
+export type ProbeProviderConnectionAnonymousRequest = { platform: string, base_url: string, auth_scheme: string, credentials: unknown, protocol?: string, task?: ModelTask,
+/**
+ * Optional concrete model id for protocols whose route embeds `{model}`.
+ */
+model?: string, probe_candidates: boolean, };
