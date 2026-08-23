@@ -82,7 +82,7 @@
 }
 
 .refreshButton,
-.insertButton,
+.copyButton,
 .resetButton {
   display: inline-flex;
   align-items: center;
@@ -110,7 +110,7 @@
 }
 
 .refreshButton:focus-visible,
-.insertButton:focus-visible,
+.copyButton:focus-visible,
 .resetButton:focus-visible,
 .chip:focus-visible,
 .cardBody:focus-visible {
@@ -397,7 +397,7 @@
   font-size: 10px;
 }
 
-.insertButton {
+.copyButton {
   min-height: 28px;
   padding: 4px 10px;
   border-color: color-mix(in srgb, rgb(var(--primary-6)) 22%, transparent);
@@ -407,7 +407,7 @@
   font-weight: 650;
 }
 
-.insertButton:hover {
+.copyButton:hover {
   background: color-mix(in srgb, rgb(var(--primary-6)) 15%, var(--color-bg-2));
 }
 
@@ -534,7 +534,7 @@
 
   .card,
   .refreshButton,
-  .insertButton,
+  .copyButton,
   .resetButton {
     transition: none;
   }

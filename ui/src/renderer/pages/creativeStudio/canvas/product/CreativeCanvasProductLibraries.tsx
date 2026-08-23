@@ -224,13 +224,13 @@ export interface CreativeCanvasProductPromptLibraryProps {
   enabled?: boolean;
   selectedId?: string | null;
   onSelect?(id: string): void;
-  onInsert(selection: PromptLibrarySelection): void;
+  onCopy(selection: PromptLibrarySelection): void;
 }
 
 /** Production prompt adapter: presets and text assets are loaded by the real port. */
 export const CreativeCanvasProductPromptLibrary: React.FC<
   CreativeCanvasProductPromptLibraryProps
-> = ({ locale, enabled = true, selectedId, onSelect, onInsert }) => {
+> = ({ locale, enabled = true, selectedId, onSelect, onCopy }) => {
   const port = useMemo(
     () => createNomiPromptLibraryPort({ locale, assets: creativeAssetClient }),
     [locale]
@@ -245,7 +245,7 @@ export const CreativeCanvasProductPromptLibrary: React.FC<
         description='来自 NomiFun 预设与文本素材'
         selectedId={selectedId}
         onSelect={(item) => onSelect?.(item.id)}
-        onInsert={onInsert}
+        onCopy={onCopy}
       />
     </div>
   );

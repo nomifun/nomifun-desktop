@@ -35,14 +35,17 @@ const render = (props: Partial<React.ComponentProps<typeof PromptLibrarySurface>
   );
 
 describe('PromptLibrarySurface', () => {
-  test('renders a validated page card, facets and insertion affordance', () => {
-    const html = render({ onInsert: () => undefined });
+  test('renders a validated page card, facets and copy affordance', () => {
+    const html = render({ onCopy: () => undefined });
     expect(html.includes('data-prompt-library="page"')).toBe(true);
     expect(html.includes('data-prompt-library-item="prompt-one"')).toBe(true);
     expect(html.includes('场景拆解')).toBe(true);
     expect(html.includes('视觉创作')).toBe(true);
     expect(html.includes('构图')).toBe(true);
-    expect(html.includes('插入提示词：场景拆解')).toBe(true);
+    expect(html.includes('复制提示词：场景拆解')).toBe(true);
+    expect(html.includes('data-prompt-library-action="copy"')).toBe(true);
+    expect(html.includes('>复制</button>')).toBe(true);
+    expect(html.includes('插入提示词')).toBe(false);
     expect(html.includes('关联 1 个知识库')).toBe(true);
   });
 

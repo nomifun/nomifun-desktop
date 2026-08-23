@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { CheckOne, FileText, FolderOpen, Refresh, Search } from '@icon-park/react';
+import { Copy, FileText, FolderOpen, Refresh, Search } from '@icon-park/react';
 import classNames from 'classnames';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
@@ -28,7 +28,7 @@ export interface PromptLibrarySurfaceProps {
   selectedId?: string | null;
   onRetry?: () => void;
   onSelect?: (item: PromptLibraryItem) => void;
-  onInsert?: (selection: PromptLibrarySelection) => void;
+  onCopy?: (selection: PromptLibrarySelection) => void;
 }
 
 const StateView: React.FC<{
@@ -71,8 +71,8 @@ const PromptCard: React.FC<{
   item: PromptLibraryItem;
   selected: boolean;
   onSelect: () => void;
-  onInsert?: () => void;
-}> = ({ item, selected, onSelect, onInsert }) => (
+  onCopy?: () => void;
+}> = ({ item, selected, onSelect, onCopy }) => (
   <article
     className={classNames(styles.card, selected && styles.selected)}
     data-prompt-library-item={item.id}
@@ -106,16 +106,21 @@ const PromptCard: React.FC<{
       ) : null}
     </button>
     <footer className={styles.cardFooter}>
-      <span>{item.knowledgeBaseIds.length > 0 ? `关联 ${item.knowledgeBaseIds.length} 个知识库` : '可直接使用'}</span>
-      {onInsert ? (
+      <span>
+        {item.knowledgeBaseIds.length > 0
+          ? `关联 ${item.knowledgeBaseIds.length} 个知识库`
+          : '复制后可灵活使用'}
+      </span>
+      {onCopy ? (
         <button
           type='button'
-          className={styles.insertButton}
-          aria-label={`插入提示词：${item.title}`}
-          onClick={onInsert}
+          className={styles.copyButton}
+          aria-label={`复制提示词：${item.title}`}
+          data-prompt-library-action='copy'
+          onClick={onCopy}
         >
-          <CheckOne theme='outline' size={13} fill='currentColor' />
-          插入
+          <Copy theme='outline' size={13} fill='currentColor' />
+          复制
         </button>
       ) : null}
     </footer>
@@ -130,11 +135,11 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
   error = null,
   invalidCount = 0,
   title = variant === 'page' ? '提示词库' : '提示词',
-  description = variant === 'page' ? '搜索并插入适合当前创作的提示词。' : '从已有内容中快速插入',
+  description = variant === 'page' ? '搜索并复制适合当前创作的提示词。' : '从已有内容中快速复制',
   selectedId,
   onRetry,
   onSelect,
-  onInsert,
+  onCopy,
 }) => {
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<string | null | undefined>(undefined);
@@ -174,12 +179,12 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
     [onSelect, selectedId]
   );
 
-  const insert = useCallback(
+  const copy = useCallback(
     (item: PromptLibraryItem) => {
       select(item);
-      onInsert?.(toPromptLibrarySelection(item));
+      onCopy?.(toPromptLibrarySelection(item));
     },
-    [onInsert, select]
+    [onCopy, select]
   );
 
   return (
@@ -333,7 +338,7 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
                   item={item}
                   selected={item.id === effectiveSelectedId}
                   onSelect={() => select(item)}
-                  onInsert={onInsert ? () => insert(item) : undefined}
+                  onCopy={onCopy ? () => copy(item) : undefined}
                 />
               ))}
             </div>
