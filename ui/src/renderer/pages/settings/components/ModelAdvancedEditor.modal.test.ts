@@ -8,18 +8,33 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('./ModelAdvancedEditor.tsx', import.meta.url), 'utf8');
+const normalizedSource = source.replace(/\s+/g, ' ');
 
 describe('existing-model advanced editor modal shell', () => {
   test('uses the responsive modal shell instead of a fixed-width popover', () => {
     expect(source.includes("import NomiModal from '@/renderer/components/base/NomiModal'")).toBe(true);
     expect(source.includes('<NomiModal')).toBe(true);
-    expect(source.includes("maxWidth: '94vw'")).toBe(true);
-    expect(source.includes("maxHeight: 'calc(92vh - 160px)',")).toBe(true);
     expect(source.includes('unmountOnExit')).toBe(true);
     expect(source.includes('maskClosable={!saving}')).toBe(true);
     expect(source.includes('escToExit={!saving}')).toBe(true);
     expect(source.includes('<Popover')).toBe(false);
     expect(source.includes('w-680px')).toBe(false);
     expect(source.includes('data-model-capability-popover')).toBe(false);
+  });
+
+  test('keeps both editor modes within the viewport and scrolls their bodies', () => {
+    expect(normalizedSource.includes("width: focusedCallConfigTask ? 840 : 760")).toBe(true);
+    expect(normalizedSource.includes("maxWidth: '94vw'")).toBe(true);
+    expect(
+      normalizedSource.includes(
+        "maxHeight: focusedCallConfigTask ? '96vh' : '92vh'"
+      )
+    ).toBe(true);
+    expect(normalizedSource.includes("overflow: 'auto'")).toBe(true);
+    expect(
+      normalizedSource.includes(
+        "maxHeight: focusedCallConfigTask ? 'calc(96vh - 72px)' : 'calc(92vh - 160px)'"
+      )
+    ).toBe(true);
   });
 });
