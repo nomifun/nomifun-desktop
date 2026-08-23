@@ -73,6 +73,8 @@ export function buildExecutionDagEdges({
       id,
       source: String(dependency.blocker_step_id),
       target: String(dependency.blocked_step_id),
+      sourceHandle: 'step-output',
+      targetHandle: 'step-input',
       type: 'smoothstep',
       animated,
       className: [
@@ -95,7 +97,7 @@ export function buildExecutionDagEdges({
         height: 12,
       },
       interactionWidth: 16,
-      zIndex: pathFocused ? 2 : running || waiting ? 1 : 0,
+      zIndex: pathFocused ? 3 : running || waiting ? 2 : 1,
     };
   });
 }

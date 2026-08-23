@@ -97,28 +97,53 @@
   flex-direction: column;
   justify-content: space-between;
   overflow: hidden;
-  border: 0;
+  border: 1px solid var(--color-border-2, var(--border-light));
+  border-color: color-mix(in srgb, var(--color-border-2, var(--border-light)) 72%, transparent);
   border-radius: 16px;
-  background: #f1eee8;
+  background: var(--color-bg-2, #fff);
+  background: color-mix(in srgb, var(--color-bg-2, #fff) 88%, var(--color-bg-1, #f7f7f8));
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 3%),
+    0 8px 24px rgb(0 0 0 / 4%);
   cursor: pointer;
-  transition: background-color 160ms ease;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    background-color 160ms ease,
+    box-shadow 160ms ease;
 }
 
 .card:hover {
-  background: #ebe6dc;
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, rgb(var(--primary-6)) 22%, var(--color-border-2, var(--border-light)));
+  background: var(--color-bg-2, #fff);
+  box-shadow:
+    0 3px 8px rgb(0 0 0 / 5%),
+    0 14px 32px rgb(0 0 0 / 7%);
 }
 
 :global([data-theme='dark']) .card {
-  background: rgb(255 255 255 / 5%);
+  border-color: color-mix(in srgb, var(--color-border-2, #4e4e4e) 76%, transparent);
+  background: color-mix(in srgb, var(--color-bg-2, #232323) 94%, #fff 6%);
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 20%),
+    0 8px 24px rgb(0 0 0 / 16%);
 }
 
 :global([data-theme='dark']) .card:hover {
-  background: rgb(255 255 255 / 10%);
+  border-color: color-mix(in srgb, rgb(var(--primary-6)) 34%, var(--color-border-2, #4e4e4e));
+  background: color-mix(in srgb, var(--color-bg-2, #232323) 90%, #fff 10%);
+  box-shadow:
+    0 3px 8px rgb(0 0 0 / 28%),
+    0 14px 32px rgb(0 0 0 / 24%);
 }
 
 .card:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--color-text-1, #000) 52%, transparent);
-  outline-offset: 2px;
+  outline: none;
+  border-color: color-mix(in srgb, rgb(var(--primary-6)) 48%, var(--color-border-2, var(--border-light)));
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, rgb(var(--primary-6)) 16%, transparent),
+    0 8px 24px rgb(0 0 0 / 5%);
 }
 
 .cardTop {
@@ -167,10 +192,12 @@
 .cardFooter {
   display: flex;
   min-width: 0;
-  margin-top: 20px;
+  margin-top: 16px;
+  padding-top: 10px;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--color-border-2, var(--border-light)) 58%, transparent);
 }
 
 .cardTimestamp {
@@ -179,6 +206,7 @@
   color: var(--color-text-3, var(--text-secondary));
   font-size: 12px;
   line-height: 16px;
+  font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -195,7 +223,20 @@
   min-width: 24px;
   height: 24px;
   padding: 0;
-  color: rgb(0 0 0 / 88%);
+  color: var(--color-text-2, var(--text-secondary));
+  transition:
+    color 140ms ease,
+    background-color 140ms ease,
+    transform 140ms ease;
+}
+
+.cardActions :global(.arco-btn:hover:not(.arco-btn-disabled)) {
+  color: var(--color-text-1, var(--text-primary));
+  background: var(--color-fill-2, rgb(0 0 0 / 6%));
+}
+
+.cardActions :global(.arco-btn:active:not(.arco-btn-disabled)) {
+  transform: scale(0.94);
 }
 
 :global([data-theme='dark']) .headerActions :global(.arco-btn:not(.arco-btn-primary)) {
@@ -208,10 +249,6 @@
 :global([data-theme='dark']) .emptyPanel :global(button.arco-btn.arco-btn-primary) {
   --button-primary-text: #171717;
   background: #d8d8d8;
-}
-
-:global([data-theme='dark']) .cardActions :global(.arco-btn) {
-  color: var(--color-text-1, #fff);
 }
 
 .statePanel,

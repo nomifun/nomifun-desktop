@@ -21,6 +21,9 @@ describe('single-source model management integration', () => {
     expect(source.includes('catalogSuggestions={catalogSuggestions}')).toBe(true);
     expect(source.includes('const capabilities = capabilityInputsFromDefinition(definition)')).toBe(true);
     expect(source.includes('capabilities,')).toBe(true);
+    expect(source.includes('useProviderAutoConfiguration({')).toBe(true);
+    expect(source.includes('applyProviderAutoConfiguration')).toBe(true);
+    expect(source.includes('<ProviderAutoConfigurationNotice')).toBe(true);
   });
 
   test('add-provider atomically sends provider, initial model, and named connections', () => {

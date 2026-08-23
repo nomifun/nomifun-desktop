@@ -330,7 +330,7 @@ const iconProps = {
   theme: 'outline' as const,
   size: 17,
   fill: 'currentColor',
-  strokeWidth: 2.5,
+  strokeWidth: 3,
 };
 
 function measuredSize(element: HTMLElement | null): CreativeSize {

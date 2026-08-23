@@ -103,7 +103,7 @@ export interface ModelDefinitionEditorHandle {
   applyCallConfig: () => void;
 }
 
-type CallConfigIntent = 'connection' | 'limits' | 'protocol' | 'diagnostics' | 'recommended';
+type CallConfigIntent = 'overview' | 'connection' | 'limits' | 'protocol' | 'diagnostics';
 
 const callConfigIntentForError = (code: CapabilityValidationError): CallConfigIntent => {
   switch (code) {
@@ -452,6 +452,12 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
   const [editingOutputLimitByTask, setEditingOutputLimitByTask] = useState<
     Partial<Record<ModelTask, boolean>>
   >({});
+  const [protocolTransportOpenByTask, setProtocolTransportOpenByTask] = useState<
+    Partial<Record<ModelTask, boolean>>
+  >({});
+  const [protocolParamsOpenByTask, setProtocolParamsOpenByTask] = useState<
+    Partial<Record<ModelTask, boolean>>
+  >({});
 
   useEffect(() => {
     if (recommendationPending) {
@@ -517,7 +523,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
       }
       setCallConfigIntentByTask((current) => ({
         ...current,
-        [task]: current[task] ?? 'recommended',
+        [task]: current[task] ?? 'overview',
       }));
       setFocusedCallConfigTask(task);
       onCallConfigFocusChange?.(task);
@@ -938,7 +944,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
           ? t('settings.modelAdvanced.sdkTransport', { defaultValue: 'SDK 连接（无需 Base URL）' })
           : compactCapabilityUrlSummary(actualBaseUrl) ||
             t('settings.modelAdvanced.baseUrlPending', { defaultValue: '待配置 Base URL' });
-        const callConfigIntent = callConfigIntentByTask[capability.task] ?? 'recommended';
+        const callConfigIntent = callConfigIntentByTask[capability.task] ?? 'overview';
         const callConfigBaseline = callConfigBaselineByTask[capability.task];
         const callConfigChanged =
           callConfigBaseline !== undefined && !sameCapabilityDraft(callConfigBaseline, capability);
@@ -959,6 +965,19 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
             capability.contextLimit !== 200_000);
         const outputLimitEditorOpen =
           Boolean(editingOutputLimitByTask[capability.task]) || outputLimitMissing;
+        const protocolTransportOpen =
+          protocolTransportOpenByTask[capability.task] ??
+          taskValidationErrors.some((error) =>
+            [
+              'base_url_required',
+              'cross_origin_consent_required',
+              'connection_missing',
+            ].includes(error.code)
+          );
+        const protocolParamsOpen =
+          protocolParamsOpenByTask[capability.task] ??
+          (Boolean(capability.providerParamsJson.trim()) ||
+            taskValidationErrors.some((error) => error.code === 'invalid_provider_params'));
         const primaryEndpointField = [...endpointFields][0];
         const primaryEndpointDescriptor: CapabilityEndpointDescriptor | undefined = primaryEndpointField
           ? endpointDescriptors.find((endpoint) => endpoint.field === primaryEndpointField) ?? {
@@ -987,9 +1006,18 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
           key: CallConfigIntent;
           title: string;
           description: string;
-          meta?: string;
           icon: React.ReactNode;
         }> = [
+          {
+            key: 'overview',
+            title: t('settings.modelAdvanced.intentOverview', {
+              defaultValue: '概览',
+            }),
+            description: t('settings.modelAdvanced.intentOverviewHint', {
+              defaultValue: '查看系统已安装的当前方案',
+            }),
+            icon: <CheckOne theme='outline' size='17' />,
+          },
           {
             key: 'connection',
             title: t('settings.modelAdvanced.intentConnection', {
@@ -998,8 +1026,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
             description: t('settings.modelAdvanced.intentConnectionHint', {
               defaultValue: '选择当前供应商下已有的连接档案',
             }),
-            meta: t('settings.modelAdvanced.ownerProvider', { defaultValue: '供应商级' }),
-            icon: <LinkOne theme='outline' size='18' />,
+            icon: <LinkOne theme='outline' size='17' />,
           },
           {
             key: 'limits',
@@ -1009,8 +1036,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
             description: t('settings.modelAdvanced.intentLimitsHint', {
               defaultValue: '设置上下文窗口或最大输出',
             }),
-            meta: t('settings.modelAdvanced.ownerTask', { defaultValue: '当前任务' }),
-            icon: <Shield theme='outline' size='18' />,
+            icon: <Shield theme='outline' size='17' />,
           },
           {
             key: 'protocol',
@@ -1020,8 +1046,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
             description: t('settings.modelAdvanced.intentProtocolHint', {
               defaultValue: '更改协议、Base URL 或 Endpoint',
             }),
-            meta: t('settings.modelAdvanced.intentProfessional', { defaultValue: '专业' }),
-            icon: <Code theme='outline' size='18' />,
+            icon: <Code theme='outline' size='17' />,
           },
           {
             key: 'diagnostics',
@@ -1031,8 +1056,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
             description: t('settings.modelAdvanced.intentDiagnosticsHint', {
               defaultValue: '查看实际请求、鉴权兼容性与错误定位',
             }),
-            meta: t('settings.modelAdvanced.intentDiagnostic', { defaultValue: '诊断' }),
-            icon: <Search theme='outline' size='18' />,
+            icon: <Search theme='outline' size='17' />,
           },
         ];
 
@@ -1244,113 +1268,63 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               </div>
             </div>
 
-            <div className='space-y-4px'>
-              <div className='text-16px font-600 leading-22px text-t-primary'>
-                {t('settings.modelAdvanced.intentQuestion', { defaultValue: '你想调整什么？' })}
-              </div>
-              <div className='text-12px leading-18px text-t-secondary'>
-                {t('settings.modelAdvanced.intentQuestionHint', {
-                  defaultValue: '选择你的目标，只展示相关设置。',
+            <div
+              className='overflow-x-auto border-0 border-b border-solid border-[var(--color-border-2)]'
+              role='tablist'
+              aria-label={t('settings.modelAdvanced.callConfigurationTitle', {
+                defaultValue: '调用配置',
+              })}
+              data-call-config-tabs={capability.task}
+            >
+              <div className='flex min-w-max items-end gap-2px'>
+                {callConfigIntents.map((intent) => {
+                  const selected = callConfigIntent === intent.key;
+                  return (
+                    <Tooltip key={intent.key} content={intent.description} position='top'>
+                      <button
+                        type='button'
+                        role='tab'
+                        aria-selected={selected}
+                        className={`inline-flex h-38px min-w-112px items-center justify-center gap-6px whitespace-nowrap border-0 border-b-2px border-b-solid bg-transparent px-12px text-12px transition-colors focus-visible:outline-none ${
+                          selected
+                            ? 'border-primary-6 text-primary-6'
+                            : 'border-transparent text-t-secondary hover:bg-fill-1 hover:text-t-primary'
+                        }`}
+                        data-call-config-tab={intent.key}
+                        onClick={() =>
+                          setCallConfigIntentByTask((current) => ({
+                            ...current,
+                            [capability.task]: intent.key,
+                          }))
+                        }
+                      >
+                        {intent.icon}
+                        <span>{intent.title}</span>
+                      </button>
+                    </Tooltip>
+                  );
                 })}
               </div>
-            </div>
-
-            <div className='space-y-4px' data-call-config-intents={capability.task}>
-              {callConfigIntents.map((intent) => {
-                const selected = callConfigIntent === intent.key;
-                return (
-                  <button
-                    key={intent.key}
-                    type='button'
-                    aria-pressed={selected}
-                    className={`flex w-full items-center gap-10px rounded-10px border border-solid px-12px py-7px text-left transition-colors focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_rgba(var(--primary-6),0.22)] ${
-                      selected
-                        ? 'border-primary-5 bg-primary-1'
-                        : 'border-[var(--color-border-2)] bg-transparent hover:bg-fill-1'
-                    }`}
-                    data-call-config-intent={intent.key}
-                    onClick={() =>
-                      setCallConfigIntentByTask((current) => ({
-                        ...current,
-                        [capability.task]: intent.key,
-                      }))
-                    }
-                  >
-                    <span
-                      aria-hidden='true'
-                      className={`size-18px shrink-0 rounded-full border border-solid ${
-                        selected ? 'border-primary-6 bg-primary-6 shadow-[inset_0_0_0_4px_white]' : 'border-[var(--color-border-3)]'
-                      }`}
-                    />
-                    <span className={selected ? 'text-primary-6' : 'text-t-secondary'}>{intent.icon}</span>
-                    <span className='min-w-0 flex-1'>
-                      <span className='block text-13px font-600 leading-18px text-t-primary'>
-                        {intent.title}
-                      </span>
-                      <span className='mt-1px block text-11px leading-15px text-t-secondary'>
-                        {intent.description}
-                      </span>
-                    </span>
-                    {intent.meta && (
-                      <span
-                        className={`shrink-0 text-11px ${
-                          selected ? 'text-primary-6' : 'text-t-tertiary'
-                        }`}
-                      >
-                        {intent.meta}
-                      </span>
-                    )}
-                    <Right theme='outline' size='14' className='shrink-0 text-t-tertiary' />
-                  </button>
-                );
-              })}
-
-              <button
-                type='button'
-                aria-pressed={callConfigIntent === 'recommended'}
-                className={`flex w-full items-center gap-10px rounded-10px border border-solid px-12px py-7px text-left transition-colors ${
-                  callConfigIntent === 'recommended'
-                    ? 'border-primary-5 bg-primary-1'
-                    : 'border-[var(--color-border-2)] bg-transparent hover:bg-fill-1'
-                }`}
-                data-call-config-intent='recommended'
-                onClick={() =>
-                  setCallConfigIntentByTask((current) => ({
-                    ...current,
-                    [capability.task]: 'recommended',
-                  }))
-                }
-              >
-                <span
-                  aria-hidden='true'
-                  className={`size-18px shrink-0 rounded-full border border-solid ${
-                    callConfigIntent === 'recommended'
-                      ? 'border-primary-6 bg-primary-6 shadow-[inset_0_0_0_4px_white]'
-                      : 'border-[var(--color-border-3)]'
-                  }`}
-                />
-                <span className='text-12px text-t-secondary'>
-                  {t('settings.modelAdvanced.intentRecommended', {
-                    defaultValue: '保持推荐配置，不做调整',
-                  })}
-                </span>
-              </button>
             </div>
 
             <div
-              hidden={callConfigIntent !== 'recommended'}
-              className='rounded-10px border border-solid border-[var(--color-border-2)] bg-fill-1 px-14px py-12px'
-              data-call-config-branch='recommended'
+              hidden={callConfigIntent !== 'overview'}
+              className='flex items-start gap-10px rounded-8px bg-fill-1 px-12px py-10px'
+              data-call-config-branch='overview'
             >
-              <div className='text-12px font-600 text-t-primary'>
-                {t('settings.modelAdvanced.recommendedBranchTitle', {
-                  defaultValue: '无需修改即可保存',
-                })}
-              </div>
-              <div className='mt-4px text-11px leading-17px text-t-secondary'>
-                {t('settings.modelAdvanced.recommendedBranchHint', {
-                  defaultValue: '协议、连接与请求路径继续跟随供应商推荐；当前任务不新增调用覆写。',
-                })}
+              <CheckOne theme='outline' size='17' className='mt-1px shrink-0 text-success-6' />
+              <div className='min-w-0'>
+                <div className='text-12px font-600 text-t-primary'>
+                  {t('settings.modelAdvanced.overviewTitle', {
+                    defaultValue: '系统方案已安装',
+                  })}
+                </div>
+                <div className='mt-2px text-11px leading-16px text-t-secondary'>
+                  {t('settings.modelAdvanced.overviewHint', {
+                    defaultValue:
+                      '当前协议、连接和请求路径可直接使用。仅在需要覆盖默认值时切换上方页签。',
+                  })}
+                </div>
               </div>
             </div>
 
@@ -1523,6 +1497,41 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   })}
                 </div>
               )}
+              {!sdkTransport && (
+                <button
+                  type='button'
+                  className='flex w-full items-center gap-8px rounded-8px border border-solid border-[var(--color-border-2)] bg-fill-1 px-10px py-8px text-left hover:bg-fill-2'
+                  aria-expanded={protocolTransportOpen}
+                  data-protocol-transport-disclosure={capability.task}
+                  onClick={() =>
+                    setProtocolTransportOpenByTask((current) => ({
+                      ...current,
+                      [capability.task]: !protocolTransportOpen,
+                    }))
+                  }
+                >
+                  <span className='min-w-0 flex-1'>
+                    <span className='block text-12px font-500 text-t-primary'>
+                      {t('settings.modelAdvanced.addressOverrides', {
+                        defaultValue: '地址与 Endpoint 覆盖',
+                      })}
+                    </span>
+                    <span className='mt-1px block truncate text-11px text-t-tertiary'>
+                      {actualRequestUrl || baseUrlSummary}
+                    </span>
+                  </span>
+                  <span className='shrink-0 text-11px text-t-secondary'>
+                    {protocolTransportOpen
+                      ? t('common.collapse', { defaultValue: '收起' })
+                      : t('common.edit', { defaultValue: '修改' })}
+                  </span>
+                  {protocolTransportOpen ? (
+                    <Down theme='outline' size='13' className='shrink-0 text-t-tertiary' />
+                  ) : (
+                    <Right theme='outline' size='13' className='shrink-0 text-t-tertiary' />
+                  )}
+                </button>
+              )}
             </div>
 
             {/*
@@ -1535,7 +1544,10 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               arbitrary.
             */}
             <div
-              hidden={callConfigIntent !== 'connection' && callConfigIntent !== 'protocol'}
+              hidden={
+                callConfigIntent !== 'connection' &&
+                (callConfigIntent !== 'protocol' || !protocolTransportOpen)
+              }
               className='space-y-10px rounded-8px border border-solid border-[var(--color-border-2)] p-12px'
               data-transport-group={capability.task}
               data-call-config-branch={callConfigIntent}
@@ -1981,7 +1993,47 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               </div>
             </div>
 
-            <div hidden={callConfigIntent !== 'protocol'} className='space-y-12px'>
+            <div hidden={callConfigIntent !== 'protocol'} className='space-y-8px'>
+            <button
+              type='button'
+              className='flex w-full items-center gap-8px rounded-8px border border-solid border-[var(--color-border-2)] bg-fill-1 px-10px py-8px text-left hover:bg-fill-2'
+              aria-expanded={protocolParamsOpen}
+              data-provider-params-disclosure={capability.task}
+              onClick={() =>
+                setProtocolParamsOpenByTask((current) => ({
+                  ...current,
+                  [capability.task]: !protocolParamsOpen,
+                }))
+              }
+            >
+              <span className='min-w-0 flex-1'>
+                <span className='block text-12px font-500 text-t-primary'>
+                  {t('settings.modelAdvanced.providerOptions', {
+                    defaultValue: '供应商专用参数',
+                  })}
+                </span>
+                <span className='mt-1px block text-11px text-t-tertiary'>
+                  {capability.providerParamsJson.trim()
+                    ? t('settings.modelAdvanced.providerOptionsConfigured', {
+                        defaultValue: '已设置自定义参数',
+                      })
+                    : t('settings.modelAdvanced.providerOptionsDefault', {
+                        defaultValue: '当前使用协议默认值',
+                      })}
+                </span>
+              </span>
+              <span className='shrink-0 text-11px text-t-secondary'>
+                {protocolParamsOpen
+                  ? t('common.collapse', { defaultValue: '收起' })
+                  : t('common.edit', { defaultValue: '修改' })}
+              </span>
+              {protocolParamsOpen ? (
+                <Down theme='outline' size='13' className='shrink-0 text-t-tertiary' />
+              ) : (
+                <Right theme='outline' size='13' className='shrink-0 text-t-tertiary' />
+              )}
+            </button>
+            <div hidden={!protocolParamsOpen} className='space-y-12px'>
             {capability.task === 'speech_synthesis' &&
               ttsSupportsProviderParamVoice(capability.protocol) && (
               <div className='space-y-6px'>
@@ -2086,6 +2138,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                       defaultValue: '必须是合法的 JSON 对象。',
                     })}
               </div>
+            </div>
             </div>
             </div>
 

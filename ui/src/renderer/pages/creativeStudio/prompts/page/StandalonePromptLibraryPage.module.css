@@ -68,6 +68,7 @@
 
 .refreshButton:focus-visible,
 .stateAction:focus-visible,
+.facetToggle:focus-visible,
 .searchField:focus-within,
 .chip:focus-visible,
 .cardButton:focus-visible {
@@ -158,10 +159,37 @@
 }
 
 .chips {
+  --facet-chips-collapsed-height: 54px;
+
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.facetContent {
+  min-width: 0;
+}
+
+.chipsCollapsed {
+  max-height: var(--facet-chips-collapsed-height);
+  overflow: hidden;
+}
+
+.facetToggle {
+  min-height: 24px;
+  padding: 2px 4px;
+  margin-top: 5px;
+  border: 0;
+  color: rgb(var(--primary-6));
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.facetToggle:hover {
+  color: rgb(var(--primary-7));
 }
 
 .chip {
