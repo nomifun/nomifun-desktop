@@ -7,6 +7,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { creativeAssetClient } from './client';
+import {
+  getCreativeAssetQueryCacheGeneration,
+  invalidateCreativeAssetQueryCache,
+  listCreativeAssetsCached,
+} from './creativeAssetQueryCache';
 import type {
   CreateCreativeTextAsset,
   CreativeAsset,
@@ -146,21 +151,34 @@ export function useCreativeAssets(options: UseCreativeAssetsOptions = {}): UseCr
     [stableQuery, pageSize]
   );
 
-  const reload = useCallback(async () => {
+  const loadFirstPage = useCallback(async (force: boolean) => {
     if (!enabled) return;
     const request = ++requestRef.current;
+    const cacheGeneration = getCreativeAssetQueryCacheGeneration(port);
     setLoading(true);
     setError(null);
     try {
-      const result = await port.list(buildQuery(1));
-      if (!mountedRef.current || request !== requestRef.current) return;
+      const result = await listCreativeAssetsCached(port, buildQuery(1), { force });
+      if (
+        !mountedRef.current ||
+        request !== requestRef.current ||
+        cacheGeneration !== getCreativeAssetQueryCacheGeneration(port)
+      ) {
+        return;
+      }
       assetsRef.current = result.items;
       totalRef.current = result.total;
       setAssets(result.items);
       setTotal(result.total);
       pageRef.current = 1;
     } catch (reason) {
-      if (!mountedRef.current || request !== requestRef.current) return;
+      if (
+        !mountedRef.current ||
+        request !== requestRef.current ||
+        cacheGeneration !== getCreativeAssetQueryCacheGeneration(port)
+      ) {
+        return;
+      }
       assetsRef.current = [];
       totalRef.current = 0;
       setAssets([]);
@@ -171,25 +189,34 @@ export function useCreativeAssets(options: UseCreativeAssetsOptions = {}): UseCr
     }
   }, [enabled, port, buildQuery]);
 
+  const reload = useCallback(() => loadFirstPage(true), [loadFirstPage]);
+
   useEffect(() => {
     if (!enabled) {
       requestRef.current += 1;
       setLoading(false);
       return;
     }
-    void reload();
-  }, [enabled, reload]);
+    void loadFirstPage(false);
+  }, [enabled, loadFirstPage]);
 
   const loadMore = useCallback(async () => {
     if (!enabled || loadingMoreRef.current || assetsRef.current.length >= totalRef.current) return;
     const request = requestRef.current;
+    const cacheGeneration = getCreativeAssetQueryCacheGeneration(port);
     const nextPage = pageRef.current + 1;
     loadingMoreRef.current = true;
     setLoadingMore(true);
     setError(null);
     try {
-      const result = await port.list(buildQuery(nextPage));
-      if (!mountedRef.current || request !== requestRef.current) return;
+      const result = await listCreativeAssetsCached(port, buildQuery(nextPage));
+      if (
+        !mountedRef.current ||
+        request !== requestRef.current ||
+        cacheGeneration !== getCreativeAssetQueryCacheGeneration(port)
+      ) {
+        return;
+      }
       const nextAssets = appendUniqueAssets(assetsRef.current, result.items);
       assetsRef.current = nextAssets;
       totalRef.current = result.total;
@@ -197,7 +224,13 @@ export function useCreativeAssets(options: UseCreativeAssetsOptions = {}): UseCr
       setTotal(result.total);
       pageRef.current = nextPage;
     } catch (reason) {
-      if (mountedRef.current && request === requestRef.current) setError(asError(reason));
+      if (
+        mountedRef.current &&
+        request === requestRef.current &&
+        cacheGeneration === getCreativeAssetQueryCacheGeneration(port)
+      ) {
+        setError(asError(reason));
+      }
     } finally {
       loadingMoreRef.current = false;
       if (mountedRef.current && request === requestRef.current) setLoadingMore(false);
@@ -241,6 +274,7 @@ export function useCreativeAssets(options: UseCreativeAssetsOptions = {}): UseCr
     (file: File, metadata: CreativeAssetMetadata = {}, signal?: AbortSignal, onProgress?: CreativeAssetUploadProgress) =>
       mutate(async () => {
         const asset = await port.upload(file, metadata, signal, onProgress);
+        invalidateCreativeAssetQueryCache(port);
         if (mountedRef.current) reconcileAsset(asset, true);
         return asset;
       }),
@@ -251,6 +285,7 @@ export function useCreativeAssets(options: UseCreativeAssetsOptions = {}): UseCr
     (input: CreateCreativeTextAsset) =>
       mutate(async () => {
         const asset = await port.createText(input);
+        invalidateCreativeAssetQueryCache(port);
         if (mountedRef.current) reconcileAsset(asset, true);
         return asset;
       }),
@@ -261,6 +296,7 @@ export function useCreativeAssets(options: UseCreativeAssetsOptions = {}): UseCr
     (assetId: string, patch: CreativeAssetPatch) =>
       mutate(async () => {
         const asset = await port.update(assetId, patch);
+        invalidateCreativeAssetQueryCache(port);
         if (mountedRef.current) reconcileAsset(asset, false);
         return asset;
       }),
@@ -271,6 +307,7 @@ export function useCreativeAssets(options: UseCreativeAssetsOptions = {}): UseCr
     (assetId: string) =>
       mutate(async () => {
         await port.remove(assetId);
+        invalidateCreativeAssetQueryCache(port);
         if (!mountedRef.current) return;
         if (!assetsRef.current.some((asset) => asset.id === assetId)) return;
         const next = assetsRef.current.filter((asset) => asset.id !== assetId);
@@ -286,6 +323,7 @@ export function useCreativeAssets(options: UseCreativeAssetsOptions = {}): UseCr
     (from: string, to: string) =>
       mutate(async () => {
         const updated = await port.renameCollection(from, to);
+        invalidateCreativeAssetQueryCache(port);
         if (mountedRef.current) await reload();
         return updated;
       }),
