@@ -118,6 +118,27 @@ describe('ImageWorkbench visual states', () => {
     expect(html.includes('2 个生成中')).toBe(true);
   });
 
+  test('renders an honest disabled state when no image model is configured', () => {
+    const html = renderWorkbench({
+      settings: { ...baseProps().settings, model: null },
+      modelOptions: [],
+    });
+
+    expect(html.includes('没有可用生图模型')).toBe(true);
+    expect(html.includes('aria-label="生图模型"')).toBe(true);
+    expect(html.includes('arco-select-view-disabled')).toBe(true);
+  });
+
+  test('renders a catalog-owned model selector instead of the fallback field', () => {
+    const html = renderWorkbench({
+      modelSlot: <div data-model-selector-state='no-compatible-model'>配置生图模型</div>,
+    });
+
+    expect(html.includes('data-model-selector-state="no-compatible-model"')).toBe(true);
+    expect(html.includes('配置生图模型')).toBe(true);
+    expect(html.includes('aria-label="生图模型"')).toBe(false);
+  });
+
   test('renders queued, running, failed and canceled cards without invented media', () => {
     const results: ImageWorkbenchResult[] = [
       { ...resultBase, status: 'queued' },
@@ -227,6 +248,8 @@ describe('ImageWorkbench controlled contract', () => {
     ];
     const key = imageWorkbenchModelKey(options[1]);
 
+    expect(key).toBe(JSON.stringify(['provider-b', 'shared-model']));
+    expect(key.includes('\u0000')).toBe(false);
     expect(key).not.toBe(imageWorkbenchModelKey(options[0]));
     expect(parseImageWorkbenchModelKey(key, options)).toEqual({
       providerId: 'provider-b',
