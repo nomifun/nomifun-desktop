@@ -9,7 +9,7 @@ import type { DirectorCaptureRequest, DirectorState } from '../domain';
 /**
  * The only asset boundary exposed by the renderer. The host resolves a stable
  * NomiFun asset ID to a URL it trusts; the 3D runtime never accepts paths or
- * opaque asset DTOs from project documents.
+ * opaque asset DTOs from Canvas documents.
  */
 export type DirectorAssetUrlResolver = (
   assetId: string,

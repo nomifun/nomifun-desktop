@@ -5,7 +5,7 @@
   },
   "navigation": {
     "label": "创意工坊",
-    "projects": "我的画布",
+    "canvases": "我的画布",
     "image": "生图工作台",
     "video": "视频创作台",
     "prompts": "提示词库",

@@ -131,7 +131,7 @@ describe('canvas image composer product model', () => {
     expect(prepared.plan.input).toMatchObject({
       owner: {
         kind: 'canvas_node',
-        projectId: document.projectId,
+        canvasId: document.projectId,
         nodeId: prepared.configNode.id,
       },
       providerId: PROVIDER_ID,

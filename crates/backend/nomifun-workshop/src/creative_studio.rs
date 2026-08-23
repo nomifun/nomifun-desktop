@@ -1207,6 +1207,132 @@ impl From<CreativeStudioProjectRow> for CreativeProjectSummary {
     }
 }
 
+/// Product-facing Canvas document. The persisted project document remains the
+/// compatibility boundary for the SQLite repository, while canonical Canvas
+/// HTTP/archive wires expose `canvasId` instead of the legacy `projectId`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreativeCanvasDocument {
+    pub schema: String,
+    pub canvas_id: String,
+    pub viewport: CreativeViewport,
+    pub background: CreativeBackground,
+    pub nodes: Vec<CreativeNode>,
+    pub connections: Vec<CreativeConnection>,
+    pub chat_sessions: Vec<CreativeChatSession>,
+    pub active_chat_id: Option<String>,
+    pub panels: CreativePanels,
+    pub pending_task_ids: Vec<String>,
+}
+
+impl CreativeCanvasDocument {
+    pub fn empty(canvas_id: String) -> Self {
+        Self::from(CreativeProjectDocument::empty(canvas_id))
+    }
+
+    pub fn validate_for_canvas(&self, expected_canvas_id: &str) -> Result<(), String> {
+        self.clone()
+            .into_project_document()
+            .validate_for_project(expected_canvas_id)
+    }
+
+    pub fn into_project_document(self) -> CreativeProjectDocument {
+        CreativeProjectDocument {
+            schema: self.schema,
+            project_id: self.canvas_id,
+            viewport: self.viewport,
+            background: self.background,
+            nodes: self.nodes,
+            connections: self.connections,
+            chat_sessions: self.chat_sessions,
+            active_chat_id: self.active_chat_id,
+            panels: self.panels,
+            pending_task_ids: self.pending_task_ids,
+        }
+    }
+
+    pub fn as_project_document(&self) -> CreativeProjectDocument {
+        self.clone().into_project_document()
+    }
+}
+
+impl From<CreativeProjectDocument> for CreativeCanvasDocument {
+    fn from(document: CreativeProjectDocument) -> Self {
+        Self {
+            schema: document.schema,
+            canvas_id: document.project_id,
+            viewport: document.viewport,
+            background: document.background,
+            nodes: document.nodes,
+            connections: document.connections,
+            chat_sessions: document.chat_sessions,
+            active_chat_id: document.active_chat_id,
+            panels: document.panels,
+            pending_task_ids: document.pending_task_ids,
+        }
+    }
+}
+
+impl From<&CreativeProjectDocument> for CreativeCanvasDocument {
+    fn from(document: &CreativeProjectDocument) -> Self {
+        Self::from(document.clone())
+    }
+}
+
+impl From<CreativeCanvasDocument> for CreativeProjectDocument {
+    fn from(document: CreativeCanvasDocument) -> Self {
+        document.into_project_document()
+    }
+}
+
+impl From<&CreativeCanvasDocument> for CreativeProjectDocument {
+    fn from(document: &CreativeCanvasDocument) -> Self {
+        document.as_project_document()
+    }
+}
+
+/// Product-facing summary. `project_id` remains available only on the
+/// compatibility type above; canonical Canvas responses have no Project wire.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreativeCanvasSummary {
+    pub canvas_id: String,
+    pub title: String,
+    /// Decimal string on the wire: callers round-trip it as an opaque CAS token.
+    pub revision: String,
+    pub node_count: i64,
+    pub connection_count: i64,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
+impl From<CreativeProjectSummary> for CreativeCanvasSummary {
+    fn from(summary: CreativeProjectSummary) -> Self {
+        Self {
+            canvas_id: summary.project_id,
+            title: summary.title,
+            revision: summary.revision,
+            node_count: summary.node_count,
+            connection_count: summary.connection_count,
+            created_at: summary.created_at,
+            updated_at: summary.updated_at,
+        }
+    }
+}
+
+impl From<CreativeStudioProjectRow> for CreativeCanvasSummary {
+    fn from(row: CreativeStudioProjectRow) -> Self {
+        Self::from(CreativeProjectSummary::from(row))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreativeCanvasDetail {
+    pub canvas: CreativeCanvasSummary,
+    pub document: CreativeCanvasDocument,
+}
+
 fn require_string(
     path: &str,
     value: &str,
@@ -1520,6 +1646,39 @@ mod tests {
         assert_eq!(value["panels"]["right"]["activeView"], "assistant");
         assert!(value.get("pendingTaskIds").unwrap().is_array());
         assert_eq!(serde_json::from_value::<CreativeProjectDocument>(value).unwrap(), doc);
+    }
+
+    #[test]
+    fn canvas_document_facade_uses_canvas_id_and_maps_storage_document() {
+        let project = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        let canvas = CreativeCanvasDocument::from(project.clone());
+        canvas.validate_for_canvas(PROJECT_ID).unwrap();
+
+        let value = serde_json::to_value(&canvas).unwrap();
+        assert_eq!(value["canvasId"], PROJECT_ID);
+        assert!(value.get("projectId").is_none());
+        assert_eq!(
+            CreativeCanvasDocument::from(project),
+            serde_json::from_value(value.clone()).unwrap()
+        );
+
+        let mut legacy = value;
+        legacy["projectId"] = legacy["canvasId"].take();
+        assert!(serde_json::from_value::<CreativeCanvasDocument>(legacy).is_err());
+
+        let summary = CreativeProjectSummary {
+            project_id: PROJECT_ID.into(),
+            title: "Canvas".into(),
+            revision: "1".into(),
+            node_count: 0,
+            connection_count: 0,
+            created_at: 100,
+            updated_at: 200,
+        };
+        let canvas_summary: CreativeCanvasSummary = summary.into();
+        let summary_value = serde_json::to_value(canvas_summary).unwrap();
+        assert_eq!(summary_value["canvasId"], PROJECT_ID);
+        assert!(summary_value.get("projectId").is_none());
     }
 
     #[test]

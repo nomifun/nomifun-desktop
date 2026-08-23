@@ -1,21 +1,22 @@
 # Creative Canvas product route wiring
 
 This directory exports a default, no-props route component. It reads the
-canonical `projectId` through `useParams` and keeps `CreativeCanvasEditor` as
+canonical `canvasId` through `useParams` and keeps `CreativeCanvasEditor` as
 the only reducer and CAS persistence owner.
 
 The production router mounts this default export at
-`/workshop/canvas/:projectId` inside `CreativeStudioFocusShell`.
+`/workshop/canvas/:canvasId` inside `CreativeStudioFocusShell`.
 It keeps the route split with
 `import('@renderer/pages/creativeStudio/canvas/product')` and the nested
-`path="canvas/:projectId"` contract.
+`path="canvas/:canvasId"` contract.
 
 The product's own “返回项目” action awaits the editor CAS `flush()` and only
-navigates to `CREATIVE_STUDIO_PROJECTS_PATH` after `noop` or `saved`. A
+The product returns to the Canvas library at `/workshop/canvases` after
+`noop` or `saved`. A
 `conflict` or `error` stays on the canvas and exposes explicit reload/retry.
 The product chrome is the single visible save/recovery surface and therefore
 sets the generic Editor save banner off. It shows a stable Chinese conflict
-message without leaking project IDs or backend diagnostics; only the backend
+message without leaking Canvas IDs or backend diagnostics; only the backend
 code `REVISION_CONFLICT` enables “重新载入远端”. A generic business 409 remains
 an ordinary save error and does not invite the user to discard local work.
 
@@ -39,28 +40,33 @@ an active exclusive Agent turn, then flushes the Editor. The left workflow panel
 uses the canonical workflow repository and durable run controller, opens the
 same typed runner and real asset picker as the standalone center, and resolves
 successful result IDs through the authenticated asset-detail endpoint before
-inserting canonical nodes. The bottom timeline now projects the project's one
+inserting canonical nodes. The bottom timeline now projects the Canvas's one
 canonical Director node without inventing global tracks or keyframes. It shows
 the saved scene pointer, camera pointer and timeline/duration values, and opens
 the real Director product only after the canvas CAS leave gate succeeds. New UI
-creation paths enforce one Director node per project; malformed documents with
+creation paths enforce one Director node per Canvas; malformed documents with
 multiple Director nodes remain visible as a fail-closed conflict. The Director
-close action returns to this same canvas project.
+close action returns to this same Canvas.
 
 The authenticated Agent mutation gateway is
-`POST /api/creative-studio/projects/{projectId}/agent-ops`. Its wrapper accepts
+`POST /api/creative-studio/canvases/{canvasId}/agent-ops`. Its wrapper accepts
 only `{ expectedRevision, ops }`; the audit source is server-owned and fixed to
 `creative-studio-agent`. Nested operations reuse the one canonical snake_case
 `CreativeAgentOp` wire contract, so the HTTP path, Gateway, service and domain do
-not drift through duplicate DTOs. One request is one project revision CAS: the
+not drift through duplicate DTOs. One request is one Canvas revision CAS: the
 server mints node/connection UUIDv7 values, validates the complete resulting
-document, and returns only the saved project summary plus ordered op results.
+Canvas document, and returns only the saved Canvas summary plus ordered op results.
 A stale revision, unknown field, empty/invalid batch, runtime-owned task-field
 patch or late invalid op produces zero writes. `delete_node` is additionally
 rejected at this Agent route because deletion remains an explicit user-confirmed
 canvas action. The product will invoke this gateway only after presenting a
 strict planning artifact for manual “应用到画布” approval, then reload the
-authoritative project rather than mutating a second optimistic graph.
+authoritative Canvas rather than mutating a second optimistic graph.
+
+The Agent route is Canvas-owned: every mutation is bound to `canvasId`, and
+node-scoped work uses `CanvasNode { canvasId, nodeId }`. The wire owner is
+`{ kind: 'canvas_node', canvas_id, node_id }`; an owner without `canvas_id` is
+invalid.
 
 Agent pending turns now persist both the user-facing `prompt` and the exact
 `modelInput` envelope plus ordered `skillIds`. Reload and response-loss recovery
@@ -110,7 +116,7 @@ The server independently reloads that owner-bound, completed assistant message,
 re-parses its unique final artifact with the same duplicate-key and operation
 allowlist rules, and requires its canonical operations to equal the HTTP body.
 The transaction rechecks the raw persisted message content to fence a concurrent
-edit. It then fingerprints the canonical operation array and commits the project
+edit. It then fingerprints the canonical operation array and commits the Canvas
 CAS plus a result receipt in one SQLite transaction. A later deliberate replay
 of the same assistant message returns the first minted node/connection IDs and
 its original applied revision without changing the graph again; reusing that
@@ -118,9 +124,9 @@ message ID for a different payload is a conflict. Gateway tool calls retain
 their separate revision-CAS contract and do not impersonate this user-approved
 proposal identity.
 
-The HTTP port verifies project identity, result-to-op correspondence, bounded
+The HTTP port verifies Canvas identity, result-to-op correspondence, bounded
 i64 revisions, and either a first `revision = expected + 1` commit or an explicit
-receipt replay whose current project revision has not regressed. It never
+receipt replay whose current Canvas revision has not regressed. It never
 automatically retries a response-loss mutation. Both success and failure paths
 attempt a guarded authoritative reload without allowing a reload failure to hide
 the original outcome. If that read is unavailable, the product remains locked
@@ -136,8 +142,8 @@ The Agent supplies its own single header; the generic right-panel tab header is
 shown only for properties so the product never renders stacked title bars.
 
 The Editor also exposes the canonical pending-task recovery feed described in
-`../editor/WIRING.md`. Project-scoped image, video, and audio task runtimes are
-mounted only after the project and Editor graph are both hydrated. The image
+`../editor/WIRING.md`. Canvas-scoped image, video, and audio task runtimes are
+mounted only after the Canvas and Editor graph are both hydrated. The image
 runtime routes two strict persisted operations without creating a second
 document controller:
 
@@ -196,3 +202,11 @@ flush the full document CAS. A stale/deleted/already-filled node is never
 overwritten; the real uploaded asset remains available in the library. The
 toolbar uses a fixed dark focused palette and becomes a viewport overlay when a
 narrow canvas column cannot contain it.
+
+## Compatibility only
+
+The migration reader for `nomifun.creative-studio/v1` may still carry an
+internal `projectId`, and legacy project-document/repository adapters may
+translate that historical shape. Those adapters are not the public Canvas API:
+the product library is `/workshop/canvases`, the route parameter is `canvasId`,
+and the Agent endpoint is scoped by `canvasId`.

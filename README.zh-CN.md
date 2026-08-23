@@ -168,7 +168,7 @@ NomiFun Desktop 已经从 Agent 聊天客户端发展为本地优先、可扩展
 |---|---|
 | **多 Agent 执行集群** | 按依赖规划任务，委派给专用 Agent，并行调度执行，同时提供实时状态、真实会话、审批、重试与恢复。 |
 | **Agent 小程序** | 把普通 Agent 会话变成可预览、可发布的本地 Web 工具，同时保留可编辑工作副本与稳定的发布快照。 |
-| **创意工坊** | 把持久无限画布、exact 模型图片/视频/语音任务、可复用素材、最小 Workflow 与受限 3D 导演台放在同一产品边界。 |
+| **创意工坊** | 提供持久 Canvas、独立 Image/Video Workbench、exact 模型媒体任务、可复用素材、私有 Workflow 与受限 3D 导演台。 |
 | **按任务路由的多模型控制面** | 可扩展管理聊天、实时、语音、视觉、媒体生成、Embedding 与 Rerank 模型，并支持任务级路由与故障切换。 |
 | **NomiFun 免费模型** | 内置托管供应商，无需先手动新建供应商，即可启用、刷新目录、健康检查并开箱使用。 |
 | **手机、机器人与开放接入** | Mobile 直连 Desktop，小智机器人绑定伙伴，并通过 WebUI、REST、MCP、IM 渠道和 NomiRelay 安全开放能力。 |
@@ -206,16 +206,19 @@ ASR、TTS、会话和工具协同。接入入口就在每个伙伴的**远程控
 
 > 指南：[`docs/guides/creative-studio.zh.md`](docs/guides/creative-studio.zh.md)
 
-创意工坊把持久无限画布、项目中心、独立图片/视频工作台、提示词与素材库、
-私有 Workflow 和受限 3D 导演台放在一起。持久化节点恰好有文本、图片、视频、
-音频、全景、配置、导演与分组八类；生成由媒体节点与可审计的配置节点共同持有，
-不会虚构循环、对比或输出节点。
+创意工坊把持久 Canvas、独立 Image/Video Workbench、提示词与素材库、私有
+Workflow 和受限 3D 导演台放在一起。它没有 Project 产品对象：Canvas 就是
+Canvas，Image/Video 在零 Canvas 时也可以独立使用。Canvas 持久化节点恰好有
+文本、图片、视频、音频、全景、配置、导演与分组八类；生成由媒体节点与可审计的
+配置节点共同持有，不会虚构循环、对比或输出节点。
 
 每次模型请求都使用 exact 且已启用的 NomiFun Provider/model task：Chat 用于一次性草稿与需
 人工批准的提案，图片生成/编辑对应 T2I/I2I，视频生成对应 T2V 或单图 I2V，语音合成对应
-TTS。项目文档使用 revision CAS，生成任务可在重载后对账，自包含项目 ZIP 携带完整
-引用素材与 Director sidecar 闭包。最小 Workflow AI 只预览一次严格草稿，等待用户应用
-到编辑器后再显式保存；它不会创建公开模板、复杂会话或自动运行。
+TTS。Canvas 文档使用 revision CAS，Canvas 任务可在重载后对账；版本 2 Canvas ZIP
+携带完整引用素材与 Director sidecar 闭包，同时继续支持版本 1 reader。独立任务 owner
+与历史只使用 `workbenchKind`；Image/Video 按工作台保存版本化 session 草稿，不绑定
+Canvas。UI/API contract version 为 21。最小 Workflow AI 只预览一次严格草稿，等待用户
+应用到编辑器后再显式保存；它不会创建公开模板、复杂会话或自动运行。
 
 ### 🧠 多 Agent 执行集群 —— 规划、调度与监督
 

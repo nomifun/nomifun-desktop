@@ -3,7 +3,7 @@
 This file tracks the user-facing screenshots used by the Desktop documentation.
 On 2026-08-15, the complete active set was freshly captured from the current
 `nomifun-desktop` checkout. The two Creative Studio README captures were
-replaced again on 2026-08-22 from the production SPA and an isolated data root.
+replaced again on 2026-08-23 from the production SPA and an isolated data root.
 These are real running-app captures, not mockups or copies of the retired
 product UI. Do not restore retired screenshots.
 
@@ -86,9 +86,11 @@ the guide uses text instead of an obsolete visual.
 ## README and product gallery set
 
 - `readme/en/` and `readme/zh/` contain current workspace, models, companions,
-  skills, and Creative Studio captures. The English Creative Studio image is
-  intentionally unedited: its focused shell follows English while the launch
-  canvas body still exposes the documented Simplified-Chinese limitation.
+  skills, and Creative Studio captures. The Creative Studio images show the
+  canonical Canvas editor with `返回画布库`, four real persisted nodes, and no
+  Project product navigation. The English image is intentionally unedited: its
+  focused shell follows English while the Canvas editor body still exposes the
+  documented Simplified-Chinese limitation.
 - `getting-started/en/` and `getting-started/zh/` contain current home captures.
 - Portal copies must be synchronized and hash-checked separately before a
   Portal publication; this manifest does not claim that synchronization.

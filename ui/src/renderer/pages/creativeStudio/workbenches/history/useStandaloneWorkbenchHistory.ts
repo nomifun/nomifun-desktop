@@ -100,7 +100,7 @@ export function useStandaloneWorkbenchHistory(
         );
       }
     },
-    [reader, scope.projectId, scope.workbenchKind]
+    [reader, scope.workbenchKind]
   );
 
   useEffect(() => {
@@ -153,7 +153,7 @@ export function useStandaloneWorkbenchHistory(
         loadingMore: false,
       }));
     }
-  }, [reader, scope.projectId, scope.workbenchKind]);
+  }, [reader, scope.workbenchKind]);
 
   return { ...state, reload, loadMore };
 }

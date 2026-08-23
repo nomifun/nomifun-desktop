@@ -5,7 +5,7 @@
   },
   "navigation": {
     "label": "Creative Studio",
-    "projects": "My canvases",
+    "canvases": "My canvases",
     "image": "Image studio",
     "video": "Video studio",
     "prompts": "Prompt library",

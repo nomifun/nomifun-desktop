@@ -135,7 +135,7 @@ export function prepareCanvasImageMaskEdit(input: {
     input.referenceDimensions.height <= 8_192;
   const plan = prepareImageWorkbenchRun({
     catalog: input.catalog,
-    projectId: input.projectId,
+    canvasId: input.projectId,
     nodeId: base.id,
     model: input.model,
     references: {
@@ -220,9 +220,9 @@ export function canvasImageMaskEditConfigForReference(
 ): ConfigNode {
   if (
     !isCanvasNodeTaskOwner(reference.owner) ||
-    reference.owner.projectId !== document.projectId
+    reference.owner.canvasId !== document.projectId
   ) {
-    throw new Error('局部编辑任务不属于当前画布项目。');
+      throw new Error('局部编辑任务不属于当前画布。');
   }
   const owner = reference.owner;
   const node = document.nodes.find(

@@ -861,8 +861,15 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
         "providers", "provider_id", "idx_workshop_assets_origin_provider_id", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
+        "workshop_assets", "origin", "$.canvas_id",
+        "SELECT json_extract(origin, '$.canvas_id') AS value FROM workshop_assets WHERE json_type(origin, '$.canvas_id') = 'text' AND json_type(origin, '$.node_id') = 'text' AND json_type(origin, '$.project_id') IS NULL AND json_type(origin, '$.workbench_kind') IS NULL" =>
+        "creative_studio_projects", "project_id", "idx_workshop_assets_origin_canvas_id", KeepHistory, AllowMissingHistoricalParent
+    ),
+    // `project_id` remains a wire/storage compatibility alias only for old
+    // Canvas origins. Standalone provenance is intentionally excluded.
+    json_text_ref!(
         "workshop_assets", "origin", "$.project_id",
-        "SELECT json_extract(origin, '$.project_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
+        "SELECT json_extract(origin, '$.project_id') AS value FROM workshop_assets WHERE json_type(origin, '$.project_id') = 'text' AND json_type(origin, '$.node_id') = 'text' AND json_type(origin, '$.canvas_id') IS NULL AND json_type(origin, '$.workbench_kind') IS NULL" =>
         "creative_studio_projects", "project_id", "idx_workshop_assets_origin_project_id", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
@@ -1752,12 +1759,13 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             &[
                 "BEFORE INSERT ON WORKSHOP_ASSETS",
                 "RAISE(ABORT, 'UNSUPPORTED CREATIVE ASSET ORIGIN ID KEY')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN PROJECT_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN CANVAS IDENTIFIER')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN LEGACY CANVAS COMPATIBILITY IDENTIFIER')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKBENCH_KIND')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_RUN_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_STEP_ID')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET OWNER BRANCH')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET CANVAS/STANDALONE/WORKFLOW OWNER BRANCH')",
             ],
         ),
         (
@@ -1765,12 +1773,13 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             &[
                 "BEFORE UPDATE OF ORIGIN ON WORKSHOP_ASSETS",
                 "RAISE(ABORT, 'UNSUPPORTED CREATIVE ASSET ORIGIN ID KEY')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN PROJECT_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN CANVAS IDENTIFIER')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN LEGACY CANVAS COMPATIBILITY IDENTIFIER')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKBENCH_KIND')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_RUN_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKFLOW_STEP_ID')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET OWNER BRANCH')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET CANVAS/STANDALONE/WORKFLOW OWNER BRANCH')",
             ],
         ),
     ];
@@ -2030,6 +2039,11 @@ async fn require_workshop_asset_origin_id_contract(
         "WORKFLOW_RUN_ID",
         "WORKFLOW_STEP_ID",
     ] {
+        let contract_name = if key == "PROJECT_ID" {
+            "legacy Canvas compatibility identifier (PROJECT_ID)"
+        } else {
+            key
+        };
         let fragments = [
             format!("JSON_TYPE(NEW.ORIGIN, '$.{key}') IS NOT NULL"),
             format!("JSON_TYPE(NEW.ORIGIN, '$.{key}') IS 'TEXT'"),
@@ -2044,7 +2058,7 @@ async fn require_workshop_asset_origin_id_contract(
         for fragment in fragments {
             if !normalized.contains(&fragment) {
                 return Err(DbError::Init(format!(
-                    "v3 workshop_assets.origin {key} contract is missing trigger fragment {fragment}"
+                    "v3 workshop_assets.origin {contract_name} contract is missing trigger fragment {fragment}"
                 )));
             }
         }
@@ -2072,7 +2086,6 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
         for retired_key in [
             "task_id",
             "providerId",
-            "canvas_id",
             "canvasId",
             "nodeId",
             "creationTaskId",
@@ -2090,6 +2103,7 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
         }
         for key in [
             "provider_id",
+            "canvas_id",
             "node_id",
             "creation_task_id",
             "project_id",
@@ -2100,18 +2114,24 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
             let Some(value) = object.get(key) else {
                 continue;
             };
+            let field_name = if key == "project_id" {
+                "legacy Canvas compatibility identifier (project_id)"
+            } else {
+                key
+            };
             let value = value.as_str().ok_or_else(|| {
                 DbError::Init(format!(
-                    "v3 workshop asset {asset_id} origin.{key} must be omitted or a canonical UUIDv7 string"
+                    "v3 workshop asset {asset_id} origin {field_name} must be omitted or a canonical UUIDv7 string"
                 ))
             })?;
             nomifun_common::validate_uuidv7(value).map_err(|error| {
                 DbError::Init(format!(
-                    "v3 workshop asset {asset_id} origin.{key}={value:?} is invalid: {error}"
+                    "v3 workshop asset {asset_id} origin {field_name}={value:?} is invalid: {error}"
                 ))
             })?;
         }
-        let has_project = object.contains_key("project_id");
+        let has_canvas = object.contains_key("canvas_id");
+        let has_legacy_canvas = object.contains_key("project_id");
         let has_node = object.contains_key("node_id");
         let has_workbench = object.contains_key("workbench_kind");
         if let Some(kind) = object.get("workbench_kind") {
@@ -2127,19 +2147,25 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
         let has_workflow = ["workflow_id", "workflow_run_id", "workflow_step_id"]
             .iter()
             .any(|key| object.contains_key(*key));
-        let canvas_owner = has_project && has_node && !has_workbench;
-        let standalone_owner = has_project && !has_node && has_workbench;
-        if (has_project || has_node || has_workbench)
+        if has_canvas && has_legacy_canvas {
+            return Err(DbError::Init(format!(
+                "v3 workshop asset {asset_id} Canvas origin contains both canonical canvas_id and the legacy project_id compatibility field"
+            )));
+        }
+        let canvas_owner = (has_canvas || has_legacy_canvas) && has_node && !has_workbench;
+        let standalone_owner = !has_canvas && !has_node && has_workbench;
+        if (has_canvas || has_legacy_canvas || has_node || has_workbench)
             && (!canvas_owner && !standalone_owner || has_workflow)
         {
             return Err(DbError::Init(format!(
-                "v3 workshop asset {asset_id} origin has an invalid project owner branch"
+                "v3 workshop asset {asset_id} origin has an invalid Canvas or standalone owner branch"
             )));
         }
         if has_workflow
             && (!["workflow_id", "workflow_run_id", "workflow_step_id"]
                 .iter()
                 .all(|key| object.contains_key(*key))
+                || object.contains_key("canvas_id")
                 || object.contains_key("project_id")
                 || object.contains_key("node_id")
                 || object.contains_key("workbench_kind"))

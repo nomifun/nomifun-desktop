@@ -223,6 +223,37 @@ describe("Director project persistence", () => {
     );
   });
 
+  test("keeps the legacy sidecar kind internal to user-facing parse errors", async () => {
+    const assets = new FakeAssets();
+    assets.items.set(SCENE_ASSET_ID, asset(SCENE_ASSET_ID, "{}"));
+    const canvas = detail();
+    canvas.document.nodes.push({
+      id: "director-1",
+      type: "director",
+      position: { x: 0, y: 0 },
+      size: { width: 360, height: 220 },
+      groupId: null,
+      zIndex: 0,
+      locked: false,
+      data: {
+        sceneId: SCENE_ASSET_ID,
+        cameraId: null,
+        timelineMs: 0,
+        durationMs: 0,
+      },
+    });
+
+    let caught: unknown;
+    try {
+      await loadDirectorProjectBaseline(canvas, assets);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught instanceof DirectorProjectLoadError).toBe(true);
+    expect((caught as Error).message.includes("project")).toBe(false);
+    expect((caught as Error).message.includes("场景文档")).toBe(true);
+  });
+
   test("refuses ambiguous projects with multiple director nodes", async () => {
     const assets = new FakeAssets();
     const project = detail();

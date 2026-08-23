@@ -6,6 +6,7 @@
   background: var(--color-bg-1, var(--bg-base));
   color: var(--color-text-1, var(--text-primary));
 }
+
 .container {
   box-sizing: border-box;
   display: flex;

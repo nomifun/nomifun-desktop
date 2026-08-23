@@ -10,18 +10,21 @@ import { readFileSync } from 'node:fs';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import type { CreateCreativeProjectRequest, CreativeProjectSummary } from '../domain';
-import type { CreativeProjectRepository } from '../services/projectRepository';
+import type {
+  CreateCreativeCanvasRequest,
+  CreativeCanvasSummary,
+} from '../domain';
+import type { CreativeCanvasRepository } from '../services/canvasRepository';
 import {
   CreativeStudioHomeSurface,
-  createCreativeStudioHomeProject,
-  creativeStudioHomeProjectTitle,
+  createCreativeStudioHomeCanvas,
+  creativeStudioHomeCanvasTitle,
 } from './CreativeStudioHomePage';
 
 const PROJECT_ID = '0198f8bb-8424-7b3d-8f17-bc6a1676f112';
 const PROVIDER_ID = '0198f8bb-8424-7b3d-8f17-bc6a1676f118' as ProviderId;
-const project: CreativeProjectSummary = {
-  projectId: PROJECT_ID,
+const canvas: CreativeCanvasSummary = {
+  canvasId: PROJECT_ID,
   title: '新品海报',
   revision: '1',
   nodeCount: 0,
@@ -30,7 +33,7 @@ const project: CreativeProjectSummary = {
   updatedAt: 1,
 };
 
-const repositoryFixture = (create: CreativeProjectRepository['create']) =>
+const repositoryFixture = (create: CreativeCanvasRepository['create']) =>
   ({
     list: async () => [],
     create,
@@ -44,7 +47,7 @@ const repositoryFixture = (create: CreativeProjectRepository['create']) =>
       throw new Error('unused');
     },
     remove: async () => undefined,
-  }) satisfies CreativeProjectRepository;
+  }) satisfies CreativeCanvasRepository;
 
 describe('Creative Studio minimal home', () => {
   test('renders only the launch fields, loading state, and inline error', () => {
@@ -71,17 +74,17 @@ describe('Creative Studio minimal home', () => {
   });
 
   test('derives a short Unicode title and navigates only after exact kickoff creation', async () => {
-    const requests: CreateCreativeProjectRequest[] = [];
+    const requests: CreateCreativeCanvasRequest[] = [];
     const paths: string[] = [];
     const prompt = `  ${'😀'.repeat(25)}补充文字  `;
     const repository = repositoryFixture(async (request = {}) => {
       requests.push(request);
       expect(paths).toEqual([]);
-      return project;
+      return canvas;
     });
 
-    expect(creativeStudioHomeProjectTitle(prompt)).toBe('😀'.repeat(24));
-    await createCreativeStudioHomeProject({
+    expect(creativeStudioHomeCanvasTitle(prompt)).toBe('😀'.repeat(24));
+    await createCreativeStudioHomeCanvas({
       prompt,
       model: { providerId: PROVIDER_ID, model: 'gpt-5' },
       repository,
@@ -105,11 +108,11 @@ describe('Creative Studio minimal home', () => {
     const paths: string[] = [];
     const idleRepository = repositoryFixture(async () => {
       creates += 1;
-      return project;
+      return canvas;
     });
 
     expect(
-      await createCreativeStudioHomeProject({
+      await createCreativeStudioHomeCanvas({
         prompt: '   ',
         model: { providerId: PROVIDER_ID, model: 'gpt-5' },
         repository: idleRepository,
@@ -117,7 +120,7 @@ describe('Creative Studio minimal home', () => {
       })
     ).toBeNull();
     expect(
-      await createCreativeStudioHomeProject({
+      await createCreativeStudioHomeCanvas({
         prompt: '新品海报',
         model: null,
         repository: idleRepository,
@@ -130,7 +133,7 @@ describe('Creative Studio minimal home', () => {
       throw new Error('offline');
     });
     try {
-      await createCreativeStudioHomeProject({
+      await createCreativeStudioHomeCanvas({
         prompt: '新品海报',
         model: { providerId: PROVIDER_ID, model: 'gpt-5' },
         repository: failedRepository,

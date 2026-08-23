@@ -181,7 +181,7 @@ memory, tools, permissions, and execution runtime:
 |---|---|
 | **Multi-Agent execution cluster** | Plans dependency-aware work, delegates steps to specialized Agents, schedules parallel execution, and exposes live state, transcripts, approvals, retry, and recovery. |
 | **Agent Mini Apps** | Turns a normal Agent conversation into a previewable and publishable local web tool, with an editable working copy and a durable published snapshot. |
-| **Creative Studio** | Combines a persistent infinite canvas with exact-model image, video, and speech tasks, reusable assets, minimal workflows, and a bounded 3D Director. |
+| **Creative Studio** | Provides a persistent Canvas, independent Image and Video Workbenches, exact-model media tasks, reusable assets, private workflows, and a bounded 3D Director. |
 | **Task-aware multi-model control plane** | Manages extensible providers and models for chat, realtime, speech, vision, media generation, embedding, and reranking, with per-task routing and fallback. |
 | **NomiFun Free Models** | Ships a managed provider that can be enabled, refreshed, health-checked, and used without first creating your own provider entry. |
 | **Phone, robot, and open access** | Pairs Mobile directly with Desktop, binds a Xiaozhi robot to a companion, and exposes governed capabilities through WebUI, REST, MCP, IM channels, and NomiRelay. |
@@ -224,21 +224,25 @@ Agents, data, models, and governed tools.
 
 > Guide: [`docs/guides/creative-studio.md`](docs/guides/creative-studio.md)
 
-Creative Studio combines a persistent infinite canvas, project center,
-standalone image and video workbenches, prompt and asset libraries, private
-workflows, and a bounded 3D Director. Its eight persisted node kinds are text,
-image, video, audio, panorama, config, director, and group; generation is owned
-by media nodes plus auditable config nodes rather than fictional loop, compare,
-or output node types.
+Creative Studio combines a persistent Canvas, independent Image and Video
+Workbenches, prompt and asset libraries, private workflows, and a bounded 3D
+Director. It has no Project product object: Canvas is Canvas, while Image and
+Video remain usable with zero Canvases. A Canvas persists eight node kinds:
+text, image, video, audio, panorama, config, director, and group; generation is
+owned by media nodes plus auditable config nodes rather than fictional loop,
+compare, or output node types.
 
 Every model request uses an exact enabled NomiFun provider/model task: Chat for
 one-shot drafts and manually approved proposals, image generation/edit for
 T2I/I2I, video generation for T2V or one-image I2V, and speech synthesis for
-TTS. Project documents use revision CAS, generation tasks can reconcile after
-reload, and a self-contained project ZIP carries the referenced asset and
-Director-sidecar closure. The minimal Workflow AI previews a strict one-shot draft, then waits
-for the user to Apply it to the editor and explicitly Save; it does not create
-a public template, complex conversation, or automatic run.
+TTS. Canvas documents use revision CAS, Canvas tasks can reconcile after reload,
+and a version-2 Canvas ZIP carries the referenced asset and Director-sidecar
+closure while the reader remains compatible with version 1. Standalone task
+ownership and history use only `workbenchKind`; Image and Video preserve
+versioned session drafts without a Canvas binding. The UI/API contract is 21.
+The minimal Workflow AI previews a strict one-shot draft, then waits for the
+user to Apply it to the editor and explicitly Save; it does not create a public
+template, complex conversation, or automatic run.
 
 ### 🧠 Multi-Agent execution cluster — plan, schedule, supervise
 

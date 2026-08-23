@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { CANONICAL_UUID_V7 } from '@/common/types/ids';
-
 import {
   CreativeTaskContractError,
   isStandaloneWorkbenchTaskOwner,
@@ -20,7 +18,6 @@ import type {
 } from '../runtime';
 
 export interface StandaloneWorkbenchHistoryScope {
-  projectId: string;
   workbenchKind: CreativeStandaloneWorkbenchKind;
 }
 
@@ -54,13 +51,6 @@ const invalidResponse = (message: string, field: string): never => {
 };
 
 const assertScope = (scope: StandaloneWorkbenchHistoryScope): void => {
-  if (!CANONICAL_UUID_V7.test(scope.projectId)) {
-    throw new CreativeTaskContractError(
-      'invalid_request',
-      'Invalid standalone history projectId',
-      'scope.projectId'
-    );
-  }
   if (!WORKBENCH_KINDS.has(scope.workbenchKind)) {
     throw new CreativeTaskContractError(
       'invalid_request',
@@ -88,7 +78,6 @@ export function isExactStandaloneWorkbenchHistoryTask(
 ): boolean {
   return (
     isStandaloneWorkbenchTaskOwner(task.owner) &&
-    task.owner.projectId === scope.projectId &&
     task.owner.workbenchKind === scope.workbenchKind &&
     task.deletedAt === null &&
     taskMatchesWorkbenchKind(task, scope.workbenchKind)
@@ -156,7 +145,6 @@ const assertRetryInput = (
   if (
     task.inputs === null ||
     !isStandaloneWorkbenchTaskOwner(input.owner) ||
-    input.owner.projectId !== scope.projectId ||
     input.owner.workbenchKind !== scope.workbenchKind ||
     !sameCreativeTaskOwner(input.owner, task.owner) ||
     input.providerId !== task.providerId ||

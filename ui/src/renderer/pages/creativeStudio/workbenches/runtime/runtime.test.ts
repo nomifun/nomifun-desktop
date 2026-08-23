@@ -120,14 +120,13 @@ const standaloneOwner = (
   workbenchKind: CreativeStandaloneWorkbenchKind,
 ): CreativeTaskOwner => ({
   kind: "standalone_workbench",
-  projectId: PROJECT_ID,
   workbenchKind,
 });
 
 function imagePlan(owner?: CreativeTaskOwner) {
   return prepareImageWorkbenchRun({
     catalog: catalog("image_generation"),
-    projectId: PROJECT_ID,
+    ...(owner?.kind === "standalone_workbench" ? {} : { canvasId: PROJECT_ID }),
     ...ownerScope(owner),
     model: { providerId: PROVIDER_ID, model: "image_generation-model" },
     references: { bindings: [], assets: [] },
@@ -145,7 +144,7 @@ function imagePlan(owner?: CreativeTaskOwner) {
 function videoPlan(taskCount = 2, owner?: CreativeTaskOwner) {
   return prepareVideoWorkbenchRun({
     catalog: catalog("video_generation"),
-    projectId: PROJECT_ID,
+    ...(owner?.kind === "standalone_workbench" ? {} : { canvasId: PROJECT_ID }),
     ...ownerScope(owner),
     model: { providerId: PROVIDER_ID, model: "video_generation-model" },
     references: { bindings: [], assets: [] },
@@ -161,7 +160,7 @@ function videoPlan(taskCount = 2, owner?: CreativeTaskOwner) {
 function audioPlan(owner?: CreativeTaskOwner) {
   return prepareAudioWorkbenchRun({
     catalog: catalog("speech_synthesis"),
-    projectId: PROJECT_ID,
+    ...(owner?.kind === "standalone_workbench" ? {} : { canvasId: PROJECT_ID }),
     ...ownerScope(owner),
     model: {
       providerId: PROVIDER_ID,
@@ -645,7 +644,6 @@ describe("Creative workbench planning and presentation boundaries", () => {
   test("builds an exact standalone owner without inventing a config node", () => {
     const base = {
       catalog: catalog("image_generation"),
-      projectId: PROJECT_ID,
       model: {
         providerId: PROVIDER_ID,
         model: "image_generation-model",
@@ -664,22 +662,20 @@ describe("Creative workbench planning and presentation boundaries", () => {
       ...base,
       owner: {
         kind: "standalone_workbench",
-        projectId: PROJECT_ID,
         workbenchKind: "image",
       },
     });
     expect(plan.input.owner).toEqual({
       kind: "standalone_workbench",
-      projectId: PROJECT_ID,
       workbenchKind: "image",
     });
     const ambiguous = captureError(() =>
       prepareImageWorkbenchRun({
         ...base,
+        canvasId: PROJECT_ID,
         nodeId: NODE_ID,
         owner: {
           kind: "standalone_workbench",
-          projectId: PROJECT_ID,
           workbenchKind: "image",
         },
       })

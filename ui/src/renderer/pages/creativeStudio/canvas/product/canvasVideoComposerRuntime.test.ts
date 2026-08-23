@@ -104,7 +104,7 @@ const configNode = (
 
 const reference = (node = configNode()): CreativeTaskReference => ({
   taskId: TASK_ID,
-  owner: { kind: 'canvas_node', projectId: PROJECT_ID, nodeId: node.id },
+  owner: { kind: 'canvas_node', canvasId: PROJECT_ID, nodeId: node.id },
   providerId: PROVIDER_ID,
   model: 'video-v1',
   task: 'video_generation',

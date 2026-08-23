@@ -301,7 +301,7 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
         <div className={styles.emptyResults} data-video-result-state='empty'>
           <span className={styles.emptyIcon}>{historyLoading ? <Loading size={40} className={styles.spin} /> : historyError ? <Error size={40} /> : <VideoTwo size={40} />}</span>
           <strong>{historyLoading ? '正在恢复生成历史' : historyError ? '生成历史加载失败' : '还没有生成视频'}</strong>
-          <p>{historyLoading ? '正在读取当前项目的真实任务与结果。' : historyError ?? '输入提示词并选择视频模型，生成成果会出现在这里。'}</p>
+          <p>{historyLoading ? '正在读取当前工作台的真实任务与结果。' : historyError ?? '输入提示词并选择视频模型，生成成果会出现在这里。'}</p>
         </div>
       ) : (
         <div className={styles.resultGrid}>

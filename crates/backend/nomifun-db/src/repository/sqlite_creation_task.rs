@@ -138,8 +138,7 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
             && workflow_id.is_none()
             && workflow_run_id.is_none()
             && workflow_step_id.is_none();
-        let standalone_owner = project_id.is_some()
-            && workbench_kind.is_some()
+        let standalone_owner = workbench_kind.is_some()
             && node_id.is_none()
             && workflow_id.is_none()
             && workflow_run_id.is_none()
@@ -237,7 +236,6 @@ enum CanonicalTaskOwner {
         node_id: String,
     },
     StandaloneWorkbench {
-        project_id: String,
         workbench_kind: String,
     },
     WorkflowStep {
@@ -268,10 +266,7 @@ fn normalize_canonical_owner(owner: CreativeTaskOwnerRef<'_>) -> Result<Canonica
                 })?
                 .into_string(),
         }),
-        CreativeTaskOwnerRef::StandaloneWorkbench {
-            project_id,
-            workbench_kind,
-        } => {
+        CreativeTaskOwnerRef::StandaloneWorkbench { workbench_kind } => {
             let workbench_kind = match workbench_kind {
                 "image" | "video" | "audio" => workbench_kind.to_owned(),
                 other => {
@@ -281,13 +276,6 @@ fn normalize_canonical_owner(owner: CreativeTaskOwnerRef<'_>) -> Result<Canonica
                 }
             };
             Ok(CanonicalTaskOwner::StandaloneWorkbench {
-                project_id: CreativeStudioProjectId::parse(project_id)
-                    .map_err(|error| {
-                        DbError::Conflict(format!(
-                            "Creative task project_id '{project_id}' is not a canonical UUIDv7: {error}"
-                        ))
-                    })?
-                    .into_string(),
                 workbench_kind,
             })
         }
@@ -335,11 +323,9 @@ fn stored_owner_matches(stored: &CreationTaskDbRow, owner: &CanonicalTaskOwner) 
                 && stored.workflow_step_id.is_none()
         }
         CanonicalTaskOwner::StandaloneWorkbench {
-            project_id,
             workbench_kind,
         } => {
-            stored.project_id.as_deref() == Some(project_id)
-                && stored.workbench_kind.as_deref() == Some(workbench_kind)
+            stored.workbench_kind.as_deref() == Some(workbench_kind)
                 && stored.node_id.is_none()
                 && stored.workflow_id.is_none()
                 && stored.workflow_run_id.is_none()
@@ -483,10 +469,10 @@ async fn lock_canonical_owner(
     owner: &CanonicalTaskOwner,
 ) -> Result<(), DbError> {
     match owner {
-        CanonicalTaskOwner::CanvasNode { project_id, .. }
-        | CanonicalTaskOwner::StandaloneWorkbench { project_id, .. } => {
+        CanonicalTaskOwner::CanvasNode { project_id, .. } => {
             lock_creative_project(tx, project_id).await?;
         }
+        CanonicalTaskOwner::StandaloneWorkbench { .. } => {}
         CanonicalTaskOwner::WorkflowStep {
             workflow_id,
             workflow_run_id,
@@ -702,11 +688,8 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
                 None,
                 Some(node_id.as_str()),
             ),
-            CanonicalTaskOwner::StandaloneWorkbench {
-                project_id,
-                workbench_kind,
-            } => (
-                Some(project_id.as_str()),
+            CanonicalTaskOwner::StandaloneWorkbench { workbench_kind } => (
+                None,
                 Some(workbench_kind.as_str()),
                 None,
                 None,
@@ -792,12 +775,6 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         &self,
         params: ListStandaloneWorkbenchTasksParams<'_>,
     ) -> Result<Vec<CreationTaskRow>, DbError> {
-        let project_id = CreativeStudioProjectId::parse(params.project_id).map_err(|error| {
-            DbError::Conflict(format!(
-                "Creative task project_id {:?} is not a canonical UUIDv7: {error}",
-                params.project_id
-            ))
-        })?;
         if !matches!(params.workbench_kind, "image" | "video" | "audio") {
             return Err(DbError::Conflict(format!(
                 "Creative task workbench_kind {:?} is invalid",
@@ -822,15 +799,14 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         let rows = if let Some(before) = params.before {
             sqlx::query_as::<_, CreationTaskDbRow>(
                 "SELECT * FROM creation_tasks \
-                 WHERE project_id = ?1 AND workbench_kind = ?2 \
+                 WHERE workbench_kind = ?1 \
                    AND deleted_at IS NULL \
                    AND node_id IS NULL AND workflow_id IS NULL \
                    AND workflow_run_id IS NULL AND workflow_step_id IS NULL \
-                   AND (?3 = 0 OR status IN ('queued', 'running')) \
-                   AND (submitted_at < ?4 OR (submitted_at = ?4 AND creation_task_id < ?5)) \
-                 ORDER BY submitted_at DESC, creation_task_id DESC LIMIT ?6",
+                   AND (?2 = 0 OR status IN ('queued', 'running')) \
+                   AND (submitted_at < ?3 OR (submitted_at = ?3 AND creation_task_id < ?4)) \
+                 ORDER BY submitted_at DESC, creation_task_id DESC LIMIT ?5",
             )
-            .bind(project_id.as_str())
             .bind(params.workbench_kind)
             .bind(i64::from(params.active_only))
             .bind(before.submitted_at)
@@ -841,14 +817,13 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         } else {
             sqlx::query_as::<_, CreationTaskDbRow>(
                 "SELECT * FROM creation_tasks \
-                 WHERE project_id = ?1 AND workbench_kind = ?2 \
+                 WHERE workbench_kind = ?1 \
                    AND deleted_at IS NULL \
                    AND node_id IS NULL AND workflow_id IS NULL \
                    AND workflow_run_id IS NULL AND workflow_step_id IS NULL \
-                   AND (?3 = 0 OR status IN ('queued', 'running')) \
-                 ORDER BY submitted_at DESC, creation_task_id DESC LIMIT ?4",
+                   AND (?2 = 0 OR status IN ('queued', 'running')) \
+                 ORDER BY submitted_at DESC, creation_task_id DESC LIMIT ?3",
             )
-            .bind(project_id.as_str())
             .bind(params.workbench_kind)
             .bind(i64::from(params.active_only))
             .bind(fetch_limit)
@@ -862,12 +837,6 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         &self,
         params: RetireStandaloneWorkbenchTasksParams<'_>,
     ) -> Result<Vec<CreationTaskRow>, DbError> {
-        let project_id = CreativeStudioProjectId::parse(params.project_id).map_err(|error| {
-            DbError::Conflict(format!(
-                "Creative task project_id {:?} is not a canonical UUIDv7: {error}",
-                params.project_id
-            ))
-        })?;
         if !matches!(params.workbench_kind, "image" | "video" | "audio") {
             return Err(DbError::Conflict(format!(
                 "Creative task workbench_kind {:?} is invalid",
@@ -929,8 +898,7 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
             ));
         }
         for row in &rows {
-            let exact_owner = row.project_id.as_deref() == Some(project_id.as_str())
-                && row.workbench_kind.as_deref() == Some(params.workbench_kind)
+            let exact_owner = row.workbench_kind.as_deref() == Some(params.workbench_kind)
                 && row.node_id.is_none()
                 && row.workflow_id.is_none()
                 && row.workflow_run_id.is_none()
@@ -1347,7 +1315,7 @@ mod tests {
 
     fn standalone_creative_params<'a>(
         creation_task_id: &'a str,
-        project_id: &'a str,
+        _project_id: &'a str,
         workbench_kind: &'a str,
         provider_id: &'a str,
         input_bindings: &'a str,
@@ -1356,7 +1324,6 @@ mod tests {
         CreateCreativeTaskParams {
             creation_task_id,
             owner: CreativeTaskOwnerRef::StandaloneWorkbench {
-                project_id,
                 workbench_kind,
             },
             provider_id,
@@ -1517,7 +1484,6 @@ mod tests {
         let fingerprint = serde_json::json!({
             "owner": {
                 "kind": "standalone_workbench",
-                "project_id": project_id,
                 "workbench_kind": "video"
             },
             "inputs": serde_json::from_str::<Value>(&bindings).unwrap()
@@ -1536,7 +1502,7 @@ mod tests {
             .await
             .unwrap();
         assert!(created.inserted);
-        assert_eq!(created.row.project_id.as_deref(), Some(project_id.as_str()));
+        assert!(created.row.project_id.is_none());
         assert_eq!(created.row.workbench_kind.as_deref(), Some("video"));
         assert!(created.row.node_id.is_none());
         assert_eq!(created.row.input_bindings.as_deref(), Some(bindings.as_str()));
@@ -1587,7 +1553,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn standalone_page_uses_descending_two_column_cursor_and_exact_owner_scope() {
+    async fn standalone_page_merges_workbench_history_across_legacy_projects() {
         let (repo, db, provider_id) = repo().await;
         let project_id = seed_creative_project(&db).await;
         let other_project_id = seed_creative_project(&db).await;
@@ -1620,12 +1586,14 @@ mod tests {
             );
             params.submitted_at = 400;
             repo.get_or_create_creative_task(params).await.unwrap();
+            if kind == "video" {
+                matching.push((400, task_id));
+            }
         }
         matching.sort_by(|left, right| right.cmp(left));
 
         let first = repo
             .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
-                project_id: &project_id,
                 workbench_kind: "video",
                 active_only: false,
                 before: None,
@@ -1645,7 +1613,6 @@ mod tests {
         let visible_last = &first[1];
         let second = repo
             .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
-                project_id: &project_id,
                 workbench_kind: "video",
                 active_only: false,
                 before: Some(crate::repository::CreationTaskPageCursorRef {
@@ -1677,7 +1644,6 @@ mod tests {
         .unwrap();
         let active = repo
             .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
-                project_id: &project_id,
                 workbench_kind: "video",
                 active_only: true,
                 before: None,
@@ -1728,7 +1694,6 @@ mod tests {
         }
         let retired = repo
             .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
-                project_id: &project_id,
                 workbench_kind: "video",
                 task_ids: &ids[..2],
                 deleted_at: 500,
@@ -1759,7 +1724,6 @@ mod tests {
         assert_eq!(replay.row.deleted_at, Some(500));
         let visible = repo
             .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
-                project_id: &project_id,
                 workbench_kind: "video",
                 active_only: false,
                 before: None,
@@ -1772,7 +1736,6 @@ mod tests {
 
         let repeated = repo
             .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
-                project_id: &project_id,
                 workbench_kind: "video",
                 task_ids: &ids[..2],
                 deleted_at: 600,
@@ -1806,7 +1769,6 @@ mod tests {
         let mixed_terminal_ids = vec![ids[0].clone(), new_terminal_id.clone()];
         let mixed_terminal = repo
             .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
-                project_id: &project_id,
                 workbench_kind: "video",
                 task_ids: &mixed_terminal_ids,
                 deleted_at: 700,
@@ -1818,7 +1780,6 @@ mod tests {
 
         let mixed_live = repo
             .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
-                project_id: &project_id,
                 workbench_kind: "video",
                 task_ids: &[ids[0].clone(), ids[2].clone()],
                 deleted_at: 700,
@@ -1834,7 +1795,6 @@ mod tests {
 
         let wrong_owner = repo
             .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
-                project_id: &project_id,
                 workbench_kind: "image",
                 task_ids: &[ids[0].clone()],
                 deleted_at: 800,
@@ -1844,7 +1804,6 @@ mod tests {
         let missing_id = CreationTaskId::new().into_string();
         let missing = repo
             .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
-                project_id: &project_id,
                 workbench_kind: "video",
                 task_ids: &[missing_id],
                 deleted_at: 800,

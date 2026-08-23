@@ -14,7 +14,6 @@ import {
   useCreativeAssets,
   type CreativeAsset,
 } from '../../assets';
-import type { CreativeProjectDetail } from '../../domain';
 import {
   CreativeModelSelect,
   useNomiCreativeModelCatalog,
@@ -35,6 +34,14 @@ import {
   type StandaloneWorkbenchHistoryState,
 } from '../history';
 import {
+  createDefaultVideoWorkbenchDraft,
+  createVideoWorkbenchDraft,
+  hydrateStandaloneWorkbenchDraftReferences,
+  isExactWorkbenchDraftModelAvailable,
+  readStandaloneWorkbenchDraft,
+  writeStandaloneWorkbenchDraft,
+} from '../drafts';
+import {
   createVideoWorkbenchRuntimeProps,
   exactWorkbenchModelOptions,
   prepareStandaloneHistoryRetry,
@@ -50,7 +57,6 @@ import {
   StandaloneWorkbenchPage,
   StandaloneHistoryGate,
   StandaloneHistoryRetireDialog,
-  useStandaloneWorkbenchScope,
 } from './shared';
 import styles from './StandaloneWorkbenchProduct.module.css';
 
@@ -109,72 +115,31 @@ const videoControlsFromTask = (
   return { prompt, resolution: match.resolution, aspect: match.aspect, duration: String(seconds) };
 };
 
-const UnownedVideoWorkbench: React.FC<{
-  historyLoading?: boolean;
-  historyError?: string;
-}> = ({ historyLoading, historyError }) => {
-  const catalog = useNomiCreativeModelCatalog();
-  const [layout, setLayout] = useState<VideoWorkbenchLayout>('side');
-  const [prompt, setPrompt] = useState('');
-  const [model, setModel] = useState<CreativeModelSelectionRef | null>(null);
-  return (
-    <VideoWorkbench
-      layout={layout}
-      onLayoutChange={setLayout}
-      prompt={prompt}
-      onPromptChange={setPrompt}
-      onGenerate={() => undefined}
-      submitDisabled
-      references={[]}
-      addReferenceLabel='添加图片参考'
-      onAddReferences={() => undefined}
-      onRemoveReference={() => undefined}
-      modelSlot={
-        <CreativeModelSelect
-          catalog={catalog}
-          filter={{ capability: 'task', task: 'video_generation' }}
-          value={model}
-          onChange={setModel}
-          disabled
-        />
-      }
-      resolution='1080p'
-      resolutionOptions={RESOLUTIONS}
-      onResolutionChange={() => undefined}
-      size='16:9'
-      sizeOptions={ASPECTS}
-      onSizeChange={() => undefined}
-      duration='5'
-      durationOptions={DURATIONS}
-      onDurationChange={() => undefined}
-      taskCount={1}
-      onTaskCountChange={() => undefined}
-      onOpenParameters={() => undefined}
-      tasks={[]}
-      selectedTaskIds={[]}
-      onSelectedTaskIdsChange={() => undefined}
-      historyLoading={historyLoading}
-      historyError={historyError}
-    />
-  );
-};
-
 const OwnedVideoWorkbenchReady: React.FC<{
-  detail: CreativeProjectDetail;
   history: StandaloneWorkbenchHistoryState;
-}> = ({ detail, history }) => {
+}> = ({ history }) => {
   const navigate = useNavigate();
   const catalog = useNomiCreativeModelCatalog();
   const assets = useCreativeAssets({ pageSize: 200, query: { sort: 'updated_desc' } });
-  const [layout, setLayout] = useState<VideoWorkbenchLayout>('side');
-  const [prompt, setPrompt] = useState('');
-  const [model, setModel] = useState<CreativeModelSelectionRef | null>(null);
-  const [resolution, setResolution] = useState('1080p');
-  const [aspect, setAspect] = useState('16:9');
-  const [duration, setDuration] = useState('5');
-  const [taskCount, setTaskCount] = useState(1);
-  const [referenceIds, setReferenceIds] = useState<string[]>([]);
+  const [initialDraft] = useState(
+    () => readStandaloneWorkbenchDraft('video') ?? createDefaultVideoWorkbenchDraft()
+  );
+  const [layout, setLayout] = useState<VideoWorkbenchLayout>(initialDraft.layout);
+  const [prompt, setPrompt] = useState(initialDraft.prompt);
+  const [model, setModel] = useState<CreativeModelSelectionRef | null>(
+    initialDraft.model ? { ...initialDraft.model } : null
+  );
+  const [resolution, setResolution] = useState<string>(initialDraft.parameters.resolution);
+  const [aspect, setAspect] = useState<string>(initialDraft.parameters.aspect);
+  const [duration, setDuration] = useState<string>(initialDraft.parameters.duration);
+  const [taskCount, setTaskCount] = useState<number>(initialDraft.parameters.taskCount);
+  const [referenceIds, setReferenceIds] = useState<string[]>([
+    ...initialDraft.referenceAssetIds,
+  ]);
   const [hydratedReferences, setHydratedReferences] = useState<CreativeAsset[]>([]);
+  const [draftReferencesRestoring, setDraftReferencesRestoring] = useState(
+    initialDraft.referenceAssetIds.length > 0
+  );
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
   const [retireTaskIds, setRetireTaskIds] = useState<string[]>([]);
   const [retiredTaskIds, setRetiredTaskIds] = useState<string[]>([]);
@@ -183,11 +148,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const loadGenerationRef = useRef(0);
-  const projectId = detail.project.projectId;
-  const historyScope = useMemo(
-    () => ({ projectId, workbenchKind: 'video' as const }),
-    [projectId]
-  );
+  const historyScope = useMemo(() => ({ workbenchKind: 'video' as const }), []);
   const durableTasks = useMemo(
     () =>
       combineStandaloneHistoryTasks(history.tasks, history.activeTasks).filter(
@@ -211,7 +172,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
     [history.reload]
   );
   const runtime = useVideoWorkbenchRuntime({
-    scopeKey: `${projectId}:standalone-video`,
+    scopeKey: 'standalone-video',
     tasks: creativeTaskClient,
     assets: creativeAssetClient,
     initialResumeRequests,
@@ -237,9 +198,63 @@ const OwnedVideoWorkbenchReady: React.FC<{
   ) || presentationRuntime.submittingCount > 0 || presentationRuntime.recoveringCount > 0;
 
   useEffect(() => {
+    const restoredReferenceIds = initialDraft.referenceAssetIds;
+    if (restoredReferenceIds.length === 0) return;
+    const restoredReferenceSet = new Set(restoredReferenceIds);
+    let canceled = false;
+    void hydrateStandaloneWorkbenchDraftReferences(
+      'video',
+      restoredReferenceIds,
+      creativeAssetClient
+    )
+      .then((hydrated) => {
+        if (canceled) return;
+        const retained = new Set(hydrated.retainedReferenceAssetIds);
+        setHydratedReferences((current) => {
+          const next = new Map(current.map((asset) => [asset.id, asset]));
+          for (const assetId of restoredReferenceSet) next.delete(assetId);
+          for (const asset of hydrated.assets) next.set(asset.id, asset);
+          return [...next.values()];
+        });
+        setReferenceIds((current) =>
+          current.filter(
+            (assetId) => !restoredReferenceSet.has(assetId) || retained.has(assetId)
+          )
+        );
+        setDraftReferencesRestoring(false);
+      })
+      .catch(() => {
+        if (canceled) return;
+        setReferenceIds((current) =>
+          current.filter((assetId) => !restoredReferenceSet.has(assetId))
+        );
+        setDraftReferencesRestoring(false);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [initialDraft.referenceAssetIds]);
+
+  useEffect(() => {
+    writeStandaloneWorkbenchDraft(
+      createVideoWorkbenchDraft({
+        layout,
+        prompt,
+        model,
+        resolution,
+        aspect,
+        duration,
+        taskCount,
+        referenceAssetIds: referenceIds,
+      })
+    );
+  }, [aspect, duration, layout, model, prompt, referenceIds, resolution, taskCount]);
+
+  useEffect(() => {
     if (!model || catalog.status !== 'ready') return;
-    const stillAvailable = exactWorkbenchModelOptions(catalog, 'video_generation').some(
-      (option) => option.providerId === model.providerId && option.model === model.model
+    const stillAvailable = isExactWorkbenchDraftModelAvailable(
+      model,
+      exactWorkbenchModelOptions(catalog, 'video_generation')
     );
     if (!stillAvailable) setModel(null);
   }, [catalog, model]);
@@ -262,6 +277,10 @@ const OwnedVideoWorkbenchReady: React.FC<{
 
   const generate = async (): Promise<void> => {
     setError(null);
+    if (draftReferencesRestoring) {
+      setError('参考素材草稿仍在恢复，未发起生成。');
+      return;
+    }
     if (!model || catalog.status !== 'ready') {
       setError('没有可用且明确选择的真实视频模型，未发起生成。');
       return;
@@ -279,8 +298,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
       const dimensions = videoDimensions(resolution, aspect);
       await runtime.generate({
         catalog,
-        projectId,
-        owner: standaloneWorkbenchOwner(projectId, 'video'),
+        owner: standaloneWorkbenchOwner('video'),
         model,
         references: {
           assets: references,
@@ -383,7 +401,6 @@ const OwnedVideoWorkbenchReady: React.FC<{
     setRetireError(null);
     try {
       const result = await creativeTaskHistoryClient.retireStandalone({
-        projectId,
         workbenchKind: 'video',
         taskIds: retireTaskIds,
       });
@@ -413,7 +430,11 @@ const OwnedVideoWorkbenchReady: React.FC<{
     onLayoutChange: setLayout,
     prompt,
     onPromptChange: setPrompt,
-    submitDisabled: catalog.status !== 'ready' || model === null || history.refreshing,
+    submitDisabled:
+      draftReferencesRestoring ||
+      catalog.status !== 'ready' ||
+      model === null ||
+      history.refreshing,
     references: videoWorkbenchReferencesFromAssets(references),
     addReferenceLabel: '添加图片参考',
     onAddReferences: () => setPickerOpen(true),
@@ -596,11 +617,8 @@ const OwnedVideoWorkbenchReady: React.FC<{
   );
 };
 
-const OwnedVideoWorkbench: React.FC<{ detail: CreativeProjectDetail }> = ({ detail }) => {
-  const historyScope = useMemo(
-    () => ({ projectId: detail.project.projectId, workbenchKind: 'video' as const }),
-    [detail.project.projectId]
-  );
+const OwnedVideoWorkbench: React.FC = () => {
+  const historyScope = useMemo(() => ({ workbenchKind: 'video' as const }), []);
   const history = useStandaloneWorkbenchHistory(historyScope);
   if (history.status !== 'ready') {
     return (
@@ -611,19 +629,14 @@ const OwnedVideoWorkbench: React.FC<{ detail: CreativeProjectDetail }> = ({ deta
       />
     );
   }
-  return <OwnedVideoWorkbenchReady detail={detail} history={history} />;
+  return <OwnedVideoWorkbenchReady history={history} />;
 };
 
 /** Router-ready, prop-free standalone video product. */
 const VideoWorkbenchProductRoute: React.FC = () => {
-  const scope = useStandaloneWorkbenchScope();
   return (
-    <StandaloneWorkbenchPage scope={scope} error={null}>
-      {scope.state === 'ready' && scope.detail ? (
-        <OwnedVideoWorkbench key={scope.detail.project.projectId} detail={scope.detail} />
-      ) : (
-        <UnownedVideoWorkbench />
-      )}
+    <StandaloneWorkbenchPage error={null}>
+      <OwnedVideoWorkbench />
     </StandaloneWorkbenchPage>
   );
 };

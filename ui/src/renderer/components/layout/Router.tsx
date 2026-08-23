@@ -4,7 +4,10 @@ import AppLoader from '@renderer/components/layout/AppLoader';
 import ProtectedAppRuntime from '@renderer/components/layout/ProtectedAppRuntime';
 import RouteErrorBoundary from '@renderer/components/layout/RouteErrorBoundary';
 import { useAuth } from '@renderer/hooks/context/AuthContext';
-import { CREATIVE_STUDIO_ROOT_PATH } from '@renderer/pages/creativeStudio/app/routes';
+import {
+  CREATIVE_STUDIO_CANVASES_PATH,
+  CREATIVE_STUDIO_ROOT_PATH,
+} from '@renderer/pages/creativeStudio/app/routes';
 const Conversation = React.lazy(() => import('@renderer/pages/conversation'));
 const Guid = React.lazy(() => import('@renderer/pages/guid'));
 const PresetSettings = React.lazy(() => import('@renderer/pages/settings/PresetSettings'));
@@ -38,8 +41,8 @@ const CreativeStudioFocusShell = React.lazy(
 const CreativeStudioHomePage = React.lazy(
   () => import('@renderer/pages/creativeStudio/app/CreativeStudioHomePage')
 );
-const CreativeStudioProjectsRoute = React.lazy(
-  () => import('@renderer/pages/creativeStudio/projects/CreativeStudioProjectsRoute')
+const CreativeStudioCanvasesRoute = React.lazy(
+  () => import('@renderer/pages/creativeStudio/canvases/CreativeStudioCanvasesRoute')
 );
 const CreativeStudioPromptsRoute = React.lazy(
   () => import('@renderer/pages/creativeStudio/prompts/page/CreativeStudioPromptsRoute')
@@ -48,7 +51,7 @@ const CreativeStudioAssetsRoute = React.lazy(
   () => import('@renderer/pages/creativeStudio/assets/page/CreativeAssetLibraryPage')
 );
 const CreativeStudioCanvasRoute = React.lazy(
-  () => import('@renderer/pages/creativeStudio/canvas/product')
+  () => import('@renderer/pages/creativeStudio/canvases/CreativeCanvasProductRoute')
 );
 const CreativeStudioImageWorkbenchRoute = React.lazy(() =>
   import('@renderer/pages/creativeStudio/workbenches/product').then((module) => ({
@@ -60,7 +63,9 @@ const CreativeStudioVideoWorkbenchRoute = React.lazy(() =>
     default: module.VideoWorkbenchProductRoute,
   }))
 );
-const CreativeStudioDirectorRoute = React.lazy(() => import('@renderer/pages/creativeStudio/director/product'));
+const CreativeStudioDirectorRoute = React.lazy(
+  () => import('@renderer/pages/creativeStudio/canvases/CreativeCanvasDirectorRoute')
+);
 const CreativeStudioWorkflowRoute = React.lazy(
   () => import('@renderer/pages/creativeStudio/workflows/page/CreativeWorkflowRoute')
 );
@@ -123,6 +128,16 @@ const LegacyExtensionsRedirect: React.FC = () => {
   return <Navigate to={withSearch('/skills', searchParams)} replace />;
 };
 
+const LegacyCreativeStudioProjectsRedirect: React.FC = () => {
+  const { search, hash } = useLocation();
+  return (
+    <Navigate
+      to={`${CREATIVE_STUDIO_CANVASES_PATH}${search}${hash}`}
+      replace
+    />
+  );
+};
+
 // Legacy `/requirements/:id/edit` deep links → open the workspace with the
 // requirement pre-selected in edit mode (the new shell hosts editing in a
 // drawer, not a standalone form page).
@@ -166,9 +181,10 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             {/* Creative Studio reuses the application titlebar and swaps the primary rail like Settings. */}
             <Route path={CREATIVE_STUDIO_ROOT_PATH} element={withRouteFallback(CreativeStudioFocusShell)}>
               <Route index element={withRouteFallback(CreativeStudioHomePage)} />
-              <Route path='projects' element={withRouteFallback(CreativeStudioProjectsRoute)} />
-              <Route path='canvas/:projectId' element={withRouteFallback(CreativeStudioCanvasRoute)} />
-              <Route path='director/:projectId' element={withRouteFallback(CreativeStudioDirectorRoute)} />
+              <Route path='canvases' element={withRouteFallback(CreativeStudioCanvasesRoute)} />
+              <Route path='projects' element={<LegacyCreativeStudioProjectsRedirect />} />
+              <Route path='canvas/:canvasId' element={withRouteFallback(CreativeStudioCanvasRoute)} />
+              <Route path='director/:canvasId' element={withRouteFallback(CreativeStudioDirectorRoute)} />
               <Route path='image' element={withRouteFallback(CreativeStudioImageWorkbenchRoute)} />
               <Route path='video' element={withRouteFallback(CreativeStudioVideoWorkbenchRoute)} />
               <Route path='prompts' element={withRouteFallback(CreativeStudioPromptsRoute)} />

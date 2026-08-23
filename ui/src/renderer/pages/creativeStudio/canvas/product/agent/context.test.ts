@@ -82,7 +82,7 @@ describe('Creative Canvas Agent context', () => {
   test('orders selected nodes before one-hop neighbors and excludes unrelated nodes', () => {
     const context = buildCreativeCanvasAgentContext({
       document: fixture(),
-      projectRevision: '7',
+      canvasRevision: '7',
       selectedNodeIds: [nodeId(3), nodeId(1), nodeId(3), nodeId(999)],
     });
     expect(context.selectedNodeIds).toEqual([nodeId(1), nodeId(3)]);
@@ -110,7 +110,7 @@ describe('Creative Canvas Agent context', () => {
     );
     const context = buildCreativeCanvasAgentContext({
       document,
-      projectRevision: '8',
+      canvasRevision: '8',
       selectedNodeIds: document.nodes.map((node) => node.id),
     });
     expect(context.nodes).toHaveLength(MAX_CREATIVE_CANVAS_AGENT_CONTEXT_NODES);
@@ -162,7 +162,7 @@ describe('Creative Canvas Agent context', () => {
     ];
     const context = buildCreativeCanvasAgentContext({
       document,
-      projectRevision: '8',
+      canvasRevision: '8',
       selectedNodeIds: [nodeId(41)],
     });
     expect(context.truncated).toBe(true);
@@ -183,7 +183,7 @@ describe('Creative Canvas Agent context', () => {
   test('serializes a deterministic approval-only planning envelope', () => {
     const context = buildCreativeCanvasAgentContext({
       document: fixture(),
-      projectRevision: '9',
+      canvasRevision: '9',
       selectedNodeIds: [nodeId(1)],
     });
     const first = serializeCreativeCanvasAgentModelInput({
@@ -215,7 +215,7 @@ describe('Creative Canvas Agent context', () => {
   test('applies composer exclusions without reintroducing nodes or dangling connections', () => {
     const context = buildCreativeCanvasAgentContext({
       document: fixture(),
-      projectRevision: '10',
+      canvasRevision: '10',
       selectedNodeIds: [nodeId(1), nodeId(3)],
     });
     const selected = selectCreativeCanvasAgentContextNodes(context, [nodeId(3), nodeId(1)]);

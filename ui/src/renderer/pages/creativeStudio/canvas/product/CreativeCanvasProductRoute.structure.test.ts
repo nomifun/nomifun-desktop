@@ -23,7 +23,11 @@ const editorStyle = readFileSync(
 
 describe('Creative Canvas product route composition', () => {
   test('is a no-props nested route over the canonical Editor store', () => {
-    expect(source.includes('useParams<{ projectId: string }>()')).toBe(true);
+    expect(source.includes('useParams<{ canvasId: string }>()')).toBe(true);
+    expect(source.includes('useParams<{ projectId: string }>()')).toBe(false);
+    expect(source.includes('const projectId = canvasId;')).toBe(true);
+    expect(source.includes('data-canvas-id={canvasId}')).toBe(true);
+    expect(source.includes('data-project-id={projectId}')).toBe(false);
     expect(source.includes('projectId={projectId}')).toBe(true);
     expect(source.includes('<CreativeCanvasChrome')).toBe(true);
     expect(source.includes('<CreativeCanvasEditor')).toBe(true);
@@ -193,8 +197,15 @@ describe('Creative Canvas product route composition', () => {
     expect(
       wiring.includes("import('@renderer/pages/creativeStudio/canvas/product')")
     ).toBe(true);
-    expect(wiring.includes('path="canvas/:projectId"')).toBe(true);
-    expect(wiring.includes('CREATIVE_STUDIO_PROJECTS_PATH')).toBe(true);
+    expect(wiring.includes('path="canvas/:canvasId"')).toBe(true);
+    expect(wiring.includes('path="canvas/:projectId"')).toBe(false);
+    expect(wiring.includes('/workshop/canvases')).toBe(true);
+    expect(wiring.includes('/api/creative-studio/canvases/{canvasId}/agent-ops')).toBe(
+      true
+    );
+    expect(wiring.includes('CanvasNode { canvasId, nodeId }')).toBe(true);
+    expect(wiring.includes('canvas_id, node_id')).toBe(true);
+    expect(wiring.includes('## Compatibility only')).toBe(true);
     expect(wiring.includes('image_edit` / `i2i')).toBe(true);
     expect(wiring.includes('authoritative 404')).toBe(true);
     expect(wiring.includes('nomifun.creative-studio.canvas-ops/v1')).toBe(true);

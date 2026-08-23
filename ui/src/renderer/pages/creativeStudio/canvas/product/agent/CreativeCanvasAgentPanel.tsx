@@ -68,7 +68,7 @@ export interface CreativeCanvasAgentPanelHandle {
 }
 
 export interface CreativeCanvasAgentPanelProps {
-  projectId: string;
+  canvasId: string;
   hydrated: boolean;
   sessions: readonly CreativeChatSessionReference[];
   activeSessionId: string | null;
@@ -383,7 +383,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
         try {
           const outcome = await controller.runTurn(
             {
-              projectId: props.projectId,
+              canvasId: props.canvasId,
               sessionId: session.id,
               idempotencyKey: pending.idempotencyKey,
               prompt: pending.prompt,
@@ -456,7 +456,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       currentRunRef.current = operation;
       await operation;
     },
-    [controller, createId, now, persistSession, props.projectId, replaceRunningAssistant]
+    [controller, createId, now, persistSession, props.canvasId, replaceRunningAssistant]
   );
 
   useEffect(() => {
@@ -493,7 +493,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
     void (async () => {
       try {
         const resolution = await resolver({
-          projectId: props.projectId,
+          canvasId: props.canvasId,
           sessionId: activeSession.id,
           model: activeModel!,
           pendingTurnIdempotencyKey: activeSession.pendingTurn?.idempotencyKey ?? null,
@@ -533,7 +533,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       }
     })();
     return () => abort.abort();
-  }, [activeSignature, loadRequest, now, persistSession, props.hydrated, props.projectId, resolver, runPersistedTurn]);
+  }, [activeSignature, loadRequest, now, persistSession, props.canvasId, resolver, runPersistedTurn]);
 
   const handleNewSession = useCallback(() => {
     if (

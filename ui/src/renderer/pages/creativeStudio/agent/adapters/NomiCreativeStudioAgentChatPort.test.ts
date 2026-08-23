@@ -232,7 +232,7 @@ const matchingResolver = (overrides: ResolverOverrides = {}): NomiCreativeStudio
     return {
       binding: {
         ownership: 'creative-studio-exclusive',
-        projectId: input.projectId,
+        canvasId: input.canvasId,
         sessionId: input.sessionId,
         conversationId,
         model: input.model,
@@ -250,7 +250,7 @@ const request = (
   signal: AbortSignal,
   overrides: Partial<Omit<CreativeStudioAgentTurnRequest, 'signal'>> = {}
 ): CreativeStudioAgentTurnRequest => ({
-  projectId: '0190f5fe-7c00-7a00-8000-000000000107',
+  canvasId: '0190f5fe-7c00-7a00-8000-000000000107',
   sessionId: '0190f5fe-7c00-7a00-8000-000000000108',
   idempotencyKey,
   prompt: displayPrompt,
@@ -379,7 +379,7 @@ describe('NomiCreativeStudioAgentChatPort', () => {
     }
   });
 
-  test('fails before send when project/session/model/history binding is not exact', async () => {
+  test('fails before send when Canvas/session/model/history binding is not exact', async () => {
     const transport = new FakeTransport();
     const port = createNomiCreativeStudioAgentChatPort({
       resolveSession: matchingResolver({ binding: { historyKey: 'different-history' } }),

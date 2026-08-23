@@ -29,7 +29,7 @@ export interface CreativeCanvasChromeSlots {
 }
 
 export interface CreativeCanvasChromeProps {
-  projectTitle: string;
+  canvasTitle: string;
   saveStatus: CreativeCanvasChromeSaveStatus;
   saveMessage?: string;
   tool: CreativeCanvasChromeTool;
@@ -45,7 +45,7 @@ export interface CreativeCanvasChromeProps {
   disabled?: boolean;
   className?: string;
   slots?: CreativeCanvasChromeSlots;
-  onBackToProjects(): void;
+  onBackToCanvases(): void;
   onToolChange(tool: CreativeCanvasChromeTool): void;
   onAddNode(kind: CreativeCanvasChromeNodeKind): void;
   onBackgroundChange(background: CreativeCanvasChromeBackground): void;

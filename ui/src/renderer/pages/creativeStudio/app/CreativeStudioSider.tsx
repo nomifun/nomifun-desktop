@@ -23,8 +23,8 @@ import { getSiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
 
 import {
   CREATIVE_STUDIO_ASSETS_PATH,
+  CREATIVE_STUDIO_CANVASES_PATH,
   CREATIVE_STUDIO_IMAGE_PATH,
-  CREATIVE_STUDIO_PROJECTS_PATH,
   CREATIVE_STUDIO_PROMPTS_PATH,
   CREATIVE_STUDIO_ROOT_PATH,
   CREATIVE_STUDIO_VIDEO_PATH,
@@ -61,7 +61,8 @@ const CreativeStudioSider: React.FC<CreativeStudioSiderProps> = ({
   const { t } = useTranslation();
   const { pathname } = useLocation();
   const section = creativeStudioSectionForPath(pathname);
-  const activeSection = section === 'canvas' || section === 'director' ? 'projects' : section;
+  const activeSection =
+    section === 'canvas' || section === 'director' ? 'canvases' : section;
   const siderTooltipProps = getSiderTooltipProps(tooltipEnabled);
 
   const navigation = useMemo<NavigationItem[]>(
@@ -73,9 +74,9 @@ const CreativeStudioSider: React.FC<CreativeStudioSiderProps> = ({
         icon: <FolderOpen />,
       },
       {
-        section: 'projects',
-        path: CREATIVE_STUDIO_PROJECTS_PATH,
-        label: t('creativeStudio.navigation.projects'),
+        section: 'canvases',
+        path: CREATIVE_STUDIO_CANVASES_PATH,
+        label: t('creativeStudio.navigation.canvases'),
         icon: <FullScreen />,
       },
       {

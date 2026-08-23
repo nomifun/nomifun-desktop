@@ -894,8 +894,8 @@ export const CreativeCanvasAssistantUnwiredPanel: React.FC<{ className?: string 
     kind='assistant'
     className={className}
     title='创作 Agent 尚未连接'
-    description='当前没有可验证的项目专属会话绑定，因此不会发送消息或复用主聊天会话。'
-    detail='需要接入 project/session resolver、真实消息历史和独占会话所有权后才能启用。'
+    description='当前没有可验证的画布专属会话绑定，因此不会发送消息或复用主聊天会话。'
+    detail='需要接入 canvas/session resolver、真实消息历史和独占会话所有权后才能启用。'
   />
 );
 
@@ -906,7 +906,7 @@ export const CreativeCanvasWorkflowUnwiredPanel: React.FC<{ className?: string }
     kind='workflows'
     className={className}
     title='工作流尚未连接'
-    description='当前项目文档没有工作流数据源，本面板不会显示示例流程或虚构运行状态。'
+    description='当前画布文档没有工作流数据源，本面板不会显示示例流程或虚构运行状态。'
   />
 );
 

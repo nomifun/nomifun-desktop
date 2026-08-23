@@ -410,7 +410,7 @@ export function prepareCanvasAudioCompose(input: {
   );
   const plan = prepareAudioWorkbenchRun({
     catalog: input.catalog,
-    projectId: input.projectId,
+    canvasId: input.projectId,
     nodeId: base.id,
     model: input.model,
     references: { assets: [], bindings: [] },
@@ -485,9 +485,9 @@ export function canvasAudioComposeConfigForReference(
 ): ConfigNode {
   if (
     !isCanvasNodeTaskOwner(reference.owner) ||
-    reference.owner.projectId !== document.projectId
+    reference.owner.canvasId !== document.projectId
   ) {
-    throw new Error('音频创作任务不属于当前画布项目。');
+      throw new Error('音频创作任务不属于当前画布。');
   }
   const owner = reference.owner;
   const node = document.nodes.find((candidate) => candidate.id === owner.nodeId);

@@ -14,7 +14,9 @@ const source = readFileSync(
 
 describe("CreativeDirectorProductRoute structure", () => {
   test("owns route identity, project CAS, real assets, runtime, and leave gate", () => {
-    expect(source.includes("useParams<{ projectId: string }>()")).toBe(true);
+    expect(source.includes("useParams<{ canvasId: string }>()")).toBe(true);
+    expect(source.includes("useParams<{ projectId: string }>()")).toBe(false);
+    expect(source.includes("const projectId = canvasId;")).toBe(true);
     expect(source.includes("creativeProjectRepository.load(projectId)")).toBe(
       true,
     );
@@ -27,6 +29,8 @@ describe("CreativeDirectorProductRoute structure", () => {
     expect(source.includes("creativeStudioCanvasProjectPath(projectId)")).toBe(
       true,
     );
+    expect(source.includes("data-canvas-id={canvasId}")).toBe(true);
+    expect(source.includes("data-project-id={projectId}")).toBe(false);
     expect(source.includes("返回画布")).toBe(true);
   });
 

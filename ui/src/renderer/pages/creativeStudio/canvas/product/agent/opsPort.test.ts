@@ -14,8 +14,8 @@ import {
   type CreativeCanvasAgentOpsHttpRequest,
 } from './opsPort';
 
-const PROJECT_ID = '0190f5fe-7c00-7a00-8000-000000000901';
-const OTHER_PROJECT_ID = '0190f5fe-7c00-7a00-8000-000000000902';
+const CANVAS_ID = '0190f5fe-7c00-7a00-8000-000000000901';
+const OTHER_CANVAS_ID = '0190f5fe-7c00-7a00-8000-000000000902';
 const ASSISTANT_MESSAGE_ID = '0190f5fe-7c00-7a00-8000-000000000908';
 const NODE_A = '0190f5fe-7c00-7a00-8000-000000000903';
 const NODE_B = '0190f5fe-7c00-7a00-8000-000000000904';
@@ -53,7 +53,7 @@ const results: CreativeCanvasAgentOpResult[] = [
 ];
 
 const summary = (overrides: Record<string, unknown> = {}) => ({
-  projectId: PROJECT_ID,
+  canvasId: CANVAS_ID,
   title: 'Agent canvas',
   revision: '8',
   nodeCount: 3,
@@ -64,7 +64,7 @@ const summary = (overrides: Record<string, unknown> = {}) => ({
 });
 
 const appliedResponse = (overrides: Record<string, unknown> = {}) => ({
-  project: summary(),
+  canvas: summary(),
   ops: results,
   replayed: false,
   appliedRevision: '8',
@@ -89,7 +89,7 @@ describe('Creative Canvas Agent operations HTTP port', () => {
     };
 
     const applied = await createCreativeCanvasAgentOpsPort(request).apply({
-      projectId: PROJECT_ID,
+      canvasId: CANVAS_ID,
       assistantMessageId: ASSISTANT_MESSAGE_ID,
       expectedRevision: '7',
       ops,
@@ -98,7 +98,7 @@ describe('Creative Canvas Agent operations HTTP port', () => {
     expect(calls).toEqual([
       {
         method: 'POST',
-        path: `/api/creative-studio/projects/${PROJECT_ID}/agent-ops`,
+        path: `/api/creative-studio/canvases/${CANVAS_ID}/agent-ops`,
         body: { assistantMessageId: ASSISTANT_MESSAGE_ID, expectedRevision: '7', ops },
       },
     ]);
@@ -118,7 +118,7 @@ describe('Creative Canvas Agent operations HTTP port', () => {
       };
       const caught = await captureAsyncError(() =>
         createCreativeCanvasAgentOpsPort(request).apply({
-          projectId: PROJECT_ID,
+          canvasId: CANVAS_ID,
           assistantMessageId: ASSISTANT_MESSAGE_ID,
           expectedRevision: '7',
           ops: [ops[2]!],
@@ -132,13 +132,13 @@ describe('Creative Canvas Agent operations HTTP port', () => {
   test('accepts a durable replay without requiring a second revision increment', async () => {
     const replayed = await createCreativeCanvasAgentOpsPort(async () =>
       appliedResponse({
-        project: summary({ revision: '12' }),
+        canvas: summary({ revision: '12' }),
         ops: [results[2]],
         replayed: true,
         appliedRevision: '8',
       })
     ).apply({
-      projectId: PROJECT_ID,
+      canvasId: CANVAS_ID,
       assistantMessageId: ASSISTANT_MESSAGE_ID,
       expectedRevision: '12',
       ops: [ops[2]!],
@@ -146,7 +146,7 @@ describe('Creative Canvas Agent operations HTTP port', () => {
 
     expect(replayed).toEqual(
       appliedResponse({
-        project: summary({ revision: '12' }),
+        canvas: summary({ revision: '12' }),
         ops: [results[2]],
         replayed: true,
         appliedRevision: '8',
@@ -155,7 +155,7 @@ describe('Creative Canvas Agent operations HTTP port', () => {
 
     const regressed = createCreativeCanvasAgentOpsPort(async () =>
       appliedResponse({
-        project: summary({ revision: '7' }),
+        canvas: summary({ revision: '7' }),
         ops: [results[2]],
         replayed: true,
         appliedRevision: '8',
@@ -163,45 +163,45 @@ describe('Creative Canvas Agent operations HTTP port', () => {
     );
     const error = await captureAsyncError(() =>
       regressed.apply({
-        projectId: PROJECT_ID,
+        canvasId: CANVAS_ID,
         assistantMessageId: ASSISTANT_MESSAGE_ID,
         expectedRevision: '7',
         ops: [ops[2]!],
       })
     );
     expect(error instanceof CreativeStudioContractError).toBe(true);
-    expect((error as CreativeStudioContractError).path).toBe('$.project.revision');
+    expect((error as CreativeStudioContractError).path).toBe('$.canvas.revision');
   });
 
-  test('rejects a foreign project and a revision that did not advance exactly once', async () => {
+  test('rejects a foreign canvas and a revision that did not advance exactly once', async () => {
     const foreign = createCreativeCanvasAgentOpsPort(async () =>
       appliedResponse({
-        project: summary({ projectId: OTHER_PROJECT_ID }),
+        canvas: summary({ canvasId: OTHER_CANVAS_ID }),
         ops: [results[2]],
       })
     );
     const foreignError = await captureAsyncError(() =>
       foreign.apply({
-        projectId: PROJECT_ID,
+        canvasId: CANVAS_ID,
         assistantMessageId: ASSISTANT_MESSAGE_ID,
         expectedRevision: '7',
         ops: [ops[2]!],
       })
     );
     expect(foreignError instanceof CreativeStudioContractError).toBe(true);
-    expect((foreignError as CreativeStudioContractError).code).toBe('PROJECT_MISMATCH');
+    expect((foreignError as CreativeStudioContractError).code).toBe('CANVAS_MISMATCH');
 
     for (const revision of ['7', '9', '9223372036854775807']) {
       const invalidRevision = createCreativeCanvasAgentOpsPort(async () =>
         appliedResponse({
-          project: summary({ revision }),
+          canvas: summary({ revision }),
           ops: [results[2]],
           appliedRevision: revision,
         })
       );
       const error = await captureAsyncError(() =>
         invalidRevision.apply({
-          projectId: PROJECT_ID,
+          canvasId: CANVAS_ID,
           assistantMessageId: ASSISTANT_MESSAGE_ID,
           expectedRevision: '7',
           ops: [ops[2]!],
@@ -215,19 +215,19 @@ describe('Creative Canvas Agent operations HTTP port', () => {
     const preciseRevision = (BigInt(largeRevision) + 1n).toString();
     const precise = createCreativeCanvasAgentOpsPort(async () =>
       appliedResponse({
-        project: summary({ revision: preciseRevision }),
+        canvas: summary({ revision: preciseRevision }),
         ops: [results[2]],
         appliedRevision: preciseRevision,
       })
     );
     const largeApplied = await precise.apply({
-      projectId: PROJECT_ID,
+      canvasId: CANVAS_ID,
       assistantMessageId: ASSISTANT_MESSAGE_ID,
       expectedRevision: largeRevision,
       ops: [ops[2]!],
     });
     expect(largeApplied).toEqual({
-      project: summary({ revision: preciseRevision }),
+      canvas: summary({ revision: preciseRevision }),
       ops: [results[2]],
       replayed: false,
       appliedRevision: preciseRevision,
@@ -247,7 +247,7 @@ describe('Creative Canvas Agent operations HTTP port', () => {
       const port = createCreativeCanvasAgentOpsPort(async () => response);
       const error = await captureAsyncError(() =>
         port.apply({
-          projectId: PROJECT_ID,
+          canvasId: CANVAS_ID,
           assistantMessageId: ASSISTANT_MESSAGE_ID,
           expectedRevision: '7',
           ops: [ops[2]!],
@@ -266,43 +266,43 @@ describe('Creative Canvas Agent operations HTTP port', () => {
 
     for (const input of [
       {
-        projectId: 'legacy-project',
+        canvasId: 'legacy-canvas',
         assistantMessageId: ASSISTANT_MESSAGE_ID,
         expectedRevision: '7',
         ops: [ops[2]!],
       },
       {
-        projectId: PROJECT_ID,
+        canvasId: CANVAS_ID,
         assistantMessageId: 'legacy-message',
         expectedRevision: '7',
         ops: [ops[2]!],
       },
       {
-        projectId: PROJECT_ID,
+        canvasId: CANVAS_ID,
         assistantMessageId: ASSISTANT_MESSAGE_ID,
         expectedRevision: '0',
         ops: [ops[2]!],
       },
       {
-        projectId: PROJECT_ID,
+        canvasId: CANVAS_ID,
         assistantMessageId: ASSISTANT_MESSAGE_ID,
         expectedRevision: '07',
         ops: [ops[2]!],
       },
       {
-        projectId: PROJECT_ID,
+        canvasId: CANVAS_ID,
         assistantMessageId: ASSISTANT_MESSAGE_ID,
         expectedRevision: '9223372036854775807',
         ops: [ops[2]!],
       },
       {
-        projectId: PROJECT_ID,
+        canvasId: CANVAS_ID,
         assistantMessageId: ASSISTANT_MESSAGE_ID,
         expectedRevision: '7',
         ops: [{ ...ops[2]!, x: Number.NaN }],
       },
       {
-        projectId: PROJECT_ID,
+        canvasId: CANVAS_ID,
         assistantMessageId: ASSISTANT_MESSAGE_ID,
         expectedRevision: '7',
         ops: [{ ...ops[3]!, width: Number.POSITIVE_INFINITY }],

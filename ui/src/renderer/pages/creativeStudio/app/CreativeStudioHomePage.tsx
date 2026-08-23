@@ -17,40 +17,40 @@ import {
   useNomiCreativeModelCatalog,
 } from '../models';
 import {
-  creativeProjectRepository,
-  isCreativeProjectRepositoryError,
-  type CreativeProjectRepository,
-} from '../services/projectRepository';
+  creativeCanvasRepository,
+  isCreativeCanvasRepositoryError,
+  type CreativeCanvasRepository,
+} from '../services/canvasRepository';
 import styles from './CreativeStudioHomePage.module.css';
-import { creativeStudioCanvasProjectPath } from './routes';
+import { creativeStudioCanvasPath } from './routes';
 
 export const CREATIVE_STUDIO_HOME_MODEL_FILTER = {
   capability: 'task',
   task: 'chat',
 } as const satisfies CreativeModelFilter;
 
-export const creativeStudioHomeProjectTitle = (prompt: string): string =>
+export const creativeStudioHomeCanvasTitle = (prompt: string): string =>
   Array.from(prompt.trim()).slice(0, 24).join('');
 
-export interface CreateCreativeStudioHomeProjectOptions {
+export interface CreateCreativeStudioHomeCanvasOptions {
   prompt: string;
   model: CreativeModelSelectionRef | null;
-  repository: CreativeProjectRepository;
+  repository: CreativeCanvasRepository;
   navigate(path: string): void;
 }
 
-/** One request creates the project, persists its first Agent turn, then opens the canvas. */
-export async function createCreativeStudioHomeProject({
+/** One request creates the canvas, persists its first Agent turn, then opens it. */
+export async function createCreativeStudioHomeCanvas({
   prompt,
   model,
   repository,
   navigate,
-}: CreateCreativeStudioHomeProjectOptions) {
+}: CreateCreativeStudioHomeCanvasOptions) {
   const normalizedPrompt = prompt.trim();
   if (!normalizedPrompt || !model) return null;
 
   const created = await repository.create({
-    title: creativeStudioHomeProjectTitle(normalizedPrompt),
+    title: creativeStudioHomeCanvasTitle(normalizedPrompt),
     agentKickoff: {
       prompt: normalizedPrompt,
       model: {
@@ -59,7 +59,7 @@ export async function createCreativeStudioHomeProject({
       },
     },
   });
-  navigate(creativeStudioCanvasProjectPath(created.projectId));
+  navigate(creativeStudioCanvasPath(created.canvasId));
   return created;
 }
 
@@ -149,15 +149,15 @@ const CreativeStudioHomePage: React.FC = () => {
     setSubmitting(true);
     setError(null);
     try {
-      await createCreativeStudioHomeProject({
+      await createCreativeStudioHomeCanvas({
         prompt,
         model: selectedModel,
-        repository: creativeProjectRepository,
+        repository: creativeCanvasRepository,
         navigate,
       });
     } catch (cause) {
       setError(
-        isCreativeProjectRepositoryError(cause) && cause.message.trim()
+        isCreativeCanvasRepositoryError(cause) && cause.message.trim()
           ? cause.message
           : '创建画布失败，请稍后重试。'
       );

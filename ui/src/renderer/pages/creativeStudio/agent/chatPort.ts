@@ -8,9 +8,9 @@ import type { CreativeModelSelectionRef } from '../models';
 import type { CreativeStudioAgentMessage } from './types';
 
 export interface CreativeStudioAgentTurnRequest {
-  projectId: string;
+  canvasId: string;
   sessionId: string;
-  /** Durable UUIDv7 persisted in the project before this turn is submitted. */
+  /** Durable UUIDv7 persisted in the Canvas before this turn is submitted. */
   idempotencyKey: string;
   /** Human-readable text persisted for the Creative Studio transcript. */
   prompt: string;

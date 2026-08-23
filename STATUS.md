@@ -1,6 +1,6 @@
 # Current Technical Status
 
-Updated: 2026-08-22.
+Updated: 2026-08-23.
 
 This file is a compact current-state snapshot. Historical P0-P5 migration notes
 were removed from the active status because they described the 2026-06-08
@@ -41,10 +41,13 @@ The current frontend route map lives in
 - `/nomi` and `/companion`
 - `/customer-service` and `/customer-service/:cs_agent_id`
 - `/knowledge` and `/knowledge/:id`
-- Creative Studio focused shell: `/workshop`, `/workshop/projects`, project
-  editors at `/workshop/canvas/:projectId` and `/workshop/director/:projectId`,
-  workbenches at `/workshop/image` and `/workshop/video`, plus
-  `/workshop/prompts`, `/workshop/assets`, and `/workshop/workflows`.
+- Creative Studio focused shell: `/workshop`, the canonical Canvas library at
+  `/workshop/canvases`, Canvas editors at `/workshop/canvas/:canvasId` and
+  `/workshop/director/:canvasId`, independent workbenches at `/workshop/image`
+  and `/workshop/video`, plus `/workshop/prompts`, `/workshop/assets`, and
+  `/workshop/workflows`.
+  `/workshop/projects` is a deprecated compatibility redirect to
+  `/workshop/canvases`; it is not a Creative Studio product object.
   `/workshop/audio` is retired; see
   [`docs/guides/creative-studio.md`](docs/guides/creative-studio.md).
 - `/settings/system` and `/settings/execution-engines`, plus system
@@ -53,6 +56,23 @@ The current frontend route map lives in
 
 Several legacy paths still exist only as redirects. Do not document them as
 primary navigation.
+
+Creative Studio has no Project domain. Canvas tasks use the
+`CanvasNode { canvasId, nodeId }` owner; standalone Image/Video tasks use only
+`StandaloneWorkbench { workbenchKind }`; WorkflowStep remains unchanged.
+Standalone history and retirement are scoped only by `workbench_kind`, and
+legacy standalone `project_id` values are inert provenance. Image and Video
+routes have no Canvas selector or prerequisite and are usable with zero
+Canvases. The canonical Canvas HTTP API is
+`/api/creative-studio/canvases`; `/api/creative-studio/projects` remains a
+deprecated alias. Gateway Canvas capabilities are
+`nomi_creative_studio_list_canvases` and
+`nomi_creative_studio_get_canvas`, with the old project-named capabilities
+retained only as deprecated aliases. The UI/API contract version is 21.
+
+Creative Studio writes version-2 Canvas archives while retaining a version-1
+reader. Image and Video preserve versioned per-workbench session drafts in
+browser session storage without `projectId` or `canvasId` keys.
 
 ## Commands
 

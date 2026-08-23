@@ -1,4 +1,4 @@
-//! `nomifun-workshop` — the canonical Creative Studio domain. It owns project
+//! `nomifun-workshop` — the canonical Creative Studio domain. It owns Canvas
 //! documents, assets, workflows, archives, and their `/api/creative-studio/*`
 //! routes. `nomifun-creation` owns asynchronous model-generation execution.
 
@@ -24,7 +24,8 @@ pub use creative_agent_ops::{
     apply_creative_agent_ops,
 };
 pub use creative_studio::{
-    CREATIVE_STUDIO_SCHEMA, CreativeProjectDocument, CreativeProjectSummary,
+    CREATIVE_STUDIO_SCHEMA, CreativeCanvasDetail, CreativeCanvasDocument,
+    CreativeCanvasSummary, CreativeProjectDocument, CreativeProjectSummary,
     MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
 };
 pub use dto::WorkshopAsset;
@@ -40,7 +41,10 @@ pub use workflow_run::{
     MAX_WORKFLOW_RUN_AGGREGATE_BYTES,
 };
 pub use routes::{workshop_public_routes, workshop_routes};
-pub use service::WorkshopService;
+pub use service::{
+    CreativeCanvasAgentKickoff, CreativeCanvasAgentProposalApplyResult, CreativeCanvasArchive,
+    WorkshopService,
+};
 pub use state::WorkshopRouterState;
 
 /// Domain root under the backend data dir. Layout:

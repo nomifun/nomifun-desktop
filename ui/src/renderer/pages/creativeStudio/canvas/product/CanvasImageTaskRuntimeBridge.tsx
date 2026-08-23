@@ -88,8 +88,8 @@ const taskKindForReference = (
   projectId: string,
   reference: CreativeTaskReference
 ): CanvasImageTaskKind => {
-  if (reference.owner.kind !== 'canvas_node' || reference.owner.projectId !== projectId) {
-    throw new Error('图片任务不属于当前画布项目。');
+  if (reference.owner.kind !== 'canvas_node' || reference.owner.canvasId !== projectId) {
+    throw new Error('图片任务不属于当前画布。');
   }
   const owner = reference.owner;
   const node = editor.getState().document.nodes.find(

@@ -1,7 +1,7 @@
-# Creative canvas chrome wiring
+# Creative Canvas chrome wiring
 
 `CreativeCanvasChrome` is a controlled, source-shaped three-column shell. The
-left and right panels consume real layout width, so the center canvas becomes
+left and right panels consume real layout width, so the center Canvas becomes
 narrower exactly as it does in the reference product. The bottom tool dock then
 scrolls horizontally when the remaining center column is compact.
 
@@ -10,7 +10,7 @@ the panel slots:
 
 ```tsx
 <CreativeCanvasChrome
-  projectTitle={project.title}
+  canvasTitle={canvas.title}
   saveStatus={save.status}
   tool={tool}
   background={background}
@@ -43,9 +43,9 @@ the panel slots:
 ```
 
 Disable the editor's built-in zoom dock when using this chrome's fit and
-minimap actions, so those actions are not duplicated. The route/controller is
-responsible for translating callbacks into canonical core commands and for
-constructing new canonical nodes. This layer never creates IDs, persists a
+minimap actions, so those actions are not duplicated. The Canvas
+route/controller translates callbacks into canonical core commands and
+constructs new canonical nodes. This layer never creates IDs, persists a Canvas
 document, invokes a model, resolves assets, or fabricates panel content.
 
 The bottom dock exposes text, image, video, audio, panorama, Director, and
@@ -55,3 +55,14 @@ intentionally not a node-creation tool; it remains a selection action.
 `rightView` and `bottomView` use `null` for a closed panel. Menu visibility is
 controlled for the remaining background picker so route transitions can close
 transient UI deterministically.
+
+Canvas owner identity is supplied by the route. When an owner is needed, use
+the canonical `CanvasNode { canvasId, nodeId }` shape and serialize it as
+`{ canvas_id, node_id }` at the HTTP boundary; the chrome does not invent either
+identifier.
+
+## Compatibility only
+
+Legacy `nomifun.creative-studio/v1` project-document and repository-adapter
+names may remain below this boundary during migration. They are compatibility
+facts only and are not Canvas product concepts or chrome callbacks.

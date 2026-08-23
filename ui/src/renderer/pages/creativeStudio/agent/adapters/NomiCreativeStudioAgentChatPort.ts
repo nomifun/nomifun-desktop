@@ -146,8 +146,8 @@ const validateBinding = (
   if (binding.ownership !== 'creative-studio-exclusive') {
     throw new NomiCreativeStudioAgentBindingError('Nomi conversation is not Creative Studio exclusive');
   }
-  if (binding.projectId !== request.projectId || binding.sessionId !== request.sessionId) {
-    throw new NomiCreativeStudioAgentBindingError('Nomi conversation project/session binding mismatch');
+  if (binding.canvasId !== request.canvasId || binding.sessionId !== request.sessionId) {
+    throw new NomiCreativeStudioAgentBindingError('Nomi conversation Canvas/session binding mismatch');
   }
   if (!sameModel(binding.model, request.model)) {
     throw new NomiCreativeStudioAgentBindingError('Nomi conversation model binding mismatch');
@@ -308,7 +308,7 @@ async function verifyStartedTurn(
 /**
  * Adapt the real NomiFun conversation transport to the small Creative Studio
  * turn stream. Session binding is deliberately injected: today's conversation
- * API has no reusable project/session mapping endpoint and reconstructing one
+ * API has no reusable Canvas/session mapping endpoint and reconstructing one
  * from route state would be unsafe.
  */
 export function createNomiCreativeStudioAgentChatPort(
@@ -326,7 +326,7 @@ export function createNomiCreativeStudioAgentChatPort(
       const requestHistoryKey = serializeCreativeStudioAgentHistory(request.history);
       const resolveAuthoritative = async (): Promise<NomiCreativeStudioAgentSessionResolution> => {
         const resolution = await options.resolveSession({
-          projectId: request.projectId,
+          canvasId: request.canvasId,
           sessionId: request.sessionId,
           model: request.model,
           pendingTurnIdempotencyKey: request.idempotencyKey,
@@ -345,7 +345,7 @@ export function createNomiCreativeStudioAgentChatPort(
           ) !== requestHistoryKey
         ) {
           throw new NomiCreativeStudioAgentBindingError(
-            'Nomi conversation no longer preserves the loaded project history prefix'
+            'Nomi conversation no longer preserves the loaded Canvas history prefix'
           );
         }
         const recoveredCount = resolution.history.length - request.history.length;

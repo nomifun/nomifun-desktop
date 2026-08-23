@@ -67,7 +67,7 @@ const configNode = (): Extract<CreativeCanvasNode, { type: 'config' }> => {
 
 const reference = (node = configNode()): CreativeTaskReference => ({
   taskId: TASK_ID,
-  owner: { kind: 'canvas_node', projectId: PROJECT_ID, nodeId: node.id },
+  owner: { kind: 'canvas_node', canvasId: PROJECT_ID, nodeId: node.id },
   providerId: PROVIDER_ID,
   model: 'edit-v1',
   task: 'image_edit',

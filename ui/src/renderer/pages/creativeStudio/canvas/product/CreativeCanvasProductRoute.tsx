@@ -546,8 +546,10 @@ const CanvasTaskRuntimeAction: React.FC<{
  * reducer and CAS owner; this component mirrors state solely to drive chrome.
  */
 const CreativeCanvasProductRoute: React.FC = () => {
-  const { projectId: routeProjectId } = useParams<{ projectId: string }>();
-  const projectId = routeProjectId?.trim() ?? '';
+  const { canvasId: routeCanvasId } = useParams<{ canvasId: string }>();
+  const canvasId = routeCanvasId?.trim() ?? '';
+  // Legacy local adapter: the migrated product internals still use projectId.
+  const projectId = canvasId;
   const navigate = useNavigate();
   const { i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language ?? 'zh-CN';
@@ -1076,8 +1078,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
           handleBottomViewChange('timeline');
           setNotice(
             directors.length === 1
-              ? '项目已有唯一导演节点，已为你选中。'
-              : '项目存在多个导演节点，请在时间线面板中处理冲突。'
+              ? '画布已有唯一导演节点，已为你选中。'
+              : '画布存在多个导演节点，请在时间线面板中处理冲突。'
           );
           return;
         }
@@ -1090,7 +1092,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
       editor.dispatch(canvasCommands.addNode(node));
       if (kind === 'director') {
         handleBottomViewChange('timeline');
-        setNotice('已创建项目唯一的导演节点。');
+        setNotice('已创建当前画布唯一的导演节点。');
       } else {
         setNotice(null);
       }
@@ -1224,7 +1226,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         let replayed = false;
         try {
           const applied = await creativeCanvasAgentOpsPort.apply({
-            projectId,
+            canvasId: projectId,
             assistantMessageId,
             expectedRevision,
             ops,
@@ -1453,7 +1455,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         const asset = uploaded.asset;
         uploadedAsset = asset;
         if (activeProjectIdRef.current !== projectId) {
-          throw new DOMException('Project changed', 'AbortError');
+          throw new DOMException('Canvas changed', 'AbortError');
         }
         const editor = editorRef.current;
         if (!editor) throw new Error('画布已经关闭，图片保留在素材库中。');
@@ -1621,7 +1623,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         uploadedAsset = uploaded.asset;
         controller.signal.throwIfAborted();
         if (activeProjectIdRef.current !== projectId) {
-          throw new DOMException('Project changed', 'AbortError');
+          throw new DOMException('Canvas changed', 'AbortError');
         }
 
         const current = editor.getState();
@@ -1768,7 +1770,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         uploadedPieces = uploaded;
         controller.signal.throwIfAborted();
         if (activeProjectIdRef.current !== projectId) {
-          throw new DOMException('Project changed', 'AbortError');
+          throw new DOMException('Canvas changed', 'AbortError');
         }
 
         const current = editor.getState();
@@ -2064,7 +2066,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         uploadedReference = uploaded.asset;
         controller.signal.throwIfAborted();
         if (activeProjectIdRef.current !== projectId) {
-          throw new DOMException('Project changed', 'AbortError');
+          throw new DOMException('Canvas changed', 'AbortError');
         }
 
         const current = editor.getState();
@@ -2337,7 +2339,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           ? await resolveCanvasImageAsset(source)
           : null;
         if (activeProjectIdRef.current !== projectId) {
-          throw new DOMException('Project changed', 'AbortError');
+          throw new DOMException('Canvas changed', 'AbortError');
         }
         const currentState = editor.getState();
         const currentSource = currentState.document.nodes.find(
@@ -2550,7 +2552,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           );
         }
         if (activeProjectIdRef.current !== projectId) {
-          throw new DOMException('Project changed', 'AbortError');
+          throw new DOMException('Canvas changed', 'AbortError');
         }
         const currentState = editor.getState();
         const currentSource = currentState.document.nodes.find(
@@ -2872,7 +2874,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           throw new Error('所选语音合成模型已不可用，未发起生成。');
         }
         if (activeProjectIdRef.current !== projectId) {
-          throw new DOMException('Project changed', 'AbortError');
+          throw new DOMException('Canvas changed', 'AbortError');
         }
         const currentState = editor.getState();
         const currentSource = currentState.document.nodes.find(
@@ -3178,7 +3180,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         editor.dispatch(
           canvasCommands.setSelection(directors.map((node) => node.id))
         );
-        setNotice('项目存在多个导演节点。请只保留一个，再进入 3D 导演台。');
+        setNotice('画布存在多个导演节点。请只保留一个，再进入 3D 导演台。');
         return;
       }
       const director = directors[0];
@@ -3343,7 +3345,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           canvasCommands.setSelection(directors.map((node) => node.id))
         );
         handleBottomViewChange('timeline');
-        setNotice('项目存在多个导演节点，请先处理冲突，未创建新的导演节点。');
+        setNotice('画布存在多个导演节点，请先处理冲突，未创建新的导演节点。');
         dismissInteractionOverlays();
         return;
       }
@@ -3405,13 +3407,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
         editor.dispatch(canvasCommands.setSelection([node.id]));
         setNotice(
           reusedDirector
-            ? '已复用项目唯一的导演节点并完成连接。'
+            ? '已复用画布唯一的导演节点并完成连接。'
             : '已创建节点并完成连接。'
         );
       } else {
         if (reusedDirector) {
           editor.dispatch(canvasCommands.setSelection([node.id]));
-          setNotice('项目已有唯一导演节点，已为你选中。');
+          setNotice('画布已有唯一导演节点，已为你选中。');
         } else {
           editor.dispatch(canvasCommands.addNode(node));
           setNotice('已在指定位置创建节点。');
@@ -3449,7 +3451,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [flushBeforeLeave]
   );
 
-  const handleBackToProjects = useCallback(async () => {
+  const handleBackToCanvases = useCallback(async () => {
     if (recoveryBusy) return;
     setRecoveryBusy(true);
     try {
@@ -3661,7 +3663,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         nodes: canvasState.document.nodes,
         connections: canvasState.document.connections,
       },
-      projectRevision: save.revision,
+      canvasRevision: save.revision,
       selectedNodeIds: canvasState.selection.nodeIds,
     });
   }, [canvasState, project.detail, save.revision]);
@@ -3697,9 +3699,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
       (entry) =>
         entry.task.status === 'queued' || entry.task.status === 'running'
     );
-  const projectTitle =
+  const canvasTitle =
     project.detail?.project.title ??
-    (project.isLoading ? '正在载入项目…' : '画布项目');
+    (project.isLoading ? '正在载入画布…' : '无限画布');
   const saveMessage = creativeCanvasSaveDisplayMessage(save);
   const compact = viewportSize.width < 760;
   const panelViews = creativeCanvasProductPanelViews(panels);
@@ -3720,7 +3722,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     <CreativeCanvasUnavailablePanel
       kind="generic"
       title="正在载入画布结构"
-      description="等待项目文档通过 canonical v1 校验。"
+      description="等待画布文档通过 canonical v1 校验。"
     />
   );
 
@@ -3764,7 +3766,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     <CreativeCanvasUnavailablePanel
       kind="generic"
       title="正在载入导演时间线"
-      description="等待项目文档通过 canonical v1 校验。"
+      description="等待画布文档通过 canonical v1 校验。"
     />
   );
 
@@ -3773,10 +3775,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
       className={styles.root}
       style={canvasLayoutStyle}
       data-creative-canvas-product-route
-      data-project-id={projectId}
+      data-canvas-id={canvasId}
     >
       <CreativeCanvasChrome
-        projectTitle={projectTitle}
+        canvasTitle={canvasTitle}
         saveStatus={save.status}
         saveMessage={saveMessage}
         tool={tool}
@@ -3790,7 +3792,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         backgroundMenuOpen={backgroundMenuOpen}
         compact={compact}
         disabled={productDisabled}
-        onBackToProjects={() => void handleBackToProjects()}
+        onBackToCanvases={() => void handleBackToCanvases()}
         onToolChange={setTool}
         onAddNode={addNode}
         onBackgroundChange={handleBackgroundChange}
@@ -4450,7 +4452,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
             assistant: (
               <CreativeCanvasAgentPanel
                 ref={agentPanelRef}
-                projectId={projectId}
+                canvasId={projectId}
                 hydrated={agentDocumentState !== null}
                 sessions={agentDocumentState?.sessions ?? []}
                 activeSessionId={agentDocumentState?.activeSessionId ?? null}

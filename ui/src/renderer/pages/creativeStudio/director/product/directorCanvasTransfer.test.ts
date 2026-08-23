@@ -206,7 +206,7 @@ describe("Director capture to canvas transfer", () => {
     ]);
     expect(plan.insertedNodes.map((node) => node.position)).toEqual([
       { x: 540, y: 80 },
-      { x: 900, y: 80 },
+      { x: 920, y: 80 },
     ]);
   });
 
@@ -225,7 +225,7 @@ describe("Director capture to canvas transfer", () => {
     const plan = planDirectorCapturesForCanvas(current, [
       { captureId: CAPTURE_ID, asset: imageAsset() },
     ]);
-    expect(plan.insertedNodes[0].position).toEqual({ x: 540, y: 2_160 });
+    expect(plan.insertedNodes[0].position).toEqual({ x: 540, y: 2_320 });
   });
 
   test("confirms a committed CAS after response loss without inserting a duplicate", async () => {

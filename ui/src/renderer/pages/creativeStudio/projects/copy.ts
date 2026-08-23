@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  resolveCreativeStudioCanvasesCopy,
+  type CreativeStudioCanvasesCopy,
+} from '../canvases/copy';
+
+/** @deprecated Historical copy contract for source compatibility only. */
 export interface CreativeStudioProjectsCopy {
   libraryLabel: string;
   title: string;
@@ -42,91 +48,106 @@ export interface CreativeStudioProjectsCopy {
   confirmDelete: string;
 }
 
-const zhCN: CreativeStudioProjectsCopy = {
-  libraryLabel: '画布库',
-  title: '无限画布',
-  newProject: '新建画布',
-  defaultProjectTitle: (index) => `无限画布 ${index}`,
-  importProjects: '导入画布',
-  archiveUnavailable: '画布归档服务尚未接入',
-  deleteAll: '删除全部',
-  exportSelected: '导出选中',
-  deleteSelected: '删除选中',
-  loading: '正在加载画布...',
-  loadError: '加载画布失败',
-  retry: '重试',
-  emptyTitle: '还没有画布',
-  emptyDescription: '新建一个画布后，就可以独立保存节点、连线和画布外观。',
-  projectStats: (nodeCount, connectionCount) => `${nodeCount} 个节点 · ${connectionCount} 条连线`,
-  updatedAt: (formattedDate) => `更新于 ${formattedDate}`,
-  openProject: '打开画布',
-  exportProject: '导出',
-  renameProject: '重命名',
-  deleteProject: '删除',
-  selectProject: (title) => `选择 ${title}`,
-  saveRename: '保存名称',
-  cancelRename: '取消重命名',
-  renamePlaceholder: '输入画布名称',
-  importSuccess: (count) => `已导入 ${count} 个画布`,
-  importFailed: '导入失败，请选择有效的画布压缩包。',
-  createFailed: '新建画布失败，请重试。',
-  exportSuccess: (count) => `已导出 ${count} 个画布`,
-  exportFailed: '导出失败，请重试。',
-  renameFailed: '重命名失败，请重试。',
-  deleteFailed: '删除失败，请重试。',
-  deleteDialogTitle: '删除画布？',
-  deleteDialogDescription: (count) => `将删除 ${count} 个画布，里面的节点和连线也会一起移除。`,
-  cancel: '取消',
-  confirmDelete: '删除',
-};
+export const canvasCopyToLegacyProjectCopy = (
+  copy: CreativeStudioCanvasesCopy
+): CreativeStudioProjectsCopy => ({
+  libraryLabel: copy.libraryLabel,
+  title: copy.title,
+  newProject: copy.newCanvas,
+  defaultProjectTitle: copy.defaultCanvasTitle,
+  importProjects: copy.importCanvases,
+  archiveUnavailable: copy.archiveUnavailable,
+  deleteAll: copy.deleteAll,
+  exportSelected: copy.exportSelected,
+  deleteSelected: copy.deleteSelected,
+  loading: copy.loading,
+  loadError: copy.loadError,
+  retry: copy.retry,
+  emptyTitle: copy.emptyTitle,
+  emptyDescription: copy.emptyDescription,
+  projectStats: copy.canvasStats,
+  updatedAt: copy.updatedAt,
+  openProject: copy.openCanvas,
+  exportProject: copy.exportCanvas,
+  renameProject: copy.renameCanvas,
+  deleteProject: copy.deleteCanvas,
+  selectProject: copy.selectCanvas,
+  saveRename: copy.saveRename,
+  cancelRename: copy.cancelRename,
+  renamePlaceholder: copy.renamePlaceholder,
+  importSuccess: copy.importSuccess,
+  importFailed: copy.importFailed,
+  createFailed: copy.createFailed,
+  exportSuccess: copy.exportSuccess,
+  exportFailed: copy.exportFailed,
+  renameFailed: copy.renameFailed,
+  deleteFailed: copy.deleteFailed,
+  deleteDialogTitle: copy.deleteDialogTitle,
+  deleteDialogDescription: copy.deleteDialogDescription,
+  cancel: copy.cancel,
+  confirmDelete: copy.confirmDelete,
+});
 
-const enUS: CreativeStudioProjectsCopy = {
-  libraryLabel: 'Canvas library',
-  title: 'Infinite canvas',
-  newProject: 'New canvas',
-  defaultProjectTitle: (index) => `Infinite canvas ${index}`,
-  importProjects: 'Import canvas',
-  archiveUnavailable: 'Canvas archive service is not connected yet',
-  deleteAll: 'Delete all',
-  exportSelected: 'Export selected',
-  deleteSelected: 'Delete selected',
-  loading: 'Loading canvases...',
-  loadError: 'Could not load canvases',
-  retry: 'Retry',
-  emptyTitle: 'No canvases yet',
-  emptyDescription: 'Create a canvas to save its nodes, connections, and appearance independently.',
-  projectStats: (nodeCount, connectionCount) =>
-    `${nodeCount} node${nodeCount === 1 ? '' : 's'} · ${connectionCount} connection${connectionCount === 1 ? '' : 's'}`,
-  updatedAt: (formattedDate) => `Updated ${formattedDate}`,
-  openProject: 'Open canvas',
-  exportProject: 'Export',
-  renameProject: 'Rename',
-  deleteProject: 'Delete',
-  selectProject: (title) => `Select ${title}`,
-  saveRename: 'Save name',
-  cancelRename: 'Cancel rename',
-  renamePlaceholder: 'Enter a canvas name',
-  importSuccess: (count) => `Imported ${count} canvas${count === 1 ? '' : 'es'}`,
-  importFailed: 'Import failed. Choose a valid canvas archive.',
-  createFailed: 'Could not create the canvas. Try again.',
-  exportSuccess: (count) => `Exported ${count} canvas${count === 1 ? '' : 'es'}`,
-  exportFailed: 'Export failed. Try again.',
-  renameFailed: 'Rename failed. Try again.',
-  deleteFailed: 'Delete failed. Try again.',
-  deleteDialogTitle: 'Delete canvases?',
-  deleteDialogDescription: (count) =>
-    `${count} canvas${count === 1 ? '' : 'es'} and all of their nodes and connections will be removed. This cannot be undone.`,
-  cancel: 'Cancel',
-  confirmDelete: 'Delete',
-};
+export function legacyProjectCopyToCanvasCopy(
+  copy: CreativeStudioProjectsCopy
+): CreativeStudioCanvasesCopy;
+export function legacyProjectCopyToCanvasCopy(
+  copy: Partial<CreativeStudioProjectsCopy> | undefined
+): Partial<CreativeStudioCanvasesCopy> | undefined;
+export function legacyProjectCopyToCanvasCopy(
+  copy: Partial<CreativeStudioProjectsCopy> | undefined
+): Partial<CreativeStudioCanvasesCopy> | undefined {
+  if (!copy) return undefined;
+  const mapped: Partial<CreativeStudioCanvasesCopy> = {
+    libraryLabel: copy.libraryLabel,
+    title: copy.title,
+    newCanvas: copy.newProject,
+    defaultCanvasTitle: copy.defaultProjectTitle,
+    importCanvases: copy.importProjects,
+    archiveUnavailable: copy.archiveUnavailable,
+    deleteAll: copy.deleteAll,
+    exportSelected: copy.exportSelected,
+    deleteSelected: copy.deleteSelected,
+    loading: copy.loading,
+    loadError: copy.loadError,
+    retry: copy.retry,
+    emptyTitle: copy.emptyTitle,
+    emptyDescription: copy.emptyDescription,
+    canvasStats: copy.projectStats,
+    updatedAt: copy.updatedAt,
+    openCanvas: copy.openProject,
+    exportCanvas: copy.exportProject,
+    renameCanvas: copy.renameProject,
+    deleteCanvas: copy.deleteProject,
+    selectCanvas: copy.selectProject,
+    saveRename: copy.saveRename,
+    cancelRename: copy.cancelRename,
+    renamePlaceholder: copy.renamePlaceholder,
+    importSuccess: copy.importSuccess,
+    importFailed: copy.importFailed,
+    createFailed: copy.createFailed,
+    exportSuccess: copy.exportSuccess,
+    exportFailed: copy.exportFailed,
+    renameFailed: copy.renameFailed,
+    deleteFailed: copy.deleteFailed,
+    deleteDialogTitle: copy.deleteDialogTitle,
+    deleteDialogDescription: copy.deleteDialogDescription,
+    cancel: copy.cancel,
+    confirmDelete: copy.confirmDelete,
+  };
+  return Object.fromEntries(
+    Object.entries(mapped).filter(([, value]) => value !== undefined)
+  ) as Partial<CreativeStudioCanvasesCopy>;
+}
 
+/** @deprecated Use resolveCreativeStudioCanvasesCopy. */
 export const resolveCreativeStudioProjectsCopy = (
   language: string | undefined,
   overrides?: Partial<CreativeStudioProjectsCopy>
 ): CreativeStudioProjectsCopy => {
-  const base = language?.toLowerCase().startsWith('zh') ? zhCN : enUS;
+  const base = resolveCreativeStudioCanvasesCopy(language);
   return {
-    ...base,
+    ...canvasCopyToLegacyProjectCopy(base),
     ...overrides,
   };
 };

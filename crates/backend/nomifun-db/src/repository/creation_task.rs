@@ -107,7 +107,6 @@ pub struct CreationTaskPageCursorRef<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ListStandaloneWorkbenchTasksParams<'a> {
-    pub project_id: &'a str,
     pub workbench_kind: &'a str,
     pub active_only: bool,
     pub before: Option<CreationTaskPageCursorRef<'a>>,
@@ -117,7 +116,6 @@ pub struct ListStandaloneWorkbenchTasksParams<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct RetireStandaloneWorkbenchTasksParams<'a> {
-    pub project_id: &'a str,
     pub workbench_kind: &'a str,
     pub task_ids: &'a [String],
     pub deleted_at: i64,
@@ -133,7 +131,6 @@ pub enum CreativeTaskOwnerRef<'a> {
         node_id: &'a str,
     },
     StandaloneWorkbench {
-        project_id: &'a str,
         workbench_kind: &'a str,
     },
     WorkflowStep {

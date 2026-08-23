@@ -22,7 +22,7 @@ import {
 } from "./types";
 
 interface WireRequest {
-  project_id: string;
+  canvas_id: string;
   session_id: string;
   model: { provider_id: string; model: string };
   pending_turn_idempotency_key: string | null;
@@ -33,7 +33,7 @@ interface CreativeStudioAgentSessionHttpTransport {
 }
 
 const endpoint = httpPost<unknown, WireRequest>(
-  "/api/creative-studio/agent-sessions/resolve",
+  "/api/creative-studio/canvas-agent-sessions/resolve",
 );
 
 const defaultTransport: CreativeStudioAgentSessionHttpTransport = {
@@ -153,7 +153,7 @@ export function createNomiCreativeStudioAgentSessionHttpPort(
     async resolveOrCreateExclusive(
       request: CreativeStudioAgentSessionPersistenceRequest,
     ) {
-      validateBoundaryId(request.projectId, "projectId");
+      validateBoundaryId(request.canvasId, "canvasId");
       validateBoundaryId(request.sessionId, "sessionId");
       if (request.pendingTurnIdempotencyKey !== null) {
         validateBoundaryId(
@@ -173,7 +173,7 @@ export function createNomiCreativeStudioAgentSessionHttpPort(
       }
       const response = record(
         await transport.resolve({
-          project_id: request.projectId,
+          canvas_id: request.canvasId,
           session_id: request.sessionId,
           model: {
             provider_id: request.model.providerId,
@@ -196,7 +196,7 @@ export function createNomiCreativeStudioAgentSessionHttpPort(
         binding,
         [
           "ownership",
-          "project_id",
+          "canvas_id",
           "session_id",
           "conversation_id",
           "model",
@@ -226,7 +226,7 @@ export function createNomiCreativeStudioAgentSessionHttpPort(
       );
       const historyKey = string(binding.history_key, "binding.history_key");
       const ownership = string(binding.ownership, "binding.ownership");
-      const boundProjectId = string(binding.project_id, "binding.project_id");
+      const boundCanvasId = string(binding.canvas_id, "binding.canvas_id");
       const boundSessionId = string(binding.session_id, "binding.session_id");
       const boundProviderId = parseProviderId(model.provider_id);
       const boundModel = string(model.model, "binding.model.model");
@@ -238,7 +238,7 @@ export function createNomiCreativeStudioAgentSessionHttpPort(
       }
       if (
         ownership !== "creative-studio-exclusive" ||
-        boundProjectId !== request.projectId ||
+        boundCanvasId !== request.canvasId ||
         boundSessionId !== request.sessionId ||
         boundProviderId !== request.model.providerId ||
         boundModel !== request.model.model
@@ -252,7 +252,7 @@ export function createNomiCreativeStudioAgentSessionHttpPort(
       return {
         binding: {
           ownership: "creative-studio-exclusive",
-          projectId: boundProjectId,
+          canvasId: boundCanvasId,
           sessionId: boundSessionId,
           conversationId: parseConversationId(binding.conversation_id),
           model: {

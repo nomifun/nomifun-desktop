@@ -22,9 +22,8 @@ use sha2::{Digest, Sha256};
 
 use crate::archive::{
     CREATIVE_STUDIO_ARCHIVE_MIME, CreativeArchiveAssetSnapshot,
-    build_creative_project_archive, collect_document_asset_ids,
-    director_sidecar_asset_ids, parse_creative_project_archive,
-    remap_creative_archive_for_import,
+    build_creative_canvas_archive, build_creative_project_archive, collect_document_asset_ids,
+    director_sidecar_asset_ids, parse_creative_archive, remap_creative_archive_for_import,
     sanitized_archive_origin,
 };
 use crate::canvas_agent_artifact::{
@@ -32,8 +31,8 @@ use crate::canvas_agent_artifact::{
 };
 use crate::creative_studio::{
     CreativeChatModel, CreativeChatPendingTurn, CreativeChatSession, CreativeGenerationStatus,
-    CreativeNodeData, CreativeProjectDocument, CreativeProjectSummary,
-    MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
+    CreativeCanvasDetail, CreativeCanvasDocument, CreativeCanvasSummary, CreativeNodeData,
+    CreativeProjectDocument, CreativeProjectSummary, MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
 };
 #[cfg(test)]
 use crate::creative_studio::CREATIVE_STUDIO_SCHEMA;
@@ -62,6 +61,8 @@ pub struct CreativeProjectAgentKickoff {
     pub model: String,
 }
 
+pub type CreativeCanvasAgentKickoff = CreativeProjectAgentKickoff;
+
 /// One CAS-committed Agent graph mutation batch.
 #[derive(Debug)]
 pub struct CreativeAgentApplyResult {
@@ -80,12 +81,24 @@ pub struct CreativeAgentProposalApplyResult {
     pub applied_revision: String,
 }
 
+/// Canvas-named façade for one durable Agent proposal application.
+pub struct CreativeCanvasAgentProposalApplyResult {
+    pub canvas: CreativeCanvasSummary,
+    pub ops: Vec<CreativeAgentOpResult>,
+    pub replayed: bool,
+    pub applied_revision: String,
+}
+
 /// A completed, bounded Creative Studio v1 project archive.
 pub struct CreativeProjectArchive {
     pub file_name: String,
     pub mime: &'static str,
     pub bytes: Vec<u8>,
 }
+
+/// Product-facing name for the same bounded archive payload. The legacy
+/// project type remains exported internally so old callers keep compiling.
+pub type CreativeCanvasArchive = CreativeProjectArchive;
 
 /// A paginated asset listing.
 pub struct AssetListPage {
@@ -219,6 +232,42 @@ pub struct AssetPatch {
 
 const DEFAULT_CREATIVE_PROJECT_TITLE: &str = "未命名画布";
 const MAX_CREATIVE_PROJECT_TITLE_CHARS: usize = 1_000;
+
+fn canvas_error_message(message: String) -> String {
+    message
+        .replace("Creative Studio project", "Creative Studio Canvas")
+        .replace("creative studio project", "creative studio canvas")
+        .replace("Creative project", "Creative Canvas")
+        .replace("creative project", "creative canvas")
+        .replace("project chat sessions", "Canvas chat sessions")
+        .replace("owner-bound project session", "owner-bound Canvas session")
+        .replace("this project", "this Canvas")
+        .replace("project_id", "canvas_id")
+        .replace("projectId", "canvasId")
+}
+
+fn map_creative_canvas_error(error: AppError) -> AppError {
+    match error {
+        AppError::NotFound(message) => AppError::NotFound(canvas_error_message(message)),
+        AppError::BadRequest(message) => AppError::BadRequest(canvas_error_message(message)),
+        AppError::Unauthorized(message) => AppError::Unauthorized(canvas_error_message(message)),
+        AppError::Forbidden(message) => AppError::Forbidden(canvas_error_message(message)),
+        AppError::Conflict(message) => AppError::Conflict(canvas_error_message(message)),
+        AppError::RevisionConflict(message) => {
+            AppError::RevisionConflict(canvas_error_message(message))
+        }
+        AppError::ProviderUnavailable(message) => {
+            AppError::ProviderUnavailable(canvas_error_message(message))
+        }
+        AppError::Internal(message) => AppError::Internal(canvas_error_message(message)),
+        AppError::BadGateway(message) => AppError::BadGateway(canvas_error_message(message)),
+        AppError::Timeout(message) => AppError::Timeout(canvas_error_message(message)),
+        AppError::UnprocessableEntity(message) => {
+            AppError::UnprocessableEntity(canvas_error_message(message))
+        }
+        other => other,
+    }
+}
 const MAX_CREATIVE_AGENT_KICKOFF_PROMPT_CHARS: usize = 65_536;
 const MAX_CREATIVE_AGENT_MODEL_CHARS: usize = 512;
 const CREATIVE_CANVAS_SKILL_ID: &str = "creative-studio-canvas";
@@ -932,6 +981,109 @@ impl WorkshopService {
         Ok(())
     }
 
+    // ---- Canvas product façade --------------------------------------------
+
+    pub async fn list_creative_canvases(&self) -> Result<Vec<CreativeCanvasSummary>, AppError> {
+        self.list_creative_projects()
+            .await
+            .map_err(map_creative_canvas_error)
+            .map(|projects| projects.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn create_creative_canvas(
+        &self,
+        title: Option<String>,
+    ) -> Result<CreativeCanvasSummary, AppError> {
+        self.create_creative_project(title)
+            .await
+            .map_err(map_creative_canvas_error)
+            .map(Into::into)
+    }
+
+    pub async fn create_creative_canvas_for_owner(
+        &self,
+        owner_id: &str,
+        title: Option<String>,
+        agent_kickoff: Option<CreativeCanvasAgentKickoff>,
+    ) -> Result<CreativeCanvasSummary, AppError> {
+        self.create_creative_project_for_owner(owner_id, title, agent_kickoff)
+            .await
+            .map_err(map_creative_canvas_error)
+            .map(Into::into)
+    }
+
+    pub async fn get_creative_canvas(
+        &self,
+        canvas_id: &str,
+    ) -> Result<CreativeCanvasDetail, AppError> {
+        let detail = self
+            .get_creative_project(canvas_id)
+            .await
+            .map_err(map_creative_canvas_error)?;
+        Ok(CreativeCanvasDetail {
+            canvas: detail.project.into(),
+            document: detail.document.into(),
+        })
+    }
+
+    pub async fn rename_creative_canvas(
+        &self,
+        canvas_id: &str,
+        title: &str,
+    ) -> Result<CreativeCanvasSummary, AppError> {
+        self.rename_creative_project(canvas_id, title)
+            .await
+            .map_err(map_creative_canvas_error)
+            .map(Into::into)
+    }
+
+    pub async fn save_creative_canvas(
+        &self,
+        canvas_id: &str,
+        expected_revision: &str,
+        document: &CreativeCanvasDocument,
+    ) -> Result<CreativeCanvasSummary, AppError> {
+        let document = document.as_project_document();
+        self.save_creative_project(canvas_id, expected_revision, &document)
+            .await
+            .map_err(map_creative_canvas_error)
+            .map(Into::into)
+    }
+
+    pub async fn apply_creative_canvas_agent_proposal(
+        &self,
+        owner_id: &str,
+        canvas_id: &str,
+        assistant_message_id: &str,
+        expected_revision: &str,
+        ops: Vec<CreativeAgentOp>,
+        source: &str,
+    ) -> Result<CreativeCanvasAgentProposalApplyResult, AppError> {
+        let applied = self
+            .apply_creative_agent_proposal(
+                owner_id,
+                canvas_id,
+                assistant_message_id,
+                expected_revision,
+                ops,
+                source,
+            )
+            .await
+            .map_err(map_creative_canvas_error)?;
+        Ok(CreativeCanvasAgentProposalApplyResult {
+            canvas: applied.project.into(),
+            ops: applied.ops,
+            replayed: applied.replayed,
+            applied_revision: applied.applied_revision,
+        })
+    }
+
+    pub async fn delete_creative_canvas(&self, canvas_id: &str) -> Result<(), AppError> {
+        self.delete_creative_project(canvas_id)
+            .await
+            .map_err(map_creative_canvas_error)
+    }
+
     // ---- canonical Creative Studio workflows ----
 
     pub async fn list_creative_workflows(
@@ -1408,6 +1560,57 @@ impl WorkshopService {
         })
     }
 
+    pub async fn export_creative_canvas_archive(
+        &self,
+        canvas_id: &str,
+    ) -> Result<CreativeCanvasArchive, AppError> {
+        let detail = self
+            .get_creative_project(canvas_id)
+            .await
+            .map_err(map_creative_canvas_error)?;
+        let asset_ids = self
+            .collect_creative_project_asset_closure(&detail.document)
+            .await
+            .map_err(map_creative_canvas_error)?;
+        let mut assets = Vec::with_capacity(asset_ids.len());
+        for asset_id in asset_ids {
+            let row = self
+                .repo
+                .get_asset(&asset_id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Conflict(format!(
+                        "creative canvas {canvas_id} references missing asset {asset_id}"
+                    ))
+                })?;
+            let bytes = self
+                .read_original(&row)
+                .await
+                .map_err(|error| match error {
+                    AppError::NotFound(message) => AppError::Conflict(format!(
+                        "creative canvas {canvas_id} asset cannot be exported: {message}"
+                    )),
+                    other => other,
+                })?
+                .0;
+            assets.push(CreativeArchiveAssetSnapshot { row, bytes });
+        }
+        let title = detail.project.title;
+        let document = detail.document;
+        let archive_bytes = tokio::task::spawn_blocking(move || {
+            build_creative_canvas_archive(&title, &document, assets, now_ms())
+        })
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!("creative canvas archive worker failed: {error}"))
+        })??;
+        Ok(CreativeCanvasArchive {
+            file_name: format!("creative-canvas-{canvas_id}.nomifun-canvas.zip"),
+            mime: CREATIVE_STUDIO_ARCHIVE_MIME,
+            bytes: archive_bytes,
+        })
+    }
+
     pub async fn import_creative_project_archive(
         &self,
         archive_bytes: Vec<u8>,
@@ -1415,7 +1618,7 @@ impl WorkshopService {
         let project_id = CreativeStudioProjectId::new().into_string();
         let remap_project_id = project_id.clone();
         let archive = tokio::task::spawn_blocking(move || {
-            let parsed = parse_creative_project_archive(&archive_bytes)?;
+            let parsed = parse_creative_archive(&archive_bytes)?;
             remap_creative_archive_for_import(parsed, &remap_project_id)
         })
         .await
@@ -1510,6 +1713,16 @@ impl WorkshopService {
             .await?;
         rollback.commit();
         Ok(imported.into())
+    }
+
+    pub async fn import_creative_canvas_archive(
+        &self,
+        archive_bytes: Vec<u8>,
+    ) -> Result<CreativeCanvasSummary, AppError> {
+        self.import_creative_project_archive(archive_bytes)
+            .await
+            .map_err(map_creative_canvas_error)
+            .map(Into::into)
     }
 
     /// Read-only startup audit for canonical Creative Studio projects and the
@@ -2736,6 +2949,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn canonical_canvas_errors_preserve_kind_without_project_vocabulary() {
+        let mapped = map_creative_canvas_error(AppError::RevisionConflict(
+            "creative studio project p revision is 2, expected 1".to_owned(),
+        ));
+        assert!(matches!(
+            mapped,
+            AppError::RevisionConflict(message)
+                if message == "creative studio canvas p revision is 2, expected 1"
+        ));
+
+        let mapped = map_creative_canvas_error(AppError::BadRequest(
+            "invalid creative project document at projectId/project_id".to_owned(),
+        ));
+        assert!(matches!(
+            mapped,
+            AppError::BadRequest(message)
+                if message == "invalid creative canvas document at canvasId/canvas_id"
+        ));
+    }
+
     fn workflow_definition() -> CreativeWorkflowDefinitionV1 {
         let workflow_id = CreativeStudioWorkflowId::new().into_string();
         let variable_id = nomifun_common::generate_id();
@@ -3887,14 +4121,16 @@ mod tests {
         let provider_id = ProviderId::new().into_string();
         insert_provider(&db, &provider_id).await;
         let task_id = nomifun_common::CreationTaskId::new().into_string();
+        let node_id = nomifun_common::CreativeStudioNodeId::new().into_string();
         nomifun_db::sqlx::query(
             "INSERT INTO creation_tasks \
-             (creation_task_id, project_id, workbench_kind, provider_id, model, capability, params, \
+             (creation_task_id, project_id, node_id, provider_id, model, capability, params, \
               input_bindings, status, submitted_at, request_fingerprint) \
-             VALUES (?, ?, 'video', ?, 'model', 't2v', '{}', '[]', 'queued', 1, '{}')",
+             VALUES (?, ?, ?, ?, 'model', 't2v', '{}', '[]', 'queued', 1, '{}')",
         )
         .bind(&task_id)
         .bind(&project.project_id)
+        .bind(&node_id)
         .bind(&provider_id)
         .execute(db.pool())
         .await
@@ -3905,7 +4141,7 @@ mod tests {
         ));
 
         nomifun_db::sqlx::query(
-            "UPDATE creation_tasks SET status = 'failed', finished_at = 2, deleted_at = 3 \
+            "UPDATE creation_tasks SET status = 'failed', finished_at = 2 \
              WHERE creation_task_id = ?",
         )
         .bind(&task_id)
@@ -3917,7 +4153,8 @@ mod tests {
             .await
             .unwrap();
         let retained: i64 = nomifun_db::sqlx::query_scalar(
-            "SELECT COUNT(*) FROM creation_tasks WHERE creation_task_id = ? AND deleted_at = 3",
+            "SELECT COUNT(*) FROM creation_tasks \
+             WHERE creation_task_id = ? AND status = 'failed' AND deleted_at IS NULL",
         )
         .bind(&task_id)
         .fetch_one(db.pool())

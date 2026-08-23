@@ -17,7 +17,7 @@ describe('Creative Studio sidebar navigation', () => {
   test('keeps the former top-level destinations in sidebar order with a home entry', () => {
     const orderedRoutes = [
       'CREATIVE_STUDIO_ROOT_PATH',
-      'CREATIVE_STUDIO_PROJECTS_PATH',
+      'CREATIVE_STUDIO_CANVASES_PATH',
       'CREATIVE_STUDIO_IMAGE_PATH',
       'CREATIVE_STUDIO_VIDEO_PATH',
       'CREATIVE_STUDIO_PROMPTS_PATH',
@@ -41,7 +41,13 @@ describe('Creative Studio sidebar navigation', () => {
       expect(settingsSource.includes(marker)).toBe(true);
     }
     expect(source.includes('data-creative-studio-sider')).toBe(true);
-    expect(source.includes("section === 'canvas' || section === 'director' ? 'projects' : section")).toBe(true);
+    expect(source.includes("? 'canvases' : section")).toBe(true);
+    expect(source.includes("section: 'projects'")).toBe(false);
+    expect(source.includes('CREATIVE_STUDIO_PROJECTS_PATH')).toBe(false);
+    expect(
+      source.includes("t('creativeStudio.navigation.canvases')")
+    ).toBe(true);
+    expect(source.includes('creativeStudio.navigation.projects')).toBe(false);
   });
 
   test('contains no product-specific titlebar or window controls', () => {

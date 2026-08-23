@@ -147,7 +147,7 @@ export function classifyCreativeCanvasAgentHistory(
     ids.length < session.messageIds.length ||
     session.messageIds.some((messageId, index) => ids[index] !== messageId)
   ) {
-    throw new Error('Creative Studio Agent authority does not preserve project message references');
+    throw new Error('Creative Studio Agent authority does not preserve Canvas message references');
   }
   const recoveredCount = ids.length - session.messageIds.length;
   if (recoveredCount === 0) return 'current';

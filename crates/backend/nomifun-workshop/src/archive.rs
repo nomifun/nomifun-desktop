@@ -1,10 +1,9 @@
-//! Strict Creative Studio v1 project archives.
+//! Strict Creative Studio archive readers and writers.
 //!
 //! An archive is a ZIP with exactly one `manifest.json` plus one content entry
 //! for every asset referenced by the canonical project document. The archive
-//! is intentionally a closed `nomifun.creative-studio/v1` contract: there is no
-//! reader for the retired Workshop canvas format and no best-effort upgrade
-//! path for older or future archive versions.
+//! has a versioned product manifest. v1 project archives remain readable for
+//! compatibility; new canonical exports use the v2 Canvas manifest.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{Cursor, Read, Write};
@@ -17,8 +16,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::creative_studio::{
-    CREATIVE_STUDIO_SCHEMA, CreativeConfigOperation, CreativeGenerationStatus,
-    CreativeNodeData, CreativeProjectDocument, MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
+    CREATIVE_STUDIO_SCHEMA, CreativeCanvasDocument, CreativeConfigOperation,
+    CreativeGenerationStatus, CreativeNodeData, CreativeProjectDocument,
+    MAX_CREATIVE_PROJECT_DOCUMENT_BYTES,
 };
 use crate::MAX_ASSET_BYTES;
 
@@ -27,6 +27,8 @@ pub const CREATIVE_STUDIO_ARCHIVE_MIME: &str =
 pub const MAX_CREATIVE_ARCHIVE_COMPRESSED_BYTES: usize = 256 * 1024 * 1024;
 const CREATIVE_STUDIO_ARCHIVE_KIND: &str = "project-archive";
 const CREATIVE_STUDIO_ARCHIVE_VERSION: u32 = 1;
+pub const CREATIVE_CANVAS_ARCHIVE_KIND: &str = "canvas-archive";
+pub const CREATIVE_CANVAS_ARCHIVE_VERSION: u32 = 2;
 // A legal Director v1 sidecar may own 5,000 captures plus 2,000 entity assets.
 // Keep the archive below the shared hardened ZIP entry ceiling rather than
 // silently making those canonical projects non-exportable.
@@ -75,6 +77,25 @@ struct CreativeArchiveManifest {
 struct CreativeArchiveProject {
     title: String,
     document: CreativeProjectDocument,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreativeCanvasArchiveManifest {
+    schema: String,
+    kind: String,
+    version: u32,
+    exported_at: i64,
+    canvas: CreativeCanvasArchiveCanvas,
+    assets: Vec<CreativeArchiveAsset>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreativeCanvasArchiveCanvas {
+    canvas_id: String,
+    title: String,
+    document: CreativeCanvasDocument,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,6 +239,67 @@ pub(crate) fn build_creative_project_archive(
     Ok(bytes)
 }
 
+/// Build the canonical Canvas v2 archive while retaining the v1 asset
+/// closure/metadata writer as the single source of truth. The v1 bytes are
+/// decoded as structured data and rewritten with the product-facing Canvas
+/// envelope; no string replacement is used for document or asset JSON.
+pub(crate) fn build_creative_canvas_archive(
+    title: &str,
+    document: &CreativeProjectDocument,
+    assets: Vec<CreativeArchiveAssetSnapshot>,
+    exported_at: i64,
+) -> Result<Vec<u8>, AppError> {
+    let legacy_bytes = build_creative_project_archive(title, document, assets, exported_at)?;
+    let mut entries = read_archive_entries(
+        &legacy_bytes,
+        MAX_CREATIVE_ARCHIVE_UNCOMPRESSED_BYTES,
+        MAX_CREATIVE_ARCHIVE_ENTRIES,
+        "creative project archive",
+    )?;
+    let manifest_bytes = entries
+        .remove(Path::new("manifest.json"))
+        .ok_or_else(|| AppError::Internal("generated creative archive is missing manifest".into()))?;
+    let legacy_manifest: CreativeArchiveManifest =
+        serde_json::from_slice(&manifest_bytes).map_err(|error| {
+            AppError::Internal(format!("decode generated creative archive manifest: {error}"))
+        })?;
+    validate_manifest_envelope(&legacy_manifest).map_err(|error| {
+        AppError::Internal(format!("generated creative archive failed validation: {error}"))
+    })?;
+
+    let canvas_document = CreativeCanvasDocument::from(legacy_manifest.project.document);
+    let canvas_id = canvas_document.canvas_id.clone();
+    let manifest = CreativeCanvasArchiveManifest {
+        schema: legacy_manifest.schema,
+        kind: CREATIVE_CANVAS_ARCHIVE_KIND.to_owned(),
+        version: CREATIVE_CANVAS_ARCHIVE_VERSION,
+        exported_at: legacy_manifest.exported_at,
+        canvas: CreativeCanvasArchiveCanvas {
+            canvas_id: canvas_id.clone(),
+            title: legacy_manifest.project.title,
+            document: canvas_document,
+        },
+        assets: legacy_manifest.assets,
+    };
+    validate_canvas_manifest_envelope(&manifest).map_err(|error| {
+        AppError::Internal(format!("generated creative Canvas archive failed validation: {error}"))
+    })?;
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| AppError::Internal(format!("encode creative Canvas archive manifest: {error}")))?;
+    if manifest_bytes.len() > MAX_CREATIVE_ARCHIVE_MANIFEST_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "creative Canvas archive manifest is too large: {} bytes",
+            manifest_bytes.len()
+        )));
+    }
+    entries.insert(PathBuf::from("manifest.json"), manifest_bytes);
+    let entries = entries
+        .into_iter()
+        .map(|(path, bytes)| (archive_path_string(&path), bytes))
+        .collect::<BTreeMap<_, _>>();
+    write_archive_entries(entries, "creative Canvas archive")
+}
+
 pub(crate) fn parse_creative_project_archive(
     bytes: &[u8],
 ) -> Result<CreativeArchiveImport, AppError> {
@@ -226,6 +308,201 @@ pub(crate) fn parse_creative_project_archive(
         MAX_CREATIVE_ARCHIVE_UNCOMPRESSED_BYTES,
         MAX_CREATIVE_ARCHIVE_ENTRIES,
     )
+}
+
+/// Parse either a legacy v1 project archive or the canonical v2 Canvas
+/// archive. Both paths end in the unchanged v1 asset/document validator and
+/// therefore produce the same normalized import representation.
+pub(crate) fn parse_creative_archive(
+    bytes: &[u8],
+) -> Result<CreativeArchiveImport, AppError> {
+    let mut entries = read_archive_entries(
+        bytes,
+        MAX_CREATIVE_ARCHIVE_UNCOMPRESSED_BYTES,
+        MAX_CREATIVE_ARCHIVE_ENTRIES,
+        "creative archive",
+    )?;
+    let manifest_bytes = entries
+        .remove(Path::new("manifest.json"))
+        .ok_or_else(|| AppError::BadRequest("creative archive is missing manifest.json".into()))?;
+    let value: Value = serde_json::from_slice(&manifest_bytes).map_err(|error| {
+        AppError::BadRequest(format!("invalid creative archive manifest: {error}"))
+    })?;
+    let version = value.get("version").and_then(Value::as_u64);
+    let kind = value.get("kind").and_then(Value::as_str);
+    if version == Some(CREATIVE_STUDIO_ARCHIVE_VERSION as u64)
+        || kind == Some(CREATIVE_STUDIO_ARCHIVE_KIND)
+    {
+        return parse_creative_project_archive(bytes);
+    }
+    if version != Some(CREATIVE_CANVAS_ARCHIVE_VERSION as u64)
+        && kind != Some(CREATIVE_CANVAS_ARCHIVE_KIND)
+    {
+        return Err(AppError::BadRequest(
+            "creative archive has an unsupported kind/version".into(),
+        ));
+    }
+
+    let manifest: CreativeCanvasArchiveManifest =
+        serde_json::from_value(value).map_err(|error| {
+            AppError::BadRequest(format!("invalid creative Canvas archive manifest: {error}"))
+        })?;
+    validate_canvas_manifest_envelope(&manifest)?;
+    let canvas_document = manifest.canvas.document;
+    let project_document = canvas_document.into_project_document();
+    project_document
+        .validate_for_project(&manifest.canvas.canvas_id)
+        .map_err(|error| {
+            AppError::BadRequest(format!(
+                "invalid creative Canvas document in archive: {error}"
+            ))
+        })?;
+    let legacy_manifest = CreativeArchiveManifest {
+        schema: manifest.schema,
+        kind: CREATIVE_STUDIO_ARCHIVE_KIND.to_owned(),
+        version: CREATIVE_STUDIO_ARCHIVE_VERSION,
+        exported_at: manifest.exported_at,
+        project: CreativeArchiveProject {
+            title: manifest.canvas.title,
+            document: project_document,
+        },
+        assets: manifest.assets,
+    };
+    let legacy_manifest_bytes = serde_json::to_vec(&legacy_manifest).map_err(|error| {
+        AppError::Internal(format!("normalize creative Canvas archive manifest: {error}"))
+    })?;
+    entries.insert(PathBuf::from("manifest.json"), legacy_manifest_bytes);
+    let legacy_entries = entries
+        .into_iter()
+        .map(|(path, bytes)| (archive_path_string(&path), bytes))
+        .collect::<BTreeMap<_, _>>();
+    let legacy_bytes = write_archive_entries(legacy_entries, "creative Canvas archive")?;
+    parse_creative_project_archive(&legacy_bytes)
+}
+
+fn read_archive_entries(
+    bytes: &[u8],
+    max_uncompressed_bytes: u64,
+    max_entries: usize,
+    label: &str,
+) -> Result<HashMap<PathBuf, Vec<u8>>, AppError> {
+    if bytes.is_empty() {
+        return Err(AppError::BadRequest(format!("{label} is empty")));
+    }
+    if bytes.len() > MAX_CREATIVE_ARCHIVE_COMPRESSED_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "{label} exceeds {MAX_CREATIVE_ARCHIVE_COMPRESSED_BYTES} compressed bytes"
+        )));
+    }
+
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|_| AppError::BadRequest(format!("not a {label}")))?;
+    let mut budget = zip_safe::ZipExtractionBudget::new(max_uncompressed_bytes, max_entries);
+    budget
+        .check_entry_count(archive.len())
+        .map_err(|error| AppError::BadRequest(error.to_string()))?;
+
+    let mut entries = HashMap::<PathBuf, Vec<u8>>::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| {
+            AppError::BadRequest(format!("corrupt {label}: {error}"))
+        })?;
+        let entry_name = entry.name().to_owned();
+        if entry.encrypted() || zip_safe::zip_entry_is_symlink(entry.unix_mode()) {
+            return Err(AppError::BadRequest(format!(
+                "unsafe {label} entry: {entry_name}"
+            )));
+        }
+        let path = zip_safe::safe_zip_entry_path(&entry_name, zip_safe::ZipColonPolicy::RejectAll)
+            .ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "unsafe {label} entry: {entry_name}"
+                ))
+            })?;
+        if entry.is_dir() || !is_allowed_archive_path(&path) {
+            return Err(AppError::BadRequest(format!(
+                "unsupported {label} entry: {entry_name}"
+            )));
+        }
+        if entries.contains_key(&path) {
+            return Err(AppError::BadRequest(format!(
+                "duplicate {label} entry: {entry_name}"
+            )));
+        }
+
+        let entry_limit = if path == Path::new("manifest.json") {
+            MAX_CREATIVE_ARCHIVE_MANIFEST_BYTES
+        } else {
+            MAX_ASSET_BYTES
+        };
+        if entry.size() > entry_limit as u64 {
+            return Err(AppError::BadRequest(format!(
+                "{label} entry is too large: {entry_name}"
+            )));
+        }
+        let mut content = Vec::with_capacity((entry.size() as usize).min(entry_limit));
+        (&mut entry)
+            .take(entry_limit as u64 + 1)
+            .read_to_end(&mut content)
+            .map_err(|error| {
+                AppError::BadRequest(format!(
+                    "cannot read {label} entry {entry_name}: {error}"
+                ))
+            })?;
+        if content.len() > entry_limit {
+            return Err(AppError::BadRequest(format!(
+                "{label} entry is too large: {entry_name}"
+            )));
+        }
+        budget
+            .record_written(content.len() as u64)
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+        entries.insert(path, content);
+    }
+    Ok(entries)
+}
+
+fn write_archive_entries(
+    entries: BTreeMap<String, Vec<u8>>,
+    label: &str,
+) -> Result<Vec<u8>, AppError> {
+    let total_uncompressed = entries.values().try_fold(0u64, |total, bytes| {
+        total
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| AppError::BadRequest(format!("{label} size overflow")))
+    })?;
+    if total_uncompressed > MAX_CREATIVE_ARCHIVE_UNCOMPRESSED_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "{label} expands beyond {MAX_CREATIVE_ARCHIVE_UNCOMPRESSED_BYTES} bytes"
+        )));
+    }
+
+    let cursor = Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(cursor);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .unix_permissions(0o600);
+    for (path, bytes) in entries {
+        writer.start_file(path, options).map_err(internal_zip_error)?;
+        writer
+            .write_all(&bytes)
+            .map_err(|error| AppError::Internal(format!("write {label} entry: {error}")))?;
+    }
+    let bytes = writer.finish().map_err(internal_zip_error)?.into_inner();
+    if bytes.len() > MAX_CREATIVE_ARCHIVE_COMPRESSED_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "{label} is too large: {} compressed bytes",
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
+}
+
+fn archive_path_string(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn parse_creative_project_archive_with_limits(
@@ -649,6 +926,47 @@ fn validate_manifest_envelope(manifest: &CreativeArchiveManifest) -> Result<(), 
             "creative project archive exportedAt must be non-negative".into(),
         ));
     }
+    Ok(())
+}
+
+fn validate_canvas_manifest_envelope(
+    manifest: &CreativeCanvasArchiveManifest,
+) -> Result<(), AppError> {
+    if manifest.schema != CREATIVE_STUDIO_SCHEMA {
+        return Err(AppError::BadRequest(format!(
+            "creative Canvas archive schema must be {CREATIVE_STUDIO_SCHEMA:?}"
+        )));
+    }
+    if manifest.kind != CREATIVE_CANVAS_ARCHIVE_KIND {
+        return Err(AppError::BadRequest(
+            "archive is not a Creative Studio Canvas archive".into(),
+        ));
+    }
+    if manifest.version != CREATIVE_CANVAS_ARCHIVE_VERSION {
+        return Err(AppError::BadRequest(format!(
+            "creative Canvas archive version must be exactly {CREATIVE_CANVAS_ARCHIVE_VERSION}"
+        )));
+    }
+    if manifest.exported_at < 0 {
+        return Err(AppError::BadRequest(
+            "creative Canvas archive exportedAt must be non-negative".into(),
+        ));
+    }
+    nomifun_common::validate_uuidv7(&manifest.canvas.canvas_id).map_err(|error| {
+        AppError::BadRequest(format!(
+            "creative Canvas archive canvasId must be a canonical UUIDv7: {error}"
+        ))
+    })?;
+    validate_archive_title(&manifest.canvas.title)?;
+    manifest
+        .canvas
+        .document
+        .validate_for_canvas(&manifest.canvas.canvas_id)
+        .map_err(|error| {
+            AppError::BadRequest(format!(
+                "invalid creative Canvas document in archive: {error}"
+            ))
+        })?;
     Ok(())
 }
 
@@ -1878,6 +2196,51 @@ mod tests {
         assert_ne!(remapped.assets[0].metadata.asset_id, ASSET_ID);
         assert!(WorkshopAssetId::parse(&remapped.assets[0].metadata.asset_id).is_ok());
         assert_eq!(remapped.document.nodes[0].node_type, CreativeNodeType::Image);
+    }
+
+    #[test]
+    fn v2_canvas_writer_uses_canvas_manifest_and_reader_accepts_both_versions() {
+        let document = image_document();
+        let bytes = build_creative_canvas_archive(
+            "归档画布",
+            &document,
+            vec![asset_snapshot()],
+            30,
+        )
+        .unwrap();
+        let files = unzip_to_map(&bytes);
+        let manifest: Value = serde_json::from_slice(files.get("manifest.json").unwrap()).unwrap();
+
+        assert_eq!(manifest["kind"], CREATIVE_CANVAS_ARCHIVE_KIND);
+        assert_eq!(manifest["version"], CREATIVE_CANVAS_ARCHIVE_VERSION);
+        assert_eq!(
+            manifest["canvas"]["canvasId"],
+            Value::String(PROJECT_ID.into())
+        );
+        assert_eq!(
+            manifest["canvas"]["document"]["canvasId"],
+            Value::String(PROJECT_ID.into())
+        );
+        assert!(manifest.get("project").is_none());
+        assert!(!String::from_utf8(files["manifest.json"].clone())
+            .unwrap()
+            .contains("projectId"));
+
+        let parsed_v2 = parse_creative_archive(&bytes).unwrap();
+        assert_eq!(parsed_v2.title, "归档画布");
+        assert_eq!(parsed_v2.document.project_id, PROJECT_ID);
+        assert_eq!(parsed_v2.assets.len(), 1);
+
+        let v1_bytes = build_creative_project_archive(
+            "旧归档项目",
+            &document,
+            vec![asset_snapshot()],
+            30,
+        )
+        .unwrap();
+        let parsed_v1 = parse_creative_archive(&v1_bytes).unwrap();
+        assert_eq!(parsed_v1.title, "旧归档项目");
+        assert_eq!(parsed_v1.document.project_id, PROJECT_ID);
     }
 
     #[test]
