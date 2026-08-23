@@ -568,7 +568,21 @@ mod tests {
 
     #[test]
     fn video_generation() {
-        assert!(tasks_of("ark", "seedance-1.0-pro").contains(&ModelTask::VideoGeneration));
+        for model in [
+            "seedance-1.0-pro",
+            "doubao-seedance-1-5-pro-251215",
+            "doubao-seedance-2-0-mini-260615",
+        ] {
+            assert!(
+                tasks_of("ark", model).contains(&ModelTask::VideoGeneration),
+                "{model}"
+            );
+        }
+        assert_eq!(
+            tasks_of("ark", "Doubao-Seed-2.0-mini"),
+            vec![ModelTask::Chat],
+            "Doubao Seed is a chat family; Seedance is the video family"
+        );
         // OpenAI's Sora API shuts down permanently on 2026-09-24 and has no
         // preset route left, so it must not be steered into VideoGeneration.
         assert!(!tasks_of("openai", "sora-2").contains(&ModelTask::VideoGeneration));

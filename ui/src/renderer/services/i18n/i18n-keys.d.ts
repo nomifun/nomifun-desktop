@@ -3574,6 +3574,7 @@ export type I18nKey =
   | 'settings.health.insufficientQuota'
   | 'settings.health.invalidAuthorizationHeader'
   | 'settings.health.invalidRequest'
+  | 'settings.health.modelUnavailable'
   | 'settings.health.nonApiResponse'
   | 'settings.health.notFound'
   | 'settings.health.rateLimited'

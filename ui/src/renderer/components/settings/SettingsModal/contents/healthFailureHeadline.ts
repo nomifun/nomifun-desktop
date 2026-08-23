@@ -38,6 +38,10 @@ const HEADLINE_KEYS: Record<ProviderHealthCheckErrorKind, { key: string; fallbac
     key: 'settings.health.notFound',
     fallback: '该地址不存在（404）——请检查 Base URL 与请求路径',
   },
+  model_unavailable: {
+    key: 'settings.health.modelUnavailable',
+    fallback: '模型或推理接入点不可用——请核对精确 Model ID、开通状态与密钥权限',
+  },
   non_api_response: {
     key: 'settings.health.nonApiResponse',
     fallback: '该地址返回的是网页而非 API——Base URL 很可能少了版本段',
@@ -67,6 +71,7 @@ export const endpointConfirmedByFailure = (
 ): boolean =>
   kind === 'unauthorized' ||
   kind === 'forbidden' ||
+  kind === 'model_unavailable' ||
   kind === 'insufficient_quota' ||
   kind === 'rate_limited';
 
