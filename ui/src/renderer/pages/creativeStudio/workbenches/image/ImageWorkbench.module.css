@@ -40,7 +40,7 @@
   border: 1px solid color-mix(in srgb, var(--color-border-2) 90%, transparent);
   border-radius: 16px;
   background: color-mix(in srgb, var(--color-bg-2) 96%, transparent);
-  box-shadow: 0 12px 38px rgba(15, 23, 42, 0.07);
+  box-shadow: 0 12px 38px color-mix(in srgb, #000 8%, transparent);
 }
 
 .sideComposer {
@@ -580,7 +580,7 @@
   border: 1px solid var(--color-border-2);
   border-radius: 13px;
   background: var(--color-bg-1);
-  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.04);
+  box-shadow: 0 6px 20px color-mix(in srgb, #000 5%, transparent);
   transition:
     border-color 140ms ease,
     box-shadow 140ms ease,
@@ -589,7 +589,7 @@
 
 .resultCard:hover {
   transform: translateY(-1px);
-  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.09);
+  box-shadow: 0 12px 28px color-mix(in srgb, #000 10%, transparent);
 }
 
 .resultCard[data-selected='true'] {
@@ -825,14 +825,32 @@
 .bottomComposer {
   width: min(1080px, 100%);
   padding: 14px;
-  border: 1px solid color-mix(in srgb, white 54%, var(--color-border-2));
+  border: 1px solid color-mix(in srgb, var(--color-border-3) 82%, transparent);
   border-radius: 22px;
-  background: color-mix(in srgb, var(--color-bg-2) 72%, transparent);
+  background: color-mix(in srgb, var(--color-bg-2) 88%, transparent);
   box-shadow:
-    0 30px 90px rgba(15, 23, 42, 0.2),
-    0 8px 28px rgba(15, 23, 42, 0.09);
+    0 30px 90px color-mix(in srgb, #000 20%, transparent),
+    0 8px 28px color-mix(in srgb, #000 9%, transparent);
   backdrop-filter: blur(24px) saturate(145%);
   pointer-events: auto;
+}
+
+:global([data-theme='dark']) .sideComposer,
+:global([data-theme='dark']) .resultsPanel {
+  box-shadow: 0 12px 38px color-mix(in srgb, #000 30%, transparent);
+}
+
+:global([data-theme='dark']) .resultCard {
+  box-shadow: 0 6px 20px color-mix(in srgb, #000 24%, transparent);
+}
+
+:global([data-theme='dark']) .resultCard:hover {
+  box-shadow: 0 12px 28px color-mix(in srgb, #000 34%, transparent);
+}
+
+:global([data-theme='dark']) .bottomComposer {
+  border-color: color-mix(in srgb, var(--color-border-3) 92%, transparent);
+  background: color-mix(in srgb, var(--color-bg-2) 92%, transparent);
 }
 
 .bottomPromptRow {

@@ -1,5 +1,5 @@
 .editor {
-  --creative-canvas-selection-accent: #2f80ff;
+  --creative-canvas-selection-accent: rgb(var(--primary-6));
   width: 100%;
   height: 100%;
 }
