@@ -758,6 +758,10 @@ struct DurableDeliveryLease {
     kind: String,
     request_payload: String,
     execution_authority: Option<AgentExecutionTurnAuthority>,
+    /// Fresh sends for hidden Creative Studio conversations carry a Canvas
+    /// pending-turn authority and may install explicitly selected planning
+    /// Skills before the runtime is built.
+    creative_studio_turn: bool,
     /// True only when this receipt can be addressed by the public
     /// continue-truncated endpoint. Internal/background authorities must not
     /// surface a recovery action that the endpoint will reject.
@@ -7962,6 +7966,7 @@ impl ConversationService {
             kind: "turn".to_owned(),
             request_payload: request_payload.clone(),
             execution_authority,
+            creative_studio_turn: creative_studio_authority.is_some(),
             truncated_recovery_eligible,
             durable_admitted: true,
             admission_epoch: Some(expected_admitted_epoch),
@@ -8303,7 +8308,7 @@ impl ConversationService {
         let send_started_at = now_ms();
 
         // Verify conversation exists and belongs to user
-        let row = self
+        let mut row = self
             .conversation_repo
             .get(parse_conv_id(conversation_id)?)
             .await?
@@ -8487,6 +8492,32 @@ impl ConversationService {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
+        let creative_studio_turn = durable_delivery
+            .as_ref()
+            .is_some_and(|delivery| delivery.creative_studio_turn);
+        // Skill metadata is captured when a Nomi runtime is built. Recycle the
+        // hidden Creative Studio runtime for every explicitly skilled turn so
+        // a cached engine can never keep an older Skill registry.
+        let rebuild_runtime_for_injected_skills =
+            creative_studio_turn && !req.inject_skills.is_empty();
+        if creative_studio_turn
+            && let Some(updated_extra) =
+                merge_injected_skills_into_extra(&row.extra, &req.inject_skills)?
+        {
+            let updated_at = now_ms();
+            self.conversation_repo
+                .update(
+                    &conversation_key,
+                    &ConversationRowUpdate {
+                        extra: Some(updated_extra.clone()),
+                        updated_at: Some(updated_at),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            row.extra = updated_extra;
+            row.updated_at = row.updated_at.max(updated_at);
+        }
 
         let (
             mut runtime_options,
@@ -8564,7 +8595,16 @@ impl ConversationService {
         // crosses the same authority boundary and stale/tampered adapter JSON
         // can never suppress the active preset.
         project_preset_runtime_context(&row, &runtime_options.agent_type, &mut runtime_options.extra)?;
-        self.ensure_auto_workspace_skill_links(&row, &runtime_options)
+        let required_injected_skills = if creative_studio_turn {
+            req.inject_skills.as_slice()
+        } else {
+            &[]
+        };
+        self.ensure_auto_workspace_skill_links(
+            &row,
+            &runtime_options,
+            required_injected_skills,
+        )
             .await?;
         if let Some(lease) = runtime_build_lease.as_ref() {
             lease.ensure_active()?;
@@ -8972,6 +9012,15 @@ impl ConversationService {
             let mut turn_cancellation = turn_cancellation;
             let build_started_at = now_ms();
             info!(conversation_id = %conv_id, "Agent runtime build started");
+            if rebuild_runtime_for_injected_skills {
+                Self::terminate_runtime_until_confirmed(
+                    &runtime_registry,
+                    &conv_id,
+                    AgentKillReason::ConfigurationChanged,
+                    "Creative Studio injected Skill refresh",
+                )
+                .await;
+            }
             let knowledge_extra = runtime_options.extra.clone();
             let mut successful_turn_model = initial_failover_authority
                 .as_ref()
@@ -11452,6 +11501,7 @@ impl ConversationService {
             kind: "turn".to_owned(),
             request_payload: request_payload.clone(),
             execution_authority: None,
+            creative_studio_turn: false,
             truncated_recovery_eligible: false,
             durable_admitted: true,
             admission_epoch: Some(admitted_admission_epoch),
@@ -12738,7 +12788,7 @@ impl ConversationService {
             )));
         }
         let mut runtime_options = self.build_runtime_options(row)?;
-        self.ensure_auto_workspace_skill_links(row, &runtime_options)
+        self.ensure_auto_workspace_skill_links(row, &runtime_options, &[])
             .await?;
         if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err(AppError::Conflict(format!(
@@ -12846,11 +12896,23 @@ impl ConversationService {
         &self,
         row: &ConversationRow,
         runtime_options: &AgentRuntimeBuildOptions,
+        required_skills: &[String],
     ) -> Result<(), AppError> {
         if !self.execution_authority(&row.user_id).controls_host() {
+            if !required_skills.is_empty() {
+                return Err(AppError::Forbidden(
+                    "Injected Skills require installation-owner host authority".to_owned(),
+                ));
+            }
             return Ok(());
         }
         if !temp_workspace_marker_present(&runtime_options.extra) {
+            if !required_skills.is_empty() {
+                return Err(AppError::Conflict(
+                    "Creative Studio Agent injected Skills require a managed workspace"
+                        .to_owned(),
+                ));
+            }
             return Ok(());
         }
         let expected_workspace = auto_workspace_path_for_row(
@@ -12881,17 +12943,49 @@ impl ConversationService {
             .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
             .unwrap_or_default();
         if skill_names.is_empty() {
+            if !required_skills.is_empty() {
+                return Err(AppError::Conflict(
+                    "Creative Studio Agent injected Skill snapshot is empty".to_owned(),
+                ));
+            }
             return Ok(());
         }
 
         let Some(rel_dirs) = native_skills_dirs(&runtime_options.agent_type) else {
+            if !required_skills.is_empty() {
+                return Err(AppError::Conflict(
+                    "Creative Studio Agent runtime does not support native Skills".to_owned(),
+                ));
+            }
             return Ok(());
         };
         if rel_dirs.is_empty() {
+            if !required_skills.is_empty() {
+                return Err(AppError::Conflict(
+                    "Creative Studio Agent runtime has no native Skill directory".to_owned(),
+                ));
+            }
             return Ok(());
         }
 
         let resolved = self.skill_resolver.resolve_skills(&skill_names).await;
+        if !required_skills.is_empty() {
+            let resolved_names = resolved
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect::<HashSet<_>>();
+            let missing = required_skills
+                .iter()
+                .filter(|skill| !resolved_names.contains(skill.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Err(AppError::NotFound(format!(
+                    "Creative Studio Agent Skills are unavailable: {}",
+                    missing.join(", ")
+                )));
+            }
+        }
         if resolved.is_empty() {
             return Ok(());
         }
@@ -12901,6 +12995,20 @@ impl ConversationService {
             .skill_resolver
             .link_workspace_skills(&workspace, &rel_dirs_refs, &resolved)
             .await;
+        if !required_skills.is_empty() {
+            for rel_dir in &rel_dirs {
+                for skill in required_skills {
+                    let manifest = workspace.join(rel_dir).join(skill).join("SKILL.md");
+                    if !manifest.is_file() {
+                        return Err(AppError::Internal(format!(
+                            "Creative Studio Agent Skill '{}' was not linked into {}",
+                            skill,
+                            workspace.join(rel_dir).display()
+                        )));
+                    }
+                }
+            }
+        }
         debug!(
             conversation_id = %row.conversation_id,
             workspace = %workspace.display(),
@@ -13536,6 +13644,85 @@ fn native_skills_dirs(agent_type: &AgentType) -> Option<Vec<String>> {
     agent_type
         .native_skills_dirs()
         .map(|dirs| dirs.iter().map(|s| (*s).to_owned()).collect())
+}
+
+/// Merge exact per-turn Skill selections into the hidden Conversation's
+/// durable skill snapshot. This is intentionally append-only: a successfully
+/// admitted turn may install a Skill as a session side effect, while an
+/// idempotent replay must not uninstall capabilities established by the first
+/// owner.
+fn merge_injected_skills_into_extra(
+    extra_json: &str,
+    injected_skills: &[String],
+) -> Result<Option<String>, AppError> {
+    if injected_skills.is_empty() {
+        return Ok(None);
+    }
+    let mut extra: serde_json::Value = serde_json::from_str(extra_json).map_err(|error| {
+        AppError::Internal(format!(
+            "Conversation extra is not valid JSON while installing injected Skills: {error}"
+        ))
+    })?;
+    let object = extra.as_object_mut().ok_or_else(|| {
+        AppError::Internal(
+            "Conversation extra must be an object while installing injected Skills".to_owned(),
+        )
+    })?;
+    let mut skills = match object.get("skills") {
+        None => Vec::new(),
+        Some(value) => value
+            .as_array()
+            .ok_or_else(|| {
+                AppError::Internal(
+                    "Conversation extra.skills must be an array while installing injected Skills"
+                        .to_owned(),
+                )
+            })?
+            .iter()
+            .map(|value| {
+                value.as_str().map(str::to_owned).ok_or_else(|| {
+                    AppError::Internal(
+                        "Conversation extra.skills contains a non-string entry".to_owned(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+    let mut seen = skills.iter().cloned().collect::<HashSet<_>>();
+    let mut changed = false;
+    for skill_id in injected_skills {
+        if skill_id.is_empty()
+            || skill_id.len() > 128
+            || skill_id.trim() != skill_id
+            || !skill_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        {
+            return Err(AppError::BadRequest(format!(
+                "Injected Skill ID '{skill_id}' is invalid"
+            )));
+        }
+        if seen.insert(skill_id.clone()) {
+            skills.push(skill_id.clone());
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(None);
+    }
+    object.insert(
+        "skills".to_owned(),
+        serde_json::to_value(skills).map_err(|error| {
+            AppError::Internal(format!(
+                "Injected Skill snapshot could not be serialized: {error}"
+            ))
+        })?,
+    );
+    serde_json::to_string(&extra).map(Some).map_err(|error| {
+        AppError::Internal(format!(
+            "Conversation extra could not persist injected Skills: {error}"
+        ))
+    })
 }
 
 fn upsert_conversation_mcp_status(
@@ -14187,6 +14374,51 @@ mod tests {
         project_preset_runtime_context(&row, &AgentType::Nomi, &mut extra).unwrap();
 
         assert_eq!(extra["preset_rules"], "execution persona");
+    }
+
+    #[test]
+    fn creative_turn_injected_skills_extend_the_session_snapshot_once() {
+        let extra = serde_json::json!({
+            "workspace": "/tmp/canvas",
+            "skills": ["cron", "creative-studio-canvas"]
+        })
+        .to_string();
+        let merged = merge_injected_skills_into_extra(
+            &extra,
+            &[
+                "creative-studio-canvas".to_owned(),
+                "creative-studio-organize".to_owned(),
+            ],
+        )
+        .unwrap()
+        .expect("one new Skill should update the snapshot");
+        let merged: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(
+            merged["skills"],
+            json!([
+                "cron",
+                "creative-studio-canvas",
+                "creative-studio-organize"
+            ])
+        );
+        assert!(
+            merge_injected_skills_into_extra(
+                &serde_json::to_string(&merged).unwrap(),
+                &["creative-studio-organize".to_owned()],
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn creative_turn_injected_skills_reject_invalid_ids() {
+        let error = merge_injected_skills_into_extra(
+            r#"{"workspace":"/tmp/canvas","skills":[]}"#,
+            &["../escape".to_owned()],
+        )
+        .unwrap_err();
+        assert!(matches!(error, AppError::BadRequest(_)));
     }
 
     #[test]

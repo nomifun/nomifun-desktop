@@ -629,7 +629,13 @@ describe('NomiCreativeStudioAgentChatPort', () => {
         transport.emitStarted(turnStarted());
         transport.emitResponse({
           type: 'error',
-          data: { message: 'rate limited' },
+          data: {
+            message: 'rate limited',
+            code: 'USER_LLM_PROVIDER_RATE_LIMITED',
+            ownership: 'user_llm_provider',
+            detail: 'raw provider payload must stay out of the Canvas panel',
+            retryable: true,
+          },
           msg_id: assistantMessageId,
           turn_id: turnId,
           conversation_id: conversationId,
@@ -646,6 +652,11 @@ describe('NomiCreativeStudioAgentChatPort', () => {
 
     expect(events[0]?.type).toBe('activity');
     expect(events[1]?.type).toBe('failed');
+    if (events[1]?.type !== 'failed') throw new Error('expected terminal failure');
+    expect(events[1].message).toBe('rate limited');
+    expect(events[1].message.includes('{')).toBe(false);
+    expect(events[1].message.includes('USER_LLM_PROVIDER_RATE_LIMITED')).toBe(false);
+    expect(events[1].message.includes('raw provider payload')).toBe(false);
     expect(transport.stopCalls).toEqual([conversationId]);
     expect(transport.responseListeners.size).toBe(0);
   });
