@@ -69,7 +69,7 @@ The source of truth is
 | `/requirements`, `/requirements/extensions`, `/requirements/sources` | Requirements Platform, AutoWork, notification/source extensions. |
 | `/nomi` | Companion configuration. |
 | `/knowledge`, `/knowledge/:id` | Knowledge base list/detail. |
-| `/workshop` | Creative Studio home inside the shared app layout. |
+| `/workshop` | Creative Studio compatibility entry; redirects to the Canvas library. |
 | `/workshop/canvases` | Canonical Canvas library. |
 | `/workshop/canvas/:canvasId`, `/workshop/director/:canvasId` | Canvas infinite editor and bounded 3D Director. |
 | `/workshop/image`, `/workshop/video` | Independent Image and Video Workbenches; both work with zero Canvases. |
@@ -87,7 +87,9 @@ Creative Studio reuses the normal app titlebar and swaps the primary rail to a
 Settings-style product navigation surface, with **Back to Workbench** pinned at
 the bottom. During an app session, the main rail entry resumes the last complete
 Creative Studio location that passes the product's exact route matcher; invalid
-or unknown stored locations fall back to `/workshop`. Its route constants and exact-match rules live in
+or unknown stored locations fall back to `/workshop/canvases`. The product rail
+has no separate home item because prompt-led creation lives in the Canvas
+Assistant. Its route constants and exact-match rules live in
 [`pages/creativeStudio/app/routes.ts`](../../ui/src/renderer/pages/creativeStudio/app/routes.ts).
 
 `/workshop/projects` is a deprecated compatibility redirect to

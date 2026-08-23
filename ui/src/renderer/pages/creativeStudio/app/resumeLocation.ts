@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { CREATIVE_STUDIO_ROOT_PATH, isCreativeStudioPath } from './routes';
+import {
+  CREATIVE_STUDIO_CANVASES_PATH,
+  CREATIVE_STUDIO_ROOT_PATH,
+  isCreativeStudioPath,
+} from './routes';
 
 export const CREATIVE_STUDIO_RESUME_LOCATION_KEY =
   'nomifun:creative-studio:resume-location';
@@ -35,7 +39,7 @@ export function normalizeCreativeStudioResumeLocation(value: unknown): string {
     !value.startsWith('/') ||
     value.startsWith('//')
   ) {
-    return CREATIVE_STUDIO_ROOT_PATH;
+    return CREATIVE_STUDIO_CANVASES_PATH;
   }
 
   try {
@@ -44,24 +48,28 @@ export function normalizeCreativeStudioResumeLocation(value: unknown): string {
       parsed.origin !== RESUME_LOCATION_BASE.origin ||
       !isCreativeStudioPath(parsed.pathname)
     ) {
-      return CREATIVE_STUDIO_ROOT_PATH;
+      return CREATIVE_STUDIO_CANVASES_PATH;
     }
-    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    const pathname =
+      parsed.pathname.replace(/\/+$/, '') === CREATIVE_STUDIO_ROOT_PATH
+        ? CREATIVE_STUDIO_CANVASES_PATH
+        : parsed.pathname;
+    return `${pathname}${parsed.search}${parsed.hash}`;
   } catch {
-    return CREATIVE_STUDIO_ROOT_PATH;
+    return CREATIVE_STUDIO_CANVASES_PATH;
   }
 }
 
 export function readCreativeStudioResumeLocation(
   storage: ResumeStorage | null = browserSessionStorage()
 ): string {
-  if (!storage) return CREATIVE_STUDIO_ROOT_PATH;
+  if (!storage) return CREATIVE_STUDIO_CANVASES_PATH;
   try {
     return normalizeCreativeStudioResumeLocation(
       storage.getItem(CREATIVE_STUDIO_RESUME_LOCATION_KEY)
     );
   } catch {
-    return CREATIVE_STUDIO_ROOT_PATH;
+    return CREATIVE_STUDIO_CANVASES_PATH;
   }
 }
 

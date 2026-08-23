@@ -92,7 +92,7 @@ describe('Creative Studio routes', () => {
   });
 
   test('matches only exact product sections', () => {
-    expect(creativeStudioSectionForPath('/workshop')).toBe('home');
+    expect(creativeStudioSectionForPath('/workshop')).toBe('canvases');
     expect(creativeStudioSectionForPath('/workshop/canvases')).toBe('canvases');
     expect(creativeStudioSectionForPath('/workshop/projects')).toBe('canvases');
     expect(creativeStudioSectionForPath('/workshop/canvas/canvas-1')).toBe('canvas');

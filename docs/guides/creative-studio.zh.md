@@ -20,15 +20,15 @@ NomiFun 现有的 Provider 与模型目录，不维护第二套模型配置系�
 窗口等控制；左侧主侧栏会像进入“设置”时一样切换为创意工坊内部导航，并且可以折叠
 以释放工作空间。入口会恢复当前应用会话中最后一个有效的创意工坊地址，包括完整查询
 参数和页内锚点。保存的地址如果非法、未知、外部或超长，会 fail-closed 回退到
-`/workshop`。想主动回到起始页时，再点击创意工坊侧栏里的**创意工坊**首页项。
-待 Canvas 或 Director 的保存结果处理完毕后，点击侧栏底部的**返回工作台**会回到
-`/guid`。
+`/workshop/canvases`。创意工坊不再提供独立首页项；通过需求发起创作的能力由已打开
+Canvas 内的**创作助手**提供。待 Canvas 或 Director 的保存结果处理完毕后，点击侧栏
+底部的**返回工作台**会回到 `/guid`。
 
 规范路由面如下：
 
 | 路由 | 用途 |
 | --- | --- |
-| `/workshop` | 创意工坊首页与入口。 |
+| `/workshop` | 兼容入口，重定向到 `/workshop/canvases`。 |
 | `/workshop/canvases` | 创建、重命名、打开、导入、导出和删除 Canvas。 |
 | `/workshop/canvas/:canvasId` | 编辑一个 Canvas 的 canonical 无限文档。 |
 | `/workshop/director/:canvasId` | 编辑附属于该 Canvas 的受限 Director 状态。 |
@@ -122,7 +122,7 @@ instance-owner capability，只对策展的 `desktop` 与 `admin` Gateway profil
 
 | 操作 | 要求的 NomiFun task | 创意工坊 capability |
 | --- | --- | --- |
-| Canvas Assistant 与简单 kickoff | `chat` | Canvas-scoped Assistant turn；严格图提案仍需人工批准。 |
+| Canvas 创作助手 | `chat` | Canvas-scoped Assistant turn；严格图提案仍需人工批准。 |
 | Workflow AI 草稿/规划 | `chat` | 一次不带工具的有界 completion。 |
 | 空图片承接节点 | `image_generation` | `t2i`。 |
 | 带真实参考的图片（包括蒙版编辑路径） | `image_edit` | `i2i`。 |
