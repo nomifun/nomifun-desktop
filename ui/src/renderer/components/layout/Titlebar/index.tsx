@@ -334,6 +334,11 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
       )}
     >
       <div ref={menuRef} className='app-titlebar__menu' style={menuStyle}>
+        {!layout?.isMobile && (
+          <div className='app-titlebar__language-control'>
+            <TitlebarLanguageMenu iconSize={iconSize} strokeWidth={desktopIconStroke} />
+          </div>
+        )}
         {showBackToChatButton && (
           renderIconButton({
             tooltip: backToChatTooltip,
@@ -370,7 +375,6 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
         )}
         {!layout?.isMobile && (
           <>
-            <TitlebarLanguageMenu iconSize={iconSize} strokeWidth={desktopIconStroke} />
             {renderIconButton({
               tooltip: t('terminal.newConversation'),
               className: 'app-titlebar__button app-titlebar__button--nav',
