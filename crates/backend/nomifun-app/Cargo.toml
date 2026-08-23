@@ -186,10 +186,9 @@ computer-use = [
     "dep:nomi-types",
 ]
 # Browser-automation tools (desktop host enables this; web/server hosts do not).
-# Also pulls the discrete-tool MCP bridge (`mcp-browser-stdio`) deps so codex/
-# ACP sessions get the same browser-use; web/headless builds omit them entirely
-# (no self-hosted-CDP / Chromium stack). Mirrors how `computer-use` pulls
-# nomi-computer/-config/-tools/-types for mcp-computer-stdio.
+# The native Nomi executor and Platform Gateway share the process-wide
+# BrowserSessionHub; web/headless builds omit the self-hosted-CDP / Chromium
+# stack entirely.
 # P3-GW1: also forwards to `nomifun-gateway/browser-use` so the Platform Gateway
 # exposes the per-companion `nomi_browser_*` tools (route A). Web/headless builds
 # omit the feature → the gateway registers no browser tools.
@@ -202,9 +201,6 @@ browser-use = [
     "dep:nomifun-browser-platform",
     "dep:nomi-process-runtime",
     "dep:sysinfo",
-    "dep:nomi-config",
-    "dep:nomi-tools",
-    "dep:nomi-types",
 ]
 
 [dependencies]
@@ -276,11 +272,9 @@ percent-encoding = "2"
 # ComputerTool. Optional; only the `computer-use` feature pulls the native
 # screen/input/UI-Automation stack, so web/headless builds stay lean.
 nomi-computer = { workspace = true, optional = true }
-# Browser-use discrete-tool MCP bridge (`mcp-browser-stdio`) — authenticated
-# proxy into the application-owned BrowserSessionHub. Optional; only the
-# `browser-use` feature pulls the managed browser engine + Chromium, so
-# web/headless builds stay lean. Shares the optional nomi-config/-tools/-types
-# deps with computer-use.
+# Browser facade used by the application-owned managed Host factory. Optional;
+# only the `browser-use` feature pulls the managed browser engine + Chromium,
+# so web/headless builds stay lean.
 nomi-browser = { workspace = true, optional = true }
 # Browser engine types used by the application-owned managed Host and identity
 # vault. Login routes allocate a Primary Hub Lane; they never launch a private

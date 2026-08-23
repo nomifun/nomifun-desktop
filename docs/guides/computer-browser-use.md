@@ -19,9 +19,9 @@ enables the relevant build feature and runtime flag.
 ## Current Architecture
 
 The old external `@playwright/mcp` sidecar and the private per-caller
-`BrowserTool` or Chromium ownership paths have been removed. The
-`mcp-browser-stdio` bridge is now a scoped proxy to the Hub; it does not create
-a browser or profile.
+`BrowserTool` or Chromium ownership paths have been removed. Browser automation
+now enters through the process-wide `BrowserSessionHub`; no browser stdio
+sidecar or per-caller profile is created.
 
 Computer use is desktop-oriented. It can observe the screen and synthesize
 input, so it is compiled into desktop/Nomi CLI builds but omitted from the

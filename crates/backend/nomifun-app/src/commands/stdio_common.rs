@@ -15,9 +15,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use futures_util::{FutureExt as _, SinkExt as _, StreamExt as _};
-use nomifun_api_types::{
-    MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY, ScopedMcpChildBootstrap,
-};
+use nomifun_api_types::ScopedMcpChildBootstrap;
 use nomifun_common::{
     LOOPBACK_CAPABILITY_RENEW_PATH, LOOPBACK_CAPABILITY_RENEWAL_MARGIN_SECS,
     LOOPBACK_CAPABILITY_REVOKE_PATH, LoopbackCapabilityAccess,
@@ -44,43 +42,25 @@ type ScopedAccess<S> = LoopbackCapabilityAccess<LoopbackCapabilityClaims<S>>;
 
 const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
 
-/// A Platform Gateway child carries broad structured platform calls, so it may
-/// retain a little more work than the browser-only bridge. This is a per-child
-/// admission bound, never a process-global concurrency cap.
+/// A Platform Gateway child carries broad structured platform calls. This is a
+/// per-child admission bound, never a process-global concurrency cap.
 pub(crate) const MAX_GATEWAY_STDIO_ACTIVE_REQUESTS: usize = 8;
 
-/// A browser-only ACP child is deliberately serial. Concurrency for one
-/// user-visible task comes from its independently fenced sibling children and
-/// from the Browser Hub, rather than from retaining multiple large JSON values
-/// in every proxy process.
-pub(crate) const MAX_BROWSER_STDIO_ACTIVE_REQUESTS: usize = 1;
-
 /// Notifications do not receive JSON-RPC responses, so they use a separate,
-/// small control budget. This keeps cancellation available while eight browser
-/// requests are active without giving notification floods an unbounded spawn
-/// path through rmcp's per-message tasks.
+/// small control budget. This keeps cancellation available without giving
+/// notification floods an unbounded spawn path through rmcp's per-message
+/// tasks.
 const MAX_STDIO_ACTIVE_NOTIFICATIONS: usize = 8;
 
-/// Browser requests are normally far smaller (crawl URLs are independently
-/// bounded by the Hub), but the shared Platform Gateway also carries rich
-/// structured tool arguments. The fixed wire limit is a structural safety fuse,
-/// not a process-wide or machine-wide memory target.
+/// The Platform Gateway carries rich structured tool arguments. The fixed wire
+/// limit is a structural safety fuse, not a process-wide or machine-wide memory
+/// target.
 pub(crate) const MAX_GATEWAY_STDIO_INPUT_FRAME_BYTES: usize = 8 * 1024 * 1024;
-
-/// Browser tool arguments are bounded again by the Hub (URL count, schema
-/// depth, strings, etc.). 256 KiB leaves ample protocol headroom without
-/// allowing every child in a task family to retain a multi-megabyte `Value`.
-pub(crate) const MAX_BROWSER_STDIO_INPUT_FRAME_BYTES: usize = 256 * 1024;
 
 /// Tool results can contain screenshots or a bounded crawl batch. Encoding is
 /// performed through a capped writer so an oversized result cannot first create
 /// an unbounded temporary JSON buffer.
 pub(crate) const MAX_GATEWAY_STDIO_OUTPUT_FRAME_BYTES: usize = 32 * 1024 * 1024;
-
-/// Browser crawl/screenshot results are capped before this encoder. 20 MiB
-/// preserves headroom around the 16 MiB loopback body fuse while bounding a
-/// blocked browser-family wire envelope independently of Gateway traffic.
-pub(crate) const MAX_BROWSER_STDIO_OUTPUT_FRAME_BYTES: usize = 20 * 1024 * 1024;
 
 /// Control notifications should contain only request ids/progress metadata.
 /// Keeping them small preserves cancellation without letting the reserved
@@ -107,21 +87,9 @@ const STDIO_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const STDIO_HANDLER_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// The HTTP stream is accumulated only up to this decompressed-byte ceiling.
-/// Browser results are independently encoded through the 20 MiB stdio cap.
+/// Tool results are independently encoded through the transport frame cap.
 const MAX_LOOPBACK_TOOL_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LOOPBACK_CONTROL_RESPONSE_BYTES: usize = 1024 * 1024;
-
-/// Maximum browser-proxy payload simultaneously retained on blocked stdio
-/// wires for one `(user, conversation)` task family. This deliberately does
-/// not estimate allocator/serde/runtime overhead; those are separately bounded
-/// by the child count, serial admission, fixed runtime, and session fuse.
-pub(crate) const MAX_BROWSER_TASK_FAMILY_STDIO_WIRE_BYTES: usize =
-    MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY
-        * (MAX_BROWSER_STDIO_ACTIVE_REQUESTS
-            * (MAX_BROWSER_STDIO_INPUT_FRAME_BYTES
-                + 1
-                + MAX_BROWSER_STDIO_OUTPUT_FRAME_BYTES)
-            + MAX_STDIO_ACTIVE_NOTIFICATIONS * (MAX_STDIO_NOTIFICATION_FRAME_BYTES + 1));
 
 #[derive(Clone)]
 pub(crate) struct ProcessRequestBudget {
@@ -142,13 +110,6 @@ impl Default for ProcessRequestBudget {
 }
 
 impl ProcessRequestBudget {
-    pub(crate) fn browser() -> Self {
-        Self::new(
-            MAX_BROWSER_STDIO_ACTIVE_REQUESTS,
-            MAX_STDIO_ACTIVE_NOTIFICATIONS,
-        )
-    }
-
     fn new(max_requests: usize, max_notifications: usize) -> Self {
         assert!(max_requests > 0);
         assert!(max_notifications > 0);
@@ -704,18 +665,6 @@ pub(crate) fn bounded_stdio_transport(
     )
 }
 
-pub(crate) fn bounded_browser_stdio_transport(
-    budget: ProcessRequestBudget,
-) -> BoundedStdioTransport<tokio::io::Stdin, tokio::io::Stdout> {
-    BoundedStdioTransport::new_with_limits(
-        tokio::io::stdin(),
-        tokio::io::stdout(),
-        budget,
-        MAX_BROWSER_STDIO_INPUT_FRAME_BYTES,
-        MAX_BROWSER_STDIO_OUTPUT_FRAME_BYTES,
-    )
-}
-
 fn request_id_is_bounded(request_id: &RequestId) -> bool {
     match request_id {
         NumberOrString::Number(_) => true,
@@ -1073,8 +1022,8 @@ enum ToolDeliveryPolicy<'a> {
     /// Never re-POST once the request may have been delivered. Only
     /// connection-setup failures — where the request provably never left this
     /// process — are retried. Used for endpoints that execute non-idempotent
-    /// side effects and have no idempotency-key dedup (the Browser Hub
-    /// bridge: click/type/press_key can be an irreversible submit).
+    /// side effects and have no idempotency-key dedup.
+    #[cfg(test)]
     AtMostOnce,
 }
 
@@ -1082,6 +1031,7 @@ impl ToolDeliveryPolicy<'_> {
     fn idempotency_key(&self) -> Option<&str> {
         match self {
             Self::AtLeastOnce { idempotency_key } => *idempotency_key,
+            #[cfg(test)]
             Self::AtMostOnce => None,
         }
     }
@@ -1522,6 +1472,7 @@ where
     /// A 401 still renews the capability and re-POSTs exactly once: the
     /// server rejects unauthorized requests before dispatching any tool, so
     /// that response is proof the side effect was not executed.
+    #[cfg(test)]
     pub(crate) async fn forward_tool_outcome_at_most_once(
         &self,
         operation: &str,
@@ -1666,8 +1617,10 @@ where
                     // this process, so even at-most-once delivery may retry it.
                     // Any other send failure (timeout, reset after send) may
                     // have delivered — and possibly executed — the request.
+                    #[cfg(test)]
                     let undelivered = error.is_connect();
                     let error = format!("tool transport failed: {error:#}");
+                    #[cfg(test)]
                     if matches!(delivery, ToolDeliveryPolicy::AtMostOnce) && !undelivered {
                         return Err(format!(
                             "{error}; the request may already have been executed and was not retried"
@@ -2319,16 +2272,6 @@ mod tests {
             .unwrap();
         assert_eq!(budget.active_requests(), 0);
         assert!(!transport.admissions.contains(&RequestId::Number(1)));
-    }
-
-    #[test]
-    fn bounded_browser_task_family_wire_formula_stays_below_half_gibibyte() {
-        assert_eq!(MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY, 16);
-        assert_eq!(MAX_BROWSER_STDIO_ACTIVE_REQUESTS, 1);
-        assert_eq!(MAX_BROWSER_STDIO_INPUT_FRAME_BYTES, 256 * 1024);
-        assert_eq!(MAX_BROWSER_STDIO_OUTPUT_FRAME_BYTES, 20 * 1024 * 1024);
-        assert_eq!(MAX_BROWSER_TASK_FAMILY_STDIO_WIRE_BYTES, 348_127_376);
-        assert!(MAX_BROWSER_TASK_FAMILY_STDIO_WIRE_BYTES < 512 * 1024 * 1024);
     }
 
     #[tokio::test]

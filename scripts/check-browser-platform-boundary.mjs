@@ -20,43 +20,8 @@ const BOOTSTRAP = 'crates/agent/nomi-agent/src/bootstrap.rs';
 const BROWSER_TOOL = 'crates/agent/nomi-browser/src/tool.rs';
 const ENGINE_BACKEND = 'crates/agent/nomi-browser-engine/src/backend/cdp.rs';
 const PLATFORM_ADAPTER = 'crates/agent/nomi-browser/src/platform_adapter.rs';
-const BROWSER_STDIO_BRIDGE =
-  'crates/backend/nomifun-app/src/commands/browser_stdio.rs';
 const GATEWAY_REGISTRY = 'crates/backend/nomifun-gateway/src/browser_registry.rs';
 const HUB_COMPOSITION = 'crates/backend/nomifun-app/src/services.rs';
-
-const BRIDGE_RESOURCE_SYMBOLS = [
-  [
-    'bridge-current-exe',
-    /\bcurrent_exe\b/gi,
-    'the browser stdio bridge must not resolve resources from the current executable',
-  ],
-  [
-    'bridge-bundled-chrome-resource',
-    /(?:chrome-for-testing|\bbundled_chrome(?:_dir)?\b)/gi,
-    'the browser stdio bridge must not mention the bundled Chrome resource',
-  ],
-  [
-    'bridge-profile-resource',
-    /\b\w*profile\w*\b/gi,
-    'the browser stdio bridge must not contain browser profile symbols',
-  ],
-  [
-    'bridge-user-data-resource',
-    /\b\w*user_data\w*\b/gi,
-    'the browser stdio bridge must not contain Chromium user-data symbols',
-  ],
-  [
-    'bridge-cdp-symbol',
-    /\b\w*cdp\w*\b/gi,
-    'the browser stdio bridge must not expose CDP state or symbols',
-  ],
-  [
-    'bridge-launch-symbol',
-    /\b\w*launch\w*\b/gi,
-    'the browser stdio bridge must not contain browser launch symbols',
-  ],
-];
 
 const OWNERSHIP_BOUNDARY_PREFIXES = [
   'apps/desktop/src/',
@@ -1022,44 +987,6 @@ function scanEntries(entries) {
     }
   }
 
-  const bridge = byPath.get(BROWSER_STDIO_BRIDGE);
-  if (!bridge) {
-    violations.push({
-      path: BROWSER_STDIO_BRIDGE,
-      line: 1,
-      rule: 'browser-stdio-bridge-missing',
-      detail: 'browser stdio bridge source is missing',
-      snippet: '',
-    });
-  } else {
-    const masked = productionMask(bridge.source);
-    for (const [rule, pattern, detail] of BRIDGE_RESOURCE_SYMBOLS) {
-      // These terms are forbidden from the bridge entirely, including
-      // literals and documentation. Resource discovery belongs to App
-      // composition and the bridge should describe only proxy behavior.
-      for (const match of findMatches(bridge.source, pattern)) {
-        report(
-          BROWSER_STDIO_BRIDGE,
-          bridge.source,
-          bridge.source,
-          match.index,
-          rule,
-          detail,
-        );
-      }
-    }
-    if (!/\bScopedBridgeClient\b/.test(masked)) {
-      report(
-        BROWSER_STDIO_BRIDGE,
-        bridge.source,
-        masked,
-        0,
-        'bridge-not-proxy',
-        'the browser stdio bridge must remain a scoped capability proxy',
-      );
-    }
-  }
-
   return violations;
 }
 
@@ -1114,10 +1041,6 @@ function selfTest() {
       `,
     },
     {
-      path: BROWSER_STDIO_BRIDGE,
-      source: 'struct Bridge { client: ScopedBridgeClient<Scope> }',
-    },
-    {
       path: GATEWAY_REGISTRY,
       source: '// BrowserTool::with_policy is intentionally mentioned in docs',
     },
@@ -1151,14 +1074,6 @@ function selfTest() {
     }),
     'private-browser-policy-facade',
     'failed to reject a factory-owned BrowserTool policy facade',
-  );
-  assertViolation(
-    baseline.concat({
-      path: 'crates/backend/nomifun-app/src/commands/browser_stdio.rs',
-      source: 'fn bad() { ManagedBrowserHost::launch(config).await?; }',
-    }),
-    'private-host-launch',
-    'failed to reject a bridge-owned Chromium host launch',
   );
   assertViolation(
     baseline.map((entry) =>
@@ -1233,38 +1148,6 @@ function selfTest() {
     'adapter-profile-allocation',
     'failed to reject managed adapter browser profile allocation',
   );
-  assertViolation(
-    baseline.map((entry) =>
-      entry.path === BROWSER_STDIO_BRIDGE
-        ? { ...entry, source: 'struct Bridge;' }
-        : entry,
-    ),
-    'bridge-not-proxy',
-    'failed to enforce the browser stdio bridge proxy contract',
-  );
-  const bridgeForbiddenSamples = [
-    ['bridge-current-exe', 'fn bad() { std::env::current_exe(); }'],
-    ['bridge-bundled-chrome-resource', 'let resource = "chrome-for-testing";'],
-    ['bridge-bundled-chrome-resource', 'fn bundled_chrome_dir() {}'],
-    ['bridge-profile-resource', 'let profile_dir = path;'],
-    ['bridge-user-data-resource', 'let user_data = path;'],
-    ['bridge-cdp-symbol', 'let cdp_endpoint = value;'],
-    ['bridge-launch-symbol', 'fn launch() {}'],
-  ];
-  for (const [rule, forbiddenSource] of bridgeForbiddenSamples) {
-    assertViolation(
-      baseline.map((entry) =>
-        entry.path === BROWSER_STDIO_BRIDGE
-          ? {
-              ...entry,
-              source: `struct Bridge { client: ScopedBridgeClient<Scope> }\n${forbiddenSource}`,
-            }
-          : entry,
-      ),
-      rule,
-      `failed to reject bridge resource/launch symbol: ${rule}`,
-    );
-  }
   assertViolation(
     baseline.concat({
       path: 'crates/backend/nomifun-app/src/desktop.rs',
