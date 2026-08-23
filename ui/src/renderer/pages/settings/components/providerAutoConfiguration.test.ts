@@ -8,9 +8,14 @@ import { describe, expect, test } from 'bun:test';
 import type { ProtocolDescriptor } from '@/common/types/provider/modelProtocolManifest';
 import {
   applyProviderAutoConfiguration,
+  applyProviderCompatibilityMode,
   buildProviderAutoConfigurationTargets,
   DEFAULT_REQUIRED_OUTPUT_LIMIT,
   isAutoConfigurationPlatform,
+  normalizeProviderBaseUrlForCompatibilityMode,
+  providerCompatibilityAuthScheme,
+  providerCompatibilityProtocolForTask,
+  providerCompatibilityProtocolPreferences,
   selectProbeAuthScheme,
   selectProviderAutoConfiguration,
 } from './providerAutoConfiguration';
@@ -93,6 +98,132 @@ describe('provider auto configuration', () => {
     expect(
       selectProbeAuthScheme(descriptor('header-only', ['header_key:<name>']), '')
     ).toBe('header_key:x-api-key');
+  });
+
+  test('provides complete OpenAI and Claude compatibility presets', () => {
+    expect(providerCompatibilityAuthScheme('auto')).toBeUndefined();
+    expect(providerCompatibilityAuthScheme('openai')).toBe('bearer');
+    expect(providerCompatibilityAuthScheme('anthropic')).toBe('header_key:x-api-key');
+    expect(providerCompatibilityProtocolForTask('openai', 'chat')).toBe(
+      'openai.chat_text'
+    );
+    expect(providerCompatibilityProtocolForTask('openai', 'image_generation')).toBe(
+      'openai.images'
+    );
+    expect(providerCompatibilityProtocolForTask('anthropic', 'chat')).toBe(
+      'anthropic.messages'
+    );
+    expect(
+      providerCompatibilityProtocolForTask('anthropic', 'image_generation')
+    ).toBeUndefined();
+  });
+
+  test('restricts live probing to the explicitly selected interface mode', () => {
+    const openai = descriptor('openai.chat_text', ['bearer']);
+    const anthropic = descriptor('anthropic.messages', ['header_key:x-api-key'], true);
+    const definition = applyProviderCompatibilityMode(
+      {
+        model: 'claude-compatible-model',
+        capabilities: [emptyCapabilityDraft('chat')],
+      },
+      'anthropic',
+      true
+    );
+    const targets = buildProviderAutoConfigurationTargets(
+      definition,
+      { chat: manifest([openai, anthropic]) },
+      'header_key:x-api-key',
+      false,
+      providerCompatibilityProtocolPreferences('anthropic')
+    );
+    expect(targets).toHaveLength(1);
+    expect(targets[0]?.candidates.map((candidate) => candidate.descriptor.protocol_id)).toEqual([
+      'anthropic.messages',
+    ]);
+    expect(targets[0]?.candidates[0]?.authScheme).toBe('header_key:x-api-key');
+  });
+
+  test('switches presets in one step and resets adapter-owned fields', () => {
+    const customized = {
+      model: 'm',
+      capabilities: [
+        {
+          ...emptyCapabilityDraft('chat'),
+          transportSource: 'user' as const,
+          protocol: 'openai.chat_text',
+          endpoint: '/custom/chat',
+          providerParamsJson: '{"temperature":0.2}',
+        },
+      ],
+    };
+    const claude = applyProviderCompatibilityMode(customized, 'anthropic', true);
+    expect(claude.capabilities[0]).toMatchObject({
+      transportSource: 'user',
+      protocol: 'anthropic.messages',
+      endpoint: '',
+      providerParamsJson: '',
+      outputLimit: DEFAULT_REQUIRED_OUTPUT_LIMIT,
+    });
+
+    const openai = applyProviderCompatibilityMode(claude, 'openai', true);
+    expect(openai.capabilities[0]).toMatchObject({
+      protocol: 'openai.chat_text',
+      outputLimit: undefined,
+    });
+  });
+
+  test('returning to auto clears an explicit preset so detection can own it again', () => {
+    const claude = applyProviderCompatibilityMode(
+      {
+        model: 'm',
+        capabilities: [emptyCapabilityDraft('chat')],
+      },
+      'anthropic',
+      true
+    );
+    const automatic = applyProviderCompatibilityMode(claude, 'auto', true);
+    expect(automatic.capabilities[0]).toMatchObject({
+      transportSource: 'blank',
+      protocol: '',
+      outputLimit: undefined,
+    });
+  });
+
+  test('Claude mode does not silently install OpenAI transport on unsupported tasks', () => {
+    const imageRecommendation = {
+      ...emptyCapabilityDraft('image_generation'),
+      transportSource: 'recommendation' as const,
+      protocol: 'openai.images',
+    };
+    const result = applyProviderCompatibilityMode(
+      { model: 'm', capabilities: [imageRecommendation] },
+      'anthropic'
+    );
+    expect(result.capabilities[0]).toMatchObject({
+      transportSource: 'blank',
+      protocol: '',
+    });
+  });
+
+  test('normalizes provider roots for OpenAI and Claude wire formats', () => {
+    expect(
+      normalizeProviderBaseUrlForCompatibilityMode(
+        'https://gateway.example',
+        'openai'
+      )
+    ).toBe('https://gateway.example/v1');
+    expect(
+      normalizeProviderBaseUrlForCompatibilityMode(
+        'https://gateway.example/api/v1',
+        'anthropic'
+      )
+    ).toBe('https://gateway.example/api');
+    expect(
+      normalizeProviderBaseUrlForCompatibilityMode(
+        'https://gateway.example/api',
+        'anthropic'
+      )
+    ).toBe('https://gateway.example/api');
   });
 
   test('prefers a reachable protocol and adopts its working root and auth', () => {

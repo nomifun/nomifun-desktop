@@ -21,7 +21,7 @@ import ModalHOC from '@/renderer/utils/ui/ModalHOC';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { AutoComplete, Form, Input, Select } from '@arco-design/web-react';
 import { LinkCloud } from '@icon-park/react';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import ModelDefinitionEditor, {
   type ModelCatalogSuggestion,
@@ -47,9 +47,15 @@ import ModelCallConfigModalFooter from './ModelCallConfigModalFooter';
 import ProviderAutoConfigurationNotice from './ProviderAutoConfigurationNotice';
 import {
   applyProviderAutoConfiguration,
+  applyProviderCompatibilityMode,
   isAutoConfigurationPlatform,
+  normalizeProviderBaseUrlForCompatibilityMode,
+  providerCompatibilityAuthScheme,
+  providerCompatibilityProtocolPreferences,
+  type ProviderCompatibilityMode,
 } from './providerAutoConfiguration';
 import useProviderAutoConfiguration from './useProviderAutoConfiguration';
+import ProviderCompatibilityModePicker from './ProviderCompatibilityModePicker';
 
 const EMPTY_DEFINITION: ModelDefinitionDraft = { model: '', capabilities: [] };
 
@@ -87,6 +93,8 @@ const AddPlatformModal = ModalHOC<{
   const [authSchemeDirty, setAuthSchemeDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
+  const [compatibilityMode, setCompatibilityMode] =
+    useState<ProviderCompatibilityMode>('auto');
   const modelEditorRef = useRef<ModelDefinitionEditorHandle>(null);
   const appliedAutoConfigurationRef = useRef('');
 
@@ -118,6 +126,10 @@ const AddPlatformModal = ModalHOC<{
         manifestState.manifests.chat;
   const runtimePlatform = providerManifest?.platform ?? selectedPlatform?.platform ?? 'custom';
   const isBedrock = runtimePlatform === 'bedrock';
+  const compatibilityProtocolPreferences = useMemo(
+    () => providerCompatibilityProtocolPreferences(compatibilityMode),
+    [compatibilityMode]
+  );
   const bedrockConfig = useMemo(() => {
     if (!isBedrock || !bedrockAuthMethod || !bedrockRegion) return undefined;
     return buildBedrockConfig(
@@ -157,6 +169,7 @@ const AddPlatformModal = ModalHOC<{
     baseUrl,
     authScheme,
     credentials:
+      compatibilityMode !== 'anthropic' &&
       credentialsResult.ok &&
       (!isBedrock ||
         (bedrockConfig &&
@@ -175,6 +188,7 @@ const AddPlatformModal = ModalHOC<{
     definition,
     manifests: manifestState.manifests,
     loadingTasks: manifestState.loadingTasks,
+    protocolPreferences: compatibilityProtocolPreferences,
     credentials:
       credentialsResult.ok && credentialsResult.credentials !== undefined
         ? credentialsResult.credentials
@@ -233,6 +247,7 @@ const AddPlatformModal = ModalHOC<{
     setAuthSchemeDirty(false);
     setSaving(false);
     setFocusedCallConfigTask(undefined);
+    setCompatibilityMode('auto');
     appliedAutoConfigurationRef.current = '';
     const requestedPreset = deepLinkData?.platform;
     const matchedPreset = requestedPreset
@@ -272,6 +287,43 @@ const AddPlatformModal = ModalHOC<{
     modalProps.visible,
     providerManifest,
   ]);
+
+  const changeCompatibilityMode = (nextMode: ProviderCompatibilityMode) => {
+    setCompatibilityMode(nextMode);
+    appliedAutoConfigurationRef.current = '';
+
+    if (nextMode === 'auto') {
+      setAuthSchemeDirty(false);
+      form.setFieldValue('auth_scheme', providerManifest?.default_auth_scheme ?? 'bearer');
+      setDefinition((current) => applyProviderCompatibilityMode(current, nextMode, true));
+      return;
+    }
+
+    const nextAuthScheme = providerCompatibilityAuthScheme(nextMode);
+    if (nextAuthScheme) {
+      setAuthSchemeDirty(true);
+      form.setFieldValue('auth_scheme', nextAuthScheme);
+    }
+    const currentBaseUrl = String(form.getFieldValue('base_url') ?? '');
+    const nextBaseUrl = normalizeProviderBaseUrlForCompatibilityMode(currentBaseUrl, nextMode);
+    if (nextBaseUrl !== currentBaseUrl.trim()) {
+      setBaseUrlDirty(true);
+      form.setFieldValue('base_url', nextBaseUrl);
+    }
+    setDefinition((current) => applyProviderCompatibilityMode(current, nextMode, true));
+  };
+
+  const updateDefinition = useCallback<
+    React.Dispatch<React.SetStateAction<ModelDefinitionDraft>>
+  >(
+    (next) => {
+      setDefinition((current) => {
+        const resolved = typeof next === 'function' ? next(current) : next;
+        return applyProviderCompatibilityMode(resolved, compatibilityMode, false);
+      });
+    },
+    [compatibilityMode]
+  );
 
   useEffect(() => {
     const batch = autoConfiguration.data;
@@ -315,6 +367,7 @@ const AddPlatformModal = ModalHOC<{
     setPendingConnections([]);
     setBaseUrlDirty(false);
     setAuthSchemeDirty(false);
+    setCompatibilityMode('auto');
     appliedAutoConfigurationRef.current = '';
     form.setFieldsValue({
       name: providerDisplayName(platform),
@@ -495,6 +548,13 @@ const AddPlatformModal = ModalHOC<{
             </Select>
           </Form.Item>
 
+          {autoConfigurationEnabled && (
+            <ProviderCompatibilityModePicker
+              value={compatibilityMode}
+              onChange={changeCompatibilityMode}
+            />
+          )}
+
           <Form.Item
             label={t('settings.modelProvider')}
             field='name'
@@ -623,13 +683,14 @@ const AddPlatformModal = ModalHOC<{
             enabled={autoConfigurationEnabled}
             loading={autoConfiguration.isLoading}
             batch={autoConfiguration.data}
+            mode={compatibilityMode}
           />
         )}
 
         <ModelDefinitionEditor
           ref={modelEditorRef}
           value={definition}
-          onChange={setDefinition}
+          onChange={updateDefinition}
           providerBaseUrl={baseUrl}
           providerAuthScheme={authScheme}
           providerLabel={providerName || selectedPlatform?.name || preset || ''}

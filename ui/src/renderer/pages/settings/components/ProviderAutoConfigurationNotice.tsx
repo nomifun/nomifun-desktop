@@ -7,13 +7,15 @@
 import { Spin, Tag } from '@arco-design/web-react';
 import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { ProviderCompatibilityMode } from './providerAutoConfiguration';
 import type { ProviderAutoConfigurationBatch } from './useProviderAutoConfiguration';
 
 const ProviderAutoConfigurationNotice: React.FC<{
   enabled: boolean;
   loading: boolean;
   batch?: ProviderAutoConfigurationBatch;
-}> = ({ enabled, loading, batch }) => {
+  mode?: ProviderCompatibilityMode;
+}> = ({ enabled, loading, batch, mode = 'auto' }) => {
   const { t } = useTranslation();
   const protocols = useMemo(
     () => [...new Set(batch?.detections.map((detection) => detection.protocol) ?? [])],
@@ -49,9 +51,17 @@ const ProviderAutoConfigurationNotice: React.FC<{
           color={confidence === 'fallback' ? 'orange' : 'green'}
           bordered={false}
         >
-          {t('settings.providerAutoConfiguration.applied', {
-            defaultValue: '已自动配置',
-          })}
+          {mode === 'openai'
+            ? t('settings.providerCompatibilityMode.openai', {
+                defaultValue: 'OpenAI 兼容',
+              })
+            : mode === 'anthropic'
+              ? t('settings.providerCompatibilityMode.anthropic', {
+                  defaultValue: 'Claude 兼容',
+                })
+              : t('settings.providerAutoConfiguration.applied', {
+                  defaultValue: '已自动配置',
+                })}
         </Tag>
       )}
       <span className='min-w-0 flex-1 leading-16px'>
