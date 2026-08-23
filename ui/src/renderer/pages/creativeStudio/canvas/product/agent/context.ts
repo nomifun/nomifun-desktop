@@ -60,6 +60,11 @@ export interface CreativeCanvasAgentContextSnapshot {
   truncated: boolean;
 }
 
+export type CreativeCanvasAgentContextDocument = Pick<
+  CreativeProjectDocument,
+  'projectId' | 'nodes' | 'connections'
+>;
+
 interface SummarizedNode {
   node: CreativeCanvasAgentContextNode;
   truncated: boolean;
@@ -220,7 +225,7 @@ const orderedKnownIds = (
     .sort((left, right) => nodeIndex.get(left)! - nodeIndex.get(right)!);
 
 const referencedNodeIds = (
-  document: CreativeProjectDocument,
+  document: CreativeCanvasAgentContextDocument,
   selectedIds: readonly string[]
 ): string[] => {
   const selected = new Set(selectedIds);
@@ -256,7 +261,7 @@ const contextConnection = (
 });
 
 export function buildCreativeCanvasAgentContext(input: {
-  document: CreativeProjectDocument;
+  document: CreativeCanvasAgentContextDocument;
   canvasRevision: string;
   selectedNodeIds: readonly string[];
 }): CreativeCanvasAgentContextSnapshot {

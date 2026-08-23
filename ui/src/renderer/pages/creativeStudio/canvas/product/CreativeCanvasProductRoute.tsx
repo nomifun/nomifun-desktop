@@ -265,6 +265,18 @@ export function shouldPublishCanvasStateToProductRoute(
   );
 }
 
+export function selectCreativeCanvasAgentContextInputs(
+  state: CanvasState | null,
+  enabled: boolean
+): readonly [
+  document: CanvasState['document'] | null,
+  selectedNodeIds: readonly string[] | null,
+] {
+  return enabled && state
+    ? [state.document, state.selection.nodeIds]
+    : [null, null];
+}
+
 type ConnectionCreateNodeIntent = Extract<
   CanvasIntegrationIntent,
   { type: 'connection/create-node-menu/open' }
@@ -4184,18 +4196,35 @@ const CreativeCanvasProductRoute: React.FC = () => {
     () => creativeCanvasProductSelectionCapabilities(canvasState),
     [canvasState]
   );
+  const panelViews = creativeCanvasProductPanelViews(panels);
+  const [agentContextDocument, agentContextSelectedNodeIds] =
+    selectCreativeCanvasAgentContextInputs(
+      canvasState,
+      panelViews.right === 'assistant'
+    );
   const agentPlanningContext = useMemo(() => {
-    if (!project.detail || !canvasState || save.revision === null) return null;
+    if (
+      !agentContextDocument ||
+      !agentContextSelectedNodeIds ||
+      save.revision === null
+    ) {
+      return null;
+    }
     return buildCreativeCanvasAgentContext({
       document: {
-        ...project.detail.document,
-        nodes: canvasState.document.nodes,
-        connections: canvasState.document.connections,
+        projectId,
+        nodes: agentContextDocument.nodes,
+        connections: agentContextDocument.connections,
       },
       canvasRevision: save.revision,
-      selectedNodeIds: canvasState.selection.nodeIds,
+      selectedNodeIds: agentContextSelectedNodeIds,
     });
-  }, [canvasState, project.detail, save.revision]);
+  }, [
+    agentContextDocument,
+    agentContextSelectedNodeIds,
+    projectId,
+    save.revision,
+  ]);
   const productDisabled =
     save.revision === null ||
     recoveryBusy ||
@@ -4239,7 +4268,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
         }));
   const saveMessage = creativeCanvasSaveDisplayMessage(save);
   const compact = viewportSize.width < 760;
-  const panelViews = creativeCanvasProductPanelViews(panels);
   const canvasLayoutStyle = {
     '--creative-canvas-right-panel-width': `${panels.right.width}px`,
     '--creative-canvas-bottom-panel-height': `${panels.bottom.height}px`,
