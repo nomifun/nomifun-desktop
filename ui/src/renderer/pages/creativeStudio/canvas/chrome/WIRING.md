@@ -13,13 +13,11 @@ the panel slots:
   canvasTitle={canvas.title}
   saveStatus={save.status}
   tool={tool}
-  background={background}
   canUndo={canUndo}
   canRedo={canRedo}
   leftView={leftView}
   rightView={rightView}
   bottomView={bottomView}
-  backgroundMenuOpen={backgroundMenuOpen}
   slots={{
     canvas: (
       <CreativeCanvasEditor
@@ -47,12 +45,13 @@ the panel slots:
 />
 ```
 
-The editor's built-in zoom dock is the only owner of fit-view and minimap
-actions. The outer chrome intentionally omits those controls so the bottom
-surface has no duplicate entry. The Canvas route/controller translates the
-remaining callbacks into canonical core commands and constructs new canonical
-nodes. This layer never creates IDs, persists a Canvas document, invokes a
-model, resolves assets, or fabricates panel content.
+The editor's built-in zoom dock is the only owner of fit-view, minimap, zoom,
+and canvas-background actions. The outer chrome intentionally omits those
+controls so the bottom surface has no duplicate entry. The Canvas
+route/controller translates the remaining callbacks into canonical core
+commands and constructs new canonical nodes. This layer never creates IDs,
+persists a Canvas document, invokes a model, resolves assets, or fabricates
+panel content.
 
 The hand icon is a pressed-state toggle: pressed selects the existing pan tool,
 while unpressed leaves the editor in its default selection mode. The bottom
@@ -63,9 +62,9 @@ The bottom dock exposes text, image, video, audio, panorama, Director, and
 generation-config creation directly in the reference order. Group creation is
 intentionally not a node-creation tool; it remains a selection action.
 
-`rightView` and `bottomView` use `null` for a closed panel. Menu visibility is
-controlled for the remaining background picker so route transitions can close
-transient UI deterministically.
+`rightView` and `bottomView` use `null` for a closed panel. The zoom dock owns
+its transient percentage/background popover and closes it when focus moves
+outside the control.
 
 Canvas owner identity is supplied by the route. When an owner is needed, use
 the canonical `CanvasNode { canvasId, nodeId }` shape and serialize it as

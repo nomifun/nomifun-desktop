@@ -33,7 +33,8 @@ export interface CreativeCanvasChromeProps {
   saveStatus: CreativeCanvasChromeSaveStatus;
   saveMessage?: string;
   tool: CreativeCanvasChromeTool;
-  background: CreativeCanvasChromeBackground;
+  /** @deprecated Background selection now lives in the zoom popover. */
+  background?: CreativeCanvasChromeBackground;
   canUndo: boolean;
   canRedo: boolean;
   leftOpen: boolean;
@@ -42,7 +43,8 @@ export interface CreativeCanvasChromeProps {
   /** Current persisted width of the right panel, in CSS pixels. */
   rightPanelWidth?: number;
   bottomView: CreativeCanvasBottomView | null;
-  backgroundMenuOpen: boolean;
+  /** @deprecated Background selection now lives in the zoom popover. */
+  backgroundMenuOpen?: boolean;
   compact?: boolean;
   disabled?: boolean;
   className?: string;
@@ -50,8 +52,10 @@ export interface CreativeCanvasChromeProps {
   onBackToCanvases(): void;
   onToolChange(tool: CreativeCanvasChromeTool): void;
   onAddNode(kind: CreativeCanvasChromeNodeKind): void;
-  onBackgroundChange(background: CreativeCanvasChromeBackground): void;
-  onBackgroundMenuOpenChange(open: boolean): void;
+  /** @deprecated Background selection now lives in the zoom popover. */
+  onBackgroundChange?(background: CreativeCanvasChromeBackground): void;
+  /** @deprecated Background selection now lives in the zoom popover. */
+  onBackgroundMenuOpenChange?(open: boolean): void;
   onUndo(): void;
   onRedo(): void;
   onLeftPanelOpenChange(open: boolean): void;

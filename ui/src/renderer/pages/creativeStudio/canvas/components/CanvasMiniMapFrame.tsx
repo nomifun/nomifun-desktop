@@ -13,6 +13,7 @@ import styles from './CanvasMiniMapFrame.module.css';
 export interface CanvasMiniMapFrameProps extends React.HTMLAttributes<HTMLDivElement> {
   children: React.ReactNode;
   label?: string;
+  footer?: React.ReactNode;
 }
 
 /**
@@ -24,6 +25,7 @@ const CanvasMiniMapFrame: React.FC<CanvasMiniMapFrameProps> = ({
   children,
   className,
   label,
+  footer,
   ...rest
 }) => {
   const { t } = useTranslation();
@@ -37,7 +39,8 @@ const CanvasMiniMapFrame: React.FC<CanvasMiniMapFrameProps> = ({
       data-canvas-no-zoom
       data-canvas-minimap
     >
-      {children}
+      <div className={styles.content}>{children}</div>
+      {footer ? <div className={styles.footer}>{footer}</div> : null}
     </div>
   );
 };

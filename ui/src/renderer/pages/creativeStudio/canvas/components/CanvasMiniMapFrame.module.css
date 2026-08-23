@@ -1,24 +1,52 @@
 .frame {
   position: relative;
-  width: clamp(190px, 17vw, 240px);
-  aspect-ratio: 3 / 2;
-  overflow: hidden;
+  display: grid;
+  width: clamp(210px, 17vw, 248px);
+  height: clamp(148px, 15vw, 184px);
+  min-height: 148px;
+  grid-template-rows: minmax(0, 1fr) auto;
+  overflow: visible;
   border: 1px solid color-mix(in srgb, var(--color-border-2) 88%, transparent);
   border-radius: 12px;
-  background: color-mix(in srgb, var(--color-bg-2) 90%, transparent);
+  background: color-mix(in srgb, var(--color-bg-2) 92%, transparent);
   box-shadow: 0 16px 42px rgba(0, 0, 0, 0.18);
   color: var(--color-text-2);
   backdrop-filter: blur(18px) saturate(135%);
 }
 
+.content {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 11px 11px 0 0;
+}
+
+.footer {
+  display: flex;
+  min-width: 0;
+  min-height: 46px;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 7px;
+  border-top: 1px solid color-mix(in srgb, var(--color-border-2) 82%, transparent);
+  background: color-mix(in srgb, var(--color-fill-1) 74%, transparent);
+  border-radius: 0 0 11px 11px;
+}
+
+.footer > * {
+  max-width: 100%;
+}
+
 @media (max-width: 1024px) {
   .frame {
-    width: 200px;
+    width: 220px;
+    height: 164px;
   }
 }
 
 @media (max-width: 640px) {
   .frame {
-    width: min(208px, calc(100vw - 20px));
+    width: min(220px, calc(100vw - 20px));
+    height: 154px;
   }
 }

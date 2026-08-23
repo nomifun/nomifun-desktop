@@ -1485,6 +1485,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         className={`${styles.editor} ${className ?? ''}`.trim()}
         viewport={state.viewport}
         backgroundMode={canvasSurfaceBackground(background)}
+        onBackgroundChange={setBackground}
         tool={tool}
         isPanning={interaction.isPanning}
         ariaLabel={ariaLabel ?? t('creativeStudio.canvas.editor.label')}

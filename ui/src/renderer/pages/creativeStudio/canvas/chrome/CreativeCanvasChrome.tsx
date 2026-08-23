@@ -34,7 +34,7 @@ import {
   Voice,
   Workbench,
 } from '@icon-park/react';
-import { Popover, Tooltip } from '@arco-design/web-react';
+import { Tooltip } from '@arco-design/web-react';
 import classNames from 'classnames';
 import React, {
   useCallback,
@@ -343,10 +343,6 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
     onWheel: stopChromeEvent,
   };
 
-  const selectBackground = (background: CreativeCanvasChromeBackground) => {
-    props.onBackgroundChange(background);
-    props.onBackgroundMenuOpenChange(false);
-  };
   const collapseResourcesLabel = t(
     'creativeStudio.canvas.chrome.collapseResources'
   );
@@ -827,35 +823,6 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
               onClick={() => props.onAddNode(kind)}
             />
           ))}
-
-          <span className={styles.divider} aria-hidden='true' />
-
-          <Popover
-            trigger='click'
-            position='top'
-            popupVisible={props.backgroundMenuOpen}
-            onVisibleChange={props.onBackgroundMenuOpenChange}
-            content={
-              <CreativeCanvasBackgroundMenu
-                value={props.background}
-                disabled={props.disabled}
-                onChange={selectBackground}
-              />
-            }
-            unmountOnExit
-          >
-            <span className={styles.menuAnchor}>
-              <ChromeIconButton
-                label={t('creativeStudio.canvas.chrome.backgroundLabel', {
-                  background: t(BACKGROUND_LABEL_KEYS[props.background]),
-                })}
-                icon={backgroundIcon(props.background)}
-                active={props.backgroundMenuOpen}
-                disabled={props.disabled}
-                onClick={() => props.onBackgroundMenuOpenChange(!props.backgroundMenuOpen)}
-              />
-            </span>
-          </Popover>
 
           <span className={styles.divider} aria-hidden='true' />
 

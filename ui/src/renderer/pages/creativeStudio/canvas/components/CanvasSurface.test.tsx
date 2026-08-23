@@ -82,8 +82,11 @@ describe('Creative Studio canvas surface', () => {
     expect(css.includes('@media (max-width: 1024px)')).toBe(true);
     expect(css.includes('@media (max-width: 640px)')).toBe(true);
     expect(css.includes('position: fixed')).toBe(false);
-    expect(css.includes('bottom: 112px')).toBe(true);
+    expect(css.includes('left: 16px')).toBe(true);
+    expect(css.includes('bottom: 18px')).toBe(true);
     expect(zoomCss.includes('@media (max-width: 640px)')).toBe(true);
-    expect(zoomCss.includes('.slider {\n    display: none;')).toBe(true);
+    expect(zoomCss.includes('.zoomMenu')).toBe(true);
+    expect(zoomCss.includes('.zoomStepper')).toBe(true);
+    expect(zoomCss.includes('.slider')).toBe(false);
   });
 });

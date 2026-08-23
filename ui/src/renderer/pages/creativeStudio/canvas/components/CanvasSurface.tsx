@@ -32,6 +32,7 @@ export interface CanvasSurfaceProps
   extends Omit<React.HTMLAttributes<HTMLDivElement>, 'children' | 'onDoubleClick'> {
   viewport: CanvasSurfaceViewport;
   backgroundMode?: CanvasBackgroundMode;
+  onBackgroundChange?: (background: CanvasBackgroundMode) => void;
   tool?: CanvasInteractionTool;
   isPanning?: boolean;
   gridStep?: number;
@@ -82,6 +83,7 @@ const CanvasSurface = React.forwardRef<HTMLDivElement, CanvasSurfaceProps>(
     {
       viewport,
       backgroundMode = 'dots',
+      onBackgroundChange,
       tool = 'select',
       isPanning = false,
       gridStep = 48,
@@ -195,19 +197,37 @@ const CanvasSurface = React.forwardRef<HTMLDivElement, CanvasSurfaceProps>(
             </div>
           ) : null}
 
-          {shouldRenderZoomControls ? (
+          {shouldRenderZoomControls && !(isMiniMapOpen && miniMap) ? (
             <div className={styles.zoomDock}>
               <CanvasZoomControls
                 {...(zoomControls ?? {})}
                 zoom={safeZoom}
                 isMiniMapOpen={isMiniMapOpen}
+                background={backgroundMode}
+                onBackgroundChange={onBackgroundChange}
               />
             </div>
           ) : null}
 
           {isMiniMapOpen && miniMap ? (
             <div className={styles.miniMapDock}>
-              <CanvasMiniMapFrame label={miniMapLabel}>{miniMap}</CanvasMiniMapFrame>
+              <CanvasMiniMapFrame
+                label={miniMapLabel}
+                footer={
+                  shouldRenderZoomControls ? (
+                    <CanvasZoomControls
+                      {...(zoomControls ?? {})}
+                      zoom={safeZoom}
+                      isMiniMapOpen={isMiniMapOpen}
+                      background={backgroundMode}
+                      onBackgroundChange={onBackgroundChange}
+                      showInlineStepper
+                    />
+                  ) : undefined
+                }
+              >
+                {miniMap}
+              </CanvasMiniMapFrame>
             </div>
           ) : null}
         </div>

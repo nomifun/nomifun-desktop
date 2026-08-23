@@ -184,7 +184,6 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('await editorRef.current.reloadRemote()')).toBe(
       true
     );
-    expect(source.includes('setBackground(next)')).toBe(true);
     expect(source.includes('creativeCanvasSaveDisplayMessage(save)')).toBe(true);
     expect(source.includes('save.error?.message ?? notice')).toBe(false);
     expect(source.includes('localStorage')).toBe(false);
