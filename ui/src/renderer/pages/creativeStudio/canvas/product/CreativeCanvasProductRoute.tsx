@@ -95,7 +95,6 @@ import {
 } from '../core';
 import {
   CreativeCanvasEditor,
-  fitCanvasViewport,
   type CanvasCasSaveSnapshot,
   type CreativeCanvasEditorHandle,
 } from '../editor';
@@ -1179,19 +1178,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
     },
     []
   );
-
-  const handleFit = useCallback(() => {
-    const editor = editorRef.current;
-    if (!editor) return;
-    editor.dispatch(
-      canvasCommands.setViewport(
-        fitCanvasViewport(
-          editor.getState(),
-          measuredSize(canvasHostRef.current)
-        )
-      )
-    );
-  }, []);
 
   const handleMiniMapNavigate = useCallback(
     (request: CanvasMiniMapNavigationRequest) => {
@@ -4317,7 +4303,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
         background={background}
         canUndo={Boolean(canvasState && canUndoCanvas(canvasState))}
         canRedo={Boolean(canvasState && canRedoCanvas(canvasState))}
-        isMiniMapOpen={miniMapOpen}
         leftOpen={panels.left.open}
         leftView={panelViews.left}
         rightView={panelViews.right}
@@ -4332,8 +4317,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
         onBackgroundMenuOpenChange={setBackgroundMenuOpen}
         onUndo={() => dispatch(canvasCommands.undo())}
         onRedo={() => dispatch(canvasCommands.redo())}
-        onFitView={handleFit}
-        onToggleMiniMap={() => setMiniMapOpen((open) => !open)}
         onLeftPanelOpenChange={handleLeftPanelOpenChange}
         onLeftViewChange={handleLeftViewChange}
         onRightViewChange={handleRightViewChange}

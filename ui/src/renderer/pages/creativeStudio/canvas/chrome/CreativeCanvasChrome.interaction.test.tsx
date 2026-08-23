@@ -6,13 +6,17 @@
 
 import '../../../../../../test/setup-dom.ts';
 
-import { cleanup, fireEvent, render } from '@testing-library/react';
+import { cleanup, fireEvent, render, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
 import React, { useState } from 'react';
 
 import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
 import CreativeCanvasChrome from './CreativeCanvasChrome';
-import type { CreativeCanvasChromeProps } from './types';
+import type {
+  CreativeCanvasBottomView,
+  CreativeCanvasChromeProps,
+  CreativeCanvasChromeTool,
+} from './types';
 
 const noop = () => undefined;
 
@@ -25,7 +29,6 @@ const baseProps = (
   background: 'lines',
   canUndo: false,
   canRedo: false,
-  isMiniMapOpen: false,
   leftOpen: true,
   leftView: 'canvas',
   rightView: null,
@@ -37,6 +40,10 @@ const baseProps = (
       canvas: <div>outline</div>,
       assets: <div>assets</div>,
     },
+    bottom: {
+      history: <div>HISTORY CONTENT</div>,
+      timeline: <div>TIMELINE CONTENT</div>,
+    },
   },
   onBackToCanvases: noop,
   onToolChange: noop,
@@ -45,8 +52,6 @@ const baseProps = (
   onBackgroundMenuOpenChange: noop,
   onUndo: noop,
   onRedo: noop,
-  onFitView: noop,
-  onToggleMiniMap: noop,
   onLeftPanelOpenChange: noop,
   onLeftViewChange: noop,
   onRightViewChange: noop,
@@ -118,5 +123,96 @@ describe('CreativeCanvasChrome floating resource rail interaction', () => {
 
     expect(viewChanges).toEqual(['assets']);
     expect(getByRole('tabpanel').hasAttribute('hidden')).toBe(false);
+  });
+});
+
+describe('CreativeCanvasChrome toolbar interactions', () => {
+  test('uses one hand toggle and one entry for the shared bottom panel', () => {
+    const ToolbarHarness: React.FC = () => {
+      const [tool, setTool] = useState<CreativeCanvasChromeTool>('select');
+      const [bottomView, setBottomView] =
+        useState<CreativeCanvasBottomView | null>(null);
+
+      return (
+        <CreativeCanvasChrome
+          {...baseProps({
+            tool,
+            bottomView,
+            onToolChange: setTool,
+            onBottomViewChange: setBottomView,
+          })}
+        />
+      );
+    };
+
+    const { container, getByRole } = render(
+      withCanvasTestI18n(<ToolbarHarness />)
+    );
+    const toolbar = getByRole('toolbar', {
+      name: 'creativeStudio.canvas.chrome.toolbar',
+    });
+
+    expect(
+      within(toolbar).queryByRole('button', {
+        name: 'creativeStudio.canvas.actions.selectTool',
+      })
+    ).toBeNull();
+    expect(
+      within(toolbar).queryByRole('button', {
+        name: 'creativeStudio.canvas.actions.fitView',
+      })
+    ).toBeNull();
+    expect(
+      within(toolbar).queryByRole('button', {
+        name: 'creativeStudio.canvas.actions.openMiniMap',
+      })
+    ).toBeNull();
+    expect(
+      within(toolbar).queryByRole('button', {
+        name: 'creativeStudio.canvas.panels.bottom.timeline',
+      })
+    ).toBeNull();
+
+    const panButton = within(toolbar).getByRole('button', {
+      name: 'creativeStudio.canvas.actions.panTool',
+    });
+    expect(panButton.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(panButton);
+    expect(panButton.getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(panButton);
+    expect(panButton.getAttribute('aria-pressed')).toBe('false');
+
+    const historyButton = within(toolbar).getByRole('button', {
+      name: 'creativeStudio.canvas.panels.bottom.history',
+    });
+    expect(historyButton.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(historyButton);
+
+    const historyPanel = container.querySelector<HTMLElement>(
+      'section[aria-label="creativeStudio.canvas.panels.bottom.history"]'
+    );
+    expect(historyPanel).not.toBeNull();
+    expect(historyButton.getAttribute('aria-pressed')).toBe('true');
+    expect(historyPanel?.textContent?.includes('HISTORY CONTENT')).toBe(true);
+
+    fireEvent.click(
+      within(historyPanel!).getByRole('tab', {
+        name: 'creativeStudio.canvas.panels.bottom.timeline',
+      })
+    );
+    const timelinePanel = container.querySelector<HTMLElement>(
+      'section[aria-label="creativeStudio.canvas.panels.bottom.timeline"]'
+    );
+    expect(timelinePanel).not.toBeNull();
+    expect(timelinePanel?.textContent?.includes('TIMELINE CONTENT')).toBe(true);
+    expect(historyButton.getAttribute('aria-pressed')).toBe('true');
+
+    fireEvent.click(historyButton);
+    expect(
+      container.querySelector(
+        'section[aria-label="creativeStudio.canvas.panels.bottom.history"], section[aria-label="creativeStudio.canvas.panels.bottom.timeline"]'
+      )
+    ).toBeNull();
+    expect(historyButton.getAttribute('aria-pressed')).toBe('false');
   });
 });

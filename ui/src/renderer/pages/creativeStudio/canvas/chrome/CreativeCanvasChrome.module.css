@@ -134,7 +134,6 @@
 }
 
 .topActions,
-.toolGroup,
 .panelTabs {
   display: flex;
   min-width: 0;
@@ -446,16 +445,8 @@
   backdrop-filter: blur(18px) saturate(135%);
 }
 
-.toolDock > *,
-.toolGroup > * {
+.toolDock > * {
   flex: 0 0 auto;
-}
-
-.toolGroup {
-  gap: 2px;
-  padding: 2px;
-  border-radius: 10px;
-  background: var(--color-fill-1);
 }
 
 .iconButton {
