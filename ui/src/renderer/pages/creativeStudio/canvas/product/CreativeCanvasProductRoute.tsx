@@ -252,6 +252,19 @@ const INITIAL_CANVAS_TASK_RUNTIME: CreativeWorkbenchRuntimeSnapshot = {
 
 const FALLBACK_VIEWPORT_SIZE: CreativeSize = { width: 1, height: 1 };
 
+export function shouldPublishCanvasStateToProductRoute(
+  currentState: CanvasState | null,
+  nextState: CanvasState
+): boolean {
+  return (
+    currentState === null ||
+    currentState.document !== nextState.document ||
+    currentState.selection !== nextState.selection ||
+    currentState.clipboard !== nextState.clipboard ||
+    currentState.history !== nextState.history
+  );
+}
+
 type ConnectionCreateNodeIntent = Extract<
   CanvasIntegrationIntent,
   { type: 'connection/create-node-menu/open' }
@@ -607,7 +620,8 @@ const CanvasTaskRuntimeAction: React.FC<{
 
 /**
  * Route-level product composition. CreativeCanvasEditor remains the only
- * reducer and CAS owner; this component mirrors state solely to drive chrome.
+ * reducer and CAS owner; this component mirrors only product-consumed state
+ * slices to drive chrome and panels, leaving viewport-only updates editor-local.
  */
 const CreativeCanvasProductRoute: React.FC = () => {
   const { canvasId: routeCanvasId } = useParams<{ canvasId: string }>();
@@ -650,7 +664,14 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const activeProjectIdRef = useRef(projectId);
   const templateRequestRef = useRef(0);
 
+  const canvasStateRef = useRef<CanvasState | null>(null);
   const [canvasState, setCanvasState] = useState<CanvasState | null>(null);
+  const handleCanvasStateChange = useCallback((nextState: CanvasState) => {
+    const currentState = canvasStateRef.current;
+    canvasStateRef.current = nextState;
+    if (!shouldPublishCanvasStateToProductRoute(currentState, nextState)) return;
+    setCanvasState(nextState);
+  }, []);
   const [save, setSave] = useState<CanvasCasSaveSnapshot>(INITIAL_SAVE);
   const [tool, setTool] = useState<CanvasInteractionTool>('select');
   const [background, setBackground] =
@@ -867,6 +888,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setPanels(defaultPanels);
     hydratedPanelsRef.current = null;
     hydratedBackgroundRef.current = null;
+    canvasStateRef.current = null;
     setCanvasState(null);
     setSave(INITIAL_SAVE);
     agentOpsReloadRequiredRef.current = false;
@@ -1060,9 +1082,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
           mergeKey: `image-composer:${nodeId}`,
         })
       );
-      setCanvasState(nextState);
+      handleCanvasStateChange(nextState);
     },
-    []
+    [handleCanvasStateChange]
   );
 
   const updateVideoComposeDraft = useCallback(
@@ -1084,9 +1106,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
           mergeKey: `video-composer:${nodeId}`,
         })
       );
-      setCanvasState(nextState);
+      handleCanvasStateChange(nextState);
     },
-    []
+    [handleCanvasStateChange]
   );
 
   const updateAudioComposeDraft = useCallback(
@@ -1109,9 +1131,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
           { mergeKey: `audio-composer:${nodeId}` }
         )
       );
-      setCanvasState(editor.getState());
+      handleCanvasStateChange(editor.getState());
     },
-    []
+    [handleCanvasStateChange]
   );
 
   const openPromptLibrary = useCallback(() => {
@@ -4344,7 +4366,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 showSaveState={false}
                 isMiniMapOpen={miniMapOpen}
                 onToggleMiniMap={() => setMiniMapOpen((open) => !open)}
-                onStateChange={setCanvasState}
+                onStateChange={handleCanvasStateChange}
                 onSaveStateChange={setSave}
                 onAgentSessionsChange={handleAgentSessionsChange}
                 onPendingTaskCommandBlocked={() =>
