@@ -8,8 +8,6 @@ mod config;
 // the full receipt loop without the whole app harness).
 pub mod delivery_notify;
 #[cfg(feature = "browser-use")]
-mod browser_mcp_server;
-#[cfg(feature = "browser-use")]
 mod browser_lane_provider;
 // Public only for `BUNDLED_CHROME_DIR_ENV`: the desktop shell resolves the
 // Tauri resource dir and publishes it through that env seam (F48).

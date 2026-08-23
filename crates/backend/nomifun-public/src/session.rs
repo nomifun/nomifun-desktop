@@ -106,7 +106,9 @@ const REMOTE_PROVISIONAL_FINAL_RETRY_INITIAL_WAIT: Duration =
 #[cfg(test)]
 const REMOTE_PROVISIONAL_FINAL_RETRY_MAX_WAIT: Duration =
     Duration::from_millis(25);
+#[cfg(feature = "browser-use")]
 const MAX_PENDING_REMOTE_BROWSER_CLEANUPS: usize = MAX_GLOBAL_REMOTE_SESSIONS;
+#[cfg(feature = "browser-use")]
 const MAX_PENDING_REMOTE_BROWSER_CLEANUP_BYTES: usize =
     MAX_PENDING_REMOTE_BROWSER_CLEANUPS * 128;
 static NEXT_REMOTE_SESSION_MANAGER_ID: AtomicU64 = AtomicU64::new(1);

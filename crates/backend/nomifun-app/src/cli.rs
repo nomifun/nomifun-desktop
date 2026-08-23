@@ -154,11 +154,6 @@ pub enum Command {
     /// on Windows when the `computer-use` build is present). A thin facade over
     /// the in-tree ComputerTool, so codex/ACP get the same upgraded automation.
     McpComputerStdio,
-    /// MCP stdio server exposing the browser-use capability as discrete tools
-    /// (navigate / observe / click / type / …; spawned by the ACP agent CLI when
-    /// the `browser-use` build is present). It is an authenticated proxy into
-    /// the application-owned BrowserSessionHub and never owns Chromium itself.
-    McpBrowserStdio,
     /// One-shot terminal lifecycle hook relay (invoked by claude/codex native
     /// hooks; reads the event JSON from stdin and POSTs it to the in-process
     /// TerminalLifecycleServer). NOT an MCP server — fire-and-forget.

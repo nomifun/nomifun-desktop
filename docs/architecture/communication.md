@@ -81,7 +81,6 @@ The current `nomicore` CLI subcommands include:
 - `mcp-gateway-stdio`
 - `mcp-open-stdio`
 - `mcp-computer-stdio`
-- `mcp-browser-stdio`
 - `terminal-hook`
 - `doctor`
 - `tools`

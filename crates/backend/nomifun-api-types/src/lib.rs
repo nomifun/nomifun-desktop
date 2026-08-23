@@ -152,17 +152,15 @@ pub use mcp::{
     OAuthStatusResponse, TestMcpConnectionRequest, UpdateMcpServerRequest,
 };
 pub use mcp_bridge::{
-    BROWSER_CAPABILITY_DOMAIN, BROWSER_MCP_TOOL_NAMES, BrowserCapabilityClaims,
-    BrowserCapabilityOperation, BrowserCapabilityScope,
-    BrowserMcpChildConfig, BrowserMcpConfig, ComputerMcpConfig, GATEWAY_CALL_TOOL_OPERATION,
+    ComputerMcpConfig, GATEWAY_CALL_TOOL_OPERATION,
     GATEWAY_CAPABILITY_DOMAIN, GATEWAY_CREATE_CONVERSATION_TOOL, GATEWAY_LIST_TOOLS_OPERATION,
     GatewayCapabilityClaims, GatewayCapabilityScope, GatewayMcpChildConfig, GatewayMcpConfig,
     KNOWLEDGE_CAPABILITY_DOMAIN, KNOWLEDGE_READ_TOOL, KNOWLEDGE_SEARCH_TOOL, KNOWLEDGE_WRITE_TOOL,
     KnowledgeCapabilityClaims, KnowledgeCapabilityScope, KnowledgeMcpChildConfig,
-    KnowledgeMcpConfig, MAX_BROWSER_MCP_CAPABILITIES_PER_TASK_FAMILY, OpenMcpConfig,
+    KnowledgeMcpConfig, OpenMcpConfig,
     REQUIREMENT_CAPABILITY_DOMAIN, REQUIREMENT_COMPLETE_TOOL, REQUIREMENT_UPDATE_STATUS_TOOL,
     RequirementCapabilityClaims, RequirementCapabilityScope, RequirementMcpChildConfig,
-    RequirementMcpConfig, ScopedMcpChildBootstrap, ScopedMcpChildConfig, browser_tool_operation,
+    RequirementMcpConfig, ScopedMcpChildBootstrap, ScopedMcpChildConfig,
 };
 pub use model_protocol::{
     AuthSchemeDescriptor, EndpointRootShape, ModelProtocolManifestResponse,

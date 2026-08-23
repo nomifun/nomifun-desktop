@@ -1061,17 +1061,15 @@ impl BrowserShutdownStep {
 
 struct BrowserPlatformShutdownInner {
     gateway: Option<BrowserShutdownStep>,
-    browser_mcp: tokio::sync::Mutex<Option<BrowserShutdownStep>>,
     state: tokio::sync::Mutex<BrowserPlatformShutdownState>,
 }
 
 /// Cloneable, process-wide authority for ordered Gateway/Browser shutdown.
 ///
 /// Gateway is always present when startup succeeds, including builds without
-/// `browser-use`. Browser-enabled builds add ACP Browser MCP and the Hub. One
-/// shared flight first closes every configured ingress in parallel and waits
-/// for authoritative quiescence/owner cleanup. Only a fully successful ingress
-/// barrier may advance to Hub shutdown. This prevents Hub or DB teardown from
+/// `browser-use`. Browser-enabled builds additionally install the Hub. One
+/// shared flight first closes Gateway and waits for authoritative quiescence;
+/// only then may Hub shutdown begin. This prevents Hub or DB teardown from
 /// racing accepted requests, while a failed flight remains retryable.
 #[derive(Clone)]
 pub(crate) struct BrowserPlatformShutdown {
@@ -1080,12 +1078,13 @@ pub(crate) struct BrowserPlatformShutdown {
 
 impl Default for BrowserPlatformShutdown {
     fn default() -> Self {
-        Self::from_steps(None, None)
+        Self::from_steps(None)
     }
 }
 
 impl BrowserPlatformShutdown {
     #[cfg(not(feature = "browser-use"))]
+    #[cfg(test)]
     fn gateway_only(
         gateway: Option<Arc<nomifun_gateway::GatewayMcpServer>>,
     ) -> Self {
@@ -1101,31 +1100,13 @@ impl BrowserPlatformShutdown {
                 async move { server.wait_for_shutdown().await }
             })
         });
-        Self::from_steps(gateway, None)
+        Self::from_steps(gateway)
     }
 
-    #[cfg(feature = "browser-use")]
-    async fn set_browser_mcp(
-        &self,
-        browser_mcp: Option<Arc<crate::browser_mcp_server::BrowserMcpServer>>,
-    ) {
-        let browser_mcp = browser_mcp.map(|server| {
-            BrowserShutdownStep::new("ACP Browser MCP ingress", move || {
-                let server = Arc::clone(&server);
-                async move { server.stop_and_wait().await }
-            })
-        });
-        self.set_browser_mcp_step(browser_mcp).await;
-    }
-
-    fn from_steps(
-        gateway: Option<BrowserShutdownStep>,
-        browser_mcp: Option<BrowserShutdownStep>,
-    ) -> Self {
+    fn from_steps(gateway: Option<BrowserShutdownStep>) -> Self {
         Self {
             inner: Arc::new(BrowserPlatformShutdownInner {
                 gateway,
-                browser_mcp: tokio::sync::Mutex::new(browser_mcp),
                 state: tokio::sync::Mutex::new(BrowserPlatformShutdownState::default()),
             }),
         }
@@ -1181,38 +1162,6 @@ impl BrowserPlatformShutdown {
         }
     }
 
-    /// Register a newly started Browser MCP ingress without allowing an
-    /// already-running or cached shutdown flight to omit it. Startup and
-    /// shutdown normally run on one task, but fatal supervisors may initiate
-    /// cleanup concurrently; use the same reopen/join protocol as Hub
-    /// installation so cleanup success always covers every published ingress.
-    async fn set_browser_mcp_step(&self, browser_mcp: Option<BrowserShutdownStep>) {
-        loop {
-            let active_flight = {
-                let mut state = self.inner.state.lock().await;
-                if state.succeeded {
-                    state.succeeded = false;
-                    state.flight = None;
-                    *self.inner.browser_mcp.lock().await = browser_mcp.clone();
-                    return;
-                }
-                if state.flight.is_none() {
-                    *self.inner.browser_mcp.lock().await = browser_mcp.clone();
-                    return;
-                }
-                state.flight.clone()
-            };
-
-            let Some(active_flight) = active_flight else {
-                unreachable!("Browser platform shutdown flight was checked above");
-            };
-            if active_flight.wait().await.is_err() {
-                self.clear_failed_flight(&active_flight).await;
-            }
-            tokio::task::yield_now().await;
-        }
-    }
-
     pub(crate) async fn shutdown(&self) -> anyhow::Result<()> {
         let flight = self.current_or_start_flight().await;
         match flight.wait().await {
@@ -1239,14 +1188,12 @@ impl BrowserPlatformShutdown {
         state.flight = Some(Arc::clone(&flight));
 
         let gateway = self.inner.gateway.clone();
-        let browser_mcp = self.inner.browser_mcp.lock().await.clone();
         let hub = state.hub.clone();
         let inner = Arc::clone(&self.inner);
         let active_flight = Arc::clone(&flight);
         tokio::spawn(async move {
             let result = match tokio::spawn(run_browser_platform_shutdown(
                 gateway,
-                browser_mcp,
                 hub,
             ))
             .await
@@ -1296,30 +1243,12 @@ impl BrowserPlatformShutdown {
 
 async fn run_browser_platform_shutdown(
     gateway: Option<BrowserShutdownStep>,
-    browser_mcp: Option<BrowserShutdownStep>,
     hub: Option<BrowserShutdownStep>,
 ) -> BrowserShutdownResult {
-    let (gateway_result, browser_mcp_result) = tokio::join!(
-        await_browser_shutdown_step(gateway),
-        await_browser_shutdown_step(browser_mcp)
-    );
-
-    let mut ingress_errors = Vec::new();
-    if let Err(error) = gateway_result {
-        ingress_errors.push(error);
-    }
-    if let Err(error) = browser_mcp_result {
-        ingress_errors.push(error);
-    }
-
-    if !ingress_errors.is_empty() {
-        // A failed or unconfirmed ingress barrier means an accepted request may
-        // still own Hub work. Do not destroy that authority underneath it. The
-        // composed flight is cleared by the caller so a later shutdown attempt
-        // can rejoin/retry the ingress authorities and only then advance.
-        return Err(Arc::from(ingress_errors.join("; ").into_boxed_str()));
-    }
-
+    // Gateway is the only ingress that can still own work against the Hub.
+    // Keep the ordering explicit: a failed or unconfirmed Gateway barrier
+    // leaves the Hub available for a later retry.
+    await_browser_shutdown_step(gateway).await?;
     await_browser_shutdown_step(hub)
         .await
         .map_err(|error| Arc::from(error.into_boxed_str()))
@@ -1394,9 +1323,6 @@ impl BrowserOrphanRecoveryOutcome {
         matches!(self, Self::Safe { .. })
     }
 
-    fn is_safe(&self) -> bool {
-        self.permits_host_composition()
-    }
 }
 
 #[cfg(feature = "browser-use")]
@@ -1779,10 +1705,6 @@ pub struct AppServices {
     #[cfg(feature = "browser-use")]
     _browser_lane_provider_slot:
         nomifun_ai_agent::BrowserLaneClientProviderSlot,
-    /// Keeps the authenticated ACP browser loopback proxy alive. Its issuer is
-    /// process-private; child runtimes receive only scoped capabilities.
-    #[cfg(feature = "browser-use")]
-    pub(crate) _browser_mcp_server: Option<Arc<crate::browser_mcp_server::BrowserMcpServer>>,
     /// Owns the Hub lifecycle sweep and user-scoped realtime forwarding loops.
     /// Dropping AppServices aborts both loops instead of detaching them.
     #[cfg(feature = "browser-use")]
@@ -1914,7 +1836,7 @@ impl StartupCleanupAuthority {
     /// A failed ingress shutdown intentionally leaves the database open.  The
     /// caller retains this authority and can invoke the same method again;
     /// `BrowserPlatformShutdown` provides the single-flight/idempotent retry
-    /// semantics for the actual Gateway, Browser MCP, and Hub owners.
+    /// semantics for the actual Gateway and Hub owners.
     pub(crate) async fn cleanup(&self) -> anyhow::Result<()> {
         let browser_cleanup = match self.browser_platform_shutdown().await {
             Some(shutdown) => shutdown.shutdown().await,
@@ -2228,10 +2150,6 @@ impl AppServices {
                 ),
                 None => error,
             });
-        }
-
-        if let Some(server) = &self._browser_mcp_server {
-            server.set_hub(Arc::downgrade(&hub));
         }
 
         let sweep_hub = Arc::clone(&hub);
@@ -2740,30 +2658,6 @@ impl AppServices {
             load_browser_startup_preferences(&preference_repo).await
         };
 
-        // Browser-use MCP is a scoped proxy into the process-wide Hub. Start
-        // its issuer only after orphan recovery proved safe. The server is
-        // registered for shutdown; its issuer config has no consumer now that
-        // no engine spawns `mcp-browser-stdio` as a child (the nomi engine
-        // drives the Hub in-process).
-        #[cfg(feature = "browser-use")]
-        let browser_mcp_server = if browser_orphan_recovery.is_safe() {
-            match crate::browser_mcp_server::BrowserMcpServer::start().await {
-                Ok(server) => {
-                    tracing::info!("Browser MCP scoped proxy started");
-                    Some(Arc::new(server))
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "Browser MCP scoped proxy failed to start");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        #[cfg(feature = "browser-use")]
-        browser_platform_shutdown
-            .set_browser_mcp(browser_mcp_server.clone())
-            .await;
         // Boot-resume: re-fetch snapshot-mode URL sources whose create-time
         // fetch never completed (the app exited mid-run — the source is
         // persisted unstamped before fetching). Spawned after the completer
@@ -3215,8 +3109,6 @@ impl AppServices {
             #[cfg(feature = "browser-use")]
             _browser_lane_provider_slot: browser_lane_provider_slot,
             #[cfg(feature = "browser-use")]
-            _browser_mcp_server: browser_mcp_server,
-            #[cfg(feature = "browser-use")]
             _browser_platform_tasks: None,
         };
 
@@ -3645,38 +3537,6 @@ mod tests {
                 .push(format!("{}:{phase}", self.label));
         }
 
-        async fn wait_for_calls(&self, expected: usize) {
-            self.wait_for_counter(&self.calls, expected).await;
-        }
-
-        async fn wait_for_completions(&self, expected: usize) {
-            self.wait_for_counter(&self.completions, expected).await;
-        }
-
-        async fn wait_for_counter(&self, counter: &AtomicUsize, expected: usize) {
-            tokio::time::timeout(Duration::from_secs(2), async {
-                loop {
-                    let changed = self.changed.notified();
-                    if counter.load(Ordering::Acquire) >= expected {
-                        return;
-                    }
-                    changed.await;
-                }
-            })
-            .await
-            .unwrap_or_else(|_| {
-                panic!(
-                    "{} did not reach expected count {expected}; calls={}, completions={}",
-                    self.label,
-                    self.calls.load(Ordering::Acquire),
-                    self.completions.load(Ordering::Acquire)
-                )
-            });
-        }
-
-        fn release_one(&self) {
-            self.release.add_permits(1);
-        }
     }
 
     #[cfg(feature = "browser-use")]
@@ -4345,238 +4205,6 @@ mod tests {
         assert_eq!(probe.shutdown_calls.load(Ordering::Acquire), 3);
     }
 
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn browser_platform_shutdown_concurrent_callers_share_one_ordered_flight() {
-        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let gateway =
-            PlatformShutdownStepProbe::new("gateway", "gateway failure", Arc::clone(&events));
-        let browser_mcp =
-            PlatformShutdownStepProbe::new("browser-mcp", "browser MCP failure", Arc::clone(&events));
-        let hub = PlatformShutdownStepProbe::new("hub", "hub failure", Arc::clone(&events));
-        gateway.block.store(true, Ordering::Release);
-        browser_mcp.block.store(true, Ordering::Release);
-        hub.block.store(true, Ordering::Release);
-
-        let shutdown =
-            BrowserPlatformShutdown::from_steps(Some(gateway.step()), Some(browser_mcp.step()));
-        shutdown.set_hub_step(hub.step()).await;
-
-        let first_flight = shutdown.current_or_start_flight().await;
-        gateway.wait_for_calls(1).await;
-        browser_mcp.wait_for_calls(1).await;
-        assert_eq!(
-            hub.calls.load(Ordering::Acquire),
-            0,
-            "Hub shutdown must not begin while either ingress is still draining"
-        );
-
-        let follower_flight = shutdown.current_or_start_flight().await;
-        assert!(
-            Arc::ptr_eq(&first_flight, &follower_flight),
-            "concurrent callers must join the exact same ordered shutdown flight"
-        );
-        assert_eq!(gateway.calls.load(Ordering::Acquire), 1);
-        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 1);
-
-        gateway.release_one();
-        gateway.wait_for_completions(1).await;
-        tokio::task::yield_now().await;
-        assert_eq!(
-            hub.calls.load(Ordering::Acquire),
-            0,
-            "one completed ingress is insufficient to start Hub shutdown"
-        );
-
-        browser_mcp.release_one();
-        hub.wait_for_calls(1).await;
-        let events = events
-            .lock()
-            .expect("platform shutdown event log poisoned")
-            .clone();
-        let hub_start = events
-            .iter()
-            .position(|event| event == "hub:start")
-            .expect("Hub start event");
-        for ingress_finish in ["gateway:finish", "browser-mcp:finish"] {
-            assert!(
-                events
-                    .iter()
-                    .position(|event| event == ingress_finish)
-                    .is_some_and(|position| position < hub_start),
-                "{ingress_finish} must precede Hub shutdown: {events:?}"
-            );
-        }
-
-        hub.release_one();
-        let (first_result, follower_result) =
-            tokio::join!(first_flight.wait(), follower_flight.wait());
-        assert!(first_result.is_ok());
-        assert!(follower_result.is_ok());
-
-        assert!(shutdown.shutdown().await.is_ok());
-        assert_eq!(gateway.calls.load(Ordering::Acquire), 1);
-        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 1);
-        assert_eq!(
-            hub.calls.load(Ordering::Acquire),
-            1,
-            "successful ordered shutdown must be cached"
-        );
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn browser_platform_shutdown_without_hub_still_stops_both_ingresses() {
-        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let gateway =
-            PlatformShutdownStepProbe::new("gateway", "gateway failure", Arc::clone(&events));
-        let browser_mcp =
-            PlatformShutdownStepProbe::new("browser-mcp", "browser MCP failure", events);
-        gateway.block.store(true, Ordering::Release);
-        browser_mcp.block.store(true, Ordering::Release);
-
-        let shutdown =
-            BrowserPlatformShutdown::from_steps(Some(gateway.step()), Some(browser_mcp.step()));
-        let waiter = {
-            let shutdown = shutdown.clone();
-            tokio::spawn(async move { shutdown.shutdown().await })
-        };
-
-        gateway.wait_for_calls(1).await;
-        browser_mcp.wait_for_calls(1).await;
-        assert!(
-            !waiter.is_finished(),
-            "ingress-only shutdown must wait for both ingress cleanup flights"
-        );
-
-        gateway.release_one();
-        browser_mcp.release_one();
-        assert!(waiter.await.unwrap().is_ok());
-        assert_eq!(gateway.completions.load(Ordering::Acquire), 1);
-        assert_eq!(browser_mcp.completions.load(Ordering::Acquire), 1);
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn browser_platform_shutdown_ingress_failures_block_hub_and_retry_in_order() {
-        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let gateway = PlatformShutdownStepProbe::new(
-            "Gateway MCP ingress",
-            "synthetic ingress error",
-            Arc::clone(&events),
-        );
-        let browser_mcp = PlatformShutdownStepProbe::new(
-            "ACP Browser MCP ingress",
-            "synthetic cleanup timed out",
-            Arc::clone(&events),
-        );
-        let hub =
-            PlatformShutdownStepProbe::new("Browser Hub", "synthetic Hub error", Arc::clone(&events));
-        gateway
-            .fail_calls_remaining
-            .store(1, Ordering::Release);
-        browser_mcp
-            .fail_calls_remaining
-            .store(1, Ordering::Release);
-
-        let shutdown =
-            BrowserPlatformShutdown::from_steps(Some(gateway.step()), Some(browser_mcp.step()));
-        shutdown.set_hub_step(hub.step()).await;
-
-        let error = shutdown.shutdown().await.unwrap_err().to_string();
-        assert!(error.contains(
-            "Gateway MCP ingress shutdown failed: synthetic ingress error"
-        ));
-        assert!(error.contains(
-            "ACP Browser MCP ingress shutdown failed: synthetic cleanup timed out"
-        ));
-        assert_eq!(gateway.calls.load(Ordering::Acquire), 1);
-        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 1);
-        assert_eq!(
-            hub.calls.load(Ordering::Acquire),
-            0,
-            "unconfirmed ingress quiescence must block Hub shutdown"
-        );
-
-        assert!(
-            shutdown.shutdown().await.is_ok(),
-            "a failed ordered flight must remain retryable"
-        );
-        assert_eq!(gateway.calls.load(Ordering::Acquire), 2);
-        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 2);
-        assert_eq!(
-            hub.calls.load(Ordering::Acquire),
-            1,
-            "Hub shutdown may begin only after the retry confirms both ingress barriers"
-        );
-
-        assert!(shutdown.shutdown().await.is_ok());
-        assert_eq!(gateway.calls.load(Ordering::Acquire), 2);
-        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 2);
-        assert_eq!(
-            hub.calls.load(Ordering::Acquire),
-            1,
-            "the first successful retry must be cached"
-        );
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn browser_platform_shutdown_waiter_timeout_does_not_cancel_ordered_authority() {
-        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let gateway =
-            PlatformShutdownStepProbe::new("gateway", "gateway failure", Arc::clone(&events));
-        let browser_mcp =
-            PlatformShutdownStepProbe::new("browser-mcp", "browser MCP failure", Arc::clone(&events));
-        let hub = PlatformShutdownStepProbe::new("hub", "hub failure", events);
-        gateway.block.store(true, Ordering::Release);
-        hub.block.store(true, Ordering::Release);
-
-        let shutdown =
-            BrowserPlatformShutdown::from_steps(Some(gateway.step()), Some(browser_mcp.step()));
-        shutdown.set_hub_step(hub.step()).await;
-
-        let timed_out_waiter = {
-            let shutdown = shutdown.clone();
-            tokio::spawn(async move {
-                tokio::time::timeout(Duration::from_millis(20), shutdown.shutdown()).await
-            })
-        };
-        gateway.wait_for_calls(1).await;
-        browser_mcp.wait_for_calls(1).await;
-        assert!(
-            timed_out_waiter.await.unwrap().is_err(),
-            "the caller-local timeout should expire while ingress remains blocked"
-        );
-        assert_eq!(
-            hub.calls.load(Ordering::Acquire),
-            0,
-            "timing out a waiter must not skip the ingress barrier"
-        );
-
-        gateway.release_one();
-        hub.wait_for_calls(1).await;
-        let follower = {
-            let shutdown = shutdown.clone();
-            tokio::spawn(async move { shutdown.shutdown().await })
-        };
-        tokio::task::yield_now().await;
-        assert_eq!(gateway.calls.load(Ordering::Acquire), 1);
-        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 1);
-        assert_eq!(
-            hub.calls.load(Ordering::Acquire),
-            1,
-            "a later waiter must join the original ordered authority"
-        );
-
-        hub.release_one();
-        assert!(follower.await.unwrap().is_ok());
-        assert!(shutdown.shutdown().await.is_ok());
-        assert_eq!(gateway.calls.load(Ordering::Acquire), 1);
-        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 1);
-        assert_eq!(hub.calls.load(Ordering::Acquire), 1);
-    }
-
     #[tokio::test]
     async fn failed_browser_cleanup_keeps_database_close_barrier_closed() {
         let close_calls = AtomicUsize::new(0);
@@ -4645,14 +4273,10 @@ mod tests {
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
         let gateway =
             PlatformShutdownStepProbe::new("gateway", "gateway failure", Arc::clone(&events));
-        let browser_mcp =
-            PlatformShutdownStepProbe::new("browser-mcp", "browser MCP failure", events);
-        let shutdown =
-            BrowserPlatformShutdown::from_steps(Some(gateway.step()), Some(browser_mcp.step()));
+        let shutdown = BrowserPlatformShutdown::from_steps(Some(gateway.step()));
 
         assert!(shutdown.shutdown().await.is_ok());
         assert_eq!(gateway.calls.load(Ordering::Acquire), 1);
-        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 1);
 
         let (coordinator, hub_probe, _hub) = shutdown_coordinator_fixture().await;
         shutdown.set_hub_coordinator(coordinator).await;
@@ -4666,51 +4290,17 @@ mod tests {
             "the earlier ingress-only cached success must not permanently skip Hub shutdown"
         );
         assert_eq!(gateway.calls.load(Ordering::Acquire), 2);
-        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 2);
 
         assert!(shutdown.shutdown().await.is_ok());
         assert_eq!(hub_probe.shutdown_calls.load(Ordering::Acquire), 1);
         assert_eq!(gateway.calls.load(Ordering::Acquire), 2);
-        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 2);
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn browser_platform_shutdown_installing_browser_mcp_reopens_cached_success() {
-        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let gateway =
-            PlatformShutdownStepProbe::new("gateway", "gateway failure", Arc::clone(&events));
-        let browser_mcp =
-            PlatformShutdownStepProbe::new("browser-mcp", "browser MCP failure", events);
-        let shutdown = BrowserPlatformShutdown::from_steps(Some(gateway.step()), None);
-
-        assert!(shutdown.shutdown().await.is_ok());
-        assert_eq!(gateway.calls.load(Ordering::Acquire), 1);
-
-        shutdown
-            .set_browser_mcp_step(Some(browser_mcp.step()))
-            .await;
-        assert!(
-            shutdown.shutdown().await.is_ok(),
-            "registering Browser MCP after cached success must reopen shutdown"
-        );
-        assert_eq!(gateway.calls.load(Ordering::Acquire), 2);
-        assert_eq!(
-            browser_mcp.calls.load(Ordering::Acquire),
-            1,
-            "the newly registered ingress must be included in verified cleanup"
-        );
-
-        assert!(shutdown.shutdown().await.is_ok());
-        assert_eq!(gateway.calls.load(Ordering::Acquire), 2);
-        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 1);
     }
 
     #[cfg(feature = "browser-use")]
     #[test]
     fn unsafe_orphan_recovery_degrades_browser_functionality() {
         let safe = nomi_browser_engine::profile::ProfileRecoveryReport::default();
-        assert!(BrowserOrphanRecoveryOutcome::from_report(&safe).is_safe());
+        assert!(BrowserOrphanRecoveryOutcome::from_report(&safe).permits_host_composition());
 
         // Resolved markers are not failures: startup recovery that verified a
         // live owner, terminated an orphan tree, removed ephemeral profiles,

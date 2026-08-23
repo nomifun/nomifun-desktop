@@ -5,7 +5,7 @@ NomiFun agent 内置/接入两项可选的系统级能力：
 - **Computer**（computer use，进程内 Rust）：截屏、鼠标键盘合成输入、窗口枚举/聚焦——让 agent 看到并操作本机桌面。crate：`nomi-computer`（xcap + enigo）。
 - **Browser**（browser use，主进程统一托管）：应用只创建一个 `BrowserSessionHub`，由它管理 Chromium Host、Browser Lane、身份、资源队列和清理。`nomi-browser-engine` 提供 CDP 驱动，`nomi-browser` 提供 Lane-aware 工具适配；Native Nomi、Gateway 和并行 AgentExecution attempt 都接入同一个 Hub。
 
-> 注：早期的外接 `@playwright/mcp` sidecar，以及各调用方各自持有私有 `BrowserTool` 或 Chromium 的路径均已移除。`mcp-browser-stdio` 现在是带作用域能力的 Hub 代理，不创建浏览器或 profile。
+> 注：早期的外接 `@playwright/mcp` sidecar，以及各调用方各自持有私有 `BrowserTool` 或 Chromium 的路径均已移除。浏览器自动化统一进入进程内 `BrowserSessionHub`，不再创建 browser stdio sidecar 或调用方私有 profile。
 >
 > 当前文档只描述已落地路径：桌面端的系统设置开关、进程内
 > browser/computer 工具，以及对应的 build feature 门控。

@@ -3,8 +3,6 @@
 //! This file is a façade — module declarations and re-exports only.
 //! All logic lives in the submodules.
 
-#[cfg(feature = "browser-use")]
-mod browser_stdio;
 #[cfg(feature = "computer-use")]
 mod computer_stdio;
 mod ctl;
@@ -19,8 +17,6 @@ mod server;
 mod stdio_common;
 mod terminal_hook;
 
-#[cfg(feature = "browser-use")]
-pub use browser_stdio::run_browser_stdio;
 #[cfg(feature = "computer-use")]
 pub use computer_stdio::run_computer_stdio;
 pub use ctl::{run_call, run_tools};
@@ -46,20 +42,6 @@ pub use terminal_hook::run_terminal_hook;
 pub async fn run_computer_stdio() -> std::process::ExitCode {
     eprintln!(
         "[mcp-computer-stdio] this build lacks the `computer-use` feature; desktop control is \
-         unavailable here."
-    );
-    std::process::ExitCode::from(1)
-}
-
-/// Stub for builds without the `browser-use` feature: the discrete-tool browser
-/// bridge requires the self-hosted-CDP browser engine + Chromium stack, which web
-/// and headless hosts deliberately omit. Keeps the `McpBrowserStdio` subcommand
-/// and its wiring uniform (no `cfg` sprinkled through cli/main/mcp_stdio) —
-/// invoking it on such a build simply reports the capability is absent.
-#[cfg(not(feature = "browser-use"))]
-pub async fn run_browser_stdio() -> std::process::ExitCode {
-    eprintln!(
-        "[mcp-browser-stdio] this build lacks the `browser-use` feature; browser automation is \
          unavailable here."
     );
     std::process::ExitCode::from(1)

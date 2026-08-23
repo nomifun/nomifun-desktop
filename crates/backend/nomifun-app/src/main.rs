@@ -64,7 +64,6 @@ async fn async_main(merged_path: String, cli: Cli) -> Result<ExitCode> {
         Some(Command::McpGatewayStdio) => Ok(commands::run_gateway_stdio().await),
         Some(Command::McpOpenStdio) => Ok(commands::run_open_stdio().await),
         Some(Command::McpComputerStdio) => Ok(commands::run_computer_stdio().await),
-        Some(Command::McpBrowserStdio) => Ok(commands::run_browser_stdio().await),
         Some(Command::TerminalHook { event }) => Ok(commands::run_terminal_hook(event).await),
         Some(Command::Doctor) => commands::run_doctor(&cli, &merged_path).await,
         Some(Command::Tools) => Ok(commands::run_tools().await),
