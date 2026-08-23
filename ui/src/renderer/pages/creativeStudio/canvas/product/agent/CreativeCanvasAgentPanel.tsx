@@ -785,7 +785,12 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       onSelectSession={handleSelectSession}
       onDraftChange={setDraft}
       onModelChange={(nextModel) => {
-        if (!lockedModel) setSelectedModel(nextModel);
+        if (!lockedModel) {
+          setSelectedModel({
+            providerId: nextModel.providerId,
+            model: nextModel.model,
+          });
+        }
       }}
       onRemoveContextItem={(itemId) =>
         setExcludedContextNodeIds((current) =>

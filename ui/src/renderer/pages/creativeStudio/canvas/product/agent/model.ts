@@ -96,6 +96,10 @@ export function creativeCanvasAgentSessionWithPendingTurn(input: {
 }): CreativeChatSessionReference {
   const prompt = input.prompt.trim();
   if (!prompt) throw new Error('Creative Studio Agent prompt must be non-empty');
+  const model: CreativeChatModelReference = {
+    providerId: input.model.providerId,
+    model: input.model.model,
+  };
   const modelInput = validatePlanningModelInput(
     input.modelInput === undefined ? prompt : input.modelInput
   );
@@ -105,7 +109,7 @@ export function creativeCanvasAgentSessionWithPendingTurn(input: {
   if (input.session.pendingTurn) {
     throw new Error('Creative Studio Agent session already has a pending turn');
   }
-  if (input.session.model && !sameModel(input.session.model, input.model)) {
+  if (input.session.model && !sameModel(input.session.model, model)) {
     throw new Error('Creative Studio Agent session model is immutable after its first turn');
   }
   const title =
@@ -115,7 +119,7 @@ export function creativeCanvasAgentSessionWithPendingTurn(input: {
   return {
     ...input.session,
     title,
-    model: { ...input.model },
+    model,
     pendingTurn: {
       idempotencyKey: input.idempotencyKey,
       prompt,
