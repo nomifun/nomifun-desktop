@@ -584,6 +584,15 @@
     "fallback": "Online verification did not finish. The compatible default {{protocols}} has been installed so configuration can continue and be adjusted later.",
     "urlAdjusted": "The API URL was corrected automatically."
   },
+  "providerCompatibilityMode": {
+    "title": "API mode",
+    "auto": "Auto detect",
+    "openai": "OpenAI compatible",
+    "anthropic": "Claude compatible",
+    "autoHint": "NomiFun probes the available protocol and falls back to OpenAI compatibility when it cannot confirm one.",
+    "openaiHint": "Presets openai.chat_text, Bearer authentication, and a /v1 API root for OpenAI-compatible gateways.",
+    "anthropicHint": "Presets anthropic.messages, x-api-key authentication, and Claude's required output limit."
+  },
   "multiApiKeyTip": "💡 Use a comma (,) between multiple API Keys; the system will auto-rotate",
   "multiApiKeyEditTip": "Supports multiple API Keys separated by a comma (,); the system will auto-rotate",
   "apiKeyPlaceholder": "Enter API Key(s); use a comma (,) between multiple keys",

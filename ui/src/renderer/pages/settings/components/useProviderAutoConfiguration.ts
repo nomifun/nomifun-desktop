@@ -35,6 +35,7 @@ interface UseProviderAutoConfigurationOptions {
   definition: ModelDefinitionDraft;
   manifests: ModelProtocolManifestMap;
   loadingTasks?: readonly ModelTask[];
+  protocolPreferences?: Readonly<Partial<Record<ModelTask, string>>>;
   providerId?: ProviderId;
   credentials?: ProviderCredentials;
 }
@@ -51,6 +52,7 @@ interface ProviderAutoConfigurationRequest {
 
 const PROBE_DEBOUNCE_MS = 500;
 const EMPTY_TASKS: readonly ModelTask[] = [];
+const EMPTY_PROTOCOL_PREFERENCES: Readonly<Partial<Record<ModelTask, string>>> = {};
 
 /**
  * Detect protocol/auth/root for untouched Custom and New API task drafts.
@@ -64,6 +66,7 @@ export const useProviderAutoConfiguration = ({
   definition,
   manifests,
   loadingTasks = EMPTY_TASKS,
+  protocolPreferences = EMPTY_PROTOCOL_PREFERENCES,
   providerId,
   credentials,
 }: UseProviderAutoConfigurationOptions) => {
@@ -84,9 +87,17 @@ export const useProviderAutoConfiguration = ({
         definition,
         manifests,
         authScheme,
-        useStoredAuth
+        useStoredAuth,
+        protocolPreferences
       ).filter((target) => !loadingTasks.includes(target.task)),
-    [authScheme, definition.capabilities, loadingTasks, manifests, useStoredAuth]
+    [
+      authScheme,
+      definition.capabilities,
+      loadingTasks,
+      manifests,
+      protocolPreferences,
+      useStoredAuth,
+    ]
   );
   const targetKey = JSON.stringify(
     targets.map((target) => [

@@ -584,6 +584,15 @@
     "fallback": "暂未完成在线验证，已安装通用方案 {{protocols}}；可继续配置并在稍后调整。",
     "urlAdjusted": "API 地址已自动修正。"
   },
+  "providerCompatibilityMode": {
+    "title": "接口模式",
+    "auto": "自动识别",
+    "openai": "OpenAI 兼容",
+    "anthropic": "Claude 兼容",
+    "autoHint": "系统会探测可用协议；无法确认时默认使用 OpenAI 兼容模式。",
+    "openaiHint": "预置 openai.chat_text、Bearer 鉴权和 /v1 根路径，适用于 OpenAI 兼容网关。",
+    "anthropicHint": "预置 anthropic.messages、x-api-key 鉴权和 Claude 所需的最大输出配置。"
+  },
   "multiApiKeyTip": "💡 多个 API Key 请使用英文逗号（,）分隔，系统将自动轮询使用",
   "multiApiKeyEditTip": "支持多个 API Key，请使用英文逗号（,）分隔，系统将自动轮询使用",
   "apiKeyPlaceholder": "请输入 API Key，多个 Key 请用英文逗号（,）分隔",

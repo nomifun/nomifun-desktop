@@ -94,6 +94,15 @@ describe('AddPlatformModal unified model input flow', () => {
     expect(addSource.includes('validationPending={autoConfiguration.isLoading}')).toBe(true);
   });
 
+  test('offers one-click OpenAI and Claude interface presets', () => {
+    expect(addSource.includes('<ProviderCompatibilityModePicker')).toBe(true);
+    expect(addSource.includes('applyProviderCompatibilityMode')).toBe(true);
+    expect(addSource.includes('providerCompatibilityAuthScheme')).toBe(true);
+    expect(addSource.includes('normalizeProviderBaseUrlForCompatibilityMode')).toBe(true);
+    expect(addSource.includes("compatibilityMode !== 'anthropic'")).toBe(true);
+    expect(addSource.includes('protocolPreferences: compatibilityProtocolPreferences')).toBe(true);
+  });
+
   test('keeps SDK-backed Bedrock providers free of transport URLs', () => {
     expect(addSource.includes("base_url: isBedrock ? '' :")).toBe(true);
     expect(addSource.includes('hidden={isBedrock}')).toBe(true);

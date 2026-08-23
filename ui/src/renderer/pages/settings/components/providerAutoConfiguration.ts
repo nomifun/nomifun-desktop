@@ -17,6 +17,25 @@ import {
 
 export const DEFAULT_REQUIRED_OUTPUT_LIMIT = 4_096;
 
+export type ProviderCompatibilityMode = 'auto' | 'openai' | 'anthropic';
+
+const OPENAI_PROTOCOL_BY_TASK: Readonly<Partial<Record<ModelTask, string>>> = {
+  chat: 'openai.chat_text',
+  image_generation: 'openai.images',
+  image_edit: 'openai.images',
+  video_generation: 'openai.videos',
+  speech_synthesis: 'openai.audio_speech',
+  speech_recognition: 'openai.audio_transcriptions',
+  embedding: 'openai.embeddings',
+  rerank: 'generic.rerank',
+};
+
+const ANTHROPIC_PROTOCOL_BY_TASK: Readonly<Partial<Record<ModelTask, string>>> = {
+  chat: 'anthropic.messages',
+};
+
+const EMPTY_PROTOCOL_BY_TASK: Readonly<Partial<Record<ModelTask, string>>> = {};
+
 export type ProviderAutoConfigurationConfidence =
   | 'verified'
   | 'endpoint_confirmed'
@@ -49,6 +68,51 @@ export interface ProviderAutoConfigurationDetection {
 export const isAutoConfigurationPlatform = (platform: string): boolean => {
   const normalized = platform.trim().toLowerCase();
   return normalized === 'custom' || normalized === 'new-api';
+};
+
+export const providerCompatibilityAuthScheme = (
+  mode: ProviderCompatibilityMode
+): string | undefined => {
+  if (mode === 'openai') return 'bearer';
+  if (mode === 'anthropic') return 'header_key:x-api-key';
+  return undefined;
+};
+
+export const providerCompatibilityProtocolPreferences = (
+  mode: ProviderCompatibilityMode
+): Readonly<Partial<Record<ModelTask, string>>> => {
+  if (mode === 'openai') return OPENAI_PROTOCOL_BY_TASK;
+  if (mode === 'anthropic') return ANTHROPIC_PROTOCOL_BY_TASK;
+  return EMPTY_PROTOCOL_BY_TASK;
+};
+
+export const providerCompatibilityProtocolForTask = (
+  mode: ProviderCompatibilityMode,
+  task: ModelTask
+): string | undefined => providerCompatibilityProtocolPreferences(mode)[task];
+
+const isVersionSegment = (segment: string): boolean => /^v\d[a-z0-9]*$/i.test(segment);
+
+/** Keep the provider root aligned with the selected wire format's URL shape. */
+export const normalizeProviderBaseUrlForCompatibilityMode = (
+  baseUrl: string,
+  mode: ProviderCompatibilityMode
+): string => {
+  const normalized = baseUrl.trim();
+  if (!normalized || mode === 'auto') return normalized;
+  try {
+    const url = new URL(normalized);
+    const segments = url.pathname.split('/').filter(Boolean);
+    if (mode === 'openai' && !segments.some(isVersionSegment)) {
+      segments.push('v1');
+    } else if (mode === 'anthropic' && segments.length > 0 && isVersionSegment(segments.at(-1)!)) {
+      segments.pop();
+    }
+    url.pathname = segments.length > 0 ? `/${segments.join('/')}` : '';
+    return `${url.origin}${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return normalized;
+  }
 };
 
 const concreteAuthScheme = (scheme: string, currentScheme: string): string | undefined => {
@@ -100,14 +164,19 @@ const protocolCanBeProbed = (descriptor: ProtocolDescriptor, task: ModelTask): b
 const orderedDescriptors = (
   manifest: ModelProtocolManifest,
   task: ModelTask,
-  currentProtocol: string
+  currentProtocol: string,
+  preferredProtocol?: string
 ): ProtocolDescriptor[] => {
+  const byId = new Map(manifest.protocols.map((descriptor) => [descriptor.protocol_id, descriptor]));
+  if (preferredProtocol) {
+    const descriptor = byId.get(preferredProtocol);
+    return descriptor && protocolCanBeProbed(descriptor, task) ? [descriptor] : [];
+  }
   const preferredIds = [
     currentProtocol.trim(),
     manifest.recommendation?.protocol_id ?? '',
     manifest.platform === 'new-api' && task === 'chat' ? 'openai.chat_text' : '',
   ].filter(Boolean);
-  const byId = new Map(manifest.protocols.map((descriptor) => [descriptor.protocol_id, descriptor]));
   const ordered: ProtocolDescriptor[] = [];
   for (const protocolId of preferredIds) {
     const descriptor = byId.get(protocolId);
@@ -128,10 +197,16 @@ export const buildProviderAutoConfigurationTargets = (
   definition: ModelDefinitionDraft,
   manifests: ModelProtocolManifestMap,
   currentAuthScheme: string,
-  useStoredAuth: boolean
+  useStoredAuth: boolean,
+  protocolPreferences: Readonly<Partial<Record<ModelTask, string>>> = {}
 ): ProviderAutoConfigurationTarget[] =>
   definition.capabilities.flatMap((capability) => {
-    if (capability.transportSource === 'user' || capability.transportSource === 'persisted') {
+    const preferredProtocol = protocolPreferences[capability.task];
+    if (
+      (capability.transportSource === 'user' ||
+        capability.transportSource === 'persisted') &&
+      !preferredProtocol
+    ) {
       return [];
     }
     const manifest = manifests[capability.task];
@@ -139,7 +214,8 @@ export const buildProviderAutoConfigurationTargets = (
     const candidates = orderedDescriptors(
       manifest,
       capability.task,
-      capability.protocol
+      capability.protocol,
+      preferredProtocol
     ).flatMap((descriptor) => {
       const authScheme = useStoredAuth
         ? currentAuthScheme.trim()
@@ -236,6 +312,117 @@ const sameDefinition = (
   left: ModelDefinitionDraft,
   right: ModelDefinitionDraft
 ): boolean => JSON.stringify(left) === JSON.stringify(right);
+
+/**
+ * Apply a one-click compatibility preset. A direct mode switch is allowed to
+ * replace manual transport fields; later-added tasks only receive the preset
+ * while they remain blank or recommendation-owned.
+ */
+export const applyProviderCompatibilityMode = (
+  definition: ModelDefinitionDraft,
+  mode: ProviderCompatibilityMode,
+  force = false
+): ModelDefinitionDraft => {
+  if (mode === 'auto') {
+    if (!force) return definition;
+    const knownProtocols = new Set([
+      ...Object.values(OPENAI_PROTOCOL_BY_TASK),
+      ...Object.values(ANTHROPIC_PROTOCOL_BY_TASK),
+    ]);
+    const next: ModelDefinitionDraft = {
+      ...definition,
+      capabilities: definition.capabilities.map((capability) => {
+        if (
+          capability.transportSource !== 'user' ||
+          !knownProtocols.has(capability.protocol.trim())
+        ) {
+          return capability;
+        }
+        return {
+          ...capability,
+          transportSource: 'blank',
+          protocol: '',
+          connectionRole: 'default',
+          baseUrlOverride: '',
+          endpoint: '',
+          pollEndpoint: '',
+          contentEndpoint: '',
+          realtimeEndpoint: '',
+          allowCrossOriginCredentials: false,
+          providerParamsJson: '',
+          outputLimit: undefined,
+        };
+      }),
+    };
+    return sameDefinition(definition, next) ? definition : next;
+  }
+  const protocols = providerCompatibilityProtocolPreferences(mode);
+  const next: ModelDefinitionDraft = {
+    ...definition,
+    capabilities: definition.capabilities.map((capability) => {
+      const protocol = protocols[capability.task];
+      if (!protocol) {
+        if (
+          mode === 'anthropic' &&
+          capability.transportSource === 'recommendation'
+        ) {
+          return {
+            ...capability,
+            transportSource: 'blank',
+            protocol: '',
+            connectionRole: 'default',
+            baseUrlOverride: '',
+            endpoint: '',
+            pollEndpoint: '',
+            contentEndpoint: '',
+            realtimeEndpoint: '',
+            allowCrossOriginCredentials: false,
+            providerParamsJson: '',
+            outputLimit: undefined,
+          };
+        }
+        return capability;
+      }
+      if (
+        !force &&
+        (capability.transportSource === 'user' ||
+          capability.transportSource === 'persisted')
+      ) {
+        return capability;
+      }
+      const resetTransport = force || capability.protocol.trim() !== protocol;
+      return {
+        ...capability,
+        // An explicit mode is a user choice. Keep it out of the manifest's
+        // automatic recommendation loop, otherwise Custom's OpenAI fallback
+        // would immediately overwrite a selected Claude mode.
+        transportSource: 'user',
+        protocol,
+        connectionRole: 'default',
+        ...(resetTransport
+          ? {
+              baseUrlOverride: '',
+              endpoint: '',
+              pollEndpoint: '',
+              contentEndpoint: '',
+              realtimeEndpoint: '',
+              allowCrossOriginCredentials: false,
+              providerParamsJson: '',
+            }
+          : {}),
+        outputLimit:
+          protocol === 'anthropic.messages'
+            ? resetTransport
+              ? DEFAULT_REQUIRED_OUTPUT_LIMIT
+              : capability.outputLimit ?? DEFAULT_REQUIRED_OUTPUT_LIMIT
+            : resetTransport
+              ? undefined
+              : capability.outputLimit,
+      };
+    }),
+  };
+  return sameDefinition(definition, next) ? definition : next;
+};
 
 /**
  * Detection owns only untouched/recommendation-owned transport. A user edit or
