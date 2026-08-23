@@ -423,6 +423,7 @@
       "canvasBackground": "Canvas background",
       "closeBottomPanel": "Close bottom panel",
       "closeRightPanel": "Close right panel",
+      "collapseResources": "Collapse canvas resources panel",
       "resourcePanel": "Canvas resources panel",
       "resources": "Canvas resources",
       "rightPanel": "Right panel",

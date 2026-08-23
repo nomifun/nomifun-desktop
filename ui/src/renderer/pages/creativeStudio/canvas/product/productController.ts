@@ -57,6 +57,19 @@ export function withCreativeCanvasLeftView(
   };
 }
 
+export function withCreativeCanvasLeftPanelOpen(
+  panels: CreativeStudioPanelState,
+  open: boolean
+): CreativeStudioPanelState {
+  return {
+    ...panels,
+    left: {
+      ...panels.left,
+      open,
+    },
+  };
+}
+
 export function withCreativeCanvasRightView(
   panels: CreativeStudioPanelState,
   view: CreativeRightPanelView | null

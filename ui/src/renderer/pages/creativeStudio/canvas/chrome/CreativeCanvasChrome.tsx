@@ -20,6 +20,7 @@ import {
   History,
   Loading,
   Magic,
+  MenuFold,
   Mouse,
   PanoramaHorizontal,
   Pic,
@@ -285,12 +286,16 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
     props.onBackgroundChange(background);
     props.onBackgroundMenuOpenChange(false);
   };
+  const collapseResourcesLabel = t(
+    'creativeStudio.canvas.chrome.collapseResources'
+  );
 
   return (
     <section
       className={classNames(styles.root, props.className)}
       data-creative-canvas-chrome
       data-compact={props.compact || undefined}
+      data-left-open={props.leftOpen}
       data-left-view={props.leftView}
       data-right-view={props.rightView ?? 'closed'}
       data-bottom-view={props.bottomView ?? 'closed'}
@@ -344,6 +349,7 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
       <aside
         className={styles.leftPanel}
         aria-label={t('creativeStudio.canvas.chrome.resourcePanel')}
+        data-left-open={props.leftOpen}
         data-canvas-no-zoom
         {...chromeEventProps}
       >
@@ -352,22 +358,59 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
           aria-label={t('creativeStudio.canvas.chrome.resources')}
           role='tablist'
         >
-          {(['canvas', 'assets', 'prompts', 'workflows'] as const).map((view) => (
-            <button
-              key={view}
-              type='button'
-              role='tab'
-              aria-selected={props.leftView === view}
-              data-active={props.leftView === view || undefined}
-              disabled={props.disabled}
-              onClick={() => props.onLeftViewChange(view)}
-            >
-              {leftIcon(view)}
-              <span className={styles.tabLabel}>{t(LEFT_LABEL_KEYS[view])}</span>
-            </button>
-          ))}
+          {(['canvas', 'assets', 'prompts', 'workflows'] as const).map((view) => {
+            const label = t(LEFT_LABEL_KEYS[view]);
+            return (
+              <Tooltip key={view} content={label} position='right' mini>
+                <button
+                  type='button'
+                  role='tab'
+                  id={`creative-canvas-left-tab-${view}`}
+                  aria-label={label}
+                  aria-selected={props.leftView === view}
+                  aria-expanded={props.leftOpen && props.leftView === view}
+                  aria-controls='creative-canvas-left-panel-body'
+                  data-active={props.leftView === view || undefined}
+                  disabled={props.disabled}
+                  title={label}
+                  onClick={() => {
+                    if (props.leftOpen && props.leftView === view) {
+                      props.onLeftPanelOpenChange(false);
+                      return;
+                    }
+                    props.onLeftViewChange(view);
+                  }}
+                >
+                  {leftIcon(view)}
+                  <span className={styles.tabLabel}>{label}</span>
+                </button>
+              </Tooltip>
+            );
+          })}
+          {props.leftOpen ? (
+            <Tooltip content={collapseResourcesLabel} position='right' mini>
+              <button
+                type='button'
+                className={styles.leftCollapseButton}
+                aria-label={collapseResourcesLabel}
+                title={collapseResourcesLabel}
+                disabled={props.disabled}
+                onClick={() => props.onLeftPanelOpenChange(false)}
+              >
+                <MenuFold {...iconProps} />
+              </button>
+            </Tooltip>
+          ) : null}
         </nav>
-        <div className={styles.panelBody} role='tabpanel' data-left-panel-body={props.leftView}>
+        <div
+          className={styles.panelBody}
+          id='creative-canvas-left-panel-body'
+          role='tabpanel'
+          aria-labelledby={`creative-canvas-left-tab-${props.leftView}`}
+          aria-hidden={!props.leftOpen}
+          hidden={!props.leftOpen}
+          data-left-panel-body={props.leftView}
+        >
           {leftSlot}
         </div>
       </aside>
