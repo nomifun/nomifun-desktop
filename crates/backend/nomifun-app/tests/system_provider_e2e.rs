@@ -68,7 +68,20 @@ async fn provider_full_crud_with_auth() {
     assert!(json["data"].get("credentials").is_none());
     assert!(json["data"].get("api_key").is_none());
 
-    // 3. List — should contain one
+    // 3. The authenticated edit endpoint intentionally returns plaintext keys.
+    let resp = app
+        .clone()
+        .oneshot(get_with_token(
+            &format!("/api/providers/{id}/api-keys"),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["data"], json!(["sk-ant-api03-test1234"]));
+
+    // 4. List — should contain one
     let resp = app
         .clone()
         .oneshot(get_with_token("/api/providers", &token))
@@ -88,7 +101,7 @@ async fn provider_full_crud_with_auth() {
             .any(|provider| provider["provider_id"].as_str() == Some(id.as_str()))
     );
 
-    // 4. Update
+    // 5. Update
     let req = json_with_token(
         "PUT",
         &format!("/api/providers/{id}"),
@@ -102,7 +115,7 @@ async fn provider_full_crud_with_auth() {
     assert_eq!(json["data"]["name"], "Updated Name");
     assert!(!json["data"]["enabled"].as_bool().unwrap());
 
-    // 5. Delete
+    // 6. Delete
     let resp = app
         .clone()
         .oneshot(delete_with_token(&format!("/api/providers/{id}"), &token, &csrf))
@@ -110,7 +123,7 @@ async fn provider_full_crud_with_auth() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // 6. Verify deleted
+    // 7. Verify deleted
     let resp = app.oneshot(get_with_token("/api/providers", &token)).await.unwrap();
     let json = body_json(resp).await;
     let providers = json["data"].as_array().unwrap();

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ipcBridge } from '@/common';
 import type { IProvider } from '@/common/config/storage';
 import type { ProviderCredentials } from '@/common/types/provider/providerApi';
 import NomiModal from '@/renderer/components/base/NomiModal';
@@ -59,6 +60,8 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
     const [message, messageContext] = useArcoMessage();
     const [saving, setSaving] = useState(false);
     const [authSchemeDirty, setAuthSchemeDirty] = useState(false);
+    const [apiKeysLoading, setApiKeysLoading] = useState(false);
+    const [apiKeysLoadFailed, setApiKeysLoadFailed] = useState(false);
     const authScheme = (Form.useWatch('auth_scheme', form) as string | undefined) ?? '';
     const bedrockAuthMethod = Form.useWatch('bedrockAuthMethod', form) as
       | BedrockAuthMethod
@@ -89,13 +92,14 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
 
     useEffect(() => {
       if (!data || !modalProps.visible) return;
+      let cancelled = false;
       form.resetFields();
       setAuthSchemeDirty(false);
+      setApiKeysLoadFailed(false);
       form.setFieldsValue({
         name: data.name,
         base_url: data.base_url,
         auth_scheme: data.auth_scheme,
-        // Provider APIs never return secrets. Empty inputs mean preserve on update.
         api_key: '',
         bedrockAuthMethod: data.bedrock_config?.auth_method || 'accessKey',
         bedrockRegion: data.bedrock_config?.region || 'us-east-1',
@@ -104,6 +108,35 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
         bedrockSessionToken: '',
         bedrockProfile: data.bedrock_config?.profile || '',
       });
+
+      if (data.platform === 'bedrock' || data.has_credentials !== true) {
+        setApiKeysLoading(false);
+        return () => {
+          cancelled = true;
+        };
+      }
+
+      setApiKeysLoading(true);
+      void ipcBridge.mode.getProviderApiKeys
+        .invoke({ provider_id: data.id })
+        .then((apiKeys) => {
+          if (!cancelled) {
+            form.setFieldValue('api_key', apiKeys.join(','));
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            console.error('Failed to load provider API keys:', error);
+            setApiKeysLoadFailed(true);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setApiKeysLoading(false);
+        });
+
+      return () => {
+        cancelled = true;
+      };
     }, [data, form, modalProps.visible]);
 
     const showCredentialError = (error: string) => {
@@ -117,6 +150,7 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
     };
 
     const save = async () => {
+      if (apiKeysLoading) return;
       try {
         const values = await form.validate();
         if (!data) return;
@@ -186,6 +220,7 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
         }}
         onOk={() => void save()}
         confirmLoading={modalProps.confirmLoading || saving}
+        okButtonProps={{ disabled: apiKeysLoading }}
         okText={t('common.save')}
         cancelText={t('common.cancel')}
       >
@@ -240,14 +275,16 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: EditProviderPa
               required={!isBedrock && !credentialsCanBePreserved}
               rules={[{ required: !isBedrock && !credentialsCanBePreserved }]}
               extra={
-                storedCredentialsHint ?? (
-                  <div className='text-11px text-t-secondary mt-2'>
-                    {t('settings.multiApiKeyEditTip')}
-                  </div>
-                )
+                <div className={`text-11px mt-2 ${apiKeysLoadFailed ? 'text-danger-6' : 'text-t-secondary'}`}>
+                  {apiKeysLoadFailed ? t('settings.apiKeyLoadFailed') : t('settings.multiApiKeyEditTip')}
+                </div>
               }
             >
-              <Input.TextArea rows={4} placeholder={t('settings.apiKeyPlaceholder')} />
+              <Input.TextArea
+                rows={4}
+                placeholder={t('settings.apiKeyPlaceholder')}
+                disabled={apiKeysLoading}
+              />
             </Form.Item>
 
             <Form.Item

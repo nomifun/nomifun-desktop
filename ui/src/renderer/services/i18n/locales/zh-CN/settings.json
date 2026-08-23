@@ -596,6 +596,7 @@
   "multiApiKeyTip": "💡 多个 API Key 请使用英文逗号（,）分隔，系统将自动轮询使用",
   "multiApiKeyEditTip": "支持多个 API Key，请使用英文逗号（,）分隔，系统将自动轮询使用",
   "apiKeyPlaceholder": "请输入 API Key，多个 Key 请用英文逗号（,）分隔",
+  "apiKeyLoadFailed": "读取已保存的 API Key 失败，请重试或直接输入新值。",
   "editApiKey": "编辑 API Key",
   "testKey": "测试密钥",
   "multiKeyTip": "多个密钥使用英文逗号（,）分隔",
