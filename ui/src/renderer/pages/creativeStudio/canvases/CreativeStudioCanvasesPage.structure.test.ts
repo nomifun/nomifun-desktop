@@ -50,4 +50,15 @@ describe('Creative Studio Canvas library product contract', () => {
     expect(css.includes('@media (max-width: 639px)')).toBe(true);
     expect(css.includes('grid-template-columns: minmax(0, 1fr)')).toBe(true);
   });
+
+  test('uses shared theme tokens instead of fixed light-only controls', () => {
+    expect(css.includes('background: #171717')).toBe(false);
+    expect(css.includes('background: #141414')).toBe(false);
+    expect(css.includes('background: #d8d8d8')).toBe(false);
+    expect(css.includes('rgb(0 0 0 / 88%)')).toBe(false);
+    expect(css.includes('var(--color-bg-1')).toBe(true);
+    expect(css.includes('var(--color-bg-2')).toBe(true);
+    expect(css.includes('var(--color-text-1')).toBe(true);
+    expect(css.includes(":global([data-theme='dark']) .card")).toBe(true);
+  });
 });

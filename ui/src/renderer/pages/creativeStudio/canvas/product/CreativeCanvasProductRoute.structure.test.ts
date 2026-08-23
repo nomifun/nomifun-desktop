@@ -225,15 +225,16 @@ describe('Creative Canvas product route composition', () => {
     expect(wiring.includes('automatically retries a response-loss mutation')).toBe(true);
   });
 
-  test('keeps the focused reference palette independent from the app theme', () => {
-    expect(style.includes('--creative-canvas-surface-background: #f4f2ed')).toBe(
+  test('derives the focused canvas palette from the active app theme', () => {
+    expect(style.includes('--creative-canvas-surface-background: var(--color-bg-1)')).toBe(
       true
     );
-    expect(style.includes('--creative-canvas-node-fill: #e7e5df')).toBe(true);
-    expect(style.includes('--color-text-1: #292524')).toBe(true);
-    expect(style.includes('--primary-6: 87, 83, 78')).toBe(true);
-    expect(style.includes('color-scheme: light')).toBe(true);
-    expect(style.includes("[data-theme='dark']")).toBe(false);
+    expect(style.includes('--creative-canvas-node-fill: color-mix(')).toBe(true);
+    expect(style.includes('--color-text-1: #292524')).toBe(false);
+    expect(style.includes('--primary-6: 87, 83, 78')).toBe(false);
+    expect(style.includes('color-scheme: inherit')).toBe(true);
+    expect(style.includes(":global([data-theme='dark']) .root")).toBe(true);
+    expect(style.includes('--creative-canvas-grid-line: color-mix(')).toBe(true);
   });
 
   test('keeps the bottom icon toolbar horizontally centered on wide canvases', () => {

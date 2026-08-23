@@ -228,7 +228,7 @@
 
 .actions button:first-child {
   background: rgb(var(--primary-6));
-  color: #fff;
+  color: var(--button-primary-text, #fff);
 }
 
 .actions button:hover:not(:disabled) {

@@ -40,8 +40,8 @@
 }
 
 .frame[data-node-selected='true'] {
-  border-color: var(--creative-canvas-selection-accent, #2f80ff);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--creative-canvas-selection-accent, #2f80ff) 34%, transparent);
+  border-color: var(--creative-canvas-selection-accent, rgb(var(--primary-6)));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--creative-canvas-selection-accent, rgb(var(--primary-6))) 34%, transparent);
 }
 
 .frame[data-node-locked='true'] {
@@ -59,8 +59,8 @@
 }
 
 .frame:focus-visible {
-  border-color: var(--creative-canvas-selection-accent, #2f80ff);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--creative-canvas-selection-accent, #2f80ff) 28%, transparent);
+  border-color: var(--creative-canvas-selection-accent, rgb(var(--primary-6)));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--creative-canvas-selection-accent, rgb(var(--primary-6))) 28%, transparent);
 }
 
 .header {

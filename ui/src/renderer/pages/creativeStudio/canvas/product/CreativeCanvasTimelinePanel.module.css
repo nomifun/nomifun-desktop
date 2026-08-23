@@ -86,7 +86,7 @@
   padding: 0 13px;
   border-radius: 8px;
   background: rgb(var(--primary-6));
-  color: #fff;
+  color: var(--button-primary-text, #fff);
   cursor: pointer;
   font-size: 12px;
   font-weight: 620;

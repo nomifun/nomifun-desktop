@@ -1,53 +1,10 @@
 .positioner {
-  --color-bg-1: #faf9f7;
-  --color-bg-2: #f5f3ef;
-  --color-bg-3: #f1efea;
-  --color-bg-4: #ffffff;
-  --color-bg-5: #ffffff;
-  --color-bg-popup: #faf9f7;
-  --color-fill-1: #f1efea;
-  --color-fill-2: #e9e6df;
-  --color-fill-3: #e1ded7;
-  --color-fill-4: #d5d1c8;
-  --color-border-1: #e1ded7;
-  --color-border-2: #d5d1c8;
-  --color-border-3: #bcb6ac;
-  --color-border-4: #a29b91;
-  --color-text-1: #242321;
-  --color-text-2: #4d4a45;
-  --color-text-3: #777269;
-  --color-text-4: #a29b91;
-  --color-secondary: #f1efea;
-  --color-secondary-hover: #e9e6df;
-  --color-secondary-active: #e1ded7;
-  --color-secondary-disabled: #f5f3ef;
-  --color-border: #e1ded7;
-  --color-neutral-1: #faf9f7;
-  --color-neutral-2: #f1efea;
-  --color-neutral-3: #e1ded7;
-  --color-neutral-4: #d5d1c8;
-  --color-neutral-6: #a29b91;
-  --color-neutral-8: #4d4a45;
-  --color-neutral-10: #242321;
-  --gray-1: 250, 249, 247;
-  --gray-2: 245, 243, 239;
-  --gray-3: 225, 222, 215;
-  --gray-4: 213, 209, 200;
-  --gray-5: 188, 182, 172;
-  --gray-6: 162, 155, 145;
-  --gray-7: 119, 114, 105;
-  --gray-8: 77, 74, 69;
-  --gray-9: 36, 35, 33;
-  --gray-10: 17, 17, 15;
-  --primary-6: 36, 35, 33;
-
   position: absolute;
   top: calc(100% + 16px * var(--creative-canvas-inverse-zoom));
   left: 50%;
   z-index: 35;
   width: 580px;
   color: var(--color-text-1);
-  color-scheme: light;
   pointer-events: auto;
   transform:
     translateX(
@@ -55,6 +12,14 @@
     )
     scale(var(--creative-canvas-inverse-zoom));
   transform-origin: center top;
+}
+
+:global([data-theme='light']) .positioner {
+  color-scheme: light;
+}
+
+:global([data-theme='dark']) .positioner {
+  color-scheme: dark;
 }
 
 .positioner[data-placement='above'] {
@@ -77,10 +42,10 @@
 .panel {
   box-sizing: border-box;
   padding: 12px;
-  border: 1px solid rgba(65, 62, 57, 0.15);
+  border: 1px solid color-mix(in srgb, var(--color-border-2) 86%, transparent);
   border-radius: 16px;
-  background: rgba(250, 249, 247, 0.96);
-  box-shadow: 0 22px 52px rgba(39, 36, 31, 0.2);
+  background: color-mix(in srgb, var(--color-bg-2) 94%, transparent);
+  box-shadow: 0 22px 52px color-mix(in srgb, #000 22%, transparent);
   backdrop-filter: blur(18px);
 }
 
@@ -99,7 +64,7 @@
   font: inherit;
   font-size: 14px;
   line-height: 20px;
-  scrollbar-color: rgba(82, 78, 72, 0.25) transparent;
+  scrollbar-color: color-mix(in srgb, var(--color-text-3) 32%, transparent) transparent;
   scrollbar-width: thin;
 }
 
@@ -108,7 +73,7 @@
 }
 
 .prompt:focus-visible {
-  box-shadow: inset 0 0 0 1px rgba(70, 67, 62, 0.18);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, rgb(var(--primary-6)) 42%, var(--color-border-2));
 }
 
 .prompt:disabled {
@@ -183,26 +148,27 @@
 .submitButton {
   width: 64px;
   min-width: 64px;
-  border-color: #242321;
+  border-color: rgb(var(--primary-6));
   border-radius: 999px;
-  background: #242321;
-  color: #faf9f7;
+  background: rgb(var(--primary-6));
+  color: var(--button-primary-text, #fff);
 }
 
 .iconButton:hover:not(:disabled),
 .settingsButton:hover:not(:disabled) {
-  border-color: #bcb6ac;
-  background: #f3f1ec;
+  border-color: var(--color-border-3);
+  background: var(--color-fill-2);
 }
 
 .submitButton:hover:not(:disabled) {
-  background: #11110f;
+  border-color: rgb(var(--primary-5));
+  background: rgb(var(--primary-5));
 }
 
 .iconButton:focus-visible,
 .settingsButton:focus-visible,
 .submitButton:focus-visible {
-  outline: 2px solid #242321;
+  outline: 2px solid rgb(var(--primary-6));
   outline-offset: 2px;
 }
 
@@ -220,14 +186,13 @@
   gap: 12px;
   padding: 4px;
   color: var(--color-text-1);
-  color-scheme: light;
 }
 
 .positioner :global(.arco-popover-content) {
   border-color: var(--color-border-1);
   border-radius: 16px;
   background: var(--color-bg-popup);
-  box-shadow: 0 18px 48px rgba(39, 36, 31, 0.2);
+  box-shadow: 0 18px 48px color-mix(in srgb, #000 22%, transparent);
 }
 
 .field {
@@ -248,15 +213,15 @@
   margin-top: 8px;
   padding: 7px 10px;
   border-radius: 8px;
-  background: #f1efea;
-  color: #6d675f;
+  background: var(--color-fill-2);
+  color: var(--color-text-2);
   font-size: 11px;
   line-height: 1.45;
 }
 
 .message[role='alert'] {
-  background: #faece9;
-  color: #9e3d30;
+  background: color-mix(in srgb, rgb(var(--danger-6)) 10%, var(--color-bg-2));
+  color: rgb(var(--danger-6));
 }
 
 .spin {

@@ -107,15 +107,18 @@ describe('CreativeCanvasImageComposer', () => {
     expect(html.includes('请输入你想要把这张图修改成什么')).toBe(false);
   });
 
-  test('owns a fixed light stone palette independent from user theme', () => {
+  test('inherits the active application theme for its creation surface', () => {
     const css = readFileSync(
       new URL('./CreativeCanvasImageComposer.module.css', import.meta.url),
       'utf8'
     );
-    expect(css.includes('color-scheme: light')).toBe(true);
-    expect(css.includes('--color-bg-1: #faf9f7')).toBe(true);
-    expect(css.includes('--color-bg-popup: #faf9f7')).toBe(true);
-    expect(css.includes('--color-secondary: #f1efea')).toBe(true);
+    expect(css.includes('--color-bg-1: #faf9f7')).toBe(false);
+    expect(css.includes('--color-bg-popup: #faf9f7')).toBe(false);
+    expect(css.includes('--color-secondary: #f1efea')).toBe(false);
+    expect(css.includes(":global([data-theme='light']) .positioner")).toBe(true);
+    expect(css.includes(":global([data-theme='dark']) .positioner")).toBe(true);
+    expect(css.includes('background: color-mix(in srgb, var(--color-bg-2)')).toBe(true);
+    expect(css.includes('background: rgb(var(--primary-6))')).toBe(true);
     expect(css.includes('@media (prefers-color-scheme: dark)')).toBe(false);
     expect(css.includes('width: 580px')).toBe(true);
     expect(css.includes('height: 160px')).toBe(true);
