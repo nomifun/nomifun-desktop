@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { FilterTrigger } from './RequirementFilters';

@@ -28,7 +28,7 @@ describe('AddPlatformModal unified model input flow', () => {
     expect(unifiedInputSource.includes('onSelect=')).toBe(true);
     expect(unifiedInputSource.includes('onChange=')).toBe(true);
     expect(unifiedInputSource.includes('onBlur=')).toBe(false);
-    expect(editorSource.includes('addCapabilityTask(current.capabilities, task)')).toBe(true);
+    expect(editorSource.includes('const added = chosen.filter')).toBe(true);
     expect(editorSource.includes('removeCapabilityTask(current.capabilities, task)')).toBe(true);
     expect(editorSource.includes('onChange((current) =>')).toBe(true);
     expect(editorSource.indexOf('data-model-task-picker')).toBeLessThan(

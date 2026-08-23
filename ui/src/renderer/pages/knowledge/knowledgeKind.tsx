@@ -13,7 +13,6 @@
  * per-kind accent colors while the detail header stays neutral — pick via
  * `textVariant`.
  */
-import React from 'react';
 import type { TFunction } from 'i18next';
 import { Earth, EditTwo, FolderOpen } from '@icon-park/react';
 import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';

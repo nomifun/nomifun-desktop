@@ -7,7 +7,6 @@
 import { describe, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { readFileSync } from 'node:fs';
-import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 

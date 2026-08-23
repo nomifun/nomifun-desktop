@@ -5,7 +5,7 @@
  */
 
 import type { IChannelPluginStatus } from '@/common/types/channel/channel';
-import { channel, type IWebUIStatus } from '@/common/adapter/ipcBridge';
+import { channel } from '@/common/adapter/ipcBridge';
 import { openExternalUrl } from '@/renderer/utils/platform';
 import { Button, Input, Message, Tooltip } from '@arco-design/web-react';
 import React, { useState } from 'react';
@@ -55,7 +55,6 @@ interface WecomConfigFormProps {
   /** 多机器人模式下寻址的渠道行；缺省 = 全局设置页 legacy 单行行为。 */
   channelTarget?: ChannelTarget;
   onStatusChange: (status: IChannelPluginStatus | null) => void;
-  webuiStatus: IWebUIStatus | null;
 }
 
 const WECOM_DEV_DOCS_URL = 'https://developer.work.weixin.qq.com/document/path/101463';
@@ -64,7 +63,6 @@ const WecomConfigForm: React.FC<WecomConfigFormProps> = ({
   pluginStatus,
   channelTarget,
   onStatusChange,
-  webuiStatus,
 }) => {
   const { t } = useTranslation();
 

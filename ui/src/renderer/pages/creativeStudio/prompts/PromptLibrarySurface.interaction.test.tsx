@@ -9,7 +9,6 @@ import '../../../../../test/setup-dom.ts';
 import { cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
-import React from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 
 import { PromptLibrarySurface } from './PromptLibrarySurface';

@@ -11,7 +11,6 @@ import type { CreativeTask } from "../../tasks";
 import { projectCreativeTaskOutput } from "../../tasks";
 import type {
   CreativeWorkbenchCommittedOutput,
-  CreativeWorkbenchReferenceBinding,
   CreativeWorkbenchReferences,
 } from "./types";
 import { CreativeWorkbenchRuntimeError } from "./types";

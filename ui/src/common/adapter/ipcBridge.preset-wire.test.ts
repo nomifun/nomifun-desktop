@@ -11,7 +11,6 @@ import { parsePresetReference, type PresetSource } from '../types/agent/presetTy
 const USER_PRESET_ID = '0190f5fe-7c00-7a00-8000-000000000001';
 const PROVIDER_ID = '0190f5fe-7c00-7a00-8000-000000000002';
 const KNOWLEDGE_BASE_ID = '0190f5fe-7c00-7a00-8000-000000000003';
-const PRESET_TAG_ID = '0190f5fe-7c00-7a00-8000-000000000005';
 const realFetch = globalThis.fetch;
 
 async function expectTypeError(action: () => Promise<unknown>): Promise<void> {

@@ -9,7 +9,7 @@ import type { SessionKnowledgeSource } from '@/renderer/pages/conversation/Works
 import { useSessionKnowledgeMounts } from '@/renderer/pages/conversation/Workspace/KnowledgePanel/useSessionKnowledgeMounts';
 import type { WorkspaceExtraTab } from '@/renderer/pages/conversation/Workspace/types';
 import { BookOne } from '@icon-park/react';
-import React, { useMemo } from 'react';
+import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
 /** The rail tab key the knowledge panel is registered under. */

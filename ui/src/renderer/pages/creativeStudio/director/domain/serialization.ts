@@ -10,7 +10,6 @@ import {
   cloneDirectorEntity,
   cloneDirectorTrack,
   cloneDirectorTransform,
-  cloneDirectorVector3,
   directorTargetKey,
   directorTrackKey,
   isDirectorAssetId,

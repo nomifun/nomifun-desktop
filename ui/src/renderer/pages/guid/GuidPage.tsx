@@ -311,7 +311,6 @@ const GuidPage: React.FC = () => {
     guidEnabledSkills,
     availableMcpServers,
     selectedMcpServerIds: guidSelectedMcpServerIds,
-    currentEffectiveAgentInfo: agentSelection.currentEffectiveAgentInfo,
     applyAdvancedConfig: advancedConfig.applyToConversation,
     autoWork: advancedConfig.autoWork,
     delegationPolicy,

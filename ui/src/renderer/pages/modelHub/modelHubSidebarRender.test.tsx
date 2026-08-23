@@ -22,7 +22,6 @@
 
 import { describe, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
-import React from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';

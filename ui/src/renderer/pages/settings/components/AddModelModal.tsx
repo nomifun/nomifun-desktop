@@ -10,7 +10,7 @@ import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import ModalHOC from '@/renderer/utils/ui/ModalHOC';
 import NomiModal from '@/renderer/components/base/NomiModal';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import useModeModeList from '@renderer/hooks/agent/useModeModeList';
 import ModelDefinitionEditor, {

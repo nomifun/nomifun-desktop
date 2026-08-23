@@ -62,7 +62,6 @@ import {
 import type {
   ICssTheme,
   IMcpServer,
-  IProvider,
   ISessionMcpServer,
   TChatConversation,
   TProviderWithModel,
@@ -166,7 +165,6 @@ import type {
   TUpdateAgentExecutionTemplate,
 } from '../types/agentExecution/agentExecutionTemplateTypes';
 import type {
-  AutoUpdateStatus,
   UpdateCheckRequest,
   UpdateCheckResult,
   UpdateDownloadProgressEvent,
@@ -605,25 +603,6 @@ export const conversation = {
         if (p.execution_template_id) body.execution_template_id = p.execution_template_id;
       }
       return body;
-    }),
-    fromApiConversation
-  ),
-  createWithConversation: withResponseMap(
-    httpPost<unknown, { conversation: TChatConversation }>('/api/conversations/clone', (p) => {
-      const isNomi = p.conversation.type === 'nomi';
-      // Drop `id` here too: the clone endpoint assigns a fresh entity ID; the
-      // source ID must never leak into the new row.
-      const { model: _rawModel, id: _sourceId, ...rest } = p.conversation as TChatConversation & {
-        model?: TProviderWithModel;
-      };
-      const clonedConversation: Record<string, unknown> = { ...rest };
-      if (isNomi) {
-        const model = toApiModelOptional(_rawModel);
-        if (model) clonedConversation.model = model;
-      }
-      return {
-        conversation: clonedConversation,
-      };
     }),
     fromApiConversation
   ),

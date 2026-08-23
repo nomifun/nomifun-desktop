@@ -5,8 +5,6 @@
  */
 
 import type { ProviderModelResponse } from '@/common/types/provider/providerModel';
-import type { ModelTask } from '@/common/protocolBindings/ModelTask';
-import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
 import type { PresetReference, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
 import type {
   TDecisionPolicy,
@@ -23,7 +21,6 @@ import type {
   ExecutionTemplateId,
   MessageId,
   McpServerId,
-  PresetId,
   ProviderId,
 } from '@/common/types/ids';
 

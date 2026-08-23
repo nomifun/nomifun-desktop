@@ -4,28 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ConversationId, SshHostId } from '@/common/types/ids';
+import type { SshHostId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import type { IConversationMcpStatus, IProvider, TChatConversation, TProviderWithModel } from '@/common/config/storage';
-import addChatIcon from '@/renderer/assets/icons/add-chat.svg';
 import { CronJobManager } from '@/renderer/pages/cron';
 import { usePresetInfo } from '@/renderer/hooks/agent/usePresetInfo';
-import { iconColors } from '@/renderer/styles/colors';
-import { Button, Dropdown, Menu, Message, Tooltip, Typography } from '@arco-design/web-react';
-import { History } from '@icon-park/react';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Message } from '@arco-design/web-react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
-import useSWR from 'swr';
-import { emitter } from '../../../utils/emitter';
 import ChatLayout, { type ChatLayoutProps } from './ChatLayout';
 import ChatSlider from './ChatSlider.tsx';
 import { saveNomiDefaultModel } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
 import { configService } from '@/common/config/configService';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import { resolveHealModel } from '../platforms/nomi/healConversationModel';
-import { getConversationOrNull, seedConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
-import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
 import { isConversationProcessing } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import NomiChat from '../platforms/nomi/NomiChat';
 import { useNomiModelSelection } from '../platforms/nomi/useNomiModelSelection';
@@ -71,119 +63,6 @@ const buildConversationModelPool = (
     return true;
   });
   return models.length === 1 ? { mode: 'single', model: models[0] } : { mode: 'range', models };
-};
-
-const _AssociatedConversation: React.FC<{ conversation_id: ConversationId }> = ({ conversation_id }) => {
-  const { data } = useSWR(['getAssociateConversation', conversation_id], () =>
-    ipcBridge.conversation.getAssociateConversation.invoke({ conversation_id }),
-  );
-  const navigate = useNavigate();
-  const list = useMemo(() => {
-    if (!data?.length) return [];
-    return data.filter((conversation) => conversation.id !== conversation_id);
-  }, [data]);
-  if (!list.length) return null;
-  return (
-    <Dropdown
-      droplist={
-        <Menu
-          onClickMenuItem={(key) => {
-            Promise.resolve(navigate(`/conversation/${key}`)).catch((error) => {
-              console.error('Navigation failed:', error);
-            });
-          }}
-        >
-          {list.map((conversation) => {
-            return (
-              <Menu.Item key={conversation.id}>
-                <Typography.Ellipsis className={'max-w-300px'}>{conversation.name}</Typography.Ellipsis>
-              </Menu.Item>
-            );
-          })}
-        </Menu>
-      }
-      trigger={['click']}
-    >
-      <Button
-        size='mini'
-        icon={
-          <History
-            theme='filled'
-            size='14'
-            fill={iconColors.primary}
-            strokeWidth={2}
-            strokeLinejoin='miter'
-            strokeLinecap='square'
-          />
-        }
-      ></Button>
-    </Dropdown>
-  );
-};
-
-const _AddNewConversation: React.FC<{ conversation: TChatConversation }> = ({ conversation }) => {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
-  const isCreatingRef = useRef(false);
-  if (!conversation.extra?.workspace) return null;
-  return (
-    <Tooltip content={t('conversation.workspace.createNewConversation')}>
-      <Button
-        size='mini'
-        icon={<img src={addChatIcon} alt='Add chat' className='w-14px h-14px block m-auto' />}
-        onClick={async () => {
-          if (isCreatingRef.current) return;
-          isCreatingRef.current = true;
-          try {
-            // Fetch latest conversation from DB to ensure session_mode is current
-            const latest = await getConversationOrNull(conversation.id);
-            const source = latest || conversation;
-            // Strip the source entity ID and let the clone endpoint mint a
-            // fresh canonical ID, then route to the value returned by the backend.
-            const { id: _sourceId, ...sourceWithoutId } = source;
-            const {
-              workspace: _sourceWorkspace,
-              custom_workspace: _sourceCustomWorkspace,
-              is_temporary_workspace: _sourceTemporaryWorkspace,
-              temp_workspace_id: _sourceTempWorkspaceId,
-              // Retired-engine resume keys. Rows persisted before the engine
-              // collapse may still carry them, and a clone must never inherit
-              // another conversation's session identity.
-              acp_session_id: _sourceAcpSessionId,
-              acp_session_conversation_id: _sourceAcpSessionConversationId,
-              acp_session_updated_at: _sourceAcpSessionUpdatedAt,
-              current_mode_id: _sourceCurrentModeId,
-              current_model_id: _sourceCurrentModelId,
-              cached_config_options: _sourceCachedConfigOptions,
-              pending_config_options: _sourcePendingConfigOptions,
-              runtimeValidation: _sourceRuntimeValidation,
-              sessionKey: _sourceSessionKey,
-              ...freshExtra
-            } = source.extra as TChatConversation['extra'] & Record<string, unknown>;
-            const created = await ipcBridge.conversation.createWithConversation.invoke({
-              conversation: {
-                ...sourceWithoutId,
-                created_at: Date.now(),
-                modified_at: Date.now(),
-                // This button creates an isolated conversation. Sharing the
-                // current workspace/session must be an explicit operation.
-                // The backend repeats this scrub as the authoritative boundary.
-                extra: freshExtra,
-              } as TChatConversation,
-            });
-            seedConversationCache(created);
-            void navigate(`/conversation/${created.id}`);
-            emitter.emit('chat.history.refresh');
-          } catch (error) {
-            console.error('Failed to create conversation:', error);
-            Message.error(getConversationCreateErrorMessage(error, t));
-          } finally {
-            isCreatingRef.current = false;
-          }
-        }}
-      />
-    </Tooltip>
-  );
 };
 
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
@@ -529,8 +408,7 @@ const NomiConversationPanel: React.FC<{
 
 const ChatConversation: React.FC<{
   conversation?: TChatConversation;
-  hideSendBox?: boolean;
-}> = ({ conversation, hideSendBox }) => {
+}> = ({ conversation }) => {
   const { t } = useTranslation();
   const workspaceEnabled = Boolean(conversation?.extra?.workspace);
 

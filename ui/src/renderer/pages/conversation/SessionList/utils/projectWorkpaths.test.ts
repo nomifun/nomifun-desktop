@@ -9,7 +9,6 @@ import { describe, expect, test } from 'bun:test';
 import {
   addProjectWorkpath,
   getProjectWorkpaths,
-  PROJECT_WORKPATHS_STORAGE_KEY,
   removeProjectWorkpath,
 } from './projectWorkpaths';
 

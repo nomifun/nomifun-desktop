@@ -22,7 +22,7 @@ const DirInputItem: React.FC<{
   const { t } = useTranslation();
   return (
     <Form.Item label={label} field={field}>
-      {(value, form) => {
+      {(_value, form) => {
         const current_value = form.getFieldValue(field) || '';
 
         const handlePick = () => {

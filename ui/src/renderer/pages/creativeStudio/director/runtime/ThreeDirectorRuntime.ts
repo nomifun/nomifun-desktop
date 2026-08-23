@@ -276,7 +276,6 @@ export class ThreeDirectorRuntime implements DirectorRuntimeHandle {
   private resolveAssetUrl: DirectorAssetUrlResolver;
   private onError: ((error: DirectorRuntimeError) => void) | undefined;
   private currentState: DirectorState | null = null;
-  private currentFrame: DirectorEvaluatedFrame | null = null;
   private renderCamera: Camera;
   private playbackTime = 0;
   private previousAnimationTime: number | null = null;
@@ -480,7 +479,6 @@ export class ThreeDirectorRuntime implements DirectorRuntimeHandle {
     if (!this.currentState) return;
     const plan = createDirectorRuntimeFramePlan(this.currentState, this.playbackTime);
     const { frame } = plan;
-    this.currentFrame = frame;
     applyDirectorTransform(this.worldRoot, frame.scene.transform);
     this.scene.background = new Color(frame.scene.environment.skyColor);
     this.grid.visible = frame.scene.environment.gridVisible;

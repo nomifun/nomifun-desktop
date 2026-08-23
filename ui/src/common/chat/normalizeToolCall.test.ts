@@ -1,12 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { parseConversationId } from '@/common/types/ids';
 import {
   formatToolDisplayName,
   normalizeToolCall,
   normalizeToolGroup,
 } from './normalizeToolCall';
-
-const CONVERSATION_ID = parseConversationId('0190f5fe-7c00-7a00-8000-000000000001');
 
 describe('normalizeToolCall', () => {
   it('preserves only structurally valid explicit retry identity', () => {
@@ -273,4 +270,3 @@ describe('normalizeToolGroup', () => {
     expect(result.nonFatalFailure).toBeUndefined();
   });
 });
-

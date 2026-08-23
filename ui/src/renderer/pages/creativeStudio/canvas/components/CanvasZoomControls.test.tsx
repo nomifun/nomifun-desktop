@@ -8,7 +8,6 @@ import '../../../../../../test/setup-dom.ts';
 
 import { cleanup, fireEvent, render, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
-import React from 'react';
 
 import { withCanvasTestI18n } from './canvasI18nTestUtils';
 import CanvasZoomControls from './CanvasZoomControls';

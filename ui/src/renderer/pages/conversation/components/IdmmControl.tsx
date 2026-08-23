@@ -14,7 +14,6 @@ import type {
   IdmmTargetKind,
   IdmmWatchTier,
   IdmmScanScope,
-  IdmmWakeStrategy,
   IdmmTendency,
   IdmmBlockedBehavior,
   IdmmCategoryMode,

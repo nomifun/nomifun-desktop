@@ -11,7 +11,7 @@ import { useSessionKnowledgeTab } from '@/renderer/pages/conversation/Workspace/
 import MiniAppPanel from '@/renderer/pages/conversation/Workspace/MiniAppPanel';
 import type { WorkspaceExtraTab } from '@/renderer/pages/conversation/Workspace/types';
 import { ApplicationOne, Terminal } from '@icon-park/react';
-import React, { useMemo } from 'react';
+import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
 /**

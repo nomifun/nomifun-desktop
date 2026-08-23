@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ipcBridge } from '@/common';
 import type { IProvider } from '@/common/config/storage';
 import { configService } from '@/common/config/configService';
 import type { Preset, PresetReference } from '@/common/types/agent/presetTypes';

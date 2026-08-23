@@ -5,7 +5,7 @@
  */
 
 import type { IChannelPluginStatus } from '@/common/types/channel/channel';
-import { channel, webui, type IWebUIStatus } from '@/common/adapter/ipcBridge';
+import { channel } from '@/common/adapter/ipcBridge';
 import ChannelDingTalkLogo from '@/renderer/assets/channel-logos/dingtalk.svg';
 import ChannelDiscordLogo from '@/renderer/assets/channel-logos/discord.svg';
 import ChannelLarkLogo from '@/renderer/assets/channel-logos/lark.svg';
@@ -34,7 +34,7 @@ import WeixinConfigForm from '@/renderer/components/settings/SettingsModal/conte
 import GroupAccessControl from '@/renderer/components/settings/SettingsModal/contents/channels/GroupAccessControl';
 import { supportsGroupAccess } from '@/renderer/components/settings/SettingsModal/contents/channels/groupAccessPlatforms';
 import { Message, Switch } from '@arco-design/web-react';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { buildEnablePluginRequest, findEnabledChannelStatus } from './channelStatusSelection';
 
@@ -130,25 +130,6 @@ export const PlatformConfigBody: React.FC<{
   const telegramTokenRef = useRef('');
   // QQ Bot needs two fields; the shared enable switch lives outside the form.
   const qqbotCredentialsRef = useRef({ appId: '', clientSecret: '' });
-  // WeCom's form surfaces callback URLs derived from the WebUI status (best-effort).
-  const [webuiStatus, setWebuiStatus] = useState<IWebUIStatus | null>(null);
-
-  useEffect(() => {
-    if (platform !== 'wecom') return;
-    let cancelled = false;
-    webui.getStatus
-      .invoke()
-      .then((status) => {
-        if (!cancelled && status) setWebuiStatus(status);
-      })
-      .catch(() => {
-        // Best-effort only — the form degrades to localhost URLs.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [platform]);
-
   const handleToggleEnabled = async (enabled: boolean) => {
     setToggleLoading(true);
     try {
@@ -293,7 +274,6 @@ export const PlatformConfigBody: React.FC<{
           pluginStatus={status}
           channelTarget={channelTarget}
           onStatusChange={onStatusChange}
-          webuiStatus={webuiStatus}
         />
       )}
     </div>
