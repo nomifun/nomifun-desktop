@@ -1235,13 +1235,6 @@ impl BackendOutputSink {
         })
     }
 
-    /// Compatibility verifier for synchronous/non-manager users. It no longer
-    /// performs filesystem work while holding the delivery ledger mutex.
-    #[cfg(test)]
-    pub fn verify_artifact_delivery_turn(&self) -> Result<(), String> {
-        self.verify_artifact_delivery_turn_sync_snapshot().map(|_| ())
-    }
-
     fn take_pending_artifact_work(
         &self,
     ) -> Result<

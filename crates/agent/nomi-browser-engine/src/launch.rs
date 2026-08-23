@@ -259,6 +259,7 @@ struct UncommittedLaunchGuard<'claim> {
 }
 
 impl<'claim> UncommittedLaunchGuard<'claim> {
+    #[cfg(test)]
     fn new(
         ownership_claim: &'claim crate::profile::ProfileLaunchClaim,
         ephemeral_cleanup: Option<crate::profile::EphemeralProfileCleanupToken>,
@@ -377,6 +378,7 @@ struct CommittedLaunchGuard {
 }
 
 impl CommittedLaunchGuard {
+    #[cfg(test)]
     fn new(
         process: nomi_process_runtime::ManagedChildProcess,
         ownership_token: crate::profile::BrowserOwnershipToken,
@@ -1214,6 +1216,7 @@ struct ReclaimableDroppedBrowserCleanup {
 }
 
 impl DroppedBrowserCleanupTicket {
+    #[cfg(test)]
     fn pending() -> Self {
         Self::pending_with_host_lease(None)
     }
@@ -1497,6 +1500,7 @@ fn quarantine_dropped_browser_cleanups_in(
 /// nobody retained that ticket, final Drop releases the process into the
 /// separately bounded `nomi-process-runtime` relay and preserves marker
 /// lineage for startup recovery.
+#[cfg(test)]
 pub(crate) fn hand_off_dropped_browser_cleanup(
     process: std::sync::Arc<
         tokio::sync::Mutex<nomi_process_runtime::ManagedChildProcess>,

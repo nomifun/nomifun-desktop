@@ -30,7 +30,6 @@ use crate::injected::InjectionManager;
 /// retained metadata) and the transient tab-list renderer below.
 pub(crate) const MAX_RETAINED_TARGET_URL_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_RETAINED_TARGET_TITLE_BYTES: usize = 16 * 1024;
-pub(crate) const MAX_RETAINED_DOWNLOAD_FILENAME_BYTES: usize = 4 * 1024;
 
 /// The LLM-facing tab inventory is transient, but it must not turn the
 /// bounded per-task tab count into a multi-megabyte response allocation.

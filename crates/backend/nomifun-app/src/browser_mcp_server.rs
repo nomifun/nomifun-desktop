@@ -600,6 +600,7 @@ impl TaskRequestAdmissions {
         })
     }
 
+    #[cfg(test)]
     async fn acquire(
         &self,
         task_resource_family_key: &str,

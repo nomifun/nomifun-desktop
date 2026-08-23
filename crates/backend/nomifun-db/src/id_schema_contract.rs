@@ -37,12 +37,6 @@ pub(crate) const FTS_SHADOW_TABLES: &[&str] = &[
     "cs_notes_fts_idx",
 ];
 
-/// Every table that is an FTS virtual table or one of its shadow tables.
-#[cfg(test)]
-pub(crate) fn is_fts_table(name: &str) -> bool {
-    name == CS_NOTES_FTS_TABLE || FTS_SHADOW_TABLES.contains(&name)
-}
-
 pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "agent_execution_attempts",
     "agent_execution_events",

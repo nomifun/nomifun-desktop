@@ -23,10 +23,11 @@ use crate::adapter::ProtocolAdapter;
 use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
 use crate::transport::{
-    ImageResponseBudget, MAX_IMAGE_RESPONSE_IMAGES, error_from_response,
-    inline_image_response_body_limit, post_json, post_multipart, read_json_capped,
-    validate_image_request_count,
+    ImageResponseBudget, error_from_response, inline_image_response_body_limit, post_json,
+    post_multipart, read_json_capped, validate_image_request_count,
 };
+#[cfg(test)]
+use crate::transport::MAX_IMAGE_RESPONSE_IMAGES;
 use crate::types::{
     ImageEditRequest, ImageGenRequest, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult,
 };
@@ -210,6 +211,7 @@ async fn submit_edits(
 /// Parse an OpenAI images response body (`{ data: [ { b64_json?, url? } ] }`)
 /// into artifacts, preferring inline base64 over a URL. Pure — unit tested with
 /// fixtures.
+#[cfg(test)]
 pub(crate) fn parse_images_response(value: &Value) -> Result<Vec<ProducedAsset>, InvokeError> {
     parse_images_response_limited(value, MAX_IMAGE_RESPONSE_IMAGES)
 }

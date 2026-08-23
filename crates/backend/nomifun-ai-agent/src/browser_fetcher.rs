@@ -630,6 +630,7 @@ fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[cfg(test)]
 fn rendered_to_page(final_url: &str, html: &str) -> FetchedPage {
     rendered_to_page_with_source_truncation(final_url, html, false)
 }
