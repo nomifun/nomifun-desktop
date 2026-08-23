@@ -282,6 +282,10 @@
   gap: 16px;
 }
 
+.modelSlot {
+  min-width: 0;
+}
+
 .field {
   display: grid;
   min-width: 0;

@@ -15,7 +15,11 @@ import {
   type CreativeAsset,
 } from '../../assets';
 import type { CreativeProjectDetail } from '../../domain';
-import { useNomiCreativeModelCatalog } from '../../models';
+import {
+  CreativeModelSelect,
+  useNomiCreativeModelCatalog,
+  type CreativeModelSelectionRef,
+} from '../../models';
 import {
   creativeTaskClient,
   creativeTaskReference,
@@ -64,6 +68,36 @@ const EMPTY_SETTINGS: ImageWorkbenchSettings = {
   count: 1,
 };
 
+const IMAGE_GENERATION_MODEL_COPY = {
+  placeholder: '选择生图模型',
+  loading: '正在加载生图模型…',
+  noCompatibleModel: '没有已启用且具备“图像生成”能力的模型。',
+  disabled: '生成任务进行中，暂不可切换模型。',
+  error: '生图模型目录加载失败。',
+  unavailable: '已选生图模型当前不可用，请重新选择。',
+  configureModels: '配置生图模型',
+};
+
+const IMAGE_EDIT_MODEL_COPY = {
+  placeholder: '选择图片编辑模型',
+  loading: '正在加载图片编辑模型…',
+  noCompatibleModel: '没有已启用且具备“图片编辑”能力的模型。',
+  disabled: '生成任务进行中，暂不可切换模型。',
+  error: '图片编辑模型目录加载失败。',
+  unavailable: '已选图片编辑模型当前不可用，请重新选择。',
+  configureModels: '配置图片编辑模型',
+};
+
+const creativeModelSelection = (
+  model: ImageWorkbenchModelIdentity | null
+): CreativeModelSelectionRef | null =>
+  model
+    ? {
+        providerId: model.providerId as CreativeModelSelectionRef['providerId'],
+        model: model.model,
+      }
+    : null;
+
 const ownerScopedPendingNoop = async (): Promise<void> => undefined;
 
 const UnownedImageWorkbench: React.FC<{
@@ -73,6 +107,7 @@ const UnownedImageWorkbench: React.FC<{
   historyLoading,
   historyError,
 }) => {
+  const navigate = useNavigate();
   const catalog = useNomiCreativeModelCatalog();
   const [prompt, setPrompt] = useState('');
   const [layout, setLayout] = useState<ImageWorkbenchLayout>('side');
@@ -84,6 +119,23 @@ const UnownedImageWorkbench: React.FC<{
       references={[]}
       settings={settings}
       modelOptions={imageWorkbenchModelOptions(catalog, 'image_generation')}
+      modelSlot={
+        <CreativeModelSelect
+          catalog={catalog}
+          filter={{ capability: 'task', task: 'image_generation' }}
+          value={creativeModelSelection(settings.model)}
+          onChange={(selection) =>
+            setSettings((value) => ({
+              ...value,
+              model: { providerId: selection.providerId, model: selection.model },
+            }))
+          }
+          disabled
+          label='模型'
+          copy={IMAGE_GENERATION_MODEL_COPY}
+          onOpenModelSettings={() => void navigate('/models?section=image')}
+        />
+      }
       results={[]}
       selectedResultIds={[]}
       task={{ state: 'idle', pendingCount: 0 }}
@@ -422,6 +474,25 @@ const OwnedImageWorkbenchReady: React.FC<{
     onRetryTask: retryTask,
     onActionError: (reason) => setError(reason instanceof Error ? reason.message : String(reason)),
   });
+  const modelSlot = (
+    <CreativeModelSelect
+      catalog={catalog}
+      filter={{ capability: 'task', task: modelTask }}
+      value={creativeModelSelection(settings.model)}
+      onChange={(selection) =>
+        setSettings((value) => ({
+          ...value,
+          model: { providerId: selection.providerId, model: selection.model },
+        }))
+      }
+      disabled={props.disabled}
+      label='模型'
+      copy={modelTask === 'image_edit' ? IMAGE_EDIT_MODEL_COPY : IMAGE_GENERATION_MODEL_COPY}
+      onOpenModelSettings={() =>
+        void navigate(`/models?section=${modelTask === 'image_edit' ? 'image-edit' : 'image'}`)
+      }
+    />
+  );
 
   return (
     <>
@@ -460,7 +531,7 @@ const OwnedImageWorkbenchReady: React.FC<{
           </button>
         </div>
       ) : null}
-      <ImageWorkbench {...props} />
+      <ImageWorkbench {...props} modelSlot={modelSlot} />
       <CreativeAssetPickerModal
         open={pickerOpen}
         assets={assets.assets}
