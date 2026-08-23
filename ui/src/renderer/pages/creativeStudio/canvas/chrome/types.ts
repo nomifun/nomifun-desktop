@@ -36,9 +36,11 @@ export interface CreativeCanvasChromeProps {
   background: CreativeCanvasChromeBackground;
   canUndo: boolean;
   canRedo: boolean;
-  isMiniMapOpen: boolean;
+  leftOpen: boolean;
   leftView: CreativeCanvasLeftView;
   rightView: CreativeCanvasRightView | null;
+  /** Current persisted width of the right panel, in CSS pixels. */
+  rightPanelWidth?: number;
   bottomView: CreativeCanvasBottomView | null;
   backgroundMenuOpen: boolean;
   compact?: boolean;
@@ -52,10 +54,11 @@ export interface CreativeCanvasChromeProps {
   onBackgroundMenuOpenChange(open: boolean): void;
   onUndo(): void;
   onRedo(): void;
-  onFitView(): void;
-  onToggleMiniMap(): void;
+  onLeftPanelOpenChange(open: boolean): void;
   onLeftViewChange(view: CreativeCanvasLeftView): void;
   onRightViewChange(view: CreativeCanvasRightView | null): void;
+  /** Persist a user-adjusted right panel width, in CSS pixels. */
+  onRightPanelWidthChange?(width: number): void;
   onBottomViewChange(view: CreativeCanvasBottomView | null): void;
 }
 
@@ -88,4 +91,16 @@ export const CREATIVE_CANVAS_CHROME_BACKGROUNDS = [
 
 export function toggleCreativeCanvasPanel<T extends string>(current: T | null, target: T): T | null {
   return current === target ? null : target;
+}
+
+export function toggleCreativeCanvasTool(
+  current: CreativeCanvasChromeTool
+): CreativeCanvasChromeTool {
+  return current === 'pan' ? 'select' : 'pan';
+}
+
+export function toggleCreativeCanvasBottomPanel(
+  current: CreativeCanvasBottomView | null
+): CreativeCanvasBottomView | null {
+  return current === null ? 'history' : null;
 }

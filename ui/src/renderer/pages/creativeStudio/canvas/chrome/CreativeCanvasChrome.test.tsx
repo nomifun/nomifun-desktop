@@ -17,7 +17,9 @@ import {
   CREATIVE_CANVAS_CHROME_BACKGROUNDS,
   CREATIVE_CANVAS_CHROME_NODE_KINDS,
   CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS,
+  toggleCreativeCanvasBottomPanel,
   toggleCreativeCanvasPanel,
+  toggleCreativeCanvasTool,
   type CreativeCanvasChromeProps,
 } from './types';
 
@@ -32,7 +34,7 @@ const baseProps = (
   background: 'dots',
   canUndo: false,
   canRedo: true,
-  isMiniMapOpen: false,
+  leftOpen: true,
   leftView: 'canvas',
   rightView: 'assistant',
   bottomView: 'history',
@@ -53,8 +55,7 @@ const baseProps = (
   onBackgroundMenuOpenChange: noop,
   onUndo: noop,
   onRedo: noop,
-  onFitView: noop,
-  onToggleMiniMap: noop,
+  onLeftPanelOpenChange: noop,
   onLeftViewChange: noop,
   onRightViewChange: noop,
   onBottomViewChange: noop,
@@ -85,7 +86,7 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
     expect(html.includes('HISTORY PANEL')).toBe(true);
     expect(
       html.includes('aria-label="creativeStudio.canvas.actions.selectTool"')
-    ).toBe(true);
+    ).toBe(false);
     expect(
       html.includes('aria-label="creativeStudio.canvas.actions.panTool"')
     ).toBe(true);
@@ -97,11 +98,27 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
     ).toBe(true);
     expect(
       html.includes('aria-label="creativeStudio.canvas.actions.fitView"')
-    ).toBe(true);
+    ).toBe(false);
     expect(
       html.includes('aria-label="creativeStudio.canvas.actions.openMiniMap"')
+    ).toBe(false);
+    expect(
+      html.includes(
+        'aria-label="creativeStudio.canvas.panels.bottom.history"'
+      )
     ).toBe(true);
+    expect(
+      html.includes(
+        'aria-label="creativeStudio.canvas.panels.bottom.timeline"'
+      )
+    ).toBe(false);
     expect(html.includes('aria-pressed="true"')).toBe(true);
+    expect(html.includes('data-left-open="true"')).toBe(true);
+    expect(
+      html.includes(
+        'aria-label="creativeStudio.canvas.chrome.collapseResources"'
+      )
+    ).toBe(true);
     expect(html.includes('data-right-panel-header')).toBe(false);
     expect(
       html.includes('creativeStudio.canvas.chrome.addNode')
@@ -178,6 +195,20 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
     expect(html.includes('data-right-panel-body')).toBe(false);
     expect(html.includes('data-bottom-panel-body')).toBe(false);
   });
+
+  test('renders floating resource bubbles while keeping the panel body mounted', () => {
+    const html = renderChrome({ leftOpen: false });
+
+    expect(html.includes('data-left-open="false"')).toBe(true);
+    expect(html.includes('data-left-panel-body="canvas"')).toBe(true);
+    expect(html.includes('aria-hidden="true"')).toBe(true);
+    expect(
+      html.includes(
+        'aria-label="creativeStudio.canvas.chrome.collapseResources"'
+      )
+    ).toBe(false);
+    expect(html.includes('aria-expanded="false"')).toBe(true);
+  });
 });
 
 describe('CreativeCanvasChrome controlled menus', () => {
@@ -208,7 +239,12 @@ describe('CreativeCanvasChrome controlled menus', () => {
     expect(html.includes('aria-checked="true"')).toBe(true);
   });
 
-  test('toggles optional panels without keeping internal product state', () => {
+  test('toggles the pan tool and unified bottom-panel entry without keeping product state', () => {
+    expect(toggleCreativeCanvasTool('select')).toBe('pan');
+    expect(toggleCreativeCanvasTool('pan')).toBe('select');
+    expect(toggleCreativeCanvasBottomPanel(null)).toBe('history');
+    expect(toggleCreativeCanvasBottomPanel('history')).toBe(null);
+    expect(toggleCreativeCanvasBottomPanel('timeline')).toBe(null);
     expect(toggleCreativeCanvasPanel(null, 'assistant')).toBe('assistant');
     expect(toggleCreativeCanvasPanel('assistant', 'assistant')).toBe(null);
     expect(toggleCreativeCanvasPanel('assistant', 'properties')).toBe('properties');

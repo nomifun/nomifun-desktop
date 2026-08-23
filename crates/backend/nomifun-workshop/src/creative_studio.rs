@@ -1107,7 +1107,7 @@ impl Default for CreativePanels {
     fn default() -> Self {
         Self {
             left: CreativeLeftPanel {
-                open: true,
+                open: false,
                 width: 280.0,
                 active_view: CreativeLeftView::Canvas,
             },
@@ -1638,7 +1638,7 @@ mod tests {
         assert_eq!(value["schema"], CREATIVE_STUDIO_SCHEMA);
         assert_eq!(value["projectId"], PROJECT_ID);
         assert_eq!(value["background"], "lines");
-        assert_eq!(value["panels"]["left"]["open"], true);
+        assert_eq!(value["panels"]["left"]["open"], false);
         assert_eq!(value["panels"]["left"]["width"], 280.0);
         assert_eq!(value["panels"]["left"]["activeView"], "canvas");
         assert_eq!(value["panels"]["right"]["open"], false);

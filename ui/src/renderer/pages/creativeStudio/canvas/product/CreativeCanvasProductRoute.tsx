@@ -95,7 +95,6 @@ import {
 } from '../core';
 import {
   CreativeCanvasEditor,
-  fitCanvasViewport,
   type CanvasCasSaveSnapshot,
   type CreativeCanvasEditorHandle,
 } from '../editor';
@@ -217,8 +216,10 @@ import {
   creativeCanvasProductSelectionCapabilities,
   creativeCanvasSaveDisplayMessage,
   resolveCreativeNodeAssetPresentation,
+  withCreativeCanvasLeftPanelOpen,
   withCreativeCanvasBottomView,
   withCreativeCanvasLeftView,
+  withCreativeCanvasRightPanelWidth,
   withCreativeCanvasRightView,
 } from './productController';
 import {
@@ -1010,9 +1011,25 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [persistPanels]
   );
 
+  const handleLeftPanelOpenChange = useCallback(
+    (open: boolean) => {
+      persistPanels(withCreativeCanvasLeftPanelOpen(panelsRef.current, open));
+    },
+    [persistPanels]
+  );
+
   const handleRightViewChange = useCallback(
     (view: CreativeStudioPanelState['right']['activeView'] | null) => {
       persistPanels(withCreativeCanvasRightView(panelsRef.current, view));
+    },
+    [persistPanels]
+  );
+
+  const handleRightPanelWidthChange = useCallback(
+    (width: number) => {
+      persistPanels(
+        withCreativeCanvasRightPanelWidth(panelsRef.current, width)
+      );
     },
     [persistPanels]
   );
@@ -1171,19 +1188,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
     },
     []
   );
-
-  const handleFit = useCallback(() => {
-    const editor = editorRef.current;
-    if (!editor) return;
-    editor.dispatch(
-      canvasCommands.setViewport(
-        fitCanvasViewport(
-          editor.getState(),
-          measuredSize(canvasHostRef.current)
-        )
-      )
-    );
-  }, []);
 
   const handleMiniMapNavigate = useCallback(
     (request: CanvasMiniMapNavigationRequest) => {
@@ -4215,7 +4219,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const compact = viewportSize.width < 760;
   const panelViews = creativeCanvasProductPanelViews(panels);
   const canvasLayoutStyle = {
-    '--creative-canvas-left-panel-width': `${panels.left.open ? panels.left.width : 0}px`,
     '--creative-canvas-right-panel-width': `${panels.right.width}px`,
     '--creative-canvas-bottom-panel-height': `${panels.bottom.height}px`,
   } as React.CSSProperties;
@@ -4310,9 +4313,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
         background={background}
         canUndo={Boolean(canvasState && canUndoCanvas(canvasState))}
         canRedo={Boolean(canvasState && canRedoCanvas(canvasState))}
-        isMiniMapOpen={miniMapOpen}
+        leftOpen={panels.left.open}
         leftView={panelViews.left}
         rightView={panelViews.right}
+        rightPanelWidth={panels.right.width}
         bottomView={panelViews.bottom}
         backgroundMenuOpen={backgroundMenuOpen}
         compact={compact}
@@ -4324,10 +4328,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
         onBackgroundMenuOpenChange={setBackgroundMenuOpen}
         onUndo={() => dispatch(canvasCommands.undo())}
         onRedo={() => dispatch(canvasCommands.redo())}
-        onFitView={handleFit}
-        onToggleMiniMap={() => setMiniMapOpen((open) => !open)}
+        onLeftPanelOpenChange={handleLeftPanelOpenChange}
         onLeftViewChange={handleLeftViewChange}
         onRightViewChange={handleRightViewChange}
+        onRightPanelWidthChange={handleRightPanelWidthChange}
         onBottomViewChange={handleBottomViewChange}
         slots={{
           canvas: (

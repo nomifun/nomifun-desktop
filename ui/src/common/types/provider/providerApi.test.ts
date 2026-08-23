@@ -19,6 +19,7 @@ const PROVIDER_ID = '0190f5fe-7c00-7a00-8000-000000000002';
 
 const initialModel: ProviderModelInput = {
   model: 'gpt-4o',
+  display_name: 'GPT-4o',
   enabled: true,
   sort_order: 0,
   capabilities: [
@@ -38,6 +39,7 @@ const initialModel: ProviderModelInput = {
 const modelResponse = (): ProviderModelResponse => ({
   provider_id: PROVIDER_ID,
   model: initialModel.model,
+  display_name: initialModel.display_name,
   enabled: initialModel.enabled ?? true,
   sort_order: 0,
   capabilities: initialModel.capabilities.map((capability) => ({

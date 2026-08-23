@@ -266,6 +266,7 @@ mod tests {
             id: 0,
             provider_id: provider_id.into(),
             model: model.into(),
+            display_name: None,
             enabled,
             sort_order: 0,
             description: None,

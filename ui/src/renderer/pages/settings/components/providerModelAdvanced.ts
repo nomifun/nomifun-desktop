@@ -68,11 +68,13 @@ export type ModelCapabilityDraftPatch = Partial<
 
 export interface ModelDefinitionDraft {
   model: string;
+  displayName?: string;
   capabilities: ModelCapabilityDraft[];
 }
 
 export interface CatalogCapabilitySuggestion {
   model: string;
+  displayName?: string;
   tasks: ModelTask[];
   traits: ModelTrait[];
   /** Context window the provider's catalog declares, when it declares one. */
@@ -308,6 +310,7 @@ export const applyCatalogSuggestionForTask = (
   const known = definition.capabilities.some((capability) => capability.task === task);
   return {
     model: suggestion.model,
+    ...(suggestion.displayName ? { displayName: suggestion.displayName } : {}),
     capabilities: known
       ? definition.capabilities.map((capability) =>
           capability.task === task && declaresTask

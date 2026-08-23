@@ -170,6 +170,34 @@ async fn aggregate_create_persists_provider_model_capability_and_named_connectio
 }
 
 #[tokio::test]
+async fn model_display_name_is_separate_from_the_runtime_model_id() {
+    let db = init_database_memory().await.unwrap();
+    let repository = SqliteProviderRepository::new(db.pool().clone());
+    repository
+        .create(
+            provider_params(Some(PROVIDER_ID)),
+            &model("ep-test-endpoint", &CHAT_CAPABILITIES),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+    models
+        .set_display_name(PROVIDER_ID, "ep-test-endpoint", Some("Seedance 1.5 Pro"))
+        .await
+        .unwrap();
+
+    let row = models
+        .get(PROVIDER_ID, "ep-test-endpoint")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.model, "ep-test-endpoint");
+    assert_eq!(row.display_name.as_deref(), Some("Seedance 1.5 Pro"));
+}
+
+#[tokio::test]
 async fn aggregate_create_rejects_a_capability_with_an_unconfigured_named_role() {
     let db = init_database_memory().await.unwrap();
     let repository = SqliteProviderRepository::new(db.pool().clone());

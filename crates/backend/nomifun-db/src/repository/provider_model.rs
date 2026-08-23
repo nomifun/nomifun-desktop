@@ -59,6 +59,19 @@ pub trait IProviderModelRepository: Send + Sync {
         model: &NewProviderModel<'_>,
     ) -> Result<ProviderModelRow, DbError>;
 
+    /// Update only the human-readable label. Display metadata is deliberately
+    /// separate from the invocation graph and therefore does not bump the
+    /// provider configuration revision.
+    async fn set_display_name(
+        &self,
+        provider_id: &str,
+        model: &str,
+        display_name: Option<&str>,
+    ) -> Result<(), DbError> {
+        let _ = (provider_id, model, display_name);
+        Ok(())
+    }
+
     async fn delete_coordinated(
         &self,
         plan: &CoordinatedProviderModelDelete,

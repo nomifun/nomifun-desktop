@@ -61,7 +61,9 @@ describe('Creative Canvas product route composition', () => {
       source.includes('<CreativeCanvasConnectionEdge {...context} />')
     ).toBe(true);
     expect(source.includes('<CanvasMiniMap')).toBe(true);
-    expect(source.includes('fitCanvasViewport(')).toBe(true);
+    expect(source.includes('fitCanvasViewport(')).toBe(false);
+    expect(source.includes('onFitView={handleFit}')).toBe(false);
+    expect(source.match(/onToggleMiniMap=/g)?.length ?? 0).toBe(1);
     expect(source.includes('<CreativeCanvasProductAssetLibrary')).toBe(true);
     expect(source.includes('<CreativeCanvasProductPromptLibrary')).toBe(true);
     expect(source.includes('<CreativeCanvasAgentPanel')).toBe(true);

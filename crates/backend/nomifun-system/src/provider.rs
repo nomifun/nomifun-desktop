@@ -149,6 +149,9 @@ impl ProviderService {
 
         let model_sort_order = req.initial_model.sort_order.unwrap_or(0);
         validate_sort_order(Some(model_sort_order))?;
+        crate::provider_model::validate_display_name(
+            req.initial_model.display_name.as_deref(),
+        )?;
         let serialized_capabilities = serialize_capabilities(&req.initial_model.capabilities)?;
         let db_capabilities = serialized_capabilities
             .iter()
@@ -182,6 +185,18 @@ impl ProviderService {
             .repo
             .create(params, &initial_model, &db_connections)
             .await?;
+        self.model_repo
+            .set_display_name(
+                &provider.provider_id,
+                &model.model,
+                req.initial_model.display_name.as_deref(),
+            )
+            .await?;
+        let model = self
+            .model_repo
+            .get(&provider.provider_id, &model.model)
+            .await?
+            .ok_or_else(|| AppError::Internal("provider model disappeared after creation".into()))?;
         let capabilities = self
             .capability_repo
             .list_for_model(&provider.provider_id, &model.model)

@@ -16,13 +16,18 @@ the panel slots:
   background={background}
   canUndo={canUndo}
   canRedo={canRedo}
-  isMiniMapOpen={miniMapOpen}
   leftView={leftView}
   rightView={rightView}
   bottomView={bottomView}
   backgroundMenuOpen={backgroundMenuOpen}
   slots={{
-    canvas: <CreativeCanvasEditor showZoomControls={false} {...editorProps} />,
+    canvas: (
+      <CreativeCanvasEditor
+        isMiniMapOpen={miniMapOpen}
+        onToggleMiniMap={toggleMiniMap}
+        {...editorProps}
+      />
+    ),
     left: {
       canvas: <CanvasOutline />,
       assets: <CreativeAssetLibrary {...assetProps} />,
@@ -42,11 +47,17 @@ the panel slots:
 />
 ```
 
-Disable the editor's built-in zoom dock when using this chrome's fit and
-minimap actions, so those actions are not duplicated. The Canvas
-route/controller translates callbacks into canonical core commands and
-constructs new canonical nodes. This layer never creates IDs, persists a Canvas
-document, invokes a model, resolves assets, or fabricates panel content.
+The editor's built-in zoom dock is the only owner of fit-view and minimap
+actions. The outer chrome intentionally omits those controls so the bottom
+surface has no duplicate entry. The Canvas route/controller translates the
+remaining callbacks into canonical core commands and constructs new canonical
+nodes. This layer never creates IDs, persists a Canvas document, invokes a
+model, resolves assets, or fabricates panel content.
+
+The hand icon is a pressed-state toggle: pressed selects the existing pan tool,
+while unpressed leaves the editor in its default selection mode. The bottom
+toolbar exposes one History icon for opening or closing the shared bottom
+panel; History and Timeline remain tabs inside that panel.
 
 The bottom dock exposes text, image, video, audio, panorama, Director, and
 generation-config creation directly in the reference order. Group creation is

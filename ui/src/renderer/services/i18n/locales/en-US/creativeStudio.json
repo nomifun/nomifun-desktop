@@ -423,9 +423,12 @@
       "canvasBackground": "Canvas background",
       "closeBottomPanel": "Close bottom panel",
       "closeRightPanel": "Close right panel",
+      "collapseResources": "Collapse canvas resources panel",
+      "resetRightPanelWidth": "Reset right panel width",
       "resourcePanel": "Canvas resources panel",
       "resources": "Canvas resources",
       "rightPanel": "Right panel",
+      "resizeRightPanel": "Resize right panel width",
       "toolbar": "Canvas toolbar",
       "workspaceControls": "Canvas workspace controls"
     },

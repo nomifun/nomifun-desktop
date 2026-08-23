@@ -11,6 +11,7 @@ import type {
   ProviderModelResponse,
 } from '@/common/types/provider/providerModel';
 import type { ProviderId } from '@/common/types/ids';
+import { modelDisplayLabel, modelPresentationRawId } from '@/common/utils/modelPresentation';
 import { Button, Collapse, Divider, Input, Message, Modal, Popconfirm, Popover, Switch, Tag, Tooltip } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { Copy, DeleteFour, Info, Minus, Plus, Write, Heartbeat, Drag } from '@icon-park/react';
@@ -205,6 +206,7 @@ const modelRowsFor = (platform: IProvider): ProviderModelResponse[] => platform.
 
 /** Row-level partial update body minus the composite key. */
 type ModelRowPatch = Partial<Pick<ProviderModelResponse, 'enabled' | 'sort_order'>> & {
+  display_name?: string | null;
   description?: string | null;
 };
 
@@ -213,16 +215,87 @@ const applyRowPatch = (row: ProviderModelResponse, patch: ModelRowPatch): Provid
   ...row,
   ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
   ...(patch.sort_order !== undefined ? { sort_order: patch.sort_order } : {}),
+  ...('display_name' in patch ? { display_name: patch.display_name ?? undefined } : {}),
   ...('description' in patch ? { description: patch.description ?? undefined } : {}),
 });
 
 const providerModelInputFor = (row: ProviderModelResponse) => ({
   model: row.model,
+  ...(row.display_name ? { display_name: row.display_name } : {}),
   enabled: row.enabled,
   sort_order: row.sort_order,
   ...(row.description ? { description: row.description } : {}),
   capabilities: row.capabilities.map(capabilityInputFromResponse),
 });
+
+const ModelDisplayNameEditor: React.FC<{
+  displayName: string;
+  onSave: (text: string) => void;
+}> = ({ displayName, onSave }) => {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(displayName);
+
+  const handleVisibleChange = (visible: boolean) => {
+    if (visible) setDraft(displayName);
+    setOpen(visible);
+  };
+
+  const handleSave = () => {
+    const next = draft.trim();
+    if (next !== displayName.trim()) onSave(next);
+    setOpen(false);
+  };
+
+  return (
+    <Popover
+      trigger='click'
+      position='bl'
+      popupVisible={open}
+      onVisibleChange={handleVisibleChange}
+      content={
+        <div className='flex w-280px flex-col gap-8px' onClick={(e) => e.stopPropagation()}>
+          <div className='text-12px text-t-secondary'>
+            {t('settings.modelDisplayNameTitle', { defaultValue: '模型显示名称' })}
+          </div>
+          <Input
+            autoFocus
+            value={draft}
+            onChange={setDraft}
+            placeholder={t('settings.modelDisplayNamePlaceholder', {
+              defaultValue: '例如：Seedance 1.5 Pro',
+            })}
+            maxLength={128}
+          />
+          <div className='text-11px leading-16px text-t-tertiary'>
+            {t('settings.modelDisplayNameHint', {
+              defaultValue: '仅用于界面展示；实际请求仍使用原始模型 ID。',
+            })}
+          </div>
+          <div className='flex items-center justify-end gap-8px'>
+            <Button size='mini' onClick={() => setOpen(false)}>
+              {t('common.cancel', { defaultValue: '取消' })}
+            </Button>
+            <Button size='mini' type='primary' onClick={handleSave}>
+              {t('common.save', { defaultValue: '保存' })}
+            </Button>
+          </div>
+        </div>
+      }
+    >
+      <Tooltip content={t('settings.editModelDisplayName', { defaultValue: '编辑模型显示名称' })}>
+        <Button
+          size='mini'
+          className={`model-provider-action-btn !h-24px !w-24px !min-w-24px shrink-0 ${
+            displayName ? 'text-primary-6 hover:text-primary-5' : 'text-t-secondary hover:text-t-primary'
+          }`}
+          icon={<Info theme='outline' size='14' />}
+          onClick={(e) => e.stopPropagation()}
+        />
+      </Tooltip>
+    </Popover>
+  );
+};
 
 /**
  * 每模型描述编辑浮层 / Per-model description editor popover.
@@ -1012,8 +1085,11 @@ const ModelModalContent: React.FC = () => {
                         unhealthyCapability ?? row.capabilities.find((capability) => capability.health);
                       const aggregateCapabilityHealth = checkedCapability?.health;
                       const healthStatus = aggregateCapabilityHealth?.status || 'unknown';
+                      const modelDisplayName = row.display_name ?? '';
                       const modelDescription = row.description ?? '';
                       const healthTasks = row.capabilities.map((capability) => capability.task);
+                      const displayName = modelDisplayLabel(model, modelDisplayName);
+                      const rawModelId = modelPresentationRawId(model, modelDisplayName);
 
                       return (
                         <SortableModelRow key={model} providerId={platform.id} model={model}>
@@ -1080,8 +1156,8 @@ const ModelModalContent: React.FC = () => {
                                   </Tooltip>
                                 )}
 
-                                <span className='text-14px text-t-primary min-w-0 truncate' title={model}>
-                                  {model}
+                                <span className='text-14px text-t-primary min-w-0 truncate' title={displayName}>
+                                  {displayName}
                                 </span>
 
                                 {/* Each modality badge reports only that task capability's probe status. */}
@@ -1111,6 +1187,13 @@ const ModelModalContent: React.FC = () => {
                                   }}
                                 />
 
+                                <ModelDisplayNameEditor
+                                  displayName={modelDisplayName}
+                                  onSave={(text) => {
+                                    void updateModelRow(platform, row, { display_name: text || null });
+                                  }}
+                                />
+
                                 {/* 每模型描述编辑（驱动智能协作选择）/ Per-model collaboration description */}
                                 <ModelDescriptionEditor
                                   description={modelDescription}
@@ -1119,6 +1202,15 @@ const ModelModalContent: React.FC = () => {
                                   }}
                                 />
                               </div>
+
+                              {rawModelId && (
+                                <div
+                                  className='text-11px text-t-tertiary font-mono leading-16px truncate pr-8px'
+                                  title={rawModelId}
+                                >
+                                  {t('settings.modelId', { defaultValue: '模型 ID' })}: {rawModelId}
+                                </div>
+                              )}
 
                               {/* 描述次级行（空态隐藏）/ Description secondary line (hidden when empty) */}
                               {modelDescription && (

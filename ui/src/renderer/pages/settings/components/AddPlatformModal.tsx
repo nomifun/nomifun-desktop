@@ -199,6 +199,7 @@ const AddPlatformModal = ModalHOC<{
       (modelListState.data?.models ?? []).map((model) => ({
         value: model.value,
         label: model.label,
+        ...(model.displayName ? { displayName: model.displayName } : {}),
         tasks: model.tasks,
         traits: model.traits,
         ...(model.contextLimit === undefined ? {} : { contextLimit: model.contextLimit }),
@@ -446,6 +447,9 @@ const AddPlatformModal = ModalHOC<{
         enabled: true,
         initial_model: {
           model: normalizeModelId(definition.model),
+          ...(definition.displayName?.trim()
+            ? { display_name: definition.displayName.trim() }
+            : {}),
           enabled: true,
           capabilities,
         },

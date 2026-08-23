@@ -5,4 +5,8 @@ import type { ProviderModelCapabilityResponse } from "./ProviderModelCapabilityR
  * One provider model with all of its usable task capabilities nested in
  * deterministic task order.
  */
-export type ProviderModelResponse = { provider_id: string, model: string, enabled: boolean, sort_order: number, description?: string, capabilities: Array<ProviderModelCapabilityResponse>, created_at: number, updated_at: number, };
+export type ProviderModelResponse = { provider_id: string, model: string,
+/**
+ * Optional human-readable label. Runtime invocation always uses `model`.
+ */
+display_name?: string, enabled: boolean, sort_order: number, description?: string, capabilities: Array<ProviderModelCapabilityResponse>, created_at: number, updated_at: number, };
