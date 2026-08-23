@@ -7317,6 +7317,16 @@ impl IConversationRepository for ClaimCommitReturnBarrierRepository {
         self.inner.get(conversation_id).await
     }
 
+    async fn find_creative_studio_agent_session_by_conversation(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<nomifun_db::models::CreativeStudioAgentSessionBindingRow>, DbError> {
+        self.inner
+            .find_creative_studio_agent_session_by_conversation(owner_id, conversation_id)
+            .await
+    }
+
     async fn create(&self, row: &ConversationRow) -> Result<String, DbError> {
         self.inner.create(row).await
     }

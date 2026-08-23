@@ -447,6 +447,7 @@ export function createNomiCreativeStudioAgentChatPort(
           return;
         }
         admittedNonTerminalTurn = true;
+        const turnStartDeadline = Date.now() + turnStartTimeoutMs;
 
         if (!receipt.value.replayed && beforeSend.authority !== 'idle') {
           throw new NomiCreativeStudioAgentRuntimeError(
@@ -465,8 +466,9 @@ export function createNomiCreativeStudioAgentChatPort(
           if (afterSend.authority === 'processing' && afterSend.activeTurnId) {
             // WebSocket events are not replayed. An accepted replay may already
             // own a live turn, so adopt only the exact active_turn_id from a
-            // fresh authoritative GET. A fresh admission still has to observe
-            // and verify its own turn.started event below.
+            // fresh authoritative GET. Fresh admissions prefer their verified
+            // turn.started event and use the same authoritative polling path
+            // below only when WebSocket delivery is missed.
             activeTurnId = afterSend.activeTurnId;
           } else if (afterSend.authority === 'idle') {
             const resolution = await reconcileCompleted();
@@ -481,9 +483,15 @@ export function createNomiCreativeStudioAgentChatPort(
         }
 
         for (;;) {
+          const waitMs = activeTurnId
+            ? recoveryPollMs
+            : Math.min(
+                recoveryPollMs,
+                Math.max(1, turnStartDeadline - Date.now())
+              );
           const queued = await queue.next(
             request.signal,
-            activeTurnId ? recoveryPollMs : turnStartTimeoutMs
+            waitMs
           );
           if (queued.kind === 'aborted') {
             return await stopAfterAbort(transport, binding.conversationId);
@@ -512,6 +520,35 @@ export function createNomiCreativeStudioAgentChatPort(
                 'NomiFun replay lost its authoritative active turn before durable completion'
               );
             }
+            const snapshot = await transport.inspect(binding.conversationId);
+            if (!sameModel(snapshot.model, request.model)) {
+              throw new NomiCreativeStudioAgentBindingError(
+                'Nomi conversation selected model changed while recovering turn start'
+              );
+            }
+            if (
+              snapshot.authority === 'processing' &&
+              snapshot.activeTurnId
+            ) {
+              // WebSocket delivery is an optimization, not the authority. The
+              // exact idempotent send was admitted against an idle dedicated
+              // conversation, so a fresh runtime snapshot can safely recover
+              // the active turn when `turn.started` was missed.
+              activeTurnId = snapshot.activeTurnId;
+              yield {
+                type: 'activity',
+                label: '连接同步中，Agent 已开始执行',
+              };
+              continue;
+            }
+            if (snapshot.authority === 'idle') {
+              const resolution = await resolveAuthoritative();
+              if (resolution.history.length === request.history.length + 2) {
+                for (const event of completedEvents(resolution)) yield event;
+                return;
+              }
+            }
+            if (Date.now() < turnStartDeadline) continue;
             throw new NomiCreativeStudioAgentRuntimeError(
               'TURN_START_TIMEOUT',
               'NomiFun accepted the message but no authoritative turn start was observed'

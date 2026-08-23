@@ -32,8 +32,12 @@ interface CreativeStudioAgentSessionHttpTransport {
   resolve(request: WireRequest): Promise<unknown>;
 }
 
+export const CREATIVE_STUDIO_AGENT_SESSION_RESOLVE_TIMEOUT_MS = 30_000;
+
 const endpoint = httpPost<unknown, WireRequest>(
   "/api/creative-studio/canvas-agent-sessions/resolve",
+  undefined,
+  { timeoutMs: CREATIVE_STUDIO_AGENT_SESSION_RESOLVE_TIMEOUT_MS },
 );
 
 const defaultTransport: CreativeStudioAgentSessionHttpTransport = {

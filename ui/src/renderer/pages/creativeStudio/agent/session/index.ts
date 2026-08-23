@@ -14,6 +14,7 @@ export {
   createFailClosedCreativeStudioAgentSessionPort,
 } from "./failClosedPort";
 export {
+  CREATIVE_STUDIO_AGENT_SESSION_RESOLVE_TIMEOUT_MS,
   createNomiCreativeStudioAgentSessionHttpPort,
   type CreativeStudioAgentSessionHttpTransport,
 } from "./httpPort";
