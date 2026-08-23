@@ -4,8 +4,8 @@ import { readFileSync } from 'fs';
 const titlebarSource = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
 const languageMenuSource = readFileSync(new URL('./TitlebarLanguageMenu.tsx', import.meta.url), 'utf8');
 
-describe('Titlebar instant icon tooltips', () => {
-  test('uses the local instant hover tooltip for icon-only titlebar actions', () => {
+describe('Titlebar action affordances', () => {
+  test('uses the local instant hover tooltip for titlebar actions', () => {
     expect(titlebarSource.includes('InstantHoverTooltip')).toBe(true);
     expect(languageMenuSource.includes('InstantHoverTooltip')).toBe(true);
     expect(titlebarSource.includes("position='bottom'")).toBe(true);
@@ -27,13 +27,16 @@ describe('Titlebar instant icon tooltips', () => {
     );
   });
 
-  test('keeps the language control at the leading edge of the desktop titlebar menu', () => {
-    const languageControlIndex = titlebarSource.indexOf("className='app-titlebar__language-control'");
-    const sidebarToggleIndex = titlebarSource.indexOf('tooltip: siderTooltip');
+  test('places the readable language selector after the left navigation actions', () => {
+    const languageIndex = titlebarSource.indexOf('<TitlebarLanguageMenu');
+    const sessionToggleIndex = titlebarSource.indexOf('tooltip: sessionToggleTooltip');
 
-    expect(languageControlIndex).toBeGreaterThanOrEqual(0);
-    expect(sidebarToggleIndex).toBeGreaterThan(languageControlIndex);
-    expect(titlebarSource.match(/<TitlebarLanguageMenu /g)?.length).toBe(1);
+    expect(languageIndex).toBeGreaterThan(sessionToggleIndex);
+    expect(languageMenuSource.includes('app-titlebar__language-button')).toBe(true);
+    expect(languageMenuSource.includes('app-titlebar__language-name')).toBe(true);
+    expect(languageMenuSource.includes('SYSTEM_LANGUAGE')).toBe(true);
+    expect(languageMenuSource.includes('languageFollowSystem')).toBe(true);
+    expect(languageMenuSource.includes('Translate')).toBe(false);
   });
 
   test('keeps shared history and quick-create navigation behind Creative Studio save gates', () => {

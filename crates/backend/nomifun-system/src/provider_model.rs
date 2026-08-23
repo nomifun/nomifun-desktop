@@ -124,7 +124,7 @@ impl ProviderModelService {
             },
         };
 
-        self.validate_capabilities(&provider, &req.model.capabilities)
+        self.validate_capabilities(&provider, &req.model.model, &req.model.capabilities)
             .await?;
         let serialized = serialize_capabilities(&req.model.capabilities)?;
         let db_capabilities = serialized
@@ -195,6 +195,7 @@ impl ProviderModelService {
     async fn validate_capabilities(
         &self,
         provider: &nomifun_db::models::Provider,
+        model: &str,
         capabilities: &[ProviderModelCapabilityInput],
     ) -> Result<(), AppError> {
         if capabilities.is_empty() {
@@ -204,6 +205,7 @@ impl ProviderModelService {
         }
         let mut tasks = HashSet::with_capacity(capabilities.len());
         for capability in capabilities {
+            validate_known_provider_model_task(&provider.platform, model, capability.task)?;
             if !tasks.insert(capability.task) {
                 return Err(AppError::BadRequest(format!(
                     "capability task {} is duplicated",
@@ -247,6 +249,39 @@ impl ProviderModelService {
         }
         Ok(())
     }
+}
+
+pub(crate) fn validate_known_provider_model_task(
+    platform: &str,
+    model: &str,
+    task: ModelTask,
+) -> Result<(), AppError> {
+    if matches!(platform, "ark" | "volcengine") && task == ModelTask::VideoGeneration {
+        let normalized = model.trim().to_ascii_lowercase().replace('_', "-");
+        let model_id = match normalized.as_str() {
+            "doubao-seedance-1.5-pro" => Some("doubao-seedance-1-5-pro-251215"),
+            "doubao-seedance-2.0-mini" => Some("doubao-seedance-2-0-mini-260615"),
+            _ => None,
+        };
+        if let Some(model_id) = model_id {
+            return Err(AppError::BadRequest(format!(
+                "Ark video model {model:?} is a console display name, not an API Model ID; \
+                 use {model_id:?} exactly or an \"ep-\" inference endpoint ID shown in \
+                 the Ark console"
+            )));
+        }
+        if normalized.starts_with("doubao-seed-")
+            && !normalized.starts_with("doubao-seedance-")
+        {
+            return Err(AppError::BadRequest(format!(
+                "Ark video generation cannot use Doubao Seed chat model {model:?}; \
+                 Seed and Seedance are different model families. Configure the exact \
+                 Seedance Model ID (normally starting with \"doubao-seedance-\") or \
+                 an \"ep-\" inference endpoint ID shown in the Ark console"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_provider_id(provider_id: &str) -> Result<(), AppError> {
@@ -840,6 +875,60 @@ mod tests {
             provider_params: serde_json::json!({}),
             context_limit: None,
             output_limit: None,
+        }
+    }
+
+    #[test]
+    fn ark_video_rejects_doubao_seed_chat_models_but_accepts_seedance() {
+        for model in ["Doubao-Seed-2.0-mini", "doubao-seed-2-0-mini-260428"] {
+            let error =
+                validate_known_provider_model_task("ark", model, ModelTask::VideoGeneration)
+                    .unwrap_err();
+            assert!(
+                matches!(error, AppError::BadRequest(message) if message.contains("Seed and Seedance"))
+            );
+        }
+        validate_known_provider_model_task(
+            "ark",
+            "doubao-seedance-2-0-mini-260615",
+            ModelTask::VideoGeneration,
+        )
+        .unwrap();
+        validate_known_provider_model_task(
+            "ark",
+            "Doubao-Seed-2.0-mini",
+            ModelTask::Chat,
+        )
+        .unwrap();
+        validate_known_provider_model_task(
+            "custom",
+            "Doubao-Seed-2.0-mini",
+            ModelTask::VideoGeneration,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ark_video_rejects_console_display_names_with_exact_api_id_hint() {
+        for (display_name, model_id) in [
+            (
+                "Doubao-Seedance-1.5-pro",
+                "doubao-seedance-1-5-pro-251215",
+            ),
+            (
+                "Doubao-Seedance-2.0-mini",
+                "doubao-seedance-2-0-mini-260615",
+            ),
+        ] {
+            let error = validate_known_provider_model_task(
+                "ark",
+                display_name,
+                ModelTask::VideoGeneration,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, AppError::BadRequest(message) if message.contains("console display name") && message.contains(model_id))
+            );
         }
     }
 

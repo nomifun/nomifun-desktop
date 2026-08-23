@@ -528,7 +528,7 @@ WS 传输通道实施（实时语音任务类型）；chat 传输基座下沉 sh
 3. **异步 submit/poll 无两家一致**：id 字段名（task_id/id/requestId/operation-name 资源路径）、id 位置（路径/query/POST body）、轮询端点（专属 vs DashScope `/api/v1/tasks/{id}`、智谱 `/async-result/{id}` 平台统一）、状态词表 5+ 套（含火山 ASR 状态在响应头 `X-Api-Status-Code`）、DashScope 以 `X-DashScope-Async: enable` 头区分同异步、客户端发号 vs 服务端发号——必须句柄化归一。
 4. **结果取回 0~2 跳**且 URL 普遍 24h~2 天过期（OpenAI Sora 另调 content 端点；MiniMax Success→file_id→download_url 三段式；DashScope ASR 结果是指向转写 JSON 的 URL 二跳）——invoke 层提供 materialize，调用方立即转存。
 5. **语音类 WS/二进制流是普遍现象**：实时 ASR 几乎全员 WS；TTS 流式三分天下（裸二进制 HTTP / SSE 内嵌编码块 / WS 会话协议）；编码 base64 vs **hex（MiniMax）** vs 自定义二进制帧——通道四分类 + codec 声明。
-6. **请求体 ≥4 形状**：JSON / multipart（`image[]` 数组字段名坑）/ 裸二进制上行（Deepgram）/ 非 OpenAI 包裹结构（Gemini instances/parameters、DashScope input/parameters）；火山 seedance 还把参数拼进 prompt 文本（`--resolution 720p`）。
+6. **请求体 ≥4 形状**：JSON / multipart（`image[]` 数组字段名坑）/ 裸二进制上行（Deepgram）/ 非 OpenAI 包裹结构（Gemini instances/parameters、DashScope input/parameters）；火山 seedance 当前把 `resolution`、`ratio`、`duration` 作为顶层 JSON 字段，不能按历史 prompt 参数编码发送。
 7. **"OpenAI 兼容"在非 chat 模态是残缺子集**：Gemini 兼容层图像仅认 5 参数且静默忽略其余、无 /audio/*；DashScope compatible-mode 音图不全；gpt-image-1 与 dall-e 同端点词表互斥——按 (供应商,任务,模型) 决定兼容层/原生，参数白名单不透传。
 8. **图像 b64/url 分歧**在 invoke 层归一为 `ProducedAsset{Bytes|Url}` + materialize。
 9. **同端点代际差异需要 per-model params schema**（gpt-image-1 vs dall-e-3；火山 TTS v1 cluster 体系 vs v3 Resource-Id 体系并存）。

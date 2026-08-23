@@ -25,4 +25,7 @@ export const STORAGE_KEYS = {
 
   /** Language preference / 语言偏好 */
   LANGUAGE: 'nomifun_language',
+
+  /** Whether the language follows the operating system / 是否跟随操作系统语言 */
+  LANGUAGE_MODE: 'nomifun_language_mode',
 } as const;

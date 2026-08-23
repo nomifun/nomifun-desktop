@@ -38,7 +38,7 @@ Ark 方舟域(ark.cn-beijing.volces.com,Bearer ARK_API_KEY,与 chat 同凭证):
 | 模态 | 路径 | 同/异步 | 响应 |
 |---|---|---|---|
 | 图像 seedream | `POST /api/v3/images/generations` | 同步 | url 或 b64_json,OpenAI 形似(多 `watermark/seed/guidance_scale` 等私有参数) |
-| 视频 seedance | `POST /api/v3/contents/generations/tasks` → `GET .../tasks/{id}` | **异步** | task id 在 body;status 词表 `queued/running/succeeded/failed/cancelled`;成品 `content.video_url`(24h);**部分生成参数以 `--resolution 720p --duration 5` 形式拼在 prompt 文本里**,是各家中最特殊的参数编码方式 |
+| 视频 seedance | `POST /api/v3/contents/generations/tasks` → `GET .../tasks/{id}` | **异步** | task id 在 body;status 词表 `queued/running/succeeded/failed/cancelled`;成品 `content.video_url`(24h);截至 2026-08-23，`resolution`、`ratio`、`duration` 等生成参数使用顶层 JSON 字段 |
 
 语音域(openspeech.bytedance.com,**完全独立的 appid/token/cluster 凭证,在语音技术控制台开通,Ark API key 不可用**):
 
@@ -125,7 +125,7 @@ Ark 方舟域(ark.cn-beijing.volces.com,Bearer ARK_API_KEY,与 chat 同凭证):
 
 **5. 语音类 WebSocket/二进制流是普遍现象,传输基座必须为非 HTTP-JSON 留位。** 实时 ASR 几乎全员 WS(Deepgram、火山 sauc、DashScope api-ws、OpenAI Realtime);TTS 流式三分天下:裸二进制 HTTP 流(OpenAI、ElevenLabs REST、StepFun)、SSE 内嵌编码块(MiniMax hex、火山 v3 JSON-lines base64)、WS 会话协议(ElevenLabs stream-input、MiniMax ws、DashScope run-task 生命周期、火山 bidirection)。且 WS 上的编码互不相同(base64 vs hex vs 自定义二进制帧)。建议基座抽象为「HTTP-JSON / HTTP-binary(上行 raw body 下行 chunked)/ SSE / WS」四种通道,音频编码(b64/hex/raw)作为通道之上的 codec 配置。
 
-**6. 请求体形状至少 4 类,序列化层不能假设 JSON:** JSON(多数)、multipart(OpenAI/StepFun 的 edits 与 transcriptions,注意 `image[]` 数组字段名)、裸二进制上行(Deepgram)、以及 Gemini `instances/parameters`、DashScope `input/parameters` 这类非 OpenAI 包裹结构。火山 seedance 还把生成参数编码进 prompt 文本(`--resolution 720p`),需要模板化处理。
+**6. 请求体形状至少 4 类,序列化层不能假设 JSON:** JSON(多数)、multipart(OpenAI/StepFun 的 edits 与 transcriptions,注意 `image[]` 数组字段名)、裸二进制上行(Deepgram)、以及 Gemini `instances/parameters`、DashScope `input/parameters` 这类非 OpenAI 包裹结构。火山 seedance 的当前原生协议把 `resolution`、`ratio`、`duration` 放在顶层 JSON，不能沿用历史 prompt 参数编码。
 
 **7. 「OpenAI 兼容」在非 chat 模态上普遍是残缺子集,不能当真。** Gemini 兼容层图像仅认 5 个参数、其余静默忽略(静默忽略比报错更危险),音频端点完全缺失但 2026 年新增了 Sora 形态的 /videos;DashScope compatible-mode 音图覆盖不全;gpt-image-1 自己都不兼容 dall-e 的 response_format/quality 词表。适配层应按「(供应商, 模态, 模型)」三元组决定走兼容层还是原生协议,并对参数做白名单校验而非透传。
 

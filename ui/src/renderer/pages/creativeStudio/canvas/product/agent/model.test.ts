@@ -181,7 +181,7 @@ describe('Creative Canvas Agent document model', () => {
     }
   });
 
-  test('accepts only the current durable prefix or one completed pending pair', () => {
+  test('accepts current history, one pending pair, or complete orphaned pairs from older clients', () => {
     const pending = creativeCanvasAgentSessionWithPendingTurn({
       session: createCreativeCanvasAgentSession(sessionId, 10),
       model,
@@ -194,6 +194,12 @@ describe('Creative Canvas Agent document model', () => {
     expect(classifyCreativeCanvasAgentHistory(pending, history)).toBe(
       'completed-pending-turn'
     );
+    expect(
+      classifyCreativeCanvasAgentHistory(
+        { ...pending, pendingTurn: null },
+        history
+      )
+    ).toBe('completed-unreferenced-turns');
     const invalidProjection = captureError(() =>
       classifyCreativeCanvasAgentHistory(pending, history.slice(0, 1))
     );

@@ -13,6 +13,9 @@ import i18nConfig from '@/common/config/i18n-config.json';
 export const SUPPORTED_LANGUAGES = i18nConfig.supportedLanguages;
 export const DEFAULT_LANGUAGE = i18nConfig.fallbackLanguage;
 export type SupportedLanguage = (typeof SUPPORTED_LANGUAGES)[number];
+export const SYSTEM_LANGUAGE = 'system' as const;
+export type LanguageMode = 'system' | 'manual';
+export type LanguagePreference = typeof SYSTEM_LANGUAGE | SupportedLanguage;
 
 /**
  * Normalize a language code to a supported BCP 47 tag.
@@ -32,6 +35,19 @@ export function normalizeLanguageCode(language: string): SupportedLanguage {
     default:
       return DEFAULT_LANGUAGE;
   }
+}
+
+/**
+ * Resolve a preference to a concrete supported locale.
+ *
+ * The renderer supplies the detected system locale for the `system` mode.
+ * Keeping this helper pure makes the fallback behavior easy to test.
+ */
+export function resolveLanguagePreference(
+  preference: LanguagePreference,
+  systemLanguage: string = DEFAULT_LANGUAGE
+): SupportedLanguage {
+  return preference === SYSTEM_LANGUAGE ? normalizeLanguageCode(systemLanguage) : normalizeLanguageCode(preference);
 }
 
 export function isPlainObject(value: unknown): value is Record<string, unknown> {

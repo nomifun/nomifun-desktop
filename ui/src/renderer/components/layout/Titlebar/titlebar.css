@@ -130,9 +130,49 @@
 .app-titlebar__language-control {
   display: inline-flex;
   align-items: center;
-  margin-right: 4px;
-  padding-right: 4px;
-  border-right: 1px solid var(--color-border-2);
+  margin-left: 8px;
+}
+
+.app-titlebar__language-button {
+  -webkit-app-region: no-drag;
+  min-width: 84px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 6px;
+  background-color: var(--bg-1);
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 0.2s ease,
+    background-color 0.2s ease;
+}
+
+.app-titlebar__language-button:hover {
+  border-color: rgb(var(--primary-6));
+  background-color: var(--bg-hover);
+}
+
+.app-titlebar__language-button:active {
+  background-color: var(--bg-active);
+}
+
+.app-titlebar__language-button svg {
+  flex-shrink: 0;
+  transform: none;
+}
+
+.app-titlebar__language-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .app-titlebar__toolbar {

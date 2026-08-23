@@ -1039,19 +1039,19 @@ fn names_image_generation(text: &str) -> bool {
     if CN_STRONG.iter().any(|term| text.contains(term)) {
         return true;
     }
-    let names_known_external_generator = ["canva", "pollinations.ai"]
-        .iter()
-        .any(|brand| text.contains(brand))
+    let words = ascii_words(text);
+    let names_known_external_generator = words.iter().any(|word| word == "canva")
+        || text.contains("pollinations.ai");
+    let names_known_external_generator = names_known_external_generator
         && (["生成", "创作", "绘制"].iter().any(|action| text.contains(action))
             || ["generate", "create", "draw", "render"]
                 .iter()
-                .any(|action| ascii_words(text).iter().any(|word| word == action)));
+                .any(|action| words.iter().any(|word| word == action)));
     if names_known_external_generator {
         return true;
     }
     let cn = CN_ACTIONS.iter().any(|term| text.contains(term))
         && CN_PRODUCTS.iter().any(|term| text.contains(term));
-    let words = ascii_words(text);
     let en_action = [
         "generate", "create", "draw", "render", "design", "make", "produce", "paint", "need",
         "want", "whip",
@@ -1506,6 +1506,8 @@ mod tests {
         for request in [
             "搜索几张猫的图片",
             "create a directory named images",
+            "在 canvas 中生成一个文本节点",
+            "Generate a text node on the canvas",
             "再来一张",
             "换成16:9再来一张",
             "今天天气如何",

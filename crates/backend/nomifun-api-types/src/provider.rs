@@ -22,6 +22,9 @@ pub enum ProviderHealthCheckErrorKind {
     Unauthorized,
     Forbidden,
     NotFound,
+    /// The API route exists, but the configured model/endpoint id is unknown,
+    /// retired, not enabled, or outside the credential's project permissions.
+    ModelUnavailable,
     InsufficientQuota,
     AwsCredentials,
     InvalidRequest,

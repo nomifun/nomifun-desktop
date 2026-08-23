@@ -5,6 +5,7 @@
  */
 
 import { uuidv7 } from '@/common/utils/uuidv7';
+import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import React, {
   useCallback,
   useEffect,
@@ -131,8 +132,12 @@ const sessionSignature = (session: CreativeChatSessionReference | undefined): st
       ])
     : 'none';
 
-const errorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error);
+const errorMessage = (error: unknown): string => {
+  if (isBackendHttpError(error) && error.backendMessage.trim()) {
+    return error.backendMessage.trim();
+  }
+  return error instanceof Error ? error.message : String(error);
+};
 
 const CreativeCanvasAgentPanel = React.forwardRef<
   CreativeCanvasAgentPanelHandle,
@@ -463,6 +468,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
             return;
           }
 
+          const outcomeErrorMessage = errorMessage(outcome.error);
           if (terminalFailureObserved) {
             await persistSession(creativeCanvasAgentSessionWithoutPendingTurn(session, now()));
           } else if (mountedRef.current) {
@@ -472,12 +478,14 @@ const CreativeCanvasAgentPanel = React.forwardRef<
               status: 'failed',
               text: message.text,
               errorMessage: t('creativeStudio.agent.submitUnconfirmed', {
-                message: outcome.error.message,
+                message: outcomeErrorMessage,
                 defaultValue: '提交结果尚未确认：{{message}}',
               }),
             }));
           }
-          if (mountedRef.current) setPanelError(outcome.error.message);
+          if (!terminalFailureObserved && mountedRef.current) {
+            setPanelError(outcomeErrorMessage);
+          }
         } catch (error) {
           if (mountedRef.current) {
             setPanelError(errorMessage(error));
@@ -505,6 +513,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       persistSession,
       props.canvasId,
       replaceRunningAssistant,
+      t,
     ]
   );
 
@@ -573,7 +582,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
         if (abort.signal.aborted || epoch !== loadEpochRef.current) return;
         const authority = classifyCreativeCanvasAgentHistory(activeSession, resolution.history);
         setAppliedProposalMessageIds([...resolution.appliedProposalMessageIds]);
-        if (authority === 'completed-pending-turn') {
+        if (authority !== 'current') {
           const reconciledHistory = copyHistory(resolution.history);
           durableHistoryRef.current = reconciledHistory;
           setMessages(reconciledHistory);

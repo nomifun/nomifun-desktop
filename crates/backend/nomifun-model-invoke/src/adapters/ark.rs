@@ -13,9 +13,9 @@
 //!   [`crate::adapters::openai_images::parse_images_response`] (url|b64_json).
 //! - [`ArkVideoJobsAdapter`] (`"ark.video_jobs"`, VideoGeneration): async
 //!   `POST {root}/api/v3/contents/generations/tasks` → `GET .../tasks/{id}`.
-//!   Generation params are encoded *inside the prompt text* (` --resolution
-//!   {size} --duration {seconds}` suffix — Ark's signature quirk); an i2v
-//!   first frame rides as a `content[]` data-URI `image_url` entry. Status
+//!   Generation params use top-level `resolution`, `ratio`, and `duration`
+//!   fields; an i2v first frame rides as a `content[]` data-URI `image_url`
+//!   entry. Status
 //!   vocabulary `queued/running` → Pending, `succeeded` → `content.video_url`
 //!   (24 h URL, mime unknown), `failed/cancelled` →
 //!   [`InvokeErrorKind::JobFailed`].
@@ -145,11 +145,12 @@ impl ProtocolAdapter for ArkVideoJobsAdapter {
                 format!("ark.video_jobs cannot serve task {:?}", call.request.task()),
             ));
         };
+        validate_ark_video_model(&call.model)?;
         let url = call.endpoint_url()?;
         let body = json_request_body(
             &call.model_params,
             &req.extra,
-            build_video_submit_body(&call.model, req),
+            build_video_submit_body(&call.model, req)?,
         )?;
 
         let resp = post_json(http, &url, SUBMIT_TIMEOUT, &call.connection.auth, &body).await?;
@@ -224,27 +225,148 @@ impl ProtocolAdapter for ArkVideoJobsAdapter {
     }
 }
 
-/// Build the Ark video-task submit body. Generation parameters are encoded as
-/// a ` --resolution {size} --duration {seconds}` suffix inside the prompt text
-/// (Ark's in-prompt parameter encoding); the first input asset (i2v first
-/// frame), when present, rides as a data-URI `image_url` content entry.
+/// Build the current Ark video-task submit body. Generation parameters use
+/// top-level `resolution`, `ratio`, and `duration` fields; the first input asset
+/// (i2v first frame), when present, rides as a data-URI `image_url` content entry.
 /// Pure — unit tested.
-pub(crate) fn build_video_submit_body(model: &str, req: &VideoGenRequest) -> Value {
-    let mut text = req.prompt.clone();
-    if let Some(size) = &req.size {
-        text.push_str(&format!(" --resolution {size}"));
+fn ark_seedance_api_model_id_hint(model: &str) -> Option<&'static str> {
+    match model.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "doubao-seedance-1.5-pro" => Some("doubao-seedance-1-5-pro-251215"),
+        "doubao-seedance-2.0-mini" => Some("doubao-seedance-2-0-mini-260615"),
+        _ => None,
     }
-    if let Some(seconds) = req.seconds {
-        text.push_str(&format!(" --duration {seconds}"));
+}
+
+fn validate_ark_video_model(model: &str) -> Result<(), InvokeError> {
+    let normalized = model.trim().to_ascii_lowercase().replace('_', "-");
+    if let Some(model_id) = ark_seedance_api_model_id_hint(model) {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            format!(
+                "Ark video model {model:?} is a console display name, not an API Model ID; \
+                 use {model_id:?} exactly or an \"ep-\" inference endpoint ID shown in \
+                 the Ark console"
+            ),
+        ));
     }
-    let mut content = vec![json!({"type": "text", "text": text})];
+    if normalized.starts_with("doubao-seed-") && !normalized.starts_with("doubao-seedance-") {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            format!(
+                "Ark video generation cannot use Doubao Seed chat model {model:?}; \
+                 Seed and Seedance are different model families. Configure the exact \
+                 Seedance Model ID (normally starting with \"doubao-seedance-\") or \
+                 an \"ep-\" inference endpoint ID shown in the Ark console"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn reduced_ratio(width: u32, height: u32) -> Option<String> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut a = width;
+    let mut b = height;
+    while b != 0 {
+        let remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    Some(format!("{}:{}", width / a, height / a))
+}
+
+fn apply_ark_video_size(body: &mut Value, size: &str) -> Result<(), InvokeError> {
+    let normalized = size.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(());
+    }
+    if matches!(normalized.as_str(), "480p" | "720p" | "1080p") {
+        body["resolution"] = Value::String(normalized);
+        return Ok(());
+    }
+    if matches!(
+        normalized.as_str(),
+        "adaptive" | "1:1" | "16:9" | "9:16" | "4:3" | "3:4" | "21:9"
+    ) {
+        body["ratio"] = Value::String(normalized);
+        return Ok(());
+    }
+
+    let Some((width, height)) = normalized.split_once('x') else {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            format!(
+                "Ark video size {size:?} is not supported; use 480p/720p/1080p, \
+                 a supported aspect ratio, or WIDTHxHEIGHT"
+            ),
+        ));
+    };
+    let width = width.trim().parse::<u32>().map_err(|_| {
+        InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            format!("Ark video size {size:?} has an invalid width"),
+        )
+    })?;
+    let height = height.trim().parse::<u32>().map_err(|_| {
+        InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            format!("Ark video size {size:?} has an invalid height"),
+        )
+    })?;
+    let short_edge = width.min(height);
+    let resolution = match short_edge {
+        480 => "480p",
+        720 => "720p",
+        1080 => "1080p",
+        _ => {
+            return Err(InvokeError::new(
+                InvokeErrorKind::InvalidParams,
+                format!(
+                    "Ark video size {size:?} has unsupported short edge {short_edge}; \
+                     expected 480, 720, or 1080 pixels"
+                ),
+            ));
+        }
+    };
+    let ratio = reduced_ratio(width, height).ok_or_else(|| {
+        InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            format!("Ark video size {size:?} must use non-zero dimensions"),
+        )
+    })?;
+    if !matches!(ratio.as_str(), "1:1" | "16:9" | "9:16" | "4:3" | "3:4" | "21:9") {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            format!("Ark video size {size:?} has unsupported aspect ratio {ratio}"),
+        ));
+    }
+    body["resolution"] = Value::String(resolution.to_owned());
+    body["ratio"] = Value::String(ratio);
+    Ok(())
+}
+
+pub(crate) fn build_video_submit_body(
+    model: &str,
+    req: &VideoGenRequest,
+) -> Result<Value, InvokeError> {
+    validate_ark_video_model(model)?;
+    let mut content = vec![json!({"type": "text", "text": req.prompt})];
     if let Some(input) = req.inputs.first() {
         content.push(json!({
             "type": "image_url",
             "image_url": { "url": format!("data:{};base64,{}", input.mime, encode_b64(&input.bytes)) }
         }));
     }
-    json!({ "model": model, "content": content })
+    let mut body = json!({ "model": model, "content": content });
+    if let Some(size) = &req.size {
+        apply_ark_video_size(&mut body, size)?;
+    }
+    if let Some(seconds) = req.seconds {
+        body["duration"] = json!(seconds);
+    }
+    Ok(body)
 }
 
 /// The distilled state of an Ark video task.
@@ -359,23 +481,30 @@ mod tests {
     // -- pure body/status fixtures ---------------------------------------------
 
     #[test]
-    fn video_body_encodes_params_in_prompt_text() {
-        let TaskRequest::VideoGeneration(req) = video_request(Some("720x480"), Some(5), vec![]) else {
+    fn video_body_uses_current_top_level_parameters() {
+        let TaskRequest::VideoGeneration(req) = video_request(Some("1280x720"), Some(5), vec![]) else {
             unreachable!()
         };
-        let body = build_video_submit_body("seedance-pro", &req);
-        assert_eq!(body["model"], "seedance-pro");
+        let body =
+            build_video_submit_body("doubao-seedance-2-0-mini-260615", &req).unwrap();
+        assert_eq!(body["model"], "doubao-seedance-2-0-mini-260615");
         let content = body["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "text");
-        assert_eq!(content[0]["text"], "a wave --resolution 720x480 --duration 5");
+        assert_eq!(content[0]["text"], "a wave");
+        assert_eq!(body["resolution"], "720p");
+        assert_eq!(body["ratio"], "16:9");
+        assert_eq!(body["duration"], 5);
     }
 
     #[test]
     fn video_body_without_params_has_bare_prompt() {
         let TaskRequest::VideoGeneration(req) = video_request(None, None, vec![]) else { unreachable!() };
-        let body = build_video_submit_body("seedance-pro", &req);
+        let body = build_video_submit_body("doubao-seedance-2-0-mini-260615", &req).unwrap();
         assert_eq!(body["content"][0]["text"], "a wave");
+        assert!(body.get("resolution").is_none());
+        assert!(body.get("ratio").is_none());
+        assert!(body.get("duration").is_none());
     }
 
     #[test]
@@ -386,11 +515,57 @@ mod tests {
             InputAsset { id: None, role: "extra".into(), bytes: b"nope".to_vec(), mime: "image/png".into() },
         ];
         let TaskRequest::VideoGeneration(req) = video_request(None, None, inputs) else { unreachable!() };
-        let body = build_video_submit_body("seedance-pro", &req);
+        let body = build_video_submit_body("doubao-seedance-2-0-mini-260615", &req).unwrap();
         let content = body["content"].as_array().unwrap();
         assert_eq!(content.len(), 2, "only the first input asset is attached");
         assert_eq!(content[1]["type"], "image_url");
         assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,aGk=");
+    }
+
+    #[test]
+    fn video_body_rejects_doubao_seed_chat_models() {
+        let TaskRequest::VideoGeneration(req) = video_request(None, None, vec![]) else {
+            unreachable!()
+        };
+        for model in ["Doubao-Seed-2.0-mini", "doubao-seed-2-0-mini-260428"] {
+            let error = build_video_submit_body(model, &req).unwrap_err();
+            assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+            assert!(error.message.contains("Seed and Seedance"), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn video_body_rejects_console_display_names_with_exact_api_id_hint() {
+        let TaskRequest::VideoGeneration(req) = video_request(None, None, vec![]) else {
+            unreachable!()
+        };
+        for (display_name, model_id) in [
+            (
+                "Doubao-Seedance-1.5-pro",
+                "doubao-seedance-1-5-pro-251215",
+            ),
+            (
+                "Doubao-Seedance-2.0-mini",
+                "doubao-seedance-2-0-mini-260615",
+            ),
+        ] {
+            let error = build_video_submit_body(display_name, &req).unwrap_err();
+            assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+            assert!(error.message.contains("console display name"), "{}", error.message);
+            assert!(error.message.contains(model_id), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn video_body_rejects_unrepresentable_dimensions() {
+        let TaskRequest::VideoGeneration(req) = video_request(Some("720x480"), None, vec![])
+        else {
+            unreachable!()
+        };
+        let error =
+            build_video_submit_body("doubao-seedance-2-0-mini-260615", &req).unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+        assert!(error.message.contains("unsupported aspect ratio"));
     }
 
     #[test]
@@ -553,21 +728,28 @@ mod tests {
     // -- ark.video_jobs wiremock --------------------------------------------------
 
     #[tokio::test]
-    async fn video_submit_posts_prompt_suffix_and_returns_pending_handle() {
+    async fn video_submit_posts_top_level_params_and_returns_pending_handle() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v3/contents/generations/tasks"))
             .and(header("authorization", "Bearer sk-test"))
             .and(body_partial_json(json!({
-                "model": "doubao-seedance",
-                "content": [{"type": "text", "text": "a wave --resolution 720x480 --duration 5"}],
+                "model": "doubao-seedance-2-0-mini-260615",
+                "content": [{"type": "text", "text": "a wave"}],
+                "resolution": "720p",
+                "ratio": "16:9",
+                "duration": 5,
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "cgt-1", "status": "queued"})))
             .expect(1)
             .mount(&server)
             .await;
 
-        let call = video_call(&server.uri(), "doubao-seedance", video_request(Some("720x480"), Some(5), vec![]));
+        let call = video_call(
+            &server.uri(),
+            "doubao-seedance-2-0-mini-260615",
+            video_request(Some("1280x720"), Some(5), vec![]),
+        );
         let out = ArkVideoJobsAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         let TaskOutcome::Pending(handle) = out else { panic!("expected Pending") };
         assert_eq!(handle.adapter_id, "ark.video_jobs");

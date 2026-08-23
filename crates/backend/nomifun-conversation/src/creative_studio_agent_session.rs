@@ -262,6 +262,17 @@ fn message_turn_id(row: &MessageRow) -> Option<String> {
         })
 }
 
+/// Only terminal transcript rows can invalidate an otherwise completed
+/// user/assistant pair. Tool calls are allowed to fail inside a successful
+/// turn (for example, one optional Skill lookup may fail before the model
+/// produces a valid final answer), so their `status = error` must not poison
+/// the whole turn projection.
+fn is_terminal_failure_row(row: &MessageRow) -> bool {
+    !row.hidden
+        && row.status.as_deref() == Some("error")
+        && matches!(row.r#type.as_str(), "text" | "tips")
+}
+
 #[derive(Debug)]
 struct AssistantGroup {
     turn_id: String,
@@ -274,7 +285,7 @@ fn project_completed_history(
 ) -> Result<Vec<CreativeStudioAgentHistoryMessage>, AppError> {
     let failed_turns = rows
         .iter()
-        .filter(|row| !row.hidden && row.status.as_deref() == Some("error"))
+        .filter(|row| is_terminal_failure_row(row))
         .filter_map(message_turn_id)
         .collect::<HashSet<_>>();
     let mut history = Vec::new();
@@ -402,9 +413,16 @@ fn validate_history_reconciliation(
         ));
     }
     let recovered = &projected_history[project_ids.len()..];
-    if !recovered.is_empty() && (!has_pending_turn || recovered.len() != 2) {
+    let recovered_is_complete_pairs = recovered.len() % 2 == 0
+        && recovered.chunks_exact(2).all(|pair| {
+            pair[0].role == CreativeStudioAgentHistoryRole::User
+                && pair[1].role == CreativeStudioAgentHistoryRole::Assistant
+        });
+    if !recovered.is_empty()
+        && (!recovered_is_complete_pairs || (has_pending_turn && recovered.len() != 2))
+    {
         return Err(AppError::Conflict(
-            "Creative Studio session recovery must reconcile exactly one completed Agent turn"
+            "Creative Studio session recovery must reconcile complete user/assistant Agent turns"
                 .to_owned(),
         ));
     }
@@ -727,6 +745,79 @@ mod tests {
     }
 
     #[test]
+    fn projection_keeps_a_successful_pair_when_intermediate_tools_failed() {
+        let mut failed_tool = row(
+            "0190f5fe-7c00-7a00-8000-000000000607",
+            "left",
+            serde_json::json!({
+                "call_id": "skill-call",
+                "name": "Skill",
+                "status": "error",
+                "turn_id": TURN_ID,
+                "output": "Skill not found"
+            }),
+        );
+        failed_tool.r#type = "tool_call".to_owned();
+        failed_tool.status = Some("error".to_owned());
+
+        let history = project_completed_history(&[
+            row(
+                USER_ID,
+                "right",
+                serde_json::json!({ "content": "请规划画布" }),
+            ),
+            failed_tool,
+            row(
+                ASSISTANT_B,
+                "left",
+                serde_json::json!({
+                    "content": "这是最终规划。",
+                    "turn_id": TURN_ID
+                }),
+            ),
+        ])
+        .unwrap();
+
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].text, "请规划画布");
+        assert_eq!(history[1].text, "这是最终规划。");
+    }
+
+    #[test]
+    fn projection_still_rejects_a_pair_with_a_terminal_failure_tip() {
+        let mut terminal_tip = row(
+            "0190f5fe-7c00-7a00-8000-000000000607",
+            "left",
+            serde_json::json!({
+                "content": "The turn failed",
+                "turn_id": TURN_ID
+            }),
+        );
+        terminal_tip.r#type = "tips".to_owned();
+        terminal_tip.status = Some("error".to_owned());
+
+        let history = project_completed_history(&[
+            row(
+                USER_ID,
+                "right",
+                serde_json::json!({ "content": "请规划画布" }),
+            ),
+            row(
+                ASSISTANT_B,
+                "left",
+                serde_json::json!({
+                    "content": "未确认的草稿",
+                    "turn_id": TURN_ID
+                }),
+            ),
+            terminal_tip,
+        ])
+        .unwrap();
+
+        assert!(history.is_empty());
+    }
+
+    #[test]
     fn projection_keeps_the_visible_prompt_out_of_the_internal_planning_envelope() {
         let planning_envelope = serde_json::json!({
             "kind": CREATIVE_STUDIO_PLANNING_TURN_KIND,
@@ -770,11 +861,12 @@ mod tests {
             ),
         ];
         validate_history_reconciliation(&[], &recovered_pair, true).unwrap();
-        assert!(validate_history_reconciliation(&[], &recovered_pair, false).is_err());
+        validate_history_reconciliation(&[], &recovered_pair, false).unwrap();
 
         let mut two_pairs = recovered_pair.clone();
         two_pairs.extend(recovered_pair.clone());
         assert!(validate_history_reconciliation(&[], &two_pairs, true).is_err());
+        validate_history_reconciliation(&[], &two_pairs, false).unwrap();
 
         validate_history_reconciliation(
             &[USER_ID.to_owned(), ASSISTANT_B.to_owned()],
