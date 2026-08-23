@@ -20,6 +20,10 @@ import { configService } from '@/common/config/configService';
 import type { ConfigKeyMap } from '@/common/config/configKeys';
 import type { ProviderId } from '@/common/types/ids';
 import { toProviderModelInput } from '@/common/utils/providerModels';
+import {
+  modelDisplayLabel,
+  modelPresentationRawId,
+} from '@/common/utils/modelPresentation';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import {
   NomiSettingList,
@@ -290,11 +294,15 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
       </div>
       <NomiSettingList>
         {group.models.map((row) => (
+          (() => {
+            const displayName = modelDisplayLabel(row.model, row.definition.display_name);
+            const rawModelId = modelPresentationRawId(row.model, row.definition.display_name);
+            return (
           <NomiSettingRow
             key={row.model}
             title={
               <div className='flex min-w-0 items-center gap-6px flex-wrap'>
-                <span className='truncate text-13px font-400 leading-18px'>{row.model}</span>
+                <span className='truncate text-13px font-400 leading-18px'>{displayName}</span>
                 <Tag size='small' color='arcoblue'>
                   {t(`settings.modelTask.${row.capability.task}` as I18nKey)}
                 </Tag>
@@ -313,7 +321,16 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
                 )}
               </div>
             }
-            description={row.description ?? undefined}
+            description={
+              <div className='flex min-w-0 flex-col gap-1px'>
+                {rawModelId && (
+                  <span className='truncate font-mono text-11px'>
+                    {t('settings.modelId', { defaultValue: 'Model ID' })}: {rawModelId}
+                  </span>
+                )}
+                {row.description && <span>{row.description}</span>}
+              </div>
+            }
             controls={
               <>
                 <Switch
@@ -357,6 +374,8 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
               </>
             }
           />
+            );
+          })()
         ))}
       </NomiSettingList>
     </div>

@@ -75,6 +75,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
         (modelListState.data?.models ?? []).map((model) => ({
           value: model.value,
           label: model.label,
+          ...(model.displayName ? { displayName: model.displayName } : {}),
           tasks: model.tasks,
           traits: model.traits,
           ...(model.contextLimit === undefined ? {} : { contextLimit: model.contextLimit }),
@@ -166,6 +167,9 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
           provider_id: data.id,
           model: {
             model: normalizeModelId(definition.model),
+            ...(definition.displayName?.trim()
+              ? { display_name: definition.displayName.trim() }
+              : {}),
             enabled: true,
             capabilities,
           },

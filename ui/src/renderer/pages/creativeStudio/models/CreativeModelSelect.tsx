@@ -183,16 +183,21 @@ const CreativeModelSelect: React.FC<CreativeModelSelectProps> = ({
         }}
       >
         {selectedUnavailable && value && (
-          <NomiSelect.Option value={optionKey(value)} disabled>
+            <NomiSelect.Option value={optionKey(value)} disabled>
             {value.model} · {copy.unavailable}
-          </NomiSelect.Option>
+            </NomiSelect.Option>
         )}
         {groups.map((group) => (
           <NomiSelect.OptGroup key={group.providerId} label={group.providerName}>
             {group.models.map((option) => (
               <NomiSelect.Option key={optionKey(option)} value={optionKey(option)}>
                 <span className={styles.option}>
-                  <span className={styles.optionModel}>{option.model}</span>
+                  <span className={styles.optionModel} title={option.rawModelId ?? option.model}>
+                    {option.displayName ?? option.model}
+                  </span>
+                  {option.rawModelId && (
+                    <span className={styles.optionRawModel}>{option.rawModelId}</span>
+                  )}
                   <span className={styles.optionProtocol}>{option.protocol}</span>
                 </span>
               </NomiSelect.Option>
@@ -204,6 +209,10 @@ const CreativeModelSelect: React.FC<CreativeModelSelectProps> = ({
       {selected && (
         <div className={styles.selectionMeta} aria-label={`${selected.providerName} · ${selected.protocol}`}>
           <span>{selected.providerName}</span>
+          <span className={styles.separator} aria-hidden='true'>
+            ·
+          </span>
+          <span>{selected.displayName ?? selected.model}</span>
           <span className={styles.separator} aria-hidden='true'>
             ·
           </span>

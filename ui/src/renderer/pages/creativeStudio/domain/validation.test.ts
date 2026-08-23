@@ -127,7 +127,7 @@ describe('Creative Studio v1 document contract', () => {
     expect(document.viewport.zoom).toBe(1);
     expect(document.background).toBe('lines');
     expect(document.panels).toEqual({
-      left: { open: true, width: 280, activeView: 'canvas' },
+      left: { open: false, width: 280, activeView: 'canvas' },
       right: { open: false, width: 390, activeView: 'assistant' },
       bottom: { open: false, height: 240, activeView: 'history' },
     });

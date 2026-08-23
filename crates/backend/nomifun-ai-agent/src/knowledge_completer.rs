@@ -158,6 +158,7 @@ mod tests {
             id: 0,
             provider_id: "provider".into(),
             model: model.into(),
+            display_name: None,
             enabled,
             sort_order,
             description: None,

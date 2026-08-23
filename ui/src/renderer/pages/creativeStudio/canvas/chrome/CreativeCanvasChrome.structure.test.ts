@@ -32,8 +32,6 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
       'onBackgroundChange',
       'onUndo',
       'onRedo',
-      'onFitView',
-      'onToggleMiniMap',
       'onLeftViewChange',
       'onRightViewChange',
       'onBottomViewChange',
@@ -52,6 +50,9 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     ]) {
       expect(component.includes(forbidden)).toBe(false);
     }
+    expect(types.includes('onFitView')).toBe(false);
+    expect(types.includes('onToggleMiniMap')).toBe(false);
+    expect(types.includes('isMiniMapOpen')).toBe(false);
   });
 
   test('keeps the canonical background vocabulary without a legacy fourth mode', () => {
@@ -75,11 +76,14 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     expect(types.includes('nodeMenuOpen')).toBe(false);
   });
 
-  test('preserves a squeezed three-column canvas and compact scrolling dock', () => {
+  test('keeps the canvas full-width while the resource rail floats above it', () => {
     for (const token of [
-      'grid-template-columns: 280px minmax(0, 1fr) 360px',
+      '--creative-canvas-right-panel-width',
+      '.rightResizeHandle',
       'grid-column: 2',
       'overflow-x: auto',
+      'position: absolute',
+      'data-left-open',
       "data-compact='true'",
       '@media (max-width: 1180px)',
       '@media (max-width: 880px)',

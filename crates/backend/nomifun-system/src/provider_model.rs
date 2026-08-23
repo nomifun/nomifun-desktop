@@ -126,6 +126,7 @@ impl ProviderModelService {
 
         self.validate_capabilities(&provider, &req.model.model, &req.model.capabilities)
             .await?;
+        validate_display_name(req.model.display_name.as_deref())?;
         let serialized = serialize_capabilities(&req.model.capabilities)?;
         let db_capabilities = serialized
             .iter()
@@ -142,6 +143,20 @@ impl ProviderModelService {
             .model_repo
             .save(&req.provider_id, provider.config_revision, &new_model)
             .await?;
+        self.model_repo
+            .set_display_name(
+                &req.provider_id,
+                &row.model,
+                req.model.display_name.as_deref(),
+            )
+            .await?;
+        let row = self
+            .model_repo
+            .get(&req.provider_id, &row.model)
+            .await?
+            .ok_or_else(|| {
+                AppError::Internal("provider model disappeared after saving display name".into())
+            })?;
         let capabilities = self
             .capability_repo
             .list_for_model(&req.provider_id, &row.model)
@@ -280,6 +295,15 @@ pub(crate) fn validate_known_provider_model_task(
                  an \"ep-\" inference endpoint ID shown in the Ark console"
             )));
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_display_name(display_name: Option<&str>) -> Result<(), AppError> {
+    if display_name.is_some_and(|value| value.chars().count() > 128) {
+        return Err(AppError::BadRequest(
+            "provider model display_name must contain at most 128 characters".into(),
+        ));
     }
     Ok(())
 }
@@ -778,6 +802,7 @@ pub(crate) fn row_to_model_response(
     Ok(ProviderModelResponse {
         provider_id: row.provider_id,
         model: row.model,
+        display_name: row.display_name,
         enabled: row.enabled,
         sort_order: row.sort_order,
         description: row.description,
@@ -930,6 +955,13 @@ mod tests {
                 matches!(error, AppError::BadRequest(message) if message.contains("console display name") && message.contains(model_id))
             );
         }
+    }
+
+    #[test]
+    fn model_display_name_is_provider_neutral_and_bounded() {
+        validate_display_name(Some("Seedance 1.5 Pro")).unwrap();
+        validate_display_name(Some("Claude Sonnet")).unwrap();
+        assert!(validate_display_name(Some(&"x".repeat(129))).is_err());
     }
 
     #[test]

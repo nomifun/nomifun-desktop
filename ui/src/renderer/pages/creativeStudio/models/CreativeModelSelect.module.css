@@ -63,6 +63,16 @@
   white-space: nowrap;
 }
 
+.optionRawModel {
+  flex: 0 1 180px;
+  overflow: hidden;
+  color: var(--color-text-4);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .selectionMeta {
   display: flex;
   min-width: 0;

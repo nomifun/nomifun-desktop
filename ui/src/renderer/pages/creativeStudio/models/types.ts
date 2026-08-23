@@ -39,6 +39,10 @@ export interface CreativeModelOption extends CreativeModelSelectionRef {
   task: ModelTask;
   traits: readonly ModelTrait[];
   protocol: string;
+  /** User-facing label; `model` remains the exact runtime id. */
+  displayName?: string;
+  /** Raw id shown as secondary metadata when the label is friendly. */
+  rawModelId?: string;
 }
 
 export interface CreativeModelGroup {

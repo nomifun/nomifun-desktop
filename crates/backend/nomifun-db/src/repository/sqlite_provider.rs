@@ -358,11 +358,12 @@ impl IProviderRepository for SqliteProviderRepository {
         for model in models {
             sqlx::query(
                 "INSERT INTO provider_models \
-                    (provider_id, model, enabled, sort_order, description, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (provider_id, model, display_name, enabled, sort_order, description, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&new_id)
             .bind(&model.model)
+            .bind(&model.display_name)
             .bind(model.enabled)
             .bind(model.sort_order)
             .bind(&model.description)

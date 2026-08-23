@@ -13,6 +13,7 @@ import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import { capabilityOf } from '@/common/utils/providerModels';
+import { modelDisplayLabel } from '@/common/utils/modelPresentation';
 import {
   taskModelSelectState,
   type TaskModelProviderScope,
@@ -106,6 +107,11 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
   const voices = voiceOptions ?? ttsVoiceOptionsFor(speechSynthesisProtocol, selectedModel ?? undefined);
   const selectedVoice = value?.provider_id === providerId ? (value.voice ?? null) : null;
 
+  const displayModelLabel = (model: string): string => {
+    const row = selectedProvider?.models.find((candidate) => candidate.model === model);
+    return modelDisplayLabel(model, row?.display_name);
+  };
+
   const hint =
     !state.anyModel && !isLoading
       ? (emptyHint ?? t('settings.taskModel.emptyHint'))
@@ -171,12 +177,12 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
         >
           {state.modelStale && selectedModel && (
             <NomiSelect.Option key={selectedModel} value={selectedModel} disabled>
-              {t('settings.taskModel.unavailableOption', { model: selectedModel })}
+              {displayModelLabel(selectedModel)} · {t('settings.taskModel.unavailableOption', { model: selectedModel })}
             </NomiSelect.Option>
           )}
           {state.models.map((m) => (
             <NomiSelect.Option key={m} value={m}>
-              {m}
+              {displayModelLabel(m)}
             </NomiSelect.Option>
           ))}
         </NomiSelect>

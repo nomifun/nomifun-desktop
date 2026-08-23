@@ -1,4 +1,4 @@
-//! Migration 048 moves the live Creative Studio persistence contract from the
+//! Migration 049 moves the live Creative Studio persistence contract from the
 //! retired workflow vocabulary to canonical template names without rewriting
 //! the published 040-047 migration lineage.
 
@@ -33,7 +33,7 @@ async fn migrate_to(pool: &sqlx::SqlitePool, max_version: i64) {
 }
 
 #[tokio::test]
-async fn migration_048_preserves_data_and_removes_the_retired_live_schema() {
+async fn migration_049_preserves_data_and_removes_the_retired_live_schema() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -149,7 +149,7 @@ async fn migration_048_preserves_data_and_removes_the_retired_live_schema() {
     .await
     .unwrap();
 
-    migrate_to(&pool, 48).await;
+    migrate_to(&pool, 49).await;
 
     let old_tables: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_schema \

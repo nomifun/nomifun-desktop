@@ -9,18 +9,16 @@ import {
   BookOpen,
   CheckOne,
   Close,
-  Compass,
   Dot,
   Error,
   FolderOpen,
-  FullScreen,
   GridFour,
   Group,
   HandDrag,
   History,
   Loading,
   Magic,
-  Mouse,
+  MenuFold,
   PanoramaHorizontal,
   Pic,
   Platte,
@@ -38,7 +36,12 @@ import {
 } from '@icon-park/react';
 import { Popover, Tooltip } from '@arco-design/web-react';
 import classNames from 'classnames';
-import React from 'react';
+import React, {
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 
 import styles from './CreativeCanvasChrome.module.css';
@@ -46,7 +49,9 @@ import {
   CREATIVE_CANVAS_CHROME_BACKGROUNDS,
   CREATIVE_CANVAS_CHROME_NODE_KINDS,
   CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS,
+  toggleCreativeCanvasBottomPanel,
   toggleCreativeCanvasPanel,
+  toggleCreativeCanvasTool,
   type CreativeCanvasBottomView,
   type CreativeCanvasChromeBackground,
   type CreativeCanvasChromeNodeKind,
@@ -105,6 +110,51 @@ const iconProps = {
   fill: 'currentColor',
   strokeWidth: 3,
 };
+
+const RIGHT_PANEL_DEFAULT_WIDTH = 390;
+const RIGHT_PANEL_MIN_WIDTH = 320;
+const RIGHT_PANEL_MAX_WIDTH = 560;
+const RIGHT_PANEL_COMPACT_MIN_WIDTH = 260;
+const MIN_CANVAS_STAGE_WIDTH = 360;
+
+interface RightPanelWidthBounds {
+  min: number;
+  max: number;
+}
+
+const rightPanelWidthBounds = (
+  containerWidth: number
+): RightPanelWidthBounds => {
+  const width =
+    Number.isFinite(containerWidth) && containerWidth > 0
+      ? containerWidth
+      : 1200;
+  const min =
+    width <= 640
+      ? 240
+      : width < 760
+        ? RIGHT_PANEL_COMPACT_MIN_WIDTH
+        : RIGHT_PANEL_MIN_WIDTH;
+  const max = Math.max(
+    min,
+    Math.min(RIGHT_PANEL_MAX_WIDTH, width - MIN_CANVAS_STAGE_WIDTH)
+  );
+  return { min, max };
+};
+
+const clampRightPanelWidth = (
+  value: number,
+  bounds: RightPanelWidthBounds
+): number =>
+  Math.round(
+    Math.max(
+      bounds.min,
+      Math.min(
+        bounds.max,
+        Number.isFinite(value) ? value : RIGHT_PANEL_DEFAULT_WIDTH
+      )
+    )
+  );
 
 function nodeIcon(kind: CreativeCanvasChromeNodeKind): React.ReactNode {
   switch (kind) {
@@ -270,9 +320,21 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
   const { t } = useTranslation();
   const rightOpen = props.rightView !== null;
   const saveIsAlert = props.saveStatus === 'conflict' || props.saveStatus === 'error';
+  const rootRef = useRef<HTMLElement>(null);
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
+  const [containerWidth, setContainerWidth] = useState(1200);
+  const [isRightPanelResizing, setIsRightPanelResizing] = useState(false);
+  const [rightPanelWidthDraft, setRightPanelWidthDraft] = useState(
+    props.rightPanelWidth ?? RIGHT_PANEL_DEFAULT_WIDTH
+  );
   const leftSlot = props.slots?.left?.[props.leftView];
   const rightSlot = props.rightView ? props.slots?.right?.[props.rightView] : null;
   const bottomSlot = props.bottomView ? props.slots?.bottom?.[props.bottomView] : null;
+  const widthBounds = rightPanelWidthBounds(containerWidth);
+  const rightPanelWidth = clampRightPanelWidth(
+    rightPanelWidthDraft,
+    widthBounds
+  );
   const chromeEventProps = {
     onPointerDown: stopChromeEvent,
     onPointerMove: stopChromeEvent,
@@ -285,12 +347,202 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
     props.onBackgroundChange(background);
     props.onBackgroundMenuOpenChange(false);
   };
+  const collapseResourcesLabel = t(
+    'creativeStudio.canvas.chrome.collapseResources'
+  );
+  const resizeRightPanelLabel = t(
+    'creativeStudio.canvas.chrome.resizeRightPanel'
+  );
+  const resetRightPanelWidthLabel = t(
+    'creativeStudio.canvas.chrome.resetRightPanelWidth'
+  );
+
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const update = () => {
+      const width = root.getBoundingClientRect().width;
+      if (width > 0) setContainerWidth(width);
+    };
+    update();
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(update);
+      observer.observe(root);
+      return () => observer.disconnect();
+    }
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!isRightPanelResizing) {
+      setRightPanelWidthDraft(
+        props.rightPanelWidth ?? RIGHT_PANEL_DEFAULT_WIDTH
+      );
+    }
+  }, [isRightPanelResizing, props.rightPanelWidth]);
+
+  useLayoutEffect(
+    () => () => {
+      resizeCleanupRef.current?.();
+      resizeCleanupRef.current = null;
+    },
+    []
+  );
+
+  const commitRightPanelWidth = useCallback(
+    (width: number) => {
+      const nextWidth = clampRightPanelWidth(
+        width,
+        rightPanelWidthBounds(
+          rootRef.current?.getBoundingClientRect().width ?? containerWidth
+        )
+      );
+      setRightPanelWidthDraft(nextWidth);
+      props.onRightPanelWidthChange?.(nextWidth);
+    },
+    [containerWidth, props.onRightPanelWidthChange]
+  );
+
+  const handleRightPanelResizeStart = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (
+        props.disabled ||
+        !rightOpen ||
+        !props.onRightPanelWidthChange ||
+        (event.pointerType !== 'touch' && event.button !== 0)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      resizeCleanupRef.current?.();
+
+      const handle = event.currentTarget;
+      const startX = event.clientX;
+      const startWidth = rightPanelWidth;
+      const bounds = rightPanelWidthBounds(
+        rootRef.current?.getBoundingClientRect().width ?? containerWidth
+      );
+      const pointerId = event.pointerId;
+      let dragging = true;
+      let latestWidth = startWidth;
+      const previousUserSelect = document.body.style.userSelect;
+      const previousCursor = document.body.style.cursor;
+
+      const updateWidth = (clientX: number) => {
+        latestWidth = clampRightPanelWidth(
+          startWidth - (clientX - startX),
+          bounds
+        );
+        setRightPanelWidthDraft(latestWidth);
+      };
+      const cleanup = () => {
+        document.body.style.userSelect = previousUserSelect;
+        document.body.style.cursor = previousCursor;
+        handle.removeEventListener(
+          'lostpointercapture',
+          handleLostPointerCapture
+        );
+        if (
+          handle.releasePointerCapture &&
+          handle.hasPointerCapture?.(pointerId)
+        ) {
+          handle.releasePointerCapture(pointerId);
+        }
+        window.removeEventListener('pointermove', handlePointerMove, true);
+        window.removeEventListener('pointerup', handlePointerUp, true);
+        window.removeEventListener('pointercancel', handlePointerCancel, true);
+        window.removeEventListener('blur', handleBlur, true);
+        resizeCleanupRef.current = null;
+      };
+      const finish = (clientX?: number) => {
+        if (!dragging) return;
+        dragging = false;
+        if (typeof clientX === 'number') updateWidth(clientX);
+        cleanup();
+        setIsRightPanelResizing(false);
+        props.onRightPanelWidthChange?.(latestWidth);
+      };
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        if (!dragging) return;
+        if (moveEvent.buttons === 0) {
+          finish(moveEvent.clientX);
+          return;
+        }
+        updateWidth(moveEvent.clientX);
+      };
+      const handlePointerUp = (upEvent: PointerEvent) => finish(upEvent.clientX);
+      const handlePointerCancel = () => finish();
+      const handleBlur = () => finish();
+      const handleLostPointerCapture = () => finish();
+
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'col-resize';
+      setIsRightPanelResizing(true);
+      try {
+        handle.setPointerCapture(pointerId);
+        handle.addEventListener('lostpointercapture', handleLostPointerCapture);
+      } catch {
+        // Window listeners still complete the drag if capture is unavailable.
+      }
+      window.addEventListener('pointermove', handlePointerMove, true);
+      window.addEventListener('pointerup', handlePointerUp, true);
+      window.addEventListener('pointercancel', handlePointerCancel, true);
+      window.addEventListener('blur', handleBlur, true);
+      resizeCleanupRef.current = cleanup;
+    },
+    [
+      containerWidth,
+      props.disabled,
+      props.onRightPanelWidthChange,
+      rightOpen,
+      rightPanelWidth,
+    ]
+  );
+
+  const handleRightPanelResizeKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (props.disabled || !props.onRightPanelWidthChange) return;
+      const step = event.shiftKey ? 32 : 16;
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        commitRightPanelWidth(rightPanelWidth + step);
+      } else if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        commitRightPanelWidth(rightPanelWidth - step);
+      } else if (event.key === 'Home') {
+        event.preventDefault();
+        commitRightPanelWidth(widthBounds.max);
+      } else if (event.key === 'End') {
+        event.preventDefault();
+        commitRightPanelWidth(widthBounds.min);
+      }
+    },
+    [
+      commitRightPanelWidth,
+      props.disabled,
+      props.onRightPanelWidthChange,
+      rightPanelWidth,
+      widthBounds.max,
+      widthBounds.min,
+    ]
+  );
 
   return (
     <section
+      ref={rootRef}
       className={classNames(styles.root, props.className)}
+      style={
+        props.rightPanelWidth !== undefined
+          ? ({
+              '--creative-canvas-right-panel-width': `${rightPanelWidth}px`,
+            } as React.CSSProperties)
+          : undefined
+      }
       data-creative-canvas-chrome
       data-compact={props.compact || undefined}
+      data-left-open={props.leftOpen}
       data-left-view={props.leftView}
       data-right-view={props.rightView ?? 'closed'}
       data-bottom-view={props.bottomView ?? 'closed'}
@@ -344,6 +596,7 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
       <aside
         className={styles.leftPanel}
         aria-label={t('creativeStudio.canvas.chrome.resourcePanel')}
+        data-left-open={props.leftOpen}
         data-canvas-no-zoom
         {...chromeEventProps}
       >
@@ -352,22 +605,63 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
           aria-label={t('creativeStudio.canvas.chrome.resources')}
           role='tablist'
         >
-          {(['canvas', 'assets', 'prompts', 'templates'] as const).map((view) => (
-            <button
-              key={view}
-              type='button'
-              role='tab'
-              aria-selected={props.leftView === view}
-              data-active={props.leftView === view || undefined}
-              disabled={props.disabled}
-              onClick={() => props.onLeftViewChange(view)}
-            >
-              {leftIcon(view)}
-              <span className={styles.tabLabel}>{t(LEFT_LABEL_KEYS[view])}</span>
-            </button>
-          ))}
+          {(['canvas', 'assets', 'prompts', 'templates'] as const).map((view) => {
+            const label = t(LEFT_LABEL_KEYS[view]);
+            return (
+              <Tooltip key={view} content={label} position='right' mini>
+                <button
+                  type='button'
+                  role='tab'
+                  id={`creative-canvas-left-tab-${view}`}
+                  aria-label={label}
+                  aria-selected={props.leftOpen && props.leftView === view}
+                  aria-expanded={props.leftOpen && props.leftView === view}
+                  aria-controls='creative-canvas-left-panel-body'
+                  data-active={
+                    props.leftOpen && props.leftView === view
+                      ? true
+                      : undefined
+                  }
+                  disabled={props.disabled}
+                  title={label}
+                  onClick={() => {
+                    if (props.leftOpen && props.leftView === view) {
+                      props.onLeftPanelOpenChange(false);
+                      return;
+                    }
+                    props.onLeftViewChange(view);
+                  }}
+                >
+                  {leftIcon(view)}
+                  <span className={styles.tabLabel}>{label}</span>
+                </button>
+              </Tooltip>
+            );
+          })}
+          {props.leftOpen ? (
+            <Tooltip content={collapseResourcesLabel} position='right' mini>
+              <button
+                type='button'
+                className={styles.leftCollapseButton}
+                aria-label={collapseResourcesLabel}
+                title={collapseResourcesLabel}
+                disabled={props.disabled}
+                onClick={() => props.onLeftPanelOpenChange(false)}
+              >
+                <MenuFold {...iconProps} />
+              </button>
+            </Tooltip>
+          ) : null}
         </nav>
-        <div className={styles.panelBody} role='tabpanel' data-left-panel-body={props.leftView}>
+        <div
+          className={styles.panelBody}
+          id='creative-canvas-left-panel-body'
+          role='tabpanel'
+          aria-labelledby={`creative-canvas-left-tab-${props.leftView}`}
+          aria-hidden={!props.leftOpen}
+          hidden={!props.leftOpen}
+          data-left-panel-body={props.leftView}
+        >
           {leftSlot}
         </div>
       </aside>
@@ -380,9 +674,36 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
         <aside
           className={styles.rightPanel}
           aria-label={t(RIGHT_LABEL_KEYS[props.rightView])}
+          data-resizing={isRightPanelResizing || undefined}
           data-canvas-no-zoom
           {...chromeEventProps}
         >
+          {props.onRightPanelWidthChange ? (
+            <div
+              className={styles.rightResizeHandle}
+              role='separator'
+              tabIndex={props.disabled ? -1 : 0}
+              aria-label={resizeRightPanelLabel}
+              aria-orientation='vertical'
+              aria-valuemin={widthBounds.min}
+              aria-valuemax={widthBounds.max}
+              aria-valuenow={rightPanelWidth}
+              aria-valuetext={`${rightPanelWidth}px`}
+              aria-disabled={props.disabled || undefined}
+              title={resizeRightPanelLabel}
+              onPointerDown={handleRightPanelResizeStart}
+              onKeyDown={handleRightPanelResizeKeyDown}
+              onDoubleClick={() =>
+                commitRightPanelWidth(RIGHT_PANEL_DEFAULT_WIDTH)
+              }
+            >
+              <span
+                className={styles.rightResizeLine}
+                aria-hidden='true'
+                title={resetRightPanelWidthLabel}
+              />
+            </div>
+          ) : null}
           {props.rightView === 'properties' ? (
             <header className={styles.panelHeader} data-right-panel-header='properties'>
               <div
@@ -472,22 +793,13 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
           data-canvas-no-zoom
           {...chromeEventProps}
         >
-          <div className={styles.toolGroup}>
-            <ChromeIconButton
-              label={t('creativeStudio.canvas.actions.selectTool')}
-              icon={<Mouse {...iconProps} />}
-              active={props.tool === 'select'}
-              disabled={props.disabled}
-              onClick={() => props.onToolChange('select')}
-            />
-            <ChromeIconButton
-              label={t('creativeStudio.canvas.actions.panTool')}
-              icon={<HandDrag {...iconProps} />}
-              active={props.tool === 'pan'}
-              disabled={props.disabled}
-              onClick={() => props.onToolChange('pan')}
-            />
-          </div>
+          <ChromeIconButton
+            label={t('creativeStudio.canvas.actions.panTool')}
+            icon={<HandDrag {...iconProps} />}
+            active={props.tool === 'pan'}
+            disabled={props.disabled}
+            onClick={() => props.onToolChange(toggleCreativeCanvasTool(props.tool))}
+          />
 
           <span className={styles.divider} aria-hidden='true' />
 
@@ -545,38 +857,17 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
             </span>
           </Popover>
 
-          <ChromeIconButton
-            label={t('creativeStudio.canvas.actions.fitView')}
-            icon={<FullScreen {...iconProps} />}
-            disabled={props.disabled}
-            onClick={props.onFitView}
-          />
-          <ChromeIconButton
-            label={t(
-              props.isMiniMapOpen
-                ? 'creativeStudio.canvas.actions.closeMiniMap'
-                : 'creativeStudio.canvas.actions.openMiniMap'
-            )}
-            icon={<Compass {...iconProps} />}
-            active={props.isMiniMapOpen}
-            disabled={props.disabled}
-            onClick={props.onToggleMiniMap}
-          />
-
           <span className={styles.divider} aria-hidden='true' />
 
-          {(['history', 'timeline'] as const).map((view) => (
-            <ChromeIconButton
-              key={view}
-              label={t(BOTTOM_LABEL_KEYS[view])}
-              icon={bottomIcon(view)}
-              active={props.bottomView === view}
-              disabled={props.disabled}
-              onClick={() =>
-                props.onBottomViewChange(toggleCreativeCanvasPanel(props.bottomView, view))
-              }
-            />
-          ))}
+          <ChromeIconButton
+            label={t(BOTTOM_LABEL_KEYS.history)}
+            icon={<History {...iconProps} />}
+            active={props.bottomView !== null}
+            disabled={props.disabled}
+            onClick={() =>
+              props.onBottomViewChange(toggleCreativeCanvasBottomPanel(props.bottomView))
+            }
+          />
           {props.slots?.toolbarTrailing}
         </div>
       </div>
