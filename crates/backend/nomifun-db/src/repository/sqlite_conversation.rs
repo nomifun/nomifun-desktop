@@ -16,7 +16,9 @@ use crate::models::{
 use crate::repository::bind::{BindValue, bind_value, bind_value_as};
 use crate::repository::conversation::{
     ConversationDeliveryReceiptClaim, ConversationFilters, ConversationMessageProjection,
-    ConversationRowUpdate, ConversationTurnAdmissionState, IConversationRepository, MessageDayBucket, MessageRowUpdate, MessageSearchRow,
+    ConversationRowUpdate, ConversationTurnAdmissionState,
+    CreativeStudioConversationTurnAuthority, IConversationRepository, MessageDayBucket,
+    MessageRowUpdate, MessageSearchRow,
     MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
     ResolveCreativeStudioAgentSessionParams, ResolvedCreativeStudioAgentSession,
     RequirementConversationTurnAuthority, SortOrder, TurnArtifactMessageCommit,
@@ -2422,6 +2424,11 @@ impl IConversationRepository for SqliteConversationRepository {
                       NULL, ?, ?, ?, 'accepted', ?, ? \
                FROM conversations conversation \
               WHERE conversation.conversation_id = ? AND conversation.user_id = ? \
+                AND NOT EXISTS ( \
+                    SELECT 1 FROM creative_studio_agent_sessions creative_session \
+                     WHERE creative_session.owner_id = conversation.user_id \
+                       AND creative_session.conversation_id = conversation.conversation_id \
+                ) \
              ON CONFLICT(operation_id) DO NOTHING",
         )
         .bind(operation_id)
@@ -2542,6 +2549,11 @@ impl IConversationRepository for SqliteConversationRepository {
                          AND owner.user_id = conversations.user_id \
                          AND owner.kind = 'turn' AND owner.status = 'accepted' \
                          AND owner.operation_id <> ? \
+                   ) \
+                   AND NOT EXISTS( \
+                       SELECT 1 FROM creative_studio_agent_sessions creative_session \
+                        WHERE creative_session.owner_id = conversations.user_id \
+                          AND creative_session.conversation_id = conversations.conversation_id \
                    )",
             )
             .bind(operation_id)
@@ -2572,6 +2584,210 @@ impl IConversationRepository for SqliteConversationRepository {
         {
             return Err(DbError::Conflict(
                 "conversation delivery operation identity was reused".to_owned(),
+            ));
+        }
+        tx.commit().await?;
+        Ok(ConversationDeliveryReceiptClaim {
+            receipt,
+            claimed_new: inserted.rows_affected() == 1,
+        })
+    }
+
+    async fn claim_creative_studio_turn_delivery_receipt_and_admit_with_candidate(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        candidate_message_id: &str,
+        request_payload: &str,
+        authority: &CreativeStudioConversationTurnAuthority,
+        expected_admission_epoch: i64,
+        now: i64,
+    ) -> Result<ConversationDeliveryReceiptClaim, DbError> {
+        if expected_admission_epoch < 0 {
+            return Err(DbError::Conflict(
+                "Conversation admission epoch must be non-negative".to_owned(),
+            ));
+        }
+        MessageId::parse(candidate_message_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "Creative Studio turn candidate_message_id is invalid: {error}"
+            ))
+        })?;
+        nomifun_common::CreativeStudioProjectId::parse(&authority.project_id).map_err(
+            |error| {
+                DbError::Conflict(format!(
+                    "Creative Studio turn project_id is invalid: {error}"
+                ))
+            },
+        )?;
+        validate_uuidv7(&authority.session_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "Creative Studio turn session_id is invalid: {error}"
+            ))
+        })?;
+        validate_uuidv7(&authority.pending_turn_idempotency_key).map_err(|error| {
+            DbError::Conflict(format!(
+                "Creative Studio pending turn idempotency key is invalid: {error}"
+            ))
+        })?;
+        if authority.model_input.trim().is_empty()
+            || authority.model_input.trim() != authority.model_input
+            || authority.model_input.chars().count() > 262_144
+        {
+            return Err(DbError::Conflict(
+                "Creative Studio turn model input must be trimmed, non-empty, and at most 262144 characters"
+                    .to_owned(),
+            ));
+        }
+        if authority.skill_ids.len() > 8
+            || authority
+                .skill_ids
+                .iter()
+                .any(|skill_id| {
+                    skill_id.is_empty()
+                        || skill_id.len() > 128
+                        || skill_id.trim() != skill_id
+                        || !skill_id
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+                })
+            || authority.skill_ids.iter().collect::<HashSet<_>>().len()
+                != authority.skill_ids.len()
+        {
+            return Err(DbError::Conflict(
+                "Creative Studio turn Skill IDs are invalid".to_owned(),
+            ));
+        }
+        let skill_ids_json = serde_json::to_string(&authority.skill_ids).map_err(|error| {
+            DbError::Conflict(format!(
+                "Creative Studio turn Skill IDs could not be serialized: {error}"
+            ))
+        })?;
+
+        let mut tx = self.pool.begin().await?;
+        let inserted = sqlx::query(
+            "INSERT INTO conversation_delivery_receipts (\
+                operation_id, message_id, conversation_id, projected_conversation_id, \
+                projected_message_id, user_id, kind, request_payload, status, created_at, updated_at\
+             ) SELECT ?, ?, conversation.conversation_id, conversation.conversation_id, \
+                      NULL, ?, 'turn', ?, 'accepted', ?, ? \
+               FROM conversations conversation \
+               JOIN creative_studio_agent_sessions binding \
+                 ON binding.owner_id = conversation.user_id \
+                AND binding.conversation_id = conversation.conversation_id \
+               JOIN creative_studio_projects project \
+                 ON project.project_id = binding.project_id \
+               JOIN json_each(project.document_json, '$.chatSessions') session \
+              WHERE conversation.conversation_id = ? AND conversation.user_id = ? \
+                AND binding.project_id = ? AND binding.session_id = ? \
+                AND json_extract(session.value, '$.id') = binding.session_id \
+                AND json_extract(project.document_json, '$.activeChatId') = binding.session_id \
+                AND json_extract(session.value, '$.pendingTurn.idempotencyKey') = ? \
+                AND COALESCE( \
+                      CAST(json_extract(session.value, '$.pendingTurn.modelInput') AS TEXT), \
+                      CAST(json_extract(session.value, '$.pendingTurn.prompt') AS TEXT) \
+                    ) = ? \
+                AND json(COALESCE( \
+                      json_extract(session.value, '$.pendingTurn.skillIds'), '[]' \
+                    )) = json(?) \
+             ON CONFLICT(operation_id) DO NOTHING",
+        )
+        .bind(operation_id)
+        .bind(candidate_message_id)
+        .bind(user_id)
+        .bind(request_payload)
+        .bind(now)
+        .bind(now)
+        .bind(conversation_id)
+        .bind(user_id)
+        .bind(&authority.project_id)
+        .bind(&authority.session_id)
+        .bind(&authority.pending_turn_idempotency_key)
+        .bind(&authority.model_input)
+        .bind(&skill_ids_json)
+        .execute(&mut *tx)
+        .await?;
+        if inserted.rows_affected() == 1 {
+            let admitted = sqlx::query(
+                "UPDATE conversations SET status = 'running', \
+                    active_turn_operation_id = ?, admission_epoch = admission_epoch + 1, \
+                    updated_at = MAX(updated_at, ?) \
+                 WHERE conversation_id = ? AND user_id = ? \
+                   AND admission_epoch = ? AND active_turn_operation_id IS NULL \
+                   AND admission_epoch < 9223372036854775806 \
+                   AND status IN ('pending', 'finished') \
+                   AND json_type(extra, '$._edit_resubmit_fence') IS NULL \
+                   AND NOT EXISTS( \
+                       SELECT 1 FROM conversation_execution_links execution_link \
+                        WHERE execution_link.conversation_id = conversations.conversation_id \
+                          AND execution_link.relation = 'attempt' \
+                   ) \
+                   AND NOT EXISTS( \
+                       SELECT 1 FROM conversation_delivery_receipts owner \
+                       WHERE owner.conversation_id = conversations.conversation_id \
+                         AND owner.user_id = conversations.user_id \
+                         AND owner.kind = 'turn' AND owner.status = 'accepted' \
+                         AND owner.operation_id <> ? \
+                   ) \
+                   AND EXISTS( \
+                       SELECT 1 \
+                         FROM creative_studio_agent_sessions binding \
+                         JOIN creative_studio_projects project \
+                           ON project.project_id = binding.project_id \
+                         JOIN json_each(project.document_json, '$.chatSessions') session \
+                        WHERE binding.owner_id = conversations.user_id \
+                          AND binding.conversation_id = conversations.conversation_id \
+                          AND binding.project_id = ? AND binding.session_id = ? \
+                          AND json_extract(session.value, '$.id') = binding.session_id \
+                          AND json_extract(project.document_json, '$.activeChatId') = binding.session_id \
+                          AND json_extract(session.value, '$.pendingTurn.idempotencyKey') = ? \
+                          AND COALESCE( \
+                                CAST(json_extract(session.value, '$.pendingTurn.modelInput') AS TEXT), \
+                                CAST(json_extract(session.value, '$.pendingTurn.prompt') AS TEXT) \
+                              ) = ? \
+                          AND json(COALESCE( \
+                                json_extract(session.value, '$.pendingTurn.skillIds'), '[]' \
+                              )) = json(?) \
+                   )",
+            )
+            .bind(operation_id)
+            .bind(now)
+            .bind(conversation_id)
+            .bind(user_id)
+            .bind(expected_admission_epoch)
+            .bind(operation_id)
+            .bind(&authority.project_id)
+            .bind(&authority.session_id)
+            .bind(&authority.pending_turn_idempotency_key)
+            .bind(&authority.model_input)
+            .bind(&skill_ids_json)
+            .execute(&mut *tx)
+            .await?;
+            if admitted.rows_affected() != 1 {
+                return Err(DbError::Conflict(
+                    "Creative Studio Canvas fence rejected durable turn admission".to_owned(),
+                ));
+            }
+        }
+        let receipt = sqlx::query_as::<_, ConversationDeliveryReceiptRow>(
+            "SELECT * FROM conversation_delivery_receipts WHERE operation_id = ?",
+        )
+        .bind(operation_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| {
+            DbError::Conflict(
+                "Creative Studio Canvas pending turn no longer authorizes this send".to_owned(),
+            )
+        })?;
+        if receipt.user_id != user_id
+            || receipt.conversation_id != conversation_id
+            || receipt.kind != "turn"
+            || receipt.request_payload != request_payload
+        {
+            return Err(DbError::Conflict(
+                "Creative Studio delivery operation identity was reused".to_owned(),
             ));
         }
         tx.commit().await?;
@@ -6147,6 +6363,8 @@ mod tests {
                 "pendingTurn": {
                     "idempotencyKey": CREATIVE_PENDING_KEY,
                     "prompt": "Create a poster",
+                    "modelInput": "creative-model-input",
+                    "skillIds": ["creative-studio-canvas"],
                     "createdAt": 1
                 },
                 "createdAt": 1,
@@ -9154,6 +9372,107 @@ mod tests {
         .unwrap();
         assert_eq!(binding_count, 0);
         assert_eq!(conversation_count, 0);
+    }
+
+    #[tokio::test]
+    async fn creative_studio_agent_turn_admission_requires_the_exact_canvas_fence() {
+        let (repo, db) = setup().await;
+        let project_id = nomifun_common::CreativeStudioProjectId::new().into_string();
+        let session_id = ConversationId::new().into_string();
+        insert_creative_project_session(db.pool(), &project_id, &session_id).await;
+        let params = creative_session_params(
+            TEST_INSTALLATION_OWNER,
+            &project_id,
+            &session_id,
+            ConversationId::new().into_string(),
+        );
+        let resolved = repo
+            .resolve_or_create_creative_studio_agent_session(&params)
+            .await
+            .unwrap();
+        let conversation_id = resolved.binding.conversation_id;
+        let authority = CreativeStudioConversationTurnAuthority {
+            project_id,
+            session_id,
+            pending_turn_idempotency_key: CREATIVE_PENDING_KEY.to_owned(),
+            model_input: "creative-model-input".to_owned(),
+            skill_ids: vec!["creative-studio-canvas".to_owned()],
+        };
+
+        let mut wrong_key = authority.clone();
+        wrong_key.pending_turn_idempotency_key =
+            "0190f5fe-7c00-7a00-8abc-012345678903".to_owned();
+        assert!(
+            repo.claim_creative_studio_turn_delivery_receipt_and_admit_with_candidate(
+                TEST_INSTALLATION_OWNER,
+                &conversation_id,
+                "creative-turn:wrong-key",
+                &MessageId::new().into_string(),
+                r#"{"content":"creative-model-input"}"#,
+                &wrong_key,
+                0,
+                2,
+            )
+            .await
+            .is_err()
+        );
+
+        let mut wrong_input = authority.clone();
+        wrong_input.model_input = "stale-model-input".to_owned();
+        assert!(
+            repo.claim_creative_studio_turn_delivery_receipt_and_admit_with_candidate(
+                TEST_INSTALLATION_OWNER,
+                &conversation_id,
+                "creative-turn:wrong-input",
+                &MessageId::new().into_string(),
+                r#"{"content":"stale-model-input"}"#,
+                &wrong_input,
+                0,
+                2,
+            )
+            .await
+            .is_err()
+        );
+
+        assert!(
+            repo.claim_turn_delivery_receipt_and_admit_with_candidate(
+                TEST_INSTALLATION_OWNER,
+                &conversation_id,
+                "creative-turn:ordinary",
+                &MessageId::new().into_string(),
+                r#"{"content":"creative-model-input"}"#,
+                0,
+                2,
+            )
+            .await
+            .is_err()
+        );
+
+        let claim = repo
+            .claim_creative_studio_turn_delivery_receipt_and_admit_with_candidate(
+                TEST_INSTALLATION_OWNER,
+                &conversation_id,
+                "creative-turn:accepted",
+                &MessageId::new().into_string(),
+                r#"{"content":"creative-model-input"}"#,
+                &authority,
+                0,
+                2,
+            )
+            .await
+            .unwrap();
+        assert!(claim.claimed_new);
+        assert_eq!(claim.receipt.status, "accepted");
+
+        let state = repo
+            .get_turn_admission_state(TEST_INSTALLATION_OWNER, &conversation_id)
+            .await
+            .unwrap();
+        assert_eq!(state.epoch, 1);
+        assert_eq!(
+            state.active_operation_id.as_deref(),
+            Some("creative-turn:accepted")
+        );
     }
 
     #[tokio::test]

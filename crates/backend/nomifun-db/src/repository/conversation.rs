@@ -34,6 +34,21 @@ pub struct ResolvedCreativeStudioAgentSession {
     pub created: bool,
 }
 
+/// Exact Canvas-owned authority required to admit a fresh turn for one hidden
+/// Creative Studio Conversation.
+///
+/// The SQLite implementation validates this snapshot against the canonical
+/// project document in the same writer transaction that inserts the delivery
+/// receipt and advances the Conversation to Running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreativeStudioConversationTurnAuthority {
+    pub project_id: String,
+    pub session_id: String,
+    pub pending_turn_idempotency_key: String,
+    pub model_input: String,
+    pub skill_ids: Vec<String>,
+}
+
 /// Remove only runtime/session instance state that can resume work after an
 /// explicit Conversation reset. User-authored configuration and execution
 /// policy remain untouched.
@@ -507,6 +522,29 @@ pub trait IConversationRepository: Send + Sync {
     ) -> Result<ConversationDeliveryReceiptClaim, DbError> {
         Err(DbError::Init(
             "conversation repository cannot atomically claim a candidate-owned turn".to_owned(),
+        ))
+    }
+
+    /// Creative Studio variant of fresh public turn admission.
+    ///
+    /// Existing receipts remain absorbing replays. A new receipt is accepted
+    /// only while the server-owned binding and the Canvas document still
+    /// expose the exact pending-turn key, model input, and ordered Skill list.
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_creative_studio_turn_delivery_receipt_and_admit_with_candidate(
+        &self,
+        _user_id: &str,
+        _conversation_id: &str,
+        _operation_id: &str,
+        _candidate_message_id: &str,
+        _request_payload: &str,
+        _authority: &CreativeStudioConversationTurnAuthority,
+        _expected_admission_epoch: i64,
+        _now: i64,
+    ) -> Result<ConversationDeliveryReceiptClaim, DbError> {
+        Err(DbError::Init(
+            "conversation repository cannot atomically validate and admit a Creative Studio turn"
+                .to_owned(),
         ))
     }
 

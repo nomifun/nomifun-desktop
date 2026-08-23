@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { CheckOne, Error, Loading, MagicWand, Refresh, Robot } from '@icon-park/react';
+import ThinkingProcessDisplay from '@renderer/components/chat/ThinkingProcessDisplay';
+import { CheckOne, Error, MagicWand, Refresh, Robot } from '@icon-park/react';
 import { Button } from '@arco-design/web-react';
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
@@ -61,10 +62,15 @@ const CreativeStudioAgentMessages: React.FC<CreativeStudioAgentMessagesProps> = 
           ) : null}
 
           {message.status === 'running' && (
-            <div className={styles.activityCard} role='status'>
-              <Loading className={styles.spin} theme='outline' size='16' />
-              <span>{message.activityLabel ?? 'Agent 正在工作'}</span>
-            </div>
+            <ThinkingProcessDisplay
+              className={styles.thinkingStatus}
+              state='running'
+              subject={message.activityLabel}
+              identityKey={message.id}
+              disclosure={false}
+              runningFallbackLabel='Agent 正在工作'
+              role='status'
+            />
           )}
 
           {message.status === 'failed' && (

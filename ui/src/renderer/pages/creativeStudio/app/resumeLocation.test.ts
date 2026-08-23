@@ -7,8 +7,11 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  CREATIVE_STUDIO_CANVASES_RESUME_LOCATION_KEY,
   CREATIVE_STUDIO_RESUME_LOCATION_KEY,
+  normalizeCreativeStudioCanvasesResumeLocation,
   normalizeCreativeStudioResumeLocation,
+  readCreativeStudioCanvasesResumeLocation,
   readCreativeStudioResumeLocation,
   rememberCreativeStudioResumeLocation,
 } from './resumeLocation';
@@ -56,6 +59,88 @@ describe('Creative Studio resume location', () => {
     }
   });
 
+  test('keeps a separate My Canvases detail location across sibling product tabs', () => {
+    const storage = memoryStorage();
+    const canvasPath = `/workshop/canvas/${PROJECT_ID}?mode=focus#node-1`;
+    const imagePath = '/workshop/image?panel=history';
+
+    expect(readCreativeStudioCanvasesResumeLocation(storage)).toBe(
+      '/workshop/canvases'
+    );
+    expect(rememberCreativeStudioResumeLocation(canvasPath, storage)).toBe(
+      canvasPath
+    );
+    expect(
+      storage.values.get(CREATIVE_STUDIO_CANVASES_RESUME_LOCATION_KEY)
+    ).toBe(canvasPath);
+
+    expect(rememberCreativeStudioResumeLocation(imagePath, storage)).toBe(
+      imagePath
+    );
+    expect(readCreativeStudioResumeLocation(storage)).toBe(imagePath);
+    expect(readCreativeStudioCanvasesResumeLocation(storage)).toBe(canvasPath);
+  });
+
+  test('accepts only Canvas-family resume routes and canonicalizes the legacy list', () => {
+    const directorPath = `/workshop/director/${PROJECT_ID}?camera=primary#timeline`;
+
+    expect(
+      normalizeCreativeStudioCanvasesResumeLocation('/workshop/canvases')
+    ).toBe('/workshop/canvases');
+    expect(
+      normalizeCreativeStudioCanvasesResumeLocation(
+        `/workshop/canvas/${PROJECT_ID}#node-2`
+      )
+    ).toBe(`/workshop/canvas/${PROJECT_ID}#node-2`);
+    expect(
+      normalizeCreativeStudioCanvasesResumeLocation(directorPath)
+    ).toBe(directorPath);
+    expect(
+      normalizeCreativeStudioCanvasesResumeLocation(
+        '/workshop/projects?sort=updated#recent'
+      )
+    ).toBe('/workshop/canvases?sort=updated#recent');
+
+    for (const path of [
+      '/workshop',
+      '/workshop/image',
+      '/workshop/prompts',
+      '/workshop/canvas',
+      '/workshop/canvas/%E0%A4%A',
+      '/guid',
+      '//evil.example/workshop/canvases',
+      'https://evil.example/workshop/canvases',
+      `/workshop/canvases?value=${'x'.repeat(4096)}`,
+    ]) {
+      expect(normalizeCreativeStudioCanvasesResumeLocation(path)).toBe(null);
+    }
+  });
+
+  test('lets an explicit Canvas list visit replace a prior detail resume', () => {
+    const storage = memoryStorage();
+    rememberCreativeStudioResumeLocation(
+      `/workshop/canvas/${PROJECT_ID}`,
+      storage
+    );
+
+    rememberCreativeStudioResumeLocation(
+      '/workshop/canvases?sort=updated',
+      storage
+    );
+
+    expect(readCreativeStudioCanvasesResumeLocation(storage)).toBe(
+      '/workshop/canvases?sort=updated'
+    );
+  });
+
+  test('bootstraps the section resume from the original product-wide key', () => {
+    const storage = memoryStorage();
+    const canvasPath = `/workshop/canvas/${PROJECT_ID}`;
+    storage.setItem(CREATIVE_STUDIO_RESUME_LOCATION_KEY, canvasPath);
+
+    expect(readCreativeStudioCanvasesResumeLocation(storage)).toBe(canvasPath);
+  });
+
   test('round-trips through session-scoped storage and tolerates unavailable storage', () => {
     const storage = memoryStorage();
     const path = '/workshop/image?panel=history';
@@ -74,6 +159,9 @@ describe('Creative Studio resume location', () => {
       },
     };
     expect(readCreativeStudioResumeLocation(unavailable)).toBe('/workshop');
+    expect(readCreativeStudioCanvasesResumeLocation(unavailable)).toBe(
+      '/workshop/canvases'
+    );
     expect(rememberCreativeStudioResumeLocation('/workshop/prompts', unavailable)).toBe(
       '/workshop/prompts'
     );
