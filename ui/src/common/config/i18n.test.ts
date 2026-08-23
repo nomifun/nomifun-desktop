@@ -5,7 +5,13 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, normalizeLanguageCode } from './i18n';
+import {
+  DEFAULT_LANGUAGE,
+  SUPPORTED_LANGUAGES,
+  SYSTEM_LANGUAGE,
+  normalizeLanguageCode,
+  resolveLanguagePreference,
+} from './i18n';
 
 describe('i18n language support', () => {
   test('only exposes simplified Chinese and English as supported app languages', () => {
@@ -20,5 +26,16 @@ describe('i18n language support', () => {
     expect(normalizeLanguageCode('tr-TR')).toBe(DEFAULT_LANGUAGE);
     expect(normalizeLanguageCode('ru-RU')).toBe(DEFAULT_LANGUAGE);
     expect(normalizeLanguageCode('uk-UA')).toBe(DEFAULT_LANGUAGE);
+  });
+
+  test('resolves the system preference from the detected operating system language', () => {
+    expect(resolveLanguagePreference(SYSTEM_LANGUAGE, 'zh-CN')).toBe('zh-CN');
+    expect(resolveLanguagePreference(SYSTEM_LANGUAGE, 'zh-TW')).toBe('zh-CN');
+    expect(resolveLanguagePreference(SYSTEM_LANGUAGE, 'fr-FR')).toBe(DEFAULT_LANGUAGE);
+  });
+
+  test('keeps an explicitly selected language independent from the system language', () => {
+    expect(resolveLanguagePreference('en-US', 'zh-CN')).toBe('en-US');
+    expect(resolveLanguagePreference('zh-CN', 'en-US')).toBe('zh-CN');
   });
 });

@@ -639,6 +639,15 @@ pub(crate) fn classify_error(message: &str, is_timeout: bool) -> ProviderHealthC
     if mentions_status(403) || lower.contains("forbidden") {
         return ProviderHealthCheckErrorKind::Forbidden;
     }
+    if lower.contains("invalidendpointormodel.notfound")
+        || (lower.contains("model or endpoint")
+            && (lower.contains("does not exist") || lower.contains("do not have access")))
+        || (lower.contains("ark video generation cannot use doubao seed")
+            && lower.contains("seedance"))
+        || (lower.contains("console display name") && lower.contains("api model id"))
+    {
+        return ProviderHealthCheckErrorKind::ModelUnavailable;
+    }
     if mentions_status(404) || lower.contains("not found") {
         return ProviderHealthCheckErrorKind::NotFound;
     }
@@ -858,6 +867,23 @@ mod tests {
             (
                 "InvalidParams: provider returned 401: invalid api key",
                 ProviderHealthCheckErrorKind::Unauthorized,
+            ),
+            (
+                "ProviderError: provider returned 404 Not Found: \
+                 {\"error\":{\"code\":\"InvalidEndpointOrModel.NotFound\",\
+                 \"message\":\"The model or endpoint Doubao-Seed-2.0-mini does not exist or you do not have access to it.\"}}",
+                ProviderHealthCheckErrorKind::ModelUnavailable,
+            ),
+            (
+                "InvalidParams: Ark video generation cannot use Doubao Seed chat model \
+                 \"Doubao-Seed-2.0-mini\"; Seed and Seedance are different model families",
+                ProviderHealthCheckErrorKind::ModelUnavailable,
+            ),
+            (
+                "InvalidParams: Ark video model \"Doubao-Seedance-1.5-pro\" is a console \
+                 display name, not an API Model ID; use \
+                 \"doubao-seedance-1-5-pro-251215\" exactly",
+                ProviderHealthCheckErrorKind::ModelUnavailable,
             ),
         ] {
             assert_eq!(classify_error(message, false), expected, "message: {message}");

@@ -6,6 +6,7 @@
 
 import { extractResponseTextChunk, toDisplayText } from '@/common/chat/displayText';
 import i18n from 'i18next';
+import { normalizeAgentStreamError } from '@/common/chat/chatLib';
 import type {
   IConversationTurnCompletedEvent,
   IConversationTurnStartedEvent,
@@ -306,12 +307,23 @@ const waitForReceiptOrAbort = <T>(
     });
   });
 
-const errorText = (event: IResponseMessage): string =>
-  extractResponseTextChunk(event.data).trim() ||
-  toDisplayText(event.data).trim() ||
-  i18n.t('creativeStudio.agent.errorWithoutDetails', {
+const errorText = (event: IResponseMessage): string => {
+  const normalized = normalizeAgentStreamError(event.data);
+  if (normalized?.message.trim()) return normalized.message.trim();
+  if (typeof event.data === 'string' && event.data.trim()) return event.data.trim();
+  if (event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
+    const record = event.data as Record<string, unknown>;
+    if (typeof record.message === 'string' && record.message.trim()) {
+      return record.message.trim();
+    }
+    if (typeof record.content === 'string' && record.content.trim()) {
+      return record.content.trim();
+    }
+  }
+  return i18n.t('creativeStudio.agent.errorWithoutDetails', {
     defaultValue: 'NomiFun Agent returned an error event without details',
   });
+};
 
 async function stopAfterAbort(
   transport: NomiCreativeStudioAgentTransport,

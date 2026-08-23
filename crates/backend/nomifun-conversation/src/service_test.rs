@@ -442,7 +442,17 @@ impl SkillResolver for RecordingSkillResolver {
                 continue;
             }
             for skill in skills {
-                if std::fs::create_dir_all(target_dir.join(&skill.name)).is_ok() {
+                let target = target_dir.join(&skill.name);
+                if std::fs::create_dir_all(&target).is_ok()
+                    && std::fs::write(
+                        target.join("SKILL.md"),
+                        format!(
+                            "---\nname: {}\ndescription: test\n---\n# {}\n",
+                            skill.name, skill.name
+                        ),
+                    )
+                    .is_ok()
+                {
                     linked += 1;
                 }
             }
@@ -5794,6 +5804,153 @@ async fn send_message_returns_accepted() {
 
     assert!(!msg_id.is_empty(), "msg_id must be non-empty");
     MessageId::parse(&msg_id).expect("msg_id should be a canonical UUIDv7");
+}
+
+#[tokio::test]
+async fn creative_studio_send_installs_selected_skill_and_rebuilds_cached_runtime() {
+    let database = init_database_memory().await.unwrap();
+    let repo = Arc::new(SqliteConversationRepository::new(database.pool().clone()));
+    let broadcaster = Arc::new(MockBroadcaster::new());
+    let resolver = Arc::new(RecordingSkillResolver::new(Vec::new()));
+    let registry = Arc::new(MockAgentRuntimeRegistry::new());
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = registry.clone();
+    let workspace_root = isolated_test_workspace("creative-skill-injection");
+    let service = ConversationService::new(
+        Arc::<str>::from(SQLITE_TEST_OWNER),
+        workspace_root,
+        broadcaster,
+        resolver.clone(),
+        runtime_registry.clone(),
+        repo.clone(),
+        Arc::new(StubAgentMetadataRepo),
+        Arc::new(crate::NoExecutionConversationBoundary),
+    );
+    let conversation = service
+        .create(
+            SQLITE_TEST_OWNER,
+            serde_json::from_value(json!({
+                "type": "nomi",
+                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+                "extra": {}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let project_id = nomifun_common::CreativeStudioProjectId::new().into_string();
+    let session_id = ConversationId::new().into_string();
+    let pending_key = MessageId::new().into_string();
+    let model_input = serde_json::json!({
+        "kind": "nomifun.creative-studio.planning-turn",
+        "version": 1,
+        "userRequest": "整理画布"
+    })
+    .to_string();
+    let document = serde_json::json!({
+        "schema": "nomifun.creative-studio/v1",
+        "projectId": project_id.clone(),
+        "viewport": { "x": 0, "y": 0, "zoom": 1 },
+        "background": "lines",
+        "nodes": [],
+        "connections": [],
+        "chatSessions": [{
+            "id": session_id.clone(),
+            "title": "整理画布",
+            "messageIds": [],
+            "model": { "providerId": PROVIDER_ID_1, "model": "m1" },
+            "pendingTurn": {
+                "idempotencyKey": pending_key.clone(),
+                "prompt": "整理画布",
+                "modelInput": model_input.clone(),
+                "skillIds": ["creative-studio-canvas"],
+                "createdAt": 1
+            },
+            "createdAt": 1,
+            "updatedAt": 1
+        }],
+        "activeChatId": session_id,
+        "panels": {
+            "left": { "open": true, "width": 280, "activeView": "canvas" },
+            "right": { "open": true, "width": 390, "activeView": "assistant" },
+            "bottom": { "open": false, "height": 240, "activeView": "history" }
+        },
+        "pendingTaskIds": []
+    });
+    nomifun_db::sqlx::query(
+        "INSERT INTO creative_studio_projects \
+            (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+         VALUES (?, 'Canvas', 1, 0, 0, ?, 1, 1)",
+    )
+    .bind(&project_id)
+    .bind(document.to_string())
+    .execute(database.pool())
+    .await
+    .unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT INTO creative_studio_agent_sessions \
+            (owner_id, project_id, session_id, conversation_id, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, 1, 1)",
+    )
+    .bind(SQLITE_TEST_OWNER)
+    .bind(&project_id)
+    .bind(&session_id)
+    .bind(&conversation.conversation_id)
+    .execute(database.pool())
+    .await
+    .unwrap();
+
+    let stored = repo
+        .get(&conversation.conversation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let warm_options = service.build_runtime_options(&stored).unwrap();
+    runtime_registry
+        .get_or_create_runtime(&conversation.conversation_id, warm_options)
+        .await
+        .unwrap();
+    assert_eq!(registry.build_count(), 1);
+
+    service
+        .send_message_with_idempotency_key(
+            SQLITE_TEST_OWNER,
+            &conversation.conversation_id,
+            &pending_key,
+            serde_json::from_value(json!({
+                "content": model_input.clone(),
+                "inject_skills": ["creative-studio-canvas"]
+            }))
+            .unwrap(),
+            &runtime_registry,
+        )
+        .await
+        .unwrap();
+    wait_for_turn_released(&service, &conversation.conversation_id).await;
+
+    assert_eq!(registry.termination_count(), 1);
+    assert_eq!(registry.build_count(), 2);
+    let stored = repo
+        .get(&conversation.conversation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let extra: serde_json::Value = serde_json::from_str(&stored.extra).unwrap();
+    assert!(
+        extra["skills"]
+            .as_array()
+            .is_some_and(|skills| skills.iter().any(|skill| skill == "creative-studio-canvas"))
+    );
+    let links = resolver.links.lock().unwrap();
+    assert!(links.iter().any(|link| {
+        link.skill_names
+            .iter()
+            .any(|skill| skill == "creative-studio-canvas")
+            && link.rel_dirs.iter().any(|dir| dir == ".nomi/skills")
+            && link
+                .workspace
+                .join(".nomi/skills/creative-studio-canvas/SKILL.md")
+                .is_file()
+    }));
 }
 
 #[tokio::test]

@@ -24,7 +24,8 @@ use crate::provider_deletion::SharedProviderDeletionCoordinator;
 use crate::provider_model::{
     capability_row_to_response, row_to_model_response, rows_to_model_responses,
     serialize_capabilities, validate_capability_auth_scheme, validate_capability_urls,
-    validate_positive_token_limit, validate_protocol, validate_provider_params,
+    validate_known_provider_model_task, validate_positive_token_limit, validate_protocol,
+    validate_provider_params,
 };
 
 #[derive(Clone)]
@@ -131,6 +132,13 @@ impl ProviderService {
             .map(|connection| prepare_new_connection(connection, &self.encryption_key))
             .collect::<Result<Vec<_>, _>>()?;
         let connection_targets = unique_connection_targets(&prepared_connections)?;
+        for capability in &req.initial_model.capabilities {
+            validate_known_provider_model_task(
+                &req.platform,
+                &req.initial_model.model,
+                capability.task,
+            )?;
+        }
         validate_capability_set(
             &req.platform,
             &req.base_url,

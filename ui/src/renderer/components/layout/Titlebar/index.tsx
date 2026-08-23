@@ -334,11 +334,6 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
       )}
     >
       <div ref={menuRef} className='app-titlebar__menu' style={menuStyle}>
-        {!layout?.isMobile && (
-          <div className='app-titlebar__language-control'>
-            <TitlebarLanguageMenu iconSize={iconSize} strokeWidth={desktopIconStroke} />
-          </div>
-        )}
         {showBackToChatButton && (
           renderIconButton({
             tooltip: backToChatTooltip,
@@ -401,6 +396,11 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
               <ExpandLeft theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />
             ),
           })
+        )}
+        {!layout?.isMobile && (
+          <div className='app-titlebar__language-control'>
+            <TitlebarLanguageMenu strokeWidth={desktopIconStroke} />
+          </div>
         )}
       </div>
       <div

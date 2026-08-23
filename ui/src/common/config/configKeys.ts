@@ -1,6 +1,7 @@
 import type { SpeechToTextConfig, TextToSpeechConfig } from '@/common/types/provider/speech';
 import type { ICssTheme } from '@/common/config/storage';
 import type { CompanionId, ProviderId } from '@/common/types/ids';
+import type { LanguageMode } from './i18n';
 
 // `auto` (default), `headless` and `external` are the three supported user
 // policies; `embedded` remains in the read type only so installations can
@@ -13,6 +14,7 @@ export type ConfigKeyMap = {
     proxy?: string;
   };
   language: string;
+  languageMode: LanguageMode | undefined;
   theme: string;
   colorScheme: string;
   'ui.zoomFactor': number | undefined;

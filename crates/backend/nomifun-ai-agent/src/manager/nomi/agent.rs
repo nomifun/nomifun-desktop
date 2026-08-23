@@ -4596,6 +4596,31 @@ mod tests {
     }
 
     #[test]
+    fn creative_studio_planning_envelope_never_routes_to_image_generation() {
+        let request = r#"{"kind":"nomifun.creative-studio.planning-turn","version":1,"userRequest":"请基于当前画布生成一个简洁的项目规划文本节点提案，并提供可应用到画布的操作。","selectedSkills":["creative-studio-canvas"],"canvasContext":{"kind":"nomifun.creative-studio.canvas-context","version":1,"canvasId":"01a02d92-7bd6-7713-b5bc-8e7bbfdbc15a","canvasRevision":"129","selectedNodeIds":[],"nodes":[],"connections":[],"totalNodeCount":1,"totalConnectionCount":0,"truncated":false},"responseContract":{"mode":"plan-and-propose","allowedArtifactKinds":["nomifun.creative-studio.canvas-ops/v1"],"requiresUserApproval":true,"forbiddenActions":["delete-node","media-generation"]}}"#;
+        let direct = classify_image_generation_intent(request);
+
+        assert_eq!(direct, ImageGenerationIntent::None);
+        assert!(!should_run_image_intent_model(
+            direct,
+            Some(ImageGenerationIntent::Creation),
+            request,
+            false,
+            false,
+        ));
+        assert_eq!(
+            host_validated_image_intent(
+                direct,
+                direct,
+                request,
+                Some(ImageGenerationIntent::Creation),
+                false,
+            ),
+            ImageGenerationIntent::None,
+        );
+    }
+
+    #[test]
     fn strict_image_routes_do_not_mount_forced_knowledge_context() {
         let image_only = HashSet::from([IMAGE_GEN_TOOL_NAME.to_owned()]);
         let no_tools = HashSet::new();
