@@ -1,5 +1,5 @@
 //! `nomifun-workshop` — the canonical Creative Studio domain. It owns Canvas
-//! documents, assets, workflows, archives, and their `/api/creative-studio/*`
+//! documents, assets, templates, archives, and their `/api/creative-studio/*`
 //! routes. `nomifun-creation` owns asynchronous model-generation execution.
 
 mod dto;
@@ -15,9 +15,9 @@ pub mod creative_studio;
 pub mod routes;
 pub mod service;
 pub mod state;
-pub mod workflow;
-pub mod workflow_draft;
-pub mod workflow_run;
+pub mod template;
+pub mod template_draft;
+pub mod template_run;
 
 pub use creative_agent_ops::{
     CreativeAgentOp, CreativeAgentOpResult, MAX_CREATIVE_AGENT_OPS_PER_CALL,
@@ -30,15 +30,15 @@ pub use creative_studio::{
 };
 pub use dto::WorkshopAsset;
 pub use prompt_catalog::{CreativePromptCatalogItem, CreativePromptCatalogPage};
-pub use workflow::{CreativeWorkflowDefinitionV1, MAX_WORKFLOW_DEFINITION_BYTES};
-pub use workflow_draft::{
-    WorkflowDraftRunRequest, WorkflowDraftRunner, MAX_WORKFLOW_DRAFT_JSON_BYTES,
-    MAX_WORKFLOW_DRAFT_RESPONSE_BYTES, WORKFLOW_DRAFT_MAX_TOKENS,
-    WORKFLOW_DRAFT_TIMEOUT_SECS,
+pub use template::{CreativeTemplateDefinitionV1, MAX_TEMPLATE_DEFINITION_BYTES};
+pub use template_draft::{
+    TemplateDraftRunRequest, TemplateDraftRunner, MAX_TEMPLATE_DRAFT_JSON_BYTES,
+    MAX_TEMPLATE_DRAFT_RESPONSE_BYTES, TEMPLATE_DRAFT_MAX_TOKENS,
+    TEMPLATE_DRAFT_TIMEOUT_SECS,
 };
-pub use workflow_run::{
-    CreativeWorkflowRunAggregateV1, CreativeWorkflowRunCreateRequest, CreativeWorkflowRunStatus,
-    MAX_WORKFLOW_RUN_AGGREGATE_BYTES,
+pub use template_run::{
+    CreativeTemplateRunAggregateV1, CreativeTemplateRunCreateRequest, CreativeTemplateRunStatus,
+    MAX_TEMPLATE_RUN_AGGREGATE_BYTES,
 };
 pub use routes::{workshop_public_routes, workshop_routes};
 pub use service::{

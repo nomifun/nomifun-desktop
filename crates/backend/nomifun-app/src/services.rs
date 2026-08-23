@@ -43,7 +43,7 @@ fn require_utf8_executable_path(path: &std::path::Path) -> anyhow::Result<String
     })
 }
 
-/// Stateless Creative Studio Workflow draft bridge.
+/// Stateless Creative Studio Template draft bridge.
 ///
 /// This intentionally uses the provider factory's stateless completion
 /// surface: one exact managed Chat config, one user message, and a
@@ -51,16 +51,16 @@ fn require_utf8_executable_path(path: &std::path::Path) -> anyhow::Result<String
 /// state and schedules no product-level retry or model failover. The selected
 /// provider may still perform its existing bounded transport negotiation while
 /// the downstream receiver remains live.
-pub(crate) struct AgentWorkflowDraftRunner {
+pub(crate) struct AgentTemplateDraftRunner {
     pub model_invoke: Arc<nomifun_model_invoke::ModelInvokeService>,
     pub workspace: PathBuf,
 }
 
 #[async_trait::async_trait]
-impl nomifun_workshop::WorkflowDraftRunner for AgentWorkflowDraftRunner {
+impl nomifun_workshop::TemplateDraftRunner for AgentTemplateDraftRunner {
     async fn run(
         &self,
-        request: nomifun_workshop::WorkflowDraftRunRequest,
+        request: nomifun_workshop::TemplateDraftRunRequest,
     ) -> Result<String, nomifun_common::AppError> {
         let completion = async {
             let config = nomifun_ai_agent::resolve_provider_config(
@@ -74,20 +74,20 @@ impl nomifun_workshop::WorkflowDraftRunner for AgentWorkflowDraftRunner {
                 &config,
                 request.system_prompt,
                 vec![nomifun_ai_agent::user_message(request.user_text)],
-                nomifun_workshop::WORKFLOW_DRAFT_MAX_TOKENS,
-                nomifun_workshop::MAX_WORKFLOW_DRAFT_RESPONSE_BYTES,
+                nomifun_workshop::TEMPLATE_DRAFT_MAX_TOKENS,
+                nomifun_workshop::MAX_TEMPLATE_DRAFT_RESPONSE_BYTES,
             )
             .await
         };
 
         tokio::time::timeout(
-            Duration::from_secs(nomifun_workshop::WORKFLOW_DRAFT_TIMEOUT_SECS),
+            Duration::from_secs(nomifun_workshop::TEMPLATE_DRAFT_TIMEOUT_SECS),
             completion,
         )
         .await
         .map_err(|_| {
             nomifun_common::AppError::Timeout(
-                "Creative Studio workflow draft generation timed out".into(),
+                "Creative Studio template draft generation timed out".into(),
             )
         })?
     }
@@ -1741,7 +1741,7 @@ pub struct AppServices {
     /// 客服无状态并发回合执行器 (channel seam target).
     pub cs_dialogue_engine: Arc<nomifun_customer_service::CsDialogueEngine>,
     /// Singleton Creative Studio service — canonical projects, assets,
-    /// workflows, and archives. Asset binaries live under
+    /// templates, and archives. Asset binaries live under
     /// `{data_dir}/workshop/`; project documents live in SQLite. Shared by the
     /// `/api/creative-studio/*` routes and Gateway capabilities.
     pub workshop_service: Arc<nomifun_workshop::WorkshopService>,

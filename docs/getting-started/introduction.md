@@ -30,7 +30,7 @@ tabs, MCP servers, and local scripts. NomiFun pulls them into one workspace:
   transcripts.
 - **One creation system beyond chat.** Creative Studio combines a persistent
   infinite Canvas, independent Image/Video Workbenches, prompt and asset
-  libraries, private Workflows/templates, and a bounded Director.
+  libraries, private templates, and a bounded Director.
 - **Backend-driven automation.** Scheduled tasks, AutoWork requirements,
   terminal sessions, channel integrations, and completion notifications are
   durable backend services, not foreground browser-tab state.

@@ -1,4 +1,4 @@
-//! Authenticated `/api/creative-studio/*` project, asset, workflow, and archive
+//! Authenticated `/api/creative-studio/*` project, asset, template, and archive
 //! routes. Their management surfaces are owner-only — mounted behind the app's
 //! authenticated router (same auth extractor as the knowledge routes). The
 //! multipart upload route raises the body limit to [`MAX_ASSET_BYTES`]; every
@@ -43,11 +43,11 @@ use crate::service::{
     PromptCatalogAssetOrigin,
 };
 use crate::state::WorkshopRouterState;
-use crate::workflow::{CreativeWorkflowDefinitionV1, MAX_WORKFLOW_DEFINITION_BYTES};
-use crate::workflow_draft::workflow_draft_run_request;
-use crate::workflow_run::{
-    CreativeWorkflowRunAggregateV1, CreativeWorkflowRunCreateRequest,
-    MAX_WORKFLOW_RUN_AGGREGATE_BYTES,
+use crate::template::{CreativeTemplateDefinitionV1, MAX_TEMPLATE_DEFINITION_BYTES};
+use crate::template_draft::template_draft_run_request;
+use crate::template_run::{
+    CreativeTemplateRunAggregateV1, CreativeTemplateRunCreateRequest,
+    MAX_TEMPLATE_RUN_AGGREGATE_BYTES,
 };
 
 pub fn workshop_routes(state: WorkshopRouterState) -> Router {
@@ -74,33 +74,33 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         ))
         .with_state(state.clone());
 
-    let workflow_write_router = Router::new()
+    let template_write_router = Router::new()
         .route(
-            "/api/creative-studio/workflows",
-            post(create_creative_workflow),
+            "/api/creative-studio/templates",
+            post(create_creative_template),
         )
         .route(
-            "/api/creative-studio/workflows/{workflow_id}",
-            axum::routing::put(save_creative_workflow),
+            "/api/creative-studio/templates/{template_id}",
+            axum::routing::put(save_creative_template),
         )
         .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(
-            MAX_WORKFLOW_DEFINITION_BYTES + 64 * 1024,
+            MAX_TEMPLATE_DEFINITION_BYTES + 64 * 1024,
         ))
         .with_state(state.clone());
 
-    let workflow_run_write_router = Router::new()
+    let template_run_write_router = Router::new()
         .route(
-            "/api/creative-studio/workflow-runs",
-            post(create_creative_workflow_run),
+            "/api/creative-studio/template-runs",
+            post(create_creative_template_run),
         )
         .route(
-            "/api/creative-studio/workflow-runs/{workflow_run_id}",
-            axum::routing::put(save_creative_workflow_run),
+            "/api/creative-studio/template-runs/{template_run_id}",
+            axum::routing::put(save_creative_template_run),
         )
         .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(
-            MAX_WORKFLOW_RUN_AGGREGATE_BYTES + 64 * 1024,
+            MAX_TEMPLATE_RUN_AGGREGATE_BYTES + 64 * 1024,
         ))
         .with_state(state.clone());
 
@@ -176,24 +176,24 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
             post(sync_prompt_catalog),
         )
         .route(
-            "/api/creative-studio/workflow-drafts",
-            post(create_workflow_draft),
+            "/api/creative-studio/template-drafts",
+            post(create_template_draft),
         )
         .route(
-            "/api/creative-studio/workflows",
-            get(list_creative_workflows),
+            "/api/creative-studio/templates",
+            get(list_creative_templates),
         )
         .route(
-            "/api/creative-studio/workflows/{workflow_id}",
-            get(get_creative_workflow).delete(delete_creative_workflow),
+            "/api/creative-studio/templates/{template_id}",
+            get(get_creative_template).delete(delete_creative_template),
         )
         .route(
-            "/api/creative-studio/workflow-runs",
-            get(list_creative_workflow_runs),
+            "/api/creative-studio/template-runs",
+            get(list_creative_template_runs),
         )
         .route(
-            "/api/creative-studio/workflow-runs/{workflow_run_id}",
-            get(get_creative_workflow_run),
+            "/api/creative-studio/template-runs/{template_run_id}",
+            get(get_creative_template_run),
         )
         .route(
             "/api/creative-studio/assets",
@@ -209,8 +209,8 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         )
         .with_state(state)
         .merge(legacy_project_alias_router)
-        .merge(workflow_write_router)
-        .merge(workflow_run_write_router)
+        .merge(template_write_router)
+        .merge(template_run_write_router)
         .merge(archive_import_router)
         .merge(upload_router)
 }
@@ -627,25 +627,25 @@ async fn sync_prompt_catalog(
     Ok(Json(ApiResponse::ok(catalog)))
 }
 
-// ── canonical Creative Studio workflows ────────────────────────────────────
+// ── canonical Creative Studio templates ────────────────────────────────────
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CreateWorkflowDraftRequest {
+struct CreateTemplateDraftRequest {
     prompt: String,
-    model: CreateWorkflowDraftModel,
+    model: CreateTemplateDraftModel,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CreateWorkflowDraftModel {
+struct CreateTemplateDraftModel {
     provider_id: String,
     model: String,
 }
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateWorkflowDraftResponse {
+struct CreateTemplateDraftResponse {
     text: String,
 }
 
@@ -653,17 +653,17 @@ struct CreateWorkflowDraftResponse {
 /// guard spans exact capability validation and the live stream to fence
 /// destructive Provider/model deletion. Ordinary updates are not covered by
 /// this barrier; the app runner resolves and freezes one config snapshot.
-async fn create_workflow_draft(
+async fn create_template_draft(
     State(state): State<WorkshopRouterState>,
     Extension(user): Extension<CurrentUser>,
-    body: Result<Json<CreateWorkflowDraftRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<CreateWorkflowDraftResponse>>, AppError> {
+    body: Result<Json<CreateTemplateDraftRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CreateTemplateDraftResponse>>, AppError> {
     let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
     state
         .service
         .require_creative_studio_owner(user.id.as_str())
         .await?;
-    let run_request = workflow_draft_run_request(
+    let run_request = template_draft_run_request(
         request.prompt,
         request.model.provider_id,
         request.model.model,
@@ -672,197 +672,197 @@ async fn create_workflow_draft(
     let _provider_guard = state.service.provider_read_guard().await;
     state
         .service
-        .require_workflow_draft_chat_model(&run_request.provider_id, &run_request.model)
+        .require_template_draft_chat_model(&run_request.provider_id, &run_request.model)
         .await?;
-    let text = state.workflow_draft_runner.run(run_request).await?;
+    let text = state.template_draft_runner.run(run_request).await?;
     if text.trim().is_empty() {
         return Err(AppError::BadGateway(
-            "workflow draft model returned an empty response".into(),
+            "template draft model returned an empty response".into(),
         ));
     }
-    Ok(Json(ApiResponse::ok(CreateWorkflowDraftResponse { text })))
+    Ok(Json(ApiResponse::ok(CreateTemplateDraftResponse { text })))
 }
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CreativeWorkflowListResponse {
-    workflows: Vec<CreativeWorkflowDefinitionV1>,
+struct CreativeTemplateListResponse {
+    templates: Vec<CreativeTemplateDefinitionV1>,
 }
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CreativeWorkflowResponse {
-    workflow: CreativeWorkflowDefinitionV1,
+struct CreativeTemplateResponse {
+    template: CreativeTemplateDefinitionV1,
 }
 
-async fn list_creative_workflows(
+async fn list_creative_templates(
     State(state): State<WorkshopRouterState>,
     Extension(_user): Extension<CurrentUser>,
-) -> Result<Json<ApiResponse<CreativeWorkflowListResponse>>, AppError> {
-    Ok(Json(ApiResponse::ok(CreativeWorkflowListResponse {
-        workflows: state.service.list_creative_workflows().await?,
+) -> Result<Json<ApiResponse<CreativeTemplateListResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(CreativeTemplateListResponse {
+        templates: state.service.list_creative_templates().await?,
     })))
 }
 
-async fn get_creative_workflow(
+async fn get_creative_template(
     State(state): State<WorkshopRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(workflow_id): Path<String>,
-) -> Result<Json<ApiResponse<CreativeWorkflowResponse>>, AppError> {
-    Ok(Json(ApiResponse::ok(CreativeWorkflowResponse {
-        workflow: state.service.get_creative_workflow(&workflow_id).await?,
+    Path(template_id): Path<String>,
+) -> Result<Json<ApiResponse<CreativeTemplateResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(CreativeTemplateResponse {
+        template: state.service.get_creative_template(&template_id).await?,
     })))
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CreateCreativeWorkflowRequest {
-    workflow: CreativeWorkflowDefinitionV1,
+struct CreateCreativeTemplateRequest {
+    template: CreativeTemplateDefinitionV1,
 }
 
-async fn create_creative_workflow(
+async fn create_creative_template(
     State(state): State<WorkshopRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    body: Result<Json<CreateCreativeWorkflowRequest>, JsonRejection>,
+    body: Result<Json<CreateCreativeTemplateRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
     let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
-    let workflow = state
+    let template = state
         .service
-        .create_creative_workflow(request.workflow)
+        .create_creative_template(request.template)
         .await?;
     Ok((
         StatusCode::CREATED,
-        Json(ApiResponse::ok(CreativeWorkflowResponse { workflow })),
+        Json(ApiResponse::ok(CreativeTemplateResponse { template })),
     ))
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SaveCreativeWorkflowRequest {
+struct SaveCreativeTemplateRequest {
     expected_revision: String,
-    workflow: CreativeWorkflowDefinitionV1,
+    template: CreativeTemplateDefinitionV1,
 }
 
-async fn save_creative_workflow(
+async fn save_creative_template(
     State(state): State<WorkshopRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(workflow_id): Path<String>,
-    body: Result<Json<SaveCreativeWorkflowRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<CreativeWorkflowResponse>>, AppError> {
+    Path(template_id): Path<String>,
+    body: Result<Json<SaveCreativeTemplateRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CreativeTemplateResponse>>, AppError> {
     let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
-    let workflow = state
+    let template = state
         .service
-        .save_creative_workflow(
-            &workflow_id,
+        .save_creative_template(
+            &template_id,
             &request.expected_revision,
-            request.workflow,
+            request.template,
         )
         .await?;
-    Ok(Json(ApiResponse::ok(CreativeWorkflowResponse {
-        workflow,
+    Ok(Json(ApiResponse::ok(CreativeTemplateResponse {
+        template,
     })))
 }
 
-async fn delete_creative_workflow(
+async fn delete_creative_template(
     State(state): State<WorkshopRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(workflow_id): Path<String>,
+    Path(template_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    state.service.delete_creative_workflow(&workflow_id).await?;
+    state.service.delete_creative_template(&template_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ── durable Creative Studio workflow runs ─────────────────────────────────
+// ── durable Creative Studio template runs ─────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CreativeWorkflowRunQuery {
-    workflow_id: Option<String>,
+struct CreativeTemplateRunQuery {
+    template_id: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CreativeWorkflowRunListResponse {
-    runs: Vec<CreativeWorkflowRunAggregateV1>,
+struct CreativeTemplateRunListResponse {
+    runs: Vec<CreativeTemplateRunAggregateV1>,
 }
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CreativeWorkflowRunResponse {
-    run: CreativeWorkflowRunAggregateV1,
+struct CreativeTemplateRunResponse {
+    run: CreativeTemplateRunAggregateV1,
 }
 
-async fn list_creative_workflow_runs(
+async fn list_creative_template_runs(
     State(state): State<WorkshopRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Query(query): Query<CreativeWorkflowRunQuery>,
-) -> Result<Json<ApiResponse<CreativeWorkflowRunListResponse>>, AppError> {
-    Ok(Json(ApiResponse::ok(CreativeWorkflowRunListResponse {
+    Query(query): Query<CreativeTemplateRunQuery>,
+) -> Result<Json<ApiResponse<CreativeTemplateRunListResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(CreativeTemplateRunListResponse {
         runs: state
             .service
-            .list_creative_workflow_runs(query.workflow_id.as_deref())
+            .list_creative_template_runs(query.template_id.as_deref())
             .await?,
     })))
 }
 
-async fn get_creative_workflow_run(
+async fn get_creative_template_run(
     State(state): State<WorkshopRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(workflow_run_id): Path<String>,
-) -> Result<Json<ApiResponse<CreativeWorkflowRunResponse>>, AppError> {
-    Ok(Json(ApiResponse::ok(CreativeWorkflowRunResponse {
+    Path(template_run_id): Path<String>,
+) -> Result<Json<ApiResponse<CreativeTemplateRunResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(CreativeTemplateRunResponse {
         run: state
             .service
-            .get_creative_workflow_run(&workflow_run_id)
+            .get_creative_template_run(&template_run_id)
             .await?,
     })))
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CreateCreativeWorkflowRunRequest {
-    request: CreativeWorkflowRunCreateRequest,
+struct CreateCreativeTemplateRunRequest {
+    request: CreativeTemplateRunCreateRequest,
 }
 
-async fn create_creative_workflow_run(
+async fn create_creative_template_run(
     State(state): State<WorkshopRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    body: Result<Json<CreateCreativeWorkflowRunRequest>, JsonRejection>,
+    body: Result<Json<CreateCreativeTemplateRunRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
     let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
     let run = state
         .service
-        .create_creative_workflow_run(request.request)
+        .create_creative_template_run(request.request)
         .await?;
     Ok((
         StatusCode::CREATED,
-        Json(ApiResponse::ok(CreativeWorkflowRunResponse { run })),
+        Json(ApiResponse::ok(CreativeTemplateRunResponse { run })),
     ))
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SaveCreativeWorkflowRunRequest {
+struct SaveCreativeTemplateRunRequest {
     expected_revision: String,
-    run: CreativeWorkflowRunAggregateV1,
+    run: CreativeTemplateRunAggregateV1,
 }
 
-async fn save_creative_workflow_run(
+async fn save_creative_template_run(
     State(state): State<WorkshopRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(workflow_run_id): Path<String>,
-    body: Result<Json<SaveCreativeWorkflowRunRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<CreativeWorkflowRunResponse>>, AppError> {
+    Path(template_run_id): Path<String>,
+    body: Result<Json<SaveCreativeTemplateRunRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CreativeTemplateRunResponse>>, AppError> {
     let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
     let run = state
         .service
-        .save_creative_workflow_run(
-            &workflow_run_id,
+        .save_creative_template_run(
+            &template_run_id,
             &request.expected_revision,
             request.run,
         )
         .await?;
-    Ok(Json(ApiResponse::ok(CreativeWorkflowRunResponse { run })))
+    Ok(Json(ApiResponse::ok(CreativeTemplateRunResponse { run })))
 }
 
 async fn export_creative_project_archive(
@@ -1262,19 +1262,19 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::{WorkshopService, WorkflowDraftRunRequest, WorkflowDraftRunner};
-    use crate::workflow::{
-        CreativeWorkflowMetadata, CreativeWorkflowOutputPlan, CreativeWorkflowPromptSource,
-        CreativeWorkflowStep, CreativeWorkflowTemplate, CreativeWorkflowTemplateSegment,
-        CreativeWorkflowVariable, CreativeWorkflowVisibility,
+    use crate::{WorkshopService, TemplateDraftRunRequest, TemplateDraftRunner};
+    use crate::template::{
+        CreativeTemplateMetadata, CreativeTemplateOutputPlan, CreativeTemplatePromptSource,
+        CreativeTemplateStep, CreativePromptTemplate, CreativePromptTemplateSegment,
+        CreativeTemplateVariable, CreativeTemplateVisibility,
     };
 
-    struct RecordingWorkflowDraftRunner {
-        calls: Mutex<Vec<WorkflowDraftRunRequest>>,
+    struct RecordingTemplateDraftRunner {
+        calls: Mutex<Vec<TemplateDraftRunRequest>>,
         response: String,
     }
 
-    impl RecordingWorkflowDraftRunner {
+    impl RecordingTemplateDraftRunner {
         fn new(response: impl Into<String>) -> Self {
             Self {
                 calls: Mutex::new(Vec::new()),
@@ -1282,26 +1282,26 @@ mod tests {
             }
         }
 
-        fn calls(&self) -> Vec<WorkflowDraftRunRequest> {
+        fn calls(&self) -> Vec<TemplateDraftRunRequest> {
             self.calls.lock().unwrap().clone()
         }
     }
 
     #[async_trait::async_trait]
-    impl WorkflowDraftRunner for RecordingWorkflowDraftRunner {
-        async fn run(&self, request: WorkflowDraftRunRequest) -> Result<String, AppError> {
+    impl TemplateDraftRunner for RecordingTemplateDraftRunner {
+        async fn run(&self, request: TemplateDraftRunRequest) -> Result<String, AppError> {
             self.calls.lock().unwrap().push(request);
             Ok(self.response.clone())
         }
     }
 
-    struct BlockingWorkflowDraftRunner {
-        calls: Mutex<Vec<WorkflowDraftRunRequest>>,
+    struct BlockingTemplateDraftRunner {
+        calls: Mutex<Vec<TemplateDraftRunRequest>>,
         entered: tokio::sync::Semaphore,
         release: tokio::sync::Semaphore,
     }
 
-    impl BlockingWorkflowDraftRunner {
+    impl BlockingTemplateDraftRunner {
         fn new() -> Self {
             Self {
                 calls: Mutex::new(Vec::new()),
@@ -1312,12 +1312,12 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl WorkflowDraftRunner for BlockingWorkflowDraftRunner {
-        async fn run(&self, request: WorkflowDraftRunRequest) -> Result<String, AppError> {
+    impl TemplateDraftRunner for BlockingTemplateDraftRunner {
+        async fn run(&self, request: TemplateDraftRunRequest) -> Result<String, AppError> {
             self.calls.lock().unwrap().push(request);
             self.entered.add_permits(1);
             self.release.acquire().await.unwrap().forget();
-            Ok("```json\n{\"kind\":\"nomifun.creative-studio.workflow-draft/v1\"}\n```".into())
+            Ok("```json\n{\"kind\":\"nomifun.creative-studio.template-draft/v1\"}\n```".into())
         }
     }
 
@@ -1332,14 +1332,14 @@ mod tests {
         tempfile::TempDir,
         Arc<nomifun_db::Database>,
     ) {
-        test_state_with_database_and_runner(Arc::new(RecordingWorkflowDraftRunner::new(
-            "unused workflow draft",
+        test_state_with_database_and_runner(Arc::new(RecordingTemplateDraftRunner::new(
+            "unused template draft",
         )))
         .await
     }
 
     async fn test_state_with_database_and_runner(
-        workflow_draft_runner: Arc<dyn WorkflowDraftRunner>,
+        template_draft_runner: Arc<dyn TemplateDraftRunner>,
     ) -> (
         WorkshopRouterState,
         CurrentUser,
@@ -1359,32 +1359,32 @@ mod tests {
             username: "owner".into(),
         };
         (
-            WorkshopRouterState::new(service, workflow_draft_runner),
+            WorkshopRouterState::new(service, template_draft_runner),
             user,
             data_dir,
             database,
         )
     }
 
-    fn workflow_definition() -> CreativeWorkflowDefinitionV1 {
+    fn template_definition() -> CreativeTemplateDefinitionV1 {
         let variable_id = nomifun_common::generate_id();
         let template_id = nomifun_common::generate_id();
         let render_id = nomifun_common::generate_id();
         let generate_id = nomifun_common::generate_id();
-        CreativeWorkflowDefinitionV1 {
-            id: nomifun_common::CreativeStudioWorkflowId::new().into_string(),
+        CreativeTemplateDefinitionV1 {
+            id: nomifun_common::CreativeStudioTemplateId::new().into_string(),
             revision: 1,
-            metadata: CreativeWorkflowMetadata {
+            metadata: CreativeTemplateMetadata {
                 name: "电商海报".into(),
                 description: "固定结构".into(),
                 category: "电商".into(),
-                visibility: CreativeWorkflowVisibility::Private,
+                visibility: CreativeTemplateVisibility::Private,
                 tags: Vec::new(),
                 created_at: 0,
                 updated_at: 0,
             },
-            output: CreativeWorkflowOutputPlan::SingleImage,
-            variables: vec![CreativeWorkflowVariable::Text {
+            output: CreativeTemplateOutputPlan::SingleImage,
+            variables: vec![CreativeTemplateVariable::Text {
                 id: variable_id.clone(),
                 key: "product_name".into(),
                 label: "产品名称".into(),
@@ -1395,33 +1395,33 @@ mod tests {
                 min_length: 0,
                 max_length: 200,
             }],
-            templates: vec![CreativeWorkflowTemplate {
+            templates: vec![CreativePromptTemplate {
                 id: template_id.clone(),
                 name: "主提示词".into(),
                 segments: vec![
-                    CreativeWorkflowTemplateSegment::Text { text: "为 ".into() },
-                    CreativeWorkflowTemplateSegment::Variable { variable_id },
-                    CreativeWorkflowTemplateSegment::Text { text: " 生成海报".into() },
+                    CreativePromptTemplateSegment::Text { text: "为 ".into() },
+                    CreativePromptTemplateSegment::Variable { variable_id },
+                    CreativePromptTemplateSegment::Text { text: " 生成海报".into() },
                 ],
             }],
             steps: vec![
-                CreativeWorkflowStep::RenderTemplate {
+                CreativeTemplateStep::RenderTemplate {
                     id: render_id.clone(),
                     name: "渲染提示词".into(),
                     depends_on: Vec::new(),
                     enabled: true,
                     template_id: template_id.clone(),
                 },
-                CreativeWorkflowStep::GenerateImages {
+                CreativeTemplateStep::GenerateImages {
                     id: generate_id,
                     name: "生成图片".into(),
                     depends_on: vec![render_id],
                     enabled: true,
-                    prompt_source: CreativeWorkflowPromptSource::Template { template_id },
+                    prompt_source: CreativeTemplatePromptSource::Template { template_id },
                     reference_variable_ids: Vec::new(),
-                    generation: crate::workflow::CreativeWorkflowImageGenerationSettings {
+                    generation: crate::template::CreativeTemplateImageGenerationSettings {
                         model: None,
-                        quality: crate::workflow::CreativeWorkflowImageQuality::Auto,
+                        quality: crate::template::CreativeTemplateImageQuality::Auto,
                         width: 1024,
                         height: 1024,
                         images_per_prompt: 1,
@@ -1508,12 +1508,12 @@ mod tests {
             .unwrap()
     }
 
-    async fn post_workflow_draft(app: &Router, body: Value) -> Response {
+    async fn post_template_draft(app: &Router, body: Value) -> Response {
         app.clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/creative-studio/workflow-drafts")
+                    .uri("/api/creative-studio/template-drafts")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -1523,21 +1523,21 @@ mod tests {
     }
 
     #[derive(Debug, PartialEq, Eq)]
-    struct WorkflowDraftPersistenceCounts {
+    struct TemplateDraftPersistenceCounts {
         conversations: i64,
         messages: i64,
         projects: i64,
-        workflows: i64,
-        workflow_runs: i64,
+        templates: i64,
+        template_runs: i64,
         agent_sessions: i64,
         proposal_receipts: i64,
         creation_tasks: i64,
         assets: i64,
     }
 
-    async fn workflow_draft_persistence_counts(
+    async fn template_draft_persistence_counts(
         database: &nomifun_db::Database,
-    ) -> WorkflowDraftPersistenceCounts {
+    ) -> TemplateDraftPersistenceCounts {
         async fn count(database: &nomifun_db::Database, table: &str) -> i64 {
             let query = format!("SELECT COUNT(*) FROM {table}");
             nomifun_db::sqlx::query_scalar(&query)
@@ -1545,12 +1545,12 @@ mod tests {
                 .await
                 .unwrap()
         }
-        WorkflowDraftPersistenceCounts {
+        TemplateDraftPersistenceCounts {
             conversations: count(database, "conversations").await,
             messages: count(database, "messages").await,
             projects: count(database, "creative_studio_projects").await,
-            workflows: count(database, "creative_studio_workflows").await,
-            workflow_runs: count(database, "creative_studio_workflow_runs").await,
+            templates: count(database, "creative_studio_templates").await,
+            template_runs: count(database, "creative_studio_template_runs").await,
             agent_sessions: count(database, "creative_studio_agent_sessions").await,
             proposal_receipts: count(database, "creative_studio_agent_proposal_receipts").await,
             creation_tasks: count(database, "creation_tasks").await,
@@ -2117,19 +2117,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workflow_draft_route_runs_one_exact_stateless_completion_without_persisting() {
+    async fn template_draft_route_runs_one_exact_stateless_completion_without_persisting() {
         let artifact = r#"```json
-{"kind":"nomifun.creative-studio.workflow-draft/v1","summary":"三张社交海报","draft":{"mode":"multi-image-series","name":"社交海报组","description":"同一主题的三张海报","category":"社交媒体","promptTemplate":"为 {{topic}} 设计 {{style}} 风格的 {{platform}} 海报"}}
+{"kind":"nomifun.creative-studio.template-draft/v1","summary":"三张社交海报","draft":{"mode":"multi-image-series","name":"社交海报组","description":"同一主题的三张海报","category":"社交媒体","promptTemplate":"为 {{topic}} 设计 {{style}} 风格的 {{platform}} 海报"}}
 ```"#;
-        let runner = Arc::new(RecordingWorkflowDraftRunner::new(artifact));
+        let runner = Arc::new(RecordingTemplateDraftRunner::new(artifact));
         let (state, owner, _data_dir, database) =
             test_state_with_database_and_runner(runner.clone()).await;
         let provider_id = ProviderId::new().into_string();
         seed_enabled_chat_model(&database, &provider_id, "chat-model").await;
-        let before = workflow_draft_persistence_counts(&database).await;
+        let before = template_draft_persistence_counts(&database).await;
         let app = workshop_routes(state).layer(Extension(owner));
 
-        let response = post_workflow_draft(
+        let response = post_template_draft(
             &app,
             serde_json::json!({
                 "prompt": "  设计三张统一风格的社交媒体海报  ",
@@ -2156,27 +2156,27 @@ mod tests {
         assert_eq!(calls[0].user_text, "设计三张统一风格的社交媒体海报");
         assert_eq!(
             calls[0].system_prompt,
-            crate::workflow_draft::WORKFLOW_DRAFT_SYSTEM_PROMPT
+            crate::template_draft::TEMPLATE_DRAFT_SYSTEM_PROMPT
         );
         assert!(calls[0]
             .system_prompt
-            .contains("nomifun.creative-studio.workflow-draft/v1"));
+            .contains("nomifun.creative-studio.template-draft/v1"));
         assert!(calls[0].system_prompt.contains("{{product_name}}"));
         assert!(calls[0].system_prompt.contains("{{topic}}"));
-        assert!(calls[0].system_prompt.contains("Never save or run a workflow"));
+        assert!(calls[0].system_prompt.contains("Never save or run a template"));
 
-        let after = workflow_draft_persistence_counts(&database).await;
+        let after = template_draft_persistence_counts(&database).await;
         assert_eq!(after, before, "draft completion must not persist product state");
     }
 
     #[tokio::test]
-    async fn workflow_draft_route_rejects_owner_body_and_catalog_failures_before_runner() {
-        let runner = Arc::new(RecordingWorkflowDraftRunner::new("must not run"));
+    async fn template_draft_route_rejects_owner_body_and_catalog_failures_before_runner() {
+        let runner = Arc::new(RecordingTemplateDraftRunner::new("must not run"));
         let (state, owner, _data_dir, database) =
             test_state_with_database_and_runner(runner.clone()).await;
         let provider_id = ProviderId::new().into_string();
         seed_enabled_chat_model(&database, &provider_id, "chat-model").await;
-        let before = workflow_draft_persistence_counts(&database).await;
+        let before = template_draft_persistence_counts(&database).await;
         let valid = || {
             serde_json::json!({
                 "prompt": "设计一张产品海报",
@@ -2191,7 +2191,7 @@ mod tests {
             id: UserId::new(),
             username: "not-owner".into(),
         }));
-        let non_owner = post_workflow_draft(&non_owner_app, valid()).await;
+        let non_owner = post_template_draft(&non_owner_app, valid()).await;
         assert_eq!(non_owner.status(), StatusCode::FORBIDDEN);
 
         let app = workshop_routes(state).layer(Extension(owner));
@@ -2202,7 +2202,7 @@ mod tests {
             }),
             serde_json::json!({
                 "prompt": "😀".repeat(
-                    crate::workflow_draft::MAX_WORKFLOW_DRAFT_PROMPT_UTF16 / 2 + 1
+                    crate::template_draft::MAX_TEMPLATE_DRAFT_PROMPT_UTF16 / 2 + 1
                 ),
                 "model": { "providerId": provider_id, "model": "chat-model" }
             }),
@@ -2219,7 +2219,7 @@ mod tests {
                 "model": {
                     "providerId": provider_id,
                     "model": "m".repeat(
-                        crate::workflow_draft::MAX_WORKFLOW_DRAFT_MODEL_UTF16 + 1
+                        crate::template_draft::MAX_TEMPLATE_DRAFT_MODEL_UTF16 + 1
                     )
                 }
             }),
@@ -2238,11 +2238,11 @@ mod tests {
             }),
         ];
         for body in rejected {
-            let response = post_workflow_draft(&app, body).await;
+            let response = post_template_draft(&app, body).await;
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         }
 
-        let missing_exact = post_workflow_draft(
+        let missing_exact = post_template_draft(
             &app,
             serde_json::json!({
                 "prompt": "设计海报",
@@ -2260,19 +2260,19 @@ mod tests {
         .execute(database.pool())
         .await
         .unwrap();
-        let disabled = post_workflow_draft(&app, valid()).await;
+        let disabled = post_template_draft(&app, valid()).await;
         assert_eq!(disabled.status(), StatusCode::CONFLICT);
 
         assert!(
             runner.calls().is_empty(),
             "authorization, input, and catalog failures must precede model invocation"
         );
-        let after = workflow_draft_persistence_counts(&database).await;
+        let after = template_draft_persistence_counts(&database).await;
         assert_eq!(after, before, "rejected drafts must not persist product state");
     }
 
     #[tokio::test]
-    async fn workflow_draft_route_blocks_provider_deletion_guard_through_completion() {
+    async fn template_draft_route_blocks_provider_deletion_guard_through_completion() {
         let database = Arc::new(nomifun_db::init_database_memory().await.unwrap());
         let repo: Arc<dyn IWorkshopRepository> = Arc::new(SqliteWorkshopRepository::new(
             database.pool().clone(),
@@ -2284,7 +2284,7 @@ mod tests {
             repo,
             provider_lifecycle.clone(),
         );
-        let runner = Arc::new(BlockingWorkflowDraftRunner::new());
+        let runner = Arc::new(BlockingTemplateDraftRunner::new());
         let owner_id = nomifun_db::installation_owner_id(database.pool())
             .await
             .unwrap();
@@ -2298,7 +2298,7 @@ mod tests {
             .layer(Extension(owner));
 
         let response_task = tokio::spawn(async move {
-            post_workflow_draft(
+            post_template_draft(
                 &app,
                 serde_json::json!({
                     "prompt": "设计产品海报",
@@ -2876,20 +2876,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creative_workflow_routes_cover_canonical_crud() {
+    async fn creative_template_routes_cover_canonical_crud() {
         let (state, user, _data_dir) = test_state().await;
         let app = workshop_routes(state).layer(Extension(user));
-        let definition = workflow_definition();
-        let workflow_id = definition.id.clone();
+        let definition = template_definition();
+        let template_id = definition.id.clone();
 
-        let create_body = serde_json::to_vec(&serde_json::json!({ "workflow": definition }))
+        let create_body = serde_json::to_vec(&serde_json::json!({ "template": definition }))
             .unwrap();
         let created = app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/creative-studio/workflows")
+                    .uri("/api/creative-studio/templates")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(create_body))
                     .unwrap(),
@@ -2902,7 +2902,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/api/creative-studio/workflows")
+                    .uri("/api/creative-studio/templates")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2914,7 +2914,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri(format!("/api/creative-studio/workflows/{workflow_id}"))
+                    .uri(format!("/api/creative-studio/templates/{template_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2925,8 +2925,8 @@ mod tests {
             .await
             .unwrap();
         let detail_json: serde_json::Value = serde_json::from_slice(&detail_body).unwrap();
-        let mut replacement: CreativeWorkflowDefinitionV1 = serde_json::from_value(
-            detail_json["data"]["workflow"].clone(),
+        let mut replacement: CreativeTemplateDefinitionV1 = serde_json::from_value(
+            detail_json["data"]["template"].clone(),
         )
         .unwrap();
         replacement.revision = 2;
@@ -2937,12 +2937,12 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/creative-studio/workflows/{workflow_id}"))
+                    .uri(format!("/api/creative-studio/templates/{template_id}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
                             "expectedRevision": "1",
-                            "workflow": replacement,
+                            "template": replacement,
                         }))
                         .unwrap(),
                     ))
@@ -2956,7 +2956,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/creative-studio/workflows/{workflow_id}"))
+                    .uri(format!("/api/creative-studio/templates/{template_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2966,7 +2966,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creative_workflow_run_routes_cover_idempotent_create_list_get_and_cas() {
+    async fn creative_template_run_routes_cover_idempotent_create_list_get_and_cas() {
         let (state, user, _data_dir, database) = test_state_with_database().await;
         let provider_id = nomifun_common::ProviderId::new().into_string();
         let credentials = nomifun_common::encrypt_string(
@@ -3006,32 +3006,32 @@ mod tests {
         .await
         .unwrap();
 
-        let mut definition = workflow_definition();
+        let mut definition = template_definition();
         let variable_id = match &definition.variables[0] {
-            CreativeWorkflowVariable::Text { id, .. } => id.clone(),
-            _ => panic!("workflow fixture must contain a text variable"),
+            CreativeTemplateVariable::Text { id, .. } => id.clone(),
+            _ => panic!("template fixture must contain a text variable"),
         };
-        if let CreativeWorkflowStep::GenerateImages { generation, .. } = &mut definition.steps[1]
+        if let CreativeTemplateStep::GenerateImages { generation, .. } = &mut definition.steps[1]
         {
-            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+            generation.model = Some(crate::template::CreativeTemplateImageModelBinding {
                 provider_id,
                 model: "image-model".into(),
-                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+                task: crate::template::CreativeTemplateImageTask::ImageGeneration,
             });
         }
         let definition = state
             .service
-            .create_creative_workflow(definition)
+            .create_creative_template(definition)
             .await
             .unwrap();
-        let workflow_id = definition.id.clone();
-        let run_id = nomifun_common::CreativeStudioWorkflowRunId::new().into_string();
+        let template_id = definition.id.clone();
+        let template_run_id = nomifun_common::CreativeStudioTemplateRunId::new().into_string();
         let app = workshop_routes(state).layer(Extension(user));
         let create_json = serde_json::json!({
             "request": {
-                "runId": run_id,
-                "workflowId": workflow_id,
-                "workflowRevision": 1,
+                "templateRunId": template_run_id,
+                "templateId": template_id,
+                "templateRevision": 1,
                 "inputs": [{
                     "type": "text",
                     "variableId": variable_id,
@@ -3045,7 +3045,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/creative-studio/workflow-runs")
+                    .uri("/api/creative-studio/template-runs")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(serde_json::to_vec(&create_json).unwrap()))
                     .unwrap(),
@@ -3057,7 +3057,7 @@ mod tests {
             .await
             .unwrap();
         let created_json: Value = serde_json::from_slice(&created_body).unwrap();
-        let mut run: CreativeWorkflowRunAggregateV1 =
+        let mut run: CreativeTemplateRunAggregateV1 =
             serde_json::from_value(created_json["data"]["run"].clone()).unwrap();
 
         let replay = app
@@ -3065,7 +3065,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/creative-studio/workflow-runs")
+                    .uri("/api/creative-studio/template-runs")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(serde_json::to_vec(&create_json).unwrap()))
                     .unwrap(),
@@ -3079,7 +3079,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!(
-                        "/api/creative-studio/workflow-runs?workflowId={workflow_id}"
+                        "/api/creative-studio/template-runs?templateId={template_id}"
                     ))
                     .body(Body::empty())
                     .unwrap(),
@@ -3091,7 +3091,9 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri(format!("/api/creative-studio/workflow-runs/{run_id}"))
+                    .uri(format!(
+                        "/api/creative-studio/template-runs/{template_run_id}"
+                    ))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3100,7 +3102,7 @@ mod tests {
         assert_eq!(detail.status(), StatusCode::OK);
 
         run.revision = 2;
-        run.record.status = crate::workflow_run::CreativeWorkflowRunStatus::Queued;
+        run.record.status = crate::template_run::CreativeTemplateRunStatus::Queued;
         run.record.task_ids = vec![nomifun_common::generate_id()];
         run.record.queued_at = Some(run.request.requested_at + 1);
         let saved = app
@@ -3108,7 +3110,9 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/creative-studio/workflow-runs/{run_id}"))
+                    .uri(format!(
+                        "/api/creative-studio/template-runs/{template_run_id}"
+                    ))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({

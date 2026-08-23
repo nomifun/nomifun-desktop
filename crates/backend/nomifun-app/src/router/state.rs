@@ -86,7 +86,7 @@ pub struct ModuleStates {
     pub companion: CompanionRouterState,
     /// 客服独立域 (customer-service domain).
     pub customer_service: nomifun_customer_service::CustomerServiceRouterState,
-    /// Creative Studio project, asset, workflow, and archive domain.
+    /// Creative Studio project, asset, template, and archive domain.
     pub workshop: WorkshopRouterState,
     /// 小程序 (mini-app) library: metadata CRUD + the document serve channel.
     pub miniapp: nomifun_miniapp::MiniAppRouterState,
@@ -1368,7 +1368,7 @@ pub fn build_webhook_state(services: &AppServices) -> WebhookRouterState {
 pub fn build_workshop_state(services: &AppServices) -> WorkshopRouterState {
     WorkshopRouterState::new(
         services.workshop_service.clone(),
-        Arc::new(crate::services::AgentWorkflowDraftRunner {
+        Arc::new(crate::services::AgentTemplateDraftRunner {
             model_invoke: services.model_invoke_service.clone(),
             workspace: services.data_dir.clone(),
         }),

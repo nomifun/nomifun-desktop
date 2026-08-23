@@ -149,7 +149,7 @@ Agent 小程序，让 Agent 创建的应用继续复用同一套本地运行时�
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/readme/zh/skills.png" alt="当前 NomiFun Skill 中心"><br/><sub><b>Skill 中心 · 可复用、受治理的 Agent 能力</b></sub></td>
-    <td width="50%"><img src="docs/images/readme/zh/creative-workshop.png" alt="NomiFun 创意工坊"><br/><sub><b>创意工坊 · 无限画布、工作台、提示词、素材与 Workflow</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/zh/creative-workshop.png" alt="NomiFun 创意工坊"><br/><sub><b>创意工坊 · 无限画布、工作台、提示词、素材与模板</b></sub></td>
   </tr>
 </table>
 
@@ -168,7 +168,7 @@ NomiFun Desktop 已经从 Agent 聊天客户端发展为本地优先、可扩展
 |---|---|
 | **多 Agent 执行集群** | 按依赖规划任务，委派给专用 Agent，并行调度执行，同时提供实时状态、真实会话、审批、重试与恢复。 |
 | **Agent 小程序** | 把普通 Agent 会话变成可预览、可发布的本地 Web 工具，同时保留可编辑工作副本与稳定的发布快照。 |
-| **创意工坊** | 提供持久化无限 Canvas、独立 Image/Video Workbench、提示词与素材库、集合/标签/搜索、exact 模型媒体任务、私有 Workflow/模板与受限 3D 导演台。 |
+| **创意工坊** | 提供持久化无限 Canvas、独立 Image/Video Workbench、提示词与素材库、集合/标签/搜索、exact 模型媒体任务、私有模板与受限 3D 导演台。 |
 | **按任务路由的多模型控制面** | 将 provider 凭据与模型记录分开管理，支持原生与兼容/自定义 endpoint（含本地、自托管服务），并为聊天、实时、语音、视觉、媒体生成、Embedding 与 Rerank 提供任务级路由和故障切换。 |
 | **NomiFun 免费模型** | 内置托管供应商，无需先手动新建供应商，即可启用、刷新目录、健康检查并开箱使用。 |
 | **手机、机器人与开放接入** | Mobile 直连 Desktop，小智机器人绑定伙伴，并通过 WebUI、REST、MCP、IM 渠道和 NomiRelay 安全开放能力。 |
@@ -207,7 +207,7 @@ ASR、TTS、会话和工具协同。接入入口就在每个伙伴的**远程控
 > 指南：[`docs/guides/creative-studio.zh.md`](docs/guides/creative-studio.zh.md)
 
 创意工坊把持久化无限 Canvas、独立 Image/Video Workbench、提示词与素材库、私有
-Workflow/模板和受限 3D 导演台放在一起。它没有 Project 产品对象：Canvas 就是
+模板和受限 3D 导演台放在一起。它没有 Project 产品对象：Canvas 就是
 Canvas，Image/Video 在零 Canvas 时也可以独立使用。提示词库让常用 brief 紧贴当前
 创作，素材库支持文字、图片、视频和音频，并提供搜索、类型筛选、集合、标签与元数据，
 便于跨轮次复用。Canvas 持久化节点恰好有文本、图片、视频、音频、全景、配置、导演

@@ -15,7 +15,7 @@ import {
   CreativeCanvasHistoryPanel,
   CreativeCanvasOutlinePanel,
   CreativeCanvasPropertiesPanel,
-  CreativeCanvasWorkflowUnwiredPanel,
+  CreativeCanvasTemplateUnwiredPanel,
   creativeCanvasNodeDisplayName,
 } from './CreativeCanvasPanels';
 
@@ -138,17 +138,17 @@ describe('Creative Canvas product presentation panels', () => {
     expect(html.includes('不会臆造历史记录')).toBe(true);
   });
 
-  test('keeps remaining unavailable agent and workflow adapters explicit', () => {
+  test('keeps remaining unavailable agent and template adapters explicit', () => {
     const html = renderToStaticMarkup(
       <>
         <CreativeCanvasAssistantUnwiredPanel />
-        <CreativeCanvasWorkflowUnwiredPanel />
+        <CreativeCanvasTemplateUnwiredPanel />
       </>
     );
 
     expect(html.includes('data-unavailable-kind="assistant"')).toBe(true);
     expect(html.includes('画布专属会话绑定')).toBe(true);
-    expect(html.includes('data-unavailable-kind="workflows"')).toBe(true);
+    expect(html.includes('data-unavailable-kind="templates"')).toBe(true);
     expect(html.includes('不会显示示例模板')).toBe(true);
     expect(html.includes('<textarea')).toBe(false);
   });

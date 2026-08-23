@@ -151,7 +151,7 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
       'creativeStudio.canvas.panels.left.canvas',
       'creativeStudio.canvas.panels.left.assets',
       'creativeStudio.canvas.panels.left.prompts',
-      'creativeStudio.canvas.panels.left.workflows',
+      'creativeStudio.canvas.panels.left.templates',
       'creativeStudio.canvas.panels.right.assistant',
       'creativeStudio.canvas.panels.right.properties',
       'creativeStudio.canvas.panels.bottom.history',

@@ -48,7 +48,7 @@ Canvas 内的**创作助手**提供。待 Canvas 或 Director 的保存结果处
 | --- | --- | --- |
 | `CanvasNode` | `{ canvasId, nodeId }` | 从 Canvas 节点发起的任务。 |
 | `StandaloneWorkbench` | `{ workbenchKind }` | Image、Video 或其他独立工作台任务。 |
-| `WorkflowStep` | 保持现有 workflow/run/step 身份 | Workflow 执行。 |
+| `TemplateStep` | 保持现有 template/run/step 身份 | 模板执行。 |
 
 只有从 Canvas 节点发起的任务才拥有 Canvas owner。独立任务不会获得隐藏、临时、
 默认或自动选择的 Canvas。旧 standalone 行可以保留 legacy `project_id` 作为 inert
@@ -220,7 +220,7 @@ Conversation 消息与活跃 pending turn 位于归档之外，导入不会克�
 2. NomiFun 执行一次不带工具的 completion：墙钟上限 120 秒、输出上限 4,096 token、
    本地响应上限 262,156 bytes。
 3. 客户端只接受一个位于最终位置、结构严格的
-   `nomifun.creative-studio.workflow-draft/v1` JSON artifact。草稿模式仅有
+   `nomifun.creative-studio.template-draft/v1` JSON artifact。草稿模式仅有
    `single-image` 与 `multi-image-series`。
 4. 先审阅预览。**应用**只会把一个私有的内存草稿打开到现有模板编辑器。
 5. 需要时继续编辑，然后点击**保存**。只有这次显式 Save 才创建模板；Apply
@@ -230,7 +230,7 @@ Conversation 消息与活跃 pending turn 位于归档之外，导入不会克�
 或模板运行记录；也不会自动重试、模型故障切换、保存或执行。模型不能决定 ID、
 revision、时间戳、可见性、标签、媒体生成模型或素材。公开模板发布/发现与复杂
 模板会话不在首发范围内。首发 UI 是 private-only：新建、编辑、复制与 AI Apply
-都会把底层 Workflow 定义规范化为 `private`，界面不提供公开可见性开关。
+都会把底层模板定义规范化为 `private`，界面不提供公开可见性开关。
 
 ## Director v1 子集
 

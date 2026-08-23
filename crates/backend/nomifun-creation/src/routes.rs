@@ -67,10 +67,10 @@ enum CreativeTaskOwnerRequest {
     StandaloneWorkbench {
         workbench_kind: StandaloneWorkbenchKind,
     },
-    WorkflowStep {
-        workflow_id: String,
-        workflow_run_id: String,
-        workflow_step_id: String,
+    TemplateStep {
+        template_id: String,
+        template_run_id: String,
+        template_step_id: String,
     },
 }
 
@@ -89,14 +89,14 @@ impl From<CreativeTaskOwnerRequest> for CreativeTaskOwner {
             } => Self::StandaloneWorkbench {
                 workbench_kind,
             },
-            CreativeTaskOwnerRequest::WorkflowStep {
-                workflow_id,
-                workflow_run_id,
-                workflow_step_id,
-            } => Self::WorkflowStep {
-                workflow_id,
-                workflow_run_id,
-                workflow_step_id,
+            CreativeTaskOwnerRequest::TemplateStep {
+                template_id,
+                template_run_id,
+                template_step_id,
+            } => Self::TemplateStep {
+                template_id,
+                template_run_id,
+                template_step_id,
             },
         }
     }
@@ -266,10 +266,10 @@ mod tests {
 
         let parsed = serde_json::from_value::<CreateCreativeTaskRequest>(json!({
             "owner": {
-                "kind": "workflow_step",
-                "workflow_id": "0190f5fe-7c00-7a00-8000-000000000001",
-                "workflow_run_id": "0190f5fe-7c00-7a00-8000-000000000002",
-                "workflow_step_id": "0190f5fe-7c00-7a00-8000-000000000003"
+                "kind": "template_step",
+                "template_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                "template_run_id": "0190f5fe-7c00-7a00-8000-000000000002",
+                "template_step_id": "0190f5fe-7c00-7a00-8000-000000000003"
             },
             "provider_id": "0190f5fe-7c00-7a00-8000-000000000004",
             "model": "image-model-v1",
@@ -279,9 +279,24 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(
-            parsed.owner,
-            CreativeTaskOwnerRequest::WorkflowStep { .. }
+            &parsed.owner,
+            CreativeTaskOwnerRequest::TemplateStep { .. }
         ));
+        let owner = CreativeTaskOwner::from(parsed.owner);
+        let owner_wire = serde_json::to_value(owner).unwrap();
+        assert_eq!(owner_wire["kind"], "template_step");
+        assert_eq!(
+            owner_wire["template_id"],
+            "0190f5fe-7c00-7a00-8000-000000000001"
+        );
+        assert_eq!(
+            owner_wire["template_run_id"],
+            "0190f5fe-7c00-7a00-8000-000000000002"
+        );
+        assert_eq!(
+            owner_wire["template_step_id"],
+            "0190f5fe-7c00-7a00-8000-000000000003"
+        );
 
         let standalone = serde_json::from_value::<CreateCreativeTaskRequest>(json!({
             "owner": {
@@ -422,9 +437,9 @@ mod tests {
             creation_task_id: "0190f5fe-7c00-7a00-8000-000000000001".into(),
             canvas_id: None,
             workbench_kind: None,
-            workflow_id: None,
-            workflow_run_id: None,
-            workflow_step_id: None,
+            template_id: None,
+            template_run_id: None,
+            template_step_id: None,
             node_id: None,
             provider_id: "0190f5fe-7c00-7a00-8000-000000000004".into(),
             model: "image-model-v1".into(),

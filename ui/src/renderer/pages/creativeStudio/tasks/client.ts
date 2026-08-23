@@ -245,17 +245,17 @@ function parseOwner(value: unknown): CreativeTaskOwner {
       ),
     };
   }
-  if (owner.kind === 'workflow_step') {
+  if (owner.kind === 'template_step') {
     requireExactKeys(
       owner,
-      ['kind', 'workflow_id', 'workflow_run_id', 'workflow_step_id'],
+      ['kind', 'template_id', 'template_run_id', 'template_step_id'],
       'owner'
     );
     return {
-      kind: 'workflow_step',
-      workflowId: parseCreativeOwnerId(owner.workflow_id, 'owner.workflow_id'),
-      workflowRunId: parseCreativeOwnerId(owner.workflow_run_id, 'owner.workflow_run_id'),
-      workflowStepId: parseCreativeOwnerId(owner.workflow_step_id, 'owner.workflow_step_id'),
+      kind: 'template_step',
+      templateId: parseCreativeOwnerId(owner.template_id, 'owner.template_id'),
+      templateRunId: parseCreativeOwnerId(owner.template_run_id, 'owner.template_run_id'),
+      templateStepId: parseCreativeOwnerId(owner.template_step_id, 'owner.template_step_id'),
     };
   }
   throw new CreativeTaskContractError(
@@ -559,16 +559,16 @@ function normalizeOwner(owner: CreativeTaskOwner): CreativeTaskOwner {
     };
   }
   return {
-    kind: 'workflow_step',
-    workflowId: parseCreativeOwnerId(owner.workflowId, 'owner.workflowId', 'invalid_request'),
-    workflowRunId: parseCreativeOwnerId(
-      owner.workflowRunId,
-      'owner.workflowRunId',
+    kind: 'template_step',
+    templateId: parseCreativeOwnerId(owner.templateId, 'owner.templateId', 'invalid_request'),
+    templateRunId: parseCreativeOwnerId(
+      owner.templateRunId,
+      'owner.templateRunId',
       'invalid_request'
     ),
-    workflowStepId: parseCreativeOwnerId(
-      owner.workflowStepId,
-      'owner.workflowStepId',
+    templateStepId: parseCreativeOwnerId(
+      owner.templateStepId,
+      'owner.templateStepId',
       'invalid_request'
     ),
   };
@@ -609,9 +609,9 @@ function ownerWire(owner: CreativeTaskOwner): Record<string, string> {
   }
   return {
     kind: owner.kind,
-    workflow_id: owner.workflowId,
-    workflow_run_id: owner.workflowRunId,
-    workflow_step_id: owner.workflowStepId,
+    template_id: owner.templateId,
+    template_run_id: owner.templateRunId,
+    template_step_id: owner.templateStepId,
   };
 }
 

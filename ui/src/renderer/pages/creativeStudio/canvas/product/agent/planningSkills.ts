@@ -16,9 +16,9 @@ export const CREATIVE_STUDIO_PLANNING_SKILLS = [
     descriptionKey: 'creativeStudio.agent.skills.organize.description',
   },
   {
-    id: 'creative-studio-workflow',
-    labelKey: 'creativeStudio.agent.skills.workflow.label',
-    descriptionKey: 'creativeStudio.agent.skills.workflow.description',
+    id: 'creative-studio-template',
+    labelKey: 'creativeStudio.agent.skills.template.label',
+    descriptionKey: 'creativeStudio.agent.skills.template.description',
   },
 ] as const;
 

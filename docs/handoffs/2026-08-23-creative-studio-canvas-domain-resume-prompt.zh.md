@@ -42,7 +42,7 @@
 2. 目标 owner：
    CanvasNode { canvasId, nodeId }
    StandaloneWorkbench { workbenchKind }
-   WorkflowStep 保持现状。
+   TemplateStep 保持现状。
 3. 新 standalone 写 NULL legacy project_id；旧 project_id 只作 inert provenance，历史按 kind 合并。
 4. GET history 与 retire body 去掉 project_id。
 5. 新 standalone asset origin 只带 workbench_kind。

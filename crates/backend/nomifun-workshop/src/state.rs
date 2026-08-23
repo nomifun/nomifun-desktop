@@ -3,22 +3,22 @@
 use std::sync::Arc;
 
 use crate::service::WorkshopService;
-use crate::workflow_draft::WorkflowDraftRunner;
+use crate::template_draft::TemplateDraftRunner;
 
 #[derive(Clone)]
 pub struct WorkshopRouterState {
     pub service: Arc<WorkshopService>,
-    pub workflow_draft_runner: Arc<dyn WorkflowDraftRunner>,
+    pub template_draft_runner: Arc<dyn TemplateDraftRunner>,
 }
 
 impl WorkshopRouterState {
     pub fn new(
         service: Arc<WorkshopService>,
-        workflow_draft_runner: Arc<dyn WorkflowDraftRunner>,
+        template_draft_runner: Arc<dyn TemplateDraftRunner>,
     ) -> Self {
         Self {
             service,
-            workflow_draft_runner,
+            template_draft_runner,
         }
     }
 }

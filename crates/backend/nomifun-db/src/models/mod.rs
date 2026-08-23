@@ -88,5 +88,5 @@ pub use user::User;
 pub use webhook::WebhookRow;
 pub use workshop::{
     CreationTaskRow, CreativeStudioAgentProposalReceiptRow, CreativeStudioProjectRow,
-    CreativeStudioWorkflowRow, CreativeStudioWorkflowRunRow, WorkshopAssetRow,
+    CreativeStudioTemplateRow, CreativeStudioTemplateRunRow, WorkshopAssetRow,
 };

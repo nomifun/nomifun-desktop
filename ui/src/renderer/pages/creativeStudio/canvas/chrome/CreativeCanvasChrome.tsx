@@ -77,7 +77,7 @@ const LEFT_LABEL_KEYS: Record<CreativeCanvasLeftView, string> = {
   canvas: 'creativeStudio.canvas.panels.left.canvas',
   assets: 'creativeStudio.canvas.panels.left.assets',
   prompts: 'creativeStudio.canvas.panels.left.prompts',
-  workflows: 'creativeStudio.canvas.panels.left.workflows',
+  templates: 'creativeStudio.canvas.panels.left.templates',
 };
 
 const RIGHT_LABEL_KEYS: Record<CreativeCanvasRightView, string> = {
@@ -352,7 +352,7 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
           aria-label={t('creativeStudio.canvas.chrome.resources')}
           role='tablist'
         >
-          {(['canvas', 'assets', 'prompts', 'workflows'] as const).map((view) => (
+          {(['canvas', 'assets', 'prompts', 'templates'] as const).map((view) => (
             <button
               key={view}
               type='button'

@@ -15,7 +15,7 @@ export type CreativeCanvasChromeBackground = CreativeCanvasBackground;
 export type CreativeCanvasChromeTool = CanvasInteractionTool;
 export type CreativeCanvasChromeSaveStatus = CanvasCasSaveStatus;
 
-export type CreativeCanvasLeftView = 'canvas' | 'assets' | 'prompts' | 'workflows';
+export type CreativeCanvasLeftView = 'canvas' | 'assets' | 'prompts' | 'templates';
 export type CreativeCanvasRightView = 'assistant' | 'properties';
 export type CreativeCanvasBottomView = 'history' | 'timeline';
 

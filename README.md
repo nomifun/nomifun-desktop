@@ -161,7 +161,7 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/readme/en/skills.png" alt="Current NomiFun Skills Hub"><br/><sub><b>Skills Hub · reusable, governed Agent capabilities</b></sub></td>
-    <td width="50%"><img src="docs/images/readme/en/creative-workshop.png" alt="NomiFun Creative Studio"><br/><sub><b>Creative Studio · infinite canvas, workbenches, prompts, assets, and workflows</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/en/creative-workshop.png" alt="NomiFun Creative Studio"><br/><sub><b>Creative Studio · infinite canvas, workbenches, prompts, assets, and templates</b></sub></td>
   </tr>
 </table>
 
@@ -181,7 +181,7 @@ memory, tools, permissions, and execution runtime:
 |---|---|
 | **Multi-Agent execution cluster** | Plans dependency-aware work, delegates steps to specialized Agents, schedules parallel execution, and exposes live state, transcripts, approvals, retry, and recovery. |
 | **Agent Mini Apps** | Turns a normal Agent conversation into a previewable and publishable local web tool, with an editable working copy and a durable published snapshot. |
-| **Creative Studio** | Provides a persistent infinite Canvas, independent Image and Video Workbenches, prompt and asset libraries, collections/tags/search, exact-model media tasks, private Workflows/templates, and a bounded 3D Director. |
+| **Creative Studio** | Provides a persistent infinite Canvas, independent Image and Video Workbenches, prompt and asset libraries, collections/tags/search, exact-model media tasks, private templates, and a bounded 3D Director. |
 | **Task-aware multi-model control plane** | Separates provider credentials from model records, accepts native and compatible/custom endpoints including local or self-hosted services, and routes chat, realtime, speech, vision, media generation, embedding, and reranking with per-task fallback. |
 | **NomiFun Free Models** | Ships a managed provider that can be enabled, refreshed, health-checked, and used without first creating your own provider entry. |
 | **Phone, robot, and open access** | Pairs Mobile directly with Desktop, binds a Xiaozhi robot to a companion, and exposes governed capabilities through WebUI, REST, MCP, IM channels, and NomiRelay. |
@@ -225,7 +225,7 @@ Agents, data, models, and governed tools.
 > Guide: [`docs/guides/creative-studio.md`](docs/guides/creative-studio.md)
 
 Creative Studio combines a persistent infinite Canvas, independent Image and Video
-Workbenches, prompt and asset libraries, private Workflows/templates, and a bounded
+Workbenches, prompt and asset libraries, private templates, and a bounded
 3D Director. It has no Project product object: Canvas is Canvas, while Image and
 Video remain usable with zero Canvases. The prompt library keeps reusable briefs
 close to the work, and the asset library supports text, image, video, and audio

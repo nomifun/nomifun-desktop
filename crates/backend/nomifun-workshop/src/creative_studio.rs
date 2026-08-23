@@ -1147,7 +1147,7 @@ pub enum CreativeLeftView {
     Canvas,
     Assets,
     Prompts,
-    Workflows,
+    Templates,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

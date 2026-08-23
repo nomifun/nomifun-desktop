@@ -25,7 +25,7 @@ Nomi 引擎、可扩展 provider/模型控制面、创意工坊、MCP 服务、�
 - **一个工作区，不只是消息流。** 会话有工作目录、文件树、预览面板和后端
   管理的 PTY 终端。
 - **一套不止于聊天的创作系统。** 创意工坊包含持久化无限 Canvas、独立
-  Image/Video Workbench、提示词与素材库、私有 Workflow/模板和受限 Director。
+  Image/Video Workbench、提示词与素材库、私有模板和受限 Director。
 - **后端驱动的自动化。** 计划任务、AutoWork、IDMM、WebUI 远程访问、
   MCP 暴露和频道能力都由 Rust 后端持久化管理。
 - **桌面与 Web 共用后端。** Tauri 桌面端和 `nomifun-web` 自托管服务使用

@@ -122,9 +122,9 @@ CREATE TABLE conversations (
 Examples of stable v3 entities include users, conversations, messages,
 terminal sessions, providers, requirements, agent executions and templates,
 Agent Execution Participant/Step/Attempt/Template Participant, knowledge
-bases, attachments, user presets, Creative Studio projects/workflows/workflow
+bases, attachments, user presets, Creative Studio projects/templates/template
 runs/Agent sessions/assets/creation tasks, and Channel Plugin/User/Session.
-Creative Studio uses `project_id`, `workflow_id`, `workflow_run_id`,
+Creative Studio uses `project_id`, `template_id`, `template_run_id`,
 `session_id`, `asset_id`, and `creation_task_id`; embedded graph nodes and
 connections also carry canonical UUIDv7 identities in the project document.
 Requirements use `requirement_id` plus a human-facing `display_no`. The Agent

@@ -1,5 +1,5 @@
 //! [`WorkshopService`] — the canonical Creative Studio project, asset,
-//! workflow, archive, and generation-support service. Project documents live
+//! template, archive, and generation-support service. Project documents live
 //! in SQLite; asset binaries live under the service data directory.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -7,14 +7,14 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use nomifun_common::{
-    AppError, CreativeStudioProjectId, CreativeStudioWorkflowId, CreativeStudioWorkflowRunId,
+    AppError, CreativeStudioProjectId, CreativeStudioTemplateId, CreativeStudioTemplateRunId,
     MessageId, ProviderId, SharedProviderLifecycleBarrier, UserId, WorkshopAssetId, now_ms,
 };
 use nomifun_db::{
     ApplyCreativeAgentProposalParams, AssetSort, CreativeStudioProjectRow,
-    CreativeStudioWorkflowRunRow, DbError, IWorkshopRepository, ListAssetsParams,
+    CreativeStudioTemplateRunRow, DbError, IWorkshopRepository, ListAssetsParams,
     ProviderModelCleanupPlan,
-    ProviderModelProjectCleanup, ProviderModelWorkflowCleanup, UpdateAssetParams,
+    ProviderModelProjectCleanup, ProviderModelTemplateCleanup, UpdateAssetParams,
     WorkshopAssetRow,
 };
 use serde_json::Value;
@@ -39,9 +39,9 @@ use crate::creative_studio::CREATIVE_STUDIO_SCHEMA;
 use crate::creative_agent_ops::{CreativeAgentOp, CreativeAgentOpResult};
 use crate::dto::WorkshopAsset;
 use crate::prompt_catalog::{CreativePromptCatalogPage, PromptCatalogService};
-use crate::workflow::{CreativeWorkflowDefinitionV1, parse_workflow_row};
-use crate::workflow_run::{
-    CreativeWorkflowRunAggregateV1, CreativeWorkflowRunCreateRequest, parse_workflow_run_row,
+use crate::template::{CreativeTemplateDefinitionV1, parse_template_row};
+use crate::template_run::{
+    CreativeTemplateRunAggregateV1, CreativeTemplateRunCreateRequest, parse_template_run_row,
 };
 use crate::{MAX_ASSET_BYTES, WORKSHOP_REL_DIR, fsio, imagemeta, thumbnail};
 
@@ -370,7 +370,7 @@ impl WorkshopService {
     /// destructive Provider/model deletion cannot invalidate the selected
     /// binding. Ordinary catalog updates are not serialized by this barrier;
     /// the app resolver reads and freezes one config snapshot for the call.
-    pub(crate) async fn require_workflow_draft_chat_model(
+    pub(crate) async fn require_template_draft_chat_model(
         &self,
         provider_id: &str,
         model: &str,
@@ -381,7 +381,7 @@ impl WorkshopService {
             .await?
         {
             return Err(AppError::Conflict(format!(
-                "Creative Studio workflow drafts require an enabled exact Chat capability for '{provider_id}/{model}'"
+                "Creative Studio template drafts require an enabled exact Chat capability for '{provider_id}/{model}'"
             )));
         }
         Ok(())
@@ -1084,60 +1084,60 @@ impl WorkshopService {
             .map_err(map_creative_canvas_error)
     }
 
-    // ---- canonical Creative Studio workflows ----
+    // ---- canonical Creative Studio templates ----
 
-    pub async fn list_creative_workflows(
+    pub async fn list_creative_templates(
         &self,
-    ) -> Result<Vec<CreativeWorkflowDefinitionV1>, AppError> {
+    ) -> Result<Vec<CreativeTemplateDefinitionV1>, AppError> {
         self.repo
-            .list_creative_workflows()
+            .list_creative_templates()
             .await?
             .into_iter()
             .map(|row| {
-                parse_workflow_row(&row).map_err(|error| {
+                parse_template_row(&row).map_err(|error| {
                     AppError::Internal(format!(
-                        "stored creative studio workflow {} is corrupt: {error}",
-                        row.workflow_id
+                        "stored creative studio template {} is corrupt: {error}",
+                        row.template_id
                     ))
                 })
             })
             .collect()
     }
 
-    pub async fn get_creative_workflow(
+    pub async fn get_creative_template(
         &self,
-        workflow_id: &str,
-    ) -> Result<CreativeWorkflowDefinitionV1, AppError> {
-        validate_creative_workflow_id(workflow_id)?;
+        template_id: &str,
+    ) -> Result<CreativeTemplateDefinitionV1, AppError> {
+        validate_creative_template_id(template_id)?;
         let row = self
             .repo
-            .get_creative_workflow(workflow_id)
+            .get_creative_template(template_id)
             .await?
             .ok_or_else(|| {
                 AppError::NotFound(format!(
-                    "creative studio workflow {workflow_id} not found"
+                    "creative studio template {template_id} not found"
                 ))
             })?;
-        parse_workflow_row(&row).map_err(|error| {
+        parse_template_row(&row).map_err(|error| {
             AppError::Internal(format!(
-                "stored creative studio workflow {workflow_id} is corrupt: {error}"
+                "stored creative studio template {template_id} is corrupt: {error}"
             ))
         })
     }
 
-    pub async fn create_creative_workflow(
+    pub async fn create_creative_template(
         &self,
-        mut definition: CreativeWorkflowDefinitionV1,
-    ) -> Result<CreativeWorkflowDefinitionV1, AppError> {
-        validate_creative_workflow_id(&definition.id)?;
+        mut definition: CreativeTemplateDefinitionV1,
+    ) -> Result<CreativeTemplateDefinitionV1, AppError> {
+        validate_creative_template_id(&definition.id)?;
         if definition.revision != 1 {
             return Err(AppError::BadRequest(
-                "a creative studio workflow must start at revision 1".into(),
+                "a creative studio template must start at revision 1".into(),
             ));
         }
-        if self.repo.get_creative_workflow(&definition.id).await?.is_some() {
+        if self.repo.get_creative_template(&definition.id).await?.is_some() {
             return Err(AppError::Conflict(format!(
-                "creative studio workflow {} already exists",
+                "creative studio template {} already exists",
                 definition.id
             )));
         }
@@ -1146,187 +1146,187 @@ impl WorkshopService {
         definition.metadata.updated_at = now;
         definition
             .validate()
-            .map_err(|error| AppError::BadRequest(format!("invalid workflow definition: {error}")))?;
-        self.validate_creative_workflow_assets(&definition).await?;
+            .map_err(|error| AppError::BadRequest(format!("invalid template definition: {error}")))?;
+        self.validate_creative_template_assets(&definition).await?;
         let _provider_guard = self.provider_read_guard().await;
-        self.validate_creative_workflow_models_under_guard(&definition)
+        self.validate_creative_template_models_under_guard(&definition)
             .await?;
         let row = definition
             .to_row()
-            .map_err(|error| AppError::BadRequest(format!("invalid workflow definition: {error}")))?;
-        let saved = self.repo.create_creative_workflow(&row).await?;
-        parse_workflow_row(&saved).map_err(|error| {
+            .map_err(|error| AppError::BadRequest(format!("invalid template definition: {error}")))?;
+        let saved = self.repo.create_creative_template(&row).await?;
+        parse_template_row(&saved).map_err(|error| {
             AppError::Internal(format!(
-                "created creative studio workflow {} is corrupt: {error}",
-                saved.workflow_id
+                "created creative studio template {} is corrupt: {error}",
+                saved.template_id
             ))
         })
     }
 
-    pub async fn save_creative_workflow(
+    pub async fn save_creative_template(
         &self,
-        workflow_id: &str,
+        template_id: &str,
         expected_revision: &str,
-        mut definition: CreativeWorkflowDefinitionV1,
-    ) -> Result<CreativeWorkflowDefinitionV1, AppError> {
-        validate_creative_workflow_id(workflow_id)?;
-        let expected_revision = parse_creative_workflow_revision(expected_revision)?;
+        mut definition: CreativeTemplateDefinitionV1,
+    ) -> Result<CreativeTemplateDefinitionV1, AppError> {
+        validate_creative_template_id(template_id)?;
+        let expected_revision = parse_creative_template_revision(expected_revision)?;
         let current_row = self
             .repo
-            .get_creative_workflow(workflow_id)
+            .get_creative_template(template_id)
             .await?
             .ok_or_else(|| {
                 AppError::NotFound(format!(
-                    "creative studio workflow {workflow_id} not found"
+                    "creative studio template {template_id} not found"
                 ))
             })?;
-        let current = parse_workflow_row(&current_row).map_err(|error| {
+        let current = parse_template_row(&current_row).map_err(|error| {
             AppError::Internal(format!(
-                "stored creative studio workflow {workflow_id} is corrupt: {error}"
+                "stored creative studio template {template_id} is corrupt: {error}"
             ))
         })?;
-        if definition.id != workflow_id {
+        if definition.id != template_id {
             return Err(AppError::BadRequest(
-                "workflow definition id must match its route id".into(),
+                "template definition id must match its route id".into(),
             ));
         }
         if definition.revision != expected_revision + 1 {
             return Err(AppError::BadRequest(
-                "workflow definition revision must increment expectedRevision exactly once".into(),
+                "template definition revision must increment expectedRevision exactly once".into(),
             ));
         }
         definition.metadata.created_at = current.metadata.created_at;
         definition.metadata.updated_at = now_ms();
         definition
             .validate()
-            .map_err(|error| AppError::BadRequest(format!("invalid workflow definition: {error}")))?;
-        self.validate_creative_workflow_assets(&definition).await?;
+            .map_err(|error| AppError::BadRequest(format!("invalid template definition: {error}")))?;
+        self.validate_creative_template_assets(&definition).await?;
         let _provider_guard = self.provider_read_guard().await;
-        self.validate_creative_workflow_models_under_guard(&definition)
+        self.validate_creative_template_models_under_guard(&definition)
             .await?;
         let replacement = definition
             .to_row()
-            .map_err(|error| AppError::BadRequest(format!("invalid workflow definition: {error}")))?;
+            .map_err(|error| AppError::BadRequest(format!("invalid template definition: {error}")))?;
         let saved = self
             .repo
-            .save_creative_workflow(workflow_id, expected_revision, &replacement)
+            .save_creative_template(template_id, expected_revision, &replacement)
             .await?;
-        parse_workflow_row(&saved).map_err(|error| {
+        parse_template_row(&saved).map_err(|error| {
             AppError::Internal(format!(
-                "saved creative studio workflow {workflow_id} is corrupt: {error}"
+                "saved creative studio template {template_id} is corrupt: {error}"
             ))
         })
     }
 
-    pub async fn delete_creative_workflow(&self, workflow_id: &str) -> Result<(), AppError> {
-        validate_creative_workflow_id(workflow_id)?;
-        self.repo.delete_creative_workflow(workflow_id).await?;
+    pub async fn delete_creative_template(&self, template_id: &str) -> Result<(), AppError> {
+        validate_creative_template_id(template_id)?;
+        self.repo.delete_creative_template(template_id).await?;
         Ok(())
     }
 
-    // ---- durable Creative Studio workflow runs ----
+    // ---- durable Creative Studio template runs ----
 
-    pub async fn list_creative_workflow_runs(
+    pub async fn list_creative_template_runs(
         &self,
-        workflow_id: Option<&str>,
-    ) -> Result<Vec<CreativeWorkflowRunAggregateV1>, AppError> {
-        if let Some(workflow_id) = workflow_id {
-            validate_creative_workflow_id(workflow_id)?;
+        template_id: Option<&str>,
+    ) -> Result<Vec<CreativeTemplateRunAggregateV1>, AppError> {
+        if let Some(template_id) = template_id {
+            validate_creative_template_id(template_id)?;
         }
         self.repo
-            .list_creative_workflow_runs(workflow_id)
+            .list_creative_template_runs(template_id)
             .await?
             .into_iter()
-            .map(|row| parse_stored_workflow_run(&row))
+            .map(|row| parse_stored_template_run(&row))
             .collect()
     }
 
-    pub async fn get_creative_workflow_run(
+    pub async fn get_creative_template_run(
         &self,
-        workflow_run_id: &str,
-    ) -> Result<CreativeWorkflowRunAggregateV1, AppError> {
-        validate_creative_workflow_run_id(workflow_run_id)?;
+        template_run_id: &str,
+    ) -> Result<CreativeTemplateRunAggregateV1, AppError> {
+        validate_creative_template_run_id(template_run_id)?;
         let row = self
             .repo
-            .get_creative_workflow_run(workflow_run_id)
+            .get_creative_template_run(template_run_id)
             .await?
             .ok_or_else(|| {
                 AppError::NotFound(format!(
-                    "creative studio workflow run {workflow_run_id} not found"
+                    "creative studio template run {template_run_id} not found"
                 ))
             })?;
-        parse_stored_workflow_run(&row)
+        parse_stored_template_run(&row)
     }
 
-    pub async fn create_creative_workflow_run(
+    pub async fn create_creative_template_run(
         &self,
-        request: CreativeWorkflowRunCreateRequest,
-    ) -> Result<CreativeWorkflowRunAggregateV1, AppError> {
-        validate_creative_workflow_run_id(&request.run_id)?;
-        validate_creative_workflow_id(&request.workflow_id)?;
-        if request.workflow_revision < 1 {
+        request: CreativeTemplateRunCreateRequest,
+    ) -> Result<CreativeTemplateRunAggregateV1, AppError> {
+        validate_creative_template_run_id(&request.template_run_id)?;
+        validate_creative_template_id(&request.template_id)?;
+        if request.template_revision < 1 {
             return Err(AppError::BadRequest(
-                "workflowRevision must be a positive integer".into(),
+                "templateRevision must be a positive integer".into(),
             ));
         }
 
         if let Some(existing) = self
             .repo
-            .get_creative_workflow_run(&request.run_id)
+            .get_creative_template_run(&request.template_run_id)
             .await?
         {
-            let existing = parse_stored_workflow_run(&existing)?;
+            let existing = parse_stored_template_run(&existing)?;
             if existing.matches_create_request(&request) {
                 return Ok(existing);
             }
             return Err(AppError::Conflict(format!(
-                "workflow run {} idempotency key is already bound to another request",
-                request.run_id
+                "template run {} idempotency key is already bound to another request",
+                request.template_run_id
             )));
         }
 
         let definition_row = self
             .repo
-            .get_creative_workflow(&request.workflow_id)
+            .get_creative_template(&request.template_id)
             .await?
             .ok_or_else(|| {
                 AppError::NotFound(format!(
-                    "creative studio workflow {} not found",
-                    request.workflow_id
+                    "creative studio template {} not found",
+                    request.template_id
                 ))
             })?;
-        let definition = parse_workflow_row(&definition_row).map_err(|error| {
+        let definition = parse_template_row(&definition_row).map_err(|error| {
             AppError::Internal(format!(
-                "stored creative studio workflow {} is corrupt: {error}",
-                request.workflow_id
+                "stored creative studio template {} is corrupt: {error}",
+                request.template_id
             ))
         })?;
-        if definition.revision != request.workflow_revision {
+        if definition.revision != request.template_revision {
             return Err(AppError::Conflict(format!(
-                "creative studio workflow {} revision changed from {} to {}",
-                request.workflow_id, request.workflow_revision, definition.revision
+                "creative studio template {} revision changed from {} to {}",
+                request.template_id, request.template_revision, definition.revision
             )));
         }
 
         let now = now_ms();
-        let aggregate = CreativeWorkflowRunAggregateV1::requested(
+        let aggregate = CreativeTemplateRunAggregateV1::requested(
             definition,
-            request.run_id.clone(),
+            request.template_run_id.clone(),
             request.inputs.clone(),
             request.reference_asset_ids.clone(),
             now,
         )
-        .map_err(|error| AppError::BadRequest(format!("invalid workflow run request: {error}")))?;
-        self.validate_creative_workflow_assets(&aggregate.workflow_snapshot)
+        .map_err(|error| AppError::BadRequest(format!("invalid template run request: {error}")))?;
+        self.validate_creative_template_assets(&aggregate.template_snapshot)
             .await?;
-        self.validate_workflow_run_input_assets(&aggregate).await?;
+        self.validate_template_run_input_assets(&aggregate).await?;
         let _provider_guard = self.provider_read_guard().await;
-        self.validate_creative_workflow_models_under_guard(&aggregate.workflow_snapshot)
+        self.validate_creative_template_models_under_guard(&aggregate.template_snapshot)
             .await?;
 
         let row = aggregate
             .to_row(now, now)
-            .map_err(|error| AppError::BadRequest(format!("invalid workflow run request: {error}")))?;
+            .map_err(|error| AppError::BadRequest(format!("invalid template run request: {error}")))?;
         let referenced_asset_ids = aggregate
             .referenced_input_asset_ids()
             .into_iter()
@@ -1334,81 +1334,81 @@ impl WorkshopService {
             .collect::<Vec<_>>();
         let persisted = self
             .repo
-            .create_creative_workflow_run(&row, &referenced_asset_ids)
+            .create_creative_template_run(&row, &referenced_asset_ids)
             .await?;
-        let persisted = parse_stored_workflow_run(&persisted)?;
+        let persisted = parse_stored_template_run(&persisted)?;
         if !persisted.matches_create_request(&request) {
             return Err(AppError::Conflict(format!(
-                "workflow run {} idempotency key is already bound to another request",
-                request.run_id
+                "template run {} idempotency key is already bound to another request",
+                request.template_run_id
             )));
         }
         Ok(persisted)
     }
 
-    pub async fn save_creative_workflow_run(
+    pub async fn save_creative_template_run(
         &self,
-        workflow_run_id: &str,
+        template_run_id: &str,
         expected_revision: &str,
-        replacement: CreativeWorkflowRunAggregateV1,
-    ) -> Result<CreativeWorkflowRunAggregateV1, AppError> {
-        validate_creative_workflow_run_id(workflow_run_id)?;
-        let expected_revision = parse_creative_workflow_revision(expected_revision)?;
-        if replacement.request.id != workflow_run_id {
+        replacement: CreativeTemplateRunAggregateV1,
+    ) -> Result<CreativeTemplateRunAggregateV1, AppError> {
+        validate_creative_template_run_id(template_run_id)?;
+        let expected_revision = parse_creative_template_revision(expected_revision)?;
+        if replacement.request.id != template_run_id {
             return Err(AppError::BadRequest(
-                "workflow run aggregate id must match its route id".into(),
+                "template run aggregate id must match its route id".into(),
             ));
         }
         let current_row = self
             .repo
-            .get_creative_workflow_run(workflow_run_id)
+            .get_creative_template_run(template_run_id)
             .await?
             .ok_or_else(|| {
                 AppError::NotFound(format!(
-                    "creative studio workflow run {workflow_run_id} not found"
+                    "creative studio template run {template_run_id} not found"
                 ))
             })?;
-        let current = parse_stored_workflow_run(&current_row)?;
+        let current = parse_stored_template_run(&current_row)?;
         if current.revision != expected_revision {
             return Err(AppError::Conflict(format!(
-                "creative studio workflow run {workflow_run_id} revision conflict"
+                "creative studio template run {template_run_id} revision conflict"
             )));
         }
         current.validate_transition(&replacement).map_err(|error| {
-            AppError::BadRequest(format!("invalid workflow run transition: {error}"))
+            AppError::BadRequest(format!("invalid template run transition: {error}"))
         })?;
-        self.validate_workflow_run_results(&replacement).await?;
+        self.validate_template_run_results(&replacement).await?;
         let now = now_ms().max(current.request.requested_at);
         let replacement_row = replacement
             .to_row(current.request.requested_at, now)
-            .map_err(|error| AppError::BadRequest(format!("invalid workflow run: {error}")))?;
+            .map_err(|error| AppError::BadRequest(format!("invalid template run: {error}")))?;
         let saved = self
             .repo
-            .save_creative_workflow_run(workflow_run_id, expected_revision, &replacement_row)
+            .save_creative_template_run(template_run_id, expected_revision, &replacement_row)
             .await?;
-        parse_stored_workflow_run(&saved)
+        parse_stored_template_run(&saved)
     }
 
-    async fn validate_workflow_run_input_assets(
+    async fn validate_template_run_input_assets(
         &self,
-        aggregate: &CreativeWorkflowRunAggregateV1,
+        aggregate: &CreativeTemplateRunAggregateV1,
     ) -> Result<(), AppError> {
         for asset_id in aggregate.referenced_input_asset_ids() {
             let asset = self.repo.get_asset(asset_id).await?.ok_or_else(|| {
-                AppError::Conflict(format!("workflow run references missing asset {asset_id}"))
+                AppError::Conflict(format!("template run references missing asset {asset_id}"))
             })?;
             if asset.kind != "image" {
                 return Err(AppError::Conflict(format!(
-                    "workflow run reference {asset_id} must identify an image asset"
+                    "template run reference {asset_id} must identify an image asset"
                 )));
             }
         }
         Ok(())
     }
 
-    async fn validate_workflow_run_results(
+    async fn validate_template_run_results(
         &self,
-        aggregate: &CreativeWorkflowRunAggregateV1,
+        aggregate: &CreativeTemplateRunAggregateV1,
     ) -> Result<(), AppError> {
         let executable_steps = aggregate
             .executable_task_step_ids()
@@ -1423,49 +1423,49 @@ impl WorkshopService {
         for asset_id in &aggregate.record.result_asset_ids {
             let asset = self.repo.get_asset(asset_id).await?.ok_or_else(|| {
                 AppError::Conflict(format!(
-                    "workflow run result references missing asset {asset_id}"
+                    "template run result references missing asset {asset_id}"
                 ))
             })?;
             if asset.kind != "image" {
                 return Err(AppError::Conflict(format!(
-                    "workflow run result {asset_id} must identify an image asset"
+                    "template run result {asset_id} must identify an image asset"
                 )));
             }
-            validate_workflow_result_origin(&asset, aggregate, &executable_steps, &task_ids)?;
+            validate_template_result_origin(&asset, aggregate, &executable_steps, &task_ids)?;
         }
         Ok(())
     }
 
-    async fn validate_creative_workflow_assets(
+    async fn validate_creative_template_assets(
         &self,
-        definition: &CreativeWorkflowDefinitionV1,
+        definition: &CreativeTemplateDefinitionV1,
     ) -> Result<(), AppError> {
         for asset_id in definition.collect_asset_ids() {
             WorkshopAssetId::parse(asset_id).map_err(|error| {
                 AppError::BadRequest(format!(
-                    "workflow references invalid asset id {asset_id:?}: {error}"
+                    "template references invalid asset id {asset_id:?}: {error}"
                 ))
             })?;
             let asset = self.repo.get_asset(asset_id).await?.ok_or_else(|| {
-                AppError::Conflict(format!("workflow references missing asset {asset_id}"))
+                AppError::Conflict(format!("template references missing asset {asset_id}"))
             })?;
             if asset.kind != "image" {
                 return Err(AppError::Conflict(format!(
-                    "workflow reference {asset_id} must identify an image asset"
+                    "template reference {asset_id} must identify an image asset"
                 )));
             }
         }
         Ok(())
     }
 
-    async fn validate_creative_workflow_models_under_guard(
+    async fn validate_creative_template_models_under_guard(
         &self,
-        definition: &CreativeWorkflowDefinitionV1,
+        definition: &CreativeTemplateDefinitionV1,
     ) -> Result<(), AppError> {
         for binding in definition.image_model_bindings() {
             ProviderId::parse(&binding.provider_id).map_err(|error| {
                 AppError::BadRequest(format!(
-                    "workflow references invalid provider id {:?}: {error}",
+                    "template references invalid provider id {:?}: {error}",
                     binding.provider_id
                 ))
             })?;
@@ -1479,7 +1479,7 @@ impl WorkshopService {
                 .await?
             {
                 return Err(AppError::Conflict(format!(
-                    "workflow model binding {}/{} does not provide enabled task {}",
+                    "template model binding {}/{} does not provide enabled task {}",
                     binding.provider_id,
                     binding.model,
                     binding.task.as_str()
@@ -1489,7 +1489,7 @@ impl WorkshopService {
         for binding in definition.text_model_bindings() {
             ProviderId::parse(&binding.provider_id).map_err(|error| {
                 AppError::BadRequest(format!(
-                    "workflow references invalid provider id {:?}: {error}",
+                    "template references invalid provider id {:?}: {error}",
                     binding.provider_id
                 ))
             })?;
@@ -1503,7 +1503,7 @@ impl WorkshopService {
                 .await?
             {
                 return Err(AppError::Conflict(format!(
-                    "workflow model binding {}/{} does not provide enabled task {}",
+                    "template model binding {}/{} does not provide enabled task {}",
                     binding.provider_id,
                     binding.model,
                     binding.task.as_str()
@@ -1872,7 +1872,7 @@ impl WorkshopService {
     }
 
     /// Remove one Provider selection from every canonical Creative Studio
-    /// config node and workflow generation step. Full Provider deletion keeps
+    /// config node and template generation step. Full Provider deletion keeps
     /// its existing coordinator contract; exact model deletion uses the atomic
     /// plan below instead.
     pub async fn clear_provider_references_under_lifecycle_write_guard(
@@ -1894,12 +1894,12 @@ impl WorkshopService {
                 )
                 .await?;
         }
-        for workflow in cleanup.workflows {
+        for template in cleanup.templates {
             self.repo
-                .save_creative_workflow(
-                    &workflow.workflow_id,
-                    workflow.expected_revision,
-                    &workflow.replacement,
+                .save_creative_template(
+                    &template.template_id,
+                    template.expected_revision,
+                    &template.replacement,
                 )
                 .await?;
         }
@@ -1910,7 +1910,7 @@ impl WorkshopService {
     /// exact Provider/model pair. No row is written here: the model repository
     /// applies the complete plan and deletes the catalog model in one SQLite
     /// transaction. Historical tasks, completed Agent sessions, assets, and
-    /// terminal workflow snapshots remain immutable audit records.
+    /// terminal template snapshots remain immutable audit records.
     pub async fn plan_provider_model_cleanup_under_lifecycle_write_guard(
         &self,
         provider_id: &str,
@@ -2080,18 +2080,18 @@ impl WorkshopService {
                 updated_at: now_ms().max(project.updated_at),
             });
         }
-        let mut workflow_cleanups = Vec::new();
-        for workflow_row in self.repo.list_creative_workflows().await? {
-            let mut workflow = parse_workflow_row(&workflow_row).map_err(|error| {
+        let mut template_cleanups = Vec::new();
+        for template_row in self.repo.list_creative_templates().await? {
+            let mut template = parse_template_row(&template_row).map_err(|error| {
                 AppError::Conflict(format!(
-                    "creative studio workflow {} is corrupt during provider cleanup: {error}",
-                    workflow_row.workflow_id
+                    "creative studio template {} is corrupt during provider cleanup: {error}",
+                    template_row.template_id
                 ))
             })?;
             let mut changed = false;
-            for step in &mut workflow.steps {
+            for step in &mut template.steps {
                 match step {
-                    crate::workflow::CreativeWorkflowStep::GenerateImages {
+                    crate::template::CreativeTemplateStep::GenerateImages {
                         generation,
                         ..
                     } if generation
@@ -2104,7 +2104,7 @@ impl WorkshopService {
                         generation.model = None;
                         changed = true;
                     }
-                    crate::workflow::CreativeWorkflowStep::DraftPrompts {
+                    crate::template::CreativeTemplateStep::DraftPrompts {
                         planning,
                         ..
                     } if planning
@@ -2123,31 +2123,31 @@ impl WorkshopService {
             if !changed {
                 continue;
             }
-            workflow.revision = workflow_row.revision + 1;
-            workflow.metadata.updated_at = now_ms().max(workflow_row.updated_at);
-            workflow.validate().map_err(|error| {
+            template.revision = template_row.revision + 1;
+            template.metadata.updated_at = now_ms().max(template_row.updated_at);
+            template.validate().map_err(|error| {
                 AppError::Conflict(format!(
-                    "creative studio workflow {} is invalid after provider cleanup: {error}",
-                    workflow.id
+                    "creative studio template {} is invalid after provider cleanup: {error}",
+                    template.id
                 ))
             })?;
-            self.validate_creative_workflow_models_under_guard(&workflow)
+            self.validate_creative_template_models_under_guard(&template)
                 .await?;
-            let replacement = workflow.to_row().map_err(|error| {
+            let replacement = template.to_row().map_err(|error| {
                 AppError::Conflict(format!(
-                    "creative studio workflow {} cannot be saved after provider cleanup: {error}",
-                    workflow.id
+                    "creative studio template {} cannot be saved after provider cleanup: {error}",
+                    template.id
                 ))
             })?;
-            workflow_cleanups.push(ProviderModelWorkflowCleanup {
-                workflow_id: workflow.id,
-                expected_revision: workflow_row.revision,
+            template_cleanups.push(ProviderModelTemplateCleanup {
+                template_id: template.id,
+                expected_revision: template_row.revision,
                 replacement,
             });
         }
         Ok(ProviderModelCleanupPlan {
             projects: project_cleanups,
-            workflows: workflow_cleanups,
+            templates: template_cleanups,
         })
     }
 
@@ -2405,27 +2405,27 @@ impl WorkshopService {
                 )));
             }
         }
-        for workflow_row in self.repo.list_creative_workflows().await? {
-            let workflow = parse_workflow_row(&workflow_row).map_err(|error| {
+        for template_row in self.repo.list_creative_templates().await? {
+            let template = parse_template_row(&template_row).map_err(|error| {
                 AppError::Internal(format!(
-                    "stored creative studio workflow {} is corrupt: {error}",
-                    workflow_row.workflow_id
+                    "stored creative studio template {} is corrupt: {error}",
+                    template_row.template_id
                 ))
             })?;
-            if workflow.collect_asset_ids().contains(id) {
+            if template.collect_asset_ids().contains(id) {
                 return Err(AppError::Conflict(format!(
-                    "asset {id} is referenced by workflow {}",
-                    workflow.id
+                    "asset {id} is referenced by template {}",
+                    template.id
                 )));
             }
         }
-        for run_row in self.repo.list_creative_workflow_runs(None).await? {
-            let run = parse_stored_workflow_run(&run_row)?;
+        for run_row in self.repo.list_creative_template_runs(None).await? {
+            let run = parse_stored_template_run(&run_row)?;
             if run.referenced_input_asset_ids().contains(&id)
                 || run.record.result_asset_ids.iter().any(|asset_id| asset_id == id)
             {
                 return Err(AppError::Conflict(format!(
-                    "asset {id} is referenced by workflow run {}",
+                    "asset {id} is referenced by template run {}",
                     run.request.id
                 )));
             }
@@ -2525,66 +2525,66 @@ fn serialize_text_asset_origin(
         .map_err(|error| AppError::BadRequest(format!("serialize text asset origin: {error}")))
 }
 
-fn validate_creative_workflow_id(workflow_id: &str) -> Result<(), AppError> {
-    CreativeStudioWorkflowId::parse(workflow_id)
+fn validate_creative_template_id(template_id: &str) -> Result<(), AppError> {
+    CreativeStudioTemplateId::parse(template_id)
         .map(|_| ())
-        .map_err(|error| AppError::BadRequest(format!("invalid workflow id: {error}")))
+        .map_err(|error| AppError::BadRequest(format!("invalid template id: {error}")))
 }
 
-fn validate_creative_workflow_run_id(workflow_run_id: &str) -> Result<(), AppError> {
-    CreativeStudioWorkflowRunId::parse(workflow_run_id)
+fn validate_creative_template_run_id(template_run_id: &str) -> Result<(), AppError> {
+    CreativeStudioTemplateRunId::parse(template_run_id)
         .map(|_| ())
-        .map_err(|error| AppError::BadRequest(format!("invalid workflow run id: {error}")))
+        .map_err(|error| AppError::BadRequest(format!("invalid template run id: {error}")))
 }
 
-fn parse_stored_workflow_run(
-    row: &CreativeStudioWorkflowRunRow,
-) -> Result<CreativeWorkflowRunAggregateV1, AppError> {
-    parse_workflow_run_row(row).map_err(|error| {
+fn parse_stored_template_run(
+    row: &CreativeStudioTemplateRunRow,
+) -> Result<CreativeTemplateRunAggregateV1, AppError> {
+    parse_template_run_row(row).map_err(|error| {
         AppError::Internal(format!(
-            "stored creative studio workflow run {} is corrupt: {error}",
-            row.workflow_run_id
+            "stored creative studio template run {} is corrupt: {error}",
+            row.template_run_id
         ))
     })
 }
 
-fn validate_workflow_result_origin(
+fn validate_template_result_origin(
     asset: &WorkshopAssetRow,
-    aggregate: &CreativeWorkflowRunAggregateV1,
+    aggregate: &CreativeTemplateRunAggregateV1,
     executable_steps: &BTreeSet<String>,
     task_ids: &BTreeSet<String>,
 ) -> Result<(), AppError> {
     let origin = asset.origin.as_deref().ok_or_else(|| {
         AppError::Conflict(format!(
-            "workflow run result {} has no durable provenance",
+            "template run result {} has no durable provenance",
             asset.asset_id
         ))
     })?;
     let origin = serde_json::from_str::<Value>(origin).map_err(|error| {
         AppError::Conflict(format!(
-            "workflow run result {} has invalid provenance: {error}",
+            "template run result {} has invalid provenance: {error}",
             asset.asset_id
         ))
     })?;
     let origin = origin.as_object().ok_or_else(|| {
         AppError::Conflict(format!(
-            "workflow run result {} provenance must be an object",
+            "template run result {} provenance must be an object",
             asset.asset_id
         ))
     })?;
     let string = |key: &str| origin.get(key).and_then(Value::as_str);
-    let workflow_step_id = string("workflow_step_id");
+    let template_step_id = string("template_step_id");
     let creation_task_id = string("creation_task_id");
-    if string("workflow_id") != Some(aggregate.request.workflow_id.as_str())
-        || string("workflow_run_id") != Some(aggregate.request.id.as_str())
-        || workflow_step_id.is_none_or(|id| !executable_steps.contains(id))
+    if string("template_id") != Some(aggregate.request.template_id.as_str())
+        || string("template_run_id") != Some(aggregate.request.id.as_str())
+        || template_step_id.is_none_or(|id| !executable_steps.contains(id))
         || creation_task_id.is_none_or(|id| !task_ids.contains(id))
         || origin.contains_key("project_id")
         || origin.contains_key("canvas_id")
         || origin.contains_key("node_id")
     {
         return Err(AppError::Conflict(format!(
-            "workflow run result {} provenance does not match run {}",
+            "template run result {} provenance does not match run {}",
             asset.asset_id, aggregate.request.id
         )));
     }
@@ -2743,7 +2743,7 @@ fn parse_stored_creative_agent_results(
     })
 }
 
-fn parse_creative_workflow_revision(revision: &str) -> Result<i64, AppError> {
+fn parse_creative_template_revision(revision: &str) -> Result<i64, AppError> {
     let parsed = revision.parse::<i64>().map_err(|_| {
         AppError::BadRequest("expectedRevision must be a positive decimal integer".into())
     })?;
@@ -2879,14 +2879,14 @@ fn classify_mime(mime: &str) -> Result<(&'static str, String), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workflow::{
-        CreativeWorkflowMetadata, CreativeWorkflowOutputPlan, CreativeWorkflowPromptSource,
-        CreativeWorkflowStep, CreativeWorkflowTemplate, CreativeWorkflowTemplateSegment,
-        CreativeWorkflowVariable, CreativeWorkflowVisibility,
+    use crate::template::{
+        CreativeTemplateMetadata, CreativeTemplateOutputPlan, CreativeTemplatePromptSource,
+        CreativeTemplateStep, CreativePromptTemplate, CreativePromptTemplateSegment,
+        CreativeTemplateVariable, CreativeTemplateVisibility,
     };
-    use crate::workflow_run::{
-        CreativeWorkflowInputValue, CreativeWorkflowRunCreateRequest,
-        CreativeWorkflowRunStatus,
+    use crate::template_run::{
+        CreativeTemplateInputValue, CreativeTemplateRunCreateRequest,
+        CreativeTemplateRunStatus,
     };
     use nomifun_common::{
         ConversationId, CreativeStudioNodeId, MessageId, ProviderLifecycleBarrier,
@@ -2970,26 +2970,26 @@ mod tests {
         ));
     }
 
-    fn workflow_definition() -> CreativeWorkflowDefinitionV1 {
-        let workflow_id = CreativeStudioWorkflowId::new().into_string();
+    fn template_definition() -> CreativeTemplateDefinitionV1 {
+        let definition_id = CreativeStudioTemplateId::new().into_string();
         let variable_id = nomifun_common::generate_id();
-        let template_id = nomifun_common::generate_id();
+        let prompt_template_id = nomifun_common::generate_id();
         let render_id = nomifun_common::generate_id();
         let generate_id = nomifun_common::generate_id();
-        CreativeWorkflowDefinitionV1 {
-            id: workflow_id,
+        CreativeTemplateDefinitionV1 {
+            id: definition_id,
             revision: 1,
-            metadata: CreativeWorkflowMetadata {
+            metadata: CreativeTemplateMetadata {
                 name: "电商海报".into(),
                 description: "固定结构".into(),
                 category: "电商".into(),
-                visibility: CreativeWorkflowVisibility::Private,
+                visibility: CreativeTemplateVisibility::Private,
                 tags: vec!["海报".into()],
                 created_at: 0,
                 updated_at: 0,
             },
-            output: CreativeWorkflowOutputPlan::SingleImage,
-            variables: vec![CreativeWorkflowVariable::Text {
+            output: CreativeTemplateOutputPlan::SingleImage,
+            variables: vec![CreativeTemplateVariable::Text {
                 id: variable_id.clone(),
                 key: "product_name".into(),
                 label: "产品名称".into(),
@@ -3000,33 +3000,35 @@ mod tests {
                 min_length: 0,
                 max_length: 200,
             }],
-            templates: vec![CreativeWorkflowTemplate {
-                id: template_id.clone(),
+            templates: vec![CreativePromptTemplate {
+                id: prompt_template_id.clone(),
                 name: "主提示词".into(),
                 segments: vec![
-                    CreativeWorkflowTemplateSegment::Text { text: "为 ".into() },
-                    CreativeWorkflowTemplateSegment::Variable { variable_id },
-                    CreativeWorkflowTemplateSegment::Text { text: " 生成海报".into() },
+                    CreativePromptTemplateSegment::Text { text: "为 ".into() },
+                    CreativePromptTemplateSegment::Variable { variable_id },
+                    CreativePromptTemplateSegment::Text { text: " 生成海报".into() },
                 ],
             }],
             steps: vec![
-                CreativeWorkflowStep::RenderTemplate {
+                CreativeTemplateStep::RenderTemplate {
                     id: render_id.clone(),
                     name: "渲染提示词".into(),
                     depends_on: Vec::new(),
                     enabled: true,
-                    template_id: template_id.clone(),
+                    template_id: prompt_template_id.clone(),
                 },
-                CreativeWorkflowStep::GenerateImages {
+                CreativeTemplateStep::GenerateImages {
                     id: generate_id,
                     name: "生成图片".into(),
                     depends_on: vec![render_id],
                     enabled: true,
-                    prompt_source: CreativeWorkflowPromptSource::Template { template_id },
+                    prompt_source: CreativeTemplatePromptSource::Template {
+                        template_id: prompt_template_id,
+                    },
                     reference_variable_ids: Vec::new(),
-                    generation: crate::workflow::CreativeWorkflowImageGenerationSettings {
+                    generation: crate::template::CreativeTemplateImageGenerationSettings {
                         model: None,
-                        quality: crate::workflow::CreativeWorkflowImageQuality::Auto,
+                        quality: crate::template::CreativeTemplateImageQuality::Auto,
                         width: 1024,
                         height: 1024,
                         images_per_prompt: 1,
@@ -3036,48 +3038,48 @@ mod tests {
         }
     }
 
-    fn series_workflow_definition(
+    fn series_template_definition(
         provider_id: &str,
         model: &str,
-    ) -> CreativeWorkflowDefinitionV1 {
-        let mut definition = workflow_definition();
+    ) -> CreativeTemplateDefinitionV1 {
+        let mut definition = template_definition();
         let template_id = definition.templates[0].id.clone();
         let draft_id = nomifun_common::generate_id();
         let generate_id = nomifun_common::generate_id();
-        definition.output = CreativeWorkflowOutputPlan::MultiImageSeries {
+        definition.output = CreativeTemplateOutputPlan::MultiImageSeries {
             target_count: 2,
             concurrency: 2,
             review_required: true,
         };
         definition.steps = vec![
-            CreativeWorkflowStep::DraftPrompts {
+            CreativeTemplateStep::DraftPrompts {
                 id: draft_id.clone(),
                 name: "规划提示词".into(),
                 depends_on: Vec::new(),
                 enabled: true,
                 template_id,
-                planning: crate::workflow::CreativeWorkflowPromptPlanningSettings {
-                    model: Some(crate::workflow::CreativeWorkflowTextModelBinding {
+                planning: crate::template::CreativeTemplatePromptPlanningSettings {
+                    model: Some(crate::template::CreativeTemplateTextModelBinding {
                         provider_id: provider_id.into(),
                         model: model.into(),
-                        task: crate::workflow::CreativeWorkflowTextTask::Chat,
+                        task: crate::template::CreativeTemplateTextTask::Chat,
                     }),
                     instruction: "保持系列连贯".into(),
                     max_tokens: 4096,
                 },
             },
-            CreativeWorkflowStep::GenerateImages {
+            CreativeTemplateStep::GenerateImages {
                 id: generate_id,
                 name: "生成图片".into(),
                 depends_on: vec![draft_id.clone()],
                 enabled: true,
-                prompt_source: CreativeWorkflowPromptSource::PromptDrafts {
+                prompt_source: CreativeTemplatePromptSource::PromptDrafts {
                     step_id: draft_id,
                 },
                 reference_variable_ids: Vec::new(),
-                generation: crate::workflow::CreativeWorkflowImageGenerationSettings {
+                generation: crate::template::CreativeTemplateImageGenerationSettings {
                     model: None,
-                    quality: crate::workflow::CreativeWorkflowImageQuality::Auto,
+                    quality: crate::template::CreativeTemplateImageQuality::Auto,
                     width: 1024,
                     height: 1024,
                     images_per_prompt: 1,
@@ -3088,16 +3090,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creative_workflow_service_persists_closed_definitions_with_cas() {
+    async fn creative_template_service_persists_closed_definitions_with_cas() {
         let (service, _dir) = service().await;
         let created = service
-            .create_creative_workflow(workflow_definition())
+            .create_creative_template(template_definition())
             .await
             .unwrap();
         assert_eq!(created.revision, 1);
         assert!(created.metadata.created_at > 0);
         assert_eq!(
-            service.list_creative_workflows().await.unwrap(),
+            service.list_creative_templates().await.unwrap(),
             vec![created.clone()]
         );
 
@@ -3105,7 +3107,7 @@ mod tests {
         replacement.revision = 2;
         replacement.metadata.name = "高端电商海报".into();
         let saved = service
-            .save_creative_workflow(&created.id, "1", replacement.clone())
+            .save_creative_template(&created.id, "1", replacement.clone())
             .await
             .unwrap();
         assert_eq!(saved.revision, 2);
@@ -3113,39 +3115,39 @@ mod tests {
         assert_eq!(saved.metadata.created_at, created.metadata.created_at);
 
         let stale = service
-            .save_creative_workflow(&created.id, "1", replacement)
+            .save_creative_template(&created.id, "1", replacement)
             .await
             .unwrap_err();
         assert!(matches!(stale, AppError::Conflict(_)));
 
-        service.delete_creative_workflow(&created.id).await.unwrap();
+        service.delete_creative_template(&created.id).await.unwrap();
         assert!(matches!(
-            service.get_creative_workflow(&created.id).await.unwrap_err(),
+            service.get_creative_template(&created.id).await.unwrap_err(),
             AppError::NotFound(_)
         ));
     }
 
     #[tokio::test]
-    async fn creative_workflow_model_binding_requires_one_enabled_exact_task() {
+    async fn creative_template_model_binding_requires_one_enabled_exact_task() {
         let (service, _dir, database) = service_with_database_and_lifecycle(None).await;
         let provider_id = ProviderId::new().into_string();
-        let mut definition = workflow_definition();
-        if let CreativeWorkflowStep::GenerateImages { generation, .. } = &mut definition.steps[1] {
-            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+        let mut definition = template_definition();
+        if let CreativeTemplateStep::GenerateImages { generation, .. } = &mut definition.steps[1] {
+            generation.model = Some(crate::template::CreativeTemplateImageModelBinding {
                 provider_id: provider_id.clone(),
                 model: "image-model".into(),
-                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+                task: crate::template::CreativeTemplateImageTask::ImageGeneration,
             });
         }
         assert!(matches!(
-            service.create_creative_workflow(definition.clone()).await,
+            service.create_creative_template(definition.clone()).await,
             Err(AppError::Conflict(_))
         ));
 
         insert_provider(&database, &provider_id).await;
         insert_provider_model(&database, &provider_id, "image-model").await;
         assert!(matches!(
-            service.create_creative_workflow(definition.clone()).await,
+            service.create_creative_template(definition.clone()).await,
             Err(AppError::Conflict(_))
         ));
 
@@ -3160,16 +3162,16 @@ mod tests {
         .execute(database.pool())
         .await
         .unwrap();
-        let created = service.create_creative_workflow(definition).await.unwrap();
+        let created = service.create_creative_template(definition).await.unwrap();
         assert_eq!(created.image_model_bindings().count(), 1);
 
         let text_provider_id = ProviderId::new().into_string();
         insert_provider(&database, &text_provider_id).await;
         insert_provider_model(&database, &text_provider_id, "chat-model").await;
-        let text_definition = series_workflow_definition(&text_provider_id, "chat-model");
+        let text_definition = series_template_definition(&text_provider_id, "chat-model");
         assert!(matches!(
             service
-                .create_creative_workflow(text_definition.clone())
+                .create_creative_template(text_definition.clone())
                 .await,
             Err(AppError::Conflict(_))
         ));
@@ -3181,14 +3183,14 @@ mod tests {
         )
         .await;
         let created = service
-            .create_creative_workflow(text_definition)
+            .create_creative_template(text_definition)
             .await
             .unwrap();
         assert_eq!(created.text_model_bindings().count(), 1);
     }
 
     #[tokio::test]
-    async fn creative_workflow_run_is_idempotent_cas_backed_and_checks_result_provenance() {
+    async fn creative_template_run_is_idempotent_cas_backed_and_checks_result_provenance() {
         let (service, _dir, database) = service_with_database_and_lifecycle(None).await;
         let provider_id = ProviderId::new().into_string();
         insert_provider(&database, &provider_id).await;
@@ -3201,22 +3203,22 @@ mod tests {
         )
         .await;
 
-        let mut definition = workflow_definition();
-        let CreativeWorkflowVariable::Text { id: variable_id, .. } = &definition.variables[0]
+        let mut definition = template_definition();
+        let CreativeTemplateVariable::Text { id: variable_id, .. } = &definition.variables[0]
         else {
-            panic!("workflow fixture must start with a text variable")
+            panic!("template fixture must start with a text variable")
         };
         let variable_id = variable_id.clone();
-        if let CreativeWorkflowStep::GenerateImages { generation, .. } = &mut definition.steps[1]
+        if let CreativeTemplateStep::GenerateImages { generation, .. } = &mut definition.steps[1]
         {
-            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+            generation.model = Some(crate::template::CreativeTemplateImageModelBinding {
                 provider_id: provider_id.clone(),
                 model: "image-model".into(),
-                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+                task: crate::template::CreativeTemplateImageTask::ImageGeneration,
             });
         }
         let definition = service
-            .create_creative_workflow(definition)
+            .create_creative_template(definition)
             .await
             .unwrap();
         let reference_asset = service
@@ -3229,34 +3231,34 @@ mod tests {
             )
             .await
             .unwrap();
-        let run_id = CreativeStudioWorkflowRunId::new().into_string();
-        let request = CreativeWorkflowRunCreateRequest {
-            run_id: run_id.clone(),
-            workflow_id: definition.id.clone(),
-            workflow_revision: definition.revision,
-            inputs: vec![CreativeWorkflowInputValue::Text {
+        let template_run_id = CreativeStudioTemplateRunId::new().into_string();
+        let request = CreativeTemplateRunCreateRequest {
+            template_run_id: template_run_id.clone(),
+            template_id: definition.id.clone(),
+            template_revision: definition.revision,
+            inputs: vec![CreativeTemplateInputValue::Text {
                 variable_id,
                 value: "NomiFun".into(),
             }],
             reference_asset_ids: vec![reference_asset.asset_id.clone()],
         };
         let created = service
-            .create_creative_workflow_run(request.clone())
+            .create_creative_template_run(request.clone())
             .await
             .unwrap();
         assert_eq!(
             service
-                .create_creative_workflow_run(request.clone())
+                .create_creative_template_run(request.clone())
                 .await
                 .unwrap(),
             created
         );
         let mut mismatched = request;
-        if let CreativeWorkflowInputValue::Text { value, .. } = &mut mismatched.inputs[0] {
+        if let CreativeTemplateInputValue::Text { value, .. } = &mut mismatched.inputs[0] {
             *value = "another request".into();
         }
         assert!(matches!(
-            service.create_creative_workflow_run(mismatched).await,
+            service.create_creative_template_run(mismatched).await,
             Err(AppError::Conflict(_))
         ));
 
@@ -3264,31 +3266,31 @@ mod tests {
         let step_id = created.executable_task_step_ids()[0].clone();
         let mut queued = created.clone();
         queued.revision = 2;
-        queued.record.status = CreativeWorkflowRunStatus::Queued;
+        queued.record.status = CreativeTemplateRunStatus::Queued;
         queued.record.task_ids = vec![task_id.clone()];
         queued.record.queued_at = Some(created.request.requested_at + 1);
         let queued = service
-            .save_creative_workflow_run(&run_id, "1", queued)
+            .save_creative_template_run(&template_run_id, "1", queued)
             .await
             .unwrap();
         assert!(matches!(
             service
-                .save_creative_workflow_run(&run_id, "1", queued.clone())
+                .save_creative_template_run(&template_run_id, "1", queued.clone())
                 .await,
             Err(AppError::Conflict(_))
         ));
 
         let mut running = queued.clone();
         running.revision = 3;
-        running.record.status = CreativeWorkflowRunStatus::Running;
+        running.record.status = CreativeTemplateRunStatus::Running;
         running.record.started_at = Some(created.request.requested_at + 2);
         let running = service
-            .save_creative_workflow_run(&run_id, "2", running)
+            .save_creative_template_run(&template_run_id, "2", running)
             .await
             .unwrap();
         nomifun_db::sqlx::query(
             "INSERT INTO creation_tasks \
-                (creation_task_id, workflow_id, workflow_run_id, workflow_step_id, \
+                (creation_task_id, template_id, template_run_id, template_step_id, \
                  provider_id, model, capability, params, status, error, result_asset_ids, \
                  remote_task_id, attempt, submitted_at, started_at, finished_at, request_fingerprint) \
              VALUES (?, ?, ?, ?, ?, 'image-model', 'image_generation', '{}', 'running', \
@@ -3296,7 +3298,7 @@ mod tests {
         )
         .bind(&task_id)
         .bind(&definition.id)
-        .bind(&run_id)
+        .bind(&template_run_id)
         .bind(&step_id)
         .bind(&provider_id)
         .bind(created.request.requested_at + 1)
@@ -3311,9 +3313,9 @@ mod tests {
                 "result",
                 false,
                 Some(serde_json::json!({
-                    "workflow_id": definition.id,
-                    "workflow_run_id": run_id,
-                    "workflow_step_id": step_id,
+                    "template_id": definition.id,
+                    "template_run_id": template_run_id,
+                    "template_step_id": step_id,
                     "creation_task_id": task_id
                 })),
             )
@@ -3321,24 +3323,24 @@ mod tests {
             .unwrap();
         let mut succeeded = running;
         succeeded.revision = 4;
-        succeeded.record.status = CreativeWorkflowRunStatus::Succeeded;
+        succeeded.record.status = CreativeTemplateRunStatus::Succeeded;
         succeeded.record.result_asset_ids = vec![asset.asset_id];
         succeeded.record.completed_at = Some(created.request.requested_at + 3);
         let succeeded = service
-            .save_creative_workflow_run(&run_id, "3", succeeded)
+            .save_creative_template_run(&template_run_id, "3", succeeded)
             .await
             .unwrap();
-        assert_eq!(succeeded.record.status, CreativeWorkflowRunStatus::Succeeded);
+        assert_eq!(succeeded.record.status, CreativeTemplateRunStatus::Succeeded);
         assert_eq!(
             service
-                .list_creative_workflow_runs(Some(&succeeded.request.workflow_id))
+                .list_creative_template_runs(Some(&succeeded.request.template_id))
                 .await
                 .unwrap(),
             vec![succeeded]
         );
         assert!(matches!(
             service.delete_asset(&reference_asset.asset_id).await,
-            Err(AppError::Conflict(message)) if message.contains("workflow run")
+            Err(AppError::Conflict(message)) if message.contains("template run")
         ));
     }
 
@@ -4812,43 +4814,43 @@ mod tests {
             .await
             .unwrap();
 
-        let mut target_workflow = workflow_definition();
-        if let CreativeWorkflowStep::GenerateImages { generation, .. } =
-            &mut target_workflow.steps[1]
+        let mut target_template = template_definition();
+        if let CreativeTemplateStep::GenerateImages { generation, .. } =
+            &mut target_template.steps[1]
         {
-            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+            generation.model = Some(crate::template::CreativeTemplateImageModelBinding {
                 provider_id: target_provider_id.into(),
                 model: "delete-me".into(),
-                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+                task: crate::template::CreativeTemplateImageTask::ImageGeneration,
             });
         }
-        let target_workflow = svc
-            .create_creative_workflow(target_workflow)
+        let target_template = svc
+            .create_creative_template(target_template)
             .await
             .unwrap();
-        let mut surviving_workflow = workflow_definition();
-        if let CreativeWorkflowStep::GenerateImages { generation, .. } =
-            &mut surviving_workflow.steps[1]
+        let mut surviving_template = template_definition();
+        if let CreativeTemplateStep::GenerateImages { generation, .. } =
+            &mut surviving_template.steps[1]
         {
-            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+            generation.model = Some(crate::template::CreativeTemplateImageModelBinding {
                 provider_id: other_provider_id.into(),
                 model: "keep-me".into(),
-                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+                task: crate::template::CreativeTemplateImageTask::ImageGeneration,
             });
         }
-        let surviving_workflow = svc
-            .create_creative_workflow(surviving_workflow)
+        let surviving_template = svc
+            .create_creative_template(surviving_template)
             .await
             .unwrap();
-        let target_planning_workflow = svc
-            .create_creative_workflow(series_workflow_definition(
+        let target_planning_template = svc
+            .create_creative_template(series_template_definition(
                 target_provider_id,
                 "delete-me",
             ))
             .await
             .unwrap();
-        let surviving_planning_workflow = svc
-            .create_creative_workflow(series_workflow_definition(
+        let surviving_planning_template = svc
+            .create_creative_template(series_template_definition(
                 other_provider_id,
                 "keep-me",
             ))
@@ -4860,13 +4862,13 @@ mod tests {
             .await
             .unwrap();
         let cleaned_once = svc
-            .get_creative_workflow(&target_workflow.id)
+            .get_creative_template(&target_template.id)
             .await
             .unwrap();
         assert_eq!(cleaned_once.revision, 2);
         assert_eq!(cleaned_once.image_model_bindings().count(), 0);
         let cleaned_planning = svc
-            .get_creative_workflow(&target_planning_workflow.id)
+            .get_creative_template(&target_planning_template.id)
             .await
             .unwrap();
         assert_eq!(cleaned_planning.revision, 2);
@@ -4939,31 +4941,31 @@ mod tests {
         assert_eq!(surviving_audio_model.model, "keep-me");
 
         let cleaned_twice = svc
-            .get_creative_workflow(&target_workflow.id)
+            .get_creative_template(&target_template.id)
             .await
             .unwrap();
         assert_eq!(cleaned_twice.revision, 2);
         assert_eq!(cleaned_twice.image_model_bindings().count(), 0);
-        let surviving_workflow = svc
-            .get_creative_workflow(&surviving_workflow.id)
+        let surviving_template = svc
+            .get_creative_template(&surviving_template.id)
             .await
             .unwrap();
-        assert_eq!(surviving_workflow.revision, 1);
-        let surviving_binding = surviving_workflow
+        assert_eq!(surviving_template.revision, 1);
+        let surviving_binding = surviving_template
             .image_model_bindings()
             .next()
-            .expect("unrelated workflow binding must survive provider cleanup");
+            .expect("unrelated template binding must survive provider cleanup");
         assert_eq!(surviving_binding.provider_id, other_provider_id);
         assert_eq!(surviving_binding.model, "keep-me");
-        let surviving_planning_workflow = svc
-            .get_creative_workflow(&surviving_planning_workflow.id)
+        let surviving_planning_template = svc
+            .get_creative_template(&surviving_planning_template.id)
             .await
             .unwrap();
-        assert_eq!(surviving_planning_workflow.revision, 1);
-        let surviving_planning_binding = surviving_planning_workflow
+        assert_eq!(surviving_planning_template.revision, 1);
+        let surviving_planning_binding = surviving_planning_template
             .text_model_bindings()
             .next()
-            .expect("unrelated workflow planning binding must survive provider cleanup");
+            .expect("unrelated template planning binding must survive provider cleanup");
         assert_eq!(surviving_planning_binding.provider_id, other_provider_id);
         assert_eq!(surviving_planning_binding.model, "keep-me");
     }
@@ -5045,36 +5047,36 @@ mod tests {
             .await
             .unwrap();
 
-        let mut target_workflow = workflow_definition();
-        if let CreativeWorkflowStep::GenerateImages { generation, .. } =
-            &mut target_workflow.steps[1]
+        let mut target_template = template_definition();
+        if let CreativeTemplateStep::GenerateImages { generation, .. } =
+            &mut target_template.steps[1]
         {
-            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+            generation.model = Some(crate::template::CreativeTemplateImageModelBinding {
                 provider_id: provider_id.into(),
                 model: "delete-me".into(),
-                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+                task: crate::template::CreativeTemplateImageTask::ImageGeneration,
             });
         }
-        let target_workflow = svc
-            .create_creative_workflow(target_workflow)
+        let target_template = svc
+            .create_creative_template(target_template)
             .await
             .unwrap();
-        let mut sibling_workflow = workflow_definition();
-        if let CreativeWorkflowStep::GenerateImages { generation, .. } =
-            &mut sibling_workflow.steps[1]
+        let mut sibling_template = template_definition();
+        if let CreativeTemplateStep::GenerateImages { generation, .. } =
+            &mut sibling_template.steps[1]
         {
-            generation.model = Some(crate::workflow::CreativeWorkflowImageModelBinding {
+            generation.model = Some(crate::template::CreativeTemplateImageModelBinding {
                 provider_id: provider_id.into(),
                 model: "keep-same-provider".into(),
-                task: crate::workflow::CreativeWorkflowImageTask::ImageGeneration,
+                task: crate::template::CreativeTemplateImageTask::ImageGeneration,
             });
         }
-        let sibling_workflow = svc
-            .create_creative_workflow(sibling_workflow)
+        let sibling_template = svc
+            .create_creative_template(sibling_template)
             .await
             .unwrap();
-        let planning_workflow = svc
-            .create_creative_workflow(series_workflow_definition(provider_id, "delete-me"))
+        let planning_template = svc
+            .create_creative_template(series_template_definition(provider_id, "delete-me"))
             .await
             .unwrap();
 
@@ -5131,28 +5133,28 @@ mod tests {
             .unwrap();
         assert_eq!(completed_chat.model.as_ref().unwrap().model, "delete-me");
 
-        assert_eq!(cleanup.workflows.len(), 2);
+        assert_eq!(cleanup.templates.len(), 2);
         let target_patch = cleanup
-            .workflows
+            .templates
             .iter()
-            .find(|patch| patch.workflow_id == target_workflow.id)
-            .expect("target image workflow must be planned");
+            .find(|patch| patch.template_id == target_template.id)
+            .expect("target image template must be planned");
         assert_eq!(target_patch.expected_revision, 1);
         assert_eq!(target_patch.replacement.revision, 2);
         assert_eq!(
-            parse_workflow_row(&target_patch.replacement)
+            parse_template_row(&target_patch.replacement)
                 .unwrap()
                 .image_model_bindings()
                 .count(),
             0
         );
         let planning_patch = cleanup
-            .workflows
+            .templates
             .iter()
-            .find(|patch| patch.workflow_id == planning_workflow.id)
-            .expect("target planning workflow must be planned");
+            .find(|patch| patch.template_id == planning_template.id)
+            .expect("target planning template must be planned");
         assert_eq!(
-            parse_workflow_row(&planning_patch.replacement)
+            parse_template_row(&planning_patch.replacement)
                 .unwrap()
                 .text_model_bindings()
                 .count(),
@@ -5160,15 +5162,15 @@ mod tests {
         );
         assert!(
             cleanup
-                .workflows
+                .templates
                 .iter()
-                .all(|patch| patch.workflow_id != sibling_workflow.id)
+                .all(|patch| patch.template_id != sibling_template.id)
         );
 
         let unchanged_project = svc.get_creative_project(&project.project_id).await.unwrap();
         assert_eq!(unchanged_project.project.revision, "2");
         assert_eq!(
-            svc.get_creative_workflow(&target_workflow.id)
+            svc.get_creative_template(&target_template.id)
                 .await
                 .unwrap()
                 .revision,

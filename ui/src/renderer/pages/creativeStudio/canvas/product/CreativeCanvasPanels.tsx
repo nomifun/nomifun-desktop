@@ -1477,7 +1477,7 @@ export const CreativeCanvasHistoryPanel: React.FC<CreativeCanvasHistoryPanelProp
   );
 };
 
-export type CreativeCanvasUnavailableKind = 'assistant' | 'workflows' | 'generic';
+export type CreativeCanvasUnavailableKind = 'assistant' | 'templates' | 'generic';
 
 export interface CreativeCanvasUnavailablePanelProps {
   kind?: CreativeCanvasUnavailableKind;
@@ -1489,7 +1489,7 @@ export interface CreativeCanvasUnavailablePanelProps {
 
 function unavailableIcon(kind: CreativeCanvasUnavailableKind): React.ReactNode {
   if (kind === 'assistant') return <Robot {...iconProps} />;
-  if (kind === 'workflows') return <Workbench {...iconProps} />;
+  if (kind === 'templates') return <Workbench {...iconProps} />;
   return <Info {...iconProps} />;
 }
 
@@ -1539,19 +1539,19 @@ export const CreativeCanvasAssistantUnwiredPanel: React.FC<{ className?: string 
   );
 };
 
-export const CreativeCanvasWorkflowUnwiredPanel: React.FC<{ className?: string }> = ({
+export const CreativeCanvasTemplateUnwiredPanel: React.FC<{ className?: string }> = ({
   className,
 }) => {
   const { t } = useTranslation();
   return (
     <CreativeCanvasUnavailablePanel
-      kind='workflows'
+      kind='templates'
       className={className}
-      title={t('creativeStudio.canvas.unavailable.workflowsTitle', {
+      title={t('creativeStudio.canvas.unavailable.templatesTitle', {
         defaultValue: '模板尚未连接',
       })}
       description={t(
-        'creativeStudio.canvas.unavailable.workflowsDescription',
+        'creativeStudio.canvas.unavailable.templatesDescription',
         {
           defaultValue:
             '当前画布文档没有模板数据源，本面板不会显示示例模板或虚构运行状态。',

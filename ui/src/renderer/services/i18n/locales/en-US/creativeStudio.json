@@ -78,7 +78,7 @@
         "description": "Adjust the positions, sizes, and connections of existing nodes.",
         "label": "Organize layout"
       },
-      "workflow": {
+      "template": {
         "description": "Turn the creative goal into a template draft for human review.",
         "label": "Template design"
       }
@@ -913,7 +913,7 @@
       "remoteReloaded": "Reloaded the remote version.",
       "remoteUnavailable": "The remote version is temporarily unavailable.",
       "resolveDirectorConflict": "This canvas contains multiple Director nodes. Keep only one before opening the 3D Director.",
-      "resolvingWorkflowResults": "Resolving the template's result assets...",
+      "resolvingTemplateResults": "Resolving the template's result assets...",
       "saveCompleted": "Save completed.",
       "splitRecovered": "Recovered the split assets after the upload response was interrupted, then created and saved {{count}} image child nodes.",
       "splitSucceeded": "Split the source image and saved {{count}} image child nodes and their connections.",
@@ -947,7 +947,7 @@
         "assets": "Assets",
         "canvas": "Canvas",
         "prompts": "Prompts",
-        "workflows": "Templates"
+        "templates": "Templates"
       },
       "right": {
         "assistant": "Creative assistant",
@@ -1112,8 +1112,8 @@
       "agentDescription": "Messages are disabled because this canvas is not linked to a dedicated Agent conversation. The main chat will not be reused.",
       "agentDetail": "This panel requires a dedicated canvas session with its own message history.",
       "agentTitle": "Creative Agent isn't connected",
-      "workflowsDescription": "This canvas has no template data source. The panel stays empty rather than showing placeholder templates or run status.",
-      "workflowsTitle": "Templates aren't connected"
+      "templatesDescription": "This canvas has no template data source. The panel stays empty rather than showing placeholder templates or run status.",
+      "templatesTitle": "Templates aren't connected"
     },
     "untitled": "Untitled canvas",
     "upload": {
@@ -1163,7 +1163,7 @@
       "unsupportedMessage": "This node cannot generate video directly. Select an empty video node or add an image reference to it.",
       "unsupportedMode": "This node does not support video generation"
     },
-    "workflows": {
+    "templates": {
       "activeSummary": " · {{count}} active",
       "empty": "No templates yet",
       "emptyDescription": "Go to Template Studio to create and configure templates.",
@@ -1904,7 +1904,7 @@
       "succeeded": "Completed"
     }
   },
-  "workflows": {
+  "templates": {
     "errors": {
       "generic": "The template operation failed. Try again."
     },

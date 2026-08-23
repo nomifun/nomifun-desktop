@@ -43,7 +43,7 @@ model from another Provider is never substituted.
 
 The canonical task API and migration 047 define standalone ownership by
 `workbench_kind` only. It is mutually exclusive with CanvasNode and
-WorkflowStep ownership, immutable under idempotent replay, and constrained to
+CreativeTemplateStep ownership, immutable under idempotent replay, and constrained to
 the matching media capability family. Historical standalone rows may retain a
 legacy `project_id` value as inert provenance, but it is ignored by owner
 equality, history paging, retirement, asset origin matching, and Canvas
@@ -106,14 +106,14 @@ are never guessed into the standalone owner scope.
 Deleting one catalog model is coordinated with Creative Studio instead of
 leaving stale invocation targets behind. Workshop first parses and validates an
 exact `{ providerId, model }` cleanup plan. The model repository then applies
-every Canvas/Workflow replacement with revision CAS, removes the exact model
+every Canvas/Template replacement with revision CAS, removes the exact model
 capabilities and model row, and increments the Provider configuration revision
 inside one SQLite writer transaction.
 
 Only mutable selections are cleared: Canvas config nodes, image/video/audio
-composer drafts, Workflow generator/planner bindings, and empty Agent
+composer drafts, Template generator/planner bindings, and empty Agent
 sessions. Completed Agent sessions, terminal creation tasks, generated-asset
-origin, and terminal Workflow snapshots remain immutable history.
+origin, and terminal Template snapshots remain immutable history.
 
 A brand-new creation task proves the Provider and exact model are enabled and
 that the model exposes the precise task capability in the same transaction

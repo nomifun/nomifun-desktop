@@ -1,6 +1,6 @@
 use nomifun_common::{
     CreationTaskId, CreativeStudioNodeId, CreativeStudioProjectId,
-    CreativeStudioWorkflowId, CreativeStudioWorkflowRunId, CreativeStudioWorkflowStepId,
+    CreativeStudioTemplateId, CreativeStudioTemplateRunId, CreativeStudioTemplateStepId,
     ProviderId, WorkshopAssetId,
 };
 #[cfg(test)]
@@ -35,9 +35,9 @@ struct CreationTaskDbRow {
     creation_task_id: String,
     project_id: Option<String>,
     workbench_kind: Option<String>,
-    workflow_id: Option<String>,
-    workflow_run_id: Option<String>,
-    workflow_step_id: Option<String>,
+    template_id: Option<String>,
+    template_run_id: Option<String>,
+    template_step_id: Option<String>,
     node_id: Option<String>,
     provider_id: String,
     model: String,
@@ -64,9 +64,9 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
             creation_task_id,
             project_id,
             workbench_kind,
-            workflow_id,
-            workflow_run_id,
-            workflow_step_id,
+            template_id,
+            template_run_id,
+            template_step_id,
             node_id,
             provider_id,
             model,
@@ -99,24 +99,24 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
                 "creation task {creation_task_id} has invalid workbench_kind {kind:?}"
             )));
         }
-        if let Some(id) = workflow_id.as_deref() {
-            CreativeStudioWorkflowId::parse(id).map_err(|error| {
+        if let Some(id) = template_id.as_deref() {
+            CreativeStudioTemplateId::parse(id).map_err(|error| {
                 DbError::Conflict(format!(
-                    "creation task {creation_task_id} has invalid workflow_id {id:?}: {error}"
+                    "creation task {creation_task_id} has invalid template_id {id:?}: {error}"
                 ))
             })?;
         }
-        if let Some(id) = workflow_run_id.as_deref() {
-            CreativeStudioWorkflowRunId::parse(id).map_err(|error| {
+        if let Some(id) = template_run_id.as_deref() {
+            CreativeStudioTemplateRunId::parse(id).map_err(|error| {
                 DbError::Conflict(format!(
-                    "creation task {creation_task_id} has invalid workflow_run_id {id:?}: {error}"
+                    "creation task {creation_task_id} has invalid template_run_id {id:?}: {error}"
                 ))
             })?;
         }
-        if let Some(id) = workflow_step_id.as_deref() {
-            CreativeStudioWorkflowStepId::parse(id).map_err(|error| {
+        if let Some(id) = template_step_id.as_deref() {
+            CreativeStudioTemplateStepId::parse(id).map_err(|error| {
                 DbError::Conflict(format!(
-                    "creation task {creation_task_id} has invalid workflow_step_id {id:?}: {error}"
+                    "creation task {creation_task_id} has invalid template_step_id {id:?}: {error}"
                 ))
             })?;
         }
@@ -135,23 +135,23 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
         let canvas_owner = project_id.is_some()
             && node_id.is_some()
             && workbench_kind.is_none()
-            && workflow_id.is_none()
-            && workflow_run_id.is_none()
-            && workflow_step_id.is_none();
+            && template_id.is_none()
+            && template_run_id.is_none()
+            && template_step_id.is_none();
         let standalone_owner = workbench_kind.is_some()
             && node_id.is_none()
-            && workflow_id.is_none()
-            && workflow_run_id.is_none()
-            && workflow_step_id.is_none();
-        let workflow_owner = project_id.is_none()
+            && template_id.is_none()
+            && template_run_id.is_none()
+            && template_step_id.is_none();
+        let template_owner = project_id.is_none()
             && workbench_kind.is_none()
             && node_id.is_none()
-            && workflow_id.is_some()
-            && workflow_run_id.is_some()
-            && workflow_step_id.is_some();
+            && template_id.is_some()
+            && template_run_id.is_some()
+            && template_step_id.is_some();
         let owner_branches = usize::from(canvas_owner)
             + usize::from(standalone_owner)
-            + usize::from(workflow_owner);
+            + usize::from(template_owner);
         let valid_owner = request_fingerprint.is_some() && owner_branches == 1;
         if !valid_owner {
             return Err(DbError::Conflict(format!(
@@ -174,9 +174,9 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
             deleted_at < submitted_at
                 || workbench_kind.is_none()
                 || node_id.is_some()
-                || workflow_id.is_some()
-                || workflow_run_id.is_some()
-                || workflow_step_id.is_some()
+                || template_id.is_some()
+                || template_run_id.is_some()
+                || template_step_id.is_some()
                 || !matches!(status.as_str(), "failed" | "canceled" | "succeeded")
         }) {
             return Err(DbError::Conflict(format!(
@@ -187,9 +187,9 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
             creation_task_id,
             project_id,
             workbench_kind,
-            workflow_id,
-            workflow_run_id,
-            workflow_step_id,
+            template_id,
+            template_run_id,
+            template_step_id,
             node_id,
             provider_id,
             model,
@@ -238,10 +238,10 @@ enum CanonicalTaskOwner {
     StandaloneWorkbench {
         workbench_kind: String,
     },
-    WorkflowStep {
-        workflow_id: String,
-        workflow_run_id: String,
-        workflow_step_id: String,
+    TemplateStep {
+        template_id: String,
+        template_run_id: String,
+        template_step_id: String,
     },
 }
 
@@ -279,29 +279,29 @@ fn normalize_canonical_owner(owner: CreativeTaskOwnerRef<'_>) -> Result<Canonica
                 workbench_kind,
             })
         }
-        CreativeTaskOwnerRef::WorkflowStep {
-            workflow_id,
-            workflow_run_id,
-            workflow_step_id,
-        } => Ok(CanonicalTaskOwner::WorkflowStep {
-            workflow_id: CreativeStudioWorkflowId::parse(workflow_id)
+        CreativeTaskOwnerRef::TemplateStep {
+            template_id,
+            template_run_id,
+            template_step_id,
+        } => Ok(CanonicalTaskOwner::TemplateStep {
+            template_id: CreativeStudioTemplateId::parse(template_id)
                 .map_err(|error| {
                     DbError::Conflict(format!(
-                        "Creative task workflow_id '{workflow_id}' is not a canonical UUIDv7: {error}"
+                        "Creative task template_id '{template_id}' is not a canonical UUIDv7: {error}"
                     ))
                 })?
                 .into_string(),
-            workflow_run_id: CreativeStudioWorkflowRunId::parse(workflow_run_id)
+            template_run_id: CreativeStudioTemplateRunId::parse(template_run_id)
                 .map_err(|error| {
                     DbError::Conflict(format!(
-                        "Creative task workflow_run_id '{workflow_run_id}' is not a canonical UUIDv7: {error}"
+                        "Creative task template_run_id '{template_run_id}' is not a canonical UUIDv7: {error}"
                     ))
                 })?
                 .into_string(),
-            workflow_step_id: CreativeStudioWorkflowStepId::parse(workflow_step_id)
+            template_step_id: CreativeStudioTemplateStepId::parse(template_step_id)
                 .map_err(|error| {
                     DbError::Conflict(format!(
-                        "Creative task workflow_step_id '{workflow_step_id}' is not a canonical UUIDv7: {error}"
+                        "Creative task template_step_id '{template_step_id}' is not a canonical UUIDv7: {error}"
                     ))
                 })?
                 .into_string(),
@@ -318,30 +318,30 @@ fn stored_owner_matches(stored: &CreationTaskDbRow, owner: &CanonicalTaskOwner) 
             stored.project_id.as_deref() == Some(project_id)
                 && stored.node_id.as_deref() == Some(node_id)
                 && stored.workbench_kind.is_none()
-                && stored.workflow_id.is_none()
-                && stored.workflow_run_id.is_none()
-                && stored.workflow_step_id.is_none()
+                && stored.template_id.is_none()
+                && stored.template_run_id.is_none()
+                && stored.template_step_id.is_none()
         }
         CanonicalTaskOwner::StandaloneWorkbench {
             workbench_kind,
         } => {
             stored.workbench_kind.as_deref() == Some(workbench_kind)
                 && stored.node_id.is_none()
-                && stored.workflow_id.is_none()
-                && stored.workflow_run_id.is_none()
-                && stored.workflow_step_id.is_none()
+                && stored.template_id.is_none()
+                && stored.template_run_id.is_none()
+                && stored.template_step_id.is_none()
         }
-        CanonicalTaskOwner::WorkflowStep {
-            workflow_id,
-            workflow_run_id,
-            workflow_step_id,
+        CanonicalTaskOwner::TemplateStep {
+            template_id,
+            template_run_id,
+            template_step_id,
         } => {
             stored.project_id.is_none()
                 && stored.workbench_kind.is_none()
                 && stored.node_id.is_none()
-                && stored.workflow_id.as_deref() == Some(workflow_id)
-                && stored.workflow_run_id.as_deref() == Some(workflow_run_id)
-                && stored.workflow_step_id.as_deref() == Some(workflow_step_id)
+                && stored.template_id.as_deref() == Some(template_id)
+                && stored.template_run_id.as_deref() == Some(template_run_id)
+                && stored.template_step_id.as_deref() == Some(template_step_id)
         }
     }
 }
@@ -434,31 +434,31 @@ async fn lock_creative_project(
     Ok(project_id.into_string())
 }
 
-async fn lock_creative_workflow_step(
+async fn lock_creative_template_step(
     tx: &mut Transaction<'_, Sqlite>,
-    workflow_id: &str,
-    workflow_run_id: &str,
-    workflow_step_id: &str,
+    template_id: &str,
+    template_run_id: &str,
+    template_step_id: &str,
 ) -> Result<(), DbError> {
     let locked = sqlx::query(
-        "UPDATE creative_studio_workflow_runs \
+        "UPDATE creative_studio_template_runs \
          SET updated_at = updated_at \
-         WHERE workflow_run_id = ?1 \
-           AND workflow_id = ?2 \
+         WHERE template_run_id = ?1 \
+           AND template_id = ?2 \
            AND status IN ('queued', 'running') \
            AND EXISTS (\
                SELECT 1 FROM json_each(step_ids_json) \
                WHERE json_each.value = ?3\
            )",
     )
-    .bind(workflow_run_id)
-    .bind(workflow_id)
-    .bind(workflow_step_id)
+    .bind(template_run_id)
+    .bind(template_id)
+    .bind(template_step_id)
     .execute(&mut **tx)
     .await?;
     if locked.rows_affected() == 0 {
         return Err(DbError::Conflict(format!(
-            "Creative workflow task owner run '{workflow_run_id}' is missing, not executable, belongs to another workflow, or does not contain step '{workflow_step_id}'"
+            "Creative template task owner run '{template_run_id}' is missing, not executable, belongs to another template, or does not contain step '{template_step_id}'"
         )));
     }
     Ok(())
@@ -473,16 +473,16 @@ async fn lock_canonical_owner(
             lock_creative_project(tx, project_id).await?;
         }
         CanonicalTaskOwner::StandaloneWorkbench { .. } => {}
-        CanonicalTaskOwner::WorkflowStep {
-            workflow_id,
-            workflow_run_id,
-            workflow_step_id,
+        CanonicalTaskOwner::TemplateStep {
+            template_id,
+            template_run_id,
+            template_step_id,
         } => {
-            lock_creative_workflow_step(
+            lock_creative_template_step(
                 tx,
-                workflow_id,
-                workflow_run_id,
-                workflow_step_id,
+                template_id,
+                template_run_id,
+                template_step_id,
             )
             .await?;
         }
@@ -672,9 +672,9 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         let (
             project_id,
             workbench_kind,
-            workflow_id,
-            workflow_run_id,
-            workflow_step_id,
+            template_id,
+            template_run_id,
+            template_step_id,
             node_id,
         ) = match &owner {
             CanonicalTaskOwner::CanvasNode {
@@ -696,22 +696,22 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
                 None,
                 None,
             ),
-            CanonicalTaskOwner::WorkflowStep {
-                workflow_id,
-                workflow_run_id,
-                workflow_step_id,
+            CanonicalTaskOwner::TemplateStep {
+                template_id,
+                template_run_id,
+                template_step_id,
             } => (
                 None,
                 None,
-                Some(workflow_id.as_str()),
-                Some(workflow_run_id.as_str()),
-                Some(workflow_step_id.as_str()),
+                Some(template_id.as_str()),
+                Some(template_run_id.as_str()),
+                Some(template_step_id.as_str()),
                 None,
             ),
         };
         let inserted = sqlx::query(
             "INSERT INTO creation_tasks \
-                (creation_task_id, project_id, workbench_kind, workflow_id, workflow_run_id, workflow_step_id, \
+                (creation_task_id, project_id, workbench_kind, template_id, template_run_id, template_step_id, \
                  node_id, provider_id, model, capability, \
                  params, input_bindings, status, error, result_asset_ids, remote_task_id, attempt, submitted_at, \
                  started_at, finished_at, request_fingerprint) \
@@ -721,9 +721,9 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         .bind(params.creation_task_id)
         .bind(project_id)
         .bind(workbench_kind)
-        .bind(workflow_id)
-        .bind(workflow_run_id)
-        .bind(workflow_step_id)
+        .bind(template_id)
+        .bind(template_run_id)
+        .bind(template_step_id)
         .bind(node_id)
         .bind(provider_id.as_str())
         .bind(params.model)
@@ -801,8 +801,8 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
                 "SELECT * FROM creation_tasks \
                  WHERE workbench_kind = ?1 \
                    AND deleted_at IS NULL \
-                   AND node_id IS NULL AND workflow_id IS NULL \
-                   AND workflow_run_id IS NULL AND workflow_step_id IS NULL \
+                   AND node_id IS NULL AND template_id IS NULL \
+                   AND template_run_id IS NULL AND template_step_id IS NULL \
                    AND (?2 = 0 OR status IN ('queued', 'running')) \
                    AND (submitted_at < ?3 OR (submitted_at = ?3 AND creation_task_id < ?4)) \
                  ORDER BY submitted_at DESC, creation_task_id DESC LIMIT ?5",
@@ -819,8 +819,8 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
                 "SELECT * FROM creation_tasks \
                  WHERE workbench_kind = ?1 \
                    AND deleted_at IS NULL \
-                   AND node_id IS NULL AND workflow_id IS NULL \
-                   AND workflow_run_id IS NULL AND workflow_step_id IS NULL \
+                   AND node_id IS NULL AND template_id IS NULL \
+                   AND template_run_id IS NULL AND template_step_id IS NULL \
                    AND (?2 = 0 OR status IN ('queued', 'running')) \
                  ORDER BY submitted_at DESC, creation_task_id DESC LIMIT ?3",
             )
@@ -900,9 +900,9 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         for row in &rows {
             let exact_owner = row.workbench_kind.as_deref() == Some(params.workbench_kind)
                 && row.node_id.is_none()
-                && row.workflow_id.is_none()
-                && row.workflow_run_id.is_none()
-                && row.workflow_step_id.is_none();
+                && row.template_id.is_none()
+                && row.template_run_id.is_none()
+                && row.template_step_id.is_none();
             if !exact_owner {
                 return Err(DbError::Conflict(format!(
                     "creation task {} does not belong to the requested standalone workbench owner",
@@ -1189,57 +1189,57 @@ mod tests {
         project_id
     }
 
-    async fn seed_creative_workflow_run(
+    async fn seed_creative_template_run(
         db: &crate::Database,
     ) -> (String, String, String) {
-        let workflow_id = CreativeStudioWorkflowId::new().into_string();
-        let workflow_run_id = CreativeStudioWorkflowRunId::new().into_string();
-        let workflow_step_id = CreativeStudioWorkflowStepId::new().into_string();
+        let template_id = CreativeStudioTemplateId::new().into_string();
+        let template_run_id = CreativeStudioTemplateRunId::new().into_string();
+        let template_step_id = CreativeStudioTemplateStepId::new().into_string();
         let definition = serde_json::json!({
-            "id": workflow_id,
+            "id": template_id,
             "revision": 1
         });
         sqlx::query(
-            "INSERT INTO creative_studio_workflows \
-                (workflow_id, revision, name, description, category, visibility, definition_json, \
+            "INSERT INTO creative_studio_templates \
+                (template_id, revision, name, description, category, visibility, definition_json, \
                  created_at, updated_at) \
              VALUES (?, 1, 'Task Owner Test', '', '', 'private', ?, 0, 0)",
         )
-        .bind(&workflow_id)
+        .bind(&template_id)
         .bind(definition.to_string())
         .execute(db.pool())
         .await
         .unwrap();
         let aggregate = serde_json::json!({
-            "kind": "nomifun.creative-studio.workflow-run",
+            "kind": "nomifun.creative-studio.template-run",
             "version": 1,
             "revision": 1,
-            "workflowSnapshot": { "id": workflow_id, "revision": 1 },
+            "templateSnapshot": { "id": template_id, "revision": 1 },
             "request": {
-                "id": workflow_run_id,
-                "workflowId": workflow_id,
-                "workflowRevision": 1
+                "id": template_run_id,
+                "templateId": template_id,
+                "templateRevision": 1
             },
             "record": {
-                "requestId": workflow_run_id,
-                "workflowId": workflow_id,
+                "requestId": template_run_id,
+                "templateId": template_id,
                 "status": "queued"
             }
         });
         sqlx::query(
-            "INSERT INTO creative_studio_workflow_runs \
-                (workflow_run_id, workflow_id, workflow_revision, revision, status, step_ids_json, \
+            "INSERT INTO creative_studio_template_runs \
+                (template_run_id, template_id, template_revision, revision, status, step_ids_json, \
                  aggregate_json, created_at, updated_at) \
              VALUES (?, ?, 1, 1, 'queued', ?, ?, 0, 0)",
         )
-        .bind(&workflow_run_id)
-        .bind(&workflow_id)
-        .bind(serde_json::to_string(&[&workflow_step_id]).unwrap())
+        .bind(&template_run_id)
+        .bind(&template_id)
+        .bind(serde_json::to_string(&[&template_step_id]).unwrap())
         .bind(aggregate.to_string())
         .execute(db.pool())
         .await
         .unwrap();
-        (workflow_id, workflow_run_id, workflow_step_id)
+        (template_id, template_run_id, template_step_id)
     }
 
     fn creative_params<'a>(
@@ -1287,20 +1287,20 @@ mod tests {
         .row
     }
 
-    fn workflow_creative_params<'a>(
+    fn template_creative_params<'a>(
         creation_task_id: &'a str,
-        workflow_id: &'a str,
-        workflow_run_id: &'a str,
-        workflow_step_id: &'a str,
+        template_id: &'a str,
+        template_run_id: &'a str,
+        template_step_id: &'a str,
         provider_id: &'a str,
         fingerprint: &'a str,
     ) -> CreateCreativeTaskParams<'a> {
         CreateCreativeTaskParams {
             creation_task_id,
-            owner: CreativeTaskOwnerRef::WorkflowStep {
-                workflow_id,
-                workflow_run_id,
-                workflow_step_id,
+            owner: CreativeTaskOwnerRef::TemplateStep {
+                template_id,
+                template_run_id,
+                template_step_id,
             },
             provider_id,
             model: "image-model-v1",
@@ -1341,20 +1341,20 @@ mod tests {
         db: &crate::Database,
         creation_task_id: &str,
         project_id: Option<&str>,
-        workflow_id: Option<&str>,
+        template_id: Option<&str>,
         node_id: Option<&str>,
         provider_id: &str,
         request_fingerprint: Option<&str>,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO creation_tasks \
-                (creation_task_id, project_id, workflow_id, node_id, provider_id, model, capability, \
+                (creation_task_id, project_id, template_id, node_id, provider_id, model, capability, \
                  params, status, submitted_at, request_fingerprint) \
              VALUES (?, ?, ?, ?, ?, 'image-model-v1', 't2i', '{}', 'queued', 100, ?)",
         )
         .bind(creation_task_id)
         .bind(project_id)
-        .bind(workflow_id)
+        .bind(template_id)
         .bind(node_id)
         .bind(provider_id)
         .bind(request_fingerprint)
@@ -1368,19 +1368,19 @@ mod tests {
         let (_repo, db, provider_id) = repo().await;
         let project_id = seed_creative_project(&db).await;
         let node_id = CreativeStudioNodeId::new().into_string();
-        let workflow_id = CreativeStudioWorkflowId::new().into_string();
+        let template_id = CreativeStudioTemplateId::new().into_string();
 
         let mixed = raw_insert_task_ownership(
             &db,
             &CreationTaskId::new().into_string(),
             Some(&project_id),
-            Some(&workflow_id),
+            Some(&template_id),
             Some(&node_id),
             &provider_id,
             Some(r#"{"project_id":"mixed"}"#),
         )
         .await;
-        assert!(mixed.is_err(), "project and workflow owners must be exclusive");
+        assert!(mixed.is_err(), "project and template owners must be exclusive");
 
         let missing_fingerprint = raw_insert_task_ownership(
             &db,
@@ -2111,52 +2111,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workflow_step_owner_requires_an_executable_run_and_exact_step() {
+    async fn template_step_owner_requires_an_executable_run_and_exact_step() {
         let (repo, db, provider_id) = repo().await;
-        let (workflow_id, workflow_run_id, workflow_step_id) =
-            seed_creative_workflow_run(&db).await;
+        let (template_id, template_run_id, template_step_id) =
+            seed_creative_template_run(&db).await;
         sqlx::query(
-            "UPDATE creative_studio_workflow_runs SET status = 'running', \
+            "UPDATE creative_studio_template_runs SET status = 'running', \
              aggregate_json = json_set(aggregate_json, '$.record.status', 'running') \
-             WHERE workflow_run_id = ?",
+             WHERE template_run_id = ?",
         )
-        .bind(&workflow_run_id)
+        .bind(&template_run_id)
         .execute(db.pool())
         .await
         .unwrap();
         let task_id = CreationTaskId::new().into_string();
-        let fingerprint = r#"{"owner":{"kind":"workflow_step"}}"#;
+        let fingerprint = r#"{"owner":{"kind":"template_step"}}"#;
 
         let first = repo
-            .get_or_create_creative_task(workflow_creative_params(
+            .get_or_create_creative_task(template_creative_params(
                 &task_id,
-                &workflow_id,
-                &workflow_run_id,
-                &workflow_step_id,
+                &template_id,
+                &template_run_id,
+                &template_step_id,
                 &provider_id,
                 fingerprint,
             ))
             .await
             .unwrap();
         assert!(first.inserted);
-        assert_eq!(first.row.workflow_id.as_deref(), Some(workflow_id.as_str()));
+        assert_eq!(first.row.template_id.as_deref(), Some(template_id.as_str()));
         assert_eq!(
-            first.row.workflow_run_id.as_deref(),
-            Some(workflow_run_id.as_str())
+            first.row.template_run_id.as_deref(),
+            Some(template_run_id.as_str())
         );
         assert_eq!(
-            first.row.workflow_step_id.as_deref(),
-            Some(workflow_step_id.as_str())
+            first.row.template_step_id.as_deref(),
+            Some(template_step_id.as_str())
         );
         assert!(first.row.project_id.is_none());
         assert!(first.row.node_id.is_none());
 
         let replay = repo
-            .get_or_create_creative_task(workflow_creative_params(
+            .get_or_create_creative_task(template_creative_params(
                 &task_id,
-                &workflow_id,
-                &workflow_run_id,
-                &workflow_step_id,
+                &template_id,
+                &template_run_id,
+                &template_step_id,
                 &provider_id,
                 fingerprint,
             ))
@@ -2164,37 +2164,37 @@ mod tests {
             .unwrap();
         assert!(!replay.inserted);
 
-        let missing_step = CreativeStudioWorkflowStepId::new().into_string();
+        let missing_step = CreativeStudioTemplateStepId::new().into_string();
         let error = repo
-            .get_or_create_creative_task(workflow_creative_params(
+            .get_or_create_creative_task(template_creative_params(
                 &CreationTaskId::new().into_string(),
-                &workflow_id,
-                &workflow_run_id,
+                &template_id,
+                &template_run_id,
                 &missing_step,
                 &provider_id,
-                r#"{"owner":{"kind":"workflow_step","attempt":2}}"#,
+                r#"{"owner":{"kind":"template_step","attempt":2}}"#,
             ))
             .await
             .unwrap_err();
         assert!(matches!(error, DbError::Conflict(message) if message.contains("does not contain step")));
 
         sqlx::query(
-            "UPDATE creative_studio_workflow_runs SET status = 'succeeded', \
+            "UPDATE creative_studio_template_runs SET status = 'succeeded', \
              aggregate_json = json_set(aggregate_json, '$.record.status', 'succeeded') \
-             WHERE workflow_run_id = ?",
+             WHERE template_run_id = ?",
         )
-        .bind(&workflow_run_id)
+        .bind(&template_run_id)
         .execute(db.pool())
         .await
         .unwrap();
         let terminal_error = repo
-            .get_or_create_creative_task(workflow_creative_params(
+            .get_or_create_creative_task(template_creative_params(
                 &CreationTaskId::new().into_string(),
-                &workflow_id,
-                &workflow_run_id,
-                &workflow_step_id,
+                &template_id,
+                &template_run_id,
+                &template_step_id,
                 &provider_id,
-                r#"{"owner":{"kind":"workflow_step","attempt":3}}"#,
+                r#"{"owner":{"kind":"template_step","attempt":3}}"#,
             ))
             .await
             .unwrap_err();

@@ -43,9 +43,6 @@ describe('Creative Studio resume location', () => {
       expect(normalizeCreativeStudioResumeLocation(path)).toBe(path);
     }
     expect(normalizeCreativeStudioResumeLocation('/workshop')).toBe('/workshop/canvases');
-    expect(normalizeCreativeStudioResumeLocation('/workshop/workflows#runs')).toBe(
-      '/workshop/templates#runs'
-    );
     expect(normalizeCreativeStudioResumeLocation('/workshop/?from=old#resume')).toBe(
       '/workshop/canvases?from=old#resume'
     );

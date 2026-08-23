@@ -45,8 +45,7 @@ The current frontend route map lives in
   `/workshop/canvases`, Canvas editors at `/workshop/canvas/:canvasId` and
   `/workshop/director/:canvasId`, independent workbenches at `/workshop/image`
   and `/workshop/video`, plus `/workshop/prompts`, `/workshop/assets`, and
-  `/workshop/templates`. `/workshop/workflows` is a deprecated compatibility
-  redirect to `/workshop/templates`.
+  `/workshop/templates`.
   `/workshop/projects` is a deprecated compatibility redirect to
   `/workshop/canvases`; it is not a Creative Studio product object.
   `/workshop/audio` is retired; see
@@ -60,7 +59,8 @@ primary navigation.
 
 Creative Studio has no Project domain. Canvas tasks use the
 `CanvasNode { canvasId, nodeId }` owner; standalone Image/Video tasks use only
-`StandaloneWorkbench { workbenchKind }`; WorkflowStep remains unchanged.
+`StandaloneWorkbench { workbenchKind }`; template executions use
+`TemplateStep { templateId, templateRunId, templateStepId }`.
 Standalone history and retirement are scoped only by `workbench_kind`, and
 legacy standalone `project_id` values are inert provenance. Image and Video
 routes have no Canvas selector or prerequisite and are usable with zero

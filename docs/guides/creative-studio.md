@@ -55,7 +55,7 @@ The task owner union is intentionally small:
 | --- | --- | --- |
 | `CanvasNode` | `{ canvasId, nodeId }` | Tasks started from a Canvas node. |
 | `StandaloneWorkbench` | `{ workbenchKind }` | Image, Video, or other standalone workbench tasks. |
-| `WorkflowStep` | Existing workflow/run/step identity | Workflow execution. |
+| `TemplateStep` | Existing template/run/step identity | Template execution. |
 
 Only a task started by a Canvas node has a Canvas owner. A standalone task
 never gets a hidden, temporary, default, or automatically selected Canvas.
@@ -262,7 +262,7 @@ scope:
 2. NomiFun performs one tool-less completion with a 120-second wall-clock
    budget, a 4,096-token output ceiling, and a 262,156-byte local response cap.
 3. The client accepts only one strict final
-   `nomifun.creative-studio.workflow-draft/v1` JSON artifact. The available
+   `nomifun.creative-studio.template-draft/v1` JSON artifact. The available
    draft modes are `single-image` and `multi-image-series`.
 4. Review the preview. **Apply** only opens the existing template editor with a
    private in-memory draft.
@@ -275,7 +275,7 @@ model failover, save, or execution. The model never chooses IDs, revisions,
 timestamps, visibility, tags, media-generation models, or assets. Public
 template publishing/discovery and complex template conversations are not part
 of this launch scope. The launch UI is private-only: create, edit, copy, and AI
-Apply all normalize the underlying workflow definition to `private`, and there is no
+Apply all normalize the underlying template definition to `private`, and there is no
 public-visibility control.
 
 ## Director v1 subset

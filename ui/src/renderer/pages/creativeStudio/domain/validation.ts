@@ -934,7 +934,7 @@ const parsePanels = (value: unknown, path: string): CreativeStudioPanelState => 
       width: asNumber(left.width, `${path}.left.width`, code, { min: 180, max: 800 }),
       activeView: asLiteral<CreativeLeftPanelView>(
         left.activeView,
-        ['canvas', 'assets', 'prompts', 'workflows'],
+        ['canvas', 'assets', 'prompts', 'templates'],
         `${path}.left.activeView`,
         code
       ),

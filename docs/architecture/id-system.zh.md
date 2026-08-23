@@ -112,9 +112,9 @@ CREATE TABLE conversations (
 v3 中的稳定实体包括用户、会话、消息、终端会话、Provider、Requirement、
 Agent Execution 及模板、Agent Execution
 Participant/Step/Attempt/Template Participant、知识库、附件、
-用户 Preset、创意工坊项目/Workflow/Workflow run/Agent session/素材/
+用户 Preset、创意工坊项目/模板/模板运行/Agent session/素材/
 creation task，以及 Channel Plugin/User/Session。创意工坊分别使用
-`project_id`、`workflow_id`、`workflow_run_id`、`session_id`、`asset_id` 和
+`project_id`、`template_id`、`template_run_id`、`session_id`、`asset_id` 和
 `creation_task_id`；项目文档内嵌的图节点与连接也携带 canonical UUIDv7
 身份。Requirement 使用 `requirement_id`，并另有只供人类展示的
 `display_no`；Agent Execution 和 Channel 子实体使用 `participant_id`、

@@ -25,9 +25,9 @@ const PROVIDER_ID = '0190f5fe-7c00-7a00-8000-000000000003';
 const TASK_ID = '0190f5fe-7c00-7a00-8000-000000000004';
 const ASSET_ID = '0190f5fe-7c00-7a00-8000-000000000005';
 const IDEMPOTENCY_KEY = '0190f5fe-7c00-7a00-8000-000000000006';
-const WORKFLOW_ID = '0190f5fe-7c00-7a00-8000-000000000007';
-const WORKFLOW_RUN_ID = '0190f5fe-7c00-7a00-8000-000000000008';
-const WORKFLOW_STEP_ID = '0190f5fe-7c00-7a00-8000-000000000009';
+const TEMPLATE_ID = '0190f5fe-7c00-7a00-8000-000000000007';
+const TEMPLATE_RUN_ID = '0190f5fe-7c00-7a00-8000-000000000008';
+const TEMPLATE_STEP_ID = '0190f5fe-7c00-7a00-8000-000000000009';
 
 const identity: CreativeTaskIdentity = {
   owner: {
@@ -137,12 +137,12 @@ describe('CreativeTaskClient', () => {
     });
   });
 
-  test('round-trips the exact workflow-step owner without canvas aliases', async () => {
+  test('round-trips the exact template-step owner without canvas aliases', async () => {
     const owner = {
-      kind: 'workflow_step' as const,
-      workflowId: WORKFLOW_ID,
-      workflowRunId: WORKFLOW_RUN_ID,
-      workflowStepId: WORKFLOW_STEP_ID,
+      kind: 'template_step' as const,
+      templateId: TEMPLATE_ID,
+      templateRunId: TEMPLATE_RUN_ID,
+      templateStepId: TEMPLATE_STEP_ID,
     };
     let body: unknown;
     const client = new CreativeTaskClient({
@@ -151,10 +151,10 @@ describe('CreativeTaskClient', () => {
         return wireTask('queued', {
           creation_task_id: key,
           owner: {
-            kind: 'workflow_step',
-            workflow_id: WORKFLOW_ID,
-            workflow_run_id: WORKFLOW_RUN_ID,
-            workflow_step_id: WORKFLOW_STEP_ID,
+            kind: 'template_step',
+            template_id: TEMPLATE_ID,
+            template_run_id: TEMPLATE_RUN_ID,
+            template_step_id: TEMPLATE_STEP_ID,
           },
         });
       },
@@ -166,10 +166,10 @@ describe('CreativeTaskClient', () => {
 
     expect(body).toEqual({
       owner: {
-        kind: 'workflow_step',
-        workflow_id: WORKFLOW_ID,
-        workflow_run_id: WORKFLOW_RUN_ID,
-        workflow_step_id: WORKFLOW_STEP_ID,
+        kind: 'template_step',
+        template_id: TEMPLATE_ID,
+        template_run_id: TEMPLATE_RUN_ID,
+        template_step_id: TEMPLATE_STEP_ID,
       },
       provider_id: PROVIDER_ID,
       model: 'image-model-v1',

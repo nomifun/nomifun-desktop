@@ -17,7 +17,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use nomifun_common::{
     AppError, CreationTaskId, CreativeStudioCanvasId, CreativeStudioNodeId,
-    CreativeStudioWorkflowId, CreativeStudioWorkflowRunId, CreativeStudioWorkflowStepId,
+    CreativeStudioTemplateId, CreativeStudioTemplateRunId, CreativeStudioTemplateStepId,
     ProviderId, WorkshopAssetId, now_ms, validate_uuidv7,
 };
 #[cfg(test)]
@@ -402,10 +402,10 @@ pub enum CreativeTaskOwner {
     StandaloneWorkbench {
         workbench_kind: StandaloneWorkbenchKind,
     },
-    WorkflowStep {
-        workflow_id: String,
-        workflow_run_id: String,
-        workflow_step_id: String,
+    TemplateStep {
+        template_id: String,
+        template_run_id: String,
+        template_step_id: String,
     },
 }
 
@@ -426,22 +426,22 @@ impl CreativeTaskOwner {
             Self::StandaloneWorkbench { workbench_kind } => {
                 Ok(Self::StandaloneWorkbench { workbench_kind })
             }
-            Self::WorkflowStep {
-                workflow_id,
-                workflow_run_id,
-                workflow_step_id,
-            } => Ok(Self::WorkflowStep {
-                workflow_id: CreativeStudioWorkflowId::parse(workflow_id)
-                    .map_err(|error| AppError::BadRequest(format!("invalid workflow_id: {error}")))?
+            Self::TemplateStep {
+                template_id,
+                template_run_id,
+                template_step_id,
+            } => Ok(Self::TemplateStep {
+                template_id: CreativeStudioTemplateId::parse(template_id)
+                    .map_err(|error| AppError::BadRequest(format!("invalid template_id: {error}")))?
                     .into_string(),
-                workflow_run_id: CreativeStudioWorkflowRunId::parse(workflow_run_id)
+                template_run_id: CreativeStudioTemplateRunId::parse(template_run_id)
                     .map_err(|error| {
-                        AppError::BadRequest(format!("invalid workflow_run_id: {error}"))
+                        AppError::BadRequest(format!("invalid template_run_id: {error}"))
                     })?
                     .into_string(),
-                workflow_step_id: CreativeStudioWorkflowStepId::parse(workflow_step_id)
+                template_step_id: CreativeStudioTemplateStepId::parse(template_step_id)
                     .map_err(|error| {
-                        AppError::BadRequest(format!("invalid workflow_step_id: {error}"))
+                        AppError::BadRequest(format!("invalid template_step_id: {error}"))
                     })?
                     .into_string(),
             }),
@@ -463,14 +463,14 @@ impl CreativeTaskOwner {
                     workbench_kind: workbench_kind.as_str(),
                 }
             }
-            Self::WorkflowStep {
-                workflow_id,
-                workflow_run_id,
-                workflow_step_id,
-            } => CreativeTaskOwnerRef::WorkflowStep {
-                workflow_id,
-                workflow_run_id,
-                workflow_step_id,
+            Self::TemplateStep {
+                template_id,
+                template_run_id,
+                template_step_id,
+            } => CreativeTaskOwnerRef::TemplateStep {
+                template_id,
+                template_run_id,
+                template_step_id,
             },
         }
     }
@@ -506,9 +506,9 @@ impl PreparedCreationTask {
         let (
             canvas_id,
             workbench_kind,
-            workflow_id,
-            workflow_run_id,
-            workflow_step_id,
+            template_id,
+            template_run_id,
+            template_step_id,
             node_id,
         ) = match owner {
             CreativeTaskOwner::CanvasNode {
@@ -523,16 +523,16 @@ impl PreparedCreationTask {
                 None,
                 None,
             ),
-            CreativeTaskOwner::WorkflowStep {
-                workflow_id,
-                workflow_run_id,
-                workflow_step_id,
+            CreativeTaskOwner::TemplateStep {
+                template_id,
+                template_run_id,
+                template_step_id,
             } => (
                 None,
                 None,
-                Some(workflow_id),
-                Some(workflow_run_id),
-                Some(workflow_step_id),
+                Some(template_id),
+                Some(template_run_id),
+                Some(template_step_id),
                 None,
             ),
         };
@@ -540,9 +540,9 @@ impl PreparedCreationTask {
             creation_task_id,
             canvas_id,
             workbench_kind,
-            workflow_id,
-            workflow_run_id,
-            workflow_step_id,
+            template_id,
+            template_run_id,
+            template_step_id,
             node_id,
             provider_id: self.provider_id,
             model: self.model,
@@ -564,7 +564,7 @@ pub struct PersistAsset {
     /// Whether the produced asset appears in the asset library. Generated
     /// products default to `true` (see [`CreationService::persist_assets`]).
     pub in_library: bool,
-    /// Canonical provenance, including exactly one Canvas/workflow owner
+    /// Canonical provenance, including exactly one Canvas/template owner
     /// branch plus provider/model/task metadata.
     pub origin: Value,
 }
@@ -654,9 +654,9 @@ struct WorkerJob {
     creation_task_id: String,
     canvas_id: Option<String>,
     workbench_kind: Option<StandaloneWorkbenchKind>,
-    workflow_id: Option<String>,
-    workflow_run_id: Option<String>,
-    workflow_step_id: Option<String>,
+    template_id: Option<String>,
+    template_run_id: Option<String>,
+    template_step_id: Option<String>,
     node_id: Option<String>,
     provider_id: String,
     model: String,
@@ -1027,9 +1027,9 @@ impl CreationService {
         for row in &rows {
             let exact_owner = row.workbench_kind.as_deref() == Some(workbench_kind.as_str())
                 && row.node_id.is_none()
-                && row.workflow_id.is_none()
-                && row.workflow_run_id.is_none()
-                && row.workflow_step_id.is_none();
+                && row.template_id.is_none()
+                && row.template_run_id.is_none()
+                && row.template_step_id.is_none();
             let capability_matches = MediaCapability::parse(&row.capability)
                 .is_some_and(|capability| workbench_kind.accepts_capability(capability));
             if !exact_owner || !capability_matches {
@@ -1085,9 +1085,9 @@ impl CreationService {
                 .ok_or_else(|| AppError::NotFound(format!("creation task {task_id} not found")))?;
             let exact_owner = row.workbench_kind.as_deref() == Some(workbench_kind.as_str())
                 && row.node_id.is_none()
-                && row.workflow_id.is_none()
-                && row.workflow_run_id.is_none()
-                && row.workflow_step_id.is_none();
+                && row.template_id.is_none()
+                && row.template_run_id.is_none()
+                && row.template_step_id.is_none();
             let capability_matches = MediaCapability::parse(&row.capability)
                 .is_some_and(|capability| workbench_kind.accepts_capability(capability));
             if !exact_owner || !capability_matches {
@@ -1394,9 +1394,9 @@ impl CreationService {
                                 .workbench_kind
                                 .as_deref()
                                 .and_then(StandaloneWorkbenchKind::parse),
-                            workflow_id: row.workflow_id,
-                            workflow_run_id: row.workflow_run_id,
-                            workflow_step_id: row.workflow_step_id,
+                            template_id: row.template_id,
+                            template_run_id: row.template_run_id,
+                            template_step_id: row.template_step_id,
                             node_id: row.node_id,
                             provider_id: row.provider_id,
                             model: row.model,
@@ -2068,19 +2068,19 @@ fn build_origin(job: &WorkerJob) -> Value {
             Value::String(workbench_kind.as_str().to_owned()),
         );
     }
-    if let Some(workflow_id) = &job.workflow_id {
-        origin.insert("workflow_id".into(), Value::String(workflow_id.clone()));
+    if let Some(template_id) = &job.template_id {
+        origin.insert("template_id".into(), Value::String(template_id.clone()));
     }
-    if let Some(workflow_run_id) = &job.workflow_run_id {
+    if let Some(template_run_id) = &job.template_run_id {
         origin.insert(
-            "workflow_run_id".into(),
-            Value::String(workflow_run_id.clone()),
+            "template_run_id".into(),
+            Value::String(template_run_id.clone()),
         );
     }
-    if let Some(workflow_step_id) = &job.workflow_step_id {
+    if let Some(template_step_id) = &job.template_step_id {
         origin.insert(
-            "workflow_step_id".into(),
-            Value::String(workflow_step_id.clone()),
+            "template_step_id".into(),
+            Value::String(template_step_id.clone()),
         );
     }
     if let Some(node_id) = &job.node_id {
@@ -2861,53 +2861,53 @@ mod tests {
         canvas_id
     }
 
-    async fn seed_creative_workflow_run(
+    async fn seed_creative_template_run(
         pool: &nomifun_db::SqlitePool,
     ) -> (String, String, String) {
-        let workflow_id = CreativeStudioWorkflowId::new().into_string();
-        let workflow_run_id = CreativeStudioWorkflowRunId::new().into_string();
-        let workflow_step_id = CreativeStudioWorkflowStepId::new().into_string();
+        let template_id = CreativeStudioTemplateId::new().into_string();
+        let template_run_id = CreativeStudioTemplateRunId::new().into_string();
+        let template_step_id = CreativeStudioTemplateStepId::new().into_string();
         sqlx::query(
-            "INSERT INTO creative_studio_workflows \
-                (workflow_id, revision, name, description, category, visibility, definition_json, \
+            "INSERT INTO creative_studio_templates \
+                (template_id, revision, name, description, category, visibility, definition_json, \
                  created_at, updated_at) \
-             VALUES (?, 1, 'Creation Workflow Test', '', '', 'private', ?, 0, 0)",
+             VALUES (?, 1, 'Creation Template Test', '', '', 'private', ?, 0, 0)",
         )
-        .bind(&workflow_id)
-        .bind(json!({"id": workflow_id, "revision": 1}).to_string())
+        .bind(&template_id)
+        .bind(json!({"id": template_id, "revision": 1}).to_string())
         .execute(pool)
         .await
         .unwrap();
         let aggregate = json!({
-            "kind": "nomifun.creative-studio.workflow-run",
+            "kind": "nomifun.creative-studio.template-run",
             "version": 1,
             "revision": 1,
-            "workflowSnapshot": {"id": workflow_id, "revision": 1},
+            "templateSnapshot": {"id": template_id, "revision": 1},
             "request": {
-                "id": workflow_run_id,
-                "workflowId": workflow_id,
-                "workflowRevision": 1
+                "id": template_run_id,
+                "templateId": template_id,
+                "templateRevision": 1
             },
             "record": {
-                "requestId": workflow_run_id,
-                "workflowId": workflow_id,
+                "requestId": template_run_id,
+                "templateId": template_id,
                 "status": "running"
             }
         });
         sqlx::query(
-            "INSERT INTO creative_studio_workflow_runs \
-                (workflow_run_id, workflow_id, workflow_revision, revision, status, step_ids_json, \
+            "INSERT INTO creative_studio_template_runs \
+                (template_run_id, template_id, template_revision, revision, status, step_ids_json, \
                  aggregate_json, created_at, updated_at) \
              VALUES (?, ?, 1, 1, 'running', ?, ?, 0, 0)",
         )
-        .bind(&workflow_run_id)
-        .bind(&workflow_id)
-        .bind(serde_json::to_string(&[&workflow_step_id]).unwrap())
+        .bind(&template_run_id)
+        .bind(&template_id)
+        .bind(serde_json::to_string(&[&template_step_id]).unwrap())
         .bind(aggregate.to_string())
         .execute(pool)
         .await
         .unwrap();
-        (workflow_id, workflow_run_id, workflow_step_id)
+        (template_id, template_run_id, template_step_id)
     }
 
     fn creative_task(provider_id: &str, prompt: &str) -> NewCreationTask {
@@ -3256,34 +3256,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creative_workflow_task_runs_with_exact_owner_and_provenance() {
+    async fn creative_template_task_runs_with_exact_owner_and_provenance() {
         let adapter = MockAdapter::sync("openai.images");
         let h = harness(adapter.clone(), "openai").await;
-        let (workflow_id, workflow_run_id, workflow_step_id) =
-            seed_creative_workflow_run(h._db.pool()).await;
+        let (template_id, template_run_id, template_step_id) =
+            seed_creative_template_run(h._db.pool()).await;
         let creation_task_id = CreationTaskId::new().into_string();
 
         let created = h
             .svc
             .create_creative_task(
-                CreativeTaskOwner::WorkflowStep {
-                    workflow_id: workflow_id.clone(),
-                    workflow_run_id: workflow_run_id.clone(),
-                    workflow_step_id: workflow_step_id.clone(),
+                CreativeTaskOwner::TemplateStep {
+                    template_id: template_id.clone(),
+                    template_run_id: template_run_id.clone(),
+                    template_step_id: template_step_id.clone(),
                 },
                 creation_task_id.clone(),
-                creative_task(&h.provider_id, "Workflow Aurora"),
+                creative_task(&h.provider_id, "Template Aurora"),
             )
             .await
             .unwrap();
-        assert_eq!(created.workflow_id.as_deref(), Some(workflow_id.as_str()));
+        assert_eq!(created.template_id.as_deref(), Some(template_id.as_str()));
         assert_eq!(
-            created.workflow_run_id.as_deref(),
-            Some(workflow_run_id.as_str())
+            created.template_run_id.as_deref(),
+            Some(template_run_id.as_str())
         );
         assert_eq!(
-            created.workflow_step_id.as_deref(),
-            Some(workflow_step_id.as_str())
+            created.template_step_id.as_deref(),
+            Some(template_step_id.as_str())
         );
         assert!(created.canvas_id.is_none());
         assert!(created.node_id.is_none());
@@ -3293,9 +3293,9 @@ mod tests {
         assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 1);
         let origins = h.sink.origins.lock().unwrap();
         assert_eq!(origins.len(), 1);
-        assert_eq!(origins[0]["workflow_id"], workflow_id);
-        assert_eq!(origins[0]["workflow_run_id"], workflow_run_id);
-        assert_eq!(origins[0]["workflow_step_id"], workflow_step_id);
+        assert_eq!(origins[0]["template_id"], template_id);
+        assert_eq!(origins[0]["template_run_id"], template_run_id);
+        assert_eq!(origins[0]["template_step_id"], template_step_id);
         assert_eq!(origins[0]["creation_task_id"], creation_task_id);
         assert!(origins[0].get("project_id").is_none());
         assert!(origins[0].get("canvas_id").is_none());
@@ -4176,9 +4176,9 @@ mod tests {
             creation_task_id: creation_task_id.clone(),
             canvas_id: Some(canvas_id.clone()),
             workbench_kind: None,
-            workflow_id: None,
-            workflow_run_id: None,
-            workflow_step_id: None,
+            template_id: None,
+            template_run_id: None,
+            template_step_id: None,
             node_id: Some(node_id.clone()),
             provider_id: provider_id.clone(),
             model: "gpt-image-1".into(),
@@ -4211,9 +4211,9 @@ mod tests {
             creation_task_id: CreationTaskId::new().into_string(),
             canvas_id: None,
             workbench_kind: None,
-            workflow_id: Some(CreativeStudioWorkflowId::new().into_string()),
-            workflow_run_id: Some(CreativeStudioWorkflowRunId::new().into_string()),
-            workflow_step_id: Some(CreativeStudioWorkflowStepId::new().into_string()),
+            template_id: Some(CreativeStudioTemplateId::new().into_string()),
+            template_run_id: Some(CreativeStudioTemplateRunId::new().into_string()),
+            template_step_id: Some(CreativeStudioTemplateStepId::new().into_string()),
             node_id: None,
             provider_id: ProviderId::new().into_string(),
             model: "gpt-image-1".into(),
@@ -4236,9 +4236,9 @@ mod tests {
             creation_task_id: CreationTaskId::new().into_string(),
             canvas_id: None,
             workbench_kind: Some(StandaloneWorkbenchKind::Video),
-            workflow_id: None,
-            workflow_run_id: None,
-            workflow_step_id: None,
+            template_id: None,
+            template_run_id: None,
+            template_step_id: None,
             node_id: None,
             provider_id: ProviderId::new().into_string(),
             model: "video-model".into(),
@@ -4254,7 +4254,7 @@ mod tests {
         assert!(origin.get("canvas_id").is_none());
         assert_eq!(origin["workbench_kind"], "video");
         assert!(origin.get("node_id").is_none());
-        assert!(origin.get("workflow_id").is_none());
+        assert!(origin.get("template_id").is_none());
     }
 
     // ---- param helpers (ported verbatim from the retired adapters/mod.rs) ----
