@@ -250,7 +250,6 @@ export type I18nKey =
   | 'assetLibrary.tagModal.ok'
   | 'assetLibrary.tagModal.placeholder'
   | 'assetLibrary.tagModal.title'
-  | 'assetLibrary.title'
   | 'autowork.runState.active'
   | 'autowork.runState.idle'
   | 'autowork.runState.off'
