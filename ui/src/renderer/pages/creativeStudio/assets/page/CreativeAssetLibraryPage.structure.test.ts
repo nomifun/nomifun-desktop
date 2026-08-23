@@ -46,12 +46,15 @@ describe('CreativeAssetLibraryPage wiring', () => {
     expect(source.includes('controller.abort()')).toBe(true);
   });
 
-  test('synchronizes every backend page before client slicing and flushes submitted search', () => {
+  test('loads only the pages required by source pagination and flushes submitted search', () => {
     const source = readFileSync(new URL('./CreativeAssetLibraryPage.tsx', import.meta.url), 'utf8');
-    expect(source.includes('creativeAssetCacheIsComplete(library.assets.length, library.total)')).toBe(true);
-    expect(source.includes('library.error || library.loading || library.loadingMore || !library.hasMore')).toBe(true);
+    expect(source.includes('creativeAssetPageIsLoaded(')).toBe(true);
+    expect(source.includes('library.loadingMore || !library.hasMore')).toBe(true);
     expect(source.includes('void library.loadMore()')).toBe(true);
-    expect(source.includes('creativeAssetPageSliceFromCompleteCache(')).toBe(true);
+    expect(source.includes('creativeAssetPageSlice(')).toBe(true);
+    expect(source.includes('creativeAssetCacheIsComplete')).toBe(false);
+    expect(source.includes('creativeAssetPageSliceFromCompleteCache')).toBe(false);
+    expect(source.includes('pageLoadAttemptRef')).toBe(true);
     expect(source.includes('setSubmittedSearch(value)')).toBe(true);
     expect(source.includes('setPendingPage')).toBe(false);
   });

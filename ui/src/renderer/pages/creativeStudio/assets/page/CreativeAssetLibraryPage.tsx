@@ -6,7 +6,7 @@
 
 import { Button, Checkbox, Input, InputTag, Message, Modal } from '@arco-design/web-react';
 import type { TFunction } from 'i18next';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { creativeAssetClient } from '../client';
@@ -26,11 +26,11 @@ import {
   CREATIVE_ASSET_MANUAL_UPLOAD_ACCEPT,
   EMPTY_CREATIVE_TEXT_ASSET_FORM,
   buildGlobalCreativeAssetQuery,
-  creativeAssetCacheIsComplete,
   creativeAssetDownloadName,
   creativeAssetEditDraft,
   creativeAssetPageCount,
-  creativeAssetPageSliceFromCompleteCache,
+  creativeAssetPageIsLoaded,
+  creativeAssetPageSlice,
   creativeAssetQuerySearch,
   manualUploadRejectionMessage,
   normalizeCreativeAssetEditDraft,
@@ -297,40 +297,68 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
   );
   const library = useCreativeAssets({ client, query, pageSize: SOURCE_ASSET_PAGE_SIZE });
   const uploads = useCreativeAssetUploadQueue(library.upload);
-  const cacheComplete = !library.loading
-    && !library.error
-    && creativeAssetCacheIsComplete(library.assets.length, library.total);
+  const pageLoadAttemptRef = useRef<{ page: number; loaded: number } | null>(null);
   const totalPages = creativeAssetPageCount(library.total, SOURCE_ASSET_PAGE_SIZE);
   const visiblePage = Math.min(page, totalPages);
+  const pageHasLoadedAssets = creativeAssetPageIsLoaded(
+    library.assets.length,
+    library.total,
+    visiblePage,
+    SOURCE_ASSET_PAGE_SIZE
+  );
+  const pageLoaded = !library.loading
+    && pageHasLoadedAssets
+    && (!library.error || library.assets.length > 0);
 
   useEffect(() => {
     setPage(1);
+    pageLoadAttemptRef.current = null;
   }, [kind, querySearch]);
 
   useEffect(() => {
-    if (!cacheComplete) return;
     setPage((current) => Math.min(current, totalPages));
-  }, [cacheComplete, totalPages]);
+  }, [totalPages]);
 
   useEffect(() => {
-    if (library.error || library.loading || library.loadingMore || !library.hasMore) return;
+    if (pageLoaded) {
+      pageLoadAttemptRef.current = null;
+      return;
+    }
+    if (library.error) {
+      pageLoadAttemptRef.current = null;
+      return;
+    }
+    if (library.loading || library.loadingMore || !library.hasMore) return;
+    const previousAttempt = pageLoadAttemptRef.current;
+    if (
+      previousAttempt?.page === visiblePage &&
+      previousAttempt.loaded === library.assets.length
+    ) {
+      return;
+    }
+    pageLoadAttemptRef.current = { page: visiblePage, loaded: library.assets.length };
     void library.loadMore();
-  }, [library.error, library.hasMore, library.loadMore, library.loading, library.loadingMore]);
+  }, [
+    library.assets.length,
+    library.error,
+    library.hasMore,
+    library.loadMore,
+    library.loading,
+    library.loadingMore,
+    pageLoaded,
+    visiblePage,
+  ]);
 
-  const visibleAssets = cacheComplete
-    ? creativeAssetPageSliceFromCompleteCache(
-        library.assets,
-        library.total,
-        visiblePage,
-        SOURCE_ASSET_PAGE_SIZE
-      )
+  const visibleAssets = pageLoaded
+    ? creativeAssetPageSlice(library.assets, visiblePage, SOURCE_ASSET_PAGE_SIZE)
     : [];
   const pageState = {
     ...library,
     assets: visibleAssets,
-    loading: !library.error && !cacheComplete,
-    loadingMore: !library.error && !cacheComplete,
-    mutating: library.mutating || !cacheComplete,
+    loading: !library.error && !pageLoaded,
+    loadingMore: library.loadingMore,
+    mutating: library.mutating,
+    error: pageLoaded ? null : library.error,
     hasMore: false,
   };
 
@@ -412,6 +440,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         tags: draft.tags,
         inLibrary: draft.inLibrary,
       });
+      void library.reload();
       setEditingAsset(null);
       Message.success(
         t('creativeStudio.assets.messages.assetUpdated', { defaultValue: '素材已更新。' })
@@ -429,6 +458,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
     setDeleteError(null);
     try {
       await library.remove(deletingAsset.id);
+      void library.reload();
       setDeletingAsset(null);
       Message.success(
         t('creativeStudio.assets.messages.assetDeleted', { defaultValue: '素材已删除。' })
@@ -479,7 +509,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
   };
 
   const handlePageChange = (nextPage: number): void => {
-    if (!cacheComplete || nextPage < 1 || nextPage > totalPages) return;
+    if (nextPage < 1 || nextPage > totalPages) return;
     setPage(nextPage);
   };
 
@@ -505,7 +535,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
           page: visiblePage,
           pageSize: SOURCE_ASSET_PAGE_SIZE,
           total: library.total,
-          loading: !cacheComplete,
+          loading: library.loading || library.loadingMore || (!pageLoaded && !library.error),
           onPageChange: handlePageChange,
         }}
         labels={{
