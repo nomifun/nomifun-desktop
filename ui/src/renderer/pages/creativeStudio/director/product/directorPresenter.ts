@@ -5,6 +5,7 @@
  */
 
 import type { CreativeAsset } from "../../assets";
+import type { TFunction } from "i18next";
 import type {
   DirectorAspectRatio,
   DirectorCapture,
@@ -17,6 +18,7 @@ import {
   findDirectorEntity,
   type DirectorCameraAspectRatio,
   type DirectorEntity,
+  type DirectorLight,
   type DirectorState,
   type DirectorTimelineTrack,
 } from "../domain";
@@ -25,6 +27,7 @@ export type DirectorAssetLookup = (
   assetId: string,
 ) => CreativeAsset | undefined;
 export type DirectorAssetUrl = (assetId: string) => string;
+export type DirectorTranslate = TFunction;
 
 const averageScale = (entity: DirectorEntity): number =>
   (entity.transform.scale.x +
@@ -39,6 +42,7 @@ const selectedEntity = (state: DirectorState): DirectorEntity | undefined =>
 
 export function directorSceneGroups(
   state: DirectorState,
+  t: DirectorTranslate,
 ): DirectorSceneGroup[] {
   const selected =
     state.selection && state.selection.kind !== "scene"
@@ -61,22 +65,30 @@ export function directorSceneGroups(
   return [
     {
       id: "cameras",
-      label: "机位",
+      label: t("creativeStudio.director.scene.groups.cameras", {
+        defaultValue: "机位",
+      }),
       objects: state.cameras.map((entity) => object(entity, "camera")),
     },
     {
       id: "characters",
-      label: "角色",
+      label: t("creativeStudio.director.scene.groups.characters", {
+        defaultValue: "角色",
+      }),
       objects: state.characters.map((entity) => object(entity, "character")),
     },
     {
       id: "objects",
-      label: "模型",
+      label: t("creativeStudio.director.scene.groups.objects", {
+        defaultValue: "模型",
+      }),
       objects: state.objects.map((entity) => object(entity, "object")),
     },
     {
       id: "lights",
-      label: "灯光",
+      label: t("creativeStudio.director.scene.groups.lights", {
+        defaultValue: "灯光",
+      }),
       objects: state.lights.map((entity) => object(entity, "object")),
     },
   ];
@@ -85,13 +97,17 @@ export function directorSceneGroups(
 function capturePresentation(
   state: DirectorState,
   assetUrl: DirectorAssetUrl,
+  t: DirectorTranslate,
 ): DirectorCapture[] {
   return state.capture.records
     .filter((record) => record.kind === "image")
     .map((record, index) => ({
       id: record.id,
       assetId: record.assetId,
-      name: `机位截图 ${index + 1}`,
+      name: t("creativeStudio.director.capture.name", {
+        defaultValue: "机位截图 {{index}}",
+        index: index + 1,
+      }),
       thumbnailUrl: assetUrl(record.assetId),
       imageUrl: assetUrl(record.assetId),
       cameraId: record.cameraId,
@@ -103,6 +119,7 @@ export function directorInspectorValue(
   assetLookup: DirectorAssetLookup,
   assetUrl: DirectorAssetUrl,
   cameraTab: "properties" | "captures",
+  t: DirectorTranslate,
 ): DirectorInspectorValue {
   const entity = selectedEntity(state);
   if (!entity) {
@@ -140,7 +157,7 @@ export function directorInspectorValue(
       rotation: { ...entity.transform.rotation },
       fov: directorVerticalFovDegrees(entity),
       tab: cameraTab,
-      captures: capturePresentation(state, assetUrl).filter(
+      captures: capturePresentation(state, assetUrl, t).filter(
         (capture) => capture.cameraId === entity.id,
       ),
     };
@@ -150,7 +167,13 @@ export function directorInspectorValue(
       kind: "character",
       id: entity.id,
       name: entity.name,
-      bodyType: entity.asset ? "已绑定真实素材" : "未绑定素材",
+      bodyType: entity.asset
+        ? t("creativeStudio.director.inspector.character.boundAsset", {
+            defaultValue: "已绑定真实素材",
+          })
+        : t("creativeStudio.director.inspector.character.unboundAsset", {
+            defaultValue: "未绑定素材",
+          }),
       position: { ...entity.transform.position },
       rotation: { ...entity.transform.rotation },
       scale: averageScale(entity),
@@ -164,10 +187,15 @@ export function directorInspectorValue(
     name: entity.name,
     modelLabel:
       entity.kind === "light"
-        ? `真实 ${entity.lightType} 灯光`
+        ? t("creativeStudio.director.inspector.object.realLight", {
+            defaultValue: "真实 {{type}} 灯光",
+            type: lightTypeLabel(entity.lightType, t),
+          })
         : entity.asset
           ? (assetLookup(entity.asset.assetId)?.title ?? entity.asset.assetId)
-          : "未绑定模型素材",
+          : t("creativeStudio.director.inspector.object.unboundAsset", {
+              defaultValue: "未绑定模型素材",
+            }),
     position: { ...entity.transform.position },
     rotation: { ...entity.transform.rotation },
     scale: averageScale(entity),
@@ -184,6 +212,62 @@ function targetLabel(
   return findDirectorEntity(state, track.target)?.name ?? track.target.id;
 }
 
+function lightTypeLabel(
+  lightType: DirectorLight["lightType"],
+  t: DirectorTranslate,
+): string {
+  switch (lightType) {
+    case "ambient":
+      return t("creativeStudio.director.lightType.ambient", {
+        defaultValue: "环境",
+      });
+    case "directional":
+      return t("creativeStudio.director.lightType.directional", {
+        defaultValue: "平行",
+      });
+    case "point":
+      return t("creativeStudio.director.lightType.point", {
+        defaultValue: "点",
+      });
+    case "spot":
+      return t("creativeStudio.director.lightType.spot", {
+        defaultValue: "聚光",
+      });
+  }
+}
+
+function trackPropertyLabel(
+  property: DirectorTimelineTrack["property"],
+  t: DirectorTranslate,
+): string {
+  switch (property) {
+    case "position":
+      return t("creativeStudio.director.timeline.property.position", {
+        defaultValue: "位置",
+      });
+    case "rotation":
+      return t("creativeStudio.director.timeline.property.rotation", {
+        defaultValue: "旋转",
+      });
+    case "scale":
+      return t("creativeStudio.director.timeline.property.scale", {
+        defaultValue: "缩放",
+      });
+    case "focalLengthMm":
+      return t("creativeStudio.director.timeline.property.focalLengthMm", {
+        defaultValue: "焦距",
+      });
+    case "intensity":
+      return t("creativeStudio.director.timeline.property.intensity", {
+        defaultValue: "强度",
+      });
+    case "visible":
+      return t("creativeStudio.director.timeline.property.visible", {
+        defaultValue: "可见性",
+      });
+  }
+}
+
 export function directorTimelinePresentation(
   state: DirectorState,
   selection: {
@@ -191,6 +275,7 @@ export function directorTimelinePresentation(
     selectedKeyframeId: string | null;
     autoKey: boolean;
   },
+  t: DirectorTranslate,
 ): DirectorTimelinePresentation {
   return {
     open: state.panels.timelineOpen,
@@ -205,7 +290,11 @@ export function directorTimelinePresentation(
     selectedKeyframeId: selection.selectedKeyframeId,
     tracks: state.timeline.tracks.map((track) => ({
       id: track.id,
-      label: `${targetLabel(state, track)} · ${track.property}`,
+      label: t("creativeStudio.director.timeline.trackLabel", {
+        defaultValue: "{{target}} · {{property}}",
+        target: targetLabel(state, track),
+        property: trackPropertyLabel(track.property, t),
+      }),
       kind:
         track.target.kind === "scene" || track.target.kind === "light"
           ? "scene"

@@ -35,6 +35,7 @@ import {
   createCreativeCanvasProductNode,
   CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
 } from './nodeFactory';
+import { creativeStudioProductText } from './i18n';
 
 export const CREATIVE_VIDEO_COMPOSE_OPERATION = 'video-node-compose';
 
@@ -98,7 +99,13 @@ export function canvasVideoComposeDimensions(
   const shortEdge =
     resolution === '720p' ? 720 : resolution === '1080p' ? 1080 : null;
   if (shortEdge === null) {
-    throw new Error(`当前视频创作不支持分辨率 ${resolution}。`);
+  throw new Error(
+    creativeStudioProductText(
+      'creativeStudio.canvas.errors.video.resolutionUnsupported',
+      '当前视频创作不支持分辨率 {{resolution}}。',
+      { resolution }
+    )
+  );
   }
   if (aspectRatio === '16:9') {
     return { width: Math.round((shortEdge * 16) / 9), height: shortEdge };
@@ -109,7 +116,13 @@ export function canvasVideoComposeDimensions(
   if (aspectRatio === '1:1') {
     return { width: shortEdge, height: shortEdge };
   }
-  throw new Error(`当前视频创作不支持画幅 ${aspectRatio}。`);
+  throw new Error(
+    creativeStudioProductText(
+      'creativeStudio.canvas.errors.video.aspectRatioUnsupported',
+      '当前视频创作不支持画幅 {{aspectRatio}}。',
+      { aspectRatio }
+    )
+  );
 }
 
 const modelSelection = (
@@ -240,9 +253,23 @@ export function canvasVideoComposeMode(
   const source = document.nodes.find(
     (node): node is VideoNode => node.id === sourceNodeId && node.type === 'video'
   );
-  if (!source) return { kind: 'unsupported', message: '视频节点已不存在。' };
+  if (!source) {
+    return {
+      kind: 'unsupported',
+      message: creativeStudioProductText(
+        'creativeStudio.canvas.errors.video.nodeMissing',
+        '视频节点已不存在。'
+      ),
+    };
+  }
   if (source.data.assetId) {
-    return { kind: 'unsupported', message: '当前后端尚不支持 V2V。' };
+    return {
+      kind: 'unsupported',
+      message: creativeStudioProductText(
+        'creativeStudio.canvas.errors.video.v2vUnsupported',
+        '当前后端尚不支持 V2V。'
+      ),
+    };
   }
   const incomingIds = new Set(
     document.connections
@@ -258,7 +285,10 @@ export function canvasVideoComposeMode(
   ) {
     return {
       kind: 'unsupported',
-      message: '当前视频创作不支持视频或音频参考。',
+      message: creativeStudioProductText(
+        'creativeStudio.canvas.errors.video.mediaReferencesUnsupported',
+        '当前视频创作不支持视频或音频参考。'
+      ),
     };
   }
   const imageAssetIds = [
@@ -273,7 +303,10 @@ export function canvasVideoComposeMode(
   if (imageAssetIds.length > 1) {
     return {
       kind: 'unsupported',
-      message: '当前 I2V 只支持一张直接连接的真实图片。',
+      message: creativeStudioProductText(
+        'creativeStudio.canvas.errors.video.singleImageReferenceRequired',
+        '当前 I2V 只支持一张直接连接的真实图片。'
+      ),
     };
   }
   return imageAssetIds[0]
@@ -299,7 +332,12 @@ export function isCanvasVideoComposeConfig(
 export function canvasVideoComposeSourceNodeId(node: ConfigNode): string {
   const value = node.data.operation?.sourceNodeId;
   if (typeof value !== 'string' || !value.trim()) {
-    throw new Error('视频创作配置缺少 sourceNodeId。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.video.missingSourceNodeId',
+        '视频创作配置缺少 sourceNodeId。'
+      )
+    );
   }
   return value;
 }
@@ -311,7 +349,12 @@ export function canvasVideoComposeSourceAssetId(
   const value = node.data.operation?.sourceAssetId;
   if (value === null) return null;
   if (typeof value !== 'string' || !value.trim()) {
-    throw new Error('视频创作配置包含无效的 sourceAssetId。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.video.invalidSourceAssetId',
+        '视频创作配置包含无效的 sourceAssetId。'
+      )
+    );
   }
   return value;
 }
@@ -343,10 +386,20 @@ export function prepareCanvasVideoCompose(input: {
 }): PreparedCanvasVideoCompose {
   const sourceAssetId = input.sourceNode.data.assetId;
   if (sourceAssetId !== null || input.sourceAsset !== null) {
-    throw new Error('当前视频创作只能使用空视频源节点。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.video.emptyNodeOnly',
+        '当前视频创作只能使用空视频源节点。'
+      )
+    );
   }
   if (input.operation.capability === 'v2v') {
-    throw new Error('当前视频创作后端尚不支持 v2v。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.video.v2vUnsupportedLowercase',
+        '当前视频创作后端尚不支持 v2v。'
+      )
+    );
   }
   if (input.operation.capability === 'i2v') {
     const asset = input.references.assets[0];
@@ -359,7 +412,12 @@ export function prepareCanvasVideoCompose(input: {
       binding.role !== 'reference' ||
       binding.assetId !== asset.id
     ) {
-      throw new Error('当前 i2v 只支持一张 role=reference 的真实图片引用。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.video.referenceContract',
+          '当前 i2v 只支持一张 role=reference 的真实图片引用。'
+        )
+      );
     }
   }
 
@@ -428,7 +486,13 @@ export function prepareCanvasVideoCompose(input: {
     connection
   );
   if (!validation.ok) {
-    throw new Error(`无法连接视频创作配置节点：${validation.code}。`);
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.video.connectConfigFailed',
+        '无法连接视频创作配置节点：{{code}}。',
+        { code: validation.code }
+      )
+    );
   }
   return { configNode, connection, plan };
 }
@@ -454,12 +518,22 @@ export function canvasVideoComposeConfigForReference(
     !isCanvasNodeTaskOwner(reference.owner) ||
     reference.owner.canvasId !== document.projectId
   ) {
-      throw new Error('视频创作任务不属于当前画布。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.video.wrongCanvas',
+          '视频创作任务不属于当前画布。'
+        )
+      );
   }
   const owner = reference.owner;
   const node = document.nodes.find((candidate) => candidate.id === owner.nodeId);
   if (!isCanvasVideoComposeConfig(node)) {
-    throw new Error('视频创作任务缺少 canonical 配置节点。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.video.missingConfig',
+        '视频创作任务缺少 canonical 配置节点。'
+      )
+    );
   }
   if (
     node.data.taskId !== reference.taskId ||
@@ -468,7 +542,12 @@ export function canvasVideoComposeConfigForReference(
     node.data.task !== reference.task ||
     node.data.capability !== reference.capability
   ) {
-    throw new Error('视频创作任务与配置节点身份不一致。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.video.identityMismatch',
+        '视频创作任务与配置节点身份不一致。'
+      )
+    );
   }
   return node;
 }
@@ -506,9 +585,16 @@ export function reconcileCanvasVideoComposeConfig(
       status: task.status,
       errorMessage:
         task.status === 'failed'
-          ? (task.error?.message ?? '视频创作失败。')
+          ? (task.error?.message ??
+            creativeStudioProductText(
+              'creativeStudio.canvas.errors.video.failed',
+              '视频创作失败。'
+            ))
           : task.status === 'canceled'
-            ? '视频创作已取消。'
+            ? creativeStudioProductText(
+                'creativeStudio.canvas.errors.video.cancelled',
+                '视频创作已取消。'
+              )
             : null,
     },
   };

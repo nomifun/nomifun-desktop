@@ -33,6 +33,7 @@ import {
   createCreativeCanvasProductNode,
   CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
 } from './nodeFactory';
+import { creativeStudioProductText } from './i18n';
 import { nextCanvasImageTaskPosition } from './imageTaskCanvasLayout';
 
 export const CREATIVE_IMAGE_MASK_EDIT_OPERATION = 'image-mask-edit';
@@ -102,7 +103,12 @@ export function prepareCanvasImageMaskEdit(input: {
     input.sourceAsset.kind !== 'image' ||
     input.sourceNode.data.assetId !== input.sourceAsset.id
   ) {
-    throw new Error('局部编辑源节点与真实图片素材不一致。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.mask.sourceAssetMismatch',
+        '局部编辑源节点与真实图片素材不一致。'
+      )
+    );
   }
   if (
     input.markedReference.kind !== 'image' ||
@@ -111,7 +117,12 @@ export function prepareCanvasImageMaskEdit(input: {
       tag.startsWith('canvas-mask-edit-operation:')
     )
   ) {
-    throw new Error('局部编辑缺少已验证的隐藏标记参考图。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.mask.referenceMissing',
+        '局部编辑缺少已验证的隐藏标记参考图。'
+      )
+    );
   }
 
   const configPosition = nextCanvasImageTaskPosition(
@@ -194,7 +205,13 @@ export function prepareCanvasImageMaskEdit(input: {
     connection
   );
   if (!validation.ok) {
-    throw new Error(`无法连接局部编辑配置节点：${validation.code}。`);
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.mask.connectConfigFailed',
+        '无法连接局部编辑配置节点：{{code}}。',
+        { code: validation.code }
+      )
+    );
   }
   return { configNode, connection, plan };
 }
@@ -222,14 +239,24 @@ export function canvasImageMaskEditConfigForReference(
     !isCanvasNodeTaskOwner(reference.owner) ||
     reference.owner.canvasId !== document.projectId
   ) {
-      throw new Error('局部编辑任务不属于当前画布。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.mask.wrongCanvas',
+          '局部编辑任务不属于当前画布。'
+        )
+      );
   }
   const owner = reference.owner;
   const node = document.nodes.find(
     (candidate) => candidate.id === owner.nodeId
   );
   if (!isCanvasImageMaskEditConfig(node)) {
-    throw new Error('局部编辑任务缺少 canonical 配置节点。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.mask.missingConfig',
+        '局部编辑任务缺少 canonical 配置节点。'
+      )
+    );
   }
   if (
     node.data.taskId !== reference.taskId ||
@@ -238,7 +265,12 @@ export function canvasImageMaskEditConfigForReference(
     node.data.task !== reference.task ||
     node.data.capability !== reference.capability
   ) {
-    throw new Error('局部编辑任务与配置节点身份不一致。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.mask.identityMismatch',
+        '局部编辑任务与配置节点身份不一致。'
+      )
+    );
   }
   return node;
 }
@@ -276,9 +308,16 @@ export function reconcileCanvasImageMaskEditConfig(
       status: task.status,
       errorMessage:
         task.status === 'failed'
-          ? (task.error?.message ?? '图片编辑失败。')
+          ? (task.error?.message ??
+            creativeStudioProductText(
+              'creativeStudio.canvas.errors.mask.failed',
+              '图片编辑失败。'
+            ))
           : task.status === 'canceled'
-            ? '图片编辑已取消。'
+            ? creativeStudioProductText(
+                'creativeStudio.canvas.errors.mask.cancelled',
+                '图片编辑已取消。'
+              )
             : null,
     },
   };

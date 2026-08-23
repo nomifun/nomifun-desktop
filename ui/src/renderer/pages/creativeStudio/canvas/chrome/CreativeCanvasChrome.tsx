@@ -39,6 +39,7 @@ import {
 import { Popover, Tooltip } from '@arco-design/web-react';
 import classNames from 'classnames';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import styles from './CreativeCanvasChrome.module.css';
 import {
@@ -55,47 +56,47 @@ import {
   type CreativeCanvasRightView,
 } from './types';
 
-const NODE_LABELS: Record<CreativeCanvasChromeNodeKind, string> = {
-  text: '文本',
-  image: '图片',
-  panorama: '全景图',
-  video: '视频',
-  audio: '音频',
-  config: '生成配置',
-  director: '导演台',
-  group: '分组',
+const NODE_LABEL_KEYS: Record<CreativeCanvasChromeNodeKind, string> = {
+  text: 'creativeStudio.canvas.nodeKinds.text',
+  image: 'creativeStudio.canvas.nodeKinds.image',
+  panorama: 'creativeStudio.canvas.nodeKinds.panorama',
+  video: 'creativeStudio.canvas.nodeKinds.video',
+  audio: 'creativeStudio.canvas.nodeKinds.audio',
+  config: 'creativeStudio.canvas.nodeKinds.config',
+  director: 'creativeStudio.canvas.nodeKinds.director',
+  group: 'creativeStudio.canvas.nodeKinds.group',
 };
 
-const BACKGROUND_LABELS: Record<CreativeCanvasChromeBackground, string> = {
-  dots: '点阵',
-  lines: '网格线',
-  blank: '空白',
+const BACKGROUND_LABEL_KEYS: Record<CreativeCanvasChromeBackground, string> = {
+  dots: 'creativeStudio.canvas.backgrounds.dots',
+  lines: 'creativeStudio.canvas.backgrounds.lines',
+  blank: 'creativeStudio.canvas.backgrounds.blank',
 };
 
-const LEFT_LABELS: Record<CreativeCanvasLeftView, string> = {
-  canvas: '画布',
-  assets: '资产',
-  prompts: '提示词',
-  workflows: '模板',
+const LEFT_LABEL_KEYS: Record<CreativeCanvasLeftView, string> = {
+  canvas: 'creativeStudio.canvas.panels.left.canvas',
+  assets: 'creativeStudio.canvas.panels.left.assets',
+  prompts: 'creativeStudio.canvas.panels.left.prompts',
+  workflows: 'creativeStudio.canvas.panels.left.workflows',
 };
 
-const RIGHT_LABELS: Record<CreativeCanvasRightView, string> = {
-  assistant: '创作助手',
-  properties: '属性',
+const RIGHT_LABEL_KEYS: Record<CreativeCanvasRightView, string> = {
+  assistant: 'creativeStudio.canvas.panels.right.assistant',
+  properties: 'creativeStudio.canvas.panels.right.properties',
 };
 
-const BOTTOM_LABELS: Record<CreativeCanvasBottomView, string> = {
-  history: '历史',
-  timeline: '时间线',
+const BOTTOM_LABEL_KEYS: Record<CreativeCanvasBottomView, string> = {
+  history: 'creativeStudio.canvas.panels.bottom.history',
+  timeline: 'creativeStudio.canvas.panels.bottom.timeline',
 };
 
-const SAVE_LABELS: Record<CreativeCanvasChromeSaveStatus, string> = {
-  idle: '等待编辑',
-  dirty: '有未保存更改',
-  saving: '正在保存',
-  saved: '已保存',
-  conflict: '保存冲突',
-  error: '保存失败',
+const SAVE_LABEL_KEYS: Record<CreativeCanvasChromeSaveStatus, string> = {
+  idle: 'creativeStudio.canvas.save.status.idle',
+  dirty: 'creativeStudio.canvas.save.status.dirty',
+  saving: 'creativeStudio.canvas.save.status.saving',
+  saved: 'creativeStudio.canvas.save.status.saved',
+  conflict: 'creativeStudio.canvas.save.status.conflict',
+  error: 'creativeStudio.canvas.save.status.error',
 };
 
 const iconProps = {
@@ -195,26 +196,31 @@ export interface CreativeCanvasNodeMenuProps {
 export const CreativeCanvasNodeMenu: React.FC<CreativeCanvasNodeMenuProps> = ({
   disabled,
   onSelect,
-}) => (
-  <div className={styles.nodeMenu} role='menu' aria-label='添加节点' data-canvas-node-menu>
-    <div className={styles.menuHeading}>添加节点</div>
-    <div className={styles.nodeMenuGrid}>
-      {CREATIVE_CANVAS_CHROME_NODE_KINDS.map((kind) => (
-        <button
-          key={kind}
-          type='button'
-          role='menuitem'
-          data-node-kind={kind}
-          disabled={disabled}
-          onClick={() => onSelect(kind)}
-        >
-          <span className={styles.nodeMenuIcon}>{nodeIcon(kind)}</span>
-          <span>{NODE_LABELS[kind]}</span>
-        </button>
-      ))}
+}) => {
+  const { t } = useTranslation();
+  const label = t('creativeStudio.canvas.chrome.addNode');
+
+  return (
+    <div className={styles.nodeMenu} role='menu' aria-label={label} data-canvas-node-menu>
+      <div className={styles.menuHeading}>{label}</div>
+      <div className={styles.nodeMenuGrid}>
+        {CREATIVE_CANVAS_CHROME_NODE_KINDS.map((kind) => (
+          <button
+            key={kind}
+            type='button'
+            role='menuitem'
+            data-node-kind={kind}
+            disabled={disabled}
+            onClick={() => onSelect(kind)}
+          >
+            <span className={styles.nodeMenuIcon}>{nodeIcon(kind)}</span>
+            <span>{t(NODE_LABEL_KEYS[kind])}</span>
+          </button>
+        ))}
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 export interface CreativeCanvasBackgroundMenuProps {
   value: CreativeCanvasChromeBackground;
@@ -226,36 +232,42 @@ export const CreativeCanvasBackgroundMenu: React.FC<CreativeCanvasBackgroundMenu
   value,
   disabled,
   onChange,
-}) => (
-  <div
-    className={styles.backgroundMenu}
-    role='menu'
-    aria-label='画布背景'
-    data-canvas-background-menu
-  >
-    <div className={styles.menuHeading}>画布背景</div>
-    {CREATIVE_CANVAS_CHROME_BACKGROUNDS.map((background) => (
-      <button
-        key={background}
-        type='button'
-        role='menuitemradio'
-        aria-checked={background === value}
-        data-background={background}
-        data-active={background === value || undefined}
-        disabled={disabled}
-        onClick={() => onChange(background)}
-      >
-        {backgroundIcon(background)}
-        <span>{BACKGROUND_LABELS[background]}</span>
-        {background === value ? <CheckOne {...iconProps} /> : null}
-      </button>
-    ))}
-  </div>
-);
+}) => {
+  const { t } = useTranslation();
+  const label = t('creativeStudio.canvas.chrome.canvasBackground');
+
+  return (
+    <div
+      className={styles.backgroundMenu}
+      role='menu'
+      aria-label={label}
+      data-canvas-background-menu
+    >
+      <div className={styles.menuHeading}>{label}</div>
+      {CREATIVE_CANVAS_CHROME_BACKGROUNDS.map((background) => (
+        <button
+          key={background}
+          type='button'
+          role='menuitemradio'
+          aria-checked={background === value}
+          data-background={background}
+          data-active={background === value || undefined}
+          disabled={disabled}
+          onClick={() => onChange(background)}
+        >
+          {backgroundIcon(background)}
+          <span>{t(BACKGROUND_LABEL_KEYS[background])}</span>
+          {background === value ? <CheckOne {...iconProps} /> : null}
+        </button>
+      ))}
+    </div>
+  );
+};
 
 const stopChromeEvent = (event: React.SyntheticEvent) => event.stopPropagation();
 
 const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
+  const { t } = useTranslation();
   const rightOpen = props.rightView !== null;
   const saveIsAlert = props.saveStatus === 'conflict' || props.saveStatus === 'error';
   const leftSlot = props.slots?.left?.[props.leftView];
@@ -282,7 +294,7 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
       data-left-view={props.leftView}
       data-right-view={props.rightView ?? 'closed'}
       data-bottom-view={props.bottomView ?? 'closed'}
-      aria-label='画布工作区控件'
+      aria-label={t('creativeStudio.canvas.chrome.workspaceControls')}
     >
       <header className={styles.topBar} data-canvas-no-zoom {...chromeEventProps}>
         <button
@@ -292,7 +304,9 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
           onClick={props.onBackToCanvases}
         >
           <ArrowLeft {...iconProps} />
-          <span className={styles.backLabel}>返回画布库</span>
+          <span className={styles.backLabel}>
+            {t('creativeStudio.canvas.chrome.backToLibrary')}
+          </span>
         </button>
 
         <div className={styles.projectIdentity}>
@@ -304,7 +318,7 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
             aria-live='polite'
           >
             {saveIcon(props.saveStatus)}
-            <span>{props.saveMessage ?? SAVE_LABELS[props.saveStatus]}</span>
+            <span>{props.saveMessage ?? t(SAVE_LABEL_KEYS[props.saveStatus])}</span>
           </div>
         </div>
 
@@ -315,7 +329,7 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
           {(['assistant', 'properties'] as const).map((view) => (
             <ChromeIconButton
               key={view}
-              label={RIGHT_LABELS[view]}
+              label={t(RIGHT_LABEL_KEYS[view])}
               icon={rightIcon(view)}
               active={props.rightView === view}
               disabled={props.disabled}
@@ -329,11 +343,15 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
 
       <aside
         className={styles.leftPanel}
-        aria-label='画布资源面板'
+        aria-label={t('creativeStudio.canvas.chrome.resourcePanel')}
         data-canvas-no-zoom
         {...chromeEventProps}
       >
-        <nav className={styles.leftTabs} aria-label='画布资源' role='tablist'>
+        <nav
+          className={styles.leftTabs}
+          aria-label={t('creativeStudio.canvas.chrome.resources')}
+          role='tablist'
+        >
           {(['canvas', 'assets', 'prompts', 'workflows'] as const).map((view) => (
             <button
               key={view}
@@ -345,7 +363,7 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
               onClick={() => props.onLeftViewChange(view)}
             >
               {leftIcon(view)}
-              <span className={styles.tabLabel}>{LEFT_LABELS[view]}</span>
+              <span className={styles.tabLabel}>{t(LEFT_LABEL_KEYS[view])}</span>
             </button>
           ))}
         </nav>
@@ -361,13 +379,17 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
       {rightOpen && props.rightView ? (
         <aside
           className={styles.rightPanel}
-          aria-label={RIGHT_LABELS[props.rightView]}
+          aria-label={t(RIGHT_LABEL_KEYS[props.rightView])}
           data-canvas-no-zoom
           {...chromeEventProps}
         >
           {props.rightView === 'properties' ? (
             <header className={styles.panelHeader} data-right-panel-header='properties'>
-              <div className={styles.panelTabs} role='tablist' aria-label='右侧面板'>
+              <div
+                className={styles.panelTabs}
+                role='tablist'
+                aria-label={t('creativeStudio.canvas.chrome.rightPanel')}
+              >
                 {(['assistant', 'properties'] as const).map((view) => (
                   <button
                     key={view}
@@ -379,12 +401,12 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
                     onClick={() => props.onRightViewChange(view)}
                   >
                     {rightIcon(view)}
-                    <span>{RIGHT_LABELS[view]}</span>
+                    <span>{t(RIGHT_LABEL_KEYS[view])}</span>
                   </button>
                 ))}
               </div>
               <ChromeIconButton
-                label='关闭右侧面板'
+                label={t('creativeStudio.canvas.chrome.closeRightPanel')}
                 icon={<Close {...iconProps} />}
                 disabled={props.disabled}
                 onClick={() => props.onRightViewChange(null)}
@@ -400,12 +422,16 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
       {props.bottomView ? (
         <section
           className={styles.bottomPanel}
-          aria-label={BOTTOM_LABELS[props.bottomView]}
+          aria-label={t(BOTTOM_LABEL_KEYS[props.bottomView])}
           data-canvas-no-zoom
           {...chromeEventProps}
         >
           <header className={styles.panelHeader}>
-            <div className={styles.panelTabs} role='tablist' aria-label='底部面板'>
+            <div
+              className={styles.panelTabs}
+              role='tablist'
+              aria-label={t('creativeStudio.canvas.chrome.bottomPanel')}
+            >
               {(['history', 'timeline'] as const).map((view) => (
                 <button
                   key={view}
@@ -417,12 +443,12 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
                   onClick={() => props.onBottomViewChange(view)}
                 >
                   {bottomIcon(view)}
-                  <span>{BOTTOM_LABELS[view]}</span>
+                  <span>{t(BOTTOM_LABEL_KEYS[view])}</span>
                 </button>
               ))}
             </div>
             <ChromeIconButton
-              label='关闭底部面板'
+              label={t('creativeStudio.canvas.chrome.closeBottomPanel')}
               icon={<Close {...iconProps} />}
               disabled={props.disabled}
               onClick={() => props.onBottomViewChange(null)}
@@ -442,20 +468,20 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
         <div
           className={styles.toolDock}
           role='toolbar'
-          aria-label='画布工具栏'
+          aria-label={t('creativeStudio.canvas.chrome.toolbar')}
           data-canvas-no-zoom
           {...chromeEventProps}
         >
           <div className={styles.toolGroup}>
             <ChromeIconButton
-              label='选择工具'
+              label={t('creativeStudio.canvas.actions.selectTool')}
               icon={<Mouse {...iconProps} />}
               active={props.tool === 'select'}
               disabled={props.disabled}
               onClick={() => props.onToolChange('select')}
             />
             <ChromeIconButton
-              label='平移工具'
+              label={t('creativeStudio.canvas.actions.panTool')}
               icon={<HandDrag {...iconProps} />}
               active={props.tool === 'pan'}
               disabled={props.disabled}
@@ -466,13 +492,13 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
           <span className={styles.divider} aria-hidden='true' />
 
           <ChromeIconButton
-            label='撤销'
+            label={t('creativeStudio.canvas.actions.undo')}
             icon={<Undo {...iconProps} />}
             disabled={props.disabled || !props.canUndo}
             onClick={props.onUndo}
           />
           <ChromeIconButton
-            label='重做'
+            label={t('creativeStudio.canvas.actions.redo')}
             icon={<Redo {...iconProps} />}
             disabled={props.disabled || !props.canRedo}
             onClick={props.onRedo}
@@ -483,7 +509,7 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
           {CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS.map((kind) => (
             <ChromeIconButton
               key={kind}
-              label={NODE_LABELS[kind]}
+              label={t(NODE_LABEL_KEYS[kind])}
               icon={nodeIcon(kind)}
               disabled={props.disabled}
               onClick={() => props.onAddNode(kind)}
@@ -508,7 +534,9 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
           >
             <span className={styles.menuAnchor}>
               <ChromeIconButton
-                label={`画布背景：${BACKGROUND_LABELS[props.background]}`}
+                label={t('creativeStudio.canvas.chrome.backgroundLabel', {
+                  background: t(BACKGROUND_LABEL_KEYS[props.background]),
+                })}
                 icon={backgroundIcon(props.background)}
                 active={props.backgroundMenuOpen}
                 disabled={props.disabled}
@@ -518,13 +546,17 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
           </Popover>
 
           <ChromeIconButton
-            label='适应内容'
+            label={t('creativeStudio.canvas.actions.fitView')}
             icon={<FullScreen {...iconProps} />}
             disabled={props.disabled}
             onClick={props.onFitView}
           />
           <ChromeIconButton
-            label={props.isMiniMapOpen ? '关闭小地图' : '打开小地图'}
+            label={t(
+              props.isMiniMapOpen
+                ? 'creativeStudio.canvas.actions.closeMiniMap'
+                : 'creativeStudio.canvas.actions.openMiniMap'
+            )}
             icon={<Compass {...iconProps} />}
             active={props.isMiniMapOpen}
             disabled={props.disabled}
@@ -536,7 +568,7 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
           {(['history', 'timeline'] as const).map((view) => (
             <ChromeIconButton
               key={view}
-              label={BOTTOM_LABELS[view]}
+              label={t(BOTTOM_LABEL_KEYS[view])}
               icon={bottomIcon(view)}
               active={props.bottomView === view}
               disabled={props.disabled}

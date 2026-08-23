@@ -69,7 +69,11 @@ function baseline(): DirectorProjectBaseline {
     name: "主机位",
   });
   let state = directorReducer(
-    createDirectorState({ projectId: PROJECT_ID, name: "导演项目" }),
+    createDirectorState({
+      projectId: PROJECT_ID,
+      name: "导演项目",
+      sceneName: "场景",
+    }),
     directorCommands.addEntity(camera),
   );
   state.capture.records.push({

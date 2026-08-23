@@ -7,8 +7,10 @@
 import type { IProvider } from '@/common/config/storage';
 import type { ProviderId } from '@/common/types/ids';
 import { describe, expect, test } from 'bun:test';
+import { createInstance } from 'i18next';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { I18nextProvider, initReactI18next } from 'react-i18next';
 
 import type { CreativeModelCatalogSnapshot, CreativeModelOption } from '../../models';
 import { validateWorkflowDefinition } from '../domain';
@@ -65,6 +67,13 @@ const model: CreativeModelOption = {
   traits: [],
   protocol: 'openai.chat_text',
 };
+const testI18n = createInstance();
+testI18n.use(initReactI18next).init({
+  lng: 'en-US',
+  fallbackLng: 'en-US',
+  resources: { 'en-US': { translation: {} } },
+  interpolation: { escapeValue: false },
+});
 
 const rejectionMessage = async (promise: Promise<unknown>): Promise<string> => {
   try {
@@ -113,9 +122,13 @@ describe('minimal Workflow Agent draft modal model', () => {
   });
 
   test('renders empty and ready previews with explicit manual-save copy', async () => {
-    const empty = renderToStaticMarkup(<WorkflowAgentDraftPreview draft={null} />);
+    const empty = renderToStaticMarkup(
+      <I18nextProvider i18n={testI18n}>
+        <WorkflowAgentDraftPreview draft={null} />
+      </I18nextProvider>
+    );
     expect(empty.includes('data-workflow-agent-preview="empty"')).toBe(true);
-    expect(empty.includes('不会自动保存或运行')).toBe(true);
+    expect(empty.includes('will not be saved or run automatically')).toBe(true);
 
     const port: WorkflowDraftPort = {
       async draft() {
@@ -135,10 +148,14 @@ describe('minimal Workflow Agent draft modal model', () => {
       },
     };
     const draft = await generateWorkflowAgentDraft({ prompt: '多图', model, catalog, port });
-    const ready = renderToStaticMarkup(<WorkflowAgentDraftPreview draft={draft} />);
+    const ready = renderToStaticMarkup(
+      <I18nextProvider i18n={testI18n}>
+        <WorkflowAgentDraftPreview draft={draft} />
+      </I18nextProvider>
+    );
     expect(ready.includes('data-workflow-agent-preview="ready"')).toBe(true);
     expect(ready.includes('社媒多图')).toBe(true);
-    expect(ready.includes('手动检查并保存')).toBe(true);
+    expect(ready.includes('Review and save the draft manually')).toBe(true);
   });
 
   test('fails closed when the Provider or final artifact is unavailable', async () => {
@@ -151,7 +168,7 @@ describe('minimal Workflow Agent draft modal model', () => {
       await rejectionMessage(
         generateWorkflowAgentDraft({ prompt: '草稿', model, catalog, port })
       )
-    ).includes('未返回可应用')).toBe(true);
+    ).includes('did not return an applicable')).toBe(true);
     expect((
       await rejectionMessage(generateWorkflowAgentDraft({
         prompt: '草稿',
@@ -159,7 +176,7 @@ describe('minimal Workflow Agent draft modal model', () => {
         catalog: { ...catalog, providers: [] },
         port,
       }))
-    ).includes('模型已不可用')).toBe(true);
+    ).includes('selected model is unavailable')).toBe(true);
   });
 
   test('does not call the backend while a stale catalog is loading or failed', async () => {
@@ -184,7 +201,7 @@ describe('minimal Workflow Agent draft modal model', () => {
           port,
         })
       );
-      expect(message.includes('模型目录尚未就绪')).toBe(true);
+      expect(message.includes('model catalog is not ready')).toBe(true);
     }
     expect(calls).toBe(0);
   });

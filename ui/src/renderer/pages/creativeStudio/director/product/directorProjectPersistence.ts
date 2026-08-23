@@ -75,6 +75,7 @@ export interface PersistDirectorProjectInput {
   state: DirectorState;
   repository: CreativeProjectRepository;
   assets: CreativeAssetLibraryPort;
+  sceneAssetTitle: string;
 }
 
 function directorNodes(
@@ -110,11 +111,14 @@ async function findTextAsset(
   }
 }
 
-function emptyDirectorState(detail: CreativeProjectDetail): DirectorState {
+function emptyDirectorState(
+  detail: CreativeProjectDetail,
+  defaultSceneName: string,
+): DirectorState {
   return createDirectorState({
     projectId: detail.project.projectId,
     name: detail.project.title,
-    sceneName: "场景",
+    sceneName: defaultSceneName,
   });
 }
 
@@ -145,6 +149,7 @@ function assertNodeProjection(
 export async function loadDirectorProjectBaseline(
   detail: CreativeProjectDetail,
   assets: CreativeAssetLibraryPort,
+  defaultSceneName: string,
 ): Promise<DirectorProjectBaseline> {
   const nodes = directorNodes(detail.document);
   if (nodes.length > 1) {
@@ -162,7 +167,7 @@ export async function loadDirectorProjectBaseline(
         "导演节点尚未绑定场景，却引用了活动机位。",
       );
     }
-    const state = emptyDirectorState(detail);
+    const state = emptyDirectorState(detail, defaultSceneName);
     if (node) {
       state.timeline.durationSeconds = node.data.durationMs / 1_000;
       state.timeline.currentTimeSeconds = Math.min(
@@ -307,7 +312,7 @@ export async function persistDirectorProject(
   }
 
   const sceneAsset = await input.assets.createText({
-    title: `${input.state.name} · 3D导演场景`,
+    title: input.sceneAssetTitle,
     textContent: exported.json,
     inLibrary: false,
     tags: ["nomifun-director-v1"],

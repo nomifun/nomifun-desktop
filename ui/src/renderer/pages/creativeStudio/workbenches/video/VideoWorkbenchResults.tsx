@@ -21,6 +21,7 @@ import {
 } from '@icon-park/react';
 import { Button, Checkbox, Progress, Tag } from '@arco-design/web-react';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import {
   clampVideoProgress,
@@ -51,25 +52,33 @@ type ResultsProps = Pick<
   | 'onLoadMoreTasks'
 >;
 
-const taskStatusLabel = (task: VideoWorkbenchTask): string => {
-  if (task.status === 'queued') return '排队中';
-  if (task.status === 'running') return '生成中';
-  if (task.status === 'succeeded') return '成功';
-  if (task.status === 'failed') return '失败';
-  return '已取消';
+const taskStatusLabel = (
+  t: ReturnType<typeof useTranslation>['t'],
+  task: VideoWorkbenchTask
+): string => {
+  if (task.status === 'queued') return t('creativeStudio.video.task.queued', { defaultValue: '排队中' });
+  if (task.status === 'running') return t('creativeStudio.video.task.running', { defaultValue: '生成中' });
+  if (task.status === 'succeeded') return t('creativeStudio.video.task.succeeded', { defaultValue: '成功' });
+  if (task.status === 'failed') return t('creativeStudio.video.task.failed', { defaultValue: '失败' });
+  return t('creativeStudio.video.task.canceled', { defaultValue: '已取消' });
 };
 
 const TaskMeta: React.FC<{
   task: VideoWorkbenchTask;
   onCopyPrompt?: (prompt: string) => void;
-}> = ({ task, onCopyPrompt }) => (
+}> = ({ task, onCopyPrompt }) => {
+  const { t } = useTranslation();
+  return (
   <div className={styles.taskMeta}>
     <div className={styles.taskPromptRow}>
       <p title={task.prompt}>{task.prompt}</p>
       {onCopyPrompt ? (
         <button
           type='button'
-          aria-label={`复制任务 ${task.id} 的提示词`}
+          aria-label={t('creativeStudio.video.results.copyPrompt', {
+            defaultValue: '复制任务 {{id}} 的提示词',
+            id: task.id,
+          })}
           onClick={() => onCopyPrompt(task.prompt)}
         >
           <Copy size={13} />
@@ -82,27 +91,45 @@ const TaskMeta: React.FC<{
       <Tag>{task.sizeLabel}</Tag>
       <Tag>{task.resolutionLabel}</Tag>
       <Tag>{task.durationLabel}</Tag>
-      <Tag>数量 {task.taskCount}</Tag>
+      <Tag>
+        {t('creativeStudio.video.results.taskCount', {
+          defaultValue: '数量 {{taskCount}}',
+          taskCount: task.taskCount,
+        })}
+      </Tag>
     </div>
   </div>
-);
+  );
+};
 
 const RunningVisual: React.FC<{ task: Extract<VideoWorkbenchTask, { status: 'running' }> }> = ({
   task,
 }) => {
+  const { t } = useTranslation();
   const progress = clampVideoProgress(task.progress);
   return (
     <div className={styles.runningVisual}>
       <div className={styles.runningPattern} aria-hidden='true' />
       <div className={styles.runningCenter}>
         <Loading size={27} className={styles.spin} />
-        <strong>{progress === null ? '生成中' : `正在创作 ${progress}%`}</strong>
+        <strong>
+          {progress === null
+            ? t('creativeStudio.video.task.running', { defaultValue: '生成中' })
+            : t('creativeStudio.video.results.creatingProgress', {
+                defaultValue: '正在创作 {{progress}}%',
+                progress,
+              })}
+        </strong>
         {task.elapsedLabel ? <span>{task.elapsedLabel}</span> : null}
       </div>
       {progress !== null ? (
         <div className={styles.progressBlock}>
           <span>
-            <small>当前创作进度</small>
+            <small>
+              {t('creativeStudio.video.results.currentProgress', {
+                defaultValue: '当前创作进度',
+              })}
+            </small>
             <small>{progress}%</small>
           </span>
           <Progress percent={progress} size='small' showText={false} />
@@ -114,55 +141,84 @@ const RunningVisual: React.FC<{ task: Extract<VideoWorkbenchTask, { status: 'run
 
 const QueuedVisual: React.FC<{
   task: Extract<VideoWorkbenchTask, { status: 'queued' }>;
-}> = ({ task }) => (
+}> = ({ task }) => {
+  const { t } = useTranslation();
+  return (
   <div className={styles.queuedVisual}>
     <div className={styles.runningPattern} aria-hidden='true' />
     <div className={styles.runningCenter}>
       <Time size={27} />
-      <strong>{task.statusLabel || '排队中'}</strong>
-      <span>等待模型开始处理</span>
+      <strong>
+        {task.statusLabel ||
+          t('creativeStudio.video.task.queued', { defaultValue: '排队中' })}
+      </strong>
+      <span>
+        {t('creativeStudio.video.results.waitingForModel', {
+          defaultValue: '等待模型开始处理',
+        })}
+      </span>
     </div>
   </div>
-);
+  );
+};
 
 const SuccessVisual: React.FC<{
   task: Extract<VideoWorkbenchTask, { status: 'succeeded' }>;
-}> = ({ task }) => (
+}> = ({ task }) => {
+  const { t } = useTranslation();
+  return (
   <div className={styles.successVisual}>
     <video
       src={task.videoUrl}
       poster={task.posterUrl}
       controls
       preload='metadata'
-      aria-label={`生成视频：${task.prompt}`}
+      aria-label={t('creativeStudio.video.results.generatedVideo', {
+        defaultValue: '生成视频：{{prompt}}',
+        prompt: task.prompt,
+      })}
     />
     <span className={styles.statusBadge} data-tone='success'>
       <Check size={11} />
-      成功
+      {t('creativeStudio.video.task.succeeded', { defaultValue: '成功' })}
     </span>
     {task.mediaMetaLabel ? <span className={styles.mediaMeta}>{task.mediaMetaLabel}</span> : null}
   </div>
-);
+  );
+};
 
 const FailedVisual: React.FC<{
   task: Extract<VideoWorkbenchTask, { status: 'failed' }>;
-}> = ({ task }) => (
+}> = ({ task }) => {
+  const { t } = useTranslation();
+  return (
   <div className={styles.failedVisual}>
     <Error size={30} />
-    <strong>生成失败</strong>
+    <strong>
+      {t('creativeStudio.video.results.generationFailed', { defaultValue: '生成失败' })}
+    </strong>
     <span>{task.error}</span>
   </div>
-);
+  );
+};
 
 const CanceledVisual: React.FC<{
   task: Extract<VideoWorkbenchTask, { status: 'canceled' }>;
-}> = ({ task }) => (
+}> = ({ task }) => {
+  const { t } = useTranslation();
+  return (
   <div className={styles.canceledVisual}>
     <CloseOne size={30} />
-    <strong>已取消</strong>
-    <span>{task.message || '任务已取消，没有生成视频'}</span>
+    <strong>{t('creativeStudio.video.task.canceled', { defaultValue: '已取消' })}</strong>
+    <span>
+      {task.message ||
+        t('creativeStudio.video.results.canceledDescription', {
+          defaultValue: '任务已取消，没有生成视频',
+        })}
+    </span>
   </div>
-);
+  );
+};
 
 const TaskVisual: React.FC<{ task: VideoWorkbenchTask }> = ({ task }) => {
   if (task.status === 'queued') return <QueuedVisual task={task} />;
@@ -180,18 +236,19 @@ const TaskActions: React.FC<{
   onInspectTask?: (taskId: string) => void;
   onDownloadTask?: (taskId: string) => void;
 }> = ({ task, onLoadTask, onRetryTask, onCancelTask, onInspectTask, onDownloadTask }) => {
+  const { t } = useTranslation();
   if (!onLoadTask && !onRetryTask && !onCancelTask && !onInspectTask && !onDownloadTask) return null;
   return (
     <div className={styles.taskActions}>
       <div>
         {onLoadTask ? (
           <Button size='mini' onClick={() => onLoadTask(task.id)}>
-            载入
+            {t('creativeStudio.video.actions.load', { defaultValue: '载入' })}
           </Button>
         ) : null}
         {(task.status === 'failed' || task.status === 'canceled') && onInspectTask ? (
           <Button size='mini' onClick={() => onInspectTask(task.id)}>
-            详情
+            {t('creativeStudio.video.actions.details', { defaultValue: '详情' })}
           </Button>
         ) : null}
       </div>
@@ -203,7 +260,7 @@ const TaskActions: React.FC<{
             icon={<Refresh />}
             onClick={() => onRetryTask(task.id)}
           >
-            重试
+            {t('creativeStudio.video.actions.retry', { defaultValue: '重试' })}
           </Button>
         ) : null}
         {(task.status === 'queued' || task.status === 'running') && onCancelTask ? (
@@ -212,7 +269,7 @@ const TaskActions: React.FC<{
             status='danger'
             onClick={() => onCancelTask(task.id)}
           >
-            取消
+            {t('creativeStudio.video.actions.cancel', { defaultValue: '取消' })}
           </Button>
         ) : null}
         {task.status === 'succeeded' && onDownloadTask ? (
@@ -221,7 +278,7 @@ const TaskActions: React.FC<{
             icon={<Download />}
             onClick={() => onDownloadTask(task.id)}
           >
-            下载
+            {t('creativeStudio.video.actions.download', { defaultValue: '下载' })}
           </Button>
         ) : null}
       </div>
@@ -247,6 +304,7 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
   historyHasMore,
   onLoadMoreTasks,
 }) => {
+  const { t } = useTranslation();
   const deletionEnabled = Boolean(onDeleteTasks);
   const taskIds = tasks.filter((task) => task.deletable).map((task) => task.id);
   const visibleSelectedIds = selectedTaskIds.filter((id) => taskIds.includes(id));
@@ -265,14 +323,26 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
       <header className={styles.resultsHeader}>
         <div className={styles.resultsTitle}>
           <History size={17} />
-          <h2>全部成果</h2>
-          <Tag>已加载 {tasks.length}</Tag>
-          {pendingCount ? <Tag color='arcoblue'>{pendingCount} 个处理中</Tag> : null}
+          <h2>{t('creativeStudio.video.results.title', { defaultValue: '全部成果' })}</h2>
+          <Tag>
+            {t('creativeStudio.video.results.loadedCount', {
+              defaultValue: '已加载 {{resultCount}}',
+              resultCount: tasks.length,
+            })}
+          </Tag>
+          {pendingCount ? (
+            <Tag color='arcoblue'>
+              {t('creativeStudio.video.results.pendingCount', {
+                defaultValue: '{{taskCount}} 个处理中',
+                taskCount: pendingCount,
+              })}
+            </Tag>
+          ) : null}
         </div>
         <div className={styles.resultsActions}>
           {onNewSession ? (
             <Button size='small' icon={<Plus />} onClick={onNewSession}>
-              新建
+              {t('creativeStudio.video.actions.new', { defaultValue: '新建' })}
             </Button>
           ) : null}
           {deletionEnabled ? <Button
@@ -283,7 +353,9 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
               onSelectedTaskIdsChange(toggleAllVideoTasks(taskIds, selectedTaskIds))
             }
           >
-            {allSelected ? '取消全选' : '全选'}
+            {allSelected
+              ? t('creativeStudio.video.results.clearAll', { defaultValue: '取消全选' })
+              : t('creativeStudio.video.results.selectAll', { defaultValue: '全选' })}
           </Button> : null}
           {deletionEnabled ? <Button
             size='small'
@@ -292,7 +364,10 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
             disabled={visibleSelectedIds.length === 0}
             onClick={() => onDeleteTasks?.(visibleSelectedIds)}
           >
-            移除{visibleSelectedIds.length ? ` ${visibleSelectedIds.length}` : ''}
+            {t('creativeStudio.video.results.removeSelected', {
+              defaultValue: '移除{{suffix}}',
+              suffix: visibleSelectedIds.length ? ` ${visibleSelectedIds.length}` : '',
+            })}
           </Button> : null}
         </div>
       </header>
@@ -300,8 +375,29 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
       {tasks.length === 0 ? (
         <div className={styles.emptyResults} data-video-result-state='empty'>
           <span className={styles.emptyIcon}>{historyLoading ? <Loading size={40} className={styles.spin} /> : historyError ? <Error size={40} /> : <VideoTwo size={40} />}</span>
-          <strong>{historyLoading ? '正在恢复生成历史' : historyError ? '生成历史加载失败' : '还没有生成视频'}</strong>
-          <p>{historyLoading ? '正在读取当前工作台的真实任务与结果。' : historyError ?? '输入提示词并选择视频模型，生成成果会出现在这里。'}</p>
+          <strong>
+            {historyLoading
+              ? t('creativeStudio.video.results.historyLoading', {
+                  defaultValue: '正在恢复生成历史',
+                })
+              : historyError
+                ? t('creativeStudio.video.results.historyFailed', {
+                    defaultValue: '生成历史加载失败',
+                  })
+                : t('creativeStudio.video.results.emptyTitle', {
+                    defaultValue: '还没有生成视频',
+                  })}
+          </strong>
+          <p>
+            {historyLoading
+              ? t('creativeStudio.video.results.historyLoadingDescription', {
+                  defaultValue: '正在读取当前工作台的真实任务与结果。',
+                })
+              : historyError ??
+                t('creativeStudio.video.results.emptyDescription', {
+                  defaultValue: '输入提示词并选择视频模型，生成成果会出现在这里。',
+                })}
+          </p>
         </div>
       ) : (
         <div className={styles.resultGrid}>
@@ -319,7 +415,10 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
                 {deletionEnabled && task.deletable ? <div className={styles.cardOverlayActions}>
                   <Checkbox
                     checked={selected}
-                    aria-label={`选择任务 ${task.id}`}
+                    aria-label={t('creativeStudio.video.results.selectTask', {
+                      defaultValue: '选择任务 {{id}}',
+                      id: task.id,
+                    })}
                     onChange={(checked) =>
                       onSelectedTaskIdsChange(
                         toggleVideoTaskSelection(selectedTaskIds, task.id, checked)
@@ -331,12 +430,15 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
                     type='text'
                     status='danger'
                     icon={<Delete />}
-                    aria-label={`从历史移除 ${task.id}`}
+                    aria-label={t('creativeStudio.video.results.removeFromHistory', {
+                      defaultValue: '从历史移除 {{id}}',
+                      id: task.id,
+                    })}
                     onClick={() => onDeleteTasks?.([task.id])}
                   />
                 </div> : null}
                 <span className={styles.cardStatus} data-status={task.status}>
-                  {taskStatusLabel(task)}
+                  {taskStatusLabel(t, task)}
                 </span>
                 <TaskVisual task={task} />
                 <TaskMeta task={task} onCopyPrompt={onCopyPrompt} />
@@ -356,7 +458,9 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
       {historyHasMore && onLoadMoreTasks ? (
         <div className={styles.historyFooter}>
           <Button loading={historyLoadingMore} onClick={onLoadMoreTasks}>
-            {historyLoadingMore ? '正在加载…' : '加载更多历史'}
+            {historyLoadingMore
+              ? t('creativeStudio.video.results.loadingMore', { defaultValue: '正在加载…' })
+              : t('creativeStudio.video.results.loadMore', { defaultValue: '加载更多历史' })}
           </Button>
         </div>
       ) : null}

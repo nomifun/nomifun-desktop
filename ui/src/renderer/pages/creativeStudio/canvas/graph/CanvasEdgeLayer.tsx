@@ -5,6 +5,7 @@
  */
 
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { CreativeCanvasConnection, CreativeCanvasNode } from '../../domain/schema';
 import {
@@ -50,16 +51,22 @@ const CanvasEdgeLayer: React.FC<CanvasEdgeLayerProps> = ({
   connections,
   handleGeometry,
   stateByConnectionId,
-  ariaLabel = '画布连接',
+  ariaLabel,
   getConnectionLabel,
   onSelectConnection,
   onConnectionContextMenu,
   onConnectionHoverChange,
 }) => {
+  const { t } = useTranslation();
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
 
   return (
-    <svg className={styles.layer} role='group' aria-label={ariaLabel} data-canvas-edge-layer>
+    <svg
+      className={styles.layer}
+      role='group'
+      aria-label={ariaLabel ?? t('creativeStudio.canvas.edges.label')}
+      data-canvas-edge-layer
+    >
       {connections.map((connection) => {
         const sourceNode = nodeById.get(connection.sourceNodeId);
         const targetNode = nodeById.get(connection.targetNodeId);

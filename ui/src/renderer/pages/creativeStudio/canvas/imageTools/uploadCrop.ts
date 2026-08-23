@@ -9,6 +9,7 @@ import type {
   CreativeAssetPort,
   CreativeAssetUploadProgress,
 } from "../../assets";
+import { translateCreativeImageTool } from "./imageToolI18n";
 
 export interface UploadCreativeImageCropInput {
   port: CreativeAssetPort;
@@ -29,7 +30,11 @@ const operationTag = (operationId: string): string =>
 
 const requireImage = (asset: CreativeAsset): CreativeAsset => {
   if (asset.kind !== "image") {
-    throw new Error("裁剪上传返回了非图片素材，已停止写入画布。");
+    throw new Error(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.cropUploadNotImage",
+      ),
+    );
   }
   return asset;
 };
@@ -43,7 +48,10 @@ export async function uploadCreativeImageCrop(
   input: UploadCreativeImageCropInput,
 ): Promise<UploadCreativeImageCropResult> {
   const tag = operationTag(input.operationId);
-  const title = `${input.source.title} · 裁剪`;
+  const title = translateCreativeImageTool(
+    "creativeStudio.canvas.imageTools.assetTitles.crop",
+    { title: input.source.title },
+  );
   const tags = [...new Set([...input.source.tags, "canvas-crop", tag])];
   try {
     const asset = requireImage(

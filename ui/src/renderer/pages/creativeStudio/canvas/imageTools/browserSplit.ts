@@ -16,6 +16,7 @@ import {
   creativeImageSplitPieces,
   type CreativeImageSplitParams,
 } from "./splitModel";
+import { translateCreativeImageTool } from "./imageToolI18n";
 
 export interface SplitCreativeImageAssetInput {
   asset: CreativeAsset;
@@ -38,7 +39,11 @@ export async function splitCreativeImageAsset(
   input: SplitCreativeImageAssetInput,
 ): Promise<SplitCreativeImageFile[]> {
   if (input.asset.kind !== "image") {
-    throw new Error("只有真实图片素材可以切图。");
+    throw new Error(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.imageRequiredForSplit",
+      ),
+    );
   }
   input.signal?.throwIfAborted();
   const codec = input.codec ?? browserCreativeImageCropCodec;

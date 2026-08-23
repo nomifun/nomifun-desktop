@@ -20,7 +20,12 @@ import type { DirectorState, DirectorVectorTrack } from './types';
 const PROJECT_ID = 'director-project-1';
 
 function initialState(): DirectorState {
-  return createDirectorState({ projectId: PROJECT_ID, name: 'Director project', durationSeconds: 10 });
+  return createDirectorState({
+    projectId: PROJECT_ID,
+    name: 'Director project',
+    sceneName: 'Scene',
+    durationSeconds: 10,
+  });
 }
 
 function withCamera(state = initialState()): DirectorState {

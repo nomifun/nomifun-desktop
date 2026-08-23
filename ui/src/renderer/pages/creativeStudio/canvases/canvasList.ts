@@ -40,7 +40,12 @@ export const formatCanvasTimestamp = (
   ).format(date);
 };
 
-export const canvasErrorMessage = (error: unknown): string =>
+export const canvasErrorMessage = (
+  error: unknown,
+  fallback = 'Unknown error'
+): string =>
   error instanceof Error && error.message.trim()
     ? error.message
-    : String(error || 'Unknown error');
+    : typeof error === 'string' && error.trim()
+      ? error.trim()
+      : fallback;

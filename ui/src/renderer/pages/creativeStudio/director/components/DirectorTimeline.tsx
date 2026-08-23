@@ -20,6 +20,7 @@ import {
 } from '@icon-park/react';
 import { Button, InputNumber, Tooltip } from '@arco-design/web-react';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import styles from './DirectorWorkbenchShell.module.css';
 import type {
@@ -73,6 +74,7 @@ const DirectorTimeline: React.FC<DirectorTimelineProps> = ({
   onKeyframeDelete,
   onTimelineExport,
 }) => {
+  const { t } = useTranslation();
   if (!timeline.open) return null;
 
   const selectedTrack = timeline.tracks.find(
@@ -88,41 +90,73 @@ const DirectorTimeline: React.FC<DirectorTimelineProps> = ({
   return (
     <section
       className={styles.timeline}
-      aria-label='时间轴'
+      aria-label={t('creativeStudio.director.timeline.title', {
+        defaultValue: '时间轴',
+      })}
       data-director-timeline
       data-timeline-playing={timeline.playing}
     >
       <header className={styles.timelineToolbar}>
         <div className={styles.timelinePlayback}>
-          <Tooltip content={timeline.playing ? '暂停' : '播放'}>
+          <Tooltip
+            content={
+              timeline.playing
+                ? t('creativeStudio.director.timeline.pause', {
+                    defaultValue: '暂停',
+                  })
+                : t('creativeStudio.director.timeline.play', {
+                    defaultValue: '播放',
+                  })
+            }
+          >
             <Button
               type='text'
               shape='circle'
               size='small'
-              aria-label={timeline.playing ? '暂停' : '播放'}
+              aria-label={
+                timeline.playing
+                  ? t('creativeStudio.director.timeline.pause', {
+                      defaultValue: '暂停',
+                    })
+                  : t('creativeStudio.director.timeline.play', {
+                      defaultValue: '播放',
+                    })
+              }
               icon={timeline.playing ? <Pause /> : <Play />}
               disabled={disabled}
               onClick={() => onTimelinePlayingChange(!timeline.playing)}
             />
           </Tooltip>
-          <Tooltip content='循环播放'>
+          <Tooltip
+            content={t('creativeStudio.director.timeline.loop', {
+              defaultValue: '循环播放',
+            })}
+          >
             <Button
               type='text'
               shape='circle'
               size='small'
-              aria-label='循环播放'
+              aria-label={t('creativeStudio.director.timeline.loop', {
+                defaultValue: '循环播放',
+              })}
               aria-pressed={timeline.loop}
               icon={<LoopOnce />}
               disabled={disabled}
               onClick={() => onTimelineLoopChange(!timeline.loop)}
             />
           </Tooltip>
-          <Tooltip content='自动帧'>
+          <Tooltip
+            content={t('creativeStudio.director.timeline.autoKey', {
+              defaultValue: '自动帧',
+            })}
+          >
             <Button
               type='text'
               shape='circle'
               size='small'
-              aria-label='自动帧'
+              aria-label={t('creativeStudio.director.timeline.autoKey', {
+                defaultValue: '自动帧',
+              })}
               aria-pressed={timeline.autoKey}
               icon={<Diamond />}
               disabled={disabled}
@@ -133,7 +167,9 @@ const DirectorTimeline: React.FC<DirectorTimelineProps> = ({
 
         <div className={styles.timelineTimeFields}>
           <InputNumber
-            aria-label='当前时间'
+            aria-label={t('creativeStudio.director.timeline.currentTime', {
+              defaultValue: '当前时间',
+            })}
             value={timeline.currentTimeSeconds}
             min={0}
             max={timeline.durationSeconds}
@@ -146,7 +182,9 @@ const DirectorTimeline: React.FC<DirectorTimelineProps> = ({
           />
           <span>/</span>
           <InputNumber
-            aria-label='时间轴时长'
+            aria-label={t('creativeStudio.director.timeline.duration', {
+              defaultValue: '时间轴时长',
+            })}
             value={timeline.durationSeconds}
             min={1}
             step={1}
@@ -156,7 +194,12 @@ const DirectorTimeline: React.FC<DirectorTimelineProps> = ({
               if (typeof next === 'number' && next > 0) onTimelineDurationChange(next);
             }}
           />
-          <small>{timeline.fps} FPS</small>
+          <small>
+            {t('creativeStudio.director.timeline.fps', {
+              defaultValue: '{{fps}} FPS',
+              fps: timeline.fps,
+            })}
+          </small>
         </div>
 
         <div className={styles.timelineEditActions}>
@@ -169,7 +212,9 @@ const DirectorTimeline: React.FC<DirectorTimelineProps> = ({
               selectedTrack && onKeyframeAdd?.(selectedTrack.id, timeline.currentTimeSeconds)
             }
           >
-            添加关键帧
+            {t('creativeStudio.director.timeline.addKeyframe', {
+              defaultValue: '添加关键帧',
+            })}
           </Button>
           <Button
             type='text'
@@ -182,7 +227,9 @@ const DirectorTimeline: React.FC<DirectorTimelineProps> = ({
               onKeyframeDelete?.(selectedTrack.id, selectedKeyframe.id)
             }
           >
-            删除
+            {t('creativeStudio.director.timeline.deleteKeyframe', {
+              defaultValue: '删除',
+            })}
           </Button>
         </div>
 
@@ -193,20 +240,28 @@ const DirectorTimeline: React.FC<DirectorTimelineProps> = ({
           disabled={disabled || !onTimelineExport}
           onClick={onTimelineExport}
         >
-          导出机位
+          {t('creativeStudio.director.timeline.exportCamera', {
+            defaultValue: '导出机位',
+          })}
         </Button>
         <Button
           type='text'
           shape='circle'
           size='small'
-          aria-label='关闭时间轴'
+          aria-label={t('creativeStudio.director.timeline.close', {
+            defaultValue: '关闭时间轴',
+          })}
           icon={<Close />}
           onClick={() => onTimelineOpenChange(false)}
         />
       </header>
 
       <div className={styles.timelineGrid}>
-        <div className={styles.timelineListHeading}>场景轨道</div>
+        <div className={styles.timelineListHeading}>
+          {t('creativeStudio.director.timeline.sceneTracks', {
+            defaultValue: '场景轨道',
+          })}
+        </div>
         <div className={styles.timelineRuler}>
           {rulerTicks.map((tick, index) => (
             <span
@@ -214,12 +269,17 @@ const DirectorTimeline: React.FC<DirectorTimelineProps> = ({
               className={styles.timelineTick}
               style={{ left: percentAt(tick, timeline.durationSeconds) }}
             >
-              {tick.toFixed(tick % 1 === 0 ? 0 : 1)}s
+              {t('creativeStudio.director.timeline.rulerTime', {
+                defaultValue: '{{time}}s',
+                time: tick.toFixed(tick % 1 === 0 ? 0 : 1),
+              })}
             </span>
           ))}
           <input
             className={styles.timelineScrubber}
-            aria-label='时间轴播放头'
+            aria-label={t('creativeStudio.director.timeline.playhead', {
+              defaultValue: '时间轴播放头',
+            })}
             type='range'
             min={0}
             max={timeline.durationSeconds}
@@ -250,7 +310,9 @@ const DirectorTimeline: React.FC<DirectorTimelineProps> = ({
         <div className={styles.timelineTracks}>
           {timeline.tracks.length === 0 ? (
             <div className={styles.timelineEmpty} role='status'>
-              添加角色、模型或机位后即可制作动画
+              {t('creativeStudio.director.timeline.empty', {
+                defaultValue: '添加角色、模型或机位后即可制作动画',
+              })}
             </div>
           ) : (
             timeline.tracks.map((track) => (
@@ -266,23 +328,29 @@ const DirectorTimeline: React.FC<DirectorTimelineProps> = ({
                     style={{ left: percentAt(tick, timeline.durationSeconds) }}
                   />
                 ))}
-                {track.keyframes.map((keyframe) => (
-                  <Tooltip key={keyframe.id} content={`${keyframe.timeSeconds.toFixed(2)} 秒关键帧`}>
-                    <button
-                      type='button'
-                      className={styles.keyframeMarker}
-                      data-keyframe-selected={
-                        keyframe.selected || timeline.selectedKeyframeId === keyframe.id
-                      }
-                      style={{ left: percentAt(keyframe.timeSeconds, timeline.durationSeconds) }}
-                      aria-label={`${keyframe.timeSeconds.toFixed(2)} 秒关键帧`}
-                      disabled={disabled}
-                      onClick={() => onKeyframeSelect(track.id, keyframe.id)}
-                    >
-                      <Diamond aria-hidden='true' size={10} strokeWidth={2} />
-                    </button>
-                  </Tooltip>
-                ))}
+                {track.keyframes.map((keyframe) => {
+                  const label = t('creativeStudio.director.timeline.keyframeAt', {
+                    defaultValue: '{{time}} 秒关键帧',
+                    time: keyframe.timeSeconds.toFixed(2),
+                  });
+                  return (
+                    <Tooltip key={keyframe.id} content={label}>
+                      <button
+                        type='button'
+                        className={styles.keyframeMarker}
+                        data-keyframe-selected={
+                          keyframe.selected || timeline.selectedKeyframeId === keyframe.id
+                        }
+                        style={{ left: percentAt(keyframe.timeSeconds, timeline.durationSeconds) }}
+                        aria-label={label}
+                        disabled={disabled}
+                        onClick={() => onKeyframeSelect(track.id, keyframe.id)}
+                      >
+                        <Diamond aria-hidden='true' size={10} strokeWidth={2} />
+                      </button>
+                    </Tooltip>
+                  );
+                })}
               </div>
             ))
           )}

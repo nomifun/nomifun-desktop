@@ -38,8 +38,10 @@ describe('Creative asset picker dialog', () => {
     expect(pickerSource.includes('alignCenter={false}')).toBe(true);
     expect(pickerSource.includes("role='listbox'")).toBe(true);
     expect(pickerSource.includes("role='tablist'")).toBe(true);
-    expect(pickerSource.includes("placeholder='搜索素材'")).toBe(true);
-    expect(pickerSource.includes('新增素材')).toBe(true);
+    expect(pickerSource.includes("t('creativeStudio.assets.picker.searchPlaceholder'")).toBe(
+      true
+    );
+    expect(pickerSource.includes("t('creativeStudio.assets.picker.addAsset'")).toBe(true);
     expect(pickerSource.includes("role='alert'")).toBe(true);
     expect(pickerSource.includes('onRetry')).toBe(true);
     expect(pickerSource.includes('onConfirm ?? onCancel')).toBe(true);

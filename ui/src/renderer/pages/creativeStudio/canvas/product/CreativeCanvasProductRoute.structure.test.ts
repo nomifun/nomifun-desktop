@@ -189,7 +189,7 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('runtime.submit(prepared.plan)')).toBe(true);
     expect(source.includes('runtime.retrySubmission(')).toBe(true);
     expect(source.includes('runtime.taskExists(')).toBe(true);
-    expect(source.includes('正在恢复{label}…')).toBe(true);
+    expect(source.includes('creativeStudio.canvas.tasks.recovering')).toBe(true);
     expect(source.includes('正在恢复图片任务…')).toBe(false);
     expect(source.includes('imageWorkbenchModelOptions(modelCatalog, \'image_edit\')')).toBe(true);
     expect(source.includes('withCanvasImageComposeDraft(node, update(current))')).toBe(true);

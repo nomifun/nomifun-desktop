@@ -19,6 +19,7 @@ import {
 } from '@icon-park/react';
 import { Button, Input, InputNumber, Radio, Select, Tag, Tooltip } from '@arco-design/web-react';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
 import {
   DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS,
@@ -77,28 +78,35 @@ const clampCount = (value: number | undefined, maximum = 10): number =>
 const LayoutSwitch: React.FC<{
   layout: ImageWorkbenchLayout;
   onChange(layout: ImageWorkbenchLayout): void;
-}> = ({ layout, onChange }) => (
-  <div className={styles.layoutSwitch} role='group' aria-label='工作台布局'>
-    <Button
-      size='small'
-      type={layout === 'side' ? 'primary' : 'text'}
-      icon={<LeftBar />}
-      aria-pressed={layout === 'side'}
-      onClick={() => onChange('side')}
+}> = ({ layout, onChange }) => {
+  const { t } = useTranslation();
+  return (
+    <div
+      className={styles.layoutSwitch}
+      role='group'
+      aria-label={t('creativeStudio.image.layout.label', { defaultValue: '工作台布局' })}
     >
-      侧边
-    </Button>
-    <Button
-      size='small'
-      type={layout === 'bottom' ? 'primary' : 'text'}
-      icon={<BottomBar />}
-      aria-pressed={layout === 'bottom'}
-      onClick={() => onChange('bottom')}
-    >
-      底部
-    </Button>
-  </div>
-);
+      <Button
+        size='small'
+        type={layout === 'side' ? 'primary' : 'text'}
+        icon={<LeftBar />}
+        aria-pressed={layout === 'side'}
+        onClick={() => onChange('side')}
+      >
+        {t('creativeStudio.image.layout.side', { defaultValue: '侧边' })}
+      </Button>
+      <Button
+        size='small'
+        type={layout === 'bottom' ? 'primary' : 'text'}
+        icon={<BottomBar />}
+        aria-pressed={layout === 'bottom'}
+        onClick={() => onChange('bottom')}
+      >
+        {t('creativeStudio.image.layout.bottom', { defaultValue: '底部' })}
+      </Button>
+    </div>
+  );
+};
 
 const ComposerActions: React.FC<{
   compact?: boolean;
@@ -106,73 +114,98 @@ const ComposerActions: React.FC<{
   onClearPrompt?(): void;
   onOpenPromptLibrary?(): void;
   onChooseReferences?(): void;
-}> = ({ compact, onPastePrompt, onClearPrompt, onOpenPromptLibrary, onChooseReferences }) => (
-  <div className={compact ? styles.compactActions : styles.actionRow}>
-    {onPastePrompt ? (
-      <Tooltip content='读取剪贴板'>
-        <Button size='small' icon={<Clipboard />} onClick={onPastePrompt}>
-          {compact ? null : '读取剪贴板'}
-        </Button>
-      </Tooltip>
-    ) : null}
-    {onClearPrompt ? (
-      <Tooltip content='清空输入'>
-        <Button size='small' icon={<Delete />} onClick={onClearPrompt}>
-          {compact ? null : '清空'}
-        </Button>
-      </Tooltip>
-    ) : null}
-    {onOpenPromptLibrary ? (
-      <Tooltip content='提示词库'>
-        <Button size='small' icon={<BookOne />} onClick={onOpenPromptLibrary}>
-          {compact ? null : '提示词库'}
-        </Button>
-      </Tooltip>
-    ) : null}
-    {onChooseReferences ? (
-      <Tooltip content='从素材库选择'>
-        <Button size='small' icon={<FolderOpen />} onClick={onChooseReferences}>
-          {compact ? null : '我的素材'}
-        </Button>
-      </Tooltip>
-    ) : null}
-  </div>
-);
+}> = ({ compact, onPastePrompt, onClearPrompt, onOpenPromptLibrary, onChooseReferences }) => {
+  const { t } = useTranslation();
+  return (
+    <div className={compact ? styles.compactActions : styles.actionRow}>
+      {onPastePrompt ? (
+        <Tooltip content={t('creativeStudio.image.actions.pastePrompt', { defaultValue: '读取剪贴板' })}>
+          <Button size='small' icon={<Clipboard />} onClick={onPastePrompt}>
+            {compact
+              ? null
+              : t('creativeStudio.image.actions.pastePrompt', { defaultValue: '读取剪贴板' })}
+          </Button>
+        </Tooltip>
+      ) : null}
+      {onClearPrompt ? (
+        <Tooltip content={t('creativeStudio.image.actions.clearInput', { defaultValue: '清空输入' })}>
+          <Button size='small' icon={<Delete />} onClick={onClearPrompt}>
+            {compact
+              ? null
+              : t('creativeStudio.image.actions.clear', { defaultValue: '清空' })}
+          </Button>
+        </Tooltip>
+      ) : null}
+      {onOpenPromptLibrary ? (
+        <Tooltip content={t('creativeStudio.image.actions.promptLibrary', { defaultValue: '提示词库' })}>
+          <Button size='small' icon={<BookOne />} onClick={onOpenPromptLibrary}>
+            {compact
+              ? null
+              : t('creativeStudio.image.actions.promptLibrary', { defaultValue: '提示词库' })}
+          </Button>
+        </Tooltip>
+      ) : null}
+      {onChooseReferences ? (
+        <Tooltip content={t('creativeStudio.image.actions.chooseFromLibrary', { defaultValue: '从素材库选择' })}>
+          <Button size='small' icon={<FolderOpen />} onClick={onChooseReferences}>
+            {compact
+              ? null
+              : t('creativeStudio.image.actions.myAssets', { defaultValue: '我的素材' })}
+          </Button>
+        </Tooltip>
+      ) : null}
+    </div>
+  );
+};
 
 const ReferenceStrip: React.FC<{
   references: readonly ImageWorkbenchReference[];
   compact?: boolean;
   uploadingCount: number;
   onRemove(referenceId: string): void;
-}> = ({ references, compact, uploadingCount, onRemove }) => (
-  <div
-    className={`${styles.referenceStrip} ${compact ? styles.referenceStripCompact : ''}`}
-    data-reference-count={references.length}
-  >
-    {references.map((reference) => (
-      <div key={reference.id} className={styles.referenceItem}>
-        <img src={reference.previewUrl} alt={reference.name} />
-        <button
-          type='button'
-          className={styles.referenceRemove}
-          aria-label={`移除参考图 ${reference.name}`}
-          onClick={() => onRemove(reference.id)}
+}> = ({ references, compact, uploadingCount, onRemove }) => {
+  const { t } = useTranslation();
+  return (
+    <div
+      className={`${styles.referenceStrip} ${compact ? styles.referenceStripCompact : ''}`}
+      data-reference-count={references.length}
+    >
+      {references.map((reference) => (
+        <div key={reference.id} className={styles.referenceItem}>
+          <img src={reference.previewUrl} alt={reference.name} />
+          <button
+            type='button'
+            className={styles.referenceRemove}
+            aria-label={t('creativeStudio.image.references.remove', {
+              defaultValue: '移除参考图 {{name}}',
+              name: reference.name,
+            })}
+            onClick={() => onRemove(reference.id)}
+          >
+            <Delete size={13} />
+          </button>
+          {compact ? null : <span className={styles.referenceName}>{reference.name}</span>}
+        </div>
+      ))}
+      {Array.from({ length: uploadingCount }, (_, index) => (
+        <div
+          key={`uploading-${index}`}
+          className={styles.referenceLoading}
+          aria-label={t('creativeStudio.image.references.adding', {
+            defaultValue: '正在添加参考图',
+          })}
         >
-          <Delete size={13} />
-        </button>
-        {compact ? null : <span className={styles.referenceName}>{reference.name}</span>}
-      </div>
-    ))}
-    {Array.from({ length: uploadingCount }, (_, index) => (
-      <div key={`uploading-${index}`} className={styles.referenceLoading} aria-label='正在添加参考图'>
-        <Loading className={styles.spin} />
-      </div>
-    ))}
-    {references.length === 0 && uploadingCount === 0 ? (
-      <div className={styles.referenceEmpty}>暂无参考图</div>
-    ) : null}
-  </div>
-);
+          <Loading className={styles.spin} />
+        </div>
+      ))}
+      {references.length === 0 && uploadingCount === 0 ? (
+        <div className={styles.referenceEmpty}>
+          {t('creativeStudio.image.references.empty', { defaultValue: '暂无参考图' })}
+        </div>
+      ) : null}
+    </div>
+  );
+};
 
 interface SettingsFieldsProps {
   compact?: boolean;
@@ -207,21 +240,36 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
   onAspectRatioChange,
   onCountChange,
 }) => {
+  const { t } = useTranslation();
   const modelValue = settings.model ? imageWorkbenchModelKey(settings.model) : undefined;
-  const dimensionsTitle = dimensionsDisabled ? '当前模型仅支持已列出的尺寸' : undefined;
+  const dimensionsTitle = dimensionsDisabled
+    ? t('creativeStudio.image.settings.fixedDimensions', {
+        defaultValue: '当前模型仅支持已列出的尺寸',
+      })
+    : undefined;
   return (
     <div className={compact ? styles.compactSettings : styles.settingsStack}>
       {modelSlot ? (
         <div className={styles.modelSlot}>{modelSlot}</div>
       ) : (
         <label className={styles.field}>
-          <span>模型</span>
+          <span>{t('creativeStudio.image.settings.model', { defaultValue: '模型' })}</span>
           <NomiSelect
             value={modelValue}
-            placeholder={modelOptions.length > 0 ? '选择生图模型' : '没有可用生图模型'}
+            placeholder={
+              modelOptions.length > 0
+                ? t('creativeStudio.image.settings.modelPlaceholder', {
+                    defaultValue: '选择生图模型',
+                  })
+                : t('creativeStudio.image.settings.noModel', {
+                    defaultValue: '没有可用生图模型',
+                  })
+            }
             disabled={disabled || modelOptions.length === 0}
             allowClear
-            aria-label='生图模型'
+            aria-label={t('creativeStudio.image.settings.modelAria', {
+              defaultValue: '生图模型',
+            })}
             onChange={(key) =>
               onModelChange(
                 typeof key === 'string' ? parseImageWorkbenchModelKey(key, modelOptions) : null
@@ -245,7 +293,7 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
       )}
 
       <label className={styles.field}>
-        <span>接口模式</span>
+        <span>{t('creativeStudio.image.settings.interfaceMode', { defaultValue: '接口模式' })}</span>
         <Radio.Group
           type='button'
           size='small'
@@ -253,20 +301,24 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
           disabled={disabled}
           onChange={(value) => onInterfaceModeChange(value as ImageWorkbenchInterfaceMode)}
         >
-          <Radio value='images'>Images</Radio>
-          <Radio value='responses'>Responses</Radio>
+          <Radio value='images'>
+            {t('creativeStudio.image.interface.images', { defaultValue: 'Images' })}
+          </Radio>
+          <Radio value='responses'>
+            {t('creativeStudio.image.interface.responses', { defaultValue: 'Responses' })}
+          </Radio>
         </Radio.Group>
       </label>
 
       {compact ? (
         <>
           <label className={styles.field} title={dimensionsTitle}>
-            <span>宽度</span>
+            <span>{t('creativeStudio.image.settings.width', { defaultValue: '宽度' })}</span>
             <InputNumber
               value={settings.width ?? undefined}
               min={1}
               max={8192}
-              placeholder='自动'
+              placeholder={t('creativeStudio.image.options.auto', { defaultValue: '自动' })}
               disabled={disabled || dimensionsDisabled || settings.width === null}
               onChange={(value) =>
                 onDimensionsChange({ width: clampDimension(value), height: settings.height })
@@ -274,12 +326,12 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
             />
           </label>
           <label className={styles.field} title={dimensionsTitle}>
-            <span>高度</span>
+            <span>{t('creativeStudio.image.settings.height', { defaultValue: '高度' })}</span>
             <InputNumber
               value={settings.height ?? undefined}
               min={1}
               max={8192}
-              placeholder='自动'
+              placeholder={t('creativeStudio.image.options.auto', { defaultValue: '自动' })}
               disabled={disabled || dimensionsDisabled || settings.height === null}
               onChange={(value) =>
                 onDimensionsChange({ width: settings.width, height: clampDimension(value) })
@@ -287,7 +339,7 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
             />
           </label>
           <label className={styles.field}>
-            <span>宽高比</span>
+            <span>{t('creativeStudio.image.settings.aspectRatio', { defaultValue: '宽高比' })}</span>
             <Select
               value={settings.aspectRatio}
               disabled={disabled}
@@ -306,7 +358,7 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
             </Select>
           </label>
           <label className={styles.field}>
-            <span>质量</span>
+            <span>{t('creativeStudio.image.settings.quality', { defaultValue: '质量' })}</span>
             <Select
               value={settings.quality}
               disabled={disabled}
@@ -320,7 +372,7 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
             </Select>
           </label>
           <label className={styles.field}>
-            <span>数量</span>
+            <span>{t('creativeStudio.image.settings.count', { defaultValue: '数量' })}</span>
             <InputNumber
               value={Math.min(settings.count, maxCount)}
               min={1}
@@ -333,7 +385,9 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
       ) : (
         <>
           <div className={styles.settingGroup}>
-            <span className={styles.settingLabel}>质量</span>
+            <span className={styles.settingLabel}>
+              {t('creativeStudio.image.settings.quality', { defaultValue: '质量' })}
+            </span>
             <div className={styles.qualityGrid}>
               {IMAGE_WORKBENCH_QUALITY_OPTIONS.map((option) => (
                 <button
@@ -351,15 +405,19 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
           </div>
 
           <div className={styles.settingGroup} title={dimensionsTitle}>
-            <span className={styles.settingLabel}>尺寸</span>
+            <span className={styles.settingLabel}>
+              {t('creativeStudio.image.settings.dimensions', { defaultValue: '尺寸' })}
+            </span>
             <div className={styles.dimensionGrid}>
               <label>
-                <span>W</span>
+                <span>
+                  {t('creativeStudio.image.settings.widthShort', { defaultValue: 'W' })}
+                </span>
                 <InputNumber
                   value={settings.width ?? undefined}
                   min={1}
                   max={8192}
-                  placeholder='自动'
+                  placeholder={t('creativeStudio.image.options.auto', { defaultValue: '自动' })}
                   disabled={disabled || dimensionsDisabled || settings.width === null}
                   onChange={(value) =>
                     onDimensionsChange({ width: clampDimension(value), height: settings.height })
@@ -368,12 +426,14 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
               </label>
               <span className={styles.dimensionLink}>×</span>
               <label>
-                <span>H</span>
+                <span>
+                  {t('creativeStudio.image.settings.heightShort', { defaultValue: 'H' })}
+                </span>
                 <InputNumber
                   value={settings.height ?? undefined}
                   min={1}
                   max={8192}
-                  placeholder='自动'
+                  placeholder={t('creativeStudio.image.options.auto', { defaultValue: '自动' })}
                   disabled={disabled || dimensionsDisabled || settings.height === null}
                   onChange={(value) =>
                     onDimensionsChange({ width: settings.width, height: clampDimension(value) })
@@ -384,7 +444,9 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
           </div>
 
           <div className={styles.settingGroup}>
-            <span className={styles.settingLabel}>宽高比</span>
+            <span className={styles.settingLabel}>
+              {t('creativeStudio.image.settings.aspectRatio', { defaultValue: '宽高比' })}
+            </span>
             <div className={styles.aspectGrid}>
               {aspectRatioOptions.map((option) => (
                 <button
@@ -411,7 +473,9 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
           </div>
 
           <div className={styles.settingGroup}>
-            <span className={styles.settingLabel}>生成张数</span>
+            <span className={styles.settingLabel}>
+              {t('creativeStudio.image.settings.outputCount', { defaultValue: '生成张数' })}
+            </span>
             <div className={styles.countGrid} data-max-count={maxCount}>
               {[1, 2, 3, 4]
                 .filter((count) => count <= maxCount)
@@ -424,7 +488,10 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
                     disabled={disabled}
                     onClick={() => onCountChange(count)}
                   >
-                    {count} 张
+                    {t('creativeStudio.image.settings.imageCount', {
+                      defaultValue: '{{imageCount}} 张',
+                      imageCount: count,
+                    })}
                   </button>
                 ))}
               <InputNumber
@@ -432,7 +499,9 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
                 min={1}
                 max={maxCount}
                 disabled={disabled}
-                aria-label='自定义生成张数'
+                aria-label={t('creativeStudio.image.settings.customCount', {
+                  defaultValue: '自定义生成张数',
+                })}
                 onChange={(value) => onCountChange(clampCount(value, maxCount))}
               />
             </div>
@@ -475,9 +544,20 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
     onCountChange,
     onGenerate,
   } = props;
+  const { t } = useTranslation();
   const canGenerate = !disabled && prompt.trim().length > 0 && settings.model !== null;
-  const pendingLabel = task.state === 'queued' ? '排队中' : '生成中';
-  const generateLabel = task.pendingCount > 0 ? `${task.pendingCount} 个${pendingLabel}` : '开始创作';
+  const pendingLabel =
+    task.state === 'queued'
+      ? t('creativeStudio.image.task.queued', { defaultValue: '排队中' })
+      : t('creativeStudio.image.task.running', { defaultValue: '生成中' });
+  const generateLabel =
+    task.pendingCount > 0
+      ? t('creativeStudio.image.generate.pending', {
+          defaultValue: '{{taskCount}} 个{{status}}',
+          taskCount: task.pendingCount,
+          status: pendingLabel,
+        })
+      : t('creativeStudio.image.generate.startCreating', { defaultValue: '开始创作' });
   const generateIcon =
     task.state === 'queued' ? (
       <Time />
@@ -495,7 +575,9 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
             <Input.TextArea
               value={prompt}
               autoSize={{ minRows: 2, maxRows: 4 }}
-              placeholder='描述你想生成的图片，可通过参考图锁定人物、风格或构图…'
+              placeholder={t('creativeStudio.image.prompt.bottomPlaceholder', {
+                defaultValue: '描述你想生成的图片，可通过参考图锁定人物、风格或构图…',
+              })}
               disabled={disabled}
               onChange={onPromptChange}
               onPressEnter={(event) => {
@@ -513,13 +595,26 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
               onChooseReferences={onChooseReferences}
             />
             {onUploadReferences ? (
-              <Tooltip content={references.length ? `添加参考图，当前 ${references.length} 张` : '添加参考图'}>
+              <Tooltip
+                content={
+                  references.length
+                    ? t('creativeStudio.image.references.addWithCount', {
+                        defaultValue: '添加参考图，当前 {{imageCount}} 张',
+                        imageCount: references.length,
+                      })
+                    : t('creativeStudio.image.references.add', { defaultValue: '添加参考图' })
+                }
+              >
                 <Button icon={<Upload />} onClick={onUploadReferences}>
                   {references.length > 0 ? references.length : null}
                 </Button>
               </Tooltip>
             ) : null}
-            <Tooltip content='切换到侧边工作台'>
+            <Tooltip
+              content={t('creativeStudio.image.layout.switchToSide', {
+                defaultValue: '切换到侧边工作台',
+              })}
+            >
               <Button icon={<LeftBar />} onClick={() => onLayoutChange('side')} />
             </Tooltip>
             <Button
@@ -566,8 +661,10 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
         <div className={styles.composerHeading}>
           <Pic size={20} />
           <span className={styles.composerHeadingText}>
-            <h1>生图工作台</h1>
-            <small>生成设置</small>
+            <h1>{t('creativeStudio.image.header.title', { defaultValue: '生图工作台' })}</h1>
+            <small>
+              {t('creativeStudio.image.header.settings', { defaultValue: '生成设置' })}
+            </small>
           </span>
         </div>
         <LayoutSwitch layout={layout} onChange={onLayoutChange} />
@@ -576,7 +673,7 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
       <div className={styles.composerScroll}>
         <section className={styles.composerSection}>
           <div className={styles.sectionHeader}>
-            <span>提示词</span>
+            <span>{t('creativeStudio.image.prompt.label', { defaultValue: '提示词' })}</span>
           </div>
           <div className={styles.sectionBody}>
             <ComposerActions
@@ -588,7 +685,9 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
             <Input.TextArea
               value={prompt}
               rows={6}
-              placeholder='描述画面主体、风格、构图、光线和用途'
+              placeholder={t('creativeStudio.image.prompt.sidePlaceholder', {
+                defaultValue: '描述画面主体、风格、构图、光线和用途',
+              })}
               disabled={disabled}
               onChange={onPromptChange}
             />
@@ -597,24 +696,26 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
 
         <section className={styles.composerSection}>
           <div className={styles.sectionHeader}>
-            <span>参考图</span>
+            <span>{t('creativeStudio.image.references.title', { defaultValue: '参考图' })}</span>
             <Tag>{references.length}</Tag>
           </div>
           <div className={styles.sectionBody}>
             <div className={styles.actionRow}>
               {onPasteReferences ? (
                 <Button size='small' icon={<Clipboard />} onClick={onPasteReferences}>
-                  剪贴板
+                  {t('creativeStudio.image.actions.clipboard', { defaultValue: '剪贴板' })}
                 </Button>
               ) : null}
               {onUploadReferences ? (
                 <Button size='small' icon={<Upload />} onClick={onUploadReferences}>
-                  上传
+                  {t('creativeStudio.image.actions.upload', { defaultValue: '上传' })}
                 </Button>
               ) : null}
               {onChooseReferences ? (
                 <Button size='small' icon={<FolderOpen />} onClick={onChooseReferences}>
-                  从素材库选择
+                  {t('creativeStudio.image.actions.chooseFromLibrary', {
+                    defaultValue: '从素材库选择',
+                  })}
                 </Button>
               ) : null}
             </div>
@@ -628,7 +729,11 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
 
         <section className={styles.composerSection}>
           <div className={styles.sectionHeader}>
-            <span>生成参数</span>
+            <span>
+              {t('creativeStudio.image.settings.generationParameters', {
+                defaultValue: '生成参数',
+              })}
+            </span>
           </div>
           <div className={styles.sectionBody}>
             <SettingsFields
@@ -660,7 +765,13 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
           disabled={!canGenerate}
           onClick={onGenerate}
         >
-          {task.pendingCount > 0 ? `继续提交（${task.pendingCount} 个${pendingLabel}）` : '开始生成'}
+          {task.pendingCount > 0
+            ? t('creativeStudio.image.generate.continue', {
+                defaultValue: '继续提交（{{taskCount}} 个{{status}}）',
+                taskCount: task.pendingCount,
+                status: pendingLabel,
+              })
+            : t('creativeStudio.image.generate.start', { defaultValue: '开始生成' })}
         </Button>
       </footer>
     </aside>

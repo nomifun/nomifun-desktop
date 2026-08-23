@@ -8,6 +8,7 @@ import { ArrowUp, BookOne, Loading, SettingTwo } from '@icon-park/react';
 import { InputNumber, Popover, Radio, Select } from '@arco-design/web-react';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 
 import {
   DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS,
@@ -77,6 +78,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
   onGenerate,
   onRetrySubmission,
 }) => {
+  const { t } = useTranslation();
   const positionerRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLSpanElement>(null);
   const horizontalOffsetRef = useRef(0);
@@ -93,7 +95,10 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
   const qualityLabel =
     IMAGE_WORKBENCH_QUALITY_OPTIONS.find(
       (option) => option.value === settings.quality
-    )?.label ?? '自动';
+    )?.label ??
+    t('creativeStudio.canvas.image.autoQuality', {
+      defaultValue: '自动',
+    });
   const canGenerate = retrySubmission
     ? !disabled && onRetrySubmission !== undefined
     : !disabled && !busy && prompt.trim().length > 0 && settings.model !== null;
@@ -230,10 +235,16 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
           maxLength={1_000_000}
           placeholder={
             hasImageContent
-              ? '请输入你想要把这张图修改成什么'
-              : '描述要生成的图片内容'
+              ? t('creativeStudio.canvas.image.editPromptPlaceholder', {
+                  defaultValue: '请输入你想要把这张图修改成什么',
+                })
+              : t('creativeStudio.canvas.image.generatePromptPlaceholder', {
+                  defaultValue: '描述要生成的图片内容',
+                })
           }
-          aria-label='图片创作提示词'
+          aria-label={t('creativeStudio.canvas.image.promptLabel', {
+            defaultValue: '图片创作提示词',
+          })}
           disabled={disabled}
           onChange={(event) => {
             setPrompt(event.target.value);
@@ -252,7 +263,9 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
             <button
               type='button'
               className={styles.iconButton}
-              aria-label='打开提示词库'
+              aria-label={t('creativeStudio.canvas.openPromptLibrary', {
+                defaultValue: '打开提示词库',
+              })}
               disabled={disabled}
               onClick={onOpenPromptLibrary}
             >
@@ -265,13 +278,29 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
               placeholder={
                 modelOptions.length > 0
                   ? hasImageContent
-                    ? '选择图片编辑模型'
-                    : '选择图片生成模型'
+                    ? t('creativeStudio.canvas.image.selectEditModel', {
+                        defaultValue: '选择图片编辑模型',
+                      })
+                    : t('creativeStudio.canvas.image.selectGenerateModel', {
+                        defaultValue: '选择图片生成模型',
+                      })
                   : hasImageContent
-                    ? '没有可用图片编辑模型'
-                    : '没有可用图片生成模型'
+                    ? t('creativeStudio.canvas.image.noEditModels', {
+                        defaultValue: '没有可用图片编辑模型',
+                      })
+                    : t('creativeStudio.canvas.image.noGenerateModels', {
+                        defaultValue: '没有可用图片生成模型',
+                      })
               }
-              aria-label={hasImageContent ? '图片编辑模型' : '图片生成模型'}
+              aria-label={
+                hasImageContent
+                  ? t('creativeStudio.canvas.image.editModelLabel', {
+                      defaultValue: '图片编辑模型',
+                    })
+                  : t('creativeStudio.canvas.image.generateModelLabel', {
+                      defaultValue: '图片生成模型',
+                    })
+              }
               disabled={disabled || modelOptions.length === 0}
               getPopupContainer={popupContainer}
               onChange={(key) =>
@@ -301,7 +330,11 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
               content={
                 <div className={styles.settingsPanel}>
                   <label className={styles.field}>
-                    <span>接口模式</span>
+                    <span>
+                      {t('creativeStudio.canvas.image.interfaceModeLabel', {
+                        defaultValue: '接口模式',
+                      })}
+                    </span>
                     <Radio.Group
                       type='button'
                       size='small'
@@ -311,12 +344,18 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                         onInterfaceModeChange(value as ImageWorkbenchInterfaceMode)
                       }
                     >
-                      <Radio value='images'>Images</Radio>
-                      <Radio value='responses'>Responses</Radio>
+                      <Radio value='images'>{t('creativeStudio.image.interface.images')}</Radio>
+                      <Radio value='responses'>
+                        {t('creativeStudio.image.interface.responses')}
+                      </Radio>
                     </Radio.Group>
                   </label>
                   <label className={styles.field}>
-                    <span>质量</span>
+                    <span>
+                      {t('creativeStudio.canvas.image.qualityLabel', {
+                        defaultValue: '质量',
+                      })}
+                    </span>
                     <Select
                       value={settings.quality}
                       disabled={disabled}
@@ -331,7 +370,11 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                     </Select>
                   </label>
                   <label className={styles.field}>
-                    <span>宽高比</span>
+                    <span>
+                      {t('creativeStudio.canvas.image.aspectRatioLabel', {
+                        defaultValue: '宽高比',
+                      })}
+                    </span>
                     <Select
                       value={settings.aspectRatio}
                       disabled={disabled}
@@ -352,12 +395,18 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                   </label>
                   <div className={styles.dimensionRow}>
                     <label className={styles.field}>
-                      <span>宽度</span>
+                      <span>
+                        {t('creativeStudio.canvas.image.widthLabel', {
+                          defaultValue: '宽度',
+                        })}
+                      </span>
                       <InputNumber
                         value={settings.width ?? undefined}
                         min={1}
                         max={8192}
-                        placeholder='自动'
+                        placeholder={t('creativeStudio.canvas.autoValue', {
+                          defaultValue: '自动',
+                        })}
                         disabled={disabled || settings.width === null}
                         onChange={(value) =>
                           onDimensionsChange({
@@ -368,12 +417,18 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                       />
                     </label>
                     <label className={styles.field}>
-                      <span>高度</span>
+                      <span>
+                        {t('creativeStudio.canvas.image.heightLabel', {
+                          defaultValue: '高度',
+                        })}
+                      </span>
                       <InputNumber
                         value={settings.height ?? undefined}
                         min={1}
                         max={8192}
-                        placeholder='自动'
+                        placeholder={t('creativeStudio.canvas.autoValue', {
+                          defaultValue: '自动',
+                        })}
                         disabled={disabled || settings.height === null}
                         onChange={(value) =>
                           onDimensionsChange({
@@ -385,7 +440,11 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                     </label>
                   </div>
                   <label className={styles.field}>
-                    <span>生成张数</span>
+                    <span>
+                      {t('creativeStudio.canvas.image.countLabel', {
+                        defaultValue: '生成张数',
+                      })}
+                    </span>
                     <InputNumber
                       value={settings.count}
                       min={1}
@@ -400,12 +459,19 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
               <button
                 type='button'
                 className={styles.settingsButton}
-                aria-label='图片生成设置'
+                aria-label={t('creativeStudio.canvas.image.settingsLabel', {
+                  defaultValue: '图片生成设置',
+                })}
                 disabled={disabled}
               >
                 <SettingTwo theme='outline' size={15} fill='currentColor' />
                 <span className={styles.settingsSummary}>
-                  {qualityLabel} · {settings.aspectRatio} · {settings.count} 张
+                  {t('creativeStudio.canvas.image.settingsSummary', {
+                    quality: qualityLabel,
+                    aspectRatio: settings.aspectRatio,
+                    count: settings.count,
+                    defaultValue: `${qualityLabel} · ${settings.aspectRatio} · ${settings.count} 张`,
+                  })}
                 </span>
               </button>
             </Popover>
@@ -414,7 +480,9 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
           <button
             type='button'
             className={styles.submitButton}
-            aria-label='生成图片'
+            aria-label={t('creativeStudio.canvas.image.generateLabel', {
+              defaultValue: '生成图片',
+            })}
             disabled={!canGenerate}
             onClick={submit}
           >

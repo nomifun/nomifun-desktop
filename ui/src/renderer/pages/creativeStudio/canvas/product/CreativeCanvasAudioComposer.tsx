@@ -14,6 +14,7 @@ import {
 import { Popover, Select } from '@arco-design/web-react';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 
 import type { CreativeGenerationStatus } from '../../domain';
 import type {
@@ -146,6 +147,7 @@ const CreativeCanvasAudioComposer: React.FC<
   onRetrySubmission,
   onConfirmSubmission,
 }) => {
+  const { t } = useTranslation();
   const positionerRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLSpanElement>(null);
   const horizontalOffsetRef = useRef(0);
@@ -190,7 +192,13 @@ const CreativeCanvasAudioComposer: React.FC<
       requiredVoiceReady &&
       promptLengthReady;
   const voiceSummary =
-    settings.voice.trim() || (voiceRequired ? '待填写音色' : '默认音色');
+    settings.voice.trim() ||
+    t(
+      voiceRequired
+        ? 'creativeStudio.canvas.audio.voiceRequired'
+        : 'creativeStudio.canvas.audio.defaultVoice',
+      { defaultValue: voiceRequired ? '待填写音色' : '默认音色' }
+    );
   const settingsSummary = [
     formatVisible ? settings.format.toUpperCase() : null,
     voiceVisible ? voiceSummary : null,
@@ -312,9 +320,13 @@ const CreativeCanvasAudioComposer: React.FC<
 
   const modelStatus =
     eligibleModelOptions.length === 0
-      ? '没有可用的语音合成模型，请先在模型管理中配置。'
+      ? t('creativeStudio.canvas.audio.noModels', {
+          defaultValue: '没有可用的语音合成模型，请先在模型管理中配置。',
+        })
       : settings.model !== null && selectedModel === null
-        ? '已选语音合成模型当前不可用，请重新选择。'
+        ? t('creativeStudio.canvas.audio.modelUnavailable', {
+            defaultValue: '已选语音合成模型当前不可用，请重新选择。',
+          })
         : null;
 
   const content = (
@@ -346,8 +358,12 @@ const CreativeCanvasAudioComposer: React.FC<
           className={styles.prompt}
           value={prompt}
           maxLength={normalizedMaxTextLength}
-          placeholder='输入要朗读的文本'
-          aria-label='朗读文本'
+          placeholder={t('creativeStudio.canvas.audio.promptPlaceholder', {
+            defaultValue: '输入要朗读的文本',
+          })}
+          aria-label={t('creativeStudio.canvas.audio.promptLabel', {
+            defaultValue: '朗读文本',
+          })}
           disabled={disabled}
           onChange={(event) => {
             setPrompt(event.target.value);
@@ -366,8 +382,12 @@ const CreativeCanvasAudioComposer: React.FC<
             <button
               type='button'
               className={styles.iconButton}
-              aria-label='打开朗读提示词库'
-              title='提示词库'
+              aria-label={t('creativeStudio.canvas.audio.openPromptLibrary', {
+                defaultValue: '打开朗读提示词库',
+              })}
+              title={t('creativeStudio.canvas.promptLibrary', {
+                defaultValue: '提示词库',
+              })}
               disabled={disabled}
               onClick={onOpenPromptLibrary}
             >
@@ -379,10 +399,16 @@ const CreativeCanvasAudioComposer: React.FC<
               value={selectedModel ? modelKey(selectedModel) : undefined}
               placeholder={
                 eligibleModelOptions.length > 0
-                  ? '选择语音合成模型'
-                  : '没有可用语音合成模型'
+                  ? t('creativeStudio.canvas.audio.selectModel', {
+                      defaultValue: '选择语音合成模型',
+                    })
+                  : t('creativeStudio.canvas.audio.noModelOptions', {
+                      defaultValue: '没有可用语音合成模型',
+                    })
               }
-              aria-label='语音合成模型'
+              aria-label={t('creativeStudio.canvas.audio.modelLabel', {
+                defaultValue: '语音合成模型',
+              })}
               disabled={disabled || eligibleModelOptions.length === 0}
               getPopupContainer={popupContainer}
               onChange={(key) => {
@@ -411,7 +437,10 @@ const CreativeCanvasAudioComposer: React.FC<
                     {voiceVisible ? (
                       <label className={styles.field}>
                         <span>
-                          Voice ID{voiceRequired ? '（必填）' : ''}
+                          {t('creativeStudio.canvas.audio.voiceIdLabel', {
+                            required: voiceRequired ? ' *' : '',
+                            defaultValue: 'Voice ID{{required}}',
+                          })}
                         </span>
                         <input
                           className={styles.voiceInput}
@@ -419,10 +448,16 @@ const CreativeCanvasAudioComposer: React.FC<
                           maxLength={256}
                           placeholder={
                             voiceRequired
-                              ? '输入 provider voice ID'
-                              : '使用模型默认音色，或输入 provider voice ID'
+                              ? t('creativeStudio.canvas.audio.voiceIdPlaceholderRequired', {
+                                  defaultValue: '输入 provider voice ID',
+                                })
+                              : t('creativeStudio.canvas.audio.voiceIdPlaceholder', {
+                                  defaultValue: '使用模型默认音色，或输入 provider voice ID',
+                                })
                           }
-                          aria-label='语音合成 Voice ID'
+                          aria-label={t('creativeStudio.canvas.audio.voiceIdAriaLabel', {
+                            defaultValue: '语音合成 Voice ID',
+                          })}
                           aria-required={voiceRequired}
                           disabled={disabled}
                           onChange={(event) =>
@@ -433,10 +468,16 @@ const CreativeCanvasAudioComposer: React.FC<
                     ) : null}
                     {formatVisible ? (
                       <label className={styles.field}>
-                        <span>音频格式</span>
+                        <span>
+                          {t('creativeStudio.canvas.audio.formatLabel', {
+                            defaultValue: '音频格式',
+                          })}
+                        </span>
                         <Select
                           value={settings.format}
-                          aria-label='音频格式'
+                          aria-label={t('creativeStudio.canvas.audio.formatAriaLabel', {
+                            defaultValue: '音频格式',
+                          })}
                           disabled={disabled}
                           getPopupContainer={popupContainer}
                           onChange={(value) =>
@@ -457,7 +498,9 @@ const CreativeCanvasAudioComposer: React.FC<
                 <button
                   type='button'
                   className={styles.settingsButton}
-                  aria-label='语音生成设置'
+                  aria-label={t('creativeStudio.canvas.audio.settingsLabel', {
+                    defaultValue: '语音生成设置',
+                  })}
                   disabled={disabled}
                 >
                   <SettingTwo theme='outline' size={15} fill='currentColor' />
@@ -474,7 +517,15 @@ const CreativeCanvasAudioComposer: React.FC<
             className={`${styles.submitButton} ${
               retrySubmission ? styles.retrySubmitButton : ''
             }`}
-            aria-label={retrySubmission ? '同键重试音频任务' : '生成音频'}
+            aria-label={
+              retrySubmission
+                ? t('creativeStudio.canvas.audio.retryLabel', {
+                    defaultValue: '同键重试音频任务',
+                  })
+                : t('creativeStudio.canvas.audio.generateLabel', {
+                    defaultValue: '生成音频',
+                  })
+            }
             disabled={!canSubmit}
             onClick={submit}
           >
@@ -488,7 +539,11 @@ const CreativeCanvasAudioComposer: React.FC<
             ) : retrySubmission ? (
               <>
                 <Refresh theme='outline' size={15} fill='currentColor' />
-                <span className={styles.retryLabel}>同键重试</span>
+                <span className={styles.retryLabel}>
+                  {t('creativeStudio.canvas.audio.retryShortLabel', {
+                    defaultValue: '同键重试',
+                  })}
+                </span>
               </>
             ) : (
               <ArrowUp
@@ -503,12 +558,17 @@ const CreativeCanvasAudioComposer: React.FC<
 
         {voiceVisible && voiceRequired && !requiredVoiceReady ? (
           <div className={styles.message} role='status'>
-            当前协议要求填写 provider Voice ID。
+            {t('creativeStudio.canvas.audio.voiceRequiredMessage', {
+              defaultValue: '当前协议要求填写 provider Voice ID。',
+            })}
           </div>
         ) : null}
         {!promptLengthReady ? (
           <div className={styles.message} role='status'>
-            朗读文本不能超过 {normalizedMaxTextLength} 个字符。
+            {t('creativeStudio.canvas.audio.promptTooLong', {
+              max: normalizedMaxTextLength,
+              defaultValue: `朗读文本不能超过 ${normalizedMaxTextLength} 个字符。`,
+            })}
           </div>
         ) : null}
         {modelStatus ? (
@@ -528,7 +588,9 @@ const CreativeCanvasAudioComposer: React.FC<
             disabled={disabled}
             onClick={onConfirmSubmission}
           >
-            确认任务状态
+            {t('creativeStudio.canvas.confirmTaskStatus', {
+              defaultValue: '确认任务状态',
+            })}
           </button>
         ) : null}
       </div>

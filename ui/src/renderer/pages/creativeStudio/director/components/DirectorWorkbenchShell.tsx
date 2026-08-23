@@ -7,6 +7,7 @@
 import { Close } from '@icon-park/react';
 import { Button, Tooltip } from '@arco-design/web-react';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import DirectorInspector from './DirectorInspector';
 import DirectorSceneSidebar from './DirectorSceneSidebar';
@@ -16,6 +17,7 @@ import styles from './DirectorWorkbenchShell.module.css';
 import type { DirectorViewMode, DirectorWorkbenchShellProps } from './types';
 
 const DirectorWorkbenchShell: React.FC<DirectorWorkbenchShellProps> = (props) => {
+  const { t } = useTranslation();
   const timelineHeight = Math.min(520, Math.max(180, props.timeline.height));
   const shellStyle = {
     '--director-timeline-height': `${timelineHeight}px`,
@@ -32,10 +34,21 @@ const DirectorWorkbenchShell: React.FC<DirectorWorkbenchShellProps> = (props) =>
     >
       <header className={styles.topBar}>
         <div className={styles.topBarLeft}>
-          <h1>{props.title || '3D导演台'}</h1>
+          <h1>
+            {props.title ||
+              t('creativeStudio.director.workbench.title', {
+                defaultValue: '3D导演台',
+              })}
+          </h1>
         </div>
 
-        <div className={styles.viewModeToggle} role='group' aria-label='视角切换'>
+        <div
+          className={styles.viewModeToggle}
+          role='group'
+          aria-label={t('creativeStudio.director.workbench.viewMode.label', {
+            defaultValue: '视角切换',
+          })}
+        >
           {(['director', 'camera'] as const).map((mode: DirectorViewMode) => (
             <Button
               key={mode}
@@ -44,7 +57,13 @@ const DirectorWorkbenchShell: React.FC<DirectorWorkbenchShellProps> = (props) =>
               disabled={props.disabled}
               onClick={() => props.onViewModeChange(mode)}
             >
-              {mode === 'director' ? '导演视角' : '机位视角'}
+              {mode === 'director'
+                ? t('creativeStudio.director.workbench.viewMode.director', {
+                    defaultValue: '导演视角',
+                  })
+                : t('creativeStudio.director.workbench.viewMode.camera', {
+                    defaultValue: '机位视角',
+                  })}
             </Button>
           ))}
         </div>
@@ -52,11 +71,17 @@ const DirectorWorkbenchShell: React.FC<DirectorWorkbenchShellProps> = (props) =>
         <div className={styles.topBarActions}>
           {props.headerActionsSlot}
           {props.onClose ? (
-            <Tooltip content='关闭导演台'>
+            <Tooltip
+              content={t('creativeStudio.director.workbench.close', {
+                defaultValue: '关闭导演台',
+              })}
+            >
               <Button
                 shape='circle'
                 type='secondary'
-                aria-label='关闭导演台'
+                aria-label={t('creativeStudio.director.workbench.close', {
+                  defaultValue: '关闭导演台',
+                })}
                 icon={<Close />}
                 onClick={props.onClose}
               />

@@ -7,6 +7,7 @@
 import { Check, Close, Error, Loading, Lock, Unlock } from '@icon-park/react';
 import classNames from 'classnames';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { CreativeCanvasNode, CreativeGenerationStatus } from '../../domain/schema';
 import type { CreativeNodePlacement, CreativeNodeRuntimePresentation } from './types';
@@ -48,16 +49,16 @@ export interface CreativeNodeFrameProps {
   onContextMenu?: React.MouseEventHandler<HTMLElement>;
 }
 
-const DEFAULT_LABELS: CreativeNodeStatusLabels = {
-  idle: '空闲',
-  queued: '排队中',
-  running: '运行中',
-  succeeded: '已完成',
-  failed: '失败',
-  canceled: '已取消',
-  locked: '节点已锁定',
-  lock: '锁定节点',
-  unlock: '解锁节点',
+const DEFAULT_LABEL_KEYS: Record<keyof CreativeNodeStatusLabels, string> = {
+  idle: 'creativeStudio.canvas.nodes.status.idle',
+  queued: 'creativeStudio.canvas.nodes.status.queued',
+  running: 'creativeStudio.canvas.nodes.status.running',
+  succeeded: 'creativeStudio.canvas.nodes.status.succeeded',
+  failed: 'creativeStudio.canvas.nodes.status.failed',
+  canceled: 'creativeStudio.canvas.nodes.status.canceled',
+  locked: 'creativeStudio.canvas.nodes.locked',
+  lock: 'creativeStudio.canvas.nodes.lock',
+  unlock: 'creativeStudio.canvas.nodes.unlock',
 };
 
 const statusIcon = (status: CreativeGenerationStatus) => {
@@ -101,8 +102,20 @@ const CreativeNodeFrame: React.FC<CreativeNodeFrameProps> = ({
   onPointerDown,
   onContextMenu,
 }) => {
+  const { t } = useTranslation();
   const status = runtime?.status ?? 'idle';
-  const statusLabels = { ...DEFAULT_LABELS, ...labels };
+  const statusLabels: CreativeNodeStatusLabels = {
+    idle: t(DEFAULT_LABEL_KEYS.idle),
+    queued: t(DEFAULT_LABEL_KEYS.queued),
+    running: t(DEFAULT_LABEL_KEYS.running),
+    succeeded: t(DEFAULT_LABEL_KEYS.succeeded),
+    failed: t(DEFAULT_LABEL_KEYS.failed),
+    canceled: t(DEFAULT_LABEL_KEYS.canceled),
+    locked: t(DEFAULT_LABEL_KEYS.locked),
+    lock: t(DEFAULT_LABEL_KEYS.lock),
+    unlock: t(DEFAULT_LABEL_KEYS.unlock),
+    ...labels,
+  };
   const progress = runtime?.progress == null ? null : Math.min(100, Math.max(0, runtime.progress));
   const layoutStyle: React.CSSProperties =
     placement === 'world'

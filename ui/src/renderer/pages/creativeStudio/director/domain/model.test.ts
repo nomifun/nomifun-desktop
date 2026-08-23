@@ -15,7 +15,11 @@ import {
 
 describe('director model factories', () => {
   test('requires caller-owned stable IDs and does not create placeholder assets', () => {
-    const state = createDirectorState({ projectId: 'project-1', name: 'Project' });
+    const state = createDirectorState({
+      projectId: 'project-1',
+      name: 'Project',
+      sceneName: 'Scene',
+    });
     expect(state.cameras).toEqual([]);
     expect(state.characters).toEqual([]);
     expect(state.objects).toEqual([]);

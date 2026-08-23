@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { CreativeAsset, CreativeAssetPort } from "../../assets";
+import { translateCreativeImageTool } from "./imageToolI18n";
 import {
   removeCreativeImageMaskReference,
   uploadCreativeImageMaskReference,
@@ -68,7 +69,10 @@ describe("creative image mask reference upload", () => {
     });
     expect(result.recoveredAfterResponseLoss).toBe(false);
     expect(metadata).toEqual({
-      title: "原图 · 局部编辑标记",
+      title: translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.assetTitles.maskMarker",
+        { title: SOURCE.title },
+      ),
       collection: "项目素材",
       tags: [
         "source",
@@ -150,7 +154,9 @@ describe("creative image mask reference upload", () => {
       cleanupFailure = error;
     }
     expect(cleanupFailure instanceof Error ? cleanupFailure.message : "").toBe(
-      "拒绝清理未验证的局部编辑参考素材。",
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.unverifiedMaskCleanup",
+      ),
     );
   });
 });

@@ -16,6 +16,7 @@ import {
   Voice,
 } from '@icon-park/react';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { CreativeCanvasNodeKind, CreativeGenerationStatus } from '../../domain/schema';
 import CreativeNodeFrame from './CreativeNodeFrame';
@@ -83,18 +84,26 @@ export interface CreativeTextNodeProps extends CreativeNodePresentationProps<'te
 }
 
 export const CreativeTextNode: React.FC<CreativeTextNodeProps> = ({
-  title = '文本',
-  emptyLabel = '双击编辑文字',
+  title,
+  emptyLabel,
   ...props
 }) => {
+  const { t } = useTranslation();
   const { node } = props;
   const fontSize = Math.min(48, Math.max(10, node.data.fontSize));
+  const resolvedTitle = title ?? t('creativeStudio.canvas.nodeKinds.text');
+  const resolvedEmptyLabel =
+    emptyLabel ?? t('creativeStudio.canvas.nodes.text.empty');
   return (
     <CreativeNodeFrame
       node={node}
       icon={<Text theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
-      title={title}
-      subtitle={node.data.format === 'markdown' ? 'Markdown' : 'Plain text'}
+      title={resolvedTitle}
+      subtitle={t(
+        node.data.format === 'markdown'
+          ? 'creativeStudio.canvas.nodes.text.formats.markdown'
+          : 'creativeStudio.canvas.nodes.text.formats.plainText'
+      )}
       {...sharedFrameProps(props)}
     >
       <div
@@ -102,7 +111,9 @@ export const CreativeTextNode: React.FC<CreativeTextNodeProps> = ({
         style={{ fontSize, textAlign: node.data.textAlign }}
         data-node-text-format={node.data.format}
       >
-        {node.data.text || <span className={styles.emptyText}>{emptyLabel}</span>}
+        {node.data.text || (
+          <span className={styles.emptyText}>{resolvedEmptyLabel}</span>
+        )}
       </div>
     </CreativeNodeFrame>
   );
@@ -119,17 +130,21 @@ export type CreativeImageNodeProps = CreativeAssetNodeProps<'image'>;
 
 export const CreativeImageNode: React.FC<CreativeImageNodeProps> = ({
   asset,
-  title = '图片',
-  emptyLabel = '空图片节点',
+  title,
+  emptyLabel,
   ...props
 }) => {
+  const { t } = useTranslation();
   const { node } = props;
   const resolved = Boolean(node.data.assetId && asset?.src);
+  const resolvedTitle = title ?? t('creativeStudio.canvas.nodeKinds.image');
+  const resolvedEmptyLabel =
+    emptyLabel ?? t('creativeStudio.canvas.nodes.image.empty');
   return (
     <CreativeNodeFrame
       node={node}
       icon={<Pic theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
-      title={title}
+      title={resolvedTitle}
       subtitle={(asset?.label ?? node.data.caption) || undefined}
       footer={node.data.naturalSize ? `${node.data.naturalSize.width} × ${node.data.naturalSize.height}` : undefined}
       {...sharedFrameProps(props)}
@@ -145,7 +160,7 @@ export const CreativeImageNode: React.FC<CreativeImageNodeProps> = ({
       ) : (
         <EmptyMedia
           icon={<Pic theme='outline' size={25} fill='currentColor' strokeWidth={2.5} />}
-          label={emptyLabel}
+          label={resolvedEmptyLabel}
           assetId={node.data.assetId}
         />
       )}
@@ -157,12 +172,16 @@ export type CreativeVideoNodeProps = CreativeAssetNodeProps<'video'>;
 
 export const CreativeVideoNode: React.FC<CreativeVideoNodeProps> = ({
   asset,
-  title = '视频',
-  emptyLabel = '空视频节点',
+  title,
+  emptyLabel,
   ...props
 }) => {
+  const { t } = useTranslation();
   const { node } = props;
   const resolved = Boolean(node.data.assetId && asset?.src);
+  const resolvedTitle = title ?? t('creativeStudio.canvas.nodeKinds.video');
+  const resolvedEmptyLabel =
+    emptyLabel ?? t('creativeStudio.canvas.nodes.video.empty');
   const trimLabel = `${formatMilliseconds(node.data.trimStartMs)} – ${
     node.data.trimEndMs == null ? '∞' : formatMilliseconds(node.data.trimEndMs)
   }`;
@@ -170,7 +189,7 @@ export const CreativeVideoNode: React.FC<CreativeVideoNodeProps> = ({
     <CreativeNodeFrame
       node={node}
       icon={<VideoTwo theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
-      title={title}
+      title={resolvedTitle}
       subtitle={asset?.label}
       footer={resolved ? trimLabel : undefined}
       {...sharedFrameProps(props)}
@@ -185,13 +204,13 @@ export const CreativeVideoNode: React.FC<CreativeVideoNodeProps> = ({
           loop={node.data.loop}
           autoPlay={node.data.autoplay}
           preload='metadata'
-          aria-label={asset?.alt ?? asset?.label ?? title}
+          aria-label={asset?.alt ?? asset?.label ?? resolvedTitle}
           onPointerDown={(event) => event.stopPropagation()}
         />
       ) : (
         <EmptyMedia
           icon={<VideoTwo theme='outline' size={25} fill='currentColor' strokeWidth={2.5} />}
-          label={emptyLabel}
+          label={resolvedEmptyLabel}
           assetId={node.data.assetId}
         />
       )}
@@ -203,12 +222,16 @@ export type CreativeAudioNodeProps = CreativeAssetNodeProps<'audio'>;
 
 export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
   asset,
-  title = '音频',
-  emptyLabel = '空音频节点',
+  title,
+  emptyLabel,
   ...props
 }) => {
+  const { t } = useTranslation();
   const { node } = props;
   const resolved = Boolean(node.data.assetId && asset?.src);
+  const resolvedTitle = title ?? t('creativeStudio.canvas.nodeKinds.audio');
+  const resolvedEmptyLabel =
+    emptyLabel ?? t('creativeStudio.canvas.nodes.audio.empty');
   const trimLabel = `${formatMilliseconds(node.data.trimStartMs)} – ${
     node.data.trimEndMs == null ? '∞' : formatMilliseconds(node.data.trimEndMs)
   } · ${Math.round(Math.min(1, Math.max(0, node.data.volume)) * 100)}%`;
@@ -216,7 +239,7 @@ export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
     <CreativeNodeFrame
       node={node}
       icon={<Voice theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
-      title={node.data.title || title}
+      title={node.data.title || resolvedTitle}
       subtitle={asset?.label}
       footer={resolved ? trimLabel : undefined}
       {...sharedFrameProps(props)}
@@ -230,14 +253,19 @@ export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
             controls
             loop={node.data.loop}
             preload='metadata'
-            aria-label={asset?.alt ?? asset?.label ?? node.data.title ?? title}
+            aria-label={
+              asset?.alt ??
+              asset?.label ??
+              node.data.title ??
+              resolvedTitle
+            }
             onPointerDown={(event) => event.stopPropagation()}
           />
         </div>
       ) : (
         <EmptyMedia
           icon={<Voice theme='outline' size={25} fill='currentColor' strokeWidth={2.5} />}
-          label={emptyLabel}
+          label={resolvedEmptyLabel}
           assetId={node.data.assetId}
         />
       )}
@@ -252,19 +280,29 @@ export interface CreativePanoramaNodeProps extends CreativeAssetNodeProps<'panor
 export const CreativePanoramaNode: React.FC<CreativePanoramaNodeProps> = ({
   asset,
   preview,
-  title = '全景图',
-  emptyLabel = '空全景图节点',
+  title,
+  emptyLabel,
   ...props
 }) => {
+  const { t } = useTranslation();
   const { node } = props;
   const resolved = Boolean(node.data.assetId && asset?.src);
+  const resolvedTitle =
+    title ?? t('creativeStudio.canvas.nodeKinds.panorama');
+  const resolvedEmptyLabel =
+    emptyLabel ?? t('creativeStudio.canvas.nodes.panorama.empty');
   return (
     <CreativeNodeFrame
       node={node}
       icon={<PanoramaHorizontal theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
-      title={title}
-      subtitle={`${Math.round(node.data.fieldOfView)}° FOV`}
-      footer={`Yaw ${Math.round(node.data.yaw)}° · Pitch ${Math.round(node.data.pitch)}°`}
+      title={resolvedTitle}
+      subtitle={t('creativeStudio.canvas.nodes.panorama.fieldOfView', {
+        value: Math.round(node.data.fieldOfView),
+      })}
+      footer={t('creativeStudio.canvas.nodes.panorama.orientation', {
+        yaw: Math.round(node.data.yaw),
+        pitch: Math.round(node.data.pitch),
+      })}
       {...sharedFrameProps(props)}
     >
       {preview ? (
@@ -275,13 +313,13 @@ export const CreativePanoramaNode: React.FC<CreativePanoramaNodeProps> = ({
         <img
           className={styles.imageMedia}
           src={asset?.src}
-          alt={asset?.alt ?? asset?.label ?? title}
+          alt={asset?.alt ?? asset?.label ?? resolvedTitle}
           draggable={false}
         />
       ) : (
         <EmptyMedia
           icon={<PanoramaHorizontal theme='outline' size={25} fill='currentColor' strokeWidth={2.5} />}
-          label={emptyLabel}
+          label={resolvedEmptyLabel}
           assetId={node.data.assetId}
         />
       )}
@@ -297,13 +335,22 @@ export interface CreativeConfigNodeProps extends CreativeNodePresentationProps<'
 }
 
 export const CreativeConfigNode: React.FC<CreativeConfigNodeProps> = ({
-  title = '生成配置',
-  providerFallback = '未选择服务商',
-  modelFallback = '未选择模型',
-  promptFallback = '尚未填写提示词',
+  title,
+  providerFallback,
+  modelFallback,
+  promptFallback,
   ...props
 }) => {
+  const { t } = useTranslation();
   const { node } = props;
+  const resolvedTitle = title ?? t('creativeStudio.canvas.nodeKinds.config');
+  const resolvedProviderFallback =
+    providerFallback ??
+    t('creativeStudio.canvas.nodes.config.providerFallback');
+  const resolvedModelFallback =
+    modelFallback ?? t('creativeStudio.canvas.nodes.config.modelFallback');
+  const resolvedPromptFallback =
+    promptFallback ?? t('creativeStudio.canvas.nodes.config.promptFallback');
   const canonicalRuntime = {
     status: node.data.status,
     errorMessage: node.data.errorMessage,
@@ -312,17 +359,22 @@ export const CreativeConfigNode: React.FC<CreativeConfigNodeProps> = ({
     <CreativeNodeFrame
       node={node}
       icon={<SettingConfig theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
-      title={title}
+      title={resolvedTitle}
       subtitle={`${node.data.task} · ${node.data.capability}`}
-      footer={`${Object.keys(node.data.parameters).length} parameters · ${node.data.inputAssetIds.length} inputs`}
+      footer={t('creativeStudio.canvas.nodes.config.summary', {
+        parameters: Object.keys(node.data.parameters).length,
+        inputs: node.data.inputAssetIds.length,
+      })}
       {...sharedFrameProps({ ...props, runtime: props.runtime ?? canonicalRuntime })}
     >
       <div className={styles.configContent}>
         <div className={styles.modelRow}>
-          <span>{node.data.providerId ?? providerFallback}</span>
-          <strong>{node.data.model ?? modelFallback}</strong>
+          <span>{node.data.providerId ?? resolvedProviderFallback}</span>
+          <strong>{node.data.model ?? resolvedModelFallback}</strong>
         </div>
-        <p className={styles.prompt}>{node.data.prompt || promptFallback}</p>
+        <p className={styles.prompt}>
+          {node.data.prompt || resolvedPromptFallback}
+        </p>
         {node.data.negativePrompt ? <p className={styles.negativePrompt}>{node.data.negativePrompt}</p> : null}
       </div>
     </CreativeNodeFrame>
@@ -336,20 +388,25 @@ export interface CreativeDirectorNodeProps extends CreativeNodePresentationProps
 }
 
 export const CreativeDirectorNode: React.FC<CreativeDirectorNodeProps> = ({
-  title = '导演台',
-  emptyLabel = '尚未建立场景',
+  title,
+  emptyLabel,
   preview,
   ...props
 }) => {
+  const { t } = useTranslation();
   const { node } = props;
   const timeline = Math.max(0, node.data.timelineMs);
   const duration = Math.max(0, node.data.durationMs);
+  const resolvedTitle =
+    title ?? t('creativeStudio.canvas.nodeKinds.director');
+  const resolvedEmptyLabel =
+    emptyLabel ?? t('creativeStudio.canvas.nodes.director.empty');
   return (
     <CreativeNodeFrame
       node={node}
       icon={<MovieBoard theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
-      title={title}
-      subtitle={node.data.sceneId ?? emptyLabel}
+      title={resolvedTitle}
+      subtitle={node.data.sceneId ?? resolvedEmptyLabel}
       footer={`${formatMilliseconds(timeline)} / ${formatMilliseconds(duration)}`}
       {...sharedFrameProps(props)}
     >
@@ -360,8 +417,12 @@ export const CreativeDirectorNode: React.FC<CreativeDirectorNodeProps> = ({
       ) : (
         <div className={styles.directorContent}>
           <Camera theme='outline' size={28} fill='currentColor' strokeWidth={2.5} />
-          <strong>{node.data.cameraId ?? emptyLabel}</strong>
-          <progress value={Math.min(timeline, duration)} max={Math.max(duration, 1)} aria-label='Timeline' />
+          <strong>{node.data.cameraId ?? resolvedEmptyLabel}</strong>
+          <progress
+            value={Math.min(timeline, duration)}
+            max={Math.max(duration, 1)}
+            aria-label={t('creativeStudio.canvas.nodes.director.timeline')}
+          />
         </div>
       )}
     </CreativeNodeFrame>
@@ -374,11 +435,14 @@ export interface CreativeGroupNodeProps extends CreativeNodePresentationProps<'g
 }
 
 export const CreativeGroupNode: React.FC<CreativeGroupNodeProps> = ({
-  titleFallback = '节点组',
+  titleFallback,
   children,
   ...props
 }) => {
+  const { t } = useTranslation();
   const { node } = props;
+  const resolvedTitleFallback =
+    titleFallback ?? t('creativeStudio.canvas.nodes.group.fallback');
   const groupStyle = {
     ...props.style,
     '--creative-node-accent': node.data.color ?? undefined,
@@ -387,8 +451,12 @@ export const CreativeGroupNode: React.FC<CreativeGroupNodeProps> = ({
     <CreativeNodeFrame
       node={node}
       icon={<Group theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
-      title={node.data.title || titleFallback}
-      subtitle={node.data.collapsed ? 'Collapsed' : undefined}
+      title={node.data.title || resolvedTitleFallback}
+      subtitle={
+        node.data.collapsed
+          ? t('creativeStudio.canvas.nodes.group.collapsed')
+          : undefined
+      }
       variant='group'
       {...sharedFrameProps({ ...props, style: groupStyle })}
     >

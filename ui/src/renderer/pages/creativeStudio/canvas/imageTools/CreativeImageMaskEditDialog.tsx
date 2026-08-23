@@ -7,6 +7,7 @@
 import { Button, Input, Modal, Progress, Slider } from "@arco-design/web-react";
 import { CloseOne, Erase, MagicWand, Paint, Refresh } from "@icon-park/react";
 import React, { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { CreativeAsset } from "../../assets";
 import {
@@ -27,6 +28,7 @@ import {
   validateCreativeImageMaskEdit,
   type CreativeImageMaskDrawMode,
   type CreativeImageMaskPoint,
+  type CreativeImageMaskValidationError,
 } from "./maskModel";
 import styles from "./CreativeImageTools.module.css";
 
@@ -68,6 +70,18 @@ const iconProps = {
   size: 15,
   fill: "currentColor",
   strokeWidth: 3,
+};
+
+const VALIDATION_ERROR_KEYS: Record<
+  CreativeImageMaskValidationError,
+  string
+> = {
+  promptRequired:
+    "creativeStudio.canvas.imageTools.mask.validation.promptRequired",
+  maskRequired:
+    "creativeStudio.canvas.imageTools.mask.validation.maskRequired",
+  modelRequired:
+    "creativeStudio.canvas.imageTools.mask.validation.modelRequired",
 };
 
 const finiteDimensions = (
@@ -191,6 +205,7 @@ export const CreativeImageMaskEditDialogContent: React.FC<
   onClose,
   onConfirm,
 }) => {
+  const { t } = useTranslation();
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement>(null);
   const pointerRef = useRef<MaskPointerSession | null>(null);
@@ -201,7 +216,8 @@ export const CreativeImageMaskEditDialogContent: React.FC<
   const [prompt, setPrompt] = useState("");
   const [brushSize, setBrushSize] = useState(CREATIVE_IMAGE_MASK_BRUSH_DEFAULT);
   const [mode, setMode] = useState<CreativeImageMaskDrawMode>("paint");
-  const [validationError, setValidationError] = useState<string | null>(null);
+  const [validationError, setValidationError] =
+    useState<CreativeImageMaskValidationError | null>(null);
   const draftLocked = busy || retryLocked;
 
   useEffect(() => {
@@ -305,7 +321,9 @@ export const CreativeImageMaskEditDialogContent: React.FC<
     });
   };
 
-  const shownError = validationError ?? error;
+  const shownError = validationError
+    ? t(VALIDATION_ERROR_KEYS[validationError])
+    : error;
 
   return (
     <div className={styles.maskDialog} data-creative-image-mask-edit-dialog>
@@ -315,7 +333,10 @@ export const CreativeImageMaskEditDialogContent: React.FC<
             {!imageFailed ? (
               <img
                 src={asset.originalUrl}
-                alt={`${asset.title} 局部编辑预览`}
+                alt={t(
+                  "creativeStudio.canvas.imageTools.mask.previewAlt",
+                  { title: asset.title },
+                )}
                 draggable={false}
                 onLoad={(event) => {
                   const image = event.currentTarget;
@@ -330,7 +351,7 @@ export const CreativeImageMaskEditDialogContent: React.FC<
               />
             ) : (
               <div className={styles.cropImageError} role="alert">
-                无法载入原图，局部编辑已停止。
+                {t("creativeStudio.canvas.imageTools.mask.loadFailed")}
               </div>
             )}
             {dimensions && !imageFailed ? (
@@ -347,7 +368,9 @@ export const CreativeImageMaskEditDialogContent: React.FC<
                   width={dimensions.width}
                   height={dimensions.height}
                   className={styles.maskPreviewCanvas}
-                  aria-label="在图片上涂抹要修改的区域"
+                  aria-label={t(
+                    "creativeStudio.canvas.imageTools.mask.canvasLabel",
+                  )}
                   onPointerDown={startDraw}
                   onPointerMove={moveDraw}
                   onPointerUp={stopDraw}
@@ -361,11 +384,11 @@ export const CreativeImageMaskEditDialogContent: React.FC<
 
       <section className={styles.maskControls}>
         <header>
-          <h2>局部遮罩编辑</h2>
+          <h2>{t("creativeStudio.canvas.imageTools.mask.heading")}</h2>
           <p>
             {dimensions
               ? `${dimensions.width} × ${dimensions.height}px`
-              : "读取中"}
+              : t("creativeStudio.canvas.imageTools.mask.reading")}
           </p>
         </header>
 
@@ -376,7 +399,7 @@ export const CreativeImageMaskEditDialogContent: React.FC<
             disabled={draftLocked}
             onClick={() => setMode("paint")}
           >
-            画笔
+            {t("creativeStudio.canvas.imageTools.mask.paint")}
           </Button>
           <Button
             type={mode === "erase" ? "primary" : "default"}
@@ -384,13 +407,15 @@ export const CreativeImageMaskEditDialogContent: React.FC<
             disabled={draftLocked}
             onClick={() => setMode("erase")}
           >
-            擦除
+            {t("creativeStudio.canvas.imageTools.mask.erase")}
           </Button>
         </div>
 
         <div className={styles.maskField}>
           <div className={styles.maskFieldLabel}>
-            <span>笔刷大小</span>
+            <span>
+              {t("creativeStudio.canvas.imageTools.mask.brushSize")}
+            </span>
             <strong>{brushSize}px</strong>
           </div>
           <Slider
@@ -414,15 +439,17 @@ export const CreativeImageMaskEditDialogContent: React.FC<
             className={styles.maskFieldTitle}
             htmlFor="creative-mask-edit-prompt"
           >
-            修改要求
+            {t("creativeStudio.canvas.imageTools.mask.promptLabel")}
           </label>
           <Input.TextArea
             id="creative-mask-edit-prompt"
             rows={6}
             value={prompt}
             disabled={draftLocked}
-            status={shownError === "请输入修改要求" ? "error" : undefined}
-            placeholder="例如：把选中区域改成金属材质，保持原图光影"
+            status={validationError === "promptRequired" ? "error" : undefined}
+            placeholder={t(
+              "creativeStudio.canvas.imageTools.mask.promptPlaceholder",
+            )}
             onChange={(value) => {
               setPrompt(value);
               setValidationError(null);
@@ -440,7 +467,7 @@ export const CreativeImageMaskEditDialogContent: React.FC<
           filter={{ capability: "task", task: "image_edit" }}
           value={model}
           disabled={draftLocked}
-          label="模型"
+          label={t("creativeStudio.canvas.imageTools.mask.modelLabel")}
           onChange={(selection) => {
             setValidationError(null);
             onModelChange(selection);
@@ -452,7 +479,9 @@ export const CreativeImageMaskEditDialogContent: React.FC<
           <Progress
             percent={Math.round(Math.min(100, Math.max(0, progress)))}
             size="small"
-            aria-label="局部编辑参考素材上传进度"
+            aria-label={t(
+              "creativeStudio.canvas.imageTools.mask.uploadProgress",
+            )}
           />
         ) : null}
 
@@ -462,7 +491,7 @@ export const CreativeImageMaskEditDialogContent: React.FC<
             disabled={draftLocked}
             onClick={reset}
           >
-            重置
+            {t("creativeStudio.canvas.actions.reset")}
           </Button>
           <div>
             <Button
@@ -470,7 +499,11 @@ export const CreativeImageMaskEditDialogContent: React.FC<
               disabled={busy || (retryLocked && !onAbandon)}
               onClick={retryLocked ? onAbandon : onClose}
             >
-              {retryLocked ? "放弃本次" : "取消"}
+              {t(
+                retryLocked
+                  ? "creativeStudio.canvas.imageTools.mask.abandon"
+                  : "creativeStudio.canvas.actions.cancel",
+              )}
             </Button>
             <Button
               type="primary"
@@ -479,7 +512,11 @@ export const CreativeImageMaskEditDialogContent: React.FC<
               disabled={busy || !asset || !dimensions || imageFailed}
               onClick={submit}
             >
-              {retryLocked ? "安全重试" : "AI 修改"}
+              {t(
+                retryLocked
+                  ? "creativeStudio.canvas.imageTools.mask.safeRetry"
+                  : "creativeStudio.canvas.imageTools.mask.submit",
+              )}
             </Button>
           </div>
         </footer>

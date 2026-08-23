@@ -21,6 +21,7 @@ import {
   clearCanvasImageComposeDraftModel,
   reconcileCanvasImageComposeConfig,
 } from './canvasImageComposerCanvas';
+import { creativeStudioProductText } from './i18n';
 import { creativeNodeFromAsset } from './nodeFactory';
 
 export type CanvasImageComposerEditorPort = Pick<
@@ -83,7 +84,12 @@ export async function settleCanvasImageComposeTask(input: {
   onAsset?: (asset: CreativeAsset) => void;
 }): Promise<void> {
   if (!isTerminalCreativeTaskStatus(input.task.status)) {
-    throw new Error('拒绝将非终态图片创作任务移出 pending 列表。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.image.nonTerminalRemovalRejected',
+        '拒绝将非终态图片创作任务移出 pending 列表。'
+      )
+    );
   }
   const initialConfig = canvasImageComposeConfigFromTask(
     taskDocument(input.editor, input.projectId),
@@ -97,14 +103,29 @@ export async function settleCanvasImageComposeTask(input: {
 
   if (input.task.status === 'succeeded') {
     if (input.task.resultAssetIds.length === 0) {
-      throw new Error('图片创作任务成功但没有返回真实图片素材。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.image.missingResult',
+          '图片创作任务成功但没有返回真实图片素材。'
+        )
+      );
     }
     const resultIds = [...new Set(input.task.resultAssetIds)];
     if (resultIds.length !== input.task.resultAssetIds.length) {
-      throw new Error('图片创作任务返回了重复的结果素材。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.image.duplicateResults',
+          '图片创作任务返回了重复的结果素材。'
+        )
+      );
     }
     if (resultIds.some((assetId) => initialConfig.data.inputAssetIds.includes(assetId))) {
-      throw new Error('图片创作结果错误地复用了输入素材，已停止写入画布。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.image.reusedInputAsset',
+          '图片创作结果错误地复用了输入素材，已停止写入画布。'
+        )
+      );
     }
     const sourceNodeId = canvasImageComposeSourceNodeId(initialConfig);
     const sourceAssetParameter = initialConfig.data.operation?.sourceAssetId;
@@ -112,7 +133,12 @@ export async function settleCanvasImageComposeTask(input: {
       sourceAssetParameter !== null &&
       (typeof sourceAssetParameter !== 'string' || !sourceAssetParameter.trim())
     ) {
-      throw new Error('图片创作配置的 sourceAssetId 非法。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.image.invalidSourceAssetId',
+          '图片创作配置的 sourceAssetId 非法。'
+        )
+      );
     }
     const replacesEmptySource = sourceAssetParameter === null;
     const resultAssets = await Promise.all(
@@ -123,7 +149,12 @@ export async function settleCanvasImageComposeTask(input: {
         (asset, index) => asset.id !== resultIds[index] || asset.kind !== 'image'
       )
     ) {
-      throw new Error('图片创作结果未解析为对应的真实图片素材。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.image.resultResolutionFailed',
+          '图片创作结果未解析为对应的真实图片素材。'
+        )
+      );
     }
 
     const resultNodeIds: string[] = [];
@@ -136,11 +167,23 @@ export async function settleCanvasImageComposeTask(input: {
         (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
           node.id === sourceNodeId && node.type === 'image'
       );
-      if (!source) throw new Error('图片创作源节点在结果写入前被移除。');
+      if (!source) {
+        throw new Error(
+          creativeStudioProductText(
+            'creativeStudio.canvas.errors.image.sourceRemoved',
+            '图片创作源节点在结果写入前被移除。'
+          )
+        );
+      }
       let resultNode: Extract<CreativeCanvasNode, { type: 'image' }> | undefined;
       if (replacesEmptySource && index === 0) {
         if (source.data.assetId !== null && source.data.assetId !== asset.id) {
-          throw new Error('空图片节点在任务完成前已关联其他素材，已停止覆盖。');
+          throw new Error(
+            creativeStudioProductText(
+              'creativeStudio.canvas.errors.image.sourceOccupied',
+              '空图片节点在任务完成前已关联其他素材，已停止覆盖。'
+            )
+          );
         }
         resultNode = source.data.assetId === asset.id
           ? source
@@ -172,12 +215,24 @@ export async function settleCanvasImageComposeTask(input: {
           (node): node is Extract<CreativeCanvasNode, { type: 'config' }> =>
             node.id === initialConfig.id && node.type === 'config'
         );
-        if (!config) throw new Error('图片创作配置节点在结果写入前被移除。');
+        if (!config) {
+          throw new Error(
+            creativeStudioProductText(
+              'creativeStudio.canvas.errors.image.configRemoved',
+              '图片创作配置节点在结果写入前被移除。'
+            )
+          );
+        }
         const created = creativeNodeFromAsset(asset, state, input.viewportSize, {
           position: canvasImageComposeResultPosition(state.document.nodes, config),
         });
         if (created.type !== 'image') {
-          throw new Error('图片创作结果未能构造成图片节点。');
+          throw new Error(
+            creativeStudioProductText(
+              'creativeStudio.canvas.errors.image.nodeConstructionFailed',
+              '图片创作结果未能构造成图片节点。'
+            )
+          );
         }
         resultNode = created;
         input.editor.dispatch(
@@ -199,7 +254,13 @@ export async function settleCanvasImageComposeTask(input: {
         };
         const validation = validateCanvasConnection(state.document, connection);
         if (!validation.ok) {
-          throw new Error(`无法连接图片创作结果：${validation.code}。`);
+          throw new Error(
+            creativeStudioProductText(
+              'creativeStudio.canvas.errors.image.connectResultFailed',
+              '无法连接图片创作结果：{{code}}。',
+              { code: validation.code }
+            )
+          );
         }
         input.editor.dispatch(
           canvasCommands.connect(initialConfig.id, resultNode.id, {
@@ -236,7 +297,10 @@ export async function orphanCanvasImageComposeTask(input: {
         ...config.data,
         status: 'failed',
         resultAssetIds: [],
-        errorMessage: '服务器未找到该任务；已确认清理恢复标记。',
+        errorMessage: creativeStudioProductText(
+          'creativeStudio.canvas.errors.taskMissingRecoveryCleared',
+          '服务器未找到该任务；已确认清理恢复标记。'
+        ),
       },
     })
   );

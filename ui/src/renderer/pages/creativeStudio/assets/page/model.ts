@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { TFunction } from 'i18next';
+
 import type { CreativeAsset, CreativeAssetKind, CreativeAssetQuery } from '../types';
 import type { CreativeAssetKindFilter, CreativeTextAssetFormValue } from '../components';
 
@@ -37,6 +39,9 @@ export interface CreativeCollectionRenameDraft {
   from: string;
   to: string;
 }
+
+type Translate = (key: string, options: { defaultValue: string }) => string;
+const fallbackTranslate: Translate = (_key, options) => options.defaultValue;
 
 export function creativeAssetQuerySearch(debounced: string, submitted: string | null): string {
   return submitted ?? debounced;
@@ -121,14 +126,24 @@ export function validateCreativeAssetManualUpload(
   return { accepted: true, rejection: null };
 }
 
-export function manualUploadRejectionMessage(rejection: CreativeAssetUploadRejection): string {
+export function manualUploadRejectionMessage(
+  rejection: CreativeAssetUploadRejection,
+  t?: TFunction
+): string {
+  const translate = (t ?? fallbackTranslate) as Translate;
   switch (rejection) {
     case 'audio_unsupported':
-      return '暂不支持手动上传音频；通过音频工作台生成的音频仍会进入素材库。';
+      return translate('creativeStudio.assets.upload.audioUnsupported', {
+        defaultValue: '暂不支持手动上传音频；通过音频工作台生成的音频仍会进入素材库。',
+      });
     case 'file_too_large':
-      return '单个素材不能超过 64 MB。';
+      return translate('creativeStudio.assets.upload.fileTooLarge', {
+        defaultValue: '单个素材不能超过 64 MB。',
+      });
     case 'unsupported_media_type':
-      return '手动上传仅支持图片和视频文件。';
+      return translate('creativeStudio.assets.upload.unsupportedMediaType', {
+        defaultValue: '手动上传仅支持图片和视频文件。',
+      });
   }
 }
 
@@ -163,12 +178,22 @@ export function normalizeCreativeTextAssetForm(
 }
 
 export function validateCreativeCollectionRename(
-  draft: CreativeCollectionRenameDraft
+  draft: CreativeCollectionRenameDraft,
+  t?: TFunction
 ): string | null {
   const from = draft.from.trim();
   const to = draft.to.trim();
-  if (!from) return '请输入当前合集名称。';
-  if (from === to) return '新合集名称需要与当前名称不同。';
+  const translate = (t ?? fallbackTranslate) as Translate;
+  if (!from) {
+    return translate('creativeStudio.assets.collection.currentNameRequired', {
+      defaultValue: '请输入当前合集名称。',
+    });
+  }
+  if (from === to) {
+    return translate('creativeStudio.assets.collection.newNameMustDiffer', {
+      defaultValue: '新合集名称需要与当前名称不同。',
+    });
+  }
   return null;
 }
 

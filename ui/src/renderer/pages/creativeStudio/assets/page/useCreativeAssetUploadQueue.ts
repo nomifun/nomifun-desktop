@@ -5,6 +5,8 @@
  */
 
 import { useCallback, useEffect, useReducer, useRef } from 'react';
+import type { TFunction } from 'i18next';
+import { useTranslation } from 'react-i18next';
 
 import { CreativeAssetUploadError } from '../api';
 import type { CreativeAssetUploadItem } from '../components';
@@ -20,10 +22,32 @@ const nextUploadId = (): string => {
   return `creative-upload-${Date.now().toString(36)}-${uploadSequence.toString(36)}`;
 };
 
-const uploadErrorText = (reason: unknown): string => {
+const uploadErrorText = (reason: unknown, t: TFunction): string => {
   if (reason instanceof CreativeAssetUploadError) {
-    if (reason.code === 'aborted') return '上传已取消。';
-    if (reason.code === 'too_large') return '素材超过后端 64 MB 上传限制。';
+    if (reason.code === 'aborted') {
+      return t('creativeStudio.assets.upload.canceled', { defaultValue: '上传已取消。' });
+    }
+    if (reason.code === 'too_large') {
+      return t('creativeStudio.assets.upload.backendLimitExceeded', {
+        defaultValue: '素材超过后端 64 MB 上传限制。',
+      });
+    }
+    if (reason.code === 'network') {
+      return t('creativeStudio.assets.upload.backendUnreachable', {
+        defaultValue: '素材上传失败：无法连接后端服务。',
+      });
+    }
+    if (reason.code === 'invalid_response') {
+      return t('creativeStudio.assets.upload.invalidResponse', {
+        defaultValue: '素材上传失败：后端返回了无效响应。',
+      });
+    }
+    if (reason.code === 'http') {
+      return t('creativeStudio.assets.upload.failed', {
+        defaultValue: '素材上传失败：{{reason}}',
+        reason: reason.message.replace(/^Asset upload failed:\s*/i, ''),
+      });
+    }
     return reason.message;
   }
   return reason instanceof Error ? reason.message : String(reason);
@@ -40,6 +64,7 @@ export interface UseCreativeAssetUploadQueueResult {
 export function useCreativeAssetUploadQueue(
   upload: UseCreativeAssetsResult['upload']
 ): UseCreativeAssetUploadQueueResult {
+  const { t } = useTranslation();
   const [items, dispatch] = useReducer(creativeAssetUploadQueueReducer, []);
   const filesRef = useRef(new Map<string, File>());
   const controllersRef = useRef(new Map<string, AbortController>());
@@ -70,13 +95,13 @@ export function useCreativeAssetUploadQueue(
       })
       .catch((reason: unknown) => {
         if (mountedRef.current) {
-          dispatch({ type: 'fail', id: uploadId, error: uploadErrorText(reason) });
+          dispatch({ type: 'fail', id: uploadId, error: uploadErrorText(reason, t) });
         }
       })
       .finally(() => {
         controllersRef.current.delete(uploadId);
       });
-  }, [upload]);
+  }, [t, upload]);
 
   const start = useCallback((files: readonly File[]): void => {
     for (const file of files) {

@@ -6,6 +6,7 @@
 
 import type { CreativeAsset, CreativeAssetPort } from "../../assets";
 import type { SplitCreativeImageFile } from "./browserSplit";
+import { translateCreativeImageTool } from "./imageToolI18n";
 
 export interface UploadedCreativeImageSplitPiece {
   row: number;
@@ -28,7 +29,11 @@ export interface UploadCreativeImageSplitInput {
 
 const requireImage = (asset: CreativeAsset): CreativeAsset => {
   if (asset.kind !== "image") {
-    throw new Error("切图上传返回了非图片素材，已停止写入画布。");
+    throw new Error(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.splitUploadNotImage",
+      ),
+    );
   }
   return asset;
 };
@@ -123,9 +128,19 @@ export async function uploadCreativeImageSplit(
   input: UploadCreativeImageSplitInput,
 ): Promise<UploadedCreativeImageSplitPiece[]> {
   if (input.source.kind !== "image") {
-    throw new Error("只有真实图片素材可以切图。");
+    throw new Error(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.imageRequiredForSplit",
+      ),
+    );
   }
-  if (input.pieces.length === 0) throw new Error("切图没有生成任何非空切片。");
+  if (input.pieces.length === 0) {
+    throw new Error(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.noSplitPieces",
+      ),
+    );
+  }
   input.signal?.throwIfAborted();
   const concurrency = Math.min(
     4,
@@ -181,7 +196,10 @@ export async function uploadCreativeImageSplit(
         : String(firstFailure);
     throw new Error(
       cleanupFailures > 0
-        ? `${message}；${cleanupFailures} 个已上传切片清理失败。`
+        ? translateCreativeImageTool(
+            "creativeStudio.canvas.imageTools.errors.splitCleanupFailedWithCause",
+            { message, count: cleanupFailures },
+          )
         : message,
       { cause: firstFailure },
     );
@@ -196,6 +214,11 @@ export async function removeUploadedCreativeImageSplit(
 ): Promise<void> {
   const failures = await rollbackUploaded(port, pieces);
   if (failures > 0) {
-    throw new Error(`${failures} 个已上传切片清理失败。`);
+    throw new Error(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.splitCleanupFailed",
+        { count: failures },
+      ),
+    );
   }
 }

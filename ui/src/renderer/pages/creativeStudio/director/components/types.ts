@@ -221,15 +221,12 @@ export interface DirectorWorkbenchShellProps {
   onTimelineExport?(): void;
 }
 
-export const DIRECTOR_ASPECT_RATIO_OPTIONS: readonly {
-  value: DirectorAspectRatio;
-  label: string;
-}[] = [
-  { value: 'free', label: '自由' },
-  { value: '1:1', label: '1:1' },
-  { value: '4:3', label: '4:3' },
-  { value: '3:4', label: '3:4' },
-  { value: '16:9', label: '16:9' },
-  { value: '9:16', label: '9:16' },
-  { value: '21:9', label: '21:9' },
+export const DIRECTOR_ASPECT_RATIO_OPTIONS: readonly DirectorAspectRatio[] = [
+  'free',
+  '1:1',
+  '4:3',
+  '3:4',
+  '16:9',
+  '9:16',
+  '21:9',
 ];

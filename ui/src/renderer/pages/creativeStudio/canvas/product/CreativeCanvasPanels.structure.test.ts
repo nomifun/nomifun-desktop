@@ -37,9 +37,9 @@ describe('Creative Canvas product panel boundaries', () => {
       expect(source.includes(forbidden)).toBe(false);
     }
     expect(source.includes("data-unavailable-kind={kind}")).toBe(true);
-    expect(source.includes('不会臆造历史记录')).toBe(true);
-    expect(source.includes('不会发送消息或复用主聊天会话')).toBe(true);
-    expect(source.includes("aria-label='编辑节点属性'")).toBe(true);
+    expect(source.includes('creativeStudio.canvas.history.disclosure')).toBe(true);
+    expect(source.includes('creativeStudio.canvas.unavailable.agentDescription')).toBe(true);
+    expect(source.includes('creativeStudio.canvas.properties.editLabel')).toBe(true);
   });
 
   test('uses semantic theme tokens and IconPark rather than handwritten artwork', () => {

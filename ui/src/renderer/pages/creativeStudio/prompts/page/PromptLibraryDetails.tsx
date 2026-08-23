@@ -6,7 +6,9 @@
 
 import { Button, Message, Modal } from '@arco-design/web-react';
 import { Copy, FolderPlus } from '@icon-park/react';
+import type { TFunction } from 'i18next';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { openExternalUrl } from '@/renderer/utils/platform';
 
@@ -33,9 +35,19 @@ export interface PromptLibraryDetailsContentProps {
   locale: string;
 }
 
-function sourceLabel(item: PromptLibraryItem): string {
-  if (item.source === 'catalog') return '公共提示词目录';
-  return item.source === 'preset' ? 'NomiFun 预设' : '我的文本素材';
+function sourceLabel(item: PromptLibraryItem, t: TFunction): string {
+  if (item.source === 'catalog') {
+    return t('creativeStudio.prompts.sourceCatalog', {
+      defaultValue: 'Public prompt catalog',
+    });
+  }
+  return item.source === 'preset'
+    ? t('creativeStudio.prompts.sourcePreset', {
+        defaultValue: 'NomiFun preset',
+      })
+    : t('creativeStudio.prompts.sourceAsset', {
+        defaultValue: 'My text assets',
+      });
 }
 
 function updatedAtLabel(value: number | null, locale: string): string | null {
@@ -50,18 +62,24 @@ function updatedAtLabel(value: number | null, locale: string): string | null {
   }).format(date);
 }
 
-function openAuditableSource(event: React.MouseEvent<HTMLAnchorElement>): void {
-  event.preventDefault();
-  const url = event.currentTarget.href;
-  void openExternalUrl(url).catch(() => Message.error('无法打开外部链接'));
-}
-
 export const PromptLibraryDetailsContent: React.FC<PromptLibraryDetailsContentProps> = ({
   item,
   locale,
 }) => {
+  const { t } = useTranslation();
   const updatedAt = updatedAtLabel(item.updatedAt, locale);
   const preview = item.preview?.replace(/!\[[^\]]*]\([^)]+\)/g, '').trim() ?? '';
+  const openAuditableSource = (event: React.MouseEvent<HTMLAnchorElement>): void => {
+    event.preventDefault();
+    const url = event.currentTarget.href;
+    void openExternalUrl(url).catch(() =>
+      Message.error(
+        t('creativeStudio.prompts.externalLinkError', {
+          defaultValue: 'Could not open the external link',
+        })
+      )
+    );
+  };
   return (
     <div
       className={styles.content}
@@ -83,19 +101,33 @@ export const PromptLibraryDetailsContent: React.FC<PromptLibraryDetailsContentPr
 
         <div className={styles.promptColumn}>
           <div className={styles.metadata}>
-            <span className={styles.source}>{sourceLabel(item)}</span>
-            <span className={styles.category}>{item.category ?? '未分类'}</span>
+            <span className={styles.source}>{sourceLabel(item, t)}</span>
+            <span className={styles.category}>
+              {item.category ??
+                t('creativeStudio.prompts.uncategorized', {
+                  defaultValue: 'Uncategorized',
+                })}
+            </span>
           </div>
 
           {item.description ? <p className={styles.description}>{item.description}</p> : null}
 
           <div className={styles.promptBlock}>
-            <span className={styles.sectionLabel}>完整提示词</span>
+            <span className={styles.sectionLabel}>
+              {t('creativeStudio.prompts.fullPrompt', {
+                defaultValue: 'Full prompt',
+              })}
+            </span>
             <pre className={styles.prompt}>{item.prompt}</pre>
           </div>
 
           {item.tags.length > 0 ? (
-            <div className={styles.tagList} aria-label='提示词标签'>
+            <div
+              className={styles.tagList}
+              aria-label={t('creativeStudio.prompts.tagsLabel', {
+                defaultValue: 'Tags',
+              })}
+            >
               {item.tags.map((tag) => (
                 <span key={tag} className={styles.tag}>
                   {tag}
@@ -106,9 +138,21 @@ export const PromptLibraryDetailsContent: React.FC<PromptLibraryDetailsContentPr
 
           {updatedAt || item.knowledgeBaseIds.length > 0 || item.license ? (
             <div className={styles.facts}>
-              {updatedAt ? <span>更新于 {updatedAt}</span> : null}
+              {updatedAt ? (
+                <span>
+                  {t('creativeStudio.prompts.updatedAt', {
+                    defaultValue: 'Updated {{date}}',
+                    date: updatedAt,
+                  })}
+                </span>
+              ) : null}
               {item.knowledgeBaseIds.length > 0 ? (
-                <span>关联 {item.knowledgeBaseIds.length} 个知识库</span>
+                <span>
+                  {t('creativeStudio.prompts.relatedKnowledgeBases', {
+                    defaultValue: '{{count}} linked knowledge bases',
+                    count: item.knowledgeBaseIds.length,
+                  })}
+                </span>
               ) : null}
               {item.sourceUrl ? (
                 <a
@@ -117,7 +161,9 @@ export const PromptLibraryDetailsContent: React.FC<PromptLibraryDetailsContentPr
                   rel='noreferrer'
                   onClick={openAuditableSource}
                 >
-                  查看来源
+                  {t('creativeStudio.prompts.viewSource', {
+                    defaultValue: 'View source',
+                  })}
                 </a>
               ) : null}
               {item.license ? (
@@ -152,63 +198,94 @@ export const PromptLibraryDetails: React.FC<PromptLibraryDetailsProps> = ({
   onClose,
   onCopy,
   onSave,
-}) => (
-  <Modal
-    visible={item !== null}
-    title={item?.title ?? '提示词详情'}
-    footer={null}
-    style={{ width: 860, maxWidth: 'calc(100vw - 32px)' }}
-    autoFocus={false}
-    unmountOnExit
-    getPopupContainer={() =>
-      document.getElementById('creative-studio-portal-root') ?? document.body
-    }
-    onCancel={onClose}
-  >
-    {item ? (
-      <>
-        <PromptLibraryDetailsContent item={item} locale={locale} />
-        <div className={styles.actions}>
-          <p
-            className={styles.copyFeedback}
-            data-copy-state={copyState}
-            role={copyState === 'failed' || saveState === 'failed' ? 'alert' : 'status'}
-            aria-live='polite'
-          >
-            {saveState === 'saved'
-              ? '已加入“我的素材”。'
-              : saveState === 'failed'
-                ? saveError || '保存失败，请稍后重试。'
-                : copyState === 'copied'
-              ? '提示词已复制到剪贴板。'
-              : copyState === 'failed'
-                ? copyError || '复制失败，请检查剪贴板权限。'
-                : '独立提示词库不会修改任何画布。'}
-          </p>
-          <div className={styles.actionButtons}>
-            <Button
-              type='primary'
-              icon={<Copy theme='outline' size={15} fill='currentColor' />}
-              loading={copyState === 'copying'}
-              onClick={onCopy}
+}) => {
+  const { t } = useTranslation();
+  const feedback =
+    saveState === 'saved'
+      ? t('creativeStudio.prompts.savedFeedback', {
+          defaultValue: 'Added to "My assets".',
+        })
+      : saveState === 'failed'
+        ? saveError ||
+          t('creativeStudio.prompts.saveFailedFallback', {
+            defaultValue: 'Save failed. Try again later.',
+          })
+        : copyState === 'copied'
+          ? t('creativeStudio.prompts.copiedFeedback', {
+              defaultValue: 'Prompt copied to the clipboard.',
+            })
+          : copyState === 'failed'
+            ? copyError ||
+              t('creativeStudio.prompts.copyFailedFallback', {
+                defaultValue: 'Copy failed. Check clipboard permissions.',
+              })
+            : t('creativeStudio.prompts.noCanvasMutation', {
+                defaultValue: 'The standalone prompt library does not modify any canvas.',
+              });
+
+  return (
+    <Modal
+      visible={item !== null}
+      title={
+        item?.title ??
+        t('creativeStudio.prompts.detailsTitle', {
+          defaultValue: 'Prompt details',
+        })
+      }
+      footer={null}
+      style={{ width: 860, maxWidth: 'calc(100vw - 32px)' }}
+      autoFocus={false}
+      unmountOnExit
+      getPopupContainer={() =>
+        document.getElementById('creative-studio-portal-root') ?? document.body
+      }
+      onCancel={onClose}
+    >
+      {item ? (
+        <>
+          <PromptLibraryDetailsContent item={item} locale={locale} />
+          <div className={styles.actions}>
+            <p
+              className={styles.copyFeedback}
+              data-copy-state={copyState}
+              role={copyState === 'failed' || saveState === 'failed' ? 'alert' : 'status'}
+              aria-live='polite'
             >
-              复制提示词
-            </Button>
-            {onSave ? (
+              {feedback}
+            </p>
+            <div className={styles.actionButtons}>
               <Button
-                icon={<FolderPlus theme='outline' size={15} fill='currentColor' />}
-                loading={saveState === 'saving'}
-                disabled={saveState === 'saved'}
-                onClick={onSave}
+                type='primary'
+                icon={<Copy theme='outline' size={15} fill='currentColor' />}
+                loading={copyState === 'copying'}
+                onClick={onCopy}
               >
-                {saveState === 'saved' ? '已加入素材' : '加入我的素材'}
+                {t('creativeStudio.prompts.copyPromptAction', {
+                  defaultValue: 'Copy prompt',
+                })}
               </Button>
-            ) : null}
+              {onSave ? (
+                <Button
+                  icon={<FolderPlus theme='outline' size={15} fill='currentColor' />}
+                  loading={saveState === 'saving'}
+                  disabled={saveState === 'saved'}
+                  onClick={onSave}
+                >
+                  {saveState === 'saved'
+                    ? t('creativeStudio.prompts.addedToAssets', {
+                        defaultValue: 'Added to assets',
+                      })
+                    : t('creativeStudio.prompts.addToAssets', {
+                        defaultValue: 'Add to my assets',
+                      })}
+                </Button>
+              ) : null}
+            </div>
           </div>
-        </div>
-      </>
-    ) : null}
-  </Modal>
-);
+        </>
+      ) : null}
+    </Modal>
+  );
+};
 
 export default PromptLibraryDetails;

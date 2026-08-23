@@ -10,6 +10,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { CreativeCanvasNode, CreativeCanvasNodeKind } from '../../domain/schema';
+import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
 import { CREATIVE_NODE_VIEW_KINDS, CreativeNodeView } from './CreativeNodeViews';
 
 const base = {
@@ -86,9 +87,12 @@ const nodes: CreativeCanvasNode[] = [
   },
 ];
 
+const renderCanvas = (content: React.ReactNode) =>
+  renderToStaticMarkup(withCanvasTestI18n(content));
+
 describe('Creative Studio canonical node views', () => {
   test('renders all eight canonical kinds through the discriminated-union dispatcher', () => {
-    const html = renderToStaticMarkup(
+    const html = renderCanvas(
       <>{nodes.map((node) => <CreativeNodeView key={node.id} node={node} selected={node.id === 'text-1'} />)}</>
     );
 
@@ -103,11 +107,15 @@ describe('Creative Studio canonical node views', () => {
   });
 
   test('shows honest empty media states and canonical failed-generation state', () => {
-    const html = renderToStaticMarkup(<>{nodes.map((node) => <CreativeNodeView key={node.id} node={node} />)}</>);
+    const html = renderCanvas(<>{nodes.map((node) => <CreativeNodeView key={node.id} node={node} />)}</>);
 
     expect(html.includes('data-node-empty-media="true"')).toBe(true);
-    expect(html.includes('空视频节点')).toBe(true);
-    expect(html.includes('空音频节点')).toBe(true);
+    expect(
+      html.includes('creativeStudio.canvas.nodes.video.empty')
+    ).toBe(true);
+    expect(
+      html.includes('creativeStudio.canvas.nodes.audio.empty')
+    ).toBe(true);
     expect(html.includes('0:00 – ∞ · 80%')).toBe(false);
     expect(html.includes('data-node-status="failed"')).toBe(true);
     expect(html.includes('role="alert"')).toBe(true);
@@ -119,7 +127,7 @@ describe('Creative Studio canonical node views', () => {
   test('renders only an explicitly resolved asset URL and controlled runtime progress', () => {
     const imageNode = nodes.find((node): node is Extract<CreativeCanvasNode, { type: 'image' }> => node.type === 'image');
     if (!imageNode) throw new Error('image fixture is missing');
-    const html = renderToStaticMarkup(
+    const html = renderCanvas(
       <CreativeNodeView
         node={imageNode}
         asset={{ src: 'asset://resolved/image-1', alt: '已解析图片' }}

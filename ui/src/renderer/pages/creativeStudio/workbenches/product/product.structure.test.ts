@@ -116,8 +116,8 @@ describe('standalone workbench product wiring', () => {
   test('gives the image workbench explicit catalog states and exact model-management routes', () => {
     expect(image.includes('<CreativeModelSelect')).toBe(true);
     expect(image.includes("filter={{ capability: 'task', task: modelTask }}")).toBe(true);
-    expect(image.includes('IMAGE_GENERATION_MODEL_COPY')).toBe(true);
-    expect(image.includes('IMAGE_EDIT_MODEL_COPY')).toBe(true);
+    expect(image.includes('creativeStudio.product.image.generationModel.placeholder')).toBe(true);
+    expect(image.includes('creativeStudio.product.image.editModel.placeholder')).toBe(true);
     expect(image.includes("modelTask === 'image_edit' ? 'image-edit' : 'image'")).toBe(true);
     expect(image.includes('<ImageWorkbench {...props} modelSlot={modelSlot} />')).toBe(true);
   });

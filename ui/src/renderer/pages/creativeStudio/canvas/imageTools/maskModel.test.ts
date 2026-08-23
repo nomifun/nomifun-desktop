@@ -55,21 +55,21 @@ describe("creative image mask model", () => {
         hasMask: false,
         hasModel: false,
       }),
-    ).toBe("请输入修改要求");
+    ).toBe("promptRequired");
     expect(
       validateCreativeImageMaskEdit({
         prompt: "换成红色外套",
         hasMask: false,
         hasModel: false,
       }),
-    ).toBe("请先涂抹局部区域");
+    ).toBe("maskRequired");
     expect(
       validateCreativeImageMaskEdit({
         prompt: "换成红色外套",
         hasMask: true,
         hasModel: false,
       }),
-    ).toBe("请选择支持图片编辑的模型");
+    ).toBe("modelRequired");
   });
 
   test("builds the exact marked-reference instruction without blue leakage", () => {

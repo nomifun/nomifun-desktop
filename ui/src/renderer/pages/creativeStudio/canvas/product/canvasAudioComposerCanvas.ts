@@ -37,6 +37,7 @@ import {
   createCreativeCanvasProductNode,
   CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
 } from './nodeFactory';
+import { creativeStudioProductText } from './i18n';
 
 export const CREATIVE_AUDIO_COMPOSE_OPERATION = 'audio-node-compose';
 
@@ -275,7 +276,12 @@ export function isCanvasAudioComposeConfig(
 export function canvasAudioComposeSourceNodeId(node: ConfigNode): string {
   const value = node.data.operation?.sourceNodeId;
   if (typeof value !== 'string' || !value.trim()) {
-    throw new Error('音频创作配置缺少 sourceNodeId。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.audio.missingSourceNodeId',
+        '音频创作配置缺少 sourceNodeId。'
+      )
+    );
   }
   return value;
 }
@@ -286,7 +292,12 @@ export function canvasAudioComposeSourceAssetId(
   const value = node.data.operation?.sourceAssetId;
   if (value === null) return null;
   if (typeof value !== 'string' || !value.trim()) {
-    throw new Error('音频创作配置包含无效的 sourceAssetId。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.audio.invalidSourceAssetId',
+        '音频创作配置包含无效的 sourceAssetId。'
+      )
+    );
   }
   return value;
 }
@@ -340,18 +351,30 @@ export function canvasAudioComposeEligibility(
       node.id === sourceNodeId && node.type === 'audio'
   );
   if (!source) {
-    return { kind: 'unsupported', message: '音频节点已不存在。' };
+    return {
+      kind: 'unsupported',
+      message: creativeStudioProductText(
+        'creativeStudio.canvas.errors.audio.nodeMissing',
+        '音频节点已不存在。'
+      ),
+    };
   }
   if (source.data.assetId !== null) {
     return {
       kind: 'unsupported',
-      message: '当前首批音频创作只支持空音频节点上的 TTS。',
+      message: creativeStudioProductText(
+        'creativeStudio.canvas.errors.audio.emptyNodeOnly',
+        '当前首批音频创作只支持空音频节点上的 TTS。'
+      ),
     };
   }
   if (incomingMediaAssetIds(document, sourceNodeId).length > 0) {
     return {
       kind: 'unsupported',
-      message: '当前 TTS 音频创作不接受图片、视频或音频参考素材。',
+      message: creativeStudioProductText(
+        'creativeStudio.canvas.errors.audio.mediaReferencesUnsupported',
+        '当前 TTS 音频创作不接受图片、视频或音频参考素材。'
+      ),
     };
   }
   return { kind: 'tts' };
@@ -375,16 +398,31 @@ export function prepareCanvasAudioCompose(input: {
   );
   if (eligibility.kind === 'unsupported') throw new Error(eligibility.message);
   if (input.sourceAsset !== null) {
-    throw new Error('当前音频创作不能绑定源素材。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.audio.sourceAssetUnsupported',
+        '当前音频创作不能绑定源素材。'
+      )
+    );
   }
   if (
     input.references.assets.length > 0 ||
     input.references.bindings.length > 0
   ) {
-    throw new Error('当前 TTS 音频创作不接受参考素材。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.audio.referencesUnsupported',
+        '当前 TTS 音频创作不接受参考素材。'
+      )
+    );
   }
   if (input.settings.format !== 'mp3' && input.settings.format !== 'wav') {
-    throw new Error('当前音频创作只支持 mp3 或 wav 格式。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.audio.formatUnsupported',
+        '当前音频创作只支持 mp3 或 wav 格式。'
+      )
+    );
   }
 
   const resolved = resolveExactWorkbenchModel(
@@ -395,7 +433,13 @@ export function prepareCanvasAudioCompose(input: {
   const protocolProfile = canvasAudioComposeProtocolProfile(resolved.protocol);
   const voice = input.settings.voice.trim();
   if (protocolProfile.voiceRequired && !voice) {
-    throw new Error(`调用协议 ${resolved.protocol} 需要选择非空音色。`);
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.audio.voiceRequired',
+        '调用协议 {{protocol}} 需要选择非空音色。',
+        { protocol: resolved.protocol }
+      )
+    );
   }
   const configPosition = nextCanvasImageTaskPosition(
     input.state.document.nodes,
@@ -461,7 +505,13 @@ export function prepareCanvasAudioCompose(input: {
     connection
   );
   if (!validation.ok) {
-    throw new Error(`无法连接音频创作配置节点：${validation.code}。`);
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.audio.connectConfigFailed',
+        '无法连接音频创作配置节点：{{code}}。',
+        { code: validation.code }
+      )
+    );
   }
   return { configNode, connection, plan };
 }
@@ -487,12 +537,22 @@ export function canvasAudioComposeConfigForReference(
     !isCanvasNodeTaskOwner(reference.owner) ||
     reference.owner.canvasId !== document.projectId
   ) {
-      throw new Error('音频创作任务不属于当前画布。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.audio.wrongCanvas',
+          '音频创作任务不属于当前画布。'
+        )
+      );
   }
   const owner = reference.owner;
   const node = document.nodes.find((candidate) => candidate.id === owner.nodeId);
   if (!isCanvasAudioComposeConfig(node)) {
-    throw new Error('音频创作任务缺少 canonical 配置节点。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.audio.missingConfig',
+        '音频创作任务缺少 canonical 配置节点。'
+      )
+    );
   }
   if (
     node.data.taskId !== reference.taskId ||
@@ -501,7 +561,12 @@ export function canvasAudioComposeConfigForReference(
     node.data.task !== reference.task ||
     node.data.capability !== reference.capability
   ) {
-    throw new Error('音频创作任务与配置节点身份不一致。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.audio.identityMismatch',
+        '音频创作任务与配置节点身份不一致。'
+      )
+    );
   }
   return node;
 }
@@ -539,9 +604,16 @@ export function reconcileCanvasAudioComposeConfig(
       status: task.status,
       errorMessage:
         task.status === 'failed'
-          ? (task.error?.message ?? '音频创作失败。')
+          ? (task.error?.message ??
+            creativeStudioProductText(
+              'creativeStudio.canvas.errors.audio.failed',
+              '音频创作失败。'
+            ))
           : task.status === 'canceled'
-            ? '音频创作已取消。'
+            ? creativeStudioProductText(
+                'creativeStudio.canvas.errors.audio.cancelled',
+                '音频创作已取消。'
+              )
             : null,
     },
   };

@@ -5,6 +5,7 @@
  */
 
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { CreativeCanvasNodeMenu } from '../chrome';
 import type { CreativeCanvasNodeKind, CreativeSize } from '../../domain';
@@ -68,6 +69,7 @@ const CreativeCanvasInteractionOverlays: React.FC<CreativeCanvasInteractionOverl
   onSelectNode,
   onDismiss,
 }) => {
+  const { t } = useTranslation();
   if (!contextMenu && !createNodeMenu) return null;
 
   return (
@@ -92,27 +94,59 @@ const CreativeCanvasInteractionOverlays: React.FC<CreativeCanvasInteractionOverl
             height: contextMenu.target.kind === 'node' ? 196 : 108,
           })}
           role='menu'
-          aria-label='画布上下文菜单'
+          aria-label={t('creativeStudio.canvas.contextMenu.label', {
+            defaultValue: '画布上下文菜单',
+          })}
           onPointerDown={(event) => event.stopPropagation()}
         >
           {contextMenu.target.kind === 'canvas' ? (
             <>
-              <MenuButton onClick={onOpenCreateNodeMenu}>添加节点</MenuButton>
-              <MenuButton onClick={onPasteFromSystemClipboard}>从系统剪贴板粘贴</MenuButton>
+              <MenuButton onClick={onOpenCreateNodeMenu}>
+                {t('creativeStudio.canvas.contextMenu.addNode', {
+                  defaultValue: '添加节点',
+                })}
+              </MenuButton>
+              <MenuButton onClick={onPasteFromSystemClipboard}>
+                {t('creativeStudio.canvas.contextMenu.pasteClipboard', {
+                  defaultValue: '从系统剪贴板粘贴',
+                })}
+              </MenuButton>
             </>
           ) : null}
           {contextMenu.target.kind === 'node' ? (
             <>
-              <MenuButton onClick={() => onContextAction('open')}>打开</MenuButton>
-              <MenuButton onClick={() => onContextAction('duplicate')}>创建副本</MenuButton>
-              <MenuButton onClick={() => onContextAction('toggle-lock')}>
-                {contextMenu.nodeLocked ? '解锁节点' : '锁定节点'}
+              <MenuButton onClick={() => onContextAction('open')}>
+                {t('creativeStudio.canvas.contextMenu.open', {
+                  defaultValue: '打开',
+                })}
               </MenuButton>
-              <MenuButton danger onClick={() => onContextAction('delete')}>删除节点</MenuButton>
+              <MenuButton onClick={() => onContextAction('duplicate')}>
+                {t('creativeStudio.canvas.contextMenu.duplicate', {
+                  defaultValue: '创建副本',
+                })}
+              </MenuButton>
+              <MenuButton onClick={() => onContextAction('toggle-lock')}>
+                {contextMenu.nodeLocked
+                  ? t('creativeStudio.canvas.contextMenu.unlockNode', {
+                      defaultValue: '解锁节点',
+                    })
+                  : t('creativeStudio.canvas.contextMenu.lockNode', {
+                      defaultValue: '锁定节点',
+                    })}
+              </MenuButton>
+              <MenuButton danger onClick={() => onContextAction('delete')}>
+                {t('creativeStudio.canvas.contextMenu.deleteNode', {
+                  defaultValue: '删除节点',
+                })}
+              </MenuButton>
             </>
           ) : null}
           {contextMenu.target.kind === 'edge' ? (
-            <MenuButton danger onClick={() => onContextAction('delete')}>删除连接</MenuButton>
+            <MenuButton danger onClick={() => onContextAction('delete')}>
+              {t('creativeStudio.canvas.contextMenu.deleteConnection', {
+                defaultValue: '删除连接',
+              })}
+            </MenuButton>
           ) : null}
         </div>
       ) : null}

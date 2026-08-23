@@ -5,7 +5,9 @@
  */
 
 import { Button, Checkbox, Input, InputTag, Message, Modal } from '@arco-design/web-react';
+import type { TFunction } from 'i18next';
 import React, { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { creativeAssetClient } from '../client';
 import {
@@ -55,6 +57,19 @@ const popupContainer = (): HTMLElement =>
 const errorText = (reason: unknown): string =>
   reason instanceof Error ? reason.message : String(reason);
 
+const assetKindLabel = (t: TFunction, kind: CreativeAsset['kind']): string => {
+  switch (kind) {
+    case 'image':
+      return t('creativeStudio.assets.kind.image', { defaultValue: '图片' });
+    case 'video':
+      return t('creativeStudio.assets.kind.video', { defaultValue: '视频' });
+    case 'audio':
+      return t('creativeStudio.assets.kind.audio', { defaultValue: '音频' });
+    case 'text':
+      return t('creativeStudio.assets.kind.text', { defaultValue: '文本' });
+  }
+};
+
 function useDebouncedValue<T>(value: T, delay: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -77,51 +92,85 @@ interface AssetPreviewModalProps {
   onClose: () => void;
 }
 
-const AssetPreviewModal: React.FC<AssetPreviewModalProps> = ({ asset, onClose }) => (
-  <Modal
-    visible={Boolean(asset)}
-    title={asset?.title ?? '素材详情'}
-    footer={null}
-    autoFocus={false}
-    focusLock
-    unmountOnExit
-    className={styles.modalBody}
-    getPopupContainer={popupContainer}
-    onCancel={onClose}
-  >
-    {asset ? (
-      <div className={styles.previewBody} data-creative-asset-preview={asset.kind}>
-        <div className={styles.previewMedia}>
-          {asset.kind === 'image' ? (
-            <img src={asset.originalUrl} alt={asset.title} />
-          ) : asset.kind === 'video' ? (
-            <video src={asset.originalUrl} controls playsInline preload='metadata' aria-label={asset.title} />
-          ) : asset.kind === 'audio' ? (
-            <audio src={asset.originalUrl} controls preload='metadata' aria-label={asset.title} />
-          ) : (
-            <pre className={styles.previewText}>{asset.textContent ?? ''}</pre>
-          )}
-        </div>
-        <div className={styles.previewMeta}>
-          <p>类型：{asset.kind}</p>
-          <p>合集：{asset.collection || '未分组'}</p>
-          {asset.mimeType ? <p>MIME：{asset.mimeType}</p> : null}
-        </div>
-        {asset.tags.length ? (
-          <div className={styles.previewTags} aria-label='素材标签'>
-            {asset.tags.map((tag) => <span key={tag}>{tag}</span>)}
+const AssetPreviewModal: React.FC<AssetPreviewModalProps> = ({ asset, onClose }) => {
+  const { t } = useTranslation();
+  return (
+    <Modal
+      visible={Boolean(asset)}
+      title={
+        asset?.title ??
+        t('creativeStudio.assets.preview.title', { defaultValue: '素材详情' })
+      }
+      footer={null}
+      autoFocus={false}
+      focusLock
+      unmountOnExit
+      className={styles.modalBody}
+      getPopupContainer={popupContainer}
+      onCancel={onClose}
+    >
+      {asset ? (
+        <div className={styles.previewBody} data-creative-asset-preview={asset.kind}>
+          <div className={styles.previewMedia}>
+            {asset.kind === 'image' ? (
+              <img src={asset.originalUrl} alt={asset.title} />
+            ) : asset.kind === 'video' ? (
+              <video src={asset.originalUrl} controls playsInline preload='metadata' aria-label={asset.title} />
+            ) : asset.kind === 'audio' ? (
+              <audio src={asset.originalUrl} controls preload='metadata' aria-label={asset.title} />
+            ) : (
+              <pre className={styles.previewText}>{asset.textContent ?? ''}</pre>
+            )}
           </div>
-        ) : null}
-        <footer className={styles.previewFooter}>
-          {asset.kind !== 'text' ? (
-            <Button type='primary' onClick={() => downloadAsset(asset)}>下载原始文件</Button>
+          <div className={styles.previewMeta}>
+            <p>
+              {t('creativeStudio.assets.preview.kind', {
+                defaultValue: '类型：{{kind}}',
+                kind: assetKindLabel(t, asset.kind),
+              })}
+            </p>
+            <p>
+              {t('creativeStudio.assets.preview.collection', {
+                defaultValue: '合集：{{collection}}',
+                collection:
+                  asset.collection ||
+                  t('creativeStudio.assets.library.noCollection', { defaultValue: '未分组' }),
+              })}
+            </p>
+            {asset.mimeType ? (
+              <p>
+                {t('creativeStudio.assets.preview.mime', {
+                  defaultValue: 'MIME：{{mime}}',
+                  mime: asset.mimeType,
+                })}
+              </p>
+            ) : null}
+          </div>
+          {asset.tags.length ? (
+            <div
+              className={styles.previewTags}
+              aria-label={t('creativeStudio.assets.preview.tags', { defaultValue: '素材标签' })}
+            >
+              {asset.tags.map((tag) => <span key={tag}>{tag}</span>)}
+            </div>
           ) : null}
-          <Button onClick={onClose}>关闭</Button>
-        </footer>
-      </div>
-    ) : null}
-  </Modal>
-);
+          <footer className={styles.previewFooter}>
+            {asset.kind !== 'text' ? (
+              <Button type='primary' onClick={() => downloadAsset(asset)}>
+                {t('creativeStudio.assets.preview.downloadOriginal', {
+                  defaultValue: '下载原始文件',
+                })}
+              </Button>
+            ) : null}
+            <Button onClick={onClose}>
+              {t('creativeStudio.assets.preview.close', { defaultValue: '关闭' })}
+            </Button>
+          </footer>
+        </div>
+      ) : null}
+    </Modal>
+  );
+};
 
 interface EditAssetModalProps {
   asset: CreativeAsset | null;
@@ -142,12 +191,13 @@ const EditAssetModal: React.FC<EditAssetModalProps> = ({
   onCancel,
   onSubmit,
 }) => {
+  const { t } = useTranslation();
   const valid = draft.title.trim().length > 0;
   const patch = (next: Partial<CreativeAssetEditDraft>) => onDraftChange({ ...draft, ...next });
   return (
     <Modal
       visible={Boolean(asset)}
-      title='编辑素材'
+      title={t('creativeStudio.assets.edit.title', { defaultValue: '编辑素材' })}
       footer={null}
       autoFocus={false}
       focusLock
@@ -167,39 +217,56 @@ const EditAssetModal: React.FC<EditAssetModalProps> = ({
           if (valid && !submitting) onSubmit();
         }}
       >
-        <p className={styles.modalDescription}>可修改后端支持的标题、合集、标签和素材库状态；素材类型与原始文件不可替换。</p>
+        <p className={styles.modalDescription}>
+          {t('creativeStudio.assets.edit.description', {
+            defaultValue:
+              '可修改后端支持的标题、合集、标签和素材库状态；素材类型与原始文件不可替换。',
+          })}
+        </p>
         <label className={styles.field}>
-          <span>标题</span>
+          <span>{t('creativeStudio.assets.edit.titleLabel', { defaultValue: '标题' })}</span>
           <Input value={draft.title} maxLength={240} disabled={submitting} onChange={(title) => patch({ title })} />
         </label>
         <label className={styles.field}>
-          <span>合集</span>
+          <span>{t('creativeStudio.assets.edit.collectionLabel', { defaultValue: '合集' })}</span>
           <Input
             value={draft.collection}
             maxLength={240}
-            placeholder='留空表示未分组'
+            placeholder={t('creativeStudio.assets.edit.collectionPlaceholder', {
+              defaultValue: '留空表示未分组',
+            })}
             disabled={submitting}
             onChange={(collection) => patch({ collection })}
           />
         </label>
         <label className={styles.field}>
-          <span>标签</span>
+          <span>{t('creativeStudio.assets.edit.tagsLabel', { defaultValue: '标签' })}</span>
           <InputTag
             value={draft.tags}
             allowClear
-            placeholder='输入标签后按回车'
+            placeholder={t('creativeStudio.assets.edit.tagsPlaceholder', {
+              defaultValue: '输入标签后按回车',
+            })}
             disabled={submitting}
             onChange={(tags) => patch({ tags: tags.map(String) })}
           />
         </label>
         <Checkbox checked={draft.inLibrary} disabled={submitting} onChange={(inLibrary) => patch({ inLibrary })}>
-          保留在素材库
+          {t('creativeStudio.assets.edit.keepInLibrary', { defaultValue: '保留在素材库' })}
         </Checkbox>
-        {!valid ? <p className={styles.modalError}>标题不能为空。</p> : null}
+        {!valid ? (
+          <p className={styles.modalError}>
+            {t('creativeStudio.assets.edit.titleRequired', { defaultValue: '标题不能为空。' })}
+          </p>
+        ) : null}
         {error ? <p className={styles.modalError} role='alert'>{error}</p> : null}
         <footer className={styles.modalFooter}>
-          <Button disabled={submitting} onClick={onCancel}>取消</Button>
-          <Button type='primary' htmlType='submit' loading={submitting} disabled={!valid || submitting}>保存</Button>
+          <Button disabled={submitting} onClick={onCancel}>
+            {t('creativeStudio.assets.edit.cancel', { defaultValue: '取消' })}
+          </Button>
+          <Button type='primary' htmlType='submit' loading={submitting} disabled={!valid || submitting}>
+            {t('creativeStudio.assets.edit.save', { defaultValue: '保存' })}
+          </Button>
         </footer>
       </form>
     </Modal>
@@ -215,6 +282,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
   client = creativeAssetClient,
   locale,
 }) => {
+  const { t, i18n } = useTranslation();
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search, 220);
   const [submittedSearch, setSubmittedSearch] = useState<string | null>(null);
@@ -292,7 +360,9 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
     for (const file of files) {
       const result = validateCreativeAssetManualUpload(file);
       if (result.accepted) accepted.push(file);
-      else if (result.rejection) rejections.add(manualUploadRejectionMessage(result.rejection));
+      else if (result.rejection) {
+        rejections.add(manualUploadRejectionMessage(result.rejection, t));
+      }
     }
     if (rejections.size) Message.warning([...rejections].join(' '));
     if (accepted.length) uploads.start(accepted);
@@ -313,7 +383,9 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
       });
       setTextModalOpen(false);
       setTextDraft(EMPTY_CREATIVE_TEXT_ASSET_FORM);
-      Message.success('文本素材已创建。');
+      Message.success(
+        t('creativeStudio.assets.messages.textCreated', { defaultValue: '文本素材已创建。' })
+      );
     } catch (reason) {
       setTextError(errorText(reason));
     } finally {
@@ -341,7 +413,9 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         inLibrary: draft.inLibrary,
       });
       setEditingAsset(null);
-      Message.success('素材已更新。');
+      Message.success(
+        t('creativeStudio.assets.messages.assetUpdated', { defaultValue: '素材已更新。' })
+      );
     } catch (reason) {
       setEditError(errorText(reason));
     } finally {
@@ -356,7 +430,9 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
     try {
       await library.remove(deletingAsset.id);
       setDeletingAsset(null);
-      Message.success('素材已删除。');
+      Message.success(
+        t('creativeStudio.assets.messages.assetDeleted', { defaultValue: '素材已删除。' })
+      );
     } catch (reason) {
       setDeleteError(errorText(reason));
     } finally {
@@ -365,7 +441,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
   };
 
   const handleRenameCollection = async (): Promise<void> => {
-    const validation = validateCreativeCollectionRename(renameDraft);
+    const validation = validateCreativeCollectionRename(renameDraft, t);
     if (validation) {
       setRenameError(validation);
       return;
@@ -376,8 +452,20 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
       const updated = await library.renameCollection(renameDraft.from.trim(), renameDraft.to.trim());
       setRenameOpen(false);
       setRenameDraft(DEFAULT_RENAME_DRAFT);
-      if (updated > 0) Message.success(`已更新 ${updated} 个素材。`);
-      else Message.info('没有找到使用该合集的素材。');
+      if (updated > 0) {
+        Message.success(
+          t('creativeStudio.assets.messages.collectionUpdated', {
+            defaultValue: '已更新 {{assetCount}} 个素材。',
+            assetCount: updated,
+          })
+        );
+      } else {
+        Message.info(
+          t('creativeStudio.assets.messages.collectionUnused', {
+            defaultValue: '没有找到使用该合集的素材。',
+          })
+        );
+      }
     } catch (reason) {
       setRenameError(errorText(reason));
     } finally {
@@ -406,11 +494,13 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         kind={kind}
         scope='library'
         view={view}
-        locale={locale}
+        locale={locale ?? i18n.resolvedLanguage ?? i18n.language}
         selectedIds={EMPTY_SELECTION}
         uploads={uploads.items}
         uploadAccept={CREATIVE_ASSET_MANUAL_UPLOAD_ACCEPT}
-        uploadHint='支持图片和视频，单文件最大 64 MB；暂不支持手动上传音频。'
+        uploadHint={t('creativeStudio.assets.upload.hint', {
+          defaultValue: '支持图片和视频，单文件最大 64 MB；暂不支持手动上传音频。',
+        })}
         pagination={{
           page: visiblePage,
           pageSize: SOURCE_ASSET_PAGE_SIZE,
@@ -419,13 +509,21 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
           onPageChange: handlePageChange,
         }}
         labels={{
-          title: '我的素材',
-          description: '收藏常用素材，按类型和标题快速查找。',
-          searchPlaceholder: '搜索素材标题',
-          kindFilter: '类型',
-          emptyTitle: '没有找到素材',
+          title: t('creativeStudio.assets.page.title', { defaultValue: '我的素材' }),
+          description: t('creativeStudio.assets.page.description', {
+            defaultValue: '收藏常用素材，按类型和标题快速查找。',
+          }),
+          searchPlaceholder: t('creativeStudio.assets.page.searchPlaceholder', {
+            defaultValue: '搜索素材标题',
+          }),
+          kindFilter: t('creativeStudio.assets.page.kindFilter', { defaultValue: '类型' }),
+          emptyTitle: t('creativeStudio.assets.page.emptyTitle', {
+            defaultValue: '没有找到素材',
+          }),
           emptyDescription: '',
-          filteredEmptyTitle: '没有找到素材',
+          filteredEmptyTitle: t('creativeStudio.assets.page.filteredEmptyTitle', {
+            defaultValue: '没有找到素材',
+          }),
           filteredEmptyDescription: '',
         }}
         onSearchChange={(value) => {
@@ -486,11 +584,11 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
 
       <Modal
         visible={Boolean(deletingAsset)}
-        title='删除素材'
+        title={t('creativeStudio.assets.delete.title', { defaultValue: '删除素材' })}
         confirmLoading={deleteSubmitting}
         okButtonProps={{ status: 'danger' }}
-        okText='删除'
-        cancelText='取消'
+        okText={t('creativeStudio.assets.delete.confirm', { defaultValue: '删除' })}
+        cancelText={t('creativeStudio.assets.delete.cancel', { defaultValue: '取消' })}
         maskClosable={!deleteSubmitting}
         closable={!deleteSubmitting}
         getPopupContainer={popupContainer}
@@ -500,14 +598,21 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         }}
       >
         <div className={styles.modalBody}>
-          <p className={styles.deleteText}>确定删除“{deletingAsset?.title}”吗？原始文件也会被永久删除，且无法恢复。</p>
+          <p className={styles.deleteText}>
+            {t('creativeStudio.assets.delete.description', {
+              defaultValue: '确定删除“{{title}}”吗？原始文件也会被永久删除，且无法恢复。',
+              title: deletingAsset?.title ?? '',
+            })}
+          </p>
           {deleteError ? <p className={styles.modalError} role='alert'>{deleteError}</p> : null}
         </div>
       </Modal>
 
       <Modal
         visible={renameOpen}
-        title='重命名合集'
+        title={t('creativeStudio.assets.collection.renameTitle', {
+          defaultValue: '重命名合集',
+        })}
         footer={null}
         autoFocus={false}
         focusLock
@@ -527,9 +632,18 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
             if (!renameSubmitting) void handleRenameCollection();
           }}
         >
-          <p className={styles.modalDescription}>这会更新所有使用当前合集名称的素材。新名称留空会将这些素材设为未分组。</p>
+          <p className={styles.modalDescription}>
+            {t('creativeStudio.assets.collection.renameDescription', {
+              defaultValue:
+                '这会更新所有使用当前合集名称的素材。新名称留空会将这些素材设为未分组。',
+            })}
+          </p>
           <label className={styles.field}>
-            <span>当前合集名称</span>
+            <span>
+              {t('creativeStudio.assets.collection.currentNameLabel', {
+                defaultValue: '当前合集名称',
+              })}
+            </span>
             <Input
               value={renameDraft.from}
               maxLength={240}
@@ -538,19 +652,29 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
             />
           </label>
           <label className={styles.field}>
-            <span>新合集名称</span>
+            <span>
+              {t('creativeStudio.assets.collection.newNameLabel', {
+                defaultValue: '新合集名称',
+              })}
+            </span>
             <Input
               value={renameDraft.to}
               maxLength={240}
-              placeholder='留空表示取消分组'
+              placeholder={t('creativeStudio.assets.collection.newNamePlaceholder', {
+                defaultValue: '留空表示取消分组',
+              })}
               disabled={renameSubmitting}
               onChange={(to) => setRenameDraft((draft) => ({ ...draft, to }))}
             />
           </label>
           {renameError ? <p className={styles.modalError} role='alert'>{renameError}</p> : null}
           <footer className={styles.modalFooter}>
-            <Button disabled={renameSubmitting} onClick={() => setRenameOpen(false)}>取消</Button>
-            <Button type='primary' htmlType='submit' loading={renameSubmitting}>确认更新</Button>
+            <Button disabled={renameSubmitting} onClick={() => setRenameOpen(false)}>
+              {t('creativeStudio.assets.collection.cancel', { defaultValue: '取消' })}
+            </Button>
+            <Button type='primary' htmlType='submit' loading={renameSubmitting}>
+              {t('creativeStudio.assets.collection.confirm', { defaultValue: '确认更新' })}
+            </Button>
           </footer>
         </form>
       </Modal>

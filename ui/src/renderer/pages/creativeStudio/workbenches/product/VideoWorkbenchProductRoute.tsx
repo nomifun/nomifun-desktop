@@ -5,7 +5,9 @@
  */
 
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
+import type { TFunction } from 'i18next';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
 import {
@@ -54,6 +56,7 @@ import {
   STANDALONE_VIDEO_MAX_CONCURRENT_TASKS,
 } from './ownership';
 import {
+  creativeWorkbenchErrorMessage,
   StandaloneWorkbenchPage,
   StandaloneHistoryGate,
   StandaloneHistoryRetireDialog,
@@ -69,29 +72,45 @@ const ASPECTS = [
   { value: '9:16', label: '9:16' },
   { value: '1:1', label: '1:1' },
 ];
-const DURATIONS = [
-  { value: '5', label: '5 秒' },
-  { value: '10', label: '10 秒' },
-];
-
 const ownerScopedPendingNoop = async (): Promise<void> => undefined;
 
 const videoDimensions = (
   resolution: string,
-  aspect: string
+  aspect: string,
+  t: TFunction
 ): { width: number; height: number } => {
   const shortEdge = resolution === '720p' ? 720 : resolution === '1080p' ? 1080 : null;
-  if (shortEdge === null) throw new Error(`不支持的视频分辨率：${resolution}`);
+  if (shortEdge === null) {
+    throw new Error(
+      t('creativeStudio.product.video.errors.unsupportedResolution', {
+        resolution,
+        defaultValue: 'Unsupported video resolution: {{resolution}}',
+      })
+    );
+  }
   if (aspect === '16:9') return { width: Math.round((shortEdge * 16) / 9), height: shortEdge };
   if (aspect === '9:16') return { width: shortEdge, height: Math.round((shortEdge * 16) / 9) };
   if (aspect === '1:1') return { width: shortEdge, height: shortEdge };
-  throw new Error(`不支持的视频画幅：${aspect}`);
+  throw new Error(
+    t('creativeStudio.product.video.errors.unsupportedAspect', {
+      aspect,
+      defaultValue: 'Unsupported video aspect ratio: {{aspect}}',
+    })
+  );
 };
 
 const videoControlsFromTask = (
-  task: CreativeTask
+  task: CreativeTask,
+  t: TFunction
 ): { prompt: string; resolution: string; aspect: string; duration: string } => {
-  if (task.task !== 'video_generation') throw new Error(`任务 ${task.taskId} 不是视频任务。`);
+  if (task.task !== 'video_generation') {
+    throw new Error(
+      t('creativeStudio.product.video.errors.notVideoTask', {
+        taskId: task.taskId,
+        defaultValue: 'Task {{taskId}} is not a video-generation task.',
+      })
+    );
+  }
   const prompt = task.parameters.prompt;
   const width = task.parameters.width;
   const height = task.parameters.height;
@@ -102,22 +121,35 @@ const videoControlsFromTask = (
     !Number.isSafeInteger(height) ||
     (seconds !== 5 && seconds !== 10)
   ) {
-    throw new Error(`任务 ${task.taskId} 的视频参数快照不完整，无法载入。`);
+    throw new Error(
+      t('creativeStudio.product.video.errors.incompleteSnapshot', {
+        taskId: task.taskId,
+        defaultValue: 'Task {{taskId}} has an incomplete video parameter snapshot.',
+      })
+    );
   }
   const match = RESOLUTIONS.flatMap((resolution) =>
     ASPECTS.map((aspect) => ({
       resolution: resolution.value,
       aspect: aspect.value,
-      dimensions: videoDimensions(resolution.value, aspect.value),
+      dimensions: videoDimensions(resolution.value, aspect.value, t),
     }))
   ).find((candidate) => candidate.dimensions.width === width && candidate.dimensions.height === height);
-  if (!match) throw new Error(`任务 ${task.taskId} 的视频尺寸不属于当前精确选项。`);
+  if (!match) {
+    throw new Error(
+      t('creativeStudio.product.video.errors.unsupportedSnapshotSize', {
+        taskId: task.taskId,
+        defaultValue: 'Task {{taskId}} uses a video size that is not available in this workbench.',
+      })
+    );
+  }
   return { prompt, resolution: match.resolution, aspect: match.aspect, duration: String(seconds) };
 };
 
 const OwnedVideoWorkbenchReady: React.FC<{
   history: StandaloneWorkbenchHistoryState;
 }> = ({ history }) => {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const catalog = useNomiCreativeModelCatalog();
   const assets = useCreativeAssets({ pageSize: 200, query: { sort: 'updated_desc' } });
@@ -147,6 +179,23 @@ const OwnedVideoWorkbenchReady: React.FC<{
   const [retireError, setRetireError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const formatError = useCallback(
+    (reason: unknown) => creativeWorkbenchErrorMessage(reason, t),
+    [t]
+  );
+  const durationOptions = useMemo(
+    () => [
+      {
+        value: '5',
+        label: t('creativeStudio.product.video.durationFive', { defaultValue: '5 秒' }),
+      },
+      {
+        value: '10',
+        label: t('creativeStudio.product.video.durationTen', { defaultValue: '10 秒' }),
+      },
+    ],
+    [t]
+  );
   const loadGenerationRef = useRef(0);
   const historyScope = useMemo(() => ({ workbenchKind: 'video' as const }), []);
   const durableTasks = useMemo(
@@ -179,7 +228,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
     onPendingTask: ownerScopedPendingNoop,
     onSettledTask,
     onRecoveryFailure,
-    onRuntimeError: (reason) => setError(reason instanceof Error ? reason.message : String(reason)),
+    onRuntimeError: (reason) => setError(formatError(reason)),
   });
   const presentationRuntime = useMemo(
     () => standaloneHistoryRuntimeSnapshot(historyScope, durableTasks, runtime, creativeAssetClient),
@@ -269,20 +318,35 @@ const OwnedVideoWorkbenchReady: React.FC<{
   const taskById = useCallback(
     (taskId: string): CreativeTask => {
       const task = presentationRuntime.entries.find((entry) => entry.task.taskId === taskId)?.task;
-      if (!task) throw new Error(`找不到任务 ${taskId}。`);
+      if (!task) {
+        throw new Error(
+          t('creativeStudio.product.errors.taskNotFound', {
+            defaultValue: '找不到任务 {{taskId}}。',
+            taskId,
+          })
+        );
+      }
       return task;
     },
-    [presentationRuntime.entries]
+    [presentationRuntime.entries, t]
   );
 
   const generate = async (): Promise<void> => {
     setError(null);
     if (draftReferencesRestoring) {
-      setError('参考素材草稿仍在恢复，未发起生成。');
+      setError(
+        t('creativeStudio.product.errors.referencesRestoring', {
+          defaultValue: '参考素材草稿仍在恢复，未发起生成。',
+        })
+      );
       return;
     }
     if (!model || catalog.status !== 'ready') {
-      setError('没有可用且明确选择的真实视频模型，未发起生成。');
+      setError(
+        t('creativeStudio.product.video.errors.modelRequired', {
+          defaultValue: '没有可用且明确选择的真实视频模型，未发起生成。',
+        })
+      );
       return;
     }
     if (
@@ -290,12 +354,16 @@ const OwnedVideoWorkbenchReady: React.FC<{
       references.length > 1 ||
       references.some((asset) => asset.kind !== 'image')
     ) {
-      setError('当前视频生成只支持一张可读取的真实图片参考；V2V 与多图引用尚未开放。');
+      setError(
+        t('creativeStudio.product.video.errors.referenceLimit', {
+          defaultValue: '当前视频生成只支持一张可读取的真实图片参考；V2V 与多图引用尚未开放。',
+        })
+      );
       return;
     }
     try {
       const capability = references.length === 1 ? 'i2v' : 't2v';
-      const dimensions = videoDimensions(resolution, aspect);
+      const dimensions = videoDimensions(resolution, aspect, t);
       await runtime.generate({
         catalog,
         owner: standaloneWorkbenchOwner('video'),
@@ -316,7 +384,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
         taskCount,
       });
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(formatError(reason));
     }
   };
 
@@ -329,7 +397,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
         prepareStandaloneHistoryRetry({ catalog, task, references: retryReferences })
       );
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(formatError(reason));
     }
   };
 
@@ -343,7 +411,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
         await creativeTaskClient.cancel(creativeTaskReference(task));
         await history.reload();
       } catch (reason) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(formatError(reason));
       }
     }
   };
@@ -354,10 +422,14 @@ const OwnedVideoWorkbenchReady: React.FC<{
     setError(null);
     try {
       const task = taskById(taskId);
-      const controls = videoControlsFromTask(task);
+      const controls = videoControlsFromTask(task, t);
       const nextReferences = await hydrateStandaloneTaskReferences(task, creativeAssetClient);
       if (nextReferences.assets.length > 1 || nextReferences.assets.some((asset) => asset.kind !== 'image')) {
-        throw new Error('该历史任务使用当前视频工作台未开放的参考类型。');
+        throw new Error(
+          t('creativeStudio.product.video.errors.unsupportedHistoryReference', {
+            defaultValue: '该历史任务使用当前视频工作台未开放的参考类型。',
+          })
+        );
       }
       if (loadGenerationRef.current !== generation) return;
       setPrompt(controls.prompt);
@@ -370,7 +442,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
       setReferenceIds(nextReferences.bindings.map((binding) => binding.assetId));
     } catch (reason) {
       if (loadGenerationRef.current !== generation) return;
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(formatError(reason));
     }
   };
 
@@ -380,17 +452,25 @@ const OwnedVideoWorkbenchReady: React.FC<{
     const unique = [...new Set(taskIds)];
     try {
       if (unique.length === 0 || unique.length > 100) {
-        throw new Error('每次必须选择 1-100 条终态历史。');
+        throw new Error(
+          t('creativeStudio.product.history.invalidSelection', {
+            defaultValue: '每次必须选择 1-100 条终态历史。',
+          })
+        );
       }
       for (const taskId of unique) {
         const task = taskById(taskId);
         if (task.status === 'queued' || task.status === 'running') {
-          throw new Error('运行中的任务必须先取消，不能直接从历史移除。');
+          throw new Error(
+            t('creativeStudio.product.history.runningTask', {
+              defaultValue: '运行中的任务必须先取消，不能直接从历史移除。',
+            })
+          );
         }
       }
       setRetireTaskIds(unique);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(formatError(reason));
     }
   };
 
@@ -410,7 +490,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
       setRetireTaskIds([]);
       await history.reload();
     } catch (reason) {
-      setRetireError(reason instanceof Error ? reason.message : String(reason));
+      setRetireError(formatError(reason));
     } finally {
       setRetiring(false);
     }
@@ -436,7 +516,9 @@ const OwnedVideoWorkbenchReady: React.FC<{
       model === null ||
       history.refreshing,
     references: videoWorkbenchReferencesFromAssets(references),
-    addReferenceLabel: '添加图片参考',
+    addReferenceLabel: t('creativeStudio.product.video.addImageReference', {
+      defaultValue: '添加图片参考',
+    }),
     onAddReferences: () => setPickerOpen(true),
     onRemoveReference: (referenceId: string) =>
       setReferenceIds((ids) => ids.filter((id) => id !== referenceId)),
@@ -457,18 +539,27 @@ const OwnedVideoWorkbenchReady: React.FC<{
     sizeOptions: ASPECTS,
     onSizeChange: setAspect,
     duration,
-    durationOptions: DURATIONS,
+    durationOptions,
     onDurationChange: setDuration,
     taskCount,
     onTaskCountChange: (count: number) => {
       if (!Number.isSafeInteger(count) || count < 1 || count > STANDALONE_VIDEO_MAX_CONCURRENT_TASKS) {
-        setError(`视频并发任务数必须在 1-${STANDALONE_VIDEO_MAX_CONCURRENT_TASKS} 之间。`);
+        setError(
+          t('creativeStudio.product.video.errors.concurrentCount', {
+            defaultValue: '视频并发任务数必须在 1-{{max}} 之间。',
+            max: STANDALONE_VIDEO_MAX_CONCURRENT_TASKS,
+          })
+        );
         return;
       }
       setTaskCount(count);
     },
     onOpenParameters: () =>
-      setError('高级参数只会在具有明确 NomiFun 协议契约后开放，当前未发送隐藏参数。'),
+      setError(
+        t('creativeStudio.product.video.parametersUnavailable', {
+          defaultValue: '高级参数只会在具有明确 NomiFun 协议契约后开放，当前未发送隐藏参数。',
+        })
+      ),
     onOpenPromptLibrary: () => navigate('/workshop/prompts'),
     selectedTaskIds,
     onSelectedTaskIdsChange: (ids: readonly string[]) => setSelectedTaskIds([...ids]),
@@ -487,14 +578,20 @@ const OwnedVideoWorkbenchReady: React.FC<{
     onInspectTask: (taskId: string) => {
       try {
         const task = taskById(taskId);
-        setError(task.error ? `${task.error.kind}: ${task.error.message}` : '任务没有错误详情。');
+        setError(
+          task.error
+            ? `${task.error.kind}: ${task.error.message}`
+            : t('creativeStudio.product.video.errors.noDetails', {
+                defaultValue: '任务没有错误详情。',
+              })
+        );
       } catch (reason) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(formatError(reason));
       }
     },
     onCopyPrompt: (value: string) => {
       void navigator.clipboard.writeText(value).catch((reason) =>
-        setError(reason instanceof Error ? reason.message : String(reason))
+        setError(formatError(reason))
       );
     },
     onDownloadTask: (taskId: string) => {
@@ -502,7 +599,11 @@ const OwnedVideoWorkbenchReady: React.FC<{
         const task = taskById(taskId);
         const assetId = task.resultAssetIds[0];
         if (!assetId || task.resultAssetIds.length !== 1) {
-          setError('视频任务没有唯一可下载结果。');
+          setError(
+            t('creativeStudio.product.video.errors.noDownloadResult', {
+              defaultValue: '视频任务没有唯一可下载结果。',
+            })
+          );
           return;
         }
         const link = document.createElement('a');
@@ -510,7 +611,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
         link.download = `${assetId}.mp4`;
         link.click();
       } catch (reason) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(formatError(reason));
       }
     },
     historyLoadingMore: history.loadingMore,
@@ -523,43 +624,51 @@ const OwnedVideoWorkbenchReady: React.FC<{
     catalog,
     onGenerate: generate,
     onRetryTask: retryTask,
-    onActionError: (reason) => setError(reason instanceof Error ? reason.message : String(reason)),
+    onActionError: (reason) => setError(formatError(reason)),
   });
 
   return (
     <>
       {history.error || error ? (
         <div className={styles.runtimeNotice} role='alert'>
-          {history.error?.message ?? error}
+          {history.error ? formatError(history.error) : error}
         </div>
       ) : null}
       {presentationRuntime.submissionFailures.map((failure) => (
         <div className={styles.runtimeNotice} role='status' key={failure.order}>
-          <span>任务提交结果尚未确认，可使用原幂等请求安全重试。</span>
+          <span>
+            {t('creativeStudio.product.submission.uncertain', {
+              defaultValue: '任务提交结果尚未确认，可使用原幂等请求安全重试。',
+            })}
+          </span>
           <button
             type='button'
             onClick={() => {
               void runtime.retrySubmission(failure.order).catch((reason) =>
-                setError(reason instanceof Error ? reason.message : String(reason))
+                setError(formatError(reason))
               );
             }}
           >
-            确认任务状态
+            {t('creativeStudio.product.submission.confirmStatus', {
+              defaultValue: '确认任务状态',
+            })}
           </button>
         </div>
       ))}
       {presentationRuntime.requestError && history.activeTasks.length > 0 ? (
         <div className={styles.runtimeNotice} role='status'>
-          <span>{presentationRuntime.requestError.message}</span>
+          <span>{formatError(presentationRuntime.requestError)}</span>
           <button
             type='button'
             onClick={() => {
               void runtime.resume(initialResumeRequests).catch((reason) =>
-                setError(reason instanceof Error ? reason.message : String(reason))
+                setError(formatError(reason))
               );
             }}
           >
-            重试任务同步
+            {t('creativeStudio.product.submission.retrySync', {
+              defaultValue: '重试任务同步',
+            })}
           </button>
         </div>
       ) : null}
@@ -593,12 +702,16 @@ const OwnedVideoWorkbenchReady: React.FC<{
               const first = uploaded[0];
               if (!first) return;
               if (first.kind !== 'image') {
-                setError('当前视频生成只支持图片参考。');
+                setError(
+                  t('creativeStudio.product.video.errors.imageReferenceOnly', {
+                    defaultValue: '当前视频生成只支持图片参考。',
+                  })
+                );
                 return;
               }
               setReferenceIds([first.id]);
             })
-            .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+            .catch((reason) => setError(formatError(reason)));
         }}
         onCancel={() => setPickerOpen(false)}
       />
@@ -618,12 +731,13 @@ const OwnedVideoWorkbenchReady: React.FC<{
 };
 
 const OwnedVideoWorkbench: React.FC = () => {
+  const { t } = useTranslation();
   const historyScope = useMemo(() => ({ workbenchKind: 'video' as const }), []);
   const history = useStandaloneWorkbenchHistory(historyScope);
   if (history.status !== 'ready') {
     return (
       <StandaloneHistoryGate
-        label='视频'
+        label={t('creativeStudio.product.video.historyLabel', { defaultValue: '视频' })}
         error={history.error}
         onRetry={() => void history.reload()}
       />

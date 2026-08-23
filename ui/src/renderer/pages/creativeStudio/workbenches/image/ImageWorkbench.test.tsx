@@ -91,7 +91,7 @@ describe('ImageWorkbench visual states', () => {
 
     expect(composerSource.includes('className={styles.composerHeading}')).toBe(true);
     expect(composerSource.includes('<Pic size={20} />')).toBe(true);
-    expect(composerSource.includes('<small>生成设置</small>')).toBe(true);
+    expect(composerSource.includes("'creativeStudio.image.header.settings'")).toBe(true);
     expect(/\.composerHeader\s*\{[\s\S]*?align-items:\s*center;/.test(css)).toBe(true);
     expect(/\.composerHeader h1\s*\{[\s\S]*?font-size:\s*14px;[\s\S]*?line-height:\s*18px;/.test(css)).toBe(true);
     expect(/\.resultsTitle h2\s*\{[\s\S]*?font-size:\s*16px;[\s\S]*?line-height:\s*22px;/.test(css)).toBe(true);

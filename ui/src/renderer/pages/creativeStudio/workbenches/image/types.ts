@@ -5,6 +5,7 @@
  */
 
 import type { ReactNode } from 'react';
+import { getI18n } from 'react-i18next';
 
 export type ImageWorkbenchLayout = 'side' | 'bottom';
 export type ImageWorkbenchInterfaceMode = 'images' | 'responses';
@@ -176,6 +177,9 @@ export interface ImageWorkbenchProps {
   onLoadMoreResults?(): void;
 }
 
+const localizedOptionLabel = (key: string, defaultValue: string): string =>
+  getI18n()?.t(key, { defaultValue }) ?? defaultValue;
+
 export const DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS: readonly ImageWorkbenchAspectRatioOption[] = [
   { value: '1:1', label: '1:1', width: 1024, height: 1024, requestSize: '1024x1024' },
   { value: '3:2', label: '3:2', width: 1536, height: 1024, requestSize: '1536x1024' },
@@ -190,7 +194,14 @@ export const DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS: readonly ImageWorkbenchAspec
   { value: '1152x2048', label: '9:16 · 2K', width: 1152, height: 2048, requestSize: '1152x2048' },
   { value: '3840x2160', label: '16:9 · 4K', width: 3840, height: 2160, requestSize: '3840x2160' },
   { value: '2160x3840', label: '9:16 · 4K', width: 2160, height: 3840, requestSize: '2160x3840' },
-  { value: 'auto', label: '自动', width: null, height: null },
+  {
+    value: 'auto',
+    get label() {
+      return localizedOptionLabel('creativeStudio.image.options.auto', '自动');
+    },
+    width: null,
+    height: null,
+  },
 ];
 
 /**
@@ -234,7 +245,14 @@ const STEPFUN_IMAGE_EDIT_2_ASPECT_RATIOS: readonly ImageWorkbenchAspectRatioOpti
     height: 1184,
     requestSize: '1184x896',
   },
-  { value: 'auto', label: '自动', width: null, height: null },
+  {
+    value: 'auto',
+    get label() {
+      return localizedOptionLabel('creativeStudio.image.options.auto', '自动');
+    },
+    width: null,
+    height: null,
+  },
 ];
 
 const STEPFUN_STEP_2X_LARGE_ASPECT_RATIOS: readonly ImageWorkbenchAspectRatioOption[] = [
@@ -273,7 +291,14 @@ const STEPFUN_STEP_2X_LARGE_ASPECT_RATIOS: readonly ImageWorkbenchAspectRatioOpt
     height: 1280,
     requestSize: '800x1280',
   },
-  { value: 'auto', label: '自动', width: null, height: null },
+  {
+    value: 'auto',
+    get label() {
+      return localizedOptionLabel('creativeStudio.image.options.auto', '自动');
+    },
+    width: null,
+    height: null,
+  },
 ];
 
 const STEPFUN_UNKNOWN_MODEL_ASPECT_RATIOS: readonly ImageWorkbenchAspectRatioOption[] = [
@@ -335,10 +360,30 @@ export const IMAGE_WORKBENCH_QUALITY_OPTIONS: readonly {
   value: ImageWorkbenchQuality;
   label: string;
 }[] = [
-  { value: 'auto', label: '自动' },
-  { value: 'high', label: '高' },
-  { value: 'medium', label: '中' },
-  { value: 'low', label: '低' },
+  {
+    value: 'auto',
+    get label() {
+      return localizedOptionLabel('creativeStudio.image.quality.auto', '自动');
+    },
+  },
+  {
+    value: 'high',
+    get label() {
+      return localizedOptionLabel('creativeStudio.image.quality.high', '高');
+    },
+  },
+  {
+    value: 'medium',
+    get label() {
+      return localizedOptionLabel('creativeStudio.image.quality.medium', '中');
+    },
+  },
+  {
+    value: 'low',
+    get label() {
+      return localizedOptionLabel('creativeStudio.image.quality.low', '低');
+    },
+  },
 ];
 
 export function imageWorkbenchModelKey(model: ImageWorkbenchModelIdentity): string {

@@ -7,6 +7,7 @@
 import { Button, Modal, Progress } from "@arco-design/web-react";
 import { CheckOne, CloseOne } from "@icon-park/react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { CreativeAsset } from "../../assets";
 import {
@@ -40,21 +41,21 @@ interface CropPointerSession {
   crop: CreativeImageCropRect;
 }
 
-const HANDLE_LABELS: Record<
+const HANDLE_LABEL_KEYS: Record<
   Exclude<CreativeImageCropHandle, "move">,
   string
 > = {
-  "north-west": "左上",
-  north: "上边",
-  "north-east": "右上",
-  east: "右边",
-  "south-east": "右下",
-  south: "下边",
-  "south-west": "左下",
-  west: "左边",
+  "north-west": "creativeStudio.canvas.imageTools.crop.handles.northWest",
+  north: "creativeStudio.canvas.imageTools.crop.handles.north",
+  "north-east": "creativeStudio.canvas.imageTools.crop.handles.northEast",
+  east: "creativeStudio.canvas.imageTools.crop.handles.east",
+  "south-east": "creativeStudio.canvas.imageTools.crop.handles.southEast",
+  south: "creativeStudio.canvas.imageTools.crop.handles.south",
+  "south-west": "creativeStudio.canvas.imageTools.crop.handles.southWest",
+  west: "creativeStudio.canvas.imageTools.crop.handles.west",
 };
 
-const HANDLES = Object.keys(HANDLE_LABELS) as Exclude<
+const HANDLES = Object.keys(HANDLE_LABEL_KEYS) as Exclude<
   CreativeImageCropHandle,
   "move"
 >[];
@@ -92,6 +93,7 @@ export const CreativeImageCropDialogContent: React.FC<
   onClose,
   onConfirm,
 }) => {
+  const { t } = useTranslation();
   const stageRef = useRef<HTMLDivElement>(null);
   const pointerRef = useRef<CropPointerSession | null>(null);
   const [crop, setCrop] = useState<CreativeImageCropRect>(
@@ -225,7 +227,9 @@ export const CreativeImageCropDialogContent: React.FC<
           {!imageFailed ? (
             <img
               src={asset.originalUrl}
-              alt={`${asset.title} 裁剪预览`}
+              alt={t("creativeStudio.canvas.imageTools.crop.previewAlt", {
+                title: asset.title,
+              })}
               draggable={false}
               onLoad={(event) => {
                 const image = event.currentTarget;
@@ -240,7 +244,7 @@ export const CreativeImageCropDialogContent: React.FC<
             />
           ) : (
             <div className={styles.cropImageError} role="alert">
-              无法载入原图，裁剪操作已停止。
+              {t("creativeStudio.canvas.imageTools.crop.loadFailed")}
             </div>
           )}
           {dimensions && !imageFailed ? (
@@ -253,7 +257,9 @@ export const CreativeImageCropDialogContent: React.FC<
                 height: `${crop.height * 100}%`,
               }}
               role="group"
-              aria-label="移动裁剪框"
+              aria-label={t(
+                "creativeStudio.canvas.imageTools.crop.moveBox",
+              )}
               tabIndex={busy ? -1 : 0}
               onPointerDown={(event) => beginPointer("move", event)}
               onKeyDown={(event) => applyKeyboardDelta("move", event)}
@@ -274,7 +280,10 @@ export const CreativeImageCropDialogContent: React.FC<
                   type="button"
                   className={styles.cropHandle}
                   data-crop-handle={handle}
-                  aria-label={`调整裁剪框：${HANDLE_LABELS[handle]}`}
+                  aria-label={t(
+                    "creativeStudio.canvas.imageTools.crop.resizeBox",
+                    { handle: t(HANDLE_LABEL_KEYS[handle]) },
+                  )}
                   disabled={busy}
                   onPointerDown={(event) => beginPointer(handle, event)}
                   onKeyDown={(event) => applyKeyboardDelta(handle, event)}
@@ -288,18 +297,29 @@ export const CreativeImageCropDialogContent: React.FC<
       <div className={styles.cropMetaBar}>
         <div className={styles.cropMetrics} aria-live="polite">
           <span>
-            裁剪尺寸 {pixels ? `${pixels.width} × ${pixels.height}` : "—"}
+            {t("creativeStudio.canvas.imageTools.crop.metrics.size", {
+              value: pixels ? `${pixels.width} × ${pixels.height}` : "—",
+            })}
           </span>
           <span>
-            比例 {pixels ? ratioLabel(pixels.width, pixels.height) : "—"}
+            {t("creativeStudio.canvas.imageTools.crop.metrics.ratio", {
+              value: pixels
+                ? ratioLabel(pixels.width, pixels.height)
+                : "—",
+            })}
           </span>
           <span>
-            原图{" "}
-            {dimensions ? `${dimensions.width} × ${dimensions.height}` : "—"}
+            {t("creativeStudio.canvas.imageTools.crop.metrics.original", {
+              value: dimensions
+                ? `${dimensions.width} × ${dimensions.height}`
+                : "—",
+            })}
           </span>
         </div>
         <label className={styles.aspectSelect}>
-          <span>裁剪比例</span>
+          <span>
+            {t("creativeStudio.canvas.imageTools.crop.aspectLabel")}
+          </span>
           <select
             value={aspect}
             disabled={busy || !dimensions}
@@ -307,7 +327,9 @@ export const CreativeImageCropDialogContent: React.FC<
               selectAspect(event.target.value as CreativeImageCropAspect)
             }
           >
-            <option value="free">自由比例</option>
+            <option value="free">
+              {t("creativeStudio.canvas.imageTools.crop.aspectFree")}
+            </option>
             <option value="1:1">1:1</option>
             <option value="4:3">4:3</option>
             <option value="16:9">16:9</option>
@@ -319,7 +341,9 @@ export const CreativeImageCropDialogContent: React.FC<
         <Progress
           percent={Math.round(Math.min(100, Math.max(0, progress)))}
           size="small"
-          aria-label="裁剪结果上传进度"
+          aria-label={t(
+            "creativeStudio.canvas.imageTools.crop.uploadProgress",
+          )}
         />
       ) : null}
       {error ? (
@@ -330,14 +354,14 @@ export const CreativeImageCropDialogContent: React.FC<
 
       <footer className={styles.cropFooter}>
         <Button disabled={busy} onClick={reset}>
-          重置
+          {t("creativeStudio.canvas.actions.reset")}
         </Button>
           <Button
             icon={<CloseOne theme="outline" size={14} />}
             disabled={busy}
             onClick={onClose}
           >
-            取消
+            {t("creativeStudio.canvas.actions.cancel")}
           </Button>
           <Button
             type="primary"
@@ -346,7 +370,7 @@ export const CreativeImageCropDialogContent: React.FC<
           disabled={!asset || !dimensions || imageFailed}
           onClick={() => onConfirm(crop)}
         >
-          确认裁剪
+          {t("creativeStudio.canvas.imageTools.crop.confirm")}
         </Button>
       </footer>
     </div>
@@ -355,24 +379,29 @@ export const CreativeImageCropDialogContent: React.FC<
 
 const CreativeImageCropDialog: React.FC<CreativeImageCropDialogProps> = (
   props,
-) => (
-  <Modal
-    title="裁剪图片"
-    visible={props.visible}
-    className={styles.cropModal}
-    style={{ width: 780, maxWidth: "calc(100vw - 32px)" }}
-    footer={null}
-    maskClosable={!props.busy}
-    escToExit={!props.busy}
-    closable={!props.busy}
-    unmountOnExit
-    getPopupContainer={() =>
-      document.getElementById("creative-studio-portal-root") ?? document.body
-    }
-    onCancel={props.onClose}
-  >
-    <CreativeImageCropDialogContent {...props} />
-  </Modal>
-);
+) => {
+  const { t } = useTranslation();
+
+  return (
+    <Modal
+      title={t("creativeStudio.canvas.imageTools.crop.title")}
+      visible={props.visible}
+      className={styles.cropModal}
+      style={{ width: 780, maxWidth: "calc(100vw - 32px)" }}
+      footer={null}
+      maskClosable={!props.busy}
+      escToExit={!props.busy}
+      closable={!props.busy}
+      unmountOnExit
+      getPopupContainer={() =>
+        document.getElementById("creative-studio-portal-root") ??
+        document.body
+      }
+      onCancel={props.onClose}
+    >
+      <CreativeImageCropDialogContent {...props} />
+    </Modal>
+  );
+};
 
 export default CreativeImageCropDialog;

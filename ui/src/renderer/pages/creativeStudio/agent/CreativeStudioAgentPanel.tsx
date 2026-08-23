@@ -7,6 +7,7 @@
 import { Error, History, Loading, Magic, MenuFold, Plus, Robot } from '@icon-park/react';
 import { Button, Tooltip } from '@arco-design/web-react';
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 
 import CreativeStudioAgentComposer from './CreativeStudioAgentComposer';
 import CreativeStudioAgentMessages from './CreativeStudioAgentMessages';
@@ -14,6 +15,7 @@ import styles from './CreativeStudioAgentPanel.module.css';
 import type { CreativeStudioAgentPanelProps } from './types';
 
 const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props) => {
+  const { t } = useTranslation();
   const panelDisabled = props.disabled === true || props.loadState !== 'ready';
 
   const renderBody = () => {
@@ -21,8 +23,16 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
       return (
         <div className={styles.state} data-agent-panel-state='loading' role='status'>
           <Loading className={styles.spin} theme='outline' size='22' />
-          <strong>正在加载会话</strong>
-          <span>正在恢复当前画布的 Agent 记录</span>
+          <strong>
+            {t('creativeStudio.agent.loadingTitle', {
+              defaultValue: 'Loading conversation',
+            })}
+          </strong>
+          <span>
+            {t('creativeStudio.agent.loadingDescription', {
+              defaultValue: 'Restoring the Agent history for this canvas',
+            })}
+          </span>
         </div>
       );
     }
@@ -31,11 +41,20 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
       return (
         <div className={styles.state} data-agent-panel-state='failed' role='alert'>
           <Error theme='outline' size='24' />
-          <strong>无法加载 Agent</strong>
-          <span>{props.errorMessage ?? '会话加载失败，请重试。'}</span>
+          <strong>
+            {t('creativeStudio.agent.loadErrorTitle', {
+              defaultValue: 'Could not load Agent',
+            })}
+          </strong>
+          <span>
+            {props.errorMessage ??
+              t('creativeStudio.agent.loadErrorFallback', {
+                defaultValue: 'Conversation loading failed. Try again.',
+              })}
+          </span>
           {props.onRetryLoad && (
             <Button size='small' onClick={props.onRetryLoad}>
-              重试
+              {t('creativeStudio.agent.retry', { defaultValue: 'Retry' })}
             </Button>
           )}
         </div>
@@ -57,7 +76,10 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
               >
                 <span className={styles.historyTitle}>{session.title}</span>
                 <span className={styles.historyMeta}>
-                  {session.messageCount} 条消息
+                  {t('creativeStudio.agent.messageCount', {
+                    defaultValue: '{{count}} messages',
+                    count: session.messageCount,
+                  })}
                   {session.updatedAtLabel ? ` · ${session.updatedAtLabel}` : ''}
                 </span>
               </button>
@@ -65,7 +87,11 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
           ) : (
             <div className={styles.historyEmpty}>
               <History theme='outline' size='22' />
-              <span>暂无对话记录</span>
+              <span>
+                {t('creativeStudio.agent.historyEmpty', {
+                  defaultValue: 'No conversation history',
+                })}
+              </span>
             </div>
           )}
         </div>
@@ -78,8 +104,17 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
           <div className={styles.emptyIcon}>
             <Magic theme='outline' size='21' />
           </div>
-          <strong>从一个想法开始</strong>
-          <span>描述故事、宣传片或现有素材，Agent 会通过 NomiFun 模型与你沟通</span>
+          <strong>
+            {t('creativeStudio.agent.emptyTitle', {
+              defaultValue: 'Start with an idea',
+            })}
+          </strong>
+          <span>
+            {t('creativeStudio.agent.emptyDescription', {
+              defaultValue:
+                'Describe a story, commercial, or existing material and discuss it with the Agent through NomiFun models',
+            })}
+          </span>
         </div>
       );
     }
@@ -101,25 +136,57 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
       data-creative-studio-agent-panel
       data-agent-view={props.view}
       data-agent-running={props.isRunning}
-      aria-label='创作 Agent'
+      aria-label={t('creativeStudio.agent.panelAriaLabel', {
+        defaultValue: 'Creative Agent',
+      })}
     >
       <header className={styles.header}>
         <div className={styles.title}>
           <Robot theme='outline' size='17' />
-          <span>{props.view === 'history' ? '历史记录' : '创作 Agent'}</span>
+          <span>
+            {props.view === 'history'
+              ? t('creativeStudio.agent.historyTitle', {
+                  defaultValue: 'History',
+                })
+              : t('creativeStudio.agent.title', {
+                  defaultValue: 'Creative Agent',
+                })}
+          </span>
         </div>
         <div className={styles.headerActions}>
-          <Tooltip content={props.view === 'history' ? '返回对话' : '历史记录'}>
+          <Tooltip
+            content={
+              props.view === 'history'
+                ? t('creativeStudio.agent.backToChat', {
+                    defaultValue: 'Back to conversation',
+                  })
+                : t('creativeStudio.agent.history', {
+                    defaultValue: 'History',
+                  })
+            }
+          >
             <Button
               type='text'
               shape='circle'
               size='small'
-              aria-label={props.view === 'history' ? '返回对话' : '查看历史记录'}
+              aria-label={
+                props.view === 'history'
+                  ? t('creativeStudio.agent.backToChat', {
+                      defaultValue: 'Back to conversation',
+                    })
+                  : t('creativeStudio.agent.viewHistory', {
+                      defaultValue: 'View history',
+                    })
+              }
               icon={<History theme='outline' size='16' />}
               onClick={() => props.onViewChange(props.view === 'history' ? 'chat' : 'history')}
             />
           </Tooltip>
-          <Tooltip content='新对话'>
+          <Tooltip
+            content={t('creativeStudio.agent.newConversation', {
+              defaultValue: 'New conversation',
+            })}
+          >
             <Button
               type='text'
               shape='circle'
@@ -130,7 +197,9 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
                 props.disabled === true ||
                 props.loadState !== 'ready'
               }
-              aria-label='新对话'
+              aria-label={t('creativeStudio.agent.newConversation', {
+                defaultValue: 'New conversation',
+              })}
               icon={<Plus theme='outline' size='16' />}
               onClick={() => {
                 props.onNewSession();
@@ -138,12 +207,18 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
               }}
             />
           </Tooltip>
-          <Tooltip content='收起 Agent'>
+          <Tooltip
+            content={t('creativeStudio.agent.collapse', {
+              defaultValue: 'Collapse Agent',
+            })}
+          >
             <Button
               type='text'
               shape='circle'
               size='small'
-              aria-label='收起 Agent 面板'
+              aria-label={t('creativeStudio.agent.collapsePanel', {
+                defaultValue: 'Collapse Agent panel',
+              })}
               icon={<MenuFold theme='outline' size='16' />}
               onClick={props.onCollapse}
             />

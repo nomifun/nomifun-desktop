@@ -17,9 +17,9 @@ import { CREATIVE_STUDIO_CANVAS_FIXTURES } from './testing';
 
 const testI18n = createInstance();
 await testI18n.use(initReactI18next).init({
-  lng: 'zh-CN',
-  fallbackLng: 'zh-CN',
-  resources: { 'zh-CN': { translation: {} } },
+  lng: 'en-US',
+  fallbackLng: 'en-US',
+  resources: { 'en-US': { translation: {} } },
   interpolation: { escapeValue: false },
 });
 
@@ -43,11 +43,11 @@ describe('Creative Studio Canvas library presentation', () => {
     expect(html.includes('data-canvases-state="ready"')).toBe(true);
     expect(html.includes('data-canvases-grid="true"')).toBe(true);
     expect(html.includes('data-canvas-id="canvas-brand-film"')).toBe(true);
-    expect(html.includes('无限画布')).toBe(true);
-    expect(html.includes('新建画布')).toBe(true);
-    expect(html.includes('导入画布')).toBe(true);
+    expect(html.includes('Infinite canvas')).toBe(true);
+    expect(html.includes('New canvas')).toBe(true);
+    expect(html.includes('Import canvas')).toBe(true);
     expect(html.includes('品牌短片概念')).toBe(true);
-    expect(html.includes('18 个节点 · 12 条连线')).toBe(true);
+    expect(html.includes('18 nodes · 12 connections')).toBe(true);
   });
 
   test('renders loading, error, empty, and selected Canvas states', () => {
@@ -55,7 +55,7 @@ describe('Creative Studio Canvas library presentation', () => {
       initialSnapshot: { status: 'loading', canvases: [] },
     });
     expect(loading.includes('data-canvases-loading="true"')).toBe(true);
-    expect(loading.includes('正在加载画布')).toBe(true);
+    expect(loading.includes('Loading canvases...')).toBe(true);
 
     const error = renderPage({
       initialSnapshot: {
@@ -65,13 +65,13 @@ describe('Creative Studio Canvas library presentation', () => {
       },
     });
     expect(error.includes('data-canvases-error="true"')).toBe(true);
-    expect(error.includes('加载画布失败')).toBe(true);
+    expect(error.includes('Could not load canvases')).toBe(true);
 
     const empty = renderPage({
       initialSnapshot: { status: 'ready', canvases: [] },
     });
     expect(empty.includes('data-canvases-empty="library"')).toBe(true);
-    expect(empty.includes('还没有画布')).toBe(true);
+    expect(empty.includes('No canvases yet')).toBe(true);
 
     const selected = renderPage({
       initialSnapshot: {
@@ -81,7 +81,7 @@ describe('Creative Studio Canvas library presentation', () => {
       initialSelectedIds: ['canvas-product-stills'],
     });
     expect(selected.includes('data-canvas-selected="true"')).toBe(true);
-    expect(selected.includes('导出选中')).toBe(true);
-    expect(selected.includes('删除选中')).toBe(true);
+    expect(selected.includes('Export selected')).toBe(true);
+    expect(selected.includes('Delete selected')).toBe(true);
   });
 });

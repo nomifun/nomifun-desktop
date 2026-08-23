@@ -8,6 +8,7 @@ import { ArrowUp, BookOne, Loading, SettingTwo } from '@icon-park/react';
 import { Popover, Select } from '@arco-design/web-react';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 
 import type {
   CreativeModelOption,
@@ -137,6 +138,7 @@ const CreativeCanvasVideoComposer: React.FC<
   onRetrySubmission,
   onConfirmSubmission,
 }) => {
+  const { t } = useTranslation();
   const positionerRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLSpanElement>(null);
   const horizontalOffsetRef = useRef(0);
@@ -164,10 +166,16 @@ const CreativeCanvasVideoComposer: React.FC<
       selectedModel !== null;
   const modeLabel =
     mode === 't2v'
-      ? '文生视频'
+      ? t('creativeStudio.canvas.video.textToVideo', {
+          defaultValue: '文生视频',
+        })
       : mode === 'i2v'
-        ? '图生视频·1张参考图'
-        : '当前节点不支持视频生成';
+        ? t('creativeStudio.canvas.video.imageToVideo', {
+            defaultValue: '图生视频·1张参考图',
+          })
+        : t('creativeStudio.canvas.video.unsupportedMode', {
+            defaultValue: '当前节点不支持视频生成',
+          });
 
   useEffect(() => setPrompt(initialPrompt), [initialPrompt, nodeId]);
 
@@ -282,9 +290,13 @@ const CreativeCanvasVideoComposer: React.FC<
 
   const modelStatus =
     modelOptions.length === 0
-      ? '没有可用的视频生成模型，请先在模型管理中配置。'
+      ? t('creativeStudio.canvas.video.noModels', {
+          defaultValue: '没有可用的视频生成模型，请先在模型管理中配置。',
+        })
       : settings.model !== null && selectedModel === null
-        ? '已选视频模型当前不可用，请重新选择。'
+        ? t('creativeStudio.canvas.video.modelUnavailable', {
+            defaultValue: '已选视频模型当前不可用，请重新选择。',
+          })
         : null;
 
   const content = (
@@ -332,10 +344,16 @@ const CreativeCanvasVideoComposer: React.FC<
           maxLength={1_000_000}
           placeholder={
             mode === 'i2v'
-              ? '描述参考图要如何运动、变化与运镜'
-              : '描述要生成的视频内容、动作与镜头'
+              ? t('creativeStudio.canvas.video.i2vPromptPlaceholder', {
+                  defaultValue: '描述参考图要如何运动、变化与运镜',
+                })
+              : t('creativeStudio.canvas.video.t2vPromptPlaceholder', {
+                  defaultValue: '描述要生成的视频内容、动作与镜头',
+                })
           }
-          aria-label='视频创作提示词'
+          aria-label={t('creativeStudio.canvas.video.promptLabel', {
+            defaultValue: '视频创作提示词',
+          })}
           disabled={interactionDisabled}
           onChange={(event) => {
             setPrompt(event.target.value);
@@ -354,8 +372,12 @@ const CreativeCanvasVideoComposer: React.FC<
             <button
               type='button'
               className={styles.iconButton}
-              aria-label='打开视频提示词库'
-              title='提示词库'
+              aria-label={t('creativeStudio.canvas.video.openPromptLibrary', {
+                defaultValue: '打开视频提示词库',
+              })}
+              title={t('creativeStudio.canvas.promptLibrary', {
+                defaultValue: '提示词库',
+              })}
               disabled={interactionDisabled}
               onClick={onOpenPromptLibrary}
             >
@@ -367,10 +389,16 @@ const CreativeCanvasVideoComposer: React.FC<
               value={selectedModel ? modelKey(selectedModel) : undefined}
               placeholder={
                 modelOptions.length > 0
-                  ? '选择视频生成模型'
-                  : '没有可用视频生成模型'
+                  ? t('creativeStudio.canvas.video.selectModel', {
+                      defaultValue: '选择视频生成模型',
+                    })
+                  : t('creativeStudio.canvas.video.noModelOptions', {
+                      defaultValue: '没有可用视频生成模型',
+                    })
               }
-              aria-label='视频生成模型'
+              aria-label={t('creativeStudio.canvas.video.modelLabel', {
+                defaultValue: '视频生成模型',
+              })}
               disabled={interactionDisabled || modelOptions.length === 0}
               getPopupContainer={popupContainer}
               onChange={(key) => {
@@ -396,10 +424,16 @@ const CreativeCanvasVideoComposer: React.FC<
               content={
                 <div className={styles.settingsPanel}>
                   <label className={styles.field}>
-                    <span>分辨率</span>
+                    <span>
+                      {t('creativeStudio.canvas.video.resolutionLabel', {
+                        defaultValue: '分辨率',
+                      })}
+                    </span>
                     <Select
                       value={settings.resolution}
-                      aria-label='视频分辨率'
+                      aria-label={t('creativeStudio.canvas.video.resolutionAriaLabel', {
+                        defaultValue: '视频分辨率',
+                      })}
                       disabled={interactionDisabled}
                       getPopupContainer={popupContainer}
                       onChange={(value) =>
@@ -414,10 +448,16 @@ const CreativeCanvasVideoComposer: React.FC<
                     </Select>
                   </label>
                   <label className={styles.field}>
-                    <span>画幅</span>
+                    <span>
+                      {t('creativeStudio.canvas.video.aspectRatioLabel', {
+                        defaultValue: '画幅',
+                      })}
+                    </span>
                     <Select
                       value={settings.aspectRatio}
-                      aria-label='视频画幅'
+                      aria-label={t('creativeStudio.canvas.video.aspectRatioAriaLabel', {
+                        defaultValue: '视频画幅',
+                      })}
                       disabled={interactionDisabled}
                       getPopupContainer={popupContainer}
                       onChange={(value) =>
@@ -432,10 +472,16 @@ const CreativeCanvasVideoComposer: React.FC<
                     </Select>
                   </label>
                   <label className={styles.field}>
-                    <span>时长</span>
+                    <span>
+                      {t('creativeStudio.canvas.video.durationLabel', {
+                        defaultValue: '时长',
+                      })}
+                    </span>
                     <Select
                       value={settings.seconds}
-                      aria-label='视频时长'
+                      aria-label={t('creativeStudio.canvas.video.durationAriaLabel', {
+                        defaultValue: '视频时长',
+                      })}
                       disabled={interactionDisabled}
                       getPopupContainer={popupContainer}
                       onChange={(value) =>
@@ -444,7 +490,10 @@ const CreativeCanvasVideoComposer: React.FC<
                     >
                       {SECONDS_OPTIONS.map((option) => (
                         <Select.Option key={option} value={option}>
-                          {option} 秒
+                          {t('creativeStudio.canvas.video.secondsOption', {
+                            seconds: option,
+                            defaultValue: `${option} 秒`,
+                          })}
                         </Select.Option>
                       ))}
                     </Select>
@@ -455,13 +504,18 @@ const CreativeCanvasVideoComposer: React.FC<
               <button
                 type='button'
                 className={styles.settingsButton}
-                aria-label='视频生成设置'
+                aria-label={t('creativeStudio.canvas.video.settingsLabel', {
+                  defaultValue: '视频生成设置',
+                })}
                 disabled={interactionDisabled}
               >
                 <SettingTwo theme='outline' size={15} fill='currentColor' />
                 <span className={styles.settingsSummary}>
                   {settings.resolution} · {settings.aspectRatio} ·{' '}
-                  {settings.seconds} 秒
+                  {t('creativeStudio.canvas.video.secondsSummary', {
+                    seconds: settings.seconds,
+                    defaultValue: `${settings.seconds} 秒`,
+                  })}
                 </span>
               </button>
             </Popover>
@@ -470,7 +524,9 @@ const CreativeCanvasVideoComposer: React.FC<
           <button
             type='button'
             className={styles.submitButton}
-            aria-label='生成视频'
+            aria-label={t('creativeStudio.canvas.video.generateLabel', {
+              defaultValue: '生成视频',
+            })}
             disabled={!canSubmit}
             onClick={submit}
           >
@@ -494,7 +550,10 @@ const CreativeCanvasVideoComposer: React.FC<
 
         {unsupported ? (
           <div className={styles.unsupported} role='status'>
-            当前节点不支持直接生成视频。请选择空视频节点，或为它添加一张图片参考。
+            {t('creativeStudio.canvas.video.unsupportedMessage', {
+              defaultValue:
+                '当前节点不支持直接生成视频。请选择空视频节点，或为它添加一张图片参考。',
+            })}
           </div>
         ) : null}
         {modelStatus ? (
@@ -514,7 +573,9 @@ const CreativeCanvasVideoComposer: React.FC<
             disabled={disabled}
             onClick={onConfirmSubmission}
           >
-            确认任务状态
+            {t('creativeStudio.canvas.confirmTaskStatus', {
+              defaultValue: '确认任务状态',
+            })}
           </button>
         ) : null}
       </div>

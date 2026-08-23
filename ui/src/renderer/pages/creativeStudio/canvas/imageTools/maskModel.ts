@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { translateCreativeImageTool } from "./imageToolI18n";
+
 export const CREATIVE_IMAGE_MASK_BRUSH_MIN = 8;
 export const CREATIVE_IMAGE_MASK_BRUSH_MAX = 160;
 export const CREATIVE_IMAGE_MASK_BRUSH_STEP = 2;
@@ -28,9 +30,9 @@ export interface CreativeImageMaskPoint {
 }
 
 export type CreativeImageMaskValidationError =
-  | "请输入修改要求"
-  | "请先涂抹局部区域"
-  | "请选择支持图片编辑的模型";
+  | "promptRequired"
+  | "maskRequired"
+  | "modelRequired";
 
 const clamp = (value: number, minimum: number, maximum: number): number =>
   Math.min(maximum, Math.max(minimum, value));
@@ -75,14 +77,20 @@ export function validateCreativeImageMaskEdit(input: {
   hasMask: boolean;
   hasModel: boolean;
 }): CreativeImageMaskValidationError | null {
-  if (!input.prompt.trim()) return "请输入修改要求";
-  if (!input.hasMask) return "请先涂抹局部区域";
-  if (!input.hasModel) return "请选择支持图片编辑的模型";
+  if (!input.prompt.trim()) return "promptRequired";
+  if (!input.hasMask) return "maskRequired";
+  if (!input.hasModel) return "modelRequired";
   return null;
 }
 
 export function creativeImageMaskEditPrompt(prompt: string): string {
   const requirement = prompt.trim();
-  if (!requirement) throw new Error("请输入修改要求");
+  if (!requirement) {
+    throw new Error(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.mask.validation.promptRequired",
+      ),
+    );
+  }
   return `参考图中蓝色高亮覆盖区域是需要修改的位置，蓝色只是编辑标记，不要保留在最终图像中。只修改蓝色高亮区域，其他区域的构图、人物、文字、光影和风格保持不变。修改要求：${requirement}`;
 }

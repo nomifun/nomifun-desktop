@@ -16,6 +16,7 @@ import {
 } from '@icon-park/react';
 import classNames from 'classnames';
 import React, { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type {
   WorkflowDefinitionV1,
@@ -52,7 +53,23 @@ const ACTIVE_STATUSES = new Set<WorkflowRunAggregateV1['record']['status']>([
   'awaiting-review',
 ]);
 
-const RUN_STATUS_LABELS: Record<WorkflowRunAggregateV1['record']['status'], string> = {
+const RUN_STATUS_KEYS: Record<
+  WorkflowRunAggregateV1['record']['status'],
+  string
+> = {
+  requested: 'creativeStudio.canvas.workflows.status.requested',
+  queued: 'creativeStudio.canvas.workflows.status.queued',
+  running: 'creativeStudio.canvas.workflows.status.running',
+  'awaiting-review': 'creativeStudio.canvas.workflows.status.awaitingReview',
+  succeeded: 'creativeStudio.canvas.workflows.status.succeeded',
+  failed: 'creativeStudio.canvas.workflows.status.failed',
+  cancelled: 'creativeStudio.canvas.workflows.status.cancelled',
+};
+
+const RUN_STATUS_FALLBACKS: Record<
+  WorkflowRunAggregateV1['record']['status'],
+  string
+> = {
   requested: '准备中',
   queued: '已排队',
   running: '运行中',
@@ -77,6 +94,7 @@ function latestRunByWorkflow(
 }
 
 function WorkflowRunStatus({ run }: { run: WorkflowRunAggregateV1 }) {
+  const { t } = useTranslation();
   const status = run.record.status;
   const icon = status === 'succeeded'
     ? <CheckOne {...iconProps} />
@@ -86,7 +104,9 @@ function WorkflowRunStatus({ run }: { run: WorkflowRunAggregateV1 }) {
   return (
     <span className={styles.runStatus} data-status={status}>
       {icon}
-      {RUN_STATUS_LABELS[status]}
+      {t(RUN_STATUS_KEYS[status], {
+        defaultValue: RUN_STATUS_FALLBACKS[status],
+      })}
     </span>
   );
 }
@@ -105,6 +125,7 @@ const CreativeCanvasWorkflowPanel: React.FC<CreativeCanvasWorkflowPanelProps> = 
   onOpenCenter,
   className,
 }) => {
+  const { t } = useTranslation();
   const [search, setSearch] = useState('');
   const runsByWorkflow = useMemo(() => latestRunByWorkflow(runtime.runs), [runtime.runs]);
   const filtered = useMemo(() => {
@@ -123,14 +144,38 @@ const CreativeCanvasWorkflowPanel: React.FC<CreativeCanvasWorkflowPanelProps> = 
     <section
       className={classNames(styles.panel, className)}
       data-canvas-product-panel='workflows'
-      aria-label='画布模板'
+      aria-label={t('creativeStudio.canvas.workflows.label', {
+        defaultValue: '画布模板',
+      })}
     >
       <header className={styles.header}>
         <div>
-          <h2>模板</h2>
-          <p>{workflows.length} 个模板{activeCount > 0 ? ` · ${activeCount} 个进行中` : ''}</p>
+          <h2>
+            {t('creativeStudio.canvas.workflows.title', {
+              defaultValue: '模板',
+            })}
+          </h2>
+          <p>
+            {t('creativeStudio.canvas.workflows.summary', {
+              count: workflows.length,
+              defaultValue: `${workflows.length} 个模板`,
+            })}
+            {activeCount > 0
+              ? t('creativeStudio.canvas.workflows.activeSummary', {
+                  count: activeCount,
+                  defaultValue: ` · ${activeCount} 个进行中`,
+                })
+              : ''}
+          </p>
         </div>
-        <button type='button' className={styles.iconButton} aria-label='打开模板工作台' onClick={onOpenCenter}>
+        <button
+          type='button'
+          className={styles.iconButton}
+          aria-label={t('creativeStudio.canvas.workflows.openCenter', {
+            defaultValue: '打开模板工作台',
+          })}
+          onClick={onOpenCenter}
+        >
           <Right {...iconProps} />
         </button>
       </header>
@@ -139,14 +184,20 @@ const CreativeCanvasWorkflowPanel: React.FC<CreativeCanvasWorkflowPanelProps> = 
         <input
           type='search'
           value={search}
-          placeholder='搜索模板'
-          aria-label='搜索模板'
+          placeholder={t('creativeStudio.canvas.workflows.searchPlaceholder', {
+            defaultValue: '搜索模板',
+          })}
+          aria-label={t('creativeStudio.canvas.workflows.searchLabel', {
+            defaultValue: '搜索模板',
+          })}
           onChange={(event) => setSearch(event.currentTarget.value)}
         />
         <button
           type='button'
           className={styles.iconButton}
-          aria-label='刷新模板'
+          aria-label={t('creativeStudio.canvas.workflows.refresh', {
+            defaultValue: '刷新模板',
+          })}
           disabled={loading}
           onClick={onRetry}
         >
@@ -158,22 +209,50 @@ const CreativeCanvasWorkflowPanel: React.FC<CreativeCanvasWorkflowPanelProps> = 
         <div className={styles.error} role='alert'>
           <Error {...iconProps} />
           <span>{error ?? runtime.loadError}</span>
-          <button type='button' onClick={onRetry}>重试</button>
+          <button type='button' onClick={onRetry}>
+            {t('creativeStudio.canvas.workflows.retry', {
+              defaultValue: '重试',
+            })}
+          </button>
         </div>
       ) : loading && workflows.length === 0 ? (
         <div className={styles.state} role='status'>
           <Loading className={styles.spinning} {...iconProps} />
-          正在载入模板…
+          {t('creativeStudio.canvas.workflows.loading', {
+            defaultValue: '正在载入模板…',
+          })}
         </div>
       ) : filtered.length === 0 ? (
         <div className={styles.state} role='status'>
           <Workbench {...iconProps} />
-          <strong>{workflows.length === 0 ? '暂无模板' : '没有匹配的模板'}</strong>
-          <span>可前往模板工作台创建和配置模板。</span>
-          <button type='button' onClick={onOpenCenter}>打开模板工作台</button>
+          <strong>
+            {workflows.length === 0
+              ? t('creativeStudio.canvas.workflows.empty', {
+                  defaultValue: '暂无模板',
+                })
+              : t('creativeStudio.canvas.workflows.noMatches', {
+                  defaultValue: '没有匹配的模板',
+                })}
+          </strong>
+          <span>
+            {t('creativeStudio.canvas.workflows.emptyDescription', {
+              defaultValue: '可前往模板工作台创建和配置模板。',
+            })}
+          </span>
+          <button type='button' onClick={onOpenCenter}>
+            {t('creativeStudio.canvas.workflows.openCenter', {
+              defaultValue: '打开模板工作台',
+            })}
+          </button>
         </div>
       ) : (
-        <div className={styles.list} role='list' aria-label='可运行模板'>
+        <div
+          className={styles.list}
+          role='list'
+          aria-label={t('creativeStudio.canvas.workflows.runnableLabel', {
+            defaultValue: '可运行模板',
+          })}
+        >
           {filtered.map((workflow) => {
             const run = runsByWorkflow.get(workflow.id) ?? null;
             const active = run ? ACTIVE_STATUSES.has(run.record.status) : false;
@@ -185,7 +264,21 @@ const CreativeCanvasWorkflowPanel: React.FC<CreativeCanvasWorkflowPanelProps> = 
                   <div className={styles.workflowIcon}><Workbench {...iconProps} /></div>
                   <div className={styles.identity}>
                     <strong title={workflow.metadata.name}>{workflow.metadata.name}</strong>
-                    <span>{workflow.metadata.category || '未分类'} · {workflow.output.kind === 'multi-image-series' ? `${workflow.output.targetCount} 张系列` : '单图'}</span>
+                    <span>
+                      {workflow.metadata.category ||
+                        t('creativeStudio.canvas.workflows.uncategorized', {
+                          defaultValue: '未分类',
+                        })}{' '}
+                      ·{' '}
+                      {workflow.output.kind === 'multi-image-series'
+                        ? t('creativeStudio.canvas.workflows.series', {
+                            count: workflow.output.targetCount,
+                            defaultValue: '{{count}} 张系列',
+                          })
+                        : t('creativeStudio.canvas.workflows.singleImage', {
+                            defaultValue: '单图',
+                          })}
+                    </span>
                   </div>
                 </div>
                 {workflow.metadata.description ? (
@@ -194,7 +287,14 @@ const CreativeCanvasWorkflowPanel: React.FC<CreativeCanvasWorkflowPanelProps> = 
                 {run ? (
                   <div className={styles.runRow}>
                     <WorkflowRunStatus run={run} />
-                    {resultCount > 0 ? <span>{resultCount} 项真实结果</span> : null}
+                    {resultCount > 0 ? (
+                      <span>
+                        {t('creativeStudio.canvas.workflows.resultCount', {
+                          count: resultCount,
+                          defaultValue: `${resultCount} 项真实结果`,
+                        })}
+                      </span>
+                    ) : null}
                   </div>
                 ) : null}
                 <div className={styles.actions}>
@@ -204,7 +304,17 @@ const CreativeCanvasWorkflowPanel: React.FC<CreativeCanvasWorkflowPanelProps> = 
                     onClick={() => onRun(workflow)}
                   >
                     <Play {...iconProps} />
-                    {active ? '正在运行' : run ? '再次运行' : '运行'}
+                    {active
+                      ? t('creativeStudio.canvas.workflows.runningAction', {
+                          defaultValue: '正在运行',
+                        })
+                      : run
+                        ? t('creativeStudio.canvas.workflows.rerun', {
+                            defaultValue: '再次运行',
+                          })
+                        : t('creativeStudio.canvas.workflows.run', {
+                            defaultValue: '运行',
+                          })}
                   </button>
                   {run && run.record.status === 'succeeded' && resultCount > 0 ? (
                     <button
@@ -213,10 +323,20 @@ const CreativeCanvasWorkflowPanel: React.FC<CreativeCanvasWorkflowPanelProps> = 
                       onClick={() => onInsertResults(run)}
                     >
                       {inserting ? <Loading className={styles.spinning} {...iconProps} /> : <Pic {...iconProps} />}
-                      {inserting ? '正在插入' : '插入结果'}
+                      {inserting
+                        ? t('creativeStudio.canvas.workflows.inserting', {
+                            defaultValue: '正在插入',
+                          })
+                        : t('creativeStudio.canvas.workflows.insertResults', {
+                            defaultValue: '插入结果',
+                          })}
                     </button>
                   ) : run?.record.status === 'awaiting-review' ? (
-                    <button type='button' onClick={onOpenCenter}>去审核</button>
+                    <button type='button' onClick={onOpenCenter}>
+                      {t('creativeStudio.canvas.workflows.review', {
+                        defaultValue: '去审核',
+                      })}
+                    </button>
                   ) : null}
                 </div>
               </article>

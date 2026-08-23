@@ -12,6 +12,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type {
   CreativeCanvasBackground,
@@ -199,25 +200,30 @@ const resolveSlot = (
   context: CreativeCanvasEditorContext
 ): React.ReactNode => (typeof slot === 'function' ? slot(context) : slot);
 
-const defaultLoading = () => (
+const defaultLoading = (label: string) => (
   <div className={styles.centerState} data-creative-canvas-state='loading' role='status'>
-    正在载入画布…
+    {label}
   </div>
 );
 
-const defaultNotFound = (projectId: string) => (
+const defaultNotFound = (projectId: string, title: string) => (
   <div className={styles.centerState} data-creative-canvas-state='not-found' role='status'>
-    <strong>画布不存在</strong>
+    <strong>{title}</strong>
     <span>{projectId}</span>
   </div>
 );
 
-const defaultError = (error: Error, retry: () => Promise<CreativeProjectDetail | undefined>) => (
+const defaultError = (
+  error: Error,
+  retry: () => Promise<CreativeProjectDetail | undefined>,
+  title: string,
+  retryLabel: string
+) => (
   <div className={styles.centerState} data-creative-canvas-state='error' role='alert'>
-    <strong>画布载入失败</strong>
+    <strong>{title}</strong>
     <span>{error.message}</span>
     <button type='button' onClick={() => void retry()}>
-      重试
+      {retryLabel}
     </button>
   </div>
 );
@@ -253,6 +259,13 @@ const RESIZE_CORNERS: readonly CanvasResizeCorner[] = [
   'bottom-right',
 ];
 
+const RESIZE_CORNER_LABEL_KEYS: Record<CanvasResizeCorner, string> = {
+  'top-left': 'creativeStudio.canvas.resizeCorners.topLeft',
+  'top-right': 'creativeStudio.canvas.resizeCorners.topRight',
+  'bottom-left': 'creativeStudio.canvas.resizeCorners.bottomLeft',
+  'bottom-right': 'creativeStudio.canvas.resizeCorners.bottomRight',
+};
+
 const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, CreativeCanvasEditorProps>(
   (
     {
@@ -263,7 +276,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       renderEdge,
       repository,
       saveDebounceMs,
-      ariaLabel = '创意工坊无限画布',
+      ariaLabel,
       className,
       topDock,
       leftPanel,
@@ -276,9 +289,9 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       onToggleMiniMap,
       showZoomControls = true,
       showSaveState = true,
-      renderLoading = defaultLoading,
-      renderNotFound = defaultNotFound,
-      renderError = defaultError,
+      renderLoading,
+      renderNotFound,
+      renderError,
       onStateChange,
       onSaveStateChange,
       onIntegrationIntent,
@@ -288,6 +301,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
     },
     ref
   ) => {
+    const { t } = useTranslation();
     const project = useCreativeProject(projectId, repository);
     const { controller: saveController, snapshot: saveSnapshot } = useCanvasCasSave(
       project.save,
@@ -1015,14 +1029,48 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       isLoading: project.isLoading,
       error: project.error,
     });
-    if (loadState === 'loading') return <>{renderLoading()}</>;
-    if (loadState === 'not-found') return <>{renderNotFound(projectId)}</>;
+    if (loadState === 'loading') {
+      return (
+        <>
+          {renderLoading?.() ??
+            defaultLoading(t('creativeStudio.canvas.editor.loading'))}
+        </>
+      );
+    }
+    if (loadState === 'not-found') {
+      return (
+        <>
+          {renderNotFound?.(projectId) ??
+            defaultNotFound(
+              projectId,
+              t('creativeStudio.canvas.editor.notFound')
+            )}
+        </>
+      );
+    }
     if (loadState === 'error' && project.error) {
-      return <>{renderError(project.error, project.refresh)}</>;
+      return (
+        <>
+          {renderError?.(project.error, project.refresh) ??
+            defaultError(
+              project.error,
+              project.refresh,
+              t('creativeStudio.canvas.editor.loadFailed'),
+              t('creativeStudio.canvas.actions.retry')
+            )}
+        </>
+      );
     }
 
     const baseDocument = baseDocumentRef.current ?? project.detail?.document;
-    if (!baseDocument) return <>{renderLoading()}</>;
+    if (!baseDocument) {
+      return (
+        <>
+          {renderLoading?.() ??
+            defaultLoading(t('creativeStudio.canvas.editor.loading'))}
+        </>
+      );
+    }
 
     const flush = () => saveController.flush();
     const context: CreativeCanvasEditorContext = {
@@ -1117,7 +1165,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
             <button
               type='button'
               className={`${styles.connectionHandle} ${styles.connectionHandleInput}`}
-              aria-label='连接输入'
+              aria-label={t('creativeStudio.canvas.editor.connectionInput')}
               data-canvas-connection-handle='target'
               data-canvas-handle-id='target'
               data-canvas-node-id={node.id}
@@ -1128,7 +1176,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
             <button
               type='button'
               className={`${styles.connectionHandle} ${styles.connectionHandleOutput}`}
-              aria-label='连接输出'
+              aria-label={t('creativeStudio.canvas.editor.connectionOutput')}
               data-canvas-connection-handle='source'
               data-canvas-handle-id='source'
               data-canvas-node-id={node.id}
@@ -1142,7 +1190,9 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
                   type='button'
                   className={styles.resizeHandle}
                   data-resize-corner={corner}
-                  aria-label={`调整节点大小：${corner}`}
+                  aria-label={t('creativeStudio.canvas.editor.resizeHandle', {
+                    corner: t(RESIZE_CORNER_LABEL_KEYS[corner]),
+                  })}
                   onPointerDown={(event) => beginNodeResize(node, corner, event)}
                 />
               ))
@@ -1186,22 +1236,31 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         role={saveSnapshot.status === 'conflict' || saveSnapshot.status === 'error' ? 'alert' : 'status'}
         aria-live='polite'
       >
-        {saveSnapshot.status === 'dirty' ? '等待保存' : null}
-        {saveSnapshot.status === 'saving' ? '正在保存' : null}
-        {saveSnapshot.status === 'saved' ? '已保存' : null}
+        {saveSnapshot.status === 'dirty'
+          ? t('creativeStudio.canvas.save.pending')
+          : null}
+        {saveSnapshot.status === 'saving'
+          ? t('creativeStudio.canvas.save.status.saving')
+          : null}
+        {saveSnapshot.status === 'saved'
+          ? t('creativeStudio.canvas.save.status.saved')
+          : null}
         {saveSnapshot.status === 'conflict' ? (
           <>
-            <span>远端版本已更新，本地更改未覆盖远端。</span>
+            <span>{t('creativeStudio.canvas.save.conflictMessage')}</span>
             <button type='button' onClick={() => void reloadRemote()}>
-              放弃本地更改并重新载入
+              {t('creativeStudio.canvas.save.reloadRemote')}
             </button>
           </>
         ) : null}
         {saveSnapshot.status === 'error' ? (
           <>
-            <span>{saveSnapshot.error?.message ?? '保存失败'}</span>
+            <span>
+              {saveSnapshot.error?.message ??
+                t('creativeStudio.canvas.save.status.error')}
+            </span>
             <button type='button' onClick={() => void saveController.flush()}>
-              重试保存
+              {t('creativeStudio.canvas.save.retry')}
             </button>
           </>
         ) : null}
@@ -1222,7 +1281,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         backgroundMode={canvasSurfaceBackground(background)}
         tool={tool}
         isPanning={interaction.isPanning}
-        ariaLabel={ariaLabel}
+        ariaLabel={ariaLabel ?? t('creativeStudio.canvas.editor.label')}
         tabIndex={disabled ? -1 : 0}
         aria-disabled={disabled}
         data-creative-canvas-editor

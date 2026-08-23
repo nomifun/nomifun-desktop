@@ -8,6 +8,7 @@ import type {
   CreativeStudioAgentMessage,
   CreativeStudioAgentProposal,
 } from '../../../agent';
+import type { TFunction } from 'i18next';
 import {
   parseCreativeCanvasAgentArtifact,
   type CreativeCanvasAgentArtifact,
@@ -23,11 +24,15 @@ export interface CreativeCanvasProposalProjection {
   proposals: readonly CreativeStudioAgentProposal[];
 }
 
+const fallbackTranslate = ((_: string, options?: { defaultValue?: unknown }) =>
+  String(options?.defaultValue ?? '')) as TFunction;
+
 /** Project strict artifacts plus durable receipt authority into card state. */
 export function projectCreativeCanvasAgentProposals(
   messages: readonly CreativeStudioAgentMessage[],
   overrides: Readonly<Record<string, CreativeCanvasProposalOverride>>,
-  appliedProposalMessageIds: readonly string[]
+  appliedProposalMessageIds: readonly string[],
+  t: TFunction = fallbackTranslate
 ): CreativeCanvasProposalProjection {
   const artifacts = new Map<string, CreativeCanvasAgentArtifact>();
   const proposals: CreativeStudioAgentProposal[] = [];
@@ -52,10 +57,14 @@ export function projectCreativeCanvasAgentProposals(
     } catch {
       proposals.push({
         messageId: message.id,
-        summary: 'Agent 返回的画布提案格式无效',
+        summary: t('creativeStudio.agent.proposal.invalidSummary', {
+          defaultValue: 'Agent 返回的画布提案格式无效',
+        }),
         opCount: 0,
         state: 'invalid',
-        errorMessage: '该提案未通过严格合同校验，不能应用到画布。',
+        errorMessage: t('creativeStudio.agent.proposal.invalidDescription', {
+          defaultValue: '该提案未通过严格合同校验，不能应用到画布。',
+        }),
       });
     }
   }

@@ -28,6 +28,7 @@ import {
 } from '@icon-park/react';
 import classNames from 'classnames';
 import React, { useId, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { CreativeAsset, CreativeAssetKind } from '../types';
 import CreativeAssetMedia, { creativeAssetKindIcon } from './CreativeAssetMedia';
@@ -44,7 +45,7 @@ import type {
   CreativeAssetUploadItem,
   CreativeAssetViewMode,
 } from './types';
-import { DEFAULT_CREATIVE_ASSET_LIBRARY_LABELS } from './types';
+import { createCreativeAssetLibraryLabels } from './types';
 import styles from './CreativeAssetLibrary.module.css';
 
 export interface CreativeAssetLibraryProps {
@@ -312,7 +313,8 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
   onRetryUpload,
   onDismissUpload,
 }) => {
-  const labels = { ...DEFAULT_CREATIVE_ASSET_LIBRARY_LABELS, ...labelOverrides };
+  const { t } = useTranslation();
+  const labels = { ...createCreativeAssetLibraryLabels(t), ...labelOverrides };
   const inputRef = useRef<HTMLInputElement>(null);
   const uploadHintId = useId();
   const [dragDepth, setDragDepth] = useState(0);

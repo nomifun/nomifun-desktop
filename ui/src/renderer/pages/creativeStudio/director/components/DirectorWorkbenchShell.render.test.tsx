@@ -5,8 +5,10 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { createInstance } from 'i18next';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { I18nextProvider, initReactI18next } from 'react-i18next';
 
 import DirectorWorkbenchShell from './DirectorWorkbenchShell';
 import type {
@@ -14,6 +16,14 @@ import type {
   DirectorInspectorValue,
   DirectorWorkbenchShellProps,
 } from './types';
+
+const testI18n = createInstance();
+await testI18n.use(initReactI18next).init({
+  lng: 'zh-CN',
+  fallbackLng: 'zh-CN',
+  resources: { 'zh-CN': { translation: {} } },
+  interpolation: { escapeValue: false },
+});
 
 const environmentInspector: DirectorInspectorValue = {
   kind: 'environment',
@@ -163,7 +173,11 @@ const baseProps: DirectorWorkbenchShellProps = {
 };
 
 const renderShell = (overrides: Partial<DirectorWorkbenchShellProps> = {}) =>
-  renderToStaticMarkup(<DirectorWorkbenchShell {...baseProps} {...overrides} />);
+  renderToStaticMarkup(
+    <I18nextProvider i18n={testI18n}>
+      <DirectorWorkbenchShell {...baseProps} {...overrides} />
+    </I18nextProvider>
+  );
 
 describe('DirectorWorkbenchShell presentation', () => {
   test('renders the source-density shell around caller-owned viewport and gizmo slots', () => {

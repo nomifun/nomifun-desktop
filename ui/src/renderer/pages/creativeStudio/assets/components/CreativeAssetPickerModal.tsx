@@ -6,7 +6,9 @@
 
 import { Button, Empty, Input, Modal, Spin } from '@arco-design/web-react';
 import { Plus } from '@icon-park/react';
+import type { TFunction } from 'i18next';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { CreativeAsset, CreativeAssetKind } from '../types';
 import CreativeAssetMedia from './CreativeAssetMedia';
@@ -32,17 +34,23 @@ export interface CreativeAssetPickerModalProps {
   onConfirm?(): void;
 }
 
-const KIND_LABELS: Record<CreativeAssetKind, string> = {
-  image: '图片',
-  video: '视频',
-  audio: '音频',
-  text: '文本',
-};
-
-function selectionHint(count: number, limit: number | undefined): string {
-  if (limit === 1) return count > 0 ? '已选择 1 项' : '请选择 1 项素材';
-  if (limit !== undefined) return `已选择 ${count}/${limit} 项`;
-  return `已选择 ${count} 项`;
+function selectionHint(t: TFunction, count: number, limit: number | undefined): string {
+  if (limit === 1) {
+    return count > 0
+      ? t('creativeStudio.assets.picker.oneSelected', { defaultValue: '已选择 1 项' })
+      : t('creativeStudio.assets.picker.oneRequired', { defaultValue: '请选择 1 项素材' });
+  }
+  if (limit !== undefined) {
+    return t('creativeStudio.assets.picker.limitedSelection', {
+      defaultValue: '已选择 {{selected}}/{{limit}} 项',
+      selected: count,
+      limit,
+    });
+  }
+  return t('creativeStudio.assets.picker.selectedCount', {
+    defaultValue: '已选择 {{itemCount}} 项',
+    itemCount: count,
+  });
 }
 
 const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
@@ -54,7 +62,7 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
   loadingMore = false,
   hasMore,
   error = null,
-  title = '选择真实素材',
+  title,
   selectionLimit,
   uploading = false,
   onToggle,
@@ -64,10 +72,20 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
   onCancel,
   onConfirm,
 }) => {
+  const { t, i18n } = useTranslation();
   const [scope, setScope] = useState<'mine' | 'library'>('mine');
   const [kind, setKind] = useState<'all' | CreativeAssetKind>('all');
   const [search, setSearch] = useState('');
   const uploadRef = useRef<HTMLInputElement>(null);
+  const kindLabels = useMemo<Record<CreativeAssetKind, string>>(
+    () => ({
+      image: t('creativeStudio.assets.kind.image', { defaultValue: '图片' }),
+      video: t('creativeStudio.assets.kind.video', { defaultValue: '视频' }),
+      audio: t('creativeStudio.assets.kind.audio', { defaultValue: '音频' }),
+      text: t('creativeStudio.assets.kind.text', { defaultValue: '文本' }),
+    }),
+    [t]
+  );
   const compatible = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
     return assets.filter((asset) => {
@@ -81,7 +99,17 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
         .includes(query);
     });
   }, [acceptedKinds, assets, kind, scope, search]);
-  const acceptedLabel = acceptedKinds.map((kind) => KIND_LABELS[kind]).join('、');
+  const acceptedLabel = useMemo(() => {
+    const labels = acceptedKinds.map((acceptedKind) => kindLabels[acceptedKind]);
+    try {
+      return new Intl.ListFormat(i18n.resolvedLanguage ?? i18n.language, {
+        style: 'short',
+        type: 'conjunction',
+      }).format(labels);
+    } catch {
+      return labels.join('、');
+    }
+  }, [acceptedKinds, i18n.language, i18n.resolvedLanguage, kindLabels]);
   const accept = acceptedKinds
     .map((acceptedKind) => {
       if (acceptedKind === 'image') return 'image/*';
@@ -103,7 +131,7 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
       visible={open}
       alignCenter={false}
       className={styles.modal}
-      title={title}
+      title={title ?? t('creativeStudio.assets.picker.title', { defaultValue: '选择真实素材' })}
       footer={null}
       autoFocus={false}
       focusLock
@@ -113,7 +141,11 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
       }
       onCancel={onCancel}
     >
-      <div className={styles.scopeTabs} role='tablist' aria-label='素材范围'>
+      <div
+        className={styles.scopeTabs}
+        role='tablist'
+        aria-label={t('creativeStudio.assets.picker.scopeLabel', { defaultValue: '素材范围' })}
+      >
         <button
           type='button'
           role='tab'
@@ -121,7 +153,7 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
           data-active={scope === 'mine'}
           onClick={() => setScope('mine')}
         >
-          我的素材
+          {t('creativeStudio.assets.picker.myAssets', { defaultValue: '我的素材' })}
         </button>
         <button
           type='button'
@@ -130,7 +162,7 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
           data-active={scope === 'library'}
           onClick={() => setScope('library')}
         >
-          素材库
+          {t('creativeStudio.assets.picker.library', { defaultValue: '素材库' })}
         </button>
       </div>
 
@@ -138,13 +170,17 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
         value={search}
         className={styles.search}
         allowClear
-        placeholder='搜索素材'
-        aria-label='搜索素材'
+        placeholder={t('creativeStudio.assets.picker.searchPlaceholder', { defaultValue: '搜索素材' })}
+        aria-label={t('creativeStudio.assets.picker.searchLabel', { defaultValue: '搜索素材' })}
         onChange={setSearch}
       />
 
       <div className={styles.filterRow}>
-        <div className={styles.kindFilters} role='group' aria-label='素材类型'>
+        <div
+          className={styles.kindFilters}
+          role='group'
+          aria-label={t('creativeStudio.assets.picker.kindLabel', { defaultValue: '素材类型' })}
+        >
           {(['all', ...acceptedKinds] as const).map((value) => (
             <button
               key={value}
@@ -152,7 +188,9 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
               data-active={kind === value}
               onClick={() => setKind(value)}
             >
-              {value === 'all' ? '全部' : KIND_LABELS[value]}
+              {value === 'all'
+                ? t('creativeStudio.assets.kind.all', { defaultValue: '全部' })
+                : kindLabels[value]}
             </button>
           ))}
         </div>
@@ -177,31 +215,48 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
               icon={<Plus theme='outline' size={13} fill='currentColor' />}
               onClick={() => uploadRef.current?.click()}
             >
-              新增素材
+              {t('creativeStudio.assets.picker.addAsset', { defaultValue: '新增素材' })}
             </Button>
           </>
         ) : null}
       </div>
 
       <div className={styles.summary}>
-        <span>可选择{acceptedLabel || '兼容素材'}</span>
-        <strong>{selectionHint(selectedIds.length, selectionLimit)}</strong>
+        <span>
+          {t('creativeStudio.assets.picker.acceptedKinds', {
+            defaultValue: '可选择{{kinds}}',
+            kinds:
+              acceptedLabel ||
+              t('creativeStudio.assets.picker.compatibleAssets', { defaultValue: '兼容素材' }),
+          })}
+        </span>
+        <strong>{selectionHint(t, selectedIds.length, selectionLimit)}</strong>
       </div>
 
       {loading && compatible.length === 0 ? (
         <div className={styles.empty} role='status'>
           <Spin />
-          <span>正在载入素材…</span>
+          <span>{t('creativeStudio.assets.picker.loading', { defaultValue: '正在载入素材…' })}</span>
         </div>
       ) : error && compatible.length === 0 ? (
         <div className={styles.empty} role='alert'>
-          <strong>素材加载失败</strong>
+          <strong>{t('creativeStudio.assets.picker.loadFailed', { defaultValue: '素材加载失败' })}</strong>
           <span>{error.message}</span>
-          {onRetry ? <Button onClick={onRetry}>重试</Button> : null}
+          {onRetry ? (
+            <Button onClick={onRetry}>
+              {t('creativeStudio.assets.picker.retry', { defaultValue: '重试' })}
+            </Button>
+          ) : null}
         </div>
       ) : compatible.length === 0 ? (
         <div className={styles.empty} role='status'>
-          <Empty description={search || kind !== 'all' ? '没有匹配的素材' : '没有素材'} />
+          <Empty
+            description={
+              search || kind !== 'all'
+                ? t('creativeStudio.assets.picker.noMatches', { defaultValue: '没有匹配的素材' })
+                : t('creativeStudio.assets.picker.empty', { defaultValue: '没有素材' })
+            }
+          />
         </div>
       ) : (
         <div className={styles.grid} role='listbox' aria-multiselectable={selectionLimit !== 1}>
@@ -217,16 +272,35 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
                 data-selected={selected}
                 role='option'
                 aria-selected={selected}
-                aria-label={`${asset.title}，${selected ? '已选择' : '未选择'}`}
+                aria-label={t('creativeStudio.assets.picker.assetSelectionLabel', {
+                  defaultValue: '{{title}}，{{state}}',
+                  title: asset.title,
+                  state: selected
+                    ? t('creativeStudio.assets.picker.selected', { defaultValue: '已选择' })
+                    : t('creativeStudio.assets.picker.notSelected', { defaultValue: '未选择' }),
+                })}
                 disabled={limitReached}
                 onClick={() => onToggle(asset)}
               >
                 <span className={styles.media}>
-                  <CreativeAssetMedia asset={asset} compact unavailableLabel='素材文件不可用' />
+                  <CreativeAssetMedia
+                    asset={asset}
+                    compact
+                    unavailableLabel={t('creativeStudio.assets.picker.mediaUnavailable', {
+                      defaultValue: '素材文件不可用',
+                    })}
+                  />
                 </span>
                 <span className={styles.identity}>
                   <strong title={asset.title}>{asset.title}</strong>
-                  <small>{KIND_LABELS[asset.kind]} · {selected ? '已选择' : '点击选择'}</small>
+                  <small>
+                    {kindLabels[asset.kind]} ·{' '}
+                    {selected
+                      ? t('creativeStudio.assets.picker.selected', { defaultValue: '已选择' })
+                      : t('creativeStudio.assets.picker.clickToSelect', {
+                          defaultValue: '点击选择',
+                        })}
+                  </small>
                 </span>
               </button>
             );
@@ -238,14 +312,18 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
         <div>
           {hasMore ? (
             <Button loading={loadingMore} disabled={loadingMore} onClick={onLoadMore}>
-              加载更多
+              {t('creativeStudio.assets.picker.loadMore', { defaultValue: '加载更多' })}
             </Button>
           ) : null}
         </div>
         <div className={styles.actions}>
-          {onConfirm ? <Button onClick={onCancel}>取消</Button> : null}
+          {onConfirm ? (
+            <Button onClick={onCancel}>
+              {t('creativeStudio.assets.picker.cancel', { defaultValue: '取消' })}
+            </Button>
+          ) : null}
           <Button type='primary' onClick={onConfirm ?? onCancel}>
-            完成
+            {t('creativeStudio.assets.picker.done', { defaultValue: '完成' })}
           </Button>
         </div>
       </footer>

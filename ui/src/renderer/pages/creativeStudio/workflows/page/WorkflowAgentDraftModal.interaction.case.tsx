@@ -110,12 +110,12 @@ const run = async (): Promise<void> => {
       </I18nextProvider>
     );
 
-    const dialog = await screen.findByRole('dialog', { name: 'AI 创建模板' });
+    const dialog = await screen.findByRole('dialog', { name: 'Create template with AI' });
     const modal = within(dialog);
-    fireEvent.change(modal.getByRole('textbox', { name: '模板需求' }), {
+    fireEvent.change(modal.getByRole('textbox', { name: 'Template request' }), {
       target: { value: 'Create a product hero workflow' },
     });
-    fireEvent.click(modal.getByRole('combobox', { name: '对话模型' }));
+    fireEvent.click(modal.getByRole('combobox', { name: 'Chat model' }));
 
     const option = await screen.findByRole('option', {
       name: 'qa-workflow-chat openai.chat_text',
@@ -128,7 +128,7 @@ const run = async (): Promise<void> => {
       assert.equal(selector?.getAttribute('data-selection-state'), 'resolved');
       assert.match(selector?.textContent ?? '', /qa-workflow-chat/);
       assert.equal(
-        (modal.getByRole('button', { name: '生成模板草稿' }) as HTMLButtonElement)
+        (modal.getByRole('button', { name: 'Generate template draft' }) as HTMLButtonElement)
           .disabled,
         false
       );

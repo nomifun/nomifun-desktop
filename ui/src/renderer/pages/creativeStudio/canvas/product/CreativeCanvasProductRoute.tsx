@@ -15,6 +15,7 @@ import {
   Ungroup,
 } from '@icon-park/react';
 import { Button, Modal, Tooltip } from '@arco-design/web-react';
+import type { TFunction } from 'i18next';
 import React, {
   useCallback,
   useEffect,
@@ -36,7 +37,7 @@ import {
 } from '../../assets';
 import {
   creativeAssetDownloadName,
-  manualUploadRejectionMessage,
+  type CreativeAssetUploadRejection,
 } from '../../assets/page/model';
 import {
   CREATIVE_STUDIO_PROJECTS_PATH,
@@ -366,26 +367,64 @@ const connectionErrorMessage = (
   code: Extract<
     CanvasIntegrationIntent,
     { type: 'connection/rejected' }
-  >['code']
+  >['code'],
+  t: TFunction
 ): string => {
   switch (code) {
     case 'missing_source':
     case 'missing_target':
-      return '连接端点已经不存在';
+      return t('creativeStudio.canvas.connection.errors.missingEndpoint', {
+        defaultValue: '连接端点已经不存在',
+      });
     case 'self_connection':
-      return '节点不能连接到自身';
+      return t('creativeStudio.canvas.connection.errors.selfConnection', {
+        defaultValue: '节点不能连接到自身',
+      });
     case 'duplicate_connection':
-      return '这两个节点已经连接';
+      return t('creativeStudio.canvas.connection.errors.duplicate', {
+        defaultValue: '这两个节点已经连接',
+      });
     case 'group_connection':
-      return '节点组不能参与生成连接';
+      return t('creativeStudio.canvas.connection.errors.groupUnsupported', {
+        defaultValue: '节点组不能参与生成连接',
+      });
     case 'config_to_config':
-      return '两个配置节点不能直接连接';
+      return t('creativeStudio.canvas.connection.errors.configToConfig', {
+        defaultValue: '两个配置节点不能直接连接',
+      });
     case 'director_output_not_supported':
-      return '导演节点只能接收输入';
+      return t('creativeStudio.canvas.connection.errors.directorInputOnly', {
+        defaultValue: '导演节点只能接收输入',
+      });
     case 'director_requires_image_input':
-      return '导演节点只接受图片或全景图输入';
+      return t('creativeStudio.canvas.connection.errors.directorImageOnly', {
+        defaultValue: '导演节点只接受图片或全景图输入',
+      });
     case 'no_valid_drop_target':
-      return '请将连接拖到对端节点的有效连接点';
+      return t('creativeStudio.canvas.connection.errors.invalidDropTarget', {
+        defaultValue: '请将连接拖到对端节点的有效连接点',
+      });
+  }
+};
+
+const manualUploadRejectionMessage = (
+  rejection: CreativeAssetUploadRejection,
+  t: TFunction
+): string => {
+  switch (rejection) {
+    case 'audio_unsupported':
+      return t('creativeStudio.canvas.upload.audioUnsupported', {
+        defaultValue:
+          '暂不支持手动上传音频；通过音频工作台生成的音频仍会进入素材库。',
+      });
+    case 'file_too_large':
+      return t('creativeStudio.canvas.upload.assetTooLarge', {
+        defaultValue: '单个素材不能超过 64 MB。',
+      });
+    case 'unsupported_media_type':
+      return t('creativeStudio.canvas.upload.mediaTypeUnsupported', {
+        defaultValue: '手动上传仅支持图片和视频文件。',
+      });
   }
 };
 
@@ -425,8 +464,10 @@ const SaveRecoveryAction: React.FC<{
   requiresAuthoritativeReload: boolean;
   onReload(): void;
   onRetry(): void;
-}> = ({ save, busy, notice, requiresAuthoritativeReload, onReload, onRetry }) => (
-  <>
+}> = ({ save, busy, notice, requiresAuthoritativeReload, onReload, onRetry }) => {
+  const { t } = useTranslation();
+  return (
+    <>
     {notice ? (
       <span className={styles.notice} role="status" title={notice}>
         {notice}
@@ -444,7 +485,9 @@ const SaveRecoveryAction: React.FC<{
         ) : (
           <Refresh {...iconProps} />
         )}
-        重新载入远端
+        {t('creativeStudio.canvas.save.reloadRemote', {
+          defaultValue: '重新载入远端',
+        })}
       </button>
     ) : null}
     {save.status === 'error' ? (
@@ -459,11 +502,14 @@ const SaveRecoveryAction: React.FC<{
         ) : (
           <Refresh {...iconProps} />
         )}
-        重试保存
+        {t('creativeStudio.canvas.save.retry', {
+          defaultValue: '重试保存',
+        })}
       </button>
     ) : null}
-  </>
-);
+    </>
+  );
+};
 
 const CanvasTaskRuntimeAction: React.FC<{
   label: string;
@@ -472,6 +518,7 @@ const CanvasTaskRuntimeAction: React.FC<{
   onCancel(taskId: string): void;
   onRetry(taskId: string): void;
 }> = ({ label, snapshot, busy, onCancel, onRetry }) => {
+  const { t } = useTranslation();
   const taskLabel = (
     _task: CreativeWorkbenchRuntimeSnapshot['entries'][number]['task']
   ) => label;
@@ -489,7 +536,10 @@ const CanvasTaskRuntimeAction: React.FC<{
           role="alert"
           title={requestError.requestError?.message}
         >
-          {taskLabel(requestError.task)}同步中断
+          {t('creativeStudio.canvas.tasks.syncInterrupted', {
+            task: taskLabel(requestError.task),
+            defaultValue: '{{task}}同步中断',
+          })}
         </span>
         <button
           type="button"
@@ -502,7 +552,9 @@ const CanvasTaskRuntimeAction: React.FC<{
           ) : (
             <Refresh {...iconProps} />
           )}
-          重试任务同步
+          {t('creativeStudio.canvas.tasks.retrySync', {
+            defaultValue: '重试任务同步',
+          })}
         </button>
       </>
     );
@@ -512,8 +564,14 @@ const CanvasTaskRuntimeAction: React.FC<{
       <>
         <span className={styles.notice} role="status">
           {active.task.status === 'queued'
-            ? `${taskLabel(active.task)}等待执行`
-            : `${taskLabel(active.task)}生成中`}
+            ? t('creativeStudio.canvas.tasks.queued', {
+                task: taskLabel(active.task),
+                defaultValue: '{{task}}等待执行',
+              })
+            : t('creativeStudio.canvas.tasks.running', {
+                task: taskLabel(active.task),
+                defaultValue: '{{task}}生成中',
+              })}
         </span>
         <button
           type="button"
@@ -526,7 +584,9 @@ const CanvasTaskRuntimeAction: React.FC<{
           ) : (
             <CloseOne {...iconProps} />
           )}
-          取消任务
+          {t('creativeStudio.canvas.tasks.cancel', {
+            defaultValue: '取消任务',
+          })}
         </button>
       </>
     );
@@ -534,7 +594,10 @@ const CanvasTaskRuntimeAction: React.FC<{
   if (snapshot.recoveringCount > 0) {
     return (
       <span className={styles.notice} role="status">
-        正在恢复{label}…
+        {t('creativeStudio.canvas.tasks.recovering', {
+          task: label,
+          defaultValue: '正在恢复{{task}}…',
+        })}
       </span>
     );
   }
@@ -551,7 +614,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   // Legacy local adapter: the migrated product internals still use projectId.
   const projectId = canvasId;
   const navigate = useNavigate();
-  const { i18n } = useTranslation();
+  const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language ?? 'zh-CN';
   const project = useCreativeProject(projectId || null);
   const modelCatalog = useNomiCreativeModelCatalog();
@@ -1071,8 +1134,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
           handleBottomViewChange('timeline');
           setNotice(
             directors.length === 1
-              ? '画布已有唯一导演节点，已为你选中。'
-              : '画布存在多个导演节点，请在时间线面板中处理冲突。'
+              ? t('creativeStudio.canvas.notices.directorSelected', {
+                  defaultValue: '画布已有唯一导演节点，已为你选中。',
+                })
+              : t('creativeStudio.canvas.notices.directorConflict', {
+                  defaultValue: '画布存在多个导演节点，请在时间线面板中处理冲突。',
+                })
           );
           return;
         }
@@ -1085,7 +1152,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
       editor.dispatch(canvasCommands.addNode(node));
       if (kind === 'director') {
         handleBottomViewChange('timeline');
-        setNotice('已创建当前画布唯一的导演节点。');
+        setNotice(
+          t('creativeStudio.canvas.notices.directorCreated', {
+            defaultValue: '已创建当前画布唯一的导演节点。',
+          })
+        );
       } else {
         setNotice(null);
       }
@@ -1124,11 +1195,19 @@ const CreativeCanvasProductRoute: React.FC = () => {
 
   const flushBeforeLeave = useCallback(async (): Promise<boolean> => {
     if (imageToolBusyRef.current) {
-      setNotice('图片工具仍在处理，请等待完成后再离开。');
+      setNotice(
+        t('creativeStudio.canvas.notices.imageToolBusyLeave', {
+          defaultValue: '图片工具仍在处理，请等待完成后再离开。',
+        })
+      );
       return false;
     }
     if (agentOpsReloadRequiredRef.current) {
-      setNotice('必须先重新载入 Agent 提案提交后的远端画布。');
+      setNotice(
+        t('creativeStudio.canvas.notices.agentReloadRequired', {
+          defaultValue: '必须先重新载入 Agent 提案提交后的远端画布。',
+        })
+      );
       return false;
     }
     const agentOpsApply = agentOpsApplyRef.current;
@@ -1136,18 +1215,30 @@ const CreativeCanvasProductRoute: React.FC = () => {
       try {
         await agentOpsApply;
       } catch {
-        setNotice('Agent 提案的应用结果尚未确认，请复核远端画布后再离开。');
+        setNotice(
+          t('creativeStudio.canvas.notices.agentApplyUnconfirmedLeave', {
+            defaultValue: 'Agent 提案的应用结果尚未确认，请复核远端画布后再离开。',
+          })
+        );
         return false;
       }
     }
     if (agentOpsReloadRequiredRef.current) {
-      setNotice('必须先重新载入 Agent 提案提交后的远端画布。');
+      setNotice(
+        t('creativeStudio.canvas.notices.agentReloadRequired', {
+          defaultValue: '必须先重新载入 Agent 提案提交后的远端画布。',
+        })
+      );
       return false;
     }
     if (!((await agentPanelRef.current?.prepareToLeave()) ?? true))
       return false;
     if (agentOpsReloadRequiredRef.current) {
-      setNotice('必须先重新载入 Agent 提案提交后的远端画布。');
+      setNotice(
+        t('creativeStudio.canvas.notices.agentReloadRequired', {
+          defaultValue: '必须先重新载入 Agent 提案提交后的远端画布。',
+        })
+      );
       return false;
     }
     const editor = editorRef.current;
@@ -1155,10 +1246,19 @@ const CreativeCanvasProductRoute: React.FC = () => {
     const result = await editor.flush();
     const canLeave = canLeaveCreativeCanvasAfterFlush(result);
     if (!canLeave) {
-      setNotice(creativeCanvasBlockedLeaveMessage(result) ?? '画布尚未安全保存。');
+      setNotice(
+        creativeCanvasBlockedLeaveMessage(result) ??
+          t('creativeStudio.canvas.save.notSafe', {
+            defaultValue: '画布尚未安全保存。',
+          })
+      );
     }
     if (agentOpsReloadRequiredRef.current) {
-      setNotice('必须先重新载入 Agent 提案提交后的远端画布。');
+      setNotice(
+        t('creativeStudio.canvas.notices.agentReloadRequired', {
+          defaultValue: '必须先重新载入 Agent 提案提交后的远端画布。',
+        })
+      );
       return false;
     }
     return canLeave;
@@ -1170,7 +1270,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
       activeSessionId: string | null
     ) => {
       const editor = editorRef.current;
-      if (!editor) throw new Error('画布尚未载入，无法保存 Agent 会话。');
+      if (!editor) {
+        throw new Error(
+          t('creativeStudio.canvas.errors.agentSessionSaveUnavailable', {
+            defaultValue: '画布尚未载入，无法保存 Agent 会话。',
+          })
+        );
+      }
       await editor.persistAgentSessions(sessions, activeSessionId);
     },
     []
@@ -1182,19 +1288,39 @@ const CreativeCanvasProductRoute: React.FC = () => {
       ops: readonly CreativeCanvasAgentOp[]
     ) => {
       if (agentOpsApplyRef.current) {
-        throw new Error('已有 Agent 提案正在应用。');
+        throw new Error(
+          t('creativeStudio.canvas.errors.agentApplyBusy', {
+            defaultValue: '已有 Agent 提案正在应用。',
+          })
+        );
       }
       if (
         agentOpsBlockedByCanvasMutation ||
         assetImportBusyRef.current ||
         imageToolBusyRef.current
       ) {
-        throw new Error('画布仍有创作或恢复任务，请等待完成后再应用 Agent 提案。');
+        throw new Error(
+          t('creativeStudio.canvas.errors.agentApplyBlocked', {
+            defaultValue:
+              '画布仍有创作或恢复任务，请等待完成后再应用 Agent 提案。',
+          })
+        );
       }
       const editor = editorRef.current;
-      if (!editor) throw new Error('画布尚未载入，无法应用 Agent 提案。');
+      if (!editor) {
+        throw new Error(
+          t('creativeStudio.canvas.errors.agentApplyUnavailable', {
+            defaultValue: '画布尚未载入，无法应用 Agent 提案。',
+          })
+        );
+      }
       flushSync(() => setAgentOpsApplyBusy(true));
-      setNotice(`正在应用 Agent 提案的 ${ops.length} 项画布操作…`);
+      setNotice(
+        t('creativeStudio.canvas.notices.applyingAgentOps', {
+          count: ops.length,
+          defaultValue: '正在应用 Agent 提案的 {{count}} 项画布操作…',
+        })
+      );
       const operation = (async () => {
         const reloadRemoteSafely = async (): Promise<boolean> => {
           try {
@@ -1206,15 +1332,25 @@ const CreativeCanvasProductRoute: React.FC = () => {
         const flush = await editor.flush();
         if (!canLeaveCreativeCanvasAfterFlush(flush)) {
           setNotice(
-            creativeCanvasBlockedLeaveMessage(flush) ?? '画布尚未安全保存。'
+            creativeCanvasBlockedLeaveMessage(flush) ??
+              t('creativeStudio.canvas.save.notSafe', {
+                defaultValue: '画布尚未安全保存。',
+              })
           );
           throw new Error(
-            creativeCanvasBlockedLeaveMessage(flush) ?? '画布尚未安全保存。'
+            creativeCanvasBlockedLeaveMessage(flush) ??
+              t('creativeStudio.canvas.save.notSafe', {
+                defaultValue: '画布尚未安全保存。',
+              })
           );
         }
         const expectedRevision = editor.getSaveState().revision;
         if (expectedRevision === null) {
-          throw new Error('画布缺少可验证的远端 revision。');
+          throw new Error(
+            t('creativeStudio.canvas.errors.missingRemoteRevision', {
+              defaultValue: '画布缺少可验证的远端 revision。',
+            })
+          );
         }
         let replayed = false;
         try {
@@ -1231,21 +1367,36 @@ const CreativeCanvasProductRoute: React.FC = () => {
           if (reloaded) agentPanelRef.current?.refreshAuthority();
           setNotice(
             reloaded
-              ? 'Agent 提案的应用结果未确认；已重新载入远端画布，请复核。'
-              : 'Agent 提案应用失败，远端画布也暂时无法重新载入。'
+              ? t('creativeStudio.canvas.notices.agentApplyReloaded', {
+                  defaultValue:
+                    'Agent 提案的应用结果未确认；已重新载入远端画布，请复核。',
+                })
+              : t('creativeStudio.canvas.notices.agentApplyReloadFailed', {
+                  defaultValue: 'Agent 提案应用失败，远端画布也暂时无法重新载入。',
+                })
           );
           throw error;
         }
         if (!(await reloadRemoteSafely())) {
           setAgentOpsReloadFence(true);
-          setNotice('Agent 提案已提交，但远端画布暂时无法重新载入。');
+          setNotice(
+            t('creativeStudio.canvas.notices.agentSubmittedReloadFailed', {
+              defaultValue: 'Agent 提案已提交，但远端画布暂时无法重新载入。',
+            })
+          );
           return;
         }
         setAgentOpsReloadFence(false);
         setNotice(
           replayed
-            ? `已确认该 Agent 提案此前应用的 ${ops.length} 项画布操作。`
-            : `已应用 Agent 提案的 ${ops.length} 项画布操作。`
+            ? t('creativeStudio.canvas.notices.agentOpsReplayed', {
+                count: ops.length,
+                defaultValue: '已确认该 Agent 提案此前应用的 {{count}} 项画布操作。',
+              })
+            : t('creativeStudio.canvas.notices.agentOpsApplied', {
+                count: ops.length,
+                defaultValue: '已应用 Agent 提案的 {{count}} 项画布操作。',
+              })
         );
       })();
       agentOpsApplyRef.current = operation;
@@ -1319,7 +1470,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const insertAssetAtWorld = useCallback(
     (asset: CreativeAsset, worldPosition: CanvasPoint, asPanorama = false) => {
       const editor = editorRef.current;
-      if (!editor) throw new Error('画布尚未载入，无法插入素材。');
+      if (!editor) {
+        throw new Error(
+          t('creativeStudio.canvas.errors.assetInsertUnavailable', {
+            defaultValue: '画布尚未载入，无法插入素材。',
+          })
+        );
+      }
       const state = editor.getState();
       const kind = asPanorama ? 'panorama' : asset.kind;
       const position = centeredNodePosition(kind, worldPosition);
@@ -1351,7 +1508,17 @@ const CreativeCanvasProductRoute: React.FC = () => {
       );
       editor.dispatch(canvasCommands.addNode(node));
       setNotice(
-        `已将“${asset.title}”插入为${asPanorama ? '全景图' : '素材'}节点。`
+        t('creativeStudio.canvas.notices.assetInserted', {
+          title: asset.title,
+          kind: asPanorama
+            ? t('creativeStudio.canvas.nodeKinds.panorama', {
+                defaultValue: '全景图',
+              })
+            : t('creativeStudio.canvas.notices.assetKind', {
+                defaultValue: '素材',
+              }),
+          defaultValue: '已将“{{title}}”插入为{{kind}}节点。',
+        })
       );
       void assets.reload();
     },
@@ -1365,19 +1532,34 @@ const CreativeCanvasProductRoute: React.FC = () => {
       panoramaChoice: 'after-upload-if-2-to-1' | 'not-applicable'
     ) => {
       if (assetImportBusyRef.current) {
-        setNotice('已有素材正在上传，请等待完成。');
+        setNotice(
+          t('creativeStudio.canvas.notices.uploadBusy', {
+            defaultValue: '已有素材正在上传，请等待完成。',
+          })
+        );
         return;
       }
       assetImportBusyRef.current = true;
       setAssetImportBusy(true);
-      setNotice(`正在上传“${file.name}”…`);
+      setNotice(
+        t('creativeStudio.canvas.notices.uploading', {
+          name: file.name,
+          defaultValue: '正在上传“{{name}}”…',
+        })
+      );
       try {
         const asset = await creativeAssetClient.upload(
           file,
           { title: file.name, inLibrary: true, tags: ['canvas-import'] },
           undefined,
           (progress) =>
-            setNotice(`正在上传“${file.name}” ${Math.round(progress)}%`)
+            setNotice(
+              t('creativeStudio.canvas.notices.uploadProgress', {
+                name: file.name,
+                progress: Math.round(progress),
+                defaultValue: '正在上传“{{name}}” {{progress}}%',
+              })
+            )
         );
         if (
           panoramaChoice === 'after-upload-if-2-to-1' &&
@@ -1387,7 +1569,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
             asset,
             worldPosition: { ...worldPosition },
           });
-          setNotice('检测到真实 2:1 图片，请选择普通图片或全景图节点。');
+          setNotice(
+            t('creativeStudio.canvas.notices.panoramaDetected', {
+              defaultValue: '检测到真实 2:1 图片，请选择普通图片或全景图节点。',
+            })
+          );
           return;
         }
         insertAssetAtWorld(asset, worldPosition);
@@ -1403,13 +1589,21 @@ const CreativeCanvasProductRoute: React.FC = () => {
 
   const openImageNodeUpload = useCallback((nodeId: string) => {
     if (assetImportBusyRef.current) {
-      setNotice('已有素材正在上传，请等待完成。');
+      setNotice(
+        t('creativeStudio.canvas.notices.uploadBusy', {
+          defaultValue: '已有素材正在上传，请等待完成。',
+        })
+      );
       return;
     }
     imageNodeUploadTargetRef.current = nodeId;
     const input = imageNodeUploadInputRef.current;
     if (!input) {
-      setNotice('图片文件选择器暂时不可用。');
+      setNotice(
+        t('creativeStudio.canvas.errors.imagePickerUnavailable', {
+          defaultValue: '图片文件选择器暂时不可用。',
+        })
+      );
       return;
     }
     input.value = '';
@@ -1425,17 +1619,30 @@ const CreativeCanvasProductRoute: React.FC = () => {
       input.value = '';
       if (!file || !nodeId) return;
       if (!file.type.startsWith('image/')) {
-        setNotice('该节点只接受真实图片文件。');
+        setNotice(
+          t('creativeStudio.canvas.upload.imageOnly', {
+            defaultValue: '该节点只接受真实图片文件。',
+          })
+        );
         return;
       }
       if (assetImportBusyRef.current) {
-        setNotice('已有素材正在上传，请等待完成。');
+        setNotice(
+          t('creativeStudio.canvas.notices.uploadBusy', {
+            defaultValue: '已有素材正在上传，请等待完成。',
+          })
+        );
         return;
       }
 
       assetImportBusyRef.current = true;
       setAssetImportBusy(true);
-      setNotice(`正在上传“${file.name}”…`);
+      setNotice(
+        t('creativeStudio.canvas.notices.uploading', {
+          name: file.name,
+          defaultValue: '正在上传“{{name}}”…',
+        })
+      );
       let uploadedAsset: CreativeAsset | null = null;
       try {
         const uploaded = await uploadCanvasImageNodeAsset({
@@ -1443,7 +1650,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
           file,
           operationId: uuidv7(),
           onProgress: (progress) =>
-            setNotice(`正在上传“${file.name}” ${Math.round(progress)}%`),
+            setNotice(
+              t('creativeStudio.canvas.notices.uploadProgress', {
+                name: file.name,
+                progress: Math.round(progress),
+                defaultValue: '正在上传“{{name}}” {{progress}}%',
+              })
+            ),
         });
         const asset = uploaded.asset;
         uploadedAsset = asset;
@@ -1451,13 +1664,25 @@ const CreativeCanvasProductRoute: React.FC = () => {
           throw new DOMException('Canvas changed', 'AbortError');
         }
         const editor = editorRef.current;
-        if (!editor) throw new Error('画布已经关闭，图片保留在素材库中。');
+        if (!editor) {
+          throw new Error(
+            t('creativeStudio.canvas.errors.closedAfterUpload', {
+              defaultValue: '画布已经关闭，图片保留在素材库中。',
+            })
+          );
+        }
         const state = editor.getState();
         const source = state.document.nodes.find(
           (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
             node.id === nodeId && node.type === 'image'
         );
-        if (!source) throw new Error('图片节点已被删除，上传结果保留在素材库中。');
+        if (!source) {
+          throw new Error(
+            t('creativeStudio.canvas.errors.imageNodeRemovedAfterUpload', {
+              defaultValue: '图片节点已被删除，上传结果保留在素材库中。',
+            })
+          );
+        }
         const updated = fillEmptyCanvasImageNodeFromAsset(source, asset);
         knownAssetsRef.current = new Map(knownAssetsRef.current).set(asset.id, asset);
         const updatedState = editor.dispatch(
@@ -1471,19 +1696,31 @@ const CreativeCanvasProductRoute: React.FC = () => {
         );
         if (linked?.type !== 'image' || linked.data.assetId !== asset.id) {
           throw new Error(
-            '图片节点当前受运行任务保护；上传素材已保留在素材库中。'
+            t('creativeStudio.canvas.errors.imageNodeTaskProtected', {
+              defaultValue:
+                '图片节点当前受运行任务保护；上传素材已保留在素材库中。',
+            })
           );
         }
         const flush = await editor.flush();
         if (!canLeaveCreativeCanvasAfterFlush(flush)) {
           throw new Error(
-            creativeCanvasBlockedLeaveMessage(flush) ?? '图片节点尚未安全保存。'
+            creativeCanvasBlockedLeaveMessage(flush) ??
+              t('creativeStudio.canvas.errors.imageNodeNotSaved', {
+                defaultValue: '图片节点尚未安全保存。',
+              })
           );
         }
         setNotice(
           uploaded.recoveredAfterResponseLoss
-            ? `已找回上传结果并将“${asset.title}”填入原图片节点。`
-            : `已将“${asset.title}”填入原图片节点。`
+            ? t('creativeStudio.canvas.notices.uploadRecoveredIntoNode', {
+                title: asset.title,
+                defaultValue: '已找回上传结果并将“{{title}}”填入原图片节点。',
+              })
+            : t('creativeStudio.canvas.notices.uploadFilledNode', {
+                title: asset.title,
+                defaultValue: '已将“{{title}}”填入原图片节点。',
+              })
         );
       } catch (error) {
         if (!(error instanceof DOMException && error.name === 'AbortError')) {
@@ -1501,11 +1738,21 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const resolveCanvasImageAsset = useCallback(
     async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
       const assetId = node.data.assetId?.trim();
-      if (!assetId) throw new Error('该图片节点尚未关联真实素材。');
+      if (!assetId) {
+        throw new Error(
+          t('creativeStudio.canvas.errors.imageAssetMissing', {
+            defaultValue: '该图片节点尚未关联真实素材。',
+          })
+        );
+      }
       const cached = knownAssetsRef.current.get(assetId);
       const asset = cached ?? (await creativeAssetClient.get(assetId));
       if (asset.kind !== 'image') {
-        throw new Error('该节点关联的素材不是图片，已停止图片操作。');
+        throw new Error(
+          t('creativeStudio.canvas.errors.imageAssetKindMismatch', {
+            defaultValue: '该节点关联的素材不是图片，已停止图片操作。',
+          })
+        );
       }
       knownAssetsRef.current = new Map(knownAssetsRef.current).set(
         asset.id,
@@ -1519,7 +1766,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const handleOpenImageCrop = useCallback(
     async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
       if (imageToolBusyRef.current || assetImportBusyRef.current) {
-        setNotice('已有图片或素材操作正在进行，请等待完成。');
+        setNotice(
+          t('creativeStudio.canvas.notices.imageOperationBusy', {
+            defaultValue: '已有图片或素材操作正在进行，请等待完成。',
+          })
+        );
         return;
       }
       setImageCropError(null);
@@ -1557,7 +1808,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const handleOpenImageSplit = useCallback(
     async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
       if (imageToolBusyRef.current || assetImportBusyRef.current) {
-        setNotice('已有图片或素材操作正在进行，请等待完成。');
+        setNotice(
+          t('creativeStudio.canvas.notices.imageOperationBusy', {
+            defaultValue: '已有图片或素材操作正在进行，请等待完成。',
+          })
+        );
         return;
       }
       setImageSplitError(null);
@@ -1587,7 +1842,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
       const editor = editorRef.current;
       if (!request || !editor || imageToolBusyRef.current) return;
       if (assetImportBusyRef.current) {
-        setImageCropError('另一个素材上传仍在进行，请等待完成后重试。');
+        setImageCropError(
+          t('creativeStudio.canvas.errors.concurrentUpload', {
+            defaultValue: '另一个素材上传仍在进行，请等待完成后重试。',
+          })
+        );
         return;
       }
 
@@ -1626,7 +1885,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
         );
         if (!source || source.data.assetId !== request.asset.id) {
           throw new Error(
-            '原图片节点已被删除或替换；裁剪素材已保存在素材库中。'
+            t('creativeStudio.canvas.errors.cropSourceChanged', {
+              defaultValue:
+                '原图片节点已被删除或替换；裁剪素材已保存在素材库中。',
+            })
           );
         }
 
@@ -1642,7 +1904,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
           { position }
         );
         if (derived.type !== 'image') {
-          throw new Error('裁剪结果未能构造成图片节点。');
+          throw new Error(
+            t('creativeStudio.canvas.errors.cropNodeConstructionFailed', {
+              defaultValue: '裁剪结果未能构造成图片节点。',
+            })
+          );
         }
         const connection = {
           sourceNodeId: source.id,
@@ -1657,7 +1923,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
         );
         if (!validation.ok) {
           throw new Error(
-            `无法连接裁剪结果：${connectionErrorMessage(validation.code)}。`
+            t('creativeStudio.canvas.errors.connectCropResult', {
+              reason: connectionErrorMessage(validation.code, t),
+              defaultValue: '无法连接裁剪结果：{{reason}}。',
+            })
           );
         }
 
@@ -1685,11 +1954,21 @@ const CreativeCanvasProductRoute: React.FC = () => {
         if (flush.status === 'saved' || flush.status === 'noop') {
           setNotice(
             uploaded.recoveredAfterResponseLoss
-              ? '上传响应中断后已找回真实裁剪素材，并将派生节点保存到画布。'
-              : '已裁剪真实原图，创建派生图片节点并保存连线。'
+              ? t('creativeStudio.canvas.notices.cropRecovered', {
+                  defaultValue:
+                    '上传响应中断后已找回真实裁剪素材，并将派生节点保存到画布。',
+                })
+              : t('creativeStudio.canvas.notices.cropSucceeded', {
+                  defaultValue: '已裁剪真实原图，创建派生图片节点并保存连线。',
+                })
           );
         } else {
-          setNotice(`裁剪素材已上传，但画布保存失败：${flush.error.message}`);
+          setNotice(
+            t('creativeStudio.canvas.errors.cropSaveFailed', {
+              message: flush.error.message,
+              defaultValue: '裁剪素材已上传，但画布保存失败：{{message}}',
+            })
+          );
         }
       } catch (error) {
         const aborted =
@@ -1731,7 +2010,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
       const editor = editorRef.current;
       if (!request || !editor || imageToolBusyRef.current) return;
       if (assetImportBusyRef.current) {
-        setImageSplitError('另一个素材上传仍在进行，请等待完成后重试。');
+        setImageSplitError(
+          t('creativeStudio.canvas.errors.concurrentUpload', {
+            defaultValue: '另一个素材上传仍在进行，请等待完成后重试。',
+          })
+        );
         return;
       }
 
@@ -1772,7 +2055,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
             node.id === request.nodeId && node.type === 'image'
         );
         if (!source || source.data.assetId !== request.asset.id) {
-          throw new Error('原图片节点已被删除或替换，未向画布写入切图结果。');
+          throw new Error(
+            t('creativeStudio.canvas.errors.splitSourceChanged', {
+              defaultValue: '原图片节点已被删除或替换，未向画布写入切图结果。',
+            })
+          );
         }
 
         const rows = creativeImageSplitRows(params);
@@ -1801,7 +2088,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
             }
           );
           if (derived.type !== 'image') {
-            throw new Error('切图结果未能构造成图片节点。');
+            throw new Error(
+              t('creativeStudio.canvas.errors.splitNodeConstructionFailed', {
+                defaultValue: '切图结果未能构造成图片节点。',
+              })
+            );
           }
           derivedNodes.push(derived);
           factoryState = {
@@ -1824,7 +2115,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
           });
           if (!validation.ok) {
             throw new Error(
-              `无法连接切图结果：${connectionErrorMessage(validation.code)}。`
+              t('creativeStudio.canvas.errors.connectSplitResult', {
+                reason: connectionErrorMessage(validation.code, t),
+                defaultValue: '无法连接切图结果：{{reason}}。',
+              })
             );
           }
         }
@@ -1861,11 +2155,24 @@ const CreativeCanvasProductRoute: React.FC = () => {
         if (flush.status === 'saved' || flush.status === 'noop') {
           setNotice(
             uploaded.some((piece) => piece.recoveredAfterResponseLoss)
-              ? `上传响应中断后已找回切图素材，创建并保存 ${derivedNodes.length} 个图片子节点。`
-              : `已切分真实原图，创建并保存 ${derivedNodes.length} 个图片子节点及连线。`
+              ? t('creativeStudio.canvas.notices.splitRecovered', {
+                  count: derivedNodes.length,
+                  defaultValue:
+                    '上传响应中断后已找回切图素材，创建并保存 {{count}} 个图片子节点。',
+                })
+              : t('creativeStudio.canvas.notices.splitSucceeded', {
+                  count: derivedNodes.length,
+                  defaultValue:
+                    '已切分真实原图，创建并保存 {{count}} 个图片子节点及连线。',
+                })
           );
         } else {
-          setNotice(`切图素材已上传，但画布保存失败：${flush.error.message}`);
+          setNotice(
+            t('creativeStudio.canvas.errors.splitSaveFailed', {
+              message: flush.error.message,
+              defaultValue: '切图素材已上传，但画布保存失败：{{message}}',
+            })
+          );
         }
       } catch (error) {
         const aborted =
@@ -1928,8 +2235,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
       ) {
         setNotice(
           runtimeBlocked
-            ? '已有局部编辑任务正在运行、恢复或等待确认，请先处理该任务。'
-            : '已有图片或素材操作正在进行，请等待完成。'
+            ? t('creativeStudio.canvas.notices.maskTaskBusy', {
+                defaultValue:
+                  '已有局部编辑任务正在运行、恢复或等待确认，请先处理该任务。',
+              })
+            : t('creativeStudio.canvas.notices.imageOperationBusy', {
+                defaultValue: '已有图片或素材操作正在进行，请等待完成。',
+              })
         );
         return;
       }
@@ -1977,7 +2289,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setPendingImageMaskEdit(null);
         setImageMaskProgress(null);
         setImageMaskError(null);
-        setNotice('局部编辑任务已安全提交；配置节点会持续显示真实后端状态。');
+        setNotice(
+          t('creativeStudio.canvas.notices.maskTaskSubmitted', {
+            defaultValue:
+              '局部编辑任务已安全提交；配置节点会持续显示真实后端状态。',
+          })
+        );
         return;
       }
       setPendingImageMaskEdit((current) =>
@@ -1993,7 +2310,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
           : current
       );
       setImageMaskError(
-        `任务提交结果尚未确认：${result.error.message}。请安全重试同一任务，或确认服务器不存在后放弃。`
+        t('creativeStudio.canvas.errors.maskSubmissionUnconfirmed', {
+          message: result.error.message,
+          defaultValue:
+            '任务提交结果尚未确认：{{message}}。请安全重试同一任务，或确认服务器不存在后放弃。',
+        })
       );
     },
     []
@@ -2031,7 +2352,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
       if (assetImportBusyRef.current) {
         imageToolBusyRef.current = false;
         setImageMaskBusy(false);
-        setImageMaskError('另一个素材上传仍在进行，请等待完成后重试。');
+        setImageMaskError(
+          t('creativeStudio.canvas.errors.concurrentUpload', {
+            defaultValue: '另一个素材上传仍在进行，请等待完成后重试。',
+          })
+        );
         return;
       }
 
@@ -2068,7 +2393,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
             node.id === request.nodeId && node.type === 'image'
         );
         if (!source || source.data.assetId !== request.asset.id) {
-          throw new Error('原图片节点已被删除或替换，未创建局部编辑任务。');
+          throw new Error(
+            t('creativeStudio.canvas.errors.maskSourceChanged', {
+              defaultValue: '原图片节点已被删除或替换，未创建局部编辑任务。',
+            })
+          );
         }
         prepared = prepareCanvasImageMaskEdit({
           projectId,
@@ -2102,7 +2431,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
         const result = await runtime.submit(prepared.plan);
         applyImageMaskAdmission(result, prepared.plan);
         if (uploaded.recoveredAfterResponseLoss && result.kind === 'admitted') {
-          setNotice('上传响应中断后已找回标记参考图，并安全提交局部编辑任务。');
+          setNotice(
+            t('creativeStudio.canvas.notices.maskReferenceRecovered', {
+              defaultValue:
+                '上传响应中断后已找回标记参考图，并安全提交局部编辑任务。',
+            })
+          );
         }
       } catch (error) {
         const aborted =
@@ -2148,7 +2482,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
           if (canvasOwned) {
             setPendingImageMaskEdit(null);
             setImageMaskProgress(null);
-            setNotice(`任务接收状态未确认，已保留同一任务恢复标记：${message}`);
+            setNotice(
+              t('creativeStudio.canvas.errors.taskAdmissionUnconfirmed', {
+                message,
+                defaultValue:
+                  '任务接收状态未确认，已保留同一任务恢复标记：{{message}}',
+              })
+            );
           } else {
             setImageMaskError(message);
           }
@@ -2181,7 +2521,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
         );
         applyImageMaskAdmission(result, request.submission.plan);
         if (result.kind === 'admitted') {
-          setNotice('服务器已存在该任务，已安全恢复而未重复创建。');
+          setNotice(
+            t('creativeStudio.canvas.notices.taskRecovered', {
+              defaultValue: '服务器已存在该任务，已安全恢复而未重复创建。',
+            })
+          );
         }
         return;
       }
@@ -2194,7 +2538,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
       setImageTaskRuntime(INITIAL_CANVAS_TASK_RUNTIME);
       setPendingImageMaskEdit(null);
       setImageMaskProgress(null);
-      setNotice('已确认服务器不存在该任务；配置节点记录为失败并清理恢复标记。');
+      setNotice(
+        t('creativeStudio.canvas.notices.taskConfirmedMissing', {
+          defaultValue:
+            '已确认服务器不存在该任务；配置节点记录为失败并清理恢复标记。',
+        })
+      );
     } catch (error) {
       setImageMaskError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -2244,7 +2593,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
       if (result.kind === 'admitted') {
         setImageComposeSubmission(null);
         setImageComposeIssue(null);
-        setNotice('图片创作任务已安全提交；配置节点会持续显示真实后端状态。');
+        setNotice(
+          t('creativeStudio.canvas.notices.imageTaskSubmitted', {
+            defaultValue:
+              '图片创作任务已安全提交；配置节点会持续显示真实后端状态。',
+          })
+        );
         return;
       }
       setImageComposeSubmission({
@@ -2254,7 +2608,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
       });
       setImageComposeIssue({
         nodeId,
-        message: `任务提交结果尚未确认：${result.error.message}。请重试同一任务。`,
+        message: t('creativeStudio.canvas.errors.submissionUnconfirmed', {
+          message: result.error.message,
+          defaultValue: '任务提交结果尚未确认：{{message}}。请重试同一任务。',
+        }),
       });
     },
     []
@@ -2268,7 +2625,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
       if (!settings.model || modelCatalog.status !== 'ready') {
         setImageComposeIssue({
           nodeId,
-          message: '没有可用且明确选择的真实图片模型，未发起生成。',
+          message: t('creativeStudio.canvas.errors.noImageModel', {
+            defaultValue: '没有可用且明确选择的真实图片模型，未发起生成。',
+          }),
         });
         return;
       }
@@ -2282,7 +2641,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
           (entry) => entry.task.status === 'queued' || entry.task.status === 'running'
         )
       ) {
-        setImageComposeIssue({ nodeId, message: '已有图片任务正在处理，请等待完成。' });
+        setImageComposeIssue({
+          nodeId,
+          message: t('creativeStudio.canvas.errors.imageTaskBusy', {
+            defaultValue: '已有图片任务正在处理，请等待完成。',
+          }),
+        });
         return;
       }
 
@@ -2297,7 +2661,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
           (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
             node.id === nodeId && node.type === 'image'
         );
-        if (!sourceNode) throw new Error('图片节点已被删除，未创建图片创作任务。');
+        if (!sourceNode) {
+          throw new Error(
+            t('creativeStudio.canvas.errors.imageNodeRemovedBeforeTask', {
+              defaultValue: '图片节点已被删除，未创建图片创作任务。',
+            })
+          );
+        }
         const selectedModelOptions = sourceNode.data.assetId
           ? imageMaskModelOptions
           : imageGenerationExactOptions;
@@ -2309,8 +2679,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
         if (!selectedModel) {
           throw new Error(
             sourceNode.data.assetId
-              ? '所选图片编辑模型已不可用，未发起生成。'
-              : '所选图片生成模型已不可用，未发起生成。'
+              ? t('creativeStudio.canvas.errors.imageEditModelUnavailable', {
+                  defaultValue: '所选图片编辑模型已不可用，未发起生成。',
+                })
+              : t('creativeStudio.canvas.errors.imageGenerateModelUnavailable', {
+                  defaultValue: '所选图片生成模型已不可用，未发起生成。',
+                })
           );
         }
         const source = withCanvasImageComposeDraft(sourceNode, {
@@ -2343,7 +2717,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
           !currentSource ||
           currentSource.data.assetId !== (sourceAsset?.id ?? null)
         ) {
-          throw new Error('原图片节点已被删除或替换，未创建图片创作任务。');
+          throw new Error(
+            t('creativeStudio.canvas.errors.imageSourceChangedBeforeTask', {
+              defaultValue: '原图片节点已被删除或替换，未创建图片创作任务。',
+            })
+          );
         }
         prepared = prepareCanvasImageCompose({
           projectId,
@@ -2391,7 +2769,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
                     : String(recoveryError)
                 )
               );
-            message = `任务接收状态未确认，已保留同一任务恢复标记：${message}`;
+            message = t('creativeStudio.canvas.errors.taskAdmissionUnconfirmed', {
+              message,
+              defaultValue:
+                '任务接收状态未确认，已保留同一任务恢复标记：{{message}}',
+            });
           } catch (saveError) {
             message = `${message}；${
               saveError instanceof Error ? saveError.message : String(saveError)
@@ -2460,13 +2842,21 @@ const CreativeCanvasProductRoute: React.FC = () => {
       if (result.kind === 'admitted') {
         setVideoComposeSubmission(null);
         setVideoComposeIssue(null);
-        setNotice('视频创作任务已安全提交；配置节点会持续显示真实后端状态。');
+        setNotice(
+          t('creativeStudio.canvas.notices.videoTaskSubmitted', {
+            defaultValue:
+              '视频创作任务已安全提交；配置节点会持续显示真实后端状态。',
+          })
+        );
         return;
       }
       setVideoComposeSubmission({ nodeId, plan, failureOrder: result.order });
       setVideoComposeIssue({
         nodeId,
-        message: `任务提交结果尚未确认：${result.error.message}。请重试同一任务。`,
+        message: t('creativeStudio.canvas.errors.submissionUnconfirmed', {
+          message: result.error.message,
+          defaultValue: '任务提交结果尚未确认：{{message}}。请重试同一任务。',
+        }),
       });
     },
     []
@@ -2491,7 +2881,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
       if (!settings.model || modelCatalog.status !== 'ready') {
         setVideoComposeIssue({
           nodeId,
-          message: '没有可用且明确选择的真实视频模型，未发起生成。',
+          message: t('creativeStudio.canvas.errors.noVideoModel', {
+            defaultValue: '没有可用且明确选择的真实视频模型，未发起生成。',
+          }),
         });
         return;
       }
@@ -2505,7 +2897,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
           (entry) => entry.task.status === 'queued' || entry.task.status === 'running'
         )
       ) {
-        setVideoComposeIssue({ nodeId, message: '已有视频任务正在处理，请等待完成。' });
+        setVideoComposeIssue({
+          nodeId,
+          message: t('creativeStudio.canvas.errors.videoTaskBusy', {
+            defaultValue: '已有视频任务正在处理，请等待完成。',
+          }),
+        });
         return;
       }
 
@@ -2519,7 +2916,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
           (node): node is Extract<CreativeCanvasNode, { type: 'video' }> =>
             node.id === nodeId && node.type === 'video'
         );
-        if (!source) throw new Error('视频节点已被删除，未创建视频创作任务。');
+        if (!source) {
+          throw new Error(
+            t('creativeStudio.canvas.errors.videoNodeRemovedBeforeTask', {
+              defaultValue: '视频节点已被删除，未创建视频创作任务。',
+            })
+          );
+        }
         const mode = canvasVideoComposeMode(state.document, nodeId);
         if (mode.kind === 'unsupported') throw new Error(mode.message);
         const selectedModel = videoModelOptions.find(
@@ -2528,7 +2931,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
             option.model === settings.model.model
         );
         if (!selectedModel) {
-          throw new Error('所选视频模型已不可用，未发起生成。');
+          throw new Error(
+            t('creativeStudio.canvas.errors.videoModelUnavailable', {
+              defaultValue: '所选视频模型已不可用，未发起生成。',
+            })
+          );
         }
         const reference =
           mode.kind === 'i2v'
@@ -2536,7 +2943,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
               (await creativeAssetClient.get(mode.assetId)))
             : null;
         if (reference && reference.kind !== 'image') {
-          throw new Error('I2V 引用没有解析为真实图片素材。');
+          throw new Error(
+            t('creativeStudio.canvas.errors.videoReferenceResolutionFailed', {
+              defaultValue: 'I2V 引用没有解析为真实图片素材。',
+            })
+          );
         }
         if (reference) {
           knownAssetsRef.current = new Map(knownAssetsRef.current).set(
@@ -2560,7 +2971,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
           (mode.kind === 'i2v' &&
             (currentMode.kind !== 'i2v' || currentMode.assetId !== mode.assetId))
         ) {
-          throw new Error('视频节点或其直接引用已变化，未创建视频创作任务。');
+          throw new Error(
+            t('creativeStudio.canvas.errors.videoSourceChangedBeforeTask', {
+              defaultValue: '视频节点或其直接引用已变化，未创建视频创作任务。',
+            })
+          );
         }
         const durableSource = withCanvasVideoComposeDraft(currentSource, {
           prompt,
@@ -2636,7 +3051,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
                     : String(recoveryError)
                 )
               );
-            message = `任务接收状态未确认，已保留同一任务恢复标记：${message}`;
+            message = t('creativeStudio.canvas.errors.taskAdmissionUnconfirmed', {
+              message,
+              defaultValue:
+                '任务接收状态未确认，已保留同一任务恢复标记：{{message}}',
+            });
           } catch (saveError) {
             message = `${message}；${
               saveError instanceof Error ? saveError.message : String(saveError)
@@ -2714,7 +3133,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
           );
           applyVideoComposeAdmission(nodeId, request.plan, result);
           if (result.kind === 'admitted') {
-            setNotice('服务器已存在该视频任务，已安全恢复而未重复创建。');
+            setNotice(
+              t('creativeStudio.canvas.notices.videoTaskRecovered', {
+                defaultValue: '服务器已存在该视频任务，已安全恢复而未重复创建。',
+              })
+            );
           }
           return;
         }
@@ -2728,7 +3151,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setVideoTaskRuntimeEpoch((value) => value + 1);
         setVideoComposeIssue({
           nodeId,
-          message: '服务器确认未创建该视频任务，已清理恢复标记，可以重新生成。',
+          message: t('creativeStudio.canvas.notices.videoTaskMissing', {
+            defaultValue:
+              '服务器确认未创建该视频任务，已清理恢复标记，可以重新生成。',
+          }),
         });
       } catch (error) {
         if (activeProjectIdRef.current === projectId) {
@@ -2792,13 +3218,21 @@ const CreativeCanvasProductRoute: React.FC = () => {
       if (result.kind === 'admitted') {
         setAudioComposeSubmission(null);
         setAudioComposeIssue(null);
-        setNotice('音频创作任务已安全提交；配置节点会持续显示真实后端状态。');
+        setNotice(
+          t('creativeStudio.canvas.notices.audioTaskSubmitted', {
+            defaultValue:
+              '音频创作任务已安全提交；配置节点会持续显示真实后端状态。',
+          })
+        );
         return;
       }
       setAudioComposeSubmission({ nodeId, plan, failureOrder: result.order });
       setAudioComposeIssue({
         nodeId,
-        message: `任务提交结果尚未确认：${result.error.message}。请重试同一任务。`,
+        message: t('creativeStudio.canvas.errors.submissionUnconfirmed', {
+          message: result.error.message,
+          defaultValue: '任务提交结果尚未确认：{{message}}。请重试同一任务。',
+        }),
       });
     },
     []
@@ -2818,7 +3252,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
       if (!settings.model || modelCatalog.status !== 'ready') {
         setAudioComposeIssue({
           nodeId,
-          message: '没有可用且明确选择的真实语音合成模型，未发起生成。',
+          message: t('creativeStudio.canvas.errors.noAudioModel', {
+            defaultValue: '没有可用且明确选择的真实语音合成模型，未发起生成。',
+          }),
         });
         return;
       }
@@ -2835,7 +3271,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
       ) {
         setAudioComposeIssue({
           nodeId,
-          message: '已有音频任务正在处理，请等待完成。',
+          message: t('creativeStudio.canvas.errors.audioTaskBusy', {
+            defaultValue: '已有音频任务正在处理，请等待完成。',
+          }),
         });
         return;
       }
@@ -2850,7 +3288,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
           (node): node is Extract<CreativeCanvasNode, { type: 'audio' }> =>
             node.id === nodeId && node.type === 'audio'
         );
-        if (!source) throw new Error('音频节点已被删除，未创建音频创作任务。');
+        if (!source) {
+          throw new Error(
+            t('creativeStudio.canvas.errors.audioNodeRemovedBeforeTask', {
+              defaultValue: '音频节点已被删除，未创建音频创作任务。',
+            })
+          );
+        }
         const eligibility = canvasAudioComposeEligibility(
           state.document,
           nodeId
@@ -2864,7 +3308,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
             option.model === settings.model.model
         );
         if (!selectedModel) {
-          throw new Error('所选语音合成模型已不可用，未发起生成。');
+          throw new Error(
+            t('creativeStudio.canvas.errors.audioModelUnavailable', {
+              defaultValue: '所选语音合成模型已不可用，未发起生成。',
+            })
+          );
         }
         if (activeProjectIdRef.current !== projectId) {
           throw new DOMException('Canvas changed', 'AbortError');
@@ -2879,7 +3327,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
           nodeId
         );
         if (!currentSource || currentEligibility.kind !== 'tts') {
-          throw new Error('音频节点或其直接引用已变化，未创建音频创作任务。');
+          throw new Error(
+            t('creativeStudio.canvas.errors.audioSourceChangedBeforeTask', {
+              defaultValue: '音频节点或其直接引用已变化，未创建音频创作任务。',
+            })
+          );
         }
         const durableSource = withCanvasAudioComposeDraft(currentSource, {
           prompt,
@@ -2941,7 +3393,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
                     : String(recoveryError)
                 )
               );
-            message = `任务接收状态未确认，已保留同一任务恢复标记：${message}`;
+            message = t('creativeStudio.canvas.errors.taskAdmissionUnconfirmed', {
+              message,
+              defaultValue:
+                '任务接收状态未确认，已保留同一任务恢复标记：{{message}}',
+            });
           } catch (saveError) {
             message = `${message}；${
               saveError instanceof Error ? saveError.message : String(saveError)
@@ -3021,7 +3477,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
           );
           applyAudioComposeAdmission(nodeId, request.plan, result);
           if (result.kind === 'admitted') {
-            setNotice('服务器已存在该音频任务，已安全恢复而未重复创建。');
+            setNotice(
+              t('creativeStudio.canvas.notices.audioTaskRecovered', {
+                defaultValue: '服务器已存在该音频任务，已安全恢复而未重复创建。',
+              })
+            );
           }
           return;
         }
@@ -3031,7 +3491,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setAudioTaskRuntimeEpoch((value) => value + 1);
         setAudioComposeIssue({
           nodeId,
-          message: '服务器确认未创建该音频任务，已清理恢复标记，可以重新生成。',
+          message: t('creativeStudio.canvas.notices.audioTaskMissing', {
+            defaultValue:
+              '服务器确认未创建该音频任务，已清理恢复标记，可以重新生成。',
+          }),
         });
       } catch (error) {
         if (activeProjectIdRef.current === projectId) {
@@ -3104,7 +3567,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
           data: { ...node.data, text: normalized },
         })
       );
-      setNotice('已从真实系统剪贴板插入文本。');
+      setNotice(
+        t('creativeStudio.canvas.notices.clipboardTextInserted', {
+          defaultValue: '已从真实系统剪贴板插入文本。',
+        })
+      );
       return true;
     },
     []
@@ -3114,7 +3581,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
     async (worldPosition: CanvasPoint) => {
       try {
         if (typeof navigator === 'undefined' || !navigator.clipboard) {
-          throw new Error('当前运行环境不提供系统剪贴板读取能力。');
+          throw new Error(
+            t('creativeStudio.canvas.errors.clipboardUnavailable', {
+              defaultValue: '当前运行环境不提供系统剪贴板读取能力。',
+            })
+          );
         }
         if (typeof navigator.clipboard.read === 'function') {
           const items = await navigator.clipboard.read();
@@ -3149,7 +3620,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
           const text = await navigator.clipboard.readText();
           if (insertClipboardText(text, worldPosition)) return;
         }
-        setNotice('系统剪贴板中没有可插入的真实文本、图片或视频。');
+        setNotice(
+          t('creativeStudio.canvas.notices.clipboardEmpty', {
+            defaultValue: '系统剪贴板中没有可插入的真实文本、图片或视频。',
+          })
+        );
       } catch (error) {
         setNotice(error instanceof Error ? error.message : String(error));
       }
@@ -3166,19 +3641,32 @@ const CreativeCanvasProductRoute: React.FC = () => {
         .document.nodes.filter((node) => node.type === 'director');
       handleBottomViewChange('timeline');
       if (directors.length === 0) {
-        setNotice('请先添加导演节点，再进入 3D 导演台。');
+        setNotice(
+          t('creativeStudio.canvas.notices.addDirectorFirst', {
+            defaultValue: '请先添加导演节点，再进入 3D 导演台。',
+          })
+        );
         return;
       }
       if (directors.length > 1) {
         editor.dispatch(
           canvasCommands.setSelection(directors.map((node) => node.id))
         );
-        setNotice('画布存在多个导演节点。请只保留一个，再进入 3D 导演台。');
+        setNotice(
+          t('creativeStudio.canvas.notices.resolveDirectorConflict', {
+            defaultValue:
+              '画布存在多个导演节点。请只保留一个，再进入 3D 导演台。',
+          })
+        );
         return;
       }
       const director = directors[0];
       if (requestedNodeId && requestedNodeId !== director.id) {
-        setNotice('请求的导演节点已不存在，请从时间线面板重新打开。');
+        setNotice(
+          t('creativeStudio.canvas.notices.directorMissing', {
+            defaultValue: '请求的导演节点已不存在，请从时间线面板重新打开。',
+          })
+        );
         return;
       }
       editor.dispatch(canvasCommands.setSelection([director.id]));
@@ -3224,10 +3712,19 @@ const CreativeCanvasProductRoute: React.FC = () => {
           openCreateNodeMenu(intent.worldPosition, intent);
           return;
         case 'connection/rejected':
-          setNotice(`无法创建连接：${connectionErrorMessage(intent.code)}。`);
+          setNotice(
+            t('creativeStudio.canvas.connection.createFailed', {
+              reason: connectionErrorMessage(intent.code, t),
+              defaultValue: '无法创建连接：{{reason}}。',
+            })
+          );
           return;
         case 'connection/created':
-          setNotice('已创建连接。');
+          setNotice(
+            t('creativeStudio.canvas.notices.connectionCreated', {
+              defaultValue: '已创建连接。',
+            })
+          );
           return;
         case 'node/open':
           dispatch(canvasCommands.setSelection([intent.nodeId]));
@@ -3239,7 +3736,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
           persistPanels(
             withCreativeCanvasRightView(panelsRef.current, 'properties')
           );
-          setNotice('已在属性面板打开所选节点。');
+          setNotice(
+            t('creativeStudio.canvas.notices.propertiesOpened', {
+              defaultValue: '已在属性面板打开所选节点。',
+            })
+          );
           return;
         case 'system-clipboard/read': {
           const editor = editorRef.current;
@@ -3263,10 +3764,19 @@ const CreativeCanvasProductRoute: React.FC = () => {
         case 'asset/import-feedback': {
           const first = intent.rejected[0];
           const rejected = first
-            ? `${intent.rejected.length} 个文件未导入（${first.fileName}: ${manualUploadRejectionMessage(first.reason)}）`
+            ? t('creativeStudio.canvas.upload.rejectedFiles', {
+                count: intent.rejected.length,
+                fileName: first.fileName,
+                reason: manualUploadRejectionMessage(first.reason, t),
+                defaultValue:
+                  '{{count}} 个文件未导入（{{fileName}}: {{reason}}）',
+              })
             : '';
           const ignored = intent.ignoredAcceptedFileNames.length
-            ? `${intent.ignoredAcceptedFileNames.length} 个额外文件按源产品规则未处理`
+            ? t('creativeStudio.canvas.upload.ignoredFiles', {
+                count: intent.ignoredAcceptedFileNames.length,
+                defaultValue: '{{count}} 个额外文件按源产品规则未处理',
+              })
             : '';
           setNotice([rejected, ignored].filter(Boolean).join('；'));
           return;
@@ -3338,7 +3848,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
           canvasCommands.setSelection(directors.map((node) => node.id))
         );
         handleBottomViewChange('timeline');
-        setNotice('画布存在多个导演节点，请先处理冲突，未创建新的导演节点。');
+        setNotice(
+          t('creativeStudio.canvas.notices.directorCreateConflict', {
+            defaultValue:
+              '画布存在多个导演节点，请先处理冲突，未创建新的导演节点。',
+          })
+        );
         dismissInteractionOverlays();
         return;
       }
@@ -3373,7 +3888,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
         });
         if (!validation.ok) {
           setNotice(
-            `无法创建连接：${connectionErrorMessage(validation.code)}。`
+            t('creativeStudio.canvas.connection.createFailed', {
+              reason: connectionErrorMessage(validation.code, t),
+              defaultValue: '无法创建连接：{{reason}}。',
+            })
           );
           return;
         }
@@ -3400,16 +3918,28 @@ const CreativeCanvasProductRoute: React.FC = () => {
         editor.dispatch(canvasCommands.setSelection([node.id]));
         setNotice(
           reusedDirector
-            ? '已复用画布唯一的导演节点并完成连接。'
-            : '已创建节点并完成连接。'
+            ? t('creativeStudio.canvas.notices.directorReusedAndConnected', {
+                defaultValue: '已复用画布唯一的导演节点并完成连接。',
+              })
+            : t('creativeStudio.canvas.notices.nodeCreatedAndConnected', {
+                defaultValue: '已创建节点并完成连接。',
+              })
         );
       } else {
         if (reusedDirector) {
           editor.dispatch(canvasCommands.setSelection([node.id]));
-          setNotice('画布已有唯一导演节点，已为你选中。');
+          setNotice(
+            t('creativeStudio.canvas.notices.directorSelected', {
+              defaultValue: '画布已有唯一导演节点，已为你选中。',
+            })
+          );
         } else {
           editor.dispatch(canvasCommands.addNode(node));
-          setNotice('已在指定位置创建节点。');
+          setNotice(
+            t('creativeStudio.canvas.notices.nodeCreatedAtPosition', {
+              defaultValue: '已在指定位置创建节点。',
+            })
+          );
         }
       }
       if (kind === 'director') {
@@ -3465,9 +3995,21 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setAgentOpsReloadFence(false);
         agentPanelRef.current?.refreshAuthority();
       }
-      setNotice(reloaded ? '已重新载入远端版本。' : '远端版本暂时不可用。');
+      setNotice(
+        reloaded
+          ? t('creativeStudio.canvas.notices.remoteReloaded', {
+              defaultValue: '已重新载入远端版本。',
+            })
+          : t('creativeStudio.canvas.notices.remoteUnavailable', {
+              defaultValue: '远端版本暂时不可用。',
+            })
+      );
     } catch {
-      setNotice('远端版本暂时不可用。');
+      setNotice(
+        t('creativeStudio.canvas.notices.remoteUnavailable', {
+          defaultValue: '远端版本暂时不可用。',
+        })
+      );
     } finally {
       setRecoveryBusy(false);
     }
@@ -3480,7 +4022,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
       const result = await editorRef.current.flush();
       setNotice(
         result.status === 'saved' || result.status === 'noop'
-          ? '保存已完成。'
+          ? t('creativeStudio.canvas.notices.saveCompleted', {
+              defaultValue: '保存已完成。',
+            })
           : result.error.message
       );
     } finally {
@@ -3544,8 +4088,17 @@ const CreativeCanvasProductRoute: React.FC = () => {
       setSelectedAssetIds(new Set());
       setNotice(
         errors.length > 0
-          ? `${inserted} 项已插入；${errors.length} 项未插入：${errors[0]}`
-          : `${inserted} 项素材已插入画布。`
+          ? t('creativeStudio.canvas.notices.assetsPartiallyInserted', {
+              inserted,
+              failed: errors.length,
+              error: errors[0],
+              defaultValue:
+                '{{inserted}} 项已插入；{{failed}} 项未插入：{{error}}',
+            })
+          : t('creativeStudio.canvas.notices.assetsInserted', {
+              count: inserted,
+              defaultValue: '{{count}} 项素材已插入画布。',
+            })
       );
     },
     [prepareCenteredInsertion]
@@ -3556,7 +4109,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
       if (workflowInsertingRunId || run.record.resultAssetIds.length === 0)
         return;
       setWorkflowInsertingRunId(run.request.id);
-        setNotice('正在解析模板的真实结果素材…');
+        setNotice(
+          t('creativeStudio.canvas.notices.resolvingWorkflowResults', {
+            defaultValue: '正在解析模板的真实结果素材…',
+          })
+        );
       try {
         const resolved = await Promise.all(
           run.record.resultAssetIds.map((assetId) =>
@@ -3581,10 +4138,19 @@ const CreativeCanvasProductRoute: React.FC = () => {
     void copyText(selection.prompt)
       .then(() => {
         setSelectedPromptId(selection.id);
-        setNotice(`已复制“${selection.title}”的提示词到剪贴板。`);
+        setNotice(
+          t('creativeStudio.canvas.notices.promptCopied', {
+            title: selection.title,
+            defaultValue: '已复制“{{title}}”的提示词到剪贴板。',
+          })
+        );
       })
       .catch(() => {
-        setNotice('提示词复制失败，请检查剪贴板权限。');
+        setNotice(
+          t('creativeStudio.canvas.errors.promptCopyFailed', {
+            defaultValue: '提示词复制失败，请检查剪贴板权限。',
+          })
+        );
       });
   }, []);
 
@@ -3638,7 +4204,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
     );
   const canvasTitle =
     project.detail?.project.title ??
-    (project.isLoading ? '正在载入画布…' : '无限画布');
+    (project.isLoading
+      ? t('creativeStudio.canvas.loadingTitle', {
+          defaultValue: '正在载入画布…',
+        })
+      : t('creativeStudio.canvas.untitled', {
+          defaultValue: '无限画布',
+        }));
   const saveMessage = creativeCanvasSaveDisplayMessage(save);
   const compact = viewportSize.width < 760;
   const panelViews = creativeCanvasProductPanelViews(panels);
@@ -3658,8 +4230,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
   ) : (
     <CreativeCanvasUnavailablePanel
       kind="generic"
-      title="正在载入画布结构"
-      description="等待画布文档通过 canonical v1 校验。"
+      title={t('creativeStudio.canvas.loading.outlineTitle', {
+        defaultValue: '正在载入画布结构',
+      })}
+      description={t('creativeStudio.canvas.loading.documentValidation', {
+        defaultValue: '等待画布文档通过 canonical v1 校验。',
+      })}
     />
   );
 
@@ -3672,8 +4248,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
   ) : (
     <CreativeCanvasUnavailablePanel
       kind="generic"
-      title="正在载入属性"
-      description="选择真实节点后才能查看 canonical 属性。"
+      title={t('creativeStudio.canvas.loading.propertiesTitle', {
+        defaultValue: '正在载入属性',
+      })}
+      description={t('creativeStudio.canvas.loading.propertiesDescription', {
+        defaultValue: '选择真实节点后才能查看 canonical 属性。',
+      })}
     />
   );
 
@@ -3686,8 +4266,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
   ) : (
     <CreativeCanvasUnavailablePanel
       kind="generic"
-      title="正在载入撤销状态"
-      description="历史面板仅展示当前编辑会话的真实撤销栈。"
+      title={t('creativeStudio.canvas.loading.historyTitle', {
+        defaultValue: '正在载入撤销状态',
+      })}
+      description={t('creativeStudio.canvas.loading.historyDescription', {
+        defaultValue: '历史面板仅展示当前编辑会话的真实撤销栈。',
+      })}
     />
   );
 
@@ -3702,8 +4286,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
   ) : (
     <CreativeCanvasUnavailablePanel
       kind="generic"
-      title="正在载入导演时间线"
-      description="等待画布文档通过 canonical v1 校验。"
+      title={t('creativeStudio.canvas.loading.timelineTitle', {
+        defaultValue: '正在载入导演时间线',
+      })}
+      description={t('creativeStudio.canvas.loading.documentValidation', {
+        defaultValue: '等待画布文档通过 canonical v1 校验。',
+      })}
     />
   );
 
@@ -3757,7 +4345,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 onAgentSessionsChange={handleAgentSessionsChange}
                 onPendingTaskCommandBlocked={() =>
                   setNotice(
-                    '运行中的生成任务必须保留配置节点；请等待任务结束后再删除或撤销。'
+                    t('creativeStudio.canvas.errors.pendingTaskProtected', {
+                      defaultValue:
+                        '运行中的生成任务必须保留配置节点；请等待任务结束后再删除或撤销。',
+                    })
                   )
                 }
                 onIntegrationIntent={(intent) =>
@@ -3799,7 +4390,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
                       ? canvasVideoComposeMode(canvasState.document, node.id)
                       : {
                           kind: 'unsupported',
-                          message: '画布尚未完成载入。',
+                          message: t('creativeStudio.canvas.errors.notLoaded', {
+                            defaultValue: '画布尚未完成载入。',
+                          }),
                         };
                     const selectedModel = composeDraft.settings.model;
                     const exactModel = selectedModel
@@ -3843,7 +4436,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
                             reference={
                               mode.kind === 'i2v'
                                 ? {
-                                    name: referenceAsset?.title ?? '已连接图片',
+                                    name:
+                                      referenceAsset?.title ??
+                                      t('creativeStudio.canvas.video.connectedImage', {
+                                        defaultValue: '已连接图片',
+                                      }),
                                     previewUrl:
                                       referenceAsset?.thumbnailUrl ??
                                       referenceAsset?.originalUrl ??
@@ -3935,7 +4532,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
                       ? canvasAudioComposeEligibility(canvasState.document, node.id)
                       : {
                           kind: 'unsupported' as const,
-                          message: '画布尚未完成载入。',
+                          message: t('creativeStudio.canvas.errors.notLoaded', {
+                            defaultValue: '画布尚未完成载入。',
+                          }),
                         };
                     const selectedModel = composeDraft.settings.model;
                     const exactModel = selectedModel
@@ -4120,7 +4719,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
                       }
                       onInfo={() => {
                         handleRightViewChange('properties');
-                        setNotice('已在属性面板打开所选节点。');
+                        setNotice(
+                          t('creativeStudio.canvas.notices.propertiesOpened', {
+                            defaultValue: '已在属性面板打开所选节点。',
+                          })
+                        );
                       }}
                       onDelete={() =>
                         dispatch(
@@ -4279,21 +4882,27 @@ const CreativeCanvasProductRoute: React.FC = () => {
           topActions: (
             <>
               <CanvasTaskRuntimeAction
-                label="图片任务"
+                label={t('creativeStudio.canvas.tasks.image', {
+                  defaultValue: '图片任务',
+                })}
                 snapshot={imageTaskRuntime}
                 busy={imageTaskRuntimeActionBusy}
                 onCancel={(taskId) => void cancelImageRuntimeTask(taskId)}
                 onRetry={(taskId) => void retryImageRuntimeTask(taskId)}
               />
               <CanvasTaskRuntimeAction
-                label="视频任务"
+                label={t('creativeStudio.canvas.tasks.video', {
+                  defaultValue: '视频任务',
+                })}
                 snapshot={videoTaskRuntime}
                 busy={videoTaskRuntimeActionBusy}
                 onCancel={(taskId) => void cancelVideoRuntimeTask(taskId)}
                 onRetry={(taskId) => void retryVideoRuntimeTask(taskId)}
               />
               <CanvasTaskRuntimeAction
-                label="音频任务"
+                label={t('creativeStudio.canvas.tasks.audio', {
+                  defaultValue: '音频任务',
+                })}
                 snapshot={audioTaskRuntime}
                 busy={audioTaskRuntimeActionBusy}
                 onCancel={(taskId) => void cancelAudioRuntimeTask(taskId)}
@@ -4312,20 +4921,26 @@ const CreativeCanvasProductRoute: React.FC = () => {
           toolbarTrailing: (
             <>
               <ProductToolbarButton
-                label="将所选节点分组"
+                label={t('creativeStudio.canvas.toolbar.group', {
+                  defaultValue: '将所选节点分组',
+                })}
                 icon={<Group {...iconProps} />}
                 disabled={productDisabled || !selection.canGroup}
                 onClick={() =>
                   dispatch(
                     canvasCommands.groupNodes({
                       nodeIds: canvasState?.selection.nodeIds,
-                      title: '节点组',
+                      title: t('creativeStudio.canvas.nodes.defaultGroupTitle', {
+                        defaultValue: '节点组',
+                      }),
                     })
                   )
                 }
               />
               <ProductToolbarButton
-                label="取消所选分组"
+                label={t('creativeStudio.canvas.toolbar.ungroup', {
+                  defaultValue: '取消所选分组',
+                })}
                 icon={<Ungroup {...iconProps} />}
                 disabled={productDisabled || selection.groupIds.length === 0}
                 onClick={() => {
@@ -4335,7 +4950,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 }}
               />
               <ProductToolbarButton
-                label="删除所选节点或连接"
+                label={t('creativeStudio.canvas.toolbar.deleteSelection', {
+                  defaultValue: '删除所选节点或连接',
+                })}
                 icon={<Delete {...iconProps} />}
                 danger
                 disabled={productDisabled || !selection.hasSelection}
@@ -4477,8 +5094,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
               variable.type === 'image-series' ? variable.maxItems : 1,
             title:
               variable.type === 'image-series'
-                ? '选择变量图片'
-                : '选择变量参考图',
+                ? t('creativeStudio.canvas.workflows.pickVariableImages', {
+                    defaultValue: '选择变量图片',
+                  })
+                : t('creativeStudio.canvas.workflows.pickVariableReference', {
+                    defaultValue: '选择变量参考图',
+                  }),
           })
         }
         onPickReferenceAssets={(selectedAssetIds) =>
@@ -4486,7 +5107,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
             acceptedKinds: ['image'],
             initialSelectedIds: selectedAssetIds,
             selectionLimit: 100,
-            title: '选择模板参考图',
+            title: t('creativeStudio.canvas.workflows.pickReferences', {
+              defaultValue: '选择模板参考图',
+            }),
           })
         }
         onUploadReferenceImages={async (files, selectedAssetIds) => {
@@ -4546,11 +5169,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
         hidden
         type="file"
         accept="image/*"
-        aria-label="上传图片到所选节点"
+        aria-label={t('creativeStudio.canvas.upload.inputLabel', {
+          defaultValue: '上传图片到所选节点',
+        })}
         onChange={(event) => void handleImageNodeUploadChange(event)}
       />
       <Modal
-        title="选择 2:1 图片的节点类型"
+        title={t('creativeStudio.canvas.panorama.dialogTitle', {
+          defaultValue: '选择 2:1 图片的节点类型',
+        })}
         visible={pendingPanoramaChoice !== null}
         closable={false}
         maskClosable={false}
@@ -4558,20 +5185,26 @@ const CreativeCanvasProductRoute: React.FC = () => {
         footer={
           <div className={styles.panoramaActions}>
             <Button onClick={() => resolvePendingPanoramaChoice(false)}>
-              作为普通图片
+              {t('creativeStudio.canvas.panorama.asImage', {
+                defaultValue: '作为普通图片',
+              })}
             </Button>
             <Button
               type="primary"
               onClick={() => resolvePendingPanoramaChoice(true)}
             >
-              作为全景图
+              {t('creativeStudio.canvas.panorama.asPanorama', {
+                defaultValue: '作为全景图',
+              })}
             </Button>
           </div>
         }
       >
         <p className={styles.panoramaDescription}>
-          图片已经真实上传并保存在素材库中。检测到宽高比接近
-          2:1，请确认它应作为普通图片还是等距柱状全景图插入当前画布。
+          {t('creativeStudio.canvas.panorama.dialogDescription', {
+            defaultValue:
+              '图片已经真实上传并保存在素材库中。检测到宽高比接近 2:1，请确认它应作为普通图片还是等距柱状全景图插入当前画布。',
+          })}
         </p>
       </Modal>
     </main>

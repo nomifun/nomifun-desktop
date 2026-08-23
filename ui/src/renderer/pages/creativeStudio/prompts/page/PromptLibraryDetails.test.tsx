@@ -5,14 +5,28 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { createInstance } from 'i18next';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { I18nextProvider, initReactI18next } from 'react-i18next';
 
 import type { PromptLibraryItem } from '../types';
 import { PromptLibraryDetailsContent } from './PromptLibraryDetails';
 
+const testI18n = createInstance();
+await testI18n.use(initReactI18next).init({
+  lng: 'en-US',
+  fallbackLng: 'en-US',
+  resources: { 'en-US': { translation: {} } },
+  interpolation: { escapeValue: false },
+});
+
 const renderDetails = (item: PromptLibraryItem) =>
-  renderToStaticMarkup(<PromptLibraryDetailsContent item={item} locale='zh-CN' />);
+  renderToStaticMarkup(
+    <I18nextProvider i18n={testI18n}>
+      <PromptLibraryDetailsContent item={item} locale='en-US' />
+    </I18nextProvider>
+  );
 
 describe('prompt-library standalone details', () => {
   test('renders the full validated preset without inventing a preview asset', () => {
@@ -36,10 +50,10 @@ describe('prompt-library standalone details', () => {
 
     expect(html.includes('data-prompt-library-details="true"')).toBe(true);
     expect(html.includes('data-prompt-source="preset"')).toBe(true);
-    expect(html.includes('NomiFun 预设')).toBe(true);
-    expect(html.includes('完整提示词')).toBe(true);
+    expect(html.includes('NomiFun preset')).toBe(true);
+    expect(html.includes('Full prompt')).toBe(true);
     expect(html.includes('生成一张具有明确视觉层级的品牌海报。')).toBe(true);
-    expect(html.includes('关联 2 个知识库')).toBe(true);
+    expect(html.includes('2 linked knowledge bases')).toBe(true);
     expect(html.includes('<img')).toBe(false);
   });
 
@@ -62,8 +76,8 @@ describe('prompt-library standalone details', () => {
       updatedAt: 1_770_000_000,
     });
 
-    expect(html.includes('我的文本素材')).toBe(true);
-    expect(html.includes('未分类')).toBe(true);
+    expect(html.includes('My text assets')).toBe(true);
+    expect(html.includes('Uncategorized')).toBe(true);
     expect(html.includes('保留真实材质与自然阴影。')).toBe(true);
   });
 
@@ -87,9 +101,9 @@ describe('prompt-library standalone details', () => {
     });
 
     expect(html.includes('data-prompt-source="catalog"')).toBe(true);
-    expect(html.includes('公共提示词目录')).toBe(true);
+    expect(html.includes('Public prompt catalog')).toBe(true);
     expect(html.includes('<img')).toBe(true);
-    expect(html.includes('查看来源')).toBe(true);
+    expect(html.includes('View source')).toBe(true);
     expect(html.includes('MIT')).toBe(true);
     expect(html.includes('来源说明')).toBe(true);
   });

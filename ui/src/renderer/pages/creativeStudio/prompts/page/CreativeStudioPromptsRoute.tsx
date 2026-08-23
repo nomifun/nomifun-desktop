@@ -48,7 +48,7 @@ export const CreativeStudioPromptsRoute: React.FC<CreativeStudioPromptsRouteProp
   writeClipboardText = copyText,
   onPromptCopied,
 }) => {
-  const { i18n } = useTranslation();
+  const { t, i18n } = useTranslation();
   const locale = localeOverride ?? i18n.resolvedLanguage ?? i18n.language ?? 'zh-CN';
   const promptPort = useMemo(
     () =>
@@ -89,15 +89,28 @@ export const CreativeStudioPromptsRoute: React.FC<CreativeStudioPromptsRouteProp
     try {
       const selection = await copyStandalonePrompt(selected, writeClipboardText);
       setCopyState('copied');
-      Message.success('提示词已复制');
+      Message.success(
+        t('creativeStudio.prompts.copySuccess', {
+          defaultValue: 'Prompt copied',
+        })
+      );
       onPromptCopied?.(selection);
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : '复制失败，请检查剪贴板权限。';
+      const message =
+        reason instanceof Error
+          ? reason.message
+          : t('creativeStudio.prompts.copyFailedFallback', {
+              defaultValue: 'Copy failed. Check clipboard permissions.',
+            });
       setCopyError(message);
       setCopyState('failed');
-      Message.error('提示词复制失败');
+      Message.error(
+        t('creativeStudio.prompts.copyFailed', {
+          defaultValue: 'Could not copy prompt',
+        })
+      );
     }
-  }, [copyState, onPromptCopied, selected, writeClipboardText]);
+  }, [copyState, onPromptCopied, selected, t, writeClipboardText]);
 
   const saveSelectedPrompt = useCallback(async () => {
     if (!selected || saveState === 'saving' || saveState === 'saved') return;
@@ -107,7 +120,9 @@ export const CreativeStudioPromptsRoute: React.FC<CreativeStudioPromptsRouteProp
       await assetPort.createText({
         title: selected.title,
         textContent: selected.prompt,
-        collection: '提示词',
+        collection: t('creativeStudio.prompts.collectionLabel', {
+          defaultValue: 'Prompts',
+        }),
         tags: [...new Set([selected.category, ...selected.tags].filter((value): value is string => Boolean(value)))],
         inLibrary: true,
         origin:
@@ -124,20 +139,32 @@ export const CreativeStudioPromptsRoute: React.FC<CreativeStudioPromptsRouteProp
             : undefined,
       });
       setSaveState('saved');
-      Message.success('已加入我的素材');
+      Message.success(
+        t('creativeStudio.prompts.saveSuccess', {
+          defaultValue: 'Added to my assets',
+        })
+      );
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : '保存失败，请稍后重试。';
+      const message =
+        reason instanceof Error
+          ? reason.message
+          : t('creativeStudio.prompts.saveFailedFallback', {
+              defaultValue: 'Save failed. Try again later.',
+            });
       setSaveError(message);
       setSaveState('failed');
-      Message.error('保存提示词失败');
+      Message.error(
+        t('creativeStudio.prompts.saveFailed', {
+          defaultValue: 'Could not save prompt',
+        })
+      );
     }
-  }, [assetPort, saveState, selected]);
+  }, [assetPort, saveState, selected, t]);
 
   return (
     <>
       <StandalonePromptLibraryPage
         port={promptPort}
-        title='提示词中心'
         selectedId={selected?.id ?? null}
         onSelect={selectPrompt}
       />

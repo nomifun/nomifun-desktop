@@ -7,18 +7,18 @@
 export const CREATIVE_STUDIO_PLANNING_SKILLS = [
   {
     id: 'creative-studio-canvas',
-    label: '画布规划',
-    description: '理解当前选择并提出安全的文本与结构操作。',
+    labelKey: 'creativeStudio.agent.skills.canvas.label',
+    descriptionKey: 'creativeStudio.agent.skills.canvas.description',
   },
   {
     id: 'creative-studio-organize',
-    label: '整理布局',
-    description: '调整现有节点的位置、尺寸与连接关系。',
+    labelKey: 'creativeStudio.agent.skills.organize.label',
+    descriptionKey: 'creativeStudio.agent.skills.organize.description',
   },
   {
     id: 'creative-studio-workflow',
-    label: '模板设计',
-    description: '把创作目标整理成可人工确认的模板草案。',
+    labelKey: 'creativeStudio.agent.skills.workflow.label',
+    descriptionKey: 'creativeStudio.agent.skills.workflow.description',
   },
 ] as const;
 

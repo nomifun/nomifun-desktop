@@ -5,9 +5,11 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { createInstance } from 'i18next';
 import { readFileSync } from 'node:fs';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { I18nextProvider, initReactI18next } from 'react-i18next';
 
 import { parseProviderId } from '@/common/types/ids';
 
@@ -19,6 +21,14 @@ import {
   type CreativeStudioAgentTurnEvent,
 } from './chatPort';
 import type { CreativeStudioAgentPanelProps } from './types';
+
+const testI18n = createInstance();
+await testI18n.use(initReactI18next).init({
+  lng: 'en-US',
+  fallbackLng: 'en-US',
+  resources: { 'en-US': { translation: {} } },
+  interpolation: { escapeValue: false },
+});
 
 const noop = () => undefined;
 const model = {
@@ -62,21 +72,25 @@ const baseProps = (
 });
 
 const renderPanel = (overrides: Partial<CreativeStudioAgentPanelProps> = {}) =>
-  renderToStaticMarkup(<CreativeStudioAgentPanel {...baseProps(overrides)} />);
+  renderToStaticMarkup(
+    <I18nextProvider i18n={testI18n}>
+      <CreativeStudioAgentPanel {...baseProps(overrides)} />
+    </I18nextProvider>
+  );
 
 describe('CreativeStudioAgentPanel source-parity states', () => {
   test('renders the 390px right panel, source header, empty state and composer', () => {
     const html = renderPanel();
 
     expect(html.includes('data-creative-studio-agent-panel="true"')).toBe(true);
-    expect(html.includes('创作 Agent')).toBe(true);
-    expect(html.includes('查看历史记录')).toBe(true);
-    expect(html.includes('新对话')).toBe(true);
-    expect(html.includes('收起 Agent 面板')).toBe(true);
+    expect(html.includes('Creative Agent')).toBe(true);
+    expect(html.includes('View history')).toBe(true);
+    expect(html.includes('New conversation')).toBe(true);
+    expect(html.includes('Collapse Agent panel')).toBe(true);
     expect(html.includes('data-agent-panel-state="empty"')).toBe(true);
-    expect(html.includes('从一个想法开始')).toBe(true);
-    expect(html.includes('描述创作目标，或继续讨论当前方案')).toBe(true);
-    expect(html.includes('直接操作当前画布')).toBe(false);
+    expect(html.includes('Start with an idea')).toBe(true);
+    expect(html.includes('Describe a creative goal or continue the current discussion')).toBe(true);
+    expect(html.includes('Directly operate on the current canvas')).toBe(false);
   });
 
   test('renders controlled history, loading and load-failure states', () => {
@@ -94,9 +108,9 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
 
     expect(history.includes('data-agent-panel-state="history"')).toBe(true);
     expect(history.includes('宣传片分镜')).toBe(true);
-    expect(history.includes('6 条消息 · 刚刚')).toBe(true);
+    expect(history.includes('6 messages · 刚刚')).toBe(true);
     expect(loading.includes('data-agent-panel-state="loading"')).toBe(true);
-    expect(loading.includes('正在加载会话')).toBe(true);
+    expect(loading.includes('Loading conversation')).toBe(true);
     expect(failed.includes('data-agent-panel-state="failed"')).toBe(true);
     expect(failed.includes('本地会话服务不可用')).toBe(true);
   });
@@ -142,7 +156,7 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     expect(html.includes('data-agent-message-status="failed"')).toBe(true);
     expect(html.includes('模型连接失败')).toBe(true);
     expect(html.includes('data-agent-message-status="stopped"')).toBe(true);
-    expect(html.includes('已停止')).toBe(true);
+    expect(html.includes('Stopped')).toBe(true);
     expect(html.includes('这是一个成功回复')).toBe(false);
   });
 
@@ -150,7 +164,7 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     const html = renderPanel({ modelLocked: true });
 
     expect(html.includes('data-agent-model-locked="true"')).toBe(true);
-    expect(html.includes('会话模型已锁定：chat-model')).toBe(true);
+    expect(html.includes('Conversation model locked: chat-model')).toBe(true);
   });
 
   test('renders removable context and explicit NomiFun Skill chips', () => {
@@ -174,7 +188,7 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
       selectedSkillIds: ['creative-studio-canvas'],
     });
     expect(html.includes('data-agent-context-items="true"')).toBe(true);
-    expect(html.includes('移除上下文：主标题')).toBe(true);
+    expect(html.includes('Remove context: 主标题')).toBe(true);
     expect(html.includes('参考图')).toBe(true);
     expect(html.includes('data-agent-skill-options="true"')).toBe(true);
     expect(html.includes('画布规划')).toBe(true);
@@ -216,8 +230,8 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     });
     expect(ready.includes('data-agent-proposal-state="ready"')).toBe(true);
     expect(ready.includes('整理主标题与参考图')).toBe(true);
-    expect(ready.includes('3 项画布操作 · 需人工确认')).toBe(true);
-    expect(ready.includes('应用到画布')).toBe(true);
+    expect(ready.includes('3 canvas operations · requires manual confirmation')).toBe(true);
+    expect(ready.includes('Apply to canvas')).toBe(true);
     expect(invalid.includes('data-agent-proposal-state="invalid"')).toBe(true);
     expect(invalid.includes('该提案不能应用。')).toBe(true);
     expect(invalid.includes('disabled=""')).toBe(true);

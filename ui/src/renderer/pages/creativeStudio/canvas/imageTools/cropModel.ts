@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { translateCreativeImageTool } from "./imageToolI18n";
+
 export interface CreativeImageDimensions {
   width: number;
   height: number;
@@ -51,7 +53,12 @@ const clamp = (value: number, minimum: number, maximum: number): number =>
 
 const finitePositive = (value: number, label: string): number => {
   if (!Number.isFinite(value) || value <= 0) {
-    throw new Error(`${label} 必须是有限正数。`);
+    throw new Error(
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.errors.finitePositive",
+        { label },
+      ),
+    );
   }
   return value;
 };
@@ -100,8 +107,18 @@ function normalizedAspectRatio(
   if (pixelAspect === null) return null;
   return (
     pixelAspect *
-    (finitePositive(image.height, "图片高度") /
-      finitePositive(image.width, "图片宽度"))
+    (finitePositive(
+      image.height,
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.dimensions.imageHeight",
+      ),
+    ) /
+      finitePositive(
+        image.width,
+        translateCreativeImageTool(
+          "creativeStudio.canvas.imageTools.dimensions.imageWidth",
+        ),
+      ))
   );
 }
 
@@ -337,8 +354,22 @@ export function creativeImageCropToPixels(
   crop: CreativeImageCropRect,
   image: CreativeImageDimensions,
 ): CreativeImageCropPixels {
-  const width = Math.round(finitePositive(image.width, "图片宽度"));
-  const height = Math.round(finitePositive(image.height, "图片高度"));
+  const width = Math.round(
+    finitePositive(
+      image.width,
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.dimensions.imageWidth",
+      ),
+    ),
+  );
+  const height = Math.round(
+    finitePositive(
+      image.height,
+      translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.dimensions.imageHeight",
+      ),
+    ),
+  );
   const normalized = normalizeCreativeImageCrop(crop);
   const x = clamp(Math.round(normalized.x * width), 0, width - 1);
   const y = clamp(Math.round(normalized.y * height), 0, height - 1);

@@ -28,6 +28,6 @@ export type {
   CreativeTextAssetFormValue,
 } from './types';
 export {
-  DEFAULT_CREATE_TEXT_ASSET_LABELS,
-  DEFAULT_CREATIVE_ASSET_LIBRARY_LABELS,
+  createCreativeAssetLibraryLabels,
+  createTextAssetLabels,
 } from './types';

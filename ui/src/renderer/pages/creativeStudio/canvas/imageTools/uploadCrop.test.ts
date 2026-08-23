@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { CreativeAsset, CreativeAssetPort } from "../../assets";
+import { translateCreativeImageTool } from "./imageToolI18n";
 import { uploadCreativeImageCrop } from "./uploadCrop";
 
 const SOURCE: CreativeAsset = {
@@ -64,7 +65,10 @@ describe("creative image crop upload", () => {
     });
     expect(result.recoveredAfterResponseLoss).toBe(false);
     expect(metadata).toEqual({
-      title: "原图 · 裁剪",
+      title: translateCreativeImageTool(
+        "creativeStudio.canvas.imageTools.assetTitles.crop",
+        { title: SOURCE.title },
+      ),
       collection: "项目素材",
       tags: [
         "source",

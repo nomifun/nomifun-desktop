@@ -27,6 +27,7 @@ import {
   canvasImageMaskEditResultPosition,
   reconcileCanvasImageMaskEditConfig,
 } from './imageMaskEditCanvas';
+import { creativeStudioProductText } from './i18n';
 import { creativeNodeFromAsset } from './nodeFactory';
 
 export type CanvasImageMaskEditEditorPort = Pick<
@@ -56,7 +57,12 @@ const requiredImageMaskOperation = (
 ) => {
   const operation = node.data.operation;
   if (operation?.kind !== 'image-mask-edit') {
-    throw new Error('局部编辑配置缺少 canonical operation。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.mask.missingOperation',
+        '局部编辑配置缺少 canonical operation。'
+      )
+    );
   }
   return operation;
 };
@@ -121,7 +127,12 @@ export async function settleCanvasImageMaskEditTask(input: {
   onAsset?: (asset: CreativeAsset) => void;
 }): Promise<void> {
   if (!isTerminalCreativeTaskStatus(input.task.status)) {
-    throw new Error('拒绝将非终态局部编辑任务移出 pending 列表。');
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.mask.nonTerminalRemovalRejected',
+        '拒绝将非终态局部编辑任务移出 pending 列表。'
+      )
+    );
   }
   const initialConfig = canvasImageMaskEditConfigFromTask(
     taskDocument(input.editor, input.projectId),
@@ -135,11 +146,21 @@ export async function settleCanvasImageMaskEditTask(input: {
 
   if (input.task.status === 'succeeded') {
     if (input.task.resultAssetIds.length === 0) {
-      throw new Error('局部编辑任务成功但没有返回真实图片素材。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.mask.missingResult',
+          '局部编辑任务成功但没有返回真实图片素材。'
+        )
+      );
     }
     const resultIds = [...new Set(input.task.resultAssetIds)];
     if (resultIds.length !== input.task.resultAssetIds.length) {
-      throw new Error('局部编辑任务返回了重复的结果素材。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.mask.duplicateResults',
+          '局部编辑任务返回了重复的结果素材。'
+        )
+      );
     }
     const { sourceAssetId, markedReferenceAssetId } =
       requiredImageMaskOperation(initialConfig);
@@ -149,7 +170,12 @@ export async function settleCanvasImageMaskEditTask(input: {
           assetId === sourceAssetId || assetId === markedReferenceAssetId
       )
     ) {
-      throw new Error('局部编辑结果错误地复用了输入素材，已停止写入画布。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.mask.reusedInputAsset',
+          '局部编辑结果错误地复用了输入素材，已停止写入画布。'
+        )
+      );
     }
 
     const resultAssets = await Promise.all(
@@ -161,7 +187,12 @@ export async function settleCanvasImageMaskEditTask(input: {
           asset.id !== resultIds[index] || asset.kind !== 'image'
       )
     ) {
-      throw new Error('局部编辑结果未解析为对应的真实图片素材。');
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.mask.resultResolutionFailed',
+          '局部编辑结果未解析为对应的真实图片素材。'
+        )
+      );
     }
 
     const resultNodeIds: string[] = [];
@@ -179,7 +210,14 @@ export async function settleCanvasImageMaskEditTask(input: {
           (node): node is Extract<CreativeCanvasNode, { type: 'config' }> =>
             node.id === initialConfig.id && node.type === 'config'
         );
-        if (!config) throw new Error('局部编辑配置节点在结果写入前被移除。');
+        if (!config) {
+          throw new Error(
+            creativeStudioProductText(
+              'creativeStudio.canvas.errors.mask.configRemoved',
+              '局部编辑配置节点在结果写入前被移除。'
+            )
+          );
+        }
         const created = creativeNodeFromAsset(
           asset,
           state,
@@ -192,7 +230,12 @@ export async function settleCanvasImageMaskEditTask(input: {
           }
         );
         if (created.type !== 'image') {
-          throw new Error('局部编辑结果未能构造成图片节点。');
+          throw new Error(
+            creativeStudioProductText(
+              'creativeStudio.canvas.errors.mask.nodeConstructionFailed',
+              '局部编辑结果未能构造成图片节点。'
+            )
+          );
         }
         resultNode = created;
         input.editor.dispatch(
@@ -215,7 +258,13 @@ export async function settleCanvasImageMaskEditTask(input: {
         };
         const validation = validateCanvasConnection(state.document, connection);
         if (!validation.ok) {
-          throw new Error(`无法连接局部编辑结果：${validation.code}。`);
+          throw new Error(
+            creativeStudioProductText(
+              'creativeStudio.canvas.errors.mask.connectResultFailed',
+              '无法连接局部编辑结果：{{code}}。',
+              { code: validation.code }
+            )
+          );
         }
         input.editor.dispatch(
           canvasCommands.connect(initialConfig.id, resultNode.id, {
@@ -254,7 +303,10 @@ export async function orphanCanvasImageMaskEditTask(input: {
         ...config.data,
         status: 'failed',
         resultAssetIds: [],
-        errorMessage: '服务器未找到该任务；已确认清理恢复标记。',
+        errorMessage: creativeStudioProductText(
+          'creativeStudio.canvas.errors.taskMissingRecoveryCleared',
+          '服务器未找到该任务；已确认清理恢复标记。'
+        ),
       },
     })
   );
@@ -310,7 +362,14 @@ export function waitForCanvasImageMaskEditAdmission(input: {
         if (settled) return;
         settled = true;
         unsubscribe();
-        reject(new Error('局部编辑任务在后端确认接收前结束。'));
+        reject(
+          new Error(
+            creativeStudioProductText(
+              'creativeStudio.canvas.errors.mask.endedBeforeAdmission',
+              '局部编辑任务在后端确认接收前结束。'
+            )
+          )
+        );
       },
       (error) => {
         if (settled) return;

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { TFunction } from 'i18next';
+
 import {
   resolveCreativeStudioCanvasesCopy,
   type CreativeStudioCanvasesCopy,
@@ -142,10 +144,10 @@ export function legacyProjectCopyToCanvasCopy(
 
 /** @deprecated Use resolveCreativeStudioCanvasesCopy. */
 export const resolveCreativeStudioProjectsCopy = (
-  language: string | undefined,
+  translatorOrLanguage: TFunction | string | undefined,
   overrides?: Partial<CreativeStudioProjectsCopy>
 ): CreativeStudioProjectsCopy => {
-  const base = resolveCreativeStudioCanvasesCopy(language);
+  const base = resolveCreativeStudioCanvasesCopy(translatorOrLanguage);
   return {
     ...canvasCopyToLegacyProjectCopy(base),
     ...overrides,

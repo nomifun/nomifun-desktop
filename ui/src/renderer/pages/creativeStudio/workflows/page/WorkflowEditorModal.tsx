@@ -14,7 +14,9 @@ import {
   Switch,
 } from '@arco-design/web-react';
 import { Delete, Plus } from '@icon-park/react';
-import React from 'react';
+import React, { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 
 import { parseProviderId } from '@/common/types/ids';
 import NomiCreativeModelSelect from '../../models/NomiCreativeModelSelect';
@@ -41,22 +43,81 @@ import {
   type WorkflowEditorMode,
   type WorkflowVariableType,
 } from './workflowViewModel';
+import { createWorkflowTranslationCopy } from '../workflowI18n';
 
-const VARIABLE_TYPE_OPTIONS: Array<{ value: WorkflowVariableType; label: string }> = [
-  { value: 'text', label: '单行文本' },
-  { value: 'multiline-text', label: '长文本' },
-  { value: 'number', label: '数字' },
-  { value: 'boolean', label: '开关' },
-  { value: 'choice', label: '下拉选项' },
-  { value: 'image', label: '参考图' },
-  { value: 'image-series', label: '参考图组' },
+const buildVariableTypeOptions = (t: TFunction): Array<{
+  value: WorkflowVariableType;
+  label: string;
+}> => [
+  {
+    value: 'text',
+    label: t('creativeStudio.workflows.editor.variableType.text', {
+      defaultValue: 'Single-line text',
+    }),
+  },
+  {
+    value: 'multiline-text',
+    label: t('creativeStudio.workflows.editor.variableType.multilineText', {
+      defaultValue: 'Long text',
+    }),
+  },
+  {
+    value: 'number',
+    label: t('creativeStudio.workflows.editor.variableType.number', {
+      defaultValue: 'Number',
+    }),
+  },
+  {
+    value: 'boolean',
+    label: t('creativeStudio.workflows.editor.variableType.boolean', {
+      defaultValue: 'Toggle',
+    }),
+  },
+  {
+    value: 'choice',
+    label: t('creativeStudio.workflows.editor.variableType.choice', {
+      defaultValue: 'Select',
+    }),
+  },
+  {
+    value: 'image',
+    label: t('creativeStudio.workflows.editor.variableType.image', {
+      defaultValue: 'Reference image',
+    }),
+  },
+  {
+    value: 'image-series',
+    label: t('creativeStudio.workflows.editor.variableType.imageSeries', {
+      defaultValue: 'Reference image set',
+    }),
+  },
 ];
 
-const QUALITY_OPTIONS = [
-  { value: 'auto', label: '自动质量' },
-  { value: 'high', label: '高质量' },
-  { value: 'medium', label: '中等质量' },
-  { value: 'low', label: '低质量' },
+const buildQualityOptions = (t: TFunction) => [
+  {
+    value: 'auto',
+    label: t('creativeStudio.workflows.editor.quality.auto', {
+      defaultValue: 'Automatic',
+    }),
+  },
+  {
+    value: 'high',
+    label: t('creativeStudio.workflows.editor.quality.high', {
+      defaultValue: 'High',
+    }),
+  },
+  {
+    value: 'medium',
+    label: t('creativeStudio.workflows.editor.quality.medium', {
+      defaultValue: 'Medium',
+    }),
+  },
+  {
+    value: 'low',
+    label: t('creativeStudio.workflows.editor.quality.low', {
+      defaultValue: 'Low',
+    }),
+  },
 ];
 
 export interface WorkflowEditorModalProps {
@@ -117,12 +178,20 @@ const patchVariable = (
 const VariableValueEditor: React.FC<{
   workflow: WorkflowDefinitionV1;
   variable: WorkflowVariable;
+  t: TFunction;
   onChange: (workflow: WorkflowDefinitionV1) => void;
-}> = ({ workflow, variable, onChange }) => {
+}> = ({ workflow, variable, t, onChange }) => {
   if (variable.type === 'text' || variable.type === 'multiline-text') {
     const controlProps = {
       value: variable.defaultValue ?? '',
-      placeholder: variable.type === 'multiline-text' ? '默认长文本（可选）' : '默认值（可选）',
+      placeholder:
+        variable.type === 'multiline-text'
+          ? t('creativeStudio.workflows.editor.default.multiline', {
+              defaultValue: 'Default long text (optional)',
+            })
+          : t('creativeStudio.workflows.editor.default.value', {
+              defaultValue: 'Default value (optional)',
+            }),
       onChange: (value: string) =>
         onChange(
           patchVariable(workflow, variable, {
@@ -141,7 +210,9 @@ const VariableValueEditor: React.FC<{
       <div className={styles.variableValueGrid}>
         <InputNumber
           value={variable.defaultValue ?? undefined}
-          placeholder='默认数字'
+          placeholder={t('creativeStudio.workflows.editor.default.number', {
+            defaultValue: 'Default number',
+          })}
           onChange={(value) =>
             onChange(
               patchVariable(workflow, variable, {
@@ -152,7 +223,9 @@ const VariableValueEditor: React.FC<{
         />
         <InputNumber
           value={variable.minimum ?? undefined}
-          placeholder='最小值'
+          placeholder={t('creativeStudio.workflows.editor.minimum', {
+            defaultValue: 'Minimum',
+          })}
           onChange={(value) =>
             onChange(
               patchVariable(workflow, variable, {
@@ -163,7 +236,9 @@ const VariableValueEditor: React.FC<{
         />
         <InputNumber
           value={variable.maximum ?? undefined}
-          placeholder='最大值'
+          placeholder={t('creativeStudio.workflows.editor.maximum', {
+            defaultValue: 'Maximum',
+          })}
           onChange={(value) =>
             onChange(
               patchVariable(workflow, variable, {
@@ -178,7 +253,11 @@ const VariableValueEditor: React.FC<{
   if (variable.type === 'boolean') {
     return (
       <div className={styles.toggleRow}>
-        <span>默认开启</span>
+        <span>
+          {t('creativeStudio.workflows.editor.defaultEnabled', {
+            defaultValue: 'Enabled by default',
+          })}
+        </span>
         <Switch
           size='small'
           checked={variable.defaultValue}
@@ -194,7 +273,9 @@ const VariableValueEditor: React.FC<{
       <div className={styles.variableValueGrid}>
         <Input
           value={variable.options.join(' / ')}
-          placeholder='选项一 / 选项二'
+          placeholder={t('creativeStudio.workflows.editor.optionsPlaceholder', {
+            defaultValue: 'Option one / Option two',
+          })}
           onChange={(value) => {
             const options = value
               .split('/')
@@ -214,7 +295,9 @@ const VariableValueEditor: React.FC<{
         />
         <Select
           value={variable.defaultValue ?? undefined}
-          placeholder='默认选项'
+          placeholder={t('creativeStudio.workflows.editor.default.option', {
+            defaultValue: 'Default option',
+          })}
           options={variable.options.map((option) => ({ value: option, label: option }))}
           onChange={(value) =>
             onChange(patchVariable(workflow, variable, { defaultValue: value }))
@@ -224,16 +307,31 @@ const VariableValueEditor: React.FC<{
     );
   }
   const selected = generationStep(workflow).referenceVariableIds.includes(variable.id);
+  const assetType = t(
+    variable.type === 'image-series'
+      ? 'creativeStudio.workflows.editor.referenceImages'
+      : 'creativeStudio.workflows.editor.referenceImage',
+    {
+      defaultValue: variable.type === 'image-series' ? 'multiple images' : 'image',
+    }
+  );
   return (
     <div className={styles.toggleRow}>
-      <span>运行时从“我的素材”选择{variable.type === 'image-series' ? '多张图片' : '图片'}</span>
+      <span>
+        {t('creativeStudio.workflows.editor.referenceSource', {
+          assetType,
+          defaultValue: 'Select {{assetType}} from My assets',
+        })}
+      </span>
       <Checkbox
         checked={selected}
         onChange={(checked) =>
           onChange(setWorkflowReferenceVariable(workflow, variable.id, checked))
         }
       >
-        用作模型参考图
+        {t('creativeStudio.workflows.editor.referenceForModel', {
+          defaultValue: 'Use as model reference image',
+        })}
       </Checkbox>
     </div>
   );
@@ -248,6 +346,10 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
   onSave,
   onOpenModelSettings,
 }) => {
+  const { t } = useTranslation();
+  const copy = useMemo(() => createWorkflowTranslationCopy(t), [t]);
+  const variableTypeOptions = useMemo(() => buildVariableTypeOptions(t), [t]);
+  const qualityOptions = useMemo(() => buildQualityOptions(t), [t]);
   if (!workflow) return null;
   const generate = generationStep(workflow);
   const expectedTask = generate.referenceVariableIds.length > 0 ? 'image_edit' : 'image_generation';
@@ -266,9 +368,14 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
     <Modal
       visible
       className={styles.editorModal}
-      title={isNew ? '新建模板' : '编辑模板'}
-      okText='保存'
-      cancelText='取消'
+      title={t(
+        isNew
+          ? 'creativeStudio.workflows.editor.createTitle'
+          : 'creativeStudio.workflows.editor.editTitle',
+        { defaultValue: isNew ? 'New template' : 'Edit template' }
+      )}
+      okText={t('creativeStudio.workflows.editor.save', { defaultValue: 'Save' })}
+      cancelText={t('creativeStudio.workflows.editor.cancel', { defaultValue: 'Cancel' })}
       autoFocus={false}
       unmountOnExit
       confirmLoading={saving}
@@ -281,34 +388,56 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
       <div className={styles.editorGrid} data-workflow-editor>
         <div className={styles.editorMain}>
           <section className={styles.editorSection}>
-            <h3>基础信息</h3>
+            <h3>
+              {t('creativeStudio.workflows.editor.basicInfo', {
+                defaultValue: 'Basic information',
+              })}
+            </h3>
             <Input
               value={workflow.metadata.name}
-              placeholder='模板名称'
+              placeholder={t('creativeStudio.workflows.editor.namePlaceholder', {
+                defaultValue: 'Template name',
+              })}
               maxLength={120}
               onChange={(name) => patchMetadata({ name })}
             />
             <div className={styles.twoColumns}>
               <Input
                 value={workflow.metadata.category}
-                placeholder='分类，例如 电商海报'
+                placeholder={t('creativeStudio.workflows.editor.categoryPlaceholder', {
+                  defaultValue: 'Category, e.g. e-commerce poster',
+                })}
                 maxLength={80}
                 onChange={(category) => patchMetadata({ category })}
               />
               <Select
                 value={mode}
                 options={[
-                  { value: 'single-image', label: '单图模板' },
-                  { value: 'multi-image-series', label: '多图模板' },
+                  {
+                    value: 'single-image',
+                    label: t('creativeStudio.workflows.editor.modeSingle', {
+                      defaultValue: 'Single-image template',
+                    }),
+                  },
+                  {
+                    value: 'multi-image-series',
+                    label: t('creativeStudio.workflows.editor.modeMulti', {
+                      defaultValue: 'Multi-image template',
+                    }),
+                  },
                 ]}
                 onChange={(nextMode) =>
-                  onChange(switchWorkflowMode(workflow, nextMode as WorkflowEditorMode))
+                  onChange(
+                    switchWorkflowMode(workflow, nextMode as WorkflowEditorMode, copy)
+                  )
                 }
               />
             </div>
             <Input.TextArea
               value={workflow.metadata.description}
-              placeholder='适用场景说明'
+              placeholder={t('creativeStudio.workflows.editor.descriptionPlaceholder', {
+                defaultValue: 'Describe the intended use',
+              })}
               maxLength={2_000}
               autoSize={{ minRows: 2, maxRows: 4 }}
               onChange={(description) => patchMetadata({ description })}
@@ -317,21 +446,31 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
 
           <section className={styles.editorSection}>
             <div className={styles.sectionHeadingRow}>
-              <h3>输入变量</h3>
+              <h3>
+                {t('creativeStudio.workflows.editor.variables', {
+                  defaultValue: 'Input variables',
+                })}
+              </h3>
               <Button
                 size='small'
                 icon={<Plus theme='outline' size={14} fill='currentColor' />}
                 onClick={() =>
                   onChange({
-                    ...workflow,
-                    variables: [
-                      ...workflow.variables,
-                      createWorkflowVariable('text', workflow.variables.length + 1),
-                    ],
-                  })
-                }
-              >
-                添加变量
+                      ...workflow,
+                      variables: [
+                        ...workflow.variables,
+                        createWorkflowVariable(
+                          'text',
+                          workflow.variables.length + 1,
+                          copy
+                        ),
+                      ],
+                    })
+                  }
+                >
+                  {t('creativeStudio.workflows.editor.addVariable', {
+                    defaultValue: 'Add variable',
+                  })}
               </Button>
             </div>
             <div className={styles.variableList}>
@@ -340,26 +479,35 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
                   <div className={styles.variableRow}>
                     <Input
                       value={variable.key}
-                      placeholder='变量名 product_name'
+                      placeholder={t(
+                        'creativeStudio.workflows.editor.variableKeyPlaceholder',
+                        { defaultValue: 'Variable key, e.g. product_name' }
+                      )}
                       onChange={(key) =>
                         onChange(patchVariable(workflow, variable, { key }))
                       }
                     />
                     <Input
                       value={variable.label}
-                      placeholder='显示名称'
+                      placeholder={t('creativeStudio.workflows.editor.variableLabelPlaceholder', {
+                        defaultValue: 'Display name',
+                      })}
                       onChange={(label) =>
                         onChange(patchVariable(workflow, variable, { label }))
                       }
                     />
                     <Select
                       value={variable.type}
-                      options={VARIABLE_TYPE_OPTIONS}
+                      options={variableTypeOptions}
                       onChange={(type) =>
                         onChange(
                           replaceWorkflowVariable(
                             workflow,
-                            convertWorkflowVariable(variable, type as WorkflowVariableType)
+                            convertWorkflowVariable(
+                              variable,
+                              type as WorkflowVariableType,
+                              copy
+                            )
                           )
                         )
                       }
@@ -370,12 +518,17 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
                         onChange(patchVariable(workflow, variable, { required }))
                       }
                     >
-                      必填
+                      {t('creativeStudio.workflows.editor.required', {
+                        defaultValue: 'Required',
+                      })}
                     </Checkbox>
                     <Button
                       size='small'
                       status='danger'
-                      aria-label={`删除变量 ${variable.label}`}
+                      aria-label={t('creativeStudio.workflows.editor.deleteVariable', {
+                        name: variable.label,
+                        defaultValue: 'Delete variable {{name}}',
+                      })}
                       icon={<Delete theme='outline' size={14} fill='currentColor' />}
                       onClick={() => onChange(removeWorkflowVariable(workflow, variable.id))}
                     />
@@ -383,6 +536,7 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
                   <VariableValueEditor
                     workflow={workflow}
                     variable={variable}
+                    t={t}
                     onChange={onChange}
                   />
                 </article>
@@ -391,11 +545,22 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
           </section>
 
           <section className={styles.editorSection}>
-            <h3>提示词模板</h3>
-            <p className={styles.sectionHint}>使用 {'{{变量名}}'} 插入结构化变量。</p>
+            <h3>
+              {t('creativeStudio.workflows.editor.promptTemplate', {
+                defaultValue: 'Prompt template',
+              })}
+            </h3>
+            <p className={styles.sectionHint}>
+              {t('creativeStudio.workflows.editor.promptHint', {
+                variableName: '{{variableName}}',
+                defaultValue: 'Use {{variableName}} to insert structured variables.',
+              })}
+            </p>
             <Input.TextArea
               value={workflowTemplateText(workflow)}
-              placeholder='填写图片生成提示词'
+              placeholder={t('creativeStudio.workflows.editor.promptPlaceholder', {
+                defaultValue: 'Enter the image-generation prompt',
+              })}
               autoSize={{ minRows: 7, maxRows: 14 }}
               onChange={(text) => onChange(replaceWorkflowTemplateText(workflow, text))}
             />
@@ -403,7 +568,11 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
         </div>
 
         <aside className={styles.editorAside}>
-          <h3>生成配置</h3>
+          <h3>
+            {t('creativeStudio.workflows.editor.generationConfig', {
+              defaultValue: 'Generation settings',
+            })}
+          </h3>
           <NomiCreativeModelSelect
             filter={{ capability: 'task', task: expectedTask }}
             value={
@@ -428,16 +597,22 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
             onOpenModelSettings={onOpenModelSettings}
           />
           <label className={styles.fieldLabel}>
-            <span>生成质量</span>
+            <span>
+              {t('creativeStudio.workflows.editor.quality.label', {
+                defaultValue: 'Quality',
+              })}
+            </span>
             <Select
               value={generate.generation.quality}
-              options={QUALITY_OPTIONS}
+              options={qualityOptions}
               onChange={(quality) => onChange(patchGeneration(workflow, { quality }))}
             />
           </label>
           <div className={styles.twoColumns}>
             <label className={styles.fieldLabel}>
-              <span>宽度</span>
+              <span>
+                {t('creativeStudio.workflows.editor.width', { defaultValue: 'Width' })}
+              </span>
               <InputNumber
                 min={64}
                 max={8192}
@@ -450,7 +625,9 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
               />
             </label>
             <label className={styles.fieldLabel}>
-              <span>高度</span>
+              <span>
+                {t('creativeStudio.workflows.editor.height', { defaultValue: 'Height' })}
+              </span>
               <InputNumber
                 min={64}
                 max={8192}
@@ -464,7 +641,11 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
             </label>
           </div>
           <label className={styles.fieldLabel}>
-            <span>每条提示词生成数量</span>
+            <span>
+              {t('creativeStudio.workflows.editor.imagesPerPrompt', {
+                defaultValue: 'Images per prompt',
+              })}
+            </span>
             <InputNumber
               min={1}
               max={6}
@@ -478,9 +659,17 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
 
           {output.kind === 'multi-image-series' ? (
             <div className={styles.seriesSettings}>
-              <h4>多图提示词规划</h4>
+              <h4>
+                {t('creativeStudio.workflows.editor.seriesPlanning', {
+                  defaultValue: 'Multi-image prompt planning',
+                })}
+              </h4>
               <label className={styles.fieldLabel}>
-                <span>提示词规划模型</span>
+                <span>
+                  {t('creativeStudio.workflows.editor.planningModel', {
+                    defaultValue: 'Prompt planning model',
+                  })}
+                </span>
                 <NomiCreativeModelSelect
                   filter={{ capability: 'task', task: 'chat' }}
                   value={
@@ -506,19 +695,30 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
                 />
               </label>
               <label className={styles.fieldLabel}>
-                <span>系列拆分要求</span>
+                <span>
+                  {t('creativeStudio.workflows.editor.splitInstruction', {
+                    defaultValue: 'Series split requirements',
+                  })}
+                </span>
                 <Input.TextArea
                   value={promptPlanning?.instruction ?? ''}
                   maxLength={2_000}
                   autoSize={{ minRows: 3, maxRows: 6 }}
-                  placeholder='说明每张图之间如何分工并保持连贯'
+                  placeholder={t('creativeStudio.workflows.editor.splitPlaceholder', {
+                    defaultValue:
+                      'Explain how images should divide the work while staying coherent',
+                  })}
                   onChange={(instruction) =>
                     onChange(patchPromptPlanning(workflow, { instruction }))
                   }
                 />
               </label>
               <label className={styles.fieldLabel}>
-                <span>规划最大输出 Token</span>
+                <span>
+                  {t('creativeStudio.workflows.editor.maxTokens', {
+                    defaultValue: 'Maximum planning output tokens',
+                  })}
+                </span>
                 <InputNumber
                   min={128}
                   max={32_768}
@@ -532,7 +732,11 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
               </label>
               <div className={styles.twoColumns}>
                 <label className={styles.fieldLabel}>
-                  <span>张数</span>
+                  <span>
+                    {t('creativeStudio.workflows.editor.count', {
+                      defaultValue: 'Number of images',
+                    })}
+                  </span>
                   <InputNumber
                     min={2}
                     max={20}
@@ -547,7 +751,11 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
                   />
                 </label>
                 <label className={styles.fieldLabel}>
-                  <span>并发</span>
+                  <span>
+                    {t('creativeStudio.workflows.editor.concurrency', {
+                      defaultValue: 'Concurrency',
+                    })}
+                  </span>
                   <InputNumber
                     min={1}
                     max={20}
@@ -563,7 +771,11 @@ const WorkflowEditorModal: React.FC<WorkflowEditorModalProps> = ({
                 </label>
               </div>
               <div className={styles.toggleRow}>
-                <span>生成前审核提示词</span>
+                <span>
+                  {t('creativeStudio.workflows.editor.reviewRequired', {
+                    defaultValue: 'Review prompts before generation',
+                  })}
+                </span>
                 <Switch
                   size='small'
                   checked={output.reviewRequired}

@@ -10,30 +10,33 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import CanvasSurface from './CanvasSurface';
+import { withCanvasTestI18n } from './canvasI18nTestUtils';
 
 const renderSurface = (backgroundMode: 'dots' | 'lines' | 'blank' = 'dots') =>
   renderToStaticMarkup(
-    <CanvasSurface
-      viewport={{ x: 120, y: -80, zoom: 1.25 }}
-      backgroundMode={backgroundMode}
-      selectionRect={{ x: 24, y: 30, width: -180, height: 96 }}
-      edgeLayer={<span data-test-slot='edges' />}
-      nodeLayer={<span data-test-slot='nodes' />}
-      worldOverlay={<span data-test-slot='world-overlay' />}
-      screenOverlay={<span data-test-slot='screen-overlay' />}
-      topDock={<span data-test-slot='top' />}
-      leftDock={<span data-test-slot='left' />}
-      rightDock={<span data-test-slot='right' />}
-      bottomDock={<span data-test-slot='bottom' />}
-      miniMap={<span data-test-slot='minimap' />}
-      isMiniMapOpen
-      zoomControls={{
-        onZoomChange: () => undefined,
-        onResetView: () => undefined,
-        onFitView: () => undefined,
-        onToggleMiniMap: () => undefined,
-      }}
-    />
+    withCanvasTestI18n(
+      <CanvasSurface
+        viewport={{ x: 120, y: -80, zoom: 1.25 }}
+        backgroundMode={backgroundMode}
+        selectionRect={{ x: 24, y: 30, width: -180, height: 96 }}
+        edgeLayer={<span data-test-slot='edges' />}
+        nodeLayer={<span data-test-slot='nodes' />}
+        worldOverlay={<span data-test-slot='world-overlay' />}
+        screenOverlay={<span data-test-slot='screen-overlay' />}
+        topDock={<span data-test-slot='top' />}
+        leftDock={<span data-test-slot='left' />}
+        rightDock={<span data-test-slot='right' />}
+        bottomDock={<span data-test-slot='bottom' />}
+        miniMap={<span data-test-slot='minimap' />}
+        isMiniMapOpen
+        zoomControls={{
+          onZoomChange: () => undefined,
+          onResetView: () => undefined,
+          onFitView: () => undefined,
+          onToggleMiniMap: () => undefined,
+        }}
+      />
+    )
   );
 
 describe('Creative Studio canvas surface', () => {
