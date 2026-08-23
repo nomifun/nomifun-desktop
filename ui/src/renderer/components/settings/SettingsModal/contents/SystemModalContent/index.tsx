@@ -173,7 +173,12 @@ const SystemModalContent: React.FC = () => {
   }, [systemInfo, form]);
 
   const preferenceItems = [
-    { key: 'language', label: t('settings.language'), component: <LanguageSwitcher /> },
+    {
+      key: 'language',
+      label: t('settings.language'),
+      description: t('settings.languagePreferenceDesc'),
+      component: <LanguageSwitcher />,
+    },
     {
       key: 'sendKey',
       label: t('settings.sendKey'),
