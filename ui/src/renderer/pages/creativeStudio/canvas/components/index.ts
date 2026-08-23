@@ -9,4 +9,8 @@ export type {
   CanvasSurfaceViewport,
 } from './CanvasSurface';
 export { default as CanvasZoomControls } from './CanvasZoomControls';
-export type { CanvasZoomControlLabels, CanvasZoomControlsProps } from './CanvasZoomControls';
+export type {
+  CanvasZoomBackground,
+  CanvasZoomControlLabels,
+  CanvasZoomControlsProps,
+} from './CanvasZoomControls';

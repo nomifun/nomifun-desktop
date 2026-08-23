@@ -46,7 +46,6 @@ import {
 } from '../../app/routes';
 import {
   DEFAULT_CREATIVE_STUDIO_PANELS,
-  type CreativeCanvasBackground,
   type CreativeCanvasNode,
   type CreativeCanvasNodeKind,
   type CreativeChatSessionReference,
@@ -665,10 +664,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
     projectId: string;
     revision: string;
   } | null>(null);
-  const hydratedBackgroundRef = useRef<{
-    projectId: string;
-    revision: string;
-  } | null>(null);
   const knownAssetsRef = useRef<ReadonlyMap<string, CreativeAsset>>(new Map());
   const assetImportBusyRef = useRef(false);
   const imageToolBusyRef = useRef(false);
@@ -686,8 +681,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, []);
   const [save, setSave] = useState<CanvasCasSaveSnapshot>(INITIAL_SAVE);
   const [tool, setTool] = useState<CanvasInteractionTool>('select');
-  const [background, setBackground] =
-    useState<CreativeCanvasBackground>('lines');
   const [viewportSize, setViewportSize] = useState<CreativeSize>(
     FALLBACK_VIEWPORT_SIZE
   );
@@ -696,7 +689,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [panels, setPanels] = useState<CreativeStudioPanelState>(() =>
     structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS)
   );
-  const [backgroundMenuOpen, setBackgroundMenuOpen] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [assetSearch, setAssetSearch] = useState('');
@@ -899,7 +891,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
     panelsRef.current = defaultPanels;
     setPanels(defaultPanels);
     hydratedPanelsRef.current = null;
-    hydratedBackgroundRef.current = null;
     canvasStateRef.current = null;
     setCanvasState(null);
     setSave(INITIAL_SAVE);
@@ -995,19 +986,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
   useEffect(() => {
     const detail = project.detail;
     if (!detail || detail.project.projectId !== projectId) return;
-
-    const hydratedBackground = hydratedBackgroundRef.current;
-    if (
-      !hydratedBackground ||
-      hydratedBackground.projectId !== projectId ||
-      hydratedBackground.revision !== detail.project.revision
-    ) {
-      setBackground(detail.document.background);
-      hydratedBackgroundRef.current = {
-        projectId,
-        revision: detail.project.revision,
-      };
-    }
 
     const hydrated = hydratedPanelsRef.current;
     const shouldHydratePanels =
@@ -1213,14 +1191,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
       }
     },
     [handleBottomViewChange, prepareCenteredInsertion, save.revision]
-  );
-
-  const handleBackgroundChange = useCallback(
-    (next: CreativeCanvasBackground) => {
-      setBackground(next);
-      editorRef.current?.setBackground(next);
-    },
-    []
   );
 
   const handleMiniMapNavigate = useCallback(
@@ -4360,7 +4330,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
         saveStatus={save.status}
         saveMessage={saveMessage}
         tool={tool}
-        background={background}
         canUndo={Boolean(canvasState && canUndoCanvas(canvasState))}
         canRedo={Boolean(canvasState && canRedoCanvas(canvasState))}
         leftOpen={panels.left.open}
@@ -4368,14 +4337,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
         rightView={panelViews.right}
         rightPanelWidth={panels.right.width}
         bottomView={panelViews.bottom}
-        backgroundMenuOpen={backgroundMenuOpen}
         compact={compact}
         disabled={productDisabled}
         onBackToCanvases={() => void handleBackToCanvases()}
         onToolChange={setTool}
         onAddNode={addNode}
-        onBackgroundChange={handleBackgroundChange}
-        onBackgroundMenuOpenChange={setBackgroundMenuOpen}
         onUndo={() => dispatch(canvasCommands.undo())}
         onRedo={() => dispatch(canvasCommands.redo())}
         onLeftPanelOpenChange={handleLeftPanelOpenChange}

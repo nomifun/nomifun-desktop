@@ -152,8 +152,8 @@
 }
 
 .miniMapDock {
-  right: 16px;
-  bottom: 72px;
+  bottom: 18px;
+  left: 16px;
 }
 
 @media (max-width: 1280px) {
@@ -188,7 +188,7 @@
   }
 
   .miniMapDock {
-    bottom: 68px;
+    bottom: 14px;
   }
 }
 
@@ -236,8 +236,8 @@
   }
 
   .miniMapDock {
-    right: 10px;
-    bottom: 112px;
+    bottom: 10px;
+    left: 10px;
   }
 }
 

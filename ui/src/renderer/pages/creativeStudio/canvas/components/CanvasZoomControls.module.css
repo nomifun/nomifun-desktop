@@ -3,20 +3,21 @@
   min-width: 0;
   height: 42px;
   align-items: center;
-  gap: 3px;
-  padding: 5px 6px;
+  gap: 2px;
+  padding: 4px 5px;
   border: 1px solid color-mix(in srgb, var(--color-border-2) 88%, transparent);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--color-bg-2) 88%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--color-bg-2) 92%, transparent);
   box-shadow: 0 10px 32px rgba(0, 0, 0, 0.15);
   color: var(--color-text-2);
   backdrop-filter: blur(18px) saturate(135%);
 }
 
 .iconButton,
-.percentageButton {
+.percentageButton,
+.stepButton {
   display: grid;
-  height: 30px;
+  height: 32px;
   flex: 0 0 auto;
   place-items: center;
   padding: 0;
@@ -32,24 +33,52 @@
 }
 
 .iconButton {
-  width: 30px;
+  width: 32px;
 }
 
 .percentageButton {
-  min-width: 50px;
-  padding: 0 7px;
+  min-width: 86px;
+  gap: 6px;
+  padding: 0 8px;
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 650;
   font-variant-numeric: tabular-nums;
 }
 
+.percentageButton > span:first-child {
+  min-width: 42px;
+  text-align: right;
+}
+
+.menuAnchor {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.zoomMenuPopover {
+  position: absolute;
+  z-index: 30;
+  right: 0;
+  bottom: calc(100% + 9px);
+  width: 196px;
+  padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--color-border-2) 88%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-bg-2) 96%, transparent);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(18px) saturate(135%);
+}
+
 .iconButton:hover:not(:disabled),
-.percentageButton:hover:not(:disabled) {
+.percentageButton:hover:not(:disabled),
+.stepButton:hover:not(:disabled) {
   background: var(--color-fill-2);
   color: var(--color-text-1);
 }
 
+.percentageButton[data-active='true'],
 .iconButton[data-active='true'] {
   background: rgba(var(--primary-6), 0.12);
   color: rgb(var(--primary-6));
@@ -58,54 +87,162 @@
 
 .iconButton:focus-visible,
 .percentageButton:focus-visible,
-.slider:focus-visible {
+.stepButton:focus-visible,
+.zoomInput:focus-within {
   outline: 2px solid rgba(var(--primary-6), 0.55);
   outline-offset: 2px;
 }
 
 .iconButton:disabled,
 .percentageButton:disabled,
-.slider:disabled {
+.stepButton:disabled,
+.zoomInput:has(input:disabled) {
   cursor: default;
   opacity: 0.38;
 }
 
 .divider {
   width: 1px;
-  height: 18px;
+  height: 22px;
   flex: 0 0 1px;
   margin: 0 2px;
   background: var(--color-border-2);
 }
 
-.slider {
-  width: clamp(72px, 9vw, 118px);
-  height: 18px;
-  margin: 0 3px;
-  flex: 0 1 118px;
+.zoomMenu {
+  width: 196px;
+  color: var(--color-text-1);
+}
+
+.backgroundHeading {
+  padding: 2px 5px 7px;
+  color: var(--color-text-3);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.backgroundOptions {
+  display: grid;
+  gap: 2px;
+}
+
+.backgroundOption {
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-2);
   cursor: pointer;
-  accent-color: rgb(var(--primary-6));
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+}
+
+.backgroundOption:hover:not(:disabled) {
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
+}
+
+.backgroundOption[data-active='true'] {
+  background: rgba(var(--primary-6), 0.1);
+  color: rgb(var(--primary-6));
+}
+
+.backgroundOption > span {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.backgroundOption:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.zoomStepper {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 7px -8px 0;
+  padding: 6px 8px 7px;
+  border-top: 1px solid var(--color-border-2);
+  background: color-mix(in srgb, var(--color-fill-1) 72%, transparent);
+}
+
+.stepButton {
+  width: 28px;
+  height: 30px;
+  flex: 0 0 28px;
+}
+
+.zoomInput {
+  display: flex;
+  min-width: 0;
+  height: 32px;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 3px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, rgb(var(--primary-6)) 62%, var(--color-border-2));
+  border-radius: 8px;
+  background: var(--color-bg-2);
+  color: var(--color-text-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.zoomInput input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--color-text-1);
+  font: inherit;
+  text-align: right;
+}
+
+.zoomInput input::-webkit-inner-spin-button,
+.zoomInput input::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
 }
 
 @media (max-width: 640px) {
   .controls {
     height: 40px;
     max-width: calc(100vw - 20px);
-    padding: 4px 5px;
+    padding: 3px 4px;
   }
 
-  .slider {
-    display: none;
+  .percentageButton {
+    min-width: 78px;
   }
 
   .divider {
     margin-inline: 1px;
   }
+
+  .zoomMenu {
+    width: min(196px, calc(100vw - 24px));
+  }
+
+  .zoomMenuPopover {
+    right: auto;
+    left: 0;
+    width: min(196px, calc(100vw - 24px));
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .iconButton,
-  .percentageButton {
+  .percentageButton,
+  .stepButton {
     transition: none;
   }
 }

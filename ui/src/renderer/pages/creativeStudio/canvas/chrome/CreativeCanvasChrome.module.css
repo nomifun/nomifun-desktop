@@ -609,11 +609,6 @@
   opacity: 0.38;
 }
 
-.menuAnchor {
-  display: inline-flex;
-  flex: 0 0 auto;
-}
-
 .divider {
   width: 1px;
   height: 24px;

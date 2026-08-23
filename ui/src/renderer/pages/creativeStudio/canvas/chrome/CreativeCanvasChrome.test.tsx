@@ -102,6 +102,7 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
     expect(
       html.includes('aria-label="creativeStudio.canvas.actions.openMiniMap"')
     ).toBe(false);
+    expect(html.includes('data-canvas-background-menu')).toBe(false);
     expect(
       html.includes(
         'aria-label="creativeStudio.canvas.panels.bottom.history"'
