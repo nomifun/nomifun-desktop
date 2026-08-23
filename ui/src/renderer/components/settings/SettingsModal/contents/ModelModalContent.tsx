@@ -256,7 +256,7 @@ const ModelDisplayNameEditor: React.FC<{
       content={
         <div className='flex w-280px flex-col gap-8px' onClick={(e) => e.stopPropagation()}>
           <div className='text-12px text-t-secondary'>
-            {t('settings.modelDisplayNameTitle', { defaultValue: '模型显示名称' })}
+            {t('settings.modelDisplayNameTitle', { defaultValue: '模型别名（选填）' })}
           </div>
           <Input
             autoFocus
@@ -269,7 +269,7 @@ const ModelDisplayNameEditor: React.FC<{
           />
           <div className='text-11px leading-16px text-t-tertiary'>
             {t('settings.modelDisplayNameHint', {
-              defaultValue: '仅用于界面展示；实际请求仍使用原始模型 ID。',
+              defaultValue: '非必填，仅用于界面展示；实际请求仍使用原始模型 ID。',
             })}
           </div>
           <div className='flex items-center justify-end gap-8px'>
@@ -283,7 +283,7 @@ const ModelDisplayNameEditor: React.FC<{
         </div>
       }
     >
-      <Tooltip content={t('settings.editModelDisplayName', { defaultValue: '编辑模型显示名称' })}>
+      <Tooltip content={t('settings.editModelDisplayName', { defaultValue: '编辑模型别名' })}>
         <Button
           size='mini'
           className={`model-provider-action-btn !h-24px !w-24px !min-w-24px shrink-0 ${

@@ -316,6 +316,33 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('请先在上方选择任务')).toBe(true);
   });
 
+  test('keeps the optional model alias behind a clear collapsed disclosure', () => {
+    const html = render({
+      model: 'step-ready',
+      displayName: '工作模型',
+      capabilities: [
+        { ...emptyCapabilityDraft('chat'), transportSource: 'persisted' as const, protocol: 'stepfun.chat' },
+      ],
+    });
+    const disclosureAt = html.indexOf('data-model-alias-disclosure="true"');
+    const disclosureStart = html.lastIndexOf('<button', disclosureAt);
+    const disclosureEnd = html.indexOf('</button>', disclosureAt);
+    const disclosure = html.slice(disclosureStart, disclosureEnd);
+    const panelAt = html.indexOf('data-model-alias-panel="true"');
+    const panelStart = html.lastIndexOf('<div', panelAt);
+    const panelEnd = html.indexOf('>', panelAt);
+    const panelTag = html.slice(panelStart, panelEnd);
+
+    expect(disclosureAt).toBeGreaterThan(-1);
+    expect(disclosure.includes('aria-expanded="false"')).toBe(true);
+    expect(disclosure.includes('模型别名（选填）')).toBe(true);
+    expect(disclosure.includes('工作模型')).toBe(true);
+    expect(panelAt).toBeGreaterThan(disclosureAt);
+    expect(panelTag.includes('hidden=""')).toBe(true);
+    expect(html.includes('data-model-alias-input')).toBe(false);
+    expect(html.indexOf('目录仅提供第一个任务的建议')).toBeLessThan(disclosureAt);
+  });
+
   test('keeps traits answerable without expanding a capability card', () => {
     const html = render({
       model: 'step-ready',
