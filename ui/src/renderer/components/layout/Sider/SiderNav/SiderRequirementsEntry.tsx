@@ -30,7 +30,7 @@ const SiderRequirementsEntry: React.FC<SiderRequirementsEntryProps> = ({
 
   if (collapsed) {
     return (
-      <Tooltip {...siderTooltipProps} content={t('requirements.title')} position='right'>
+      <Tooltip {...siderTooltipProps} content={t('requirements.siderTitle')} position='right'>
         <div
           className={classNames(
             'w-full h-28px flex items-center justify-center cursor-pointer transition-colors rd-8px text-t-primary',
@@ -51,7 +51,7 @@ const SiderRequirementsEntry: React.FC<SiderRequirementsEntryProps> = ({
   }
 
   return (
-    <Tooltip {...siderTooltipProps} content={t('requirements.title')} position='right'>
+    <Tooltip {...siderTooltipProps} content={t('requirements.siderTitle')} position='right'>
       <div
         className={classNames(
           'box-border group h-28px w-full flex items-center justify-start gap-8px pl-10px pr-8px rd-0.5rem cursor-pointer shrink-0 transition-all text-t-primary',
@@ -70,7 +70,7 @@ const SiderRequirementsEntry: React.FC<SiderRequirementsEntryProps> = ({
           />
         </span>
         <span className='collapsed-hidden text-14px font-[500] leading-24px'>
-          {t('requirements.title')}
+          {t('requirements.siderTitle')}
         </span>
       </div>
     </Tooltip>

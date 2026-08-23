@@ -2,7 +2,8 @@
   "title": "Mini-Apps",
   "subtitle": "AI-built web tools you reopen instantly",
   "nav": {
-    "entry": "Mini-Apps"
+    "entry": "Mini-Apps",
+     "siderEntry": "Apps"
   },
   "list": {
     "searchPlaceholder": "Search mini-apps",
