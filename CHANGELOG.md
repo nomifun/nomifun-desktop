@@ -7,6 +7,16 @@ notes at a high level rather than a complete historical log.
 
 No unreleased changes yet.
 
+## v0.7.2 - 2026-08-24
+
+- **Markdown code highlighting failures are isolated.** A broken highlighter
+  language registration or runtime render failure no longer takes down the whole
+  Markdown block; the code block falls back to a safe plain-text renderer, with
+  language normalization covered by targeted tests.
+- **Creative Studio workbench tool panels are more compact.** Image workbench
+  and prompt-library controls use denser panel spacing and layout affordances so
+  common actions stay visible without crowding the canvas.
+
 ## v0.7.1 - 2026-08-24
 
 - **Model management now shows the saved provider API Keys in plaintext.**
