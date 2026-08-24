@@ -1,11 +1,15 @@
 {
   "version": "0.7.2",
   "notes": "- **Markdown code highlighting failures are isolated.** A broken highlighter\n  language registration or runtime render failure no longer takes down the whole\n  Markdown block; the code block falls back to a safe plain-text renderer, with\n  language normalization covered by targeted tests.\n- **Creative Studio workbench tool panels are more compact.** Image workbench\n  and prompt-library controls use denser panel spacing and layout affordances so\n  common actions stay visible without crowding the canvas.",
-  "pub_date": "2026-08-24T09:25:44.504Z",
+  "pub_date": "2026-08-24T10:06:50.307Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODAvUHllZUhRcVNHUCtIMGwyL2Q3cTlMTmRkUHBMUlNOYk13MVZ5aklpUTREcFJjbmFFOTJmaUNNcWtvdzUxQ3hjb21ZMmtMTHNhYkExTVRvNnMwNlFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3NTYzNDgzCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CnJRKzNyTnh1TEZBZjAvbmNNSTZ5U2FCemJaUmlxOWpheFZ3anBsdmYyUHVZd1pZQkNPK3BPSUgvVko4OU1wSEY5bHBKTFNpQmhVRW1Vd25iZTNBUkJnPT0K",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.7.2/NomiFun.app.tar.gz"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHpiWEhOMUFCRi8vM3ZHZ21WaytxMXR4YzAycHE0MUNFakl5dm82REZ3UzRhWldZZmdudE44N1djalZ0a1crdnhOZ0lmVVlUdUNvZC9TYkdmbkdFV3c4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3NTY2MDA5CWZpbGU6Tm9taUZ1bl8wLjcuMl94NjQtc2V0dXAuZXhlCkpGOW9mc3JmckNlbjhTZWpYRXpEaldCd3FUZVVkVWVXUWZqMWcrN2htRFBTVndtY2lyRjlYZDBhdE1KOVFBWjFjOEJXQWpmUXFxU25ZZk0waURGa0JBPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.7.2/NomiFun_0.7.2_x64-setup.exe"
     }
   }
 }
