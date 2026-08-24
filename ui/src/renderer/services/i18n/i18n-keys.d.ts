@@ -4827,6 +4827,7 @@ export type I18nKey =
   | 'settings.addCustomAgentTitle'
   | 'settings.addEnvVar'
   | 'settings.addModel'
+  | 'settings.addModelDisplayName'
   | 'settings.addModelHint'
   | 'settings.addModelMoreCount'
   | 'settings.addModelNoExisting'
