@@ -23,6 +23,33 @@ export const normalizeVideoTaskCount = (value: number): number => {
   return Math.max(1, Math.min(6, Math.floor(value)));
 };
 
+export function videoWorkbenchDimensions(
+  resolution: string,
+  aspectRatio: string
+): { width: number; height: number } | null {
+  const shortEdge = resolution === '720p' ? 720 : resolution === '1080p' ? 1080 : null;
+  if (shortEdge === null) return null;
+  if (aspectRatio === '16:9') {
+    return { width: Math.round((shortEdge * 16) / 9), height: shortEdge };
+  }
+  if (aspectRatio === '9:16') {
+    return { width: shortEdge, height: Math.round((shortEdge * 16) / 9) };
+  }
+  if (aspectRatio === '1:1') return { width: shortEdge, height: shortEdge };
+  return null;
+}
+
+export function videoWorkbenchSizeOptionLabel(
+  resolution: string,
+  aspectRatio: string,
+  label = aspectRatio
+): string {
+  const dimensions = videoWorkbenchDimensions(resolution, aspectRatio);
+  return dimensions
+    ? `${label} · ${dimensions.width} × ${dimensions.height}`
+    : label;
+}
+
 export const toggleVideoTaskSelection = (
   selectedIds: readonly string[],
   taskId: string,

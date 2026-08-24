@@ -25,6 +25,7 @@ import {
   DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS,
   IMAGE_WORKBENCH_QUALITY_OPTIONS,
   imageWorkbenchModelKey,
+  imageWorkbenchSizeDimensionsLabel,
   parseImageWorkbenchModelKey,
   type ImageWorkbenchAspectRatioOption,
   type ImageWorkbenchInterfaceMode,
@@ -45,7 +46,6 @@ interface ImageWorkbenchComposerProps {
   settings: ImageWorkbenchSettings;
   modelOptions: readonly ImageWorkbenchModelOption[];
   aspectRatioOptions?: readonly ImageWorkbenchAspectRatioOption[];
-  dimensionsDisabled?: boolean;
   maxCount?: number;
   modelSlot?: React.ReactNode;
   task: ImageWorkbenchTaskSummary;
@@ -63,14 +63,10 @@ interface ImageWorkbenchComposerProps {
   onModelChange(model: ImageWorkbenchModelIdentity | null): void;
   onInterfaceModeChange(mode: ImageWorkbenchInterfaceMode): void;
   onQualityChange(quality: ImageWorkbenchQuality): void;
-  onDimensionsChange(dimensions: { width: number | null; height: number | null }): void;
   onAspectRatioChange(option: ImageWorkbenchAspectRatioOption): void;
   onCountChange(count: number): void;
   onGenerate(): void;
 }
-
-const clampDimension = (value: number | undefined): number =>
-  Math.max(1, Math.min(8192, Math.floor(value || 1)));
 
 const clampCount = (value: number | undefined, maximum = 10): number =>
   Math.max(1, Math.min(maximum, Math.floor(value || 1)));
@@ -212,14 +208,12 @@ interface SettingsFieldsProps {
   settings: ImageWorkbenchSettings;
   modelOptions: readonly ImageWorkbenchModelOption[];
   aspectRatioOptions: readonly ImageWorkbenchAspectRatioOption[];
-  dimensionsDisabled: boolean;
   maxCount: number;
   modelSlot?: React.ReactNode;
   disabled?: boolean;
   onModelChange(model: ImageWorkbenchModelIdentity | null): void;
   onInterfaceModeChange(mode: ImageWorkbenchInterfaceMode): void;
   onQualityChange(quality: ImageWorkbenchQuality): void;
-  onDimensionsChange(dimensions: { width: number | null; height: number | null }): void;
   onAspectRatioChange(option: ImageWorkbenchAspectRatioOption): void;
   onCountChange(count: number): void;
 }
@@ -229,24 +223,17 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
   settings,
   modelOptions,
   aspectRatioOptions,
-  dimensionsDisabled,
   maxCount,
   modelSlot,
   disabled,
   onModelChange,
   onInterfaceModeChange,
   onQualityChange,
-  onDimensionsChange,
   onAspectRatioChange,
   onCountChange,
 }) => {
   const { t } = useTranslation();
   const modelValue = settings.model ? imageWorkbenchModelKey(settings.model) : undefined;
-  const dimensionsTitle = dimensionsDisabled
-    ? t('creativeStudio.image.settings.fixedDimensions', {
-        defaultValue: '当前模型仅支持已列出的尺寸',
-      })
-    : undefined;
   return (
     <div className={compact ? styles.compactSettings : styles.settingsStack}>
       {modelSlot ? (
@@ -320,38 +307,6 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
 
       {compact ? (
         <>
-          <label
-            className={`${styles.field} ${styles.compactWidthField}`}
-            title={dimensionsTitle}
-          >
-            <span>{t('creativeStudio.image.settings.width', { defaultValue: '宽度' })}</span>
-            <InputNumber
-              value={settings.width ?? undefined}
-              min={1}
-              max={8192}
-              placeholder={t('creativeStudio.image.options.auto', { defaultValue: '自动' })}
-              disabled={disabled || dimensionsDisabled || settings.width === null}
-              onChange={(value) =>
-                onDimensionsChange({ width: clampDimension(value), height: settings.height })
-              }
-            />
-          </label>
-          <label
-            className={`${styles.field} ${styles.compactHeightField}`}
-            title={dimensionsTitle}
-          >
-            <span>{t('creativeStudio.image.settings.height', { defaultValue: '高度' })}</span>
-            <InputNumber
-              value={settings.height ?? undefined}
-              min={1}
-              max={8192}
-              placeholder={t('creativeStudio.image.options.auto', { defaultValue: '自动' })}
-              disabled={disabled || dimensionsDisabled || settings.height === null}
-              onChange={(value) =>
-                onDimensionsChange({ width: settings.width, height: clampDimension(value) })
-              }
-            />
-          </label>
           <label className={`${styles.field} ${styles.compactAspectField}`}>
             <span>{t('creativeStudio.image.settings.aspectRatio', { defaultValue: '宽高比' })}</span>
             <Select
@@ -366,7 +321,21 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
             >
               {aspectRatioOptions.map((option) => (
                 <Select.Option key={option.value} value={option.value} disabled={option.disabled}>
-                  {option.label}
+                  <span className={styles.sizeOption}>
+                    <span className={styles.sizeOptionIdentity}>
+                      <span
+                        className={styles.aspectShape}
+                        style={
+                          option.width && option.height
+                            ? { aspectRatio: `${option.width} / ${option.height}` }
+                            : undefined
+                        }
+                        aria-hidden='true'
+                      />
+                      <span>{option.label}</span>
+                    </span>
+                    <small>{imageWorkbenchSizeDimensionsLabel(option) ?? option.label}</small>
+                  </span>
                 </Select.Option>
               ))}
             </Select>
@@ -418,45 +387,6 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
             </div>
           </div>
 
-          <div className={styles.settingGroup} title={dimensionsTitle}>
-            <span className={styles.settingLabel}>
-              {t('creativeStudio.image.settings.dimensions', { defaultValue: '尺寸' })}
-            </span>
-            <div className={styles.dimensionGrid}>
-              <label>
-                <span>
-                  {t('creativeStudio.image.settings.widthShort', { defaultValue: 'W' })}
-                </span>
-                <InputNumber
-                  value={settings.width ?? undefined}
-                  min={1}
-                  max={8192}
-                  placeholder={t('creativeStudio.image.options.auto', { defaultValue: '自动' })}
-                  disabled={disabled || dimensionsDisabled || settings.width === null}
-                  onChange={(value) =>
-                    onDimensionsChange({ width: clampDimension(value), height: settings.height })
-                  }
-                />
-              </label>
-              <span className={styles.dimensionLink}>×</span>
-              <label>
-                <span>
-                  {t('creativeStudio.image.settings.heightShort', { defaultValue: 'H' })}
-                </span>
-                <InputNumber
-                  value={settings.height ?? undefined}
-                  min={1}
-                  max={8192}
-                  placeholder={t('creativeStudio.image.options.auto', { defaultValue: '自动' })}
-                  disabled={disabled || dimensionsDisabled || settings.height === null}
-                  onChange={(value) =>
-                    onDimensionsChange({ width: settings.width, height: clampDimension(value) })
-                  }
-                />
-              </label>
-            </div>
-          </div>
-
           <div className={styles.settingGroup}>
             <span className={styles.settingLabel}>
               {t('creativeStudio.image.settings.aspectRatio', { defaultValue: '宽高比' })}
@@ -481,6 +411,7 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
                     aria-hidden='true'
                   />
                   <span>{option.label}</span>
+                  <small>{imageWorkbenchSizeDimensionsLabel(option) ?? option.label}</small>
                 </button>
               ))}
             </div>
@@ -535,7 +466,6 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
     settings,
     modelOptions,
     aspectRatioOptions = DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS,
-    dimensionsDisabled = false,
     maxCount = 10,
     modelSlot,
     task,
@@ -553,7 +483,6 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
     onModelChange,
     onInterfaceModeChange,
     onQualityChange,
-    onDimensionsChange,
     onAspectRatioChange,
     onCountChange,
     onGenerate,
@@ -661,14 +590,12 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
               settings={settings}
               modelOptions={modelOptions}
               aspectRatioOptions={aspectRatioOptions}
-              dimensionsDisabled={dimensionsDisabled}
               maxCount={maxCount}
               modelSlot={modelSlot}
               disabled={disabled}
               onModelChange={onModelChange}
               onInterfaceModeChange={onInterfaceModeChange}
               onQualityChange={onQualityChange}
-              onDimensionsChange={onDimensionsChange}
               onAspectRatioChange={onAspectRatioChange}
               onCountChange={onCountChange}
             />
@@ -763,14 +690,12 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
               settings={settings}
               modelOptions={modelOptions}
               aspectRatioOptions={aspectRatioOptions}
-              dimensionsDisabled={dimensionsDisabled}
               maxCount={maxCount}
               modelSlot={modelSlot}
               disabled={disabled}
               onModelChange={onModelChange}
               onInterfaceModeChange={onInterfaceModeChange}
               onQualityChange={onQualityChange}
-              onDimensionsChange={onDimensionsChange}
               onAspectRatioChange={onAspectRatioChange}
               onCountChange={onCountChange}
             />

@@ -158,7 +158,7 @@
 .iconButton,
 .settingsButton,
 .submitButton {
-  appearance: none;
+  appearance: auto;
   display: inline-flex;
   box-sizing: border-box;
   height: 40px;
@@ -257,6 +257,43 @@
   min-width: 0;
   gap: 6px;
   color: var(--color-text-2);
+  font-size: 11px;
+}
+
+.settingsSelect {
+  appearance: none;
+  box-sizing: border-box;
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  outline: none;
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.settingsSelect:hover:not(:disabled) {
+  border-color: var(--color-border-3);
+  background: var(--color-fill-3);
+}
+
+.settingsSelect:focus-visible {
+  border-color: rgb(var(--primary-6));
+  box-shadow: 0 0 0 2px rgba(var(--primary-6), 0.14);
+}
+
+.settingsSelect:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.settingsSelect option {
+  background: var(--color-bg-popup);
+  color: var(--color-text-1);
   font-size: 11px;
 }
 

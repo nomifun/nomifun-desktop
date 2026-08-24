@@ -42,6 +42,9 @@ import {
   type ImageWorkbenchModelIdentity,
   type ImageWorkbenchSettings,
   imageWorkbenchSizePolicyForModel,
+  imageWorkbenchSelectableSizeOptions,
+  imageWorkbenchSizeOptionForSettings,
+  normalizeImageWorkbenchSettingsSize,
 } from '../image';
 import {
   combineStandaloneHistoryTasks,
@@ -177,16 +180,13 @@ const OwnedImageWorkbenchReady: React.FC<{
     () => imageWorkbenchSizePolicyForModel(selectedModelOption),
     [selectedModelOption]
   );
+  const sizeOptions = useMemo(
+    () => imageWorkbenchSelectableSizeOptions(sizePolicy.options),
+    [sizePolicy.options]
+  );
   const selectedSizeOption = useMemo(
-    () =>
-      sizePolicy.options.find(
-        (option) =>
-          !option.disabled &&
-          option.value === settings.aspectRatio &&
-          option.width === settings.width &&
-          option.height === settings.height
-      ) ?? null,
-    [settings.aspectRatio, settings.height, settings.width, sizePolicy.options]
+    () => imageWorkbenchSizeOptionForSettings(sizePolicy.options, settings),
+    [settings.aspectRatio, sizePolicy.options]
   );
 
   useEffect(() => {
@@ -255,27 +255,7 @@ const OwnedImageWorkbenchReady: React.FC<{
 
   useEffect(() => {
     if (!selectedModelOption) return;
-    const currentOption = sizePolicy.options.find(
-      (option) => option.value === settings.aspectRatio
-    );
-    const fallbackOption =
-      currentOption && !currentOption.disabled
-        ? currentOption
-        : sizePolicy.options.find((option) => !option.disabled);
-    if (!fallbackOption) return;
-    const dimensionsMatch =
-      settings.width === fallbackOption.width && settings.height === fallbackOption.height;
-    const shouldNormalizeDimensions =
-      !sizePolicy.allowCustomDimensions && !dimensionsMatch;
-    const nextCount = Math.min(settings.count, sizePolicy.maxCount);
-    if (!shouldNormalizeDimensions && nextCount === settings.count) return;
-    setSettings((value) => ({
-      ...value,
-      aspectRatio: fallbackOption.value,
-      width: shouldNormalizeDimensions ? fallbackOption.width : value.width,
-      height: shouldNormalizeDimensions ? fallbackOption.height : value.height,
-      count: nextCount,
-    }));
+    setSettings((value) => normalizeImageWorkbenchSettingsSize(value, sizePolicy));
   }, [
     selectedModelOption,
     settings.aspectRatio,
@@ -337,7 +317,7 @@ const OwnedImageWorkbenchReady: React.FC<{
       );
       return;
     }
-    if (!sizePolicy.allowCustomDimensions && !selectedSizeOption) {
+    if (!selectedSizeOption) {
       setError(
         t('creativeStudio.product.image.errors.unsupportedSize', {
           defaultValue: '当前模型不支持该尺寸，请重新选择尺寸。',
@@ -458,8 +438,7 @@ const OwnedImageWorkbenchReady: React.FC<{
     prompt,
     references: imageWorkbenchReferencesFromAssets(references),
     settings,
-    aspectRatioOptions: sizePolicy.options,
-    dimensionsDisabled: !sizePolicy.allowCustomDimensions,
+    aspectRatioOptions: sizeOptions,
     maxCount: sizePolicy.maxCount,
     selectedResultIds,
     onLayoutChange: setLayout,
@@ -475,12 +454,8 @@ const OwnedImageWorkbenchReady: React.FC<{
       setSettings((value) => ({ ...value, interfaceMode })),
     onQualityChange: (quality: ImageWorkbenchSettings['quality']) =>
       setSettings((value) => ({ ...value, quality })),
-    onDimensionsChange: (dimensions: { width: number | null; height: number | null }) => {
-      if (!sizePolicy.allowCustomDimensions) return;
-      setSettings((value) => ({ ...value, ...dimensions }));
-    },
     onAspectRatioChange: (option: ImageWorkbenchAspectRatioOption) => {
-      if (!sizePolicy.options.some((candidate) => candidate.value === option.value)) return;
+      if (!sizeOptions.some((candidate) => candidate.value === option.value)) return;
       setSettings((value) => ({
         ...value,
         aspectRatio: option.value,

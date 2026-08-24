@@ -50,7 +50,12 @@ import {
   videoWorkbenchReferencesFromAssets,
   useVideoWorkbenchRuntime,
 } from '../runtime';
-import { VideoWorkbench, type VideoWorkbenchLayout } from '../video';
+import {
+  VideoWorkbench,
+  videoWorkbenchDimensions as resolveVideoWorkbenchDimensions,
+  videoWorkbenchSizeOptionLabel,
+  type VideoWorkbenchLayout,
+} from '../video';
 import {
   standaloneWorkbenchOwner,
   STANDALONE_VIDEO_MAX_CONCURRENT_TASKS,
@@ -79,8 +84,9 @@ const videoDimensions = (
   aspect: string,
   t: TFunction
 ): { width: number; height: number } => {
-  const shortEdge = resolution === '720p' ? 720 : resolution === '1080p' ? 1080 : null;
-  if (shortEdge === null) {
+  const dimensions = resolveVideoWorkbenchDimensions(resolution, aspect);
+  if (dimensions) return dimensions;
+  if (resolution !== '720p' && resolution !== '1080p') {
     throw new Error(
       t('creativeStudio.product.video.errors.unsupportedResolution', {
         resolution,
@@ -88,9 +94,6 @@ const videoDimensions = (
       })
     );
   }
-  if (aspect === '16:9') return { width: Math.round((shortEdge * 16) / 9), height: shortEdge };
-  if (aspect === '9:16') return { width: shortEdge, height: Math.round((shortEdge * 16) / 9) };
-  if (aspect === '1:1') return { width: shortEdge, height: shortEdge };
   throw new Error(
     t('creativeStudio.product.video.errors.unsupportedAspect', {
       aspect,
@@ -536,7 +539,10 @@ const OwnedVideoWorkbenchReady: React.FC<{
     resolutionOptions: RESOLUTIONS,
     onResolutionChange: setResolution,
     size: aspect,
-    sizeOptions: ASPECTS,
+    sizeOptions: ASPECTS.map((option) => ({
+      ...option,
+      label: videoWorkbenchSizeOptionLabel(resolution, option.value, option.label),
+    })),
     onSizeChange: setAspect,
     duration,
     durationOptions,
