@@ -142,7 +142,8 @@ describe('standalone prompt-library source-parity appearance', () => {
     expect(css.includes('min-height: 263px')).toBe(true);
     expect(css.includes('background-size: 18px 18px')).toBe(true);
     expect(css.includes('width: min(672px, 100%)')).toBe(true);
-    expect(css.includes('width: min(1152px, calc(100vw - 48px))')).toBe(true);
+    expect(css.includes('max-width: 1152px')).toBe(true);
+    expect(css.includes('overflow-wrap: anywhere')).toBe(true);
     expect(css.includes('padding-top: 126px')).toBe(true);
     expect(css.includes('aspect-ratio: 4 / 3')).toBe(true);
     expect(css.includes('gap: 20px')).toBe(true);

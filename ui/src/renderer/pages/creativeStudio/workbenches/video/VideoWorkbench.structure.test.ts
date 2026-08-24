@@ -12,6 +12,10 @@ const composer = readFileSync(new URL('./VideoWorkbenchComposer.tsx', import.met
 const results = readFileSync(new URL('./VideoWorkbenchResults.tsx', import.meta.url), 'utf8');
 const types = readFileSync(new URL('./types.ts', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./VideoWorkbench.module.css', import.meta.url), 'utf8');
+const productRoute = readFileSync(
+  new URL('../product/VideoWorkbenchProductRoute.tsx', import.meta.url),
+  'utf8'
+);
 
 describe('VideoWorkbench controlled boundary', () => {
   test('owns only presentation and switches controlled layouts', () => {
@@ -103,5 +107,11 @@ describe('VideoWorkbench controlled boundary', () => {
     expect(types.includes('onDurationChange: (value: string) => void')).toBe(true);
     expect(types.includes('onTaskCountChange: (value: number) => void')).toBe(true);
     expect(types.includes('onOpenParameters: () => void')).toBe(true);
+    expect(productRoute.includes('Message.info({')).toBe(true);
+    expect(productRoute.includes('duration: 2600')).toBe(true);
+    expect(productRoute.includes("position: 'top'")).toBe(true);
+    expect(
+      productRoute.includes("onOpenParameters: () =>\n      setError(")
+    ).toBe(false);
   });
 });

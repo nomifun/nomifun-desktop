@@ -361,7 +361,14 @@ const Layout: React.FC<{
     <LayoutContext.Provider value={{ isMobile, siderCollapsed: collapsed, setSiderCollapsed: setCollapsed }}>
       <NavigationHistoryProvider>
         <WebuiServerProvider>
-          <div className='app-shell flex flex-col size-full min-h-0'>
+          <div
+            className='app-shell flex flex-col size-full min-h-0'
+            style={
+              {
+                '--app-sider-width': `${isMobile || collapsed ? 0 : siderWidth}px`,
+              } as React.CSSProperties
+            }
+          >
             <Titlebar workspaceAvailable={workspaceAvailable} />
           {/* 移动端左侧边栏蒙板 / Mobile left sider backdrop */}
           {isMobile && !collapsed && (
