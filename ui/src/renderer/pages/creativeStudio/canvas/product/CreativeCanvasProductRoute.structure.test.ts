@@ -241,8 +241,16 @@ describe('Creative Canvas product route composition', () => {
     expect(style.includes('--creative-canvas-grid-line: color-mix(')).toBe(true);
   });
 
-  test('keeps the bottom icon toolbar horizontally centered on wide canvases', () => {
-    expect(style.includes('transform: translateY(-4px)')).toBe(true);
+  test('keeps the compact icon toolbar centered at the top of the canvas', () => {
+    expect(
+      /\.toolbarPositioner\s*\{[\s\S]*?padding:\s*16px 16px 0;[\s\S]*?grid-row:\s*2;[\s\S]*?align-self:\s*start;[\s\S]*?justify-content:\s*center;/.test(
+        chromeStyle
+      )
+    ).toBe(true);
+    expect(/\.toolDock\s*\{[\s\S]*?height:\s*42px;/.test(chromeStyle)).toBe(
+      true
+    );
+    expect(style.includes('transform: translateY(-4px)')).toBe(false);
     expect(style.includes('translate(clamp(0px, 10vw, 142px), -4px)')).toBe(false);
     expect(/\.toolbarButton > button\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;[\s\S]*?place-items:\s*center;/.test(style)).toBe(true);
     expect(/\.iconButton > button\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;[\s\S]*?place-items:\s*center;/.test(chromeStyle)).toBe(true);
