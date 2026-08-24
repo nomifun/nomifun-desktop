@@ -5,6 +5,10 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+No unreleased changes yet.
+
+## v0.7.1 - 2026-08-24
+
 - **Model management now shows the saved provider API Keys in plaintext.**
   Opening an editable provider reads its keys through the authenticated
   `GET /api/providers/:provider_id/api-keys` endpoint and fills the ordinary
