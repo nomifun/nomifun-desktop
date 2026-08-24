@@ -41,7 +41,7 @@
 
 .panel {
   box-sizing: border-box;
-  padding: 12px;
+  padding: 10px;
   border: 1px solid color-mix(in srgb, var(--color-border-2) 86%, transparent);
   border-radius: 16px;
   background: color-mix(in srgb, var(--color-bg-2) 94%, transparent);
@@ -53,17 +53,17 @@
   display: block;
   box-sizing: border-box;
   width: 100%;
-  height: 160px;
+  height: 104px;
   resize: none;
-  padding: 8px 12px;
+  padding: 7px 10px;
   border: 0;
   border-radius: 12px;
   outline: none;
   background: transparent;
   color: var(--color-text-1);
   font: inherit;
-  font-size: 14px;
-  line-height: 20px;
+  font-size: 12px;
+  line-height: 18px;
   scrollbar-color: color-mix(in srgb, var(--color-text-3) 32%, transparent) transparent;
   scrollbar-width: thin;
 }
@@ -84,18 +84,25 @@
 .footer {
   display: flex;
   min-width: 0;
+  min-height: 30px;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin-top: 8px;
+  gap: 6px;
+  margin-top: 6px;
 }
 
 .controls {
   display: flex;
   min-width: 0;
+  min-height: 30px;
   flex: 1 1 auto;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+}
+
+.controls > *,
+.submitButton {
+  align-self: center;
 }
 
 .iconButton,
@@ -104,7 +111,7 @@
   appearance: none;
   display: inline-flex;
   box-sizing: border-box;
-  height: 40px;
+  height: 30px;
   align-items: center;
   justify-content: center;
   border: 1px solid var(--color-border-2);
@@ -115,9 +122,9 @@
 }
 
 .iconButton {
-  width: 32px;
-  height: 32px;
-  flex: 0 0 32px;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
   padding: 0;
   border-color: transparent;
   border-radius: 50%;
@@ -125,29 +132,69 @@
 }
 
 .modelSelect {
-  width: 180px;
+  width: 156px;
+  height: 30px;
   min-width: 0;
-  flex: 0 1 180px;
+  flex: 0 1 156px;
 }
 
 .modelSelect :global(.arco-select-view) {
-  height: 40px;
+  display: flex;
+  height: 30px;
+  align-items: center;
   border-radius: 999px;
   background: var(--color-bg-1);
+  font-size: 11px;
+}
+
+.modelSelect:global(.arco-select-size-mini.arco-select-single)
+  :global(.arco-select-view) {
+  height: 30px;
+  padding: 0 9px;
+  font-size: 11px;
+  line-height: 28px;
+}
+
+.modelSelect:global(.arco-select-size-mini.arco-select-single)
+  :global(.arco-select-view-value) {
+  font-size: 11px;
+  line-height: 28px;
+}
+
+.footer :global(.i-icon) {
+  display: grid;
+  width: 14px;
+  height: 14px;
+  place-items: center;
+  line-height: 0;
+  vertical-align: middle;
+}
+
+.footer :global(.i-icon > svg) {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .settingsButton {
-  min-width: 148px;
-  max-width: 170px;
-  gap: 7px;
-  padding: 0 12px;
+  min-width: 124px;
+  max-width: 144px;
+  gap: 5px;
+  padding: 0 8px;
   border-radius: 999px;
+  font-size: 11px;
   white-space: nowrap;
 }
 
+.settingsSummary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .submitButton {
-  width: 64px;
-  min-width: 64px;
+  width: 48px;
+  min-width: 48px;
   border-color: rgb(var(--primary-6));
   border-radius: 999px;
   background: rgb(var(--primary-6));
@@ -193,6 +240,23 @@
   border-radius: 16px;
   background: var(--color-bg-popup);
   box-shadow: 0 18px 48px color-mix(in srgb, #000 22%, transparent);
+}
+
+.positioner :global(.arco-select-popup) {
+  padding: 3px 0;
+  border-radius: 10px;
+}
+
+.positioner :global(.arco-select-popup .arco-select-option) {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 11px;
+  line-height: 28px;
+}
+
+.positioner :global(.arco-select-popup .arco-select-option-empty) {
+  height: 28px;
+  font-size: 11px;
 }
 
 .field {
@@ -244,8 +308,8 @@
   }
 
   .settingsButton {
-    min-width: 40px;
-    width: 40px;
+    min-width: 30px;
+    width: 30px;
     padding: 0;
   }
 }

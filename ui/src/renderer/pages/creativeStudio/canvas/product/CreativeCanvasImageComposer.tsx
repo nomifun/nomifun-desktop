@@ -274,6 +274,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
 
             <Select
               className={styles.modelSelect}
+              size='mini'
               value={modelValue}
               placeholder={
                 modelOptions.length > 0

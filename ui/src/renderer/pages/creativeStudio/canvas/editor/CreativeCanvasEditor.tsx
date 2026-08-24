@@ -835,7 +835,11 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
           viewport: stateRef.current.viewport,
         });
         if (!started.ok) return;
-        applyCommand(canvasCommands.setSelection([node.id]));
+        // A connection handle is an interaction control, not node activation.
+        // Clear selection so product composers keyed to a single selected node
+        // stay closed throughout the drag and only reopen after an explicit
+        // node click.
+        applyCommand(canvasCommands.clearSelection());
         setInteraction({ type: 'gesture/start', gesture: started.gesture });
         capturePointer(event.pointerId);
       },
