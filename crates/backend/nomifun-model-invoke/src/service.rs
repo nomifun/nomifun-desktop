@@ -14,6 +14,9 @@ use serde_json::json;
 use crate::adapter::{AdapterRegistry, ProtocolAdapter};
 use crate::adapters::default_realtime_adapters;
 use crate::error::{InvokeError, InvokeErrorKind};
+use crate::media_prompt::{
+    apply_known_media_prompt_limit, apply_media_prompt_length_retry,
+};
 use crate::realtime::{
     RealtimeAdapterRegistry, RealtimeServerEvent, RealtimeSession, RealtimeSessionConfig,
 };
@@ -259,13 +262,38 @@ impl ModelInvokeService {
     ) -> Result<(TaskOutcome, InvocationContext), InvokeError> {
         let task = req.task();
         let (call, adapter) = self.resolve(m, task, req).await?;
-        let context = InvocationContext::from_resolved(call, adapter)?;
+        let mut context = InvocationContext::from_resolved(call, adapter)?;
+        let _ = apply_known_media_prompt_limit(
+            &context.call.protocol,
+            &context.call.model,
+            &mut context.call.request,
+        );
         let redactor = context.call.connection.auth.secret_redactor();
-        let outcome = context
+        let first_attempt = context
             .adapter
             .submit(&self.http, &context.call)
             .await
-            .map_err(|error| error.redacted(&redactor))?;
+            .map_err(|error| error.redacted(&redactor));
+        let outcome = match first_attempt {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if apply_media_prompt_length_retry(
+                    &context.call.protocol,
+                    &context.call.model,
+                    &mut context.call.request,
+                    &error,
+                )
+                .is_none()
+                {
+                    return Err(error);
+                }
+                context
+                    .adapter
+                    .submit(&self.http, &context.call)
+                    .await
+                    .map_err(|retry_error| retry_error.redacted(&redactor))?
+            }
+        };
         let outcome = bind_pending_job(
             &context.call.protocol,
             context.call.config_revision,
@@ -656,6 +684,7 @@ fn probe_request_for_protocol(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use nomifun_api_types::ModelTask;
     use nomifun_common::encrypt_string;
@@ -899,14 +928,18 @@ mod tests {
         })
     }
 
-    fn video_request() -> TaskRequest {
+    fn video_request_with_prompt(prompt: &str) -> TaskRequest {
         TaskRequest::VideoGeneration(VideoGenRequest {
-            prompt: "a wave".into(),
+            prompt: prompt.into(),
             seconds: None,
             size: None,
             inputs: vec![],
             extra: json!({}),
         })
+    }
+
+    fn video_request() -> TaskRequest {
+        video_request_with_prompt("a wave")
     }
 
     // -- invoke --------------------------------------------------------------
@@ -931,6 +964,103 @@ mod tests {
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
         assert_eq!(assets.len(), 1);
         assert!(matches!(&assets[0].data, ProducedData::Bytes(b) if b == b"hi"));
+    }
+
+    #[tokio::test]
+    async fn stepfun_long_image_prompt_is_fitted_before_the_provider_wire() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"data": [{"b64_json": "aGk="}]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let base_url = format!("{}/v1", server.uri());
+        let pid = seed_provider_on(&pool, "stepfun", &base_url).await;
+        seed_model(
+            &pool,
+            &pid,
+            "step-image-edit-2",
+            r#"["image_generation"]"#,
+            "{}",
+            true,
+        )
+        .await;
+        let canonical_prompt = format!("START-{}-END", "角色细节".repeat(300));
+
+        let output = svc
+            .invoke(
+                &mref(&pid, "step-image-edit-2"),
+                image_request(&canonical_prompt),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(output, TaskOutcome::Done(TaskResult::Assets(_))));
+
+        let requests = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let wire_prompt = body["prompt"].as_str().expect("StepFun prompt string");
+        assert!(wire_prompt.chars().count() <= 512);
+        assert!(wire_prompt.starts_with("START-"));
+        assert!(wire_prompt.ends_with("-END"));
+        assert!(canonical_prompt.chars().count() > 512, "canonical prompt remains complete");
+    }
+
+    #[tokio::test]
+    async fn provider_prompt_too_long_response_retries_video_once_with_reported_limit() {
+        let server = MockServer::start().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let responder_attempts = Arc::clone(&attempts);
+        Mock::given(method("POST"))
+            .and(path("/v1/videos"))
+            .respond_with(move |_request: &wiremock::Request| {
+                if responder_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(400).set_body_json(json!({
+                        "error": {
+                            "type": "prompt_too_long",
+                            "message": "prompt max 256"
+                        }
+                    }))
+                } else {
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"id": "v1", "status": "queued"}))
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "sora-2", r#"["video_generation"]"#, "{}", true).await;
+        let canonical_prompt = format!("START-{}-END", "scene ".repeat(300));
+
+        let outcome = svc
+            .invoke(
+                &mref(&pid, "sora-2"),
+                video_request_with_prompt(&canonical_prompt),
+            )
+            .await
+            .unwrap();
+        let TaskOutcome::Pending(job) = outcome else {
+            panic!("expected retried video request to be accepted")
+        };
+        assert_eq!(job.remote_id, "v1");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let first = String::from_utf8_lossy(&requests[0].body);
+        let second = String::from_utf8_lossy(&requests[1].body);
+        assert!(second.len() < first.len());
+        assert!(second.contains("START-"));
+        assert!(second.contains("-END"));
+        assert!(canonical_prompt.chars().count() > 256, "canonical prompt remains complete");
     }
 
     #[tokio::test]
