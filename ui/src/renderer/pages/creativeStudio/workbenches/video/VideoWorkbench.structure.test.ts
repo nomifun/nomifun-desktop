@@ -33,6 +33,25 @@ describe('VideoWorkbench controlled boundary', () => {
     expect(/\.emptyResults\s*\{[\s\S]*?margin:\s*0 18px 18px;/.test(css)).toBe(true);
   });
 
+  test('uses the shared two-pane bottom-composer rhythm without dropping video controls', () => {
+    expect(composer.includes('className={styles.bottomComposerBody}')).toBe(true);
+    expect(composer.includes('className={styles.bottomActionRow}')).toBe(true);
+    expect(composer.includes('<SettingsGrid {...settings} compact />')).toBe(true);
+    expect(
+      /\.bottomComposerBody\s*\{[\s\S]*?grid-template-columns:\s*minmax\(330px, 0\.86fr\) minmax\(0, 1\.14fr\);/.test(
+        css
+      )
+    ).toBe(true);
+    expect(
+      /\.compactSettingsGrid\s*\{[\s\S]*?grid-template-columns:\s*repeat\(12, minmax\(0, 1fr\)\);/.test(
+        css
+      )
+    ).toBe(true);
+    expect(composer.indexOf('styles.bottomGenerateButton')).toBeLessThan(
+      composer.indexOf('styles.bottomTools')
+    );
+  });
+
   test('contains no API, persistence, model-name heuristics or retired-workshop dependency', () => {
     const combined = `${root}\n${composer}\n${results}`;
     expect(combined.includes('ipcBridge')).toBe(false);

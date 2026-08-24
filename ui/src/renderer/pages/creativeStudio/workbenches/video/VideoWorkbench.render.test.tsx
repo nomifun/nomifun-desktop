@@ -5,10 +5,21 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { createInstance } from 'i18next';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { I18nextProvider, initReactI18next } from 'react-i18next';
 
 import VideoWorkbenchResults from './VideoWorkbenchResults';
 import type { VideoWorkbenchTask } from './types';
+
+const testI18n = createInstance();
+
+await testI18n.use(initReactI18next).init({
+  lng: 'zh-CN',
+  fallbackLng: 'zh-CN',
+  resources: { 'zh-CN': { translation: {} } },
+  interpolation: { escapeValue: false },
+});
 
 const base = {
   prompt: '镜头缓慢推进',
@@ -54,12 +65,14 @@ const tasks: VideoWorkbenchTask[] = [
 describe('VideoWorkbench result rendering', () => {
   test('renders every backend state without inventing progress or media', () => {
     const html = renderToStaticMarkup(
-      <VideoWorkbenchResults
-        tasks={tasks}
-        selectedTaskIds={[]}
-        onSelectedTaskIdsChange={() => undefined}
-        onDeleteTasks={() => undefined}
-      />
+      <I18nextProvider i18n={testI18n}>
+        <VideoWorkbenchResults
+          tasks={tasks}
+          selectedTaskIds={[]}
+          onSelectedTaskIdsChange={() => undefined}
+          onDeleteTasks={() => undefined}
+        />
+      </I18nextProvider>
     );
 
     for (const status of ['queued', 'running', 'succeeded', 'failed', 'canceled']) {
