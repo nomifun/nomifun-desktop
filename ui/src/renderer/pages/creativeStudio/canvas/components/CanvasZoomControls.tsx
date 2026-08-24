@@ -7,13 +7,10 @@
 import {
   CheckOne,
   Compass,
-  Dot,
   Down,
   FullScreen,
-  GridFour,
   Minus,
   Plus,
-  Square,
   Up,
 } from '@icon-park/react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -63,12 +60,6 @@ const iconProps = {
   size: 16,
   fill: 'currentColor',
   strokeWidth: 3,
-};
-
-const backgroundIcon = (background: CanvasZoomBackground): React.ReactNode => {
-  if (background === 'dots') return <Dot {...iconProps} />;
-  if (background === 'lines') return <GridFour {...iconProps} />;
-  return <Square {...iconProps} />;
 };
 
 /**
@@ -125,8 +116,17 @@ const CanvasZoomControls: React.FC<CanvasZoomControlsProps> = ({
         setZoomMenuOpen(false);
       }
     };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setZoomMenuOpen(false);
+      }
+    };
     document.addEventListener('pointerdown', handlePointerDown);
-    return () => document.removeEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
   }, [zoomMenuOpen]);
 
   const updateZoom = (nextZoom: number) => {
@@ -164,9 +164,10 @@ const CanvasZoomControls: React.FC<CanvasZoomControlsProps> = ({
               setZoomMenuOpen(false);
             }}
           >
-            {backgroundIcon(background)}
+            <span className={styles.selectionIndicator} aria-hidden='true'>
+              {background === selectedBackground ? <CheckOne {...iconProps} /> : null}
+            </span>
             <span>{t(`creativeStudio.canvas.backgrounds.${background}`)}</span>
-            {background === selectedBackground ? <CheckOne {...iconProps} /> : null}
           </button>
         ))}
       </div>
@@ -220,6 +221,7 @@ const CanvasZoomControls: React.FC<CanvasZoomControlsProps> = ({
       className={styles.controls}
       data-canvas-no-zoom
       data-canvas-zoom-controls
+      data-embedded={showInlineStepper || undefined}
     >
       <div className={styles.menuAnchor}>
         {zoomMenuOpen ? (

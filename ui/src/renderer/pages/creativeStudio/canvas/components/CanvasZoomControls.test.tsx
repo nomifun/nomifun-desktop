@@ -81,4 +81,29 @@ describe('CanvasZoomControls', () => {
     }));
     expect(backgroundChanges).toEqual(['blank']);
   });
+
+  test('keeps the minimap variant compact and dismisses the menu with Escape', () => {
+    const { container, getByRole, queryByRole } = render(
+      withCanvasTestI18n(
+        <CanvasZoomControls
+          zoom={0.82}
+          showInlineStepper
+          onZoomChange={() => undefined}
+          onBackgroundChange={() => undefined}
+        />
+      )
+    );
+
+    expect(
+      container.querySelector('[data-canvas-zoom-controls]')?.getAttribute('data-embedded')
+    ).toBe('true');
+
+    fireEvent.click(getByRole('button', {
+      name: 'creativeStudio.canvas.zoom.slider, 82%',
+    }));
+    expect(getByRole('menu')).toBeDefined();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(queryByRole('menu')).toBeNull();
+  });
 });

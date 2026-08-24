@@ -104,12 +104,6 @@
   height: min(60vh, var(--creative-canvas-bottom-panel-height, 240px));
 }
 
-@media (min-width: 1181px) {
-  .root :global([data-creative-canvas-chrome][data-right-view='closed'] [role='toolbar'][aria-label='画布工具栏']) {
-    transform: translateY(-4px);
-  }
-}
-
 .canvasHost {
   position: relative;
 }
@@ -124,11 +118,11 @@
 
 .toolbarButton {
   display: grid;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
   place-items: center;
-  border-radius: 9px;
+  border-radius: 8px;
   background: transparent;
   color: var(--color-text-1);
   cursor: pointer;

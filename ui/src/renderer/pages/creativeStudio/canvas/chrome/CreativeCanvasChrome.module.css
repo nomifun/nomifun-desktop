@@ -192,10 +192,11 @@
 
 .leftPanel {
   position: absolute;
+  z-index: 60;
   top: 68px;
   bottom: 76px;
   left: 14px;
-  width: min(352px, calc(100% - 28px));
+  width: min(320px, calc(100% - 28px));
   flex-direction: row;
   border: 1px solid color-mix(in srgb, var(--color-border-2) 86%, transparent);
   border-radius: 16px;
@@ -263,12 +264,12 @@
 
 .leftTabs {
   display: flex;
-  width: 58px;
+  width: 50px;
   min-height: 0;
-  flex: 0 0 58px;
+  flex: 0 0 50px;
   flex-direction: column;
   gap: 4px;
-  padding: 10px 7px;
+  padding: 10px 5px;
   border-right: 1px solid color-mix(in srgb, var(--color-border-2) 78%, transparent);
   background: color-mix(in srgb, var(--color-fill-1) 62%, transparent);
 }
@@ -287,11 +288,11 @@
 }
 
 .leftTabs button {
-  width: 44px;
-  min-height: 44px;
-  flex: 0 0 44px;
+  width: 38px;
+  min-height: 38px;
+  flex: 0 0 38px;
   padding: 0;
-  border-radius: 11px;
+  border-radius: 10px;
   flex-direction: column;
   transition:
     background-color 120ms ease,
@@ -311,13 +312,13 @@
 }
 
 .leftTabs button[data-active='true'] {
-  background: color-mix(in srgb, rgb(var(--primary-6)) 12%, var(--color-fill-1));
-  box-shadow: inset 3px 0 0 rgb(var(--primary-6));
+  background: color-mix(in srgb, rgb(var(--primary-6)) 10%, transparent);
+  box-shadow: none;
   color: rgb(var(--primary-6));
 }
 
 .leftTabs button[data-active='true'] :global(.i-icon) {
-  transform: translateX(1px);
+  transform: none;
 }
 
 .panelTabs button[data-active='true']::after {
@@ -356,9 +357,9 @@
 
 .leftCollapseButton {
   display: grid;
-  width: 44px;
-  height: 38px;
-  flex: 0 0 38px;
+  width: 38px;
+  height: 34px;
+  flex: 0 0 34px;
   place-items: center;
   margin-top: auto;
   padding: 0;
@@ -387,28 +388,29 @@
   top: 50%;
   right: auto;
   bottom: auto;
-  width: 58px;
+  width: 50px;
   min-height: 0;
   transform: translateY(-50%);
-  border-radius: 19px;
+  border-radius: 17px;
 }
 
 .leftPanel[data-left-open='false'] .leftTabs {
   width: 100%;
   flex-basis: auto;
-  padding: 8px 7px;
+  padding: 8px 4px;
   border-right: 0;
   background: transparent;
 }
 
 .leftPanel[data-left-open='false'] .leftTabs button {
+  width: 40px;
   min-height: 40px;
   flex-basis: 40px;
-  border-radius: 13px;
+  border-radius: 11px;
 }
 
 .leftPanel[data-left-open='false'] .leftTabs button[data-active='true'] {
-  box-shadow: inset 3px 0 0 rgb(var(--primary-6));
+  box-shadow: none;
 }
 
 .leftPanel[data-left-open='false'] .panelBody {
@@ -464,7 +466,7 @@
   height: min(34vh, 300px);
   min-width: 0;
   min-height: 160px;
-  margin: 0 16px 78px;
+  margin: 0 16px 16px;
   grid-column: 2;
   grid-row: 2;
   align-self: end;
@@ -481,10 +483,10 @@
   z-index: 50;
   display: flex;
   min-width: 0;
-  padding: 0 16px 18px;
+  padding: 16px 16px 0;
   grid-column: 2;
   grid-row: 2;
-  align-self: end;
+  align-self: start;
   justify-content: center;
   pointer-events: none;
 }
@@ -493,17 +495,17 @@
   display: flex;
   width: max-content;
   max-width: 100%;
-  height: 54px;
+  height: 42px;
   min-width: 0;
   align-items: center;
-  gap: 3px;
-  padding: 6px 8px;
+  gap: 2px;
+  padding: 4px 6px;
   overflow-x: auto;
   overflow-y: hidden;
   border: 1px solid color-mix(in srgb, var(--color-border-2) 88%, transparent);
-  border-radius: 13px;
-  background: color-mix(in srgb, var(--color-bg-2) 90%, transparent);
-  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.17);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-bg-2) 94%, transparent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
   color: var(--color-text-1);
   pointer-events: auto;
   scrollbar-color: var(--color-fill-4) transparent;
@@ -516,9 +518,9 @@
 }
 
 .iconButton {
-  height: 34px;
+  height: 30px;
   padding: 0;
-  border-radius: 9px;
+  border-radius: 8px;
   background: transparent;
   color: inherit;
   cursor: pointer;
@@ -530,13 +532,13 @@
 
 .iconButton {
   display: grid;
-  width: 34px;
-  flex: 0 0 34px;
+  width: 30px;
+  flex: 0 0 30px;
   place-items: center;
 }
 
 /* Arco Tooltip wraps disabled controls in a span and moves the supplied class
-   to that wrapper. Keep the real button at the same 34px geometry so disabled
+   to that wrapper. Keep the real button at the same 30px geometry so disabled
    and enabled toolbar icons share one center line. */
 .iconButton > button {
   appearance: none;
@@ -611,9 +613,9 @@
 
 .divider {
   width: 1px;
-  height: 24px;
+  height: 20px;
   flex: 0 0 1px;
-  margin: 0 3px;
+  margin: 0 2px;
   background: var(--color-border-2);
 }
 
@@ -828,13 +830,13 @@
     top: 58px;
     bottom: 64px;
     left: 8px;
-    width: min(360px, calc(100% - 16px));
+    width: min(320px, calc(100% - 16px));
   }
 
   .leftPanel[data-left-open='false'] {
     top: 50%;
     left: 8px;
-    width: 58px;
+    width: 50px;
   }
 
   .projectIdentity {
@@ -867,17 +869,17 @@
   .bottomPanel {
     height: min(40vh, 260px);
     min-height: 140px;
-    margin: 0 8px 70px;
+    margin: 0 8px 12px;
   }
 
   .toolbarPositioner {
-    padding: 0 8px 10px;
+    padding: 10px 8px 0;
   }
 
   .toolDock {
-    height: 50px;
-    padding-block: 5px;
-    border-radius: 12px;
+    height: 40px;
+    padding-block: 3px;
+    border-radius: 11px;
   }
 }
 

@@ -94,5 +94,34 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     ]) {
       expect(css.includes(token)).toBe(true);
     }
+    expect(
+      /\.leftPanel\s*\{[\s\S]*?width:\s*min\(320px,\s*calc\(100% - 28px\)\);/.test(
+        css
+      )
+    ).toBe(true);
+    expect(/\.leftTabs\s*\{[\s\S]*?width:\s*50px;/.test(css)).toBe(true);
+    expect(
+      /\.leftTabs button\s*\{[\s\S]*?width:\s*38px;/.test(css)
+    ).toBe(true);
+    expect(css.includes('box-shadow: inset 3px 0 0 rgb(var(--primary-6));')).toBe(
+      false
+    );
+    expect(
+      /\.leftPanel\[data-left-open='false'\]\s*\{[\s\S]*?width:\s*50px;/.test(
+        css
+      )
+    ).toBe(true);
+    expect(
+      /\.leftPanel\[data-left-open='false'\] \.leftTabs button\s*\{[\s\S]*?width:\s*40px;/.test(
+        css
+      )
+    ).toBe(true);
+  });
+
+  test('keeps the left resource bubble above the top tool dock', () => {
+    expect(/\.leftPanel\s*\{[\s\S]*?z-index:\s*60;/.test(css)).toBe(true);
+    expect(/\.toolbarPositioner\s*\{[\s\S]*?z-index:\s*50;/.test(css)).toBe(
+      true
+    );
   });
 });

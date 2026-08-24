@@ -1,14 +1,15 @@
 .controls {
   display: flex;
+  box-sizing: border-box;
   min-width: 0;
   height: 42px;
   align-items: center;
   gap: 2px;
   padding: 4px 5px;
   border: 1px solid color-mix(in srgb, var(--color-border-2) 88%, transparent);
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--color-bg-2) 92%, transparent);
-  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.15);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-bg-2) 96%, transparent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
   color: var(--color-text-2);
   backdrop-filter: blur(18px) saturate(135%);
 }
@@ -37,37 +38,45 @@
 }
 
 .percentageButton {
-  min-width: 86px;
-  gap: 6px;
-  padding: 0 8px;
+  display: flex;
+  min-width: 76px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 7px;
   font: inherit;
   font-size: 13px;
   font-weight: 650;
+  line-height: 1;
   font-variant-numeric: tabular-nums;
 }
 
 .percentageButton > span:first-child {
-  min-width: 42px;
+  min-width: 36px;
   text-align: right;
 }
 
 .menuAnchor {
   position: relative;
   display: inline-flex;
+  min-width: 0;
   flex: 0 0 auto;
+  align-items: center;
 }
 
 .zoomMenuPopover {
   position: absolute;
   z-index: 30;
-  right: 0;
-  bottom: calc(100% + 9px);
-  width: 196px;
+  bottom: calc(100% + 8px);
+  left: 0;
+  box-sizing: border-box;
+  width: 220px;
+  max-width: calc(100vw - 40px);
   padding: 8px;
   border: 1px solid color-mix(in srgb, var(--color-border-2) 88%, transparent);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--color-bg-2) 96%, transparent);
-  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--color-bg-2) 98%, transparent);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.14);
   backdrop-filter: blur(18px) saturate(135%);
 }
 
@@ -110,12 +119,12 @@
 }
 
 .zoomMenu {
-  width: 196px;
+  width: 100%;
   color: var(--color-text-1);
 }
 
 .backgroundHeading {
-  padding: 2px 5px 7px;
+  padding: 3px 8px 7px;
   color: var(--color-text-3);
   font-size: 11px;
   font-weight: 650;
@@ -129,12 +138,12 @@
 .backgroundOption {
   display: flex;
   width: 100%;
-  min-height: 34px;
+  min-height: 36px;
   align-items: center;
-  gap: 8px;
-  padding: 0 7px;
+  gap: 9px;
+  padding: 0 8px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 8px;
   background: transparent;
   color: var(--color-text-2);
   cursor: pointer;
@@ -149,11 +158,19 @@
 }
 
 .backgroundOption[data-active='true'] {
-  background: rgba(var(--primary-6), 0.1);
+  color: var(--color-text-1);
+}
+
+.selectionIndicator {
+  display: grid;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  place-items: center;
   color: rgb(var(--primary-6));
 }
 
-.backgroundOption > span {
+.selectionIndicator + span {
   min-width: 0;
   flex: 1 1 auto;
 }
@@ -166,11 +183,10 @@
 .zoomStepper {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin: 7px -8px 0;
-  padding: 6px 8px 7px;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
   border-top: 1px solid var(--color-border-2);
-  background: color-mix(in srgb, var(--color-fill-1) 72%, transparent);
 }
 
 .stepButton {
@@ -186,8 +202,8 @@
   flex: 1 1 auto;
   align-items: center;
   gap: 3px;
-  padding: 0 8px;
-  border: 1px solid color-mix(in srgb, rgb(var(--primary-6)) 62%, var(--color-border-2));
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, rgb(var(--primary-6)) 70%, var(--color-border-2));
   border-radius: 8px;
   background: var(--color-bg-2);
   color: var(--color-text-2);
@@ -207,6 +223,40 @@
   text-align: right;
 }
 
+.controls[data-embedded='true'] {
+  width: 100%;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.controls[data-embedded='true'] .menuAnchor {
+  flex: 1 1 auto;
+}
+
+.controls[data-embedded='true'] .percentageButton {
+  min-width: 0;
+  flex: 1 1 auto;
+  padding-inline: 3px;
+}
+
+.controls[data-embedded='true'] .percentageButton > span:first-child {
+  min-width: 34px;
+}
+
+.controls[data-embedded='true'] .stepButton {
+  width: 26px;
+  flex-basis: 26px;
+}
+
+.controls[data-embedded='true'] .iconButton {
+  width: 30px;
+}
+
 .zoomInput input::-webkit-inner-spin-button,
 .zoomInput input::-webkit-outer-spin-button {
   margin: 0;
@@ -221,7 +271,7 @@
   }
 
   .percentageButton {
-    min-width: 78px;
+    min-width: 72px;
   }
 
   .divider {
@@ -229,13 +279,12 @@
   }
 
   .zoomMenu {
-    width: min(196px, calc(100vw - 24px));
+    width: 100%;
   }
 
   .zoomMenuPopover {
-    right: auto;
     left: 0;
-    width: min(196px, calc(100vw - 24px));
+    width: min(220px, calc(100vw - 24px));
   }
 }
 

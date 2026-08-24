@@ -1,6 +1,7 @@
 .frame {
   position: relative;
   display: grid;
+  box-sizing: border-box;
   width: clamp(210px, 17vw, 248px);
   height: clamp(148px, 15vw, 184px);
   min-height: 148px;
@@ -23,17 +24,18 @@
 
 .footer {
   display: flex;
+  box-sizing: border-box;
   min-width: 0;
-  min-height: 46px;
+  min-height: 44px;
   align-items: center;
-  justify-content: center;
-  padding: 5px 7px;
+  padding: 4px 6px;
   border-top: 1px solid color-mix(in srgb, var(--color-border-2) 82%, transparent);
-  background: color-mix(in srgb, var(--color-fill-1) 74%, transparent);
+  background: color-mix(in srgb, var(--color-bg-2) 98%, transparent);
   border-radius: 0 0 11px 11px;
 }
 
 .footer > * {
+  width: 100%;
   max-width: 100%;
 }
 
