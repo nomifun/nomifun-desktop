@@ -59,13 +59,14 @@ const AliasHarness: React.FC = () => {
 describe('ModelDefinitionEditor model alias disclosure', () => {
   test('renders the alias input only after expansion', () => {
     const { container, getByLabelText } = render(<AliasHarness />);
-    const disclosure = container.querySelector<HTMLButtonElement>(
-      'button[data-model-alias-disclosure]'
-    );
+    const currentDisclosure = () =>
+      container.querySelector<HTMLButtonElement>('button[data-model-alias-disclosure]');
+    const disclosure = currentDisclosure();
 
     expect(disclosure).not.toBeNull();
     expect(disclosure?.getAttribute('aria-expanded')).toBe('false');
-    expect((disclosure?.textContent ?? '').includes('非必填')).toBe(true);
+    expect(disclosure?.getAttribute('aria-label')).toBe('添加模型别名');
+    expect(disclosure?.getAttribute('data-model-alias-configured')).toBe('false');
     expect(container.querySelector('[data-model-alias-input]')).toBeNull();
 
     fireEvent.click(disclosure!);
@@ -74,8 +75,12 @@ describe('ModelDefinitionEditor model alias disclosure', () => {
     const aliasInput = getByLabelText('模型别名（选填）') as HTMLInputElement;
     expect(aliasInput.value).toBe('');
 
-    fireEvent.click(disclosure!);
-    expect(disclosure?.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.keyDown(aliasInput, { key: 'Escape' });
+    expect(currentDisclosure()?.getAttribute('aria-expanded')).toBe('false');
     expect(container.querySelector('[data-model-alias-input]')).toBeNull();
+
+    fireEvent.click(currentDisclosure()!);
+    expect(currentDisclosure()?.getAttribute('aria-expanded')).toBe('true');
+    expect((getByLabelText('模型别名（选填）') as HTMLInputElement).value).toBe('');
   });
 });
