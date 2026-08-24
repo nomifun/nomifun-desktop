@@ -9,7 +9,7 @@ import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
 import { ttsSupportsProviderParamVoice, ttsVoiceOptionsFor } from '@/renderer/components/model/ttsVoiceOptions';
 import { AutoComplete, Button, Checkbox, Input, Modal, Popconfirm, Select, Tag, Tooltip } from '@arco-design/web-react';
-import { CheckOne, Code, DeleteFour, Down, Left, LinkOne, Refresh, Right, Search, Shield } from '@icon-park/react';
+import { CheckOne, Code, DeleteFour, Down, Left, LinkOne, Refresh, Right, Search, Shield, TagOne } from '@icon-park/react';
 import React, { useEffect, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ContextLimitSelect } from './ContextLimitSelect';
@@ -389,6 +389,9 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
   const capabilityDetailsId = useId();
   const modelAlias = value.displayName?.trim() ?? '';
   const [modelAliasExpanded, setModelAliasExpanded] = useState(false);
+  const modelAliasActionLabel = modelAlias
+    ? `${t('settings.editModelDisplayName', { defaultValue: '编辑模型别名' })}：${modelAlias}`
+    : t('settings.addModelDisplayName', { defaultValue: '添加模型别名' });
   const [customConnectionTask, setCustomConnectionTask] = useState<ModelTask>();
   const selectedTasks = useMemo(
     () => value.capabilities.map((capability) => capability.task),
@@ -750,51 +753,132 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               </Tooltip>
             )}
           </div>
-          <AutoComplete
-            value={value.model}
-            data={filteredCatalogSuggestions.map((suggestion) => ({
-              value: suggestion.value,
-              name: suggestion.label,
-            }))}
-            disabled={value.capabilities.length === 0}
-            loading={catalogLoading}
-            allowClear
-            status={
-              value.capabilities.length > 0 && (!value.model.trim() || duplicateModel)
-                ? 'error'
-                : undefined
-            }
-            placeholder={
-              value.capabilities.length > 0
-                ? t('settings.modelSelectionPlaceholder', {
-                    defaultValue: '搜索目录模型，或直接输入官网模型 ID',
-                  })
-                : t('settings.modelSelectionRequiresTask', {
-                    defaultValue: '请先在上方选择任务',
-                  })
-            }
-            defaultActiveFirstOption={false}
-            onChange={(model, option) => {
-              const manualModel = resolveModelInputChange(model, option);
-              if (manualModel !== undefined) {
-                onChange((current) =>
-                  current.model === manualModel
-                    ? current
-                    : { ...current, model: manualModel, displayName: undefined }
-                );
+          <div className='flex min-w-0 items-center gap-6px' data-model-id-controls>
+            <AutoComplete
+              className='min-w-0 flex-1'
+              value={value.model}
+              data={filteredCatalogSuggestions.map((suggestion) => ({
+                value: suggestion.value,
+                name: suggestion.label,
+              }))}
+              disabled={value.capabilities.length === 0}
+              loading={catalogLoading}
+              allowClear
+              status={
+                value.capabilities.length > 0 && (!value.model.trim() || duplicateModel)
+                  ? 'error'
+                  : undefined
               }
-            }}
-            onSelect={(model) => {
-              const suggestion = filteredCatalogSuggestions.find((item) => item.value === model);
-              if (suggestion) selectCatalogSuggestion(suggestion);
-            }}
-            triggerProps={{ getPopupContainer: () => document.body }}
-            inputProps={{
-              id: modelInputId,
-              'aria-describedby': `${modelInputId}-hint`,
-            }}
-            data-unified-model-input
-          />
+              placeholder={
+                value.capabilities.length > 0
+                  ? t('settings.modelSelectionPlaceholder', {
+                      defaultValue: '搜索目录模型，或直接输入官网模型 ID',
+                    })
+                  : t('settings.modelSelectionRequiresTask', {
+                      defaultValue: '请先在上方选择任务',
+                    })
+              }
+              defaultActiveFirstOption={false}
+              onChange={(model, option) => {
+                const manualModel = resolveModelInputChange(model, option);
+                if (manualModel !== undefined) {
+                  onChange((current) =>
+                    current.model === manualModel
+                      ? current
+                      : { ...current, model: manualModel, displayName: undefined }
+                  );
+                }
+              }}
+              onSelect={(model) => {
+                const suggestion = filteredCatalogSuggestions.find((item) => item.value === model);
+                if (suggestion) selectCatalogSuggestion(suggestion);
+              }}
+              triggerProps={{ getPopupContainer: () => document.body }}
+              inputProps={{
+                id: modelInputId,
+                'aria-describedby': `${modelInputId}-hint`,
+              }}
+              data-unified-model-input
+            />
+            <Tooltip
+              mini
+              position='top'
+              content={
+                <span className='block max-w-240px'>
+                  <span className='block font-500'>{modelAliasActionLabel}</span>
+                  <span className='mt-2px block text-11px opacity-80'>
+                    {t('settings.modelDisplayNameHint', {
+                      defaultValue: '非必填，仅用于界面展示；实际请求仍使用原始模型 ID。',
+                    })}
+                  </span>
+                </span>
+              }
+            >
+              <Button
+                size='small'
+                type='secondary'
+                className={`!h-32px !w-32px !min-w-32px !shrink-0 !p-0 ${
+                  modelAliasExpanded || modelAlias
+                    ? '!bg-primary-1 !text-primary-6'
+                    : '!bg-fill-1 !text-t-tertiary hover:!bg-fill-2 hover:!text-t-secondary'
+                }`}
+                icon={<TagOne theme='outline' size='15' />}
+                aria-label={modelAliasActionLabel}
+                aria-expanded={modelAliasExpanded}
+                aria-controls={modelAliasPanelId}
+                data-model-alias-disclosure
+                data-model-alias-configured={Boolean(modelAlias)}
+                onClick={() => setModelAliasExpanded((expanded) => !expanded)}
+              />
+            </Tooltip>
+          </div>
+          <div
+            id={modelAliasPanelId}
+            hidden={!modelAliasExpanded}
+            className='space-y-4px'
+            data-model-alias-panel
+          >
+            {modelAliasExpanded && (
+              <>
+                <Input
+                  id={modelAliasInputId}
+                  value={value.displayName ?? ''}
+                  placeholder={t('settings.modelDisplayNamePlaceholder', {
+                    defaultValue: '例如：Seedance 1.5 Pro',
+                  })}
+                  maxLength={128}
+                  allowClear
+                  autoFocus
+                  onChange={(displayName) =>
+                    onChange((current) => ({
+                      ...current,
+                      displayName,
+                    }))
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      setModelAliasExpanded(false);
+                    }
+                  }}
+                  aria-label={t('settings.modelDisplayNameTitle', {
+                    defaultValue: '模型别名（选填）',
+                  })}
+                  aria-describedby={`${modelAliasInputId}-hint`}
+                  data-model-alias-input
+                />
+                <div
+                  id={`${modelAliasInputId}-hint`}
+                  className='text-11px leading-4 text-t-tertiary'
+                  role='note'
+                >
+                  {t('settings.modelDisplayNameHint', {
+                    defaultValue: '非必填，仅用于界面展示；实际请求仍使用原始模型 ID。',
+                  })}
+                </div>
+              </>
+            )}
+          </div>
           <div
             id={`${modelInputId}-hint`}
             role={duplicateModel || missingModel ? 'alert' : 'note'}
@@ -832,82 +916,6 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               {catalogError}
             </div>
           )}
-          <div className='space-y-6px' data-model-alias-section>
-            <button
-              type='button'
-              className='flex w-full items-center gap-8px rounded-8px border border-dashed border-[var(--color-border-2)] bg-fill-1 px-10px py-8px text-left hover:bg-fill-2'
-              aria-expanded={modelAliasExpanded}
-              aria-controls={modelAliasPanelId}
-              data-model-alias-disclosure
-              onClick={() => setModelAliasExpanded((expanded) => !expanded)}
-            >
-              <span className='min-w-0 flex-1'>
-                <span className='block text-12px font-500 text-t-primary'>
-                  {t('settings.modelDisplayNameTitle', {
-                    defaultValue: '模型别名（选填）',
-                  })}
-                </span>
-                <span
-                  className='block truncate text-11px leading-4 text-t-tertiary'
-                  title={modelAlias || undefined}
-                >
-                  {modelAlias ||
-                    t('settings.modelDisplayNameHint', {
-                      defaultValue: '非必填，仅用于界面展示；实际请求仍使用原始模型 ID。',
-                    })}
-                </span>
-              </span>
-              <span className='shrink-0 text-11px text-t-secondary'>
-                {modelAliasExpanded
-                  ? t('common.collapse', { defaultValue: '收起' })
-                  : t('common.expand', { defaultValue: '展开' })}
-              </span>
-              {modelAliasExpanded ? (
-                <Down theme='outline' size='13' className='shrink-0 text-t-tertiary' />
-              ) : (
-                <Right theme='outline' size='13' className='shrink-0 text-t-tertiary' />
-              )}
-            </button>
-            <div
-              id={modelAliasPanelId}
-              hidden={!modelAliasExpanded}
-              className='space-y-6px rounded-8px border border-solid border-[var(--color-border-2)] bg-fill-1 p-10px'
-              data-model-alias-panel
-            >
-              {modelAliasExpanded && (
-                <>
-                  <Input
-                    id={modelAliasInputId}
-                    value={value.displayName ?? ''}
-                    placeholder={t('settings.modelDisplayNamePlaceholder', {
-                      defaultValue: '例如：Seedance 1.5 Pro',
-                    })}
-                    maxLength={128}
-                    onChange={(displayName) =>
-                      onChange((current) => ({
-                        ...current,
-                        displayName,
-                      }))
-                    }
-                    aria-label={t('settings.modelDisplayNameTitle', {
-                      defaultValue: '模型别名（选填）',
-                    })}
-                    aria-describedby={`${modelAliasInputId}-hint`}
-                    data-model-alias-input
-                  />
-                  <div
-                    id={`${modelAliasInputId}-hint`}
-                    className='text-11px leading-4 text-t-tertiary'
-                    role='note'
-                  >
-                    {t('settings.modelDisplayNameHint', {
-                      defaultValue: '非必填，仅用于界面展示；实际请求仍使用原始模型 ID。',
-                    })}
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
         </div>
       ) : (
         <div hidden={focusedCallConfigTask !== undefined} className='space-y-8px'>
