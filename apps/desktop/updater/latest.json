@@ -1,11 +1,19 @@
 {
   "version": "0.7.0",
-  "notes": "## NomiFun v0.7.0\n\n- Creative Studio 全面升级为 Canvas-first，新增画布、导演、提示词、素材、模板及图像/视频/音频工作台。 / Creative Studio is now Canvas-first, with new canvas, director, prompt, asset, template, and image/video/audio workbenches.\n- Agent 能力支持持久化会话、画布操作、提案确认、任务历史与恢复保护。 / Agent workflows now support durable sessions, canvas operations, proposal confirmation, task history, and recovery safeguards.\n- 模型与供应商配置更清晰，支持自动兼容配置、显示名称和编辑时查看已保存 API Key。 / Model and provider configuration is clearer, with automatic compatibility setup, display names, and saved API key visibility while editing.\n- 浏览器使用更稳定，优化内存归因、超限回收和智能显示策略。 / Browser use is more reliable with improved memory attribution, reclaim behavior, and smart visibility.\n- 完善中英文界面与系统语言跟随，提升多语言使用体验。 / English and Chinese localization is more complete, with system-language detection for a smoother multilingual experience.\n- 优化画布加载、资源查询和视口交互，减少等待并提升操作流畅度。 / Canvas loading, asset queries, and viewport interactions are faster and smoother.\n- 改进 Windows 安装与数据目录分离，并完善 updater 发布支持。 / Windows installation and data-root separation are improved, with stronger updater release support.",
-  "pub_date": "2026-08-23T18:26:35.718Z",
+  "notes": "- 创作工坊画布交互、缩放、小地图和资源侧栏更顺手。 / Refined Creative Studio canvas interactions, zoom, minimap, and resource sidebar.\n- 创作工坊性能优化：按需加载资产页、裁剪屏外图层、减少画布持久化开销。 / Improved Creative Studio performance with on-demand asset loading, offscreen layer culling, and lighter canvas persistence.\n- 模型与供应商配置更清晰，补齐能力校验、兼容性设置和中英文展示。 / Clarified model and provider setup with capability checks, compatibility defaults, and bilingual display names.\n- 修复 Creative Studio、Agent 执行、数据库迁移、国际化和深色主题体验问题。 / Fixed Creative Studio, agent execution, database migration, localization, and dark theme issues.\n- 优化桌面打包与 Windows 安装/数据目录边界。 / Improved desktop packaging and Windows install/data directory boundaries.",
+  "pub_date": "2026-08-23T18:58:46.736Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODJQb1p2YVpwT0dDUVlmTFR0T0c2djRDRVJ3MExGQXY0SWNVbWFiaHJMU05uOE9MeThZdURJL2Qrak4xSk9FV0JmNGdoN2RHTlpqUEtaK3dWMUFiaEE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3NTA5NTk1CWZpbGU6Tm9taUZ1bl8wLjcuMF94NjQtc2V0dXAuZXhlCkF0UDdOWXFWOGk0ZGRTL01WOU8xUlpVOGpPMmxpKzdJWTIyUzJyb0JwMXBidmVGR292WmZnNExXOWYyWjlOZGRpNXpNRTZpVjRabENRN1JlbytPckJ3PT0K",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.7.0/NomiFun_0.7.0_x64-setup.exe"
+    },
+    "linux-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODEzZ256SWl5SjNKUzV4Y2dVRFdPUEpseGtJQ1BmZlRMS251cDVKajltQ2QzczJZZ01SdmprRjVQMElNQk9jMG1TSVlRNVU3eFphL2t2V1psY3RMVHdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3NTEwOTEyCWZpbGU6Tm9taUZ1bl8wLjcuMF9hbWQ2NC5BcHBJbWFnZQppR0ZFUS9xODRwbnFGN0E3N0ZYUGkwaUdXZUZnT3RoWjNVcG02MzZpMnZocnVwVmExbGJvTHAwNU1WcWVUdUN6c1dMKytCWjA4VzVsTFJyQTlFVDZCdz09Cg==",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.7.0/NomiFun_0.7.0_amd64.AppImage"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODZsRkVFNGt6cXN4aEJ6R2l5ekV2d0ZxOWFZRlluU0JOYk42TlVXeHRBZmFsSDFocUVqV2k3MWNpczBmUWxHZnZXbDVmMmFvMDVHeW01UVo0UEhldVFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3NTExMTE5CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CkRiVVlYK3pSeXZZc1NaL2VPRE1raG1mMGpZeWs4MUVXb2dXalBISXUraFhhOFhKeHhsSkNiejFOeDllMTBMcHhBTXgwTmZVQ2hYYzBuZjlGS3pKNkNnPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.7.0/NomiFun.app.tar.gz"
     }
   }
 }
