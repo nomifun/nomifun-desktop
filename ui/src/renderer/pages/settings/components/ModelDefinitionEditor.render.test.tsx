@@ -316,7 +316,7 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('请先在上方选择任务')).toBe(true);
   });
 
-  test('keeps the optional model alias behind a clear collapsed disclosure', () => {
+  test('keeps the optional model alias behind a compact control beside the model input', () => {
     const html = render({
       model: 'step-ready',
       displayName: '工作模型',
@@ -328,19 +328,23 @@ describe('unified model definition editor rendering and interactions', () => {
     const disclosureStart = html.lastIndexOf('<button', disclosureAt);
     const disclosureEnd = html.indexOf('</button>', disclosureAt);
     const disclosure = html.slice(disclosureStart, disclosureEnd);
+    const modelControlsAt = html.indexOf('data-model-id-controls="true"');
     const panelAt = html.indexOf('data-model-alias-panel="true"');
     const panelStart = html.lastIndexOf('<div', panelAt);
     const panelEnd = html.indexOf('>', panelAt);
     const panelTag = html.slice(panelStart, panelEnd);
 
     expect(disclosureAt).toBeGreaterThan(-1);
+    expect(modelControlsAt).toBeGreaterThan(-1);
+    expect(disclosureAt).toBeGreaterThan(modelControlsAt);
     expect(disclosure.includes('aria-expanded="false"')).toBe(true);
-    expect(disclosure.includes('模型别名（选填）')).toBe(true);
-    expect(disclosure.includes('工作模型')).toBe(true);
+    expect(disclosure.includes('aria-label="编辑模型别名：工作模型"')).toBe(true);
+    expect(disclosure.includes('data-model-alias-configured="true"')).toBe(true);
     expect(panelAt).toBeGreaterThan(disclosureAt);
     expect(panelTag.includes('hidden=""')).toBe(true);
     expect(html.includes('data-model-alias-input')).toBe(false);
-    expect(html.indexOf('目录仅提供第一个任务的建议')).toBeLessThan(disclosureAt);
+    expect(disclosure.includes('border-dashed')).toBe(false);
+    expect(disclosure.includes('w-full')).toBe(false);
   });
 
   test('keeps traits answerable without expanding a capability card', () => {

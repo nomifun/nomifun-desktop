@@ -512,6 +512,7 @@
   "modelDisplayNameTitle": "Model alias (optional)",
   "modelDisplayNamePlaceholder": "For example: Seedance 1.5 Pro",
   "modelDisplayNameHint": "Optional and display-only; requests continue to use the original model ID.",
+  "addModelDisplayName": "Add model alias",
   "editModelDisplayName": "Edit model alias",
   "modelIdDuplicate": "This model ID already exists.",
   "modelIdRequired": "Enter a model ID — the model cannot be saved without one.",

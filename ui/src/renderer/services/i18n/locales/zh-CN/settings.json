@@ -512,6 +512,7 @@
   "modelDisplayNameTitle": "模型别名（选填）",
   "modelDisplayNamePlaceholder": "例如：Seedance 1.5 Pro",
   "modelDisplayNameHint": "非必填，仅用于界面展示；实际请求仍使用原始模型 ID。",
+  "addModelDisplayName": "添加模型别名",
   "editModelDisplayName": "编辑模型别名",
   "modelIdDuplicate": "该模型 ID 已存在。",
   "modelIdRequired": "请填写模型 ID，否则无法保存。",
