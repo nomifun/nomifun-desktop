@@ -101,6 +101,18 @@ describe('ImageWorkbench visual states', () => {
     expect(composerSource.includes('SettingTwo')).toBe(false);
   });
 
+  test('keeps side controls dense and both workbench panes inside their viewport', () => {
+    const css = readFileSync(new URL('./ImageWorkbench.module.css', import.meta.url), 'utf8');
+
+    expect(/\.sideLayout,\s*\.bottomLayout\s*\{[\s\S]*?box-sizing:\s*border-box;[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;/.test(css)).toBe(true);
+    expect(/\.sideLayout\s*\{[\s\S]*?grid-template-columns:\s*minmax\(330px, 380px\) minmax\(0, 1fr\);/.test(css)).toBe(true);
+    expect(/\.aspectGrid\s*\{[\s\S]*?grid-template-columns:\s*repeat\(7, minmax\(0, 1fr\)\);[\s\S]*?gap:\s*4px;/.test(css)).toBe(true);
+    expect(/\.aspectOption\s*\{[\s\S]*?min-height:\s*46px;[\s\S]*?font-size:\s*9px;/.test(css)).toBe(true);
+    expect(/\.aspectShape\s*\{[\s\S]*?width:\s*18px;[\s\S]*?max-height:\s*16px;/.test(css)).toBe(true);
+    expect(/\.optionPill\s*\{[\s\S]*?height:\s*28px;[\s\S]*?font-size:\s*10px;/.test(css)).toBe(true);
+    expect(/\.dimensionGrid label > span\s*\{[\s\S]*?height:\s*30px;[\s\S]*?font-size:\s*10px;/.test(css)).toBe(true);
+  });
+
   test('renders the floating bottom composer with exact model and parameter controls', () => {
     const html = renderWorkbench({
       layout: 'bottom',

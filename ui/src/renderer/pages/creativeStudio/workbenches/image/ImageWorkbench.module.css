@@ -13,6 +13,7 @@
 
 .sideLayout,
 .bottomLayout {
+  box-sizing: border-box;
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -22,7 +23,7 @@
 
 .sideLayout {
   display: grid;
-  grid-template-columns: minmax(350px, 420px) minmax(0, 1fr);
+  grid-template-columns: minmax(330px, 380px) minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -279,7 +280,7 @@
 
 .settingsStack {
   display: grid;
-  gap: 16px;
+  gap: 11px;
 }
 
 .modelSlot {
@@ -289,9 +290,9 @@
 .field {
   display: grid;
   min-width: 0;
-  gap: 6px;
+  gap: 4px;
   color: var(--color-text-3);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 560;
 }
 
@@ -308,8 +309,16 @@
 
 .field :global(.arco-select-view),
 .field :global(.arco-input-number) {
-  min-height: 38px;
-  border-radius: 10px;
+  min-height: 30px;
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.field :global(.arco-radio-button-inner) {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 11px;
+  line-height: 28px;
 }
 
 .modelOption {
@@ -334,12 +343,12 @@
 
 .settingGroup {
   display: grid;
-  gap: 9px;
+  gap: 5px;
 }
 
 .settingLabel {
   color: var(--color-text-3);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 560;
 }
 
@@ -347,7 +356,7 @@
 .countGrid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 7px;
+  gap: 5px;
 }
 
 .countGrid[data-max-count='1'] {
@@ -357,18 +366,20 @@
 .countGrid :global(.arco-input-number) {
   grid-column: span 2;
   width: 100%;
+  min-height: 28px;
   border-radius: 999px;
+  font-size: 10px;
 }
 
 .optionPill {
-  height: 35px;
-  padding: 0 6px;
+  height: 28px;
+  padding: 0 4px;
   border: 1px solid var(--color-border-2);
   border-radius: 999px;
   background: transparent;
   color: var(--color-text-2);
   font: inherit;
-  font-size: 12px;
+  font-size: 10px;
   cursor: pointer;
 }
 
@@ -389,31 +400,33 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  gap: 7px;
+  gap: 5px;
 }
 
 .dimensionGrid label {
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr);
+  grid-template-columns: 26px minmax(0, 1fr);
   align-items: center;
   overflow: hidden;
   border: 1px solid var(--color-border-2);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--color-fill-1);
 }
 
 .dimensionGrid label > span {
   display: grid;
-  height: 36px;
+  height: 30px;
   place-items: center;
   color: var(--color-text-3);
-  font-size: 11px;
+  font-size: 10px;
 }
 
 .dimensionGrid :global(.arco-input-number) {
   width: 100%;
+  min-height: 30px;
   border: 0;
   background: transparent;
+  font-size: 11px;
 }
 
 .dimensionLink {
@@ -422,26 +435,33 @@
 
 .aspectGrid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 7px;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
 }
 
 .aspectOption {
   display: flex;
   min-width: 0;
-  min-height: 62px;
+  min-height: 46px;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  padding: 6px 4px;
+  gap: 3px;
+  padding: 4px 2px;
   border: 1px solid var(--color-border-2);
-  border-radius: 10px;
+  border-radius: 7px;
   background: transparent;
   color: var(--color-text-2);
   font: inherit;
-  font-size: 10px;
+  font-size: 9px;
   cursor: pointer;
+}
+
+.aspectOption > span:last-child {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .aspectOption[data-selected='true'] {
@@ -452,16 +472,16 @@
 
 .aspectShape {
   display: block;
-  width: 24px;
-  max-height: 24px;
-  min-height: 10px;
-  border: 1.5px solid currentColor;
-  border-radius: 2px;
+  width: 18px;
+  max-height: 16px;
+  min-height: 7px;
+  border: 1px solid currentColor;
+  border-radius: 1px;
 }
 
 .aspectOption:last-child .aspectShape:empty {
-  width: 22px;
-  height: 16px;
+  width: 18px;
+  height: 13px;
   border-style: dashed;
   aspect-ratio: auto;
 }
@@ -469,14 +489,16 @@
 .generateFooter {
   display: grid;
   flex: 0 0 auto;
-  gap: 7px;
-  padding: 13px 16px 16px;
+  gap: 5px;
+  padding: 10px 16px 12px;
   border-top: 1px solid var(--color-border-2);
   background: color-mix(in srgb, var(--color-bg-2) 96%, transparent);
 }
 
 .generateFooter :global(.arco-btn) {
-  border-radius: 11px;
+  height: 32px;
+  border-radius: 9px;
+  font-size: 11px;
 }
 
 .taskMessage {
@@ -931,8 +953,8 @@
   display: grid;
   grid-template-columns: 1.35fr 1.05fr 0.68fr 0.68fr 0.9fr 0.76fr 0.62fr;
   align-items: end;
-  gap: 8px;
-  margin-top: 10px;
+  gap: 6px;
+  margin-top: 8px;
 }
 
 .bottomComposer .referenceStripCompact {
@@ -957,7 +979,7 @@
 
 @media (max-width: 1180px) {
   .sideLayout {
-    grid-template-columns: minmax(330px, 380px) minmax(0, 1fr);
+    grid-template-columns: minmax(310px, 350px) minmax(0, 1fr);
   }
 
   .resultGrid {
@@ -1057,7 +1079,7 @@
   }
 
   .aspectGrid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 
   .bottomLayout .resultsPanel {

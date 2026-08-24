@@ -49,8 +49,11 @@
 }
 
 .sidebar .header {
-  padding: 16px 14px 0;
-  margin-bottom: 14px;
+  min-height: 58px;
+  align-items: center;
+  padding: 10px 12px;
+  margin-bottom: 0;
+  border-bottom: 1px solid var(--color-border-2);
 }
 
 .title {
@@ -63,8 +66,10 @@
 }
 
 .sidebar .title {
-  font-size: 18px;
-  letter-spacing: -0.02em;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.5;
 }
 
 .description {
@@ -76,9 +81,9 @@
 }
 
 .sidebar .description {
-  margin-top: 5px;
-  font-size: 12px;
-  line-height: 1.45;
+  margin-top: 0;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .refreshButton,
@@ -101,6 +106,15 @@
   width: 34px;
   height: 34px;
   flex: 0 0 34px;
+}
+
+.sidebar .refreshButton {
+  width: 32px;
+  height: 32px;
+  flex-basis: 32px;
+  border-color: transparent;
+  border-radius: 8px;
+  background: transparent;
 }
 
 .refreshButton:hover,
@@ -132,8 +146,8 @@
 }
 
 .sidebar .toolbar {
-  gap: 10px;
-  padding: 0 14px 12px;
+  gap: 8px;
+  padding: 10px;
   border: 0;
   border-bottom: 1px solid var(--color-border-2);
   border-radius: 0;
@@ -172,6 +186,19 @@
   color: var(--color-text-3);
 }
 
+.sidebar .searchField {
+  height: 34px;
+  gap: 6px;
+  padding: 0 8px;
+  border-color: transparent;
+  border-radius: 8px;
+  background: var(--color-fill-1);
+}
+
+.sidebar .searchField input {
+  font-size: 12px;
+}
+
 .facetRow {
   display: grid;
   grid-template-columns: 52px minmax(0, 1fr);
@@ -184,6 +211,16 @@
   color: var(--color-text-3);
   font-size: 11px;
   font-weight: 650;
+}
+
+.sidebar .facetRow {
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 6px;
+}
+
+.sidebar .facetLabel {
+  padding-top: 4px;
+  font-weight: 500;
 }
 
 .chips {
@@ -203,6 +240,15 @@
   font: inherit;
   font-size: 11px;
   cursor: pointer;
+}
+
+.sidebar .chips {
+  gap: 4px;
+}
+
+.sidebar .chip {
+  min-height: 24px;
+  padding: 2px 8px;
 }
 
 .chip:hover {
@@ -228,7 +274,7 @@
 }
 
 .sidebar .statusLine {
-  padding: 9px 14px 5px;
+  padding: 8px 10px 4px;
 }
 
 .warning {
@@ -296,7 +342,7 @@
 }
 
 .sidebar .cardBody {
-  padding: 12px;
+  padding: 10px;
 }
 
 .cardHeading {
@@ -327,6 +373,11 @@
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.sidebar .cardTitle {
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .category {
@@ -364,6 +415,8 @@
 
 .sidebar .promptPreview {
   -webkit-line-clamp: 3;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .tagList {
@@ -421,6 +474,7 @@
 
 .sidebar .state {
   min-height: 190px;
+  padding: 20px;
 }
 
 .stateIcon {
@@ -448,6 +502,19 @@
   font-size: 12px;
   line-height: 1.55;
   overflow-wrap: anywhere;
+}
+
+.sidebar .stateTitle {
+  color: var(--color-text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sidebar .stateDescription {
+  max-width: 240px;
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.55;
 }
 
 .resetButton {
