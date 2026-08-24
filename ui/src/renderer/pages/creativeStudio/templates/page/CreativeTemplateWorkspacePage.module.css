@@ -529,6 +529,26 @@
   font-size: 12px;
 }
 
+.sizeOptionRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sizeOptionRow > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sizeOptionRow small {
+  flex: 0 0 auto;
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
 .seriesSettings {
   display: flex;
   flex-direction: column;

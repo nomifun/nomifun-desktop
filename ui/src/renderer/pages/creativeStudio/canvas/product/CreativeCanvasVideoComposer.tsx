@@ -14,6 +14,7 @@ import type {
   CreativeModelOption,
   CreativeModelSelectionRef,
 } from '../../models';
+import { videoWorkbenchSizeOptionLabel } from '../../workbenches/video';
 import type {
   CanvasVideoComposeSettings,
   CanvasVideoComposeTaskSummary,
@@ -429,23 +430,23 @@ const CreativeCanvasVideoComposer: React.FC<
                         defaultValue: '分辨率',
                       })}
                     </span>
-                    <Select
+                    <select
+                      className={styles.settingsSelect}
                       value={settings.resolution}
                       aria-label={t('creativeStudio.canvas.video.resolutionAriaLabel', {
                         defaultValue: '视频分辨率',
                       })}
                       disabled={interactionDisabled}
-                      getPopupContainer={popupContainer}
-                      onChange={(value) =>
-                        onResolutionChange(value as CanvasVideoResolution)
+                      onChange={(event) =>
+                        onResolutionChange(event.target.value as CanvasVideoResolution)
                       }
                     >
                       {RESOLUTION_OPTIONS.map((option) => (
-                        <Select.Option key={option} value={option}>
+                        <option key={option} value={option}>
                           {option}
-                        </Select.Option>
+                        </option>
                       ))}
-                    </Select>
+                    </select>
                   </label>
                   <label className={styles.field}>
                     <span>
@@ -453,23 +454,26 @@ const CreativeCanvasVideoComposer: React.FC<
                         defaultValue: '画幅',
                       })}
                     </span>
-                    <Select
+                    <select
+                      className={styles.settingsSelect}
                       value={settings.aspectRatio}
                       aria-label={t('creativeStudio.canvas.video.aspectRatioAriaLabel', {
                         defaultValue: '视频画幅',
                       })}
                       disabled={interactionDisabled}
-                      getPopupContainer={popupContainer}
-                      onChange={(value) =>
-                        onAspectRatioChange(value as CanvasVideoAspectRatio)
+                      onChange={(event) =>
+                        onAspectRatioChange(event.target.value as CanvasVideoAspectRatio)
                       }
                     >
                       {ASPECT_RATIO_OPTIONS.map((option) => (
-                        <Select.Option key={option} value={option}>
-                          {option}
-                        </Select.Option>
+                        <option key={option} value={option}>
+                          {videoWorkbenchSizeOptionLabel(
+                            settings.resolution,
+                            option
+                          )}
+                        </option>
                       ))}
-                    </Select>
+                    </select>
                   </label>
                   <label className={styles.field}>
                     <span>
@@ -477,26 +481,26 @@ const CreativeCanvasVideoComposer: React.FC<
                         defaultValue: '时长',
                       })}
                     </span>
-                    <Select
+                    <select
+                      className={styles.settingsSelect}
                       value={settings.seconds}
                       aria-label={t('creativeStudio.canvas.video.durationAriaLabel', {
                         defaultValue: '视频时长',
                       })}
                       disabled={interactionDisabled}
-                      getPopupContainer={popupContainer}
-                      onChange={(value) =>
-                        onSecondsChange(Number(value) as CanvasVideoSeconds)
+                      onChange={(event) =>
+                        onSecondsChange(Number(event.target.value) as CanvasVideoSeconds)
                       }
                     >
                       {SECONDS_OPTIONS.map((option) => (
-                        <Select.Option key={option} value={option}>
+                        <option key={option} value={option}>
                           {t('creativeStudio.canvas.video.secondsOption', {
                             seconds: option,
                             defaultValue: `${option} 秒`,
                           })}
-                        </Select.Option>
+                        </option>
                       ))}
-                    </Select>
+                    </select>
                   </label>
                 </div>
               }

@@ -396,53 +396,16 @@
   opacity: 0.42;
 }
 
-.dimensionGrid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: center;
-  gap: 5px;
-}
-
-.dimensionGrid label {
-  display: grid;
-  grid-template-columns: 26px minmax(0, 1fr);
-  align-items: center;
-  overflow: hidden;
-  border: 1px solid var(--color-border-2);
-  border-radius: 8px;
-  background: var(--color-fill-1);
-}
-
-.dimensionGrid label > span {
-  display: grid;
-  height: 30px;
-  place-items: center;
-  color: var(--color-text-3);
-  font-size: 10px;
-}
-
-.dimensionGrid :global(.arco-input-number) {
-  width: 100%;
-  min-height: 30px;
-  border: 0;
-  background: transparent;
-  font-size: 11px;
-}
-
-.dimensionLink {
-  color: var(--color-text-3);
-}
-
 .aspectGrid {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 4px;
 }
 
 .aspectOption {
   display: flex;
   min-width: 0;
-  min-height: 46px;
+  min-height: 58px;
   flex-direction: column;
   align-items: center;
   justify-content: center;
@@ -457,11 +420,43 @@
   cursor: pointer;
 }
 
-.aspectOption > span:last-child {
+.aspectOption > span:nth-child(2) {
   width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.aspectOption > small {
+  overflow: hidden;
+  width: 100%;
+  color: var(--color-text-3);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sizeOption,
+.sizeOptionIdentity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.sizeOption {
+  width: 100%;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sizeOptionIdentity {
+  gap: 7px;
+}
+
+.sizeOption small {
+  flex: 0 0 auto;
+  color: var(--color-text-3);
+  font-size: 10px;
 }
 
 .aspectOption[data-selected='true'] {
@@ -999,24 +994,16 @@
   grid-column: 8 / -1;
 }
 
-.compactWidthField {
+.compactAspectField {
   grid-column: 1 / 7;
 }
 
-.compactHeightField {
-  grid-column: 7 / -1;
-}
-
-.compactAspectField {
-  grid-column: 1 / 5;
-}
-
 .compactQualityField {
-  grid-column: 5 / 9;
+  grid-column: 7 / 10;
 }
 
 .compactCountField {
-  grid-column: 9 / -1;
+  grid-column: 10 / -1;
 }
 
 .compactModelField :global([data-creative-model-select]) {
@@ -1235,16 +1222,8 @@
     grid-column: 1 / -1;
   }
 
-  .compactWidthField,
-  .compactAspectField {
-    grid-column: 1 / 7;
-  }
-
-  .compactHeightField,
-  .compactQualityField {
-    grid-column: 7 / -1;
-  }
-
+  .compactAspectField,
+  .compactQualityField,
   .compactCountField {
     grid-column: 1 / -1;
   }

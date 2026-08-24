@@ -629,6 +629,7 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
         }}
         onSave={() => void saveEditing()}
         onOpenModelSettings={onOpenModelSettings}
+        modelCatalog={agentModelCatalog}
       />
       <TemplateRunModal
         template={running}

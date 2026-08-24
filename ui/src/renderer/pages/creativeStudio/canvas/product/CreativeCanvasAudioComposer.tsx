@@ -473,23 +473,23 @@ const CreativeCanvasAudioComposer: React.FC<
                             defaultValue: '音频格式',
                           })}
                         </span>
-                        <Select
+                        <select
+                          className={styles.settingsSelect}
                           value={settings.format}
                           aria-label={t('creativeStudio.canvas.audio.formatAriaLabel', {
                             defaultValue: '音频格式',
                           })}
                           disabled={disabled}
-                          getPopupContainer={popupContainer}
-                          onChange={(value) =>
-                            onFormatChange(value as CanvasAudioFormat)
+                          onChange={(event) =>
+                            onFormatChange(event.target.value as CanvasAudioFormat)
                           }
                         >
                           {AUDIO_FORMAT_OPTIONS.map((option) => (
-                            <Select.Option key={option} value={option}>
+                            <option key={option} value={option}>
                               {option.toUpperCase()}
-                            </Select.Option>
+                            </option>
                           ))}
-                        </Select>
+                        </select>
                       </label>
                     ) : null}
                   </div>

@@ -4,15 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, test } from 'bun:test';
+import '../../../../../../test/setup-dom.ts';
+
+import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
 
+import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
 import CreativeCanvasImageComposer, {
   type CreativeCanvasImageComposerProps,
 } from './CreativeCanvasImageComposer';
 
 const noop = () => undefined;
+
+afterEach(() => cleanup());
 
 const props = (
   overrides: Partial<CreativeCanvasImageComposerProps> = {}
@@ -37,12 +43,34 @@ const props = (
       providerLabel: 'Provider A',
     },
   ],
+  aspectRatioOptions: [
+    {
+      value: '1:1',
+      label: '1:1',
+      width: 1024,
+      height: 1024,
+      requestSize: '1024x1024',
+    },
+    {
+      value: '16:9',
+      label: '16:9',
+      width: 1920,
+      height: 1080,
+      requestSize: '1920x1080',
+    },
+    {
+      value: 'auto',
+      label: '自动',
+      width: null,
+      height: null,
+    },
+  ],
+  maxCount: 10,
   task: { state: 'idle', pendingCount: 0 },
   onOpenPromptLibrary: noop,
   onModelChange: noop,
   onInterfaceModeChange: noop,
   onQualityChange: noop,
-  onDimensionsChange: noop,
   onAspectRatioChange: noop,
   onCountChange: noop,
   onGenerate: noop,
@@ -63,6 +91,60 @@ describe('CreativeCanvasImageComposer', () => {
     expect(html.includes('图片生成设置')).toBe(true);
     expect(html.includes('生成图片')).toBe(true);
     expect(html.includes('自动 · 1:1 · 1 张')).toBe(true);
+  });
+
+  test('opens stable in-flow quality and aspect-ratio selectors', async () => {
+    const qualityChanges: string[] = [];
+    const aspectRatioChanges: string[] = [];
+    const { getByRole } = render(
+      withCanvasTestI18n(
+        <CreativeCanvasImageComposer
+          {...props({
+            onQualityChange: (quality) => qualityChanges.push(quality),
+            onAspectRatioChange: (option) => aspectRatioChanges.push(option.value),
+          })}
+        />
+      )
+    );
+
+    const settingsButton = getByRole('button', { name: '图片生成设置' });
+    fireEvent.click(settingsButton);
+
+    await waitFor(() => {
+      expect(document.querySelectorAll('select').length).toBe(1);
+    });
+    const [qualitySelect] = Array.from(
+      document.querySelectorAll<HTMLSelectElement>('select')
+    );
+
+    expect(qualitySelect.closest('[data-canvas-image-composer]')).not.toBeNull();
+    fireEvent.change(qualitySelect, { target: { value: 'high' } });
+    fireEvent.click(getByRole('button', { name: '宽高比' }));
+    const sizeListbox = getByRole('listbox', { name: '宽高比' });
+    const sizeOption = getByRole('option', {
+      name: /16:9.*1920 × 1080/,
+    });
+    expect(within(sizeListbox).getByRole('option', { name: '自动' })).not.toBeNull();
+    expect(sizeOption.lastElementChild?.textContent).toBe('1920 × 1080');
+    fireEvent.click(sizeOption);
+    expect(qualityChanges).toEqual(['high']);
+    expect(aspectRatioChanges).toEqual(['16:9']);
+    expect(settingsButton.getAttribute('aria-expanded')).toBe('true');
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => {
+      expect(document.querySelectorAll('select').length).toBe(0);
+    });
+    expect(settingsButton.getAttribute('aria-expanded')).toBe('false');
+
+    fireEvent.click(settingsButton);
+    await waitFor(() => {
+      expect(document.querySelectorAll('select').length).toBe(1);
+    });
+    fireEvent.pointerDown(document.body);
+    await waitFor(() => {
+      expect(document.querySelectorAll('select').length).toBe(0);
+    });
   });
 
   test('keeps an uncertain submission retryable without inventing another key', () => {
@@ -139,6 +221,13 @@ describe('CreativeCanvasImageComposer', () => {
     expect(css.includes('--creative-canvas-image-composer-offset-x')).toBe(true);
     expect(css.includes(".positioner[data-overlay='true']")).toBe(true);
     expect(css.includes('.settingsSummary')).toBe(true);
+    expect(css.includes('.settingsPopover')).toBe(true);
+    expect(css.includes('.settingsSelect select')).toBe(true);
+    expect(
+      /\.sizeMenuOption\s*\{[\s\S]*?justify-content:\s*space-between;/.test(css)
+    ).toBe(true);
+    expect(css.includes('appearance: none')).toBe(true);
+    expect(css.includes('pointer-events: none')).toBe(true);
     expect(css.includes('.settingsButton span')).toBe(false);
   });
 

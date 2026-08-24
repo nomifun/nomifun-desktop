@@ -59,10 +59,13 @@ import {
 import type { PromptLibrarySelection } from '../../prompts';
 import { useCreativeProject } from '../../services';
 import type { CreativeTaskReference } from '../../tasks';
-import type {
-  ImageWorkbenchAspectRatioOption,
-  ImageWorkbenchModelIdentity,
-  ImageWorkbenchSettings,
+import {
+  imageWorkbenchSizePolicyForModel,
+  imageWorkbenchSelectableSizeOptions,
+  normalizeImageWorkbenchSettingsSize,
+  type ImageWorkbenchAspectRatioOption,
+  type ImageWorkbenchModelIdentity,
+  type ImageWorkbenchSettings,
 } from '../../workbenches/image';
 import {
   exactWorkbenchModelOptions,
@@ -4711,14 +4714,24 @@ const CreativeCanvasProductRoute: React.FC = () => {
                   const onlyModel = composeModelOptions.length === 1
                     ? composeModelOptions[0]
                     : null;
-                  const composeSettings: ImageWorkbenchSettings = {
-                    ...composeDraft.settings,
-                    model: exactModel
-                      ? { providerId: exactModel.providerId, model: exactModel.model }
-                      : onlyModel
-                        ? { providerId: onlyModel.providerId, model: onlyModel.model }
-                        : null,
-                  };
+                  const resolvedModel = exactModel ?? onlyModel;
+                  const composeSizePolicy = imageWorkbenchSizePolicyForModel(resolvedModel);
+                  const composeSizeOptions = imageWorkbenchSelectableSizeOptions(
+                    composeSizePolicy.options
+                  );
+                  const composeSettings: ImageWorkbenchSettings =
+                    normalizeImageWorkbenchSettingsSize(
+                      {
+                        ...composeDraft.settings,
+                        model: resolvedModel
+                          ? {
+                              providerId: resolvedModel.providerId,
+                              model: resolvedModel.model,
+                            }
+                          : null,
+                      },
+                      composeSizePolicy
+                    );
                   const singleSelected =
                     selected && canvasState?.selection.nodeIds.length === 1;
                   const retrySubmission = imageComposeSubmission?.nodeId === node.id;
@@ -4762,6 +4775,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           hasImageContent={Boolean(node.data.assetId)}
                           initialPrompt={composeDraft.prompt}
                           settings={composeSettings}
+                          aspectRatioOptions={composeSizeOptions}
+                          maxCount={composeSizePolicy.maxCount}
                           modelOptions={composeModelOptions}
                           task={canvasImageComposeTaskSummary(composeConfig)}
                           disabled={
@@ -4794,10 +4809,22 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           onModelChange={(model: ImageWorkbenchModelIdentity | null) =>
                             updateImageComposeDraft(
                               node.id,
-                              (current) => ({
-                                ...current,
-                                settings: { ...current.settings, model },
-                              })
+                              (current) => {
+                                const modelOption = model
+                                  ? composeModelOptions.find(
+                                      (option) =>
+                                        option.providerId === model.providerId &&
+                                        option.model === model.model
+                                    )
+                                  : null;
+                                return {
+                                  ...current,
+                                  settings: normalizeImageWorkbenchSettingsSize(
+                                    { ...current.settings, model },
+                                    imageWorkbenchSizePolicyForModel(modelOption)
+                                  ),
+                                };
+                              }
                             )
                           }
                           onInterfaceModeChange={(interfaceMode) =>
@@ -4815,15 +4842,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
                               (current) => ({
                                 ...current,
                                 settings: { ...current.settings, quality },
-                              })
-                            )
-                          }
-                          onDimensionsChange={(dimensions) =>
-                            updateImageComposeDraft(
-                              node.id,
-                              (current) => ({
-                                ...current,
-                                settings: { ...current.settings, ...dimensions },
                               })
                             )
                           }

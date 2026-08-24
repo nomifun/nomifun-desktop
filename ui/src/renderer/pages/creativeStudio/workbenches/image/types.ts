@@ -140,7 +140,6 @@ export interface ImageWorkbenchProps {
   settings: ImageWorkbenchSettings;
   modelOptions: readonly ImageWorkbenchModelOption[];
   aspectRatioOptions?: readonly ImageWorkbenchAspectRatioOption[];
-  dimensionsDisabled?: boolean;
   maxCount?: number;
   /** Optional catalog-owned selector with explicit loading/error/empty states. */
   modelSlot?: ReactNode;
@@ -161,7 +160,6 @@ export interface ImageWorkbenchProps {
   onModelChange(model: ImageWorkbenchModelIdentity | null): void;
   onInterfaceModeChange(mode: ImageWorkbenchInterfaceMode): void;
   onQualityChange(quality: ImageWorkbenchQuality): void;
-  onDimensionsChange(dimensions: { width: number | null; height: number | null }): void;
   onAspectRatioChange(option: ImageWorkbenchAspectRatioOption): void;
   onCountChange(count: number): void;
   onGenerate(): void;
@@ -203,6 +201,79 @@ export const DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS: readonly ImageWorkbenchAspec
     height: null,
   },
 ];
+
+export function imageWorkbenchSizeDimensionsLabel(
+  option: Pick<ImageWorkbenchAspectRatioOption, 'width' | 'height'>
+): string | null {
+  return option.width !== null && option.height !== null
+    ? `${option.width} × ${option.height}`
+    : null;
+}
+
+export function imageWorkbenchSizeOptionLabel(
+  option: Pick<ImageWorkbenchAspectRatioOption, 'label' | 'width' | 'height'>
+): string {
+  const dimensions = imageWorkbenchSizeDimensionsLabel(option);
+  return dimensions ? `${option.label} · ${dimensions}` : option.label;
+}
+
+export function imageWorkbenchFixedSizeOptions(
+  options: readonly ImageWorkbenchAspectRatioOption[]
+): ImageWorkbenchAspectRatioOption[] {
+  return options.filter(
+    (option) => option.width !== null && option.height !== null
+  );
+}
+
+export function imageWorkbenchSelectableSizeOptions(
+  options: readonly ImageWorkbenchAspectRatioOption[]
+): ImageWorkbenchAspectRatioOption[] {
+  return options.filter(
+    (option) =>
+      (option.width !== null && option.height !== null) || option.value === 'auto'
+  );
+}
+
+export function imageWorkbenchSizeOptionForSettings(
+  options: readonly ImageWorkbenchAspectRatioOption[],
+  settings: Pick<ImageWorkbenchSettings, 'aspectRatio'>
+): ImageWorkbenchAspectRatioOption | null {
+  return (
+    options.find(
+      (option) =>
+        !option.disabled &&
+        option.value === settings.aspectRatio
+    ) ??
+    options.find((option) => !option.disabled) ??
+    null
+  );
+}
+
+/** Width and height remain transport/history fields, but the selected size
+ * option is their sole product-level authority. */
+export function normalizeImageWorkbenchSettingsSize(
+  settings: ImageWorkbenchSettings,
+  policy: Pick<ImageWorkbenchSizePolicy, 'options' | 'maxCount'>
+): ImageWorkbenchSettings {
+  const option = imageWorkbenchSizeOptionForSettings(policy.options, settings);
+  if (!option) return settings;
+  const count = Math.min(settings.count, policy.maxCount);
+  if (
+    settings.aspectRatio === option.value &&
+    settings.width === option.width &&
+    settings.height === option.height &&
+    settings.count === count
+  ) {
+    return settings;
+  }
+  return {
+    ...settings,
+    aspectRatio: option.value,
+    width: option.width,
+    height: option.height,
+    count,
+  };
+}
 
 /**
  * StepFun's image API uses a strict size enum. For step-image-edit-2 the

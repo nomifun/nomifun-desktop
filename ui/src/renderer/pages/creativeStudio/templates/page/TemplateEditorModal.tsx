@@ -14,15 +14,24 @@ import {
   Switch,
 } from '@arco-design/web-react';
 import { Delete, Plus } from '@icon-park/react';
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
 import { parseProviderId } from '@/common/types/ids';
 import NomiCreativeModelSelect from '../../models/NomiCreativeModelSelect';
+import type { CreativeModelCatalogSnapshot } from '../../models';
+import {
+  imageWorkbenchSizeDimensionsLabel,
+  imageWorkbenchFixedSizeOptions,
+  imageWorkbenchSizeOptionLabel,
+  imageWorkbenchSizePolicyForModel,
+} from '../../workbenches/image';
+import { exactWorkbenchModelOptions } from '../../workbenches/runtime';
 import {
   cloneTemplateDefinition,
   type CreativeTemplateDefinitionV1,
+  type CreativeTemplateImageTask,
   type CreativeTemplateImageGenerationSettings,
   type CreativeTemplatePromptPlanningSettings,
   type CreativeTemplateVariable,
@@ -128,6 +137,7 @@ export interface TemplateEditorModalProps {
   onCancel: () => void;
   onSave: () => void;
   onOpenModelSettings?: () => void;
+  modelCatalog?: CreativeModelCatalogSnapshot;
 }
 
 function patchGeneration(
@@ -345,14 +355,73 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
   onCancel,
   onSave,
   onOpenModelSettings,
+  modelCatalog,
 }) => {
   const { t } = useTranslation();
   const copy = useMemo(() => createTemplateTranslationCopy(t), [t]);
   const variableTypeOptions = useMemo(() => buildVariableTypeOptions(t), [t]);
   const qualityOptions = useMemo(() => buildQualityOptions(t), [t]);
+  const imageSizeContext = useMemo(() => {
+    if (!template) return null;
+    const generate = generationStep(template);
+    const expectedTask: CreativeTemplateImageTask =
+      generate.referenceVariableIds.length > 0 ? 'image_edit' : 'image_generation';
+    const options = modelCatalog
+      ? exactWorkbenchModelOptions(modelCatalog, expectedTask)
+      : [];
+    const selectedModel = generate.generation.model
+      ? options.find(
+          (option) =>
+            option.providerId === generate.generation.model?.providerId &&
+            option.model === generate.generation.model.model
+        )
+      : null;
+    const policy = imageWorkbenchSizePolicyForModel(selectedModel);
+    const sizeOptions = imageWorkbenchFixedSizeOptions(policy.options);
+    const selectedSize =
+      sizeOptions.find(
+        (option) =>
+          !option.disabled &&
+          option.width === generate.generation.width &&
+          option.height === generate.generation.height
+      ) ?? sizeOptions.find((option) => !option.disabled) ?? null;
+    return {
+      expectedTask,
+      options,
+      policy,
+      sizeOptions,
+      selectedSize,
+      generation: generate.generation,
+    };
+  }, [modelCatalog, template]);
+
+  useEffect(() => {
+    if (!template || !imageSizeContext?.selectedSize) return;
+    const { generation, selectedSize, policy } = imageSizeContext;
+    const imagesPerPrompt = Math.min(
+      generation.imagesPerPrompt,
+      policy.maxCount
+    );
+    if (
+      generation.width === selectedSize.width &&
+      generation.height === selectedSize.height &&
+      generation.imagesPerPrompt === imagesPerPrompt
+    ) {
+      return;
+    }
+    if (selectedSize.width === null || selectedSize.height === null) return;
+    onChange(
+      patchGeneration(template, {
+        width: selectedSize.width,
+        height: selectedSize.height,
+        imagesPerPrompt,
+      })
+    );
+  }, [imageSizeContext, onChange, template]);
+
   if (!template) return null;
   const generate = generationStep(template);
-  const expectedTask = generate.referenceVariableIds.length > 0 ? 'image_edit' : 'image_generation';
+  const expectedTask = imageSizeContext?.expectedTask ?? 'image_generation';
   const mode = templateMode(template);
   const output = template.output;
   const promptPlanning = draftPromptsStep(template)?.planning ?? null;
@@ -583,7 +652,16 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
                   }
                 : null
             }
-            onChange={(selection) =>
+            onChange={(selection) => {
+              const selectedModel = imageSizeContext?.options.find(
+                (option) =>
+                  option.providerId === selection.providerId &&
+                  option.model === selection.model
+              );
+              const policy = imageWorkbenchSizePolicyForModel(selectedModel);
+              const size = imageWorkbenchFixedSizeOptions(policy.options).find(
+                (option) => !option.disabled
+              );
               onChange(
                 patchGeneration(template, {
                   model: {
@@ -591,9 +669,16 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
                     model: selection.model,
                     task: expectedTask,
                   },
+                  ...(size && size.width !== null && size.height !== null
+                    ? { width: size.width, height: size.height }
+                    : {}),
+                  imagesPerPrompt: Math.min(
+                    generate.generation.imagesPerPrompt,
+                    policy.maxCount
+                  ),
                 })
-              )
-            }
+              );
+            }}
             onOpenModelSettings={onOpenModelSettings}
           />
           <label className={styles.fieldLabel}>
@@ -608,38 +693,42 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
               onChange={(quality) => onChange(patchGeneration(template, { quality }))}
             />
           </label>
-          <div className={styles.twoColumns}>
-            <label className={styles.fieldLabel}>
-              <span>
-                {t('creativeStudio.templates.editor.width', { defaultValue: 'Width' })}
-              </span>
-              <InputNumber
-                min={64}
-                max={8192}
-                step={16}
-                value={generate.generation.width}
-                onChange={(width) =>
-                  typeof width === 'number' &&
-                  onChange(patchGeneration(template, { width }))
-                }
-              />
-            </label>
-            <label className={styles.fieldLabel}>
-              <span>
-                {t('creativeStudio.templates.editor.height', { defaultValue: 'Height' })}
-              </span>
-              <InputNumber
-                min={64}
-                max={8192}
-                step={16}
-                value={generate.generation.height}
-                onChange={(height) =>
-                  typeof height === 'number' &&
-                  onChange(patchGeneration(template, { height }))
-                }
-              />
-            </label>
-          </div>
+          <label className={styles.fieldLabel}>
+            <span>
+              {t('creativeStudio.templates.editor.size', { defaultValue: 'Size' })}
+            </span>
+            <Select
+              value={imageSizeContext?.selectedSize?.value}
+              onChange={(value) => {
+                const size = imageSizeContext?.sizeOptions.find(
+                  (option) => option.value === value && !option.disabled
+                );
+                if (!size || size.width === null || size.height === null) return;
+                onChange(
+                  patchGeneration(template, {
+                    width: size.width,
+                    height: size.height,
+                  })
+                );
+              }}
+            >
+              {imageSizeContext?.sizeOptions.map((option) => (
+                <Select.Option
+                  key={option.value}
+                  value={option.value}
+                  disabled={option.disabled || option.width === null || option.height === null}
+                >
+                  <span className={styles.sizeOptionRow}>
+                    <span>{option.label}</span>
+                    <small>
+                      {imageWorkbenchSizeDimensionsLabel(option) ??
+                        imageWorkbenchSizeOptionLabel(option)}
+                    </small>
+                  </span>
+                </Select.Option>
+              ))}
+            </Select>
+          </label>
           <label className={styles.fieldLabel}>
             <span>
               {t('creativeStudio.templates.editor.imagesPerPrompt', {
@@ -648,7 +737,7 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
             </span>
             <InputNumber
               min={1}
-              max={6}
+              max={imageSizeContext?.policy.maxCount ?? 6}
               value={generate.generation.imagesPerPrompt}
               onChange={(imagesPerPrompt) =>
                 typeof imagesPerPrompt === 'number' &&

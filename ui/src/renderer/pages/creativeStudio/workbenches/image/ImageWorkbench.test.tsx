@@ -12,6 +12,9 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import ImageWorkbench from './ImageWorkbench';
 import {
   imageWorkbenchSizePolicyForModel,
+  imageWorkbenchSizeOptionLabel,
+  imageWorkbenchSelectableSizeOptions,
+  normalizeImageWorkbenchSettingsSize,
   imageWorkbenchModelKey,
   nextImageWorkbenchSelection,
   parseImageWorkbenchModelKey,
@@ -59,7 +62,6 @@ const baseProps = (overrides: Partial<ImageWorkbenchProps> = {}): ImageWorkbench
   onModelChange: noop,
   onInterfaceModeChange: noop,
   onQualityChange: noop,
-  onDimensionsChange: noop,
   onAspectRatioChange: noop,
   onCountChange: noop,
   onGenerate: noop,
@@ -120,11 +122,12 @@ describe('ImageWorkbench visual states', () => {
 
     expect(/\.sideLayout,\s*\.bottomLayout\s*\{[\s\S]*?box-sizing:\s*border-box;[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;/.test(css)).toBe(true);
     expect(/\.sideLayout\s*\{[\s\S]*?grid-template-columns:\s*minmax\(330px, 380px\) minmax\(0, 1fr\);/.test(css)).toBe(true);
-    expect(/\.aspectGrid\s*\{[\s\S]*?grid-template-columns:\s*repeat\(7, minmax\(0, 1fr\)\);[\s\S]*?gap:\s*4px;/.test(css)).toBe(true);
-    expect(/\.aspectOption\s*\{[\s\S]*?min-height:\s*46px;[\s\S]*?font-size:\s*9px;/.test(css)).toBe(true);
+    expect(/\.aspectGrid\s*\{[\s\S]*?grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\);[\s\S]*?gap:\s*4px;/.test(css)).toBe(true);
+    expect(/\.aspectOption\s*\{[\s\S]*?min-height:\s*58px;[\s\S]*?font-size:\s*9px;/.test(css)).toBe(true);
     expect(/\.aspectShape\s*\{[\s\S]*?width:\s*18px;[\s\S]*?max-height:\s*16px;/.test(css)).toBe(true);
     expect(/\.optionPill\s*\{[\s\S]*?height:\s*28px;[\s\S]*?font-size:\s*10px;/.test(css)).toBe(true);
-    expect(/\.dimensionGrid label > span\s*\{[\s\S]*?height:\s*30px;[\s\S]*?font-size:\s*10px;/.test(css)).toBe(true);
+    expect(css.includes('.dimensionGrid')).toBe(false);
+    expect(css.includes('.sizeOption')).toBe(true);
   });
 
   test('renders the floating bottom composer with exact model and parameter controls', () => {
@@ -327,6 +330,46 @@ describe('ImageWorkbench model size policies', () => {
     expect(policy.allowCustomDimensions).toBe(true);
     expect(policy.maxCount).toBe(10);
   });
+
+  test('uses the selected size option as the sole UI authority for dimensions', () => {
+    const policy = imageWorkbenchSizePolicyForModel({
+      platform: 'custom',
+      protocol: 'custom.images',
+      model: 'custom-image',
+    });
+    const normalized = normalizeImageWorkbenchSettingsSize(
+      {
+        ...baseProps().settings,
+        aspectRatio: '16:9',
+        width: 64,
+        height: 1024,
+      },
+      policy
+    );
+    const option = policy.options.find((candidate) => candidate.value === '16:9')!;
+    expect(normalized).toMatchObject({
+      aspectRatio: '16:9',
+      width: option.width,
+      height: option.height,
+    });
+    expect(
+      imageWorkbenchSizeOptionLabel(option).includes(
+        `${option.width} × ${option.height}`
+      )
+    ).toBe(true);
+  });
+
+  test('keeps automatic sizing without restoring manual width and height inputs', () => {
+    const policy = imageWorkbenchSizePolicyForModel(null);
+    const selectable = imageWorkbenchSelectableSizeOptions(policy.options);
+    expect(selectable.some((option) => option.value === 'auto')).toBe(true);
+    expect(
+      normalizeImageWorkbenchSettingsSize(
+        { ...baseProps().settings, aspectRatio: 'auto' },
+        policy
+      )
+    ).toMatchObject({ aspectRatio: 'auto', width: null, height: null });
+  });
 });
 
 describe('ImageWorkbench controlled contract', () => {
@@ -365,7 +408,6 @@ describe('ImageWorkbench controlled contract', () => {
       'onModelChange',
       'onInterfaceModeChange',
       'onQualityChange',
-      'onDimensionsChange',
       'onAspectRatioChange',
       'onCountChange',
       'onResultSelectionChange',
@@ -373,6 +415,7 @@ describe('ImageWorkbench controlled contract', () => {
     ]) {
       expect(typesSource.includes(callback)).toBe(true);
     }
+    expect(typesSource.includes('onDimensionsChange')).toBe(false);
     expect(componentSource.includes('httpRequest')).toBe(false);
     expect(componentSource.includes('useModelsForTask')).toBe(false);
     expect(css.includes('.bottomComposerDock {\n  position: absolute;')).toBe(true);
