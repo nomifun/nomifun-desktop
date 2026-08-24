@@ -5,6 +5,7 @@
  */
 
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
+import { Message } from '@arco-design/web-react';
 import type { TFunction } from 'i18next';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -561,11 +562,15 @@ const OwnedVideoWorkbenchReady: React.FC<{
       setTaskCount(count);
     },
     onOpenParameters: () =>
-      setError(
-        t('creativeStudio.product.video.parametersUnavailable', {
+      Message.info({
+        content: t('creativeStudio.product.video.parametersUnavailable', {
           defaultValue: '高级参数只会在具有明确 NomiFun 协议契约后开放，当前未发送隐藏参数。',
-        })
-      ),
+        }),
+        duration: 2600,
+        id: 'video-advanced-parameters-hint',
+        position: 'top',
+        closable: false,
+      }),
     onOpenPromptLibrary: () => navigate('/workshop/prompts'),
     selectedTaskIds,
     onSelectedTaskIdsChange: (ids: readonly string[]) => setSelectedTaskIds([...ids]),

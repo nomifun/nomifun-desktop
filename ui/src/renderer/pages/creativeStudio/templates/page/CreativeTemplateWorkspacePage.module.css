@@ -412,16 +412,25 @@
 }
 
 .editorModal {
-  width: min(1080px, calc(100vw - 48px)) !important;
+  left: calc(var(--app-sider-width, 0px) * 0.5);
+  width: min(
+    1080px,
+    calc(100vw - var(--app-sider-width, 0px) - 32px)
+  ) !important;
+  max-height: calc(100vh - 24px);
 }
 
 .editorModal :global(.arco-modal-content) {
+  min-height: 0;
+  max-height: calc(100vh - 144px);
   padding: 16px 20px 20px;
+  overflow: hidden;
 }
 
 .editorGrid {
   display: grid;
-  max-height: min(710px, calc(100vh - 190px));
+  height: min(710px, calc(100vh - 190px));
+  max-height: calc(100vh - 190px);
   grid-template-columns: minmax(0, 1fr) 360px;
   gap: 16px;
   overflow: hidden;
@@ -964,6 +973,11 @@
 }
 
 @media (max-width: 820px) {
+  .editorModal {
+    left: 0;
+    width: calc(100vw - 24px) !important;
+  }
+
   .editorGrid,
   .runGrid {
     max-height: calc(100vh - 190px);

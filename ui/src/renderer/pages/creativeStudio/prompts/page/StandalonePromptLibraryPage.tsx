@@ -352,6 +352,7 @@ export const StandalonePromptLibraryAppearance: React.FC<
                     <button
                       key={item}
                       type='button'
+                      title={item}
                       className={classNames(styles.chip, category === item && styles.chipActive)}
                       aria-pressed={category === item}
                       onClick={() => setCategory(item)}
@@ -393,6 +394,7 @@ export const StandalonePromptLibraryAppearance: React.FC<
                       <button
                         key={tag}
                         type='button'
+                        title={tag}
                         className={classNames(styles.chip, active && styles.chipActive)}
                         aria-pressed={active}
                         onClick={() =>

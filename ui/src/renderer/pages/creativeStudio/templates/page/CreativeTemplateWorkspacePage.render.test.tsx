@@ -58,6 +58,9 @@ describe('Creative Template workspace page', () => {
     expect(css.includes('--primary-6: 87, 83, 78')).toBe(true);
     expect(css.includes('color-scheme: light')).toBe(true);
     expect(css.includes('.editorModal')).toBe(true);
+    expect(css.includes('--app-sider-width')).toBe(true);
+    expect(css.includes('max-height: calc(100vh - 24px)')).toBe(true);
+    expect(css.includes('max-height: calc(100vh - 144px)')).toBe(true);
     expect(css.includes('.runModal')).toBe(true);
     expect(css.includes('.reviewModal')).toBe(true);
   });
