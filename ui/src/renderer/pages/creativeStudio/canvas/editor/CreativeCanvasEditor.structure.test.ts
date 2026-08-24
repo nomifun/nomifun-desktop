@@ -139,6 +139,21 @@ describe('CreativeCanvasEditor composition contract', () => {
     expect(editorStyles.includes('pointer-events: auto')).toBe(true);
   });
 
+  test('keeps connection gestures separate from explicit node activation', () => {
+    const nodePointerStart = editorSource.slice(
+      editorSource.indexOf('const beginNodePointer'),
+      editorSource.indexOf('const beginNodeResize')
+    );
+    const connectionStart = editorSource.slice(
+      editorSource.indexOf('const beginConnectionDrag'),
+      editorSource.indexOf('const handleSurfacePointerDown')
+    );
+
+    expect(nodePointerStart.includes('canvasCommands.setSelection([node.id])')).toBe(true);
+    expect(connectionStart.includes('canvasCommands.clearSelection()')).toBe(true);
+    expect(connectionStart.includes('canvasCommands.setSelection([node.id])')).toBe(false);
+  });
+
   test('does not manufacture assets or invoke generation/model APIs', () => {
     for (const forbidden of [
       'useModelsForTask',

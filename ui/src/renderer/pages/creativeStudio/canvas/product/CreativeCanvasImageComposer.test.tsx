@@ -59,6 +59,7 @@ describe('CreativeCanvasImageComposer', () => {
     expect(html.includes('请输入你想要把这张图修改成什么')).toBe(true);
     expect(html.includes('打开提示词库')).toBe(true);
     expect(html.includes('图片编辑模型')).toBe(true);
+    expect(html.includes('arco-select-size-mini')).toBe(true);
     expect(html.includes('图片生成设置')).toBe(true);
     expect(html.includes('生成图片')).toBe(true);
     expect(html.includes('自动 · 1:1 · 1 张')).toBe(true);
@@ -120,11 +121,25 @@ describe('CreativeCanvasImageComposer', () => {
     expect(css.includes('background: rgb(var(--primary-6))')).toBe(true);
     expect(css.includes('@media (prefers-color-scheme: dark)')).toBe(false);
     expect(css.includes('width: 580px')).toBe(true);
-    expect(css.includes('height: 160px')).toBe(true);
+    expect(css.includes('height: 104px')).toBe(true);
+    expect(css.includes('height: 160px')).toBe(false);
+    expect(css.includes('flex: 0 1 156px')).toBe(true);
+    expect(css.includes('min-width: 124px')).toBe(true);
+    expect(css.includes('min-width: 48px')).toBe(true);
+    expect(css.includes('font-size: 11px')).toBe(true);
+    expect(css.includes('width: 14px')).toBe(true);
+    expect(css.includes('line-height: 28px')).toBe(true);
+    expect(css.includes('.arco-select-popup .arco-select-option')).toBe(true);
+    expect(css.includes('min-height: 28px')).toBe(true);
+    expect(css.includes('padding: 0 10px')).toBe(true);
+    expect(css.includes('.controls > *,\n.submitButton')).toBe(true);
+    expect(css.includes('.footer :global(.i-icon)')).toBe(true);
+    expect(css.includes('place-items: center')).toBe(true);
     expect(css.includes(".positioner[data-placement='above']")).toBe(true);
     expect(css.includes('--creative-canvas-image-composer-offset-x')).toBe(true);
     expect(css.includes(".positioner[data-overlay='true']")).toBe(true);
     expect(css.includes('.settingsSummary')).toBe(true);
     expect(css.includes('.settingsButton span')).toBe(false);
   });
+
 });
