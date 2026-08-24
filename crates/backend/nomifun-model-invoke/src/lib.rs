@@ -18,6 +18,7 @@ pub mod auth;
 pub mod call;
 pub mod error;
 pub mod manifest;
+mod media_prompt;
 pub mod realtime;
 pub mod materialize;
 pub mod resolve;
