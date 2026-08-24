@@ -4,18 +4,18 @@
  * Without these, every importer trips TS7016 ("could not find a declaration
  * file ... implicitly has an 'any' type").
  *
- * The library is used only for its default highlighter component and a style
- * preset object, so loose typings are sufficient here.
+ * The library is used through its PrismLight component and style preset
+ * objects, so loose typings are sufficient here.
  */
 declare module 'react-syntax-highlighter' {
-  import type { ComponentType, ReactNode } from 'react';
+  import type { ComponentType, CSSProperties, ReactNode } from 'react';
 
   export interface SyntaxHighlighterProps {
     language?: string;
     style?: Record<string, unknown>;
     children?: ReactNode;
-    customStyle?: Record<string, unknown>;
-    codeTagProps?: Record<string, unknown>;
+    customStyle?: CSSProperties;
+    codeTagProps?: { style?: CSSProperties; [key: string]: unknown };
     PreTag?: keyof JSX.IntrinsicElements | ComponentType<unknown>;
     CodeTag?: keyof JSX.IntrinsicElements | ComponentType<unknown>;
     wrapLines?: boolean;
@@ -52,7 +52,22 @@ declare module 'react-syntax-highlighter/dist/esm/light' {
   export default SyntaxHighlighter;
 }
 
+declare module 'react-syntax-highlighter/dist/esm/prism-light' {
+  import type { ComponentType } from 'react';
+  import type { SyntaxHighlighterProps } from 'react-syntax-highlighter';
+
+  const SyntaxHighlighter: ComponentType<SyntaxHighlighterProps> & {
+    registerLanguage(name: string, grammar: unknown): void;
+  };
+  export default SyntaxHighlighter;
+}
+
 declare module 'react-syntax-highlighter/dist/esm/languages/hljs/*' {
+  const grammar: unknown;
+  export default grammar;
+}
+
+declare module 'react-syntax-highlighter/dist/esm/languages/prism/*' {
   const grammar: unknown;
   export default grammar;
 }
@@ -70,4 +85,9 @@ declare module 'react-syntax-highlighter/dist/esm/styles/hljs/vs2015' {
 declare module 'react-syntax-highlighter/dist/esm/styles/prism' {
   const styles: Record<string, Record<string, unknown>>;
   export default styles;
+}
+
+declare module 'react-syntax-highlighter/dist/esm/styles/prism/*' {
+  const style: Record<string, Record<string, unknown>>;
+  export default style;
 }
