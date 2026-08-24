@@ -10,6 +10,7 @@
 }
 
 .sideLayout {
+  box-sizing: border-box;
   display: grid;
   width: 100%;
   height: 100%;
@@ -22,6 +23,7 @@
 
 .bottomLayout {
   position: relative;
+  box-sizing: border-box;
   display: flex;
   width: 100%;
   height: 100%;
@@ -180,7 +182,7 @@
 }
 
 .promptSection :global(.arco-textarea),
-.bottomPromptRow :global(.arco-textarea) {
+.bottomPromptPane :global(.arco-textarea) {
   resize: none;
   border-color: var(--color-border-2);
   background: var(--color-fill-1);
@@ -197,7 +199,7 @@
 }
 
 .promptSection :global(.arco-textarea:focus),
-.bottomPromptRow :global(.arco-textarea:focus) {
+.bottomPromptPane :global(.arco-textarea:focus) {
   border-color: rgb(var(--primary-6));
 }
 
@@ -418,7 +420,7 @@
 }
 
 .bottomLayout > .resultsPanel {
-  padding-bottom: 178px;
+  padding-bottom: 238px;
 }
 
 .resultsHeader {
@@ -843,9 +845,9 @@
 
 .bottomComposer {
   position: absolute;
-  right: 28px;
-  bottom: 24px;
-  left: 28px;
+  right: 18px;
+  bottom: 18px;
+  left: 18px;
   z-index: 20;
   display: flex;
   justify-content: center;
@@ -853,56 +855,82 @@
 }
 
 .bottomComposerSurface {
-  display: grid;
-  width: min(1024px, 100%);
+  width: min(1080px, 100%);
   max-height: min(440px, calc(100vh - 110px));
-  gap: 11px;
   overflow-y: auto;
-  padding: 14px;
+  padding: 13px;
   border: 1px solid color-mix(in srgb, var(--color-border-3) 82%, transparent);
-  border-radius: 22px;
+  border-radius: 19px;
   background: color-mix(in srgb, var(--color-bg-2) 88%, transparent);
   box-shadow:
     0 30px 88px color-mix(in srgb, #000 24%, transparent),
     0 8px 24px color-mix(in srgb, #000 10%, transparent);
-  backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px) saturate(140%);
   pointer-events: auto;
 }
 
-.bottomPromptRow {
+.bottomComposerBody {
   display: grid;
+  grid-template-columns: minmax(330px, 0.86fr) minmax(0, 1.14fr);
+  align-items: stretch;
+  gap: 22px;
+}
+
+.bottomPromptPane {
+  display: flex;
   min-width: 0;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
+  flex-direction: column;
   gap: 10px;
 }
 
-.bottomPromptRow :global(.arco-textarea) {
-  min-height: 64px;
-  border-radius: 13px;
+.bottomPromptPane :global(.arco-textarea) {
+  border-radius: 11px;
   padding: 10px 12px;
   font-size: 13px;
   line-height: 1.55;
 }
 
-.bottomPromptRow :global(.arco-textarea::placeholder) {
+.bottomPromptPane :global(.arco-textarea::placeholder) {
   color: var(--color-text-4);
 }
 
-.bottomPromptActions {
+.bottomActionRow {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 7px;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  margin-top: auto;
 }
 
-.bottomPromptActions :global(.arco-btn:not(.arco-btn-primary)) {
+.bottomGenerateButton {
+  min-width: 150px;
+  min-height: 38px;
+  flex: 1 1 auto;
+  border-radius: 9px;
+}
+
+.bottomTools {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.bottomTools :global(.arco-btn) {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 9px;
+}
+
+.bottomTools :global(.arco-btn:not(.arco-btn-primary)) {
   border-color: var(--color-border-2);
   background: color-mix(in srgb, var(--color-bg-1) 92%, transparent);
   color: var(--color-text-2);
 }
 
-.bottomPromptActions :global(.arco-btn:not(.arco-btn-primary):hover) {
+.bottomTools :global(.arco-btn:not(.arco-btn-primary):hover) {
   border-color: var(--color-border-3);
   background: var(--color-fill-2);
   color: var(--color-text-1);
@@ -918,21 +946,76 @@
   background: color-mix(in srgb, var(--color-bg-2) 92%, transparent);
 }
 
-.bottomComposer .settingsGrid {
-  grid-template-columns: minmax(220px, 1.35fr) repeat(4, minmax(100px, 0.72fr));
-  align-items: end;
+.compactSettingsGrid {
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  align-content: start;
+  align-items: center;
+  gap: 12px 14px;
 }
 
-.bottomComposer .modelControl {
-  grid-column: auto;
+.compactSettingsGrid .modelControl,
+.compactSettingsGrid .quickControl {
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
 }
 
-.bottomComposer .referenceStrip {
+.compactSettingsGrid .modelControl {
+  grid-column: 1 / -1;
+}
+
+.compactSettingsGrid .quickControl:nth-child(2),
+.compactSettingsGrid .quickControl:nth-child(4) {
+  grid-column: 1 / 7;
+}
+
+.compactSettingsGrid .quickControl:nth-child(3),
+.compactSettingsGrid .quickControl:nth-child(5) {
+  grid-column: 7 / -1;
+}
+
+.compactSettingsGrid .modelControl > span,
+.compactSettingsGrid .quickControl > span {
+  color: var(--color-text-2);
+  font-size: 12px;
+  font-weight: 620;
+  white-space: nowrap;
+}
+
+.compactSettingsGrid .modelControl > div {
+  min-width: 0;
+}
+
+.compactSettingsGrid
+  .modelControl
+  :global([data-creative-model-select])
+  > :first-child {
+  display: none;
+}
+
+.compactSettingsGrid
+  .modelControl
+  :global([data-creative-model-select][data-selection-state='resolved'])
+  > :nth-child(3) {
+  display: none;
+}
+
+.compactSettingsGrid .modelControl :global(.arco-select-view) {
+  min-height: 38px;
+  border-radius: 9px;
+  font-size: 12px;
+}
+
+.bottomPromptPane .referenceSection {
+  gap: 6px;
+}
+
+.bottomPromptPane .referenceStrip {
   max-height: 112px;
 }
 
-.bottomComposer .referenceItem,
-.bottomComposer .addReference {
+.bottomPromptPane .referenceItem,
+.bottomPromptPane .addReference {
   width: 82px;
   min-width: 82px;
   min-height: 90px;
@@ -954,16 +1037,13 @@
     grid-template-columns: 1fr;
   }
 
-  .bottomComposer .settingsGrid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .bottomComposer .modelControl {
-    grid-column: span 2;
+  .bottomComposerBody {
+    grid-template-columns: minmax(300px, 0.78fr) minmax(0, 1.22fr);
+    gap: 16px;
   }
 
   .bottomLayout > .resultsPanel {
-    padding-bottom: 232px;
+    padding-bottom: 250px;
   }
 }
 
@@ -980,13 +1060,8 @@
     flex: 0 0 auto;
   }
 
-  .resultsHeader,
-  .bottomPromptRow {
-    align-items: stretch;
-    grid-template-columns: 1fr;
-  }
-
   .resultsHeader {
+    align-items: stretch;
     flex-direction: column;
   }
 
@@ -994,30 +1069,25 @@
     align-self: flex-end;
   }
 
-  .bottomPromptActions {
-    justify-content: flex-start;
-  }
-
   .bottomComposer {
-    right: 16px;
-    bottom: 16px;
-    left: 16px;
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
   }
 
   .bottomComposerSurface {
     border-radius: 16px;
   }
 
-  .bottomComposer .settingsGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .bottomComposer .modelControl {
-    grid-column: 1 / -1;
+  .bottomComposerBody {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
   }
 
   .bottomLayout > .resultsPanel {
-    padding-bottom: 310px;
+    min-height: 0;
+    flex: 1 1 auto;
+    padding-bottom: 420px;
   }
 }
 
@@ -1027,14 +1097,32 @@
     padding: 8px;
   }
 
-  .settingsGrid,
-  .bottomComposer .settingsGrid {
+  .settingsGrid {
     grid-template-columns: 1fr;
   }
 
-  .modelControl,
-  .bottomComposer .modelControl {
+  .modelControl {
     grid-column: auto;
+  }
+
+  .compactSettingsGrid {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+  }
+
+  .compactSettingsGrid .modelControl,
+  .compactSettingsGrid .quickControl {
+    grid-column: 1 / -1;
+  }
+
+  .bottomActionRow {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .bottomTools {
+    align-self: flex-end;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
   .resultsActions {
@@ -1049,7 +1137,8 @@
   }
 
   .bottomLayout > .resultsPanel {
-    padding-bottom: 390px;
+    min-height: 0;
+    padding-bottom: 560px;
   }
 }
 

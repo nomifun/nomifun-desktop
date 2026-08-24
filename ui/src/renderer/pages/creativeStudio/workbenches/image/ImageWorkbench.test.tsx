@@ -5,8 +5,10 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { createInstance } from 'i18next';
 import { readFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { I18nextProvider, initReactI18next } from 'react-i18next';
 import ImageWorkbench from './ImageWorkbench';
 import {
   imageWorkbenchSizePolicyForModel,
@@ -18,6 +20,14 @@ import {
 } from './types';
 
 const noop = () => undefined;
+const testI18n = createInstance();
+
+await testI18n.use(initReactI18next).init({
+  lng: 'zh-CN',
+  fallbackLng: 'zh-CN',
+  resources: { 'zh-CN': { translation: {} } },
+  interpolation: { escapeValue: false },
+});
 
 const baseProps = (overrides: Partial<ImageWorkbenchProps> = {}): ImageWorkbenchProps => ({
   layout: 'side',
@@ -60,7 +70,11 @@ const baseProps = (overrides: Partial<ImageWorkbenchProps> = {}): ImageWorkbench
 });
 
 const renderWorkbench = (overrides: Partial<ImageWorkbenchProps> = {}) =>
-  renderToStaticMarkup(<ImageWorkbench {...baseProps(overrides)} />);
+  renderToStaticMarkup(
+    <I18nextProvider i18n={testI18n}>
+      <ImageWorkbench {...baseProps(overrides)} />
+    </I18nextProvider>
+  );
 
 const resultBase = {
   id: 'result-1',
@@ -128,6 +142,24 @@ describe('ImageWorkbench visual states', () => {
     expect(html.includes('质量')).toBe(true);
     expect(html.includes('数量')).toBe(true);
     expect(html.includes('2 个生成中')).toBe(true);
+
+    const css = readFileSync(new URL('./ImageWorkbench.module.css', import.meta.url), 'utf8');
+    const composerSource = readFileSync(
+      new URL('./ImageWorkbenchComposer.tsx', import.meta.url),
+      'utf8'
+    );
+    expect(composerSource.includes('className={styles.bottomComposerBody}')).toBe(true);
+    expect(composerSource.includes('className={styles.bottomActionRow}')).toBe(true);
+    expect(
+      /\.bottomComposerBody\s*\{[\s\S]*?grid-template-columns:\s*minmax\(330px, 0\.86fr\) minmax\(0, 1\.14fr\);/.test(
+        css
+      )
+    ).toBe(true);
+    expect(
+      /\.compactSettings\s*\{[\s\S]*?grid-template-columns:\s*repeat\(12, minmax\(0, 1fr\)\);/.test(
+        css
+      )
+    ).toBe(true);
   });
 
   test('renders an honest disabled state when no image model is configured', () => {

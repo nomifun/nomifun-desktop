@@ -229,23 +229,26 @@ const QuickSelect: React.FC<{
   </label>
 );
 
-const SettingsGrid: React.FC<
-  Pick<
-    ComposerProps,
-    | 'modelSlot'
-    | 'resolution'
-    | 'resolutionOptions'
-    | 'onResolutionChange'
-    | 'size'
-    | 'sizeOptions'
-    | 'onSizeChange'
-    | 'duration'
-    | 'durationOptions'
-    | 'onDurationChange'
-    | 'taskCount'
-    | 'onTaskCountChange'
-  >
-> = ({
+type SettingsGridProps = Pick<
+  ComposerProps,
+  | 'modelSlot'
+  | 'resolution'
+  | 'resolutionOptions'
+  | 'onResolutionChange'
+  | 'size'
+  | 'sizeOptions'
+  | 'onSizeChange'
+  | 'duration'
+  | 'durationOptions'
+  | 'onDurationChange'
+  | 'taskCount'
+  | 'onTaskCountChange'
+> & {
+  compact?: boolean;
+};
+
+const SettingsGrid: React.FC<SettingsGridProps> = ({
+  compact = false,
   modelSlot,
   resolution,
   resolutionOptions,
@@ -261,42 +264,44 @@ const SettingsGrid: React.FC<
 }) => {
   const { t } = useTranslation();
   return (
-  <div className={styles.settingsGrid}>
-    <div className={styles.modelControl}>
-      <span>{t('creativeStudio.video.settings.model', { defaultValue: '模型' })}</span>
-      <div>{modelSlot}</div>
-    </div>
-    <QuickSelect
-      label={t('creativeStudio.video.settings.resolution', { defaultValue: '清晰度' })}
-      value={resolution}
-      options={resolutionOptions}
-      onChange={onResolutionChange}
-    />
-    <QuickSelect
-      label={t('creativeStudio.video.settings.size', { defaultValue: '尺寸' })}
-      value={size}
-      options={sizeOptions}
-      onChange={onSizeChange}
-    />
-    <QuickSelect
-      label={t('creativeStudio.video.settings.duration', { defaultValue: '时长' })}
-      value={duration}
-      options={durationOptions}
-      onChange={onDurationChange}
-    />
-    <label className={styles.quickControl}>
-      <span>{t('creativeStudio.video.settings.taskCount', { defaultValue: '任务数量' })}</span>
-      <input
-        type='number'
-        min={1}
-        max={6}
-        value={taskCount}
-        onChange={(event) =>
-          onTaskCountChange(normalizeVideoTaskCount(Number(event.target.value)))
-        }
+    <div
+      className={`${styles.settingsGrid} ${compact ? styles.compactSettingsGrid : ''}`}
+    >
+      <div className={styles.modelControl}>
+        <span>{t('creativeStudio.video.settings.model', { defaultValue: '模型' })}</span>
+        <div>{modelSlot}</div>
+      </div>
+      <QuickSelect
+        label={t('creativeStudio.video.settings.resolution', { defaultValue: '清晰度' })}
+        value={resolution}
+        options={resolutionOptions}
+        onChange={onResolutionChange}
       />
-    </label>
-  </div>
+      <QuickSelect
+        label={t('creativeStudio.video.settings.size', { defaultValue: '尺寸' })}
+        value={size}
+        options={sizeOptions}
+        onChange={onSizeChange}
+      />
+      <QuickSelect
+        label={t('creativeStudio.video.settings.duration', { defaultValue: '时长' })}
+        value={duration}
+        options={durationOptions}
+        onChange={onDurationChange}
+      />
+      <label className={styles.quickControl}>
+        <span>{t('creativeStudio.video.settings.taskCount', { defaultValue: '任务数量' })}</span>
+        <input
+          type='number'
+          min={1}
+          max={6}
+          value={taskCount}
+          onChange={(event) =>
+            onTaskCountChange(normalizeVideoTaskCount(Number(event.target.value)))
+          }
+        />
+      </label>
+    </div>
   );
 };
 
@@ -360,78 +365,87 @@ const VideoWorkbenchComposer: React.FC<ComposerProps> = ({
     return (
       <aside className={styles.bottomComposer} data-video-composer='bottom'>
         <div className={styles.bottomComposerSurface}>
-          <div className={styles.bottomPromptRow}>
-            <Input.TextArea
-              value={prompt}
-              onChange={onPromptChange}
-              autoSize={{ minRows: 2, maxRows: 4 }}
-              placeholder={t('creativeStudio.video.prompt.placeholder', {
-                defaultValue: '描述镜头运动、主体动作、场景氛围和画面风格',
-              })}
-              aria-label={t('creativeStudio.video.prompt.label', { defaultValue: '视频提示词' })}
-              onPressEnter={(event) => {
-                if (!event.shiftKey && !disabled && !generating) {
-                  event.preventDefault();
-                  onGenerate();
-                }
-              }}
-            />
-            <div className={styles.bottomPromptActions}>
-              <Button
-                aria-label={t('creativeStudio.video.actions.clearPrompt', {
-                  defaultValue: '清空提示词',
+          <div className={styles.bottomComposerBody}>
+            <div className={styles.bottomPromptPane}>
+              <Input.TextArea
+                value={prompt}
+                onChange={onPromptChange}
+                autoSize={{ minRows: 4, maxRows: 6 }}
+                placeholder={t('creativeStudio.video.prompt.placeholder', {
+                  defaultValue: '描述镜头运动、主体动作、场景氛围和画面风格',
                 })}
-                icon={<CloseSmall />}
-                onClick={() => onPromptChange('')}
+                aria-label={t('creativeStudio.video.prompt.label', {
+                  defaultValue: '视频提示词',
+                })}
+                onPressEnter={(event) => {
+                  if (!event.shiftKey && !disabled && !generating) {
+                    event.preventDefault();
+                    onGenerate();
+                  }
+                }}
               />
-              {onOpenPromptLibrary ? (
+              {references.length ? <ReferenceStrip {...referenceProps} /> : null}
+              <div className={styles.bottomActionRow}>
                 <Button
-                  aria-label={t('creativeStudio.video.actions.openPromptLibrary', {
-                    defaultValue: '打开提示词库',
-                  })}
-                  icon={<MagicWand />}
-                  onClick={onOpenPromptLibrary}
-                />
-              ) : null}
-              <Button
-                aria-label={t('creativeStudio.video.actions.addReference', {
-                  defaultValue: '添加参考素材',
-                })}
-                icon={<FolderPlus />}
-                onClick={onAddReferences}
-              />
-              <Button
-                aria-label={t('creativeStudio.video.actions.openParameters', {
-                  defaultValue: '打开高级参数',
-                })}
-                icon={<SettingTwo />}
-                onClick={onOpenParameters}
-              />
-              <Button
-                aria-label={t('creativeStudio.video.layout.switchToSide', {
-                  defaultValue: '切换到侧边工作台',
-                })}
-                icon={<LayoutOne />}
-                onClick={() => onLayoutChange('side')}
-              />
-              <Button
-                type='primary'
-                loading={generating}
-                disabled={disabled}
-                icon={<Play />}
-                onClick={onGenerate}
-              >
-                {pendingCount
-                  ? t('creativeStudio.video.generate.pending', {
-                      defaultValue: '{{taskCount}} 个处理中',
-                      taskCount: pendingCount,
-                    })
-                  : t('creativeStudio.video.generate.start', { defaultValue: '开始创作' })}
-              </Button>
+                  className={styles.bottomGenerateButton}
+                  type='primary'
+                  loading={generating}
+                  disabled={disabled}
+                  icon={<Play />}
+                  onClick={onGenerate}
+                >
+                  {pendingCount
+                    ? t('creativeStudio.video.generate.pending', {
+                        defaultValue: '{{taskCount}} 个处理中',
+                        taskCount: pendingCount,
+                      })
+                    : t('creativeStudio.video.generate.start', {
+                        defaultValue: '开始创作',
+                      })}
+                </Button>
+                <div className={styles.bottomTools}>
+                  <Button
+                    aria-label={t('creativeStudio.video.actions.clearPrompt', {
+                      defaultValue: '清空提示词',
+                    })}
+                    icon={<CloseSmall />}
+                    onClick={() => onPromptChange('')}
+                  />
+                  {onOpenPromptLibrary ? (
+                    <Button
+                      aria-label={t('creativeStudio.video.actions.openPromptLibrary', {
+                        defaultValue: '打开提示词库',
+                      })}
+                      icon={<MagicWand />}
+                      onClick={onOpenPromptLibrary}
+                    />
+                  ) : null}
+                  <Button
+                    aria-label={t('creativeStudio.video.actions.addReference', {
+                      defaultValue: '添加参考素材',
+                    })}
+                    icon={<FolderPlus />}
+                    onClick={onAddReferences}
+                  />
+                  <Button
+                    aria-label={t('creativeStudio.video.actions.openParameters', {
+                      defaultValue: '打开高级参数',
+                    })}
+                    icon={<SettingTwo />}
+                    onClick={onOpenParameters}
+                  />
+                  <Button
+                    aria-label={t('creativeStudio.video.layout.switchToSide', {
+                      defaultValue: '切换到侧边工作台',
+                    })}
+                    icon={<LayoutOne />}
+                    onClick={() => onLayoutChange('side')}
+                  />
+                </div>
+              </div>
             </div>
+            <SettingsGrid {...settings} compact />
           </div>
-          <SettingsGrid {...settings} />
-          {references.length ? <ReferenceStrip {...referenceProps} /> : null}
         </div>
       </aside>
     );

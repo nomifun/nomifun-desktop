@@ -904,14 +904,14 @@
 
 .bottomComposer {
   width: min(1080px, 100%);
-  padding: 14px;
+  padding: 13px;
   border: 1px solid color-mix(in srgb, var(--color-border-3) 82%, transparent);
-  border-radius: 22px;
+  border-radius: 19px;
   background: color-mix(in srgb, var(--color-bg-2) 88%, transparent);
   box-shadow:
     0 30px 90px color-mix(in srgb, #000 20%, transparent),
     0 8px 28px color-mix(in srgb, #000 9%, transparent);
-  backdrop-filter: blur(24px) saturate(145%);
+  backdrop-filter: blur(24px) saturate(140%);
   pointer-events: auto;
 }
 
@@ -933,32 +933,173 @@
   background: color-mix(in srgb, var(--color-bg-2) 92%, transparent);
 }
 
-.bottomPromptRow {
+.bottomComposerBody {
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) auto auto auto;
-  align-items: start;
-  gap: 8px;
+  grid-template-columns: minmax(330px, 0.86fr) minmax(0, 1.14fr);
+  align-items: stretch;
+  gap: 22px;
 }
 
-.bottomPromptRow :global(.arco-textarea) {
-  border-radius: 13px;
+.bottomPromptPane {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
 }
 
-.bottomPromptRow > :global(.arco-btn) {
-  min-height: 36px;
-  border-radius: 10px;
+.bottomPromptPane :global(.arco-textarea-wrapper),
+.bottomPromptPane :global(.arco-textarea) {
+  border-radius: 11px;
 }
 
 .compactSettings {
   display: grid;
-  grid-template-columns: 1.35fr 1.05fr 0.68fr 0.68fr 0.9fr 0.76fr 0.62fr;
-  align-items: end;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  align-content: start;
+  align-items: center;
+  gap: 12px 14px;
+}
+
+.compactSettings > * {
+  min-width: 0;
+}
+
+.compactSettings .field {
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  column-gap: 10px;
+}
+
+.compactSettings .field > span {
+  color: var(--color-text-2);
+  font-size: 12px;
+  font-weight: 620;
+  white-space: nowrap;
+}
+
+.compactSettings .field :global(.arco-select-view),
+.compactSettings .field :global(.arco-input-number) {
+  min-height: 38px;
+  border-radius: 9px;
+  font-size: 12px;
+}
+
+.compactSettings .field :global(.arco-radio-button-inner) {
+  height: 36px;
+  padding: 0 12px;
+  font-size: 11px;
+  line-height: 36px;
+}
+
+.compactModelField {
+  grid-column: 1 / 8;
+}
+
+.compactInterfaceField {
+  grid-column: 8 / -1;
+}
+
+.compactWidthField {
+  grid-column: 1 / 7;
+}
+
+.compactHeightField {
+  grid-column: 7 / -1;
+}
+
+.compactAspectField {
+  grid-column: 1 / 5;
+}
+
+.compactQualityField {
+  grid-column: 5 / 9;
+}
+
+.compactCountField {
+  grid-column: 9 / -1;
+}
+
+.compactModelField :global([data-creative-model-select]) {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 0 10px;
+}
+
+.compactModelField :global([data-creative-model-select]) > :first-child {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.compactModelField :global([data-creative-model-select]) > :first-child > :first-child {
+  color: var(--color-text-2);
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.compactModelField :global([data-creative-model-select]) > :first-child > :last-child {
+  display: none;
+}
+
+.compactModelField :global([data-creative-model-select]) > :nth-child(2) {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+}
+
+.compactModelField :global([data-creative-model-select]) > :nth-child(n + 3) {
+  grid-column: 2;
+}
+
+.compactModelField
+  :global([data-creative-model-select][data-selection-state='resolved'])
+  > :nth-child(3) {
+  display: none;
+}
+
+.compactModelField :global(.arco-select-view) {
+  min-height: 38px;
+  border-radius: 9px;
+  font-size: 12px;
+}
+
+.bottomActionRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  margin-top: auto;
+}
+
+.bottomGenerateButton {
+  min-width: 150px;
+  min-height: 38px;
+  flex: 1 1 auto;
+  border-radius: 9px;
+}
+
+.bottomTools {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
   gap: 6px;
-  margin-top: 8px;
+}
+
+.bottomTools .compactActions {
+  gap: 6px;
+}
+
+.bottomTools .compactActions :global(.arco-btn),
+.bottomTools > :global(.arco-btn) {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 9px;
 }
 
 .bottomComposer .referenceStripCompact {
-  margin-top: 9px;
+  margin: 0;
 }
 
 .spin {
@@ -986,12 +1127,13 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .compactSettings {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .bottomComposerBody {
+    grid-template-columns: minmax(300px, 0.78fr) minmax(0, 1.22fr);
+    gap: 16px;
   }
 
   .bottomLayout .resultsPanel {
-    padding-bottom: 310px;
+    padding-bottom: 250px;
   }
 }
 
@@ -1013,13 +1155,13 @@
   }
 
   .bottomLayout {
-    height: auto;
-    min-height: 100%;
+    height: 100%;
+    min-height: 0;
   }
 
   .bottomLayout .resultsPanel {
-    min-height: 760px;
-    padding-bottom: 380px;
+    min-height: 0;
+    padding-bottom: 420px;
   }
 
   .bottomComposerDock {
@@ -1029,13 +1171,9 @@
     left: 12px;
   }
 
-  .bottomPromptRow {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .bottomPromptRow .compactActions {
-    grid-column: 1 / -1;
-    grid-row: 2;
+  .bottomComposerBody {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
   }
 }
 
@@ -1083,8 +1221,8 @@
   }
 
   .bottomLayout .resultsPanel {
-    min-height: 900px;
-    padding: 13px 13px 520px;
+    min-height: 0;
+    padding: 13px 13px 660px;
   }
 
   .bottomComposer {
@@ -1092,18 +1230,35 @@
     border-radius: 17px;
   }
 
-  .bottomPromptRow {
-    grid-template-columns: 1fr auto;
-  }
-
-  .bottomPromptRow > :global(.arco-textarea-wrapper) {
+  .compactModelField,
+  .compactInterfaceField {
     grid-column: 1 / -1;
   }
 
-  .compactSettings {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .compactWidthField,
+  .compactAspectField {
+    grid-column: 1 / 7;
   }
 
+  .compactHeightField,
+  .compactQualityField {
+    grid-column: 7 / -1;
+  }
+
+  .compactCountField {
+    grid-column: 1 / -1;
+  }
+
+  .bottomActionRow {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .bottomTools {
+    align-self: flex-end;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

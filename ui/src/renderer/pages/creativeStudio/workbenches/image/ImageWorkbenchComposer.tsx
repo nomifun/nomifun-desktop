@@ -250,9 +250,15 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
   return (
     <div className={compact ? styles.compactSettings : styles.settingsStack}>
       {modelSlot ? (
-        <div className={styles.modelSlot}>{modelSlot}</div>
+        <div
+          className={`${styles.modelSlot} ${compact ? styles.compactModelField : ''}`}
+        >
+          {modelSlot}
+        </div>
       ) : (
-        <label className={styles.field}>
+        <label
+          className={`${styles.field} ${compact ? styles.compactModelField : ''}`}
+        >
           <span>{t('creativeStudio.image.settings.model', { defaultValue: '模型' })}</span>
           <NomiSelect
             value={modelValue}
@@ -292,7 +298,9 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
         </label>
       )}
 
-      <label className={styles.field}>
+      <label
+        className={`${styles.field} ${compact ? styles.compactInterfaceField : ''}`}
+      >
         <span>{t('creativeStudio.image.settings.interfaceMode', { defaultValue: '接口模式' })}</span>
         <Radio.Group
           type='button'
@@ -312,7 +320,10 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
 
       {compact ? (
         <>
-          <label className={styles.field} title={dimensionsTitle}>
+          <label
+            className={`${styles.field} ${styles.compactWidthField}`}
+            title={dimensionsTitle}
+          >
             <span>{t('creativeStudio.image.settings.width', { defaultValue: '宽度' })}</span>
             <InputNumber
               value={settings.width ?? undefined}
@@ -325,7 +336,10 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
               }
             />
           </label>
-          <label className={styles.field} title={dimensionsTitle}>
+          <label
+            className={`${styles.field} ${styles.compactHeightField}`}
+            title={dimensionsTitle}
+          >
             <span>{t('creativeStudio.image.settings.height', { defaultValue: '高度' })}</span>
             <InputNumber
               value={settings.height ?? undefined}
@@ -338,7 +352,7 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
               }
             />
           </label>
-          <label className={styles.field}>
+          <label className={`${styles.field} ${styles.compactAspectField}`}>
             <span>{t('creativeStudio.image.settings.aspectRatio', { defaultValue: '宽高比' })}</span>
             <Select
               value={settings.aspectRatio}
@@ -357,7 +371,7 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
               ))}
             </Select>
           </label>
-          <label className={styles.field}>
+          <label className={`${styles.field} ${styles.compactQualityField}`}>
             <span>{t('creativeStudio.image.settings.quality', { defaultValue: '质量' })}</span>
             <Select
               value={settings.quality}
@@ -371,7 +385,7 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
               ))}
             </Select>
           </label>
-          <label className={styles.field}>
+          <label className={`${styles.field} ${styles.compactCountField}`}>
             <span>{t('creativeStudio.image.settings.count', { defaultValue: '数量' })}</span>
             <InputNumber
               value={Math.min(settings.count, maxCount)}
@@ -571,85 +585,94 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
     return (
       <div className={styles.bottomComposerDock} data-image-workbench-composer='bottom'>
         <div className={styles.bottomComposer}>
-          <div className={styles.bottomPromptRow}>
-            <Input.TextArea
-              value={prompt}
-              autoSize={{ minRows: 2, maxRows: 4 }}
-              placeholder={t('creativeStudio.image.prompt.bottomPlaceholder', {
-                defaultValue: '描述你想生成的图片，可通过参考图锁定人物、风格或构图…',
-              })}
-              disabled={disabled}
-              onChange={onPromptChange}
-              onPressEnter={(event) => {
-                if (!event.shiftKey && canGenerate) {
-                  event.preventDefault();
-                  onGenerate();
-                }
-              }}
-            />
-            <ComposerActions
-              compact
-              onPastePrompt={onPastePrompt}
-              onClearPrompt={onClearPrompt}
-              onOpenPromptLibrary={onOpenPromptLibrary}
-              onChooseReferences={onChooseReferences}
-            />
-            {onUploadReferences ? (
-              <Tooltip
-                content={
-                  references.length
-                    ? t('creativeStudio.image.references.addWithCount', {
-                        defaultValue: '添加参考图，当前 {{imageCount}} 张',
-                        imageCount: references.length,
-                      })
-                    : t('creativeStudio.image.references.add', { defaultValue: '添加参考图' })
-                }
-              >
-                <Button icon={<Upload />} onClick={onUploadReferences}>
-                  {references.length > 0 ? references.length : null}
+          <div className={styles.bottomComposerBody}>
+            <div className={styles.bottomPromptPane}>
+              <Input.TextArea
+                value={prompt}
+                autoSize={{ minRows: 4, maxRows: 6 }}
+                placeholder={t('creativeStudio.image.prompt.bottomPlaceholder', {
+                  defaultValue: '描述你想生成的图片，可通过参考图锁定人物、风格或构图…',
+                })}
+                disabled={disabled}
+                onChange={onPromptChange}
+                onPressEnter={(event) => {
+                  if (!event.shiftKey && canGenerate) {
+                    event.preventDefault();
+                    onGenerate();
+                  }
+                }}
+              />
+              {references.length > 0 || uploadingReferenceCount > 0 ? (
+                <ReferenceStrip
+                  compact
+                  references={references}
+                  uploadingCount={uploadingReferenceCount}
+                  onRemove={onRemoveReference}
+                />
+              ) : null}
+              <div className={styles.bottomActionRow}>
+                <Button
+                  className={styles.bottomGenerateButton}
+                  type='primary'
+                  icon={generateIcon}
+                  disabled={!canGenerate}
+                  onClick={onGenerate}
+                >
+                  {generateLabel}
                 </Button>
-              </Tooltip>
-            ) : null}
-            <Tooltip
-              content={t('creativeStudio.image.layout.switchToSide', {
-                defaultValue: '切换到侧边工作台',
-              })}
-            >
-              <Button icon={<LeftBar />} onClick={() => onLayoutChange('side')} />
-            </Tooltip>
-            <Button
-              type='primary'
-              icon={generateIcon}
-              disabled={!canGenerate}
-              onClick={onGenerate}
-            >
-              {generateLabel}
-            </Button>
-          </div>
-          <SettingsFields
-            compact
-            settings={settings}
-            modelOptions={modelOptions}
-            aspectRatioOptions={aspectRatioOptions}
-            dimensionsDisabled={dimensionsDisabled}
-            maxCount={maxCount}
-            modelSlot={modelSlot}
-            disabled={disabled}
-            onModelChange={onModelChange}
-            onInterfaceModeChange={onInterfaceModeChange}
-            onQualityChange={onQualityChange}
-            onDimensionsChange={onDimensionsChange}
-            onAspectRatioChange={onAspectRatioChange}
-            onCountChange={onCountChange}
-          />
-          {references.length > 0 || uploadingReferenceCount > 0 ? (
-            <ReferenceStrip
+                <div className={styles.bottomTools}>
+                  <ComposerActions
+                    compact
+                    onPastePrompt={onPastePrompt}
+                    onClearPrompt={onClearPrompt}
+                    onOpenPromptLibrary={onOpenPromptLibrary}
+                    onChooseReferences={onChooseReferences}
+                  />
+                  {onUploadReferences ? (
+                    <Tooltip
+                      content={
+                        references.length
+                          ? t('creativeStudio.image.references.addWithCount', {
+                              defaultValue: '添加参考图，当前 {{imageCount}} 张',
+                              imageCount: references.length,
+                            })
+                          : t('creativeStudio.image.references.add', {
+                              defaultValue: '添加参考图',
+                            })
+                      }
+                    >
+                      <Button icon={<Upload />} onClick={onUploadReferences}>
+                        {references.length > 0 ? references.length : null}
+                      </Button>
+                    </Tooltip>
+                  ) : null}
+                  <Tooltip
+                    content={t('creativeStudio.image.layout.switchToSide', {
+                      defaultValue: '切换到侧边工作台',
+                    })}
+                  >
+                    <Button icon={<LeftBar />} onClick={() => onLayoutChange('side')} />
+                  </Tooltip>
+                </div>
+              </div>
+            </div>
+            <SettingsFields
               compact
-              references={references}
-              uploadingCount={uploadingReferenceCount}
-              onRemove={onRemoveReference}
+              settings={settings}
+              modelOptions={modelOptions}
+              aspectRatioOptions={aspectRatioOptions}
+              dimensionsDisabled={dimensionsDisabled}
+              maxCount={maxCount}
+              modelSlot={modelSlot}
+              disabled={disabled}
+              onModelChange={onModelChange}
+              onInterfaceModeChange={onInterfaceModeChange}
+              onQualityChange={onQualityChange}
+              onDimensionsChange={onDimensionsChange}
+              onAspectRatioChange={onAspectRatioChange}
+              onCountChange={onCountChange}
             />
-          ) : null}
+          </div>
         </div>
       </div>
     );
