@@ -12,7 +12,9 @@ import { useTranslation } from 'react-i18next';
 import { copyText } from '@/renderer/utils/ui/clipboard';
 import MermaidBlock from './MermaidBlock';
 import { formatCode, getDiffLineStyle } from './markdownUtils';
+import SyntaxHighlightBoundary from './SyntaxHighlightBoundary';
 import SyntaxHighlighter, { vs, vs2015 } from './SyntaxHighlighter';
+import { resolveSyntaxLanguage } from './syntaxLanguage';
 
 const PREVIEW_LINES = 3;
 // code span: font-size 13px, line-height 20px (per ShadowView injection)
@@ -67,7 +69,7 @@ function CodeBlock(props: CodeBlockProps) {
     showMermaidOpenInPanelButton,
     ...rest
   } = props;
-  const match = /language-(\w+)/.exec(className || '');
+  const match = /(?:^|\s)language-([^\s]+)/.exec(className || '');
   const language = match?.[1] || 'text';
 
   // KaTeX math blocks
@@ -103,8 +105,9 @@ function CodeBlock(props: CodeBlockProps) {
     );
   }
 
-  const isDiff = language === 'diff';
   const formattedContent = formatCode(children);
+  const highlightLanguage = resolveSyntaxLanguage(language);
+  const isDiff = highlightLanguage === 'diff';
   const totalLines = formattedContent.split('\n').length;
   const canCollapse = totalLines > PREVIEW_LINES;
   const codeTheme = currentTheme === 'dark' ? vs2015 : vs;
@@ -133,6 +136,25 @@ function CodeBlock(props: CodeBlockProps) {
   const footerTextColor = isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.35)';
   const borderColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
   const bgColor = isDark ? 'rgba(255,255,255,0.04)' : 'var(--bg-2)';
+  const syntaxContainerStyle: React.CSSProperties = {
+    margin: 0,
+    padding: '0 12px 8px',
+    borderRadius: 0,
+    border: 'none',
+    background: 'transparent',
+    color: 'var(--text-primary)',
+    overflowX: 'auto',
+    maxWidth: '100%',
+  };
+  const syntaxCodeStyle: React.CSSProperties = {
+    color: 'var(--text-primary)',
+    background: 'transparent',
+  };
+  const plainTextFallback = (
+    <div style={syntaxContainerStyle} data-syntax-highlight-fallback>
+      <code style={{ ...syntaxCodeStyle, whiteSpace: 'pre' }}>{formattedContent}</code>
+    </div>
+  );
 
   return (
     <div
@@ -199,39 +221,30 @@ function CodeBlock(props: CodeBlockProps) {
             overflowX: 'visible',
           }}
         >
-          <SyntaxHighlighter
-            children={formattedContent}
-            language={language}
-            style={codeTheme}
-            PreTag='div'
-            wrapLines={isDiff}
-            lineProps={
-              isDiff
-                ? (lineNumber: number) => ({
-                    style: {
-                      display: 'block',
-                      ...getDiffLineStyle(diffLines[lineNumber - 1] || '', isDark),
-                    },
-                  })
-                : undefined
-            }
-            customStyle={{
-              margin: 0,
-              padding: '0 12px 8px',
-              borderRadius: 0,
-              border: 'none',
-              background: 'transparent',
-              color: 'var(--text-primary)',
-              overflowX: 'auto',
-              maxWidth: '100%',
-            }}
-            codeTagProps={{
-              style: {
-                color: 'var(--text-primary)',
-                background: 'transparent',
-              },
-            }}
-          />
+          <SyntaxHighlightBoundary
+            fallback={plainTextFallback}
+            resetKey={`${highlightLanguage}\u0000${formattedContent}`}
+          >
+            <SyntaxHighlighter
+              children={formattedContent}
+              language={highlightLanguage}
+              style={codeTheme}
+              PreTag='div'
+              wrapLines={isDiff}
+              lineProps={
+                isDiff
+                  ? (lineNumber: number) => ({
+                      style: {
+                        display: 'block',
+                        ...getDiffLineStyle(diffLines[lineNumber - 1] || '', isDark),
+                      },
+                    })
+                  : undefined
+              }
+              customStyle={syntaxContainerStyle}
+              codeTagProps={{ style: syntaxCodeStyle }}
+            />
+          </SyntaxHighlightBoundary>
         </div>
 
         {/* Footer */}
