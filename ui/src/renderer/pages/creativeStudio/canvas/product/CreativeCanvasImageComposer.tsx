@@ -6,7 +6,14 @@
 
 import { ArrowUp, BookOne, Check, CloseOne, Down, Loading, SettingTwo } from '@icon-park/react';
 import { InputNumber, Radio, Select } from '@arco-design/web-react';
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 
@@ -24,6 +31,7 @@ import {
   type ImageWorkbenchTaskSummary,
 } from '../../workbenches/image';
 import CreativeCanvasReferencePromptInput, {
+  relabelCreativeCanvasPromptMentions,
   type CreativeCanvasPromptMentionBinding,
   type CreativeCanvasPromptReferenceOption,
   type CreativeCanvasReferencePromptChange,
@@ -107,15 +115,41 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
   onGenerate,
   onRetrySubmission,
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const positionerRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLSpanElement>(null);
   const settingsHostRef = useRef<HTMLDivElement>(null);
   const sizeSelectRef = useRef<HTMLDivElement>(null);
   const horizontalOffsetRef = useRef(0);
-  const [prompt, setPrompt] = useState(initialPrompt);
+  const referenceMentionLabel = useCallback(
+    (ordinal: number) =>
+      t('creativeStudio.canvas.image.referenceMentionLabel', {
+        index: ordinal,
+        defaultValue: `图片${ordinal}` as const,
+      }),
+    [t]
+  );
+  const referenceAliasSignature = `${i18n.resolvedLanguage ?? i18n.language}:${references
+    .map(
+      (reference) =>
+        `${reference.nodeId}:${reference.ordinal}:${reference.disabledReason ? 'disabled' : 'enabled'}`
+    )
+    .join(',')}`;
+  const normalizedInitialDraft = useMemo(
+    () =>
+      relabelCreativeCanvasPromptMentions(
+        initialPrompt,
+        initialMentions,
+        references,
+        referenceMentionLabel
+      ),
+    // Reference display names and thumbnails do not affect prompt aliases.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [initialMentions, initialPrompt, referenceAliasSignature, referenceMentionLabel]
+  );
+  const [prompt, setPrompt] = useState(normalizedInitialDraft.value);
   const [mentions, setMentions] = useState<CreativeCanvasPromptMentionBinding[]>(
-    () => structuredClone([...initialMentions])
+    () => structuredClone(normalizedInitialDraft.mentions)
   );
   const [placement, setPlacement] = useState<'above' | 'below'>('below');
   const [horizontalOffset, setHorizontalOffset] = useState(0);
@@ -145,9 +179,18 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
     ) ?? aspectRatioOptions.find((option) => !option.disabled) ?? null;
 
   useEffect(() => {
-    setPrompt(initialPrompt);
-    setMentions(structuredClone([...initialMentions]));
-  }, [initialMentions, initialPrompt, nodeId]);
+    setPrompt(normalizedInitialDraft.value);
+    setMentions(structuredClone(normalizedInitialDraft.mentions));
+    if (normalizedInitialDraft.value !== initialPrompt) {
+      onPromptChange?.({
+        value: normalizedInitialDraft.value,
+        mentions: structuredClone(normalizedInitialDraft.mentions),
+      });
+    }
+    // onPromptChange is an inline route callback; the normalized value is the
+    // idempotency boundary that prevents a migration loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialPrompt, nodeId, normalizedInitialDraft]);
 
   useEffect(() => {
     setSettingsOpen(false);
@@ -408,6 +451,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
             disconnectedReference: t('creativeStudio.canvas.image.referenceDisconnected', {
               defaultValue: '引用已断开',
             }),
+            referenceMentionLabel,
           }}
           onChange={(change) => {
             setPrompt(change.value);

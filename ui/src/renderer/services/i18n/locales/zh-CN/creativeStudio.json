@@ -674,6 +674,7 @@
       "referenceKindUnsupported": "已连接素材不是可用图片。",
       "referenceLimitExceeded": "当前模型最多支持 {{max}} 张参考图，已连接 {{count}} 张。",
       "referenceLimitUnknown": "当前模型未声明多图上限，无法安全发送 {{count}} 张参考图。",
+      "referenceMentionLabel": "图片{{index}}",
       "referenceNodeMissing": "参考节点已经不存在。",
       "referenceTextChanged": "Prompt 中的素材引用已被部分修改，请删除后重新使用 @ 选择。",
       "selectEditModel": "选择图片编辑模型",

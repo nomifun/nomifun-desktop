@@ -14,6 +14,7 @@ import CreativeCanvasReferencePromptInput, {
   collectCreativeCanvasPromptMentionIssues,
   findCreativeCanvasMentionTrigger,
   rebaseCreativeCanvasPromptMentions,
+  relabelCreativeCanvasPromptMentions,
   type CreativeCanvasPromptMentionBinding,
   type CreativeCanvasPromptReferenceOption,
   type CreativeCanvasReferencePromptChange,
@@ -89,8 +90,8 @@ describe('CreativeCanvasReferencePromptInput', () => {
     expect(input.getAttribute('aria-controls')).not.toBeNull();
     const listbox = getByRole('listbox');
     expect(within(listbox).getAllByRole('option').length).toBe(2);
-    expect(within(listbox).getByRole('option', { name: /@人物图/ })).toBeDefined();
-    expect(within(listbox).getByRole('option', { name: /@服装图/ })).toBeDefined();
+    expect(within(listbox).getByRole('option', { name: /@图片1.*人物图/ })).toBeDefined();
+    expect(within(listbox).getByRole('option', { name: /@图片2.*服装图/ })).toBeDefined();
   });
 
   test('opens after adjacent Chinese text but not inside an existing bound token', () => {
@@ -120,21 +121,21 @@ describe('CreativeCanvasReferencePromptInput', () => {
     const input = getByRole('combobox') as HTMLTextAreaElement;
 
     typeAtCaret(input, '让 @', 3);
-    fireEvent.click(getByRole('option', { name: /@人物图/ }));
+    fireEvent.click(getByRole('option', { name: /@图片1/ }));
 
-    expect(input.value).toBe('让 @人物图 ');
+    expect(input.value).toBe('让 @图片1 ');
     expect(latest?.mentions).toEqual([
       {
         id: 'mention-person-node',
         sourceNodeId: 'person-node',
-        fallbackLabel: '人物图',
+        fallbackLabel: '图片1',
         start: 2,
         end: 6,
       },
     ]);
   });
 
-  test('normalizes a connected asset label before persisting its token', () => {
+  test('keeps the asset name searchable while persisting only its ordinal alias', () => {
     let latest: CreativeCanvasReferencePromptChange | undefined;
     const { getByRole } = render(
       <Harness
@@ -151,10 +152,10 @@ describe('CreativeCanvasReferencePromptInput', () => {
     const input = getByRole('combobox') as HTMLTextAreaElement;
 
     typeAtCaret(input, '@');
-    fireEvent.click(getByRole('option', { name: /@人物 参考/ }));
+    fireEvent.click(getByRole('option', { name: /@图片1.*人物 参考/ }));
 
-    expect(input.value).toBe('@人物 参考 ');
-    expect(latest?.mentions[0]?.fallbackLabel).toBe('人物 参考');
+    expect(input.value).toBe('@图片1 ');
+    expect(latest?.mentions[0]?.fallbackLabel).toBe('图片1');
   });
 
   test('filters, navigates with arrows, selects with Enter, and dismisses with Escape', () => {
@@ -164,13 +165,13 @@ describe('CreativeCanvasReferencePromptInput', () => {
     typeAtCaret(input, '@服');
     expect(getByRole('listbox').querySelectorAll('[role="option"]').length).toBe(1);
     fireEvent.keyDown(input, { key: 'Enter' });
-    expect(input.value).toBe('@服装图 ');
+    expect(input.value).toBe('@图片2 ');
     expect(queryByRole('listbox')).toBeNull();
 
     typeAtCaret(input, `${input.value}@`);
     fireEvent.keyDown(input, { key: 'ArrowDown' });
     fireEvent.keyDown(input, { key: 'Enter' });
-    expect(input.value.endsWith('@服装图 ')).toBe(true);
+    expect(input.value.endsWith('@图片2 ')).toBe(true);
 
     typeAtCaret(input, `${input.value}@`);
     expect(getByRole('listbox')).toBeDefined();
@@ -309,6 +310,72 @@ describe('CreativeCanvasReferencePromptInput', () => {
     expect(
       rebaseCreativeCanvasPromptMentions('让 @人物图 出镜', '让  出镜', [mention])
     ).toEqual([]);
+  });
+
+  test('atomically relabels legacy mentions and rebases later disconnected ranges', () => {
+    const value = '让 @很长的人物参考图 穿 @服装图，并保留 @失效参考';
+    const personStart = value.indexOf('@很长的人物参考图');
+    const clothesStart = value.indexOf('@服装图');
+    const disconnectedStart = value.indexOf('@失效参考');
+    const legacyMentions: CreativeCanvasPromptMentionBinding[] = [
+      {
+        id: 'mention-person',
+        sourceNodeId: 'person-node',
+        fallbackLabel: '很长的人物参考图',
+        start: personStart,
+        end: personStart + '@很长的人物参考图'.length,
+      },
+      {
+        id: 'mention-clothes',
+        sourceNodeId: 'clothes-node',
+        fallbackLabel: '服装图',
+        start: clothesStart,
+        end: clothesStart + '@服装图'.length,
+      },
+      {
+        id: 'mention-disconnected',
+        sourceNodeId: 'disconnected-node',
+        fallbackLabel: '失效参考',
+        start: disconnectedStart,
+        end: disconnectedStart + '@失效参考'.length,
+      },
+    ];
+
+    const relabeled = relabelCreativeCanvasPromptMentions(
+      value,
+      legacyMentions,
+      references
+    );
+
+    expect(relabeled.value).toBe('让 @图片1 穿 @图片2，并保留 @失效参考');
+    expect(
+      relabeled.mentions.map((mention) => ({
+        sourceNodeId: mention.sourceNodeId,
+        fallbackLabel: mention.fallbackLabel,
+        token: relabeled.value.slice(mention.start, mention.end),
+      }))
+    ).toEqual([
+      {
+        sourceNodeId: 'person-node',
+        fallbackLabel: '图片1',
+        token: '@图片1',
+      },
+      {
+        sourceNodeId: 'clothes-node',
+        fallbackLabel: '图片2',
+        token: '@图片2',
+      },
+      {
+        sourceNodeId: 'disconnected-node',
+        fallbackLabel: '失效参考',
+        token: '@失效参考',
+      },
+    ]);
+
+    const malformed = [{ ...legacyMentions[0]!, end: 2 }];
+    expect(
+      relabelCreativeCanvasPromptMentions(value, malformed, references)
+    ).toEqual({ value, mentions: malformed });
   });
 
   test('finds only an active @ query and reports disabled-reference issues', () => {

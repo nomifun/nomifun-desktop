@@ -15,6 +15,7 @@ import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
 import CreativeCanvasImageComposer, {
   type CreativeCanvasImageComposerProps,
 } from './CreativeCanvasImageComposer';
+import type { CreativeCanvasReferencePromptChange } from './CreativeCanvasReferencePromptInput';
 
 const noop = () => undefined;
 
@@ -205,15 +206,16 @@ describe('CreativeCanvasImageComposer', () => {
     expect(disconnected).toEqual(['edge-clothes']);
 
     fireEvent.click(getByRole('button', { name: '引用已连接素材' }));
-    fireEvent.click(getByRole('option', { name: /@人物图/ }));
+    fireEvent.click(getByRole('option', { name: /@图片1.*人物图/ }));
     expect(promptChanges.at(-1)).toMatchObject({
-      value: '@人物图 ',
-      mentions: [{ sourceNodeId: 'person-node', fallbackLabel: '人物图' }],
+      value: '@图片1 ',
+      mentions: [{ sourceNodeId: 'person-node', fallbackLabel: '图片1' }],
     });
   });
 
   test('preserves authored whitespace so mention offsets remain valid on submit', () => {
     const submissions: Array<{ prompt: string; start: number }> = [];
+    const migrations: CreativeCanvasReferencePromptChange[] = [];
     const { getByRole } = render(
       withCanvasTestI18n(
         <CreativeCanvasImageComposer
@@ -238,6 +240,7 @@ describe('CreativeCanvasImageComposer', () => {
                 ordinal: 1,
               },
             ],
+            onPromptChange: (change) => migrations.push(change),
             onGenerate: (prompt, mentions) =>
               submissions.push({ prompt, start: mentions[0]?.start ?? -1 }),
           })}
@@ -245,8 +248,22 @@ describe('CreativeCanvasImageComposer', () => {
       )
     );
 
+    expect(migrations).toEqual([
+      {
+        value: '  @图片1',
+        mentions: [
+          {
+            id: 'mention-person',
+            sourceNodeId: 'person-node',
+            fallbackLabel: '图片1',
+            start: 2,
+            end: 6,
+          },
+        ],
+      },
+    ]);
     fireEvent.click(getByRole('button', { name: '生成图片' }));
-    expect(submissions).toEqual([{ prompt: '  @人物图', start: 2 }]);
+    expect(submissions).toEqual([{ prompt: '  @图片1', start: 2 }]);
   });
 
   test('projects an empty image node as text-to-image rather than image editing', () => {
