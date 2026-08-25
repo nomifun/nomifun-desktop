@@ -9,12 +9,10 @@ import { InputNumber, Radio, Select } from '@arco-design/web-react';
 import React, {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from 'react';
-import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 
 import {
@@ -36,6 +34,8 @@ import CreativeCanvasReferencePromptInput, {
   type CreativeCanvasPromptReferenceOption,
   type CreativeCanvasReferencePromptChange,
 } from './CreativeCanvasReferencePromptInput';
+import CreativeCanvasComposerShell from './CreativeCanvasComposerShell';
+import composerStyles from './CreativeCanvasComposerShell.module.css';
 import styles from './CreativeCanvasImageComposer.module.css';
 
 export interface CreativeCanvasImageComposerReference
@@ -116,11 +116,8 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
   onRetrySubmission,
 }) => {
   const { t, i18n } = useTranslation();
-  const positionerRef = useRef<HTMLDivElement>(null);
-  const anchorRef = useRef<HTMLSpanElement>(null);
   const settingsHostRef = useRef<HTMLDivElement>(null);
   const sizeSelectRef = useRef<HTMLDivElement>(null);
-  const horizontalOffsetRef = useRef(0);
   const referenceMentionLabel = useCallback(
     (ordinal: number) =>
       t('creativeStudio.canvas.image.referenceMentionLabel', {
@@ -151,16 +148,8 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
   const [mentions, setMentions] = useState<CreativeCanvasPromptMentionBinding[]>(
     () => structuredClone(normalizedInitialDraft.mentions)
   );
-  const [placement, setPlacement] = useState<'above' | 'below'>('below');
-  const [horizontalOffset, setHorizontalOffset] = useState(0);
-  const [overlay, setOverlay] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sizeMenuOpen, setSizeMenuOpen] = useState(false);
-  const [overlayLayout, setOverlayLayout] = useState({
-    left: 16,
-    top: 16,
-    width: 358,
-  });
   const busy = task.state === 'queued' || task.state === 'running';
   const qualityLabel =
     IMAGE_WORKBENCH_QUALITY_OPTIONS.find(
@@ -230,96 +219,6 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
     };
   }, [settingsOpen, sizeMenuOpen]);
 
-  useLayoutEffect(() => {
-    const positioner = positionerRef.current;
-    const anchor = anchorRef.current;
-    const surface = anchor?.closest<HTMLElement>('[data-canvas-surface]');
-    const node = anchor?.closest<HTMLElement>('[data-canvas-node-id]');
-    if (!positioner || !surface || !node) return;
-
-    const updatePlacement = (): void => {
-      const surfaceRect = surface.getBoundingClientRect();
-      const nodeRect = node.getBoundingClientRect();
-      const panelRect = positioner.getBoundingClientRect();
-      const panelHeight = panelRect.height;
-      const inset = 12;
-      const gap = 16;
-      const compactWidth = Math.min(580, Math.max(0, window.innerWidth - 32));
-      const shouldOverlay = surfaceRect.width < compactWidth + inset * 2;
-      const spaceBelow = surfaceRect.bottom - nodeRect.bottom - gap - inset;
-      const spaceAbove = nodeRect.top - surfaceRect.top - gap - inset;
-      const next =
-        panelHeight <= spaceBelow || spaceBelow >= spaceAbove ? 'below' : 'above';
-      setPlacement((current) => (current === next ? current : next));
-
-      setOverlay((current) => (current === shouldOverlay ? current : shouldOverlay));
-      if (shouldOverlay) {
-        const belowTop = nodeRect.bottom + gap;
-        const aboveTop = nodeRect.top - panelHeight - gap;
-        const preferredTop =
-          belowTop + panelHeight <= window.innerHeight - inset
-            ? belowTop
-            : aboveTop >= inset
-              ? aboveTop
-              : Math.max(
-                  inset,
-                  Math.min(window.innerHeight - panelHeight - inset, nodeRect.top)
-                );
-        const nextLayout = {
-          left: Math.max(16, (window.innerWidth - compactWidth) / 2),
-          top: preferredTop,
-          width: compactWidth,
-        };
-        setOverlayLayout((current) =>
-          Math.abs(current.left - nextLayout.left) < 0.5 &&
-          Math.abs(current.top - nextLayout.top) < 0.5 &&
-          Math.abs(current.width - nextLayout.width) < 0.5
-            ? current
-            : nextLayout
-        );
-        if (horizontalOffsetRef.current !== 0) {
-          horizontalOffsetRef.current = 0;
-          setHorizontalOffset(0);
-        }
-        return;
-      }
-
-      const naturalLeft = panelRect.left - horizontalOffsetRef.current;
-      const naturalRight = panelRect.right - horizontalOffsetRef.current;
-      const surfaceCanContainPanel =
-        surfaceRect.width >= panelRect.width + inset * 2;
-      const minimumLeft = (surfaceCanContainPanel ? surfaceRect.left : 0) + inset;
-      const maximumRight =
-        (surfaceCanContainPanel ? surfaceRect.right : window.innerWidth) - inset;
-      const desiredOffset =
-        panelRect.width > maximumRight - minimumLeft
-          ? (minimumLeft + maximumRight) / 2 -
-            (naturalLeft + naturalRight) / 2
-          : naturalLeft < minimumLeft
-            ? minimumLeft - naturalLeft
-            : naturalRight > maximumRight
-              ? maximumRight - naturalRight
-              : 0;
-      if (Math.abs(horizontalOffsetRef.current - desiredOffset) >= 0.5) {
-        horizontalOffsetRef.current = desiredOffset;
-        setHorizontalOffset(desiredOffset);
-      }
-    };
-
-    updatePlacement();
-    const observer =
-      typeof ResizeObserver === 'undefined'
-        ? null
-        : new ResizeObserver(updatePlacement);
-    observer?.observe(surface);
-    observer?.observe(positioner);
-    window.addEventListener('resize', updatePlacement);
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener('resize', updatePlacement);
-    };
-  }, [nodeId, overlay]);
-
   const submit = (
     change: CreativeCanvasReferencePromptChange = { value: prompt, mentions }
   ): void => {
@@ -335,28 +234,11 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
     setMentions([]);
   };
 
-  const content = (
-    <div
-      ref={positionerRef}
-      className={styles.positioner}
-      data-canvas-image-composer
-      data-overlay={overlay || undefined}
-      data-placement={placement}
-      data-node-id={nodeId}
-      style={
-        {
-          '--creative-canvas-image-composer-offset-x': `${horizontalOffset}px`,
-          '--creative-canvas-image-composer-overlay-left': `${overlayLayout.left}px`,
-          '--creative-canvas-image-composer-overlay-top': `${overlayLayout.top}px`,
-          '--creative-canvas-image-composer-overlay-width': `${overlayLayout.width}px`,
-        } as React.CSSProperties
-      }
-      onMouseDown={(event) => event.stopPropagation()}
-      onPointerDown={(event) => event.stopPropagation()}
-      onDoubleClick={(event) => event.stopPropagation()}
-      onWheel={(event) => event.stopPropagation()}
+  return (
+    <CreativeCanvasComposerShell
+      kind='image'
+      nodeId={nodeId}
     >
-      <div className={styles.panel}>
         {references.length > 0 ? (
           <div className={styles.referenceSection}>
             <div className={styles.referenceHeader}>
@@ -461,11 +343,11 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
           onSubmit={submit}
         />
 
-        <div className={styles.footer}>
-          <div className={styles.controls}>
+        <div className={composerStyles.footer}>
+          <div className={composerStyles.controls}>
             <button
               type='button'
-              className={styles.iconButton}
+              className={`${composerStyles.controlButton} ${composerStyles.iconButton}`}
               aria-label={t('creativeStudio.canvas.openPromptLibrary', {
                 defaultValue: '打开提示词库',
               })}
@@ -476,7 +358,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
             </button>
 
             <Select
-              className={styles.modelSelect}
+              className={composerStyles.modelSelect}
               size='mini'
               value={modelValue}
               placeholder={
@@ -538,7 +420,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                   })}
                 >
                 <div className={styles.settingsPanel}>
-                  <div className={styles.field}>
+                  <div className={composerStyles.field}>
                     <span>
                       {t('creativeStudio.canvas.image.interfaceModeLabel', {
                         defaultValue: '接口模式',
@@ -559,7 +441,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                       </Radio>
                     </Radio.Group>
                   </div>
-                  <label className={styles.field}>
+                  <label className={composerStyles.field}>
                     <span>
                       {t('creativeStudio.canvas.image.qualityLabel', {
                         defaultValue: '质量',
@@ -585,7 +467,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                       <Down theme='outline' size={12} fill='currentColor' />
                     </span>
                   </label>
-                  <div className={styles.field}>
+                  <div className={composerStyles.field}>
                     <span>
                       {t('creativeStudio.canvas.image.aspectRatioLabel', {
                         defaultValue: '宽高比',
@@ -665,7 +547,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                       ) : null}
                     </div>
                   </div>
-                  <label className={styles.field}>
+                  <label className={composerStyles.field}>
                     <span>
                       {t('creativeStudio.canvas.image.countLabel', {
                         defaultValue: '生成张数',
@@ -684,7 +566,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
               ) : null}
               <button
                 type='button'
-                className={styles.settingsButton}
+                className={`${composerStyles.controlButton} ${composerStyles.settingsButton}`}
                 aria-label={t('creativeStudio.canvas.image.settingsLabel', {
                   defaultValue: '图片生成设置',
                 })}
@@ -699,7 +581,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                 }
               >
                 <SettingTwo theme='outline' size={15} fill='currentColor' />
-                <span className={styles.settingsSummary}>
+                <span className={composerStyles.settingsSummary}>
                   {t('creativeStudio.canvas.image.settingsSummary', {
                     quality: qualityLabel,
                     aspectRatio: settings.aspectRatio,
@@ -713,7 +595,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
 
           <button
             type='button'
-            className={styles.submitButton}
+            className={`${composerStyles.controlButton} ${composerStyles.submitButton}`}
             aria-label={t('creativeStudio.canvas.image.generateLabel', {
               defaultValue: '生成图片',
             })}
@@ -721,7 +603,12 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
             onClick={() => submit()}
           >
             {busy ? (
-              <Loading className={styles.spin} theme='outline' size={17} fill='currentColor' />
+              <Loading
+                className={composerStyles.spin}
+                theme='outline'
+                size={17}
+                fill='currentColor'
+              />
             ) : (
               <ArrowUp theme='outline' size={17} fill='currentColor' strokeWidth={4} />
             )}
@@ -729,27 +616,14 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
         </div>
 
         {error || task.message ? (
-          <div className={styles.message} role={error ? 'alert' : 'status'}>
+          <div
+            className={composerStyles.message}
+            role={error ? 'alert' : 'status'}
+          >
             {error ?? task.message}
           </div>
         ) : null}
-      </div>
-    </div>
-  );
-
-  return (
-    <>
-      <span
-        ref={anchorRef}
-        hidden
-        aria-hidden='true'
-        data-canvas-image-composer-anchor
-        data-placement={placement}
-      />
-      {overlay && typeof document !== 'undefined'
-        ? createPortal(content, document.body)
-        : content}
-    </>
+    </CreativeCanvasComposerShell>
   );
 };
 

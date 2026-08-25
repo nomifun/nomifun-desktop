@@ -291,9 +291,13 @@ describe('CreativeCanvasImageComposer', () => {
     expect(html.includes('请输入你想要把这张图修改成什么')).toBe(false);
   });
 
-  test('inherits the active application theme for its creation surface', () => {
+  test('uses the shared compact shell while keeping image-specific controls', () => {
     const css = readFileSync(
       new URL('./CreativeCanvasImageComposer.module.css', import.meta.url),
+      'utf8'
+    );
+    const shellCss = readFileSync(
+      new URL('./CreativeCanvasComposerShell.module.css', import.meta.url),
       'utf8'
     );
     const promptCss = readFileSync(
@@ -303,30 +307,21 @@ describe('CreativeCanvasImageComposer', () => {
     expect(css.includes('--color-bg-1: #faf9f7')).toBe(false);
     expect(css.includes('--color-bg-popup: #faf9f7')).toBe(false);
     expect(css.includes('--color-secondary: #f1efea')).toBe(false);
-    expect(css.includes(":global([data-theme='light']) .positioner")).toBe(true);
-    expect(css.includes(":global([data-theme='dark']) .positioner")).toBe(true);
-    expect(css.includes('background: color-mix(in srgb, var(--color-bg-2)')).toBe(true);
-    expect(css.includes('background: rgb(var(--primary-6))')).toBe(true);
-    expect(css.includes('@media (prefers-color-scheme: dark)')).toBe(false);
-    expect(css.includes('width: 580px')).toBe(true);
+    expect(shellCss.includes(":global([data-theme='light']) .positioner")).toBe(true);
+    expect(shellCss.includes(":global([data-theme='dark']) .positioner")).toBe(true);
+    expect(shellCss.includes('background: color-mix(in srgb, var(--color-bg-2)')).toBe(true);
+    expect(shellCss.includes('background: rgb(var(--primary-6))')).toBe(true);
+    expect(shellCss.includes('@media (prefers-color-scheme: dark)')).toBe(false);
+    expect(shellCss.includes('width: 580px')).toBe(true);
     expect(promptCss.includes('min-height: 104px')).toBe(true);
     expect(css.includes('height: 160px')).toBe(false);
-    expect(css.includes('flex: 0 1 156px')).toBe(true);
-    expect(css.includes('min-width: 124px')).toBe(true);
-    expect(css.includes('min-width: 48px')).toBe(true);
-    expect(css.includes('font-size: 11px')).toBe(true);
-    expect(css.includes('width: 14px')).toBe(true);
-    expect(css.includes('line-height: 28px')).toBe(true);
-    expect(css.includes('.arco-select-popup .arco-select-option')).toBe(true);
-    expect(css.includes('min-height: 28px')).toBe(true);
-    expect(css.includes('padding: 0 10px')).toBe(true);
-    expect(css.includes('.controls > *,\n.submitButton')).toBe(true);
-    expect(css.includes('.footer :global(.i-icon)')).toBe(true);
-    expect(css.includes('place-items: center')).toBe(true);
-    expect(css.includes(".positioner[data-placement='above']")).toBe(true);
-    expect(css.includes('--creative-canvas-image-composer-offset-x')).toBe(true);
-    expect(css.includes(".positioner[data-overlay='true']")).toBe(true);
-    expect(css.includes('.settingsSummary')).toBe(true);
+    expect(shellCss.includes('flex: 0 1 156px')).toBe(true);
+    expect(shellCss.includes('min-width: 124px')).toBe(true);
+    expect(shellCss.includes('min-width: 48px')).toBe(true);
+    expect(shellCss.includes('.footer :global(.i-icon)')).toBe(true);
+    expect(shellCss.includes(".positioner[data-placement='above']")).toBe(true);
+    expect(shellCss.includes('--creative-canvas-composer-offset-x')).toBe(true);
+    expect(shellCss.includes(".positioner[data-overlay='true']")).toBe(true);
     expect(css.includes('.settingsPopover')).toBe(true);
     expect(css.includes('.settingsSelect select')).toBe(true);
     expect(
@@ -334,7 +329,6 @@ describe('CreativeCanvasImageComposer', () => {
     ).toBe(true);
     expect(css.includes('appearance: none')).toBe(true);
     expect(css.includes('pointer-events: none')).toBe(true);
-    expect(css.includes('.settingsButton span')).toBe(false);
   });
 
 });

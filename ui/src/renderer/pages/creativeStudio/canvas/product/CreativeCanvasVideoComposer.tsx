@@ -6,8 +6,7 @@
 
 import { ArrowUp, BookOne, Loading, SettingTwo } from '@icon-park/react';
 import { Popover, Select } from '@arco-design/web-react';
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type {
@@ -19,6 +18,8 @@ import type {
   CanvasVideoComposeSettings,
   CanvasVideoComposeTaskSummary,
 } from './canvasVideoComposerCanvas';
+import CreativeCanvasComposerShell from './CreativeCanvasComposerShell';
+import composerStyles from './CreativeCanvasComposerShell.module.css';
 import styles from './CreativeCanvasVideoComposer.module.css';
 
 export type CanvasVideoComposerMode = 't2v' | 'i2v' | 'unsupported';
@@ -140,18 +141,7 @@ const CreativeCanvasVideoComposer: React.FC<
   onConfirmSubmission,
 }) => {
   const { t } = useTranslation();
-  const positionerRef = useRef<HTMLDivElement>(null);
-  const anchorRef = useRef<HTMLSpanElement>(null);
-  const horizontalOffsetRef = useRef(0);
   const [prompt, setPrompt] = useState(initialPrompt);
-  const [placement, setPlacement] = useState<'above' | 'below'>('below');
-  const [horizontalOffset, setHorizontalOffset] = useState(0);
-  const [overlay, setOverlay] = useState(false);
-  const [overlayLayout, setOverlayLayout] = useState({
-    left: 16,
-    top: 16,
-    width: 358,
-  });
   const busy = task.state === 'queued' || task.state === 'running';
   const unsupported = mode === 'unsupported';
   const interactionDisabled = disabled || unsupported;
@@ -180,101 +170,6 @@ const CreativeCanvasVideoComposer: React.FC<
 
   useEffect(() => setPrompt(initialPrompt), [initialPrompt, nodeId]);
 
-  useLayoutEffect(() => {
-    const positioner = positionerRef.current;
-    const anchor = anchorRef.current;
-    const surface = anchor?.closest<HTMLElement>('[data-canvas-surface]');
-    const node = anchor?.closest<HTMLElement>('[data-canvas-node-id]');
-    if (!positioner || !surface || !node) return;
-
-    const updatePlacement = (): void => {
-      const surfaceRect = surface.getBoundingClientRect();
-      const nodeRect = node.getBoundingClientRect();
-      const panelRect = positioner.getBoundingClientRect();
-      const panelHeight = panelRect.height;
-      const inset = 12;
-      const gap = 16;
-      const compactWidth = Math.min(580, Math.max(0, window.innerWidth - 32));
-      const shouldOverlay = surfaceRect.width < compactWidth + inset * 2;
-      const spaceBelow = surfaceRect.bottom - nodeRect.bottom - gap - inset;
-      const spaceAbove = nodeRect.top - surfaceRect.top - gap - inset;
-      const next =
-        panelHeight <= spaceBelow || spaceBelow >= spaceAbove ? 'below' : 'above';
-      setPlacement((current) => (current === next ? current : next));
-
-      setOverlay((current) =>
-        current === shouldOverlay ? current : shouldOverlay
-      );
-      if (shouldOverlay) {
-        const belowTop = nodeRect.bottom + gap;
-        const aboveTop = nodeRect.top - panelHeight - gap;
-        const preferredTop =
-          belowTop + panelHeight <= window.innerHeight - inset
-            ? belowTop
-            : aboveTop >= inset
-              ? aboveTop
-              : Math.max(
-                  inset,
-                  Math.min(
-                    window.innerHeight - panelHeight - inset,
-                    nodeRect.top
-                  )
-                );
-        const nextLayout = {
-          left: Math.max(16, (window.innerWidth - compactWidth) / 2),
-          top: preferredTop,
-          width: compactWidth,
-        };
-        setOverlayLayout((current) =>
-          Math.abs(current.left - nextLayout.left) < 0.5 &&
-          Math.abs(current.top - nextLayout.top) < 0.5 &&
-          Math.abs(current.width - nextLayout.width) < 0.5
-            ? current
-            : nextLayout
-        );
-        if (horizontalOffsetRef.current !== 0) {
-          horizontalOffsetRef.current = 0;
-          setHorizontalOffset(0);
-        }
-        return;
-      }
-
-      const naturalLeft = panelRect.left - horizontalOffsetRef.current;
-      const naturalRight = panelRect.right - horizontalOffsetRef.current;
-      const surfaceCanContainPanel =
-        surfaceRect.width >= panelRect.width + inset * 2;
-      const minimumLeft = (surfaceCanContainPanel ? surfaceRect.left : 0) + inset;
-      const maximumRight =
-        (surfaceCanContainPanel ? surfaceRect.right : window.innerWidth) - inset;
-      const desiredOffset =
-        panelRect.width > maximumRight - minimumLeft
-          ? (minimumLeft + maximumRight) / 2 -
-            (naturalLeft + naturalRight) / 2
-          : naturalLeft < minimumLeft
-            ? minimumLeft - naturalLeft
-            : naturalRight > maximumRight
-              ? maximumRight - naturalRight
-              : 0;
-      if (Math.abs(horizontalOffsetRef.current - desiredOffset) >= 0.5) {
-        horizontalOffsetRef.current = desiredOffset;
-        setHorizontalOffset(desiredOffset);
-      }
-    };
-
-    updatePlacement();
-    const observer =
-      typeof ResizeObserver === 'undefined'
-        ? null
-        : new ResizeObserver(updatePlacement);
-    observer?.observe(surface);
-    observer?.observe(positioner);
-    window.addEventListener('resize', updatePlacement);
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener('resize', updatePlacement);
-    };
-  }, [nodeId, overlay]);
-
   const submit = (): void => {
     const result = dispatchCanvasVideoComposerSubmission({
       mode,
@@ -300,29 +195,12 @@ const CreativeCanvasVideoComposer: React.FC<
           })
         : null;
 
-  const content = (
-    <div
-      ref={positionerRef}
-      className={styles.positioner}
-      data-canvas-video-composer
-      data-overlay={overlay || undefined}
-      data-placement={placement}
-      data-mode={mode}
-      data-node-id={nodeId}
-      style={
-        {
-          '--creative-canvas-video-composer-offset-x': `${horizontalOffset}px`,
-          '--creative-canvas-video-composer-overlay-left': `${overlayLayout.left}px`,
-          '--creative-canvas-video-composer-overlay-top': `${overlayLayout.top}px`,
-          '--creative-canvas-video-composer-overlay-width': `${overlayLayout.width}px`,
-        } as React.CSSProperties
-      }
-      onMouseDown={(event) => event.stopPropagation()}
-      onPointerDown={(event) => event.stopPropagation()}
-      onDoubleClick={(event) => event.stopPropagation()}
-      onWheel={(event) => event.stopPropagation()}
+  return (
+    <CreativeCanvasComposerShell
+      kind='video'
+      nodeId={nodeId}
+      mode={mode}
     >
-      <div className={styles.panel}>
         <div className={styles.contextRow}>
           <span className={styles.modePill}>{modeLabel}</span>
           {mode === 'i2v' && reference ? (
@@ -340,7 +218,7 @@ const CreativeCanvasVideoComposer: React.FC<
         </div>
 
         <textarea
-          className={styles.prompt}
+          className={composerStyles.prompt}
           value={prompt}
           maxLength={1_000_000}
           placeholder={
@@ -368,11 +246,11 @@ const CreativeCanvasVideoComposer: React.FC<
           }}
         />
 
-        <div className={styles.footer}>
-          <div className={styles.controls}>
+        <div className={composerStyles.footer}>
+          <div className={composerStyles.controls}>
             <button
               type='button'
-              className={styles.iconButton}
+              className={`${composerStyles.controlButton} ${composerStyles.iconButton}`}
               aria-label={t('creativeStudio.canvas.video.openPromptLibrary', {
                 defaultValue: '打开视频提示词库',
               })}
@@ -386,7 +264,8 @@ const CreativeCanvasVideoComposer: React.FC<
             </button>
 
             <Select
-              className={styles.modelSelect}
+              className={composerStyles.modelSelect}
+              size='mini'
               value={selectedModel ? modelKey(selectedModel) : undefined}
               placeholder={
                 modelOptions.length > 0
@@ -423,15 +302,15 @@ const CreativeCanvasVideoComposer: React.FC<
               position='top'
               getPopupContainer={popupContainer}
               content={
-                <div className={styles.settingsPanel}>
-                  <label className={styles.field}>
+                <div className={composerStyles.popoverSettingsPanel}>
+                  <label className={composerStyles.field}>
                     <span>
                       {t('creativeStudio.canvas.video.resolutionLabel', {
                         defaultValue: '分辨率',
                       })}
                     </span>
                     <select
-                      className={styles.settingsSelect}
+                      className={composerStyles.settingsControl}
                       value={settings.resolution}
                       aria-label={t('creativeStudio.canvas.video.resolutionAriaLabel', {
                         defaultValue: '视频分辨率',
@@ -448,14 +327,14 @@ const CreativeCanvasVideoComposer: React.FC<
                       ))}
                     </select>
                   </label>
-                  <label className={styles.field}>
+                  <label className={composerStyles.field}>
                     <span>
                       {t('creativeStudio.canvas.video.aspectRatioLabel', {
                         defaultValue: '画幅',
                       })}
                     </span>
                     <select
-                      className={styles.settingsSelect}
+                      className={composerStyles.settingsControl}
                       value={settings.aspectRatio}
                       aria-label={t('creativeStudio.canvas.video.aspectRatioAriaLabel', {
                         defaultValue: '视频画幅',
@@ -475,14 +354,14 @@ const CreativeCanvasVideoComposer: React.FC<
                       ))}
                     </select>
                   </label>
-                  <label className={styles.field}>
+                  <label className={composerStyles.field}>
                     <span>
                       {t('creativeStudio.canvas.video.durationLabel', {
                         defaultValue: '时长',
                       })}
                     </span>
                     <select
-                      className={styles.settingsSelect}
+                      className={composerStyles.settingsControl}
                       value={settings.seconds}
                       aria-label={t('creativeStudio.canvas.video.durationAriaLabel', {
                         defaultValue: '视频时长',
@@ -507,14 +386,14 @@ const CreativeCanvasVideoComposer: React.FC<
             >
               <button
                 type='button'
-                className={styles.settingsButton}
+                className={`${composerStyles.controlButton} ${composerStyles.settingsButton}`}
                 aria-label={t('creativeStudio.canvas.video.settingsLabel', {
                   defaultValue: '视频生成设置',
                 })}
                 disabled={interactionDisabled}
               >
                 <SettingTwo theme='outline' size={15} fill='currentColor' />
-                <span className={styles.settingsSummary}>
+                <span className={composerStyles.settingsSummary}>
                   {settings.resolution} · {settings.aspectRatio} ·{' '}
                   {t('creativeStudio.canvas.video.secondsSummary', {
                     seconds: settings.seconds,
@@ -527,7 +406,7 @@ const CreativeCanvasVideoComposer: React.FC<
 
           <button
             type='button'
-            className={styles.submitButton}
+            className={`${composerStyles.controlButton} ${composerStyles.submitButton}`}
             aria-label={t('creativeStudio.canvas.video.generateLabel', {
               defaultValue: '生成视频',
             })}
@@ -536,7 +415,7 @@ const CreativeCanvasVideoComposer: React.FC<
           >
             {busy && !retrySubmission ? (
               <Loading
-                className={styles.spin}
+                className={composerStyles.spin}
                 theme='outline'
                 size={17}
                 fill='currentColor'
@@ -553,7 +432,10 @@ const CreativeCanvasVideoComposer: React.FC<
         </div>
 
         {unsupported ? (
-          <div className={styles.unsupported} role='status'>
+          <div
+            className={`${composerStyles.message} ${styles.unsupported}`}
+            role='status'
+          >
             {t('creativeStudio.canvas.video.unsupportedMessage', {
               defaultValue:
                 '当前节点不支持直接生成视频。请选择空视频节点，或为它添加一张图片参考。',
@@ -561,19 +443,22 @@ const CreativeCanvasVideoComposer: React.FC<
           </div>
         ) : null}
         {modelStatus ? (
-          <div className={styles.message} role='status'>
+          <div className={composerStyles.message} role='status'>
             {modelStatus}
           </div>
         ) : null}
         {error || task.message ? (
-          <div className={styles.message} role={error ? 'alert' : 'status'}>
+          <div
+            className={composerStyles.message}
+            role={error ? 'alert' : 'status'}
+          >
             {error ?? task.message}
           </div>
         ) : null}
         {retrySubmission && onConfirmSubmission ? (
           <button
             type='button'
-            className={styles.confirmSubmissionButton}
+            className={composerStyles.confirmSubmissionButton}
             disabled={disabled}
             onClick={onConfirmSubmission}
           >
@@ -582,23 +467,7 @@ const CreativeCanvasVideoComposer: React.FC<
             })}
           </button>
         ) : null}
-      </div>
-    </div>
-  );
-
-  return (
-    <>
-      <span
-        ref={anchorRef}
-        hidden
-        aria-hidden='true'
-        data-canvas-video-composer-anchor
-        data-placement={placement}
-      />
-      {overlay && typeof document !== 'undefined'
-        ? createPortal(content, document.body)
-        : content}
-    </>
+    </CreativeCanvasComposerShell>
   );
 };
 
