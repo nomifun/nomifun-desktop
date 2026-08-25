@@ -1,19 +1,11 @@
 {
-  "version": "0.7.2",
-  "notes": "- **Markdown code highlighting failures are isolated.** A broken highlighter\n  language registration or runtime render failure no longer takes down the whole\n  Markdown block; the code block falls back to a safe plain-text renderer, with\n  language normalization covered by targeted tests.\n- **Creative Studio workbench tool panels are more compact.** Image workbench\n  and prompt-library controls use denser panel spacing and layout affordances so\n  common actions stay visible without crowding the canvas.",
-  "pub_date": "2026-08-25T05:52:46.605Z",
+  "version": "0.7.3",
+  "notes": "# NomiFun v0.7.3\n\n## 中文\n\n- **Creative Studio 画布编辑体验继续打磨。** 画布中的文字节点支持内联编辑，画布图片引用、引用提及和 composer 布局都更顺手，常用操作在紧凑布局下更容易保持可见。\n- **图片与提示词资产流程更稳。** Prompt asset 保存改为可撤销路径，减少误操作成本；超大媒体提示词和媒体尺寸控制经过适配，降低编辑中断概率。\n- **多图编辑兼容性增强。** Ark 多图编辑流程现在可以正确携带多张图片引用，方便从画布或素材库连续产出。\n- **Windows 首发产物。** 本次发布包含 Windows x64 安装包、Tauri updater 签名，以及面向自动更新的 `latest.json`。\n\n## English\n\n- **Creative Studio canvas editing is smoother.** Text nodes can now be edited inline, while canvas image references, short reference mentions, and the composer layout make common actions easier to reach in compact spaces.\n- **Image and prompt asset workflows are safer.** Prompt asset saves are reversible, oversized media prompts are handled more gracefully, and media size controls have been refined to reduce interruption during creation.\n- **Multi-image editing compatibility is improved.** Ark multi-image editing now carries multiple image references correctly, making it easier to continue from canvas or library assets.\n- **Windows-first artifacts.** This release includes the Windows x64 installer, the Tauri updater signature, and the `latest.json` manifest for automatic updates.",
+  "pub_date": "2026-08-25T20:21:25.290Z",
   "platforms": {
-    "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODAvUHllZUhRcVNHUCtIMGwyL2Q3cTlMTmRkUHBMUlNOYk13MVZ5aklpUTREcFJjbmFFOTJmaUNNcWtvdzUxQ3hjb21ZMmtMTHNhYkExTVRvNnMwNlFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3NTYzNDgzCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CnJRKzNyTnh1TEZBZjAvbmNNSTZ5U2FCemJaUmlxOWpheFZ3anBsdmYyUHVZd1pZQkNPK3BPSUgvVko4OU1wSEY5bHBKTFNpQmhVRW1Vd25iZTNBUkJnPT0K",
-      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.7.2/NomiFun.app.tar.gz"
-    },
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHpiWEhOMUFCRi8vM3ZHZ21WaytxMXR4YzAycHE0MUNFakl5dm82REZ3UzRhWldZZmdudE44N1djalZ0a1crdnhOZ0lmVVlUdUNvZC9TYkdmbkdFV3c4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3NTY2MDA5CWZpbGU6Tm9taUZ1bl8wLjcuMl94NjQtc2V0dXAuZXhlCkpGOW9mc3JmckNlbjhTZWpYRXpEaldCd3FUZVVkVWVXUWZqMWcrN2htRFBTVndtY2lyRjlYZDBhdE1KOVFBWjFjOEJXQWpmUXFxU25ZZk0waURGa0JBPT0K",
-      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.7.2/NomiFun_0.7.2_x64-setup.exe"
-    },
-    "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODBrWmkwSDFSVmpJdG1zVjlLRWZ4dFpDY1EwZUJvRTNKbFY4UXB4NG94dTlreFh0dkI3Nzh2THhraXYwc1dtejgxSGphOGJNTEVvQWRtVmF5blRVVmc4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3NjM3MDUxCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CnhoQTFkVTQ3Z1pNWjV6K1p0REE3ZkcraEorRkh5VUpGUkMxZVFmY1NjZnNYYnZjZjRMY3U4TFNuTnZKSGowRmkwR1NYS3FKVGZrdWpMeHBhQXNCbkN3PT0K",
-      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.7.2/NomiFun_0.7.2_x64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOC9sWkVRTWVHS3lsM2RYUjdRd1RINThkdzRkVzl3aUkyNXpnVkdSTDdvblNMeFlDRUpQK3RDL3ovUDk3TFBic0dGSS9pMmV6cnp2NzBYZTVZMndwZ0FnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3Njg5MjgzCWZpbGU6Tm9taUZ1bl8wLjcuM194NjQtc2V0dXAuZXhlCnlaNC9BWWp0bDB4YUVVRmgzNjFQckxNbDlydUp3L2VrQUNYTGMwWGtyaWdWQjhEU3g0V0xjWWNRVmhpRmtrMmR6YTJ0cW4zYnNEMFZRbVI4cmRyR0NBPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.7.3/NomiFun_0.7.3_x64-setup.exe"
     }
   }
 }
