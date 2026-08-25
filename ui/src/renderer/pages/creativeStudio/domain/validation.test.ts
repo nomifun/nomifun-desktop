@@ -536,6 +536,52 @@ describe('Creative Studio v1 document contract', () => {
       'INVALID_DOCUMENT',
       '$.nodes[0].data.composer.aspectRatio'
     );
+
+    const withMention = structuredClone(image);
+    if (withMention.type !== 'image') throw new Error('fixture must be an image');
+    withMention.data.composer = {
+      prompt: '让 @人物图 出镜',
+      mentions: [
+        {
+          id: 'mention-1',
+          sourceNodeId: 'source-image',
+          fallbackLabel: '人物图',
+          start: 2,
+          end: 6,
+        },
+      ],
+      model: null,
+      interfaceMode: 'images',
+      quality: 'auto',
+      width: 1024,
+      height: 1024,
+      aspectRatio: '1:1',
+      count: 1,
+    };
+    const parsedMention = parseCreativeProjectDocument({
+      ...createEmptyCreativeProjectDocument(PROJECT_ID),
+      nodes: [withMention],
+    });
+    expect(
+      parsedMention.nodes[0].type === 'image'
+        ? parsedMention.nodes[0].data.composer?.mentions
+        : null
+    ).toEqual(withMention.data.composer.mentions);
+
+    const staleMention = structuredClone(withMention);
+    if (staleMention.type !== 'image' || !staleMention.data.composer?.mentions) {
+      throw new Error('fixture must contain mentions');
+    }
+    staleMention.data.composer.mentions[0].end = 5;
+    expectContractError(
+      () =>
+        parseCreativeProjectDocument({
+          ...createEmptyCreativeProjectDocument(PROJECT_ID),
+          nodes: [staleMention],
+        }),
+      'INVALID_DOCUMENT',
+      '$.nodes[0].data.composer.mentions[0]'
+    );
   });
 
   test('round-trips video composer drafts and defaults old v1 video nodes', () => {

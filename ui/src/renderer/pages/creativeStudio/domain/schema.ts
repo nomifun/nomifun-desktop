@@ -64,6 +64,23 @@ export interface CreativeComposerModel {
 }
 
 /**
+ * Stable binding behind one user-visible `@label` in an image prompt.
+ *
+ * The label remains plain prompt text while sourceNodeId keeps the reference
+ * independent from a mutable node caption. If that source disappears, the
+ * occurrence remains auditable and generation fails closed until the user
+ * reconnects the same node or removes the mention.
+ */
+export interface CreativeImagePromptMention {
+  id: string;
+  sourceNodeId: string;
+  fallbackLabel: string;
+  /** UTF-16 offsets matching browser textarea selection APIs. */
+  start: number;
+  end: number;
+}
+
+/**
  * The durable, node-owned draft shown by the inline image composer.
  *
  * It intentionally contains no task or asset identity. Submitted work is
@@ -71,6 +88,8 @@ export interface CreativeComposerModel {
  */
 export interface CreativeImageComposerDraft {
   prompt: string;
+  /** Optional for backward-compatible v1 documents written before mentions. */
+  mentions?: CreativeImagePromptMention[];
   model: CreativeComposerModel | null;
   interfaceMode: 'images' | 'responses';
   quality: 'auto' | 'high' | 'medium' | 'low';

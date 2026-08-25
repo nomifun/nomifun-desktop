@@ -164,6 +164,91 @@ describe('CreativeCanvasImageComposer', () => {
     expect(html.includes('aria-label="生成图片" disabled')).toBe(false);
   });
 
+  test('shows connected references, disconnects an edge, and inserts a stable @ mention', () => {
+    const disconnected: string[] = [];
+    const promptChanges: Array<{ value: string; mentions: unknown[] }> = [];
+    const { getByRole } = render(
+      withCanvasTestI18n(
+        <CreativeCanvasImageComposer
+          {...props({
+            references: [
+              {
+                nodeId: 'person-node',
+                assetId: 'asset-person',
+                connectionId: 'edge-person',
+                base: false,
+                label: '人物图',
+                thumbnailUrl: 'https://example.test/person.png',
+                ordinal: 1,
+              },
+              {
+                nodeId: 'clothes-node',
+                assetId: 'asset-clothes',
+                connectionId: 'edge-clothes',
+                base: false,
+                label: '服装图',
+                thumbnailUrl: 'https://example.test/clothes.png',
+                ordinal: 2,
+              },
+            ],
+            referenceCapacityLabel: '2/3',
+            onReferenceDisconnect: (connectionId) => disconnected.push(connectionId),
+            onPromptChange: (change) => promptChanges.push(change),
+          })}
+        />
+      )
+    );
+
+    expect(getByRole('list').textContent?.includes('人物图')).toBe(true);
+    expect(getByRole('list').textContent?.includes('服装图')).toBe(true);
+    fireEvent.click(getByRole('button', { name: '断开参考图 服装图' }));
+    expect(disconnected).toEqual(['edge-clothes']);
+
+    fireEvent.click(getByRole('button', { name: '引用已连接素材' }));
+    fireEvent.click(getByRole('option', { name: /@人物图/ }));
+    expect(promptChanges.at(-1)).toMatchObject({
+      value: '@人物图 ',
+      mentions: [{ sourceNodeId: 'person-node', fallbackLabel: '人物图' }],
+    });
+  });
+
+  test('preserves authored whitespace so mention offsets remain valid on submit', () => {
+    const submissions: Array<{ prompt: string; start: number }> = [];
+    const { getByRole } = render(
+      withCanvasTestI18n(
+        <CreativeCanvasImageComposer
+          {...props({
+            initialPrompt: '  @人物图',
+            initialMentions: [
+              {
+                id: 'mention-person',
+                sourceNodeId: 'person-node',
+                fallbackLabel: '人物图',
+                start: 2,
+                end: 6,
+              },
+            ],
+            references: [
+              {
+                nodeId: 'person-node',
+                assetId: 'asset-person',
+                connectionId: 'edge-person',
+                base: false,
+                label: '人物图',
+                ordinal: 1,
+              },
+            ],
+            onGenerate: (prompt, mentions) =>
+              submissions.push({ prompt, start: mentions[0]?.start ?? -1 }),
+          })}
+        />
+      )
+    );
+
+    fireEvent.click(getByRole('button', { name: '生成图片' }));
+    expect(submissions).toEqual([{ prompt: '  @人物图', start: 2 }]);
+  });
+
   test('projects an empty image node as text-to-image rather than image editing', () => {
     const html = renderToStaticMarkup(
       <CreativeCanvasImageComposer
@@ -194,6 +279,10 @@ describe('CreativeCanvasImageComposer', () => {
       new URL('./CreativeCanvasImageComposer.module.css', import.meta.url),
       'utf8'
     );
+    const promptCss = readFileSync(
+      new URL('./CreativeCanvasReferencePromptInput.module.css', import.meta.url),
+      'utf8'
+    );
     expect(css.includes('--color-bg-1: #faf9f7')).toBe(false);
     expect(css.includes('--color-bg-popup: #faf9f7')).toBe(false);
     expect(css.includes('--color-secondary: #f1efea')).toBe(false);
@@ -203,7 +292,7 @@ describe('CreativeCanvasImageComposer', () => {
     expect(css.includes('background: rgb(var(--primary-6))')).toBe(true);
     expect(css.includes('@media (prefers-color-scheme: dark)')).toBe(false);
     expect(css.includes('width: 580px')).toBe(true);
-    expect(css.includes('height: 104px')).toBe(true);
+    expect(promptCss.includes('min-height: 104px')).toBe(true);
     expect(css.includes('height: 160px')).toBe(false);
     expect(css.includes('flex: 0 1 156px')).toBe(true);
     expect(css.includes('min-width: 124px')).toBe(true);
