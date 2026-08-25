@@ -9,7 +9,7 @@ use crate::models::{
 use crate::repository::IWorkshopRepository;
 use crate::repository::workshop::{
     ApplyCreativeAgentProposalParams, AssetSort, CreativeAgentProposalCommit, ListAssetsParams,
-    UpdateAssetParams,
+    PromptLibraryAssetIdentity, UpdateAssetParams,
 };
 
 /// SQLite-backed implementation of [`IWorkshopRepository`].
@@ -33,6 +33,60 @@ fn order_by_sql(sort: AssetSort) -> &'static str {
 impl SqliteWorkshopRepository {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    async fn find_prompt_library_asset(
+        &self,
+        identity: PromptLibraryAssetIdentity<'_>,
+    ) -> Result<Option<WorkshopAssetRow>, DbError> {
+        let row = sqlx::query_as::<_, WorkshopAssetRow>(
+            "SELECT * FROM workshop_assets \
+             WHERE kind = 'text' AND (\
+                 (json_extract(origin, '$.prompt_library_source') = ?1 \
+                  AND json_extract(origin, '$.prompt_library_id') = ?2) \
+                 OR (?1 = 'catalog' \
+                     AND json_extract(origin, '$.prompt_catalog_id') = ?2)\
+             ) \
+             ORDER BY CASE \
+                 WHEN json_extract(origin, '$.prompt_library_source') = ?1 \
+                  AND json_extract(origin, '$.prompt_library_id') = ?2 \
+                 THEN 0 ELSE 1 END, \
+                 in_library DESC, \
+                 id ASC \
+             LIMIT 1",
+        )
+        .bind(identity.source)
+        .bind(identity.prompt_library_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = &row {
+            validate_asset_row(row)?;
+        }
+        Ok(row)
+    }
+
+    async fn ensure_prompt_library_asset_visible(
+        &self,
+        row: WorkshopAssetRow,
+        now: i64,
+    ) -> Result<Option<WorkshopAssetRow>, DbError> {
+        if row.in_library {
+            return Ok(Some(row));
+        }
+        let restored = sqlx::query_as::<_, WorkshopAssetRow>(
+            "UPDATE workshop_assets \
+             SET in_library = 1, updated_at = MAX(updated_at, ?) \
+             WHERE asset_id = ? \
+             RETURNING *",
+        )
+        .bind(now)
+        .bind(&row.asset_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(restored) = &restored {
+            validate_asset_row(restored)?;
+        }
+        Ok(restored)
     }
 }
 
@@ -220,6 +274,75 @@ fn validate_asset_row(row: &WorkshopAssetRow) -> Result<(), DbError> {
 fn validate_asset_rows(rows: &[WorkshopAssetRow]) -> Result<(), DbError> {
     for row in rows {
         validate_asset_row(row)?;
+    }
+    Ok(())
+}
+
+fn validate_prompt_library_asset_identity(
+    row: &WorkshopAssetRow,
+    identity: PromptLibraryAssetIdentity<'_>,
+) -> Result<(), DbError> {
+    if row.kind != "text" {
+        return Err(DbError::Conflict(
+            "prompt-library materialization requires a text asset".into(),
+        ));
+    }
+    validate_prompt_library_identity(identity)?;
+    let origin = row.origin.as_deref().ok_or_else(|| {
+        DbError::Conflict("prompt-library materialization requires origin metadata".into())
+    })?;
+    let references = origin_references(Some(origin))?;
+    if references.provider_id.is_some()
+        || references.canvas_id.is_some()
+        || references.node_id.is_some()
+        || references.workbench_kind.is_some()
+        || references.template_id.is_some()
+        || references.template_run_id.is_some()
+        || references.template_step_id.is_some()
+        || references.creation_task_id.is_some()
+    {
+        return Err(DbError::Conflict(
+            "prompt-library materialization cannot carry durable owner references".into(),
+        ));
+    }
+    let object = serde_json::from_str::<Value>(origin)
+        .map_err(|error| DbError::Conflict(format!("invalid workshop asset origin JSON: {error}")))?
+        .as_object()
+        .cloned()
+        .ok_or_else(|| DbError::Conflict("workshop asset origin must be a JSON object".into()))?;
+    if object
+        .get("prompt_library_source")
+        .and_then(Value::as_str)
+        != Some(identity.source)
+        || object
+            .get("prompt_library_id")
+            .and_then(Value::as_str)
+            != Some(identity.prompt_library_id)
+    {
+        return Err(DbError::Conflict(
+            "prompt-library identity does not match asset origin".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_prompt_library_identity(
+    identity: PromptLibraryAssetIdentity<'_>,
+) -> Result<(), DbError> {
+    if !matches!(identity.source, "catalog" | "preset") {
+        return Err(DbError::Conflict(format!(
+            "unsupported prompt-library source {:?}",
+            identity.source
+        )));
+    }
+    if identity.prompt_library_id.is_empty()
+        || identity.prompt_library_id.trim() != identity.prompt_library_id
+        || identity.prompt_library_id.len() > 255
+        || identity.prompt_library_id.chars().any(char::is_control)
+    {
+        return Err(DbError::Conflict(
+            "prompt-library identity is not canonical".into(),
+        ));
     }
     Ok(())
 }
@@ -1422,6 +1545,106 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         .await?;
         tx.commit().await?;
         Ok(row.clone())
+    }
+
+    async fn create_prompt_library_asset(
+        &self,
+        row: &WorkshopAssetRow,
+        identity: PromptLibraryAssetIdentity<'_>,
+    ) -> Result<WorkshopAssetRow, DbError> {
+        validate_asset_row(row)?;
+        validate_prompt_library_asset_identity(row, identity)?;
+
+        // Existing catalog saves used only `prompt_catalog_id`. Prefer a row
+        // carrying the canonical identity, but replay the oldest legacy row
+        // instead of creating yet another copy. Historical duplicates remain
+        // untouched because they may already be referenced by projects/tasks.
+        if let Some(existing) = self.find_prompt_library_asset(identity).await?
+            && let Some(visible) = self
+                .ensure_prompt_library_asset_visible(existing, row.updated_at)
+                .await?
+        {
+            return Ok(visible);
+        }
+
+        // The v52 expression index makes this INSERT the concurrency boundary.
+        // A loser does not surface a uniqueness error; it reads and returns the
+        // winner below. Other validation/trigger failures still fail closed.
+        let inserted = sqlx::query(
+            "INSERT INTO workshop_assets \
+                (asset_id, kind, title, collection, tags, rel_path, thumb_rel_path, mime, width, height, bytes, \
+                 text_content, in_library, origin, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&row.asset_id)
+        .bind(&row.kind)
+        .bind(&row.title)
+        .bind(&row.collection)
+        .bind(&row.tags)
+        .bind(&row.rel_path)
+        .bind(&row.thumb_rel_path)
+        .bind(&row.mime)
+        .bind(row.width)
+        .bind(row.height)
+        .bind(row.bytes)
+        .bind(&row.text_content)
+        .bind(row.in_library)
+        .bind(&row.origin)
+        .bind(row.created_at)
+        .bind(row.updated_at)
+        .execute(&self.pool)
+        .await?;
+        if inserted.rows_affected() == 1 {
+            return Ok(row.clone());
+        }
+
+        let existing = self.find_prompt_library_asset(identity).await?.ok_or_else(|| {
+            DbError::Conflict(format!(
+                "prompt-library asset insert for {}:{:?} conflicted without an existing identity",
+                identity.source, identity.prompt_library_id
+            ))
+        })?;
+        self.ensure_prompt_library_asset_visible(existing, row.updated_at)
+            .await?
+            .ok_or_else(|| {
+                DbError::Conflict(format!(
+                    "prompt-library asset {}:{:?} disappeared during idempotent replay",
+                    identity.source, identity.prompt_library_id
+                ))
+            })
+    }
+
+    async fn hide_prompt_library_assets(
+        &self,
+        identity: PromptLibraryAssetIdentity<'_>,
+        now: i64,
+    ) -> Result<u64, DbError> {
+        validate_prompt_library_identity(identity)?;
+        // One statement is the concurrency boundary and deliberately matches
+        // every historical catalog duplicate. Already-hidden rows keep their
+        // original updated_at, making retries state-idempotent as well.
+        let matched: Vec<String> = sqlx::query_scalar(
+            "UPDATE workshop_assets \
+             SET in_library = 0, \
+                 updated_at = CASE \
+                     WHEN in_library = 1 THEN MAX(updated_at, ?3) \
+                     ELSE updated_at \
+                 END \
+             WHERE kind = 'text' AND (\
+                 (json_extract(origin, '$.prompt_library_source') = ?1 \
+                  AND json_extract(origin, '$.prompt_library_id') = ?2) \
+                 OR (?1 = 'catalog' \
+                     AND json_extract(origin, '$.prompt_catalog_id') = ?2)\
+             ) \
+             RETURNING asset_id",
+        )
+        .bind(identity.source)
+        .bind(identity.prompt_library_id)
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(matched.len() as u64)
     }
 
     async fn get_asset(&self, id: &str) -> Result<Option<WorkshopAssetRow>, DbError> {

@@ -23,6 +23,8 @@ export interface PromptLibraryItem {
   licenseUrl: string | null;
   createdAt: number | null;
   updatedAt: number | null;
+  /** True when this catalog/preset prompt already has a provenance-linked asset. */
+  savedToAssets: boolean;
 }
 /** Immutable payload handed to a canvas/editor integration. */
 export interface PromptLibrarySelection {

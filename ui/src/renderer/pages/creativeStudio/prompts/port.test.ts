@@ -19,6 +19,7 @@ import {
   createNomiPromptLibraryPort,
   mapNomiPresetToPromptLibraryItem,
   mapNomiTextAssetToPromptLibraryItem,
+  promptAssetIdentity,
 } from './port';
 
 const PRESET_ID = parsePresetId('0190f5fe-7c00-7a00-8000-000000000001');
@@ -121,6 +122,7 @@ describe('Nomi prompt library port', () => {
       licenseUrl: null,
       createdAt: null,
       updatedAt: null,
+      savedToAssets: false,
     });
     expect(mapNomiPresetToPromptLibraryItem(preset({ enabled: false }), [TAG], 'zh-CN')).toBeNull();
     expect(
@@ -128,28 +130,40 @@ describe('Nomi prompt library port', () => {
     ).toBeNull();
   });
 
-  test('accepts only library text assets with real content', () => {
+  test('accepts only independent library text assets with real content', () => {
     expect(mapNomiTextAssetToPromptLibraryItem(TEXT_ASSET)?.prompt).toBe(
       '描述主体位置、景别与光线关系。'
     );
     expect(mapNomiTextAssetToPromptLibraryItem({ ...TEXT_ASSET, kind: 'image' })).toBeNull();
     expect(mapNomiTextAssetToPromptLibraryItem({ ...TEXT_ASSET, inLibrary: false })).toBeNull();
     expect(mapNomiTextAssetToPromptLibraryItem({ ...TEXT_ASSET, textContent: ' ' })).toBeNull();
-    expect(
-      mapNomiTextAssetToPromptLibraryItem({
-        ...TEXT_ASSET,
-        origin: {
-          promptCatalogId: 'catalog-prompt-1',
-          sourceUrl: 'https://example.test/source',
-          license: 'CC0-1.0',
-          licenseUrl: 'https://example.test/license',
-        },
-      })
-    ).toMatchObject({
-      sourceUrl: 'https://example.test/source',
-      license: 'CC0-1.0',
-      licenseUrl: 'https://example.test/license',
+    const legacyMirror = {
+      ...TEXT_ASSET,
+      origin: {
+        promptCatalogId: 'catalog-prompt-1',
+        sourceUrl: 'https://example.test/source',
+        license: 'CC0-1.0',
+        licenseUrl: 'https://example.test/license',
+      },
+    };
+    expect(promptAssetIdentity(legacyMirror)).toEqual({
+      source: 'catalog',
+      id: 'catalog-prompt-1',
     });
+    expect(mapNomiTextAssetToPromptLibraryItem(legacyMirror)).toBeNull();
+
+    const presetMirror = {
+      ...TEXT_ASSET,
+      origin: {
+        promptLibrarySource: 'preset' as const,
+        promptLibraryId: PRESET_ID,
+      },
+    };
+    expect(promptAssetIdentity(presetMirror)).toEqual({
+      source: 'preset',
+      id: PRESET_ID,
+    });
+    expect(mapNomiTextAssetToPromptLibraryItem(presetMirror)).toBeNull();
   });
 
   test('combines injected Nomi preset and asset services without inventing data', async () => {
@@ -174,5 +188,114 @@ describe('Nomi prompt library port', () => {
       'asset',
     ]);
     expect(calls).toEqual(['presets', 'tags']);
+  });
+
+  test('filters saved mirrors and marks their original catalog/preset entries as added', async () => {
+    const catalogId = 'catalog-prompt-1';
+    const catalogItem = {
+      id: catalogId,
+      source: 'catalog',
+      title: 'Catalog prompt',
+      description: null,
+      prompt: 'Catalog prompt body',
+      category: null,
+      tags: [],
+      knowledgeBaseIds: [],
+      coverUrl: null,
+      preview: null,
+      sourceUrl: 'https://example.test/source',
+      license: 'MIT',
+      licenseUrl: 'https://example.test/license',
+      createdAt: null,
+      updatedAt: null,
+      savedToAssets: false,
+    };
+    const catalogMirror: CreativeAsset = {
+      ...TEXT_ASSET,
+      origin: {
+        promptLibrarySource: 'catalog',
+        promptLibraryId: catalogId,
+        promptCatalogId: catalogId,
+      },
+    };
+    const presetMirror: CreativeAsset = {
+      ...TEXT_ASSET,
+      id: parseAssetId('0190f5fe-7c00-7a00-8000-000000000006'),
+      origin: {
+        promptLibrarySource: 'preset',
+        promptLibraryId: PRESET_ID,
+      },
+    };
+    const port = createNomiPromptLibraryPort({
+      locale: 'zh-CN',
+      catalog: { list: async () => [catalogItem] },
+      loadPresets: async () => [preset()],
+      loadPresetTags: async () => [TAG],
+      assets: assets([catalogMirror, presetMirror, TEXT_ASSET]),
+    });
+
+    const result = (await port.list()) as Array<{
+      id: string;
+      source: string;
+      savedToAssets: boolean;
+    }>;
+    expect(result.map(({ source, id }) => `${source}:${id}`)).toEqual([
+      `catalog:${catalogId}`,
+      `preset:${PRESET_ID}`,
+      `asset:${ASSET_ID}`,
+    ]);
+    expect(result.slice(0, 2).every((item) => item.savedToAssets)).toBe(true);
+  });
+
+  test('reflects a server-side removal after the prompt port reloads', async () => {
+    const catalogId = 'catalog-removable';
+    const catalogItem = {
+      id: catalogId,
+      source: 'catalog',
+      title: 'Removable prompt',
+      description: null,
+      prompt: 'Prompt body',
+      category: null,
+      tags: [],
+      knowledgeBaseIds: [],
+      coverUrl: null,
+      preview: null,
+      sourceUrl: 'https://example.test/source',
+      license: 'MIT',
+      licenseUrl: 'https://example.test/license',
+      createdAt: null,
+      updatedAt: null,
+      savedToAssets: false,
+    };
+    const mirror: CreativeAsset = {
+      ...TEXT_ASSET,
+      origin: {
+        promptLibrarySource: 'catalog',
+        promptLibraryId: catalogId,
+        promptCatalogId: catalogId,
+      },
+    };
+    let visible = true;
+    const mutableAssets: CreativeAssetLibraryPort = {
+      ...assets([]),
+      list: async (query) => {
+        const items = visible && query?.inLibrary ? [mirror] : [];
+        return { items, total: items.length };
+      },
+    };
+    const port = createNomiPromptLibraryPort({
+      includePresets: false,
+      catalog: { list: async () => [catalogItem] },
+      assets: mutableAssets,
+    });
+
+    const before = (await port.list()) as Array<{ source: string; savedToAssets: boolean }>;
+    expect(before).toHaveLength(1);
+    expect(before[0]).toMatchObject({ source: 'catalog', savedToAssets: true });
+
+    visible = false;
+    const after = (await port.list()) as Array<{ source: string; savedToAssets: boolean }>;
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ source: 'catalog', savedToAssets: false });
   });
 });

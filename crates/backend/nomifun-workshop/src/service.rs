@@ -13,6 +13,7 @@ use nomifun_common::{
 use nomifun_db::{
     ApplyCreativeAgentProposalParams, AssetSort, CreativeStudioProjectRow,
     CreativeStudioTemplateRunRow, DbError, IWorkshopRepository, ListAssetsParams,
+    PromptLibraryAssetIdentity,
     ProviderModelCleanupPlan,
     ProviderModelProjectCleanup, ProviderModelTemplateCleanup, UpdateAssetParams,
     WorkshopAssetRow,
@@ -178,7 +179,8 @@ pub struct NewAssetUpload {
     pub in_library: Option<bool>,
 }
 
-/// Auditable provenance stored with a prompt-catalog text asset.
+/// Legacy catalog-only provenance accepted from older clients. New writes are
+/// normalized to [`PromptLibraryAssetOrigin`] before persistence.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromptCatalogAssetOrigin {
@@ -188,6 +190,45 @@ pub struct PromptCatalogAssetOrigin {
     pub license_url: String,
 }
 
+/// Stable provenance of a prompt-library item materialized in My Assets.
+/// `prompt_library_source` namespaces IDs so a catalog entry and a preset may
+/// safely use the same raw identifier.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptLibraryAssetOrigin {
+    pub prompt_library_source: String,
+    pub prompt_library_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_catalog_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_url: Option<String>,
+}
+
+/// Backward-compatible request shape. Untagged decoding accepts both the new
+/// namespaced identity and the pre-v52 catalog-only object.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum TextAssetOrigin {
+    PromptLibrary(PromptLibraryAssetOrigin),
+    LegacyCatalog(PromptCatalogAssetOrigin),
+}
+
+impl From<PromptLibraryAssetOrigin> for TextAssetOrigin {
+    fn from(value: PromptLibraryAssetOrigin) -> Self {
+        Self::PromptLibrary(value)
+    }
+}
+
+impl From<PromptCatalogAssetOrigin> for TextAssetOrigin {
+    fn from(value: PromptCatalogAssetOrigin) -> Self {
+        Self::LegacyCatalog(value)
+    }
+}
+
 /// A `text`-kind asset (no binary; body lives in `text_content`).
 pub struct NewTextAsset {
     pub title: String,
@@ -195,10 +236,10 @@ pub struct NewTextAsset {
     pub collection: Option<String>,
     pub tags: Option<Vec<String>>,
     pub in_library: Option<bool>,
-    /// Optional bounded provenance for a prompt-catalog item. The text itself
-    /// remains authoritative in `text_content`; this metadata preserves source
-    /// attribution when the user adds a catalog prompt to My Assets.
-    pub origin: Option<PromptCatalogAssetOrigin>,
+    /// Optional bounded prompt-library provenance. The text itself remains
+    /// authoritative in `text_content`; the stable source/id pair exists only
+    /// to make explicit materialization idempotent.
+    pub origin: Option<TextAssetOrigin>,
 }
 
 /// Filters + pagination for [`WorkshopService::list_assets`].
@@ -2302,6 +2343,9 @@ impl WorkshopService {
         if title.is_empty() {
             return Err(AppError::BadRequest("title must not be empty".into()));
         }
+        let SerializedTextAssetOrigin { encoded, identity } =
+            serialize_text_asset_origin(input.origin)?;
+        let in_library = identity.is_some() || input.in_library.unwrap_or(true);
         let now = now_ms();
         let row = WorkshopAssetRow {
             id: 0,
@@ -2317,12 +2361,47 @@ impl WorkshopService {
             height: None,
             bytes: None,
             text_content: Some(input.text_content),
-            in_library: input.in_library.unwrap_or(true),
-            origin: serialize_text_asset_origin(input.origin)?,
+            in_library,
+            origin: encoded,
             created_at: now,
             updated_at: now,
         };
-        WorkshopAsset::try_from(self.repo.create_asset(&row).await?)
+        let saved = match identity {
+            Some(identity) => {
+                self.repo
+                    .create_prompt_library_asset(
+                        &row,
+                        PromptLibraryAssetIdentity {
+                            source: &identity.source,
+                            prompt_library_id: &identity.prompt_library_id,
+                        },
+                    )
+                    .await?
+            }
+            None => self.repo.create_asset(&row).await?,
+        };
+        WorkshopAsset::try_from(saved)
+    }
+
+    /// Remove every materialization of one prompt-library item from My Assets
+    /// without deleting rows/files. Direct asset lookups and project/task
+    /// references therefore remain valid.
+    pub async fn hide_prompt_library_assets(
+        &self,
+        source: &str,
+        prompt_library_id: &str,
+    ) -> Result<u64, AppError> {
+        let identity = normalize_prompt_library_identity(source, prompt_library_id)?;
+        Ok(self
+            .repo
+            .hide_prompt_library_assets(
+                PromptLibraryAssetIdentity {
+                    source: &identity.source,
+                    prompt_library_id: &identity.prompt_library_id,
+                },
+                now_ms(),
+            )
+            .await?)
     }
 
     pub async fn list_assets(&self, query: AssetQuery) -> Result<AssetListPage, AppError> {
@@ -2489,40 +2568,140 @@ fn validate_creative_project_id(project_id: &str) -> Result<(), AppError> {
         })
 }
 
-fn serialize_text_asset_origin(
-    origin: Option<PromptCatalogAssetOrigin>,
-) -> Result<Option<String>, AppError> {
-    let Some(origin) = origin else {
-        return Ok(None);
-    };
-    let required = |key: &str, value: &str, max: usize| -> Result<(), AppError> {
-        let value = Some(value)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| AppError::BadRequest(format!("text asset origin.{key} is required")))?;
-        if value.len() > max || value.chars().any(char::is_control) {
-            return Err(AppError::BadRequest(format!(
-                "text asset origin.{key} is invalid"
-            )));
-        }
-        Ok(())
-    };
-    required("prompt_catalog_id", &origin.prompt_catalog_id, 255)?;
-    required("source_url", &origin.source_url, 4_096)?;
-    required("license", &origin.license, 120)?;
-    required("license_url", &origin.license_url, 4_096)?;
-    let valid_https_url = |value: &str| {
-        reqwest::Url::parse(value)
-            .is_ok_and(|url| url.scheme() == "https" && url.host().is_some())
-    };
-    if !valid_https_url(&origin.source_url) || !valid_https_url(&origin.license_url) {
+struct PromptLibraryAssetIdentityOwned {
+    source: String,
+    prompt_library_id: String,
+}
+
+struct SerializedTextAssetOrigin {
+    encoded: Option<String>,
+    identity: Option<PromptLibraryAssetIdentityOwned>,
+}
+
+fn bounded_origin_text(key: &str, value: &str, max: usize) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > max || value.chars().any(char::is_control) {
+        return Err(AppError::BadRequest(format!(
+            "text asset origin.{key} is invalid"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn normalize_prompt_library_identity(
+    source: &str,
+    prompt_library_id: &str,
+) -> Result<PromptLibraryAssetIdentityOwned, AppError> {
+    let source = bounded_origin_text("prompt_library_source", source, 16)?;
+    if !matches!(source.as_str(), "catalog" | "preset") {
         return Err(AppError::BadRequest(
-            "text asset origin URLs must use HTTPS".into(),
+            "text asset origin.prompt_library_source must be catalog or preset".into(),
         ));
     }
-    serde_json::to_string(&origin)
-        .map(Some)
-        .map_err(|error| AppError::BadRequest(format!("serialize text asset origin: {error}")))
+    let prompt_library_id =
+        bounded_origin_text("prompt_library_id", prompt_library_id, 255)?;
+    Ok(PromptLibraryAssetIdentityOwned {
+        source,
+        prompt_library_id,
+    })
+}
+
+fn serialize_text_asset_origin(
+    origin: Option<TextAssetOrigin>,
+) -> Result<SerializedTextAssetOrigin, AppError> {
+    let Some(origin) = origin else {
+        return Ok(SerializedTextAssetOrigin {
+            encoded: None,
+            identity: None,
+        });
+    };
+    let mut origin = match origin {
+        TextAssetOrigin::PromptLibrary(origin) => origin,
+        TextAssetOrigin::LegacyCatalog(origin) => PromptLibraryAssetOrigin {
+            prompt_library_source: "catalog".into(),
+            prompt_library_id: origin.prompt_catalog_id.clone(),
+            prompt_catalog_id: Some(origin.prompt_catalog_id),
+            source_url: Some(origin.source_url),
+            license: Some(origin.license),
+            license_url: Some(origin.license_url),
+        },
+    };
+
+    let identity = normalize_prompt_library_identity(
+        &origin.prompt_library_source,
+        &origin.prompt_library_id,
+    )?;
+    origin.prompt_library_source = identity.source.clone();
+    origin.prompt_library_id = identity.prompt_library_id.clone();
+
+    match origin.prompt_library_source.as_str() {
+        "catalog" => {
+            let prompt_catalog_id = origin.prompt_catalog_id.as_deref().ok_or_else(|| {
+                AppError::BadRequest(
+                    "text asset catalog origin.prompt_catalog_id is required".into(),
+                )
+            })?;
+            let prompt_catalog_id =
+                bounded_origin_text("prompt_catalog_id", prompt_catalog_id, 255)?;
+            if prompt_catalog_id != origin.prompt_library_id {
+                return Err(AppError::BadRequest(
+                    "text asset catalog origin IDs must match".into(),
+                ));
+            }
+            origin.prompt_catalog_id = Some(prompt_catalog_id);
+            let valid_https_url = |value: &str| {
+                reqwest::Url::parse(value)
+                    .is_ok_and(|url| url.scheme() == "https" && url.host().is_some())
+            };
+            origin.source_url = origin
+                .source_url
+                .as_deref()
+                .map(|value| bounded_origin_text("source_url", value, 4_096))
+                .transpose()?;
+            origin.license = origin
+                .license
+                .as_deref()
+                .map(|value| bounded_origin_text("license", value, 120))
+                .transpose()?;
+            origin.license_url = origin
+                .license_url
+                .as_deref()
+                .map(|value| bounded_origin_text("license_url", value, 4_096))
+                .transpose()?;
+            if origin
+                .source_url
+                .as_deref()
+                .is_some_and(|value| !valid_https_url(value))
+                || origin
+                    .license_url
+                    .as_deref()
+                    .is_some_and(|value| !valid_https_url(value))
+            {
+                return Err(AppError::BadRequest(
+                    "text asset origin URLs must use HTTPS".into(),
+                ));
+            }
+        }
+        "preset" => {
+            if origin.prompt_catalog_id.is_some()
+                || origin.source_url.is_some()
+                || origin.license.is_some()
+                || origin.license_url.is_some()
+            {
+                return Err(AppError::BadRequest(
+                    "text asset preset origin cannot carry catalog attribution".into(),
+                ));
+            }
+        }
+        _ => unreachable!("prompt-library source validated above"),
+    }
+
+    let encoded = serde_json::to_string(&origin)
+        .map_err(|error| AppError::BadRequest(format!("serialize text asset origin: {error}")))?;
+    Ok(SerializedTextAssetOrigin {
+        encoded: Some(encoded),
+        identity: Some(identity),
+    })
 }
 
 fn validate_creative_template_id(template_id: &str) -> Result<(), AppError> {
@@ -5458,7 +5637,8 @@ mod tests {
                     license: "MIT".into(),
                     license_url:
                         "https://github.com/ZeroLu/awesome-gpt-image/blob/main/LICENSE".into(),
-                }),
+                }
+                .into()),
             })
             .await
             .unwrap();
@@ -5479,11 +5659,399 @@ mod tests {
                     source_url: "http://example.test/source".into(),
                     license: "MIT".into(),
                     license_url: "https://example.test/license".into(),
-                }),
+                }
+                .into()),
             })
             .await
             .unwrap_err();
         assert!(matches!(error, AppError::BadRequest(_)));
+    }
+
+    fn prompt_library_origin(source: &str, id: &str) -> TextAssetOrigin {
+        PromptLibraryAssetOrigin {
+            prompt_library_source: source.into(),
+            prompt_library_id: id.into(),
+            prompt_catalog_id: (source == "catalog").then(|| id.to_owned()),
+            source_url: None,
+            license: None,
+            license_url: None,
+        }
+        .into()
+    }
+
+    fn prompt_library_text(source: &str, id: &str, title: &str) -> NewTextAsset {
+        NewTextAsset {
+            title: title.into(),
+            text_content: format!("prompt body for {source}:{id}"),
+            collection: Some("提示词".into()),
+            tags: None,
+            in_library: Some(true),
+            origin: Some(prompt_library_origin(source, id)),
+        }
+    }
+
+    async fn insert_legacy_catalog_asset(
+        db: &nomifun_db::Database,
+        prompt_catalog_id: &str,
+        title: &str,
+    ) -> String {
+        let asset_id = WorkshopAssetId::new().into_string();
+        let origin = serde_json::json!({
+            "prompt_catalog_id": prompt_catalog_id,
+            "source_url": "https://example.test/source",
+            "license": "MIT",
+            "license_url": "https://example.test/license"
+        });
+        nomifun_db::sqlx::query(
+            "INSERT INTO workshop_assets \
+                (asset_id, kind, title, tags, text_content, in_library, origin, created_at, updated_at) \
+             VALUES (?, 'text', ?, '[]', 'legacy body', 1, ?, 1, 1)",
+        )
+        .bind(&asset_id)
+        .bind(title)
+        .bind(origin.to_string())
+        .execute(db.pool())
+        .await
+        .unwrap();
+        asset_id
+    }
+
+    #[tokio::test]
+    async fn prompt_library_asset_serial_replay_returns_one_asset() {
+        let (svc, _dir, db) = service_with_database_and_lifecycle(None).await;
+        let first = svc
+            .create_text_asset(prompt_library_text("catalog", "same-prompt", "first"))
+            .await
+            .unwrap();
+        let replay = svc
+            .create_text_asset(prompt_library_text("catalog", "same-prompt", "changed"))
+            .await
+            .unwrap();
+
+        assert_eq!(replay.asset_id, first.asset_id);
+        assert_eq!(replay.title, "first", "a replay must not overwrite user metadata");
+        let count: i64 = nomifun_db::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workshop_assets \
+             WHERE json_extract(origin, '$.prompt_library_source') = 'catalog' \
+               AND json_extract(origin, '$.prompt_library_id') = 'same-prompt'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn prompt_library_asset_concurrent_replay_converges() {
+        let (svc, _dir, db) = service_with_database_and_lifecycle(None).await;
+        let left = svc.clone();
+        let right = svc.clone();
+        let (left, right) = tokio::join!(
+            left.create_text_asset(prompt_library_text("preset", "shared-id", "left")),
+            right.create_text_asset(prompt_library_text("preset", "shared-id", "right")),
+        );
+        let left = left.unwrap();
+        let right = right.unwrap();
+
+        assert_eq!(left.asset_id, right.asset_id);
+        let count: i64 = nomifun_db::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workshop_assets \
+             WHERE json_extract(origin, '$.prompt_library_source') = 'preset' \
+               AND json_extract(origin, '$.prompt_library_id') = 'shared-id'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn prompt_library_asset_identity_is_source_namespaced() {
+        let (svc, _dir) = service().await;
+        let catalog = svc
+            .create_text_asset(prompt_library_text("catalog", "same-id", "catalog"))
+            .await
+            .unwrap();
+        let preset = svc
+            .create_text_asset(prompt_library_text("preset", "same-id", "preset"))
+            .await
+            .unwrap();
+        assert_ne!(catalog.asset_id, preset.asset_id);
+    }
+
+    #[tokio::test]
+    async fn prompt_library_asset_replay_restores_hidden_and_delete_allows_recreate() {
+        let (svc, _dir, db) = service_with_database_and_lifecycle(None).await;
+        let first = svc
+            .create_text_asset(prompt_library_text("preset", "restore-id", "first"))
+            .await
+            .unwrap();
+        nomifun_db::sqlx::query(
+            "UPDATE workshop_assets SET in_library = 0 WHERE asset_id = ?",
+        )
+        .bind(&first.asset_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let restored = svc
+            .create_text_asset(prompt_library_text("preset", "restore-id", "replay"))
+            .await
+            .unwrap();
+        assert_eq!(restored.asset_id, first.asset_id);
+        assert!(restored.in_library);
+
+        svc.delete_asset(&first.asset_id).await.unwrap();
+        let recreated = svc
+            .create_text_asset(prompt_library_text("preset", "restore-id", "new"))
+            .await
+            .unwrap();
+        assert_ne!(recreated.asset_id, first.asset_id);
+        assert!(recreated.in_library);
+    }
+
+    #[tokio::test]
+    async fn prompt_library_asset_recognizes_legacy_catalog_origin_without_rewriting_it() {
+        let (svc, _dir, db) = service_with_database_and_lifecycle(None).await;
+        let legacy_id = WorkshopAssetId::new().into_string();
+        let legacy_origin = serde_json::json!({
+            "prompt_catalog_id": "legacy-catalog-item",
+            "source_url": "https://example.test/source",
+            "license": "MIT",
+            "license_url": "https://example.test/license"
+        })
+        .to_string();
+        nomifun_db::sqlx::query(
+            "INSERT INTO workshop_assets \
+                (asset_id, kind, title, tags, text_content, in_library, origin, created_at, updated_at) \
+             VALUES (?, 'text', 'legacy', '[]', 'legacy body', 1, ?, 1, 1)",
+        )
+        .bind(&legacy_id)
+        .bind(&legacy_origin)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let replay = svc
+            .create_text_asset(prompt_library_text(
+                "catalog",
+                "legacy-catalog-item",
+                "new copy",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(replay.asset_id, legacy_id);
+        assert_eq!(replay.origin.unwrap()["prompt_library_source"], Value::Null);
+        let count: i64 =
+            nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM workshop_assets")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(count, 1, "legacy replay must not add or rewrite a row");
+    }
+
+    #[tokio::test]
+    async fn prompt_library_asset_hide_is_concurrent_idempotent_and_namespaced() {
+        let (svc, _dir, db) = service_with_database_and_lifecycle(None).await;
+        let current = svc
+            .create_text_asset(prompt_library_text("catalog", "hide-id", "current"))
+            .await
+            .unwrap();
+        let preset = svc
+            .create_text_asset(prompt_library_text("preset", "hide-id", "preset"))
+            .await
+            .unwrap();
+        let legacy_a = insert_legacy_catalog_asset(&db, "hide-id", "legacy-a").await;
+        let legacy_b = insert_legacy_catalog_asset(&db, "hide-id", "legacy-b").await;
+
+        let left = svc.clone();
+        let right = svc.clone();
+        let (left, right) = tokio::join!(
+            left.hide_prompt_library_assets("catalog", "hide-id"),
+            right.hide_prompt_library_assets("catalog", "hide-id"),
+        );
+        assert_eq!(left.unwrap(), 3);
+        assert_eq!(right.unwrap(), 3);
+        assert_eq!(
+            svc.hide_prompt_library_assets("catalog", "hide-id")
+                .await
+                .unwrap(),
+            3,
+            "a serial retry must remain successful and report the same matches"
+        );
+
+        for asset_id in [&current.asset_id, &legacy_a, &legacy_b] {
+            let asset = svc.get_asset(asset_id).await.unwrap();
+            assert!(!asset.in_library, "matched rows remain readable but hidden");
+        }
+        assert!(
+            svc.get_asset(&preset.asset_id).await.unwrap().in_library,
+            "catalog removal must not affect a preset with the same raw id"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_library_asset_hide_readd_without_new_rows() {
+        let (svc, _dir, db) = service_with_database_and_lifecycle(None).await;
+        let current = svc
+            .create_text_asset(prompt_library_text("catalog", "readd-id", "current"))
+            .await
+            .unwrap();
+        let legacy = insert_legacy_catalog_asset(&db, "readd-id", "legacy").await;
+        assert_eq!(
+            svc.hide_prompt_library_assets("catalog", "readd-id")
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(!svc.get_asset(&current.asset_id).await.unwrap().in_library);
+        assert!(!svc.get_asset(&legacy).await.unwrap().in_library);
+
+        let before: i64 =
+            nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM workshop_assets")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        let restored = svc
+            .create_text_asset(prompt_library_text("catalog", "readd-id", "ignored"))
+            .await
+            .unwrap();
+        let after: i64 =
+            nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM workshop_assets")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(restored.asset_id, current.asset_id);
+        assert!(restored.in_library);
+        assert_eq!(after, before, "re-adding must restore, not insert");
+        let visible: i64 = nomifun_db::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workshop_assets \
+             WHERE in_library = 1 AND kind = 'text' AND (\
+                (json_extract(origin, '$.prompt_library_source') = 'catalog' \
+                 AND json_extract(origin, '$.prompt_library_id') = 'readd-id') \
+                OR json_extract(origin, '$.prompt_catalog_id') = 'readd-id'\
+             )",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(visible, 1, "historical duplicates stay hidden after re-add");
+        assert!(svc.get_asset(&legacy).await.is_ok(), "legacy row is retained");
+    }
+
+    #[tokio::test]
+    async fn prompt_library_asset_add_remove_race_converges_without_duplicate() {
+        let (svc, _dir, db) = service_with_database_and_lifecycle(None).await;
+        let adding = svc.clone();
+        let removing = svc.clone();
+        let (added, removed) = tokio::join!(
+            adding.create_text_asset(prompt_library_text(
+                "preset",
+                "add-remove-race",
+                "raced",
+            )),
+            removing.hide_prompt_library_assets("preset", "add-remove-race"),
+        );
+        let added = added.unwrap();
+        removed.unwrap();
+        let current_count: i64 = nomifun_db::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workshop_assets \
+             WHERE json_extract(origin, '$.prompt_library_source') = 'preset' \
+               AND json_extract(origin, '$.prompt_library_id') = 'add-remove-race'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(current_count, 1);
+
+        assert_eq!(
+            svc.hide_prompt_library_assets("preset", "add-remove-race")
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(!svc.get_asset(&added.asset_id).await.unwrap().in_library);
+        let restored = svc
+            .create_text_asset(prompt_library_text(
+                "preset",
+                "add-remove-race",
+                "replay",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(restored.asset_id, added.asset_id);
+        assert!(restored.in_library);
+        let final_count: i64 = nomifun_db::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workshop_assets \
+             WHERE json_extract(origin, '$.prompt_library_source') = 'preset' \
+               AND json_extract(origin, '$.prompt_library_id') = 'add-remove-race'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(final_count, 1);
+    }
+
+    #[tokio::test]
+    async fn prompt_library_asset_hide_keeps_previously_hidden_timestamp_stable() {
+        let (svc, _dir, db) = service_with_database_and_lifecycle(None).await;
+        let legacy = insert_legacy_catalog_asset(&db, "hidden-legacy", "legacy").await;
+        nomifun_db::sqlx::query(
+            "UPDATE workshop_assets SET in_library = 0, updated_at = 77 WHERE asset_id = ?",
+        )
+        .bind(&legacy)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        for _ in 0..2 {
+            assert_eq!(
+                svc.hide_prompt_library_assets("catalog", "hidden-legacy")
+                    .await
+                    .unwrap(),
+                1
+            );
+            let state: (bool, i64) = nomifun_db::sqlx::query_as(
+                "SELECT in_library, updated_at FROM workshop_assets WHERE asset_id = ?",
+            )
+            .bind(&legacy)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+            assert_eq!(state, (false, 77));
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_library_asset_legacy_only_readd_restores_oldest_without_insert() {
+        let (svc, _dir, db) = service_with_database_and_lifecycle(None).await;
+        let oldest = insert_legacy_catalog_asset(&db, "legacy-only", "oldest").await;
+        let newer = insert_legacy_catalog_asset(&db, "legacy-only", "newer").await;
+        assert_eq!(
+            svc.hide_prompt_library_assets("catalog", "legacy-only")
+                .await
+                .unwrap(),
+            2
+        );
+        let before: i64 =
+            nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM workshop_assets")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+
+        let restored = svc
+            .create_text_asset(prompt_library_text("catalog", "legacy-only", "ignored"))
+            .await
+            .unwrap();
+        let after: i64 =
+            nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM workshop_assets")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(restored.asset_id, oldest);
+        assert!(restored.in_library);
+        assert!(!svc.get_asset(&newer).await.unwrap().in_library);
+        assert_eq!(after, before);
     }
 
     /// A real, decodable PNG (unlike the header-only `png_1x1`).

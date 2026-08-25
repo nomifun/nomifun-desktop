@@ -6,6 +6,7 @@
 
 export { CreativeAssetClient, creativeAssetClient } from './client';
 export { CreativeAssetUploadError, workshopAssetApi } from './api';
+export { invalidateCreativeAssetQueryCache } from './creativeAssetQueryCache';
 export { CREATIVE_ASSET_PAGE_SIZE, creativeAssetMatchesQuery, useCreativeAssets } from './useCreativeAssets';
 export { CreativeAssetPickerModal } from './components';
 export type { CreativeAssetPickerModalProps } from './components';
@@ -28,6 +29,11 @@ export type {
   CreativeAssetPage,
   CreativeAssetPatch,
   CreativeAssetPort,
+  CreativeCatalogPromptAssetOrigin,
+  CreativePresetPromptAssetOrigin,
+  CreativePromptAssetOrigin,
+  CreativePromptAssetPort,
+  CreativePromptLibrarySource,
   CreativeAssetQuery,
   CreativeAssetSort,
   CreativeAssetUploadProgress,

@@ -1100,6 +1100,7 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
     validate_logical_reference_coverage(pool).await?;
     validate_json_logical_reference_registry(pool).await?;
     require_workshop_asset_origin_id_contract(pool).await?;
+    require_prompt_library_asset_identity_contract(pool).await?;
     for contract in PARTIAL_UNIQUE_INDEXES {
         require_partial_unique_index(
             pool,
@@ -1776,6 +1777,28 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET CANVAS/STANDALONE/TEMPLATE OWNER BRANCH')",
             ],
         ),
+        (
+            "validate_prompt_library_asset_origin_insert",
+            &[
+                "BEFORE INSERT ON WORKSHOP_ASSETS",
+                "PROMPT_LIBRARY_SOURCE",
+                "PROMPT_LIBRARY_ID",
+                "RAISE(ABORT, 'INVALID PROMPT LIBRARY ASSET ORIGIN IDENTITY')",
+                "RAISE(ABORT, 'INVALID CATALOG PROMPT LIBRARY ASSET ORIGIN')",
+                "RAISE(ABORT, 'INVALID PRESET PROMPT LIBRARY ASSET ORIGIN')",
+            ],
+        ),
+        (
+            "validate_prompt_library_asset_origin_update",
+            &[
+                "BEFORE UPDATE OF ORIGIN, KIND ON WORKSHOP_ASSETS",
+                "PROMPT_LIBRARY_SOURCE",
+                "PROMPT_LIBRARY_ID",
+                "RAISE(ABORT, 'INVALID PROMPT LIBRARY ASSET ORIGIN IDENTITY')",
+                "RAISE(ABORT, 'INVALID CATALOG PROMPT LIBRARY ASSET ORIGIN')",
+                "RAISE(ABORT, 'INVALID PRESET PROMPT LIBRARY ASSET ORIGIN')",
+            ],
+        ),
     ];
     let trigger_rows =
         sqlx::query("SELECT name, sql FROM sqlite_schema WHERE type = 'trigger' ORDER BY name")
@@ -2055,6 +2078,40 @@ async fn require_workshop_asset_origin_id_contract(
                     "v3 workshop_assets.origin {contract_name} contract is missing trigger fragment {fragment}"
                 )));
             }
+        }
+    }
+    Ok(())
+}
+
+async fn require_prompt_library_asset_identity_contract(
+    pool: &SqlitePool,
+) -> Result<(), DbError> {
+    const INDEX: &str = "uq_workshop_assets_prompt_library_identity";
+    let create_sql: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?",
+    )
+    .bind(INDEX)
+    .fetch_optional(pool)
+    .await?;
+    let create_sql = create_sql.ok_or_else(|| {
+        DbError::Init(format!(
+            "v3 prompt-library asset identity requires unique index {INDEX}"
+        ))
+    })?;
+    let normalized = normalize_sql(&create_sql);
+    for fragment in [
+        "CREATE UNIQUE INDEX UQ_WORKSHOP_ASSETS_PROMPT_LIBRARY_IDENTITY",
+        "ON WORKSHOP_ASSETS(",
+        "JSON_EXTRACT(ORIGIN, '$.PROMPT_LIBRARY_SOURCE')",
+        "JSON_EXTRACT(ORIGIN, '$.PROMPT_LIBRARY_ID')",
+        "WHERE KIND = 'TEXT'",
+        "JSON_TYPE(ORIGIN, '$.PROMPT_LIBRARY_SOURCE') = 'TEXT'",
+        "JSON_TYPE(ORIGIN, '$.PROMPT_LIBRARY_ID') = 'TEXT'",
+    ] {
+        if !normalized.contains(fragment) {
+            return Err(DbError::Init(format!(
+                "v3 prompt-library asset identity index {INDEX} is missing {fragment}"
+            )));
         }
     }
     Ok(())

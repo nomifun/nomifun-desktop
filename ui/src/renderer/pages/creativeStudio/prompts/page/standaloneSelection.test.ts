@@ -25,6 +25,7 @@ const item: PromptLibraryItem = {
   licenseUrl: null,
   createdAt: 1_760_000_000,
   updatedAt: 1_770_000_000,
+  savedToAssets: true,
 };
 
 describe('standalone prompt selection', () => {
