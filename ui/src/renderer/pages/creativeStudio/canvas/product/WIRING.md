@@ -148,9 +148,20 @@ runtime routes two strict persisted operations without creating a second
 document controller:
 
 - `image-mask-edit` uploads the blue-marked reference as a hidden real asset.
-- `image-node-compose` submits empty image nodes as exact
-  `image_generation` / `t2i`, while an image with a real asset submits exact
-  `image_edit` / `i2i` with that asset as the implicit reference.
+- `image-node-compose` submits exact `image_generation` / `t2i` only when the
+  active image node has neither a base asset nor directly connected image or
+  panorama assets. Otherwise it submits exact `image_edit` / `i2i`: the active
+  node's base image is pinned first and valid direct media inputs follow durable
+  connection order. The inline composer shows that same ordered reference list.
+  `@` selections persist occurrence-level node bindings and compile only those
+  tokens to `Reference N`; all other authored text remains unchanged. The
+  config keeps the authored prompt while task parameters and ordered inputs
+  freeze the exact Provider prompt and asset snapshot used for retry/recovery.
+  Protocol-specific input policies block unknown or exceeded multi-image
+  requests, and adapters reject rather than truncate unsupported extra images.
+  A separate product ceiling limits image-edit inputs to eight and the creation
+  engine caps decoded input bytes at 256 MiB, so an open-ended Provider
+  transport cannot turn a large Canvas fan-in into unbounded memory use.
 
 Both operations persist a locked config owner plus `pendingTaskIds` before POST
 and submit the exact task/capability/provider/model identity through the shared

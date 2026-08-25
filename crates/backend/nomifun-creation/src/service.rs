@@ -57,6 +57,28 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(2500);
 const DEFAULT_TASK_TIMEOUT: Duration = Duration::from_secs(600);
 /// Timeout for fetching a URL-form artifact the adapter returned.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
+/// Product safety ceiling for one image-edit request, independent of Provider limits.
+const MAX_IMAGE_INPUT_COUNT: usize = 8;
+/// Decoded aggregate input budget across any one creation task.
+const MAX_CREATION_INPUT_BYTES: usize = 256 * 1024 * 1024;
+
+fn checked_creation_input_bytes(current: usize, next: usize) -> Result<usize, CreationError> {
+    let total = current.checked_add(next).ok_or_else(|| {
+        CreationError::new(
+            "input_batch_too_large",
+            "creation input byte count overflowed the supported range",
+        )
+    })?;
+    if total > MAX_CREATION_INPUT_BYTES {
+        return Err(CreationError::new(
+            "input_batch_too_large",
+            format!(
+                "creation inputs exceed the aggregate byte limit of {MAX_CREATION_INPUT_BYTES}"
+            ),
+        ));
+    }
+    Ok(total)
+}
 
 /// The MIME stamped on produced text artifacts (the bridge keys its text-asset
 /// special case off a `text/plain` prefix).
@@ -851,6 +873,13 @@ impl CreationService {
                 })
             })
             .collect::<Result<Vec<_>, AppError>>()?;
+        if matches!(capability, MediaCapability::I2i | MediaCapability::Inpaint)
+            && inputs.len() > MAX_IMAGE_INPUT_COUNT
+        {
+            return Err(AppError::BadRequest(format!(
+                "image editing supports at most {MAX_IMAGE_INPUT_COUNT} input assets per task"
+            )));
+        }
         let params = canonical_json(req.params);
         let params_json = serde_json::to_string(&params)
             .map_err(|e| AppError::BadRequest(format!("invalid params json: {e}")))?;
@@ -1741,6 +1770,7 @@ impl CreationService {
             .as_ref()
             .ok_or_else(|| CreationError::config("no asset source wired into the creation engine"))?;
         let mut out = Vec::with_capacity(inputs.len());
+        let mut total_bytes = 0usize;
         for i in inputs {
             let loaded = source.load(&i.asset_id).await?;
             if !i.kind.matches_mime(&loaded.mime) {
@@ -1754,6 +1784,7 @@ impl CreationService {
                     ),
                 ));
             }
+            total_bytes = checked_creation_input_bytes(total_bytes, loaded.bytes.len())?;
             out.push(InputAsset {
                 id: Some(i.asset_id.clone()),
                 role: i.role.clone(),
@@ -3667,6 +3698,38 @@ mod tests {
                 AppError::BadRequest(_)
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn image_edit_input_count_is_bounded_before_task_admission() {
+        let h = harness(MockAdapter::sync("openai.images"), "openai").await;
+        let mut task = new_task(&h.provider_id, "i2i");
+        task.inputs = (0..=MAX_IMAGE_INPUT_COUNT)
+            .map(|_| CreationInput {
+                asset_id: WorkshopAssetId::new().into_string(),
+                kind: CreationInputKind::Image,
+                role: "reference".into(),
+            })
+            .collect();
+
+        let error = match h.svc.prepare_task(task).await {
+            Ok(_) => panic!("excessive image inputs must be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, AppError::BadRequest(_)));
+        assert!(error.to_string().contains("at most 8 input assets"));
+    }
+
+    #[test]
+    fn creation_input_byte_budget_is_checked_without_overflow() {
+        assert_eq!(
+            checked_creation_input_bytes(MAX_CREATION_INPUT_BYTES - 1, 1).unwrap(),
+            MAX_CREATION_INPUT_BYTES
+        );
+        let excessive = checked_creation_input_bytes(MAX_CREATION_INPUT_BYTES, 1).unwrap_err();
+        assert_eq!(excessive.kind, "input_batch_too_large");
+        let overflow = checked_creation_input_bytes(usize::MAX, 1).unwrap_err();
+        assert_eq!(overflow.kind, "input_batch_too_large");
     }
 
     #[tokio::test]

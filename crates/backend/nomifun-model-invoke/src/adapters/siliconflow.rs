@@ -31,6 +31,7 @@ use super::json_request_body;
 
 const SUBMIT_TIMEOUT: Duration = Duration::from_secs(180);
 const POLL_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_IMAGE_EDIT_INPUTS: usize = 3;
 pub const AUDIO_SPEECH_ADAPTER_ID: &str = "siliconflow.audio_speech";
 const VIDEO_ADAPTER_ID: &str = "siliconflow.video_jobs";
 
@@ -384,11 +385,20 @@ fn build_image_edit_body(call: &ResolvedCall, req: &ImageEditRequest) -> Result<
             "SiliconFlow image editing supports exactly one output image",
         ));
     }
-    let images: Vec<_> = req.inputs.iter().filter(|input| input.role != "mask").take(3).collect();
+    let images: Vec<_> = req.inputs.iter().filter(|input| input.role != "mask").collect();
     if images.is_empty() {
         return Err(InvokeError::new(
             InvokeErrorKind::InvalidParams,
             "SiliconFlow image editing requires at least one non-mask input image",
+        ));
+    }
+    if images.len() > MAX_IMAGE_EDIT_INPUTS {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            format!(
+                "SiliconFlow image editing supports at most {MAX_IMAGE_EDIT_INPUTS} input images, got {}",
+                images.len()
+            ),
         ));
     }
 
@@ -883,6 +893,31 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert!(body.get("image_size").is_none(), "typed size must not break Qwen image-edit");
+    }
+
+    #[test]
+    fn edit_rejects_more_than_three_images_instead_of_truncating_them() {
+        let request = ImageEditRequest {
+            prompt: "merge".into(),
+            count: 1,
+            size: None,
+            inputs: vec![
+                image_input(b"one"),
+                image_input(b"two"),
+                image_input(b"three"),
+                image_input(b"four"),
+            ],
+            extra: json!({}),
+        };
+        let call = image_call(
+            "https://api.siliconflow.com/v1",
+            "Qwen/Qwen-Image-Edit-2509",
+            TaskRequest::ImageEdit(request.clone()),
+        );
+
+        let error = build_image_edit_body(&call, &request).unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+        assert!(error.message.contains("at most 3 input images"));
     }
 
     #[tokio::test]
