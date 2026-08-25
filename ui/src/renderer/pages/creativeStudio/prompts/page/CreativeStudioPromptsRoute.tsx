@@ -5,24 +5,28 @@
  */
 
 import { Message } from '@arco-design/web-react';
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { copyText } from '@/renderer/utils/ui/clipboard';
 
 import {
   creativeAssetClient,
+  invalidateCreativeAssetQueryCache,
   type CreativeAssetLibraryPort,
+  type CreativePromptAssetPort,
 } from '../../assets';
 import {
   createNomiPromptLibraryPort,
   creativePromptCatalogPort,
+  promptLibraryItemKey,
   type PromptLibraryItem,
   type PromptLibraryPort,
   type PromptLibrarySelection,
 } from '..';
 import PromptLibraryDetails, {
   type PromptCopyState,
+  type PromptRemoveState,
   type PromptSaveState,
 } from './PromptLibraryDetails';
 import StandalonePromptLibraryPage from './StandalonePromptLibraryPage';
@@ -31,13 +35,31 @@ import {
   type PromptClipboardWriter,
 } from './standaloneSelection';
 
+const defaultNotifySuccess = (message: string): void => {
+  Message.success(message);
+};
+const defaultNotifyError = (message: string): void => {
+  Message.error(message);
+};
+
+function notifySafely(notify: (message: string) => void, message: string): void {
+  try {
+    notify(message);
+  } catch {
+    // A transient toast failure must not change the completed product action.
+  }
+}
+
 export interface CreativeStudioPromptsRouteProps {
   /** Test/host injection only; production uses the NomiFun preset + asset adapter. */
   port?: PromptLibraryPort;
-  assetPort?: CreativeAssetLibraryPort;
+  assetPort?: CreativeAssetLibraryPort & CreativePromptAssetPort;
   locale?: string;
   writeClipboardText?: PromptClipboardWriter;
   onPromptCopied?: (selection: PromptLibrarySelection) => void;
+  /** Test/host notification injection; production defaults to Arco messages. */
+  notifySuccess?: (message: string) => void;
+  notifyError?: (message: string) => void;
 }
 
 /** Standalone `/workshop/prompts` route. It deliberately has no canvas insertion target. */
@@ -47,6 +69,8 @@ export const CreativeStudioPromptsRoute: React.FC<CreativeStudioPromptsRouteProp
   locale: localeOverride,
   writeClipboardText = copyText,
   onPromptCopied,
+  notifySuccess = defaultNotifySuccess,
+  notifyError = defaultNotifyError,
 }) => {
   const { t, i18n } = useTranslation();
   const locale = localeOverride ?? i18n.resolvedLanguage ?? i18n.language ?? 'zh-CN';
@@ -65,21 +89,49 @@ export const CreativeStudioPromptsRoute: React.FC<CreativeStudioPromptsRouteProp
   const [copyError, setCopyError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<PromptSaveState>('idle');
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [removeState, setRemoveState] = useState<PromptRemoveState>('idle');
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const selectedPromptKeyRef = useRef<string | null>(null);
+  const promptMembershipOverridesRef = useRef(new Map<string, boolean>());
+  const promptMutationByKeyRef = useRef(new Map<string, 'saving' | 'removing'>());
+
+  const promptKey = useCallback((item: PromptLibraryItem): string | null => {
+    return item.source === 'asset' ? null : promptLibraryItemKey(item);
+  }, []);
+
+  const promptIsSaved = useCallback((item: PromptLibraryItem, key: string | null): boolean => {
+    if (key === null) return false;
+    return promptMembershipOverridesRef.current.get(key) ?? item.savedToAssets;
+  }, []);
 
   const selectPrompt = useCallback((item: PromptLibraryItem) => {
+    const key = promptKey(item);
+    const mutation = key === null ? undefined : promptMutationByKeyRef.current.get(key);
+    selectedPromptKeyRef.current = key;
     setSelected(item);
     setCopyState('idle');
     setCopyError(null);
-    setSaveState('idle');
+    setSaveState(
+      mutation === 'saving'
+        ? 'saving'
+        : promptIsSaved(item, key)
+          ? 'saved'
+          : 'idle'
+    );
     setSaveError(null);
-  }, []);
+    setRemoveState(mutation === 'removing' ? 'removing' : 'idle');
+    setRemoveError(null);
+  }, [promptIsSaved, promptKey]);
 
   const closeDetails = useCallback(() => {
+    selectedPromptKeyRef.current = null;
     setSelected(null);
     setCopyState('idle');
     setCopyError(null);
     setSaveState('idle');
     setSaveError(null);
+    setRemoveState('idle');
+    setRemoveError(null);
   }, []);
 
   const copySelectedPrompt = useCallback(async () => {
@@ -89,7 +141,8 @@ export const CreativeStudioPromptsRoute: React.FC<CreativeStudioPromptsRouteProp
     try {
       const selection = await copyStandalonePrompt(selected, writeClipboardText);
       setCopyState('copied');
-      Message.success(
+      notifySafely(
+        notifySuccess,
         t('creativeStudio.prompts.copySuccess', {
           defaultValue: 'Prompt copied',
         })
@@ -104,42 +157,62 @@ export const CreativeStudioPromptsRoute: React.FC<CreativeStudioPromptsRouteProp
             });
       setCopyError(message);
       setCopyState('failed');
-      Message.error(
+      notifySafely(
+        notifyError,
         t('creativeStudio.prompts.copyFailed', {
           defaultValue: 'Could not copy prompt',
         })
       );
     }
-  }, [copyState, onPromptCopied, selected, t, writeClipboardText]);
+  }, [copyState, notifyError, notifySuccess, onPromptCopied, selected, t, writeClipboardText]);
 
   const saveSelectedPrompt = useCallback(async () => {
-    if (!selected || saveState === 'saving' || saveState === 'saved') return;
+    if (!selected || selected.source === 'asset') return;
+    const item = selected;
+    const key = promptKey(item);
+    if (
+      key === null ||
+      promptIsSaved(item, key) ||
+      promptMutationByKeyRef.current.has(key)
+    ) {
+      return;
+    }
+    // React state is asynchronous; the synchronous key lock also blocks a
+    // same-render double click before the button can re-render as loading.
+    promptMutationByKeyRef.current.set(key, 'saving');
     setSaveState('saving');
     setSaveError(null);
+    setRemoveState('idle');
+    setRemoveError(null);
     try {
       await assetPort.createText({
-        title: selected.title,
-        textContent: selected.prompt,
+        title: item.title,
+        textContent: item.prompt,
         collection: t('creativeStudio.prompts.collectionLabel', {
           defaultValue: 'Prompts',
         }),
-        tags: [...new Set([selected.category, ...selected.tags].filter((value): value is string => Boolean(value)))],
+        tags: [...new Set([item.category, ...item.tags].filter((value): value is string => Boolean(value)))],
         inLibrary: true,
         origin:
-          selected.source === 'catalog' &&
-          selected.sourceUrl &&
-          selected.license &&
-          selected.licenseUrl
+          item.source === 'catalog'
             ? {
-                promptCatalogId: selected.id,
-                sourceUrl: selected.sourceUrl,
-                license: selected.license,
-                licenseUrl: selected.licenseUrl,
+                promptLibrarySource: 'catalog',
+                promptLibraryId: item.id,
+                promptCatalogId: item.id,
+                sourceUrl: item.sourceUrl ?? undefined,
+                license: item.license ?? undefined,
+                licenseUrl: item.licenseUrl ?? undefined,
               }
-            : undefined,
+            : {
+                promptLibrarySource: 'preset',
+                promptLibraryId: item.id,
+              },
       });
-      setSaveState('saved');
-      Message.success(
+      invalidateCreativeAssetQueryCache(assetPort);
+      promptMembershipOverridesRef.current.set(key, true);
+      if (selectedPromptKeyRef.current === key) setSaveState('saved');
+      notifySafely(
+        notifySuccess,
         t('creativeStudio.prompts.saveSuccess', {
           defaultValue: 'Added to my assets',
         })
@@ -151,21 +224,85 @@ export const CreativeStudioPromptsRoute: React.FC<CreativeStudioPromptsRouteProp
           : t('creativeStudio.prompts.saveFailedFallback', {
               defaultValue: 'Save failed. Try again later.',
             });
-      setSaveError(message);
-      setSaveState('failed');
-      Message.error(
+      if (selectedPromptKeyRef.current === key) {
+        setSaveError(message);
+        setSaveState('failed');
+      }
+      notifySafely(
+        notifyError,
         t('creativeStudio.prompts.saveFailed', {
           defaultValue: 'Could not save prompt',
         })
       );
+    } finally {
+      if (promptMutationByKeyRef.current.get(key) === 'saving') {
+        promptMutationByKeyRef.current.delete(key);
+      }
     }
-  }, [assetPort, saveState, selected, t]);
+  }, [assetPort, notifyError, notifySuccess, promptIsSaved, promptKey, selected, t]);
+
+  const removeSelectedPrompt = useCallback(async () => {
+    if (!selected || selected.source === 'asset') return;
+    const item = selected;
+    const key = promptKey(item);
+    if (
+      key === null ||
+      !promptIsSaved(item, key) ||
+      promptMutationByKeyRef.current.has(key)
+    ) {
+      return;
+    }
+    promptMutationByKeyRef.current.set(key, 'removing');
+    setRemoveState('removing');
+    setRemoveError(null);
+    try {
+      await assetPort.removePromptAsset(
+        item.source === 'catalog' ? 'catalog' : 'preset',
+        item.id
+      );
+      invalidateCreativeAssetQueryCache(assetPort);
+      promptMembershipOverridesRef.current.set(key, false);
+      if (selectedPromptKeyRef.current === key) {
+        setSaveState('idle');
+        setSaveError(null);
+        setRemoveState('removed');
+      }
+      notifySafely(
+        notifySuccess,
+        t('creativeStudio.prompts.removeSuccess', {
+          defaultValue: 'Removed from my assets',
+        })
+      );
+    } catch (reason) {
+      const message =
+        reason instanceof Error
+          ? reason.message
+          : t('creativeStudio.prompts.removeFailedFallback', {
+              defaultValue: 'Could not remove this prompt. Try again later.',
+            });
+      if (selectedPromptKeyRef.current === key) {
+        setRemoveError(message);
+        setRemoveState('failed');
+      }
+      notifySafely(
+        notifyError,
+        t('creativeStudio.prompts.removeFailed', {
+          defaultValue: 'Could not remove prompt from my assets',
+        })
+      );
+    } finally {
+      if (promptMutationByKeyRef.current.get(key) === 'removing') {
+        promptMutationByKeyRef.current.delete(key);
+      }
+    }
+  }, [assetPort, notifyError, notifySuccess, promptIsSaved, promptKey, selected, t]);
 
   return (
     <>
       <StandalonePromptLibraryPage
         port={promptPort}
         selectedId={selected?.id ?? null}
+        selectedSource={selected?.source ?? null}
         onSelect={selectPrompt}
       />
       <PromptLibraryDetails
@@ -175,9 +312,12 @@ export const CreativeStudioPromptsRoute: React.FC<CreativeStudioPromptsRouteProp
         copyError={copyError}
         saveState={saveState}
         saveError={saveError}
+        removeState={removeState}
+        removeError={removeError}
         onClose={closeDetails}
         onCopy={() => void copySelectedPrompt()}
         onSave={selected?.source === 'asset' ? undefined : () => void saveSelectedPrompt()}
+        onRemove={selected?.source === 'asset' ? undefined : () => void removeSelectedPrompt()}
       />
     </>
   );

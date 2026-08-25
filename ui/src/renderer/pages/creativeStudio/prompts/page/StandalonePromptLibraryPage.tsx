@@ -11,6 +11,7 @@ import { useTranslation } from 'react-i18next';
 
 import {
   filterPromptLibraryItems,
+  promptLibraryItemKey,
   promptLibraryFacets,
   sortPromptLibraryItemsByUpdatedAt,
   type PromptLibraryItem,
@@ -88,6 +89,7 @@ export interface StandalonePromptLibraryAppearanceProps {
   error?: Error | null;
   invalidCount?: number;
   selectedId?: string | null;
+  selectedSource?: PromptLibraryItem['source'] | null;
   title?: string;
   onRetry?: () => void;
   onSelect?: (item: PromptLibraryItem) => void;
@@ -182,6 +184,7 @@ export const StandalonePromptLibraryAppearance: React.FC<
   error = null,
   invalidCount = 0,
   selectedId = null,
+  selectedSource = null,
   title,
   onRetry,
   onSelect,
@@ -467,10 +470,13 @@ export const StandalonePromptLibraryAppearance: React.FC<
                 ) : (
                   <div className={styles.grid} role='list'>
                     {visibleItems.map((item) => (
-                      <div key={item.id} role='listitem'>
+                      <div key={promptLibraryItemKey(item)} role='listitem'>
                         <PromptCard
                           item={item}
-                          selected={selectedId === item.id}
+                          selected={
+                            selectedId === item.id &&
+                            (selectedSource === null || selectedSource === item.source)
+                          }
                           onSelect={onSelect}
                         />
                       </div>

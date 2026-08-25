@@ -40,7 +40,7 @@ use crate::dto::WorkshopAsset;
 use crate::prompt_catalog::CreativePromptCatalogPage;
 use crate::service::{
     AssetPatch, AssetQuery, CreativeProjectAgentKickoff, NewAssetUpload, NewTextAsset,
-    PromptCatalogAssetOrigin,
+    TextAssetOrigin,
 };
 use crate::state::WorkshopRouterState;
 use crate::template::{CreativeTemplateDefinitionV1, MAX_TEMPLATE_DEFINITION_BYTES};
@@ -202,6 +202,10 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         .route(
             "/api/creative-studio/assets/{asset_id}",
             get(get_asset).patch(patch_asset).delete(delete_asset),
+        )
+        .route(
+            "/api/creative-studio/prompt-library-assets/remove",
+            post(remove_prompt_library_assets),
         )
         .route(
             "/api/creative-studio/collections/rename",
@@ -1130,7 +1134,7 @@ struct CreateTextAssetRequest {
     #[serde(default)]
     in_library: Option<bool>,
     #[serde(default)]
-    origin: Option<PromptCatalogAssetOrigin>,
+    origin: Option<TextAssetOrigin>,
 }
 
 async fn create_text_asset(
@@ -1156,6 +1160,40 @@ async fn create_text_asset(
         })
         .await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(asset))))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemovePromptLibraryAssetsRequest {
+    prompt_library_source: String,
+    prompt_library_id: String,
+}
+
+#[derive(serde::Serialize)]
+struct RemovePromptLibraryAssetsResponse {
+    matched: u64,
+}
+
+async fn remove_prompt_library_assets(
+    State(state): State<WorkshopRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    body: Result<Json<RemovePromptLibraryAssetsRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<RemovePromptLibraryAssetsResponse>>, AppError> {
+    state
+        .service
+        .require_creative_studio_owner(user.id.as_str())
+        .await?;
+    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let matched = state
+        .service
+        .hide_prompt_library_assets(
+            &request.prompt_library_source,
+            &request.prompt_library_id,
+        )
+        .await?;
+    Ok(Json(ApiResponse::ok(RemovePromptLibraryAssetsResponse {
+        matched,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -3298,6 +3336,110 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn prompt_library_asset_remove_route_soft_hides_and_is_idempotent() {
+        let (state, user, _data_dir) = test_state().await;
+        let asset = state
+            .service
+            .create_text_asset(NewTextAsset {
+                title: "saved prompt".into(),
+                text_content: "body".into(),
+                collection: None,
+                tags: None,
+                in_library: Some(true),
+                origin: Some(
+                    crate::service::PromptLibraryAssetOrigin {
+                        prompt_library_source: "catalog".into(),
+                        prompt_library_id: "route-remove-id".into(),
+                        prompt_catalog_id: Some("route-remove-id".into()),
+                        source_url: None,
+                        license: None,
+                        license_url: None,
+                    }
+                    .into(),
+                ),
+            })
+            .await
+            .unwrap();
+        let app = workshop_routes(state.clone()).layer(Extension(user));
+        let body = r#"{"prompt_library_source":"catalog","prompt_library_id":"route-remove-id"}"#;
+
+        for _ in 0..2 {
+            let removed = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/api/creative-studio/prompt-library-assets/remove")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(removed.status(), StatusCode::OK);
+            assert_eq!(response_json(removed).await["data"]["matched"], 1);
+        }
+
+        let unknown = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/creative-studio/prompt-library-assets/remove")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"prompt_library_source":"catalog","prompt_library_id":"missing"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::OK);
+        assert_eq!(response_json(unknown).await["data"]["matched"], 0);
+
+        for invalid_body in [
+            r#"{"prompt_library_source":"asset","prompt_library_id":"route-remove-id"}"#,
+            r#"{"prompt_library_source":"catalog","prompt_library_id":" "}"#,
+        ] {
+            let invalid = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/api/creative-studio/prompt-library-assets/remove")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(invalid_body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        }
+
+        let forbidden = workshop_routes(state.clone())
+            .layer(Extension(CurrentUser {
+                id: UserId::new(),
+                username: "not-owner".into(),
+            }))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/creative-studio/prompt-library-assets/remove")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        let retained = state.service.get_asset(&asset.asset_id).await.unwrap();
+        assert!(!retained.in_library);
+        assert_eq!(retained.asset_id, asset.asset_id);
+        assert_eq!(retained.text_content.as_deref(), Some("body"));
     }
 
     #[tokio::test]

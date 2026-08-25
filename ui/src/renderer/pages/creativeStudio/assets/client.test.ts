@@ -46,6 +46,7 @@ function apiStub(overrides: Partial<WorkshopAssetApi> = {}): WorkshopAssetApi {
     get: async () => assetDto(),
     upload: async () => assetDto(),
     createText: async () => assetDto({ kind: 'text', mime: null, width: null, height: null, bytes: null }),
+    removePromptAsset: async () => ({ matched: 0 }),
     update: async () => assetDto(),
     remove: async () => undefined,
     renameCollection: async () => 0,
@@ -71,6 +72,8 @@ describe('CreativeAssetClient', () => {
       canvasId: '0190f5fe-7c00-7a00-8000-000000000003',
       nodeId: '0190f5fe-7c00-7a00-8000-000000000004',
       generationTaskId: '0190f5fe-7c00-7a00-8000-000000000005',
+      promptLibrarySource: undefined,
+      promptLibraryId: undefined,
       promptCatalogId: undefined,
       sourceUrl: undefined,
       license: undefined,
@@ -137,6 +140,10 @@ describe('CreativeAssetClient', () => {
         calls.push(['createText', input]);
         return assetDto({ kind: 'text', mime: null, width: null, height: null, bytes: null });
       },
+      removePromptAsset: async (input) => {
+        calls.push(['removePromptAsset', input]);
+        return { matched: 2 };
+      },
       update: async (_id, patch) => {
         calls.push(['update', patch]);
         return assetDto({ title: 'Updated' });
@@ -174,6 +181,8 @@ describe('CreativeAssetClient', () => {
           title: 'Prompt',
           textContent: 'Hello',
           origin: {
+            promptLibrarySource: 'catalog',
+            promptLibraryId: 'prompt-1',
             promptCatalogId: 'prompt-1',
             sourceUrl: 'https://example.test/source',
             license: 'MIT',
@@ -182,6 +191,7 @@ describe('CreativeAssetClient', () => {
         })
       ).kind
     ).toBe('text');
+    expect(await client.removePromptAsset('catalog', 'prompt-1')).toBe(2);
     expect((await client.update(ASSET_ID, { collection: null, inLibrary: false })).title).toBe('Updated');
     await client.remove(ASSET_ID);
     expect(await client.renameCollection('Old', 'New')).toBe(3);
@@ -193,6 +203,7 @@ describe('CreativeAssetClient', () => {
       'get',
       'upload',
       'createText',
+      'removePromptAsset',
       'update',
       'remove',
       'rename',
@@ -211,11 +222,17 @@ describe('CreativeAssetClient', () => {
       tags: undefined,
       in_library: undefined,
       origin: {
+        prompt_library_source: 'catalog',
+        prompt_library_id: 'prompt-1',
         prompt_catalog_id: 'prompt-1',
         source_url: 'https://example.test/source',
         license: 'MIT',
         license_url: 'https://example.test/license',
       },
+    });
+    expect(calls.find(([name]) => name === 'removePromptAsset')?.[1]).toEqual({
+      prompt_library_source: 'catalog',
+      prompt_library_id: 'prompt-1',
     });
   });
 
@@ -228,5 +245,72 @@ describe('CreativeAssetClient', () => {
     }
     expect(error instanceof TypeError).toBe(true);
     expect(error instanceof Error ? error.message : '').toBe('Unknown creative asset kind: archive');
+  });
+
+  test('rejects incomplete prompt-library provenance instead of losing its identity', () => {
+    let error: unknown;
+    try {
+      mapWorkshopAsset(
+        assetDto({
+          origin: {
+            prompt_library_source: 'preset',
+          },
+        })
+      );
+    } catch (reason) {
+      error = reason;
+    }
+    expect(error instanceof Error ? error.message : '').toBe(
+      'Invalid creative asset prompt-library origin'
+    );
+  });
+
+  test('serializes preset provenance without catalog-only attribution fields', async () => {
+    let request: unknown;
+    const client = new CreativeAssetClient(
+      apiStub({
+        createText: async (input) => {
+          request = input;
+          return assetDto({
+            kind: 'text',
+            mime: null,
+            width: null,
+            height: null,
+            bytes: null,
+          });
+        },
+      })
+    );
+
+    await client.createText({
+      title: 'Preset prompt',
+      textContent: 'Prompt body',
+      origin: {
+        promptLibrarySource: 'preset',
+        promptLibraryId: 'preset-1',
+      },
+    });
+    expect(request).toMatchObject({
+      origin: {
+        prompt_library_source: 'preset',
+        prompt_library_id: 'preset-1',
+      },
+    });
+    expect(JSON.stringify(request).includes('prompt_catalog_id')).toBe(false);
+  });
+
+  test('rejects an invalid prompt-removal match count', async () => {
+    const client = new CreativeAssetClient(
+      apiStub({ removePromptAsset: async () => ({ matched: -1 }) })
+    );
+    let error: unknown;
+    try {
+      await client.removePromptAsset('preset', 'preset-1');
+    } catch (reason) {
+      error = reason;
+    }
+    expect(error instanceof Error ? error.message : '').toBe(
+      'Invalid creative asset matched prompt assets'
+    );
   });
 });

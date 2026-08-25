@@ -18,6 +18,7 @@ export {
   filterPromptLibraryItems,
   normalizePromptLibrary,
   parsePromptLibraryItem,
+  promptLibraryItemKey,
   promptLibraryFacets,
   sortPromptLibraryItemsByUpdatedAt,
   toPromptLibrarySelection,
@@ -26,8 +27,9 @@ export {
   createNomiPromptLibraryPort,
   mapNomiPresetToPromptLibraryItem,
   mapNomiTextAssetToPromptLibraryItem,
+  promptAssetIdentity,
 } from './port';
-export type { NomiPromptLibraryPortOptions } from './port';
+export type { NomiPromptLibraryPortOptions, PromptAssetIdentity } from './port';
 export { usePromptLibrary } from './usePromptLibrary';
 export type { UsePromptLibraryOptions, UsePromptLibraryResult } from './usePromptLibrary';
 export type {

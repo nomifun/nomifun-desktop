@@ -45,6 +45,7 @@ describe('prompt-library standalone details', () => {
       licenseUrl: null,
       createdAt: null,
       updatedAt: null,
+      savedToAssets: false,
     });
 
     expect(html.includes('data-prompt-library-details="true"')).toBe(true);
@@ -73,6 +74,7 @@ describe('prompt-library standalone details', () => {
       licenseUrl: null,
       createdAt: 1_760_000_000,
       updatedAt: 1_770_000_000,
+      savedToAssets: true,
     });
 
     expect(html.includes('My text assets')).toBe(true);
@@ -97,6 +99,7 @@ describe('prompt-library standalone details', () => {
       licenseUrl: 'https://github.com/ZeroLu/awesome-gpt-image/blob/main/LICENSE',
       createdAt: null,
       updatedAt: null,
+      savedToAssets: false,
     });
 
     expect(html.includes('data-prompt-source="catalog"')).toBe(true);

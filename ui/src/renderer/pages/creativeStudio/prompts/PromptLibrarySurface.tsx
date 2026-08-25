@@ -11,6 +11,7 @@ import { useTranslation } from 'react-i18next';
 
 import {
   filterPromptLibraryItems,
+  promptLibraryItemKey,
   promptLibraryFacets,
   toPromptLibrarySelection,
 } from './library';
@@ -27,6 +28,8 @@ export interface PromptLibrarySurfaceProps {
   title?: string;
   description?: string;
   selectedId?: string | null;
+  /** Optional source namespace for controlled selections with colliding IDs. */
+  selectedSource?: PromptLibraryItem['source'] | null;
   onRetry?: () => void;
   onSelect?: (item: PromptLibraryItem) => void;
   onCopy?: (selection: PromptLibrarySelection) => void;
@@ -188,6 +191,7 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
   title,
   description,
   selectedId,
+  selectedSource,
   onRetry,
   onSelect,
   onCopy,
@@ -196,13 +200,12 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<string | null | undefined>(undefined);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
-  const [localSelectedId, setLocalSelectedId] = useState<string | null>(null);
+  const [localSelectedKey, setLocalSelectedKey] = useState<string | null>(null);
   const facets = useMemo(() => promptLibraryFacets(items), [items]);
   const filteredItems = useMemo(
     () => filterPromptLibraryItems(items, { query, category, tags: selectedTags }),
     [category, items, query, selectedTags]
   );
-  const effectiveSelectedId = selectedId === undefined ? localSelectedId : selectedId;
   const hasFilters = Boolean(query.trim() || category !== undefined || selectedTags.length > 0);
   const resolvedTitle =
     title ??
@@ -243,7 +246,7 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
 
   const select = useCallback(
     (item: PromptLibraryItem) => {
-      if (selectedId === undefined) setLocalSelectedId(item.id);
+      if (selectedId === undefined) setLocalSelectedKey(promptLibraryItemKey(item));
       onSelect?.(item);
     },
     [onSelect, selectedId]
@@ -444,9 +447,14 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
             <div className={styles.grid} role='list'>
               {filteredItems.map((item) => (
                 <PromptCard
-                  key={item.id}
+                  key={promptLibraryItemKey(item)}
                   item={item}
-                  selected={item.id === effectiveSelectedId}
+                  selected={
+                    selectedId === undefined
+                      ? promptLibraryItemKey(item) === localSelectedKey
+                      : item.id === selectedId &&
+                        (selectedSource == null || item.source === selectedSource)
+                  }
                   onSelect={() => select(item)}
                   onCopy={onCopy ? () => copy(item) : undefined}
                 />

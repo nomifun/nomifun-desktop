@@ -151,11 +151,15 @@
   font-size: 12px;
 }
 
-.copyFeedback[data-copy-state='copied'] {
+.copyFeedback[data-copy-state='copied'],
+.copyFeedback[data-save-state='saved'],
+.copyFeedback[data-remove-state='removed'] {
   color: rgb(var(--success-6));
 }
 
-.copyFeedback[data-copy-state='failed'] {
+.copyFeedback[data-copy-state='failed'],
+.copyFeedback[data-save-state='failed'],
+.copyFeedback[data-remove-state='failed'] {
   color: rgb(var(--danger-6));
 }
 
