@@ -1,4 +1,4 @@
-# Current Technical Status
+﻿# Current Technical Status
 
 Updated: 2026-08-23.
 
@@ -52,7 +52,7 @@ The current frontend route map lives in
   [`docs/guides/creative-studio.md`](docs/guides/creative-studio.md).
 - `/settings/system` and `/settings/execution-engines`, plus system
   sub-sections routed through the system settings page
-- `/settings/ssh-hosts` — the SSH remote-host book (instance owner only)
+- `/settings/ssh-hosts` 鈥?the SSH remote-host book (instance owner only)
 
 Several legacy paths still exist only as redirects. Do not document them as
 primary navigation.
@@ -98,6 +98,7 @@ For packaging and signing, see:
 ## Known Documentation Policy
 
 The active docs are `README.md`, `STATUS.md`, and the non-archive sections under
-`docs/`. Dated design specs, audits, and Superpowers implementation plans are
+`docs/`. Dated design specs and audits are
 historical records. They can explain why code exists, but they must not be used
 as current product or operator instructions without re-checking the source.
+
