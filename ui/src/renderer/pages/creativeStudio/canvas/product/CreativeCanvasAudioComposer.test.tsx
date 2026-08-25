@@ -231,26 +231,18 @@ describe('CreativeCanvasAudioComposer', () => {
     }
   });
 
-  test('inherits the active application theme and keeps safe mobile settings selector', () => {
-    const css = readFileSync(
-      new URL('./CreativeCanvasAudioComposer.module.css', import.meta.url),
+  test('uses the shared compact shell and keeps safe audio settings controls', () => {
+    const shellCss = readFileSync(
+      new URL('./CreativeCanvasComposerShell.module.css', import.meta.url),
       'utf8'
     );
-    expect(css.includes('--color-bg-1: #faf9f7')).toBe(false);
-    expect(css.includes('--color-bg-popup: #faf9f7')).toBe(false);
-    expect(css.includes('--color-secondary: #f1efea')).toBe(false);
-    expect(css.includes(":global([data-theme='light']) .positioner")).toBe(true);
-    expect(css.includes(":global([data-theme='dark']) .positioner")).toBe(true);
-    expect(css.includes('background: color-mix(in srgb, var(--color-bg-2)')).toBe(true);
-    expect(css.includes('background: rgb(var(--primary-6))')).toBe(true);
-    expect(css.includes('@media (prefers-color-scheme: dark)')).toBe(false);
-    expect(css.includes('width: 580px')).toBe(true);
-    expect(css.includes('height: 160px')).toBe(true);
-    expect(css.includes(".positioner[data-placement='above']")).toBe(true);
-    expect(css.includes('--creative-canvas-audio-composer-offset-x')).toBe(true);
-    expect(css.includes(".positioner[data-overlay='true']")).toBe(true);
-    expect(css.includes('@media (max-width: 760px)')).toBe(true);
-    expect(css.includes('.settingsSummary {')).toBe(true);
-    expect(css.includes('.settingsButton span')).toBe(false);
+    expect(shellCss.includes(":global([data-theme='light']) .positioner")).toBe(true);
+    expect(shellCss.includes(":global([data-theme='dark']) .positioner")).toBe(true);
+    expect(shellCss.includes('height: 104px')).toBe(true);
+    expect(shellCss.includes('min-width: 48px')).toBe(true);
+    expect(shellCss.includes('.retrySubmitButton')).toBe(true);
+    expect(shellCss.includes('@media (max-width: 760px)')).toBe(true);
+    expect(shellCss.includes('.popoverSettingsPanel')).toBe(true);
+    expect(shellCss.includes('.settingsControl')).toBe(true);
   });
 });
