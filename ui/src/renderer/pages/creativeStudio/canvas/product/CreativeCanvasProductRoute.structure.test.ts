@@ -169,6 +169,10 @@ describe('Creative Canvas product route composition', () => {
       "handleBottomViewChange('timeline')",
       'onOpen={onOpen}',
       'onToggleLock={onToggleLock}',
+      "intent.mode === 'edit-text'",
+      'setEditingTextNodeId(node.id)',
+      'handleInlineTextChange(node.id, text)',
+      'finishInlineTextEditing(node.id)',
     ]) {
       expect(source.includes(token)).toBe(true);
     }

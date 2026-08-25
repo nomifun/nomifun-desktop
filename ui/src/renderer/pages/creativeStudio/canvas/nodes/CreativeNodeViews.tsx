@@ -81,11 +81,17 @@ const sharedFrameProps = <K extends CreativeCanvasNodeKind>(props: CreativeNodeP
 export interface CreativeTextNodeProps extends CreativeNodePresentationProps<'text'> {
   title?: string;
   emptyLabel?: string;
+  editing?: boolean;
+  onTextChange?: (text: string) => void;
+  onFinishEditing?: () => void;
 }
 
 export const CreativeTextNode: React.FC<CreativeTextNodeProps> = ({
   title,
   emptyLabel,
+  editing = false,
+  onTextChange,
+  onFinishEditing,
   ...props
 }) => {
   const { t } = useTranslation();
@@ -106,15 +112,63 @@ export const CreativeTextNode: React.FC<CreativeTextNodeProps> = ({
       )}
       {...sharedFrameProps(props)}
     >
-      <div
-        className={styles.textContent}
-        style={{ fontSize, textAlign: node.data.textAlign }}
-        data-node-text-format={node.data.format}
-      >
-        {node.data.text || (
-          <span className={styles.emptyText}>{resolvedEmptyLabel}</span>
-        )}
-      </div>
+      {editing && !node.locked ? (
+        <textarea
+          className={styles.textEditor}
+          style={{ fontSize, textAlign: node.data.textAlign }}
+          value={node.data.text}
+          placeholder={resolvedEmptyLabel}
+          maxLength={1_000_000}
+          autoFocus
+          aria-label={t('creativeStudio.canvas.properties.content', {
+            defaultValue: '内容',
+          })}
+          data-node-text-editor
+          data-node-text-format={node.data.format}
+          onFocus={(event) => {
+            if (event.currentTarget.dataset.initialCaretPlaced) return;
+            event.currentTarget.dataset.initialCaretPlaced = 'true';
+            const end = event.currentTarget.value.length;
+            event.currentTarget.setSelectionRange(end, end);
+          }}
+          onChange={(event) => onTextChange?.(event.currentTarget.value)}
+          onBlur={() => onFinishEditing?.()}
+          onKeyDown={(event) => {
+            event.stopPropagation();
+            if (
+              event.nativeEvent.isComposing ||
+              (event.nativeEvent as KeyboardEvent & { keyCode?: number }).keyCode ===
+                229
+            ) {
+              return;
+            }
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              onFinishEditing?.();
+              return;
+            }
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault();
+              onFinishEditing?.();
+            }
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.stopPropagation()}
+          onWheel={(event) => event.stopPropagation()}
+        />
+      ) : (
+        <div
+          className={styles.textContent}
+          style={{ fontSize, textAlign: node.data.textAlign }}
+          data-node-text-format={node.data.format}
+        >
+          {node.data.text || (
+            <span className={styles.emptyText}>{resolvedEmptyLabel}</span>
+          )}
+        </div>
+      )}
     </CreativeNodeFrame>
   );
 };
@@ -472,6 +526,9 @@ export type CreativeAnyNodeViewProps = CreativeNodePresentationProps<CreativeCan
   panoramaPreview?: React.ReactNode;
   directorPreview?: React.ReactNode;
   groupContent?: React.ReactNode;
+  textEditing?: boolean;
+  onTextChange?: (text: string) => void;
+  onTextEditingComplete?: () => void;
 };
 
 /** Canonical discriminated-union dispatcher for the eight persisted node kinds. */
@@ -479,7 +536,15 @@ export const CreativeNodeView: React.FC<CreativeAnyNodeViewProps> = (props) => {
   const { node } = props;
   switch (node.type) {
     case 'text':
-      return <CreativeTextNode {...props} node={node} />;
+      return (
+        <CreativeTextNode
+          {...props}
+          node={node}
+          editing={props.textEditing}
+          onTextChange={props.onTextChange}
+          onFinishEditing={props.onTextEditingComplete}
+        />
+      );
     case 'image':
       return <CreativeImageNode {...props} node={node} asset={props.asset} />;
     case 'video':

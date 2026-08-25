@@ -69,6 +69,7 @@ import {
   canvasStateFromProjectDocument,
   canvasSurfaceBackground,
   canonicalCreativePendingTaskIds,
+  canvasNodeIdFromEventTarget,
   classifyCreativeCanvasLoadState,
   creativeStudioPanelStateEqual,
   fitCanvasViewport,
@@ -732,26 +733,60 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       return { x: clientX - (rect?.left ?? 0), y: clientY - (rect?.top ?? 0) };
     }, []);
 
-    const capturePointer = useCallback((pointerId: number) => {
-      const surface = surfaceRef.current;
-      if (!surface || surface.hasPointerCapture(pointerId)) return;
+    const pointerCaptureOwnersRef = useRef<Map<number, HTMLElement>>(new Map());
+
+    const capturePointer = useCallback(
+      (owner: HTMLElement, pointerId: number) => {
+        if (
+          typeof owner.hasPointerCapture !== 'function' ||
+          typeof owner.setPointerCapture !== 'function' ||
+          owner.hasPointerCapture(pointerId)
+        ) {
+          return;
+        }
+        try {
+          owner.setPointerCapture(pointerId);
+          pointerCaptureOwnersRef.current.set(pointerId, owner);
+        } catch {
+          // The pointer may have been canceled between the handler and capture.
+        }
+      },
+      []
+    );
+
+    const releasePointer = useCallback((pointerId: number) => {
+      const owner = pointerCaptureOwnersRef.current.get(pointerId);
+      pointerCaptureOwnersRef.current.delete(pointerId);
+      if (
+        !owner ||
+        typeof owner.hasPointerCapture !== 'function' ||
+        typeof owner.releasePointerCapture !== 'function' ||
+        !owner.hasPointerCapture(pointerId)
+      ) {
+        return;
+      }
       try {
-        surface.setPointerCapture(pointerId);
+        owner.releasePointerCapture(pointerId);
       } catch {
-        // The pointer may have been canceled between the child handler and capture.
+        // A detached or canceled owner may already have lost capture.
       }
     }, []);
 
-    const releasePointer = useCallback((pointerId: number) => {
-      const surface = surfaceRef.current;
-      if (surface?.hasPointerCapture(pointerId)) surface.releasePointerCapture(pointerId);
-    }, []);
+    const releaseAllPointers = useCallback(() => {
+      for (const pointerId of pointerCaptureOwnersRef.current.keys()) {
+        releasePointer(pointerId);
+      }
+      pointerCaptureOwnersRef.current.clear();
+    }, [releasePointer]);
+
+    useEffect(() => releaseAllPointers, [releaseAllPointers]);
 
     useEffect(() => {
       if (!disabled) return;
+      releaseAllPointers();
       setInteraction({ type: 'gesture/end' });
       surfaceRef.current?.blur();
-    }, [disabled, setInteraction]);
+    }, [disabled, releaseAllPointers, setInteraction]);
 
     const beginNodePointer = useCallback(
       (node: CreativeCanvasNode, event: React.PointerEvent<HTMLElement>) => {
@@ -778,7 +813,10 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
             mergeKey: `move:${projectId}:${gestureSequenceRef.current}`,
           },
         });
-        capturePointer(event.pointerId);
+        const placement = event.currentTarget.closest<HTMLElement>(
+          '[data-canvas-node-kind]'
+        );
+        capturePointer(placement ?? event.currentTarget, event.pointerId);
       },
       [applyCommand, capturePointer, projectId, setInteraction, tool]
     );
@@ -812,7 +850,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
             mergeKey: `resize:${projectId}:${node.id}:${gestureSequenceRef.current}`,
           },
         });
-        capturePointer(event.pointerId);
+        capturePointer(event.currentTarget, event.pointerId);
       },
       [applyCommand, capturePointer, projectId, setInteraction, tool]
     );
@@ -841,7 +879,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         // node click.
         applyCommand(canvasCommands.clearSelection());
         setInteraction({ type: 'gesture/start', gesture: started.gesture });
-        capturePointer(event.pointerId);
+        capturePointer(event.currentTarget, event.pointerId);
       },
       [applyCommand, capturePointer, localClientPoint, setInteraction, tool]
     );
@@ -875,7 +913,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
             gesture: { kind: 'select', pointerId: event.pointerId, lastClient: client },
           });
         }
-        capturePointer(event.pointerId);
+        capturePointer(event.currentTarget, event.pointerId);
       },
       [applyCommand, capturePointer, localClientPoint, setInteraction, tool]
     );
@@ -1098,10 +1136,11 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
     const handleCanvasDoubleClick = useCallback(
       (event: React.MouseEvent<HTMLDivElement>) => {
         event.preventDefault();
+        const nodeId = canvasNodeIdFromEventTarget(event.target);
         applyInteractionResolution(
           resolveCanvasDoubleClick(
             stateRef.current,
-            { kind: 'canvas' },
+            nodeId ? { kind: 'node', nodeId } : { kind: 'canvas' },
             localClientPoint(event.clientX, event.clientY),
             stateRef.current.viewport
           )

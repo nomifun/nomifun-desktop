@@ -208,3 +208,15 @@ export function isCanvasKeyboardTarget(target: EventTarget | null): boolean {
     target.closest('input, textarea, select, [contenteditable="true"]') !== null
   );
 }
+
+/** Resolve a delegated Canvas event back to its stable node boundary. */
+export function canvasNodeIdFromEventTarget(
+  target: EventTarget | null
+): string | null {
+  if (!(target instanceof Element)) return null;
+  return (
+    target
+      .closest<HTMLElement>('[data-canvas-node-id]')
+      ?.dataset.canvasNodeId?.trim() || null
+  );
+}
