@@ -674,6 +674,7 @@
       "referenceKindUnsupported": "A connected asset is not a usable image.",
       "referenceLimitExceeded": "The current model supports at most {{max}} reference images; {{count}} are connected.",
       "referenceLimitUnknown": "The current model does not declare a multi-image limit, so {{count}} references cannot be sent safely.",
+      "referenceMentionLabel": "Image{{index}}",
       "referenceNodeMissing": "A referenced node no longer exists.",
       "referenceTextChanged": "A material mention was partially edited. Remove it and choose it again with @.",
       "selectEditModel": "Select an image editing model",

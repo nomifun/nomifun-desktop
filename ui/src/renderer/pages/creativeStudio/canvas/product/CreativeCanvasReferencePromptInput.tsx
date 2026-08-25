@@ -54,6 +54,7 @@ export interface CreativeCanvasReferencePromptLabels {
   alreadyMentioned: string;
   results: (count: number) => string;
   referenceOrdinal: (ordinal: number) => string;
+  referenceMentionLabel: (ordinal: number) => string;
 }
 
 export interface CreativeCanvasReferencePromptInputProps {
@@ -94,6 +95,7 @@ const DEFAULT_LABELS: CreativeCanvasReferencePromptLabels = {
   alreadyMentioned: '已引用',
   results: (count) => `${count} 个可选素材`,
   referenceOrdinal: (ordinal) => `图 ${ordinal}`,
+  referenceMentionLabel: (ordinal) => `图片${ordinal}`,
 };
 
 const nextDefaultMentionId = (): string => {
@@ -129,9 +131,16 @@ const hasValidMentionRange = (
   binding.end <= value.length &&
   value.slice(binding.start, binding.end) === mentionToken(binding);
 
+interface NormalizedCreativeCanvasPromptReference
+  extends CreativeCanvasPromptReferenceOption {
+  mentionLabel: string;
+}
+
 const normalizeReferences = (
-  references: readonly CreativeCanvasPromptReferenceOption[]
-): CreativeCanvasPromptReferenceOption[] => {
+  references: readonly CreativeCanvasPromptReferenceOption[],
+  referenceMentionLabel: (ordinal: number) => string =
+    DEFAULT_LABELS.referenceMentionLabel
+): NormalizedCreativeCanvasPromptReference[] => {
   const seen = new Set<string>();
   return references
     .map((reference, index) => ({ reference, index }))
@@ -142,13 +151,83 @@ const normalizeReferences = (
     .flatMap(({ reference }) => {
       if (seen.has(reference.nodeId)) return [];
       seen.add(reference.nodeId);
+      const label = normalizeReferenceLabel(reference.label, reference.ordinal);
       return [
         {
           ...reference,
-          label: normalizeReferenceLabel(reference.label, reference.ordinal),
+          label,
+          mentionLabel: reference.disabledReason
+            ? label
+            : normalizeReferenceLabel(
+                referenceMentionLabel(reference.ordinal),
+                reference.ordinal
+              ),
         },
       ];
     });
+};
+
+/**
+ * Upgrade durable full-name mentions to compact ordinal aliases without
+ * changing their stable source-node identity. Every valid range is rebuilt in
+ * one pass so shortening an early token cannot stale later UTF-16 offsets.
+ * Malformed external state is returned untouched and remains fail-closed.
+ */
+export const relabelCreativeCanvasPromptMentions = (
+  value: string,
+  mentions: readonly CreativeCanvasPromptMentionBinding[],
+  references: readonly CreativeCanvasPromptReferenceOption[],
+  referenceMentionLabel: (ordinal: number) => string =
+    DEFAULT_LABELS.referenceMentionLabel,
+  maxLength = DEFAULT_MAX_LENGTH
+): CreativeCanvasReferencePromptChange => {
+  if (mentions.length === 0) return { value, mentions: [] };
+
+  const sortedMentions = [...mentions].sort(
+    (left, right) => left.start - right.start || left.end - right.end
+  );
+  for (const [index, binding] of sortedMentions.entries()) {
+    if (!hasValidMentionRange(value, binding)) {
+      return { value, mentions: [...mentions] };
+    }
+    const previous = sortedMentions[index - 1];
+    if (previous && binding.start < previous.end) {
+      return { value, mentions: [...mentions] };
+    }
+  }
+
+  const referencesByNodeId = new Map(
+    normalizeReferences(references, referenceMentionLabel)
+      .filter((reference) => !reference.disabledReason)
+      .map((reference) => [reference.nodeId, reference] as const)
+  );
+  const nextMentions: CreativeCanvasPromptMentionBinding[] = [];
+  let cursor = 0;
+  let nextValue = '';
+  let changed = false;
+
+  for (const binding of sortedMentions) {
+    nextValue += value.slice(cursor, binding.start);
+    const reference = referencesByNodeId.get(binding.sourceNodeId);
+    const fallbackLabel = reference?.mentionLabel ?? binding.fallbackLabel;
+    const token = `@${fallbackLabel}`;
+    const start = nextValue.length;
+    nextValue += token;
+    nextMentions.push({
+      ...binding,
+      fallbackLabel,
+      start,
+      end: start + token.length,
+    });
+    changed ||= fallbackLabel !== binding.fallbackLabel || start !== binding.start;
+    cursor = binding.end;
+  }
+  nextValue += value.slice(cursor);
+
+  if (!changed || nextValue.length > maxLength) {
+    return { value, mentions: [...mentions] };
+  }
+  return { value: nextValue, mentions: nextMentions };
 };
 
 export const findCreativeCanvasMentionTrigger = (
@@ -295,8 +374,8 @@ const CreativeCanvasReferencePromptInput: React.FC<
     [labels]
   );
   const normalizedReferences = useMemo(
-    () => normalizeReferences(references),
-    [references]
+    () => normalizeReferences(references, controlLabels.referenceMentionLabel),
+    [controlLabels.referenceMentionLabel, references]
   );
   const mentionedNodeIds = useMemo(
     () => new Set(mentions.map((binding) => binding.sourceNodeId)),
@@ -306,7 +385,9 @@ const CreativeCanvasReferencePromptInput: React.FC<
     const query = trigger?.query.trim().toLocaleLowerCase() ?? '';
     if (!query) return normalizedReferences;
     return normalizedReferences.filter((reference) =>
-      `${reference.label} ${reference.ordinal} ${controlLabels.referenceOrdinal(reference.ordinal)}`
+      `${reference.mentionLabel} ${reference.label} ${reference.ordinal} ${controlLabels.referenceOrdinal(
+        reference.ordinal
+      )}`
         .toLocaleLowerCase()
         .includes(query)
     );
@@ -412,10 +493,10 @@ const CreativeCanvasReferencePromptInput: React.FC<
   };
 
   const chooseReference = (
-    reference: CreativeCanvasPromptReferenceOption
+    reference: NormalizedCreativeCanvasPromptReference
   ): void => {
     if (!trigger || reference.disabledReason || disabled) return;
-    const token = `@${reference.label}`;
+    const token = `@${reference.mentionLabel}`;
     const suffix = value.slice(trigger.end);
     const trailingSpace = followsTokenWithoutSpace(suffix) ? ' ' : '';
     const replacement = `${token}${trailingSpace}`;
@@ -441,7 +522,7 @@ const CreativeCanvasReferencePromptInput: React.FC<
         ? nextDefaultMentionId()
         : proposedId,
       sourceNodeId: reference.nodeId,
-      fallbackLabel: reference.label,
+      fallbackLabel: reference.mentionLabel,
       start: trigger.start,
       end: trigger.start + token.length,
     });
@@ -754,13 +835,19 @@ const CreativeCanvasReferencePromptInput: React.FC<
                         )}
                       </span>
                       <span className={styles.optionContent}>
-                        <span className={styles.optionTitle}>@{reference.label}</span>
+                        <span className={styles.optionTitle}>
+                          @{reference.mentionLabel}
+                        </span>
                         <span className={styles.optionMeta}>
                           {reference.disabledReason
                             ? reference.disabledReason
                             : mentionedNodeIds.has(reference.nodeId)
-                              ? `${controlLabels.referenceOrdinal(reference.ordinal)} · ${controlLabels.alreadyMentioned}`
-                              : controlLabels.referenceOrdinal(reference.ordinal)}
+                              ? `${reference.label} · ${controlLabels.referenceOrdinal(
+                                  reference.ordinal
+                                )} · ${controlLabels.alreadyMentioned}`
+                              : `${reference.label} · ${controlLabels.referenceOrdinal(
+                                  reference.ordinal
+                                )}`}
                         </span>
                       </span>
                     </button>

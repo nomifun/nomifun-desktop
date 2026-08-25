@@ -386,7 +386,7 @@ function measuredSize(element: HTMLElement | null): CreativeSize {
   };
 }
 
-const normalizeCanvasImageMentionLabel = (
+const normalizeCanvasImageReferenceLabel = (
   value: string,
   ordinal: number
 ): string => {
@@ -400,20 +400,14 @@ const normalizeCanvasImageMentionLabel = (
 };
 
 const canvasImageComposerReferences = (
-  references: readonly CanvasImageReference[],
-  mentions: readonly CreativeImagePromptMention[]
+  references: readonly CanvasImageReference[]
 ): CreativeCanvasImageComposerReference[] => {
-  const previousLabelBySource = new Map<string, string>();
-  for (const mention of mentions) {
-    if (!previousLabelBySource.has(mention.sourceNodeId)) {
-      previousLabelBySource.set(mention.sourceNodeId, mention.fallbackLabel);
-    }
-  }
   const used = new Set<string>();
   return references.map((reference) => {
-    const preferred =
-      previousLabelBySource.get(reference.sourceNodeId) ??
-      normalizeCanvasImageMentionLabel(reference.displayName, reference.ordinal);
+    const preferred = normalizeCanvasImageReferenceLabel(
+      reference.displayName,
+      reference.ordinal
+    );
     let label = preferred;
     let suffix = 2;
     while (used.has(label)) {
@@ -466,7 +460,7 @@ const invalidCanvasImageComposerReferences = (
           ? issue.assetId
           : null;
     const asset = assetId ? assetsById.get(assetId) ?? null : null;
-    const label = normalizeCanvasImageMentionLabel(
+    const label = normalizeCanvasImageReferenceLabel(
       asset?.title ??
         (source?.type === 'image' ? source.data.caption : '') ??
         t('creativeStudio.canvas.image.unavailableReference', {
@@ -505,7 +499,7 @@ const invalidCanvasImageComposerReferences = (
       assetId: targetIssue.assetId,
       connectionId: null,
       base: true,
-      label: normalizeCanvasImageMentionLabel(
+      label: normalizeCanvasImageReferenceLabel(
         asset?.title ?? (target?.type === 'image' ? target.data.caption : ''),
         1
       ),
@@ -5133,12 +5127,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
                     canvasImageGenerationBlockerMessage(
                       generationGate.blockers[0],
                       t
-                    );
+                  );
                   const composerReferences = [
-                    ...canvasImageComposerReferences(
-                      referenceResolution.references,
-                      composeMentions
-                    ),
+                    ...canvasImageComposerReferences(referenceResolution.references),
                     ...(canvasState
                       ? invalidCanvasImageComposerReferences(
                           canvasState,

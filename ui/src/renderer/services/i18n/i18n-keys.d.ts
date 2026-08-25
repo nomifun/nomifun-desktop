@@ -1568,6 +1568,7 @@ export type I18nKey =
   | 'creativeStudio.canvas.image.referenceKindUnsupported'
   | 'creativeStudio.canvas.image.referenceLimitExceeded'
   | 'creativeStudio.canvas.image.referenceLimitUnknown'
+  | 'creativeStudio.canvas.image.referenceMentionLabel'
   | 'creativeStudio.canvas.image.referenceNodeMissing'
   | 'creativeStudio.canvas.image.referenceTextChanged'
   | 'creativeStudio.canvas.image.selectEditModel'
