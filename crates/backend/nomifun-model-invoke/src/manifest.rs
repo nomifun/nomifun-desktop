@@ -496,7 +496,10 @@ const PROTOCOL_SPECS: &[ProtocolSpec] = &[
     ] },
     ProtocolSpec { id: "deepgram.listen", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["deepgram"], connection_role: None, endpoints: &[origin_endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/v1/listen")] },
     ProtocolSpec { id: "deepgram.speak_rest", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["deepgram"], connection_role: None, endpoints: &[origin_endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/v1/speak")] },
-    ProtocolSpec { id: "ark.images", tasks: &[ImageGeneration], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["ark", "volcengine"], connection_role: None, endpoints: &[endpoint(ImageGeneration, "endpoint", Submit, "POST", "/images/generations")] },
+    ProtocolSpec { id: "ark.images", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["ark", "volcengine"], connection_role: None, endpoints: &[
+        endpoint(ImageGeneration, "endpoint", Submit, "POST", "/images/generations"),
+        endpoint(ImageEdit, "endpoint", Submit, "POST", "/images/generations"),
+    ] },
     ProtocolSpec { id: "ark.video_jobs", tasks: &[VideoGeneration], executor: AsyncJob, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["ark", "volcengine"], connection_role: None, endpoints: &[
         endpoint(VideoGeneration, "endpoint", Submit, "POST", "/contents/generations/tasks"),
         endpoint(VideoGeneration, "poll_endpoint", Poll, "GET", "/contents/generations/tasks/{id}"),
@@ -735,7 +738,7 @@ fn provider_params_encoding(
         | ("generic.rerank", Rerank)
         | ("openai.audio_speech", SpeechSynthesis)
         | ("gemini.generate_content", ImageGeneration | ImageEdit)
-        | ("ark.images", ImageGeneration)
+        | ("ark.images", ImageGeneration | ImageEdit)
         | ("ark.video_jobs", VideoGeneration)
         | ("volc.asr_file", SpeechRecognition)
         | ("volc.tts_v3", SpeechSynthesis)
@@ -1898,7 +1901,7 @@ mod tests {
             (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
         });
         assert_eq!(
-            hash, 335_427_579_411_274_270,
+            hash, 15_708_070_195_996_868_304,
             "recommendation URL snapshot changed:\n{snapshot}"
         );
     }

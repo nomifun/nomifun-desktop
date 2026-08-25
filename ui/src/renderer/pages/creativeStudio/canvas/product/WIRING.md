@@ -159,6 +159,9 @@ document controller:
   freeze the exact Provider prompt and asset snapshot used for retry/recovery.
   Protocol-specific input policies block unknown or exceeded multi-image
   requests, and adapters reject rather than truncate unsupported extra images.
+  Ark Seedream uses the same `ark.images` generation endpoint for `image_edit`;
+  ordered references are encoded into its JSON `image` field and are bounded to
+  the same eight-input product ceiling.
   A separate product ceiling limits image-edit inputs to eight and the creation
   engine caps decoded input bytes at 256 MiB, so an open-ended Provider
   transport cannot turn a large Canvas fan-in into unbounded memory use.

@@ -37,7 +37,7 @@ Ark 方舟域(ark.cn-beijing.volces.com,Bearer ARK_API_KEY,与 chat 同凭证):
 
 | 模态 | 路径 | 同/异步 | 响应 |
 |---|---|---|---|
-| 图像 seedream | `POST /api/v3/images/generations` | 同步 | url 或 b64_json,OpenAI 形似(多 `watermark/seed/guidance_scale` 等私有参数) |
+| 图像 seedream | `POST /api/v3/images/generations` | 同步 | url 或 b64_json；同一路径同时承载文生图与图片编辑，参考图通过 `image` 字符串/数组传 URL 或 `data:image/...;base64,...`（产品侧最多 8 张），另有 `watermark/seed/guidance_scale` 等私有参数 |
 | 视频 seedance | `POST /api/v3/contents/generations/tasks` → `GET .../tasks/{id}` | **异步** | task id 在 body;status 词表 `queued/running/succeeded/failed/cancelled`;成品 `content.video_url`(24h);截至 2026-08-23，`resolution`、`ratio`、`duration` 等生成参数使用顶层 JSON 字段 |
 
 语音域(openspeech.bytedance.com,**完全独立的 appid/token/cluster 凭证,在语音技术控制台开通,Ark API key 不可用**):
