@@ -85,21 +85,23 @@ The retired duplicate files `autowork-04-tag-sessions.png` and
 hidden old-image aliases. `cron-03-detail.png` has no current product capture;
 the guide uses text instead of an obsolete visual.
 
+- desktop-companion-window-crop.png | Current desktop companion window captured from the isolated development data root.
+
 ## README and product gallery set
 
 - `readme/en/` and `readme/zh/` contain current workspace, models, companions,
   skills, and Creative Studio captures. The English workspace, models,
   companions, and skills images were recaptured on 2026-08-23 with the current
   short-label sidebar. The Creative Studio images show the
-  canonical Canvas editor with `返回画布库`, four real persisted nodes, and no
+  canonical Canvas editor with `杩斿洖鐢诲竷搴揱, four real persisted nodes, and no
   Project product navigation. The English image is intentionally unedited: its
   focused shell follows English while the Canvas editor body still exposes the
   documented Simplified-Chinese limitation.
 - `getting-started/en/` and `getting-started/zh/` contain current home captures.
 - Portal English home aliases (`current-home-en.png`, `gs-01-introduction-hero.png`,
   and `gs-05-quickstart-guid.png`) are synchronized from the same refreshed
-  product capture, with the Portal's 1296×841 presentation size.
-- The Desktop English home aliases use the same capture at 1280×720 so the
+  product capture, with the Portal's 1296脳841 presentation size.
+- The Desktop English home aliases use the same capture at 1280脳720 so the
   README and getting-started pages render consistently.
 - `desktop-01-main-window.png` shows the current application content. It does
   not claim to document platform-specific native titlebar chrome.
