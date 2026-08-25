@@ -475,6 +475,8 @@ impl CreativeImageNodeData {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreativeImageComposerDraft {
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<CreativeImagePromptMention>,
     pub model: Option<CreativeComposerModel>,
     pub interface_mode: CreativeImageComposerInterfaceMode,
     pub quality: CreativeImageComposerQuality,
@@ -487,6 +489,23 @@ pub struct CreativeImageComposerDraft {
 impl CreativeImageComposerDraft {
     fn validate(&self, path: &str) -> Result<(), String> {
         require_string(&format!("{path}.prompt"), &self.prompt, true, 1_000_000)?;
+        let mut mention_ids = BTreeSet::new();
+        let mut previous_end = 0usize;
+        let mut mentions = self.mentions.iter().enumerate().collect::<Vec<_>>();
+        mentions.sort_by_key(|(_, mention)| (mention.start, mention.end));
+        for (sorted_index, (index, mention)) in mentions.into_iter().enumerate() {
+            mention.validate(&format!("{path}.mentions[{index}]"), &self.prompt)?;
+            if !mention_ids.insert(mention.id.as_str()) {
+                return Err(format!(
+                    "{path}.mentions contains duplicate id {:?}",
+                    mention.id
+                ));
+            }
+            if sorted_index > 0 && mention.start < previous_end {
+                return Err(format!("{path}.mentions[{index}] overlaps another mention"));
+            }
+            previous_end = mention.end;
+        }
         if let Some(model) = &self.model {
             model.validate(&format!("{path}.model"))?;
         }
@@ -509,6 +528,72 @@ impl CreativeImageComposerDraft {
             return Err(format!("{path}.count must be between 1 and 10"));
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreativeImagePromptMention {
+    pub id: String,
+    pub source_node_id: String,
+    pub fallback_label: String,
+    pub start: usize,
+    pub end: usize,
+}
+
+impl CreativeImagePromptMention {
+    fn validate(&self, path: &str, prompt: &str) -> Result<(), String> {
+        require_trimmed_string(&format!("{path}.id"), &self.id, 128)?;
+        require_id(&format!("{path}.sourceNodeId"), &self.source_node_id)?;
+        require_trimmed_string(
+            &format!("{path}.fallbackLabel"),
+            &self.fallback_label,
+            128,
+        )?;
+        if self.fallback_label.starts_with('@') || self.fallback_label.contains(['\r', '\n']) {
+            return Err(format!(
+                "{path}.fallbackLabel must be a single-line label without an @ prefix"
+            ));
+        }
+        let expected = format!("@{}", self.fallback_label);
+        if !utf16_range_matches(prompt, self.start, self.end, &expected) {
+            return Err(format!("{path} range must match the authored @label token"));
+        }
+        Ok(())
+    }
+}
+
+fn utf16_range_matches(value: &str, start: usize, end: usize, expected: &str) -> bool {
+    if end <= start {
+        return false;
+    }
+    let mut utf16_offset = 0usize;
+    let mut start_byte = if start == 0 { Some(0) } else { None };
+    let mut end_byte = if end == 0 { Some(0) } else { None };
+    for (byte_offset, character) in value.char_indices() {
+        if utf16_offset == start {
+            start_byte = Some(byte_offset);
+        }
+        if utf16_offset == end {
+            end_byte = Some(byte_offset);
+            break;
+        }
+        utf16_offset += character.len_utf16();
+        if utf16_offset > start && start_byte.is_none()
+            || utf16_offset > end && end_byte.is_none()
+        {
+            return false;
+        }
+    }
+    if utf16_offset == start {
+        start_byte.get_or_insert(value.len());
+    }
+    if utf16_offset == end {
+        end_byte.get_or_insert(value.len());
+    }
+    match (start_byte, end_byte) {
+        (Some(start_byte), Some(end_byte)) => value.get(start_byte..end_byte) == Some(expected),
+        _ => false,
     }
 }
 
@@ -1761,6 +1846,36 @@ mod tests {
         };
         assert_eq!(old_data.composer, None);
         assert_eq!(serde_json::to_value(old_image).unwrap()["data"]["composer"], Value::Null);
+
+        let mut mentioned = node_value("mentioned-image", "image");
+        mentioned["data"]["composer"]["prompt"] = Value::String("让 @人物图 出镜".into());
+        mentioned["data"]["composer"]["mentions"] = serde_json::json!([{
+            "id": "mention-1",
+            "sourceNodeId": "source-image",
+            "fallbackLabel": "人物图",
+            "start": 2,
+            "end": 6
+        }]);
+        let mentioned: CreativeNode = serde_json::from_value(mentioned).unwrap();
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(mentioned.clone());
+        document.validate_for_project(PROJECT_ID).unwrap();
+        let CreativeNodeData::Image(data) = &mentioned.data else {
+            unreachable!()
+        };
+        assert_eq!(data.composer.as_ref().unwrap().mentions.len(), 1);
+
+        let mut stale = mentioned;
+        let CreativeNodeData::Image(data) = &mut stale.data else {
+            unreachable!()
+        };
+        data.composer.as_mut().unwrap().mentions[0].end = 5;
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(stale);
+        assert!(document
+            .validate_for_project(PROJECT_ID)
+            .unwrap_err()
+            .contains("range must match"));
 
         let mut invalid_count = node("invalid-composer", "image");
         let CreativeNodeData::Image(data) = &mut invalid_count.data else {

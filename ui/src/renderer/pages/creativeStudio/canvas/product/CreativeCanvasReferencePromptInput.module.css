@@ -1,0 +1,254 @@
+.root {
+  position: relative;
+  min-width: 0;
+  color: var(--color-text-1);
+}
+
+.editor {
+  position: relative;
+  min-width: 0;
+}
+
+.input {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 104px;
+  resize: none;
+  padding: 7px 42px 7px 10px;
+  border: 0;
+  border-radius: 12px;
+  outline: none;
+  background: transparent;
+  color: var(--color-text-1);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  scrollbar-color: color-mix(in srgb, var(--color-text-3) 32%, transparent)
+    transparent;
+  scrollbar-width: thin;
+}
+
+.input::placeholder {
+  color: var(--color-text-4);
+}
+
+.input:focus-visible {
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, rgb(var(--primary-6)) 42%, var(--color-border-2));
+}
+
+.root[data-invalid='true'] .input {
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, rgb(var(--danger-6)) 58%, var(--color-border-2));
+}
+
+.input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.mentionButton {
+  appearance: none;
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  display: inline-grid;
+  box-sizing: border-box;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--color-border-2) 82%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-bg-1) 86%, transparent);
+  color: rgb(var(--primary-6));
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.mentionButton:hover:not(:disabled) {
+  border-color: color-mix(in srgb, rgb(var(--primary-6)) 38%, var(--color-border-2));
+  background: color-mix(in srgb, rgb(var(--primary-6)) 9%, var(--color-bg-1));
+}
+
+.mentionButton:focus-visible {
+  outline: 2px solid rgb(var(--primary-6));
+  outline-offset: 2px;
+}
+
+.mentionButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.popup {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 12;
+  box-sizing: border-box;
+  width: min(340px, 100%);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-border-2) 90%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-bg-popup) 96%, transparent);
+  box-shadow: 0 14px 34px color-mix(in srgb, #000 20%, transparent);
+  backdrop-filter: blur(16px);
+}
+
+.popupHeader {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border-2) 72%, transparent);
+  color: var(--color-text-2);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.resultCount {
+  color: var(--color-text-4);
+  font-weight: 400;
+}
+
+.listbox {
+  max-height: 248px;
+  overflow-y: auto;
+  padding: 5px;
+  scrollbar-color: color-mix(in srgb, var(--color-text-3) 32%, transparent)
+    transparent;
+  scrollbar-width: thin;
+}
+
+.option {
+  appearance: none;
+  display: flex;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 48px;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--color-text-1);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.option:hover:not(:disabled),
+.option[data-active='true'] {
+  background: color-mix(in srgb, rgb(var(--primary-6)) 10%, var(--color-fill-2));
+}
+
+.option:focus-visible {
+  outline: 2px solid rgb(var(--primary-6));
+  outline-offset: -2px;
+}
+
+.option[data-unavailable='true'] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.thumbnail {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  overflow: hidden;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--color-border-2) 80%, transparent);
+  border-radius: 8px;
+  background: var(--color-fill-2);
+}
+
+.thumbnail img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.thumbnailFallback {
+  color: var(--color-text-3);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.optionContent {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+
+.optionTitle,
+.optionMeta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.optionTitle {
+  color: var(--color-text-1);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.optionMeta {
+  color: var(--color-text-4);
+  font-size: 10px;
+}
+
+.empty {
+  display: grid;
+  min-height: 68px;
+  place-items: center;
+  padding: 8px;
+  color: var(--color-text-4);
+  font-size: 11px;
+  text-align: center;
+}
+
+.issues {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 5px;
+  padding: 0 8px;
+  color: rgb(var(--danger-6));
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.issue {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.issueToken {
+  font-weight: 600;
+}
+
+@media (max-width: 520px) {
+  .popup {
+    right: auto;
+    left: 0;
+    width: 100%;
+  }
+
+  .option {
+    min-height: 52px;
+  }
+}

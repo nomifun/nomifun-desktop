@@ -7,4 +7,5 @@
 export { default as ImageWorkbench } from './ImageWorkbench';
 export { default as ImageWorkbenchComposer } from './ImageWorkbenchComposer';
 export { default as ImageWorkbenchResults } from './ImageWorkbenchResults';
+export * from './imageReferenceInputPolicy';
 export * from './types';

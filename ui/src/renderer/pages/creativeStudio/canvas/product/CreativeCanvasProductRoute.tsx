@@ -49,6 +49,7 @@ import {
   type CreativeCanvasNode,
   type CreativeCanvasNodeKind,
   type CreativeChatSessionReference,
+  type CreativeImagePromptMention,
   type CreativeSize,
   type CreativeStudioPanelState,
 } from '../../domain';
@@ -60,8 +61,10 @@ import type { PromptLibrarySelection } from '../../prompts';
 import { useCreativeProject } from '../../services';
 import type { CreativeTaskReference } from '../../tasks';
 import {
+  effectiveImageReferenceInputLimit,
   imageWorkbenchSizePolicyForModel,
   imageWorkbenchSelectableSizeOptions,
+  imageReferenceInputPolicy,
   normalizeImageWorkbenchSettingsSize,
   type ImageWorkbenchAspectRatioOption,
   type ImageWorkbenchModelIdentity,
@@ -71,6 +74,7 @@ import {
   exactWorkbenchModelOptions,
   imageWorkbenchModelOptions,
   type CreativeWorkbenchRuntimeSnapshot,
+  type CreativeWorkbenchReferences,
   type PreparedCreativeWorkbenchRun,
 } from '../../workbenches/runtime';
 import type {
@@ -138,7 +142,9 @@ import type { CreativeCanvasAgentOp } from './agent/artifacts';
 import { creativeCanvasAgentOpsPort } from './agent/opsPort';
 import CreativeCanvasConnectionEdge from './CreativeCanvasConnectionEdge';
 import CreativeCanvasAudioComposer from './CreativeCanvasAudioComposer';
-import CreativeCanvasImageComposer from './CreativeCanvasImageComposer';
+import CreativeCanvasImageComposer, {
+  type CreativeCanvasImageComposerReference,
+} from './CreativeCanvasImageComposer';
 import CreativeCanvasVideoComposer from './CreativeCanvasVideoComposer';
 import CreativeCanvasInteractionOverlays, {
   type CreativeCanvasContextMenuState,
@@ -165,6 +171,15 @@ import {
   withCanvasImageComposeDraft,
   type CanvasImageComposeDraft,
 } from './canvasImageComposerCanvas';
+import {
+  canvasImageReferenceAssetIds,
+  compileCanvasImageReferencePrompt,
+  evaluateCanvasImageGenerationGate,
+  resolveCanvasImageReferences,
+  type CanvasImageGenerationBlocker,
+  type CanvasImageReference,
+  type CanvasImageReferenceResolution,
+} from './canvasImageReferences';
 import CanvasImageTaskRuntimeBridge, {
   canvasImageTaskReferenceFromPlan,
   type CanvasImageTaskRuntimeBridgeHandle,
@@ -370,6 +385,218 @@ function measuredSize(element: HTMLElement | null): CreativeSize {
       rect && Number.isFinite(rect.height) && rect.height > 0 ? rect.height : 1,
   };
 }
+
+const normalizeCanvasImageMentionLabel = (
+  value: string,
+  ordinal: number
+): string => {
+  const normalized = value
+    .replaceAll('@', '')
+    .replace(/[\r\n]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, 64);
+  return normalized || `图片${ordinal}`;
+};
+
+const canvasImageComposerReferences = (
+  references: readonly CanvasImageReference[],
+  mentions: readonly CreativeImagePromptMention[]
+): CreativeCanvasImageComposerReference[] => {
+  const previousLabelBySource = new Map<string, string>();
+  for (const mention of mentions) {
+    if (!previousLabelBySource.has(mention.sourceNodeId)) {
+      previousLabelBySource.set(mention.sourceNodeId, mention.fallbackLabel);
+    }
+  }
+  const used = new Set<string>();
+  return references.map((reference) => {
+    const preferred =
+      previousLabelBySource.get(reference.sourceNodeId) ??
+      normalizeCanvasImageMentionLabel(reference.displayName, reference.ordinal);
+    let label = preferred;
+    let suffix = 2;
+    while (used.has(label)) {
+      label = `${preferred} ${suffix}`;
+      suffix += 1;
+    }
+    used.add(label);
+    return {
+      nodeId: reference.sourceNodeId,
+      assetId: reference.assetId,
+      connectionId: reference.connection?.id ?? null,
+      base: reference.connection === null,
+      label,
+      thumbnailUrl: reference.asset.thumbnailUrl ?? reference.asset.originalUrl,
+      ordinal: reference.ordinal,
+    };
+  });
+};
+
+const invalidCanvasImageComposerReferences = (
+  state: CanvasState,
+  targetNodeId: string,
+  resolution: CanvasImageReferenceResolution,
+  assetsById: ReadonlyMap<string, CreativeAsset>,
+  t: TFunction
+): CreativeCanvasImageComposerReference[] => {
+  const validConnectionIds = new Set(
+    resolution.references.flatMap((reference) =>
+      reference.connection ? [reference.connection.id] : []
+    )
+  );
+  const nodesById = new Map(state.document.nodes.map((node) => [node.id, node]));
+  const issueByConnectionId = new Map(
+    resolution.issues.flatMap((issue) =>
+      'connectionId' in issue ? [[issue.connectionId, issue] as const] : []
+    )
+  );
+  const items: CreativeCanvasImageComposerReference[] = [];
+  for (const [index, connection] of state.document.connections
+    .filter((edge) => edge.targetNodeId === targetNodeId)
+    .entries()) {
+    if (validConnectionIds.has(connection.id)) continue;
+    const source = nodesById.get(connection.sourceNodeId);
+    const issue = issueByConnectionId.get(connection.id);
+    if (!issue) continue;
+    const assetId =
+      source && (source.type === 'image' || source.type === 'panorama')
+        ? source.data.assetId
+        : 'assetId' in issue
+          ? issue.assetId
+          : null;
+    const asset = assetId ? assetsById.get(assetId) ?? null : null;
+    const label = normalizeCanvasImageMentionLabel(
+      asset?.title ??
+        (source?.type === 'image' ? source.data.caption : '') ??
+        t('creativeStudio.canvas.image.unavailableReference', {
+          defaultValue: '不可用参考',
+        }),
+      index + 1
+    );
+    items.push({
+      nodeId: source?.id ?? connection.sourceNodeId,
+      assetId,
+      connectionId: connection.id,
+      base: false,
+      label,
+      thumbnailUrl: asset?.thumbnailUrl ?? asset?.originalUrl ?? null,
+      ordinal: 1_000 + index,
+      disabledReason:
+        canvasImageGenerationBlockerMessage(
+          { code: 'reference_resolution_failed', issue },
+          t
+        ) ??
+        t('creativeStudio.canvas.image.unavailableReference', {
+          defaultValue: '不可用参考',
+        }),
+    });
+  }
+  const targetIssue = resolution.issues.find(
+    (issue) =>
+      issue.code === 'target_asset_unresolved' ||
+      issue.code === 'target_asset_kind_unsupported'
+  );
+  if (targetIssue) {
+    const target = nodesById.get(targetNodeId);
+    const asset = assetsById.get(targetIssue.assetId) ?? null;
+    items.unshift({
+      nodeId: targetNodeId,
+      assetId: targetIssue.assetId,
+      connectionId: null,
+      base: true,
+      label: normalizeCanvasImageMentionLabel(
+        asset?.title ?? (target?.type === 'image' ? target.data.caption : ''),
+        1
+      ),
+      thumbnailUrl: asset?.thumbnailUrl ?? asset?.originalUrl ?? null,
+      ordinal: 0,
+      disabledReason:
+        canvasImageGenerationBlockerMessage(
+          { code: 'reference_resolution_failed', issue: targetIssue },
+          t
+        ) ?? undefined,
+    });
+  }
+  return items;
+};
+
+const canvasImageWorkbenchReferences = (
+  resolution: CanvasImageReferenceResolution
+): CreativeWorkbenchReferences => ({
+  assets: resolution.references.map((reference) => reference.asset),
+  bindings: resolution.references.map((reference) => ({
+    assetId: reference.assetId,
+    kind: 'image' as const,
+    role: 'reference' as const,
+  })),
+});
+
+const canvasImageGenerationBlockerMessage = (
+  blocker: CanvasImageGenerationBlocker | undefined,
+  t: TFunction
+): string | null => {
+  if (!blocker) return null;
+  if (blocker.code === 'reference_limit_exceeded') {
+    return t('creativeStudio.canvas.image.referenceLimitExceeded', {
+      count: blocker.referenceCount,
+      max: blocker.maxInputImages,
+      defaultValue: `当前模型最多支持 ${blocker.maxInputImages} 张参考图，已连接 ${blocker.referenceCount} 张。`,
+    });
+  }
+  if (blocker.code === 'reference_limit_unknown') {
+    return t('creativeStudio.canvas.image.referenceLimitUnknown', {
+      count: blocker.referenceCount,
+      defaultValue: `当前模型未声明多图上限，无法安全发送 ${blocker.referenceCount} 张参考图。`,
+    });
+  }
+  if (blocker.code === 'reference_bytes_exceeded') {
+    return t('creativeStudio.canvas.image.referenceBytesExceeded', {
+      total: Math.ceil(blocker.totalBytes / (1024 * 1024)),
+      max: Math.floor(blocker.maxInputBytes / (1024 * 1024)),
+      defaultValue: `参考图合计约 ${Math.ceil(blocker.totalBytes / (1024 * 1024))} MB，超过 ${Math.floor(blocker.maxInputBytes / (1024 * 1024))} MB 安全上限。`,
+    });
+  }
+  if (blocker.code === 'prompt_compilation_failed') {
+    return blocker.issue.code === 'mention_reference_disconnected'
+      ? t('creativeStudio.canvas.image.referenceDisconnected', {
+          defaultValue: 'Prompt 中存在已断开的素材引用，请重新连接或删除该引用。',
+        })
+      : t('creativeStudio.canvas.image.referenceTextChanged', {
+          defaultValue: 'Prompt 中的素材引用已被部分修改，请删除后重新使用 @ 选择。',
+        });
+  }
+  switch (blocker.issue.code) {
+    case 'duplicate_asset':
+      return t('creativeStudio.canvas.image.duplicateReferenceAsset', {
+        defaultValue: '同一图片通过多个节点重复接入，请断开重复连线。',
+      });
+    case 'source_asset_id_missing':
+      return t('creativeStudio.canvas.image.referenceAssetMissing', {
+        defaultValue: '已连接的图片节点还没有可用素材。',
+      });
+    case 'source_asset_unresolved':
+    case 'target_asset_unresolved':
+      return t('creativeStudio.canvas.image.referenceAssetLoading', {
+        defaultValue: '正在载入参考图片，请稍候。',
+      });
+    case 'source_asset_kind_unsupported':
+    case 'target_asset_kind_unsupported':
+      return t('creativeStudio.canvas.image.referenceKindUnsupported', {
+        defaultValue: '已连接素材不是可用图片。',
+      });
+    case 'source_node_missing':
+    case 'target_node_missing':
+      return t('creativeStudio.canvas.image.referenceNodeMissing', {
+        defaultValue: '参考节点已经不存在。',
+      });
+    case 'target_node_kind_unsupported':
+    case 'source_node_kind_unsupported':
+      return t('creativeStudio.canvas.image.referenceKindUnsupported', {
+        defaultValue: '该连接不能作为图片参考。',
+      });
+  }
+};
 
 const centeredNodePosition = (
   kind: CreativeCanvasNodeKind,
@@ -694,6 +921,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [assetSearch, setAssetSearch] = useState('');
+  const [canvasReferenceAssets, setCanvasReferenceAssets] = useState<
+    ReadonlyMap<string, CreativeAsset>
+  >(new Map());
   const [assetKind, setAssetKind] =
     useState<CreativeCanvasAssetKindFilter>('all');
   const [selectedAssetIds, setSelectedAssetIds] = useState<ReadonlySet<string>>(
@@ -868,9 +1098,49 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const knownAssetsById = useMemo(() => {
     const merged = new Map(knownAssetsRef.current);
     for (const asset of assets.assets) merged.set(asset.id, asset);
+    for (const asset of canvasReferenceAssets.values()) merged.set(asset.id, asset);
     knownAssetsRef.current = merged;
     return merged;
-  }, [assets.assets]);
+  }, [assets.assets, canvasReferenceAssets]);
+
+  const selectedCanvasImageReferenceAssetIds = useMemo(() => {
+    if (!canvasState || canvasState.selection.nodeIds.length !== 1) return [];
+    const nodeId = canvasState.selection.nodeIds[0];
+    const node = canvasState.document.nodes.find((candidate) => candidate.id === nodeId);
+    return node?.type === 'image'
+      ? canvasImageReferenceAssetIds(canvasState, node.id)
+      : [];
+  }, [canvasState]);
+  const selectedCanvasImageReferenceAssetKey =
+    selectedCanvasImageReferenceAssetIds.join('\u0000');
+
+  useEffect(() => {
+    if (!projectId || selectedCanvasImageReferenceAssetIds.length === 0) return;
+    const missing = selectedCanvasImageReferenceAssetIds.filter(
+      (assetId) => !knownAssetsById.has(assetId)
+    );
+    if (missing.length === 0) return;
+    let active = true;
+    void Promise.allSettled(missing.map((assetId) => creativeAssetClient.get(assetId))).then(
+      (results) => {
+        if (!active || activeProjectIdRef.current !== projectId) return;
+        const resolved = results.flatMap((result) =>
+          result.status === 'fulfilled' && result.value.kind === 'image'
+            ? [result.value]
+            : []
+        );
+        if (resolved.length === 0) return;
+        setCanvasReferenceAssets((current) => {
+          const next = new Map(current);
+          for (const asset of resolved) next.set(asset.id, asset);
+          return next;
+        });
+      }
+    );
+    return () => {
+      active = false;
+    };
+  }, [knownAssetsById, projectId, selectedCanvasImageReferenceAssetKey]);
 
   useLayoutEffect(() => {
     const host = canvasHostRef.current;
@@ -900,6 +1170,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setAgentOpsReloadRequired(false);
     setAgentOpsApplyBusy(false);
     setNotice(null);
+    setCanvasReferenceAssets(new Map());
     setContextMenu(null);
     setCreateNodeMenu(null);
     setPendingPanoramaChoice(null);
@@ -2628,7 +2899,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
   );
 
   const generateFromCanvasImage = useCallback(
-    async (nodeId: string, prompt: string, settings: ImageWorkbenchSettings) => {
+    async (
+      nodeId: string,
+      prompt: string,
+      mentions: readonly CreativeImagePromptMention[],
+      settings: ImageWorkbenchSettings
+    ) => {
       const editor = editorRef.current;
       const runtime = imageTaskRuntimeRef.current;
       if (!editor || !runtime || imageToolBusyRef.current || imageComposeSubmission) return;
@@ -2678,7 +2954,66 @@ const CreativeCanvasProductRoute: React.FC = () => {
             })
           );
         }
-        const selectedModelOptions = sourceNode.data.assetId
+        const requiredAssetIds = canvasImageReferenceAssetIds(state, nodeId);
+        const resolvedAssets = await Promise.all(
+          requiredAssetIds.map(async (assetId) => {
+            const cached = knownAssetsRef.current.get(assetId);
+            const asset = cached ?? (await creativeAssetClient.get(assetId));
+            if (asset.kind !== 'image') {
+              throw new Error(
+                t('creativeStudio.canvas.image.referenceKindUnsupported', {
+                  defaultValue: '已连接素材不是可用图片。',
+                })
+              );
+            }
+            return asset;
+          })
+        );
+        if (activeProjectIdRef.current !== projectId) {
+          throw new DOMException('Canvas changed', 'AbortError');
+        }
+        const currentState = editor.getState();
+        const currentSource = currentState.document.nodes.find(
+          (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
+            node.id === nodeId && node.type === 'image'
+        );
+        if (!currentSource) {
+          throw new Error(
+            t('creativeStudio.canvas.errors.imageNodeRemovedBeforeTask', {
+              defaultValue: '图片节点已被删除，未创建图片创作任务。',
+            })
+          );
+        }
+        const latestRequiredAssetIds = canvasImageReferenceAssetIds(
+          currentState,
+          nodeId
+        );
+        if (
+          latestRequiredAssetIds.length !== requiredAssetIds.length ||
+          latestRequiredAssetIds.some((assetId, index) => assetId !== requiredAssetIds[index])
+        ) {
+          throw new Error(
+            t('creativeStudio.canvas.errors.imageSourceChangedBeforeTask', {
+              defaultValue: '图片节点或其直接参考已变化，未创建图片创作任务。',
+            })
+          );
+        }
+        const nextKnownAssets = new Map(knownAssetsRef.current);
+        for (const asset of resolvedAssets) nextKnownAssets.set(asset.id, asset);
+        knownAssetsRef.current = nextKnownAssets;
+        setCanvasReferenceAssets((current) => {
+          const next = new Map(current);
+          for (const asset of resolvedAssets) next.set(asset.id, asset);
+          return next;
+        });
+
+        const referenceResolution = resolveCanvasImageReferences(
+          currentState,
+          nodeId,
+          resolvedAssets
+        );
+        const hasReferences = referenceResolution.references.length > 0;
+        const selectedModelOptions = hasReferences
           ? imageMaskModelOptions
           : imageGenerationExactOptions;
         const selectedModel = selectedModelOptions.find(
@@ -2688,7 +3023,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         );
         if (!selectedModel) {
           throw new Error(
-            sourceNode.data.assetId
+            hasReferences
               ? t('creativeStudio.canvas.errors.imageEditModelUnavailable', {
                   defaultValue: '所选图片编辑模型已不可用，未发起生成。',
                 })
@@ -2697,8 +3032,51 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 })
           );
         }
-        const source = withCanvasImageComposeDraft(sourceNode, {
+        const compilation = compileCanvasImageReferencePrompt(
           prompt,
+          mentions.map((mention) => ({
+            sourceNodeId: mention.sourceNodeId,
+            start: mention.start,
+            end: mention.end,
+            tokenText: `@${mention.fallbackLabel}`,
+          })),
+          referenceResolution.references
+        );
+        const inputPolicy = imageReferenceInputPolicy(
+          selectedModel.protocol,
+          hasReferences ? 'image_edit' : 'image_generation'
+        );
+        const effectiveInputLimit = effectiveImageReferenceInputLimit(inputPolicy);
+        const generationGate = evaluateCanvasImageGenerationGate({
+          resolution: referenceResolution,
+          compilation,
+          maxInputImages: effectiveInputLimit,
+        });
+        if (!generationGate.allowed || !compilation.ok) {
+          throw new Error(
+            canvasImageGenerationBlockerMessage(generationGate.blockers[0], t) ??
+              t('creativeStudio.canvas.errors.imageReferenceUnavailable', {
+                defaultValue: '当前参考图无法安全提交。',
+              })
+          );
+        }
+        const sourceAsset = currentSource.data.assetId
+          ? (referenceResolution.references.find(
+              (reference) =>
+                reference.sourceNodeId === currentSource.id &&
+                reference.assetId === currentSource.data.assetId
+            )?.asset ?? null)
+          : null;
+        if (currentSource.data.assetId && !sourceAsset) {
+          throw new Error(
+            t('creativeStudio.canvas.errors.imageSourceChangedBeforeTask', {
+              defaultValue: '原图片节点已被删除或替换，未创建图片创作任务。',
+            })
+          );
+        }
+        const source = withCanvasImageComposeDraft(currentSource, {
+          prompt,
+          mentions: structuredClone([...mentions]),
           settings: {
             ...settings,
             model: {
@@ -2712,36 +3090,17 @@ const CreativeCanvasProductRoute: React.FC = () => {
             mergeKey: `image-composer:${nodeId}`,
           })
         );
-        const sourceAsset = source.data.assetId
-          ? await resolveCanvasImageAsset(source)
-          : null;
-        if (activeProjectIdRef.current !== projectId) {
-          throw new DOMException('Canvas changed', 'AbortError');
-        }
-        const currentState = editor.getState();
-        const currentSource = currentState.document.nodes.find(
-          (node): node is Extract<CreativeCanvasNode, { type: 'image' }> =>
-            node.id === nodeId && node.type === 'image'
-        );
-        if (
-          !currentSource ||
-          currentSource.data.assetId !== (sourceAsset?.id ?? null)
-        ) {
-          throw new Error(
-            t('creativeStudio.canvas.errors.imageSourceChangedBeforeTask', {
-              defaultValue: '原图片节点已被删除或替换，未创建图片创作任务。',
-            })
-          );
-        }
         prepared = prepareCanvasImageCompose({
           projectId,
-          state: currentState,
+          state: editor.getState(),
           viewportSize: measuredSize(canvasHostRef.current),
-          sourceNode: currentSource,
+          sourceNode: source,
           sourceAsset,
+          references: canvasImageWorkbenchReferences(referenceResolution),
           catalog: modelCatalog,
           model: selectedModel,
           prompt,
+          providerPrompt: compilation.providerPrompt,
           settings: {
             interfaceMode: settings.interfaceMode,
             quality: settings.quality,
@@ -2805,7 +3164,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
       imageMaskModelOptions,
       modelCatalog,
       projectId,
-      resolveCanvasImageAsset,
     ]
   );
 
@@ -4697,12 +5055,44 @@ const CreativeCanvasProductRoute: React.FC = () => {
                     ? canvasImageComposeDraftFromState(canvasState, node.id)
                     : {
                         prompt: '',
+                        mentions: [],
                         settings: structuredClone(DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS),
                       };
                   const composeDraft = composeFallback;
-                  const composeModelOptions = node.data.assetId
+                  const composeMentions = composeDraft.mentions ?? [];
+                  const referenceAssetIds = canvasState
+                    ? canvasImageReferenceAssetIds(canvasState, node.id)
+                    : [];
+                  const hasReferenceIntent = referenceAssetIds.length > 0;
+                  const referenceResolution = canvasState
+                    ? resolveCanvasImageReferences(
+                        canvasState,
+                        node.id,
+                        [...knownAssetsById.values()]
+                      )
+                    : {
+                        targetNodeId: node.id,
+                        inboundConnectionCount: 0,
+                        references: [],
+                        issues: [],
+                      };
+                  const baseComposeModelOptions = hasReferenceIntent
                     ? imageComposeModelOptions
                     : imageGenerationModelOptions;
+                  const composeModelOptions = baseComposeModelOptions.map((option) => {
+                    const policy = imageReferenceInputPolicy(
+                      option.protocol,
+                      hasReferenceIntent ? 'image_edit' : 'image_generation'
+                    );
+                    const effectiveLimit = effectiveImageReferenceInputLimit(policy);
+                    const referenceCount = referenceAssetIds.length;
+                    const incompatible =
+                      (effectiveLimit !== null && referenceCount > effectiveLimit) ||
+                      (policy.kind === 'unknown' && referenceCount > 1);
+                    return incompatible || option.disabled
+                      ? { ...option, disabled: true }
+                      : option;
+                  });
                   const selectedModel = composeDraft.settings.model;
                   const exactModel = selectedModel
                     ? composeModelOptions.find(
@@ -4711,10 +5101,57 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           option.model === selectedModel.model
                       )
                     : null;
-                  const onlyModel = composeModelOptions.length === 1
-                    ? composeModelOptions[0]
+                  const enabledComposeModelOptions = composeModelOptions.filter(
+                    (option) => !option.disabled
+                  );
+                  const onlyModel = enabledComposeModelOptions.length === 1
+                    ? enabledComposeModelOptions[0]
                     : null;
                   const resolvedModel = exactModel ?? onlyModel;
+                  const referencePolicy = imageReferenceInputPolicy(
+                    resolvedModel?.protocol,
+                    hasReferenceIntent ? 'image_edit' : 'image_generation'
+                  );
+                  const effectiveReferenceLimit =
+                    effectiveImageReferenceInputLimit(referencePolicy);
+                  const promptCompilation = compileCanvasImageReferencePrompt(
+                    composeDraft.prompt,
+                    composeMentions.map((mention) => ({
+                      sourceNodeId: mention.sourceNodeId,
+                      start: mention.start,
+                      end: mention.end,
+                      tokenText: `@${mention.fallbackLabel}`,
+                    })),
+                    referenceResolution.references
+                  );
+                  const generationGate = evaluateCanvasImageGenerationGate({
+                    resolution: referenceResolution,
+                    compilation: promptCompilation,
+                    maxInputImages: effectiveReferenceLimit,
+                  });
+                  const generationBlockerMessage =
+                    canvasImageGenerationBlockerMessage(
+                      generationGate.blockers[0],
+                      t
+                    );
+                  const composerReferences = [
+                    ...canvasImageComposerReferences(
+                      referenceResolution.references,
+                      composeMentions
+                    ),
+                    ...(canvasState
+                      ? invalidCanvasImageComposerReferences(
+                          canvasState,
+                          node.id,
+                          referenceResolution,
+                          knownAssetsById,
+                          t
+                        )
+                      : []),
+                  ].sort((left, right) => left.ordinal - right.ordinal);
+                  const referenceCapacityLabel = effectiveReferenceLimit !== null
+                    ? `${referenceResolution.references.length}/${effectiveReferenceLimit}`
+                    : `${referenceResolution.references.length}`;
                   const composeSizePolicy = imageWorkbenchSizePolicyForModel(resolvedModel);
                   const composeSizeOptions = imageWorkbenchSelectableSizeOptions(
                     composeSizePolicy.options
@@ -4772,8 +5209,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
                       {singleSelected ? (
                         <CreativeCanvasImageComposer
                           nodeId={node.id}
-                          hasImageContent={Boolean(node.data.assetId)}
+                          hasImageContent={hasReferenceIntent}
                           initialPrompt={composeDraft.prompt}
+                          initialMentions={composeMentions}
+                          references={composerReferences}
+                          referenceCapacityLabel={referenceCapacityLabel}
                           settings={composeSettings}
                           aspectRatioOptions={composeSizeOptions}
                           maxCount={composeSizePolicy.maxCount}
@@ -4791,17 +5231,28 @@ const CreativeCanvasProductRoute: React.FC = () => {
                               composeConfig?.data.status !== 'queued' &&
                               composeConfig?.data.status !== 'running')
                           }
+                          generateBlocked={!generationGate.allowed}
                           error={
                             imageComposeIssue?.nodeId === node.id
                               ? imageComposeIssue.message
-                              : null
+                              : generationBlockerMessage
                           }
                           retrySubmission={retrySubmission}
-                          onPromptChange={(prompt) =>
+                          onPromptChange={(change) =>
                             updateImageComposeDraft(
                               node.id,
-                              (current) => ({ ...current, prompt })
+                              (current) => ({
+                                ...current,
+                                prompt: change.value,
+                                mentions: structuredClone(change.mentions),
+                              })
                             )
+                          }
+                          onReferenceActivate={(sourceNodeId) =>
+                            dispatch(canvasCommands.setSelection([sourceNodeId]))
+                          }
+                          onReferenceDisconnect={(connectionId) =>
+                            dispatch(canvasCommands.deleteEdges([connectionId]))
                           }
                           onOpenPromptLibrary={() =>
                             openPromptLibrary()
@@ -4868,8 +5319,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
                               })
                             )
                           }
-                          onGenerate={(prompt) =>
-                            void generateFromCanvasImage(node.id, prompt, composeSettings)
+                          onGenerate={(prompt, mentions) =>
+                            void generateFromCanvasImage(
+                              node.id,
+                              prompt,
+                              mentions,
+                              composeSettings
+                            )
                           }
                           onRetrySubmission={() =>
                             void retryCanvasImageComposeSubmission(node.id)

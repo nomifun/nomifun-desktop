@@ -37,6 +37,7 @@ const MEDIA_TIMEOUT: Duration = Duration::from_secs(180);
 const TTS_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const STT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const POLL_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_IMAGE_EDIT_INPUTS: usize = 3;
 
 const IMAGES_ADAPTER_ID: &str = "xai.images_json";
 const VIDEO_ADAPTER_ID: &str = "xai.video_jobs";
@@ -196,6 +197,15 @@ fn image_edit_body(call: &ResolvedCall, req: &ImageEditRequest) -> Result<Value,
         return Err(InvokeError::new(
             InvokeErrorKind::InvalidParams,
             "xAI images/edits requires at least one input image",
+        ));
+    }
+    if req.inputs.len() > MAX_IMAGE_EDIT_INPUTS {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            format!(
+                "xAI images/edits supports at most {MAX_IMAGE_EDIT_INPUTS} input images, got {}",
+                req.inputs.len()
+            ),
         ));
     }
 
@@ -816,12 +826,16 @@ mod tests {
     }
 
     #[test]
-    fn image_edit_uses_images_for_multiple_inputs_and_rejects_mask() {
+    fn image_edit_uses_images_for_multiple_inputs_and_rejects_unsupported_inputs() {
         let request = ImageEditRequest {
             prompt: "merge".into(),
             count: 1,
             size: None,
-            inputs: vec![input("image", "image/png", b"a"), input("image", "image/jpeg", b"b")],
+            inputs: vec![
+                input("image", "image/png", b"a"),
+                input("image", "image/jpeg", b"b"),
+                input("image", "image/webp", b"c"),
+            ],
             extra: json!({}),
         };
         let multi_call = image_edit_call(
@@ -830,8 +844,26 @@ mod tests {
             TaskRequest::ImageEdit(request.clone()),
         );
         let body = image_edit_body(&multi_call, &request).unwrap();
-        assert_eq!(body["images"].as_array().unwrap().len(), 2);
+        assert_eq!(body["images"].as_array().unwrap().len(), MAX_IMAGE_EDIT_INPUTS);
         assert!(body.get("image").is_none());
+
+        let excessive = ImageEditRequest {
+            inputs: vec![
+                input("image", "image/png", b"a"),
+                input("image", "image/jpeg", b"b"),
+                input("image", "image/webp", b"c"),
+                input("image", "image/png", b"d"),
+            ],
+            ..request.clone()
+        };
+        let excessive_call = image_edit_call(
+            "https://api.x.ai/v1",
+            "grok-imagine-image-quality",
+            TaskRequest::ImageEdit(excessive.clone()),
+        );
+        let error = image_edit_body(&excessive_call, &excessive).unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+        assert!(error.message.contains("at most 3 input images"));
 
         let masked = ImageEditRequest {
             inputs: vec![input("image", "image/png", b"a"), input("mask", "image/png", b"m")],

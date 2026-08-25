@@ -8,6 +8,7 @@ import type { CreativeAsset } from '../../assets';
 import type {
   CreativeCanvasConnection,
   CreativeCanvasNode,
+  CreativeImagePromptMention,
   CreativeProjectDocument,
   CreativeSize,
 } from '../../domain';
@@ -30,6 +31,7 @@ import type {
 import {
   prepareImageWorkbenchRun,
   workbenchResumeRequestsFromDocument,
+  type CreativeWorkbenchReferences,
   type CreativeWorkbenchResumeRequest,
   type PreparedCreativeWorkbenchRun,
 } from '../../workbenches/runtime';
@@ -48,6 +50,7 @@ type ConfigNode = Extract<CreativeCanvasNode, { type: 'config' }>;
 
 export interface CanvasImageComposeDraft {
   prompt: string;
+  mentions?: CreativeImagePromptMention[];
   settings: ImageWorkbenchSettings;
 }
 
@@ -114,6 +117,7 @@ export function canvasImageComposeDraftFromState(
   if (persisted) {
     return {
       prompt: persisted.prompt,
+      mentions: structuredClone(persisted.mentions ?? []),
       settings: {
         model: persisted.model ? { ...persisted.model } : null,
         interfaceMode: persisted.interfaceMode,
@@ -128,6 +132,7 @@ export function canvasImageComposeDraftFromState(
   const config = latestCanvasImageComposeConfig(state.document, nodeId);
   return {
     prompt: config?.data.prompt ?? '',
+    mentions: [],
     settings: config
       ? canvasImageComposeSettings(config)
       : structuredClone(DEFAULT_CANVAS_IMAGE_COMPOSE_SETTINGS),
@@ -145,6 +150,7 @@ export function withCanvasImageComposeDraft(
       ...node.data,
       composer: {
         prompt: draft.prompt,
+        mentions: structuredClone(draft.mentions ?? []),
         model: draft.settings.model ? { ...draft.settings.model } : null,
         interfaceMode: draft.settings.interfaceMode,
         quality: draft.settings.quality,
@@ -256,9 +262,13 @@ export function prepareCanvasImageCompose(input: {
   viewportSize: CreativeSize;
   sourceNode: ImageNode;
   sourceAsset: CreativeAsset | null;
+  references?: CreativeWorkbenchReferences;
   catalog: CreativeModelCatalogSnapshot;
   model: CreativeModelSelectionRef;
+  /** User-authored text retained for the Canvas and history UI. */
   prompt: string;
+  /** Exact mention-resolved text sent to the selected Provider. */
+  providerPrompt?: string;
   settings: Omit<ImageWorkbenchSettings, 'model'>;
 }): PreparedCanvasImageCompose {
   const sourceAssetId = input.sourceNode.data.assetId;
@@ -271,6 +281,30 @@ export function prepareCanvasImageCompose(input: {
       creativeStudioProductText(
         'creativeStudio.canvas.errors.image.sourceAssetMismatch',
         '图片创作源节点与真实图片素材不一致。'
+      )
+    );
+  }
+  const references: CreativeWorkbenchReferences = input.references ??
+    (input.sourceAsset
+      ? {
+          assets: [input.sourceAsset],
+          bindings: [
+            {
+              assetId: input.sourceAsset.id,
+              kind: 'image',
+              role: 'reference',
+            },
+          ],
+        }
+      : { assets: [], bindings: [] });
+  if (
+    sourceAssetId !== null &&
+    references.bindings[0]?.assetId !== sourceAssetId
+  ) {
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.image.baseReferenceOrderMismatch',
+        '当前图片必须作为第一张参考图发送。'
       )
     );
   }
@@ -291,22 +325,11 @@ export function prepareCanvasImageCompose(input: {
     canvasId: input.projectId,
     nodeId: base.id,
     model: input.model,
-    references: input.sourceAsset
-      ? {
-          assets: [input.sourceAsset],
-          bindings: [
-            {
-              assetId: input.sourceAsset.id,
-              kind: 'image',
-              role: 'reference',
-            },
-          ],
-        }
-      : { assets: [], bindings: [] },
-    operation: input.sourceAsset
+    references,
+    operation: references.bindings.length > 0
       ? { task: 'image_edit', capability: 'i2i' }
       : { task: 'image_generation', capability: 't2i' },
-    prompt: input.prompt,
+    prompt: input.providerPrompt ?? input.prompt,
     interfaceMode: input.settings.interfaceMode,
     quality: input.settings.quality,
     width: input.settings.width,
@@ -322,14 +345,14 @@ export function prepareCanvasImageCompose(input: {
       capability: plan.input.capability,
       providerId: plan.model.providerId,
       model: plan.model.model,
-      prompt: input.prompt.trim(),
+      prompt: input.prompt,
       operation: {
         kind: CREATIVE_IMAGE_COMPOSE_OPERATION,
         sourceNodeId: input.sourceNode.id,
         sourceAssetId: input.sourceAsset?.id ?? null,
       },
       parameters: structuredClone(plan.input.parameters),
-      inputAssetIds: input.sourceAsset ? [input.sourceAsset.id] : [],
+      inputAssetIds: references.bindings.map((binding) => binding.assetId),
       taskId: plan.input.idempotencyKey,
       resultAssetIds: [],
       status: 'queued',
@@ -436,6 +459,23 @@ export function reconcileCanvasImageComposeConfig(
   node: ConfigNode,
   task: CreativeTask
 ): ConfigNode {
+  if (
+    task.inputs !== null &&
+    (task.inputs.length !== node.data.inputAssetIds.length ||
+      task.inputs.some(
+        (input, index) =>
+          input.assetId !== node.data.inputAssetIds[index] ||
+          input.kind !== 'image' ||
+          input.role !== 'reference'
+      ))
+  ) {
+    throw new Error(
+      creativeStudioProductText(
+        'creativeStudio.canvas.errors.image.inputSnapshotMismatch',
+        '图片任务输入与画布配置快照不一致，已停止恢复。'
+      )
+    );
+  }
   const terminal =
     task.status === 'succeeded' ||
     task.status === 'failed' ||

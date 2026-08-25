@@ -332,10 +332,90 @@ const parseImageComposerDraft = (
       'aspectRatio',
       'count',
     ],
-    [],
+    ['mentions'],
     path,
     code
   );
+  const prompt = asString(record.prompt, `${path}.prompt`, code, {
+    allowEmpty: true,
+    maxLength: 1_000_000,
+  });
+  const mentions =
+    record.mentions === undefined
+      ? []
+      : asArray(
+          record.mentions,
+          `${path}.mentions`,
+          code,
+          (entry, indexPath) => {
+            const mention = asRecord(entry, indexPath, code);
+            exactKeys(
+              mention,
+              ['id', 'sourceNodeId', 'fallbackLabel', 'start', 'end'],
+              [],
+              indexPath,
+              code
+            );
+            const fallbackLabel = asString(
+              mention.fallbackLabel,
+              `${indexPath}.fallbackLabel`,
+              code,
+              {
+              maxLength: 128,
+              }
+            );
+            if (
+              fallbackLabel !== fallbackLabel.trim() ||
+              fallbackLabel.startsWith('@') ||
+              /[\r\n]/u.test(fallbackLabel)
+            ) {
+              fail(
+                code,
+                `${indexPath}.fallbackLabel`,
+                'trimmed single-line label without @ prefix'
+              );
+            }
+            const start = asNumber(mention.start, `${indexPath}.start`, code, {
+              min: 0,
+              max: 1_000_000,
+              integer: true,
+            });
+            const end = asNumber(mention.end, `${indexPath}.end`, code, {
+              min: start + 1,
+              max: 1_000_000,
+              integer: true,
+            });
+            return {
+              id: asString(mention.id, `${indexPath}.id`, code, { maxLength: 128 }),
+              sourceNodeId: asId(
+                mention.sourceNodeId,
+                `${indexPath}.sourceNodeId`,
+                code
+              ),
+              fallbackLabel,
+              start,
+              end,
+            };
+          }
+        );
+  assertUnique(
+    mentions.map((mention) => mention.id),
+    `${path}.mentions[].id`,
+    code
+  );
+  const sortedMentions = [...mentions].sort(
+    (left, right) => left.start - right.start || left.end - right.end
+  );
+  for (const [index, mention] of sortedMentions.entries()) {
+    const token = `@${mention.fallbackLabel}`;
+    if (mention.end > prompt.length || prompt.slice(mention.start, mention.end) !== token) {
+      fail(code, `${path}.mentions[${index}]`, 'range matching the authored @label token');
+    }
+    const previous = sortedMentions[index - 1];
+    if (previous && mention.start < previous.end) {
+      fail(code, `${path}.mentions[${index}].start`, 'range not overlapping another mention');
+    }
+  }
   const model = parseComposerModel(record.model, `${path}.model`);
   const nullableDimension = (entry: unknown, entryPath: string): number | null =>
     entry === null
@@ -360,10 +440,8 @@ const parseImageComposerDraft = (
     fail(code, `${path}.aspectRatio`, 'trimmed non-empty aspect ratio');
   }
   return {
-    prompt: asString(record.prompt, `${path}.prompt`, code, {
-      allowEmpty: true,
-      maxLength: 1_000_000,
-    }),
+    prompt,
+    ...(record.mentions === undefined ? {} : { mentions }),
     model,
     interfaceMode: asLiteral(
       record.interfaceMode,

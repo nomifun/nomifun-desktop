@@ -240,6 +240,20 @@ export function materializeCanvasPaste(
   const nodes = clipboard.nodes.map((node): CanvasNode => {
     const clone = cloneCanvasNode(node);
     const nextGroupId = clone.type === 'group' || !clone.groupId ? null : (idMap.get(clone.groupId) ?? null);
+    const nextData =
+      clone.type === 'image' && clone.data.composer?.mentions
+        ? {
+            ...clone.data,
+            composer: {
+              ...clone.data.composer,
+              mentions: clone.data.composer.mentions.map((mention) => ({
+                ...mention,
+                sourceNodeId:
+                  idMap.get(mention.sourceNodeId) ?? mention.sourceNodeId,
+              })),
+            },
+          }
+        : clone.data;
     return {
       ...clone,
       id: idMap.get(node.id) as string,
@@ -248,6 +262,7 @@ export function materializeCanvasPaste(
         y: clone.position.y + offset.y,
       },
       groupId: nextGroupId,
+      data: nextData,
     } as CanvasNode;
   });
   const connections = clipboard.connections.flatMap((edge) => {
