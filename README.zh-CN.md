@@ -143,6 +143,11 @@ Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Inf
   <br/><sub><b>统一工作台 · 会话、Agent、任务、工具与连接设备集中管理</b></sub>
 </p>
 
+<p>
+  <img src="docs/images/readme/zh/creative-workshop.png" alt="NomiFun 创意工坊画布编辑器" width="100%">
+  <br/><sub><b>创意工坊 · 持久化 Canvas、独立媒体工作台、可复用提示词与素材、模板和受限 Director</b></sub>
+</p>
+
 <table>
   <tr>
     <td width="50%"><img src="docs/images/readme/zh/models.png" alt="NomiFun 多模型管理"><br/><sub><b>多模型管理 · 按任务路由与免费模型</b></sub></td>
@@ -150,7 +155,7 @@ Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Inf
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/readme/zh/skills.png" alt="当前 NomiFun Skill 中心"><br/><sub><b>Skill 中心 · 可复用、受治理的 Agent 能力</b></sub></td>
-    <td width="50%"><img src="docs/images/readme/zh/creative-workshop.png" alt="NomiFun 创意工坊"><br/><sub><b>创意工坊 · 无限画布、工作台、提示词、素材与模板</b></sub></td>
+    <td width="50%"><sub><b>更多创意工坊截图见下方</b><br/>编号画廊覆盖当前 Canvas、工作台、素材库、模板、Assistant、技能、Director 与伙伴协同流程。</sub></td>
   </tr>
 </table>
 
@@ -160,37 +165,49 @@ Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Inf
 
 ---
 
-## 🎨 创意工坊截图
+## 🎨 创意工坊 —— 亮点新创作面
 
-下面的截图来自当前 Desktop 构建，覆盖从画布入口到独立工作台、素材复用、模板
-与 Director 的完整创作路径，而不是只有一张宣传图。
+创意工坊是 NomiFun Desktop 中新加入的专注创作面，不是一张宣传图。
+下面的编号画廊按真实产品入口展开：持久化 Canvas、独立图像与视频工作台、
+Prompt Center、My Assets、私有模板与 AI Create、多图系列、Director、
+Canvas Assistant、明确选择的 Creative Studio 技能，以及可选的原生桌面伙伴。
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/01-canvas-library.png" alt="创意工坊无限画布库"><br/><sub><b>无限画布库</b> · 新建、重命名、导入、导出与恢复持久化 Canvas</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/02-canvas-editor-rich.png" alt="创意工坊丰富画布编辑器"><br/><sub><b>画布编辑器</b> · 素材库、媒体节点、Director 时间线与 Canvas Assistant</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/01-canvas-library.png" alt="创意工坊无限画布库"><br/><sub><b>Canvas 库</b> · 新建、打开、管理、导入、导出持久化 Canvas</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/02-canvas-editor-rich.png" alt="创意工坊丰富画布编辑器"><br/><sub><b>Canvas 编辑器</b> · 无限文档、媒体节点、素材库、Director 面板与 Assistant</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/03-image-workbench.png" alt="创意工坊图像工作台"><br/><sub><b>图像工作台</b> · 独立 T2I/I2I、真实参考图与任务结果</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/04-video-workbench.png" alt="创意工坊视频工作台"><br/><sub><b>视频工作台</b> · 独立 T2V/I2V、时长、画幅与历史记录</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/03-image-workbench.png" alt="创意工坊图像工作台"><br/><sub><b>图像工作台</b> · 独立 T2I/I2I、精确图像任务与真实素材参考</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/04-video-workbench.png" alt="创意工坊视频工作台"><br/><sub><b>视频工作台</b> · 独立 T2V/单图 I2V、时长、画幅与历史记录</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/05-prompt-center.png" alt="创意工坊提示词库"><br/><sub><b>Prompt Center</b> · 可搜索、带来源归属的提示词集合、分类与标签</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/06-asset-library.png" alt="创意工坊我的素材"><br/><sub><b>我的素材</b> · 文字、图片、视频、音频的筛选、集合、标签与元数据</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/05-prompt-center.png" alt="创意工坊 Prompt Center"><br/><sub><b>Prompt Center</b> · 可搜索、带来源归属的提示词目录，支持分类、标签、复制与保存到素材</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/06-asset-library.png" alt="创意工坊我的素材"><br/><sub><b>My Assets</b> · 可复用文字、图片、视频、音频，支持筛选、集合、标签与选择器</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/07-template-studio.png" alt="创意工坊模板工作台"><br/><sub><b>Template Studio</b> · 私有提示词、变量、模型绑定与输出计划模板</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/08-template-editor.png" alt="创意工坊模板编辑器"><br/><sub><b>模板编辑器</b> · 审阅 AI Create 草稿，并在显式保存后复用</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/07-template-studio.png" alt="创意工坊 Template Studio"><br/><sub><b>Template Studio</b> · 私有单图与多图系列模板、变量和精确模型设置</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/08-template-editor.png" alt="创意工坊 AI Create 模板编辑器"><br/><sub><b>AI Create + 模板编辑器</b> · 审阅一份受限草稿，编辑后显式保存再复用</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/09-director-timeline.png" alt="创意工坊 Director 时间线"><br/><sub><b>Director</b> · 受边界约束的 3D 场景、镜头、时间线、关键帧、捕获与 Canvas 引用</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/companion.png" alt="当前工作台旁显示的 NomiFun 桌面伙伴"><br/><sub><b>桌面伙伴</b> · 创作时可让实时桌面伙伴保持显示</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/09-director-timeline.png" alt="创意工坊 Director 时间线"><br/><sub><b>Director 时间线</b> · 绑定 Canvas 的受限 3D 场景、镜头、关键帧、捕获与引用</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/10-director-stage.png" alt="创意工坊 Director 3D 舞台"><br/><sub><b>Director 舞台</b> · 绑定到 Canvas 的 3D 场景与机位视图</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/11-companion-settings.png" alt="NomiFun 桌面伙伴工作区"><br/><sub><b>伙伴工作区</b> · 伙伴形象、人格、模型、记忆、Skills 与“显示在桌面”控制</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/zh-CN/12-companion-workspace.png" alt="创作时显示的 NomiFun 桌面伙伴"><br/><sub><b>桌面伙伴协同</b> · 原生伙伴窗口可以在创作时保持可用</sub></td>
   </tr>
 </table>
 
-所有图片均为仓库内文件，采集于 **2026 年 8 月 25 日**的当前 0.7.2 Desktop，使用
-隔离数据目录生成。完整来源与采集说明见
+编号路径是 Creative Studio 画廊的稳定 README 约定：`01`–`12`。Canvas 编辑器截图
+同时展示 Canvas Assistant 与明确选择的 Creative Studio 技能；上方 Skills Hub
+截图展示这些技能作为可复用能力包。所有截图都应来自正在运行的产品，不应是
+mockup 或凭空扩展的能力。完整来源与采集说明见
 [`docs/images/SCREENSHOTS.md`](docs/images/SCREENSHOTS.md)。
+
+面向用户的教程、首次使用与排障请使用
+[NomiFun Portal 创意工坊指南](https://www.nomifun.com/zh/docs/guides/creative-workshop/)；
+下方本地链接保留 Desktop 技术契约。
 
 ---
 
@@ -203,7 +220,7 @@ NomiFun Desktop 已经从 Agent 聊天客户端发展为本地优先、可扩展
 |---|---|
 | **多 Agent 执行集群** | 按依赖规划任务，委派给专用 Agent，并行调度执行，同时提供实时状态、真实会话、审批、重试与恢复。 |
 | **Agent 小程序** | 把普通 Agent 会话变成可预览、可发布的本地 Web 工具，同时保留可编辑工作副本与稳定的发布快照。 |
-| **创意工坊** | 提供持久化无限 Canvas、独立 Image/Video Workbench、提示词与素材库、集合/标签/搜索、exact 模型媒体任务、私有模板与受限 3D 导演台。 |
+| **创意工坊** | 提供持久化 Canvas、独立 Image/Video Workbench、Prompt Center、My Assets、私有模板、AI Create、多图系列、Canvas Assistant、Creative Studio 技能、受限 Director，以及可选的桌面伙伴协同。 |
 | **按任务路由的多模型控制面** | 将 provider 凭据与模型记录分开管理，支持原生与兼容/自定义 endpoint（含本地、自托管服务），并为聊天、实时、语音、视觉、媒体生成、Embedding 与 Rerank 提供任务级路由和故障切换。 |
 | **NomiFun 免费模型** | 内置托管供应商，无需先手动新建供应商，即可启用、刷新目录、健康检查并开箱使用。 |
 | **手机、机器人与开放接入** | Mobile 直连 Desktop，小智机器人绑定伙伴，并通过 WebUI、REST、MCP、IM 渠道和 NomiRelay 安全开放能力。 |

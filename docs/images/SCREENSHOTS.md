@@ -6,8 +6,10 @@ from the 0.7.2 codebase with an isolated data root.
 
 The Creative Studio set covers Canvas Library, the rich Canvas editor, Image
 Workbench, Video Workbench, Prompt Center, My Assets, Template Studio, Template
-Editor, Director, and a visible native desktop companion. These are current
-running-app captures, not legacy mockups. Do not restore retired screenshots.
+Editor, the Director timeline and stage, and a visible native desktop
+companion. These are current running-app captures, not legacy mockups. Do not
+restore retired screenshots or introduce temporary aliases into the numbered
+gallery.
 
 ## Ownership and storage
 
@@ -36,19 +38,32 @@ under `creative-studio/zh-CN/`. Both locale sets use the same route order:
 | File | Route / subject |
 | --- | --- |
 | `01-canvas-library.png` | `#/workshop/canvases` · Canvas Library |
-| `02-canvas-editor-rich.png` | `#/workshop/canvas/:canvasId` · rich Canvas editor, assets, Assistant, and Director panel |
+| `02-canvas-editor-rich.png` | `#/workshop/canvas/:canvasId` · rich Canvas editor, assets, Canvas Assistant, and Director panel |
 | `03-image-workbench.png` | `#/workshop/image` · standalone T2I/I2I workbench |
 | `04-video-workbench.png` | `#/workshop/video` · standalone T2V/I2V workbench |
 | `05-prompt-center.png` | `#/workshop/prompts` · searchable Prompt Center |
 | `06-asset-library.png` | `#/workshop/assets` · My Assets and reusable inputs |
-| `07-template-studio.png` | `#/workshop/templates` · Template Studio |
-| `08-template-editor.png` | Template Editor and AI Create review flow |
-| `09-director-timeline.png` | Director timeline, cameras, keyframes, and capture |
-| `companion.png` | Current workspace with the real transparent companion window visible |
+| `07-template-studio.png` | `#/workshop/templates` · private Template Studio, including multi-image series setup |
+| `08-template-editor.png` | Template Editor and bounded AI Create review flow |
+| `09-director-timeline.png` | Canvas-bound Director timeline, cameras, keyframes, and capture |
+| `10-director-stage.png` | Canvas-bound Director 3D stage and camera view |
+| `11-companion-settings.png` | Companion workspace with figure, persona, model, memory, Skills, and desktop visibility control |
+| `12-companion-workspace.png` | Companion surface kept visible beside the creative workspace |
 
-The Creative Studio captures use a 1440×900 viewport. The companion image was
-captured from the native transparent Tauri window and composited over the
-current workspace; the companion itself was not replaced with a web mockup.
+The Creative Studio captures use a 1440×900 viewport. The companion images were
+captured from the running companion-enabled product surface and the native
+transparent companion window. The numbered
+`11-companion-settings.png` and `12-companion-workspace.png` captures are the
+gallery references. Neither is a
+management-page thumbnail substituted for the native companion experience.
+
+The Canvas Editor capture visibly includes the Canvas Assistant and its
+explicit Creative Studio skill choices. The companion settings capture shows
+the desktop-visibility toggle, while the companion workspace capture shows the
+companion surface alongside the product. The separate top-level
+`readme/en/skills.png` and `readme/zh/skills.png` captures document the
+reusable Skills Hub packages; there is no numbered `11-creative-skills.png`
+gallery asset.
 
 ## Capture recipe
 
@@ -62,7 +77,9 @@ current workspace; the companion itself was not replaced with a web mockup.
 4. For a desktop companion, confirm
    `appearance.companion_enabled=true`, find the native
    `companion-<companion_id>` window, and capture its own transparent window
-   rectangle. Do not use a management-page thumbnail as a substitute.
+   rectangle. For the numbered gallery, also capture the companion workspace
+   state at `12-companion-workspace.png`. Do not use a management-page
+   thumbnail as a substitute.
 5. Verify every expected PNG is non-empty, resolve every Markdown reference,
    and run `git diff --check` before committing.
 
