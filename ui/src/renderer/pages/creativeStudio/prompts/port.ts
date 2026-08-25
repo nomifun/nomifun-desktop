@@ -8,7 +8,11 @@ import { ipcBridge } from '@/common';
 import type { Preset, PresetTag } from '@/common/types/agent/presetTypes';
 import { presetSupportsTarget } from '@/common/types/agent/presetTypes';
 
-import type { CreativeAsset, CreativeAssetLibraryPort } from '../assets';
+import type {
+  CreativeAsset,
+  CreativeAssetLibraryPort,
+  CreativePromptLibrarySource,
+} from '../assets';
 import type { PromptLibraryItem, PromptLibraryPort } from './types';
 
 export interface NomiPromptLibraryPortOptions {
@@ -93,11 +97,35 @@ export function mapNomiPresetToPromptLibraryItem(
     licenseUrl: null,
     createdAt: null,
     updatedAt: null,
+    savedToAssets: false,
   };
+}
+
+export interface PromptAssetIdentity {
+  source: CreativePromptLibrarySource;
+  id: string;
+}
+
+function promptIdentityKey(source: CreativePromptLibrarySource, id: string): string {
+  return `${source}\u0000${id}`;
+}
+
+/** Resolve both current and legacy provenance written by "Add to My Assets". */
+export function promptAssetIdentity(asset: CreativeAsset): PromptAssetIdentity | null {
+  const source = asset.origin?.promptLibrarySource;
+  const id = asset.origin?.promptLibraryId?.trim();
+  if ((source === 'catalog' || source === 'preset') && id) return { source, id };
+
+  const legacyCatalogId = asset.origin?.promptCatalogId?.trim();
+  return legacyCatalogId ? { source: 'catalog', id: legacyCatalogId } : null;
 }
 
 export function mapNomiTextAssetToPromptLibraryItem(asset: CreativeAsset): PromptLibraryItem | null {
   if (asset.kind !== 'text' || !asset.inLibrary || !asset.textContent?.trim()) return null;
+  // A saved prompt is a My Assets record, not a new prompt-library source.
+  // Keeping this boundary explicit prevents the library from feeding its own
+  // output back into itself while preserving independently-authored text assets.
+  if (promptAssetIdentity(asset)) return null;
   const promptOrigin = asset.origin;
   return {
     id: asset.id,
@@ -115,6 +143,22 @@ export function mapNomiTextAssetToPromptLibraryItem(asset: CreativeAsset): Promp
     licenseUrl: promptOrigin?.licenseUrl ?? null,
     createdAt: asset.createdAt,
     updatedAt: asset.updatedAt,
+    savedToAssets: true,
+  };
+}
+
+function markSavedPrompt(
+  value: unknown,
+  saved: ReadonlySet<string>
+): unknown {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+  const item = value as Record<string, unknown>;
+  const source = item.source;
+  const id = typeof item.id === 'string' ? item.id.trim() : '';
+  if ((source !== 'catalog' && source !== 'preset') || !id) return value;
+  return {
+    ...item,
+    savedToAssets: saved.has(promptIdentityKey(source, id)),
   };
 }
 
@@ -164,15 +208,21 @@ export function createNomiPromptLibraryPort(
         throw new TypeError('Prompt catalog adapter must return an array');
       }
       const [presets, tags] = presetData;
+      const savedPrompts = new Set(
+        assetData
+          .map(promptAssetIdentity)
+          .filter((identity): identity is PromptAssetIdentity => identity !== null)
+          .map((identity) => promptIdentityKey(identity.source, identity.id))
+      );
       return [
-        ...catalogData,
+        ...catalogData.map((item) => markSavedPrompt(item, savedPrompts)),
         ...presets
           .map((preset) => mapNomiPresetToPromptLibraryItem(preset, tags, locale))
           .filter((item): item is PromptLibraryItem => item !== null),
         ...assetData
           .map(mapNomiTextAssetToPromptLibraryItem)
           .filter((item): item is PromptLibraryItem => item !== null),
-      ];
+      ].map((item) => markSavedPrompt(item, savedPrompts));
     },
   };
 }

@@ -71,6 +71,7 @@ function mapCatalogItem(value: unknown): unknown {
     licenseUrl: item.licenseUrl ?? null,
     createdAt: timestamp(item.createdAt, 'createdAt'),
     updatedAt: timestamp(item.updatedAt, 'updatedAt'),
+    savedToAssets: false,
   };
 }
 

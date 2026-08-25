@@ -31,6 +31,7 @@ const FIRST: PromptLibraryItem = {
   licenseUrl: null,
   createdAt: null,
   updatedAt: null,
+  savedToAssets: false,
 };
 
 const SECOND: PromptLibraryItem = {
@@ -49,6 +50,7 @@ const SECOND: PromptLibraryItem = {
   licenseUrl: null,
   createdAt: 10,
   updatedAt: 20,
+  savedToAssets: true,
 };
 
 describe('prompt library validation and filtering', () => {
@@ -63,6 +65,16 @@ describe('prompt library validation and filtering', () => {
 
     expect(result.items).toEqual([FIRST, SECOND]);
     expect(result.invalidCount).toBe(3);
+  });
+
+  test('defaults saved membership for older injected prompt ports', () => {
+    const { savedToAssets: _savedToAssets, ...legacyItem } = FIRST;
+    expect(normalizePromptLibrary([legacyItem]).items[0]?.savedToAssets).toBe(false);
+  });
+
+  test('keeps equal raw IDs from different source namespaces', () => {
+    const catalog = { ...FIRST, source: 'catalog' as const };
+    expect(normalizePromptLibrary([FIRST, catalog]).items).toEqual([FIRST, catalog]);
   });
 
   test('filters by text, exact category and intersected tags', () => {

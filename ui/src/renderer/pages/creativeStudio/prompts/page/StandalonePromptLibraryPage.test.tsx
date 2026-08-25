@@ -38,6 +38,7 @@ const ITEM: PromptLibraryItem = {
   licenseUrl: null,
   createdAt: null,
   updatedAt: null,
+  savedToAssets: false,
 };
 
 const render = (

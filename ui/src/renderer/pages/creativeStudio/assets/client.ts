@@ -23,6 +23,7 @@ import type {
   CreativeAssetOrigin,
   CreativeAssetPage,
   CreativeAssetPatch,
+  CreativePromptAssetPort,
   CreativeAssetQuery,
   CreativeAssetUploadProgress,
   CreativeAssetVariant,
@@ -77,6 +78,17 @@ function mapOrigin(value: unknown): CreativeAssetOrigin | null {
   ) {
     throw new TypeError('Invalid creative asset Canvas origin');
   }
+  const promptLibrarySource =
+    origin.prompt_library_source === 'catalog' || origin.prompt_library_source === 'preset'
+      ? origin.prompt_library_source
+      : undefined;
+  const promptLibraryId = optionalString(origin.prompt_library_id);
+  if (
+    (origin.prompt_library_source !== undefined || origin.prompt_library_id !== undefined) &&
+    (!promptLibrarySource || !promptLibraryId?.trim())
+  ) {
+    throw new TypeError('Invalid creative asset prompt-library origin');
+  }
   return {
     prompt: optionalString(origin.prompt),
     model: optionalString(origin.model),
@@ -86,6 +98,8 @@ function mapOrigin(value: unknown): CreativeAssetOrigin | null {
     canvasId: canonicalCanvasId ?? legacyCanvasId,
     nodeId: optionalString(origin.node_id),
     generationTaskId: optionalString(origin.creation_task_id),
+    promptLibrarySource,
+    promptLibraryId,
     promptCatalogId: optionalString(origin.prompt_catalog_id),
     sourceUrl: optionalString(origin.source_url),
     license: optionalString(origin.license),
@@ -113,6 +127,13 @@ function nullableNumber(value: unknown, field: string): number | null {
 
 function requireNumber(value: unknown, field: string): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new TypeError(`Invalid creative asset ${field}`);
+  }
+  return value;
+}
+
+function requireCount(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
     throw new TypeError(`Invalid creative asset ${field}`);
   }
   return value;
@@ -178,7 +199,7 @@ function toWorkshopPatch(patch: CreativeAssetPatch): WorkshopAssetPatch {
   };
 }
 
-export class CreativeAssetClient implements CreativeAssetLibraryPort {
+export class CreativeAssetClient implements CreativeAssetLibraryPort, CreativePromptAssetPort {
   constructor(private readonly api: WorkshopAssetApi = workshopAssetApi) {}
 
   private map(dto: WorkshopAssetDto): CreativeAsset {
@@ -226,15 +247,33 @@ export class CreativeAssetClient implements CreativeAssetLibraryPort {
         tags: input.tags,
         in_library: input.inLibrary,
         origin: input.origin
-          ? {
+          ? input.origin.promptLibrarySource === 'catalog'
+            ? {
+                prompt_library_source: input.origin.promptLibrarySource,
+                prompt_library_id: input.origin.promptLibraryId,
                 prompt_catalog_id: input.origin.promptCatalogId,
                 source_url: input.origin.sourceUrl,
                 license: input.origin.license,
                 license_url: input.origin.licenseUrl,
               }
-            : undefined,
+            : {
+                prompt_library_source: 'preset',
+                prompt_library_id: input.origin.promptLibraryId,
+              }
+          : undefined,
       })
     );
+  }
+
+  async removePromptAsset(
+    source: 'catalog' | 'preset',
+    promptId: string
+  ): Promise<number> {
+    const response = await this.api.removePromptAsset({
+      prompt_library_source: source,
+      prompt_library_id: promptId,
+    });
+    return requireCount(response.matched, 'matched prompt assets');
   }
 
   async update(assetId: string, patch: CreativeAssetPatch): Promise<CreativeAsset> {

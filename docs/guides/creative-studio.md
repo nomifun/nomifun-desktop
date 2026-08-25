@@ -208,8 +208,13 @@ required task; a same-named model from another Provider is never substituted.
 The library supports text search, exact category filters, intersected tag
 filters, detail inspection, and clipboard copy. A catalog or preset item can be
 saved explicitly as a text asset in **My Assets**; catalog provenance keeps the
-source repository and license attached. The catalog cache remains usable
-offline after a successful synchronization.
+source repository and license attached. Prompt-saved assets carry a stable
+source identity: they do not feed back into the prompt library as new entries,
+and the same source is saved at most once. The details view can remove one from
+**My Assets** without deleting its record or any Canvas reference, and it can
+be added again later. Independently authored text assets remain valid prompt
+sources. The catalog cache remains usable offline after a successful
+synchronization.
 
 The standalone route deliberately has no hidden Canvas insertion target.
 Copying or saving a prompt does not create a Canvas or start generation. Pick
