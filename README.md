@@ -138,7 +138,7 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
 
 ---
 
-## 🖼️ A look inside
+## 🖼️ See the product
 
 <div align="center">
 
@@ -156,6 +156,11 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
   <br/><sub><b>Workspace · conversations, Agents, tasks, tools, and connected devices in one desktop</b></sub>
 </p>
 
+<p>
+  <img src="docs/images/readme/en/creative-workshop.png" alt="NomiFun Creative Studio Canvas editor" width="100%">
+  <br/><sub><b>Creative Studio · a persistent Canvas, focused media workbenches, reusable prompts and assets, templates, and a bounded Director</b></sub>
+</p>
+
 <table>
   <tr>
     <td width="50%"><img src="docs/images/readme/en/models.png" alt="NomiFun multi-model management"><br/><sub><b>Multi-model management · task-aware routing and Free Models</b></sub></td>
@@ -163,7 +168,7 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/readme/en/skills.png" alt="Current NomiFun Skills Hub"><br/><sub><b>Skills Hub · reusable, governed Agent capabilities</b></sub></td>
-    <td width="50%"><img src="docs/images/readme/en/creative-workshop.png" alt="NomiFun Creative Studio"><br/><sub><b>Creative Studio · infinite canvas, workbenches, prompts, assets, and templates</b></sub></td>
+    <td width="50%"><sub><b>More Creative Studio screens follow below</b><br/>The numbered gallery covers the current Canvas, workbenches, libraries, templates, Assistant, skills, Director, and companion workflow.</sub></td>
   </tr>
 </table>
 
@@ -173,39 +178,53 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
 
 ---
 
-## 🎨 Creative Studio gallery
+## 🎨 Creative Studio — the new creation surface
 
-The current Creative Studio is a complete creation surface, not a single
-marketing screen. The gallery below follows a real workflow: persistent
-canvases, the rich Canvas editor, independent image and video workbenches,
-prompt and asset reuse, templates, Director, and a visible desktop companion.
+Creative Studio is a new, focused creation surface inside NomiFun Desktop—not a
+single marketing screen. The numbered gallery follows the product surfaces a
+creator can actually open: persistent Canvases, independent Image and Video
+Workbenches, Prompt Center, My Assets, private templates and AI Create,
+multi-image series, Director, Canvas Assistant, explicit Creative Studio skills,
+and an optional native desktop companion.
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/01-canvas-library.png" alt="Creative Studio Canvas Library"><br/><sub><b>Canvas Library</b> · create, rename, open, import, export, and recover persistent canvases</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/02-canvas-editor-rich.png" alt="Creative Studio rich Canvas editor"><br/><sub><b>Canvas Editor</b> · asset library, media nodes, Director timeline, and Canvas Assistant</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/01-canvas-library.png" alt="Creative Studio Canvas Library"><br/><sub><b>Canvas Library</b> · create, open, manage, import, and export persistent Canvases</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/02-canvas-editor-rich.png" alt="Creative Studio rich Canvas editor"><br/><sub><b>Canvas Editor</b> · an infinite document with media nodes, Asset library, Director panel, and Assistant</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/03-image-workbench.png" alt="Creative Studio Image Workbench"><br/><sub><b>Image Workbench</b> · standalone T2I/I2I creation, real reference images, and task results</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/04-video-workbench.png" alt="Creative Studio Video Workbench"><br/><sub><b>Video Workbench</b> · standalone T2V/I2V creation, duration, ratio, and history</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/03-image-workbench.png" alt="Creative Studio Image Workbench"><br/><sub><b>Image Workbench</b> · standalone T2I/I2I with the configured image task and real asset references</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/04-video-workbench.png" alt="Creative Studio Video Workbench"><br/><sub><b>Video Workbench</b> · standalone T2V/one-image I2V with duration, ratio, and history</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/05-prompt-center.png" alt="Creative Studio Prompt Center"><br/><sub><b>Prompt Center</b> · searchable, attributed prompt collections with categories and tags</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/06-asset-library.png" alt="Creative Studio My Assets library"><br/><sub><b>My Assets</b> · reusable text, image, video, and audio inputs with filters and metadata</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/05-prompt-center.png" alt="Creative Studio Prompt Center"><br/><sub><b>Prompt Center</b> · a searchable, attributed prompt catalog with categories, tags, copy, and save-to-assets actions</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/06-asset-library.png" alt="Creative Studio My Assets library"><br/><sub><b>My Assets</b> · reusable text, image, video, and audio assets with filters, collections, tags, and pickers</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/07-template-studio.png" alt="Creative Studio Template Studio"><br/><sub><b>Template Studio</b> · private prompt, variable, model-binding, and output-plan templates</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/08-template-editor.png" alt="Creative Studio Template Editor"><br/><sub><b>Template Editor</b> · review and explicitly save AI Create drafts before reuse</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/07-template-studio.png" alt="Creative Studio Template Studio"><br/><sub><b>Template Studio</b> · private single-image and multi-image-series templates with variables and exact model settings</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/08-template-editor.png" alt="Creative Studio AI Create template editor"><br/><sub><b>AI Create + Template Editor</b> · review one bounded draft, edit it, and explicitly Save before reuse</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/09-director-timeline.png" alt="Creative Studio Director timeline"><br/><sub><b>Director</b> · bounded 3D scene, camera, timeline, keyframes, capture, and Canvas references</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/companion.png" alt="NomiFun desktop companion beside the current workspace"><br/><sub><b>Desktop companion</b> · the live companion window can stay visible alongside creation</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/09-director-timeline.png" alt="Creative Studio Director timeline"><br/><sub><b>Director</b> · a Canvas-bound, bounded 3D scene and timeline with cameras, keyframes, capture, and Canvas references</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/10-director-stage.png" alt="Creative Studio Director 3D stage"><br/><sub><b>Director stage</b> · the bounded 3D scene and camera view attached to a Canvas</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/11-companion-settings.png" alt="NomiFun companion workspace"><br/><sub><b>Companion workspace</b> · companion figure, persona, model, memory, Skills, and the <em>Show on desktop</em> control</sub></td>
+    <td width="50%"><img src="docs/images/creative-studio/en-US/12-companion-workspace.png" alt="NomiFun desktop companion beside Creative Studio"><br/><sub><b>Desktop companion collaboration</b> · the native companion can stay visible while you create</sub></td>
   </tr>
 </table>
 
-All images are repository-local and were captured from the current 0.7.2 app on
-August 25, 2026 using an isolated data root. See
-[`docs/images/SCREENSHOTS.md`](docs/images/SCREENSHOTS.md) for the capture manifest.
+The numbered paths are the stable README contract for the Creative Studio
+gallery: `01`–`12`. The Canvas Editor capture also shows the
+Canvas Assistant and its explicit Creative Studio skill choices; the Skills
+Hub capture above shows those packages as reusable capabilities. All captures
+should represent the running product, not a mockup or an invented capability. See
+[`docs/images/SCREENSHOTS.md`](docs/images/SCREENSHOTS.md) for the capture
+manifest.
+
+For user-facing walkthroughs, onboarding, and troubleshooting, use the
+[Creative Studio guide on NomiFun Portal](https://www.nomifun.com/docs/guides/creative-workshop/).
+The local guide linked below is the Desktop technical contract.
 
 ---
 
@@ -219,7 +238,7 @@ memory, tools, permissions, and execution runtime:
 |---|---|
 | **Multi-Agent execution cluster** | Plans dependency-aware work, delegates steps to specialized Agents, schedules parallel execution, and exposes live state, transcripts, approvals, retry, and recovery. |
 | **Agent Mini Apps** | Turns a normal Agent conversation into a previewable and publishable local web tool, with an editable working copy and a durable published snapshot. |
-| **Creative Studio** | Provides a persistent infinite Canvas, independent Image and Video Workbenches, prompt and asset libraries, collections/tags/search, exact-model media tasks, private templates, and a bounded 3D Director. |
+| **Creative Studio** | Adds a persistent Canvas, independent Image and Video Workbenches, Prompt Center, My Assets, private templates, AI Create, multi-image series, Canvas Assistant, Creative Studio skills, a bounded Director, and optional companion-in-the-workspace collaboration. |
 | **Task-aware multi-model control plane** | Separates provider credentials from model records, accepts native and compatible/custom endpoints including local or self-hosted services, and routes chat, realtime, speech, vision, media generation, embedding, and reranking with per-task fallback. |
 | **NomiFun Free Models** | Ships a managed provider that can be enabled, refreshed, health-checked, and used without first creating your own provider entry. |
 | **Phone, robot, and open access** | Pairs Mobile directly with Desktop, binds a Xiaozhi robot to a companion, and exposes governed capabilities through WebUI, REST, MCP, IM channels, and NomiRelay. |
@@ -280,6 +299,12 @@ audio nodes and TTS. **Prompt Center** provides searchable, attributed prompt
 collections, while **My Assets** stores reusable text, image, video, and audio
 assets with kind filters, collections, tags, metadata, and pickers. Reference
 images are hydrated by asset ID, so reloads never reuse stale browser objects.
+
+Canvas Assistant turns a creative request into a Canvas-scoped proposal, and
+the composer requires explicit selection of 1–3 Creative Studio skills:
+**Canvas planning**, **Organize layout**, or **Template design**. These skills
+shape the proposal; they are not inferred from arbitrary prompt wording, and
+applying a proposal still requires the user’s explicit confirmation.
 
 **Template Studio** turns prompts, variables, exact model bindings, and output
 plans into private reusable templates. **AI Create** produces one strict draft
