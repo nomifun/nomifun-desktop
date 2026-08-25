@@ -21,6 +21,7 @@ import {
   clearCanvasImageComposeDraftModel,
   latestCanvasImageComposeConfig,
   prepareCanvasImageCompose,
+  reconcileCanvasImageComposeConfig,
   withCanvasImageComposeDraft,
 } from './canvasImageComposerCanvas';
 
@@ -216,6 +217,87 @@ describe('canvas image composer product model', () => {
     });
   });
 
+  test('prepares connected multi-image references in exact visible order', () => {
+    const target = testNode('image', 20, { width: 340, height: 240 });
+    const personAsset = sourceAsset({ id: testUuid(320), title: '人物图' });
+    const clothingAsset = sourceAsset({ id: testUuid(321), title: '服装图' });
+    const person = {
+      ...testNode('image', 21),
+      data: { ...testNode('image', 21).data, assetId: personAsset.id },
+    };
+    const clothing = {
+      ...testNode('image', 22),
+      data: { ...testNode('image', 22).data, assetId: clothingAsset.id },
+    };
+    const document = createEmptyCreativeProjectDocument(testUuid(322));
+    document.nodes = [target, person, clothing];
+    document.connections = [
+      {
+        id: testUuid(323),
+        sourceNodeId: person.id,
+        targetNodeId: target.id,
+        sourceHandle: 'source',
+        targetHandle: 'target',
+      },
+      {
+        id: testUuid(324),
+        sourceNodeId: clothing.id,
+        targetNodeId: target.id,
+        sourceHandle: 'source',
+        targetHandle: 'target',
+      },
+    ];
+
+    const prepared = prepareCanvasImageCompose({
+      projectId: document.projectId,
+      state: createInitialCanvasState({ document }),
+      viewportSize: { width: 1440, height: 900 },
+      sourceNode: target,
+      sourceAsset: null,
+      references: {
+        assets: [personAsset, clothingAsset],
+        bindings: [personAsset, clothingAsset].map((asset) => ({
+          assetId: asset.id,
+          kind: 'image' as const,
+          role: 'reference' as const,
+        })),
+      },
+      catalog: { status: 'ready', providers: [provider], error: null },
+      model: { providerId: PROVIDER_ID, model: 'edit-v1' },
+      prompt: '@人物图 是人物，@服装图 是服装',
+      providerPrompt: 'Reference 1 是人物，Reference 2 是服装',
+      settings: {
+        interfaceMode: 'images',
+        quality: 'auto',
+        width: 1024,
+        height: 1024,
+        aspectRatio: '1:1',
+        count: 1,
+      },
+    });
+
+    expect(prepared.plan.input).toMatchObject({
+      task: 'image_edit',
+      capability: 'i2i',
+      inputs: [
+        { assetId: personAsset.id, kind: 'image', role: 'reference' },
+        { assetId: clothingAsset.id, kind: 'image', role: 'reference' },
+      ],
+      parameters: {
+        prompt: 'Reference 1 是人物，Reference 2 是服装',
+      },
+    });
+    expect(prepared.configNode.data).toMatchObject({
+      prompt: '@人物图 是人物，@服装图 是服装',
+      inputAssetIds: [personAsset.id, clothingAsset.id],
+      operation: {
+        kind: 'image-node-compose',
+        sourceNodeId: target.id,
+        sourceAssetId: null,
+      },
+    });
+  });
+
   test('rejects a source node whose asset identity or kind does not match', () => {
     const { document, source } = preparedFixture();
     const base = {
@@ -277,6 +359,39 @@ describe('canvas image composer product model', () => {
     });
   });
 
+  test('fails closed when the backend task input snapshot differs from config', () => {
+    const { prepared } = preparedFixture();
+    const config = prepared.configNode;
+    expect(
+      thrownMessage(() =>
+        reconcileCanvasImageComposeConfig(config, {
+          taskId: config.data.taskId as string,
+          owner: {
+            kind: 'canvas_node',
+            canvasId: testUuid(302),
+            nodeId: config.id,
+          },
+          providerId: PROVIDER_ID,
+          model: 'edit-v1',
+          task: 'image_edit',
+          capability: 'i2i',
+          parameters: { prompt: '把画面改成清晨' },
+          inputs: [
+            { assetId: testUuid(399), kind: 'image', role: 'reference' },
+          ],
+          status: 'running',
+          error: null,
+          resultAssetIds: [],
+          attempt: 1,
+          submittedAt: 1,
+          startedAt: 2,
+          finishedAt: null,
+          deletedAt: null,
+        })
+      ).includes('输入与画布配置快照不一致')
+    ).toBe(true);
+  });
+
   test('restores the node-owned draft before submitted config and clears task-specific models', () => {
     const { document, prepared, source } = preparedFixture();
     document.nodes.push(prepared.configNode);
@@ -299,6 +414,7 @@ describe('canvas image composer product model', () => {
     );
     expect(restored).toEqual({
       prompt: '尚未提交的新草稿',
+      mentions: [],
       settings: {
         model: { providerId: PROVIDER_ID, model: 'edit-v1' },
         interfaceMode: 'responses',

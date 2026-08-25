@@ -8,6 +8,15 @@ import type { CanvasCommand, CanvasState } from '../core';
 import type { CreativeConfigOperation } from '../../domain';
 import { canvasReducer } from '../core';
 
+type CanvasMediaAssetNode = Extract<
+  CanvasState['document']['nodes'][number],
+  { type: 'image' | 'panorama' }
+>;
+
+const isCanvasMediaAssetNode = (
+  node: CanvasState['document']['nodes'][number]
+): node is CanvasMediaAssetNode => node.type === 'image' || node.type === 'panorama';
+
 const sameOperation = (
   left: CreativeConfigOperation | null,
   right: CreativeConfigOperation | null
@@ -72,12 +81,44 @@ export function pendingTaskCommandGuard(
         operation.sourceAssetId === null &&
         command.type === 'node/reconcile-runtime' &&
         command.node.id === sourceNodeId;
-      return (
+      if (
         !authoritativeSourceReconcile &&
         'assetId' in nextSource.data &&
         'assetId' in currentSource.data &&
         nextSource.data.assetId !== currentSource.data.assetId
-      );
+      ) {
+        return true;
+      }
+
+      for (const assetId of currentOwner.data.inputAssetIds) {
+        const currentInputNodes = state.document.nodes.filter(
+          (node): node is CanvasMediaAssetNode =>
+            isCanvasMediaAssetNode(node) && node.data.assetId === assetId
+        );
+        if (currentInputNodes.length === 0) return true;
+        for (const currentInput of currentInputNodes) {
+          const nextInput = next.document.nodes.find(
+            (node): node is CanvasMediaAssetNode =>
+              node.id === currentInput.id && isCanvasMediaAssetNode(node)
+          );
+          if (!nextInput || nextInput.data.assetId !== assetId) return true;
+          if (currentInput.id === sourceNodeId) continue;
+          const currentReferenceEdge = state.document.connections.find(
+            (edge) =>
+              edge.sourceNodeId === currentInput.id &&
+              edge.targetNodeId === sourceNodeId
+          );
+          if (
+            currentReferenceEdge &&
+            !next.document.connections.some(
+              (edge) => edge.id === currentReferenceEdge.id
+            )
+          ) {
+            return true;
+          }
+        }
+      }
+      return false;
     }
   );
   return { allowed: orphanedTaskIds.length === 0, orphanedTaskIds };

@@ -7,7 +7,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { canvasCommands, createInitialCanvasState } from '../core';
-import { testDocument, testNode, testUuid } from '../core/testFixtures';
+import { testDocument, testEdge, testNode, testUuid } from '../core/testFixtures';
 import {
   canvasCommandPreservesPendingTaskOwners,
   pendingTaskCommandGuard,
@@ -167,6 +167,48 @@ describe('canvas pending task owner guard', () => {
           ...source,
           data: { ...source.data, assetId: testUuid(40) },
         })
+      )
+    ).toBe(true);
+  });
+
+  test('protects connected multi-image inputs and their lineage while pending', () => {
+    const { owner: baseOwner, source } = pendingImageCompose();
+    const reference = testNode('image', 42);
+    reference.data.assetId = testUuid(43);
+    const owner = {
+      ...baseOwner,
+      data: {
+        ...baseOwner.data,
+        task: 'image_edit' as const,
+        capability: 'i2i',
+        inputAssetIds: [reference.data.assetId],
+      },
+    };
+    const edge = testEdge(44, reference.id, source.id);
+    const state = createInitialCanvasState({
+      document: testDocument([owner, source, reference], [edge]),
+    });
+    const taskIds = [owner.data.taskId as string];
+
+    expect(
+      canvasCommandPreservesPendingTaskOwners(
+        state,
+        taskIds,
+        canvasCommands.deleteSelection({ nodeIds: [reference.id] })
+      )
+    ).toBe(false);
+    expect(
+      canvasCommandPreservesPendingTaskOwners(
+        state,
+        taskIds,
+        canvasCommands.deleteEdges([edge.id])
+      )
+    ).toBe(false);
+    expect(
+      canvasCommandPreservesPendingTaskOwners(
+        state,
+        taskIds,
+        canvasCommands.moveNodes({ x: 8, y: 4 }, { nodeIds: [reference.id] })
       )
     ).toBe(true);
   });

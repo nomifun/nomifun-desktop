@@ -1547,7 +1547,17 @@ fn remap_node_references(
     node_ids: &BTreeMap<String, String>,
 ) -> Result<(), AppError> {
     match data {
-        CreativeNodeData::Image(data) => remap_optional_asset(&mut data.asset_id, asset_ids),
+        CreativeNodeData::Image(data) => {
+            remap_optional_asset(&mut data.asset_id, asset_ids)?;
+            if let Some(composer) = data.composer.as_mut() {
+                for mention in &mut composer.mentions {
+                    if let Some(remapped) = node_ids.get(&mention.source_node_id) {
+                        mention.source_node_id = remapped.clone();
+                    }
+                }
+            }
+            Ok(())
+        }
         CreativeNodeData::Panorama(data) => remap_optional_asset(&mut data.asset_id, asset_ids),
         CreativeNodeData::Config(data) => {
             remap_asset_vec(&mut data.input_asset_ids, asset_ids)?;
@@ -1666,7 +1676,24 @@ mod tests {
                 "caption": "",
                 "alt": "asset",
                 "fit": "contain",
-                "naturalSize": null
+                "naturalSize": null,
+                "composer": {
+                    "prompt": "@备注",
+                    "mentions": [{
+                        "id": "mention-archive",
+                        "sourceNodeId": "target-node",
+                        "fallbackLabel": "备注",
+                        "start": 0,
+                        "end": 3
+                    }],
+                    "model": null,
+                    "interfaceMode": "images",
+                    "quality": "auto",
+                    "width": 1024,
+                    "height": 1024,
+                    "aspectRatio": "1:1",
+                    "count": 1
+                }
             }
         }))
         .unwrap();
@@ -2193,6 +2220,10 @@ mod tests {
             panic!("expected image node")
         };
         assert_eq!(image.asset_id.as_deref(), Some(remapped.assets[0].metadata.asset_id.as_str()));
+        assert_eq!(
+            image.composer.as_ref().unwrap().mentions[0].source_node_id,
+            remapped.document.nodes[1].id
+        );
         assert_ne!(remapped.assets[0].metadata.asset_id, ASSET_ID);
         assert!(WorkshopAssetId::parse(&remapped.assets[0].metadata.asset_id).is_ok());
         assert_eq!(remapped.document.nodes[0].node_type, CreativeNodeType::Image);

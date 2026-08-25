@@ -146,4 +146,45 @@ describe('Creative Studio clipboard', () => {
       },
     ]);
   });
+
+  test('remaps durable image-prompt mentions when their source is pasted together', () => {
+    const source = testNode('image', 20);
+    const target = testNode('image', 21);
+    target.data.composer = {
+      prompt: '@人物图 出镜',
+      mentions: [
+        {
+          id: 'mention-1',
+          sourceNodeId: source.id,
+          fallbackLabel: '人物图',
+          start: 0,
+          end: 4,
+        },
+      ],
+      model: null,
+      interfaceMode: 'images',
+      quality: 'auto',
+      width: 1024,
+      height: 1024,
+      aspectRatio: '1:1',
+      count: 1,
+    };
+    const clipboard = copyCanvasFragment(
+      testDocument([source, target], [testEdge(22, source.id, target.id)]),
+      [source.id, target.id]
+    );
+    if (!clipboard) throw new Error('expected clipboard');
+
+    const pasted = materializeCanvasPaste(clipboard, {
+      idFactory: sequentialTestIdFactory(220),
+    });
+    const pastedSource = pasted.nodes[0];
+    const pastedTarget = pasted.nodes[1];
+    expect(pastedTarget?.type).toBe('image');
+    expect(
+      pastedTarget?.type === 'image'
+        ? pastedTarget.data.composer?.mentions?.[0]?.sourceNodeId
+        : null
+    ).toBe(pastedSource?.id);
+  });
 });

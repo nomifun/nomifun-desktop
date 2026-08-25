@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ArrowUp, BookOne, Check, Down, Loading, SettingTwo } from '@icon-park/react';
+import { ArrowUp, BookOne, Check, CloseOne, Down, Loading, SettingTwo } from '@icon-park/react';
 import { InputNumber, Radio, Select } from '@arco-design/web-react';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -23,28 +23,49 @@ import {
   type ImageWorkbenchSettings,
   type ImageWorkbenchTaskSummary,
 } from '../../workbenches/image';
+import CreativeCanvasReferencePromptInput, {
+  type CreativeCanvasPromptMentionBinding,
+  type CreativeCanvasPromptReferenceOption,
+  type CreativeCanvasReferencePromptChange,
+} from './CreativeCanvasReferencePromptInput';
 import styles from './CreativeCanvasImageComposer.module.css';
+
+export interface CreativeCanvasImageComposerReference
+  extends CreativeCanvasPromptReferenceOption {
+  assetId: string | null;
+  connectionId: string | null;
+  base: boolean;
+}
 
 export interface CreativeCanvasImageComposerProps {
   nodeId: string;
   hasImageContent: boolean;
   initialPrompt: string;
+  initialMentions?: readonly CreativeCanvasPromptMentionBinding[];
+  references?: readonly CreativeCanvasImageComposerReference[];
+  referenceCapacityLabel?: string | null;
   settings: ImageWorkbenchSettings;
   aspectRatioOptions: readonly ImageWorkbenchAspectRatioOption[];
   maxCount: number;
   modelOptions: readonly ImageWorkbenchModelOption[];
   task: ImageWorkbenchTaskSummary;
   disabled?: boolean;
+  generateBlocked?: boolean;
   error?: string | null;
   retrySubmission?: boolean;
-  onPromptChange?(prompt: string): void;
+  onPromptChange?(change: CreativeCanvasReferencePromptChange): void;
+  onReferenceActivate?(sourceNodeId: string): void;
+  onReferenceDisconnect?(connectionId: string): void;
   onOpenPromptLibrary(): void;
   onModelChange(model: ImageWorkbenchModelIdentity | null): void;
   onInterfaceModeChange(mode: ImageWorkbenchInterfaceMode): void;
   onQualityChange(quality: ImageWorkbenchQuality): void;
   onAspectRatioChange(option: ImageWorkbenchAspectRatioOption): void;
   onCountChange(count: number): void;
-  onGenerate(prompt: string): void;
+  onGenerate(
+    prompt: string,
+    mentions: readonly CreativeCanvasPromptMentionBinding[]
+  ): void;
   onRetrySubmission?(): void;
 }
 
@@ -55,19 +76,28 @@ const popupContainer = (trigger: HTMLElement): HTMLElement =>
   (trigger.closest('[data-canvas-image-composer]') as HTMLElement | null) ??
   document.body;
 
+const EMPTY_MENTIONS: readonly CreativeCanvasPromptMentionBinding[] = [];
+const EMPTY_REFERENCES: readonly CreativeCanvasImageComposerReference[] = [];
+
 const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = ({
   nodeId,
   hasImageContent,
   initialPrompt,
+  initialMentions = EMPTY_MENTIONS,
+  references = EMPTY_REFERENCES,
+  referenceCapacityLabel = null,
   settings,
   aspectRatioOptions,
   maxCount,
   modelOptions,
   task,
   disabled = false,
+  generateBlocked = false,
   error,
   retrySubmission = false,
   onPromptChange,
+  onReferenceActivate,
+  onReferenceDisconnect,
   onOpenPromptLibrary,
   onModelChange,
   onInterfaceModeChange,
@@ -84,6 +114,9 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
   const sizeSelectRef = useRef<HTMLDivElement>(null);
   const horizontalOffsetRef = useRef(0);
   const [prompt, setPrompt] = useState(initialPrompt);
+  const [mentions, setMentions] = useState<CreativeCanvasPromptMentionBinding[]>(
+    () => structuredClone([...initialMentions])
+  );
   const [placement, setPlacement] = useState<'above' | 'below'>('below');
   const [horizontalOffset, setHorizontalOffset] = useState(0);
   const [overlay, setOverlay] = useState(false);
@@ -104,14 +137,17 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
     });
   const canGenerate = retrySubmission
     ? !disabled && onRetrySubmission !== undefined
-    : !disabled && !busy && prompt.trim().length > 0 && settings.model !== null;
+    : !disabled && !generateBlocked && !busy && prompt.trim().length > 0 && settings.model !== null;
   const modelValue = settings.model ? imageWorkbenchModelKey(settings.model) : undefined;
   const selectedSizeOption =
     aspectRatioOptions.find(
       (option) => !option.disabled && option.value === settings.aspectRatio
     ) ?? aspectRatioOptions.find((option) => !option.disabled) ?? null;
 
-  useEffect(() => setPrompt(initialPrompt), [initialPrompt, nodeId]);
+  useEffect(() => {
+    setPrompt(initialPrompt);
+    setMentions(structuredClone([...initialMentions]));
+  }, [initialMentions, initialPrompt, nodeId]);
 
   useEffect(() => {
     setSettingsOpen(false);
@@ -241,15 +277,19 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
     };
   }, [nodeId, overlay]);
 
-  const submit = (): void => {
+  const submit = (
+    change: CreativeCanvasReferencePromptChange = { value: prompt, mentions }
+  ): void => {
     if (retrySubmission && onRetrySubmission) {
       onRetrySubmission();
       return;
     }
-    const value = prompt.trim();
-    if (!canGenerate || !value) return;
-    onGenerate(value);
+    if (!canGenerate || !change.value.trim()) return;
+    // Mention offsets are relative to the authored string. Preserve it exactly;
+    // trimming here would make otherwise valid UTF-16 ranges stale.
+    onGenerate(change.value, change.mentions);
     setPrompt('');
+    setMentions([]);
   };
 
   const content = (
@@ -274,9 +314,73 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
       onWheel={(event) => event.stopPropagation()}
     >
       <div className={styles.panel}>
-        <textarea
-          className={styles.prompt}
+        {references.length > 0 ? (
+          <div className={styles.referenceSection}>
+            <div className={styles.referenceHeader}>
+              <span>
+                {t('creativeStudio.canvas.image.connectedReferences', {
+                  defaultValue: '已连接参考',
+                })}
+              </span>
+              {referenceCapacityLabel ? <small>{referenceCapacityLabel}</small> : null}
+            </div>
+            <div
+              className={styles.referenceStrip}
+              role='list'
+              aria-label={t('creativeStudio.canvas.image.connectedReferences', {
+                defaultValue: '已连接参考',
+              })}
+            >
+              {references.map((reference) => (
+                <div
+                  key={reference.nodeId}
+                  className={styles.referenceItem}
+                  role='listitem'
+                  data-base={reference.base || undefined}
+                  data-unavailable={Boolean(reference.disabledReason) || undefined}
+                >
+                  <button
+                    type='button'
+                    className={styles.referencePreview}
+                    aria-label={t('creativeStudio.canvas.image.locateReference', {
+                      name: reference.label,
+                      defaultValue: `定位参考图 ${reference.label}`,
+                    })}
+                    disabled={disabled}
+                    onClick={() => onReferenceActivate?.(reference.nodeId)}
+                  >
+                    {reference.thumbnailUrl ? (
+                      <img src={reference.thumbnailUrl} alt='' />
+                    ) : (
+                      <span aria-hidden='true'>{reference.ordinal}</span>
+                    )}
+                    <strong>{reference.disabledReason ? '!' : reference.ordinal}</strong>
+                  </button>
+                  <span className={styles.referenceName}>{reference.label}</span>
+                  {!reference.base && reference.connectionId && onReferenceDisconnect ? (
+                    <button
+                      type='button'
+                      className={styles.referenceRemove}
+                      aria-label={t('creativeStudio.canvas.image.disconnectReference', {
+                        name: reference.label,
+                        defaultValue: `断开参考图 ${reference.label}`,
+                      })}
+                      disabled={disabled}
+                      onClick={() => onReferenceDisconnect(reference.connectionId as string)}
+                    >
+                      <CloseOne theme='outline' size={11} fill='currentColor' />
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        <CreativeCanvasReferencePromptInput
           value={prompt}
+          mentions={mentions}
+          references={references}
           maxLength={1_000_000}
           placeholder={
             hasImageContent
@@ -287,20 +391,30 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                   defaultValue: '描述要生成的图片内容',
                 })
           }
-          aria-label={t('creativeStudio.canvas.image.promptLabel', {
-            defaultValue: '图片创作提示词',
-          })}
           disabled={disabled}
-          onChange={(event) => {
-            setPrompt(event.target.value);
-            onPromptChange?.(event.target.value);
+          labels={{
+            input: t('creativeStudio.canvas.image.promptLabel', {
+              defaultValue: '图片创作提示词',
+            }),
+            insertReference: t('creativeStudio.canvas.image.insertReference', {
+              defaultValue: '引用已连接素材',
+            }),
+            connectedReferences: t('creativeStudio.canvas.image.connectedReferences', {
+              defaultValue: '已连接参考',
+            }),
+            emptyReferences: t('creativeStudio.canvas.image.noMatchingReferences', {
+              defaultValue: '没有匹配的已连接素材',
+            }),
+            disconnectedReference: t('creativeStudio.canvas.image.referenceDisconnected', {
+              defaultValue: '引用已断开',
+            }),
           }}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault();
-              submit();
-            }
+          onChange={(change) => {
+            setPrompt(change.value);
+            setMentions(change.mentions);
+            onPromptChange?.(change);
           }}
+          onSubmit={submit}
         />
 
         <div className={styles.footer}>
@@ -560,7 +674,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
               defaultValue: '生成图片',
             })}
             disabled={!canGenerate}
-            onClick={submit}
+            onClick={() => submit()}
           >
             {busy ? (
               <Loading className={styles.spin} theme='outline' size={17} fill='currentColor' />
