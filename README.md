@@ -767,3 +767,10 @@ See [`NOTICE`](NOTICE) for third-party attributions.
 <br/><br/>
 <a href="#top">⬆ Back to top</a>
 </div>
+
+## Product documentation
+
+User-facing installation and feature guides are maintained centrally in the
+[NomiFun Portal](https://www.nomifun.com/docs/) (中文：[产品文档](https://www.nomifun.com/zh/docs/)).
+This repository keeps technical architecture, API, deployment, development,
+security, and contribution documentation.
