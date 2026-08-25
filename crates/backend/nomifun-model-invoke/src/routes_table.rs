@@ -75,7 +75,7 @@ pub fn preset_protocol_recommendation(platform: &str, task: ModelTask) -> Option
 
         // Volcano Ark multimodal adapters. Voice uses a distinct connection
         // because its domain and credentials differ from Ark's default API.
-        ("ark" | "volcengine", ImageGeneration) => route("ark.images"),
+        ("ark" | "volcengine", ImageGeneration | ImageEdit) => route("ark.images"),
         ("ark" | "volcengine", VideoGeneration) => route("ark.video_jobs"),
         ("ark" | "volcengine", SpeechRecognition) => Some(TaskRoute {
             protocol: "volc.asr_file",
@@ -272,6 +272,7 @@ mod tests {
         for platform in ["ark", "volcengine"] {
             assert_eq!(platform_route(platform, Chat), plain("openai.chat_text"));
             assert_eq!(platform_route(platform, ImageGeneration), plain("ark.images"));
+            assert_eq!(platform_route(platform, ImageEdit), plain("ark.images"));
             assert_eq!(platform_route(platform, VideoGeneration), plain("ark.video_jobs"));
             assert_eq!(
                 platform_route(platform, SpeechRecognition),
@@ -281,7 +282,7 @@ mod tests {
                 platform_route(platform, SpeechSynthesis),
                 Some(TaskRoute { protocol: "volc.tts_v3", connection_role: Some("voice") })
             );
-            for task in [ImageEdit, Embedding, Rerank] {
+            for task in [Embedding, Rerank] {
                 assert_eq!(platform_route(platform, task), None, "({platform}, {task:?})");
             }
         }

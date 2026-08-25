@@ -331,6 +331,16 @@ describe('ImageWorkbench model size policies', () => {
     expect(policy.maxCount).toBe(10);
   });
 
+  test('does not expose unsupported repeat count for Ark image requests', () => {
+    const policy = imageWorkbenchSizePolicyForModel({
+      platform: 'ark',
+      protocol: 'ark.images',
+      model: 'ep-seedream',
+    });
+    expect(policy.allowCustomDimensions).toBe(true);
+    expect(policy.maxCount).toBe(1);
+  });
+
   test('uses the selected size option as the sole UI authority for dimensions', () => {
     const policy = imageWorkbenchSizePolicyForModel({
       platform: 'custom',

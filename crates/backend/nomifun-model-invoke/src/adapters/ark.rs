@@ -6,10 +6,11 @@
 //! Ark lives under `/api/v3` rather than the OpenAI `/v1` convention. The
 //! selected capability supplies the exact protocol endpoint for both adapters.
 //!
-//! - [`ArkImagesAdapter`] (`"ark.images"`, ImageGeneration): sync
+//! - [`ArkImagesAdapter`] (`"ark.images"`, ImageGeneration/ImageEdit): sync
 //!   `POST {root}/api/v3/images/generations`, OpenAI-shaped body plus Ark
 //!   private knobs (`watermark`/`seed`/`guidance_scale` whitelisted from
-//!   `extra`); response reuses
+//!   `extra`). Image edits use the same endpoint and carry one or more ordered
+//!   Base64 data URIs in Ark's `image` field; response reuses
 //!   [`crate::adapters::openai_images::parse_images_response`] (url|b64_json).
 //! - [`ArkVideoJobsAdapter`] (`"ark.video_jobs"`, VideoGeneration): async
 //!   `POST {root}/api/v3/contents/generations/tasks` → `GET .../tasks/{id}`.
@@ -35,7 +36,8 @@ use crate::transport::{
     read_json_capped, validate_image_request_count,
 };
 use crate::types::{
-    JobHandle, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult, VideoGenRequest,
+    ImageEditRequest, InputAsset, JobHandle, ProducedAsset, ProducedData, TaskOutcome, TaskRequest,
+    TaskResult, VideoGenRequest,
 };
 
 use super::json_request_body;
@@ -45,6 +47,10 @@ use super::openai_images::parse_images_response_limited;
 const SUBMIT_TIMEOUT: Duration = Duration::from_secs(180);
 /// Poll round-trips are cheap status reads.
 const POLL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Keep Ark aligned with the creation engine and Canvas product safety ceiling.
+const MAX_ARK_IMAGE_EDIT_INPUTS: usize = 8;
+/// Ark's documented per-reference upload limit for Seedream image input.
+const MAX_ARK_INPUT_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // ark.images
@@ -60,28 +66,12 @@ impl ProtocolAdapter for ArkImagesAdapter {
     }
 
     fn supports(&self, task: ModelTask) -> bool {
-        task == ModelTask::ImageGeneration
+        matches!(task, ModelTask::ImageGeneration | ModelTask::ImageEdit)
     }
 
     async fn submit(&self, http: &reqwest::Client, call: &ResolvedCall) -> Result<TaskOutcome, InvokeError> {
-        let TaskRequest::ImageGeneration(req) = &call.request else {
-            return Err(InvokeError::new(
-                InvokeErrorKind::UnsupportedTask,
-                format!("ark.images cannot serve task {:?}", call.request.task()),
-            ));
-        };
-        let expected_images = validate_ark_image_request(req)?;
+        let (body, expected_images) = build_ark_image_request(call)?;
         let url = call.endpoint_url()?;
-
-        let mut body = json!({
-            "model": call.model,
-            "prompt": req.prompt,
-            "response_format": "b64_json",
-        });
-        if let Some(size) = &req.size {
-            body["size"] = Value::String(size.clone());
-        }
-        let body = json_request_body(&call.model_params, &req.extra, body)?;
 
         let resp = post_json(http, &url, SUBMIT_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
@@ -99,23 +89,144 @@ impl ProtocolAdapter for ArkImagesAdapter {
     }
 }
 
-fn validate_ark_image_request(
-    request: &crate::types::ImageGenRequest,
-) -> Result<usize, InvokeError> {
-    let count = validate_image_request_count(request.count)?;
+fn validate_ark_output_count(count: u32) -> Result<usize, InvokeError> {
+    let count = validate_image_request_count(count)?;
     if count != 1 {
         return Err(InvokeError::new(
             InvokeErrorKind::InvalidParams,
             "ark.images does not support count greater than 1",
         ));
     }
-    if request.quality.is_some() {
+    Ok(count)
+}
+
+fn ark_input_data_uri(input: &InputAsset, index: usize) -> Result<String, InvokeError> {
+    if input.bytes.is_empty() {
         return Err(InvokeError::new(
             InvokeErrorKind::InvalidParams,
-            "ark.images does not support the quality parameter",
+            format!("ark.images input image {index} is empty"),
         ));
     }
-    Ok(count)
+    if input.bytes.len() > MAX_ARK_INPUT_IMAGE_BYTES {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            format!(
+                "ark.images input image {index} exceeds the {MAX_ARK_INPUT_IMAGE_BYTES}-byte limit"
+            ),
+        ));
+    }
+    let essence = input
+        .mime
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let mime = match essence.as_str() {
+        "image/png" => "image/png",
+        "image/jpeg" | "image/jpg" => "image/jpeg",
+        _ => {
+            return Err(InvokeError::new(
+                InvokeErrorKind::InvalidParams,
+                format!(
+                    "ark.images input image {index} has unsupported MIME {:?}; expected image/png or image/jpeg",
+                    input.mime
+                ),
+            ));
+        }
+    };
+    Ok(format!("data:{mime};base64,{}", encode_b64(&input.bytes)))
+}
+
+fn ark_edit_images(request: &ImageEditRequest) -> Result<Value, InvokeError> {
+    if request.inputs.iter().any(|input| input.role == "mask") {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            "ark.images does not support a separate mask input; send a visibly marked reference image instead",
+        ));
+    }
+    if request.inputs.is_empty() {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            "ark.images image editing requires at least one input image",
+        ));
+    }
+    if request.inputs.len() > MAX_ARK_IMAGE_EDIT_INPUTS {
+        return Err(InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            format!(
+                "ark.images image editing supports at most {MAX_ARK_IMAGE_EDIT_INPUTS} input images, got {}",
+                request.inputs.len()
+            ),
+        ));
+    }
+
+    let mut images = request
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| ark_input_data_uri(input, index + 1))
+        .collect::<Result<Vec<_>, _>>()?;
+    if images.len() == 1 {
+        let image = images.pop().ok_or_else(|| {
+            InvokeError::new(
+                InvokeErrorKind::InvalidParams,
+                "ark.images image editing lost its validated input image",
+            )
+        })?;
+        Ok(Value::String(image))
+    } else {
+        Ok(Value::Array(images.into_iter().map(Value::String).collect()))
+    }
+}
+
+fn build_ark_image_request(call: &ResolvedCall) -> Result<(Value, usize), InvokeError> {
+    let (prompt, count, size, extra, image) = match &call.request {
+        TaskRequest::ImageGeneration(request) => {
+            if request.quality.is_some() {
+                return Err(InvokeError::new(
+                    InvokeErrorKind::InvalidParams,
+                    "ark.images does not support the quality parameter",
+                ));
+            }
+            (
+                &request.prompt,
+                request.count,
+                request.size.as_ref(),
+                &request.extra,
+                None,
+            )
+        }
+        TaskRequest::ImageEdit(request) => (
+            &request.prompt,
+            request.count,
+            request.size.as_ref(),
+            &request.extra,
+            Some(ark_edit_images(request)?),
+        ),
+        other => {
+            return Err(InvokeError::new(
+                InvokeErrorKind::UnsupportedTask,
+                format!("ark.images cannot serve task {:?}", other.task()),
+            ));
+        }
+    };
+    let expected_images = validate_ark_output_count(count)?;
+    let mut typed = json!({
+        "model": call.model,
+        "prompt": prompt,
+        "response_format": "b64_json",
+    });
+    if let Some(size) = size {
+        typed["size"] = Value::String(size.clone());
+    }
+    if let Some(image) = image {
+        typed["image"] = image;
+    }
+    Ok((
+        json_request_body(&call.model_params, extra, typed)?,
+        expected_images,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +575,25 @@ mod tests {
         })
     }
 
+    fn edit_request(inputs: Vec<InputAsset>) -> TaskRequest {
+        TaskRequest::ImageEdit(ImageEditRequest {
+            prompt: "combine image one and image two".into(),
+            count: 1,
+            size: Some("2048x2048".into()),
+            inputs,
+            extra: json!({"watermark": false}),
+        })
+    }
+
+    fn image_input(role: &str, mime: &str, bytes: &[u8]) -> InputAsset {
+        InputAsset {
+            id: None,
+            role: role.into(),
+            bytes: bytes.to_vec(),
+            mime: mime.into(),
+        }
+    }
+
     fn video_request(size: Option<&str>, seconds: Option<u32>, inputs: Vec<InputAsset>) -> TaskRequest {
         TaskRequest::VideoGeneration(VideoGenRequest {
             prompt: "a wave".into(),
@@ -625,6 +755,109 @@ mod tests {
         let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(body["steps"], 9);
         assert!(body.get("size").is_some());
+    }
+
+    #[tokio::test]
+    async fn image_edit_posts_ordered_reference_data_uris_to_the_generation_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v3/images/generations"))
+            .and(header("authorization", "Bearer sk-test"))
+            .and(body_partial_json(json!({
+                "model": "doubao-seedream-5-0-260128",
+                "prompt": "combine image one and image two",
+                "image": [
+                    "data:image/png;base64,b25l",
+                    "data:image/jpeg;base64,dHdv"
+                ],
+                "size": "2048x2048",
+                "response_format": "b64_json",
+                "watermark": false
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"data": [{"b64_json": "aGk="}]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let request = edit_request(vec![
+            image_input("reference", "image/png", b"one"),
+            image_input("reference", "image/jpeg", b"two"),
+        ]);
+        let call = image_call(&server.uri(), "doubao-seedream-5-0-260128", request);
+        let out = ArkImagesAdapter
+            .submit(&reqwest::Client::new(), &call)
+            .await
+            .unwrap();
+        assert!(matches!(out, TaskOutcome::Done(TaskResult::Assets(a)) if a.len() == 1));
+    }
+
+    #[test]
+    fn image_edit_uses_a_scalar_for_one_reference_and_typed_input_wins() {
+        let request = edit_request(vec![image_input(
+            "reference",
+            "image/jpg; charset=binary",
+            b"one",
+        )]);
+        let mut call = image_call(
+            "https://ark.cn-beijing.volces.com/api/v3",
+            "ep-seedream",
+            request,
+        );
+        call.model_params["image"] = Value::String("must-not-win".into());
+
+        let (body, expected_images) = build_ark_image_request(&call).unwrap();
+
+        assert_eq!(expected_images, 1);
+        assert_eq!(body["image"], "data:image/jpeg;base64,b25l");
+        assert_eq!(body["watermark"], false);
+    }
+
+    #[test]
+    fn image_edit_rejects_unsafe_or_unsupported_reference_inputs_without_truncation() {
+        let cases = [
+            (
+                edit_request(vec![]),
+                "requires at least one input image",
+            ),
+            (
+                edit_request(
+                    (0..=MAX_ARK_IMAGE_EDIT_INPUTS)
+                        .map(|_| image_input("reference", "image/png", b"x"))
+                        .collect(),
+                ),
+                "supports at most 8 input images",
+            ),
+            (
+                edit_request(vec![image_input("mask", "image/png", b"mask")]),
+                "does not support a separate mask",
+            ),
+            (
+                edit_request(vec![image_input("reference", "image/webp", b"webp")]),
+                "unsupported MIME",
+            ),
+            (
+                edit_request(vec![image_input(
+                    "reference",
+                    "image/png",
+                    &vec![0; MAX_ARK_INPUT_IMAGE_BYTES + 1],
+                )]),
+                "exceeds the 10485760-byte limit",
+            ),
+        ];
+
+        for (request, expected) in cases {
+            let call = image_call(
+                "https://ark.cn-beijing.volces.com/api/v3",
+                "ep-seedream",
+                request,
+            );
+            let error = build_ark_image_request(&call).unwrap_err();
+            assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+            assert!(error.message.contains(expected), "{}", error.message);
+        }
     }
 
     #[tokio::test]

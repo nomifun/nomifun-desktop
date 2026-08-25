@@ -447,6 +447,7 @@ mod tests {
             ("deepgram.listen", ModelTask::SpeechRecognition),
             ("deepgram.speak_rest", ModelTask::SpeechSynthesis),
             ("ark.images", ModelTask::ImageGeneration),
+            ("ark.images", ModelTask::ImageEdit),
             ("ark.video_jobs", ModelTask::VideoGeneration),
             ("volc.asr_file", ModelTask::SpeechRecognition),
             ("volc.tts_v3", ModelTask::SpeechSynthesis),
@@ -483,8 +484,7 @@ mod tests {
         assert!(registry.get("gemini.generate_content", ModelTask::Chat).is_err());
         assert!(registry.get("deepgram.listen", ModelTask::SpeechSynthesis).is_err());
         assert!(registry.get("deepgram.speak_rest", ModelTask::SpeechRecognition).is_err());
-        // ark.images serves ImageGeneration only (ImageEdit stays on openai.images).
-        assert!(registry.get("ark.images", ModelTask::ImageEdit).is_err());
+        assert!(registry.get("ark.images", ModelTask::Chat).is_err());
         assert!(registry.get("ark.video_jobs", ModelTask::ImageGeneration).is_err());
         assert!(registry.get("volc.asr_file", ModelTask::SpeechSynthesis).is_err());
         assert!(registry.get("volc.tts_v3", ModelTask::SpeechRecognition).is_err());

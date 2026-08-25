@@ -280,7 +280,7 @@ export const catalogSuggestionsForTask = <T extends { tasks: readonly ModelTask[
 ): T[] => (task ? suggestions.filter((suggestion) => suggestion.tasks.includes(task)) : []);
 
 /**
- * Adopt a catalog entry's model id, enriching only the task it was chosen for.
+ * Adopt a catalog entry's model id, enriching the task it was chosen for.
  *
  * Non-destructive by contract. This used to return a single fresh capability,
  * which silently discarded every other declared task, plus that task's own
@@ -291,6 +291,12 @@ export const catalogSuggestionsForTask = <T extends { tasks: readonly ModelTask[
  * actually declares this task: an entry that says nothing about the task says
  * nothing about its capabilities either. A window the user already chose wins —
  * they may be correcting the provider, which is the whole point of the field.
+ *
+ * A verified unified image model is the narrow exception to single-task
+ * adoption: when the catalog explicitly declares both image generation and
+ * image editing, add the missing sibling draft too. This keeps models such as
+ * Ark Seedream selectable after references are attached while leaving opaque
+ * endpoint ids and unrelated multi-task catalogs untouched.
  */
 export const applyCatalogSuggestionForTask = (
   definition: ModelDefinitionDraft,
@@ -308,23 +314,35 @@ export const applyCatalogSuggestionForTask = (
       ? suggestion.contextLimit
       : undefined;
   const known = definition.capabilities.some((capability) => capability.task === task);
+  const selectedCapabilities = known
+    ? definition.capabilities.map((capability) =>
+        capability.task === task && declaresTask
+          ? {
+              ...capability,
+              traits,
+              contextLimit: capability.contextLimit ?? declaredWindow,
+            }
+          : capability
+      )
+    : [
+        ...definition.capabilities,
+        { ...emptyCapabilityDraft(task), traits, contextLimit: declaredWindow },
+      ];
+  const declaresUnifiedImageTasks =
+    declaresTask &&
+    (task === 'image_generation' || task === 'image_edit') &&
+    suggestion.tasks.includes('image_generation') &&
+    suggestion.tasks.includes('image_edit');
+  const capabilities = declaresUnifiedImageTasks
+    ? addCapabilityTask(
+        selectedCapabilities,
+        task === 'image_generation' ? 'image_edit' : 'image_generation'
+      )
+    : selectedCapabilities;
   return {
     model: suggestion.model,
     ...(suggestion.displayName ? { displayName: suggestion.displayName } : {}),
-    capabilities: known
-      ? definition.capabilities.map((capability) =>
-          capability.task === task && declaresTask
-            ? {
-                ...capability,
-                traits,
-                contextLimit: capability.contextLimit ?? declaredWindow,
-              }
-            : capability
-        )
-      : [
-          ...definition.capabilities,
-          { ...emptyCapabilityDraft(task), traits, contextLimit: declaredWindow },
-        ],
+    capabilities,
   };
 };
 

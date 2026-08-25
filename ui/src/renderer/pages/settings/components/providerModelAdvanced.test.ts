@@ -164,6 +164,33 @@ describe('model definition capability selection', () => {
     expect(applied.capabilities[0]).toBe(oldChat);
   });
 
+  test('adds the verified sibling task for a unified image catalog model', () => {
+    const applied = applyCatalogSuggestionForTask(
+      {
+        model: '',
+        capabilities: [emptyCapabilityDraft('image_generation')],
+      },
+      {
+        model: 'doubao-seedream-5-0-260128',
+        tasks: ['image_generation', 'image_edit'],
+        traits: [],
+      },
+      'image_generation'
+    );
+
+    expect(applied.capabilities).toEqual([
+      emptyCapabilityDraft('image_generation'),
+      emptyCapabilityDraft('image_edit'),
+    ]);
+
+    const opaque = applyCatalogSuggestionForTask(
+      { model: '', capabilities: [emptyCapabilityDraft('image_generation')] },
+      { model: 'ep-opaque', tasks: ['image_generation'], traits: [] },
+      'image_generation'
+    );
+    expect(opaque.capabilities).toEqual([emptyCapabilityDraft('image_generation')]);
+  });
+
   test('adopting a catalog model keeps the chosen task transport and only refreshes its traits', () => {
     const configuredChat: ModelCapabilityDraft = {
       ...emptyCapabilityDraft('chat'),

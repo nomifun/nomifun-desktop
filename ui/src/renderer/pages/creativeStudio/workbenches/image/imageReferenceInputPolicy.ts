@@ -43,6 +43,8 @@ export function imageReferenceInputPolicy(
   switch (protocol) {
     case 'stepfun.images':
       return { kind: 'bounded', maxInputs: 1 };
+    case 'ark.images':
+      return { kind: 'bounded', maxInputs: IMAGE_REFERENCE_PRODUCT_MAX_INPUTS };
     case 'siliconflow.images':
     case 'xai.images_json':
       return { kind: 'bounded', maxInputs: 3 };

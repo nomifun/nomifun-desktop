@@ -394,6 +394,16 @@ export function imageWorkbenchSizePolicyForModel(
   const protocol = model.protocol?.trim().toLowerCase();
   const modelId = model.model.trim().toLowerCase();
   const isStepFunImages = protocol === 'stepfun.images';
+  if (protocol === 'ark.images') {
+    return {
+      options: DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS,
+      allowCustomDimensions: true,
+      // Ark's `count` is not an `n` parameter. Group output is a separate,
+      // non-exact sequential-generation contract, so one task promises one
+      // image unless that contract is modeled explicitly in the future.
+      maxCount: 1,
+    };
+  }
   if (!isStepFunImages) {
     return {
       options: DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS,

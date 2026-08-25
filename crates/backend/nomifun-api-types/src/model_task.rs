@@ -104,6 +104,20 @@ fn push_unique(tasks: &mut Vec<ModelTask>, task: ModelTask) {
     }
 }
 
+fn is_unified_ark_seedream_model(model: &str) -> bool {
+    let base = base_model_name(model);
+    [
+        "seedream-4.0",
+        "seedream-4-0",
+        "seedream-4.5",
+        "seedream-4-5",
+        "seedream-5.0",
+        "seedream-5-0",
+    ]
+    .iter()
+    .any(|family| base.contains(family))
+}
+
 /// Provider/model combinations whose official task is known and whose name is
 /// either ambiguous or actively misleading to generic substring inference.
 /// Keep this table intentionally small: live provider catalogs decide which
@@ -117,6 +131,9 @@ fn verified_provider_profile(
     let base = base_model_name(model);
 
     match platform {
+        "ark" | "volcengine" if is_unified_ark_seedream_model(model) => {
+            Some((vec![ImageGeneration, ImageEdit], vec![]))
+        }
         "mimo" | "mimo-token-plan-cn" | "mimo-token-plan-sgp" | "mimo-token-plan-ams" => {
             match base.as_str() {
                 "mimo-v2.5-pro" | "mimo-v2.5-pro-ultraspeed" => Some((vec![Chat], vec![])),
@@ -412,6 +429,26 @@ mod tests {
             );
             assert!(tasks.contains(&ModelTask::ImageEdit), "{platform}/{model}");
         }
+    }
+
+    #[test]
+    fn current_ark_seedream_models_declare_generation_and_editing() {
+        for (platform, model) in [
+            ("ark", "doubao-seedream-5-0-260128"),
+            ("ark", "Doubao-Seedream-5.0-lite"),
+            ("volcengine", "doubao-seedream-4-5-251128"),
+            ("ark", "doubao-seedream-4.0"),
+        ] {
+            assert_eq!(
+                tasks_of(platform, model),
+                vec![ModelTask::ImageGeneration, ModelTask::ImageEdit],
+                "{platform}/{model}"
+            );
+        }
+        assert_eq!(
+            tasks_of("ark", "doubao-seedream-3-0-t2i-250415"),
+            vec![ModelTask::ImageGeneration]
+        );
     }
 
     #[test]

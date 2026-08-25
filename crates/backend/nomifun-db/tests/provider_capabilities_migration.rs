@@ -787,6 +787,154 @@ async fn migration_32_filters_incompatible_legacy_protocols_per_task() {
 }
 
 #[tokio::test]
+async fn migration_51_adds_ark_image_edit_without_inventing_health_or_touching_other_protocols() {
+    const ARK: &str = "0190f5fe-7c00-7a00-8abc-012345678951";
+    const OPENAI: &str = "0190f5fe-7c00-7a00-8abc-012345678952";
+    let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
+    apply_through(&mut connection, 30).await;
+    seed_provider(
+        &mut connection,
+        ARK,
+        "ark",
+        "https://ark.cn-beijing.volces.com/api/v3",
+    )
+    .await;
+    seed_provider(
+        &mut connection,
+        OPENAI,
+        "openai",
+        "https://api.openai.com/v1",
+    )
+    .await;
+    seed_model(
+        &mut connection,
+        ARK,
+        "ep-opaque-seedream",
+        "[\"image_generation\"]",
+        "{}",
+    )
+    .await;
+    seed_model(
+        &mut connection,
+        ARK,
+        "already-paired",
+        "[\"image_generation\"]",
+        "{}",
+    )
+    .await;
+    seed_model(
+        &mut connection,
+        OPENAI,
+        "generation-only-by-choice",
+        "[\"image_generation\"]",
+        "{}",
+    )
+    .await;
+
+    apply_through(&mut connection, 50).await;
+    sqlx::query(
+        "UPDATE provider_model_capabilities \
+            SET base_url_override = 'https://ark-override.example/api/v3', \
+                endpoint = '/custom/images/generations', \
+                allow_cross_origin_credentials = 1, \
+                provider_params = '{\"watermark\":false}', \
+                health = '{\"status\":\"healthy\"}', health_checked_at = 777 \
+          WHERE provider_id = ? AND model = 'ep-opaque-seedream' \
+            AND task = 'image_generation'",
+    )
+    .bind(ARK)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO provider_model_capabilities \
+            (provider_id, model, task, traits, protocol, connection_role, \
+             provider_params, created_at, updated_at) \
+         VALUES (?, 'already-paired', 'image_edit', '[]', 'ark.images', \
+                 'default', '{\"preserve\":true}', 9, 9)",
+    )
+    .bind(ARK)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+
+    apply_through(&mut connection, 51).await;
+
+    let ark_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT model, task FROM provider_model_capabilities \
+         WHERE provider_id = ? ORDER BY model, task",
+    )
+    .bind(ARK)
+    .fetch_all(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        ark_rows,
+        vec![
+            ("already-paired".into(), "image_edit".into()),
+            ("already-paired".into(), "image_generation".into()),
+            ("ep-opaque-seedream".into(), "image_edit".into()),
+            ("ep-opaque-seedream".into(), "image_generation".into()),
+        ]
+    );
+
+    let edit: (
+        String,
+        Option<String>,
+        Option<String>,
+        bool,
+        String,
+        Option<String>,
+        Option<i64>,
+    ) = sqlx::query_as(
+        "SELECT protocol, base_url_override, endpoint, \
+                allow_cross_origin_credentials, provider_params, health, health_checked_at \
+           FROM provider_model_capabilities \
+          WHERE provider_id = ? AND model = 'ep-opaque-seedream' \
+            AND task = 'image_edit'",
+    )
+    .bind(ARK)
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(edit.0, "ark.images");
+    assert_eq!(
+        edit.1.as_deref(),
+        Some("https://ark-override.example/api/v3")
+    );
+    assert_eq!(edit.2.as_deref(), Some("/custom/images/generations"));
+    assert!(edit.3);
+    assert_eq!(edit.4, r#"{"watermark":false}"#);
+    assert_eq!((edit.5, edit.6), (None, None));
+
+    let preserved: String = sqlx::query_scalar(
+        "SELECT provider_params FROM provider_model_capabilities \
+         WHERE provider_id = ? AND model = 'already-paired' AND task = 'image_edit'",
+    )
+    .bind(ARK)
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(preserved, r#"{"preserve":true}"#);
+    let ark_revision: i64 =
+        sqlx::query_scalar("SELECT config_revision FROM providers WHERE provider_id = ?")
+            .bind(ARK)
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(ark_revision, 1);
+
+    let openai_tasks: Vec<String> = sqlx::query_scalar(
+        "SELECT task FROM provider_model_capabilities WHERE provider_id = ? ORDER BY task",
+    )
+    .bind(OPENAI)
+    .fetch_all(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(openai_tasks, vec!["image_generation"]);
+}
+
+#[tokio::test]
 async fn migration_32_reclassifies_stepfun_realtime_without_name_wildcards() {
     const STEP: &str = "0190f5fe-7c00-7a00-8abc-012345678904";
     const ZHIPU: &str = "0190f5fe-7c00-7a00-8abc-012345678905";
