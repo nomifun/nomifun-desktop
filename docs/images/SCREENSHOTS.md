@@ -1,110 +1,92 @@
 # Screenshot Manifest
 
-This file tracks the user-facing screenshots used by the Desktop documentation.
-On 2026-08-23, every English screenshot shown on the root README was refreshed
-from the current `nomifun-desktop` checkout after the English sidebar labels
-were shortened and re-laid out. The English home aliases used by Getting
-Started and Portal were refreshed in the same pass. The Creative Studio README
-captures were also replaced from the production SPA and an isolated data root.
-These are real running-app captures, not mockups or copies of the retired
-product UI. Do not restore retired screenshots.
+This manifest records the repository-local screenshots used by the Desktop
+README and technical guides. The current set was captured on **August 25, 2026**
+from the 0.7.2 codebase with an isolated data root.
 
-## Naming scheme
+The Creative Studio set covers Canvas Library, the rich Canvas editor, Image
+Workbench, Video Workbench, Prompt Center, My Assets, Template Studio, Template
+Editor, the Director timeline and stage, and a visible native desktop
+companion. These are current running-app captures, not legacy mockups. Do not
+restore retired screenshots or introduce temporary aliases into the numbered
+gallery.
 
-```text
-<module-prefix>-<NN>-<slug>.png
-```
+## Ownership and storage
 
-| Prefix | Owner doc area |
+- Product-use documentation and its canonical screenshot library are owned by
+  [NomiFun Portal](https://www.nomifun.com/docs/).
+- Desktop keeps technical contracts and a small offline README showcase. Portal
+  owns the end-user walkthroughs and production gallery.
+- Repository-local images are intentional so README pages remain readable
+  offline. Do not replace them with external image URLs.
+
+## README showcase
+
+| File | Current surface |
 | --- | --- |
-| `gs-` | `getting-started/` |
-| `desktop-` | `guides/desktop-app` |
-| `webserver-` | `guides/web-server-deployment` |
-| `webui-` | `guides/webui-remote-access` |
-| `terminal-` | `guides/terminal` |
-| `autowork-` | `guides/autowork-requirements` |
-| `cron-` | `guides/scheduled-tasks` |
-| `channels-` | `guides/channels` |
-| `mcp-` | `guides/mcp-and-skills` |
-| `readme-` | root README showcase |
+| `readme/en/workspace.png` / `readme/zh/workspace.png` | Current Desktop workspace and session hub |
+| `readme/en/models.png` / `readme/zh/models.png` | Model Management and task-aware model catalog |
+| `readme/en/companions.png` / `readme/zh/companions.png` | Current workspace with the live desktop companion visible |
+| `readme/en/skills.png` / `readme/zh/skills.png` | Skills Hub with Creative Studio skills |
+| `readme/en/creative-workshop.png` / `readme/zh/creative-workshop.png` | Rich Creative Studio Canvas editor |
 
-## Current capture process
+## Creative Studio gallery
 
-The desktop app and `nomifun-web` render the same production SPA (`ui/dist`).
-Capture app content from a loopback-only web host with an isolated data
-directory, then synchronize the verified files to Desktop and Portal.
+English captures live under `creative-studio/en-US/`; Chinese captures live
+under `creative-studio/zh-CN/`. Both locale sets use the same route order:
 
-1. Build the current SPA with `bun run build:ui`.
-2. Start an isolated no-auth host:
-
-   ```powershell
-   cargo run -p nomifun-web --features static-webui -- `
-     --host 127.0.0.1 --port 8799 --dist ui/dist `
-     --data-dir $env:TEMP/nomifun-doc-captures --insecure-no-auth
-   ```
-
-3. Create only synthetic demo content through the visible current UI, such as
-   a requirement, a companion, and a terminal session. Never use the normal
-   NomiFun data directory or real credentials.
-4. Capture current routes in the Codex in-app browser at `1280x720`, including
-   list, dialog, settings, model, skill, companion, terminal, Mini App and
-   Creative Studio views.
-5. For authentication screens, start a second isolated host without
-   `--insecure-no-auth` and capture exactly what the current SPA renders.
-6. Before copying, verify every expected file is non-empty. Afterwards compare
-   hashes across Desktop and Portal, resolve all Markdown/HTML image references,
-   and run both repositories' normal builds/checks.
-
-## Fresh synchronized guide set
-
-| File | Current screen |
+| File | Route / subject |
 | --- | --- |
-| `autowork-01-tag-sessions.png` | AutoWork session binding |
-| `autowork-02-list.png` | Requirements list |
-| `autowork-03-kanban.png` | Requirements board |
-| `autowork-05-webhook-binding.png` | Notify and webhook binding |
-| `channels-01-overview.png` | Companion remote-channel overview |
-| `channels-02-pairing.png` | Current channel connection dialog |
-| `cron-01-list.png` | Scheduled Tasks list |
-| `cron-02-create-dialog.png` | Create scheduled task dialog |
-| `gs-03-web-first-run-setup.png` | Current WebUI authentication entry |
-| `gs-04-quickstart-login.png` | Current WebUI authentication entry |
-| `gs-05-quickstart-guid.png` | Current home and session page |
-| `gs-06-quickstart-model-settings.png` | Current Models and Agents management |
-| `mcp-01-capabilities.png` | Current MCP Hub |
-| `mcp-03-skills.png` | Current Skills Hub |
-| `terminal-01-session.png` | Live in-app terminal session |
-| `terminal-02-create-page.png` | Terminal creation page |
-| `webserver-02-first-run-setup.png` | Current WebUI authentication entry |
-| `webui-01-settings-overview.png` | Remote and Open capabilities settings |
-| `webui-03-login-screen.png` | Current remote-browser authentication entry |
-| `webui-04-cross-device.png` | Current authenticated remote workspace |
+| `01-canvas-library.png` | `#/workshop/canvases` · Canvas Library |
+| `02-canvas-editor-rich.png` | `#/workshop/canvas/:canvasId` · rich Canvas editor, assets, Canvas Assistant, and Director panel |
+| `03-image-workbench.png` | `#/workshop/image` · standalone T2I/I2I workbench |
+| `04-video-workbench.png` | `#/workshop/video` · standalone T2V/I2V workbench |
+| `05-prompt-center.png` | `#/workshop/prompts` · searchable Prompt Center |
+| `06-asset-library.png` | `#/workshop/assets` · My Assets and reusable inputs |
+| `07-template-studio.png` | `#/workshop/templates` · private Template Studio, including multi-image series setup |
+| `08-template-editor.png` | Template Editor and bounded AI Create review flow |
+| `09-director-timeline.png` | Canvas-bound Director timeline, cameras, keyframes, and capture |
+| `10-director-stage.png` | Canvas-bound Director 3D stage and camera view |
+| `11-companion-settings.png` | Companion workspace with figure, persona, model, memory, Skills, and desktop visibility control |
+| `12-companion-workspace.png` | Companion surface kept visible beside the creative workspace |
 
-The retired duplicate files `autowork-04-tag-sessions.png` and
-`gs-01-introduction-hero.png` were removed from Portal rather than preserved as
-hidden old-image aliases. `cron-03-detail.png` has no current product capture;
-the guide uses text instead of an obsolete visual.
+The Creative Studio captures use a 1440×900 viewport. The companion images were
+captured from the running companion-enabled product surface and the native
+transparent companion window. The numbered
+`11-companion-settings.png` and `12-companion-workspace.png` captures are the
+gallery references. Neither is a
+management-page thumbnail substituted for the native companion experience.
 
-- desktop-companion-window-crop.png | Current desktop companion window captured from the isolated development data root.
+The Canvas Editor capture visibly includes the Canvas Assistant and its
+explicit Creative Studio skill choices. The companion settings capture shows
+the desktop-visibility toggle, while the companion workspace capture shows the
+companion surface alongside the product. The separate top-level
+`readme/en/skills.png` and `readme/zh/skills.png` captures document the
+reusable Skills Hub packages; there is no numbered `11-creative-skills.png`
+gallery asset.
 
-## README and product gallery set
+## Capture recipe
 
-- `readme/en/` and `readme/zh/` contain current workspace, models, companions,
-  skills, and Creative Studio captures. The English workspace, models,
-  companions, and skills images were recaptured on 2026-08-23 with the current
-  short-label sidebar. The Creative Studio images show the
-  canonical Canvas editor with `杩斿洖鐢诲竷搴揱, four real persisted nodes, and no
-  Project product navigation. The English image is intentionally unedited: its
-  focused shell follows English while the Canvas editor body still exposes the
-  documented Simplified-Chinese limitation.
-- `getting-started/en/` and `getting-started/zh/` contain current home captures.
-- Portal English home aliases (`current-home-en.png`, `gs-01-introduction-hero.png`,
-  and `gs-05-quickstart-guid.png`) are synchronized from the same refreshed
-  product capture, with the Portal's 1296脳841 presentation size.
-- The Desktop English home aliases use the same capture at 1280脳720 so the
-  README and getting-started pages render consistently.
-- `desktop-01-main-window.png` shows the current application content. It does
-  not claim to document platform-specific native titlebar chrome.
+1. Build the current UI with `bun run build:ui` or run the Desktop dev host.
+2. Use only the isolated data root `%TEMP%\nomifun-doc-desktop` (or the
+   equivalent path under the current user profile). Never use production data
+   or real credentials.
+3. Seed synthetic Canvas, asset, template, and companion records through the
+   current UI/API, then capture visible product routes with Puppeteer/Chrome or
+   the running Tauri app.
+4. For a desktop companion, confirm
+   `appearance.companion_enabled=true`, find the native
+   `companion-<companion_id>` window, and capture its own transparent window
+   rectangle. For the numbered gallery, also capture the companion workspace
+   state at `12-companion-workspace.png`. Do not use a management-page
+   thumbnail as a substitute.
+5. Verify every expected PNG is non-empty, resolve every Markdown reference,
+   and run `git diff --check` before committing.
 
-All screenshots are repository-local so the documentation remains usable
-offline. Do not replace them with externally hosted image URLs.
+## Older guide captures
+
+The existing `autowork-*`, `channels-*`, `cron-*`, `gs-*`, `mcp-*`, `terminal-*`,
+and `webui-*` files remain only where a technical guide still references them.
+They are not part of the Creative Studio gallery. When a Portal walkthrough
+supersedes one, remove the old file and update its references instead of
+keeping duplicate aliases.
