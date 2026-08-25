@@ -33,6 +33,38 @@ describe('canvas pointer controllers', () => {
     expect(startCanvasResize({ ...node, locked: true }, 3, { x: 0, y: 0 }, 'bottom-right', { x: 0, y: 0, zoom: 1 })).toEqual({ ok: false, reason: 'locked' });
   });
 
+  test('allows only text nodes to collapse to the compact 88px height', () => {
+    const text = testNode('text', 20, { width: 340, height: 160 });
+    const textResize = startCanvasResize(
+      text,
+      20,
+      { x: 0, y: 0 },
+      'bottom-right',
+      { x: 0, y: 0, zoom: 1 }
+    );
+    expect(textResize.ok).toBe(true);
+    if (!textResize.ok) return;
+    expect(
+      updateCanvasResize(textResize.gesture, 20, { x: 0, y: -1_000 }).node
+        ?.size
+    ).toEqual({ width: 340, height: 88 });
+
+    const image = testNode('image', 21, { width: 340, height: 160 });
+    const imageResize = startCanvasResize(
+      image,
+      21,
+      { x: 0, y: 0 },
+      'bottom-right',
+      { x: 0, y: 0, zoom: 1 }
+    );
+    expect(imageResize.ok).toBe(true);
+    if (!imageResize.ok) return;
+    expect(
+      updateCanvasResize(imageResize.gesture, 21, { x: 0, y: -1_000 }).node
+        ?.size
+    ).toEqual({ width: 340, height: 160 });
+  });
+
   test('orients target-handle drags, validates the graph, and emits blank-drop intent', () => {
     const text = testNode('text', 3);
     const image = testNode('image', 4);

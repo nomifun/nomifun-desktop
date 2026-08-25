@@ -896,9 +896,24 @@ const CreativeCanvasProductRoute: React.FC = () => {
 
   const canvasStateRef = useRef<CanvasState | null>(null);
   const [canvasState, setCanvasState] = useState<CanvasState | null>(null);
+  const [editingTextNodeId, setEditingTextNodeId] = useState<string | null>(
+    null
+  );
   const handleCanvasStateChange = useCallback((nextState: CanvasState) => {
     const currentState = canvasStateRef.current;
     canvasStateRef.current = nextState;
+    setEditingTextNodeId((current) => {
+      if (!current) return null;
+      const node = nextState.document.nodes.find(
+        (candidate) => candidate.id === current
+      );
+      return node?.type === 'text' &&
+        !node.locked &&
+        nextState.selection.nodeIds.length === 1 &&
+        nextState.selection.nodeIds[0] === current
+        ? current
+        : null;
+    });
     if (!shouldPublishCanvasStateToProductRoute(currentState, nextState)) return;
     setCanvasState(nextState);
   }, []);
@@ -1159,6 +1174,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     hydratedPanelsRef.current = null;
     canvasStateRef.current = null;
     setCanvasState(null);
+    setEditingTextNodeId(null);
     setSave(INITIAL_SAVE);
     agentOpsReloadRequiredRef.current = false;
     setAgentOpsReloadRequired(false);
@@ -1392,6 +1408,37 @@ const CreativeCanvasProductRoute: React.FC = () => {
     },
     [handleCanvasStateChange]
   );
+
+  const handleInlineTextChange = useCallback(
+    (nodeId: string, text: string) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      const node = editor
+        .getState()
+        .document.nodes.find(
+          (candidate): candidate is Extract<
+            CreativeCanvasNode,
+            { type: 'text' }
+          > => candidate.id === nodeId && candidate.type === 'text'
+        );
+      if (!node || node.locked || text.length > 1_000_000) {
+        setEditingTextNodeId(null);
+        return;
+      }
+      const nextState = editor.dispatch(
+        canvasCommands.updateNode(
+          { ...node, data: { ...node.data, text } },
+          { mergeKey: `inline-text:${nodeId}` }
+        )
+      );
+      handleCanvasStateChange(nextState);
+    },
+    [handleCanvasStateChange]
+  );
+
+  const finishInlineTextEditing = useCallback((nodeId: string) => {
+    setEditingTextNodeId((current) => (current === nodeId ? null : current));
+  }, []);
 
   const openPromptLibrary = useCallback(() => {
     handleLeftViewChange('prompts');
@@ -4088,9 +4135,32 @@ const CreativeCanvasProductRoute: React.FC = () => {
             })
           );
           return;
-        case 'node/open':
+        case 'node/open': {
+          const node = editorRef.current
+            ?.getState()
+            .document.nodes.find(
+              (candidate) => candidate.id === intent.nodeId
+            );
           dispatch(canvasCommands.setSelection([intent.nodeId]));
           dismissInteractionOverlays();
+          if (intent.mode === 'edit-text') {
+            if (node?.type !== 'text') {
+              setEditingTextNodeId(null);
+              return;
+            }
+            if (node.locked) {
+              setEditingTextNodeId(null);
+              setNotice(
+                t('creativeStudio.canvas.nodes.locked', {
+                  defaultValue: '节点已锁定',
+                })
+              );
+              return;
+            }
+            setEditingTextNodeId(node.id);
+            return;
+          }
+          setEditingTextNodeId(null);
           if (intent.mode === 'open-director') {
             await handleOpenDirector(intent.nodeId);
             return;
@@ -4104,6 +4174,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
             })
           );
           return;
+        }
         case 'system-clipboard/read': {
           const editor = editorRef.current;
           if (!editor) return;
@@ -4554,6 +4625,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
     recoveryBusy ||
     agentOpsApplyBusy ||
     agentOpsReloadRequired;
+  useEffect(() => {
+    if (productDisabled) setEditingTextNodeId(null);
+  }, [productDisabled]);
   const imageTaskRuntimeBlocksNew =
     imageTaskRuntime.submittingCount > 0 ||
     imageTaskRuntime.recoveringCount > 0 ||
@@ -4751,6 +4825,19 @@ const CreativeCanvasProductRoute: React.FC = () => {
                       onOpen={onOpen}
                       onToggleLock={onToggleLock}
                       onPointerDown={dragHandleProps.onPointerDown}
+                      textEditing={
+                        node.type === 'text' && editingTextNodeId === node.id
+                      }
+                      onTextChange={
+                        node.type === 'text'
+                          ? (text) => handleInlineTextChange(node.id, text)
+                          : undefined
+                      }
+                      onTextEditingComplete={
+                        node.type === 'text'
+                          ? () => finishInlineTextEditing(node.id)
+                          : undefined
+                      }
                     />
                   );
                   if (node.type === 'video') {

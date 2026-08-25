@@ -26,9 +26,13 @@ describe('canvas context, double-click and drop intents', () => {
 
   test('derives typed double-click modes and canvas-world create position', () => {
     const node = testNode('config', 2);
-    const state = createInitialCanvasState({ document: testDocument([node]), viewport: { x: 20, y: 10, zoom: 2 } });
+    const text = testNode('text', 3);
+    const state = createInitialCanvasState({ document: testDocument([node, text]), viewport: { x: 20, y: 10, zoom: 2 } });
     expect(resolveCanvasDoubleClick(state, { kind: 'node', nodeId: node.id }, { x: 0, y: 0 }, state.viewport).intents).toEqual([
       { type: 'node/open', nodeId: node.id, mode: 'compose' },
+    ]);
+    expect(resolveCanvasDoubleClick(state, { kind: 'node', nodeId: text.id }, { x: 0, y: 0 }, state.viewport).intents).toEqual([
+      { type: 'node/open', nodeId: text.id, mode: 'edit-text' },
     ]);
     expect(resolveCanvasDoubleClick(state, { kind: 'canvas' }, { x: 120, y: 90 }, state.viewport).intents).toEqual([
       { type: 'canvas/create-node-menu/open', worldPosition: { x: 50, y: 40 } },

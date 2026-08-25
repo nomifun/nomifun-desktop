@@ -55,6 +55,12 @@ export const SOURCE_CANVAS_MIN_NODE_SIZE: CanvasSize = {
   height: 160,
 };
 
+/** Text can collapse to the compact blue-frame height without affecting media. */
+export const SOURCE_CANVAS_MIN_TEXT_NODE_SIZE: CanvasSize = {
+  width: 220,
+  height: 88,
+};
+
 const finitePoint = (point: CanvasPoint): boolean =>
   Number.isFinite(point.x) && Number.isFinite(point.y);
 
@@ -74,9 +80,13 @@ export function startCanvasResize(
     return { ok: false, reason: 'invalid-pointer' };
   }
 
+  const defaultMinSize =
+    node.type === 'text'
+      ? SOURCE_CANVAS_MIN_TEXT_NODE_SIZE
+      : SOURCE_CANVAS_MIN_NODE_SIZE;
   const minSize = {
-    width: positiveFinite(options.minSize?.width ?? SOURCE_CANVAS_MIN_NODE_SIZE.width, 1),
-    height: positiveFinite(options.minSize?.height ?? SOURCE_CANVAS_MIN_NODE_SIZE.height, 1),
+    width: positiveFinite(options.minSize?.width ?? defaultMinSize.width, 1),
+    height: positiveFinite(options.minSize?.height ?? defaultMinSize.height, 1),
   };
   const startWidth = positiveFinite(node.size.width, minSize.width);
   const startHeight = positiveFinite(node.size.height, minSize.height);
