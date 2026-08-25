@@ -59,12 +59,19 @@ export interface WorkshopTextAssetInput {
   collection?: string;
   tags?: string[];
   in_library?: boolean;
-  origin?: {
-    prompt_catalog_id: string;
-    source_url: string;
-    license: string;
-    license_url: string;
-  };
+  origin?:
+    | {
+        prompt_library_source: 'catalog';
+        prompt_library_id: string;
+        prompt_catalog_id: string;
+        source_url?: string;
+        license?: string;
+        license_url?: string;
+      }
+    | {
+        prompt_library_source: 'preset';
+        prompt_library_id: string;
+      };
 }
 
 export interface WorkshopAssetPatch {
@@ -73,6 +80,11 @@ export interface WorkshopAssetPatch {
   collection?: string;
   tags?: string[];
   in_library?: boolean;
+}
+
+export interface WorkshopPromptAssetIdentity {
+  prompt_library_source: 'catalog' | 'preset';
+  prompt_library_id: string;
 }
 
 export interface WorkshopAssetApi {
@@ -85,6 +97,7 @@ export interface WorkshopAssetApi {
     onProgress?: CreativeAssetUploadProgress
   ): Promise<WorkshopAssetDto>;
   createText(input: WorkshopTextAssetInput): Promise<WorkshopAssetDto>;
+  removePromptAsset(input: WorkshopPromptAssetIdentity): Promise<{ matched: number }>;
   update(assetId: AssetId, patch: WorkshopAssetPatch): Promise<WorkshopAssetDto>;
   remove(assetId: AssetId): Promise<void>;
   renameCollection(from: string, to: string): Promise<number>;
@@ -250,6 +263,14 @@ export const workshopAssetApi: WorkshopAssetApi = {
 
   createText(input) {
     return httpRequest<WorkshopAssetDto>('POST', '/api/creative-studio/assets', input);
+  },
+
+  removePromptAsset(input) {
+    return httpRequest<{ matched: number }>(
+      'POST',
+      '/api/creative-studio/prompt-library-assets/remove',
+      input
+    );
   },
 
   update(assetId, patch) {

@@ -136,7 +136,8 @@ pub use repository::{
     ApplyCreativeAgentProposalParams, AssetSort, CreateCreativeTaskParams,
     CreationTaskPageCursorRef, CreativeAgentProposalCommit, CreativeTaskOwnerRef,
     ICreationTaskRepository, IWorkshopRepository, IdempotentCreationTask, ListAssetsParams,
-    ListStandaloneWorkbenchTasksParams, RetireStandaloneWorkbenchTasksParams,
+    ListStandaloneWorkbenchTasksParams, PromptLibraryAssetIdentity,
+    RetireStandaloneWorkbenchTasksParams,
     SqliteCreationTaskRepository, SqliteWorkshopRepository, UpdateAssetParams,
     UpdateCreationTaskParams,
 };

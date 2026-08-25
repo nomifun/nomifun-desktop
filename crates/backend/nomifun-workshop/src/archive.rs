@@ -810,7 +810,11 @@ pub(crate) fn sanitized_archive_origin(origin: Option<Value>) -> Result<Option<S
     };
     // Provider/task/canvas/message data is not part of a project archive. Keep
     // portable provenance such as prompt/model/parameters, but remove every
-    // durable reference that could point into another installation.
+    // durable reference that could point into another installation. A prompt-
+    // library materialization identity is installation-local membership state,
+    // too: importing a project must not claim or conflict with My Assets. This
+    // includes the legacy catalog identity; source/license attribution fields
+    // remain portable and are preserved independently.
     for key in [
         "provider_id",
         "project_id",
@@ -829,6 +833,9 @@ pub(crate) fn sanitized_archive_origin(origin: Option<Value>) -> Result<Option<S
         "canvasId",
         "nodeId",
         "creationTaskId",
+        "prompt_library_source",
+        "prompt_library_id",
+        "prompt_catalog_id",
     ] {
         object.remove(key);
     }
@@ -2662,7 +2669,10 @@ mod tests {
             "templateId": "0190f5fe-7c00-7a00-8abc-000000000710",
             "templateRunId": "0190f5fe-7c00-7a00-8abc-000000000711",
             "templateStepId": "0190f5fe-7c00-7a00-8abc-000000000712",
-            "node_id": "0190f5fe-7c00-7a00-8abc-000000000705"
+            "node_id": "0190f5fe-7c00-7a00-8abc-000000000705",
+            "prompt_library_source": "catalog",
+            "prompt_library_id": "catalog-1",
+            "prompt_catalog_id": "catalog-1"
         });
         let value: Value = serde_json::from_str(
             sanitized_archive_origin(Some(origin)).unwrap().as_deref().unwrap(),

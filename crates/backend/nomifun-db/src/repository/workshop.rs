@@ -35,6 +35,15 @@ pub struct CreativeAgentProposalCommit {
     pub replayed: bool,
 }
 
+/// Stable, namespaced identity of a prompt-library item materialized as a text
+/// asset. The database owns the uniqueness guarantee; callers must not derive
+/// this identity from mutable title/body text.
+#[derive(Debug, Clone, Copy)]
+pub struct PromptLibraryAssetIdentity<'a> {
+    pub source: &'a str,
+    pub prompt_library_id: &'a str,
+}
+
 /// Data access for canonical Creative Studio projects, templates, runs, and
 /// the shared asset library.
 ///
@@ -285,6 +294,26 @@ pub trait IWorkshopRepository: Send + Sync {
 
     /// Insert a fully-formed asset row.
     async fn create_asset(&self, row: &WorkshopAssetRow) -> Result<WorkshopAssetRow, DbError>;
+
+    /// Atomically materialize one prompt-library item or return the already
+    /// materialized row. Implementations must make concurrent calls for the
+    /// same `(source, prompt_library_id)` converge on one asset. Catalog lookup
+    /// also recognizes the legacy `origin.prompt_catalog_id` representation.
+    async fn create_prompt_library_asset(
+        &self,
+        row: &WorkshopAssetRow,
+        identity: PromptLibraryAssetIdentity<'_>,
+    ) -> Result<WorkshopAssetRow, DbError>;
+
+    /// Soft-remove every materialization of one prompt-library identity from
+    /// My Assets. Catalog matching includes the legacy `prompt_catalog_id`
+    /// representation so historical duplicates cannot keep membership alive.
+    /// Rows and files remain intact for project/task references.
+    async fn hide_prompt_library_assets(
+        &self,
+        identity: PromptLibraryAssetIdentity<'_>,
+        now: i64,
+    ) -> Result<u64, DbError>;
 
     /// One asset by id, or `None`.
     async fn get_asset(&self, id: &str) -> Result<Option<WorkshopAssetRow>, DbError>;

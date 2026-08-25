@@ -69,6 +69,12 @@ function timestamp(value: unknown): number | null {
   return value;
 }
 
+function boolean(value: unknown, field: string, fallback = false): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'boolean') throw new TypeError(`${field} must be a boolean`);
+  return value;
+}
+
 function nullableHttpsUrl(value: unknown, field: string): string | null {
   const normalized = nullableText(value, field, 4_096);
   if (normalized === null) return null;
@@ -100,10 +106,18 @@ export function parsePromptLibraryItem(value: unknown): PromptLibraryItem {
     licenseUrl: nullableHttpsUrl(item.licenseUrl, 'licenseUrl'),
     createdAt: timestamp(item.createdAt),
     updatedAt: timestamp(item.updatedAt),
+    savedToAssets: boolean(item.savedToAssets, 'savedToAssets'),
   };
 }
 
-/** Keep valid records only and preserve the first occurrence of each stable ID. */
+/** IDs are stable only within their source namespace. */
+export function promptLibraryItemKey(
+  item: Pick<PromptLibraryItem, 'source' | 'id'>
+): string {
+  return `${item.source}\u0000${item.id}`;
+}
+
+/** Keep valid records only and preserve the first occurrence of each namespaced identity. */
 export function normalizePromptLibrary(value: unknown): NormalizedPromptLibrary {
   if (!Array.isArray(value)) throw new TypeError('Prompt library response must be an array');
   const ids = new Set<string>();
@@ -113,11 +127,12 @@ export function normalizePromptLibrary(value: unknown): NormalizedPromptLibrary 
   for (const candidate of value) {
     try {
       const item = parsePromptLibraryItem(candidate);
-      if (ids.has(item.id)) {
+      const key = promptLibraryItemKey(item);
+      if (ids.has(key)) {
         invalidCount += 1;
         continue;
       }
-      ids.add(item.id);
+      ids.add(key);
       items.push(item);
     } catch {
       invalidCount += 1;

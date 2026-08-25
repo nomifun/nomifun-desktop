@@ -5,7 +5,7 @@
  */
 
 import { Button, Message, Modal } from '@arco-design/web-react';
-import { Copy, FolderPlus } from '@icon-park/react';
+import { Copy, FolderMinus, FolderPlus } from '@icon-park/react';
 import type { TFunction } from 'i18next';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
@@ -17,6 +17,7 @@ import styles from './PromptLibraryDetails.module.css';
 
 export type PromptCopyState = 'idle' | 'copying' | 'copied' | 'failed';
 export type PromptSaveState = 'idle' | 'saving' | 'saved' | 'failed';
+export type PromptRemoveState = 'idle' | 'removing' | 'removed' | 'failed';
 
 export interface PromptLibraryDetailsProps {
   item: PromptLibraryItem | null;
@@ -25,9 +26,12 @@ export interface PromptLibraryDetailsProps {
   copyError?: string | null;
   saveState?: PromptSaveState;
   saveError?: string | null;
+  removeState?: PromptRemoveState;
+  removeError?: string | null;
   onClose(): void;
   onCopy(): void;
   onSave?(): void;
+  onRemove?(): void;
 }
 
 export interface PromptLibraryDetailsContentProps {
@@ -195,33 +199,49 @@ export const PromptLibraryDetails: React.FC<PromptLibraryDetailsProps> = ({
   copyError,
   saveState = 'idle',
   saveError,
+  removeState = 'idle',
+  removeError,
   onClose,
   onCopy,
   onSave,
+  onRemove,
 }) => {
   const { t } = useTranslation();
   const feedback =
-    saveState === 'saved'
-      ? t('creativeStudio.prompts.savedFeedback', {
-          defaultValue: 'Added to "My assets".',
+    removeState === 'removed'
+      ? t('creativeStudio.prompts.removedFeedback', {
+          defaultValue: 'Removed from "My assets".',
         })
-      : saveState === 'failed'
-        ? saveError ||
-          t('creativeStudio.prompts.saveFailedFallback', {
-            defaultValue: 'Save failed. Try again later.',
+      : removeState === 'failed'
+        ? removeError ||
+          t('creativeStudio.prompts.removeFailedFallback', {
+            defaultValue: 'Could not remove this prompt. Try again later.',
           })
-        : copyState === 'copied'
-          ? t('creativeStudio.prompts.copiedFeedback', {
-              defaultValue: 'Prompt copied to the clipboard.',
+        : removeState === 'removing'
+          ? t('creativeStudio.prompts.removingFeedback', {
+              defaultValue: 'Removing from "My assets"…',
             })
-          : copyState === 'failed'
-            ? copyError ||
-              t('creativeStudio.prompts.copyFailedFallback', {
-                defaultValue: 'Copy failed. Check clipboard permissions.',
+          : saveState === 'saved'
+            ? t('creativeStudio.prompts.savedFeedback', {
+                defaultValue: 'Added to "My assets".',
               })
-            : t('creativeStudio.prompts.noCanvasMutation', {
-                defaultValue: 'The standalone prompt library does not modify any canvas.',
-              });
+            : saveState === 'failed'
+              ? saveError ||
+                t('creativeStudio.prompts.saveFailedFallback', {
+                  defaultValue: 'Save failed. Try again later.',
+                })
+              : copyState === 'copied'
+                ? t('creativeStudio.prompts.copiedFeedback', {
+                    defaultValue: 'Prompt copied to the clipboard.',
+                  })
+                : copyState === 'failed'
+                  ? copyError ||
+                    t('creativeStudio.prompts.copyFailedFallback', {
+                      defaultValue: 'Copy failed. Check clipboard permissions.',
+                    })
+                  : t('creativeStudio.prompts.noCanvasMutation', {
+                      defaultValue: 'The standalone prompt library does not modify any canvas.',
+                    });
 
   return (
     <Modal
@@ -248,7 +268,13 @@ export const PromptLibraryDetails: React.FC<PromptLibraryDetailsProps> = ({
             <p
               className={styles.copyFeedback}
               data-copy-state={copyState}
-              role={copyState === 'failed' || saveState === 'failed' ? 'alert' : 'status'}
+              data-save-state={saveState}
+              data-remove-state={removeState}
+              role={
+                copyState === 'failed' || saveState === 'failed' || removeState === 'failed'
+                  ? 'alert'
+                  : 'status'
+              }
               aria-live='polite'
             >
               {feedback}
@@ -264,20 +290,36 @@ export const PromptLibraryDetails: React.FC<PromptLibraryDetailsProps> = ({
                   defaultValue: 'Copy prompt',
                 })}
               </Button>
-              {onSave ? (
+              {saveState === 'saved' ? (
+                onRemove ? (
+                  <Button
+                    icon={<FolderMinus theme='outline' size={15} fill='currentColor' />}
+                    loading={removeState === 'removing'}
+                    onClick={onRemove}
+                  >
+                    {t('creativeStudio.prompts.removeFromAssets', {
+                      defaultValue: 'Remove from my assets',
+                    })}
+                  </Button>
+                ) : onSave ? (
+                  <Button
+                    disabled
+                    icon={<FolderPlus theme='outline' size={15} fill='currentColor' />}
+                  >
+                    {t('creativeStudio.prompts.addedToAssets', {
+                      defaultValue: 'Added to assets',
+                    })}
+                  </Button>
+                ) : null
+              ) : onSave ? (
                 <Button
                   icon={<FolderPlus theme='outline' size={15} fill='currentColor' />}
                   loading={saveState === 'saving'}
-                  disabled={saveState === 'saved'}
                   onClick={onSave}
                 >
-                  {saveState === 'saved'
-                    ? t('creativeStudio.prompts.addedToAssets', {
-                        defaultValue: 'Added to assets',
-                      })
-                    : t('creativeStudio.prompts.addToAssets', {
-                        defaultValue: 'Add to my assets',
-                      })}
+                  {t('creativeStudio.prompts.addToAssets', {
+                    defaultValue: 'Add to my assets',
+                  })}
                 </Button>
               ) : null}
             </div>

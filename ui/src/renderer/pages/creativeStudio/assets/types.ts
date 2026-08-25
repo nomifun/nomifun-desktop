@@ -22,18 +22,35 @@ export interface CreativeAssetOrigin {
   canvasId?: string;
   nodeId?: string;
   generationTaskId?: string;
+  /** Stable identity of a prompt-library item saved into My Assets. */
+  promptLibrarySource?: CreativePromptLibrarySource;
+  promptLibraryId?: string;
+  /** Legacy catalog-only identity retained for existing saved assets. */
   promptCatalogId?: string;
   sourceUrl?: string;
   license?: string;
   licenseUrl?: string;
 }
 
-export interface CreativePromptAssetOrigin {
+export type CreativePromptLibrarySource = 'catalog' | 'preset';
+
+export interface CreativeCatalogPromptAssetOrigin {
+  promptLibrarySource: 'catalog';
+  promptLibraryId: string;
   promptCatalogId: string;
-  sourceUrl: string;
-  license: string;
-  licenseUrl: string;
+  sourceUrl?: string;
+  license?: string;
+  licenseUrl?: string;
 }
+
+export interface CreativePresetPromptAssetOrigin {
+  promptLibrarySource: 'preset';
+  promptLibraryId: string;
+}
+
+export type CreativePromptAssetOrigin =
+  | CreativeCatalogPromptAssetOrigin
+  | CreativePresetPromptAssetOrigin;
 
 /** Product-facing asset shape. Backend snake_case is contained in api.ts/client.ts. */
 export interface CreativeAsset {
@@ -116,4 +133,9 @@ export interface CreativeAssetPort {
 export interface CreativeAssetLibraryPort extends CreativeAssetPort {
   createText(input: CreateCreativeTextAsset): Promise<CreativeAsset>;
   renameCollection(from: string, to: string): Promise<number>;
+}
+
+/** Prompt-library-specific membership mutation, kept out of general asset ports. */
+export interface CreativePromptAssetPort {
+  removePromptAsset(source: CreativePromptLibrarySource, promptId: string): Promise<number>;
 }

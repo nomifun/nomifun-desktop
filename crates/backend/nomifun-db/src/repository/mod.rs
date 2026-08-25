@@ -148,5 +148,5 @@ pub use user::IUserRepository;
 pub use webhook::IWebhookRepository;
 pub use workshop::{
     ApplyCreativeAgentProposalParams, AssetSort, CreativeAgentProposalCommit,
-    IWorkshopRepository, ListAssetsParams, UpdateAssetParams,
+    IWorkshopRepository, ListAssetsParams, PromptLibraryAssetIdentity, UpdateAssetParams,
 };
